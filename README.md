@@ -1,4 +1,21 @@
+<p align="center">
+  <img src="assets/zinc_trademark.png" alt="ZINC Logo" width="400">
+</p>
+
 # ZINC — Zig INferenCe Engine for AMD GPUs
+
+<p align="center">
+  <a href="https://github.com/zolotukhin/zinc/actions/workflows/test.yml">
+    <img src="https://github.com/zolotukhin/zinc/actions/workflows/test.yml/badge.svg" alt="CI Status">
+  </a>
+  <a href="https://ziglang.org/download/">
+    <img src="https://img.shields.io/badge/Zig-0.15.2-orange.svg?logo=zig&logoColor=white" alt="Zig Version">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License">
+  </a>
+  <img src="https://img.shields.io/badge/platform-linux-lightgrey" alt="Platform">
+</p>
 
 > Making AMD consumer GPUs actually usable for LLM inference.
 
