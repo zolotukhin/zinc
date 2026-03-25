@@ -1,0 +1,3 @@
+// Placeholder — Q4_K dequantize + matrix-vector multiply
+// RDNA4-optimized: wave64, 2 rows per workgroup
+// TODO: implement

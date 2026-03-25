@@ -1,0 +1,3 @@
+// Placeholder — Fused RMS normalization + scale multiply
+// Single read + single write, eliminates intermediate buffer
+// TODO: implement

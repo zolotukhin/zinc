@@ -1,0 +1,9 @@
+{
+  "name": "zinc",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Stepan Zolotukhin",
+  "scripts": {
+    "test": "bun test"
+  }
+}

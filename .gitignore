@@ -1,0 +1,26 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+.zig-cache/
+*.o
+*.spv
+*.so
+*.dylib
+*.a
+*.exe
+
+# Bun / Node
+node_modules/
+bun.lock
+bun.lockb
+
+# Optimization loop state
+.llm_optimize/
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
