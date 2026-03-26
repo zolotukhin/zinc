@@ -805,6 +805,42 @@ pub fn generate(
         log.info("Generated {d} tokens in {d:.1} ms — {d:.2} tok/s ({d:.1} ms/tok)", .{
             decode_tokens, @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0, tok_per_sec, ms_per_tok,
         });
+
+        // Bandwidth metrics: compute bytes read per decode token
+        const config = &engine.model.config;
+        const lm_tensor = findLoadedTensor(engine.model, "output.weight") orelse
+            findLoadedTensor(engine.model, "token_embd.weight");
+        if (lm_tensor) |t| {
+            const lm_quant = t.info.type_;
+            const bpb = lm_quant.bytesPerBlock();
+            const bs = lm_quant.blockSize();
+            // LM head: vocab_size rows x hidden_dim cols
+            const lm_blocks_per_row = @as(u64, config.hidden_dim) / @as(u64, bs);
+            const lm_bytes: u64 = @as(u64, config.vocab_size) * lm_blocks_per_row * @as(u64, bpb);
+            // Norm weights: hidden_dim * 4 bytes (f32)
+            const norm_bytes: u64 = @as(u64, config.hidden_dim) * 4;
+            // Input/output vectors: hidden_dim * 4 + vocab_size * 4
+            const vec_bytes: u64 = (@as(u64, config.hidden_dim) + @as(u64, config.vocab_size)) * 4;
+            // Logits readback: vocab_size * 4
+            const readback_bytes: u64 = @as(u64, config.vocab_size) * 4;
+            const total_bytes_per_tok = lm_bytes + norm_bytes + vec_bytes + readback_bytes;
+            const total_bytes_all = total_bytes_per_tok * @as(u64, @intCast(decode_tokens));
+
+            const decode_secs = @as(f64, @floatFromInt(decode_ns)) / 1_000_000_000.0;
+            const eff_bw_gbs = @as(f64, @floatFromInt(total_bytes_all)) / decode_secs / 1_000_000_000.0;
+            const theo_bw_gbs: f64 = @floatFromInt(engine.gpu_config.bandwidth_gbps);
+            const utilization = if (theo_bw_gbs > 0) eff_bw_gbs / theo_bw_gbs * 100.0 else 0.0;
+
+            log.info("Bandwidth: {d:.1} GB/s effective, {d:.0} GB/s theoretical ({d:.1}% utilization)", .{
+                eff_bw_gbs, theo_bw_gbs, utilization,
+            });
+            log.info("Per-token: {d:.2} MB read ({s} LM head {d}x{d})", .{
+                @as(f64, @floatFromInt(total_bytes_per_tok)) / 1_000_000.0,
+                @tagName(lm_quant),
+                config.vocab_size,
+                config.hidden_dim,
+            });
+        }
     } else {
         log.info("Generated {d} tokens", .{decode_tokens});
     }

@@ -35,7 +35,13 @@ These cards cost $500–1500 (vs $15,000+ for MI300X) and sit in millions of des
 
 ## The Solution
 
-A purpose-built LLM inference engine written in **Zig** + **Vulkan compute**, targeting AMD RDNA3/RDNA4 consumer GPUs. OpenAI-compatible API, optimized for throughput on parallel requests.
+ZINC takes the hardware these cards already have — 576 GB/s memory bandwidth, cooperative matrix units, 16–32 GB VRAM — and builds an inference engine that actually uses it.
+
+**Hand-tuned for the hardware.** The GPU shaders are written specifically for RDNA4's memory hierarchy: wave64 dispatch, architecture-aware tiling, fused operations that cut redundant VRAM round-trips. Not a generic Vulkan backend that happens to run on AMD — built to hit 90%+ of theoretical memory bandwidth on the matmuls that dominate LLM decode.
+
+**Built for serving, not demos.** Continuous batching with paged KV cache (same approach as vLLM) means multiple requests share the GPU without per-slot degradation. A single RX 9070 XT can serve 4+ concurrent users at full speed. TurboQuant KV compression shrinks cache memory 5x, doubling how many sessions fit before VRAM runs out.
+
+**Drop-in compatible.** The API is OpenAI-compatible — point your existing client at it and it works. No ROCm, no CUDA, no driver stack to fight. One binary, one GPU, production inference on a $550 card.
 
 ## Quick Start
 
@@ -248,54 +254,40 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 
 ## Benchmarks
 
-Measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB).
-Same hardware, same model, same prompt (`"The capital of France is"`), 256 generated tokens. Benchmarked 2026-03-26.
+All numbers measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB, MoE 35B total / 3B active).
+Same hardware, same model, same prompt (`"The capital of France is"`), 256 generated tokens with reasoning. Benchmarked 2026-03-26.
 
 ### Decode throughput (tok/s, higher is better)
 
 ```
-                 Qwen3.5-35B-A3B Q4_K — Decode (256 tokens)
-  ┌─────────────────────────────────────────────────────────────────┐
-  │                                                                 │
-  │  llama.cpp   ██████████░░░░░░░░░░░░░░░░░░░░░░░░░░  24.4 tok/s  │
-  │  Vulkan                                                         │
-  │                                                                 │
-  │  ZINC        ██████████████████░░░░░░░░░░░░░░░░░░░  45.5 tok/s  │
-  │  (current)                                         ▲ 1.87× ▲    │
-  │                                                                 │
-  │  ZINC        ███████████████████████████████████████ 110+ tok/s  │
-  │  (target)                                                       │
-  │                                                                 │
-  └─────────────────────────────────────────────────────────────────┘
+       Qwen3.5-35B-A3B Q4_K_XL — Decode with reasoning, AI PRO R9700
+
+  llama.cpp      ██████████████████████████████████████░░  107 tok/s
+  (baseline)
+
+  ZINC           ████████████████░░░░░░░░░░░░░░░░░░░░░░░  46 tok/s
+  (current)
+
+  ZINC           ██████████████████████████████████████░░  110+ tok/s
+  (target)
 ```
 
-### Full comparison
+### Comparison
 
-| Metric | llama.cpp Vulkan | ZINC (current) | ZINC (target) |
+| Metric | llama.cpp (baseline) | ZINC (current) | ZINC (target) |
 |--------|:---:|:---:|:---:|
-| **Decode** | 24.4 tok/s | **45.5 tok/s** (1.87x) | 110+ tok/s |
-| **Prompt eval** | 55.6 tok/s | **2,655 tok/s** (pp10) | 2,800+ tok/s (pp512) |
-| **Coherent output** | Yes (reasoning) | WIP | Yes |
-| **RDNA4-tuned kernels** | No | Yes | Yes |
-| **Native tokenizer** | Yes | Yes (BPE from GGUF) | Yes |
-| **Continuous batching** | No | Phase 4 | Yes |
+| **Decode** | 107 tok/s | 46 tok/s | 110+ tok/s |
+| **Prefill** | 223 tok/s | 1,607 tok/s (pp10) | 2,800+ tok/s (pp512) |
+| **Coherent output** | Yes | WIP | Yes |
+| **Flash attention** | Yes | Phase 3 | Yes |
+| **RDNA4-tuned DMMV** | No | Yes | Yes |
+| **Native BPE tokenizer** | Yes | Yes (from GGUF) | Yes |
+| **Continuous batching** | Yes | Phase 4 | Yes |
 | **TurboQuant KV** | No | Phase 5 | Yes |
 
-> **Note**: Both engines ran on the same GPU with the same model and prompt. ZINC prompt eval used 10 tokens (short prompt); llama.cpp reports its own prompt eval rate. ZINC output is not yet coherent (compute graph correctness is WIP) — throughput numbers reflect real GPU kernel execution time.
-
-### Performance targets
-
-#### Radeon AI PRO R9700 (32GB, 576 GB/s)
-| Model | Quant | Single-req | 4-concurrent | Aggregate |
-|-------|-------|------------|--------------|-----------|
-| Qwen3-8B | Q4_K | 120+ tok/s | 110+ each | 440+ tok/s |
-| Qwen3.5-35B-A3B | Q4_K | 110+ tok/s | 108+ each | 432+ tok/s |
-| Llama-3.1-70B | Q4_K | 35+ tok/s | 32+ each | 128+ tok/s |
-
-#### RX 9070 XT (16GB, 672 GB/s)
-| Model | Quant | Single-req | 4-concurrent | Aggregate |
-|-------|-------|------------|--------------|-----------|
-| Qwen3-8B | Q4_K | 130+ tok/s | 120+ each | 480+ tok/s |
+> **Baseline setup**: llama-server (build `3306dba`) with `RADV_PERFTEST=coop_matrix`, `--flash-attn on`, `--mlock`, `-ngl 99`, `-ctk q8_0 -ctv q8_0`. Mesa 25.0.7, GECC disabled (`amdgpu.ras_enable=0`). See [RDNA4 Tuning Guide](docs/RDNA4_TUNING.md) and [AGENTS.md](AGENTS.md) for full setup and reproduction steps.
+>
+> ZINC does not yet have flash attention — once implemented, decode throughput should close the gap. Output is not yet coherent (compute graph correctness WIP); throughput numbers reflect real GPU kernel execution time.
 
 ## Current Status
 

@@ -50,6 +50,8 @@ const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, i
 ---
 
 <DocLayout title="Zig API" description={description} keywords={keywords} lastmod={zigApi.lastmod}>
+  <div class="api-page">
+  <div class="api-main">
   <section class="hero">
     <p class="eyebrow">Primary Reference</p>
     <h1>ZINC Zig API</h1>
@@ -159,9 +161,112 @@ const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, i
       ))}
     </div>
   </section>
+  </div><!-- .api-main -->
+
+  <aside class="api-nav">
+    <p class="nav-title">On This Page</p>
+    <ul>
+      <li><a href="#sections">API Sections</a></li>
+      {zigApi.sections.map(section => (
+        <li class="nav-section">
+          <a href={`#${section.slug}`}>{section.title}</a>
+          <ul>
+            {section.modules.map(mod => (
+              <li><a href={mod.href}>{mod.title}</a></li>
+            ))}
+          </ul>
+        </li>
+      ))}
+    </ul>
+  </aside>
+  </div><!-- .api-page -->
 </DocLayout>
 
 <style>
+  .api-page {
+    display: grid;
+    grid-template-columns: 1fr 170px;
+    gap: var(--space-lg);
+    align-items: start;
+  }
+
+  .api-main {
+    min-width: 0;
+  }
+
+  .api-nav {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    padding: var(--space-sm) 0;
+  }
+
+  .nav-title {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin: 0 0 var(--space-sm);
+  }
+
+  .api-nav > ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .api-nav li {
+    margin: 0;
+  }
+
+  .api-nav > ul > li {
+    margin-bottom: 0.15rem;
+  }
+
+  .api-nav a {
+    display: block;
+    font-size: 0.72rem;
+    line-height: 1.3;
+    padding: 0.15rem 0;
+    color: var(--color-text-muted);
+  }
+
+  .api-nav a:hover {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  .nav-section > a {
+    font-weight: 600;
+    color: var(--color-text);
+    font-size: 0.74rem;
+    margin-top: 0.4rem;
+  }
+
+  .nav-section > ul {
+    list-style: none;
+    padding-left: 0.6rem;
+    margin: 0;
+    border-left: 1px solid var(--color-border);
+  }
+
+  .nav-section > ul a {
+    font-size: 0.68rem;
+    color: var(--color-text-muted);
+  }
+
+  @media (max-width: 960px) {
+    .api-page {
+      grid-template-columns: 1fr;
+    }
+
+    .api-nav {
+      display: none;
+    }
+  }
+
   .hero {
     padding: var(--space-xl);
     border: 1px solid var(--color-border);

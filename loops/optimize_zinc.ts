@@ -96,6 +96,8 @@ export type BuildRunResult = {
   tokPerSec: number | null;
   tokensGenerated: number;
   garbageOutput: boolean;
+  bandwidthUtil: number | null; // % of theoretical bandwidth
+  effectiveBW: number | null; // GB/s
   error: string | null;
 };
 
@@ -136,6 +138,18 @@ export function isGarbageOutput(output: string): boolean {
   for (const t of tokens) counts.set(t, (counts.get(t) ?? 0) + 1);
   const maxCount = Math.max(...counts.values());
   return maxCount / tokens.length > 0.8;
+}
+
+/** Parse bandwidth utilization percentage from ZINC output. */
+export function parseBandwidthUtil(output: string): number | null {
+  const m = output.match(/(\d+\.?\d*)%\s*utilization/i);
+  return m ? parseFloat(m[1]) : null;
+}
+
+/** Parse effective bandwidth in GB/s from ZINC output. */
+export function parseEffectiveBW(output: string): number | null {
+  const m = output.match(/(\d+\.?\d*)\s*GB\/s\s*effective/i);
+  return m ? parseFloat(m[1]) : null;
 }
 
 /** Determine if we're in fix or optimize phase. */
@@ -300,6 +314,8 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
       tokPerSec: null,
       tokensGenerated: 0,
       garbageOutput: false,
+      bandwidthUtil: null,
+      effectiveBW: null,
       error: "Build failed",
     };
   }
@@ -309,6 +325,8 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
   const tps = parseTokPerSec(run.output);
   const tokensGenerated = parseTokensGenerated(run.output);
   const garbage = isGarbageOutput(run.output);
+  const bwUtil = parseBandwidthUtil(run.output);
+  const effBW = parseEffectiveBW(run.output);
 
   const result: BuildRunResult = {
     buildExitCode: 0,
@@ -319,6 +337,8 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
     tokPerSec: tps,
     tokensGenerated,
     garbageOutput: garbage,
+    bandwidthUtil: bwUtil,
+    effectiveBW: effBW,
     error: run.exitCode !== 0 ? `Runtime exit code ${run.exitCode}` : null,
   };
   result.phase = detectPhase(result);
@@ -563,7 +583,8 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
           .slice(-20)
           .map((h) => {
             const desc = trunc(h.description, 80);
-            return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "✅ KEPT" : "❌ REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s)` : ""}`;
+            const bw = h.bandwidthUtil != null ? `, ${h.bandwidthUtil.toFixed(0)}% BW` : "";
+            return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "✅ KEPT" : "❌ REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s${bw})` : ""}`;
           })
           .join("\n")
       : "  (none yet)";
@@ -603,7 +624,10 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     diagnosis.push("- Token embedding lookup (read from token_embd.weight tensor)");
     diagnosis.push("- Actual DMMV dispatches for QKV projections, FFN layers");
   } else if (lastResult.tokPerSec != null && lastResult.tokPerSec > 0) {
-    diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s (DECODE), ${lastResult.tokensGenerated} tokens`);
+    const bwInfo = lastResult.bandwidthUtil != null
+      ? ` | ${lastResult.effectiveBW?.toFixed(0) ?? "?"} GB/s (${lastResult.bandwidthUtil.toFixed(0)}% of 576 GB/s)`
+      : "";
+    diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s (DECODE), ${lastResult.tokensGenerated} tokens${bwInfo}`);
     if (lastResult.garbageOutput) {
       diagnosis.push("");
       diagnosis.push("⚠ WARNING: Output tokens are GARBAGE (same token repeated). The model is not producing");
@@ -613,6 +637,14 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     }
     diagnosis.push("");
     diagnosis.push("ZINC is generating tokens. Optimize for DECODE throughput (not prefill).");
+    if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 70) {
+      diagnosis.push(`Memory bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — well below the 90%+ target.`);
+      diagnosis.push("This means the GPU is stalling on something other than raw VRAM reads.");
+      diagnosis.push("Likely causes: Vulkan submission overhead, barriers, descriptor management, CPU-side work.");
+    } else if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil >= 70) {
+      diagnosis.push(`Memory bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — approaching the hardware limit.`);
+      diagnosis.push("Further gains require reducing bytes read (better quant packing) or algorithmic changes.");
+    }
     diagnosis.push("");
     diagnosis.push("Focus on:");
     diagnosis.push("1. DMMV shader bandwidth utilization (target: 90%+ on large matmuls)");
@@ -705,6 +737,8 @@ type CycleResult = {
   description: string;
   kept: boolean;
   tokPerSec: number | null;
+  bandwidthUtil: number | null;
+  effectiveBW: number | null;
   buildExitCode: number;
   runExitCode: number | null;
   error?: string;
@@ -784,7 +818,8 @@ async function runCycle(
     console.log(clr("1;31", `  ❌ RUNTIME CRASH (exit ${buildRun.runExitCode})`));
   } else if (buildRun.tokPerSec != null && buildRun.tokPerSec > 0) {
     const qualityTag = buildRun.garbageOutput ? clr("1;33", " [GARBAGE OUTPUT]") : "";
-    console.log(clr("1;32", `  ✅ RUNNING — ${buildRun.tokPerSec.toFixed(1)} tok/s, ${buildRun.tokensGenerated} tokens`) + qualityTag);
+    const bwTag = buildRun.bandwidthUtil != null ? `, ${buildRun.effectiveBW?.toFixed(0) ?? "?"} GB/s (${buildRun.bandwidthUtil.toFixed(0)}% BW)` : "";
+    console.log(clr("1;32", `  ✅ RUNNING — ${buildRun.tokPerSec.toFixed(1)} tok/s, ${buildRun.tokensGenerated} tokens${bwTag}`) + qualityTag);
   } else {
     console.log(clr("1;33", `  ⚠ ENGINE NOT GENERATING — build OK, ${buildRun.tokensGenerated} tokens produced`));
   }
@@ -859,6 +894,8 @@ async function runCycle(
       tokPerSec: null,
       tokensGenerated: 0,
       garbageOutput: false,
+      bandwidthUtil: null,
+      effectiveBW: null,
       error: String(e),
     };
   }
@@ -991,6 +1028,8 @@ async function runCycle(
     description,
     kept: keep,
     tokPerSec: verifyResult.tokPerSec,
+    bandwidthUtil: verifyResult.bandwidthUtil,
+    effectiveBW: verifyResult.effectiveBW,
     buildExitCode: verifyResult.buildExitCode,
     runExitCode: verifyResult.runExitCode,
     selfAnalysis,

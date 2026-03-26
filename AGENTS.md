@@ -140,3 +140,86 @@ main.zig
 ## Remote Test Node
 
 An RDNA4 test node (AMD Radeon AI PRO R9700, 32GB, 576 GB/s) is available via SSH. Credentials are in `.env` (gitignored) as `ZINC_HOST`, `ZINC_USER`, `ZINC_PORT`.
+
+## Running Benchmarks
+
+### Baseline: 107 tok/s (2026-03-26)
+
+The reference baseline is llama.cpp server on the RDNA4 test node with this exact configuration. All ZINC numbers are compared against this.
+
+**Model**: `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` (20.7 GiB, MoE 35B/3B active)
+**Baseline result**: 107 tok/s decode (with reasoning), 223 tok/s prefill
+
+### Test node setup (critical for reproducing baseline)
+
+```bash
+# 1. Mesa must be 25.0.7 (25.2.8 causes ~14% RADV regression)
+dpkg -l mesa-vulkan-drivers  # should show 25.0.7-0ubuntu0.24.04.2
+# Pinned in /etc/apt/preferences.d/mesa-pin to prevent auto-upgrade
+
+# 2. GECC disabled (amdgpu.ras_enable=0 in /etc/default/grub)
+cat /sys/module/amdgpu/parameters/ras_enable  # should show 0
+
+# 3. RADV_PERFTEST=coop_matrix set in llama-server.service
+#    Without this, cooperative matrix is disabled → scalar fallback
+
+# 4. llama.cpp build 3306dba, built with:
+#    cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release \
+#      -DCMAKE_CXX_FLAGS='-O3 -march=znver4' -DCMAKE_C_FLAGS='-O3 -march=znver4'
+
+# 5. Server flags (in /etc/systemd/system/llama-server.service):
+#    -ngl 99 --device Vulkan0 --parallel 4 -c 32768
+#    -ctk q8_0 -ctv q8_0 -b 4096 -ub 1024 --mlock --flash-attn on
+```
+
+### Measure llama.cpp baseline
+
+```bash
+source .env
+
+# Start server (if not running)
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "systemctl start llama-server && sleep 15"
+
+# Warmup + 3 benchmark runs via OpenAI API
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST '
+  curl -s http://localhost:8088/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" > /dev/null
+  for i in 1 2 3; do
+    curl -s http://localhost:8088/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\":\"The capital of France is\"}],\"max_tokens\":256,\"stream\":false}" \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get(\"timings\",{}); print(f\"Run {i}: gen {t.get(\"predicted_per_second\",0):.1f} tok/s | prompt {t.get(\"prompt_per_second\",0):.1f} tok/s\")"
+  done
+'
+# Expected: ~107 tok/s generation, ~220 tok/s prompt (runs 2-3, after warmup)
+```
+
+### Measure ZINC
+
+```bash
+source .env
+
+# Sync source to test node
+rsync -az --delete --exclude '.zig-cache' --exclude 'zig-out' --exclude 'node_modules' \
+  --exclude '.DS_Store' --exclude 'site' --exclude 'research/turboquant-pytorch-master' \
+  -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/root/zinc/
+
+# Build and run
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && zig build && \
+  RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
+  -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --prompt 'The capital of France is'"
+
+# Key output lines:
+#   info(forward): Prefill complete: N tokens in X ms (Y tok/s)
+#   info(forward): Generated N tokens in X ms — Y tok/s (Z ms/tok)
+```
+
+### Troubleshooting performance
+
+If llama.cpp baseline drops below ~100 tok/s, check in order:
+1. **Mesa version** — `dpkg -l mesa-vulkan-drivers` must show 25.0.7 (not 25.2.8)
+2. **GECC** — `cat /sys/module/amdgpu/parameters/ras_enable` must show 0
+3. **coop_matrix** — server log must show `matrix cores: KHR_coopmat`
+4. **Reboot** — Mesa/driver changes need a reboot to take full effect
