@@ -246,7 +246,7 @@ pub const InferenceEngine = struct {
         var decode_cmd = try CommandBuffer.init(instance, &cmd_pool);
         errdefer decode_cmd.deinit(&cmd_pool);
 
-        var dmmv = try DmmvDispatch.init(instance, &gpu_config, shader_dir, allocator);
+        var dmmv = try DmmvDispatch.init(instance, &gpu_config, shader_dir, config.hidden_dim, allocator);
         errdefer dmmv.deinit();
 
         var elementwise = try ElementwiseDispatch.init(instance, shader_dir, allocator);
