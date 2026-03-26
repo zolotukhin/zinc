@@ -29,6 +29,8 @@ pub const DecodeState = struct {
     allocator: std.mem.Allocator,
 
     /// Initialize decode state for a fresh generation request.
+    /// @param allocator Allocator used for the generated token list.
+    /// @returns A DecodeState positioned at token index zero with an empty output buffer.
     pub fn init(allocator: std.mem.Allocator) DecodeState {
         return .{
             .position = 0,
@@ -38,6 +40,8 @@ pub const DecodeState = struct {
     }
 
     /// Release the generated token buffer owned by the decode state.
+    /// @param self Decode state to tear down in place.
+    /// @note After this call the state is invalid and should not be reused.
     pub fn deinit(self: *DecodeState) void {
         self.generated_tokens.deinit(self.allocator);
         self.* = undefined;
@@ -231,6 +235,13 @@ pub const InferenceEngine = struct {
     allocator: std.mem.Allocator,
 
     /// Create the runtime objects needed to execute decode-time work on the GPU.
+    /// @param model Loaded model weights and metadata.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param gpu_config Derived GPU tuning parameters for the selected device.
+    /// @param shader_dir Directory containing compiled SPIR-V shader binaries.
+    /// @param allocator Allocator used for graphs, staging state, and temporary setup structures.
+    /// @returns An initialized inference engine ready to prefill prompts and run decode steps.
+    /// @note This allocates shared descriptor pools, staging buffers, intermediate activations, and dispatch wrappers up front.
     pub fn init(
         model: *Model,
         instance: *const Instance,
@@ -709,7 +720,9 @@ pub const InferenceEngine = struct {
     // Teardown
     // -----------------------------------------------------------------------
 
-    /// Release GPU buffers, graphs, and dispatch helpers owned by the engine.
+    /// Release GPU buffers, graphs, command objects, and dispatch helpers owned by the engine.
+    /// @param self Inference engine to tear down in place.
+    /// @note The command buffer is destroyed before its pool, and all Vulkan resources become invalid afterwards.
     pub fn deinit(self: *InferenceEngine) void {
         vk.c.vkDestroyDescriptorPool(self.instance.device, self.shared_pool, null);
         self.embed_staging.deinit();
@@ -728,11 +741,18 @@ pub const InferenceEngine = struct {
     }
 };
 
-/// Run single-request inference: tokenize → prefill → decode → detokenize.
+/// Run single-request inference: prefill the prompt, decode greedily, and return generated token IDs.
+/// @param engine Initialized inference engine.
+/// @param prompt_tokens Tokenized prompt that seeds the prefill pass.
+/// @param max_tokens Maximum number of decode tokens to emit after prefill.
+/// @param allocator Allocator used for transient decode state and the returned token slice.
+/// @returns A heap-allocated slice containing only the generated continuation tokens.
+/// @note Generation stops early on common EOS token IDs used by the currently supported model families.
 pub fn generate(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
     max_tokens: u32,
+    eos_token_id: u32,
     allocator: std.mem.Allocator,
 ) ![]u32 {
     var state = DecodeState.init(allocator);
@@ -772,8 +792,8 @@ pub fn generate(
         const token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, token);
 
-        // Check for EOS — common EOS token IDs across model families
-        if (token == 151643 or token == 128001 or token == 2) break;
+        // Check for EOS token (read from GGUF metadata)
+        if (token == eos_token_id) break;
     }
     const decode_end = std.time.nanoTimestamp();
 

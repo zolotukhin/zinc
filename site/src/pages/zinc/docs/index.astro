@@ -16,24 +16,29 @@ const breadcrumbItems = [
 
 const docMeta: Record<string, { label: string; description: string; order: number }> = {
   spec: {
-    label: 'ZINC Technical Specification',
-    description: 'Architecture, GPU kernels, model support, scheduler behavior, and system design context around the runtime.',
+    label: 'Technical Specification',
+    description: 'Architecture, GPU kernels, model support, scheduler behavior',
     order: 1,
   },
   'turboquant-spec': {
-    label: 'TurboQuant KV Cache Compression',
-    description: 'Two-stage vector quantization, residual correction, and memory-reduction tradeoffs for the paged KV-cache path.',
+    label: 'TurboQuant Compression',
+    description: 'Two-stage vector quantization and KV cache memory reduction',
     order: 2,
   },
   'rdna4-tuning': {
-    label: 'RDNA4 GPU Tuning Guide',
-    description: 'Performance profiling for AMD GPUs, cooperative matrix behavior, SPIR-V toolchain notes, and bandwidth tuning.',
+    label: 'RDNA4 Tuning Guide',
+    description: 'Cooperative matrix, bandwidth tuning, SPIR-V toolchain',
     order: 3,
   },
   api: {
     label: 'Serving HTTP API',
-    description: 'OpenAI-compatible request and response shapes for clients talking to ZINC. This is the network API, not the Zig code reference.',
+    description: 'OpenAI-compatible request/response shapes for clients',
     order: 4,
+  },
+  'gpu-reference': {
+    label: 'GPU Reference',
+    description: 'RDNA3/RDNA4 hardware specs, ISA, memory hierarchy',
+    order: 5,
   },
 };
 
@@ -87,280 +92,205 @@ const jsonLd = {
 >
   <Breadcrumbs items={breadcrumbItems} />
 
-  <section class="hero">
-    <div class="hero-copy">
-      <p class="eyebrow">Primary Reference</p>
-      <h1>ZINC Documentation</h1>
-      <p class="intro">
-        The docs are organized around the generated Zig API. That is the main reference for the runtime and the place
-        to start if you want to understand the code. The pages below are supplemental specs, tuning notes, and the
-        external serving API.
-      </p>
+  <div class="docs-hub">
+    <header class="hub-header">
+      <h1>Documentation</h1>
+      <p>Start with the Zig API for the runtime internals, or jump to any spec below.</p>
+    </header>
 
-      <div class="hero-actions">
-        <a href="/zinc/docs/zig-api" class="button button-primary">Open Zig API</a>
-        <a href="#supplemental" class="button button-secondary">Supplemental Docs</a>
-      </div>
-    </div>
+    <div class="hub-grid">
+      <a href="/zinc/docs/zig-api" class="card card-primary">
+        <div class="card-head">
+          <h2>Zig API Reference</h2>
+          <span class="badge">Primary</span>
+        </div>
+        <p>Generated from <code>src/**/*.zig</code></p>
+        <div class="card-stats">
+          <span>{zigApi.sections.length} sections</span>
+          <span>{zigApi.moduleCount} modules</span>
+          <span>{zigApi.exportCount} exports</span>
+        </div>
+      </a>
 
-    <a href="/zinc/docs/zig-api" class="primary-card">
-      <p class="card-label">Generated from <code>src/**/*.zig</code></p>
-      <h2>Zig API</h2>
-      <p>
-        {zigApi.moduleCount} modules grouped into {zigApi.sections.length} functional sections, with {zigApi.exportCount} exports,
-        {' '}{zigApi.memberCount} documented methods, and stable symbol anchors.
-      </p>
-
-      <div class="stat-strip">
-        <span>{zigApi.moduleCount} modules</span>
-        <span>{zigApi.exportCount} exports</span>
-        <span>{zigApi.memberCount} methods</span>
-      </div>
-
-      <p class="primary-note">
-        Start here for the actual runtime surface. The HTTP API further down is only the client-facing server
-        interface.
-      </p>
-    </a>
-  </section>
-
-  <section class="section-panel">
-    <div class="panel-header">
-      <div>
-        <p class="eyebrow">Key Functionality</p>
-        <h2>API Sections</h2>
-      </div>
-    </div>
-
-    <div class="section-grid">
-      {zigApi.sections.map(section => (
-        <a href={`/zinc/docs/zig-api#${section.slug}`} class="section-card">
-          <div class="section-card-top">
-            <span>{section.modules.length} modules</span>
-            <span>{section.symbolCount} symbols</span>
-          </div>
-          <h3>{section.title}</h3>
-          <p>{section.description}</p>
-        </a>
-      ))}
-    </div>
-  </section>
-
-  <section id="supplemental" class="section-panel supplemental-panel">
-    <div class="panel-header">
-      <div>
-        <p class="eyebrow">Supplemental</p>
-        <h2>Specs, Tuning, and Client-Facing APIs</h2>
-      </div>
-    </div>
-
-    <p class="section-copy">
-      These pages support the Zig API reference. The “Serving HTTP API” page documents the external request and
-      response surface exposed by ZINC, not the internal Zig implementation.
-    </p>
-
-    <div class="supplemental-grid">
       {supplementalDocs.map(doc => (
-        <a href={`/zinc/docs/${doc.slug}`} class="supplemental-card">
-          <h3>{docMeta[doc.slug]?.label ?? doc.title}</h3>
-          <p>{docMeta[doc.slug]?.description ?? 'ZINC documentation'}</p>
+        <a href={`/zinc/docs/${doc.slug}`} class="card">
+          <h2>{docMeta[doc.slug]?.label ?? doc.title}</h2>
+          <p>{docMeta[doc.slug]?.description}</p>
         </a>
       ))}
     </div>
-  </section>
+
+    <div class="hub-sections">
+      <h3>API Sections</h3>
+      <div class="section-list">
+        {zigApi.sections.map(section => (
+          <a href={`/zinc/docs/zig-api#${section.slug}`} class="section-link">
+            <span class="section-name">{section.title}</span>
+            <span class="section-meta">{section.modules.length} modules, {section.symbolCount} symbols</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  </div>
 </BaseLayout>
 
 <style>
-  .hero {
-    display: grid;
-    grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
-    gap: var(--space-lg);
-    margin-bottom: var(--space-xl);
+  .docs-hub {
+    max-width: 960px;
+    margin: 0 auto;
   }
 
-  .hero-copy,
-  .primary-card,
-  .section-panel {
-    border: 1px solid var(--color-border);
-    border-radius: 18px;
-    background: var(--color-bg);
-  }
-
-  .hero-copy {
-    padding: var(--space-xl);
-    background:
-      radial-gradient(circle at top right, rgba(211, 84, 0, 0.14), transparent 30%),
-      linear-gradient(180deg, var(--color-bg-alt), var(--color-bg));
-  }
-
-  .eyebrow {
-    margin: 0 0 var(--space-xs);
-    font-size: 0.74rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--color-text-muted);
-  }
-
-  .intro {
-    color: var(--color-text-muted);
-    max-width: 62ch;
-  }
-
-  .hero-actions {
-    display: flex;
-    gap: var(--space-sm);
-    flex-wrap: wrap;
-    margin-top: var(--space-lg);
-  }
-
-  .button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 2.7rem;
-    padding: 0 1rem;
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-    text-decoration: none;
-  }
-
-  .button-primary {
-    background: var(--color-accent);
-    border-color: var(--color-accent);
-    color: white;
-  }
-
-  .button-secondary {
-    background: var(--color-bg);
-    color: var(--color-text);
-  }
-
-  .button:hover {
-    text-decoration: none;
-  }
-
-  .primary-card {
-    display: block;
-    padding: var(--space-xl);
-    color: var(--color-text);
-    background:
-      linear-gradient(180deg, rgba(211, 84, 0, 0.08), transparent 42%),
-      var(--color-bg);
-  }
-
-  .primary-card:hover,
-  .section-card:hover,
-  .supplemental-card:hover {
-    text-decoration: none;
-    border-color: var(--color-accent);
-  }
-
-  .card-label {
-    margin: 0 0 var(--space-sm);
-    color: var(--color-text-muted);
-    font-size: 0.82rem;
-  }
-
-  .primary-card h2 {
-    margin-bottom: var(--space-sm);
-  }
-
-  .stat-strip {
-    display: flex;
-    gap: var(--space-xs);
-    flex-wrap: wrap;
-    margin-top: var(--space-lg);
-  }
-
-  .stat-strip span,
-  .section-card-top span {
-    display: inline-flex;
-    align-items: center;
-    min-height: 2rem;
-    padding: 0 0.7rem;
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-    background: var(--color-bg-alt);
-    color: var(--color-text-muted);
-    font-size: 0.82rem;
-  }
-
-  .section-panel {
-    padding: var(--space-lg);
+  .hub-header {
     margin-bottom: var(--space-lg);
   }
 
-  .panel-header h2 {
+  .hub-header h1 {
+    margin-bottom: var(--space-xs);
+  }
+
+  .hub-header p {
+    color: var(--color-text-muted);
     margin: 0;
   }
 
-  .section-grid,
-  .supplemental-grid {
+  .hub-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: var(--space-md);
-    margin-top: var(--space-lg);
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
   }
 
-  .section-copy,
-  .primary-note {
-    color: var(--color-text-muted);
-  }
-
-  .primary-note {
-    margin: var(--space-md) 0 0;
-    font-size: 0.92rem;
-  }
-
-  .section-card,
-  .supplemental-card {
-    display: block;
-    padding: var(--space-lg);
+  .card {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-md);
     border: 1px solid var(--color-border);
-    border-radius: 14px;
+    border-radius: 10px;
     color: var(--color-text);
-    transition: border-color 0.15s ease, transform 0.15s ease;
+    transition: border-color 0.15s ease;
   }
 
-  .section-card {
-    background: var(--color-bg);
+  .card:hover {
+    text-decoration: none;
+    border-color: var(--color-accent);
   }
 
-  .section-card:hover,
-  .supplemental-card:hover {
-    transform: translateY(-1px);
+  .card-primary {
+    grid-column: 1 / -1;
+    background:
+      linear-gradient(135deg, rgba(211, 84, 0, 0.08), transparent 50%),
+      var(--color-bg);
   }
 
-  .section-card-top {
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+
+  .card h2 {
+    font-size: 1rem;
+    margin: 0 0 var(--space-xs);
+  }
+
+  .card-primary h2 {
+    font-size: 1.15rem;
+    margin: 0;
+  }
+
+  .badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    background: var(--color-accent);
+    color: white;
+  }
+
+  .card p {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    margin: var(--space-xs) 0 0;
+    flex: 1;
+  }
+
+  .card-stats {
     display: flex;
     gap: var(--space-xs);
     flex-wrap: wrap;
-    margin-bottom: var(--space-md);
+    margin-top: var(--space-sm);
   }
 
-  .section-card h3,
-  .supplemental-card h3 {
+  .card-stats span {
+    font-size: 0.75rem;
+    padding: 0.15rem 0.55rem;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    color: var(--color-text-muted);
+    background: var(--color-bg-alt);
+  }
+
+  .hub-sections {
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: var(--space-md);
+  }
+
+  .hub-sections h3 {
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
     margin: 0 0 var(--space-sm);
   }
 
-  .section-card p,
-  .supplemental-card p {
-    font-size: 0.9rem;
-    color: var(--color-text-muted);
-    margin: 0;
+  .section-list {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1px;
+    background: var(--color-border);
+    border-radius: 6px;
+    overflow: hidden;
   }
 
-  .supplemental-panel {
-    background: linear-gradient(180deg, var(--color-bg), var(--color-bg-alt));
-  }
-
-  .supplemental-card {
+  .section-link {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.55rem 0.75rem;
     background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 0.88rem;
+    transition: background 0.1s ease;
   }
 
-  @media (max-width: 900px) {
-    .hero {
+  .section-link:hover {
+    text-decoration: none;
+    background: var(--color-bg-alt);
+  }
+
+  .section-name {
+    font-weight: 500;
+  }
+
+  .section-meta {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    margin-left: var(--space-sm);
+  }
+
+  @media (max-width: 700px) {
+    .hub-grid {
+      grid-template-columns: 1fr;
+    }
+    .card-primary {
+      grid-column: 1;
+    }
+    .section-list {
       grid-template-columns: 1fr;
     }
   }

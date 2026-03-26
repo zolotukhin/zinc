@@ -3,7 +3,7 @@
 Findings from extensive profiling of LLM inference on AMD Radeon AI PRO R9700 (RDNA4, gfx1201).
 
 ## Hardware Specifications
-- **GPU**: 64 CUs, wave64, 32KB L1/CU, 6MB L2
+- **GPU**: 64 CUs, wave64, 32KB L0 vector cache/CU, 8MB L2
 - **Memory**: 32GB GDDR6, 576 GB/s bandwidth
 - **Vulkan**: VK_KHR_cooperative_matrix 16x16x16
 - **Architecture**: gfx1201 (detected as AMD_RDNA3 by llama.cpp)

@@ -6,6 +6,7 @@ const std = @import("std");
 const instance_mod = @import("vulkan/instance.zig");
 const gpu_detect = @import("vulkan/gpu_detect.zig");
 const loader_mod = @import("model/loader.zig");
+const architecture_mod = @import("model/architecture.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
 const forward_mod = @import("compute/forward.zig");
 const CommandPool = @import("vulkan/command.zig").CommandPool;
@@ -38,6 +39,8 @@ pub const Config = struct {
     max_parallel: u32 = 4,
     prompt: ?[]const u8 = null,
     kv_quant: u8 = 0, // 0=disabled, 2/3/4=TurboQuant bits
+    graph_report_path: ?[]const u8 = null,
+    graph_dot_path: ?[]const u8 = null,
     show_help: bool = false,
 };
 
@@ -52,6 +55,8 @@ const banner =
     \\  --parallel <n>           Max concurrent requests (default: 4)
     \\  --prompt <text>          Single prompt (CLI mode, no server)
     \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
+    \\  --graph-report <path>    Write decode-graph JSON report from GGUF metadata
+    \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
     \\  -h, --help               Show this help
     \\
 ;
@@ -100,12 +105,84 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             if (config.kv_quant != 0 and config.kv_quant != 2 and config.kv_quant != 3 and config.kv_quant != 4) {
                 return error.InvalidKvQuant;
             }
+        } else if (std.mem.eql(u8, arg, "--graph-report")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            config.graph_report_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--graph-dot")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            config.graph_dot_path = args[i];
         } else {
             return error.UnknownArgument;
         }
     }
 
     return config;
+}
+
+/// Build the static decode graph from GGUF metadata and write debugging artifacts.
+/// @param model_path Path to the GGUF file to inspect.
+/// @param report_path Optional JSON destination for the structural graph report.
+/// @param dot_path Optional DOT destination for Graphviz rendering.
+/// @param allocator Allocator used for GGUF parsing and graph analysis.
+fn exportDecodeGraphArtifacts(
+    model_path: []const u8,
+    report_path: ?[]const u8,
+    dot_path: ?[]const u8,
+    allocator: std.mem.Allocator,
+) !void {
+    const model_config = try loader_mod.inspectConfig(model_path, allocator);
+    var decode_graph = try architecture_mod.buildDecodeGraph(&model_config, allocator);
+    defer decode_graph.deinit();
+
+    if (report_path) |path| {
+        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        defer {
+            var close_file = file;
+            close_file.close();
+        }
+
+        var file_buffer: [4096]u8 = undefined;
+        var file_writer = file.writer(&file_buffer);
+        try decode_graph.writeJsonReport(&file_writer.interface, allocator);
+        try file_writer.interface.flush();
+        log.info("Wrote decode graph JSON report to {s}", .{path});
+    }
+
+    if (dot_path) |path| {
+        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        defer {
+            var close_file = file;
+            close_file.close();
+        }
+
+        var file_buffer: [4096]u8 = undefined;
+        var file_writer = file.writer(&file_buffer);
+        try decode_graph.writeDot(&file_writer.interface, allocator);
+        try file_writer.interface.flush();
+        log.info("Wrote decode graph DOT export to {s}", .{path});
+    }
+
+    var analysis = try decode_graph.analyze(allocator);
+    defer analysis.deinit();
+
+    log.info(
+        "Decode graph {s}: {d} nodes | {d} edges | critical path {d} nodes ({d} edges) | max parallel width {d}",
+        .{
+            analysis.name,
+            analysis.node_count,
+            analysis.edge_count,
+            analysis.critical_path_node_count,
+            analysis.critical_path_edge_count,
+            analysis.max_parallel_width,
+        },
+    );
+
+    const top_n = @min(analysis.op_counts.len, 5);
+    for (analysis.op_counts[0..top_n]) |entry| {
+        log.info("  op {s}: {d}", .{ @tagName(entry.op), entry.count });
+    }
 }
 
 /// Start the ZINC process in prompt mode or server mode.
@@ -129,6 +206,23 @@ pub fn main() !void {
         return;
     }
 
+    if (config.model_path == null) {
+        log.warn("No model specified (-m). Use --help for usage.", .{});
+        return;
+    }
+
+    const model_path = config.model_path.?;
+    log.info("Model: {s}", .{model_path});
+
+    if (config.graph_report_path != null or config.graph_dot_path != null) {
+        exportDecodeGraphArtifacts(model_path, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
+            log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+
+        if (config.prompt == null) return;
+    }
+
     // Initialize Vulkan
     var vk_instance = instance_mod.Instance.init(allocator, config.device_index) catch |err| {
         log.err("Vulkan init failed: {s}", .{@errorName(err)});
@@ -139,14 +233,6 @@ pub fn main() !void {
     // Detect GPU capabilities
     const gpu_config = gpu_detect.detect(&vk_instance);
     gpu_config.log_info();
-
-    if (config.model_path == null) {
-        log.warn("No model specified (-m). Use --help for usage.", .{});
-        return;
-    }
-
-    const model_path = config.model_path.?;
-    log.info("Model: {s}", .{model_path});
 
     // Load model
     var cmd_pool = try CommandPool.init(&vk_instance);
@@ -171,45 +257,28 @@ pub fn main() !void {
     if (config.prompt) |prompt| {
         log.info("Prompt: {s}", .{prompt});
 
-        // Tokenize prompt — try external tokenizer, fall back to dummy tokens
-        var prompt_tokens: []u32 = &.{};
-        var owns_tokens = false;
+        // Initialize native BPE tokenizer from GGUF metadata
+        var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
+            log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer tokenizer.deinit();
 
-        blk: {
-            var tokenizer = tokenizer_mod.Tokenizer.init(allocator, model_path, .sentencepiece);
-            defer tokenizer.deinit();
+        // Tokenize prompt
+        const raw_tokens = try tokenizer.encode(prompt);
+        defer allocator.free(raw_tokens);
 
-            prompt_tokens = tokenizer.encode(prompt) catch |err| {
-                log.warn("External tokenizer failed ({s}), using dummy tokens", .{@errorName(err)});
-                break :blk;
-            };
-            if (prompt_tokens.len > 0) {
-                owns_tokens = true;
-                break :blk;
-            }
-            log.warn("External tokenizer returned 0 tokens, using dummy tokens", .{});
-        }
-
-        // Fallback: generate simple dummy token IDs from prompt bytes
-        if (prompt_tokens.len == 0) {
-            const words = std.mem.count(u8, prompt, " ") + 1;
-            const n_tokens: usize = @min(words * 2, 64); // ~2 tokens per word, cap at 64
-            const dummy = try allocator.alloc(u32, n_tokens);
-            for (dummy, 0..) |*t, i| {
-                // Use prompt bytes to seed token IDs in valid vocab range
-                const byte_idx = (i * prompt.len) / n_tokens;
-                t.* = @as(u32, prompt[byte_idx]) + @as(u32, @intCast(i)) * 137 + 1000;
-            }
-            prompt_tokens = dummy;
-            owns_tokens = true;
-        }
-        defer if (owns_tokens) allocator.free(prompt_tokens);
+        // Prepend BOS token
+        const prompt_tokens = try allocator.alloc(u32, raw_tokens.len + 1);
+        prompt_tokens[0] = tokenizer.bosId();
+        @memcpy(prompt_tokens[1..], raw_tokens);
+        defer allocator.free(prompt_tokens);
 
         log.info("Prompt tokens: {d}", .{prompt_tokens.len});
 
         // Generate
         const max_tokens: u32 = 256;
-        const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, allocator);
+        const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator);
         defer allocator.free(output_tokens);
 
         // Output token IDs (detokenization requires external tokenizer)
@@ -238,6 +307,7 @@ test "parseArgs: full args" {
         "zinc",          "-m",       "model.gguf", "-p",     "9090",
         "-d",            "1",        "-c",         "8192",   "--parallel",
         "8",             "--prompt",  "hello",      "--kv-quant", "3",
+        "--graph-report", "graph.json", "--graph-dot", "graph.dot",
     };
     const config = try parseArgs(&args);
     try std.testing.expectEqualStrings("model.gguf", config.model_path.?);
@@ -247,6 +317,8 @@ test "parseArgs: full args" {
     try std.testing.expectEqual(@as(u32, 8), config.max_parallel);
     try std.testing.expectEqualStrings("hello", config.prompt.?);
     try std.testing.expectEqual(@as(u8, 3), config.kv_quant);
+    try std.testing.expectEqualStrings("graph.json", config.graph_report_path.?);
+    try std.testing.expectEqualStrings("graph.dot", config.graph_dot_path.?);
 }
 
 test "parseArgs: help flag" {

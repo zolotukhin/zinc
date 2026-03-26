@@ -175,7 +175,12 @@ pub const Instance = struct {
         self.* = undefined;
     }
 
-    /// Find a memory type index matching the requirements.
+    /// Find a Vulkan memory type that satisfies both compatibility and property requirements.
+    /// @param self Active Vulkan instance and memory properties.
+    /// @param type_filter Bitmask of compatible memory types reported by Vulkan.
+    /// @param properties Required Vulkan memory property flags.
+    /// @returns The matching memory type index, or `null` when no heap satisfies the request.
+    /// @note All requested property bits must be present on the returned memory type.
     pub fn findMemoryType(self: *const Instance, type_filter: u32, properties: vk.c.VkMemoryPropertyFlags) ?u32 {
         for (0..self.mem_props.memoryTypeCount) |i| {
             const idx: u5 = @intCast(i);
@@ -188,7 +193,10 @@ pub const Instance = struct {
         return null;
     }
 
-    /// Total device-local VRAM in bytes.
+    /// Sum the size of all device-local memory heaps exposed by the selected GPU.
+    /// @param self Active Vulkan instance and memory properties.
+    /// @returns The total number of bytes in device-local heaps.
+    /// @note Drivers may expose multiple heaps, so this is an aggregate capacity rather than a single contiguous pool.
     pub fn vramBytes(self: *const Instance) u64 {
         var total: u64 = 0;
         for (self.mem_props.memoryHeaps[0..self.mem_props.memoryHeapCount]) |heap| {

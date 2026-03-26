@@ -96,7 +96,18 @@ pub const ElementwiseDispatch = struct {
         };
     }
 
-    /// Record an RMS norm + scale dispatch.
+    /// Record an RMS-norm-plus-scale dispatch for a batch of tokens.
+    ///
+    /// This binds the fused normalization shader used before attention and MLP
+    /// projections so each token is normalized against its hidden dimension.
+    /// @param self Dispatch wrapper containing the RMS norm pipeline.
+    /// @param cmd Command buffer currently being recorded.
+    /// @param descriptor_set Descriptor set containing input, weight, and output buffers.
+    /// @param hidden_dim Hidden width processed per token.
+    /// @param n_tokens Number of tokens covered by the dispatch.
+    /// @param eps Numerical stability epsilon passed to the shader.
+    /// @returns `error.ShaderNotLoaded` when the RMS norm pipeline is unavailable.
+    /// @note The helper dispatches one workgroup per token.
     pub fn recordRmsNorm(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
@@ -114,7 +125,13 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_tokens, 1, 1);
     }
 
-    /// Record a SwiGLU dispatch.
+    /// Record a SwiGLU activation dispatch.
+    /// @param self Dispatch wrapper containing the SwiGLU pipeline.
+    /// @param cmd Command buffer currently being recorded.
+    /// @param descriptor_set Descriptor set containing gate, up, and output buffers.
+    /// @param n_elements Total number of output elements to compute.
+    /// @returns `error.ShaderNotLoaded` when the SwiGLU pipeline is unavailable.
+    /// @note Workgroups are sized as `ceil(n_elements / 64)`.
     pub fn recordSwiglu(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
@@ -127,7 +144,19 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
-    /// Record a RoPE dispatch.
+    /// Record a rotary-position-embedding dispatch for the active decode position.
+    ///
+    /// This applies RoPE in-place semantics through the dedicated shader so
+    /// attention inputs are rotated consistently with the current token index.
+    /// @param self Dispatch wrapper containing the RoPE pipeline.
+    /// @param cmd Command buffer currently being recorded.
+    /// @param descriptor_set Descriptor set containing input and output buffers.
+    /// @param head_dim Hidden width per attention head.
+    /// @param n_heads Number of heads to rotate.
+    /// @param position Decode position being encoded.
+    /// @param freq_base Base rotary frequency parameter.
+    /// @returns `error.ShaderNotLoaded` when the RoPE pipeline is unavailable.
+    /// @note The helper dispatches one workgroup per head.
     pub fn recordRope(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,

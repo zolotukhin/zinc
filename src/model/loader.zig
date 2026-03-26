@@ -174,6 +174,34 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     };
 }
 
+/// Inspect a GGUF file and extract only the normalized model configuration.
+/// @param path Path to the GGUF file on disk.
+/// @param allocator Allocator used for the parsed metadata structures.
+/// @returns A ModelConfig derived from GGUF metadata without uploading tensors to the GPU.
+pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfig {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer {
+        var close_file = file;
+        close_file.close();
+    }
+
+    const stat = try file.stat();
+    const mmap_data = try std.posix.mmap(
+        null,
+        stat.size,
+        std.posix.PROT.READ,
+        .{ .TYPE = .PRIVATE },
+        file.handle,
+        0,
+    );
+    defer std.posix.munmap(mmap_data);
+
+    var gf = try gguf.parse(mmap_data, allocator);
+    defer gf.deinit();
+
+    return extractConfig(&gf);
+}
+
 /// Load a GGUF model: memory-map the file, parse headers, and DMA tensors to GPU VRAM.
 /// @param path Path to the GGUF file on disk.
 /// @param instance Active Vulkan instance used for buffer allocation.

@@ -100,7 +100,11 @@ pub const DmmvDispatch = struct {
         };
     }
 
-    /// Select the appropriate pipeline for a quantization type.
+    /// Select the quantization-specific pipeline used for a weight matrix format.
+    /// @param self Dispatch wrapper containing the loaded DMMV pipelines.
+    /// @param quant_type GGML quantization format for the weight matrix.
+    /// @returns A pipeline pointer when that quantization format has a loaded shader implementation.
+    /// @note Unsupported or unloaded formats return `null` so callers can surface `error.UnsupportedQuantType`.
     pub fn pipelineForType(self: *const DmmvDispatch, quant_type: GGMLType) ?*const Pipeline {
         return switch (quant_type) {
             .q4_k => if (self.pipeline_q4k) |*p| p else null,
@@ -110,7 +114,18 @@ pub const DmmvDispatch = struct {
         };
     }
 
-    /// Record a DMMV dispatch into a command buffer.
+    /// Record a decode-time matrix-vector multiply dispatch.
+    /// @param self Dispatch wrapper containing the quantization-specific pipelines.
+    /// @param cmd Command buffer currently being recorded.
+    /// @param quant_type GGML quantization format for the weight matrix.
+    /// @param descriptor_set Descriptor set containing matrix, input vector, and output buffers.
+    /// @param M Output row count.
+    /// @param K Input feature width.
+    /// @param a_offset Byte offset for the weight matrix.
+    /// @param x_offset Byte offset for the input vector.
+    /// @param y_offset Byte offset for the output vector.
+    /// @returns `error.UnsupportedQuantType` when no pipeline is available for `quant_type`.
+    /// @note The helper uses one workgroup per 64 output rows.
     pub fn recordDispatch(
         self: *const DmmvDispatch,
         cmd: *const CommandBuffer,

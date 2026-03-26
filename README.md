@@ -78,6 +78,21 @@ The binary is placed in `zig-out/bin/zinc`. Compiled SPIR-V shaders go to `zig-o
 ./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
 ```
 
+### Export Decode Graph Artifacts
+
+```bash
+# Machine-readable structural report for custom tooling
+./zig-out/bin/zinc -m /path/to/model.gguf --graph-report decode-graph.json
+
+# Graphviz DOT for quick rendering/debugging
+./zig-out/bin/zinc -m /path/to/model.gguf --graph-dot decode-graph.dot
+
+# Both at once
+./zig-out/bin/zinc -m /path/to/model.gguf \
+  --graph-report decode-graph.json \
+  --graph-dot decode-graph.dot
+```
+
 ### CLI Reference
 
 ```
@@ -89,8 +104,12 @@ Usage: zinc [options]
   --parallel <n>           Max concurrent requests (default: 4)
   --prompt <text>          Single prompt (CLI mode, no server)
   --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
+  --graph-report <path>    Write decode-graph JSON report from GGUF metadata
+  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
   -h, --help               Show this help
 ```
+
+The JSON report includes node/edge lists, op-type counts, per-node depth, root/leaf flags, and the structural critical path. The DOT export is intended for Graphviz or downstream visualization tools.
 
 ### Tests
 
@@ -178,16 +197,52 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
   <img src="assets/architecture.svg" alt="ZINC Architecture" width="680">
 </p>
 
-## Performance Targets
+## Benchmarks
 
-### Radeon AI PRO R9700 (32GB, 576 GB/s)
+Measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB). Benchmarked 2026-03-26.
+
+### Decode throughput (tok/s, higher is better)
+
+```
+                 Qwen3.5-35B-A3B Q4_K — Decode (tg128/tg256)
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                                                                 │
+  │  llama.cpp   ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░  16.7 tok/s  │
+  │  Vulkan                                                         │
+  │                                                                 │
+  │  ZINC        ██████████████████████░░░░░░░░░░░░░░░  45.5 tok/s  │
+  │  (current)                                          ▲ 2.7× ▲    │
+  │                                                                 │
+  │  ZINC        ███████████████████████████████████████ 110+ tok/s  │
+  │  (target)                                                       │
+  │                                                                 │
+  └─────────────────────────────────────────────────────────────────┘
+```
+
+### Full comparison
+
+| Metric | llama.cpp Vulkan | ZINC (current) | ZINC (target) |
+|--------|:---:|:---:|:---:|
+| **Decode** | 16.7 tok/s | **45.5 tok/s** (2.7x) | 110+ tok/s |
+| **Prefill** | 432 tok/s (pp512) | **2,655 tok/s** (pp10) | 2,800+ tok/s (pp512) |
+| **Coherent output** | Yes | WIP | Yes |
+| **RDNA4-tuned kernels** | No | Yes | Yes |
+| **Native tokenizer** | Yes | Yes (BPE from GGUF) | Yes |
+| **Continuous batching** | No | Phase 4 | Yes |
+| **TurboQuant KV** | No | Phase 5 | Yes |
+
+> **Note**: ZINC prefill was measured at pp10 (short prompt); llama.cpp at pp512. Decode numbers are directly comparable. ZINC output is not yet coherent (compute graph correctness is WIP) — throughput numbers reflect real GPU kernel execution time.
+
+### Performance targets
+
+#### Radeon AI PRO R9700 (32GB, 576 GB/s)
 | Model | Quant | Single-req | 4-concurrent | Aggregate |
 |-------|-------|------------|--------------|-----------|
 | Qwen3-8B | Q4_K | 120+ tok/s | 110+ each | 440+ tok/s |
 | Qwen3.5-35B-A3B | Q4_K | 110+ tok/s | 108+ each | 432+ tok/s |
 | Llama-3.1-70B | Q4_K | 35+ tok/s | 32+ each | 128+ tok/s |
 
-### RX 9070 XT (16GB, 672 GB/s)
+#### RX 9070 XT (16GB, 672 GB/s)
 | Model | Quant | Single-req | 4-concurrent | Aggregate |
 |-------|-------|------------|--------------|-----------|
 | Qwen3-8B | Q4_K | 130+ tok/s | 120+ each | 480+ tok/s |
@@ -199,9 +254,10 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 | Vulkan infrastructure | Done |
 | GGUF parser + model loader | Done |
 | GPU detection (RDNA3/4) | Done |
-| GLSL compute shaders (14) | Done |
+| Native BPE tokenizer (from GGUF) | Done |
+| GLSL compute shaders (16) | Done |
 | Compute graph + architecture builders | Done |
-| Forward pass (decode loop) | Skeleton (dispatches not wired) |
+| Forward pass (decode loop) | Running (2.7x llama.cpp, output correctness WIP) |
 | HTTP server + OpenAI API | Phase 4 |
 | Continuous batching | Phase 4 |
 | TurboQuant KV compression | Phase 5 |

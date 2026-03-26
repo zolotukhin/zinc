@@ -65,7 +65,10 @@ pub const GpuConfig = struct {
     }
 };
 
-/// Detect GPU capabilities and derive tuning parameters.
+/// Inspect Vulkan device properties and derive runtime tuning defaults.
+/// @param instance Active Vulkan instance whose selected physical device should be classified.
+/// @returns A GpuConfig populated from Vulkan limits plus ZINC-specific vendor heuristics.
+/// @note The classification is heuristic and intentionally biased toward sensible defaults rather than exact SKU detection.
 pub fn detect(instance: *const Instance) GpuConfig {
     const props = instance.device_props;
     const name_slice = std.mem.sliceTo(&props.deviceName, 0);

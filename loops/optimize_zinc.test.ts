@@ -1,26 +1,42 @@
 import { describe, expect, test } from "bun:test";
-import { parseTokPerSec, parseTokensGenerated, detectPhase } from "./optimize_zinc";
+import { parseTokPerSec, parseTokensGenerated, detectPhase, isGarbageOutput } from "./optimize_zinc";
 import type { BuildRunResult, Phase } from "./optimize_zinc";
 
 describe("parseTokPerSec", () => {
-  test("extracts tok/s from output", () => {
-    expect(parseTokPerSec("Generation: 110.5 tok/s")).toBe(110.5);
+  test("prefers decode tok/s over prefill tok/s", () => {
+    const output = [
+      "info(forward): Prefill complete: 10 tokens in 1.3 ms (7459.27 tok/s)",
+      "info(forward): Generated 256 tokens in 5635.3 ms — 45.43 tok/s (22.0 ms/tok)",
+    ].join("\n");
+    expect(parseTokPerSec(output)).toBeCloseTo(45.43, 1);
   });
 
-  test("extracts tok/s with integer", () => {
+  test("extracts decode tok/s with em dash", () => {
+    expect(parseTokPerSec("Generated 256 tokens in 2500.0 ms — 102.4 tok/s")).toBeCloseTo(102.4, 1);
+  });
+
+  test("extracts decode tok/s with en dash", () => {
+    expect(parseTokPerSec("Generated 256 tokens in 2500.0 ms – 102.4 tok/s")).toBeCloseTo(102.4, 1);
+  });
+
+  test("extracts decode tok/s with hyphen", () => {
+    expect(parseTokPerSec("Generated 256 tokens in 2500.0 ms - 102.4 tok/s")).toBeCloseTo(102.4, 1);
+  });
+
+  test("computes from generated tokens + time when no inline tok/s", () => {
+    expect(parseTokPerSec("Generated 256 tokens in 2.5 s")).toBeCloseTo(102.4, 0);
+  });
+
+  test("computes from ms timing", () => {
+    expect(parseTokPerSec("Generated 100 tokens in 1000 ms")).toBeCloseTo(100, 0);
+  });
+
+  test("falls back to any tok/s when no Generated line", () => {
     expect(parseTokPerSec("Running at 98 tok/s")).toBe(98);
   });
 
   test("returns null for no tok/s", () => {
     expect(parseTokPerSec("Build successful")).toBeNull();
-  });
-
-  test("extracts from generated tokens + time", () => {
-    expect(parseTokPerSec("Generated 256 tokens in 2.5s")).toBeCloseTo(102.4, 0);
-  });
-
-  test("handles ms timing", () => {
-    expect(parseTokPerSec("Generated 100 tokens in 1000ms")).toBeCloseTo(100, 0);
   });
 });
 
@@ -46,6 +62,28 @@ info(forward): Generated 256 tokens`;
   });
 });
 
+describe("isGarbageOutput", () => {
+  test("detects repeated tokens", () => {
+    expect(isGarbageOutput(
+      "info(zinc): Output tokens (20): { 6160, 1136, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047, 6047 }"
+    )).toBe(true);
+  });
+
+  test("accepts diverse tokens", () => {
+    expect(isGarbageOutput(
+      "info(zinc): Output tokens (10): { 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000 }"
+    )).toBe(false);
+  });
+
+  test("returns false when no Output tokens line", () => {
+    expect(isGarbageOutput("info(forward): Generated 256 tokens")).toBe(false);
+  });
+
+  test("handles short token lists", () => {
+    expect(isGarbageOutput("info(zinc): Output tokens (2): { 100, 100 }")).toBe(false);
+  });
+});
+
 describe("detectPhase", () => {
   const base: BuildRunResult = {
     buildExitCode: 0,
@@ -55,6 +93,7 @@ describe("detectPhase", () => {
     phase: "fix",
     tokPerSec: null,
     tokensGenerated: 0,
+    garbageOutput: false,
     error: null,
   };
 

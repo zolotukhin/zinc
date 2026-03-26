@@ -16,7 +16,13 @@ pub const Buffer = struct {
     mapped: ?[*]u8,
     device: vk.c.VkDevice,
 
-    /// Create a GPU buffer with the given usage and memory properties.
+    /// Create a Vulkan buffer and allocate backing device memory for it.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param size Buffer size in bytes.
+    /// @param usage Vulkan buffer usage flags.
+    /// @param mem_properties Required Vulkan memory property flags for the allocation.
+    /// @returns A Buffer with memory bound but not automatically mapped.
+    /// @note Use `initStaging()` when you need an immediately mapped upload buffer.
     pub fn init(
         instance: *const Instance,
         size: vk.c.VkDeviceSize,
@@ -80,7 +86,12 @@ pub const Buffer = struct {
         };
     }
 
-    /// Create a device-local buffer (GPU VRAM, not host-visible).
+    /// Create a device-local buffer for GPU-only reads and writes.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param size Buffer size in bytes.
+    /// @param usage Additional Vulkan usage flags for the buffer.
+    /// @returns A device-local buffer with transfer-destination usage enabled.
+    /// @note This helper automatically adds `VK_BUFFER_USAGE_TRANSFER_DST_BIT` for staging uploads.
     pub fn initDeviceLocal(instance: *const Instance, size: vk.c.VkDeviceSize, usage: vk.c.VkBufferUsageFlags) !Buffer {
         return init(
             instance,
@@ -90,7 +101,11 @@ pub const Buffer = struct {
         );
     }
 
-    /// Create a host-visible staging buffer for CPU→GPU transfers.
+    /// Create and immediately map a host-visible staging buffer.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param size Buffer size in bytes.
+    /// @returns A staging buffer ready for CPU writes through `mapped`.
+    /// @note The buffer uses coherent host memory so writes do not require an explicit flush.
     pub fn initStaging(instance: *const Instance, size: vk.c.VkDeviceSize) !Buffer {
         var buf = try init(
             instance,
@@ -112,7 +127,10 @@ pub const Buffer = struct {
         return buf;
     }
 
-    /// Write data to a mapped staging buffer.
+    /// Copy raw bytes into a previously mapped staging buffer.
+    /// @param self Mapped staging buffer to write into.
+    /// @param data Bytes to copy from the CPU into the mapped range.
+    /// @note Debug assertions ensure the buffer is mapped and the write fits in the allocation.
     pub fn upload(self: *const Buffer, data: []const u8) void {
         std.debug.assert(self.mapped != null);
         std.debug.assert(data.len <= self.size);
@@ -132,7 +150,14 @@ pub const Buffer = struct {
     }
 };
 
-/// Record and execute a buffer-to-buffer copy via a one-shot command buffer.
+/// Copy bytes between two Vulkan buffers with a temporary one-shot command buffer.
+/// @param instance Active Vulkan instance and logical device.
+/// @param cmd_pool Command pool used to allocate the temporary command buffer.
+/// @param src Source buffer.
+/// @param dst Destination buffer.
+/// @param size Number of bytes to copy.
+/// @returns `error.AllocCmdBufFailed` or `error.QueueSubmitFailed` when command allocation or submission fails.
+/// @note This helper waits for the compute queue to go idle before returning.
 pub fn copyBuffer(
     instance: *const Instance,
     cmd_pool: vk.c.VkCommandPool,

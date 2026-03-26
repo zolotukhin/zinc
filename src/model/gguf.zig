@@ -67,7 +67,10 @@ pub const GGMLType = enum(u32) {
     bf16 = 30,
     _,
 
-    /// Block size for quantized types (number of elements per block).
+    /// Return the number of tensor elements encoded by one storage block.
+    /// @param self GGML tensor format to inspect.
+    /// @returns The number of logical elements represented by one block of this format.
+    /// @note Quantized formats pack many elements into one block, while plain scalar types return `1`.
     pub fn blockSize(self: GGMLType) u32 {
         return switch (self) {
             .f32, .f16, .bf16, .f64 => 1,
@@ -85,7 +88,10 @@ pub const GGMLType = enum(u32) {
         };
     }
 
-    /// Bytes per block for quantized types.
+    /// Return the serialized byte width of one storage block.
+    /// @param self GGML tensor format to inspect.
+    /// @returns The number of on-disk bytes consumed by one block of this format.
+    /// @note Use this together with `blockSize()` to convert element counts into tensor byte ranges.
     pub fn bytesPerBlock(self: GGMLType) u32 {
         return switch (self) {
             .f32 => 4,
@@ -179,7 +185,9 @@ pub const TensorInfo = struct {
     type_: GGMLType,
     offset: u64, // offset from start of tensor data section
 
-    /// Total number of elements.
+    /// Multiply the active tensor dimensions to get the logical element count.
+    /// @param self Tensor descriptor to inspect.
+    /// @returns The total number of logical elements across the first `n_dims` entries in `dims`.
     pub fn numElements(self: *const TensorInfo) u64 {
         var n: u64 = 1;
         for (self.dims[0..self.n_dims]) |d| {
@@ -188,7 +196,10 @@ pub const TensorInfo = struct {
         return n;
     }
 
-    /// Total size in bytes.
+    /// Compute the serialized tensor byte size for the descriptor's GGML storage format.
+    /// @param self Tensor descriptor to inspect.
+    /// @returns The number of bytes occupied by the tensor payload, rounded up to whole quantization blocks.
+    /// @note Quantized tensors round element counts up to a full block before multiplying by bytes-per-block.
     pub fn sizeBytes(self: *const TensorInfo) u64 {
         const n = self.numElements();
         const bs = self.type_.blockSize();

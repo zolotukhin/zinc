@@ -92,7 +92,10 @@ pub const CommandBuffer = struct {
         };
     }
 
-    /// Begin recording commands.
+    /// Begin recording a reusable command buffer.
+    /// @param self Command buffer to begin recording into.
+    /// @returns `error.BeginCommandBufferFailed` when Vulkan rejects the begin request.
+    /// @note Use `reset()` or wait for prior submissions before recording into the same buffer again.
     pub fn begin(self: *const CommandBuffer) !void {
         const begin_info = vk.c.VkCommandBufferBeginInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -104,7 +107,10 @@ pub const CommandBuffer = struct {
         if (result != vk.c.VK_SUCCESS) return error.BeginCommandBufferFailed;
     }
 
-    /// Begin recording for one-time submission.
+    /// Begin recording for a single submit-and-discard style workload.
+    /// @param self Command buffer to begin recording into.
+    /// @returns `error.BeginCommandBufferFailed` when Vulkan rejects the begin request.
+    /// @note This sets `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` so the driver can optimize transient work.
     pub fn beginOneTime(self: *const CommandBuffer) !void {
         const begin_info = vk.c.VkCommandBufferBeginInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -116,7 +122,14 @@ pub const CommandBuffer = struct {
         if (result != vk.c.VK_SUCCESS) return error.BeginCommandBufferFailed;
     }
 
-    /// Record a compute dispatch.
+    /// Record a compute dispatch with an already-created descriptor set.
+    /// @param self Command buffer currently being recorded.
+    /// @param pipeline Compute pipeline to bind before dispatch.
+    /// @param descriptor_set Descriptor set bound at set `0`.
+    /// @param group_count_x Workgroup count in the X dimension.
+    /// @param group_count_y Workgroup count in the Y dimension.
+    /// @param group_count_z Workgroup count in the Z dimension.
+    /// @note This helper binds pipeline and descriptors only; required barriers must be recorded separately.
     pub fn dispatch(
         self: *const CommandBuffer,
         pipeline: *const Pipeline,
@@ -139,7 +152,15 @@ pub const CommandBuffer = struct {
         vk.c.vkCmdDispatch(self.handle, group_count_x, group_count_y, group_count_z);
     }
 
-    /// Record a compute dispatch with push constants.
+    /// Record a compute dispatch that also uploads a serialized push-constant block.
+    /// @param self Command buffer currently being recorded.
+    /// @param pipeline Compute pipeline to bind before dispatch.
+    /// @param descriptor_set Descriptor set bound at set `0`.
+    /// @param push_data Raw bytes copied into the pipeline's push-constant range at offset `0`.
+    /// @param group_count_x Workgroup count in the X dimension.
+    /// @param group_count_y Workgroup count in the Y dimension.
+    /// @param group_count_z Workgroup count in the Z dimension.
+    /// @note The caller is responsible for matching `push_data` to the shader layout declared by `pipeline`.
     pub fn dispatchWithPush(
         self: *const CommandBuffer,
         pipeline: *const Pipeline,
@@ -171,7 +192,9 @@ pub const CommandBuffer = struct {
         vk.c.vkCmdDispatch(self.handle, group_count_x, group_count_y, group_count_z);
     }
 
-    /// Record a pipeline barrier (compute → compute).
+    /// Record a coarse compute-to-compute memory barrier.
+    /// @param self Command buffer currently being recorded.
+    /// @note This synchronizes shader writes with later shader reads when a full buffer barrier is not needed.
     pub fn computeBarrier(self: *const CommandBuffer) void {
         const barrier = vk.c.VkMemoryBarrier{
             .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -193,13 +216,19 @@ pub const CommandBuffer = struct {
         );
     }
 
-    /// End recording.
+    /// Finalize command recording so the buffer can be submitted.
+    /// @param self Command buffer to finalize.
+    /// @returns `error.EndCommandBufferFailed` when Vulkan rejects the recorded command stream.
     pub fn end(self: *const CommandBuffer) !void {
         const result = vk.c.vkEndCommandBuffer(self.handle);
         if (result != vk.c.VK_SUCCESS) return error.EndCommandBufferFailed;
     }
 
-    /// Submit the command buffer and wait for completion.
+    /// Submit the command buffer and block until the GPU signals completion.
+    /// @param self Recorded command buffer to submit.
+    /// @param queue Queue to submit the work on.
+    /// @returns `error.QueueSubmitFailed` or `error.FenceWaitFailed` when submission or synchronization fails.
+    /// @note The fence is reset before returning so the command buffer can be reused by a later step.
     pub fn submitAndWait(self: *const CommandBuffer, queue: vk.c.VkQueue) !void {
         const submit_info = vk.c.VkSubmitInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -225,7 +254,11 @@ pub const CommandBuffer = struct {
         _ = vk.c.vkResetFences(self.device, 1, &self.fence);
     }
 
-    /// Submit without waiting (for pre-recorded replay). Caller must manage synchronization.
+    /// Submit recorded work and return immediately.
+    /// @param self Recorded command buffer to submit.
+    /// @param queue Queue to submit the work on.
+    /// @returns `error.QueueSubmitFailed` when Vulkan rejects the submission.
+    /// @note Pair this with `waitForCompletion()` before resetting or re-recording the command buffer.
     pub fn submit(self: *const CommandBuffer, queue: vk.c.VkQueue) !void {
         const submit_info = vk.c.VkSubmitInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -246,14 +279,20 @@ pub const CommandBuffer = struct {
         }
     }
 
-    /// Wait for a previously submitted command buffer to complete.
+    /// Wait for the command buffer's fence to signal and then reset it.
+    /// @param self Command buffer whose most recent submission should complete before returning.
+    /// @returns `error.FenceWaitFailed` when the wait operation fails.
+    /// @note After this returns, the command buffer can be reset and recorded again.
     pub fn waitForCompletion(self: *const CommandBuffer) !void {
         const result = vk.c.vkWaitForFences(self.device, 1, &self.fence, vk.c.VK_TRUE, std.math.maxInt(u64));
         if (result != vk.c.VK_SUCCESS) return error.FenceWaitFailed;
         _ = vk.c.vkResetFences(self.device, 1, &self.fence);
     }
 
-    /// Reset the command buffer for re-recording.
+    /// Reset the command buffer so new commands can be recorded into it.
+    /// @param self Command buffer to reset.
+    /// @returns `error.ResetCommandBufferFailed` when Vulkan rejects the reset request.
+    /// @note The caller must ensure the previous submission has completed before calling this.
     pub fn reset(self: *const CommandBuffer) !void {
         const result = vk.c.vkResetCommandBuffer(self.handle, 0);
         if (result != vk.c.VK_SUCCESS) return error.ResetCommandBufferFailed;
@@ -262,6 +301,7 @@ pub const CommandBuffer = struct {
     /// Destroy the command buffer fence and free the command buffer back to its pool.
     /// @param self Command buffer to tear down in place.
     /// @param pool Command pool that owns the Vulkan command buffer allocation.
+    /// @note Callers should ensure the GPU is no longer using the buffer before teardown.
     pub fn deinit(self: *CommandBuffer, pool: *const CommandPool) void {
         vk.c.vkDestroyFence(self.device, self.fence, null);
         vk.c.vkFreeCommandBuffers(self.device, pool.handle, 1, &self.handle);

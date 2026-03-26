@@ -13,7 +13,7 @@ Measured on llama.cpp: 67-93% depending on matrix size
 **Approach:**
 - Hand-written GLSL compute shaders compiled to SPIR-V with the system glslc
 - Specialization constants for matrix dimensions (M, K, quant type)
-- RDNA4-specific tuning: wave64, 64 CUs, 32KB L1/CU, 6MB L2
+- RDNA4-specific tuning: wave64, 64 CUs, 32KB L0 vector cache/CU, 8MB L2
 - Cooperative matrix 16x16x16 for prefill/batched decode
 - Per-quant-type optimized dequantize+dot-product kernels
 

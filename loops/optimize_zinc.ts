@@ -95,24 +95,26 @@ export type BuildRunResult = {
   phase: Phase;
   tokPerSec: number | null;
   tokensGenerated: number;
+  garbageOutput: boolean;
   error: string | null;
 };
 
-/** Parse tok/s from ZINC stderr output. */
+/** Parse decode tok/s from ZINC output (the "Generated N tokens in T ms — X tok/s" line). */
 export function parseTokPerSec(output: string): number | null {
-  // Look for patterns like "Generated N tokens" with timing info
-  // or "110.5 tok/s" style output
-  const m = output.match(/(\d+\.?\d*)\s*tok\/s/i);
-  if (m) return parseFloat(m[1]);
-  // Fallback: look for timing in logs
-  const genMatch = output.match(/Generated\s+(\d+)\s+tokens/i);
-  const timeMatch = output.match(/in\s+(\d+\.?\d*)\s*(?:ms|s)/i);
-  if (genMatch && timeMatch) {
+  // Match the decode-specific line: "Generated 256 tokens in 5635.3 ms — 45.43 tok/s"
+  const decodeMatch = output.match(/Generated\s+\d+\s+tokens\s+in\s+[\d.]+\s*(?:ms|s)\s*[—–-]\s*(\d+\.?\d*)\s*tok\/s/i);
+  if (decodeMatch) return parseFloat(decodeMatch[1]);
+  // Fallback: compute from "Generated N tokens in T ms/s"
+  const genMatch = output.match(/Generated\s+(\d+)\s+tokens\s+in\s+(\d+\.?\d*)\s*(ms|s)/i);
+  if (genMatch) {
     const tokens = parseInt(genMatch[1], 10);
-    let seconds = parseFloat(timeMatch[1]);
-    if (timeMatch[0].includes("ms")) seconds /= 1000;
+    let seconds = parseFloat(genMatch[2]);
+    if (genMatch[3] === "ms") seconds /= 1000;
     if (seconds > 0) return tokens / seconds;
   }
+  // Last resort: any tok/s (will catch prefill-only output)
+  const m = output.match(/(\d+\.?\d*)\s*tok\/s/i);
+  if (m) return parseFloat(m[1]);
   return null;
 }
 
@@ -120,6 +122,20 @@ export function parseTokPerSec(output: string): number | null {
 export function parseTokensGenerated(output: string): number {
   const m = output.match(/Generated\s+(\d+)\s+tokens/i);
   return m ? parseInt(m[1], 10) : 0;
+}
+
+/** Check if output tokens look like garbage (e.g. same token repeated). */
+export function isGarbageOutput(output: string): boolean {
+  // Match "Output tokens (N): { t1, t2, t3, ... }"
+  const m = output.match(/Output tokens\s*\(\d+\)\s*:\s*\{([^}]+)\}/i);
+  if (!m) return false; // can't tell, assume OK
+  const tokens = m[1].split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  if (tokens.length < 4) return false;
+  // Check diversity: if >80% of tokens are the same value, it's garbage
+  const counts = new Map<string, number>();
+  for (const t of tokens) counts.set(t, (counts.get(t) ?? 0) + 1);
+  const maxCount = Math.max(...counts.values());
+  return maxCount / tokens.length > 0.8;
 }
 
 /** Determine if we're in fix or optimize phase. */
@@ -246,7 +262,7 @@ async function remoteBuild(): Promise<{ exitCode: number; output: string }> {
       "-p", String(ZINC_PORT),
       "-o", "StrictHostKeyChecking=no",
       `${ZINC_USER}@${ZINC_HOST}`,
-      `cd ${REMOTE_ZINC_DIR} && zig build 2>&1`,
+      `cd ${REMOTE_ZINC_DIR} && zig build -Doptimize=ReleaseFast 2>&1`,
     ],
     { streamOutput: true, timeout: 300_000 },
   );
@@ -283,6 +299,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
       phase: "fix",
       tokPerSec: null,
       tokensGenerated: 0,
+      garbageOutput: false,
       error: "Build failed",
     };
   }
@@ -291,6 +308,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
   const run = await remoteRun(modelPath, "The capital of France is");
   const tps = parseTokPerSec(run.output);
   const tokensGenerated = parseTokensGenerated(run.output);
+  const garbage = isGarbageOutput(run.output);
 
   const result: BuildRunResult = {
     buildExitCode: 0,
@@ -300,6 +318,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
     phase: "fix",
     tokPerSec: tps,
     tokensGenerated,
+    garbageOutput: garbage,
     error: run.exitCode !== 0 ? `Runtime exit code ${run.exitCode}` : null,
   };
   result.phase = detectPhase(result);
@@ -584,8 +603,16 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     diagnosis.push("- Token embedding lookup (read from token_embd.weight tensor)");
     diagnosis.push("- Actual DMMV dispatches for QKV projections, FFN layers");
   } else if (lastResult.tokPerSec != null && lastResult.tokPerSec > 0) {
-    diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s, ${lastResult.tokensGenerated} tokens`);
-    diagnosis.push("ZINC is generating tokens! Optimize for throughput.");
+    diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s (DECODE), ${lastResult.tokensGenerated} tokens`);
+    if (lastResult.garbageOutput) {
+      diagnosis.push("");
+      diagnosis.push("⚠ WARNING: Output tokens are GARBAGE (same token repeated). The model is not producing");
+      diagnosis.push("  coherent output. This likely means the forward pass computation is incorrect —");
+      diagnosis.push("  check buffer bindings, push constant dimensions, and shader math.");
+      diagnosis.push("  Fixing output quality is HIGHER PRIORITY than optimizing tok/s.");
+    }
+    diagnosis.push("");
+    diagnosis.push("ZINC is generating tokens. Optimize for DECODE throughput (not prefill).");
     diagnosis.push("");
     diagnosis.push("Focus on:");
     diagnosis.push("1. DMMV shader bandwidth utilization (target: 90%+ on large matmuls)");
@@ -756,7 +783,8 @@ async function runCycle(
   } else if (buildRun.runExitCode !== 0 && buildRun.runExitCode !== null) {
     console.log(clr("1;31", `  ❌ RUNTIME CRASH (exit ${buildRun.runExitCode})`));
   } else if (buildRun.tokPerSec != null && buildRun.tokPerSec > 0) {
-    console.log(clr("1;32", `  ✅ RUNNING — ${buildRun.tokPerSec.toFixed(1)} tok/s, ${buildRun.tokensGenerated} tokens`));
+    const qualityTag = buildRun.garbageOutput ? clr("1;33", " [GARBAGE OUTPUT]") : "";
+    console.log(clr("1;32", `  ✅ RUNNING — ${buildRun.tokPerSec.toFixed(1)} tok/s, ${buildRun.tokensGenerated} tokens`) + qualityTag);
   } else {
     console.log(clr("1;33", `  ⚠ ENGINE NOT GENERATING — build OK, ${buildRun.tokensGenerated} tokens produced`));
   }
@@ -790,7 +818,23 @@ async function runCycle(
     lastChars.match(/^NEXT_IDEAS:\s*(.+)/im);
 
   const rawDesc = descMatch?.[1]?.trim() ?? "";
-  const description = rawDesc && !isGarbageString(rawDesc) ? rawDesc : "Agent made changes";
+  let description = rawDesc && !isGarbageString(rawDesc) ? rawDesc : "";
+  // Fallback: summarize from git diff if agent didn't emit @@@DESCRIPTION
+  if (!description) {
+    try {
+      const diff = await runCommand("git", ["diff", "--stat", preHash, "HEAD"], { cwd: PROJECT_ROOT });
+      const files = diff.stdout.split("\n")
+        .filter((l) => l.includes("|"))
+        .map((l) => l.trim().split("|")[0].trim().split("/").pop())
+        .filter(Boolean)
+        .slice(0, 3);
+      description = files.length > 0
+        ? `Modified ${files.join(", ")}`
+        : "Agent made changes";
+    } catch {
+      description = "Agent made changes";
+    }
+  }
   const selfAnalysis = analysisMatch?.[1]?.trim() ?? "";
   const newIdeas =
     ideasMatch?.[1]
@@ -814,6 +858,7 @@ async function runCycle(
       phase: "fix",
       tokPerSec: null,
       tokensGenerated: 0,
+      garbageOutput: false,
       error: String(e),
     };
   }
@@ -869,21 +914,44 @@ async function runCycle(
       }
     }
   } else {
-    // In optimize mode: keep if tok/s improved and didn't break
+    // In optimize mode: keep if tok/s improved vs cycle baseline AND vs global best
+    const minThreshold = Math.max(3.0, buildRun.tokPerSec! * 0.02); // at least +2% or +3 tok/s
+    const globalBest = state.currentBest?.tokPerSec ?? 0;
     if (
       verifyResult.phase === "optimize" &&
       verifyResult.tokPerSec != null &&
       buildRun.tokPerSec != null &&
-      verifyResult.tokPerSec >= buildRun.tokPerSec + 3.0 // +3 tok/s minimum to keep
+      verifyResult.tokPerSec >= buildRun.tokPerSec + minThreshold &&
+      verifyResult.tokPerSec >= globalBest // never regress below the known best
     ) {
-      keep = true;
-      console.log(
-        clr(
-          "1;32",
-          `  📈 Improved: ${buildRun.tokPerSec.toFixed(1)} → ${verifyResult.tokPerSec.toFixed(1)} tok/s`,
-        ),
-      );
+      if (verifyResult.garbageOutput) {
+        console.log(clr("1;33", `  ⚠ Output is garbage (repeated tokens) — not keeping despite tok/s improvement`));
+      } else {
+        keep = true;
+        console.log(
+          clr(
+            "1;32",
+            `  📈 Improved: ${buildRun.tokPerSec.toFixed(1)} → ${verifyResult.tokPerSec.toFixed(1)} tok/s (threshold: +${minThreshold.toFixed(1)}, global best: ${globalBest.toFixed(1)})`,
+          ),
+        );
+      }
+    } else if (
+      verifyResult.phase === "optimize" &&
+      verifyResult.tokPerSec != null &&
+      buildRun.tokPerSec != null
+    ) {
+      const delta = verifyResult.tokPerSec - buildRun.tokPerSec;
+      const reason = verifyResult.tokPerSec < globalBest
+        ? `below global best (${globalBest.toFixed(1)})`
+        : `below threshold (+${minThreshold.toFixed(1)})`;
+      console.log(clr("2", `  ℹ ${delta >= 0 ? "+" : ""}${delta.toFixed(1)} tok/s — ${reason}`));
     }
+  }
+
+  // Quality gate: block keeping changes that produce garbage output
+  if (keep && verifyResult.garbageOutput && !buildRun.garbageOutput) {
+    console.log(clr("1;33", "  ⚠ Agent introduced garbage output (repeated tokens) — reverting"));
+    keep = false;
   }
 
   console.log(
@@ -1081,15 +1149,20 @@ async function main() {
       }
     }
 
-    // Merge new ideas
-    const existingLower = new Set(state.ideas.map((i) => i.toLowerCase()));
+    // Merge new ideas (with fuzzy dedup — skip if >60% word overlap with existing)
     for (const idea of cycleResult.nextIdeas) {
-      if (!existingLower.has(idea.toLowerCase()) && !isGarbageString(idea)) {
-        state.ideas.push(idea);
-        existingLower.add(idea.toLowerCase());
-      }
+      if (isGarbageString(idea)) continue;
+      const words = new Set(idea.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
+      const isDupe = state.ideas.some((existing) => {
+        const existWords = new Set(existing.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
+        if (existWords.size === 0 || words.size === 0) return false;
+        let overlap = 0;
+        for (const w of words) if (existWords.has(w)) overlap++;
+        return overlap / Math.min(words.size, existWords.size) > 0.6;
+      });
+      if (!isDupe) state.ideas.push(idea);
     }
-    if (state.ideas.length > 50) state.ideas = state.ideas.slice(0, 50);
+    if (state.ideas.length > 30) state.ideas = state.ideas.slice(-30);
 
     // Cap cycle history
     if (state.cycles.length > 60) {

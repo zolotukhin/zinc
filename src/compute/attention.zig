@@ -68,7 +68,17 @@ pub const AttentionDispatch = struct {
         };
     }
 
-    /// Record a flash attention dispatch.
+    /// Record a flash-attention dispatch for the current decode position.
+    /// @param self Dispatch wrapper containing the flash-attention pipeline.
+    /// @param cmd Command buffer currently being recorded.
+    /// @param descriptor_set Descriptor set containing query, KV-cache, page-table, and output buffers.
+    /// @param head_dim Hidden width per attention head.
+    /// @param n_heads Number of query heads to process.
+    /// @param n_kv_heads Number of KV heads present in the cache.
+    /// @param seq_len Current decoded sequence length.
+    /// @param page_size Tokens stored in each KV-cache page.
+    /// @returns `error.ShaderNotLoaded` when the flash-attention shader pipeline is unavailable.
+    /// @note The helper dispatches one workgroup per query head.
     pub fn recordFlashAttn(
         self: *const AttentionDispatch,
         cmd: *const CommandBuffer,
