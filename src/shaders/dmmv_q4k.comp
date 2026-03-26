@@ -2,9 +2,13 @@
 // ZINC — Q4_K dequantize + matrix-vector multiply (decode, single token)
 // RDNA4-optimized: wave64 (64 threads/workgroup), 1 row per thread, 64 rows per WG
 //
-// Key optimization: with K=2048 → blocks_per_row=8, a strided loop over blocks
-// wastes 56/64 threads. Instead, each thread computes one full output row,
-// giving 100% thread utilization and 32x fewer workgroup launches.
+// Key optimizations:
+// 1. 1-thread-per-row: with K=2048 → blocks_per_row=8, strided loops waste
+//    56/64 threads. Instead, each thread computes one full output row.
+// 2. Shared memory input vector: cooperative load of x_data into LDS eliminates
+//    L1 cache contention between weight reads and input vector reads. With 64
+//    threads spanning 72KB of weight data (> 32KB L1), x_data would be
+//    repeatedly evicted. LDS provides dedicated, high-bandwidth storage.
 //
 // Q4_K block layout (QK_K=256 elements, 144 bytes):
 //   [0..1]    f16 d      — super-block scale
@@ -54,6 +58,11 @@ layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];  };
 const uint Q4K_BLOCK_SIZE = 256;  // elements per block
 const uint Q4K_BYTES      = 144;  // bytes per block
 
+// Shared memory for input vector — eliminates L1 cache contention with weight reads.
+// 64 threads spanning 72KB of weight data exceed 32KB L1; without this, x_data
+// lines get evicted and re-fetched repeatedly. LDS load is cooperative (32 floats/thread).
+shared float s_x[SPEC_K];
+
 // Decode scale for sub-block sb (0..7) from 12-byte k_scales at ks_off in a_data
 float decode_scale(uint ks_off, uint sb) {
     if (sb < 4u) {
@@ -80,14 +89,13 @@ float decode_min(uint ks_off, uint sb) {
 // qs_off: byte offset of qs[0] for this block in a_data
 // ks_off: byte offset of k_scales[0] for this block in a_data
 // d_val, dmin_val: super-block scales
-// x_base: element offset into x_data for this block's 256 elements
+// x_local: element offset into s_x[] for this block's 256 elements
 //
 // Optimization: fuse paired sub-blocks (sb, sb+4) to read each qs byte once
 // and extract both nibbles. Sub-blocks 0-3 use the low nibble, sub-blocks 4-7
-// use the high nibble of the same qs[0..127]. This halves qs memory traffic,
-// avoiding L1 eviction and re-fetch under multi-WG cache pressure.
+// use the high nibble of the same qs[0..127]. This halves qs memory traffic.
 void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
-                 uint x_base, inout float acc) {
+                 uint x_local, inout float acc) {
     for (uint sp = 0u; sp < 4u; sp++) {
         // Low sub-block (sp): elements sp*32..(sp+1)*32-1
         float sc_lo = decode_scale(ks_off, sp);
@@ -101,8 +109,8 @@ void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
         float factor_hi = d_val * sc_hi;
         float bias_hi   = dmin_val * mn_hi;
 
-        uint x_sb_lo = x_base + sp * 32u;
-        uint x_sb_hi = x_base + (sp + 4u) * 32u;
+        uint x_sb_lo = x_local + sp * 32u;
+        uint x_sb_hi = x_local + (sp + 4u) * 32u;
         uint qs_base = qs_off + sp * 32u;
 
         for (uint e = 0u; e < 32u; e++) {
@@ -110,15 +118,25 @@ void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
             uint q_lo = byte_val & 0x0Fu;
             uint q_hi = (byte_val >> 4) & 0x0Fu;
 
-            acc += (factor_lo * float(q_lo) - bias_lo) * x_data[x_sb_lo + e];
-            acc += (factor_hi * float(q_hi) - bias_hi) * x_data[x_sb_hi + e];
+            acc += (factor_lo * float(q_lo) - bias_lo) * s_x[x_sb_lo + e];
+            acc += (factor_hi * float(q_hi) - bias_hi) * s_x[x_sb_hi + e];
         }
     }
 }
 
 void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Cooperatively load input vector into shared memory (all threads participate)
+    // 64 threads × ceil(K/64) iterations = full vector loaded
+    uint x_global_base = x_offset / 4u;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x_data[x_global_base + i];
+    }
+    barrier();
+
     // Each thread computes one output row (1 thread = 1 row, 64 rows per WG)
-    uint row = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.x * 64u + tid;
     if (row >= M) return;
 
     uint blocks_per_row = K / Q4K_BLOCK_SIZE;
@@ -126,7 +144,7 @@ void main() {
 
     // Process all blocks for this row sequentially
     for (uint blk = 0u; blk < blocks_per_row; blk++) {
-        uint x_base = x_offset / 4u + blk * Q4K_BLOCK_SIZE;
+        uint x_local = blk * Q4K_BLOCK_SIZE;
         uint byte_off = a_offset + row * blocks_per_row * Q4K_BYTES + blk * Q4K_BYTES;
 
         // Read f16 super-block scales: d and dmin
@@ -135,7 +153,7 @@ void main() {
         float d_val    = unpackHalf2x16(d_bits).x;
         float dmin_val = unpackHalf2x16(dmin_bits).x;
 
-        accum_block(byte_off + 16u, byte_off + 4u, d_val, dmin_val, x_base, sum);
+        accum_block(byte_off + 16u, byte_off + 4u, d_val, dmin_val, x_local, sum);
     }
 
     // Each thread writes its own result — no reduction needed
