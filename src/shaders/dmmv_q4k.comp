@@ -127,10 +127,17 @@ void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
 void main() {
     uint tid = gl_LocalInvocationID.x;
 
+    // Use compile-time SPEC_K (specialization constant = hidden_dim) instead of
+    // push-constant K for loop bounds. Both are set to hidden_dim by the host,
+    // but SPEC_K lets the compiler unroll loops and interleave loads across blocks
+    // to hide VRAM latency. Key wins: block loop (8 iters) and LDS load (32 iters)
+    // become compile-time bounded, enabling full unrolling + instruction scheduling.
+    const uint blocks_per_row = SPEC_K / Q4K_BLOCK_SIZE;
+
     // Cooperatively load input vector into shared memory (all threads participate)
-    // 64 threads × ceil(K/64) iterations = full vector loaded
+    // 64 threads × (SPEC_K/64) iterations = full vector loaded
     uint x_global_base = x_offset / 4u;
-    for (uint i = tid; i < K; i += 64u) {
+    for (uint i = tid; i < SPEC_K; i += 64u) {
         s_x[i] = x_data[x_global_base + i];
     }
     barrier();
@@ -139,10 +146,9 @@ void main() {
     uint row = gl_WorkGroupID.x * 64u + tid;
     if (row >= M) return;
 
-    uint blocks_per_row = K / Q4K_BLOCK_SIZE;
     float sum = 0.0;
 
-    // Process all blocks for this row sequentially
+    // Process all blocks for this row sequentially (compile-time trip count)
     for (uint blk = 0u; blk < blocks_per_row; blk++) {
         uint x_local = blk * Q4K_BLOCK_SIZE;
         uint byte_off = a_offset + row * blocks_per_row * Q4K_BYTES + blk * Q4K_BYTES;
