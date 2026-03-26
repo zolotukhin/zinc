@@ -21,6 +21,16 @@ bun.lockb
 .env
 .env.*
 
+# Claude Code — track commands, ignore user-specific files
+.claude/settings.json
+.claude/settings.local.json
+.claude/credentials.json
+.claude/statsig/
+.claude/todos/
+.claude/memory/
+
 # OS
 .DS_Store
 Thumbs.db
+
+research/turboquant-pytorch-master/
