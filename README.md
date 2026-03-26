@@ -31,7 +31,7 @@ AMD's RDNA3/RDNA4 GPUs (RX 9070, Radeon AI PRO R9700, etc.) have excellent memor
 3. **llama.cpp Vulkan works** but treats RDNA4 as an afterthought — no RDNA4-specific tuning, SPIR-V toolchain incompatibilities, no tensor parallelism
 4. **No solution handles parallel requests well** on these GPUs for production use
 
-These cards cost $500-1000 (vs $15,000+ for MI300X) and sit in millions of desktops doing nothing during inference.
+These cards cost $500–1500 (vs $15,000+ for MI300X) and sit in millions of desktops doing nothing during inference.
 
 ## The Solution
 

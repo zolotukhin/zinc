@@ -1,3 +1,7 @@
+//! Build static decode graphs for the supported model families.
+//! @section Decode Planning
+//! These graphs describe the logical order of decode-time operations so runtime
+//! code can bind buffers and record compute work against a stable structure.
 const std = @import("std");
 const graph_mod = @import("../compute/graph.zig");
 const Graph = graph_mod.Graph;
@@ -8,7 +12,10 @@ const ModelConfig = loader.ModelConfig;
 const log = std.log.scoped(.architecture);
 
 /// Build a compute graph for a single transformer decode step.
-/// This creates the graph structure — actual buffer bindings are set at runtime.
+/// This creates the graph structure; actual buffer bindings are set at runtime.
+/// @param config Normalized model dimensions and architecture metadata.
+/// @param allocator Allocator used for graph storage.
+/// @returns A Graph describing the decode-time op order for the selected architecture.
 pub fn buildDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocator) !Graph {
     return switch (config.architecture) {
         .llama, .mistral, .qwen2 => try buildLlamaDecodeGraph(config, allocator),

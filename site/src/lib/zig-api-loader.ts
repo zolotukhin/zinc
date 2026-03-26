@@ -234,6 +234,32 @@ function toParagraphs(raw: string): string[] {
     .filter(Boolean);
 }
 
+function splitSummaryAndDescription(raw: string): Pick<ZigApiDocBlock, 'summary' | 'description'> {
+  const paragraphs = toParagraphs(raw);
+
+  if (paragraphs.length > 1) {
+    return {
+      summary: paragraphs[0],
+      description: paragraphs.slice(1),
+    };
+  }
+
+  const singleParagraph = paragraphs[0] ?? '';
+  const sentenceMatch = singleParagraph.match(/^(.+?[.!?])(?:\s+)(.+)$/);
+
+  if (sentenceMatch) {
+    return {
+      summary: sentenceMatch[1].trim(),
+      description: [sentenceMatch[2].trim()],
+    };
+  }
+
+  return {
+    summary: singleParagraph,
+    description: [],
+  };
+}
+
 function parseDocComment(lines: string[]): ParsedComment {
   const textLines: string[] = [];
   const params: ZigApiParam[] = [];
@@ -279,12 +305,12 @@ function parseDocComment(lines: string[]): ParsedComment {
   }
 
   const raw = normalizeDocLines(textLines);
-  const paragraphs = toParagraphs(raw);
+  const { summary, description } = splitSummaryAndDescription(raw);
 
   return {
     raw,
-    summary: paragraphs[0] ?? '',
-    description: paragraphs.slice(1),
+    summary,
+    description,
     section,
     params,
     returns,

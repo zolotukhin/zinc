@@ -40,14 +40,29 @@ const jsonLd = {
   ],
 };
 
-const docNav = [
-  { slug: 'spec', label: 'Technical Spec' },
-  { slug: 'turboquant-spec', label: 'TurboQuant' },
-  { slug: 'rdna4-tuning', label: 'RDNA4 Tuning' },
-  { slug: 'api', label: 'API Reference' },
+const docNavSections = [
+  {
+    label: 'Reference',
+    items: [
+      { slug: 'zig-api', label: 'Zig API' },
+    ],
+  },
+  {
+    label: 'Supplemental',
+    items: [
+      { slug: 'spec', label: 'Technical Spec' },
+      { slug: 'api', label: 'HTTP API' },
+      { slug: 'rdna4-tuning', label: 'RDNA4 Tuning' },
+      { slug: 'turboquant-spec', label: 'TurboQuant' },
+    ],
+  },
 ];
 
 const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/, '');
+
+function isActive(slug: string): boolean {
+  return currentSlug === slug || currentSlug.startsWith(`${slug}/`);
+}
 ---
 
 <BaseLayout title={title} description={metaDescription} keywords={keywords} jsonLd={jsonLd}>
@@ -55,15 +70,20 @@ const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/,
   <div class="doc-layout wide">
     <aside class="doc-nav">
       <h3><a href="/zinc/docs">Docs</a></h3>
-      <ul>
-        {docNav.map(item => (
-          <li>
-            <a href={`/zinc/docs/${item.slug}`} class:list={[{ active: currentSlug === item.slug }]}>
-              {item.label}
-            </a>
-          </li>
-        ))}
-      </ul>
+      {docNavSections.map(section => (
+        <div class="doc-nav-section">
+          <p class="doc-nav-label">{section.label}</p>
+          <ul>
+            {section.items.map(item => (
+              <li>
+                <a href={`/zinc/docs/${item.slug}`} class:list={[{ active: isActive(item.slug) }]}>
+                  {item.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </aside>
     <article class="doc-content">
       {lastmod && <p class="lastmod">Last updated: {lastmod}</p>}
@@ -98,9 +118,29 @@ const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/,
     color: var(--color-text);
   }
 
+  .doc-nav {
+    position: sticky;
+    top: 1rem;
+    align-self: start;
+  }
+
+  .doc-nav-section + .doc-nav-section {
+    margin-top: var(--space-lg);
+  }
+
+  .doc-nav-label {
+    margin: 0 0 var(--space-xs);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
   .doc-nav ul {
     list-style: none;
     padding: 0;
+    margin: 0;
   }
 
   .doc-nav li {
@@ -131,6 +171,10 @@ const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/,
   @media (max-width: 700px) {
     .doc-layout {
       grid-template-columns: 1fr;
+    }
+
+    .doc-nav {
+      position: static;
     }
 
     .doc-nav ul {

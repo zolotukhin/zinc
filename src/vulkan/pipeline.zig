@@ -16,6 +16,8 @@ pub const Pipeline = struct {
     pipeline: vk.c.VkPipeline,
     device: vk.c.VkDevice,
 
+    /// Destroy the shader module, descriptor layout, pipeline layout, and pipeline.
+    /// @param self Pipeline object to tear down in place.
     pub fn deinit(self: *Pipeline) void {
         vk.c.vkDestroyPipeline(self.device, self.pipeline, null);
         vk.c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
@@ -32,6 +34,13 @@ pub const SpecConst = struct {
 };
 
 /// Create a compute pipeline from a SPIR-V file.
+/// @param instance Active Vulkan instance and logical device.
+/// @param spirv_path Filesystem path to the compiled SPIR-V module.
+/// @param binding_count Number of storage-buffer bindings expected by the shader.
+/// @param push_constant_size Size of the push-constant block in bytes.
+/// @param spec_constants Specialization constants applied at pipeline creation time.
+/// @param allocator Allocator used for shader bytes and temporary Vulkan structs.
+/// @returns A fully created compute pipeline and its associated layouts.
 pub fn createFromSpirv(
     instance: *const Instance,
     spirv_path: []const u8,

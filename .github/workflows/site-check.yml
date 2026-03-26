@@ -5,6 +5,7 @@ on:
     paths:
       - 'site/**'
       - 'docs/**'
+      - 'src/**'
 
 jobs:
   build:

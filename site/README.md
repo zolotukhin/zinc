@@ -24,9 +24,10 @@ Useful commands:
 
 - The Astro app lives in `site/`
 - Technical documentation source files live in repo-root `docs/`
+- Generated Zig API reference content comes from repo-root `src/**/*.zig`
 - Blog posts live in `site/src/content/posts/`
 
-Because docs are loaded from `../docs`, the Cloudflare Pages project must watch both `site/*` and `docs/*`.
+Because docs are loaded from `../docs` and the Zig API reference is generated from `../src`, the Cloudflare Pages project must watch `site/**`, `docs/**`, and `src/**`.
 
 ## First Cloudflare Pages deploy
 
@@ -89,10 +90,10 @@ Open the Pages project and go to:
 
 Use:
 
-- Include paths: `site/*, docs/*`
+- Include paths: `site/**, docs/**, src/**`
 - Exclude paths: leave empty unless you later want to skip other directories
 
-This matters because the docs pages are built from the repo-root `docs/` directory, not only from files inside `site/`.
+This matters because the docs pages are built from the repo-root `docs/` directory and the generated API reference is built from repo-root `src/**/*.zig`, not only from files inside `site/`.
 
 ### 6. Attach the production domain
 
