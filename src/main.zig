@@ -212,15 +212,11 @@ pub fn main() !void {
         const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, allocator);
         defer allocator.free(output_tokens);
 
-        // Detokenize
-        const output_text = tokenizer.decode(output_tokens) catch |err| {
-            log.err("Detokenization failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        defer allocator.free(output_text);
-
-        std.fs.File.stdout().writeAll(output_text) catch {};
-        std.fs.File.stdout().writeAll("\n") catch {};
+        // Output token IDs (detokenization requires external tokenizer)
+        log.info("Output tokens ({d}): {any}", .{
+            output_tokens.len,
+            output_tokens[0..@min(output_tokens.len, 20)],
+        });
     } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
         // TODO: start HTTP server (Phase 4)

@@ -561,40 +561,55 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const buildOut = lastResult.buildOutput.slice(-3000);
   const runOut = lastResult.runOutput.slice(-3000);
 
+  // Build precise diagnosis from the actual result
+  const diagnosis: string[] = [];
+
+  if (lastResult.buildExitCode !== 0) {
+    diagnosis.push("## Status: BUILD FAILURE");
+    diagnosis.push("The Zig or GLSL shader build is failing. Fix the compilation error shown below.");
+  } else if (lastResult.runExitCode !== 0 && lastResult.runExitCode !== null) {
+    diagnosis.push(`## Status: RUNTIME CRASH (exit code ${lastResult.runExitCode})`);
+    diagnosis.push("Build succeeds but ZINC crashes at runtime. Fix the crash shown below.");
+  } else if (lastResult.tokensGenerated <= 1) {
+    diagnosis.push(`## Status: ENGINE NOT GENERATING (${lastResult.tokensGenerated} tokens)`);
+    diagnosis.push("Build and run succeed, model loads, but the forward pass doesn't produce real output.");
+    diagnosis.push("");
+    diagnosis.push("The most likely issue is that the forward pass `decodeStep` in `src/compute/forward.zig`");
+    diagnosis.push("records barriers but doesn't actually dispatch compute shaders with real buffer bindings.");
+    diagnosis.push("The shaders need descriptor sets bound to actual model weight buffers.");
+    diagnosis.push("");
+    diagnosis.push("Key things to wire up:");
+    diagnosis.push("- Descriptor sets binding model weight buffers to shader pipelines");
+    diagnosis.push("- Push constants with correct M/K dimensions for each layer");
+    diagnosis.push("- Token embedding lookup (read from token_embd.weight tensor)");
+    diagnosis.push("- Actual DMMV dispatches for QKV projections, FFN layers");
+  } else if (lastResult.tokPerSec != null && lastResult.tokPerSec > 0) {
+    diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s, ${lastResult.tokensGenerated} tokens`);
+    diagnosis.push("ZINC is generating tokens! Optimize for throughput.");
+    diagnosis.push("");
+    diagnosis.push("Focus on:");
+    diagnosis.push("1. DMMV shader bandwidth utilization (target: 90%+ on large matmuls)");
+    diagnosis.push("2. Correct buffer bindings and descriptor set wiring in the forward pass");
+    diagnosis.push("3. Memory access patterns in shaders (coalesced reads, wave64 optimization)");
+  } else {
+    diagnosis.push(`## Status: RUNNING BUT NO METRICS (${lastResult.tokensGenerated} tokens generated)`);
+    diagnosis.push("The engine runs and generates tokens but isn't reporting tok/s metrics.");
+    diagnosis.push("Add timing measurement to the decode loop and report tok/s.");
+  }
+
+  diagnosis.push("");
+  diagnosis.push("## RDNA4 Constraints");
+  diagnosis.push("- RADV may not support all GL_KHR_cooperative_matrix features — stub out or use fallbacks");
+  diagnosis.push("- Shared memory: 64KB max per workgroup");
+  diagnosis.push("- glslc from Ubuntu 24.04 (shaderc 2023.8) — newer versions break RADV");
+  diagnosis.push("- wave64 optimal, workgroup size 64, 2 rows per WG for DMMV");
+
   const phaseLabel = phase === "fix" ? "FIX" : "OPTIMIZE";
-  const phaseInstructions =
-    phase === "fix"
-      ? [
-          "## Phase: FIX",
-          "The build or runtime is failing. Your job is to fix ONE error.",
-          "",
-          "Priority order:",
-          "1. If build fails: fix the Zig compilation error or GLSL shader error",
-          "2. If runtime crashes: fix the Vulkan error, segfault, or assertion",
-          "3. If shader compilation fails on RADV: the shader may use features not supported by the driver",
-          "",
-          "Common RADV/RDNA4 issues:",
-          "- RADV may not support all GL_KHR_cooperative_matrix features — stub out or use fallbacks",
-          "- Shared memory limits on RDNA4: 64KB max per workgroup",
-          "- glslc from Ubuntu 24.04 (shaderc 2023.8) is required — newer versions break RADV",
-          "- Some Vulkan 1.3 features may need explicit feature enablement on device creation",
-        ]
-      : [
-          "## Phase: OPTIMIZE",
-          `ZINC is running! Current: ${state.currentBest?.tokPerSec?.toFixed(1) ?? "?"} tok/s.`,
-          "",
-          "Your job is to improve throughput. Focus on:",
-          "1. DMMV shader bandwidth utilization (target: 90%+ on large matmuls)",
-          "2. Reducing dispatch overhead (pre-record command buffers)",
-          "3. Memory access patterns in shaders (coalesced reads, wave64 optimization)",
-          "4. Fusing operations to reduce dispatch count",
-          "5. Correct buffer bindings and descriptor set wiring in the forward pass",
-        ];
 
   return [
     `# ZINC ${phaseLabel} Task`,
     "",
-    ...phaseInstructions,
+    ...diagnosis,
     "",
     "## Hardware (remote RDNA4 node)",
     "- GPU: AMD Radeon AI PRO R9700 (RDNA4, gfx1201, 32GB VRAM, 576 GB/s)",
@@ -676,7 +691,7 @@ type RunState = {
   failedApproaches: string[];
   ideas: string[];
   phase: Phase;
-  currentBest: { tokPerSec: number | null } | null;
+  currentBest: { tokPerSec: number | null; tokensGenerated?: number } | null;
 };
 
 async function loadState(runDir: string): Promise<RunState | null> {
@@ -747,7 +762,9 @@ async function runCycle(
     }
   }
 
-  // Step 2: Git snapshot before agent changes
+  // Step 2: Git snapshot before agent changes — commit current state so we can revert cleanly
+  await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => {});
+  await runCommand("git", ["commit", "--allow-empty", "-m", `zinc-loop: pre-cycle-${cycleNum} checkpoint`], { cwd: PROJECT_ROOT }).catch(() => {});
   const preCommit = await runCommand("git", ["rev-parse", "HEAD"], { cwd: PROJECT_ROOT });
   const preHash = preCommit.stdout.trim();
 
@@ -875,23 +892,28 @@ async function runCycle(
   );
 
   if (!keep) {
-    // Revert local changes
-    console.log(clr("2", "  Reverting local changes..."));
-    await runCommand("git", ["checkout", "."], { cwd: PROJECT_ROOT }).catch(() => {});
-    // Also reset any new files the agent may have created
-    await runCommand("git", ["clean", "-fd", "src/", "build.zig"], { cwd: PROJECT_ROOT }).catch(() => {});
+    // Revert only the agent's changes — reset to pre-cycle checkpoint
+    console.log(clr("2", `  Reverting to pre-cycle checkpoint (${preHash.slice(0, 8)})...`));
+    await runCommand("git", ["reset", "--hard", preHash], { cwd: PROJECT_ROOT }).catch(() => {});
   } else {
-    // Commit successful change
-    await runCommand("git", ["add", "src/", "build.zig", "build.zig.zon"], { cwd: PROJECT_ROOT }).catch(() => {});
+    // Commit successful change on top of checkpoint
+    await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => {});
     await runCommand(
       "git",
-      ["commit", "-m", `zinc-loop: ${description}`],
+      ["commit", "--allow-empty", "-m", `zinc-loop: ${description}`],
       { cwd: PROJECT_ROOT },
     ).catch(() => {});
 
-    // Update best
+    // Update best metrics
     if (verifyResult.tokPerSec != null) {
       state.currentBest = { tokPerSec: verifyResult.tokPerSec };
+    }
+    if (verifyResult.tokensGenerated > (state.currentBest?.tokensGenerated ?? 0)) {
+      state.currentBest = {
+        ...(state.currentBest ?? {}),
+        tokPerSec: verifyResult.tokPerSec,
+        tokensGenerated: verifyResult.tokensGenerated,
+      };
     }
   }
 
