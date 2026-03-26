@@ -126,8 +126,8 @@ pub const DmmvDispatch = struct {
             .y_offset = y_offset,
         };
 
-        // 2 rows per workgroup → ceil(M/2) workgroups
-        const workgroups_x = (M + 1) / 2;
+        // 64 rows per workgroup (1 thread = 1 row) → ceil(M/64) workgroups
+        const workgroups_x = (M + 63) / 64;
 
         cmd.dispatchWithPush(
             pip,
