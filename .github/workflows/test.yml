@@ -22,7 +22,7 @@ jobs:
     - name: Install Vulkan SDK
       run: |
         sudo apt-get update
-        sudo apt-get install -y libvulkan-dev vulkan-tools
+        sudo apt-get install -y libvulkan-dev vulkan-tools glslc
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@v1
