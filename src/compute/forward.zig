@@ -538,6 +538,166 @@ pub const InferenceEngine = struct {
         state.position += 1;
     }
 
+    /// Batch-process all prompt tokens in a single GPU submission.
+    /// Eliminates per-token submit/wait overhead by recording all token
+    /// computations in one command buffer with vkCmdUpdateBuffer for embeddings.
+    fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        if (prompt_tokens.len == 0) return;
+
+        const hidden_dim = self.model.config.hidden_dim;
+        const embed_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+
+        // Find required tensors
+        const embd = findLoadedTensor(self.model, "token_embd.weight") orelse {
+            log.err("token_embd.weight not found", .{});
+            return error.TensorNotFound;
+        };
+        const norm_tensor = findLoadedTensor(self.model, "output_norm.weight") orelse {
+            log.err("output_norm.weight not found", .{});
+            return error.TensorNotFound;
+        };
+        const lm_tensor = findLoadedTensor(self.model, "output.weight") orelse
+            findLoadedTensor(self.model, "token_embd.weight") orelse
+        {
+            log.err("output.weight not found", .{});
+            return error.TensorNotFound;
+        };
+
+        const mmap = self.model.mmap_data orelse return error.NoMmapData;
+        const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
+        const quant_type = lm_tensor.info.type_;
+
+        // Pre-dequantize all embeddings on CPU
+        const hdim: usize = @intCast(hidden_dim);
+        const total_floats = prompt_tokens.len * hdim;
+        const embeddings = try self.allocator.alloc(f32, total_floats);
+        defer self.allocator.free(embeddings);
+
+        for (prompt_tokens, 0..) |token_id, i| {
+            const safe_id = @min(token_id, self.model.config.vocab_size -| 1);
+            const offset = i * hdim;
+            dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, embeddings[offset..][0..hdim]);
+        }
+
+        // Reset descriptor pool and allocate sets once for all tokens
+        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+
+        const rms_pip = self.elementwise.pipeline_rms_norm orelse {
+            log.warn("RMS norm shader not loaded, skipping prefill", .{});
+            return;
+        };
+        const rms_ds = try self.allocDescSet(rms_pip.descriptor_set_layout);
+        self.writeDescSet3(
+            rms_ds,
+            self.hidden_buf.handle, self.hidden_buf.size,
+            norm_tensor.gpu_buffer.handle, norm_tensor.gpu_buffer.size,
+            self.norm_buf.handle, self.norm_buf.size,
+        );
+
+        const dmmv_pip = self.dmmv.pipelineForType(quant_type) orelse {
+            log.err("No DMMV pipeline for quant type {d}", .{@intFromEnum(quant_type)});
+            return error.UnsupportedQuantType;
+        };
+        const dmmv_ds = try self.allocDescSet(dmmv_pip.descriptor_set_layout);
+        self.writeDescSet3(
+            dmmv_ds,
+            lm_tensor.gpu_buffer.handle, lm_tensor.gpu_buffer.size,
+            self.norm_buf.handle, self.norm_buf.size,
+            self.logits_buf.handle, self.logits_buf.size,
+        );
+
+        // Record single command buffer for all prompt tokens
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+
+        for (0..prompt_tokens.len) |i| {
+            // Upload embedding inline via vkCmdUpdateBuffer (8KB per token)
+            const embed_offset = i * hdim;
+            vk.c.vkCmdUpdateBuffer(
+                self.decode_cmd.handle,
+                self.hidden_buf.handle,
+                0,
+                embed_size,
+                @ptrCast(embeddings[embed_offset..].ptr),
+            );
+
+            // Barrier: transfer → compute
+            {
+                const barrier = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(
+                    self.decode_cmd.handle,
+                    vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0, 1, &barrier, 0, null, 0, null,
+                );
+            }
+
+            // RMS norm: hidden_buf → norm_buf
+            try self.elementwise.recordRmsNorm(
+                &self.decode_cmd, rms_ds, hidden_dim, 1, 1e-6,
+            );
+
+            // Barrier: compute → compute
+            self.decode_cmd.computeBarrier();
+
+            // DMMV: lm_tensor × norm_buf → logits_buf
+            try self.dmmv.recordDispatch(
+                &self.decode_cmd, quant_type, dmmv_ds,
+                self.model.config.vocab_size, hidden_dim, 0, 0, 0,
+            );
+
+            // Between tokens: drain compute before next vkCmdUpdateBuffer
+            if (i < prompt_tokens.len - 1) {
+                const barrier = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(
+                    self.decode_cmd.handle,
+                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0, 1, &barrier, 0, null, 0, null,
+                );
+            }
+        }
+
+        // After last token: readback logits
+        {
+            const barrier = vk.c.VkMemoryBarrier{
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
+                .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+            };
+            vk.c.vkCmdPipelineBarrier(
+                self.decode_cmd.handle,
+                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 1, &barrier, 0, null, 0, null,
+            );
+            const logits_copy_size = @as(vk.c.VkDeviceSize, self.model.config.vocab_size) * @sizeOf(f32);
+            const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_copy_size };
+            vk.c.vkCmdCopyBuffer(
+                self.decode_cmd.handle,
+                self.logits_buf.handle,
+                self.logits_staging.handle,
+                1, &region,
+            );
+        }
+
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+        state.position += @intCast(prompt_tokens.len);
+    }
+
     // -----------------------------------------------------------------------
     // Sampling
     // -----------------------------------------------------------------------
@@ -597,11 +757,9 @@ pub fn generate(
         prompt_tokens.len, max_tokens,
     });
 
-    // Prefill: process all prompt tokens
+    // Prefill: batch all prompt tokens in a single GPU submission
     const prefill_start = std.time.nanoTimestamp();
-    for (prompt_tokens) |token_id| {
-        try engine.decodeStep(&state, token_id);
-    }
+    try engine.prefillBatch(&state, prompt_tokens);
     const prefill_end = std.time.nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
     const prefill_tok_per_sec = if (prefill_ns > 0 and prompt_tokens.len > 0)
