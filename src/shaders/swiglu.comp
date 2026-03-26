@@ -1,5 +1,33 @@
 #version 460
-// Placeholder — Fused SiLU gated linear unit: silu(x) * y
-// TODO: implement
+// Fused SiLU-gated linear unit (SwiGLU)
+// y = silu(gate) * up, where silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
+// Simple element-wise kernel, each thread handles one element.
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+
 layout(local_size_x = 64) in;
-void main() {}
+
+layout(set = 0, binding = 0) readonly buffer Gate {
+    float gate[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Up {
+    float up[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Y {
+    float y[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint N;  // total number of elements
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= N) return;
+
+    float g = gate[idx];
+    // silu(g) = g * sigmoid(g) = g / (1.0 + exp(-g))
+    float silu_g = g / (1.0 + exp(-g));
+    y[idx] = silu_g * up[idx];
+}

@@ -1,6 +1,10 @@
 const std = @import("std");
 const instance_mod = @import("vulkan/instance.zig");
 const gpu_detect = @import("vulkan/gpu_detect.zig");
+const loader_mod = @import("model/loader.zig");
+const tokenizer_mod = @import("model/tokenizer.zig");
+const forward_mod = @import("compute/forward.zig");
+const CommandPool = @import("vulkan/command.zig").CommandPool;
 
 const log = std.log.scoped(.zinc);
 
@@ -15,6 +19,10 @@ comptime {
     _ = @import("model/tokenizer.zig");
     _ = @import("model/architecture.zig");
     _ = @import("compute/graph.zig");
+    _ = @import("compute/dmmv.zig");
+    _ = @import("compute/elementwise.zig");
+    _ = @import("compute/attention.zig");
+    _ = @import("compute/forward.zig");
 }
 
 pub const Config = struct {
@@ -122,16 +130,64 @@ pub fn main() !void {
     const gpu_config = gpu_detect.detect(&vk_instance);
     gpu_config.log_info();
 
-    if (config.model_path) |path| {
-        log.info("Model: {s}", .{path});
-    } else {
+    if (config.model_path == null) {
         log.warn("No model specified (-m). Use --help for usage.", .{});
+        return;
     }
+
+    const model_path = config.model_path.?;
+    log.info("Model: {s}", .{model_path});
+
+    // Load model
+    var cmd_pool = try CommandPool.init(&vk_instance);
+    defer cmd_pool.deinit();
+
+    var model = loader_mod.load(model_path, &vk_instance, &cmd_pool, allocator) catch |err| {
+        log.err("Failed to load model: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer model.deinit(&vk_instance);
+
+    // Determine shader directory
+    const shader_dir = "zig-out/share/zinc/shaders";
+
+    // Initialize inference engine
+    var engine = forward_mod.InferenceEngine.init(&model, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
+        log.err("Failed to init inference engine: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer engine.deinit();
 
     if (config.prompt) |prompt| {
         log.info("Prompt: {s}", .{prompt});
-        // TODO: single-request inference (Phase 3)
-    } else if (config.model_path != null) {
+
+        // Tokenize prompt
+        var tokenizer = tokenizer_mod.Tokenizer.init(allocator, model_path, .sentencepiece);
+        defer tokenizer.deinit();
+
+        const prompt_tokens = tokenizer.encode(prompt) catch |err| {
+            log.err("Tokenization failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer allocator.free(prompt_tokens);
+
+        log.info("Prompt tokens: {d}", .{prompt_tokens.len});
+
+        // Generate
+        const max_tokens: u32 = 256;
+        const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, allocator);
+        defer allocator.free(output_tokens);
+
+        // Detokenize
+        const output_text = tokenizer.decode(output_tokens) catch |err| {
+            log.err("Detokenization failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer allocator.free(output_text);
+
+        std.fs.File.stdout().writeAll(output_text) catch {};
+        std.fs.File.stdout().writeAll("\n") catch {};
+    } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
         // TODO: start HTTP server (Phase 4)
     }

@@ -72,6 +72,7 @@ const jsonLd = {
 <BaseLayout
   title="ZINC — LLM Inference Engine for AMD GPUs"
   description="ZINC is an inference engine for AMD consumer GPUs that ROCm ignores. Built with Zig and Vulkan, with hand-tuned RDNA4 shaders, continuous batching, and TurboQuant KV compression. 110+ tok/s on AI PRO R9700."
+  keywords="ZINC, LLM inference engine, AMD GPU, RDNA4, RDNA3, RX 9070 XT, RX 7900 XTX, Radeon AI PRO R9700, Vulkan compute, Zig, TurboQuant, KV cache compression, vLLM alternative, llama.cpp alternative, ROCm alternative, OpenAI compatible API, local AI, continuous batching, paged KV cache, GGUF, LLaMA, Qwen, Mistral, Mamba"
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
@@ -170,11 +171,8 @@ const jsonLd = {
 
     <p>Any GPU with Vulkan 1.3 and a working RADV or AMDVLK driver should work. RDNA4 is the primary tuning target.</p>
 
-    <div class="cta">
-      <a href="/zinc/docs" class="btn">Documentation</a>
-      <a href="/zinc/docs/turboquant-spec" class="btn">TurboQuant</a>
-      <a href="https://github.com/zolotukhin/zinc" class="btn btn-outline">GitHub</a>
-    </div>
+    <hr />
+    <p><a href="/zinc/docs">Documentation</a> · <a href="/zinc/docs/turboquant-spec">TurboQuant spec</a> · <a href="https://github.com/zolotukhin/zinc">GitHub</a></p>
   </section>
 </BaseLayout>
 
@@ -199,34 +197,6 @@ const jsonLd = {
     color: var(--color-text-muted);
   }
 
-  .cta {
-    display: flex;
-    gap: var(--space-md);
-    margin-top: var(--space-xl);
-    flex-wrap: wrap;
-  }
-
-  .btn {
-    display: inline-block;
-    padding: 0.6em 1.5em;
-    border-radius: 6px;
-    font-size: 0.95rem;
-    font-weight: 500;
-    text-decoration: none;
-    background: var(--color-accent);
-    color: #fff;
-  }
-
-  .btn:hover {
-    opacity: 0.9;
-    text-decoration: none;
-  }
-
-  .btn-outline {
-    background: transparent;
-    border: 1px solid var(--color-border);
-    color: var(--color-text);
-  }
 
   .btn-outline:hover {
     border-color: var(--color-accent);

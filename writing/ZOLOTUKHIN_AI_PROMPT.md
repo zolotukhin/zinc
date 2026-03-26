@@ -8,8 +8,8 @@ Write a blog post for `zolotukhin.ai`.
 
 Before writing, read and follow:
 
-- `/Users/stepan/Workspace/zinc/writing/ZOLOTUKHIN_AI_BLOG_GUIDE.md`
-- `/Users/stepan/Workspace/zinc/writing/ZOLOTUKHIN_AI_POST_TEMPLATE.md`
+- `writing/ZOLOTUKHIN_AI_BLOG_GUIDE.md`
+- `writing/ZOLOTUKHIN_AI_POST_TEMPLATE.md`
 
 Requirements:
 

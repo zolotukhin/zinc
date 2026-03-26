@@ -339,16 +339,18 @@ flowchart LR
 
 ### Modified Attention Pipeline
 
+**Standard attention:**
+
 ```mermaid
-flowchart TD
-    subgraph Standard
-        S1["scores = Q × Kᵀ"] --> S2["weights = softmax(scores / √d)"]
-        S2 --> S3["output = weights × V"]
-    end
-    subgraph TurboQuant
-        T1["scores = tq_attention_scores(Q, compressed_K)"] --> T2["weights = softmax(scores / √d)"]
-        T2 --> T3["output = tq_weighted_values(weights, compressed_V)"]
-    end
+flowchart LR
+    S1["scores = Q × Kᵀ"] --> S2["softmax(scores / √d)"] --> S3["output = weights × V"]
+```
+
+**TurboQuant attention (no decompression):**
+
+```mermaid
+flowchart LR
+    T1["tq_attention_scores\n(Q, compressed_K)"] --> T2["softmax(scores / √d)"] --> T3["tq_weighted_values\n(weights, compressed_V)"]
 ```
 
 ### Prefill vs Decode Strategy

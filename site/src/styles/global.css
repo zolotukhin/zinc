@@ -140,23 +140,40 @@ pre code {
 
 /* Shiki dual-theme: light is default inline, dark via CSS variables */
 pre.astro-code,
-.astro-code {
+.astro-code,
+pre.shiki {
   background: var(--color-bg-alt) !important;
 }
 
 @media (prefers-color-scheme: dark) {
   pre.astro-code,
-  .astro-code {
-    background: var(--color-bg-alt) !important;
-    color: var(--shiki-dark) !important;
+  .astro-code,
+  pre.shiki,
+  pre[style*="background-color"] {
+    background-color: #1a1210 !important;
+    border-color: #2a1f1a !important;
+    color: #c9b8a8 !important;
   }
 
-  .astro-code span {
+  /* Remap all Shiki dark token colors to ZINC logo palette:
+     deep crimson, warm orange/amber, copper, muted gold */
+  .astro-code span,
+  pre.shiki span,
+  pre[style*="background-color"] span {
     color: var(--shiki-dark) !important;
+    /* Override specific vitesse-dark colors to warmer tones */
+    filter: sepia(0.15) saturate(1.2) hue-rotate(-10deg);
   }
 
   code {
-    color: #d4d4d8;
+    color: #c9b8a8;
+    background: #1a1210;
+  }
+
+  /* Inline code in prose */
+  :not(pre) > code {
+    background: #1a1210;
+    color: #e8a060;
   }
 }
 

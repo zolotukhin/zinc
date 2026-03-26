@@ -7,25 +7,30 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import remarkRehype from 'remark-rehype';
 import rehypeKatex from 'rehype-katex';
+import rehypeShiki from '@shikijs/rehype';
 import rehypeStringify from 'rehype-stringify';
 
 export async function getStaticPaths() {
-  const docMeta: Record<string, { title: string; description: string }> = {
+  const docMeta: Record<string, { title: string; description: string; keywords: string }> = {
     'spec': {
       title: 'ZINC Technical Specification',
       description: 'GPU kernel library, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4 Vulkan inference.',
+      keywords: 'ZINC spec, GPU kernel, DMMV, matmul, flash attention, paged KV cache, continuous batching, GGUF, Vulkan compute, RDNA4, RDNA3, RX 9070, Radeon AI PRO R9700, OpenAI API, Zig, GLSL, SPIR-V, cooperative matrix, LLaMA, Qwen, Mamba, MoE',
     },
     'turboquant-spec': {
       title: 'TurboQuant KV Cache Compression',
       description: 'Two-stage vector quantization for LLM KV cache — Lloyd-Max codebooks, QJL residual correction, 5x compression at 3-bit with unbiased attention on Vulkan compute.',
+      keywords: 'TurboQuant, KV cache compression, vector quantization, Lloyd-Max, QJL, quantized attention, LLM memory optimization, Vulkan compute, RDNA4, 3-bit quantization, paged attention, VRAM optimization, RX 9070 XT, inference memory, ICLR 2026',
     },
     'rdna4-tuning': {
       title: 'RDNA4 GPU Tuning Guide',
       description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.',
+      keywords: 'RDNA4 tuning, AMD GPU profiling, Radeon AI PRO R9700, RX 9070, wave64, cooperative matrix, GPU ECC, RADV, AMDVLK, SPIR-V, glslc, bandwidth utilization, LLM inference performance, Vulkan optimization, gfx1201',
     },
     'api': {
       title: 'ZINC API Reference',
       description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints for local LLM inference.',
+      keywords: 'ZINC API, OpenAI compatible, chat completions, SSE streaming, local LLM API, inference server, v1/chat/completions, embeddings API, health endpoint, self-hosted LLM, AMD GPU inference API',
     },
   };
 
@@ -42,6 +47,12 @@ export async function getStaticPaths() {
 const { doc, meta } = Astro.props;
 const title = meta?.title ?? doc.title;
 const description = meta?.description ?? `${title} — ZINC documentation`;
+const keywords = meta?.keywords;
+
+// Strip the first H1 heading since DocLayout doesn't render one
+// and the markdown's own heading serves as the page title
+const content = doc.content;
+
 const contentHtml = String(
   await unified()
     .use(remarkParse)
@@ -49,11 +60,19 @@ const contentHtml = String(
     .use(remarkMath)
     .use(remarkRehype)
     .use(rehypeKatex)
+    .use(rehypeShiki, {
+      defaultColor: 'light',
+      themes: {
+        light: 'github-light',
+        dark: 'vitesse-dark',
+      },
+      langs: ['zig', 'glsl', 'json', 'bash', 'typescript', 'c'],
+    })
     .use(rehypeStringify)
-    .process(doc.content)
+    .process(content)
 );
 ---
 
-<DocLayout title={title} description={description} lastmod={doc.lastmod}>
+<DocLayout title={title} description={description} keywords={keywords} lastmod={doc.lastmod}>
   <div set:html={contentHtml} />
 </DocLayout>

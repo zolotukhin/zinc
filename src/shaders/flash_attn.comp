@@ -1,5 +1,180 @@
 #version 460
-// Placeholder — Paged flash attention with GQA support
-// TODO: implement
+// ZINC — Paged flash attention with grouped-query attention (GQA) support
+// RDNA4-optimized: wave64 (64 threads/workgroup), one query head per workgroup
+//
+// Implements the flash attention algorithm for autoregressive decode:
+//   - Single query token attending to the full KV cache
+//   - Paged KV cache with 16-token pages accessed via a page table
+//   - GQA: multiple query heads share fewer KV heads (n_heads / n_kv_heads)
+//   - Online softmax with numerically stable running max/sum
+//   - 256-token block chunking for bounded shared memory usage
+//
+// Dispatch: one workgroup per query head (gl_WorkGroupID.x = head index)
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_subgroup_extended_types_float16 : enable
+
 layout(local_size_x = 64) in;
-void main() {}
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;      // dimension per head (e.g. 128)
+    uint n_heads;       // number of query heads
+    uint n_kv_heads;    // number of KV heads (n_heads >= n_kv_heads)
+    uint seq_len;       // current sequence length (number of cached KV tokens)
+    uint page_size;     // tokens per page (16)
+};
+
+// Buffer bindings
+layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];     };
+layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];     };
+layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];     };
+layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];   };
+layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];     };
+
+// Shared memory for attention block processing
+// Attention scores for one 256-token block (max scores held at once)
+const uint BLOCK_SIZE = 256u;
+shared float s_scores[BLOCK_SIZE];
+// Accumulator for output vector, one element per thread slot
+shared float s_out[256];  // supports head_dim up to 256
+// Running softmax state
+shared float s_max_old;
+shared float s_sum_old;
+
+void main() {
+    uint head = gl_WorkGroupID.x;   // query head index
+    uint tid = gl_LocalInvocationID.x;  // 0..63
+
+    // GQA: map query head to its corresponding KV head
+    uint kv_head = head / (n_heads / n_kv_heads);
+
+    // Base offset into query buffer for this head
+    uint q_base = head * head_dim;
+
+    // --- Load query vector into registers ---
+    // Each thread handles head_dim/64 elements with stride 64.
+    // For head_dim=128, each thread handles 2 elements.
+
+    // Initialize output accumulator in shared memory
+    for (uint d = tid; d < head_dim; d += 64u) {
+        s_out[d] = 0.0;
+    }
+
+    if (tid == 0u) {
+        s_max_old = -1.0e30;
+        s_sum_old = 0.0;
+    }
+    barrier();
+
+    float scale = inversesqrt(float(head_dim));
+
+    // Total number of pages covering the sequence
+    uint total_pages = (seq_len + page_size - 1u) / page_size;
+
+    // --- Process KV cache in 256-token blocks ---
+    for (uint block_start = 0u; block_start < seq_len; block_start += BLOCK_SIZE) {
+        uint block_end = min(block_start + BLOCK_SIZE, seq_len);
+        uint block_len = block_end - block_start;
+
+        // --- Phase 1: Compute attention scores for this block ---
+        // Each thread computes one or more scores (stride of 64 across block_len)
+        for (uint i = tid; i < block_len; i += 64u) {
+            uint seq_pos = block_start + i;
+
+            // Paged lookup: find which page this position is in
+            uint page_idx = seq_pos / page_size;
+            uint page_off = seq_pos % page_size;
+            uint page_id = page_ids[page_idx];
+
+            // K cache layout: k_data[page_id * page_size * head_dim * n_kv_heads
+            //                         + page_off * head_dim * n_kv_heads
+            //                         + kv_head * head_dim + d]
+            // Simplified: each page stores page_size tokens, each token stores
+            // n_kv_heads * head_dim floats.
+            uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
+                          + kv_head * head_dim;
+
+            // Dot product q . k
+            float dot = 0.0;
+            for (uint d = 0u; d < head_dim; d++) {
+                dot += q_data[q_base + d] * k_data[k_base + d];
+            }
+
+            s_scores[i] = dot * scale;
+        }
+
+        barrier();
+
+        // --- Phase 2: Find max score in this block (for numerical stability) ---
+        float local_max = -1.0e30;
+        for (uint i = tid; i < block_len; i += 64u) {
+            local_max = max(local_max, s_scores[i]);
+        }
+        float block_max = subgroupMax(local_max);
+
+        // Make block_max available to all threads
+        // On wave64, subgroup covers the entire workgroup, so block_max is uniform.
+
+        // New running max across all blocks seen so far
+        float new_max = max(s_max_old, block_max);
+
+        // --- Phase 3: Compute exp(score - new_max) and sum ---
+        float local_sum = 0.0;
+        for (uint i = tid; i < block_len; i += 64u) {
+            float e = exp(s_scores[i] - new_max);
+            s_scores[i] = e;
+            local_sum += e;
+        }
+        float block_sum = subgroupAdd(local_sum);
+
+        // --- Phase 4: Rescale previous accumulator and add new contribution ---
+        // Previous accum was weighted by sum_old * exp(max_old - max_old) relative
+        // to the old max. We need to rescale it to the new max.
+        float rescale = exp(s_max_old - new_max);
+
+        // Rescale running output and running sum
+        for (uint d = tid; d < head_dim; d += 64u) {
+            s_out[d] = s_out[d] * rescale;
+        }
+
+        barrier();
+
+        // Accumulate weighted V vectors for this block
+        for (uint i = tid; i < block_len; i += 64u) {
+            uint seq_pos = block_start + i;
+            uint page_idx = seq_pos / page_size;
+            uint page_off = seq_pos % page_size;
+            uint page_id = page_ids[page_idx];
+
+            // V cache layout: same as K cache
+            uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
+                          + kv_head * head_dim;
+
+            float w = s_scores[i];
+
+            // Each thread that owns score[i] scatters w*V into shared output.
+            // Since block_len <= 256 and stride is 64, at most 4 threads write
+            // per iteration. We serialize by having each thread loop over head_dim.
+            for (uint d = 0u; d < head_dim; d++) {
+                atomicAdd(s_out[d], w * v_data[v_base + d]);
+            }
+        }
+
+        barrier();
+
+        // Update running softmax state
+        if (tid == 0u) {
+            s_sum_old = s_sum_old * rescale + block_sum;
+            s_max_old = new_max;
+        }
+        barrier();
+    }
+
+    // --- Phase 5: Normalize output by total softmax sum ---
+    float inv_sum = 1.0 / s_sum_old;
+    uint o_base = head * head_dim;
+
+    for (uint d = tid; d < head_dim; d += 64u) {
+        o_data[o_base + d] = s_out[d] * inv_sum;
+    }
+}

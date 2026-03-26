@@ -1,8 +1,12 @@
 <!-- Renders mermaid code blocks into SVG diagrams client-side -->
 <script>
   async function renderMermaid() {
-    const pres = document.querySelectorAll('pre[data-language="mermaid"]');
-    if (pres.length === 0) return;
+    // Astro content collection: pre[data-language="mermaid"]
+    // Custom docs pipeline: pre > code.language-mermaid (get the parent pre)
+    const fromAstro = document.querySelectorAll('pre[data-language="mermaid"]');
+    const fromRehype = document.querySelectorAll('pre:has(> code.language-mermaid)');
+    const pres = new Set([...fromAstro, ...fromRehype]);
+    if (pres.size === 0) return;
 
     const { default: mermaid } = await import('mermaid');
     mermaid.initialize({

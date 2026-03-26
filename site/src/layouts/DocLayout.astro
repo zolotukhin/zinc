@@ -6,10 +6,11 @@ import { buildBreadcrumbList } from '../lib/structured-data';
 interface Props {
   title: string;
   description?: string;
+  keywords?: string;
   lastmod?: string;
 }
 
-const { title, description, lastmod } = Astro.props;
+const { title, description, keywords, lastmod } = Astro.props;
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const metaDescription = description ?? `${title} — ZINC documentation`;
@@ -49,7 +50,7 @@ const docNav = [
 const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/, '');
 ---
 
-<BaseLayout title={title} description={metaDescription} jsonLd={jsonLd}>
+<BaseLayout title={title} description={metaDescription} keywords={keywords} jsonLd={jsonLd}>
   <Breadcrumbs items={breadcrumbItems} />
   <div class="doc-layout wide">
     <aside class="doc-nav">

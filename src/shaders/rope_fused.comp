@@ -1,5 +1,52 @@
 #version 460
-// Placeholder — Fused RoPE + reshape + cache write
-// TODO: implement
+// Fused Rotary Position Embedding (RoPE) + reshape + cache write
+// For each pair (x_i, x_{i+d/2}):
+//   freq_i   = 1.0 / (base ^ (2i / d))
+//   theta    = pos * freq_i
+//   y_i      = x_i      * cos(theta) - x_{i+d/2} * sin(theta)
+//   y_{i+d/2}= x_i      * sin(theta) + x_{i+d/2} * cos(theta)
+// Each workgroup handles one head; each thread handles one dimension pair.
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+
 layout(local_size_x = 64) in;
-void main() {}
+
+layout(set = 0, binding = 0) readonly buffer InputQK {
+    float x[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer OutputQK {
+    float y[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint  head_dim;   // dimension per head (d), must be even
+    uint  n_heads;    // total number of heads
+    uint  position;   // token position in the sequence (pos)
+    float freq_base;  // RoPE base frequency (typically 10000.0)
+};
+
+void main() {
+    uint tid  = gl_LocalInvocationID.x;    // thread within the workgroup
+    uint head = gl_WorkGroupID.x;          // which head this WG processes
+
+    uint half_dim = head_dim / 2;
+
+    // Each thread handles one pair of dimensions, striding if head_dim/2 > 64.
+    for (uint i = tid; i < half_dim; i += 64) {
+        uint base_idx = head * head_dim;
+
+        float x_i    = x[base_idx + i];
+        float x_ihd  = x[base_idx + i + half_dim];
+
+        // freq_i = 1.0 / (freq_base ^ (2*i / head_dim))
+        float exponent = float(2 * i) / float(head_dim);
+        float freq_i   = 1.0 / pow(freq_base, exponent);
+        float theta    = float(position) * freq_i;
+
+        float cos_t = cos(theta);
+        float sin_t = sin(theta);
+
+        y[base_idx + i]            = x_i * cos_t - x_ihd * sin_t;
+        y[base_idx + i + half_dim] = x_i * sin_t + x_ihd * cos_t;
+    }
+}

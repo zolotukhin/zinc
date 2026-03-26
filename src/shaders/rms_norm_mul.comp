@@ -1,6 +1,69 @@
 #version 460
-// Placeholder — Fused RMS normalization + scale multiply
-// Single read + single write, eliminates intermediate buffer
-// TODO: implement
+// Fused RMS normalization + scale multiply
+// y = weight * (x / sqrt(mean(x^2) + eps))
+// Each workgroup processes one token position across the hidden dimension.
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
 layout(local_size_x = 64) in;
-void main() {}
+
+layout(set = 0, binding = 0) readonly buffer X {
+    float x[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Weight {
+    float weight[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Y {
+    float y[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint N;      // hidden dimension
+    float eps;   // epsilon for numerical stability (typically 1e-5)
+};
+
+// Shared memory for partial sums when N > 64
+shared float s_partial[64];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint token = gl_WorkGroupID.x;         // each WG handles one token
+    uint base = token * N;                 // offset into x[] for this token
+
+    // --- Pass 1: accumulate sum of squares ---
+    // Each thread strides across the hidden dimension, accumulating its share.
+    float sum_sq = 0.0;
+    for (uint i = tid; i < N; i += 64) {
+        float val = x[base + i];
+        sum_sq += val * val;
+    }
+
+    // Reduce within the subgroup (wave64 — covers the full workgroup on RDNA4).
+    sum_sq = subgroupAdd(sum_sq);
+
+    // For architectures where subgroup size < workgroup size, fall back to shared memory.
+    if (gl_SubgroupSize < 64) {
+        s_partial[tid] = sum_sq;
+        barrier();
+        if (tid == 0) {
+            float total = 0.0;
+            uint num_subgroups = (64 + gl_SubgroupSize - 1) / gl_SubgroupSize;
+            for (uint s = 0; s < num_subgroups; s++) {
+                total += s_partial[s * gl_SubgroupSize];
+            }
+            s_partial[0] = total;
+        }
+        barrier();
+        sum_sq = s_partial[0];
+    }
+
+    // Compute reciprocal of RMS: 1 / sqrt(mean(x^2) + eps)
+    float rms_inv = inversesqrt(sum_sq / float(N) + eps);
+
+    // --- Pass 2: normalize and multiply by weight ---
+    for (uint i = tid; i < N; i += 64) {
+        y[base + i] = weight[i] * (x[base + i] * rms_inv);
+    }
+}

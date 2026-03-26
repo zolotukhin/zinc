@@ -187,8 +187,8 @@ pub const TensorInfo = struct {
 pub const GGUFFile = struct {
     version: GGUFVersion,
     tensor_count: u64,
-    metadata: std.StringHashMap(MetadataValue) = .{},
-    tensors: std.ArrayList(TensorInfo) = .{},
+    metadata: std.StringHashMapUnmanaged(MetadataValue),
+    tensors: std.ArrayList(TensorInfo),
     tensor_data_offset: u64, // file offset where tensor data begins
     allocator: std.mem.Allocator,
 
@@ -263,7 +263,7 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
     });
 
     // Parse metadata
-    var metadata: std.StringHashMap(MetadataValue) = .{};
+    var metadata: std.StringHashMapUnmanaged(MetadataValue) = .{};
     errdefer metadata.deinit(allocator);
 
     for (0..metadata_count) |_| {

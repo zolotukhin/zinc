@@ -43,7 +43,7 @@ pub const Model = struct {
     config: ModelConfig,
     gguf_file: gguf.GGUFFile,
     tensors: std.ArrayList(LoadedTensor),
-    mmap_data: ?[]align(std.mem.page_size) const u8,
+    mmap_data: ?[]align(std.heap.page_size_min) const u8,
     mmap_file: ?std.fs.File,
     allocator: std.mem.Allocator,
 

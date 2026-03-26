@@ -15,6 +15,9 @@
     <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License">
   </a>
   <img src="https://img.shields.io/badge/platform-linux-lightgrey" alt="Platform">
+  <a href="https://zolotukhin.ai/zinc">
+    <img src="https://img.shields.io/badge/web-zolotukhin.ai%2Fzinc-8B5CF6" alt="Website">
+  </a>
 </p>
 
 > Making AMD consumer GPUs actually usable for LLM inference.

@@ -15,6 +15,7 @@
     "@astrojs/mdx": "^5.0.2",
     "@astrojs/rss": "^4.0.17",
     "@astrojs/sitemap": "^3.7.1",
+    "@shikijs/rehype": "^4.0.2",
     "astro": "^6.0.8",
     "katex": "^0.16.42",
     "mermaid": "^11.13.0",

@@ -1,5 +1,78 @@
 #version 460
-// Placeholder — F16 matrix-vector multiply
-// TODO: implement
+// ZINC — F16 matrix-vector multiply (decode, single token)
+// RDNA4-optimized: wave64 (64 threads/workgroup), 2 output rows per workgroup
+//
+// No dequantization — straightforward f16 dot product.
+// Used for KV cache projections, small tensors, and lm_head when not quantized.
+//
+// Matrix A is stored as packed float16. Vector x is float32.
+// Output y is float32.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_16bit_storage : require
+
 layout(local_size_x = 64) in;
-void main() {}
+
+// Specialization constants for compile-time dimension tuning
+layout(constant_id = 0) const uint SPEC_M = 4096;
+layout(constant_id = 1) const uint SPEC_K = 4096;
+
+// Push constants for runtime parameters
+layout(push_constant) uniform PushConstants {
+    uint M;           // number of output rows
+    uint K;           // number of input columns (elements)
+    uint a_offset;    // byte offset into matrix A buffer
+    uint x_offset;    // byte offset into vector x buffer
+    uint y_offset;    // byte offset into vector y buffer
+};
+
+// Buffer bindings
+// Matrix A: packed float16 values, accessed as uint16 and converted
+layout(set = 0, binding = 0) readonly buffer MatrixA { float16_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[];     };
+layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];    };
+
+void main() {
+    // Each workgroup processes 2 rows
+    uint wg_id = gl_WorkGroupID.x;
+    uint row0 = wg_id * 2u;
+    uint row1 = row0 + 1u;
+    uint tid = gl_LocalInvocationID.x;  // 0..63
+
+    // Element offsets (a_offset is in bytes, each f16 is 2 bytes)
+    uint a_elem_offset = a_offset / 2u;
+    uint x_elem_offset = x_offset / 4u;
+
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+
+    // Each thread handles elements: tid, tid+64, tid+128, ...
+    // Stride of 64 threads across K columns
+    for (uint col = tid; col < K; col += 64u) {
+        float xv = x_data[x_elem_offset + col];
+
+        // Row 0
+        if (row0 < M) {
+            float av = float(a_data[a_elem_offset + row0 * K + col]);
+            sum0 += av * xv;
+        }
+
+        // Row 1
+        if (row1 < M) {
+            float av = float(a_data[a_elem_offset + row1 * K + col]);
+            sum1 += av * xv;
+        }
+    }
+
+    // Warp-level reduction (wave64: single subgroupAdd covers all 64 threads)
+    sum0 = subgroupAdd(sum0);
+    sum1 = subgroupAdd(sum1);
+
+    // Thread 0 writes final results
+    if (tid == 0u) {
+        uint y_base = y_offset / 4u;
+        if (row0 < M) y_data[y_base + row0] = sum0;
+        if (row1 < M) y_data[y_base + row1] = sum1;
+    }
+}

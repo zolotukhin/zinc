@@ -43,9 +43,9 @@ pub const Tokenizer = struct {
         };
 
         var child = std.process.Child.init(cmd, self.allocator);
-        child.stdin_behavior = .pipe;
-        child.stdout_behavior = .pipe;
-        child.stderr_behavior = .pipe;
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
 
         try child.spawn();
 
@@ -110,9 +110,9 @@ pub const Tokenizer = struct {
         };
 
         var child = std.process.Child.init(cmd, self.allocator);
-        child.stdin_behavior = .pipe;
-        child.stdout_behavior = .pipe;
-        child.stderr_behavior = .pipe;
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
 
         try child.spawn();
 

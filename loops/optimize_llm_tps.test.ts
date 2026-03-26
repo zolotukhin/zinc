@@ -91,12 +91,12 @@ describe("extractTextFromStreamJson", () => {
 
 describe("summarizeFromSSHCommands", () => {
   test("reports no modifications for read-only commands", () => {
-    const cmds = ['ssh -p 2223 root@host "cat /etc/os-release"'];
+    const cmds = ['ssh -p 2222 user@host "cat /etc/os-release"'];
     expect(summarizeFromSSHCommands(cmds)).toContain("explored server");
   });
 
   test("detects modification commands", () => {
-    const cmds = ['ssh -p 2223 root@host "sed -i s/old/new/ /etc/conf"'];
+    const cmds = ['ssh -p 2222 user@host "sed -i s/old/new/ /etc/conf"'];
     expect(summarizeFromSSHCommands(cmds)).toContain("modified server");
   });
 

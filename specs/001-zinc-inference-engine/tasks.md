@@ -55,31 +55,31 @@
 
 ### GPU Kernel Implementation
 
-- [ ] T013 [P] [US1] Write DMMV Q4_K shader in src/shaders/dmmv_q4k.comp — wave64, specialization constants for M/K, 2 rows per workgroup
-- [ ] T014 [P] [US1] Write DMMV Q8_0 shader in src/shaders/dmmv_q8_0.comp — optimized for attention weight matmul
-- [ ] T015 [P] [US1] Write DMMV F16 shader in src/shaders/dmmv_f16.comp — for KV cache and small tensors
-- [ ] T016 [P] [US1] Write fused RMS_NORM_MUL shader in src/shaders/rms_norm_mul.comp — RMS norm + scale multiply in single dispatch
-- [ ] T017 [P] [US1] Write fused SwiGLU shader in src/shaders/swiglu.comp — SILU(x) * y
-- [ ] T018 [P] [US1] Write fused ROPE shader in src/shaders/rope_fused.comp — RoPE + reshape + cache write
-- [ ] T019 [P] [US1] Write flash attention shader in src/shaders/flash_attn.comp — paged, 256-token blocks, GQA support
-- [ ] T020 [P] [US1] Write cooperative matrix matmul shader in src/shaders/coop_matmul.comp — 16x16x16 tiles for prefill
+- [X] T013 [P] [US1] Write DMMV Q4_K shader in src/shaders/dmmv_q4k.comp — wave64, specialization constants for M/K, 2 rows per workgroup
+- [X] T014 [P] [US1] Write DMMV Q8_0 shader in src/shaders/dmmv_q8_0.comp — optimized for attention weight matmul
+- [X] T015 [P] [US1] Write DMMV F16 shader in src/shaders/dmmv_f16.comp — for KV cache and small tensors
+- [X] T016 [P] [US1] Write fused RMS_NORM_MUL shader in src/shaders/rms_norm_mul.comp — RMS norm + scale multiply in single dispatch
+- [X] T017 [P] [US1] Write fused SwiGLU shader in src/shaders/swiglu.comp — SILU(x) * y
+- [X] T018 [P] [US1] Write fused ROPE shader in src/shaders/rope_fused.comp — RoPE + reshape + cache write
+- [X] T019 [P] [US1] Write flash attention shader in src/shaders/flash_attn.comp — paged, 256-token blocks, GQA support
+- [X] T020 [P] [US1] Write cooperative matrix matmul shader in src/shaders/coop_matmul.comp — 16x16x16 tiles for prefill
 
 ### Host-Side Dispatch
 
-- [ ] T021 [US1] Implement DMMV dispatch logic in src/compute/dmmv.zig — select shader by quant type, set specialization constants, manage push constants (depends on T005, T013-T015)
-- [ ] T022 [US1] Implement fused element-wise dispatch in src/compute/elementwise.zig — dispatch RMS_NORM_MUL, SwiGLU, ROPE_FUSED with correct buffer bindings (depends on T005, T016-T018)
-- [ ] T023 [US1] Implement flash attention dispatch in src/compute/attention.zig — page table lookup, block iteration, GQA head mapping (depends on T005, T019)
+- [X] T021 [US1] Implement DMMV dispatch logic in src/compute/dmmv.zig — select shader by quant type, set specialization constants, manage push constants (depends on T005, T013-T015)
+- [X] T022 [US1] Implement fused element-wise dispatch in src/compute/elementwise.zig — dispatch RMS_NORM_MUL, SwiGLU, ROPE_FUSED with correct buffer bindings (depends on T005, T016-T018)
+- [X] T023 [US1] Implement flash attention dispatch in src/compute/attention.zig — page table lookup, block iteration, GQA head mapping (depends on T005, T019)
 
 ### Forward Pass Integration
 
-- [ ] T024 [US1] Implement single-request decode loop in src/main.zig — tokenize prompt, prefill, decode token-by-token, detokenize output (depends on T011, T021-T023)
-- [ ] T025 [US1] Implement command buffer pre-recording for decode graph in src/vulkan/command.zig — record once, replay per token via vkQueueSubmit (depends on T006, T024)
+- [X] T024 [US1] Implement single-request decode loop in src/main.zig — tokenize prompt, prefill, decode token-by-token, detokenize output (depends on T011, T021-T023)
+- [X] T025 [US1] Implement command buffer pre-recording for decode graph in src/vulkan/command.zig — record once, replay per token via vkQueueSubmit (depends on T006, T024)
 
 ### Validation
 
-- [ ] T026 [US1] Create bandwidth utilization benchmark in benchmarks/bandwidth.zig — measure effective GB/s for each DMMV quant type at various matrix sizes
-- [ ] T027 [US1] Create dispatch overhead benchmark in benchmarks/dispatch.zig — measure single dispatch, 1500 dispatches, and pre-recorded replay
-- [ ] T028 [US1] Create logit comparison test — generate tokens with ZINC and llama.cpp on same model/prompt/seed, compute cosine similarity (target >99.5%)
+- [X] T026 [US1] Create bandwidth utilization benchmark in benchmarks/bandwidth.zig — measure effective GB/s for each DMMV quant type at various matrix sizes
+- [X] T027 [US1] Create dispatch overhead benchmark in benchmarks/dispatch.zig — measure single dispatch, 1500 dispatches, and pre-recorded replay
+- [X] T028 [US1] Create logit comparison test — generate tokens with ZINC and llama.cpp on same model/prompt/seed, compute cosine similarity (target >99.5%)
 
 **Checkpoint**: Single-request inference works end-to-end. Can generate coherent text at target speed with measured bandwidth utilization.
 
