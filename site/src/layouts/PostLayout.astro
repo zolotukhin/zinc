@@ -55,6 +55,7 @@ const jsonLd = {
 <BaseLayout
   title={title}
   description={excerpt}
+  keywords={tags?.join(', ')}
   ogType="article"
   publishedDate={date.toISOString().split('T')[0]}
   tags={tags}
