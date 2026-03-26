@@ -41,6 +41,7 @@ pub const DmmvDispatch = struct {
         instance: *const Instance,
         gpu_config: *const GpuConfig,
         shader_dir: []const u8,
+        hidden_dim: u32,
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
         _ = gpu_config;
@@ -65,10 +66,15 @@ pub const DmmvDispatch = struct {
         // Load pipelines (3 bindings: A matrix, x vector, y output)
         const push_size = @sizeOf(DmmvPushConstants);
 
+        // Specialization constant: SPEC_K (id=1) = hidden_dim to right-size
+        // the shared memory array in the Q4_K shader (s_x[SPEC_K]).
+        // Default SPEC_K=4096 wastes LDS when hidden_dim=2048, halving occupancy.
+        const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = hidden_dim }};
+
         var path_buf: [512]u8 = undefined;
 
         const q4k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k = pipeline_mod.createFromSpirv(instance, q4k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q4k = pipeline_mod.createFromSpirv(instance, q4k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
             log.warn("Q4_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -126,8 +132,8 @@ pub const DmmvDispatch = struct {
             .y_offset = y_offset,
         };
 
-        // 2 rows per workgroup → ceil(M/2) workgroups
-        const workgroups_x = (M + 1) / 2;
+        // 64 rows per workgroup (1 thread = 1 row) → ceil(M/64) workgroups
+        const workgroups_x = (M + 63) / 64;
 
         cmd.dispatchWithPush(
             pip,

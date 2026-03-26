@@ -1,0 +1,93 @@
+#version 460
+// ZINC — Q4_K embedding row dequantization for batched decode
+// Single workgroup of 64 threads dequantizes one embedding row.
+// Reads token_id from a GPU buffer (written by argmax shader),
+// enabling fully GPU-resident decode without CPU embedding lookup.
+//
+// 64 threads / 8 blocks = 8 threads per block, 1 thread per sub-block.
+// Each thread dequantizes 32 elements of the Q4_K block.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer TokenBuf { uint token_id[]; };
+layout(set = 0, binding = 1) readonly buffer EmbedData { uint8_t embd[]; };
+layout(set = 0, binding = 2) writeonly buffer HiddenOut { float hidden[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint hidden_dim;
+    uint embd_byte_offset;  // byte offset of embedding tensor data (usually 0)
+};
+
+const uint Q4K_BLOCK_SIZE = 256u;  // elements per block
+const uint Q4K_BYTES      = 144u;  // bytes per block
+
+// Decode 6-bit scale from packed k_scales (same as dmmv_q4k.comp)
+float decode_scale(uint ks_off, uint sb) {
+    if (sb < 4u) {
+        return float(uint(embd[ks_off + sb]) & 0x3Fu);
+    } else {
+        uint lo = uint(embd[ks_off + sb + 4u]) & 0x0Fu;
+        uint hi = (uint(embd[ks_off + sb - 4u]) >> 6) & 0x03u;
+        return float(lo | (hi << 4));
+    }
+}
+
+// Decode 6-bit min from packed k_scales (same as dmmv_q4k.comp)
+float decode_min(uint ks_off, uint sb) {
+    if (sb < 4u) {
+        return float(uint(embd[ks_off + sb + 4u]) & 0x3Fu);
+    } else {
+        uint lo = (uint(embd[ks_off + sb + 4u]) >> 4) & 0x0Fu;
+        uint hi = (uint(embd[ks_off + sb]) >> 6) & 0x03u;
+        return float(lo | (hi << 4));
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    uint row = token_id[0];
+    uint blocks_per_row = hidden_dim / Q4K_BLOCK_SIZE;
+
+    // 64 threads, 8 blocks (for hidden_dim=2048): 8 threads per block
+    uint block_idx = tid / 8u;
+    uint sub_idx = tid % 8u;
+
+    if (block_idx >= blocks_per_row) return;
+
+    uint row_base = embd_byte_offset + row * blocks_per_row * Q4K_BYTES;
+    uint blk_off = row_base + block_idx * Q4K_BYTES;
+
+    // Read f16 super-block scales
+    uint d_bits = uint(embd[blk_off]) | (uint(embd[blk_off + 1u]) << 8);
+    uint dm_bits = uint(embd[blk_off + 2u]) | (uint(embd[blk_off + 3u]) << 8);
+    float d_val = unpackHalf2x16(d_bits).x;
+    float dmin_val = unpackHalf2x16(dm_bits).x;
+
+    // Decode scale and min for this sub-block
+    uint ks_off = blk_off + 4u;
+    float sc = decode_scale(ks_off, sub_idx);
+    float mn = decode_min(ks_off, sub_idx);
+    float factor = d_val * sc;
+    float bias = dmin_val * mn;
+
+    // Output offset: block's base + sub-block offset
+    uint out_base = block_idx * Q4K_BLOCK_SIZE + sub_idx * 32u;
+    uint qs_off = blk_off + 16u;
+
+    // Dequantize 32 elements for this sub-block
+    for (uint e = 0u; e < 32u; e++) {
+        uint q;
+        if (sub_idx < 4u) {
+            // Low nibble: sub-blocks 0..3
+            q = uint(embd[qs_off + sub_idx * 32u + e]) & 0x0Fu;
+        } else {
+            // High nibble: sub-blocks 4..7 share qs bytes with 0..3
+            q = (uint(embd[qs_off + (sub_idx - 4u) * 32u + e]) >> 4) & 0x0Fu;
+        }
+        hidden[out_base + e] = factor * float(q) - bias;
+    }
+}
