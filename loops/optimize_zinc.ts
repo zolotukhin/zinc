@@ -874,7 +874,7 @@ async function runCycle(
       verifyResult.phase === "optimize" &&
       verifyResult.tokPerSec != null &&
       buildRun.tokPerSec != null &&
-      verifyResult.tokPerSec > buildRun.tokPerSec * 1.005 // 0.5% improvement threshold
+      verifyResult.tokPerSec >= buildRun.tokPerSec + 3.0 // +3 tok/s minimum to keep
     ) {
       keep = true;
       console.log(
