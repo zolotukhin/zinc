@@ -326,6 +326,12 @@ test "buildDecodeGraph: llama 2 layers" {
         .rope_freq_base = 500000.0,
         .n_experts = 0,
         .n_experts_used = 0,
+        .ssm_d_conv = 0,
+        .ssm_d_inner = 0,
+        .ssm_d_state = 0,
+        .ssm_dt_rank = 0,
+        .ssm_n_group = 0,
+        .full_attn_interval = 0,
     };
 
     var g = try buildDecodeGraph(&config, allocator);
@@ -355,6 +361,12 @@ test "buildDecodeGraph: moe 1 layer" {
         .rope_freq_base = 10000.0,
         .n_experts = 60,
         .n_experts_used = 4,
+        .ssm_d_conv = 0,
+        .ssm_d_inner = 0,
+        .ssm_d_state = 0,
+        .ssm_dt_rank = 0,
+        .ssm_n_group = 0,
+        .full_attn_interval = 0,
     };
 
     var g = try buildDecodeGraph(&config, allocator);

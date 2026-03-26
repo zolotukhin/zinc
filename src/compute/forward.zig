@@ -289,9 +289,14 @@ pub const InferenceEngine = struct {
     moe_out_buf: Buffer, // weighted expert accumulator: hidden_dim f32
     router_logits_buf: Buffer, // MoE router: n_experts f32
     router_staging: Buffer, // host-visible router readback
-    // KV cache (per-layer)
+    // KV cache (per-layer, for attention layers)
     kv_k_cache: []Buffer, // [n_layers] K cache buffers
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
+    // SSM state (per-layer, CPU-side, for SSM layers)
+    ssm_conv_states: [][]f32, // [n_layers] conv state: (kernel_size-1) * conv_channels
+    ssm_states: [][]f32, // [n_layers] recurrent state: head_v_dim * head_v_dim * num_v_heads
+    // Host-visible staging for SSM hidden state transfer
+    ssm_hidden_staging: Buffer,
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
     instance: *const Instance,
@@ -373,7 +378,9 @@ pub const InferenceEngine = struct {
         const q_size = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32);
         const kv_size = @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
         const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
-        const inter_size = @as(vk.c.VkDeviceSize, inter_dim) * @sizeOf(f32);
+        // SSM d_inner may be larger than MoE intermediate_dim; buffers must fit both
+        const max_inter = @max(inter_dim, if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim);
+        const inter_size = @as(vk.c.VkDeviceSize, max_inter) * @sizeOf(f32);
         const n_experts_total = if (config.n_experts > 0) config.n_experts else @as(u32, 1);
 
         const storage_xfer = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -384,7 +391,10 @@ pub const InferenceEngine = struct {
         errdefer k_buf.deinit();
         var v_buf = try Buffer.initDeviceLocal(instance, kv_size, storage_xfer);
         errdefer v_buf.deinit();
-        var attn_out_buf = try Buffer.initDeviceLocal(instance, q_size, storage_xfer);
+        // attn_out_buf: needs max(q_size, conv_channels*4) for SSM wqkv readback
+        const conv_ch = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
+        const attn_out_size = @max(q_size, @as(vk.c.VkDeviceSize, conv_ch) * @sizeOf(f32));
+        var attn_out_buf = try Buffer.initDeviceLocal(instance, attn_out_size, storage_xfer);
         errdefer attn_out_buf.deinit();
         var o_proj_buf = try Buffer.initDeviceLocal(instance, hidden_size, storage_xfer);
         errdefer o_proj_buf.deinit();
@@ -435,6 +445,52 @@ pub const InferenceEngine = struct {
             kv_cache_per_layer * 2 / (1024 * 1024),
             config.n_layers * kv_cache_per_layer * 2 / (1024 * 1024),
         });
+
+        // SSM state (CPU-side, for hybrid models)
+        const ssm_conv_states = try allocator.alloc([]f32, config.n_layers);
+        const ssm_states = try allocator.alloc([]f32, config.n_layers);
+        const has_ssm = config.ssm_d_inner > 0;
+        if (has_ssm) {
+            const d_inner = config.ssm_d_inner;
+            const dt_rank_v = config.ssm_dt_rank;
+            const head_v_dim_v = d_inner / dt_rank_v;
+            const conv_channels = d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
+            const conv_state_size = (config.ssm_d_conv - 1) * conv_channels;
+            const ssm_state_size = head_v_dim_v * head_v_dim_v * dt_rank_v;
+
+            for (0..config.n_layers) |i| {
+                ssm_conv_states[i] = try allocator.alloc(f32, conv_state_size);
+                @memset(ssm_conv_states[i], 0);
+                ssm_states[i] = try allocator.alloc(f32, ssm_state_size);
+                @memset(ssm_states[i], 0);
+            }
+            log.info("SSM state: {d} layers × {d} KB conv + {d} KB recurrent", .{
+                config.n_layers,
+                conv_state_size * 4 / 1024,
+                ssm_state_size * 4 / 1024,
+            });
+        } else {
+            for (0..config.n_layers) |i| {
+                ssm_conv_states[i] = &.{};
+                ssm_states[i] = &.{};
+            }
+        }
+
+        // SSM hidden state staging buffer (for GPU↔CPU transfers)
+        // Size for d_inner (SSM output) which may be larger than hidden_dim
+        const ssm_staging_size = @max(hidden_size, @as(vk.c.VkDeviceSize, if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim) * @sizeOf(f32));
+        var ssm_hidden_staging = try Buffer.init(
+            instance, ssm_staging_size,
+            vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer ssm_hidden_staging.deinit();
+        {
+            var map_ptr: ?*anyopaque = null;
+            const mr2 = vk.c.vkMapMemory(instance.device, ssm_hidden_staging.memory, 0, ssm_staging_size, 0, &map_ptr);
+            if (mr2 != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            ssm_hidden_staging.mapped = @ptrCast(map_ptr);
+        }
 
         // Descriptor pool: need many sets for all layers + MoE experts
         // Per layer: ~15 descriptor sets; MoE adds ~32 per layer (8 experts × 4 ops)
@@ -490,6 +546,9 @@ pub const InferenceEngine = struct {
             .router_staging = router_staging,
             .kv_k_cache = kv_k_cache,
             .kv_v_cache = kv_v_cache,
+            .ssm_conv_states = ssm_conv_states,
+            .ssm_states = ssm_states,
+            .ssm_hidden_staging = ssm_hidden_staging,
             .shared_pool = shared_pool,
             .instance = instance,
             .allocator = allocator,
@@ -654,8 +713,8 @@ pub const InferenceEngine = struct {
         const kv_vec_size = @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
         const is_moe = config.n_experts > 0;
         const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else hidden_dim * 4;
-        // Qwen35moe: every 4th layer (0-indexed: 3,7,11,...) is full attention, rest are SSM
-        const full_attn_interval: u32 = 4;
+        // Hybrid models: every Nth layer is full attention, rest are SSM/linear attention
+        const full_attn_interval = if (config.full_attn_interval > 0) config.full_attn_interval else 1;
 
         // 1. CPU: dequantize embedding
         try self.embedToken(token_id);
@@ -773,11 +832,10 @@ pub const InferenceEngine = struct {
                 }
                 self.decode_cmd.computeBarrier();
             } else {
-                // === SSM / LINEAR ATTENTION LAYER ===
-                // Full delta-net SSM requires conv1d state + recurrent state (TODO).
-                // For now, skip the attention/SSM block entirely — hidden_buf passes
-                // unchanged to the FFN. This is incorrect but allows the MoE FFN
-                // to still process each layer, producing non-degenerate output.
+                // === SSM / LINEAR ATTENTION LAYER (CPU-side delta-net) ===
+                // Read hidden state from GPU, run SSM on CPU using mmap weights,
+                // upload result back to GPU. Avoids needing many new GPU shaders.
+                try self.runSsmLayerCpu(state, layer, layer_idx);
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
@@ -1025,6 +1083,224 @@ pub const InferenceEngine = struct {
         try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, a_offset, 0, 0);
     }
 
+    // -----------------------------------------------------------------------
+    // CPU-side SSM / delta-net layer
+    // -----------------------------------------------------------------------
+
+    /// Run one SSM layer: GPU for large projections, CPU for small state ops.
+    fn runSsmLayerCpu(self: *InferenceEngine, _: *DecodeState, layer: u32, layer_idx: usize) !void {
+        const config = &self.model.config;
+        const hidden_dim = config.hidden_dim;
+        const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+        const d_inner = config.ssm_d_inner;
+        const d_conv = config.ssm_d_conv;
+        const d_state = config.ssm_d_state;
+        const n_group = config.ssm_n_group;
+        const dt_rank = config.ssm_dt_rank;
+
+        if (d_inner == 0) return;
+
+        const head_v_dim = d_inner / dt_rank;
+        const conv_channels = d_inner + 2 * n_group * d_state;
+
+        // --- GPU phase 1: Run large projections via DMMV ---
+        const wqkv_tensor = self.findLayerTensor(layer, "attn_qkv.weight") orelse return;
+        try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+
+        const z_tensor = self.findLayerTensor(layer, "attn_gate.weight") orelse return;
+        try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+
+        const alpha_tensor = self.findLayerTensor(layer, "ssm_alpha.weight") orelse return;
+        try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
+
+        const beta_tensor = self.findLayerTensor(layer, "ssm_beta.weight") orelse return;
+        try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
+        self.decode_cmd.computeBarrier();
+
+        // --- Readback projection results to CPU via logits_staging ---
+        const qkv_bytes = @as(vk.c.VkDeviceSize, conv_channels) * @sizeOf(f32);
+        const z_bytes = @as(vk.c.VkDeviceSize, d_inner) * @sizeOf(f32);
+        const ab_bytes = @as(vk.c.VkDeviceSize, dt_rank) * @sizeOf(f32);
+        {
+            const barrier = vk.c.VkMemoryBarrier{
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+            };
+            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
+                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 1, &barrier, 0, null, 0, null);
+
+            const r1 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.logits_staging.handle, 1, &r1);
+            const r2 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = qkv_bytes, .size = z_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gate_buf.handle, self.logits_staging.handle, 1, &r2);
+            const r3 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = qkv_bytes + z_bytes, .size = ab_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.logits_staging.handle, 1, &r3);
+            const r4 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = qkv_bytes + z_bytes + ab_bytes, .size = ab_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.logits_staging.handle, 1, &r4);
+        }
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+        // --- CPU phase: conv1d + delta-net state update ---
+        const staging_f32: [*]f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+        const qkv_cpu = staging_f32[0..conv_channels];
+        const z_cpu = staging_f32[conv_channels..][0..d_inner];
+        const alpha_cpu = staging_f32[conv_channels + d_inner ..][0..dt_rank];
+        const beta_cpu = staging_f32[conv_channels + d_inner + dt_rank ..][0..dt_rank];
+
+        // Conv1d with state
+        const conv_state = self.ssm_conv_states[layer_idx];
+        const d_conv_1 = d_conv - 1;
+        const mmap = self.model.mmap_data orelse return error.NoMmapData;
+        const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
+        const conv_data_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + conv_tensor.info.offset);
+        const conv_kptr: [*]const f32 = @ptrCast(@alignCast(mmap[conv_data_off..].ptr));
+
+        if (d_conv_1 > 1) {
+            const shift = (d_conv_1 - 1) * conv_channels;
+            std.mem.copyForwards(f32, conv_state[0..shift], conv_state[conv_channels..shift + conv_channels]);
+        }
+        @memcpy(conv_state[(d_conv_1 - 1) * conv_channels ..][0..conv_channels], qkv_cpu);
+
+        const conv_out = try self.allocator.alloc(f32, conv_channels);
+        defer self.allocator.free(conv_out);
+        for (0..conv_channels) |ch| {
+            var sum: f32 = 0;
+            for (0..d_conv) |ki| {
+                const kw = conv_kptr[ki * conv_channels + ch];
+                const sv = if (ki < d_conv_1) conv_state[ki * conv_channels + ch] else qkv_cpu[ch];
+                sum += kw * sv;
+            }
+            const sig = 1.0 / (1.0 + @exp(-sum));
+            conv_out[ch] = sum * sig;
+        }
+
+        // Split Q/K/V, L2 normalize
+        const qk_dim = d_state * n_group;
+        var q_ssm = conv_out[0..qk_dim];
+        var k_ssm = conv_out[qk_dim .. 2 * qk_dim];
+        const v_ssm = conv_out[2 * qk_dim .. 2 * qk_dim + d_inner];
+        l2Normalize(q_ssm);
+        l2Normalize(k_ssm);
+
+        // Compute gate and beta
+        const dt_bias_ptr: ?[*]const f32 = if (self.findLayerTensor(layer, "ssm_dt.bias")) |t| blk: {
+            const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + t.info.offset);
+            break :blk @ptrCast(@alignCast(mmap[off..].ptr));
+        } else null;
+        const ssm_a_ptr: ?[*]const f32 = if (self.findLayerTensor(layer, "ssm_a")) |t| blk: {
+            const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + t.info.offset);
+            break :blk @ptrCast(@alignCast(mmap[off..].ptr));
+        } else null;
+
+        const gate_arr = try self.allocator.alloc(f32, dt_rank);
+        defer self.allocator.free(gate_arr);
+        const beta_arr = try self.allocator.alloc(f32, dt_rank);
+        defer self.allocator.free(beta_arr);
+        for (0..dt_rank) |i| {
+            var a = alpha_cpu[i];
+            if (dt_bias_ptr) |p| a += p[i];
+            const sp = @log(1.0 + @exp(a));
+            gate_arr[i] = if (ssm_a_ptr) |p| sp * p[i] else -sp;
+            beta_arr[i] = 1.0 / (1.0 + @exp(-beta_cpu[i]));
+        }
+
+        // Delta-net autoregressive update
+        const ssm_state = self.ssm_states[layer_idx];
+        for (0..dt_rank) |h| {
+            const s_base = h * head_v_dim * head_v_dim;
+            const g_val = @exp(gate_arr[h]);
+            const b_val = beta_arr[h];
+            const k_hi = if (n_group == dt_rank) h else h / (dt_rank / n_group);
+            const k_head = k_ssm[k_hi * d_state ..][0..@min(d_state, head_v_dim)];
+            const v_head = v_ssm[h * head_v_dim ..][0..head_v_dim];
+
+            for (0..head_v_dim * head_v_dim) |i| ssm_state[s_base + i] *= g_val;
+
+            for (0..head_v_dim) |i| {
+                var sk: f32 = 0;
+                for (0..@min(head_v_dim, k_head.len)) |j| sk += ssm_state[s_base + i * head_v_dim + j] * k_head[j];
+                const d_val = b_val * (v_head[i] - sk);
+                for (0..@min(head_v_dim, k_head.len)) |j| {
+                    ssm_state[s_base + j * head_v_dim + i] += k_head[j] * d_val;
+                }
+            }
+        }
+
+        // Read from state: o = s @ q
+        const ssm_output = try self.allocator.alloc(f32, d_inner);
+        defer self.allocator.free(ssm_output);
+        for (0..dt_rank) |h| {
+            const s_base = h * head_v_dim * head_v_dim;
+            const q_hi = if (n_group == dt_rank) h else h / (dt_rank / n_group);
+            const q_head = q_ssm[q_hi * d_state ..][0..@min(d_state, head_v_dim)];
+            for (0..head_v_dim) |i| {
+                var val: f32 = 0;
+                for (0..@min(head_v_dim, q_head.len)) |j| val += ssm_state[s_base + i * head_v_dim + j] * q_head[j];
+                ssm_output[h * head_v_dim + i] = val;
+            }
+        }
+
+        // Gated normalization: RMS_norm(o) * SiLU(z)
+        const norm_w: ?[*]const f32 = if (self.findLayerTensor(layer, "ssm_norm.weight")) |t| blk: {
+            const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + t.info.offset);
+            break :blk @ptrCast(@alignCast(mmap[off..].ptr));
+        } else null;
+
+        for (0..dt_rank) |h| {
+            const o_sl = ssm_output[h * head_v_dim ..][0..head_v_dim];
+            const z_sl = z_cpu[h * head_v_dim ..][0..head_v_dim];
+            var sq: f32 = 0;
+            for (o_sl) |v| sq += v * v;
+            const rms = @sqrt(sq / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
+            for (0..head_v_dim) |i| {
+                var nv = o_sl[i] / rms;
+                if (norm_w) |p| nv *= p[i % d_state];
+                const zv = z_sl[i];
+                o_sl[i] = nv * (zv / (1.0 + @exp(-zv)));
+            }
+        }
+
+        // --- GPU phase 2: ssm_out DMMV + residual ---
+        const out_staging: [*]f32 = @ptrCast(@alignCast(self.ssm_hidden_staging.mapped.?));
+        @memcpy(out_staging[0..d_inner], ssm_output);
+
+        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        try self.decode_cmd.reset();
+        try self.decode_cmd.begin();
+
+        {
+            const r = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = z_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.ssm_hidden_staging.handle, self.swiglu_buf.handle, 1, &r);
+        }
+        self.decode_cmd.transferToComputeBarrier();
+
+        const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+        try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
+        self.decode_cmd.computeBarrier();
+
+        // Residual: hidden_buf += o_proj_buf
+        {
+            const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
+            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+            self.writeDescSet2(ds, self.hidden_buf.handle, hidden_size, self.o_proj_buf.handle, hidden_size);
+            try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
+        }
+        self.decode_cmd.computeBarrier();
+    }
+
+    /// L2 normalize a vector in-place.
+    fn l2Normalize(v: []f32) void {
+        var sum_sq: f32 = 0;
+        for (v) |x| sum_sq += x * x;
+        const norm = @sqrt(sum_sq + 1e-12);
+        if (norm > 0) {
+            for (v) |*x| x.* /= norm;
+        }
+    }
+
     /// Batch-process all prompt tokens in a single GPU submission.
     /// Eliminates per-token submit/wait overhead by recording all token
     /// computations in one command buffer with vkCmdUpdateBuffer for embeddings.
@@ -1199,6 +1475,12 @@ pub const InferenceEngine = struct {
     /// Release GPU buffers, graphs, command objects, and dispatch helpers owned by the engine.
     pub fn deinit(self: *InferenceEngine) void {
         vk.c.vkDestroyDescriptorPool(self.instance.device, self.shared_pool, null);
+        // SSM state
+        for (self.ssm_conv_states) |s| if (s.len > 0) self.allocator.free(s);
+        for (self.ssm_states) |s| if (s.len > 0) self.allocator.free(s);
+        self.allocator.free(self.ssm_conv_states);
+        self.allocator.free(self.ssm_states);
+        self.ssm_hidden_staging.deinit();
         // KV cache
         for (self.kv_k_cache) |*b| b.deinit();
         for (self.kv_v_cache) |*b| b.deinit();

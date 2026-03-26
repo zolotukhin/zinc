@@ -38,6 +38,13 @@ pub const ModelConfig = struct {
     // MoE fields
     n_experts: u32,
     n_experts_used: u32,
+    // SSM / delta-net fields (hybrid models)
+    ssm_d_conv: u32, // conv kernel size (typically 4)
+    ssm_d_inner: u32, // inner dimension (typically 4096)
+    ssm_d_state: u32, // state size per head (typically 128)
+    ssm_dt_rank: u32, // number of V heads (typically 32)
+    ssm_n_group: u32, // number of K heads / groups (typically 16)
+    full_attn_interval: u32, // every Nth layer is full attention (typically 4)
 };
 
 /// A tensor descriptor paired with the GPU buffer that stores its contents.
@@ -154,9 +161,21 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         break :blk gf.getU32(key) orelse 0;
     };
 
+    // SSM parameters (hybrid models like Qwen3.5)
+    const ssm_d_conv = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.conv_kernel", .{prefix}) catch "") orelse 0;
+    const ssm_d_inner = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.inner_size", .{prefix}) catch "") orelse 0;
+    const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
+    const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
+    const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
+
     log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
         arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
     });
+    if (ssm_d_inner > 0) {
+        log.info("SSM: d_conv={d} d_inner={d} d_state={d} dt_rank={d} n_group={d}", .{
+            ssm_d_conv, ssm_d_inner, ssm_d_state, ssm_dt_rank, ssm_n_group,
+        });
+    }
 
     return ModelConfig{
         .architecture = arch,
@@ -168,9 +187,15 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .intermediate_dim = intermediate_dim,
         .vocab_size = vocab_size,
         .context_length = context_length,
-        .rope_freq_base = 10000.0, // default, can be overridden
+        .rope_freq_base = 10000.0,
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,
+        .ssm_d_conv = ssm_d_conv,
+        .ssm_d_inner = ssm_d_inner,
+        .ssm_d_state = ssm_d_state,
+        .ssm_dt_rank = ssm_dt_rank,
+        .ssm_n_group = ssm_n_group,
+        .full_attn_interval = 4, // default for Qwen3.5
     };
 }
 
