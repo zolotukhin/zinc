@@ -26,8 +26,11 @@ const DmmvPushConstants = extern struct {
 /// Manages DMMV pipelines for different quantization types.
 pub const DmmvDispatch = struct {
     pipeline_q4k: ?Pipeline,
+    pipeline_q5k: ?Pipeline,
+    pipeline_q6k: ?Pipeline,
     pipeline_q8_0: ?Pipeline,
     pipeline_f16: ?Pipeline,
+    pipeline_f32: ?Pipeline,
     descriptor_pool: vk.c.VkDescriptorPool,
     device: vk.c.VkDevice,
 
@@ -85,16 +88,37 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+            log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        const q6k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+            log.warn("Q6_K shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         const f16_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f16.spv", .{shader_dir}) catch unreachable;
         const pipeline_f16 = pipeline_mod.createFromSpirv(instance, f16_path, 3, push_size, &.{}, allocator) catch |err| blk: {
             log.warn("F16 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
+        const f32_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f32.spv", .{shader_dir}) catch unreachable;
+        const pipeline_f32 = pipeline_mod.createFromSpirv(instance, f32_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+            log.warn("F32 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
+            .pipeline_q5k = pipeline_q5k,
+            .pipeline_q6k = pipeline_q6k,
             .pipeline_q8_0 = pipeline_q8_0,
             .pipeline_f16 = pipeline_f16,
+            .pipeline_f32 = pipeline_f32,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -108,8 +132,11 @@ pub const DmmvDispatch = struct {
     pub fn pipelineForType(self: *const DmmvDispatch, quant_type: GGMLType) ?*const Pipeline {
         return switch (quant_type) {
             .q4_k => if (self.pipeline_q4k) |*p| p else null,
+            .q5_k => if (self.pipeline_q5k) |*p| p else null,
+            .q6_k => if (self.pipeline_q6k) |*p| p else null,
             .q8_0 => if (self.pipeline_q8_0) |*p| p else null,
             .f16 => if (self.pipeline_f16) |*p| p else null,
+            .f32 => if (self.pipeline_f32) |*p| p else null,
             else => null,
         };
     }
@@ -164,8 +191,11 @@ pub const DmmvDispatch = struct {
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
+        if (self.pipeline_q5k) |*p| p.deinit();
+        if (self.pipeline_q6k) |*p| p.deinit();
         if (self.pipeline_q8_0) |*p| p.deinit();
         if (self.pipeline_f16) |*p| p.deinit();
+        if (self.pipeline_f32) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

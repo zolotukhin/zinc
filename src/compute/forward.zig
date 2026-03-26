@@ -983,7 +983,6 @@ pub const InferenceEngine = struct {
     // -----------------------------------------------------------------------
 
     /// Dispatch a DMMV: weight × input_buf → output_buf.
-    /// Falls back to q8_0 pipeline for unsupported quant types (q5_k, q6_k, f32).
     fn dispatchDmmv(
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
@@ -992,15 +991,16 @@ pub const InferenceEngine = struct {
         M: u32, K: u32,
     ) !void {
         const qt = tensor.info.type_;
-        // Try native pipeline, fall back to q8_0 for unsupported types
-        const effective_qt: GGMLType = if (self.dmmv.pipelineForType(qt) != null) qt else .q8_0;
-        const pip = self.dmmv.pipelineForType(effective_qt) orelse return error.UnsupportedQuantType;
+        const pip = self.dmmv.pipelineForType(qt) orelse {
+            log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(qt), tensor.info.name });
+            return error.UnsupportedQuantType;
+        };
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet3(ds,
             tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
             input_buf.handle, input_size,
             output_buf.handle, output_buf.size);
-        try self.dmmv.recordDispatch(&self.decode_cmd, effective_qt, ds, M, K, 0, 0, 0);
+        try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, 0, 0, 0);
     }
 
     /// Dispatch a DMMV with byte offset into stacked weight tensor (for MoE experts).
@@ -1013,14 +1013,16 @@ pub const InferenceEngine = struct {
         a_offset: u32,
     ) !void {
         const qt = tensor.info.type_;
-        const effective_qt: GGMLType = if (self.dmmv.pipelineForType(qt) != null) qt else .q8_0;
-        const pip = self.dmmv.pipelineForType(effective_qt) orelse return error.UnsupportedQuantType;
+        const pip = self.dmmv.pipelineForType(qt) orelse {
+            log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(qt), tensor.info.name });
+            return error.UnsupportedQuantType;
+        };
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet3(ds,
             tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
             input_buf.handle, input_size,
             output_buf.handle, output_buf.size);
-        try self.dmmv.recordDispatch(&self.decode_cmd, effective_qt, ds, M, K, a_offset, 0, 0);
+        try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, a_offset, 0, 0);
     }
 
     /// Batch-process all prompt tokens in a single GPU submission.

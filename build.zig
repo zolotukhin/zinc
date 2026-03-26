@@ -13,7 +13,10 @@ pub fn build(b: *std.Build) void {
     const shader_sources = .{
         "dmmv_q4k",
         "dmmv_q8_0",
+        "dmmv_q5k",
+        "dmmv_q6k",
         "dmmv_f16",
+        "dmmv_f32",
         "rms_norm_mul",
         "swiglu",
         "sigmoid_mul",

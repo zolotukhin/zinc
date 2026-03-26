@@ -1,0 +1,87 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
+layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+};
+
+// Q5_K block: 176 bytes / 256 elements
+// Layout: d(f16,2) dmin(f16,2) scales(12) qh(32) qs(128)
+// d at offset 0, dmin at offset 2, scales at 4, qh at 16, qs at 48
+
+float fp16_to_fp32(uint h) {
+    return unpackHalf2x16(h).x;
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= M) return;
+
+    uint blocks_per_row = K / 256;
+    uint row_offset = a_offset + row * blocks_per_row * 176;
+    uint x_base = x_offset / 4;
+    uint y_base = y_offset / 4;
+
+    float sum = 0.0;
+    uint xi = 0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint bb = row_offset + b * 176;
+
+        uint d_bits = uint(w[bb]) | (uint(w[bb + 1]) << 8);
+        float d = fp16_to_fp32(d_bits);
+        uint dm_bits = uint(w[bb + 2]) | (uint(w[bb + 3]) << 8);
+        float dmin = fp16_to_fp32(dm_bits);
+
+        // 6-bit scales packed in 12 bytes at offset 4
+        // 32 bytes of high bits at offset 16
+        // 128 bytes of low nibbles at offset 48
+
+        for (uint j = 0; j < 256; j++) {
+            uint sub_block = j / 32;
+            uint in_block = j % 32;
+
+            // Get scale and min for this sub-block (simplified)
+            uint sc_idx = sub_block;
+            uint sc_byte;
+            uint m_byte;
+            if (sc_idx < 4) {
+                sc_byte = uint(w[bb + 4 + sc_idx]) & 63u;
+                m_byte = uint(w[bb + 4 + sc_idx + 4]) & 63u;
+            } else {
+                sc_byte = (uint(w[bb + 4 + sc_idx + 4]) & 0xFu) | ((uint(w[bb + 4 + sc_idx - 4]) >> 6) << 4);
+                m_byte = (uint(w[bb + 4 + sc_idx + 4]) >> 4) | ((uint(w[bb + 4 + sc_idx]) >> 6) << 4);
+            }
+
+            float sc = d * float(sc_byte);
+            float m = dmin * float(m_byte);
+
+            // Get quantized value: 5 bits = 4-bit low nibble + 1-bit high
+            uint qh_byte_idx = in_block;
+            uint qh_bit = (uint(w[bb + 16 + qh_byte_idx]) >> (j / 32)) & 1u;
+
+            uint qs_idx = j / 2;
+            uint qs_val;
+            if ((j & 1) == 0) {
+                qs_val = uint(w[bb + 48 + qs_idx]) & 0xFu;
+            } else {
+                qs_val = uint(w[bb + 48 + qs_idx]) >> 4;
+            }
+
+            float q = float(qs_val | (qh_bit << 4));
+            sum += (sc * q - m) * x[x_base + xi];
+            xi++;
+        }
+    }
+
+    y[y_base + row] = sum;
+}
