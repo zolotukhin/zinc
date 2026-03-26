@@ -1,0 +1,36 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import PostCard from '../../components/PostCard.astro';
+import { getCollection } from 'astro:content';
+
+const posts = (await getCollection('posts', ({ data }) => !data.draft))
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
+---
+
+<BaseLayout
+  title="Blog"
+  description="Writing about building ZINC, local LLM inference on AMD GPUs, Vulkan compute, Zig systems programming, TurboQuant KV compression, and GPU performance engineering."
+>
+  <h1>Blog</h1>
+  <p class="intro">Writing about local AI, GPU programming, and building ZINC.</p>
+
+  <section>
+    {posts.map(post => (
+      <PostCard
+        title={post.data.title}
+        date={post.data.date}
+        excerpt={post.data.excerpt}
+        slug={post.id}
+        tags={post.data.tags}
+      />
+    ))}
+  </section>
+</BaseLayout>
+
+<style>
+  .intro {
+    color: var(--color-text-muted);
+    padding-bottom: var(--space-lg);
+    border-bottom: 1px solid var(--color-border);
+  }
+</style>

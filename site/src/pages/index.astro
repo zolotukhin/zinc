@@ -1,0 +1,109 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PostCard from '../components/PostCard.astro';
+import { getCollection } from 'astro:content';
+
+const posts = (await getCollection('posts', ({ data }) => !data.draft))
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
+  .slice(0, 5);
+---
+
+<BaseLayout
+  title="Stepan Zolotukhin"
+  description="Building ZINC — a Zig + Vulkan LLM inference engine for AMD RDNA3/RDNA4 consumer GPUs. Writing about local AI, GPU programming, and systems engineering."
+  jsonLd={{
+    '@context': 'https://schema.org',
+    '@type': 'WebSite',
+    name: 'Stepan Zolotukhin',
+    url: 'https://zolotukhin.ai',
+    description: 'Building ZINC — a Zig + Vulkan LLM inference engine for AMD consumer GPUs.',
+  }}
+>
+  <section class="hero">
+    <h1>Stepan Zolotukhin</h1>
+    <p>Building <a href="/zinc">ZINC</a> — a Zig + Vulkan inference engine that makes AMD consumer GPUs actually usable for LLM inference. Writing about local AI, GPU programming, and systems engineering.</p>
+  </section>
+
+  <section class="project-highlight">
+    <a href="/zinc" class="project-card">
+      <h2>ZINC</h2>
+      <p>LLM inference engine for AMD RDNA3/RDNA4 GPUs. Hand-tuned Vulkan compute shaders, continuous batching, paged KV cache, TurboQuant KV compression, OpenAI-compatible API. 110+ tok/s on AI PRO R9700.</p>
+      <span class="project-link">Learn more &rarr;</span>
+    </a>
+  </section>
+
+  <section class="recent-posts">
+    <h2>Recent posts</h2>
+    {posts.map(post => (
+      <PostCard
+        title={post.data.title}
+        date={post.data.date}
+        excerpt={post.data.excerpt}
+        slug={post.id}
+        tags={post.data.tags}
+      />
+    ))}
+    <p class="all-posts"><a href="/blog">All posts &rarr;</a></p>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    padding: var(--space-xl) 0;
+  }
+
+  .hero h1 {
+    font-size: 2.5rem;
+    margin-bottom: var(--space-sm);
+  }
+
+  .hero p {
+    font-size: 1.1rem;
+    color: var(--color-text-muted);
+    line-height: 1.7;
+    max-width: 600px;
+  }
+
+  .project-highlight {
+    padding-bottom: var(--space-lg);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .project-card {
+    display: block;
+    padding: var(--space-lg);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    color: var(--color-text);
+    transition: border-color 0.15s;
+  }
+
+  .project-card:hover {
+    border-color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  .project-card h2 {
+    font-size: 1.3rem;
+    margin: 0 0 var(--space-sm);
+  }
+
+  .project-card p {
+    color: var(--color-text-muted);
+    font-size: 0.95rem;
+    margin-bottom: var(--space-sm);
+  }
+
+  .project-link {
+    color: var(--color-accent);
+    font-size: 0.9rem;
+  }
+
+  .recent-posts h2 {
+    margin-top: var(--space-xl);
+  }
+
+  .all-posts {
+    margin-top: var(--space-md);
+  }
+</style>

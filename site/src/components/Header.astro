@@ -1,0 +1,140 @@
+---
+const pathname = Astro.url.pathname;
+const navItems = [
+  { href: '/zinc', label: 'ZINC' },
+  { href: '/blog', label: 'Blog' },
+  { href: '/zinc/docs', label: 'Docs' },
+  { href: '/about', label: 'About' },
+];
+---
+
+<header class="site-header">
+  <nav class="container nav">
+    <a href="/" class="site-name">zolotukhin.ai</a>
+    <input type="checkbox" id="nav-toggle" class="nav-toggle sr-only" />
+    <label for="nav-toggle" class="nav-toggle-label" aria-label="Toggle navigation">
+      <span></span>
+    </label>
+    <ul class="nav-links">
+      {navItems.map(item => (
+        <li>
+          <a href={item.href} class:list={[{ active: pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href)) }]}>
+            {item.label}
+          </a>
+        </li>
+      ))}
+      <li class="nav-icons">
+        <a href="mailto:stepan@zolotukhin.ai" aria-label="Email" title="stepan@zolotukhin.ai">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+        </a>
+        <a href="https://github.com/zolotukhin/zinc" aria-label="ZINC on GitHub" title="ZINC on GitHub">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.63 0 12 0z"/></svg>
+        </a>
+      </li>
+    </ul>
+  </nav>
+</header>
+
+<style>
+  .site-header {
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-md) 0;
+  }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .site-name {
+    font-weight: 700;
+    font-size: 1.2rem;
+    letter-spacing: 0.08em;
+    color: var(--color-text);
+    text-decoration: none;
+  }
+
+  .nav-toggle-label {
+    display: none;
+    cursor: pointer;
+    padding: var(--space-sm);
+  }
+
+  .nav-toggle-label span,
+  .nav-toggle-label span::before,
+  .nav-toggle-label span::after {
+    display: block;
+    width: 20px;
+    height: 2px;
+    background: var(--color-text);
+    position: relative;
+    transition: 0.2s;
+  }
+
+  .nav-toggle-label span::before,
+  .nav-toggle-label span::after {
+    content: '';
+    position: absolute;
+  }
+
+  .nav-toggle-label span::before { top: -6px; }
+  .nav-toggle-label span::after { top: 6px; }
+
+  .nav-links {
+    display: flex;
+    list-style: none;
+    gap: var(--space-lg);
+    padding: 0;
+    margin: 0;
+  }
+
+  .nav-links a {
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+  }
+
+  .nav-links a:hover,
+  .nav-links a.active {
+    color: var(--color-text);
+    text-decoration: none;
+  }
+
+  .nav-icons {
+    display: flex;
+    gap: var(--space-md);
+    align-items: center;
+  }
+
+  .nav-icons a {
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+  }
+
+  .nav-icons a:hover {
+    opacity: 1;
+    color: var(--color-text);
+  }
+
+  @media (max-width: 600px) {
+    .nav-toggle-label {
+      display: block;
+    }
+
+    .nav-links {
+      display: none;
+      width: 100%;
+      flex-direction: column;
+      gap: var(--space-sm);
+      padding-top: var(--space-md);
+    }
+
+    .nav-toggle:checked ~ .nav-links {
+      display: flex;
+    }
+  }
+</style>

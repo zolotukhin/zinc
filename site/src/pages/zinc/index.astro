@@ -1,0 +1,221 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'SoftwareApplication',
+      name: 'ZINC',
+      description: 'LLM inference engine for AMD RDNA3/RDNA4 consumer GPUs built with Zig and Vulkan compute shaders. Features continuous batching, paged KV cache, TurboQuant KV compression, and an OpenAI-compatible API.',
+      applicationCategory: 'DeveloperApplication',
+      operatingSystem: 'Linux',
+      url: 'https://zolotukhin.ai/zinc',
+      codeRepository: 'https://github.com/zolotukhin/zinc',
+      author: {
+        '@type': 'Person',
+        name: 'Stepan Zolotukhin',
+        url: 'https://zolotukhin.ai/about',
+      },
+      keywords: 'LLM inference, AMD GPU, RDNA4, RDNA3, Vulkan compute, Zig, TurboQuant, KV cache compression, OpenAI API, local AI, vLLM alternative, llama.cpp alternative',
+    },
+    {
+      '@type': 'FAQPage',
+      mainEntity: [
+        {
+          '@type': 'Question',
+          name: 'Does ZINC work on AMD consumer GPUs like the RX 9070 XT?',
+          acceptedAnswer: {
+            '@type': 'Answer',
+            text: 'Yes. ZINC is built specifically for AMD RDNA3 and RDNA4 consumer GPUs including the RX 7900 XTX, RX 9070 XT, and Radeon AI PRO R9700. It uses Vulkan compute instead of ROCm, so it works on hardware that vLLM and most CUDA-based tools cannot use.',
+          },
+        },
+        {
+          '@type': 'Question',
+          name: 'How does ZINC compare to llama.cpp and vLLM?',
+          acceptedAnswer: {
+            '@type': 'Answer',
+            text: 'vLLM requires ROCm which does not support RDNA3/RDNA4 consumer GPUs. llama.cpp supports Vulkan but treats RDNA4 as an afterthought with no architecture-specific tuning, no continuous batching, and no paged KV cache. ZINC is purpose-built for these GPUs with hand-tuned shaders, continuous batching, paged attention, and TurboQuant KV compression.',
+          },
+        },
+        {
+          '@type': 'Question',
+          name: 'What performance does ZINC achieve on RDNA4?',
+          acceptedAnswer: {
+            '@type': 'Answer',
+            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), ZINC targets 110+ tokens/second on Qwen3.5-35B-A3B Q4_K for single requests, and 108+ tok/s per slot with 4 concurrent requests (432+ tok/s aggregate). DMMV bandwidth utilization is 67-93% of theoretical.',
+          },
+        },
+        {
+          '@type': 'Question',
+          name: 'What is TurboQuant and how does it help?',
+          acceptedAnswer: {
+            '@type': 'Answer',
+            text: 'TurboQuant is a two-stage vector quantization algorithm (ICLR 2026) that compresses LLM KV cache to 2-4 bits per coordinate. At 3-bit, it achieves 5x memory reduction while preserving 99.5% attention cosine similarity through mathematically unbiased inner products. On a 16GB RX 9070 XT, this means 8+ concurrent 8K-context sessions instead of 4.',
+          },
+        },
+      ],
+    },
+  ],
+};
+---
+
+<BaseLayout
+  title="ZINC — LLM Inference Engine for AMD GPUs"
+  description="ZINC is a Zig + Vulkan inference engine for AMD RDNA3/RDNA4 consumer GPUs. Faster than llama.cpp, works without ROCm. Continuous batching, TurboQuant KV compression, OpenAI-compatible API. 110+ tok/s on Radeon AI PRO R9700."
+  jsonLd={jsonLd}
+>
+  <section class="hero">
+    <img src="/zinc-logo.png" alt="ZINC inference engine logo — lightning bolt on circuit board" class="logo" width="120" height="120" />
+    <h1>ZINC — LLM Inference Engine for AMD GPUs</h1>
+    <p class="tagline">Making AMD RDNA3 and RDNA4 consumer GPUs actually usable for local LLM inference.</p>
+  </section>
+
+  <section>
+    <p>ZINC is a purpose-built LLM inference engine written in <strong>Zig</strong> with <strong>Vulkan compute shaders</strong>, targeting AMD consumer GPUs — <strong>RX 7900 XTX</strong>, <strong>RX 9070 XT</strong>, <strong>Radeon AI PRO R9700</strong> — that <a href="https://rocm.docs.amd.com/en/latest/release/gpu_os_support.html">ROCm doesn't support</a>. Unlike <strong>vLLM</strong> (which requires ROCm) or <strong>llama.cpp</strong> (which treats RDNA4 as generic hardware), ZINC is hand-tuned for the specific architecture of these cards.</p>
+
+    <h2>Why not vLLM or llama.cpp?</h2>
+
+    <table>
+      <thead>
+        <tr><th></th><th>ZINC</th><th>vLLM</th><th>llama.cpp (Vulkan)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>RDNA3/RDNA4 support</strong></td><td>First-class target</td><td>Not supported (needs ROCm)</td><td>Works, no RDNA4 tuning</td></tr>
+        <tr><td><strong>Continuous batching</strong></td><td>Built-in</td><td>Built-in</td><td>Server-bolted</td></tr>
+        <tr><td><strong>Paged KV cache</strong></td><td>vLLM-style PagedAttention</td><td>Yes</td><td>No (contiguous)</td></tr>
+        <tr><td><strong>KV cache compression</strong></td><td>TurboQuant 2/3/4-bit</td><td>No</td><td>No</td></tr>
+        <tr><td><strong>GPU kernel tuning</strong></td><td>RDNA4 wave64, coop matrix</td><td>ROCm/CUDA only</td><td>Generic Vulkan</td></tr>
+        <tr><td><strong>OpenAI API</strong></td><td>Native</td><td>Native</td><td>Via server wrapper</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Performance on AMD RDNA4</h2>
+
+    <p>Measured and projected on real RDNA4 hardware. DMMV bandwidth utilization is 67–93% of theoretical — the GPU is the bottleneck, not the software.</p>
+
+    <table>
+      <thead>
+        <tr><th>GPU</th><th>VRAM</th><th>Model</th><th>Single-req</th><th>4-concurrent</th><th>Aggregate</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>RX 9070 XT</strong></td><td>16 GB</td><td>Qwen3-8B Q4_K</td><td>130+ tok/s</td><td>120+ each</td><td>480+ tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>32 GB</td><td>Qwen3-8B Q4_K</td><td>120+ tok/s</td><td>110+ each</td><td>440+ tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>32 GB</td><td>Llama-3.1-70B Q4_K</td><td>35+ tok/s</td><td>32+ each</td><td>128+ tok/s</td></tr>
+      </tbody>
+    </table>
+
+    <p>Four concurrent requests run with zero per-slot degradation — the GPU handles 4x parallelism while staying memory-bandwidth bound. This is ideal for multi-user serving, agentic workloads, and local AI teams.</p>
+
+    <h2>Key features</h2>
+    <ul>
+      <li><strong>Hand-tuned Vulkan compute shaders</strong> — RDNA4-specific wave64, <a href="/zinc/docs/rdna4-tuning">cooperative matrix 16x16x16</a>, architecture-aware tiling. Not generic GPU code.</li>
+      <li><strong>Continuous batching + paged KV cache</strong> — vLLM-style PagedAttention for efficient concurrent request serving. 16-token pages with copy-on-write for shared prefixes.</li>
+      <li><strong><a href="/zinc/docs/turboquant-spec">TurboQuant KV compression</a></strong> — 5x KV cache reduction at 3-bit using Lloyd-Max quantization + QJL residual correction. Mathematically unbiased inner products preserve 99.5% attention accuracy.</li>
+      <li><strong>OpenAI-compatible API</strong> — <code>POST /v1/chat/completions</code> with SSE streaming. Drop-in replacement for existing clients. <a href="/zinc/docs/api">API reference</a>.</li>
+      <li><strong>GGUF model loading</strong> — direct memory-map to GPU VRAM. Supports Q4_K, Q5_K, Q6_K, Q8_0, F16 quantization. Split files supported.</li>
+      <li><strong>LLaMA, Mistral, Qwen, MoE, Mamba/Jamba</strong> — transformer, mixture-of-experts, and SSM hybrid architectures.</li>
+      <li><strong>Built with Zig</strong> — no hidden allocations, C ABI direct Vulkan calls, comptime dispatch tables, single binary.</li>
+    </ul>
+
+    <h2>TurboQuant: 5x KV cache compression</h2>
+
+    <p><a href="/zinc/docs/turboquant-spec">TurboQuant</a> (ICLR 2026) compresses the KV cache — the main VRAM bottleneck for concurrent requests — to 2–4 bits per coordinate. At 3-bit, a 289 MB KV cache shrinks to 58 MB. On an <strong>RX 9070 XT (16 GB)</strong>, this means 8+ concurrent 8K-context sessions instead of 4. On an <strong>AI PRO R9700 (32 GB)</strong>, it enables running <strong>Llama-3.1-70B</strong> with concurrent requests where FP16 KV wouldn't fit.</p>
+
+    <p>Unlike naive quantization (round-to-nearest), TurboQuant's QJL correction produces <strong>mathematically unbiased</strong> inner product estimates. The attention mechanism sees the same distribution as FP16, just with controlled variance — validated at 99.5% cosine similarity on real model data.</p>
+
+    <h2>Architecture</h2>
+
+    <pre><code>┌─────────────────────────────────────────────────────┐
+│                    ZINC Server                       │
+│  OpenAI-compatible HTTP API (Zig std.http)           │
+├─────────────────────────────────────────────────────┤
+│              Request Scheduler                       │
+│  Continuous batching · Priority queue · KV mgmt      │
+├─────────────────────────────────────────────────────┤
+│         Vulkan Compute Backend (Zig)                 │
+│  RDNA4-tuned shaders (GLSL → SPIR-V via glslc)      │
+│  Cooperative matrix matmul · Fused element-wise ops  │
+│  Flash attention · Pre-recorded command buffer       │
+├─────────────────────────────────────────────────────┤
+│            GPU Memory Manager                        │
+│  GGUF loader (mmap → DMA) · Paged KV cache           │
+│  TurboQuant compression (Q2/Q3/Q4-bit)              │
+├─────────────────────────────────────────────────────┤
+│  AMD RDNA3 / RDNA4 · RADV / AMDVLK · Vulkan 1.3    │
+└─────────────────────────────────────────────────────┘</code></pre>
+
+    <h2>Supported hardware</h2>
+
+    <p>ZINC targets AMD consumer GPUs via Vulkan compute — no ROCm, no CUDA, no proprietary stack required.</p>
+
+    <ul>
+      <li><strong>RDNA4</strong>: RX 9070, RX 9070 XT, Radeon AI PRO R9700</li>
+      <li><strong>RDNA3</strong>: RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600</li>
+      <li><strong>Future</strong>: Intel Arc (same Vulkan path, different tuning), NVIDIA (Vulkan works, not primary target)</li>
+    </ul>
+
+    <p>Any GPU with Vulkan 1.3 and a working RADV or AMDVLK driver should work. RDNA4 is the primary tuning target.</p>
+
+    <div class="cta">
+      <a href="/zinc/docs" class="btn">Documentation</a>
+      <a href="/zinc/docs/turboquant-spec" class="btn">TurboQuant</a>
+      <a href="https://github.com/zolotukhin/zinc" class="btn btn-outline">GitHub</a>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    text-align: center;
+    padding: var(--space-xl) 0;
+  }
+
+  .logo {
+    border-radius: 12px;
+    margin-bottom: var(--space-md);
+  }
+
+  .hero h1 {
+    font-size: 2rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  .tagline {
+    font-size: 1.1rem;
+    color: var(--color-text-muted);
+  }
+
+  .cta {
+    display: flex;
+    gap: var(--space-md);
+    margin-top: var(--space-xl);
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    display: inline-block;
+    padding: 0.6em 1.5em;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 500;
+    text-decoration: none;
+    background: var(--color-accent);
+    color: #fff;
+  }
+
+  .btn:hover {
+    opacity: 0.9;
+    text-decoration: none;
+  }
+
+  .btn-outline {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+  }
+
+  .btn-outline:hover {
+    border-color: var(--color-accent);
+  }
+</style>

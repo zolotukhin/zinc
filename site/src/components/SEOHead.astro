@@ -1,0 +1,57 @@
+---
+interface Props {
+  title: string;
+  description: string;
+  canonicalUrl?: string;
+  ogType?: string;
+  ogImage?: string;
+  publishedDate?: string;
+  tags?: string[];
+  jsonLd?: Record<string, unknown>;
+}
+
+const {
+  title,
+  description,
+  canonicalUrl = Astro.url.href,
+  ogType = 'website',
+  ogImage = '/og-image.png',
+  publishedDate,
+  tags,
+  jsonLd,
+} = Astro.props;
+
+const fullTitle = title === 'Stepan Zolotukhin'
+  ? 'Stepan Zolotukhin — zolotukhin.ai'
+  : title.includes('zolotukhin') ? title : `${title} — zolotukhin.ai`;
+const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const ogImageUrl = ogImage.startsWith('http') ? ogImage : `${siteUrl}${ogImage}`;
+---
+
+<title>{fullTitle}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonicalUrl} />
+
+<!-- Open Graph -->
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonicalUrl} />
+<meta property="og:type" content={ogType} />
+<meta property="og:image" content={ogImageUrl} />
+<meta property="og:site_name" content="zolotukhin.ai" />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogImageUrl} />
+
+{publishedDate && <meta property="article:published_time" content={publishedDate} />}
+{tags && tags.map(tag => <meta property="article:tag" content={tag} />)}
+
+<!-- RSS -->
+<link rel="alternate" type="application/rss+xml" title="zolotukhin.ai" href={`${siteUrl}/feed.xml`} />
+
+{jsonLd && (
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+)}

@@ -1,0 +1,126 @@
+---
+import BaseLayout from './BaseLayout.astro';
+
+interface Props {
+  title: string;
+  description?: string;
+  lastmod?: string;
+}
+
+const { title, description, lastmod } = Astro.props;
+
+const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const metaDescription = description ?? `${title} — ZINC documentation`;
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: title,
+  dateModified: lastmod,
+  author: {
+    '@type': 'Organization',
+    name: 'ZINC Project',
+  },
+  description: metaDescription,
+  url: Astro.url.href,
+};
+
+const docNav = [
+  { slug: 'spec', label: 'Technical Spec' },
+  { slug: 'turboquant-spec', label: 'TurboQuant' },
+  { slug: 'rdna4-tuning', label: 'RDNA4 Tuning' },
+  { slug: 'api', label: 'API Reference' },
+];
+
+const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/, '');
+---
+
+<BaseLayout title={title} description={metaDescription} jsonLd={jsonLd}>
+  <div class="doc-layout wide">
+    <aside class="doc-nav">
+      <h3><a href="/docs">Docs</a></h3>
+      <ul>
+        {docNav.map(item => (
+          <li>
+            <a href={`/zinc/docs/${item.slug}`} class:list={[{ active: currentSlug === item.slug }]}>
+              {item.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </aside>
+    <article class="doc-content">
+      {lastmod && <p class="lastmod">Last updated: {lastmod}</p>}
+      <slot />
+    </article>
+  </div>
+</BaseLayout>
+
+<style>
+  .doc-layout {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: var(--space-xl);
+    max-width: var(--max-width-wide);
+    margin: 0 auto;
+  }
+
+  .wide {
+    /* Break out of the narrow .container */
+    width: 100vw;
+    max-width: var(--max-width-wide);
+    margin-left: calc(50% - min(50vw, var(--max-width-wide) / 2));
+    padding: 0 var(--space-md);
+  }
+
+  .doc-nav h3 {
+    font-size: 0.9rem;
+    margin-bottom: var(--space-sm);
+  }
+
+  .doc-nav h3 a {
+    color: var(--color-text);
+  }
+
+  .doc-nav ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .doc-nav li {
+    margin-bottom: var(--space-xs);
+  }
+
+  .doc-nav a {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+  }
+
+  .doc-nav a:hover,
+  .doc-nav a.active {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  .lastmod {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-lg);
+  }
+
+  .doc-content {
+    min-width: 0;
+  }
+
+  @media (max-width: 700px) {
+    .doc-layout {
+      grid-template-columns: 1fr;
+    }
+
+    .doc-nav ul {
+      display: flex;
+      gap: var(--space-md);
+      flex-wrap: wrap;
+    }
+  }
+</style>

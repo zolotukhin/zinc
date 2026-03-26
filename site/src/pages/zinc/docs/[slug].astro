@@ -1,0 +1,59 @@
+---
+import DocLayout from '../../../layouts/DocLayout.astro';
+import { getCollection, render } from 'astro:content';
+
+const DOC_META: Record<string, { title: string; description: string }> = {
+  'spec': {
+    title: 'ZINC Technical Specification',
+    description: 'GPU kernel library, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4 Vulkan inference.',
+  },
+  'turboquant_spec': {
+    title: 'TurboQuant KV Cache Compression',
+    description: 'Two-stage vector quantization for LLM KV cache — Lloyd-Max codebooks, QJL residual correction, 5x compression at 3-bit with unbiased attention on Vulkan compute.',
+  },
+  'rdna4_tuning': {
+    title: 'RDNA4 GPU Tuning Guide',
+    description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.',
+  },
+  'api': {
+    title: 'ZINC API Reference',
+    description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints for local LLM inference.',
+  },
+};
+
+export async function getStaticPaths() {
+  const META: Record<string, { title: string; description: string }> = {
+    'spec': {
+      title: 'ZINC Technical Specification',
+      description: 'GPU kernel library, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4 Vulkan inference.',
+    },
+    'turboquant_spec': {
+      title: 'TurboQuant KV Cache Compression',
+      description: 'Two-stage vector quantization for LLM KV cache — Lloyd-Max codebooks, QJL residual correction, 5x compression at 3-bit with unbiased attention on Vulkan compute.',
+    },
+    'rdna4_tuning': {
+      title: 'RDNA4 GPU Tuning Guide',
+      description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.',
+    },
+    'api': {
+      title: 'ZINC API Reference',
+      description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints for local LLM inference.',
+    },
+  };
+
+  const docs = await getCollection('docs');
+  return docs.map(doc => ({
+    params: { slug: doc.id.replace(/_/g, '-') },
+    props: { doc, meta: META[doc.id] },
+  }));
+}
+
+const { doc, meta } = Astro.props;
+const { Content } = await render(doc);
+const title = meta?.title ?? doc.id;
+const description = meta?.description ?? `${title} — ZINC documentation`;
+---
+
+<DocLayout title={title} description={description}>
+  <Content />
+</DocLayout>

@@ -1,0 +1,39 @@
+name: Site Build Check
+
+on:
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'docs/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git lastmod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build site
+        working-directory: site
+        run: npm run build
+
+      - name: Check output
+        working-directory: site
+        run: |
+          echo "=== Built pages ==="
+          find dist -name '*.html' | sort
+          echo "=== Checking critical files ==="
+          test -f dist/index.html
+          test -f dist/feed.xml
+          test -f dist/sitemap-index.xml
+          test -f dist/robots.txt
+          echo "All checks passed."

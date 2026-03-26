@@ -24,38 +24,36 @@ With TurboQuant, the AI PRO R9700 goes from barely fitting 70B with 4 concurrent
 
 ### Why not simpler quantization (round-to-nearest Q4/Q8)?
 
-Naive per-channel quantization of KV cache introduces **biased** inner products. The attention mechanism computes `softmax(Q @ K^T)` — biased scores shift the attention distribution, causing the model to attend to wrong tokens. TurboQuant's QJL correction makes the inner product estimator **mathematically unbiased** with variance O(1/d), which is why it preserves 99.5% attention cosine similarity at 3-bit (validated on real Qwen2.5-3B data).
+Naive per-channel quantization of KV cache introduces **biased** inner products. The attention mechanism computes $\text{softmax}(QK^\top)$ — biased scores shift the attention distribution, causing the model to attend to wrong tokens. TurboQuant's QJL correction makes the inner product estimator **mathematically unbiased** with variance $O(1/d)$, which is why it preserves 99.5% attention cosine similarity at 3-bit (validated on real Qwen2.5-3B data).
 
 ## Algorithm Summary
 
 ### Stage 1: Random Rotation + Lloyd-Max Quantization (MSE-optimal)
 
-1. **Rotate** the vector by a fixed random orthogonal matrix Pi: `y = Pi @ x`
-   - After rotation, each coordinate follows a known distribution ≈ N(0, 1/d)
+1. **Rotate** the vector by a fixed random orthogonal matrix $\Pi$: $\mathbf{y} = \Pi \mathbf{x}$
+   - After rotation, each coordinate follows a known distribution $\approx \mathcal{N}(0, 1/d)$
    - Coordinates become nearly independent → enables per-coordinate scalar quantization
 2. **Quantize** each coordinate to its nearest Lloyd-Max centroid (precomputed codebook)
-3. **Store** the (b-1)-bit index per coordinate
+3. **Store** the $(b-1)$-bit index per coordinate
 
 ### Stage 2: QJL Residual Correction (1 bit per coordinate)
 
-1. **Reconstruct** from Stage 1: `x_mse = Pi^T @ centroids[indices]`
-2. **Compute residual**: `r = x - x_mse`
-3. **Project** residual through random Gaussian matrix S: `projected = S @ r`
-4. **Store sign bits**: `signs = sign(projected)` — exactly 1 bit per dimension
-5. **Store** `||r||` as a single FP16 scalar per vector
+1. **Reconstruct** from Stage 1: $\hat{\mathbf{x}}_{\text{mse}} = \Pi^\top \cdot \text{centroids}[\text{indices}]$
+2. **Compute residual**: $\mathbf{r} = \mathbf{x} - \hat{\mathbf{x}}_{\text{mse}}$
+3. **Project** residual through random Gaussian matrix $S$: $\text{projected} = S \mathbf{r}$
+4. **Store sign bits**: $\text{signs} = \text{sign}(\text{projected})$ — exactly 1 bit per dimension
+5. **Store** $\|\mathbf{r}\|$ as a single FP16 scalar per vector
 
 ### Asymmetric Inner Product (the attention kernel)
 
-To compute `<query, key>` without decompressing:
+To compute $\langle \mathbf{q}, \mathbf{k} \rangle$ without decompressing:
 
-```
-<q, k> ≈ <q, k_mse> + ||r_k|| × sqrt(π/2) / m × <S @ q, signs_k>
-```
+$$\langle \mathbf{q}, \mathbf{k} \rangle \approx \langle \mathbf{q}, \hat{\mathbf{k}}_{\text{mse}} \rangle + \|\mathbf{r}_k\| \cdot \sqrt{\frac{\pi}{2}} \cdot \frac{1}{m} \cdot \langle S\mathbf{q},\, \text{signs}_k \rangle$$
 
-- Term 1: standard Q × K_mse^T matmul
-- Term 2: QJL correction — projects query through S, dot-products with stored signs
+- **Term 1**: standard $Q \times \hat{K}_{\text{mse}}^\top$ matmul
+- **Term 2**: QJL correction — projects query through $S$, dot-products with stored signs
 
-This estimator is **unbiased** regardless of bit-width. The variance decreases as O(1/d).
+This estimator is **unbiased** regardless of bit-width. The variance decreases as $O(1/d)$.
 
 ### Value compression
 
@@ -218,9 +216,9 @@ void main() {
 
 **Key optimization — rotate the query instead of the keys:**
 
-The inner product `<q, Pi^T @ centroids[idx]>` can be rewritten as `<Pi @ q, centroids[idx]>`. We rotate each query **once** (128 FMAs), then dot the rotated query directly with the centroid values. This avoids decompressing each key entirely — we just look up centroid values and accumulate.
+The inner product $\langle \mathbf{q},\, \Pi^\top \cdot \text{centroids}[\text{idx}] \rangle$ can be rewritten as $\langle \Pi \mathbf{q},\, \text{centroids}[\text{idx}] \rangle$. We rotate each query **once** (128 FMAs), then dot the rotated query directly with the centroid values. This avoids decompressing each key entirely — we just look up centroid values and accumulate.
 
-Similarly for QJL: `<S @ q, signs>` — project the query once, then dot with stored sign bits.
+Similarly for QJL: $\langle S\mathbf{q},\, \text{signs} \rangle$ — project the query once, then dot with stored sign bits.
 
 **Performance estimate per query × page (16 keys, d=128, 3-bit):**
 - Rotate query: 128 × 128 = 16K FMAs (once)
@@ -262,9 +260,9 @@ Runs once at model load. Computes optimal quantization centroids for the given h
 
 The Lloyd-Max algorithm iterates:
 1. Set boundaries = midpoints between adjacent centroids
-2. Set centroids = conditional expectations E[X | X in partition]
+2. Set centroids = conditional expectations $\mathbb{E}[X \mid X \in \text{partition}]$
 
-For d≥64, the coordinate distribution is well-approximated by N(0, 1/d). The solver converges in ~50-100 iterations. This can run on CPU at load time since it produces only 2^b float values.
+For $d \geq 64$, the coordinate distribution is well-approximated by $\mathcal{N}(0, 1/d)$. The solver converges in ~50–100 iterations. This can run on CPU at load time since it produces only $2^b$ float values.
 
 **Implementation**: Compute on CPU in Zig using numerical integration (trapezoidal rule is sufficient — the integrands are smooth Gaussians). Store results in a small GPU buffer.
 

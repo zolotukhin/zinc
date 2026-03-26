@@ -1,0 +1,107 @@
+---
+import BaseLayout from './BaseLayout.astro';
+
+interface Props {
+  title: string;
+  date: Date;
+  excerpt: string;
+  tags?: string[];
+}
+
+const { title, date, excerpt, tags } = Astro.props;
+
+const formattedDate = date.toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
+const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'BlogPosting',
+  headline: title,
+  datePublished: date.toISOString().split('T')[0],
+  author: {
+    '@type': 'Person',
+    name: 'Stepan Zolotukhin',
+    url: `${siteUrl}/about`,
+  },
+  publisher: {
+    '@type': 'Organization',
+    name: 'ZINC Project',
+    url: siteUrl,
+  },
+  description: excerpt,
+  url: Astro.url.href,
+  keywords: tags,
+};
+---
+
+<BaseLayout
+  title={title}
+  description={excerpt}
+  ogType="article"
+  publishedDate={date.toISOString().split('T')[0]}
+  tags={tags}
+  jsonLd={jsonLd}
+>
+  <article class="post">
+    <header class="post-header">
+      <time datetime={date.toISOString().split('T')[0]}>{formattedDate}</time>
+      <h1>{title}</h1>
+      {tags && tags.length > 0 && (
+        <div class="tags">
+          {tags.map(tag => <span class="tag">{tag}</span>)}
+        </div>
+      )}
+    </header>
+    <div class="post-content">
+      <slot />
+    </div>
+  </article>
+  <nav class="post-nav">
+    <a href="/blog">&larr; All posts</a>
+  </nav>
+</BaseLayout>
+
+<style>
+  .post-header {
+    margin-bottom: var(--space-xl);
+  }
+
+  .post-header time {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+  }
+
+  .post-header h1 {
+    margin-top: var(--space-xs);
+  }
+
+  .tags {
+    display: flex;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    font-size: 0.75rem;
+    background: var(--color-tag-bg);
+    color: var(--color-tag-text);
+    padding: 0.1em 0.5em;
+    border-radius: 3px;
+  }
+
+  .post-content {
+    line-height: 1.8;
+  }
+
+  .post-nav {
+    margin-top: var(--space-xl);
+    padding-top: var(--space-lg);
+    border-top: 1px solid var(--color-border);
+  }
+</style>

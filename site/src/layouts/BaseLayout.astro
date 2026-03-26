@@ -1,0 +1,59 @@
+---
+import Header from '../components/Header.astro';
+import SEOHead from '../components/SEOHead.astro';
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+  ogType?: string;
+  publishedDate?: string;
+  tags?: string[];
+  jsonLd?: Record<string, unknown>;
+}
+
+const props = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="msapplication-TileColor" content="#0d0d0f" />
+    <meta name="theme-color" content="#0d0d0f" />
+    <meta name="generator" content={Astro.generator} />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+" crossorigin="anonymous" />
+    <SEOHead {...props} />
+  </head>
+  <body>
+    <Header />
+    <main class="container">
+      <slot />
+    </main>
+    <footer class="container footer">
+      <p>Stepan Zolotukhin · <a href="/zinc">ZINC</a> · <a href="/blog">Blog</a> · <a href="/feed.xml">RSS</a></p>
+    </footer>
+  </body>
+</html>
+
+<style>
+  main {
+    padding: var(--space-xl) var(--space-md);
+    min-height: calc(100vh - 200px);
+  }
+
+  .footer {
+    border-top: 1px solid var(--color-border);
+    padding: var(--space-lg) var(--space-md);
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+  }
+</style>
