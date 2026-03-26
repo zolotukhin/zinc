@@ -10,6 +10,8 @@ jobs:
   socket-scan:
     name: Socket Security Scan
     runs-on: ubuntu-latest
+    env:
+      SOCKET_ORG_SLUG: ${{ vars.SOCKET_ORG_SLUG || 'personal-y1bbx' }}
 
     steps:
       - name: Checkout code
@@ -23,7 +25,22 @@ jobs:
       - name: Install Socket CLI
         run: npm install -g @socketsecurity/cli
 
-      - name: Run Socket CI
-        run: socket ci .
+      - name: Run Socket Scan
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          BRANCH_NAME="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+
+          EXTRA_ARGS=()
+          if [ "$BRANCH_NAME" = "main" ]; then
+            EXTRA_ARGS+=(--default-branch)
+          fi
+
+          socket scan create \
+            --report \
+            --org "$SOCKET_ORG_SLUG" \
+            --repo "$REPO_NAME" \
+            --branch "$BRANCH_NAME" \
+            "${EXTRA_ARGS[@]}" \
+            .
         env:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}

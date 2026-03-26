@@ -93,6 +93,55 @@ The binary is placed in `zig-out/bin/zinc`. Compiled SPIR-V shaders go to `zig-o
   --graph-dot decode-graph.dot
 ```
 
+### Visualize the Decode Graph
+
+The graph export is intended for debugging and performance work before adding a richer runtime profiler. The two outputs serve different purposes:
+
+- `decode-graph.json`: machine-readable structure for scripts, dashboards, or a future custom viewer
+- `decode-graph.dot`: quick visual rendering through Graphviz
+
+Typical workflow:
+
+```bash
+# 1. Export both artifacts
+./zig-out/bin/zinc -m /path/to/model.gguf \
+  --graph-report decode-graph.json \
+  --graph-dot decode-graph.dot
+
+# 2. Render the DOT file to SVG
+dot -Tsvg decode-graph.dot -o decode-graph.svg
+
+# 3. Open the rendered graph
+open decode-graph.svg   # macOS
+# xdg-open decode-graph.svg   # Linux
+```
+
+Useful JSON inspection commands:
+
+```bash
+# Top-level structural summary
+jq '{name, node_count, edge_count, max_depth, max_parallel_width, critical_path_node_count}' decode-graph.json
+
+# Which op types dominate the graph?
+jq '.op_counts' decode-graph.json
+
+# Show the structural critical path
+jq '.critical_path' decode-graph.json
+
+# Inspect nodes that lie on the critical path
+jq '.nodes[] | select(.is_on_critical_path)' decode-graph.json
+```
+
+How to read the output:
+
+- `op_counts` shows which logical ZINC operations dominate the decode DAG, such as `dmmv`, `flash_attn`, `rope`, and `swiglu`
+- `max_depth` and `critical_path_node_count` describe the longest dependency chain through the graph
+- `max_parallel_width` shows the widest layer of structurally independent work
+- nodes marked `is_on_critical_path` are the best first candidates when you want to reduce total decode latency
+- the current export is structural, not timed: it tells you where parallelism and dependencies exist, not yet how long each node took on GPU
+
+The DOT export highlights critical-path nodes in red so you can see the longest chain immediately. The JSON export is the better source for automated analysis or a future in-browser visualizer.
+
 ### CLI Reference
 
 ```
@@ -199,19 +248,20 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 
 ## Benchmarks
 
-Measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB). Benchmarked 2026-03-26.
+Measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB).
+Same hardware, same model, same prompt (`"The capital of France is"`), 256 generated tokens. Benchmarked 2026-03-26.
 
 ### Decode throughput (tok/s, higher is better)
 
 ```
-                 Qwen3.5-35B-A3B Q4_K — Decode (tg128/tg256)
+                 Qwen3.5-35B-A3B Q4_K — Decode (256 tokens)
   ┌─────────────────────────────────────────────────────────────────┐
   │                                                                 │
-  │  llama.cpp   ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░  16.7 tok/s  │
+  │  llama.cpp   ██████████░░░░░░░░░░░░░░░░░░░░░░░░░░  24.4 tok/s  │
   │  Vulkan                                                         │
   │                                                                 │
-  │  ZINC        ██████████████████████░░░░░░░░░░░░░░░  45.5 tok/s  │
-  │  (current)                                          ▲ 2.7× ▲    │
+  │  ZINC        ██████████████████░░░░░░░░░░░░░░░░░░░  45.5 tok/s  │
+  │  (current)                                         ▲ 1.87× ▲    │
   │                                                                 │
   │  ZINC        ███████████████████████████████████████ 110+ tok/s  │
   │  (target)                                                       │
@@ -223,15 +273,15 @@ Measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-
 
 | Metric | llama.cpp Vulkan | ZINC (current) | ZINC (target) |
 |--------|:---:|:---:|:---:|
-| **Decode** | 16.7 tok/s | **45.5 tok/s** (2.7x) | 110+ tok/s |
-| **Prefill** | 432 tok/s (pp512) | **2,655 tok/s** (pp10) | 2,800+ tok/s (pp512) |
-| **Coherent output** | Yes | WIP | Yes |
+| **Decode** | 24.4 tok/s | **45.5 tok/s** (1.87x) | 110+ tok/s |
+| **Prompt eval** | 55.6 tok/s | **2,655 tok/s** (pp10) | 2,800+ tok/s (pp512) |
+| **Coherent output** | Yes (reasoning) | WIP | Yes |
 | **RDNA4-tuned kernels** | No | Yes | Yes |
 | **Native tokenizer** | Yes | Yes (BPE from GGUF) | Yes |
 | **Continuous batching** | No | Phase 4 | Yes |
 | **TurboQuant KV** | No | Phase 5 | Yes |
 
-> **Note**: ZINC prefill was measured at pp10 (short prompt); llama.cpp at pp512. Decode numbers are directly comparable. ZINC output is not yet coherent (compute graph correctness is WIP) — throughput numbers reflect real GPU kernel execution time.
+> **Note**: Both engines ran on the same GPU with the same model and prompt. ZINC prompt eval used 10 tokens (short prompt); llama.cpp reports its own prompt eval rate. ZINC output is not yet coherent (compute graph correctness is WIP) — throughput numbers reflect real GPU kernel execution time.
 
 ### Performance targets
 

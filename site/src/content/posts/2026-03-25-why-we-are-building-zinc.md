@@ -12,7 +12,7 @@ excerpt: "ZINC exists because AMD consumer GPUs are still treated like second-cl
 
 If you want to run serious local AI on an AMD consumer GPU today, the story is still far worse than it should be. The hardware is real. The demand is real. The open models are finally good enough to matter. But the software stack still feels fragmented, fragile, and too often built around the assumption that NVIDIA is the only platform worth taking seriously.
 
-That gap is why I decided to build ZINC.
+That gap is why I decided to build [ZINC](https://github.com/zolotukhin/zinc).
 
 ZINC is an inference engine for AMD RDNA3 and RDNA4 GPUs, built with [Zig](https://ziglang.org/) and [Vulkan](https://www.vulkan.org/) compute. At a technical level, it is about hand-tuned GPU kernels, [GGUF](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md) model loading, paged KV cache, continuous batching, and [TurboQuant](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) KV compression. At a higher level, the mission is simpler: make AMD consumer GPUs genuinely useful for local LLM inference, not as a second-best fallback, but as a first-class target.
 

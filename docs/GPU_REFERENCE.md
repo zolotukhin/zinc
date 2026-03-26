@@ -63,7 +63,7 @@ Hardware specifications, ISA details, and compute architecture reference for LLM
 
 ### RDNA4 CU Layout
 
-![RDNA4 WGP Architecture](../assets/compute-unit.svg)
+![RDNA4 WGP Architecture](/compute-unit.svg)
 
 Each RDNA4 Compute Unit contains:
 
@@ -124,7 +124,7 @@ Note: Wave64 waves consume 2x the physical register space of wave32 waves (64 la
 
 ### Memory Hierarchy
 
-![RDNA4 Memory Hierarchy](../assets/memory-hierarchy.svg)
+![RDNA4 Memory Hierarchy](/memory-hierarchy.svg)
 
 ```
 Thread → VGPRs (192 KB/SIMD)
