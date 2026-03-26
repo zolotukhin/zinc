@@ -569,14 +569,17 @@ pub const InferenceEngine = struct {
 
         // Pre-dequantize all embeddings on CPU
         const hdim: usize = @intCast(hidden_dim);
-        const total_floats = prompt_tokens.len * hdim;
-        const embeddings = try self.allocator.alloc(f32, total_floats);
+        // Only the last token needs LM-head projection — without transformer
+        // layers, intermediate tokens don't fill KV cache, so their embedding
+        // → norm → DMMV is redundant (logits get overwritten each iteration).
+        // This cuts weight reads from N × 273 MB to 1 × 273 MB.
+        const embeddings = try self.allocator.alloc(f32, hdim);
         defer self.allocator.free(embeddings);
 
-        for (prompt_tokens, 0..) |token_id, i| {
-            const safe_id = @min(token_id, self.model.config.vocab_size -| 1);
-            const offset = i * hdim;
-            dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, embeddings[offset..][0..hdim]);
+        {
+            const last_token = prompt_tokens[prompt_tokens.len - 1];
+            const safe_id = @min(last_token, self.model.config.vocab_size -| 1);
+            dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, embeddings[0..hdim]);
         }
 
         // Reset descriptor pool and allocate sets once for all tokens
@@ -606,67 +609,49 @@ pub const InferenceEngine = struct {
             self.logits_buf.handle, self.logits_buf.size,
         );
 
-        // Record single command buffer for all prompt tokens
+        // Record single command buffer — project only the last token through
+        // final-norm + LM-head (see allocation comment above for rationale).
         try self.decode_cmd.reset();
         try self.decode_cmd.beginOneTime();
 
-        for (0..prompt_tokens.len) |i| {
-            // Upload embedding inline via vkCmdUpdateBuffer (8KB per token)
-            const embed_offset = i * hdim;
-            vk.c.vkCmdUpdateBuffer(
+        // Upload last token's embedding
+        vk.c.vkCmdUpdateBuffer(
+            self.decode_cmd.handle,
+            self.hidden_buf.handle,
+            0,
+            embed_size,
+            @ptrCast(embeddings.ptr),
+        );
+
+        // Barrier: transfer → compute
+        {
+            const barrier = vk.c.VkMemoryBarrier{
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
+                .srcAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
+            };
+            vk.c.vkCmdPipelineBarrier(
                 self.decode_cmd.handle,
-                self.hidden_buf.handle,
-                0,
-                embed_size,
-                @ptrCast(embeddings[embed_offset..].ptr),
+                vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 1, &barrier, 0, null, 0, null,
             );
-
-            // Barrier: transfer → compute
-            {
-                const barrier = vk.c.VkMemoryBarrier{
-                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                    .pNext = null,
-                    .srcAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
-                    .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
-                };
-                vk.c.vkCmdPipelineBarrier(
-                    self.decode_cmd.handle,
-                    vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0, 1, &barrier, 0, null, 0, null,
-                );
-            }
-
-            // RMS norm: hidden_buf → norm_buf
-            try self.elementwise.recordRmsNorm(
-                &self.decode_cmd, rms_ds, hidden_dim, 1, 1e-6,
-            );
-
-            // Barrier: compute → compute
-            self.decode_cmd.computeBarrier();
-
-            // DMMV: lm_tensor × norm_buf → logits_buf
-            try self.dmmv.recordDispatch(
-                &self.decode_cmd, quant_type, dmmv_ds,
-                self.model.config.vocab_size, hidden_dim, 0, 0, 0,
-            );
-
-            // Between tokens: drain compute before next vkCmdUpdateBuffer
-            if (i < prompt_tokens.len - 1) {
-                const barrier = vk.c.VkMemoryBarrier{
-                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                    .pNext = null,
-                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
-                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
-                };
-                vk.c.vkCmdPipelineBarrier(
-                    self.decode_cmd.handle,
-                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    0, 1, &barrier, 0, null, 0, null,
-                );
-            }
         }
+
+        // RMS norm: hidden_buf → norm_buf
+        try self.elementwise.recordRmsNorm(
+            &self.decode_cmd, rms_ds, hidden_dim, 1, 1e-6,
+        );
+
+        // Barrier: compute → compute
+        self.decode_cmd.computeBarrier();
+
+        // DMMV: lm_tensor × norm_buf → logits_buf
+        try self.dmmv.recordDispatch(
+            &self.decode_cmd, quant_type, dmmv_ds,
+            self.model.config.vocab_size, hidden_dim, 0, 0, 0,
+        );
 
         // After last token: readback logits
         {
