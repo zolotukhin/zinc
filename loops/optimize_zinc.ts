@@ -717,7 +717,7 @@ async function runCycle(
   await mkdir(cycleDir, { recursive: true });
 
   console.log(clr("1;35", "\n" + "═".repeat(64)));
-  console.log(clr("1;35", `  CYCLE ${cycleNum} — phase: ${state.phase.toUpperCase()}`));
+  console.log(clr("1;35", `  CYCLE ${cycleNum}`));
   console.log(clr("1;35", "═".repeat(64)));
 
   // Step 1: rsync + build + run
@@ -750,16 +750,15 @@ async function runCycle(
 
   state.phase = buildRun.phase;
 
-  // Print current status
+  // Print current status with actual phase
   if (buildRun.buildExitCode !== 0) {
-    console.log(clr("1;31", `  ❌ Build failed (exit ${buildRun.buildExitCode})`));
-  } else if (buildRun.runExitCode !== 0) {
-    console.log(clr("1;31", `  ❌ Runtime failed (exit ${buildRun.runExitCode})`));
+    console.log(clr("1;31", `  ❌ BUILD FAILED (exit ${buildRun.buildExitCode})`));
+  } else if (buildRun.runExitCode !== 0 && buildRun.runExitCode !== null) {
+    console.log(clr("1;31", `  ❌ RUNTIME CRASH (exit ${buildRun.runExitCode})`));
+  } else if (buildRun.tokPerSec != null && buildRun.tokPerSec > 0) {
+    console.log(clr("1;32", `  ✅ RUNNING — ${buildRun.tokPerSec.toFixed(1)} tok/s, ${buildRun.tokensGenerated} tokens`));
   } else {
-    console.log(clr("1;32", `  ✅ Build + run succeeded (${buildRun.tokensGenerated} tokens generated)`));
-    if (buildRun.tokPerSec != null) {
-      console.log(clr("1;33", `  📊 ${buildRun.tokPerSec.toFixed(1)} tok/s`));
-    }
+    console.log(clr("1;33", `  ⚠ ENGINE NOT GENERATING — build OK, ${buildRun.tokensGenerated} tokens produced`));
   }
 
   // Step 2: Git snapshot before agent changes — commit current state so we can revert cleanly
