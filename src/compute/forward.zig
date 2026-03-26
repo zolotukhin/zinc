@@ -229,14 +229,24 @@ pub fn generate(
     });
 
     // Prefill: process all prompt tokens
+    const prefill_start = std.time.nanoTimestamp();
     for (prompt_tokens) |_| {
         try engine.decodeStep(&state);
     }
+    const prefill_end = std.time.nanoTimestamp();
+    const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
+    const prefill_tok_per_sec = if (prefill_ns > 0 and prompt_tokens.len > 0)
+        @as(f64, @floatFromInt(prompt_tokens.len)) * 1_000_000_000.0 / @as(f64, @floatFromInt(prefill_ns))
+    else
+        0.0;
 
-    log.info("Prefill complete at position {d}", .{state.position});
+    log.info("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
+        prompt_tokens.len, @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0, prefill_tok_per_sec,
+    });
 
     // Decode: generate tokens one at a time
     var generated: u32 = 0;
+    const decode_start = std.time.nanoTimestamp();
     while (generated < max_tokens) : (generated += 1) {
         try engine.decodeStep(&state);
         const token = try engine.sampleGreedy();
@@ -246,8 +256,19 @@ pub fn generate(
         // Don't treat token 0 as EOS since uninitialized logits produce 0.
         if (token == 151643 or token == 128001 or token == 2) break;
     }
+    const decode_end = std.time.nanoTimestamp();
 
-    log.info("Generated {d} tokens", .{state.generated_tokens.items.len});
+    const decode_tokens = state.generated_tokens.items.len;
+    const decode_ns: u64 = @intCast(decode_end - decode_start);
+    if (decode_ns > 0 and decode_tokens > 0) {
+        const tok_per_sec = @as(f64, @floatFromInt(decode_tokens)) * 1_000_000_000.0 / @as(f64, @floatFromInt(decode_ns));
+        const ms_per_tok = @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0 / @as(f64, @floatFromInt(decode_tokens));
+        log.info("Generated {d} tokens in {d:.1} ms — {d:.2} tok/s ({d:.1} ms/tok)", .{
+            decode_tokens, @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0, tok_per_sec, ms_per_tok,
+        });
+    } else {
+        log.info("Generated {d} tokens", .{decode_tokens});
+    }
 
     return try allocator.dupe(u32, state.generated_tokens.items);
 }
