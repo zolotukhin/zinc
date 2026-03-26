@@ -334,6 +334,7 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
     border-radius: 14px;
     padding: var(--space-lg);
     background: var(--color-bg);
+    min-width: 0;
   }
 
   .member-card {
@@ -348,9 +349,15 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
     margin-bottom: var(--space-sm);
   }
 
+  .symbol-heading > div {
+    min-width: 0;
+  }
+
   .symbol-heading h2,
   .symbol-heading h4 {
     margin: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .symbol-kind {
@@ -371,11 +378,31 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
     font-weight: 600;
   }
 
+  .symbol-card pre,
+  .member-card pre {
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .symbol-card pre code,
+  .member-card pre code {
+    white-space: inherit;
+  }
+
   .doc-empty,
   .source-meta {
     color: var(--color-text-muted);
     font-size: 0.9rem;
     margin-bottom: 0;
+  }
+
+  .module-meta a,
+  .source-meta a,
+  .detail-list dt code {
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .members {
