@@ -1,3 +1,7 @@
+//! Wrap the flash-attention compute shader and its dispatch parameters.
+//! @section Shader Dispatch
+//! This helper owns the pipeline resources needed to bind paged attention
+//! inputs and record a flash-attention compute pass.
 const std = @import("std");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
@@ -22,6 +26,11 @@ pub const AttentionDispatch = struct {
     descriptor_pool: vk.c.VkDescriptorPool,
     device: vk.c.VkDevice,
 
+    /// Create the flash-attention dispatch wrapper and load its shader pipeline.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param shader_dir Directory containing compiled SPIR-V shader binaries.
+    /// @param allocator Allocator used for temporary pipeline creation state.
+    /// @returns An AttentionDispatch ready to record flash-attention passes.
     pub fn init(
         instance: *const Instance,
         shader_dir: []const u8,
@@ -84,6 +93,8 @@ pub const AttentionDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
     }
 
+    /// Destroy the loaded pipeline and descriptor pool.
+    /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *AttentionDispatch) void {
         if (self.pipeline) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);

@@ -1,3 +1,7 @@
+//! Wrap the decode-time matrix-vector shader family used for projection ops.
+//! @section Shader Dispatch
+//! This helper selects quantization-specific DMMV pipelines and records the
+//! push constants and workgroup sizes needed for single-token decode.
 const std = @import("std");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
@@ -27,6 +31,12 @@ pub const DmmvDispatch = struct {
     descriptor_pool: vk.c.VkDescriptorPool,
     device: vk.c.VkDevice,
 
+    /// Create the DMMV dispatch wrapper and load the supported quantized pipelines.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param gpu_config Derived GPU tuning parameters.
+    /// @param shader_dir Directory containing compiled SPIR-V shader binaries.
+    /// @param allocator Allocator used for temporary pipeline creation state.
+    /// @returns A DmmvDispatch ready to record projection work.
     pub fn init(
         instance: *const Instance,
         gpu_config: *const GpuConfig,
@@ -129,6 +139,8 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Destroy the loaded pipelines and descriptor pool.
+    /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
         if (self.pipeline_q8_0) |*p| p.deinit();

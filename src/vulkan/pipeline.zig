@@ -1,3 +1,7 @@
+//! Load SPIR-V compute shaders into Vulkan pipelines.
+//! @section Vulkan Runtime
+//! Dispatch helpers use this module to build descriptor layouts, pipeline
+//! layouts, and compute pipelines from the compiled shader binaries.
 const std = @import("std");
 const vk = @import("vk.zig");
 const Instance = @import("instance.zig").Instance;

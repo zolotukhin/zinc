@@ -1,7 +1,12 @@
+//! Bridge UTF-8 text and token IDs through an external tokenizer backend.
+//! @section Tokenization
+//! The current implementation shells out to Python-backed tokenizers so the
+//! runtime can handle prompts and decoded output before a native tokenizer lands.
 const std = @import("std");
 
 const log = std.log.scoped(.tokenizer);
 
+/// Tokenizer backends supported by the current shell-out implementation.
 pub const TokenizerBackend = enum {
     sentencepiece,
     tiktoken,
@@ -14,6 +19,11 @@ pub const Tokenizer = struct {
     model_path: []const u8,
     allocator: std.mem.Allocator,
 
+    /// Construct a tokenizer wrapper for a specific backend and model path.
+    /// @param allocator Allocator used for process IO buffers.
+    /// @param model_path Model or tokenizer path consumed by the backend.
+    /// @param backend Backend implementation to invoke for encode/decode.
+    /// @returns A Tokenizer value that borrows the provided model path.
     pub fn init(allocator: std.mem.Allocator, model_path: []const u8, backend: TokenizerBackend) Tokenizer {
         return Tokenizer{
             .backend = backend,
@@ -22,7 +32,10 @@ pub const Tokenizer = struct {
         };
     }
 
-    /// Encode text to token IDs by calling external tokenizer.
+    /// Encode text into token IDs by invoking the configured backend.
+    /// @param self Tokenizer configuration and allocator.
+    /// @param text UTF-8 prompt text to encode.
+    /// @returns A heap-allocated slice of token IDs.
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         const cmd = switch (self.backend) {
             .sentencepiece => &[_][]const u8{
@@ -78,7 +91,10 @@ pub const Tokenizer = struct {
         return try tokens.toOwnedSlice(self.allocator);
     }
 
-    /// Decode token IDs to text by calling external tokenizer.
+    /// Decode token IDs back into UTF-8 text by invoking the configured backend.
+    /// @param self Tokenizer configuration and allocator.
+    /// @param tokens Token IDs to decode in order.
+    /// @returns A heap-allocated UTF-8 byte slice containing the decoded text.
     pub fn decode(self: *const Tokenizer, tokens: []const u32) ![]u8 {
         // Build token list as space-separated string
         var token_str: std.ArrayList(u8) = .{};
@@ -130,6 +146,8 @@ pub const Tokenizer = struct {
         return result;
     }
 
+    /// Release tokenizer-owned resources.
+    /// @note The current implementation only borrows the model path, so deinit is a no-op.
     pub fn deinit(self: *Tokenizer) void {
         _ = self;
         // No resources to free — paths are borrowed

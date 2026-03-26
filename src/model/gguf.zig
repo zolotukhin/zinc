@@ -1,17 +1,22 @@
+//! Parse GGUF container files and expose the metadata needed by the loader.
+//! @section Model Format & Loading
+//! The helpers in this module decode GGUF headers, metadata values, tensor
+//! offsets, and GGML quantization information without copying the whole file.
 const std = @import("std");
 
 const log = std.log.scoped(.gguf);
 
-// GGUF format constants
+/// Little-endian magic value expected at the start of every GGUF file.
 pub const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as bytes: 'G','G','U','F' → LE u32
 
+/// GGUF container versions recognized by the parser.
 pub const GGUFVersion = enum(u32) {
     v2 = 2,
     v3 = 3,
     _,
 };
 
-// GGUF metadata value types
+/// Primitive metadata value tags defined by the GGUF format.
 pub const GGUFType = enum(u32) {
     uint8 = 0,
     int8 = 1,
@@ -29,7 +34,7 @@ pub const GGUFType = enum(u32) {
     _,
 };
 
-// GGML tensor types (quantization formats)
+/// GGML tensor storage and quantization formats referenced by GGUF tensors.
 pub const GGMLType = enum(u32) {
     f32 = 0,
     f16 = 1,
@@ -108,6 +113,7 @@ pub const GGMLType = enum(u32) {
     }
 };
 
+/// Typed representation of a GGUF metadata value.
 pub const MetadataValue = union(enum) {
     uint8: u8,
     int8: i8,
@@ -123,6 +129,8 @@ pub const MetadataValue = union(enum) {
     float64: f64,
     array: []MetadataValue,
 
+    /// Interpret the metadata value as a string slice when the stored type is `.string`.
+    /// @returns The string contents, or `null` when the value is not a string.
     pub fn asString(self: MetadataValue) ?[]const u8 {
         return switch (self) {
             .string => |s| s,
@@ -130,6 +138,8 @@ pub const MetadataValue = union(enum) {
         };
     }
 
+    /// Interpret the metadata value as an unsigned 32-bit integer when it fits.
+    /// @returns A normalized `u32` or `null` when the stored value cannot be represented as one.
     pub fn asU32(self: MetadataValue) ?u32 {
         return switch (self) {
             .uint32 => |v| v,
@@ -139,6 +149,8 @@ pub const MetadataValue = union(enum) {
         };
     }
 
+    /// Interpret the metadata value as an unsigned 64-bit integer when it fits.
+    /// @returns A normalized `u64` or `null` when the stored value cannot be represented as one.
     pub fn asU64(self: MetadataValue) ?u64 {
         return switch (self) {
             .uint64 => |v| v,
@@ -148,6 +160,8 @@ pub const MetadataValue = union(enum) {
         };
     }
 
+    /// Interpret the metadata value as a 32-bit floating-point number when possible.
+    /// @returns An `f32` value or `null` when the stored value is not numeric.
     pub fn asF32(self: MetadataValue) ?f32 {
         return switch (self) {
             .float32 => |v| v,
@@ -157,6 +171,7 @@ pub const MetadataValue = union(enum) {
     }
 };
 
+/// Tensor descriptor read from the GGUF header.
 pub const TensorInfo = struct {
     name: []const u8,
     n_dims: u32,
@@ -184,6 +199,7 @@ pub const TensorInfo = struct {
     }
 };
 
+/// Parsed GGUF header state, metadata map, and tensor table.
 pub const GGUFFile = struct {
     version: GGUFVersion,
     tensor_count: u64,
@@ -192,6 +208,8 @@ pub const GGUFFile = struct {
     tensor_data_offset: u64, // file offset where tensor data begins
     allocator: std.mem.Allocator,
 
+    /// Release metadata keys, metadata payloads, and tensor names owned by the parsed file.
+    /// @param self Parsed GGUF file to tear down in place.
     pub fn deinit(self: *GGUFFile) void {
         // Free metadata string values and keys
         var it = self.metadata.iterator();
@@ -209,19 +227,28 @@ pub const GGUFFile = struct {
         self.* = undefined;
     }
 
-    /// Look up a metadata string value.
+    /// Look up a metadata string value by key.
+    /// @param self Parsed GGUF file.
+    /// @param key Metadata key to search for.
+    /// @returns The stored string value when present and typed as `.string`.
     pub fn getString(self: *const GGUFFile, key: []const u8) ?[]const u8 {
         const val = self.metadata.get(key) orelse return null;
         return val.asString();
     }
 
-    /// Look up a metadata u32 value.
+    /// Look up a metadata value as `u32` when it can be normalized to that type.
+    /// @param self Parsed GGUF file.
+    /// @param key Metadata key to search for.
+    /// @returns The normalized integer value when present.
     pub fn getU32(self: *const GGUFFile, key: []const u8) ?u32 {
         const val = self.metadata.get(key) orelse return null;
         return val.asU32();
     }
 
-    /// Find a tensor by name.
+    /// Find a tensor descriptor by name.
+    /// @param self Parsed GGUF file.
+    /// @param name Tensor name to look up.
+    /// @returns A pointer to the tensor descriptor when the tensor exists.
     pub fn findTensor(self: *const GGUFFile, name: []const u8) ?*const TensorInfo {
         for (self.tensors.items) |*t| {
             if (std.mem.eql(u8, t.name, name)) return t;
@@ -243,7 +270,10 @@ fn freeMetadataValue(allocator: std.mem.Allocator, val: MetadataValue) void {
     }
 }
 
-/// Parse a GGUF file from a byte slice (typically memory-mapped).
+/// Parse a GGUF file from a byte slice.
+/// @param data Raw GGUF bytes, typically from a memory-mapped file.
+/// @param allocator Allocator used for metadata strings, arrays, and tensor descriptors.
+/// @returns A parsed GGUFFile that borrows from `data` for numeric fields and owns copied strings.
 pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
     var reader = Reader{ .data = data, .pos = 0 };
 

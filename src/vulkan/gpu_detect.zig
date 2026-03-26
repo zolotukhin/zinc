@@ -1,9 +1,14 @@
+//! Inspect the selected Vulkan device and derive architecture-specific tuning defaults.
+//! @section Hardware Detection
+//! The heuristics here convert raw Vulkan device properties into the settings
+//! used by DMMV, matmul, and attention dispatch code.
 const std = @import("std");
 const vk = @import("vk.zig");
 const Instance = @import("instance.zig").Instance;
 
 const log = std.log.scoped(.gpu_detect);
 
+/// GPU vendor and architecture buckets used by ZINC's tuning heuristics.
 pub const GpuVendor = enum {
     amd_rdna3,
     amd_rdna4,
@@ -36,10 +41,14 @@ pub const GpuConfig = struct {
     matmul_tile_n: u32,
     flash_attn_block_size: u32,
 
+    /// Return the active device name as a trimmed byte slice.
+    /// @returns The populated prefix of `device_name`.
     pub fn nameSlice(self: *const GpuConfig) []const u8 {
         return self.device_name[0..self.device_name_len];
     }
 
+    /// Log the detected GPU properties and derived tuning parameters.
+    /// @param self Derived GPU configuration for the selected device.
     pub fn log_info(self: *const GpuConfig) void {
         log.info("GPU: {s}", .{self.nameSlice()});
         log.info("  Vendor: {s}", .{@tagName(self.vendor)});

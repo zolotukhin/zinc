@@ -1,3 +1,7 @@
+//! Wrap the fused element-wise shader family used by the decode loop.
+//! @section Shader Dispatch
+//! This helper loads the RMS norm, SwiGLU, and RoPE pipelines and records the
+//! push constants needed for their dispatches.
 const std = @import("std");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
@@ -34,6 +38,11 @@ pub const ElementwiseDispatch = struct {
     descriptor_pool: vk.c.VkDescriptorPool,
     device: vk.c.VkDevice,
 
+    /// Create the fused element-wise dispatch wrapper and load its shaders.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param shader_dir Directory containing compiled SPIR-V shader binaries.
+    /// @param allocator Allocator used for temporary pipeline creation state.
+    /// @returns An ElementwiseDispatch ready to record element-wise passes.
     pub fn init(
         instance: *const Instance,
         shader_dir: []const u8,
@@ -139,6 +148,8 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
     }
 
+    /// Destroy the loaded pipelines and descriptor pool.
+    /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *ElementwiseDispatch) void {
         if (self.pipeline_rms_norm) |*p| p.deinit();
         if (self.pipeline_swiglu) |*p| p.deinit();

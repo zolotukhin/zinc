@@ -1,9 +1,14 @@
+//! Allocate Vulkan buffers used by weights, intermediates, and staging copies.
+//! @section Vulkan Runtime
+//! These helpers centralize buffer creation, memory mapping, and one-shot copy
+//! utilities so the rest of the runtime can work with higher-level abstractions.
 const std = @import("std");
 const vk = @import("vk.zig");
 const Instance = @import("instance.zig").Instance;
 
 const log = std.log.scoped(.buffer);
 
+/// Vulkan buffer allocation paired with its device memory and optional mapped pointer.
 pub const Buffer = struct {
     handle: vk.c.VkBuffer,
     memory: vk.c.VkDeviceMemory,
@@ -114,6 +119,8 @@ pub const Buffer = struct {
         @memcpy(self.mapped.?[0..data.len], data);
     }
 
+    /// Destroy the Vulkan buffer, free memory, and unmap any mapped staging pointer.
+    /// @param self Buffer to tear down in place.
     pub fn deinit(self: *Buffer) void {
         if (self.mapped != null) {
             vk.c.vkUnmapMemory(self.device, self.memory);

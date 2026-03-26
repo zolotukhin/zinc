@@ -1,3 +1,7 @@
+//! Represent decode work as a dependency graph that can be topologically ordered.
+//! @section Decode Planning
+//! Graph builders use this module to describe fused operations, dependencies,
+//! and dispatch metadata before any Vulkan command recording happens.
 const std = @import("std");
 
 const log = std.log.scoped(.graph);
@@ -67,6 +71,10 @@ pub const Graph = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
 
+    /// Initialize an empty graph with a human-readable name.
+    /// @param allocator Allocator used for node storage.
+    /// @param name Debug name for logging and diagnostics.
+    /// @returns A graph ready to accept nodes and dependencies.
     pub fn init(allocator: std.mem.Allocator, name: []const u8) Graph {
         return Graph{
             .allocator = allocator,
@@ -74,6 +82,8 @@ pub const Graph = struct {
         };
     }
 
+    /// Release all graph nodes owned by the graph.
+    /// @param self Graph to tear down in place.
     pub fn deinit(self: *Graph) void {
         self.nodes.deinit(self.allocator);
         self.* = undefined;

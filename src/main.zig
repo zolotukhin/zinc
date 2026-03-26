@@ -1,3 +1,7 @@
+//! CLI entrypoints for configuring ZINC and starting local inference.
+//! @section CLI & Entrypoints
+//! This module wires together Vulkan initialization, model loading, tokenization,
+//! and the single-process decode loop used for prompt-mode execution.
 const std = @import("std");
 const instance_mod = @import("vulkan/instance.zig");
 const gpu_detect = @import("vulkan/gpu_detect.zig");
@@ -25,6 +29,7 @@ comptime {
     _ = @import("compute/forward.zig");
 }
 
+/// Runtime configuration built from CLI flags and default values.
 pub const Config = struct {
     model_path: ?[]const u8 = null,
     port: u16 = 8080,
@@ -51,6 +56,9 @@ const banner =
     \\
 ;
 
+/// Parse the process argument vector into a validated runtime configuration.
+/// @param args Raw argv slice, including argv[0].
+/// @returns A populated Config value or a validation error describing the first invalid flag.
 pub fn parseArgs(args: []const [:0]const u8) !Config {
     var config = Config{};
     var i: usize = 1; // skip argv[0]
@@ -100,6 +108,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
     return config;
 }
 
+/// Start the ZINC process in prompt mode or server mode.
+/// @note Fatal startup errors are logged and terminate the process rather than bubbling to the caller.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

@@ -1,3 +1,7 @@
+//! Create reusable compute command pools and command buffers.
+//! @section Vulkan Runtime
+//! The decode runtime uses these wrappers to record dispatches, insert barriers,
+//! and synchronize submitted compute work.
 const std = @import("std");
 const vk = @import("vk.zig");
 const Instance = @import("instance.zig").Instance;
@@ -10,6 +14,9 @@ pub const CommandPool = struct {
     handle: vk.c.VkCommandPool,
     device: vk.c.VkDevice,
 
+    /// Create a command pool bound to the selected compute queue family.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @returns A CommandPool ready to allocate compute command buffers.
     pub fn init(instance: *const Instance) !CommandPool {
         const pool_info = vk.c.VkCommandPoolCreateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -31,6 +38,8 @@ pub const CommandPool = struct {
         };
     }
 
+    /// Destroy the underlying Vulkan command pool.
+    /// @param self Command pool to tear down in place.
     pub fn deinit(self: *CommandPool) void {
         vk.c.vkDestroyCommandPool(self.device, self.handle, null);
         self.* = undefined;
@@ -43,6 +52,10 @@ pub const CommandBuffer = struct {
     fence: vk.c.VkFence,
     device: vk.c.VkDevice,
 
+    /// Allocate a primary command buffer and fence from a compute command pool.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param pool Command pool used for command buffer allocation.
+    /// @returns A CommandBuffer paired with a completion fence.
     pub fn init(instance: *const Instance, pool: *const CommandPool) !CommandBuffer {
         const alloc_info = vk.c.VkCommandBufferAllocateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -246,6 +259,9 @@ pub const CommandBuffer = struct {
         if (result != vk.c.VK_SUCCESS) return error.ResetCommandBufferFailed;
     }
 
+    /// Destroy the command buffer fence and free the command buffer back to its pool.
+    /// @param self Command buffer to tear down in place.
+    /// @param pool Command pool that owns the Vulkan command buffer allocation.
     pub fn deinit(self: *CommandBuffer, pool: *const CommandPool) void {
         vk.c.vkDestroyFence(self.device, self.fence, null);
         vk.c.vkFreeCommandBuffers(self.device, pool.handle, 1, &self.handle);

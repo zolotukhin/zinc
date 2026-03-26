@@ -1,0 +1,77 @@
+import { describe, expect, it } from 'bun:test';
+import { loadZigApi, parseZigModule } from './zig-api-loader';
+
+describe('parseZigModule', () => {
+  it('extracts module docs, symbols, and nested methods', () => {
+    const module = parseZigModule(
+      `//! Example module summary.
+//! @section Shader Dispatch
+//! Example module overview paragraph.
+
+const std = @import("std");
+
+/// Example struct docs.
+pub const Example = struct {
+    value: usize,
+
+    /// Initialize example state.
+    /// @param value Value to store on the instance.
+    /// @returns A new Example value.
+    pub fn init(value: usize) Example {
+        return .{ .value = value };
+    }
+};
+
+/// Compute an output value.
+/// @param input Value to double.
+/// @returns The doubled input.
+pub fn compute(
+    input: usize,
+) usize {
+    return input * 2;
+}
+`,
+      'compute/example.zig'
+    );
+
+    expect(module).not.toBeNull();
+    expect(module?.section).toBe('Shader Dispatch');
+    expect(module?.summary).toBe('Example module summary.');
+    expect(module?.overview).toEqual(['Example module overview paragraph.']);
+    expect(module?.symbols.map(symbol => symbol.name)).toEqual(['Example', 'compute']);
+    expect(module?.symbols[0]?.members).toHaveLength(1);
+    expect(module?.symbols[0]?.members[0]?.qualifiedName).toBe('Example.init');
+    expect(module?.symbols[0]?.members[0]?.doc.params[0]).toEqual({
+      name: 'value',
+      description: 'Value to store on the instance.',
+    });
+    expect(module?.symbols[1]?.doc.returns).toBe('The doubled input.');
+  });
+
+  it('ignores nested public declarations outside exported type methods', () => {
+    const module = parseZigModule(
+      `pub const Container = struct {
+    pub const Nested = struct {};
+    fn hidden() void {}
+};`,
+      'model/container.zig'
+    );
+
+    expect(module).not.toBeNull();
+    expect(module?.symbols).toHaveLength(1);
+    expect(module?.symbols[0]?.name).toBe('Container');
+    expect(module?.symbols[0]?.members).toHaveLength(0);
+  });
+});
+
+describe('loadZigApi', () => {
+  it('loads grouped modules from the current repository', async () => {
+    const api = await loadZigApi();
+
+    expect(api.moduleCount).toBeGreaterThan(0);
+    expect(api.exportCount).toBeGreaterThan(10);
+    expect(api.memberCount).toBeGreaterThan(10);
+    expect(api.sections.some(section => section.title === 'Vulkan Runtime')).toBe(true);
+    expect(api.modules.some(module => module.href === '/zinc/docs/zig-api/loader')).toBe(true);
+  });
+});

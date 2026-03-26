@@ -1,3 +1,7 @@
+//! Run the inference runtime: decode state, pipeline ownership, and token generation.
+//! @section Inference Runtime
+//! This module ties together model state, compute graphs, dispatch helpers,
+//! and greedy token sampling for a single active inference engine.
 const std = @import("std");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
@@ -22,6 +26,9 @@ pub const DecodeState = struct {
     generated_tokens: std.ArrayList(u32),
     allocator: std.mem.Allocator,
 
+    /// Initialize decode state for a fresh generation request.
+    /// @param allocator Allocator used for the generated token buffer.
+    /// @returns A DecodeState positioned at token index zero.
     pub fn init(allocator: std.mem.Allocator) DecodeState {
         return .{
             .position = 0,
@@ -30,6 +37,8 @@ pub const DecodeState = struct {
         };
     }
 
+    /// Release the generated token buffer owned by the decode state.
+    /// @param self Decode state to tear down in place.
     pub fn deinit(self: *DecodeState) void {
         self.generated_tokens.deinit(self.allocator);
         self.* = undefined;
@@ -53,6 +62,13 @@ pub const InferenceEngine = struct {
     instance: *const Instance,
     allocator: std.mem.Allocator,
 
+    /// Create the runtime objects needed to execute decode-time work on the GPU.
+    /// @param model Loaded model weights and metadata.
+    /// @param instance Active Vulkan instance and logical device.
+    /// @param gpu_config Derived GPU tuning parameters.
+    /// @param shader_dir Directory containing compiled SPIR-V shader binaries.
+    /// @param allocator Allocator used for graphs and temporary runtime state.
+    /// @returns An initialized inference engine ready to record decode work.
     pub fn init(
         model: *Model,
         instance: *const Instance,
@@ -182,6 +198,8 @@ pub const InferenceEngine = struct {
         return max_idx;
     }
 
+    /// Release GPU buffers, graphs, and dispatch helpers owned by the engine.
+    /// @param self Inference engine to tear down in place.
     pub fn deinit(self: *InferenceEngine) void {
         self.logits_buf.deinit();
         self.residual_buf.deinit();

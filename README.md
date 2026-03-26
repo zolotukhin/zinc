@@ -105,54 +105,6 @@ bun test loops/
 zig build test && bun test loops/
 ```
 
-## Project Structure
-
-```
-src/
-├── main.zig                 # Entry point, CLI, Vulkan init, inference pipeline
-├── vulkan/
-│   ├── vk.zig               # Vulkan C bindings
-│   ├── instance.zig          # Vulkan 1.3 instance, device, compute queue
-│   ├── buffer.zig            # GPU buffer allocation, staging, DMA
-│   ├── pipeline.zig          # Compute pipeline from SPIR-V + specialization constants
-│   ├── command.zig           # Command pool, recording, dispatch, fence sync
-│   └── gpu_detect.zig        # RDNA3/4 detection, auto-tuning parameters
-├── model/
-│   ├── gguf.zig              # GGUF v2/v3 parser (header, tensors, metadata)
-│   ├── loader.zig            # Memory-mapped model loading, DMA to GPU VRAM
-│   ├── architecture.zig      # Graph builders: LLaMA, MoE, Mamba/Jamba
-│   └── tokenizer.zig         # External tokenizer interface (sentencepiece/tiktoken)
-├── compute/
-│   ├── graph.zig             # Compute graph with topological sort
-│   ├── dmmv.zig              # Decode matmul-vec dispatch (Q4_K, Q8_0, F16)
-│   ├── elementwise.zig       # Fused RMS norm, SwiGLU, RoPE dispatch
-│   ├── attention.zig         # Flash attention dispatch (paged, GQA)
-│   └── forward.zig           # Forward pass decode loop, greedy sampling
-└── shaders/                  # GLSL 460 compute shaders (→ SPIR-V via glslc)
-    ├── dmmv_q4k.comp         # Q4_K dequantize + matrix-vector multiply
-    ├── dmmv_q8_0.comp        # Q8_0 dequantize + matrix-vector multiply
-    ├── dmmv_f16.comp         # F16 matrix-vector multiply
-    ├── rms_norm_mul.comp      # Fused RMS normalization + scale
-    ├── swiglu.comp            # Fused SiLU(x) * y
-    ├── rope_fused.comp        # Fused RoPE + reshape
-    ├── flash_attn.comp        # Paged flash attention with GQA
-    ├── coop_matmul.comp       # Cooperative matrix matmul (prefill)
-    └── ...                    # sigmoid_mul, softmax_topk, TurboQuant shaders
-
-benchmarks/
-├── bandwidth.zig             # DMMV bandwidth utilization benchmark
-└── dispatch.zig              # Vulkan dispatch overhead benchmark
-
-loops/
-├── optimize_zinc.ts          # Self-improving ZINC optimization loop
-├── optimize_zinc.test.ts     # Tests for ZINC loop
-├── optimize_llm_tps.ts       # llama.cpp TPS optimization loop
-└── optimize_llm_tps.test.ts  # Tests for llama.cpp loop
-
-specs/                        # Feature specifications (speckit)
-docs/                         # Technical documentation
-```
-
 ## Self-Improving Optimization Loop
 
 ZINC includes an AI-powered self-improving loop that iteratively builds, deploys, and fixes/optimizes the engine on real RDNA4 hardware.
@@ -222,34 +174,9 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────┐
-│                ZINC Server                   │
-│  OpenAI-compatible HTTP API (Zig HTTP)       │
-├─────────────────────────────────────────────┤
-│           Request Scheduler                  │
-│  Continuous batching, KV cache management    │
-├─────────────────────────────────────────────┤
-│         Compute Graph Engine                 │
-│  Model graph → fused op sequences            │
-│  Static graph recording + replay             │
-├─────────────────────────────────────────────┤
-│      Vulkan Compute Backend (Zig)            │
-│  Hand-tuned RDNA4 shaders (GLSL → SPIR-V)   │
-│  Cooperative matrix matmul                   │
-│  Fused element-wise kernels                  │
-│  Pre-recorded command buffer replay          │
-├─────────────────────────────────────────────┤
-│         GPU Memory Manager                   │
-│  GGUF model loader                           │
-│  Paged KV cache (like vLLM's PagedAttention) │
-│  Quantized weight storage (Q4_K, Q8_0, etc.) │
-├─────────────────────────────────────────────┤
-│      Vulkan API (via Zig C bindings)         │
-│           AMD RADV / AMDVLK driver           │
-│            RDNA3 / RDNA4 Hardware             │
-└─────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/architecture.svg" alt="ZINC Architecture" width="680">
+</p>
 
 ## Performance Targets
 

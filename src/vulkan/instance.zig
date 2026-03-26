@@ -1,8 +1,13 @@
+//! Initialize Vulkan, select a compute-capable device, and expose memory utilities.
+//! @section Vulkan Runtime
+//! This is the entry point for GPU setup: instance creation, device selection,
+//! queue discovery, and VRAM inspection.
 const std = @import("std");
 const vk = @import("vk.zig");
 
 const log = std.log.scoped(.vulkan);
 
+/// Active Vulkan instance, selected physical device, logical device, and memory metadata.
 pub const Instance = struct {
     handle: vk.c.VkInstance,
     physical_device: vk.c.VkPhysicalDevice,
@@ -13,6 +18,10 @@ pub const Instance = struct {
     mem_props: vk.c.VkPhysicalDeviceMemoryProperties,
     allocator: std.mem.Allocator,
 
+    /// Create a Vulkan instance and select a compute-capable device.
+    /// @param allocator Allocator used for temporary device and queue enumeration state.
+    /// @param preferred_device Preferred physical device index when multiple GPUs are present.
+    /// @returns An initialized Instance bound to a logical device and compute queue.
     pub fn init(allocator: std.mem.Allocator, preferred_device: u32) !Instance {
         // Create Vulkan instance
         const app_info = vk.c.VkApplicationInfo{
@@ -157,6 +166,8 @@ pub const Instance = struct {
         };
     }
 
+    /// Wait for outstanding work, destroy the logical device, and destroy the Vulkan instance.
+    /// @param self Vulkan instance wrapper to tear down in place.
     pub fn deinit(self: *Instance) void {
         _ = vk.c.vkDeviceWaitIdle(self.device);
         vk.c.vkDestroyDevice(self.device, null);

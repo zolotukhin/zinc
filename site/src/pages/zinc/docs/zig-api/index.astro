@@ -1,0 +1,340 @@
+---
+import DocLayout from '../../../../layouts/DocLayout.astro';
+import { loadZigApi } from '../../../../lib/zig-api-loader';
+
+const zigApi = await loadZigApi();
+
+const supplementalDocs = [
+  {
+    href: '/zinc/docs/spec',
+    title: 'Technical Spec',
+    description: 'Architecture notes, scheduling model, model support, and system design context behind the code reference.',
+  },
+  {
+    href: '/zinc/docs/api',
+    title: 'HTTP API Reference',
+    description: 'OpenAI-compatible request and response shapes for the serving interface built on top of the Zig runtime.',
+  },
+  {
+    href: '/zinc/docs/rdna4-tuning',
+    title: 'RDNA4 Tuning',
+    description: 'Architecture-specific performance findings and profiling notes that explain the GPU assumptions in the implementation.',
+  },
+  {
+    href: '/zinc/docs/turboquant-spec',
+    title: 'TurboQuant',
+    description: 'Background on the KV-cache compression approach that the runtime is designed to accommodate.',
+  },
+];
+
+const description = 'Generated reference for the ZINC Zig codebase, grouped by runtime responsibility with module pages and stable symbol anchors.';
+const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, inference runtime, GGUF parser, AMD GPU';
+---
+
+<DocLayout title="Zig API" description={description} keywords={keywords} lastmod={zigApi.lastmod}>
+  <section class="hero">
+    <p class="eyebrow">Primary Reference</p>
+    <h1>ZINC Zig API</h1>
+    <p class="hero-copy">
+      This is the main documentation surface for the codebase: generated from <code>src/**/*.zig</code>, grouped by
+      functionality, and linked with stable module and symbol anchors.
+    </p>
+
+    <div class="hero-actions">
+      <a href="#sections" class="button button-primary">Browse API Sections</a>
+      {zigApi.modules[0] && <a href={zigApi.modules[0].href} class="button button-secondary">Open First Module</a>}
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <span>Sections</span>
+        <strong>{zigApi.sections.length}</strong>
+      </div>
+      <div class="stat-card">
+        <span>Modules</span>
+        <strong>{zigApi.moduleCount}</strong>
+      </div>
+      <div class="stat-card">
+        <span>Exports</span>
+        <strong>{zigApi.exportCount}</strong>
+      </div>
+      <div class="stat-card">
+        <span>Methods</span>
+        <strong>{zigApi.memberCount}</strong>
+      </div>
+    </div>
+  </section>
+
+  <div id="sections" class="section-stack">
+    {zigApi.sections.map(section => (
+      <section class="section-card" id={section.slug}>
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">API Section</p>
+            <h2>{section.title}</h2>
+          </div>
+          <span class="section-count">{section.symbolCount} symbols</span>
+        </div>
+        <p class="section-description">{section.description}</p>
+
+        <div class="module-grid">
+          {section.modules.map(module => (
+            <a href={module.href} class="module-card">
+              <div class="module-card-top">
+                <span class="module-source">{module.sourcePath}</span>
+                <span class="module-counts">{module.exportCount} exports · {module.memberCount} methods</span>
+              </div>
+              <h3>{module.title}</h3>
+              <p>{module.summary}</p>
+              <ul class="symbol-preview">
+                {module.symbols.slice(0, 4).map(symbol => (
+                  <li>{symbol.name}</li>
+                ))}
+              </ul>
+            </a>
+          ))}
+        </div>
+      </section>
+    ))}
+  </div>
+
+  <section class="supplemental">
+    <div class="section-header">
+      <div>
+        <p class="eyebrow">Supplemental</p>
+        <h2>Architecture and Narrative Docs</h2>
+      </div>
+    </div>
+    <p class="section-description">
+      These pages support the API reference with higher-level specs, tuning notes, and protocol descriptions. They are
+      intentionally secondary to the generated Zig reference.
+    </p>
+
+    <div class="module-grid supplemental-grid">
+      {supplementalDocs.map(doc => (
+        <a href={doc.href} class="module-card supplemental-card">
+          <h3>{doc.title}</h3>
+          <p>{doc.description}</p>
+        </a>
+      ))}
+    </div>
+  </section>
+</DocLayout>
+
+<style>
+  .hero {
+    padding: var(--space-xl);
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    background:
+      radial-gradient(circle at top right, rgba(211, 84, 0, 0.14), transparent 30%),
+      linear-gradient(180deg, var(--color-bg-alt), var(--color-bg));
+    margin-bottom: var(--space-xl);
+  }
+
+  .hero h1 {
+    margin-bottom: var(--space-sm);
+  }
+
+  .hero-copy {
+    color: var(--color-text-muted);
+    max-width: 62ch;
+  }
+
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xs);
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+    margin: var(--space-lg) 0;
+  }
+
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.6rem;
+    padding: 0 0.95rem;
+    border-radius: 999px;
+    font-size: 0.9rem;
+    border: 1px solid var(--color-border);
+    text-decoration: none;
+  }
+
+  .button-primary {
+    background: var(--color-accent);
+    color: white;
+    border-color: var(--color-accent);
+  }
+
+  .button-secondary {
+    color: var(--color-text);
+    background: var(--color-bg);
+  }
+
+  .button:hover {
+    text-decoration: none;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: var(--space-sm);
+  }
+
+  .stat-card {
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: var(--color-bg);
+    padding: var(--space-md);
+  }
+
+  .stat-card span {
+    display: block;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  .stat-card strong {
+    font-size: 1.5rem;
+  }
+
+  .section-stack {
+    display: grid;
+    gap: var(--space-lg);
+  }
+
+  .section-card,
+  .supplemental {
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    padding: var(--space-lg);
+    background: var(--color-bg);
+  }
+
+  .section-header {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-md);
+    align-items: flex-start;
+    margin-bottom: var(--space-sm);
+  }
+
+  .section-header h2 {
+    margin: 0;
+  }
+
+  .section-count {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .section-description {
+    color: var(--color-text-muted);
+    max-width: 70ch;
+  }
+
+  .module-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: var(--space-md);
+    margin-top: var(--space-lg);
+  }
+
+  .module-card {
+    display: block;
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    padding: var(--space-md);
+    color: var(--color-text);
+    background: var(--color-bg);
+    transition: transform 0.15s ease, border-color 0.15s ease;
+  }
+
+  .module-card:hover {
+    border-color: var(--color-accent);
+    text-decoration: none;
+    transform: translateY(-2px);
+  }
+
+  .module-card-top {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-sm);
+    font-size: 0.78rem;
+    color: var(--color-text-muted);
+  }
+
+  .module-source,
+  .module-counts {
+    display: inline-flex;
+  }
+
+  .module-card h3 {
+    margin-top: 0;
+  }
+
+  .module-card p {
+    color: var(--color-text-muted);
+    font-size: 0.92rem;
+  }
+
+  .symbol-preview {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+  }
+
+  .symbol-preview li {
+    margin: 0;
+    padding: 0.2rem 0.45rem;
+    border-radius: 999px;
+    background: var(--color-bg-alt);
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  .supplemental {
+    margin-top: var(--space-xl);
+  }
+
+  .supplemental-grid {
+    margin-top: var(--space-md);
+  }
+
+  .supplemental-card h3 {
+    margin-bottom: var(--space-xs);
+  }
+
+  @media (max-width: 700px) {
+    .hero,
+    .section-card,
+    .supplemental {
+      padding: var(--space-md);
+    }
+
+    .section-header,
+    .module-card-top {
+      display: block;
+    }
+
+    .section-count,
+    .module-counts {
+      display: inline-block;
+      margin-top: var(--space-xs);
+    }
+  }
+</style>

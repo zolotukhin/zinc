@@ -1,0 +1,471 @@
+---
+import DocLayout from '../../../../layouts/DocLayout.astro';
+import { getSourceHref, loadZigApi, type ZigApiMember, type ZigApiModule, type ZigApiSymbol } from '../../../../lib/zig-api-loader';
+
+interface Props {
+  apiModule: ZigApiModule;
+  lastmod: string;
+}
+
+export async function getStaticPaths() {
+  const zigApi = await loadZigApi();
+
+  return zigApi.modules.map(apiModule => ({
+    params: { module: apiModule.slug },
+    props: {
+      apiModule,
+      lastmod: zigApi.lastmod,
+    },
+  }));
+}
+
+const { apiModule, lastmod } = Astro.props as Props;
+
+const description = `${apiModule.summary} Generated reference page for ${apiModule.title} in the ZINC Zig API.`;
+const keywords = `ZINC ${apiModule.title}, Zig API, ${apiModule.section}, ${apiModule.sourcePath}`;
+
+const toc = apiModule.symbols.flatMap(symbol => [
+  { label: symbol.qualifiedName, href: `#${symbol.anchor}`, depth: 0 },
+  ...symbol.members.map(member => ({
+    label: member.qualifiedName,
+    href: `#${member.anchor}`,
+    depth: 1,
+  })),
+]);
+
+function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
+  return Boolean(
+    symbol.doc.summary ||
+      symbol.doc.description.length > 0 ||
+      symbol.doc.params.length > 0 ||
+      symbol.doc.returns ||
+      symbol.doc.notes.length > 0
+  );
+}
+---
+
+<DocLayout title={`${apiModule.title} Zig API`} description={description} keywords={keywords} lastmod={lastmod}>
+  <div class="module-page">
+    <div class="module-main">
+      <section class="module-hero">
+        <div class="module-hero-top">
+          <div>
+            <p class="eyebrow">{apiModule.section}</p>
+            <h1>{apiModule.title}</h1>
+          </div>
+          <a href="/zinc/docs/zig-api" class="back-link">All API Sections</a>
+        </div>
+
+        <p class="module-summary">{apiModule.summary}</p>
+        {apiModule.overview.map(paragraph => (
+          <p class="module-overview">{paragraph}</p>
+        ))}
+
+        <div class="module-meta">
+          <span>{apiModule.exportCount} exports</span>
+          <span>{apiModule.memberCount} methods</span>
+          <a href={getSourceHref(apiModule.sourcePath, apiModule.symbols[0]?.line ?? 1)} target="_blank" rel="noreferrer">
+            {apiModule.sourcePath}
+          </a>
+        </div>
+      </section>
+
+      <div class="symbol-stack">
+        {apiModule.symbols.map(symbol => (
+          <section id={symbol.anchor} class="symbol-card">
+            <div class="symbol-heading">
+              <div>
+                <p class="symbol-kind">{symbol.symbolKind}</p>
+                <h2>{symbol.qualifiedName}</h2>
+              </div>
+              <a href={`#${symbol.anchor}`} class="anchor-link">#</a>
+            </div>
+
+            <pre><code>{symbol.signature}</code></pre>
+
+            {hasDocContent(symbol) ? (
+              <div class="doc-copy">
+                {symbol.doc.summary && <p class="doc-summary">{symbol.doc.summary}</p>}
+                {symbol.doc.description.map(paragraph => (
+                  <p>{paragraph}</p>
+                ))}
+
+                {symbol.doc.params.length > 0 && (
+                  <div class="meta-block">
+                    <h3>Parameters</h3>
+                    <dl class="detail-list">
+                      {symbol.doc.params.map(param => (
+                        <div>
+                          <dt><code>{param.name}</code></dt>
+                          <dd>{param.description}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </div>
+                )}
+
+                {symbol.doc.returns && (
+                  <div class="meta-block">
+                    <h3>Returns</h3>
+                    <p>{symbol.doc.returns}</p>
+                  </div>
+                )}
+
+                {symbol.doc.notes.length > 0 && (
+                  <div class="meta-block">
+                    <h3>Notes</h3>
+                    {symbol.doc.notes.map(note => (
+                      <p>{note}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p class="doc-empty">No public doc comment yet.</p>
+            )}
+
+            <p class="source-meta">
+              <a href={getSourceHref(symbol.sourcePath, symbol.line)} target="_blank" rel="noreferrer">
+                {symbol.sourcePath}:{symbol.line}
+              </a>
+            </p>
+
+            {symbol.members.length > 0 && (
+              <div class="members">
+                <div class="members-header">
+                  <h3>Methods</h3>
+                  <span>{symbol.members.length}</span>
+                </div>
+
+                <div class="member-stack">
+                  {symbol.members.map(member => (
+                    <article id={member.anchor} class="member-card">
+                      <div class="symbol-heading member-heading">
+                        <div>
+                          <p class="symbol-kind">method</p>
+                          <h4>{member.qualifiedName}</h4>
+                        </div>
+                        <a href={`#${member.anchor}`} class="anchor-link">#</a>
+                      </div>
+
+                      <pre><code>{member.signature}</code></pre>
+
+                      {hasDocContent(member) ? (
+                        <div class="doc-copy">
+                          {member.doc.summary && <p class="doc-summary">{member.doc.summary}</p>}
+                          {member.doc.description.map(paragraph => (
+                            <p>{paragraph}</p>
+                          ))}
+
+                          {member.doc.params.length > 0 && (
+                            <div class="meta-block">
+                              <h5>Parameters</h5>
+                              <dl class="detail-list">
+                                {member.doc.params.map(param => (
+                                  <div>
+                                    <dt><code>{param.name}</code></dt>
+                                    <dd>{param.description}</dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            </div>
+                          )}
+
+                          {member.doc.returns && (
+                            <div class="meta-block">
+                              <h5>Returns</h5>
+                              <p>{member.doc.returns}</p>
+                            </div>
+                          )}
+
+                          {member.doc.notes.length > 0 && (
+                            <div class="meta-block">
+                              <h5>Notes</h5>
+                              {member.doc.notes.map(note => (
+                                <p>{note}</p>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <p class="doc-empty">No public doc comment yet.</p>
+                      )}
+
+                      <p class="source-meta">
+                        <a href={getSourceHref(member.sourcePath, member.line)} target="_blank" rel="noreferrer">
+                          {member.sourcePath}:{member.line}
+                        </a>
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        ))}
+      </div>
+    </div>
+
+    <aside class="toc">
+      <p class="eyebrow">On This Page</p>
+      <ul>
+        {toc.map(item => (
+          <li class:list={[`depth-${item.depth}`]}>
+            <a href={item.href}>{item.label}</a>
+          </li>
+        ))}
+      </ul>
+    </aside>
+  </div>
+</DocLayout>
+
+<style>
+  .module-page {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 240px;
+    gap: var(--space-xl);
+    align-items: start;
+  }
+
+  .module-main {
+    min-width: 0;
+  }
+
+  .module-hero {
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    padding: var(--space-xl);
+    background:
+      linear-gradient(180deg, var(--color-bg-alt), var(--color-bg));
+    margin-bottom: var(--space-xl);
+  }
+
+  .module-hero-top {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-md);
+    align-items: flex-start;
+  }
+
+  .module-hero h1 {
+    margin-bottom: var(--space-sm);
+  }
+
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xs);
+  }
+
+  .back-link {
+    white-space: nowrap;
+    font-size: 0.9rem;
+  }
+
+  .module-summary {
+    font-size: 1.05rem;
+  }
+
+  .module-overview {
+    color: var(--color-text-muted);
+  }
+
+  .module-meta {
+    display: flex;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+    margin-top: var(--space-lg);
+  }
+
+  .module-meta span,
+  .module-meta a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2rem;
+    padding: 0 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+  }
+
+  .symbol-stack,
+  .member-stack {
+    display: grid;
+    gap: var(--space-md);
+  }
+
+  .symbol-card,
+  .member-card {
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    padding: var(--space-lg);
+    background: var(--color-bg);
+  }
+
+  .member-card {
+    background: var(--color-bg-alt);
+  }
+
+  .symbol-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    align-items: flex-start;
+    margin-bottom: var(--space-sm);
+  }
+
+  .symbol-heading h2,
+  .symbol-heading h4 {
+    margin: 0;
+  }
+
+  .symbol-kind {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.72rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xs);
+  }
+
+  .anchor-link {
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    font-size: 0.95rem;
+  }
+
+  .doc-summary {
+    font-weight: 600;
+  }
+
+  .doc-empty,
+  .source-meta {
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    margin-bottom: 0;
+  }
+
+  .members {
+    margin-top: var(--space-lg);
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .members-header {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    align-items: center;
+    margin-bottom: var(--space-md);
+  }
+
+  .members-header h3 {
+    margin: 0;
+  }
+
+  .members-header span {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+  }
+
+  .meta-block {
+    margin-top: var(--space-md);
+  }
+
+  .meta-block h3,
+  .meta-block h5 {
+    margin-top: 0;
+    margin-bottom: var(--space-xs);
+  }
+
+  .detail-list {
+    display: grid;
+    gap: var(--space-sm);
+  }
+
+  .detail-list div {
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: var(--space-sm);
+    background: var(--color-bg);
+  }
+
+  .detail-list dt {
+    font-weight: 600;
+    margin-bottom: var(--space-xs);
+  }
+
+  .detail-list dd {
+    margin: 0;
+    color: var(--color-text-muted);
+  }
+
+  .toc {
+    position: sticky;
+    top: 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    padding: var(--space-md);
+    background: var(--color-bg);
+  }
+
+  .toc ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: var(--space-xs);
+  }
+
+  .toc li {
+    margin: 0;
+  }
+
+  .toc li.depth-1 {
+    padding-left: var(--space-md);
+  }
+
+  .toc a {
+    color: var(--color-text-muted);
+    font-size: 0.88rem;
+  }
+
+  .toc a:hover {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  @media (max-width: 960px) {
+    .module-page {
+      grid-template-columns: 1fr;
+    }
+
+    .toc {
+      position: static;
+      order: -1;
+    }
+  }
+
+  @media (max-width: 700px) {
+    .module-hero,
+    .symbol-card,
+    .member-card {
+      padding: var(--space-md);
+    }
+
+    .module-hero-top,
+    .symbol-heading,
+    .members-header {
+      display: block;
+    }
+
+    .back-link,
+    .anchor-link {
+      display: inline-block;
+      margin-top: var(--space-xs);
+    }
+  }
+</style>

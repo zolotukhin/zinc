@@ -1,3 +1,7 @@
+//! Build runtime model state from GGUF metadata and GPU-resident tensor buffers.
+//! @section Model Format & Loading
+//! This module translates an on-disk GGUF file into the normalized model
+//! configuration and uploaded tensors consumed by the inference runtime.
 const std = @import("std");
 const gguf = @import("gguf.zig");
 const vk = @import("../vulkan/vk.zig");
@@ -8,6 +12,7 @@ const CommandPool = @import("../vulkan/command.zig").CommandPool;
 
 const log = std.log.scoped(.loader);
 
+/// Supported model families inferred from GGUF architecture metadata.
 pub const Architecture = enum {
     llama,
     mistral,
@@ -18,6 +23,7 @@ pub const Architecture = enum {
     unknown,
 };
 
+/// Normalized model dimensions and routing metadata extracted from GGUF fields.
 pub const ModelConfig = struct {
     architecture: Architecture,
     n_layers: u32,
@@ -34,11 +40,13 @@ pub const ModelConfig = struct {
     n_experts_used: u32,
 };
 
+/// A tensor descriptor paired with the GPU buffer that stores its contents.
 pub const LoadedTensor = struct {
     info: gguf.TensorInfo,
     gpu_buffer: Buffer,
 };
 
+/// Runtime model state backed by a memory-mapped GGUF file and uploaded tensor buffers.
 pub const Model = struct {
     config: ModelConfig,
     gguf_file: gguf.GGUFFile,
@@ -47,6 +55,9 @@ pub const Model = struct {
     mmap_file: ?std.fs.File,
     allocator: std.mem.Allocator,
 
+    /// Release tensor buffers, GGUF metadata, and the backing file mapping owned by the model.
+    /// @param self Model instance to tear down in place.
+    /// @param instance Active Vulkan instance that created the device resources.
     pub fn deinit(self: *Model, instance: *const Instance) void {
         _ = instance;
         for (self.tensors.items) |*t| {
@@ -164,6 +175,11 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
 }
 
 /// Load a GGUF model: memory-map the file, parse headers, and DMA tensors to GPU VRAM.
+/// @param path Path to the GGUF file on disk.
+/// @param instance Active Vulkan instance used for buffer allocation.
+/// @param cmd_pool Command pool used for staging copy operations.
+/// @param allocator Allocator used for metadata, tensor lists, and temporary state.
+/// @returns A fully populated Model with parsed metadata and uploaded tensors.
 pub fn load(
     path: []const u8,
     instance: *const Instance,
