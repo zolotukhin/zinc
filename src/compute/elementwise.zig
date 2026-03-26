@@ -22,6 +22,17 @@ const SwigluPush = extern struct {
     N: u32,
 };
 
+/// Push constants for vector add shader.
+const VaddPush = extern struct {
+    N: u32,
+};
+
+/// Push constants for scale-accumulate shader.
+const ScaleAccPush = extern struct {
+    N: u32,
+    scale_bits: u32, // float reinterpreted as u32
+};
+
 /// Push constants for RoPE shader.
 const RopePush = extern struct {
     head_dim: u32,
@@ -35,6 +46,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_rms_norm: ?Pipeline,
     pipeline_swiglu: ?Pipeline,
     pipeline_rope: ?Pipeline,
+    pipeline_vadd: ?Pipeline,
+    pipeline_scale_acc: ?Pipeline,
     descriptor_pool: vk.c.VkDescriptorPool,
     device: vk.c.VkDevice,
 
@@ -87,10 +100,26 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // vadd: 2 inputs + 1 output = 3 bindings
+        const vadd_path = std.fmt.bufPrint(&path_buf, "{s}/vadd.spv", .{shader_dir}) catch unreachable;
+        const pipeline_vadd = pipeline_mod.createFromSpirv(instance, vadd_path, 3, @sizeOf(VaddPush), &.{}, allocator) catch |err| blk: {
+            log.warn("vadd shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // scale_accumulate: 1 read-write + 1 read = 2 bindings
+        const sacc_path = std.fmt.bufPrint(&path_buf, "{s}/scale_accumulate.spv", .{shader_dir}) catch unreachable;
+        const pipeline_scale_acc = pipeline_mod.createFromSpirv(instance, sacc_path, 2, @sizeOf(ScaleAccPush), &.{}, allocator) catch |err| blk: {
+            log.warn("scale_accumulate shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
             .pipeline_rope = pipeline_rope,
+            .pipeline_vadd = pipeline_vadd,
+            .pipeline_scale_acc = pipeline_scale_acc,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -177,12 +206,41 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
     }
 
+    /// Record a vector add dispatch: c = a + b.
+    pub fn recordVadd(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+    ) !void {
+        const pip = if (self.pipeline_vadd) |*p| p else return error.ShaderNotLoaded;
+        const push = VaddPush{ .N = n_elements };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
+    /// Record a scale-accumulate dispatch: a[i] += scale * b[i].
+    pub fn recordScaleAcc(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+        scale: f32,
+    ) !void {
+        const pip = if (self.pipeline_scale_acc) |*p| p else return error.ShaderNotLoaded;
+        const push = ScaleAccPush{ .N = n_elements, .scale_bits = @bitCast(scale) };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *ElementwiseDispatch) void {
         if (self.pipeline_rms_norm) |*p| p.deinit();
         if (self.pipeline_swiglu) |*p| p.deinit();
         if (self.pipeline_rope) |*p| p.deinit();
+        if (self.pipeline_vadd) |*p| p.deinit();
+        if (self.pipeline_scale_acc) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

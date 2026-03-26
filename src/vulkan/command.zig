@@ -216,6 +216,22 @@ pub const CommandBuffer = struct {
         );
     }
 
+    /// Record a transfer-to-compute memory barrier.
+    pub fn transferToComputeBarrier(self: *const CommandBuffer) void {
+        const barrier = vk.c.VkMemoryBarrier{
+            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
+        };
+        vk.c.vkCmdPipelineBarrier(
+            self.handle,
+            vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &barrier, 0, null, 0, null,
+        );
+    }
+
     /// Finalize command recording so the buffer can be submitted.
     /// @param self Command buffer to finalize.
     /// @returns `error.EndCommandBufferFailed` when Vulkan rejects the recorded command stream.

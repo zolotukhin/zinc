@@ -21,6 +21,8 @@ pub fn build(b: *std.Build) void {
         "softmax_topk",
         "flash_attn",
         "coop_matmul",
+        "vadd",
+        "scale_accumulate",
         "tq_quantize_keys",
         "tq_quantize_values",
         "tq_attention_scores",
