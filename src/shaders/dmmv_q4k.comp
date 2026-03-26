@@ -81,33 +81,37 @@ float decode_min(uint ks_off, uint sb) {
 // ks_off: byte offset of k_scales[0] for this block in a_data
 // d_val, dmin_val: super-block scales
 // x_base: element offset into x_data for this block's 256 elements
+//
+// Optimization: fuse paired sub-blocks (sb, sb+4) to read each qs byte once
+// and extract both nibbles. Sub-blocks 0-3 use the low nibble, sub-blocks 4-7
+// use the high nibble of the same qs[0..127]. This halves qs memory traffic,
+// avoiding L1 eviction and re-fetch under multi-WG cache pressure.
 void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
                  uint x_base, inout float acc) {
-    for (uint sb = 0u; sb < 8u; sb++) {
-        float sc = decode_scale(ks_off, sb);
-        float mn = decode_min(ks_off, sb);
+    for (uint sp = 0u; sp < 4u; sp++) {
+        // Low sub-block (sp): elements sp*32..(sp+1)*32-1
+        float sc_lo = decode_scale(ks_off, sp);
+        float mn_lo = decode_min(ks_off, sp);
+        float factor_lo = d_val * sc_lo;
+        float bias_lo   = dmin_val * mn_lo;
 
-        float factor = d_val * sc;
-        float bias   = dmin_val * mn;
+        // High sub-block (sp+4): elements (sp+4)*32..(sp+5)*32-1
+        float sc_hi = decode_scale(ks_off, sp + 4u);
+        float mn_hi = decode_min(ks_off, sp + 4u);
+        float factor_hi = d_val * sc_hi;
+        float bias_hi   = dmin_val * mn_hi;
 
-        uint x_sb = x_base + sb * 32u;
+        uint x_sb_lo = x_base + sp * 32u;
+        uint x_sb_hi = x_base + (sp + 4u) * 32u;
+        uint qs_base = qs_off + sp * 32u;
 
-        if (sb < 4u) {
-            // Sub-blocks 0..3: elements 0..127, stored in low nibbles of qs[0..127]
-            uint qs_base = qs_off + sb * 32u;
-            for (uint e = 0u; e < 32u; e++) {
-                uint q = uint(a_data[qs_base + e]) & 0x0Fu;
-                float xv = x_data[x_sb + e];
-                acc += (factor * float(q) - bias) * xv;
-            }
-        } else {
-            // Sub-blocks 4..7: elements 128..255, stored in high nibbles of qs[0..127]
-            uint qs_base = qs_off + (sb - 4u) * 32u;
-            for (uint e = 0u; e < 32u; e++) {
-                uint q = (uint(a_data[qs_base + e]) >> 4) & 0x0Fu;
-                float xv = x_data[x_sb + e];
-                acc += (factor * float(q) - bias) * xv;
-            }
+        for (uint e = 0u; e < 32u; e++) {
+            uint byte_val = uint(a_data[qs_base + e]);
+            uint q_lo = byte_val & 0x0Fu;
+            uint q_hi = (byte_val >> 4) & 0x0Fu;
+
+            acc += (factor_lo * float(q_lo) - bias_lo) * x_data[x_sb_lo + e];
+            acc += (factor_hi * float(q_hi) - bias_hi) * x_data[x_sb_hi + e];
         }
     }
 }
