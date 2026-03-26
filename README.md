@@ -29,13 +29,196 @@ AMD's RDNA3/RDNA4 GPUs (RX 9070, Radeon AI PRO R9700, etc.) have excellent memor
 1. **ROCm doesn't support them** — only MI-series datacenter GPUs
 2. **vLLM requires ROCm** — so it can't use these GPUs at all
 3. **llama.cpp Vulkan works** but treats RDNA4 as an afterthought — no RDNA4-specific tuning, SPIR-V toolchain incompatibilities, no tensor parallelism
-4. **No solution handles parallel requests well** on these GPUs for production use (agentic workloads, multi-user serving, etc.)
+4. **No solution handles parallel requests well** on these GPUs for production use
 
 These cards cost $500-1000 (vs $15,000+ for MI300X) and sit in millions of desktops doing nothing during inference.
 
 ## The Solution
 
 A purpose-built LLM inference engine written in **Zig** + **Vulkan compute**, targeting AMD RDNA3/RDNA4 consumer GPUs. OpenAI-compatible API, optimized for throughput on parallel requests.
+
+## Quick Start
+
+### Prerequisites
+
+| Tool | Version | Install |
+|------|---------|---------|
+| Zig | 0.15.2+ | [ziglang.org/download](https://ziglang.org/download/) |
+| Vulkan SDK | 1.3+ | `apt install libvulkan-dev vulkan-tools` (Linux) or `brew install vulkan-loader vulkan-headers` (macOS) |
+| glslc | shaderc 2023.8 | `apt install glslc` (Linux only, Ubuntu 24.04) |
+| Bun | 1.0+ | `curl -fsSL https://bun.sh/install \| bash` |
+
+**Important**: On Linux with RDNA4, newer glslc versions (v2026.2+) cause a 5x performance regression. Use the system package version only.
+
+### Build
+
+```bash
+# Clone
+git clone https://github.com/zolotukhin/zinc.git
+cd zinc
+
+# Build (macOS: shaders skipped; Linux: shaders compiled automatically)
+zig build
+
+# Force shader compilation on any platform
+zig build -Dshaders=true
+```
+
+The binary is placed in `zig-out/bin/zinc`. Compiled SPIR-V shaders go to `zig-out/share/zinc/shaders/`.
+
+### Run Inference (CLI mode)
+
+```bash
+./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"
+```
+
+### Run as Server (Phase 4 — in progress)
+
+```bash
+./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
+```
+
+### CLI Reference
+
+```
+Usage: zinc [options]
+  -m, --model <path>       Path to GGUF model file (required)
+  -p, --port <port>        Server port (default: 8080)
+  -d, --device <id>        Vulkan device index (default: 0)
+  -c, --context <size>     Context length (default: 4096)
+  --parallel <n>           Max concurrent requests (default: 4)
+  --prompt <text>          Single prompt (CLI mode, no server)
+  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
+  -h, --help               Show this help
+```
+
+### Tests
+
+```bash
+# Zig unit tests (18 tests)
+zig build test
+
+# TypeScript loop tests (34 tests)
+bun test loops/
+
+# All tests
+zig build test && bun test loops/
+```
+
+## Project Structure
+
+```
+src/
+├── main.zig                 # Entry point, CLI, Vulkan init, inference pipeline
+├── vulkan/
+│   ├── vk.zig               # Vulkan C bindings
+│   ├── instance.zig          # Vulkan 1.3 instance, device, compute queue
+│   ├── buffer.zig            # GPU buffer allocation, staging, DMA
+│   ├── pipeline.zig          # Compute pipeline from SPIR-V + specialization constants
+│   ├── command.zig           # Command pool, recording, dispatch, fence sync
+│   └── gpu_detect.zig        # RDNA3/4 detection, auto-tuning parameters
+├── model/
+│   ├── gguf.zig              # GGUF v2/v3 parser (header, tensors, metadata)
+│   ├── loader.zig            # Memory-mapped model loading, DMA to GPU VRAM
+│   ├── architecture.zig      # Graph builders: LLaMA, MoE, Mamba/Jamba
+│   └── tokenizer.zig         # External tokenizer interface (sentencepiece/tiktoken)
+├── compute/
+│   ├── graph.zig             # Compute graph with topological sort
+│   ├── dmmv.zig              # Decode matmul-vec dispatch (Q4_K, Q8_0, F16)
+│   ├── elementwise.zig       # Fused RMS norm, SwiGLU, RoPE dispatch
+│   ├── attention.zig         # Flash attention dispatch (paged, GQA)
+│   └── forward.zig           # Forward pass decode loop, greedy sampling
+└── shaders/                  # GLSL 460 compute shaders (→ SPIR-V via glslc)
+    ├── dmmv_q4k.comp         # Q4_K dequantize + matrix-vector multiply
+    ├── dmmv_q8_0.comp        # Q8_0 dequantize + matrix-vector multiply
+    ├── dmmv_f16.comp         # F16 matrix-vector multiply
+    ├── rms_norm_mul.comp      # Fused RMS normalization + scale
+    ├── swiglu.comp            # Fused SiLU(x) * y
+    ├── rope_fused.comp        # Fused RoPE + reshape
+    ├── flash_attn.comp        # Paged flash attention with GQA
+    ├── coop_matmul.comp       # Cooperative matrix matmul (prefill)
+    └── ...                    # sigmoid_mul, softmax_topk, TurboQuant shaders
+
+benchmarks/
+├── bandwidth.zig             # DMMV bandwidth utilization benchmark
+└── dispatch.zig              # Vulkan dispatch overhead benchmark
+
+loops/
+├── optimize_zinc.ts          # Self-improving ZINC optimization loop
+├── optimize_zinc.test.ts     # Tests for ZINC loop
+├── optimize_llm_tps.ts       # llama.cpp TPS optimization loop
+└── optimize_llm_tps.test.ts  # Tests for llama.cpp loop
+
+specs/                        # Feature specifications (speckit)
+docs/                         # Technical documentation
+```
+
+## Self-Improving Optimization Loop
+
+ZINC includes an AI-powered self-improving loop that iteratively builds, deploys, and fixes/optimizes the engine on real RDNA4 hardware.
+
+### Setup
+
+Create a `.env` file with your remote RDNA4 node credentials:
+
+```bash
+ZINC_HOST=your.server.ip
+ZINC_PORT=22
+ZINC_USER=root
+```
+
+The remote node needs: Zig 0.15.2+, Vulkan drivers, glslc, and a GGUF model file.
+
+### Run the Loop
+
+```bash
+# Dry run — verifies SSH, rsync, build, and run (no AI agent)
+bun loops/optimize_zinc.ts --dry-run
+
+# Run 1 cycle
+bun loops/optimize_zinc.ts --cycles 1
+
+# Run overnight (infinite cycles, ctrl+c to stop)
+bun loops/optimize_zinc.ts
+
+# Custom model path
+bun loops/optimize_zinc.ts --model-path /root/models/Qwen3-8B-Q4_K.gguf
+
+# Resume a previous run
+bun loops/optimize_zinc.ts --resume .zinc_optimize/2026-03-26T...
+```
+
+### How It Works
+
+Each cycle:
+1. **rsync** local source to the remote RDNA4 node
+2. **Build** via `zig build` (compiles Zig + GLSL shaders)
+3. **Run** `zinc --prompt ...` and capture output
+4. **Analyze** — build errors? runtime crash? tok/s metrics?
+5. **Spawn Claude** with full context (errors, history, RDNA4 constraints)
+6. Claude edits local source files (one focused change per cycle)
+7. **Verify** — rsync + rebuild + rerun
+8. **Keep or revert** — git checkpoint, revert if regression
+
+Two phases:
+- **FIX** — resolve build errors, shader issues, Vulkan crashes
+- **OPTIMIZE** — improve throughput once running (tok/s, bandwidth utilization)
+
+Results are saved to `.zinc_optimize/` with full logs per cycle.
+
+## RDNA4 Hardware Setup
+
+For running ZINC on AMD RDNA4 GPUs:
+
+```bash
+# Required: enable cooperative matrix support
+export RADV_PERFTEST=coop_matrix
+
+# Recommended: disable GPU ECC for ~10% more bandwidth
+# Add to /etc/default/grub:
+GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
+# Then: update-grub && reboot
+```
 
 ## Architecture
 
@@ -62,171 +245,41 @@ A purpose-built LLM inference engine written in **Zig** + **Vulkan compute**, ta
 │  Paged KV cache (like vLLM's PagedAttention) │
 │  Quantized weight storage (Q4_K, Q8_0, etc.) │
 ├─────────────────────────────────────────────┤
-│      Vulkan API (via Zig vulkan bindings)     │
+│      Vulkan API (via Zig C bindings)         │
 │           AMD RADV / AMDVLK driver           │
 │            RDNA3 / RDNA4 Hardware             │
 └─────────────────────────────────────────────┘
 ```
 
-## Why Zig
-
-- **No hidden allocations** — critical for GPU memory management
-- **C ABI compatible** — direct Vulkan API calls, zero bindings overhead
-- **Comptime** — generate kernel dispatch tables at compile time
-- **Cross-compilation** — single binary for any Linux target
-- **No undefined behavior** — safety without runtime overhead
-
-## Why Vulkan (not HIP/ROCm)
-
-- **Actually works on RDNA4** — ROCm doesn't
-- **Cooperative matrix extension** — hardware matmul acceleration
-- **Compute dispatch is nearly free** — measured 0.016µs per dispatch on RDNA4
-- **Command buffer replay** — pre-record the decode graph, replay per token
-- **RADV driver is excellent** — open source, actively maintained
-
-## Performance (measured on Radeon AI PRO R9700)
-
-Based on extensive profiling and optimization of RDNA4 Vulkan inference:
-
-| Metric | Result |
-|--------|--------|
-| DMMV bandwidth utilization | 67-93% of theoretical (576 GB/s) |
-| Vulkan dispatch overhead | 0.016 µs per dispatch (negligible) |
-| Single-request generation | 110 tok/s (Qwen3.5-35B-A3B Q4_K) |
-| 4 concurrent requests | 108 tok/s each = 432 tok/s aggregate |
-| Prefill throughput | 2800+ tok/s (pp512) |
-
-The GPU handles 4x parallelism with zero per-slot degradation — ideal for multi-request serving.
-
 ## Performance Targets
 
-### Single RX 9070 XT (16GB, 672 GB/s)
-| Model | Quant | Single-req | 4-concurrent | Aggregate |
-|-------|-------|------------|--------------|-----------|
-| Qwen3-8B | Q4_K | 130+ tok/s | 120+ each | 480+ tok/s |
-| Llama-3.1-70B | Q4_K | 20+ tok/s | 18+ each | 72+ tok/s |
-
-### Single Radeon AI PRO R9700 (32GB, 576 GB/s)
+### Radeon AI PRO R9700 (32GB, 576 GB/s)
 | Model | Quant | Single-req | 4-concurrent | Aggregate |
 |-------|-------|------------|--------------|-----------|
 | Qwen3-8B | Q4_K | 120+ tok/s | 110+ each | 440+ tok/s |
+| Qwen3.5-35B-A3B | Q4_K | 110+ tok/s | 108+ each | 432+ tok/s |
 | Llama-3.1-70B | Q4_K | 35+ tok/s | 32+ each | 128+ tok/s |
 
-## Key Technical Features
+### RX 9070 XT (16GB, 672 GB/s)
+| Model | Quant | Single-req | 4-concurrent | Aggregate |
+|-------|-------|------------|--------------|-----------|
+| Qwen3-8B | Q4_K | 130+ tok/s | 120+ each | 480+ tok/s |
 
-- **Paged KV cache** — like vLLM's PagedAttention, enables efficient concurrent requests
-- **Continuous batching** — process multiple requests simultaneously
-- **RDNA4-tuned shaders** — hand-optimized GLSL compute shaders, not generic
-- **Fused kernels** — RMS_NORM+MUL, SwiGLU, ROPE fusions reduce memory traffic
-- **Command buffer replay** — static decode graph pre-recorded, replayed per token
-- **GGUF model loading** — direct memory-map to GPU VRAM
-- **MoE support** — Qwen, Mixtral mixture-of-experts architectures
-- **SSM/Mamba support** — hybrid attention+SSM models
+## Current Status
 
-## Development Phases
+| Component | Status |
+|-----------|--------|
+| Vulkan infrastructure | Done |
+| GGUF parser + model loader | Done |
+| GPU detection (RDNA3/4) | Done |
+| GLSL compute shaders (14) | Done |
+| Compute graph + architecture builders | Done |
+| Forward pass (decode loop) | Skeleton (dispatches not wired) |
+| HTTP server + OpenAI API | Phase 4 |
+| Continuous batching | Phase 4 |
+| TurboQuant KV compression | Phase 5 |
 
-### Phase 0: Scaffold
-- Zig project setup with Vulkan bindings
-- GPU detection + capability query
-- Basic compute shader dispatch
-- GGUF file parser
-
-### Phase 1: Single-Request Inference
-- Q8_0 and Q4_K dequant+matmul shaders
-- RMS norm, ROPE, softmax, flash attention
-- LLaMA architecture forward pass
-- Correctness validation against llama.cpp
-
-### Phase 2: Server + Batching
-- HTTP server with OpenAI-compatible API
-- SSE streaming
-- Paged KV cache + continuous batching
-- Chat template support
-
-### Phase 3: Performance
-- Cooperative matrix matmul for prefill
-- Fused element-wise kernels
-- Command buffer pre-recording + replay
-- MoE and SSM/Mamba support
-
-### Phase 4: Production
-- Speculative decoding
-- Prompt caching
-- Multi-GPU tensor parallelism
-- Docker image + benchmarks
-
-## RDNA4 Tuning Notes
-
-Key findings from profiling (see `research/` for details):
-
-- **Disable GPU ECC**: `amdgpu.ras_enable=0` — ECC silently consumes ~10% memory bandwidth
-- **Enable cooperative matrix**: `RADV_PERFTEST=coop_matrix`
-- **Wave64 is optimal** for DMMV (wave32 measured slower)
-- **System glslc (shaderc 2023.8)** produces RADV-compatible SPIR-V; newer versions cause 5x regression
-- **SMU version mismatch** on kernel 6.17 limits RDNA4 to 2200 MHz (should be 2350)
-
-## Getting Started
-
-### Prerequisites
-
-**macOS:**
-```bash
-brew install zig           # 0.15.2+
-brew install vulkan-loader vulkan-headers
-brew install oven-sh/bun/bun
-```
-
-**Linux (Ubuntu/Debian):**
-```bash
-# Zig 0.15.2+
-# See https://ziglang.org/download/ for latest install instructions
-
-# Vulkan
-sudo apt install libvulkan-dev vulkan-tools
-
-# Bun (for TypeScript loop tests)
-curl -fsSL https://bun.sh/install | bash
-```
-
-**Linux (Fedora):**
-```bash
-sudo dnf install vulkan-loader-devel vulkan-headers
-curl -fsSL https://bun.sh/install | bash
-```
-
-### Build
-
-```bash
-zig build
-```
-
-The binary is placed in `zig-out/bin/zinc`.
-
-### Run
-
-```bash
-zig build run
-# or directly:
-./zig-out/bin/zinc -m model.gguf -p 8080
-```
-
-### Test
-
-Run all tests (Zig unit tests + TypeScript bun tests):
-
-```bash
-zig build test
-```
-
-Run only TypeScript tests:
-
-```bash
-bun test
-```
-
-## Status
-
-Early development. Star the repo and watch for updates.
+Validated on AMD Radeon AI PRO R9700 (RDNA4): Vulkan 1.3 init, GGUF parsing, 21GB model loaded to VRAM, 723-node MoE graph built, inference engine initialized.
 
 ## License
 
