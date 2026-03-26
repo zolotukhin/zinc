@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTokPerSec, detectPhase } from "./optimize_zinc";
+import { parseTokPerSec, parseTokensGenerated, detectPhase } from "./optimize_zinc";
 import type { BuildRunResult, Phase } from "./optimize_zinc";
 
 describe("parseTokPerSec", () => {
@@ -24,6 +24,28 @@ describe("parseTokPerSec", () => {
   });
 });
 
+describe("parseTokensGenerated", () => {
+  test("extracts token count from ZINC output", () => {
+    expect(parseTokensGenerated("info(forward): Generated 256 tokens")).toBe(256);
+  });
+
+  test("extracts 1 token", () => {
+    expect(parseTokensGenerated("Generated 1 tokens")).toBe(1);
+  });
+
+  test("returns 0 for no match", () => {
+    expect(parseTokensGenerated("Build failed")).toBe(0);
+  });
+
+  test("extracts from full output", () => {
+    const output = `info(loader): Loaded 733 tensors
+info(forward): Generating: 0 prompt tokens, max 256 output tokens
+info(forward): Prefill complete at position 0
+info(forward): Generated 256 tokens`;
+    expect(parseTokensGenerated(output)).toBe(256);
+  });
+});
+
 describe("detectPhase", () => {
   const base: BuildRunResult = {
     buildExitCode: 0,
@@ -32,6 +54,7 @@ describe("detectPhase", () => {
     runOutput: "",
     phase: "fix",
     tokPerSec: null,
+    tokensGenerated: 0,
     error: null,
   };
 

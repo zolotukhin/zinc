@@ -94,6 +94,7 @@ export type BuildRunResult = {
   runOutput: string;
   phase: Phase;
   tokPerSec: number | null;
+  tokensGenerated: number;
   error: string | null;
 };
 
@@ -113,6 +114,12 @@ export function parseTokPerSec(output: string): number | null {
     if (seconds > 0) return tokens / seconds;
   }
   return null;
+}
+
+/** Parse number of tokens generated from ZINC output. */
+export function parseTokensGenerated(output: string): number {
+  const m = output.match(/Generated\s+(\d+)\s+tokens/i);
+  return m ? parseInt(m[1], 10) : 0;
 }
 
 /** Determine if we're in fix or optimize phase. */
@@ -258,6 +265,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
       runOutput: "",
       phase: "fix",
       tokPerSec: null,
+      tokensGenerated: 0,
       error: "Build failed",
     };
   }
@@ -265,6 +273,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
   // Run
   const run = await remoteRun(modelPath, "The capital of France is");
   const tps = parseTokPerSec(run.output);
+  const tokensGenerated = parseTokensGenerated(run.output);
 
   const result: BuildRunResult = {
     buildExitCode: 0,
@@ -273,6 +282,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
     runOutput: run.output,
     phase: "fix",
     tokPerSec: tps,
+    tokensGenerated,
     error: run.exitCode !== 0 ? `Runtime exit code ${run.exitCode}` : null,
   };
   result.phase = detectPhase(result);
@@ -544,7 +554,7 @@ async function runCycle(
   } else if (buildRun.runExitCode !== 0) {
     console.log(clr("1;31", `  ❌ Runtime failed (exit ${buildRun.runExitCode})`));
   } else {
-    console.log(clr("1;32", `  ✅ Build + run succeeded`));
+    console.log(clr("1;32", `  ✅ Build + run succeeded (${buildRun.tokensGenerated} tokens generated)`));
     if (buildRun.tokPerSec != null) {
       console.log(clr("1;33", `  📊 ${buildRun.tokPerSec.toFixed(1)} tok/s`));
     }
@@ -600,6 +610,7 @@ async function runCycle(
       runOutput: "",
       phase: "fix",
       tokPerSec: null,
+      tokensGenerated: 0,
       error: String(e),
     };
   }
@@ -625,6 +636,26 @@ async function runCycle(
     ) {
       keep = true; // Runtime now succeeds
       console.log(clr("1;32", "  ✅ Runtime now passes."));
+    } else if (
+      verifyResult.buildExitCode === 0 &&
+      verifyResult.runExitCode === 0 &&
+      buildRun.buildExitCode === 0 &&
+      buildRun.runExitCode === 0 &&
+      verifyResult.tokensGenerated > buildRun.tokensGenerated
+    ) {
+      keep = true; // More tokens generated — forward progress
+      console.log(clr("1;32", `  📈 More tokens: ${buildRun.tokensGenerated} → ${verifyResult.tokensGenerated}`));
+    } else if (
+      verifyResult.buildExitCode === 0 &&
+      verifyResult.runExitCode === 0 &&
+      buildRun.buildExitCode === 0 &&
+      buildRun.runExitCode === 0
+    ) {
+      // Both succeed with same token count — keep if no regression (agent may have improved code quality)
+      if (verifyResult.tokensGenerated >= buildRun.tokensGenerated) {
+        keep = true;
+        console.log(clr("1;33", `  ↔ No regression (${verifyResult.tokensGenerated} tokens). Keeping.`));
+      }
     } else if (verifyResult.buildExitCode !== 0 && buildRun.buildExitCode !== 0) {
       // Both fail — check if error changed (might be progress)
       const beforeErrors = (buildRun.buildOutput.match(/error:/g) ?? []).length;
