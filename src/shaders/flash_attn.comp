@@ -139,25 +139,23 @@ void main() {
 
         barrier();
 
-        // Accumulate weighted V vectors for this block
-        for (uint i = tid; i < block_len; i += 64u) {
-            uint seq_pos = block_start + i;
-            uint page_idx = seq_pos / page_size;
-            uint page_off = seq_pos % page_size;
-            uint page_id = page_ids[page_idx];
+        // Accumulate weighted V vectors for this block.
+        // Each thread iterates over head_dim in strides of 64 and accumulates
+        // the weighted sum of V vectors for the positions it owns.
+        for (uint d = tid; d < head_dim; d += 64u) {
+            float acc = 0.0;
+            for (uint i = 0u; i < block_len; i++) {
+                uint seq_pos = block_start + i;
+                uint page_idx = seq_pos / page_size;
+                uint page_off = seq_pos % page_size;
+                uint page_id = page_ids[page_idx];
 
-            // V cache layout: same as K cache
-            uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
-                          + kv_head * head_dim;
+                uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
+                              + kv_head * head_dim;
 
-            float w = s_scores[i];
-
-            // Each thread that owns score[i] scatters w*V into shared output.
-            // Since block_len <= 256 and stride is 64, at most 4 threads write
-            // per iteration. We serialize by having each thread loop over head_dim.
-            for (uint d = 0u; d < head_dim; d++) {
-                atomicAdd(s_out[d], w * v_data[v_base + d]);
+                acc += s_scores[i] * v_data[v_base + d];
             }
+            s_out[d] += acc;
         }
 
         barrier();

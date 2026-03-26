@@ -74,6 +74,8 @@ fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "mistral")) return .mistral;
     if (std.mem.eql(u8, arch_str, "qwen2")) return .qwen2;
     if (std.mem.eql(u8, arch_str, "qwen2moe")) return .qwen2_moe;
+    if (std.mem.eql(u8, arch_str, "qwen3moe")) return .qwen2_moe;
+    if (std.mem.eql(u8, arch_str, "qwen35moe")) return .qwen2_moe;
     if (std.mem.eql(u8, arch_str, "mamba")) return .mamba;
     if (std.mem.eql(u8, arch_str, "jamba")) return .jamba;
     return .unknown;
@@ -116,8 +118,14 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     };
 
     const vocab_size = blk: {
+        // Try metadata first
         const key = std.fmt.bufPrint(&key_buf, "{s}.vocab_size", .{prefix}) catch break :blk @as(u32, 0);
-        break :blk gf.getU32(key) orelse 0;
+        const from_meta = gf.getU32(key);
+        if (from_meta) |v| if (v > 0) break :blk v;
+        // Infer from output.weight or token_embd.weight tensor
+        if (gf.findTensor("output.weight")) |t| break :blk @as(u32, @intCast(t.dims[1]));
+        if (gf.findTensor("token_embd.weight")) |t| break :blk @as(u32, @intCast(t.dims[1]));
+        break :blk @as(u32, 0);
     };
 
     const context_length = blk: {

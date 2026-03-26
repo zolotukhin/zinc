@@ -13,6 +13,7 @@
 // Dispatch: (N/16, M/16, 1) workgroups
 
 #extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
 
@@ -33,6 +34,7 @@ layout(set = 0, binding = 2) writeonly buffer MatC { float     c_data[]; };
 // Each tile is 16x16 = 256 elements of f16 (512 bytes)
 shared float16_t s_a[16 * 16];
 shared float16_t s_b[16 * 16];
+shared float     s_c[16 * 16];
 
 void main() {
     // Each workgroup computes a 16x16 tile of C
@@ -104,10 +106,7 @@ void main() {
     // Write the 16x16 f32 accumulator to C via shared memory reinterpretation.
     // coopMatStore can write directly to a buffer if we compute the correct stride.
 
-    // Use a shared f32 buffer for the store, then copy to global.
-    // This avoids alignment issues with direct buffer stores.
-    shared float s_c[16 * 16];
-
+    // Store accumulator to shared memory, then copy to global.
     coopMatStore(coop_c, s_c, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
 
     barrier();

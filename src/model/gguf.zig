@@ -3,7 +3,7 @@ const std = @import("std");
 const log = std.log.scoped(.gguf);
 
 // GGUF format constants
-pub const GGUF_MAGIC: u32 = 0x46475547; // "GGUF" in little-endian
+pub const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as bytes: 'G','G','U','F' → LE u32
 
 pub const GGUFVersion = enum(u32) {
     v2 = 2,
