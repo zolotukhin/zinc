@@ -70,7 +70,7 @@ const ZINC_HOST = process.env.ZINC_HOST ?? ENV.ZINC_HOST ?? "127.0.0.1";
 const ZINC_PORT = Number(process.env.ZINC_PORT ?? ENV.ZINC_PORT ?? "22");
 const ZINC_USER = process.env.ZINC_USER ?? ENV.ZINC_USER ?? "root";
 const REMOTE_ZINC_DIR = "/root/zinc";
-const DEFAULT_MODEL = "/root/models/Qwen3-8B-Q4_K.gguf";
+const DEFAULT_MODEL = "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf";
 
 const BLOCKED_GIT_OPS = [
   "Bash(git checkout:*)",
