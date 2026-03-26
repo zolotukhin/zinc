@@ -1,39 +1,67 @@
 ---
 import BaseLayout from '../../../layouts/BaseLayout.astro';
-import { getCollection } from 'astro:content';
+import Breadcrumbs from '../../../components/Breadcrumbs.astro';
+import { buildBreadcrumbList } from '../../../lib/structured-data';
+import { loadDocs } from '../../../lib/docs-loader';
 
-const docs = await getCollection('docs');
+const docs = await loadDocs();
+const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const breadcrumbItems = [
+  { name: 'Home', href: '/' },
+  { name: 'ZINC', href: '/zinc' },
+  { name: 'Docs' },
+];
 
 const docMeta: Record<string, { label: string; description: string; order: number }> = {
   'spec': { label: 'ZINC Technical Specification', description: 'Architecture, GPU kernels, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4.', order: 1 },
-  'turboquant_spec': { label: 'TurboQuant KV Cache Compression', description: 'Two-stage vector quantization — Lloyd-Max codebooks, QJL residual correction, 5x memory reduction at 3-bit on Vulkan compute.', order: 2 },
-  'rdna4_tuning': { label: 'RDNA4 GPU Tuning Guide', description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.', order: 3 },
+  'turboquant-spec': { label: 'TurboQuant KV Cache Compression', description: 'Two-stage vector quantization — Lloyd-Max codebooks, QJL residual correction, 5x memory reduction at 3-bit on Vulkan compute.', order: 2 },
+  'rdna4-tuning': { label: 'RDNA4 GPU Tuning Guide', description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.', order: 3 },
   'api': { label: 'ZINC API Reference', description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints.', order: 4 },
 };
 
 const sortedDocs = docs.sort((a, b) => {
-  const aOrder = docMeta[a.id]?.order ?? 99;
-  const bOrder = docMeta[b.id]?.order ?? 99;
+  const aOrder = docMeta[a.slug]?.order ?? 99;
+  const bOrder = docMeta[b.slug]?.order ?? 99;
   return aOrder - bOrder;
 });
 
-function toSlug(id: string): string {
-  return id.replace(/_/g, '-');
-}
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'CollectionPage',
+      name: 'ZINC Documentation',
+      description: 'Technical documentation for the ZINC LLM inference engine — Vulkan compute shaders, TurboQuant KV compression, RDNA4 tuning, and OpenAI-compatible API.',
+      url: `${siteUrl}/zinc/docs`,
+      mainEntity: {
+        '@type': 'ItemList',
+        itemListElement: sortedDocs.map((doc, index) => ({
+          '@type': 'ListItem',
+          position: index + 1,
+          name: docMeta[doc.slug]?.label ?? doc.title,
+          url: `${siteUrl}/zinc/docs/${doc.slug}`,
+        })),
+      },
+    },
+    buildBreadcrumbList(siteUrl, breadcrumbItems),
+  ],
+};
 ---
 
 <BaseLayout
   title="ZINC Documentation"
   description="Technical documentation for the ZINC LLM inference engine — Vulkan compute shaders, TurboQuant KV compression, RDNA4 tuning, and OpenAI-compatible API."
+  jsonLd={jsonLd}
 >
+  <Breadcrumbs items={breadcrumbItems} />
   <h1>Documentation</h1>
   <p class="intro">Technical documentation for the ZINC inference engine — Zig + Vulkan compute for AMD RDNA3/RDNA4 GPUs.</p>
 
   <div class="doc-list">
     {sortedDocs.map(doc => (
-      <a href={`/zinc/docs/${toSlug(doc.id)}`} class="doc-item">
-        <h2>{docMeta[doc.id]?.label ?? doc.id}</h2>
-        <p>{docMeta[doc.id]?.description ?? 'ZINC documentation'}</p>
+      <a href={`/zinc/docs/${doc.slug}`} class="doc-item">
+        <h2>{docMeta[doc.slug]?.label ?? doc.title}</h2>
+        <p>{docMeta[doc.slug]?.description ?? 'ZINC documentation'}</p>
       </a>
     ))}
   </div>

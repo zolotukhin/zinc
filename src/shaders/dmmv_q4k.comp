@@ -1,3 +1,6 @@
+#version 460
 // Placeholder — Q4_K dequantize + matrix-vector multiply
 // RDNA4-optimized: wave64, 2 rows per workgroup
 // TODO: implement
+layout(local_size_x = 64) in;
+void main() {}

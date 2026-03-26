@@ -1,5 +1,7 @@
 ---
 import BaseLayout from './BaseLayout.astro';
+import Breadcrumbs from '../components/Breadcrumbs.astro';
+import { buildBreadcrumbList } from '../lib/structured-data';
 
 interface Props {
   title: string;
@@ -17,25 +19,36 @@ const formattedDate = date.toLocaleDateString('en-US', {
 });
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const breadcrumbItems = [
+  { name: 'Home', href: '/' },
+  { name: 'Blog', href: '/blog' },
+  { name: title },
+];
 
 const jsonLd = {
   '@context': 'https://schema.org',
-  '@type': 'BlogPosting',
-  headline: title,
-  datePublished: date.toISOString().split('T')[0],
-  author: {
-    '@type': 'Person',
-    name: 'Stepan Zolotukhin',
-    url: `${siteUrl}/about`,
-  },
-  publisher: {
-    '@type': 'Organization',
-    name: 'ZINC Project',
-    url: siteUrl,
-  },
-  description: excerpt,
-  url: Astro.url.href,
-  keywords: tags,
+  '@graph': [
+    {
+      '@type': 'BlogPosting',
+      headline: title,
+      datePublished: date.toISOString().split('T')[0],
+      author: {
+        '@type': 'Person',
+        name: 'Stepan Zolotukhin',
+        url: `${siteUrl}/about`,
+      },
+      publisher: {
+        '@type': 'Organization',
+        name: 'ZINC Project',
+        url: siteUrl,
+      },
+      description: excerpt,
+      url: Astro.url.href,
+      keywords: tags,
+      mainEntityOfPage: Astro.url.href,
+    },
+    buildBreadcrumbList(siteUrl, breadcrumbItems),
+  ],
 };
 ---
 
@@ -47,6 +60,7 @@ const jsonLd = {
   tags={tags}
   jsonLd={jsonLd}
 >
+  <Breadcrumbs items={breadcrumbItems} />
   <article class="post">
     <header class="post-header">
       <time datetime={date.toISOString().split('T')[0]}>{formattedDate}</time>

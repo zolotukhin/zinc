@@ -1,5 +1,7 @@
 ---
 import BaseLayout from './BaseLayout.astro';
+import Breadcrumbs from '../components/Breadcrumbs.astro';
+import { buildBreadcrumbList } from '../lib/structured-data';
 
 interface Props {
   title: string;
@@ -11,18 +13,30 @@ const { title, description, lastmod } = Astro.props;
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const metaDescription = description ?? `${title} — ZINC documentation`;
+const breadcrumbItems = [
+  { name: 'Home', href: '/' },
+  { name: 'ZINC', href: '/zinc' },
+  { name: 'Docs', href: '/zinc/docs' },
+  { name: title },
+];
 
 const jsonLd = {
   '@context': 'https://schema.org',
-  '@type': 'TechArticle',
-  headline: title,
-  dateModified: lastmod,
-  author: {
-    '@type': 'Organization',
-    name: 'ZINC Project',
-  },
-  description: metaDescription,
-  url: Astro.url.href,
+  '@graph': [
+    {
+      '@type': 'TechArticle',
+      headline: title,
+      ...(lastmod ? { dateModified: lastmod } : {}),
+      author: {
+        '@type': 'Organization',
+        name: 'ZINC Project',
+      },
+      description: metaDescription,
+      url: Astro.url.href,
+      mainEntityOfPage: Astro.url.href,
+    },
+    buildBreadcrumbList(siteUrl, breadcrumbItems),
+  ],
 };
 
 const docNav = [
@@ -36,9 +50,10 @@ const currentSlug = Astro.url.pathname.replace('/zinc/docs/', '').replace(/\/$/,
 ---
 
 <BaseLayout title={title} description={metaDescription} jsonLd={jsonLd}>
+  <Breadcrumbs items={breadcrumbItems} />
   <div class="doc-layout wide">
     <aside class="doc-nav">
-      <h3><a href="/docs">Docs</a></h3>
+      <h3><a href="/zinc/docs">Docs</a></h3>
       <ul>
         {docNav.map(item => (
           <li>

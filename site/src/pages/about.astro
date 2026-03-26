@@ -2,14 +2,16 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 
-<BaseLayout title="About" description="Stepan Zolotukhin — building ZINC, an LLM inference engine for AMD consumer GPUs with Zig and Vulkan compute.">
+<BaseLayout title="About" description="Stepan Zolotukhin — systems engineer working on ZINC, with a background in storage infrastructure, Linux systems, and AWS.">
   <h1>About</h1>
 
-  <p>I'm Stepan Zolotukhin. I build systems software with a focus on GPU computing and AI infrastructure.</p>
+  <p>I'm Stepan Zolotukhin. I'm a systems engineer. Right now I spend most of my time on GPU compute and local AI inference.</p>
 
-  <p>My current project is <a href="/zinc">ZINC</a> — an LLM inference engine written in Zig with Vulkan compute shaders, targeting AMD RDNA3/RDNA4 consumer GPUs that mainstream AI stacks ignore. The goal is to make a $500 GPU as useful for local LLM inference as hardware that costs 30x more.</p>
+  <p>I spent seven years building infrastructure for storage systems. For the past six years, I've worked at AWS on low-level systems problems across Linux kernels, userland, cross-compilation, glibc, and adjacent platform work.</p>
 
-  <p>I write about the work on this site — GPU kernel optimization, Vulkan compute, quantization algorithms, systems engineering tradeoffs, and what it takes to build performance-critical software from scratch.</p>
+  <p>I'm building <a href="/zinc">ZINC</a>, an inference engine for AMD consumer GPUs that the mainstream AI stack does not support. It uses Zig and Vulkan compute shaders instead of ROCm or CUDA. The goal is to make a $500 GPU as useful for local LLM inference as hardware that costs 30x more.</p>
+
+  <p>I write about the work here — how the GPU kernels are tuned, what the quantization tradeoffs look like, and the systems engineering decisions behind ZINC.</p>
 
   <h2>Find me</h2>
   <ul>

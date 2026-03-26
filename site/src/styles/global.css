@@ -20,12 +20,12 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-bg: #0d1117;
-    --color-bg-alt: #161b22;
-    --color-text: #e6edf3;
-    --color-text-muted: #8b949e;
+    --color-bg: #0d0d0f;
+    --color-bg-alt: #18181b;
+    --color-text: #c9c9d1;
+    --color-text-muted: #7a7a88;
     --color-accent: #e8722a;
-    --color-border: #30363d;
+    --color-border: #27272a;
     --color-tag-bg: #3d2410;
     --color-tag-text: #e8722a;
   }
@@ -136,6 +136,28 @@ pre code {
   background: none;
   padding: 0;
   border-radius: 0;
+}
+
+/* Shiki dual-theme: light is default inline, dark via CSS variables */
+pre.astro-code,
+.astro-code {
+  background: var(--color-bg-alt) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  pre.astro-code,
+  .astro-code {
+    background: var(--color-bg-alt) !important;
+    color: var(--shiki-dark) !important;
+  }
+
+  .astro-code span {
+    color: var(--shiki-dark) !important;
+  }
+
+  code {
+    color: #d4d4d8;
+  }
 }
 
 .container {

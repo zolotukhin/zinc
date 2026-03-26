@@ -1,0 +1,66 @@
+---
+interface BreadcrumbItem {
+  name: string;
+  href?: string;
+}
+
+interface Props {
+  items: BreadcrumbItem[];
+}
+
+const { items } = Astro.props;
+const lastIndex = items.length - 1;
+---
+
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <ol>
+    {items.map((item, index) => (
+      <li>
+        {item.href && index !== lastIndex ? (
+          <a href={item.href}>{item.name}</a>
+        ) : (
+          <span aria-current={index === lastIndex ? 'page' : undefined}>{item.name}</span>
+        )}
+      </li>
+    ))}
+  </ol>
+</nav>
+
+<style>
+  .breadcrumbs {
+    margin-bottom: var(--space-lg);
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  .breadcrumbs ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+  }
+
+  .breadcrumbs li {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .breadcrumbs li:not(:last-child)::after {
+    content: "/";
+    color: var(--color-text-muted);
+  }
+
+  .breadcrumbs a {
+    color: var(--color-text-muted);
+  }
+
+  .breadcrumbs a:hover {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+  </style>

@@ -1,5 +1,5 @@
 #version 460
-// Placeholder — Fused SiLU gated linear unit: silu(x) * y
+// Placeholder — Fused softmax + top-k for MoE routing
 // TODO: implement
 layout(local_size_x = 64) in;
 void main() {}

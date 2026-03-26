@@ -21,13 +21,13 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
 >
   <section class="hero">
     <h1>Stepan Zolotukhin</h1>
-    <p>Building <a href="/zinc">ZINC</a> — a Zig + Vulkan inference engine that makes AMD consumer GPUs actually usable for LLM inference. Writing about local AI, GPU programming, and systems engineering.</p>
+    <p>I'm building <a href="/zinc">ZINC</a>, an inference engine for AMD consumer GPUs that the mainstream AI stack ignores. This site is where I write about the work — GPU kernels, Vulkan compute, quantization, and the systems engineering underneath.</p>
   </section>
 
   <section class="project-highlight">
     <a href="/zinc" class="project-card">
       <h2>ZINC</h2>
-      <p>LLM inference engine for AMD RDNA3/RDNA4 GPUs. Hand-tuned Vulkan compute shaders, continuous batching, paged KV cache, TurboQuant KV compression, OpenAI-compatible API. 110+ tok/s on AI PRO R9700.</p>
+      <p>AMD consumer GPUs are fast enough for local LLM inference, but the software stack ignores them. ZINC fixes that with hand-tuned Vulkan shaders, continuous batching, and TurboQuant KV compression. 110+ tok/s on the AI PRO R9700.</p>
       <span class="project-link">Learn more &rarr;</span>
     </a>
   </section>

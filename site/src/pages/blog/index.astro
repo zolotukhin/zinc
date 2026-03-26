@@ -12,7 +12,7 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
   description="Writing about building ZINC, local LLM inference on AMD GPUs, Vulkan compute, Zig systems programming, TurboQuant KV compression, and GPU performance engineering."
 >
   <h1>Blog</h1>
-  <p class="intro">Writing about local AI, GPU programming, and building ZINC.</p>
+  <p class="intro">Notes on building ZINC, GPU programming, and making local AI work on hardware people actually own.</p>
 
   <section>
     {posts.map(post => (

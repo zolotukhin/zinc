@@ -19,13 +19,13 @@
 
 **Purpose**: Project initialization, Vulkan setup, build system, GPU detection
 
-- [ ] T001 Configure build.zig to compile GLSL shaders to SPIR-V via system glslc and link Vulkan loader
-- [ ] T002 [P] Implement Vulkan instance creation, physical device selection, and compute queue setup in src/vulkan/instance.zig
-- [ ] T003 [P] Implement GPU buffer allocation, memory type selection, and staging buffer management in src/vulkan/buffer.zig
-- [ ] T004 [P] Implement GPU capability detection and auto-tuning parameter derivation in src/vulkan/gpu_detect.zig (vendor, VRAM, bandwidth, CU count, wave size, coopmat support → derived workgroup sizes, tile dims)
-- [ ] T005 Implement compute pipeline creation from SPIR-V modules with specialization constants in src/vulkan/pipeline.zig (depends on T001)
-- [ ] T006 Implement command buffer recording, submission, and pre-recorded replay in src/vulkan/command.zig (depends on T002)
-- [ ] T007 [P] Implement CLI argument parsing in src/main.zig (model path, port, kv-quant, prompt)
+- [X] T001 Configure build.zig to compile GLSL shaders to SPIR-V via system glslc and link Vulkan loader
+- [X] T002 [P] Implement Vulkan instance creation, physical device selection, and compute queue setup in src/vulkan/instance.zig
+- [X] T003 [P] Implement GPU buffer allocation, memory type selection, and staging buffer management in src/vulkan/buffer.zig
+- [X] T004 [P] Implement GPU capability detection and auto-tuning parameter derivation in src/vulkan/gpu_detect.zig (vendor, VRAM, bandwidth, CU count, wave size, coopmat support → derived workgroup sizes, tile dims)
+- [X] T005 Implement compute pipeline creation from SPIR-V modules with specialization constants in src/vulkan/pipeline.zig (depends on T001)
+- [X] T006 Implement command buffer recording, submission, and pre-recorded replay in src/vulkan/command.zig (depends on T002)
+- [X] T007 [P] Implement CLI argument parsing in src/main.zig (model path, port, kv-quant, prompt)
 
 **Checkpoint**: Vulkan infrastructure ready — can create device, allocate buffers, compile and dispatch shaders, detect GPU capabilities.
 
@@ -37,11 +37,11 @@
 
 **CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T008 Implement GGUF file parser in src/model/gguf.zig — parse header, tensor descriptors, metadata key-value pairs, support split files
-- [ ] T009 Implement model loader in src/model/loader.zig — memory-map GGUF file, DMA weight tensors to GPU VRAM buffers, parse architecture metadata (depends on T003, T008)
-- [ ] T010 Implement compute graph definition in src/compute/graph.zig — represent ops as nodes, support topological ordering, static graph for decode path
-- [ ] T011 [P] Implement architecture-specific graph builders for LLaMA/Mistral/Qwen transformer in src/model/architecture.zig (depends on T009, T010)
-- [ ] T012 [P] Implement tokenizer interface in src/model/tokenizer.zig — shell out to external sentencepiece/tiktoken process, handle BPE encoding/decoding
+- [X] T008 Implement GGUF file parser in src/model/gguf.zig — parse header, tensor descriptors, metadata key-value pairs, support split files
+- [X] T009 Implement model loader in src/model/loader.zig — memory-map GGUF file, DMA weight tensors to GPU VRAM buffers, parse architecture metadata (depends on T003, T008)
+- [X] T010 Implement compute graph definition in src/compute/graph.zig — represent ops as nodes, support topological ordering, static graph for decode path
+- [X] T011 [P] Implement architecture-specific graph builders for LLaMA/Mistral/Qwen transformer in src/model/architecture.zig (depends on T009, T010)
+- [X] T012 [P] Implement tokenizer interface in src/model/tokenizer.zig — shell out to external sentencepiece/tiktoken process, handle BPE encoding/decoding
 
 **Checkpoint**: Can load a GGUF model into GPU VRAM, construct the compute graph, and tokenize input. Ready for kernel implementation.
 

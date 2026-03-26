@@ -329,32 +329,26 @@ const KVPage = struct {
 
 ### Compression Pipeline (per decode step)
 
-```
-┌──────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│ Attention     │     │ tq_quantize_keys │     │ Compressed       │
-│ K projection  │────▶│ .comp shader     │────▶│ Key Page         │
-│ (raw FP16 K)  │     │                  │     │ (packed bits)    │
-└──────────────┘     └──────────────────┘     └──────────────────┘
-
-┌──────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│ Attention     │     │ tq_quantize_vals │     │ Compressed       │
-│ V projection  │────▶│ .comp shader     │────▶│ Value Page       │
-│ (raw FP16 V)  │     │                  │     │ (packed bits)    │
-└──────────────┘     └──────────────────┘     └──────────────────┘
+```mermaid
+flowchart LR
+    A["Attention K projection\n(raw FP16 K)"] --> B["tq_quantize_keys\n.comp shader"]
+    B --> C["Compressed\nKey Page\n(packed bits)"]
+    D["Attention V projection\n(raw FP16 V)"] --> E["tq_quantize_vals\n.comp shader"]
+    E --> F["Compressed\nValue Page\n(packed bits)"]
 ```
 
 ### Modified Attention Pipeline
 
-```
-Standard:
-  scores = Q @ K^T                        (memory-bound on long seq)
-  weights = softmax(scores / sqrt(d))
-  output = weights @ V
-
-TurboQuant:
-  scores = tq_attention_scores(Q, compressed_K)    (shader 3)
-  weights = softmax(scores / sqrt(d))               (existing shader)
-  output = tq_weighted_values(weights, compressed_V) (shader 4)
+```mermaid
+flowchart TD
+    subgraph Standard
+        S1["scores = Q × Kᵀ"] --> S2["weights = softmax(scores / √d)"]
+        S2 --> S3["output = weights × V"]
+    end
+    subgraph TurboQuant
+        T1["scores = tq_attention_scores(Q, compressed_K)"] --> T2["weights = softmax(scores / √d)"]
+        T2 --> T3["output = tq_weighted_values(weights, compressed_V)"]
+    end
 ```
 
 ### Prefill vs Decode Strategy

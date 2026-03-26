@@ -1,37 +1,25 @@
 ---
 import DocLayout from '../../../layouts/DocLayout.astro';
-import { getCollection, render } from 'astro:content';
-
-const DOC_META: Record<string, { title: string; description: string }> = {
-  'spec': {
-    title: 'ZINC Technical Specification',
-    description: 'GPU kernel library, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4 Vulkan inference.',
-  },
-  'turboquant_spec': {
-    title: 'TurboQuant KV Cache Compression',
-    description: 'Two-stage vector quantization for LLM KV cache — Lloyd-Max codebooks, QJL residual correction, 5x compression at 3-bit with unbiased attention on Vulkan compute.',
-  },
-  'rdna4_tuning': {
-    title: 'RDNA4 GPU Tuning Guide',
-    description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.',
-  },
-  'api': {
-    title: 'ZINC API Reference',
-    description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints for local LLM inference.',
-  },
-};
+import { loadDocs } from '../../../lib/docs-loader';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import remarkRehype from 'remark-rehype';
+import rehypeKatex from 'rehype-katex';
+import rehypeStringify from 'rehype-stringify';
 
 export async function getStaticPaths() {
-  const META: Record<string, { title: string; description: string }> = {
+  const docMeta: Record<string, { title: string; description: string }> = {
     'spec': {
       title: 'ZINC Technical Specification',
       description: 'GPU kernel library, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4 Vulkan inference.',
     },
-    'turboquant_spec': {
+    'turboquant-spec': {
       title: 'TurboQuant KV Cache Compression',
       description: 'Two-stage vector quantization for LLM KV cache — Lloyd-Max codebooks, QJL residual correction, 5x compression at 3-bit with unbiased attention on Vulkan compute.',
     },
-    'rdna4_tuning': {
+    'rdna4-tuning': {
       title: 'RDNA4 GPU Tuning Guide',
       description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.',
     },
@@ -41,19 +29,31 @@ export async function getStaticPaths() {
     },
   };
 
-  const docs = await getCollection('docs');
+  const docs = await loadDocs();
   return docs.map(doc => ({
-    params: { slug: doc.id.replace(/_/g, '-') },
-    props: { doc, meta: META[doc.id] },
+    params: { slug: doc.slug },
+    props: {
+      doc,
+      meta: docMeta[doc.slug],
+    },
   }));
 }
 
 const { doc, meta } = Astro.props;
-const { Content } = await render(doc);
-const title = meta?.title ?? doc.id;
+const title = meta?.title ?? doc.title;
 const description = meta?.description ?? `${title} — ZINC documentation`;
+const contentHtml = String(
+  await unified()
+    .use(remarkParse)
+    .use(remarkGfm)
+    .use(remarkMath)
+    .use(remarkRehype)
+    .use(rehypeKatex)
+    .use(rehypeStringify)
+    .process(doc.content)
+);
 ---
 
-<DocLayout title={title} description={description}>
-  <Content />
+<DocLayout title={title} description={description} lastmod={doc.lastmod}>
+  <div set:html={contentHtml} />
 </DocLayout>

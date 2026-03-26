@@ -1,3 +1,6 @@
+#version 460
 // Placeholder — Fused RMS normalization + scale multiply
 // Single read + single write, eliminates intermediate buffer
 // TODO: implement
+layout(local_size_x = 64) in;
+void main() {}

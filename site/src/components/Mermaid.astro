@@ -1,0 +1,44 @@
+<!-- Renders mermaid code blocks into SVG diagrams client-side -->
+<script>
+  async function renderMermaid() {
+    const pres = document.querySelectorAll('pre[data-language="mermaid"]');
+    if (pres.length === 0) return;
+
+    const { default: mermaid } = await import('mermaid');
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default',
+      fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif',
+    });
+
+    for (const pre of pres) {
+      const code = pre.textContent?.trim() || '';
+      if (!code) continue;
+      try {
+        const id = `mermaid-${Math.random().toString(36).slice(2, 8)}`;
+        const { svg } = await mermaid.render(id, code);
+        const div = document.createElement('div');
+        div.className = 'mermaid-diagram';
+        div.innerHTML = svg;
+        pre.replaceWith(div);
+      } catch (e) {
+        console.warn('Mermaid render failed:', e);
+      }
+    }
+  }
+
+  renderMermaid();
+</script>
+
+<style is:global>
+  .mermaid-diagram {
+    margin: var(--space-md) 0;
+    overflow-x: auto;
+    text-align: center;
+  }
+
+  .mermaid-diagram svg {
+    max-width: 100%;
+    height: auto;
+  }
+</style>
