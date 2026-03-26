@@ -3,8 +3,10 @@ import BaseLayout from '../../../layouts/BaseLayout.astro';
 import Breadcrumbs from '../../../components/Breadcrumbs.astro';
 import { buildBreadcrumbList } from '../../../lib/structured-data';
 import { loadDocs } from '../../../lib/docs-loader';
+import { loadZigApi } from '../../../lib/zig-api-loader';
 
 const docs = await loadDocs();
+const zigApi = await loadZigApi();
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const breadcrumbItems = [
   { name: 'Home', href: '/' },
@@ -13,17 +15,46 @@ const breadcrumbItems = [
 ];
 
 const docMeta: Record<string, { label: string; description: string; order: number }> = {
-  'spec': { label: 'ZINC Technical Specification', description: 'Architecture, GPU kernels, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4.', order: 1 },
-  'turboquant-spec': { label: 'TurboQuant KV Cache Compression', description: 'Two-stage vector quantization — Lloyd-Max codebooks, QJL residual correction, 5x memory reduction at 3-bit on Vulkan compute.', order: 2 },
-  'rdna4-tuning': { label: 'RDNA4 GPU Tuning Guide', description: 'Performance profiling for AI PRO R9700 and RX 9070 — ECC, cooperative matrix, wave64, SPIR-V toolchain, bandwidth optimization.', order: 3 },
-  'api': { label: 'ZINC API Reference', description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints.', order: 4 },
+  spec: {
+    label: 'ZINC Technical Specification',
+    description: 'Architecture, GPU kernels, model support, scheduler behavior, and system design context around the runtime.',
+    order: 1,
+  },
+  'turboquant-spec': {
+    label: 'TurboQuant KV Cache Compression',
+    description: 'Two-stage vector quantization, residual correction, and memory-reduction tradeoffs for the paged KV-cache path.',
+    order: 2,
+  },
+  'rdna4-tuning': {
+    label: 'RDNA4 GPU Tuning Guide',
+    description: 'Performance profiling for AMD GPUs, cooperative matrix behavior, SPIR-V toolchain notes, and bandwidth tuning.',
+    order: 3,
+  },
+  api: {
+    label: 'Serving HTTP API',
+    description: 'OpenAI-compatible request and response shapes for clients talking to ZINC. This is the network API, not the Zig code reference.',
+    order: 4,
+  },
 };
 
-const sortedDocs = docs.sort((a, b) => {
+const supplementalDocs = [...docs].sort((a, b) => {
   const aOrder = docMeta[a.slug]?.order ?? 99;
   const bOrder = docMeta[b.slug]?.order ?? 99;
   return aOrder - bOrder;
 });
+
+const combinedDocs = [
+  {
+    label: 'ZINC Zig API',
+    href: '/zinc/docs/zig-api',
+    description: 'Primary generated reference built from src/**/*.zig with module sections, symbol anchors, and source links.',
+  },
+  ...supplementalDocs.map(doc => ({
+    label: docMeta[doc.slug]?.label ?? doc.title,
+    href: `/zinc/docs/${doc.slug}`,
+    description: docMeta[doc.slug]?.description ?? 'ZINC documentation',
+  })),
+];
 
 const jsonLd = {
   '@context': 'https://schema.org',
@@ -31,15 +62,15 @@ const jsonLd = {
     {
       '@type': 'CollectionPage',
       name: 'ZINC Documentation',
-      description: 'Technical documentation for the ZINC LLM inference engine — Vulkan compute shaders, TurboQuant KV compression, RDNA4 tuning, and OpenAI-compatible API.',
+      description: 'Documentation for the ZINC inference engine centered on the generated Zig API reference, with supplemental architecture, tuning, and protocol docs.',
       url: `${siteUrl}/zinc/docs`,
       mainEntity: {
         '@type': 'ItemList',
-        itemListElement: sortedDocs.map((doc, index) => ({
+        itemListElement: combinedDocs.map((doc, index) => ({
           '@type': 'ListItem',
           position: index + 1,
-          name: docMeta[doc.slug]?.label ?? doc.title,
-          url: `${siteUrl}/zinc/docs/${doc.slug}`,
+          name: doc.label,
+          url: `${siteUrl}${doc.href}`,
         })),
       },
     },
@@ -50,57 +81,287 @@ const jsonLd = {
 
 <BaseLayout
   title="ZINC Documentation"
-  description="Technical documentation for the ZINC LLM inference engine — Vulkan compute shaders, TurboQuant KV compression, RDNA4 tuning, and OpenAI-compatible API."
-  keywords="ZINC documentation, LLM inference docs, Vulkan compute, TurboQuant, RDNA4 tuning, OpenAI API reference, AMD GPU inference, Zig, GLSL shaders, GGUF"
+  description="Documentation for the ZINC inference engine centered on the generated Zig API reference, with supplemental architecture, tuning, and protocol docs."
+  keywords="ZINC documentation, Zig API, Vulkan compute, GGUF, AMD GPU inference, TurboQuant, RDNA4 tuning, OpenAI-compatible API"
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
-  <h1>Documentation</h1>
-  <p class="intro">Technical documentation for the ZINC inference engine — Zig + Vulkan compute for AMD RDNA3/RDNA4 GPUs.</p>
 
-  <div class="doc-list">
-    {sortedDocs.map(doc => (
-      <a href={`/zinc/docs/${doc.slug}`} class="doc-item">
-        <h2>{docMeta[doc.slug]?.label ?? doc.title}</h2>
-        <p>{docMeta[doc.slug]?.description ?? 'ZINC documentation'}</p>
-      </a>
-    ))}
-  </div>
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Primary Reference</p>
+      <h1>ZINC Documentation</h1>
+      <p class="intro">
+        The docs are organized around the generated Zig API. That is the main reference for the runtime and the place
+        to start if you want to understand the code. The pages below are supplemental specs, tuning notes, and the
+        external serving API.
+      </p>
+
+      <div class="hero-actions">
+        <a href="/zinc/docs/zig-api" class="button button-primary">Open Zig API</a>
+        <a href="#supplemental" class="button button-secondary">Supplemental Docs</a>
+      </div>
+    </div>
+
+    <a href="/zinc/docs/zig-api" class="primary-card">
+      <p class="card-label">Generated from <code>src/**/*.zig</code></p>
+      <h2>Zig API</h2>
+      <p>
+        {zigApi.moduleCount} modules grouped into {zigApi.sections.length} functional sections, with {zigApi.exportCount} exports,
+        {' '}{zigApi.memberCount} documented methods, and stable symbol anchors.
+      </p>
+
+      <div class="stat-strip">
+        <span>{zigApi.moduleCount} modules</span>
+        <span>{zigApi.exportCount} exports</span>
+        <span>{zigApi.memberCount} methods</span>
+      </div>
+
+      <p class="primary-note">
+        Start here for the actual runtime surface. The HTTP API further down is only the client-facing server
+        interface.
+      </p>
+    </a>
+  </section>
+
+  <section class="section-panel">
+    <div class="panel-header">
+      <div>
+        <p class="eyebrow">Key Functionality</p>
+        <h2>API Sections</h2>
+      </div>
+    </div>
+
+    <div class="section-grid">
+      {zigApi.sections.map(section => (
+        <a href={`/zinc/docs/zig-api#${section.slug}`} class="section-card">
+          <div class="section-card-top">
+            <span>{section.modules.length} modules</span>
+            <span>{section.symbolCount} symbols</span>
+          </div>
+          <h3>{section.title}</h3>
+          <p>{section.description}</p>
+        </a>
+      ))}
+    </div>
+  </section>
+
+  <section id="supplemental" class="section-panel supplemental-panel">
+    <div class="panel-header">
+      <div>
+        <p class="eyebrow">Supplemental</p>
+        <h2>Specs, Tuning, and Client-Facing APIs</h2>
+      </div>
+    </div>
+
+    <p class="section-copy">
+      These pages support the Zig API reference. The “Serving HTTP API” page documents the external request and
+      response surface exposed by ZINC, not the internal Zig implementation.
+    </p>
+
+    <div class="supplemental-grid">
+      {supplementalDocs.map(doc => (
+        <a href={`/zinc/docs/${doc.slug}`} class="supplemental-card">
+          <h3>{docMeta[doc.slug]?.label ?? doc.title}</h3>
+          <p>{docMeta[doc.slug]?.description ?? 'ZINC documentation'}</p>
+        </a>
+      ))}
+    </div>
+  </section>
 </BaseLayout>
 
 <style>
-  .intro {
-    color: var(--color-text-muted);
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+    gap: var(--space-lg);
     margin-bottom: var(--space-xl);
   }
 
-  .doc-list {
-    display: grid;
-    gap: var(--space-md);
-  }
-
-  .doc-item {
-    display: block;
-    padding: var(--space-lg);
+  .hero-copy,
+  .primary-card,
+  .section-panel {
     border: 1px solid var(--color-border);
-    border-radius: 8px;
-    color: var(--color-text);
-    transition: border-color 0.15s;
+    border-radius: 18px;
+    background: var(--color-bg);
   }
 
-  .doc-item:hover {
-    border-color: var(--color-accent);
+  .hero-copy {
+    padding: var(--space-xl);
+    background:
+      radial-gradient(circle at top right, rgba(211, 84, 0, 0.14), transparent 30%),
+      linear-gradient(180deg, var(--color-bg-alt), var(--color-bg));
+  }
+
+  .eyebrow {
+    margin: 0 0 var(--space-xs);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .intro {
+    color: var(--color-text-muted);
+    max-width: 62ch;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+    margin-top: var(--space-lg);
+  }
+
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.7rem;
+    padding: 0 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
     text-decoration: none;
   }
 
-  .doc-item h2 {
-    font-size: 1.1rem;
-    margin: 0 0 var(--space-xs);
+  .button-primary {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: white;
   }
 
-  .doc-item p {
+  .button-secondary {
+    background: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  .button:hover {
+    text-decoration: none;
+  }
+
+  .primary-card {
+    display: block;
+    padding: var(--space-xl);
+    color: var(--color-text);
+    background:
+      linear-gradient(180deg, rgba(211, 84, 0, 0.08), transparent 42%),
+      var(--color-bg);
+  }
+
+  .primary-card:hover,
+  .section-card:hover,
+  .supplemental-card:hover {
+    text-decoration: none;
+    border-color: var(--color-accent);
+  }
+
+  .card-label {
+    margin: 0 0 var(--space-sm);
+    color: var(--color-text-muted);
+    font-size: 0.82rem;
+  }
+
+  .primary-card h2 {
+    margin-bottom: var(--space-sm);
+  }
+
+  .stat-strip {
+    display: flex;
+    gap: var(--space-xs);
+    flex-wrap: wrap;
+    margin-top: var(--space-lg);
+  }
+
+  .stat-strip span,
+  .section-card-top span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2rem;
+    padding: 0 0.7rem;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-bg-alt);
+    color: var(--color-text-muted);
+    font-size: 0.82rem;
+  }
+
+  .section-panel {
+    padding: var(--space-lg);
+    margin-bottom: var(--space-lg);
+  }
+
+  .panel-header h2 {
+    margin: 0;
+  }
+
+  .section-grid,
+  .supplemental-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--space-md);
+    margin-top: var(--space-lg);
+  }
+
+  .section-copy,
+  .primary-note {
+    color: var(--color-text-muted);
+  }
+
+  .primary-note {
+    margin: var(--space-md) 0 0;
+    font-size: 0.92rem;
+  }
+
+  .section-card,
+  .supplemental-card {
+    display: block;
+    padding: var(--space-lg);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    color: var(--color-text);
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+
+  .section-card {
+    background: var(--color-bg);
+  }
+
+  .section-card:hover,
+  .supplemental-card:hover {
+    transform: translateY(-1px);
+  }
+
+  .section-card-top {
+    display: flex;
+    gap: var(--space-xs);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-md);
+  }
+
+  .section-card h3,
+  .supplemental-card h3 {
+    margin: 0 0 var(--space-sm);
+  }
+
+  .section-card p,
+  .supplemental-card p {
     font-size: 0.9rem;
     color: var(--color-text-muted);
     margin: 0;
+  }
+
+  .supplemental-panel {
+    background: linear-gradient(180deg, var(--color-bg), var(--color-bg-alt));
+  }
+
+  .supplemental-card {
+    background: var(--color-bg);
+  }
+
+  @media (max-width: 900px) {
+    .hero {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

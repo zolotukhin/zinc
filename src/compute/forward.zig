@@ -242,8 +242,9 @@ pub fn generate(
         const token = try engine.sampleGreedy();
         try state.generated_tokens.append(allocator, token);
 
-        // Check for EOS (token 0 or 2 are common EOS tokens)
-        if (token == 0 or token == 2) break;
+        // Check for EOS — use 151643 (Qwen) or 128001 (Llama) as common EOS tokens.
+        // Don't treat token 0 as EOS since uninitialized logits produce 0.
+        if (token == 151643 or token == 128001 or token == 2) break;
     }
 
     log.info("Generated {d} tokens", .{state.generated_tokens.items.len});

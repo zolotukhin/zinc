@@ -369,7 +369,7 @@ function braceDelta(line: string): number {
   return delta;
 }
 
-function captureDeclaration(lines: string[], startIndex: number): { signature: string; endIndex: number } {
+function captureDeclaration(lines: string[], startIndex: number): { signature: string; endIndex: number; hasBlock: boolean } {
   const declaration: string[] = [];
 
   for (let i = startIndex; i < lines.length; i += 1) {
@@ -385,6 +385,7 @@ function captureDeclaration(lines: string[], startIndex: number): { signature: s
             .replace(/;$/, '')
         ),
         endIndex: i,
+        hasBlock: source.includes('{'),
       };
     }
   }
@@ -392,6 +393,7 @@ function captureDeclaration(lines: string[], startIndex: number): { signature: s
   return {
     signature: collapseWhitespace(declaration.join(' ')),
     endIndex: lines.length - 1,
+    hasBlock: false,
   };
 }
 
@@ -517,8 +519,8 @@ function parseContainerMembers(
 
     if (depth === 1 && /^pub fn\b/.test(trimmed)) {
       const match = trimmed.match(/^pub fn\s+([A-Za-z_][A-Za-z0-9_]*)/);
-      const { signature, endIndex } = captureDeclaration(lines, i);
-      const bodyEnd = signature.includes('{') ? captureBlockEnd(lines, i) : endIndex;
+      const { signature, endIndex, hasBlock } = captureDeclaration(lines, i);
+      const bodyEnd = hasBlock ? captureBlockEnd(lines, i) : endIndex;
 
       if (match) {
         const name = match[1];
@@ -579,13 +581,13 @@ function parseZigModuleContent(content: string, relativePath: string): ZigApiMod
 
     if (depth === 0 && /^(pub (const|fn|var))\b/.test(trimmed)) {
       const match = trimmed.match(/^pub (const|fn|var)\s+([A-Za-z_][A-Za-z0-9_]*)/);
-      const { signature, endIndex } = captureDeclaration(lines, i);
+      const { signature, endIndex, hasBlock } = captureDeclaration(lines, i);
 
       if (match) {
         const declarationKind = match[1] as ZigApiSymbol['declarationKind'];
         const name = match[2];
         const symbolKind = classifySymbol(signature, declarationKind);
-        const blockEnd = signature.includes('{') ? captureBlockEnd(lines, i) : endIndex;
+        const blockEnd = hasBlock ? captureBlockEnd(lines, i) : endIndex;
         const members = isContainerSymbol(symbolKind)
           ? parseContainerMembers(lines, i, blockEnd, relativePath, slug, name)
           : [];

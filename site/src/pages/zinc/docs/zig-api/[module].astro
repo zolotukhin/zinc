@@ -47,7 +47,7 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
 <DocLayout title={`${apiModule.title} Zig API`} description={description} keywords={keywords} lastmod={lastmod}>
   <div class="module-page">
     <div class="module-main">
-      <section class="module-hero">
+      <section class="module-hero" data-module-hero>
         <div class="module-hero-top">
           <div>
             <p class="eyebrow">{apiModule.section}</p>
@@ -206,7 +206,7 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
       </div>
     </div>
 
-    <aside class="toc">
+    <aside class="toc" data-module-toc>
       <p class="eyebrow">On This Page</p>
       <ul>
         {toc.map(item => (
@@ -218,6 +218,36 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
     </aside>
   </div>
 </DocLayout>
+
+<script>
+  const syncCondensedToc = () => {
+    const toc = document.querySelector<HTMLElement>('[data-module-toc]');
+    const hero = document.querySelector<HTMLElement>('[data-module-hero]');
+    if (!toc || !hero) return;
+
+    const mobile = window.matchMedia('(max-width: 960px)');
+    const update = () => {
+      if (mobile.matches) {
+        delete toc.dataset.condensed;
+        return;
+      }
+
+      const heroBottom = hero.getBoundingClientRect().bottom;
+      toc.dataset.condensed = heroBottom <= 88 ? 'true' : 'false';
+    };
+
+    update();
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    mobile.addEventListener?.('change', update);
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', syncCondensedToc, { once: true });
+  } else {
+    syncCondensedToc();
+  }
+</script>
 
 <style>
   .module-page {
@@ -410,6 +440,24 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
     border-radius: 14px;
     padding: var(--space-md);
     background: var(--color-bg);
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    transition:
+      top 0.18s ease,
+      padding 0.18s ease,
+      border-color 0.18s ease,
+      box-shadow 0.18s ease;
+  }
+
+  .toc[data-condensed="true"] {
+    top: 0.7rem;
+    padding: 0.7rem 0.75rem;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  }
+
+  .toc[data-condensed="true"] .eyebrow {
+    font-size: 0.68rem;
+    margin-bottom: 0.35rem;
   }
 
   .toc ul {
@@ -420,6 +468,10 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
     gap: var(--space-xs);
   }
 
+  .toc[data-condensed="true"] ul {
+    gap: 0.2rem;
+  }
+
   .toc li {
     margin: 0;
   }
@@ -428,9 +480,18 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
     padding-left: var(--space-md);
   }
 
+  .toc[data-condensed="true"] li.depth-1 {
+    padding-left: var(--space-sm);
+  }
+
   .toc a {
     color: var(--color-text-muted);
     font-size: 0.88rem;
+    line-height: 1.4;
+  }
+
+  .toc[data-condensed="true"] a {
+    font-size: 0.8rem;
   }
 
   .toc a:hover {
