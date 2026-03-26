@@ -27,6 +27,24 @@ const supplementalDocs = [
   },
 ];
 
+const agentArtifacts = [
+  {
+    href: '/zinc/docs/zig-api.json',
+    title: 'JSON Export',
+    description: 'Structured machine-readable dump of sections, modules, symbols, methods, doc tags, anchors, and source links.',
+  },
+  {
+    href: '/zinc/docs/zig-api.txt',
+    title: 'Plain Text Export',
+    description: 'Single text artifact of the Zig API for retrieval-oriented agents and lightweight ingestion.',
+  },
+  {
+    href: '/llms.txt',
+    title: 'LLMs Index',
+    description: 'Root agent entrypoint that tells clients to use the Zig API first and points to supplemental docs second.',
+  },
+];
+
 const description = 'Generated reference for the ZINC Zig codebase, grouped by runtime responsibility with module pages and stable symbol anchors.';
 const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, inference runtime, GGUF parser, AMD GPU';
 ---
@@ -62,6 +80,28 @@ const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, i
         <span>Methods</span>
         <strong>{zigApi.memberCount}</strong>
       </div>
+    </div>
+  </section>
+
+  <section class="supplemental">
+    <div class="section-header">
+      <div>
+        <p class="eyebrow">Agent Access</p>
+        <h2>Machine-Readable Entry Points</h2>
+      </div>
+    </div>
+    <p class="section-description">
+      Agents should prefer the generated Zig API exports instead of scraping HTML. The JSON export is the canonical
+      structured surface; <code>llms.txt</code> points callers at the right docs in the right order.
+    </p>
+
+    <div class="module-grid supplemental-grid">
+      {agentArtifacts.map(artifact => (
+        <a href={artifact.href} class="module-card supplemental-card">
+          <h3>{artifact.title}</h3>
+          <p>{artifact.description}</p>
+        </a>
+      ))}
     </div>
   </section>
 

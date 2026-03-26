@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { loadZigApi, parseZigModule } from './zig-api-loader';
+import { createZigApiAgentPayload, loadZigApi, parseZigModule, renderZigApiAgentText } from './zig-api-loader';
 
 describe('parseZigModule', () => {
   it('extracts module docs, symbols, and nested methods', () => {
@@ -73,5 +73,19 @@ describe('loadZigApi', () => {
     expect(api.memberCount).toBeGreaterThan(10);
     expect(api.sections.some(section => section.title === 'Vulkan Runtime')).toBe(true);
     expect(api.modules.some(module => module.href === '/zinc/docs/zig-api/loader')).toBe(true);
+  });
+
+  it('serializes agent-friendly JSON and text exports', async () => {
+    const api = await loadZigApi();
+    const payload = createZigApiAgentPayload(api, 'https://zolotukhin.ai/');
+    const text = renderZigApiAgentText(api, 'https://zolotukhin.ai/');
+
+    expect(payload.root_url).toBe('https://zolotukhin.ai/zinc/docs/zig-api');
+    expect(payload.json_url).toBe('https://zolotukhin.ai/zinc/docs/zig-api.json');
+    expect(payload.sections.length).toBeGreaterThan(0);
+    expect(payload.sections.some(section => section.modules.some(module => module.symbols.length > 0))).toBe(true);
+    expect(text).toContain('# ZINC Zig API');
+    expect(text).toContain('JSON export: https://zolotukhin.ai/zinc/docs/zig-api.json');
+    expect(text).toContain('Guidance: Use the generated Zig API as the canonical internal runtime reference.');
   });
 });

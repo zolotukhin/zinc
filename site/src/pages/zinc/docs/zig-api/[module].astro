@@ -45,7 +45,7 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
 ---
 
 <DocLayout title={`${apiModule.title} Zig API`} description={description} keywords={keywords} lastmod={lastmod}>
-  <div class="module-page">
+  <div class="module-page" data-module-page>
     <div class="module-main">
       <section class="module-hero" data-module-hero>
         <div class="module-hero-top">
@@ -223,17 +223,21 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
   const syncCondensedToc = () => {
     const toc = document.querySelector<HTMLElement>('[data-module-toc]');
     const hero = document.querySelector<HTMLElement>('[data-module-hero]');
-    if (!toc || !hero) return;
+    const page = document.querySelector<HTMLElement>('[data-module-page]');
+    if (!toc || !hero || !page) return;
 
     const mobile = window.matchMedia('(max-width: 960px)');
     const update = () => {
       if (mobile.matches) {
         delete toc.dataset.condensed;
+        delete page.dataset.tocCondensed;
         return;
       }
 
       const heroBottom = hero.getBoundingClientRect().bottom;
-      toc.dataset.condensed = heroBottom <= 88 ? 'true' : 'false';
+      const condensed = heroBottom <= 88;
+      toc.dataset.condensed = condensed ? 'true' : 'false';
+      page.dataset.tocCondensed = condensed ? 'true' : 'false';
     };
 
     update();
@@ -251,10 +255,17 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
 
 <style>
   .module-page {
+    --toc-width: 210px;
+    --toc-gap: calc(var(--space-lg) * 0.75);
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 240px;
-    gap: var(--space-xl);
+    grid-template-columns: minmax(0, 1fr) var(--toc-width);
+    gap: var(--toc-gap);
     align-items: start;
+  }
+
+  .module-page[data-toc-condensed="true"] {
+    --toc-width: 164px;
+    --toc-gap: var(--space-md);
   }
 
   .module-main {
@@ -381,9 +392,8 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
   .symbol-card pre,
   .member-card pre {
     max-width: 100%;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    word-break: break-word;
+    overflow-x: auto;
+    white-space: pre;
   }
 
   .symbol-card pre code,
@@ -463,6 +473,8 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
   .toc {
     position: sticky;
     top: 1rem;
+    justify-self: end;
+    width: 100%;
     border: 1px solid var(--color-border);
     border-radius: 14px;
     padding: var(--space-md);
@@ -478,7 +490,7 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
 
   .toc[data-condensed="true"] {
     top: 0.7rem;
-    padding: 0.7rem 0.75rem;
+    padding: 0.6rem 0.65rem;
     box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
   }
 
@@ -513,12 +525,13 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
 
   .toc a {
     color: var(--color-text-muted);
-    font-size: 0.88rem;
-    line-height: 1.4;
+    font-size: 0.82rem;
+    line-height: 1.35;
   }
 
   .toc[data-condensed="true"] a {
-    font-size: 0.8rem;
+    font-size: 0.72rem;
+    line-height: 1.25;
   }
 
   .toc a:hover {
@@ -528,6 +541,7 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
 
   @media (max-width: 960px) {
     .module-page {
+      --toc-width: 100%;
       grid-template-columns: 1fr;
     }
 

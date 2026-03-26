@@ -217,6 +217,16 @@ function sourceHref(sourcePath: string, line: number): string {
   return `https://github.com/zolotukhin/zinc/blob/main/${sourcePath}#L${line}`;
 }
 
+function siteBaseUrl(siteUrl: string): string {
+  return siteUrl.replace(/\/$/, '');
+}
+
+function absoluteUrl(siteUrl: string, path: string): string {
+  if (/^https?:\/\//.test(path)) return path;
+  const base = siteBaseUrl(siteUrl);
+  return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -682,6 +692,169 @@ export function parseZigModule(content: string, relativePath: string): ZigApiMod
 
 export function getSourceHref(sourcePath: string, line: number): string {
   return sourceHref(sourcePath, line);
+}
+
+function normalizeDocBlock(doc: ZigApiDocBlock) {
+  return {
+    summary: doc.summary,
+    description: doc.description,
+    params: doc.params,
+    returns: doc.returns ?? null,
+    notes: doc.notes,
+    raw: doc.raw,
+  };
+}
+
+export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
+  const base = siteBaseUrl(siteUrl);
+
+  return {
+    schema_version: 'zinc-zig-api-v1',
+    title: 'ZINC Zig API',
+    description: 'Primary generated reference for the ZINC Zig runtime and supporting Vulkan compute modules.',
+    site: base,
+    root_url: absoluteUrl(base, '/zinc/docs/zig-api'),
+    json_url: absoluteUrl(base, '/zinc/docs/zig-api.json'),
+    text_url: absoluteUrl(base, '/zinc/docs/zig-api.txt'),
+    llms_url: absoluteUrl(base, '/llms.txt'),
+    generated_at: api.generatedAt,
+    last_updated: api.lastmod,
+    counts: {
+      sections: api.sections.length,
+      modules: api.moduleCount,
+      exports: api.exportCount,
+      methods: api.memberCount,
+      symbols: api.symbolCount,
+    },
+    sections: api.sections.map(section => ({
+      slug: section.slug,
+      title: section.title,
+      description: section.description,
+      url: absoluteUrl(base, `/zinc/docs/zig-api#${section.slug}`),
+      module_count: section.modules.length,
+      symbol_count: section.symbolCount,
+      modules: section.modules.map(module => ({
+        slug: module.slug,
+        title: module.title,
+        section: module.section,
+        summary: module.summary,
+        overview: module.overview,
+        url: absoluteUrl(base, module.href),
+        source_path: module.sourcePath,
+        source_url: sourceHref(module.sourcePath, module.symbols[0]?.line ?? 1),
+        counts: {
+          exports: module.exportCount,
+          methods: module.memberCount,
+          symbols: module.symbolCount,
+        },
+        symbols: module.symbols.map(symbol => ({
+          name: symbol.name,
+          qualified_name: symbol.qualifiedName,
+          declaration_kind: symbol.declarationKind,
+          kind: symbol.symbolKind,
+          signature: symbol.signature,
+          anchor: symbol.anchor,
+          url: absoluteUrl(base, symbol.href),
+          source_path: symbol.sourcePath,
+          source_line: symbol.line,
+          source_url: sourceHref(symbol.sourcePath, symbol.line),
+          doc: normalizeDocBlock(symbol.doc),
+          members: symbol.members.map(member => ({
+            name: member.name,
+            qualified_name: member.qualifiedName,
+            declaration_kind: member.declarationKind,
+            kind: member.symbolKind,
+            signature: member.signature,
+            anchor: member.anchor,
+            url: absoluteUrl(base, member.href),
+            source_path: member.sourcePath,
+            source_line: member.line,
+            source_url: sourceHref(member.sourcePath, member.line),
+            doc: normalizeDocBlock(member.doc),
+          })),
+        })),
+      })),
+    })),
+  };
+}
+
+export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string {
+  const payload = createZigApiAgentPayload(api, siteUrl);
+  const lines: string[] = [
+    '# ZINC Zig API',
+    '',
+    payload.description,
+    '',
+    `Primary docs: ${payload.root_url}`,
+    `JSON export: ${payload.json_url}`,
+    `Text export: ${payload.text_url}`,
+    `LLMs index: ${payload.llms_url}`,
+    `Last updated: ${payload.last_updated}`,
+    `Counts: ${payload.counts.sections} sections, ${payload.counts.modules} modules, ${payload.counts.exports} exports, ${payload.counts.methods} methods.`,
+    '',
+    'Guidance: Use the generated Zig API as the canonical internal runtime reference. Use the Serving HTTP API doc only for the client-facing network protocol.',
+  ];
+
+  for (const section of payload.sections) {
+    lines.push('', `## ${section.title}`, '', section.description, `URL: ${section.url}`);
+
+    for (const module of section.modules) {
+      lines.push(
+        '',
+        `### Module: ${module.title}`,
+        `URL: ${module.url}`,
+        `Source: ${module.source_path}`,
+        `Summary: ${module.summary}`
+      );
+
+      for (const paragraph of module.overview) {
+        lines.push(`Overview: ${paragraph}`);
+      }
+
+      for (const symbol of module.symbols) {
+        lines.push(
+          '',
+          `- ${symbol.qualified_name} [${symbol.kind}]`,
+          `  URL: ${symbol.url}`,
+          `  Signature: ${symbol.signature}`
+        );
+
+        if (symbol.doc.summary) lines.push(`  Summary: ${symbol.doc.summary}`);
+        for (const paragraph of symbol.doc.description) {
+          lines.push(`  Description: ${paragraph}`);
+        }
+        for (const param of symbol.doc.params) {
+          lines.push(`  Param ${param.name}: ${param.description}`);
+        }
+        if (symbol.doc.returns) lines.push(`  Returns: ${symbol.doc.returns}`);
+        for (const note of symbol.doc.notes) {
+          lines.push(`  Note: ${note}`);
+        }
+
+        for (const member of symbol.members) {
+          lines.push(
+            `  - ${member.qualified_name} [method]`,
+            `    URL: ${member.url}`,
+            `    Signature: ${member.signature}`
+          );
+
+          if (member.doc.summary) lines.push(`    Summary: ${member.doc.summary}`);
+          for (const paragraph of member.doc.description) {
+            lines.push(`    Description: ${paragraph}`);
+          }
+          for (const param of member.doc.params) {
+            lines.push(`    Param ${param.name}: ${param.description}`);
+          }
+          if (member.doc.returns) lines.push(`    Returns: ${member.doc.returns}`);
+          for (const note of member.doc.notes) {
+            lines.push(`    Note: ${note}`);
+          }
+        }
+      }
+    }
+  }
+
+  return `${lines.join('\n').trim()}\n`;
 }
 
 export async function loadZigApi(): Promise<ZigApiIndex> {
