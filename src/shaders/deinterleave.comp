@@ -1,0 +1,32 @@
+#version 460
+// Deinterleave Q+gate from element-interleaved layout to separate buffers
+// Input layout per head: [Q_0, gate_0, Q_1, gate_1, ..., Q_{hd-1}, gate_{hd-1}]
+// Output Q: [Q_0, Q_1, ..., Q_{hd-1}] per head
+// Output gate: [gate_0, gate_1, ..., gate_{hd-1}] per head
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer OutQ { float q[]; };
+layout(set = 0, binding = 2) writeonly buffer OutG { float g[]; };
+
+layout(push_constant) uniform PC {
+    uint head_dim;  // elements per head in output (half of input stride)
+    uint n_heads;   // number of heads
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint total = head_dim * n_heads;
+    if (i >= total) return;
+
+    uint head = i / head_dim;
+    uint dim = i % head_dim;
+
+    // Input has 2 * head_dim elements per head (interleaved Q and gate)
+    uint in_idx = head * head_dim * 2 + dim * 2;      // Q at even indices
+    uint in_idx_g = head * head_dim * 2 + dim * 2 + 1; // gate at odd indices
+
+    q[i] = x[in_idx];
+    g[i] = x[in_idx_g];
+}

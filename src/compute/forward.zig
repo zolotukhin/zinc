@@ -801,21 +801,19 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
                 self.decode_cmd.computeBarrier();
 
-                // Extract Q (first head_dim of each 2*head_dim block) and gate (second half)
-                // into q_buf and gate_buf respectively using per-head buffer copies
+                // Q+gate are block-interleaved per head:
+                // [head0_Q(head_dim), head0_gate(head_dim), head1_Q(head_dim), head1_gate(head_dim), ...]
+                // Extract Q and gate into separate buffers using per-head copies
                 {
                     const hd = config.head_dim;
                     const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
-                    const stride_bytes = hd_bytes * 2; // Q + gate per head
+                    const stride_bytes = hd_bytes * 2;
                     for (0..config.n_heads) |h| {
-                        // Q: copy head_dim floats from offset h*(2*head_dim) to q_buf[h*head_dim]
-                        const q_src = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
-                        const q_dst = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
-                        const qr = vk.c.VkBufferCopy{ .srcOffset = q_src, .dstOffset = q_dst, .size = hd_bytes };
+                        const src_off = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
+                        const dst_off = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
+                        const qr = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = dst_off, .size = hd_bytes };
                         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &qr);
-                        // Gate: copy head_dim floats from offset h*(2*head_dim)+head_dim to gate_buf[h*head_dim]
-                        const g_src = q_src + hd_bytes;
-                        const gr = vk.c.VkBufferCopy{ .srcOffset = g_src, .dstOffset = q_dst, .size = hd_bytes };
+                        const gr = vk.c.VkBufferCopy{ .srcOffset = src_off + hd_bytes, .dstOffset = dst_off, .size = hd_bytes };
                         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.gate_buf.handle, 1, &gr);
                     }
                 }
