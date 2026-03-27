@@ -7,7 +7,19 @@ tags:
   - llm-inference
   - amd
   - vulkan
-excerpt: "ZINC exists because AMD consumer GPUs are still treated like second-class hardware for local AI. The mission is to make RDNA3 and RDNA4 cards practical, fast, and production-ready for local LLM inference with Zig, Vulkan, continuous batching, and TurboQuant."
+  - rdna4
+  - rdna3
+  - rx-9070-xt
+  - radeon-ai-pro-r9700
+  - rx-7900-xtx
+  - turboquant
+  - kv-cache-compression
+  - vllm-alternative
+  - llama-cpp-alternative
+  - openai-compatible
+  - zig
+  - vulkan-compute
+excerpt: "ZINC is a purpose-built LLM inference engine for AMD RDNA3 and RDNA4 consumer GPUs — RX 9070 XT, RX 7900 XTX, Radeon AI PRO R9700. Hand-tuned Vulkan compute shaders, continuous batching, paged KV cache, TurboQuant compression. Built with Zig. OpenAI-compatible API. No ROCm required."
 ---
 
 If you want to run serious local AI on an AMD consumer GPU today, the story is still far worse than it should be. The hardware is real. The demand is real. The open models are finally good enough to matter. But the software stack still feels fragmented, fragile, and too often built around the assumption that NVIDIA is the only platform worth taking seriously.

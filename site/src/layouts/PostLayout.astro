@@ -114,6 +114,36 @@ const jsonLd = {
     line-height: 1.8;
   }
 
+  .post-content img {
+    max-width: 50%;
+    height: auto;
+    border-radius: 6px;
+    margin: var(--space-sm) 0 var(--space-md);
+  }
+
+  .post-content p:has(img) {
+    overflow: hidden;
+  }
+
+  .post-content p:has(img):nth-of-type(odd) img {
+    float: left;
+    margin-right: var(--space-lg);
+  }
+
+  .post-content p:has(img):nth-of-type(even) img {
+    float: right;
+    margin-left: var(--space-lg);
+  }
+
+  @media (max-width: 700px) {
+    .post-content img {
+      max-width: 100%;
+      float: none !important;
+      margin-left: 0 !important;
+      margin-right: 0 !important;
+    }
+  }
+
   .post-nav {
     margin-top: var(--space-xl);
     padding-top: var(--space-lg);

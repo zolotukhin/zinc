@@ -1,5 +1,5 @@
 ---
-title: "Inside the home RDNA4 setup behind ZINC"
+title: "I built a trading workstation and accidentally ended up with an AI rig"
 date: "2026-03-26"
 tags:
   - zinc
@@ -8,140 +8,133 @@ tags:
   - homelab
   - amd
   - hardware
-excerpt: "The machine behind ZINC is a single home GPU tower built around an AMD Radeon AI PRO R9700, a Ryzen 7 9800X3D, 96 GB of DDR5, and a storage layout tuned for large GGUF models. This is the exact setup I am using, why each part is there, and which current retail links match it."
+  - radeon-ai-pro-r9700
+  - ryzen-9800x3d
+  - home-ai-setup
+  - amd-inference
+  - pc-build
+  - noctua
+  - proart-pa602
+  - x870e-taichi
+  - ddr5-overclocking
+  - local-llm
+  - gpu-workstation
+excerpt: "How I built the home RDNA4 node behind ZINC — from a Ryzen 9800X3D trading workstation to an AMD Radeon AI PRO R9700 inference rig. Parts list, Noctua fan swap, assembly photos, and why a $1300 GPU turned an overclocking platform into a local AI server."
 ---
 
-The machine that matters most to ZINC is not in a datacenter. It is a single tower at home, and right now it is the box that decides whether an optimization is real or just a good story. The current node is built around an AMD Radeon AI PRO R9700, a Ryzen 7 9800X3D, 96 GB of DDR5, an ASUS ProArt PA602 case, a ProArt LC 420 with Noctua radiator fans, and enough fast local storage that model copies and benchmark artifacts do not constantly get in the way.
+This was supposed to be a trading machine.
 
-That shape matters more than it may sound. ZINC is not a project where I can get away with vague claims about "good local AI performance." If I change a shader, a graph schedule, or a memory layout, I need a machine that can run the same workload over and over and tell me whether the change actually moved the number. A home setup for this kind of work has to be boring in the right places, fast where it counts, and easy to reason about when something regresses.
+I had been running high-frequency trading bots and needed a platform I could overclock hard — tight memory timings, fast single-thread, stable under sustained load. So I picked parts for exactly that: an [AMD Ryzen 7 9800X3D](https://www.amazon.com/dp/B0DKFMSMYK) for the best single-thread on AM5 and that massive 3D V-Cache, [96 GB of G.SKILL DDR5-6000 CL26](https://www.amazon.com/dp/B0F79YGMX1) because it overclocks well and holds timings, and an [ASRock X870E Taichi](https://www.amazon.com/dp/B0DFP2Q3TM) because I wanted real VRMs and a BIOS I could actually tune with.
 
-## The shape of the setup
+No GPU plans. No AI ambitions. Just a fast, quiet box for running trading strategies.
 
-The setup is deliberately split in two. I edit and iterate from my everyday machine, but the serious builds, validation runs, and throughput benchmarks land on the RDNA4 node over SSH. That keeps the development loop simple and makes the benchmark box behave like a small internal lab machine instead of a desktop that is always half-busy doing something else.
+![The Amazon order — most of the build in one cart, $2,009 before the GPU](/blog/order.jpg)
 
-```mermaid
-flowchart LR
-    A[Local dev machine] --> B[ZINC repo]
-    B --> C[rsync over SSH]
-    C --> D[Ubuntu 24.04.3 RDNA4 node]
-    D --> E[zig build and benchmark runs]
-    E --> F[AMD Radeon AI PRO R9700]
-    F --> G[tok/s logs, correctness checks, perf notes]
-```
+Then I started thinking about local LLM inference on AMD hardware. The CPU, memory, and motherboard were already sitting on my desk, tuned and stable. All I needed was a GPU.
 
-*Diagram: The home setup is a simple two-machine loop. Editing happens locally, but every serious result gets pushed onto the dedicated RDNA4 tower before I trust it.*
+That one decision changed the whole project.
 
-The important point here is not the network hop. It is the separation of concerns. The benchmark machine stays close to a known-good state, while the editing machine can stay messy. That makes it much easier to compare ZINC against llama.cpp, rerun the same prompt, and know that the result changed because the code changed.
+## Picking the case
 
-## The physical build is simple on purpose
+The compact enclosure I had been using for trading was not going to cut it. A big GPU means real heat, and I wanted something I could run overnight without it turning my office into a sauna.
 
-The chassis, cooling, and power choices are all aimed at the same goal: keep one large GPU and one fast AM5 CPU happy for long runs without turning the office into a wind tunnel. I am not trying to build a flashy showpiece here. I want a machine that is easy to cool, easy to service, and boring enough that thermals do not become a hidden variable in benchmark work.
+I landed on the [ASUS ProArt PA602](https://www.amazon.com/dp/B0CPP3DWLX). It is not a flashy gaming case. It is a big, quiet, well-ventilated E-ATX box designed for workstation builds — room for a 420 mm radiator on top, space for oversized fans, and enough GPU clearance that you do not have to play Tetris with your components.
 
-These are the actual purchase links I have for the physical build pieces:
+![The ProArt PA602 on the floor — clean lines, mesh front, no RGB anywhere](/blog/build_screen1.jpg)
 
-| Part | Current choice | Why it is there | Buy link |
-| --- | --- | --- | --- |
-| Case | ASUS ProArt PA602 | Big-airflow E-ATX case with room for a serious GPU, large fans, and a 420 mm radiator | [Amazon](https://www.amazon.com/dp/B0CPP3DWLX) |
-| CPU cooler | ASUS ProArt LC 420 | Simple oversized cooling for a machine that spends a lot of time compiling and benchmarking | [Amazon](https://www.amazon.com/dp/B0CXLJ2N5B) |
-| Radiator fans | 3 x Noctua NF-A14 industrialPPC-2000 PWM | High static pressure and predictable cooling on the radiator | [Amazon](https://www.amazon.com/dp/B00KESSUDW) |
-| Additional case fans | Noctua NF-A20 PWM chromax.Black.swap and Noctua NF-A12x25 PWM chromax.Black.swap | Large low-noise airflow where possible, one excellent 120 mm fan where it helps most | [NF-A20](https://www.amazon.com/dp/B07ZP46RNR) and [NF-A12x25](https://www.amazon.com/dp/B09C6DQDNT) |
-| CPU contact frame | Thermalright AM5 CPU Contact Frame V2 | Cheap mechanical insurance for repeatable mounting pressure and clean CPU contact | [Amazon](https://www.amazon.com/dp/B0D1V45DSL) |
-| Thermal paste | Thermal Grizzly Kryonaut, 1 g kit | Good paste, plus wipes so remounting the cooler is not annoying | [Amazon](https://www.amazon.com/dp/B0F48FLCRX) |
-| Power supply | Corsair HX1000i | Plenty of headroom for a single-GPU workstation without making the PSU the constraint | [Amazon](https://www.amazon.com/dp/B0BZ2CRW8H) |
+![Side panel off, mid-build — this is what "room to work" looks like](/blog/build_screen3.jpg)
 
-```mermaid
-flowchart LR
-    A[Large case airflow] --> B[AMD Radeon AI PRO R9700]
-    A --> C[Ryzen 7 9800X3D]
-    C --> D[420 mm radiator]
-    E[AM5 contact frame and Kryonaut] --> C
-    F[HX1000i power headroom] --> B
-    F --> C
-```
+I know it is not the sexiest case in the world. That is the point. I wanted a case I would forget about once it was closed up.
 
-*Diagram: The physical build is not complicated. The priorities are straightforward airflow, predictable CPU mounting, and enough PSU margin that long runs feel like normal workstation behavior, not a stress test.*
+## Ripping out the stock fans
 
-What matters is not the fan count by itself. What matters is that the case gives the GPU space, the CPU cooler has more than enough thermal capacity, and the machine does not have to solve its problems by getting louder. That is a much better fit for a home office than a cramped high-RPM build.
+The PA602 ships with its own fans. They are fine for a quiet office machine. They are not fine when a GPU is pulling sustained power for hours while you sleep in the next room.
 
-## The node I actually benchmark on
+![The stock Fractal fans — first things I pulled out](/blog/IMG_8037.jpg)
 
-As of March 26, 2026, these are the compute and storage parts I can verify directly from the running machine with `hostnamectl`, `lscpu`, `dmidecode`, and `lsblk`. Where I have the exact purchase link, I used it. For the GPU, current US retail availability is still uneven, so I linked a current AI PRO R9700 board listing rather than pretending workstation GPU retail is tidy.
+![Stock fans still mounted in the front panel — about to get replaced](/blog/IMG_8036.jpg)
 
-| Part | Current choice | Why it is in the build | Buy link |
-| --- | --- | --- | --- |
-| CPU | [AMD Ryzen 7 9800X3D](https://www.amazon.com/dp/B0DKFMSMYK) | Fast single-thread responsiveness, low platform drama, and more than enough CPU for orchestration, tokenization, and build work | [Amazon](https://www.amazon.com/dp/B0DKFMSMYK) |
-| Motherboard | [ASRock X870E Taichi](https://www.amazon.com/dp/B0DFP2Q3TM) | Stable AM5 platform, strong I/O, and enough NVMe flexibility for a storage-heavy local inference box | [Amazon](https://www.amazon.com/dp/B0DFP2Q3TM) |
-| GPU | AMD Radeon AI PRO R9700, 32 GB | This is the whole point of the node: 32 GB of VRAM, RDNA4, and enough memory bandwidth to make 35B-class local inference interesting | [Current retail example](https://www.bhphotovideo.com/c/product/1927021-REG/gigabyte_gv_r9700ai_top_32gd_radeon_ai_pro_r9700.html) |
-| Memory | [G.SKILL Trident Z5 Neo RGB 96 GB DDR5-6000 CL26](https://www.amazon.com/dp/B0F79YGMX1) | Large model files, build artifacts, browser tabs, scripts, and benchmark tools can all coexist without the machine feeling cramped | [Amazon](https://www.amazon.com/dp/B0F79YGMX1) |
-| OS drive | [WD_BLACK SN8100 2 TB](https://www.amazon.com/dp/B0F3BD1W6R) | Fast boot and build drive, separate from the big model and scratch volume | [Amazon](https://www.amazon.com/dp/B0F3BD1W6R) |
-| Scratch and models | 2 x [WD_BLACK SN850X 8 TB](https://www.newegg.com/western-digital-8tb-black/p/N82E16820250270?Item=N82E16820250270) in RAID0 | High-capacity fast local storage for models, build outputs, benchmark logs, and temporary datasets | [Newegg](https://www.newegg.com/western-digital-8tb-black/p/N82E16820250270?Item=N82E16820250270) |
-| Archive drive | [WD Ultrastar DC HC550 16 TB](https://www.newegg.com/wd-0f38462-16tb/p/N82E16822234479?msockid=26c1a7ec59fe61670f53b161587760e5) | Cheap cold storage for older runs, exports, and anything I do not want occupying NVMe space | [Newegg](https://www.newegg.com/wd-0f38462-16tb/p/N82E16822234479?msockid=26c1a7ec59fe61670f53b161587760e5) |
+I replaced everything with Noctua. Two [NF-A20 PWM chromax](https://www.amazon.com/dp/B07ZP46RNR) 200 mm fans went into the front. These move serious air at barely audible RPM. The difference was immediate — I went from "I can hear the machine" to "wait, is it on?"
 
-There is nothing especially glamorous about that list, and that is a good sign. The CPU is not there because ZINC is CPU-bound. It is there because the rest of the machine needs to stay responsive while I compile Zig, run helper scripts, sync code, inspect logs, and prepare model files. The motherboard choice is equally practical. Once you start running a large GPU, a Gen5 boot drive, and a pair of high-capacity NVMe drives for scratch space, "good enough" boards stop being good enough very quickly.
+![Noctua Chromax fans installed in the front — the noise floor dropped dramatically](/blog/IMG_8041.jpg)
 
-The RAM choice is one of the least flashy and most useful decisions in the build. This node reports two 48 GB DDR5 DIMMs configured at 6000 MT/s. That means I get enough headroom to treat the machine like a real workstation instead of a brittle appliance. Large GGUF files, compression experiments, benchmark traces, and the usual pile of terminal sessions can all stay resident without forcing constant cleanup.
+The [ProArt LC 420](https://www.amazon.com/dp/B0CXLJ2N5B) CPU cooler radiator got three [Noctua NF-A14 industrialPPC-2000 PWM](https://www.amazon.com/dp/B00KESSUDW) fans. These are the high static pressure variant — they actually push air through a radiator instead of just spinning next to it.
 
-## The software stack is half the performance story
+![Noctua industrials on the 420 mm radiator up top — overkill for a 9800X3D, perfect for overnight runs](/blog/IMG_8035.jpg)
 
-The hardware gets the attention, but this box only became useful once the software stack got pinned into something repeatable. On this machine the boring details matter a lot: Ubuntu 24.04.3 LTS, Mesa `25.0.7-0ubuntu0.24.04.2`, Linux `6.17.0-19-generic`, and GECC disabled with `amdgpu.ras_enable=0`.
+Total fan budget was probably more than some people spend on their GPU. I do not care. Silence during a 12-hour optimization loop is worth every dollar.
 
-That last part is not cosmetic. The ZINC repo already documents why the current baseline stays on Mesa 25.0.7: Mesa 25.2.8 caused a meaningful RADV regression on this workload, roughly 14% on the llama.cpp baseline. If I am comparing ZINC against a 107 tok/s decode baseline on Qwen3.5-35B-A3B Q4_K_XL, I cannot casually let the driver stack drift and pretend the comparison still means the same thing.
+## The motherboard and CPU
 
-| Layer | Current choice | Why I keep it this way |
+The Taichi went into the case first. The board is massive — serious VRM heatsinks, tons of I/O, four M.2 slots. I originally picked it because I wanted the overclocking headroom for trading. Turns out that same VRM headroom is exactly what you want when a machine is compiling Zig, syncing over SSH, and managing GPU workloads at the same time.
+
+![ASRock X870E Taichi in the case — VRM heatsinks, empty socket, waiting for the CPU](/blog/IMG_8042.jpg)
+
+Then the 9800X3D dropped into the socket. I used a [Thermalright AM5 contact frame](https://www.amazon.com/dp/B0D1V45DSL) for even mounting pressure — five dollars of insurance for repeatable thermals. [Thermal Grizzly Kryonaut](https://www.amazon.com/dp/B0F48FLCRX) on top.
+
+![9800X3D seated in the AM5 socket — this chip was chosen for trading, but it turned out to be exactly right for this too](/blog/IMG_8070.jpg)
+
+Here is the thing about the 9800X3D in an AI build: nobody picks it for inference. It is "a gaming CPU." But when your actual workload is compiling a Zig codebase, running helper scripts, syncing code over SSH, tokenizing prompts, scanning logits on the CPU side, and keeping the whole machine responsive while the GPU does the heavy lifting — having the fastest single-thread chip on the platform is not a luxury. It is the reason the machine never feels slow even when the GPU is floored.
+
+## The power supply
+
+A [Corsair HX1000i](https://www.amazon.com/dp/B0BZ2CRW8H). 1000 watts of clean power, fully modular, and way more headroom than this single-GPU build actually needs. That is deliberate. I wanted the PSU to be the one component I never think about.
+
+![Corsair HX1000i — enough headroom that it barely wakes up during normal inference loads](/blog/IMG_8047.jpg)
+
+## The GPU that changed the whole project
+
+The previous card in my daily machine was an NVIDIA GeForce RTX 4080 Founders Edition. If you have ever held one, you know the thing: a massive triple-slot slab of metal that weighs like a brick and dominates whatever case it lives in. You build *around* a 4080 FE.
+
+So when the [AI PRO R9700](https://www.bhphotovideo.com/c/product/1927021-REG/gigabyte_gv_r9700ai_top_32gd_radeon_ai_pro_r9700.html) arrived and I pulled it out of the anti-static bag, I genuinely paused. This cannot be right. It is a compact dual-slot card with a single blower fan. No RGB. No backplate theatrics. It looks like something you would find in a Dell workstation, not in a build where you are trying to push the limits of local AI inference.
+
+![Holding the R9700 — this is the ASRock Creator edition. My hand for scale. Compare this to any triple-slot gaming card.](/blog/gpu_2.jpg)
+
+![The back — "AMD RADEON AI PRO" branding. Workstation-plain. Tiny.](/blog/gpu_3.jpg)
+
+I held it in one hand and thought: this small thing has 32 GB of VRAM and 576 GB/s of memory bandwidth. This is supposed to run 35-billion-parameter models.
+
+After years of GPUs trying to look like they belong in a spaceship, there is something deeply satisfying about a card that just looks like a tool.
+
+![R9700 on the desk next to cabling — a dual-slot card with 32 GB of VRAM. The size-to-capability ratio is absurd.](/blog/gpu_1.jpg)
+
+It slotted into the X870E Taichi and looked almost lost. The ProArt case was designed for cards twice this size. All that empty space turned out to be a feature, not a waste — the blower has room to breathe, and the whole thermal situation is dramatically calmer than anything I have ever built with triple-slot gaming cards.
+
+![R9700 installed — it practically disappears inside the PA602. That airflow gap is doing real work.](/blog/gpu_4.jpg)
+
+![The full interior — motherboard, RAM, GPU, and a lot of room to breathe](/blog/IMG_8039.jpg)
+
+32 GB of VRAM is what makes this build actually useful for [ZINC](https://github.com/zolotukhin/zinc). It is the difference between running toy demos and fitting a real 35B-class model with room for KV cache, concurrent sessions, and TurboQuant experiments. For that, 32 GB is not a luxury. It is room to work.
+
+## The finished machine
+
+![Completed build — front panel on, tucked under the desk, doing its job](/blog/build_screen1.jpg)
+
+![Top and I/O side — mesh top for the radiator exhaust, everything tidy](/blog/build_screen2.jpg)
+
+Here is the full parts list with links:
+
+| Part | Choice | Why |
 | --- | --- | --- |
-| OS | Ubuntu 24.04.3 LTS | Predictable packages and low drama on a dedicated node |
-| Vulkan driver | Mesa 25.0.7 | Current known-good baseline for the RDNA4 comparison work |
-| GPU setting | `amdgpu.ras_enable=0` | More bandwidth, less ECC overhead, better match for this benchmark box |
-| Vulkan tuning | `RADV_PERFTEST=coop_matrix` | Required for cooperative matrix support on the workloads that benefit from it |
-| Benchmark reference | llama.cpp `3306dba` | Fixed comparison point instead of a moving target |
+| CPU | [AMD Ryzen 7 9800X3D](https://www.amazon.com/dp/B0DKFMSMYK) | Originally for HFT — best single-thread AM5, 3D V-Cache |
+| Motherboard | [ASRock X870E Taichi](https://www.amazon.com/dp/B0DFP2Q3TM) | VRM headroom for overclocking, strong I/O, 4x M.2 |
+| GPU | [AMD Radeon AI PRO R9700](https://www.bhphotovideo.com/c/product/1927021-REG/gigabyte_gv_r9700ai_top_32gd_radeon_ai_pro_r9700.html) | 32 GB VRAM, RDNA4, 576 GB/s — the reason ZINC exists |
+| Memory | [G.SKILL Trident Z5 Neo 96 GB DDR5-6000 CL26](https://www.amazon.com/dp/B0F79YGMX1) | Overclocks well, tight timings, real workstation capacity |
+| Case | [ASUS ProArt PA602](https://www.amazon.com/dp/B0CPP3DWLX) | Big airflow, 420 mm rad support, GPU clearance |
+| CPU cooler | [ASUS ProArt LC 420](https://www.amazon.com/dp/B0CXLJ2N5B) | Oversized AIO for sustained loads |
+| Radiator fans | [3x Noctua NF-A14 industrialPPC-2000](https://www.amazon.com/dp/B00KESSUDW) | High static pressure through the radiator |
+| Case fans | [Noctua NF-A20 chromax](https://www.amazon.com/dp/B07ZP46RNR) + [NF-A12x25 chromax](https://www.amazon.com/dp/B09C6DQDNT) | Quiet high-airflow replacements |
+| PSU | [Corsair HX1000i](https://www.amazon.com/dp/B0BZ2CRW8H) | Clean power, headroom |
+| OS drive | [WD_BLACK SN8100 2 TB](https://www.amazon.com/dp/B0F3BD1W6R) | Fast boot + builds |
+| Model storage | [2x WD_BLACK SN850X 8 TB](https://www.newegg.com/western-digital-8tb-black/p/N82E16820250270) RAID0 | 14.6 TB fast scratch for GGUF models |
+| Archive | [WD Ultrastar DC HC550 16 TB](https://www.newegg.com/wd-0f38462-16tb/p/N82E16822234479) | Cold storage for old runs |
 
-That is the general theme of this home setup. I do not want a machine that is theoretically perfect. I want one that is stable enough that a kernel regression looks like a kernel regression, not like a package update.
+## What it does now
 
-## The storage layout matters more than people think
+The node runs Ubuntu 24.04.3 LTS with the Vulkan driver pinned to Mesa 25.0.7 (newer versions caused a 14% RADV regression), `RADV_PERFTEST=coop_matrix` for cooperative matrix support, and GPU ECC disabled for extra bandwidth. The llama.cpp baseline on this hardware is 107 tok/s decode on Qwen3.5-35B-A3B Q4_K_XL.
 
-The node uses three different storage roles, and I would build it this way again. The 2 TB SN8100 is the system drive. The two 8 TB SN850X drives are striped into a 14.6 TB RAID0 volume mounted at `/base`. The 16 TB HDD sits on `/mnt/hdd` as slower archival storage.
+I edit code on my laptop and push to this machine over SSH. The [ZINC optimization loop](/blog/2026-03-25-why-we-are-building-zinc) rsyncs source, builds, runs, measures, and iterates — sometimes overnight, sometimes for dozens of cycles. The machine needs to be thermally stable for that. Quiet enough that I forget it is running. And producing numbers I can trust.
 
-```mermaid
-flowchart TB
-    A[WD_BLACK SN8100 2 TB] --> B[Ubuntu, toolchains, source trees]
-    C[2 x WD_BLACK SN850X 8 TB RAID0 at /base] --> D[GGUF models, build outputs, temporary datasets]
-    E[WD Ultrastar 16 TB at /mnt/hdd] --> F[Older runs, exports, archives]
-    D --> G[AMD Radeon AI PRO R9700]
-    B --> G
-```
+The fact that this started as a trading workstation turned out to be a feature. An overclocking-grade platform — fast CPU, tuned memory, real VRMs — is exactly the kind of foundation you want for sustained GPU inference work. The 9800X3D handles Zig compilation, SSH orchestration, and host-side decode overhead without breaking a sweat. The DDR5 stays out of the way. The VRMs stay cool.
 
-*Diagram: The node separates the operating system, the fast scratch/model tier, and the slower archive tier so benchmarks do not compete with the boot drive.*
-
-This is one of those choices that sounds excessive until you spend a few weeks moving multi-gigabyte model files around. Large local AI workflows are brutally good at revealing bad storage layouts. If the OS drive is also holding your models, build cache, logs, and random downloaded checkpoints, the machine eventually turns into a junk drawer. Keeping `/base` as the place where heavy assets live means I can wipe, reshuffle, or benchmark aggressively without destabilizing the system volume.
-
-## The GPU that changed everything
-
-The previous card in my daily machine was an NVIDIA GeForce RTX 4080 Founders Edition. If you have ever held a 4080 FE, you know the thing: it is a massive slab of metal and fans, triple-slot, weighs like a brick, and dominates whatever case it lives in. You build around it.
-
-When the AI PRO R9700 arrived, I pulled it out of the anti-static bag and genuinely thought they had shipped the wrong card. It is a compact dual-slot blower design. Workstation-plain. No RGB, no attitude. It practically disappears inside the ProArt PA602.
-
-![The R9700 out of the box — ASRock Creator edition, blower cooler, surprisingly compact](/blog/gpu_2.jpg)
-
-![Back side of the R9700 — "AMD RADEON AI PRO" branding, single blower fan, workstation-plain](/blog/gpu_3.jpg)
-
-I held it in one hand and thought: this is the card with 32 GB of VRAM and 576 GB/s of memory bandwidth. This small thing is supposed to run 35-billion-parameter models. After years of GPUs that try to look like they belong in a spaceship, there is something satisfying about a card that just looks like a tool.
-
-![The R9700 sitting on the desk next to cabling — for scale, this is a dual-slot card](/blog/gpu_1.jpg)
-
-It slots into the X870E Taichi and looks almost lost. The ProArt case was designed for cards twice this size. That extra space turns out to be a feature: the blower has room to breathe, and the whole thermal situation is dramatically calmer than any build I have done with triple-slot gaming cards.
-
-![R9700 installed in the case — almost lost inside the ProArt PA602, which is exactly what you want](/blog/gpu_4.jpg)
-
-I built this node around the AI PRO R9700 because 32 GB of VRAM changes what is practical. It gives enough headroom for serious 35B-class experiments, larger KV cache budgets, and a much more honest development target for the serving work ZINC is trying to do.
-
-That does not mean everyone should start here. If your real goal is to run smaller local models cheaply, a 16 GB RDNA4 card is a much easier answer. But ZINC is not aimed at toy workloads. The project is trying to make AMD consumer and workstation-class RDNA3 and RDNA4 hardware viable for real local inference, including serving and larger-context workloads. For that, 32 GB is not luxury. It is room to work.
-
-The current reference baseline on this node is llama.cpp at roughly 107 tok/s decode and 223 tok/s prefill on Qwen3.5-35B-A3B Q4_K_XL, with `RADV_PERFTEST=coop_matrix`, flash attention enabled, and the rest of the stack held steady. That is the environment ZINC has to beat or at least seriously challenge. A home setup only becomes useful for systems work once it stops being an anecdote and starts being a real measuring instrument.
-
-## Why this setup works at home
-
-The main thing I like about this machine is that it stays honest. It is not an overbuilt rack full of compromises. It is one fast GPU tower with a clear job: hold a stable benchmark environment, run heavy local inference workloads, and tell me whether the code is getting better.
-
-That is the broader lesson I would carry into any home AI build. You do not need to imitate a datacenter to do meaningful systems work. You do need a machine with enough VRAM, enough storage discipline, and enough software stability that you can trust what it tells you. For ZINC, this is that machine.
-
-Retail availability will move, especially for workstation GPUs, so treat the links above as current as of March 26, 2026 rather than permanent truth. But the design logic is stable: one RDNA4 GPU with real VRAM, enough DDR5 that the box behaves like a workstation, separate fast and slow storage tiers, and a pinned software stack that does not sabotage the measurements.
+One $1300 GPU card turned a platform I already had into the machine that is building [ZINC](https://github.com/zolotukhin/zinc). That is the kind of leverage local AI should feel like.
