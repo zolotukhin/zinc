@@ -274,7 +274,20 @@ pub fn main() !void {
         @memcpy(prompt_tokens[1..], raw_tokens);
         defer allocator.free(prompt_tokens);
 
-        log.info("Prompt tokens: {d}", .{prompt_tokens.len});
+        log.info("Prompt tokens ({d}): {any}", .{prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)]});
+        // Decode prompt tokens for verification
+        {
+            var pt_buf: std.ArrayList(u8) = .{};
+            defer pt_buf.deinit(allocator);
+            for (prompt_tokens) |tid| {
+                if (tid < tokenizer.vocab.len) {
+                    try pt_buf.appendSlice(allocator, tokenizer.vocab[tid]);
+                } else {
+                    try pt_buf.appendSlice(allocator, "<?>");
+                }
+            }
+            log.info("Prompt decoded: \"{s}\"", .{pt_buf.items});
+        }
 
         // Generate
         const max_tokens: u32 = 256;
@@ -287,12 +300,13 @@ pub fn main() !void {
             output_tokens[0..@min(output_tokens.len, 20)],
         });
 
-        // Debug: dump first generated token's logits + last token's logits
-        if (output_tokens.len > 0) {
-            log.info("First token: id={d} \"{s}\"", .{
-                output_tokens[0],
-                if (output_tokens[0] < tokenizer.vocab.len) tokenizer.vocab[output_tokens[0]] else "?",
-            });
+        // Debug: dump first 5 generated tokens with their vocabulary text
+        {
+            const show_n = @min(output_tokens.len, 5);
+            for (0..show_n) |ti| {
+                const tok_str = if (output_tokens[ti] < tokenizer.vocab.len) tokenizer.vocab[output_tokens[ti]] else "?";
+                log.info("  gen[{d}]: id={d} \"{s}\"", .{ ti, output_tokens[ti], tok_str });
+            }
         }
         // Debug: dump top-5 logits from the last decode step
         {
