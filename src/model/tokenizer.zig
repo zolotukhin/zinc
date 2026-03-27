@@ -130,21 +130,55 @@ pub const Tokenizer = struct {
     /// @param text UTF-8 input text to tokenize.
     /// @returns A heap-allocated token-ID slice in model order.
     /// @note Unknown merged symbols fall back to byte-level tokens so encoding always produces a result.
+    /// GPT-2 byte-to-unicode mapping. Maps each raw byte to a Unicode character.
+    /// Printable ASCII (33-126, 161-172, 174-255) maps to itself.
+    /// Non-printable bytes (0-32, 127-160, 173) map to U+0100+ range.
+    /// This is how GPT-2/Qwen tokenizers represent raw bytes in the vocabulary.
+    fn gpt2ByteToUnicode(byte: u8) [4]u8 {
+        // Build the codepoint for this byte
+        const cp: u21 = switch (byte) {
+            // Printable ranges that map to themselves
+            '!'...'~', 0xA1...0xAC, 0xAE...0xFF => byte,
+            // Non-printable: shift to U+0100+ range
+            else => @as(u21, 256) + @as(u21, switch (byte) {
+                0...0x20 => byte, // 0-32 → U+0100..U+0120
+                0x7F...0xA0 => byte - 0x7F + 33, // 127-160 → U+0121..U+0141
+                0xAD => 33 + 34, // 173 → U+0143
+                else => byte,
+            }),
+        };
+        // Encode as UTF-8
+        var buf: [4]u8 = .{ 0, 0, 0, 0 };
+        if (cp < 0x80) {
+            buf[0] = @intCast(cp);
+            return buf;
+        } else if (cp < 0x800) {
+            buf[0] = @intCast(0xC0 | (cp >> 6));
+            buf[1] = @intCast(0x80 | (cp & 0x3F));
+            return buf;
+        } else {
+            buf[0] = @intCast(0xE0 | (cp >> 12));
+            buf[1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+            buf[2] = @intCast(0x80 | (cp & 0x3F));
+            return buf;
+        }
+    }
+
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
 
-        // Start with individual bytes/characters as initial tokens
+        // Start with GPT-2 byte-level encoding: each raw byte maps to a Unicode char
         var symbols: std.ArrayList([]const u8) = .{};
         defer symbols.deinit(self.allocator);
 
-        // Try to split into individual UTF-8 characters first
-        var i: usize = 0;
-        while (i < text.len) {
-            const byte = text[i];
-            const char_len: usize = if (byte < 0x80) 1 else if (byte < 0xE0) 2 else if (byte < 0xF0) 3 else 4;
-            const end = @min(i + char_len, text.len);
-            try symbols.append(self.allocator, text[i..end]);
-            i = end;
+        for (text) |byte| {
+            const unicode_char = gpt2ByteToUnicode(byte);
+            // Find length of UTF-8 encoding
+            const len: usize = if (unicode_char[0] < 0x80) 1 else if (unicode_char[0] < 0xE0) 2 else 3;
+            // We need to allocate a persistent copy since symbols stores slices
+            const copy = try self.allocator.alloc(u8, len);
+            @memcpy(copy, unicode_char[0..len]);
+            try symbols.append(self.allocator, copy);
         }
 
         // If we have merges (GPT-2/tiktoken style), use merge-based BPE
