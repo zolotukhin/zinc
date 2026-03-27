@@ -7,31 +7,31 @@
   </defs>
 
   <rect width="880" height="700" rx="12" fill="url(#bg2)"/>
-  <text x="440" y="32" text-anchor="middle" fill="#c9b8a8" font-size="16" font-weight="600">RDNA4 Work Group Processor (WGP) — 2 Compute Units</text>
+  <text x="440" y="32" text-anchor="middle" fill="#e8dcd0" font-size="16" font-weight="600">RDNA4 Work Group Processor (WGP) — 2 Compute Units</text>
 
   <!-- WGP outer box -->
-  <rect x="20" y="48" width="840" height="610" rx="10" fill="none" stroke="#4a3a2a" stroke-width="1.5"/>
-  <text x="40" y="70" fill="#6a5a4a" font-size="11" font-weight="600">WGP (Work Group Processor)</text>
+  <rect x="20" y="48" width="840" height="610" rx="10" fill="none" stroke="#8a7060" stroke-width="1.5"/>
+  <text x="40" y="70" fill="#a09080" font-size="11" font-weight="600">WGP (Work Group Processor)</text>
 
   <!-- CU 0 -->
   <rect x="35" y="80" width="395" height="420" rx="8" fill="none" stroke="#3a2a1a" stroke-width="1"/>
-  <text x="232" y="100" text-anchor="middle" fill="#8a7a6a" font-size="12" font-weight="600">Compute Unit 0</text>
+  <text x="232" y="100" text-anchor="middle" fill="#c0b0a0" font-size="12" font-weight="600">Compute Unit 0</text>
 
   <!-- SIMD 0 -->
   <rect x="50" y="110" width="180" height="190" rx="6" fill="#1a1210" stroke="#e8722a" stroke-width="1.5"/>
   <text x="140" y="130" text-anchor="middle" fill="#e8722a" font-size="11" font-weight="600">SIMD 0</text>
-  <text x="140" y="148" text-anchor="middle" fill="#8a7a6a" font-size="9">16 wave slots</text>
+  <text x="140" y="148" text-anchor="middle" fill="#c0b0a0" font-size="9">16 wave slots</text>
   <!-- VGPR box -->
-  <rect x="60" y="156" width="160" height="36" rx="4" fill="#2a1a10" stroke="#c47040" stroke-width="1"/>
-  <text x="140" y="172" text-anchor="middle" fill="#c47040" font-size="10" font-weight="600">VGPR File — 192 KB</text>
-  <text x="140" y="186" text-anchor="middle" fill="#6a5a4a" font-size="8">256 regs × 1024b (wave32)</text>
+  <rect x="60" y="156" width="160" height="36" rx="4" fill="#2a1a10" stroke="#e09060" stroke-width="1"/>
+  <text x="140" y="172" text-anchor="middle" fill="#e09060" font-size="10" font-weight="600">VGPR File — 192 KB</text>
+  <text x="140" y="186" text-anchor="middle" fill="#a09080" font-size="8">256 regs × 1024b (wave32)</text>
   <!-- ALU -->
-  <rect x="60" y="198" width="75" height="30" rx="3" fill="#2a1a10" stroke="#a86030" stroke-width="1"/>
-  <text x="97" y="217" text-anchor="middle" fill="#a86030" font-size="9" font-weight="600">VALU ×2</text>
+  <rect x="60" y="198" width="75" height="30" rx="3" fill="#2a1a10" stroke="#d08050" stroke-width="1"/>
+  <text x="97" y="217" text-anchor="middle" fill="#d08050" font-size="9" font-weight="600">VALU ×2</text>
   <!-- Matrix -->
   <rect x="145" y="198" width="75" height="30" rx="3" fill="#2a1a10" stroke="#d35400" stroke-width="1"/>
   <text x="182" y="212" text-anchor="middle" fill="#d35400" font-size="8" font-weight="600">Matrix Core</text>
-  <text x="182" y="224" text-anchor="middle" fill="#6a5a4a" font-size="7">16×16×16 WMMA</text>
+  <text x="182" y="224" text-anchor="middle" fill="#a09080" font-size="7">16×16×16 WMMA</text>
   <!-- Trans -->
   <rect x="60" y="234" width="160" height="22" rx="3" fill="#2a1a10" stroke="#8a5030" stroke-width="1"/>
   <text x="140" y="249" text-anchor="middle" fill="#8a5030" font-size="8">Transcendental (EXP, LOG, RCP, RSQ)</text>
@@ -42,24 +42,24 @@
   <!-- SIMD 1 -->
   <rect x="245" y="110" width="180" height="190" rx="6" fill="#1a1210" stroke="#e8722a" stroke-width="1.5"/>
   <text x="335" y="130" text-anchor="middle" fill="#e8722a" font-size="11" font-weight="600">SIMD 1</text>
-  <text x="335" y="148" text-anchor="middle" fill="#8a7a6a" font-size="9">16 wave slots</text>
-  <rect x="255" y="156" width="160" height="36" rx="4" fill="#2a1a10" stroke="#c47040" stroke-width="1"/>
-  <text x="335" y="172" text-anchor="middle" fill="#c47040" font-size="10" font-weight="600">VGPR File — 192 KB</text>
-  <text x="335" y="186" text-anchor="middle" fill="#6a5a4a" font-size="8">256 regs × 1024b (wave32)</text>
-  <rect x="255" y="198" width="75" height="30" rx="3" fill="#2a1a10" stroke="#a86030" stroke-width="1"/>
-  <text x="292" y="217" text-anchor="middle" fill="#a86030" font-size="9" font-weight="600">VALU ×2</text>
+  <text x="335" y="148" text-anchor="middle" fill="#c0b0a0" font-size="9">16 wave slots</text>
+  <rect x="255" y="156" width="160" height="36" rx="4" fill="#2a1a10" stroke="#e09060" stroke-width="1"/>
+  <text x="335" y="172" text-anchor="middle" fill="#e09060" font-size="10" font-weight="600">VGPR File — 192 KB</text>
+  <text x="335" y="186" text-anchor="middle" fill="#a09080" font-size="8">256 regs × 1024b (wave32)</text>
+  <rect x="255" y="198" width="75" height="30" rx="3" fill="#2a1a10" stroke="#d08050" stroke-width="1"/>
+  <text x="292" y="217" text-anchor="middle" fill="#d08050" font-size="9" font-weight="600">VALU ×2</text>
   <rect x="340" y="198" width="75" height="30" rx="3" fill="#2a1a10" stroke="#d35400" stroke-width="1"/>
   <text x="377" y="212" text-anchor="middle" fill="#d35400" font-size="8" font-weight="600">Matrix Core</text>
-  <text x="377" y="224" text-anchor="middle" fill="#6a5a4a" font-size="7">16×16×16 WMMA</text>
+  <text x="377" y="224" text-anchor="middle" fill="#a09080" font-size="7">16×16×16 WMMA</text>
   <rect x="255" y="234" width="160" height="22" rx="3" fill="#2a1a10" stroke="#8a5030" stroke-width="1"/>
   <text x="335" y="249" text-anchor="middle" fill="#8a5030" font-size="8">Transcendental (EXP, LOG, RCP, RSQ)</text>
   <rect x="255" y="262" width="160" height="22" rx="3" fill="#2a1a10" stroke="#6a4020" stroke-width="1"/>
   <text x="335" y="277" text-anchor="middle" fill="#6a4020" font-size="8">Branch + DPP Cross-Lane</text>
 
   <!-- Scalar Unit -->
-  <rect x="50" y="310" width="370" height="36" rx="4" fill="#1a1210" stroke="#8a6a4a" stroke-width="1"/>
-  <text x="235" y="326" text-anchor="middle" fill="#8a6a4a" font-size="10" font-weight="600">Scalar Unit — SGPR 32 KB · SALU · S_FMA (RDNA4)</text>
-  <text x="235" y="340" text-anchor="middle" fill="#6a5a4a" font-size="8">Shared between SIMD 0 &amp; 1 · Uniform ops, branch, descriptors</text>
+  <rect x="50" y="310" width="370" height="36" rx="4" fill="#1a1210" stroke="#c0a080" stroke-width="1"/>
+  <text x="235" y="326" text-anchor="middle" fill="#c0a080" font-size="10" font-weight="600">Scalar Unit — SGPR 32 KB · SALU · S_FMA (RDNA4)</text>
+  <text x="235" y="340" text-anchor="middle" fill="#a09080" font-size="8">Shared between SIMD 0 &amp; 1 · Uniform ops, branch, descriptors</text>
 
   <!-- L0 caches for CU0 -->
   <rect x="50" y="356" width="115" height="36" rx="4" fill="#1a1210" stroke="#6a5030" stroke-width="1"/>
@@ -75,24 +75,24 @@
   <text x="357" y="386" text-anchor="middle" fill="#5a4a3a" font-size="7">Shader code</text>
 
   <!-- LDS for CU0 -->
-  <rect x="50" y="400" width="370" height="36" rx="4" fill="#1a1210" stroke="#c47040" stroke-width="1"/>
-  <text x="235" y="416" text-anchor="middle" fill="#c47040" font-size="10" font-weight="600">LDS — 64 KB (CU mode) / 128 KB (WGP shared)</text>
-  <text x="235" y="430" text-anchor="middle" fill="#6a5a4a" font-size="8">32 banks × 4B · ~2 cycles · Cross-thread communication</text>
+  <rect x="50" y="400" width="370" height="36" rx="4" fill="#1a1210" stroke="#e09060" stroke-width="1"/>
+  <text x="235" y="416" text-anchor="middle" fill="#e09060" font-size="10" font-weight="600">LDS — 64 KB (CU mode) / 128 KB (WGP shared)</text>
+  <text x="235" y="430" text-anchor="middle" fill="#a09080" font-size="8">32 banks × 4B · ~2 cycles · Cross-thread communication</text>
 
   <!-- CU 1 (simplified) -->
   <rect x="445" y="80" width="395" height="420" rx="8" fill="none" stroke="#3a2a1a" stroke-width="1"/>
-  <text x="642" y="100" text-anchor="middle" fill="#8a7a6a" font-size="12" font-weight="600">Compute Unit 1</text>
+  <text x="642" y="100" text-anchor="middle" fill="#c0b0a0" font-size="12" font-weight="600">Compute Unit 1</text>
 
   <rect x="460" y="110" width="180" height="65" rx="6" fill="#1a1210" stroke="#e8722a" stroke-width="1.5"/>
   <text x="550" y="135" text-anchor="middle" fill="#e8722a" font-size="11" font-weight="600">SIMD 2</text>
-  <text x="550" y="152" text-anchor="middle" fill="#8a7a6a" font-size="9">VGPR 192KB · VALU ×2 · Matrix Core</text>
+  <text x="550" y="152" text-anchor="middle" fill="#c0b0a0" font-size="9">VGPR 192KB · VALU ×2 · Matrix Core</text>
 
   <rect x="655" y="110" width="180" height="65" rx="6" fill="#1a1210" stroke="#e8722a" stroke-width="1.5"/>
   <text x="745" y="135" text-anchor="middle" fill="#e8722a" font-size="11" font-weight="600">SIMD 3</text>
-  <text x="745" y="152" text-anchor="middle" fill="#8a7a6a" font-size="9">VGPR 192KB · VALU ×2 · Matrix Core</text>
+  <text x="745" y="152" text-anchor="middle" fill="#c0b0a0" font-size="9">VGPR 192KB · VALU ×2 · Matrix Core</text>
 
-  <rect x="460" y="185" width="370" height="28" rx="4" fill="#1a1210" stroke="#8a6a4a" stroke-width="1"/>
-  <text x="645" y="203" text-anchor="middle" fill="#8a6a4a" font-size="9">Scalar Unit — SGPR 32 KB · SALU · S_FMA</text>
+  <rect x="460" y="185" width="370" height="28" rx="4" fill="#1a1210" stroke="#c0a080" stroke-width="1"/>
+  <text x="645" y="203" text-anchor="middle" fill="#c0a080" font-size="9">Scalar Unit — SGPR 32 KB · SALU · S_FMA</text>
 
   <rect x="460" y="222" width="115" height="28" rx="4" fill="#1a1210" stroke="#6a5030" stroke-width="1"/>
   <text x="517" y="240" text-anchor="middle" fill="#6a5030" font-size="8">L0 Vec 32KB</text>
@@ -103,47 +103,47 @@
   <rect x="710" y="222" width="115" height="28" rx="4" fill="#1a1210" stroke="#6a5030" stroke-width="1"/>
   <text x="767" y="240" text-anchor="middle" fill="#6a5030" font-size="8">L0 Ins 32KB</text>
 
-  <rect x="460" y="258" width="370" height="28" rx="4" fill="#1a1210" stroke="#c47040" stroke-width="1"/>
-  <text x="645" y="276" text-anchor="middle" fill="#c47040" font-size="9">LDS — 64 KB (CU mode) / 128 KB (WGP shared)</text>
+  <rect x="460" y="258" width="370" height="28" rx="4" fill="#1a1210" stroke="#e09060" stroke-width="1"/>
+  <text x="645" y="276" text-anchor="middle" fill="#e09060" font-size="9">LDS — 64 KB (CU mode) / 128 KB (WGP shared)</text>
 
   <!-- Instruction rates annotation -->
   <rect x="460" y="298" width="370" height="190" rx="6" fill="#1a1210" stroke="#3a2a1a" stroke-width="1"/>
-  <text x="645" y="318" text-anchor="middle" fill="#c9b8a8" font-size="11" font-weight="600">Instruction Throughput per SIMD</text>
+  <text x="645" y="318" text-anchor="middle" fill="#e8dcd0" font-size="11" font-weight="600">Instruction Throughput per SIMD</text>
 
-  <text x="475" y="340" fill="#8a7a6a" font-size="9">V_FMA_F32 (wave32)</text>
+  <text x="475" y="340" fill="#c0b0a0" font-size="9">V_FMA_F32 (wave32)</text>
   <text x="790" y="340" text-anchor="end" fill="#e8722a" font-size="9">1/clk</text>
 
-  <text x="475" y="356" fill="#8a7a6a" font-size="9">V_FMA_F32 (wave64)</text>
+  <text x="475" y="356" fill="#c0b0a0" font-size="9">V_FMA_F32 (wave64)</text>
   <text x="790" y="356" text-anchor="end" fill="#d4854a" font-size="9">1/2 clk</text>
 
-  <text x="475" y="372" fill="#8a7a6a" font-size="9">V_DOT2_F32_F16</text>
+  <text x="475" y="372" fill="#c0b0a0" font-size="9">V_DOT2_F32_F16</text>
   <text x="790" y="372" text-anchor="end" fill="#e8722a" font-size="9">1/clk (2 FMAs)</text>
 
-  <text x="475" y="388" fill="#8a7a6a" font-size="9">WMMA 16×16×16 FP16</text>
+  <text x="475" y="388" fill="#c0b0a0" font-size="9">WMMA 16×16×16 FP16</text>
   <text x="790" y="388" text-anchor="end" fill="#d35400" font-size="9">32 clk (1024 FMAs)</text>
 
-  <text x="475" y="404" fill="#8a7a6a" font-size="9">V_EXP_F32 / V_LOG_F32</text>
-  <text x="790" y="404" text-anchor="end" fill="#a86030" font-size="9">4/clk</text>
+  <text x="475" y="404" fill="#c0b0a0" font-size="9">V_EXP_F32 / V_LOG_F32</text>
+  <text x="790" y="404" text-anchor="end" fill="#d08050" font-size="9">4/clk</text>
 
-  <text x="475" y="420" fill="#8a7a6a" font-size="9">V_RCP_F32 / V_RSQ_F32</text>
-  <text x="790" y="420" text-anchor="end" fill="#a86030" font-size="9">4/clk</text>
+  <text x="475" y="420" fill="#c0b0a0" font-size="9">V_RCP_F32 / V_RSQ_F32</text>
+  <text x="790" y="420" text-anchor="end" fill="#d08050" font-size="9">4/clk</text>
 
-  <text x="475" y="436" fill="#8a7a6a" font-size="9">S_FMA_F32 (scalar, RDNA4)</text>
-  <text x="790" y="436" text-anchor="end" fill="#8a6a4a" font-size="9">1/clk</text>
+  <text x="475" y="436" fill="#c0b0a0" font-size="9">S_FMA_F32 (scalar, RDNA4)</text>
+  <text x="790" y="436" text-anchor="end" fill="#c0a080" font-size="9">1/clk</text>
 
-  <text x="475" y="452" fill="#8a7a6a" font-size="9">GLOBAL_LOAD_DWORDX4</text>
+  <text x="475" y="452" fill="#c0b0a0" font-size="9">GLOBAL_LOAD_DWORDX4</text>
   <text x="790" y="452" text-anchor="end" fill="#6a5030" font-size="9">1/clk issue, ~300 clk lat</text>
 
-  <text x="475" y="468" fill="#8a7a6a" font-size="9">DS_READ_B128 (LDS)</text>
-  <text x="790" y="468" text-anchor="end" fill="#c47040" font-size="9">1/clk issue, ~2 clk lat</text>
+  <text x="475" y="468" fill="#c0b0a0" font-size="9">DS_READ_B128 (LDS)</text>
+  <text x="790" y="468" text-anchor="end" fill="#e09060" font-size="9">1/clk issue, ~2 clk lat</text>
 
-  <text x="475" y="484" fill="#8a7a6a" font-size="9">S_BARRIER</text>
-  <text x="790" y="484" text-anchor="end" fill="#8a6a4a" font-size="9">~20 clk</text>
+  <text x="475" y="484" fill="#c0b0a0" font-size="9">S_BARRIER</text>
+  <text x="790" y="484" text-anchor="end" fill="#c0a080" font-size="9">~20 clk</text>
 
   <!-- Shared L2 -->
   <rect x="35" y="510" width="810" height="44" rx="6" fill="#1a1210" stroke="#8a5030" stroke-width="1.5"/>
   <text x="440" y="530" text-anchor="middle" fill="#8a5030" font-size="12" font-weight="600">L2 Cache — 8 MB · 128B lines · ~100 cycles · Shared across Shader Engine</text>
-  <text x="440" y="546" text-anchor="middle" fill="#6a5a4a" font-size="9">2x bandwidth per slice vs RDNA3 · Services all CUs in the Shader Engine</text>
+  <text x="440" y="546" text-anchor="middle" fill="#a09080" font-size="9">2x bandwidth per slice vs RDNA3 · Services all CUs in the Shader Engine</text>
 
   <!-- Infinity Cache + VRAM -->
   <rect x="35" y="562" width="395" height="40" rx="6" fill="#1a1210" stroke="#6a4020" stroke-width="1"/>
@@ -156,6 +156,6 @@
 
   <!-- Total per WGP annotation -->
   <rect x="35" y="610" width="810" height="40" rx="6" fill="#2a1a10" stroke="#3a2a1a" stroke-width="1"/>
-  <text x="440" y="628" text-anchor="middle" fill="#c9b8a8" font-size="10" font-weight="600">WGP Totals: 4 SIMDs · 768 KB VGPRs · 64 KB SGPRs · 128 KB LDS · 160 KB L0 · 4 Matrix Cores</text>
-  <text x="440" y="642" text-anchor="middle" fill="#8a7a6a" font-size="9">64 CUs = 32 WGPs = 128 SIMDs = 128 Matrix Cores on RX 9070 XT / AI PRO R9700</text>
+  <text x="440" y="628" text-anchor="middle" fill="#e8dcd0" font-size="10" font-weight="600">WGP Totals: 4 SIMDs · 768 KB VGPRs · 64 KB SGPRs · 128 KB LDS · 160 KB L0 · 4 Matrix Cores</text>
+  <text x="440" y="642" text-anchor="middle" fill="#c0b0a0" font-size="9">64 CUs = 32 WGPs = 128 SIMDs = 128 Matrix Cores on RX 9070 XT / AI PRO R9700</text>
 </svg>

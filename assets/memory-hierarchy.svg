@@ -7,73 +7,73 @@
   </defs>
 
   <rect width="800" height="620" rx="12" fill="url(#bg)"/>
-  <text x="400" y="32" text-anchor="middle" fill="#c9b8a8" font-size="16" font-weight="600">RDNA4 Memory Hierarchy — Latency &amp; Bandwidth</text>
+  <text x="400" y="32" text-anchor="middle" fill="#e8dcd0" font-size="16" font-weight="600">RDNA4 Memory Hierarchy — Latency &amp; Bandwidth</text>
 
   <!-- Level 0: VGPRs (top of pyramid) -->
   <polygon points="400,52 310,120 490,120" fill="none" stroke="#e8722a" stroke-width="2"/>
   <text x="400" y="82" text-anchor="middle" fill="#e8722a" font-size="13" font-weight="700">VGPRs</text>
-  <text x="400" y="98" text-anchor="middle" fill="#8a7a6a" font-size="10">192 KB/SIMD · 0 cycles</text>
-  <text x="400" y="112" text-anchor="middle" fill="#6a5a4a" font-size="9">256 regs × 32 bits × 32 or 64 lanes</text>
+  <text x="400" y="98" text-anchor="middle" fill="#c0b0a0" font-size="10">192 KB/SIMD · 0 cycles</text>
+  <text x="400" y="112" text-anchor="middle" fill="#a09080" font-size="9">256 regs × 32 bits × 32 or 64 lanes</text>
 
   <!-- Level 1: SGPRs -->
   <polygon points="400,52 260,170 540,170" fill="none" stroke="#d4854a" stroke-width="1.5" stroke-dasharray="none"/>
   <rect x="275" y="128" width="250" height="36" rx="4" fill="#1a1210" stroke="#d4854a" stroke-width="1"/>
   <text x="400" y="144" text-anchor="middle" fill="#d4854a" font-size="12" font-weight="600">SGPRs — 32 KB/CU</text>
-  <text x="400" y="158" text-anchor="middle" fill="#8a7a6a" font-size="10">~2 cycles · Uniform values (scales, descriptors)</text>
+  <text x="400" y="158" text-anchor="middle" fill="#c0b0a0" font-size="10">~2 cycles · Uniform values (scales, descriptors)</text>
 
   <!-- Level 2: LDS -->
-  <polygon points="400,52 210,225 590,225" fill="none" stroke="#c47040" stroke-width="1.5"/>
-  <rect x="225" y="178" width="350" height="40" rx="4" fill="#1a1210" stroke="#c47040" stroke-width="1"/>
-  <text x="400" y="194" text-anchor="middle" fill="#c47040" font-size="12" font-weight="600">LDS (Local Data Share) — 64 KB/CU</text>
-  <text x="400" y="210" text-anchor="middle" fill="#8a7a6a" font-size="10">~2 cycles · 32 banks × 4B · 64 B/clk · Shared within workgroup</text>
+  <polygon points="400,52 210,225 590,225" fill="none" stroke="#e09060" stroke-width="1.5"/>
+  <rect x="225" y="178" width="350" height="40" rx="4" fill="#1a1210" stroke="#e09060" stroke-width="1"/>
+  <text x="400" y="194" text-anchor="middle" fill="#e09060" font-size="12" font-weight="600">LDS (Local Data Share) — 64 KB/CU</text>
+  <text x="400" y="210" text-anchor="middle" fill="#c0b0a0" font-size="10">~2 cycles · 32 banks × 4B · 64 B/clk · Shared within workgroup</text>
 
   <!-- Level 3: L0 Vector Cache -->
-  <polygon points="400,52 160,285 640,285" fill="none" stroke="#a86030" stroke-width="1.5"/>
-  <rect x="175" y="233" width="450" height="46" rx="4" fill="#1a1210" stroke="#a86030" stroke-width="1"/>
-  <text x="400" y="249" text-anchor="middle" fill="#a86030" font-size="12" font-weight="600">L0 Vector Cache — 32 KB/CU</text>
-  <text x="400" y="263" text-anchor="middle" fill="#8a7a6a" font-size="10">~30 cycles · 64B lines · 64 B/clk read · Per-CU private</text>
-  <text x="400" y="275" text-anchor="middle" fill="#6a5a4a" font-size="9">Also: L0 Scalar (16 KB) + L0 Instruction (32 KB)</text>
+  <polygon points="400,52 160,285 640,285" fill="none" stroke="#d08050" stroke-width="1.5"/>
+  <rect x="175" y="233" width="450" height="46" rx="4" fill="#1a1210" stroke="#d08050" stroke-width="1"/>
+  <text x="400" y="249" text-anchor="middle" fill="#d08050" font-size="12" font-weight="600">L0 Vector Cache — 32 KB/CU</text>
+  <text x="400" y="263" text-anchor="middle" fill="#c0b0a0" font-size="10">~30 cycles · 64B lines · 64 B/clk read · Per-CU private</text>
+  <text x="400" y="275" text-anchor="middle" fill="#a09080" font-size="9">Also: L0 Scalar (16 KB) + L0 Instruction (32 KB)</text>
 
   <!-- Level 4: L2 Cache -->
   <polygon points="400,52 110,350 690,350" fill="none" stroke="#8a5030" stroke-width="1.5"/>
   <rect x="125" y="293" width="550" height="50" rx="4" fill="#1a1210" stroke="#8a5030" stroke-width="1"/>
   <text x="400" y="309" text-anchor="middle" fill="#8a5030" font-size="12" font-weight="600">L2 Cache — 8 MB (Navi 48)</text>
-  <text x="400" y="323" text-anchor="middle" fill="#8a7a6a" font-size="10">~100 cycles · 128B lines · Shared across all CUs</text>
-  <text x="400" y="337" text-anchor="middle" fill="#6a5a4a" font-size="9">2x bandwidth/slice vs RDNA3 · Read+Write</text>
+  <text x="400" y="323" text-anchor="middle" fill="#c0b0a0" font-size="10">~100 cycles · 128B lines · Shared across all CUs</text>
+  <text x="400" y="337" text-anchor="middle" fill="#a09080" font-size="9">2x bandwidth/slice vs RDNA3 · Read+Write</text>
 
   <!-- Level 5: Infinity Cache -->
   <polygon points="400,52 60,420 740,420" fill="none" stroke="#6a4020" stroke-width="1.5"/>
   <rect x="75" y="358" width="650" height="54" rx="4" fill="#1a1210" stroke="#6a4020" stroke-width="1"/>
   <text x="400" y="374" text-anchor="middle" fill="#6a4020" font-size="12" font-weight="600">Infinity Cache — 64 MB (Navi 48)</text>
-  <text x="400" y="388" text-anchor="middle" fill="#8a7a6a" font-size="10">~150 cycles · 64B lines · Victim cache between L2 and VRAM</text>
-  <text x="400" y="402" text-anchor="middle" fill="#6a5a4a" font-size="9">4 MB per Coherent Station × 16 blocks · Amplifies effective bandwidth</text>
+  <text x="400" y="388" text-anchor="middle" fill="#c0b0a0" font-size="10">~150 cycles · 64B lines · Victim cache between L2 and VRAM</text>
+  <text x="400" y="402" text-anchor="middle" fill="#a09080" font-size="9">4 MB per Coherent Station × 16 blocks · Amplifies effective bandwidth</text>
 
   <!-- Level 6: GDDR6 VRAM -->
   <polygon points="400,52 20,495 780,495" fill="none" stroke="#4a3020" stroke-width="1.5"/>
   <rect x="35" y="428" width="730" height="60" rx="4" fill="#1a1210" stroke="#4a3020" stroke-width="1"/>
   <text x="400" y="444" text-anchor="middle" fill="#4a3020" font-size="12" font-weight="600">GDDR6 VRAM — 16–32 GB</text>
-  <text x="400" y="458" text-anchor="middle" fill="#8a7a6a" font-size="10">~300+ cycles · 256-bit bus · 576–640 GB/s theoretical</text>
-  <text x="400" y="472" text-anchor="middle" fill="#6a5a4a" font-size="9">67–93% achievable on large DMMV · 18–20 Gbps per pin</text>
+  <text x="400" y="458" text-anchor="middle" fill="#c0b0a0" font-size="10">~300+ cycles · 256-bit bus · 576–640 GB/s theoretical</text>
+  <text x="400" y="472" text-anchor="middle" fill="#a09080" font-size="9">67–93% achievable on large DMMV · 18–20 Gbps per pin</text>
   <text x="400" y="484" text-anchor="middle" fill="#5a4a3a" font-size="9">Model weights live here · KV cache pages live here · DMA from CPU via PCIe 5.0 x16 (64 GB/s)</text>
 
   <!-- Legend at bottom -->
-  <text x="400" y="520" text-anchor="middle" fill="#6a5a4a" font-size="10">▲ Faster, smaller, closer to compute · ▼ Slower, larger, farther from compute</text>
+  <text x="400" y="520" text-anchor="middle" fill="#a09080" font-size="10">▲ Faster, smaller, closer to compute · ▼ Slower, larger, farther from compute</text>
 
   <!-- Bandwidth arrow on right side -->
-  <line x1="750" y1="70" x2="750" y2="490" stroke="#4a3a2a" stroke-width="1.5" marker-end="url(#arrowdown)"/>
-  <text x="760" y="280" fill="#6a5a4a" font-size="10" transform="rotate(90,760,280)">Latency increases →</text>
+  <line x1="750" y1="70" x2="750" y2="490" stroke="#8a7060" stroke-width="1.5" marker-end="url(#arrowdown)"/>
+  <text x="760" y="280" fill="#a09080" font-size="10" transform="rotate(90,760,280)">Latency increases →</text>
 
   <!-- Size arrow on left side -->
-  <line x1="50" y1="70" x2="50" y2="490" stroke="#4a3a2a" stroke-width="1.5"/>
-  <text x="40" y="280" fill="#6a5a4a" font-size="10" transform="rotate(-90,40,280)">← Capacity increases</text>
+  <line x1="50" y1="70" x2="50" y2="490" stroke="#8a7060" stroke-width="1.5"/>
+  <text x="40" y="280" fill="#a09080" font-size="10" transform="rotate(-90,40,280)">← Capacity increases</text>
 
   <!-- Inference working set annotations -->
   <rect x="50" y="540" width="700" height="60" rx="6" fill="#1a1210" stroke="#2a1f1a" stroke-width="1"/>
-  <text x="400" y="558" text-anchor="middle" fill="#8a7a6a" font-size="11" font-weight="600">Inference Working Sets</text>
+  <text x="400" y="558" text-anchor="middle" fill="#c0b0a0" font-size="11" font-weight="600">Inference Working Sets</text>
   <text x="200" y="576" text-anchor="middle" fill="#e8722a" font-size="10">Activations → VGPRs + LDS</text>
-  <text x="400" y="576" text-anchor="middle" fill="#c47040" font-size="10">KV Cache → L2 / Inf. Cache / VRAM</text>
+  <text x="400" y="576" text-anchor="middle" fill="#e09060" font-size="10">KV Cache → L2 / Inf. Cache / VRAM</text>
   <text x="600" y="576" text-anchor="middle" fill="#8a5030" font-size="10">Model Weights → VRAM (streamed)</text>
-  <text x="200" y="592" text-anchor="middle" fill="#6a5a4a" font-size="9">(hot, reused per layer)</text>
-  <text x="400" y="592" text-anchor="middle" fill="#6a5a4a" font-size="9">(grows with context × concurrency)</text>
-  <text x="600" y="592" text-anchor="middle" fill="#6a5a4a" font-size="9">(bandwidth-bound, read-once per token)</text>
+  <text x="200" y="592" text-anchor="middle" fill="#a09080" font-size="9">(hot, reused per layer)</text>
+  <text x="400" y="592" text-anchor="middle" fill="#a09080" font-size="9">(grows with context × concurrency)</text>
+  <text x="600" y="592" text-anchor="middle" fill="#a09080" font-size="9">(bandwidth-bound, read-once per token)</text>
 </svg>

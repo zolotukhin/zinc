@@ -14,48 +14,48 @@
   <rect width="720" height="520" rx="12" fill="url(#bg)"/>
 
   <!-- Title -->
-  <text x="360" y="38" text-anchor="middle" fill="#c9b8a8" font-size="18" font-weight="600">ZINC Architecture</text>
+  <text x="360" y="38" text-anchor="middle" fill="#e8dcd0" font-size="18" font-weight="600">ZINC Architecture</text>
 
   <!-- Layer 1: HTTP API -->
   <rect x="40" y="56" width="640" height="68" rx="8" fill="none" stroke="#e8722a" stroke-width="1.5"/>
   <text x="360" y="82" text-anchor="middle" fill="#e8722a" font-size="15" font-weight="600">OpenAI-compatible HTTP API</text>
-  <text x="360" y="104" text-anchor="middle" fill="#8a7a6a" font-size="12">Zig std.http · SSE streaming · /v1/chat/completions</text>
+  <text x="360" y="104" text-anchor="middle" fill="#c0b0a0" font-size="12">Zig std.http · SSE streaming · /v1/chat/completions</text>
 
   <!-- Arrow -->
-  <line x1="360" y1="124" x2="360" y2="140" stroke="#4a3a2a" stroke-width="1.5"/>
-  <polygon points="354,136 360,144 366,136" fill="#4a3a2a"/>
+  <line x1="360" y1="124" x2="360" y2="140" stroke="#8a7060" stroke-width="1.5"/>
+  <polygon points="354,136 360,144 366,136" fill="#8a7060"/>
 
   <!-- Layer 2: Scheduler -->
   <rect x="40" y="148" width="640" height="68" rx="8" fill="none" stroke="#b85c1f" stroke-width="1.5"/>
   <text x="360" y="174" text-anchor="middle" fill="#d4854a" font-size="15" font-weight="600">Request Scheduler</text>
-  <text x="360" y="196" text-anchor="middle" fill="#8a7a6a" font-size="12">Continuous batching · Priority queue · KV cache management</text>
+  <text x="360" y="196" text-anchor="middle" fill="#c0b0a0" font-size="12">Continuous batching · Priority queue · KV cache management</text>
 
   <!-- Arrow -->
-  <line x1="360" y1="216" x2="360" y2="232" stroke="#4a3a2a" stroke-width="1.5"/>
-  <polygon points="354,228 360,236 366,228" fill="#4a3a2a"/>
+  <line x1="360" y1="216" x2="360" y2="232" stroke="#8a7060" stroke-width="1.5"/>
+  <polygon points="354,228 360,236 366,228" fill="#8a7060"/>
 
   <!-- Layer 3: Vulkan Backend -->
-  <rect x="40" y="240" width="640" height="82" rx="8" fill="none" stroke="#a04a18" stroke-width="1.5"/>
-  <text x="360" y="266" text-anchor="middle" fill="#c47040" font-size="15" font-weight="600">Vulkan Compute Backend</text>
-  <text x="360" y="286" text-anchor="middle" fill="#8a7a6a" font-size="12">RDNA4-tuned shaders (GLSL → SPIR-V) · Cooperative matrix matmul</text>
-  <text x="360" y="304" text-anchor="middle" fill="#8a7a6a" font-size="12">Fused element-wise ops · Flash attention · Command buffer replay</text>
+  <rect x="40" y="240" width="640" height="82" rx="8" fill="none" stroke="#d06028" stroke-width="1.5"/>
+  <text x="360" y="266" text-anchor="middle" fill="#e09060" font-size="15" font-weight="600">Vulkan Compute Backend</text>
+  <text x="360" y="286" text-anchor="middle" fill="#c0b0a0" font-size="12">RDNA4-tuned shaders (GLSL → SPIR-V) · Cooperative matrix matmul</text>
+  <text x="360" y="304" text-anchor="middle" fill="#c0b0a0" font-size="12">Fused element-wise ops · Flash attention · Command buffer replay</text>
 
   <!-- Arrow -->
-  <line x1="360" y1="322" x2="360" y2="338" stroke="#4a3a2a" stroke-width="1.5"/>
-  <polygon points="354,334 360,342 366,334" fill="#4a3a2a"/>
+  <line x1="360" y1="322" x2="360" y2="338" stroke="#8a7060" stroke-width="1.5"/>
+  <polygon points="354,334 360,342 366,334" fill="#8a7060"/>
 
   <!-- Layer 4: Memory Manager -->
-  <rect x="40" y="346" width="640" height="82" rx="8" fill="none" stroke="#8a3a10" stroke-width="1.5"/>
-  <text x="360" y="372" text-anchor="middle" fill="#a86030" font-size="15" font-weight="600">GPU Memory Manager</text>
-  <text x="360" y="392" text-anchor="middle" fill="#8a7a6a" font-size="12">GGUF loader (mmap → DMA) · Paged KV cache (PagedAttention)</text>
-  <text x="360" y="410" text-anchor="middle" fill="#8a7a6a" font-size="12">TurboQuant compression (Q2/Q3/Q4-bit) · Q4_K/Q8_0/F16 weights</text>
+  <rect x="40" y="346" width="640" height="82" rx="8" fill="none" stroke="#c05a20" stroke-width="1.5"/>
+  <text x="360" y="372" text-anchor="middle" fill="#d08050" font-size="15" font-weight="600">GPU Memory Manager</text>
+  <text x="360" y="392" text-anchor="middle" fill="#c0b0a0" font-size="12">GGUF loader (mmap → DMA) · Paged KV cache (PagedAttention)</text>
+  <text x="360" y="410" text-anchor="middle" fill="#c0b0a0" font-size="12">TurboQuant compression (Q2/Q3/Q4-bit) · Q4_K/Q8_0/F16 weights</text>
 
   <!-- Arrow -->
-  <line x1="360" y1="428" x2="360" y2="444" stroke="#4a3a2a" stroke-width="1.5"/>
-  <polygon points="354,440 360,448 366,440" fill="#4a3a2a"/>
+  <line x1="360" y1="428" x2="360" y2="444" stroke="#8a7060" stroke-width="1.5"/>
+  <polygon points="354,440 360,448 366,440" fill="#8a7060"/>
 
   <!-- Layer 5: Hardware -->
-  <rect x="40" y="452" width="640" height="54" rx="8" fill="#1a1210" stroke="#5a3a1a" stroke-width="1.5"/>
-  <text x="360" y="476" text-anchor="middle" fill="#8a6a4a" font-size="15" font-weight="600">AMD RDNA3 / RDNA4</text>
-  <text x="360" y="494" text-anchor="middle" fill="#6a5a4a" font-size="12">RADV / AMDVLK · Vulkan 1.3 · RX 9070 XT · AI PRO R9700</text>
+  <rect x="40" y="452" width="640" height="54" rx="8" fill="#1a1210" stroke="#906838" stroke-width="1.5"/>
+  <text x="360" y="476" text-anchor="middle" fill="#c0a080" font-size="15" font-weight="600">AMD RDNA3 / RDNA4</text>
+  <text x="360" y="494" text-anchor="middle" fill="#a09080" font-size="12">RADV / AMDVLK · Vulkan 1.3 · RX 9070 XT · AI PRO R9700</text>
 </svg>
