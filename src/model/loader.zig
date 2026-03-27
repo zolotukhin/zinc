@@ -187,7 +187,18 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .intermediate_dim = intermediate_dim,
         .vocab_size = vocab_size,
         .context_length = context_length,
-        .rope_freq_base = 10000.0,
+        .rope_freq_base = blk: {
+            const key2 = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
+            const val = gf.metadata.get(key2);
+            if (val) |v| {
+                switch (v) {
+                    .float32 => |f| break :blk f,
+                    .uint32 => |u| break :blk @floatFromInt(u),
+                    else => {},
+                }
+            }
+            break :blk @as(f32, 10000.0);
+        },
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,
         .ssm_d_conv = ssm_d_conv,

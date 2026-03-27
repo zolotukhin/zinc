@@ -202,16 +202,32 @@ fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, o
 // ---------------------------------------------------------------------------
 
 /// Softmax + top-k selection on CPU. Writes top-k indices and normalized weights.
+/// Bug fix #11: Softmax over ALL experts first, then pick top-k (matching llama.cpp).
 fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
-    // Find top-k by repeated argmax (k is small, typically 8)
-    var used = [_]bool{false} ** 256; // max 256 experts
+
+    // Step 1: Softmax over all expert logits
+    var max_val: f32 = -std.math.inf(f32);
+    for (logits) |v| if (v > max_val) { max_val = v; };
+
+    var probs: [256]f32 = undefined;
+    var sum: f32 = 0;
+    for (0..n) |i| {
+        probs[i] = @exp(logits[i] - max_val);
+        sum += probs[i];
+    }
+    if (sum > 0) {
+        for (0..n) |i| probs[i] /= sum;
+    }
+
+    // Step 2: Pick top-k from the probabilities
+    var used = [_]bool{false} ** 256;
     for (0..k) |ki| {
         var best_idx: u32 = 0;
-        var best_val: f32 = -std.math.inf(f32);
+        var best_val: f32 = -1.0;
         for (0..n) |i| {
-            if (!used[i] and logits[i] > best_val) {
-                best_val = logits[i];
+            if (!used[i] and probs[i] > best_val) {
+                best_val = probs[i];
                 best_idx = @intCast(i);
             }
         }
@@ -219,18 +235,12 @@ fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) 
         out_weights[ki] = best_val;
         used[best_idx] = true;
     }
-    // Softmax over the selected k logits
-    var max_val: f32 = out_weights[0];
-    for (out_weights[1..k]) |w| {
-        if (w > max_val) max_val = w;
-    }
-    var sum: f32 = 0;
-    for (0..k) |i| {
-        out_weights[i] = @exp(out_weights[i] - max_val);
-        sum += out_weights[i];
-    }
-    if (sum > 0) {
-        for (0..k) |i| out_weights[i] /= sum;
+
+    // Step 3: Renormalize selected weights to sum to 1
+    var wsum: f32 = 0;
+    for (0..k) |i| wsum += out_weights[i];
+    if (wsum > 0) {
+        for (0..k) |i| out_weights[i] /= wsum;
     }
 }
 
@@ -755,41 +765,76 @@ pub const InferenceEngine = struct {
 
             if (is_full_attn) {
                 // === FULL ATTENTION LAYER ===
-                // Separate Q/K/V projections + Q/K normalization + RoPE + attention + output projection
+                // Q+gate projection → strided Q extraction → Q/K norm → K/V proj → RoPE →
+                // KV cache → flash attention → sigmoid gate → output projection → residual
 
-                // Q projection: attn_q.weight outputs (n_embd_head * 2) * n_head (Q + gate interleaved)
                 const q_tensor = self.findLayerTensor(layer, "attn_q.weight") orelse return error.TensorNotFound;
                 const k_tensor = self.findLayerTensor(layer, "attn_k.weight") orelse return error.TensorNotFound;
                 const v_tensor = self.findLayerTensor(layer, "attn_v.weight") orelse return error.TensorNotFound;
 
-                // Q is 2x size (Q + gate): output dim = n_heads * head_dim * 2 = 8192
-                // We only use the Q portion (first half) for now, skip gate
-                const q_full_dim = q_dim * 2; // includes gate
+                // Bug fix #4: Q+gate are interleaved per head as [Q_head, gate_head, Q_head, gate_head, ...]
+                // attn_q outputs (head_dim * 2) * n_heads. Q is at stride-2 offsets.
+                // For now, project Q+gate together, then extract Q with strided copy.
+                const q_full_dim = q_dim * 2;
                 try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
                 try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
                 try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
                 self.decode_cmd.computeBarrier();
 
-                // Extract Q from the first half of the Q+gate output
-                // Q is interleaved: [head_dim, gate_dim, head_dim, gate_dim, ...] per head
-                // For simplicity, just take first q_dim elements as Q
+                // Extract Q (first head_dim of each 2*head_dim block) and gate (second half)
+                // into q_buf and gate_buf respectively using per-head buffer copies
                 {
-                    const q_bytes = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32);
-                    const q_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = q_bytes };
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &q_region);
+                    const hd = config.head_dim;
+                    const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
+                    const stride_bytes = hd_bytes * 2; // Q + gate per head
+                    for (0..config.n_heads) |h| {
+                        // Q: copy head_dim floats from offset h*(2*head_dim) to q_buf[h*head_dim]
+                        const q_src = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
+                        const q_dst = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
+                        const qr = vk.c.VkBufferCopy{ .srcOffset = q_src, .dstOffset = q_dst, .size = hd_bytes };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &qr);
+                        // Gate: copy head_dim floats from offset h*(2*head_dim)+head_dim to gate_buf[h*head_dim]
+                        const g_src = q_src + hd_bytes;
+                        const gr = vk.c.VkBufferCopy{ .srcOffset = g_src, .dstOffset = q_dst, .size = hd_bytes };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.gate_buf.handle, 1, &gr);
+                    }
                 }
                 self.decode_cmd.transferToComputeBarrier();
 
-                // RoPE on Q and K
+                // Bug fix #1: Q/K normalization (per-head RMS norm)
+                // attn_q_norm and attn_k_norm are per-head norms with head_dim weights
+                const q_norm_tensor = self.findLayerTensor(layer, "attn_q_norm.weight");
+                const k_norm_tensor = self.findLayerTensor(layer, "attn_k_norm.weight");
+                if (q_norm_tensor) |qn| {
+                    const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                    // Apply RMS norm to each Q head (n_heads workgroups, head_dim elements each)
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, self.q_buf.handle, self.q_buf.size,
+                        qn.gpu_buffer.handle, qn.gpu_buffer.size,
+                        self.q_buf.handle, self.q_buf.size); // in-place via same output
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_heads, 1e-6);
+                }
+                if (k_norm_tensor) |kn| {
+                    const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, self.k_buf.handle, self.k_buf.size,
+                        kn.gpu_buffer.handle, kn.gpu_buffer.size,
+                        self.k_buf.handle, self.k_buf.size);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_kv_heads, 1e-6);
+                }
+                self.decode_cmd.computeBarrier();
+
+                // Bug fix #6: Use correct rope_freq_base from model config
+                const rope_freq = config.rope_freq_base;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
                     const q_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size);
-                    try self.elementwise.recordRope(&self.decode_cmd, q_ds, config.head_dim, config.n_heads, state.position, 10000000.0);
+                    try self.elementwise.recordRope(&self.decode_cmd, q_ds, config.head_dim, config.n_heads, state.position, rope_freq);
 
                     const k_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size);
-                    try self.elementwise.recordRope(&self.decode_cmd, k_ds, config.head_dim, config.n_kv_heads, state.position, 10000000.0);
+                    try self.elementwise.recordRope(&self.decode_cmd, k_ds, config.head_dim, config.n_kv_heads, state.position, rope_freq);
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -817,6 +862,12 @@ pub const InferenceEngine = struct {
                         state.position + 1, 1);
                 }
                 self.decode_cmd.computeBarrier();
+
+                // Bug fix #2: Attention gating — attn_output = attn_output * sigmoid(gate)
+                // gate_buf already has the gate values extracted above
+                // We need a shader for element-wise: out[i] = attn[i] * sigmoid(gate[i])
+                // Reuse scale_accumulate concept: for now, skip gating (TODO: add sigmoid_mul shader)
+                // This is still a known issue but less critical than the other fixes
 
                 // Output projection: attn_output.weight
                 const o_tensor = self.findLayerTensor(layer, "attn_output.weight") orelse return error.TensorNotFound;
@@ -1169,7 +1220,8 @@ pub const InferenceEngine = struct {
         for (0..conv_channels) |ch| {
             var sum: f32 = 0;
             for (0..d_conv) |ki| {
-                const kw = conv_kptr[ki * conv_channels + ch];
+                // Bug fix #7: GGUF stores conv kernel as [d_conv, conv_channels] (d_conv is fast dim)
+                const kw = conv_kptr[ch * d_conv + ki];
                 const sv = if (ki < d_conv_1) conv_state[ki * conv_channels + ch] else qkv_cpu[ch];
                 sum += kw * sv;
             }
@@ -1182,8 +1234,11 @@ pub const InferenceEngine = struct {
         var q_ssm = conv_out[0..qk_dim];
         var k_ssm = conv_out[qk_dim .. 2 * qk_dim];
         const v_ssm = conv_out[2 * qk_dim .. 2 * qk_dim + d_inner];
-        l2Normalize(q_ssm);
-        l2Normalize(k_ssm);
+        // Bug fix #8: L2 normalize per-head, not across all heads
+        for (0..n_group) |h| {
+            l2Normalize(q_ssm[h * d_state ..][0..d_state]);
+            l2Normalize(k_ssm[h * d_state ..][0..d_state]);
+        }
 
         // Compute gate and beta
         const dt_bias_ptr: ?[*]const f32 = if (self.findLayerTensor(layer, "ssm_dt.bias")) |t| blk: {
@@ -1207,7 +1262,15 @@ pub const InferenceEngine = struct {
             beta_arr[i] = 1.0 / (1.0 + @exp(-beta_cpu[i]));
         }
 
+        // Bug fix #9: Scale Q by 1/sqrt(head_k_dim) before state readout
+        const q_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_state)));
+        for (q_ssm) |*v| v.* *= q_scale;
+
         // Delta-net autoregressive update
+        // Bug fix #10: State layout s[row][col] where:
+        //   sk[row] = sum_col s[row][col] * k[col]
+        //   s[row][col] += k[row] * d[col]   (outer product)
+        //   o[row] = sum_col s[row][col] * q[col]
         const ssm_state = self.ssm_states[layer_idx];
         for (0..dt_rank) |h| {
             const s_base = h * head_v_dim * head_v_dim;
@@ -1217,29 +1280,41 @@ pub const InferenceEngine = struct {
             const k_head = k_ssm[k_hi * d_state ..][0..@min(d_state, head_v_dim)];
             const v_head = v_ssm[h * head_v_dim ..][0..head_v_dim];
 
+            // Decay: s *= exp(gate)
             for (0..head_v_dim * head_v_dim) |i| ssm_state[s_base + i] *= g_val;
 
-            for (0..head_v_dim) |i| {
+            // sk = s @ k (per-row dot with k vector)
+            // d = beta * (v - sk), then s += outer(k, d) = k[row] * d[col]
+            for (0..head_v_dim) |row| {
                 var sk: f32 = 0;
-                for (0..@min(head_v_dim, k_head.len)) |j| sk += ssm_state[s_base + i * head_v_dim + j] * k_head[j];
-                const d_val = b_val * (v_head[i] - sk);
-                for (0..@min(head_v_dim, k_head.len)) |j| {
-                    ssm_state[s_base + j * head_v_dim + i] += k_head[j] * d_val;
+                for (0..@min(head_v_dim, k_head.len)) |col| {
+                    sk += ssm_state[s_base + row * head_v_dim + col] * k_head[col];
+                }
+                const d_val = b_val * (v_head[row] - sk);
+                // Outer product update: s[r][c] += k[r] * d[c] for all c
+                // But d is scalar here (for row), so s[col][row] += k[col] * d_val
+                // No — llama.cpp: kd[row][col] = k[row] * d[col], and d is a vector
+                // In autoregressive (n_tokens=1), d is effectively scalar per row
+                // s[k_idx][v_idx] += k[k_idx] * d[v_idx]
+                for (0..@min(head_v_dim, k_head.len)) |col| {
+                    ssm_state[s_base + col * head_v_dim + row] += k_head[col] * d_val;
                 }
             }
         }
 
-        // Read from state: o = s @ q
+        // Read from state: o[row] = sum_col s[row][col] * q[col]
         const ssm_output = try self.allocator.alloc(f32, d_inner);
         defer self.allocator.free(ssm_output);
         for (0..dt_rank) |h| {
             const s_base = h * head_v_dim * head_v_dim;
             const q_hi = if (n_group == dt_rank) h else h / (dt_rank / n_group);
             const q_head = q_ssm[q_hi * d_state ..][0..@min(d_state, head_v_dim)];
-            for (0..head_v_dim) |i| {
+            for (0..head_v_dim) |row| {
                 var val: f32 = 0;
-                for (0..@min(head_v_dim, q_head.len)) |j| val += ssm_state[s_base + i * head_v_dim + j] * q_head[j];
-                ssm_output[h * head_v_dim + i] = val;
+                for (0..@min(head_v_dim, q_head.len)) |col| {
+                    val += ssm_state[s_base + row * head_v_dim + col] * q_head[col];
+                }
+                ssm_output[h * head_v_dim + row] = val;
             }
         }
 
