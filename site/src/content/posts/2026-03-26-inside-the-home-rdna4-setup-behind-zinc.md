@@ -85,7 +85,7 @@ A [Corsair HX1000i](https://www.amazon.com/dp/B0BZ2CRW8H). 1000 watts of clean p
 
 The previous card in my daily machine was an NVIDIA GeForce RTX 4080 Founders Edition. If you have ever held one, you know the thing: a massive triple-slot slab of metal that weighs like a brick and dominates whatever case it lives in. You build *around* a 4080 FE.
 
-So when the [AI PRO R9700](https://www.bhphotovideo.com/c/product/1927021-REG/gigabyte_gv_r9700ai_top_32gd_radeon_ai_pro_r9700.html) arrived and I pulled it out of the anti-static bag, I genuinely paused. This cannot be right. It is a compact dual-slot card with a single blower fan. No RGB. No backplate theatrics. It looks like something you would find in a Dell workstation, not in a build where you are trying to push the limits of local AI inference.
+So when the [AI PRO R9700](https://www.newegg.com/asrock-creator-r9700-ct-radeon-ai-pro-r9700-32gb-graphics-card/p/N82E16814930143) arrived and I pulled it out of the anti-static bag, I genuinely paused. This cannot be right. It is a compact dual-slot card with a single blower fan. No RGB. No backplate theatrics. It looks like something you would find in a Dell workstation, not in a build where you are trying to push the limits of local AI inference.
 
 <div class="img-pair">
 
@@ -126,7 +126,7 @@ Here is the full parts list with links:
 | --- | --- | --- |
 | CPU | [AMD Ryzen 7 9800X3D](https://www.amazon.com/dp/B0DKFMSMYK) | Originally for HFT — best single-thread AM5, 3D V-Cache |
 | Motherboard | [ASRock X870E Taichi](https://www.amazon.com/dp/B0DFP2Q3TM) | VRM headroom for overclocking, strong I/O, 4x M.2 |
-| GPU | [AMD Radeon AI PRO R9700](https://www.bhphotovideo.com/c/product/1927021-REG/gigabyte_gv_r9700ai_top_32gd_radeon_ai_pro_r9700.html) | 32 GB VRAM, RDNA4, 576 GB/s — the reason ZINC exists |
+| GPU | [AMD Radeon AI PRO R9700](https://www.newegg.com/asrock-creator-r9700-ct-radeon-ai-pro-r9700-32gb-graphics-card/p/N82E16814930143) | 32 GB VRAM, RDNA4, 576 GB/s — the reason ZINC exists |
 | Memory | [G.SKILL Trident Z5 Neo 96 GB DDR5-6000 CL26](https://www.amazon.com/dp/B0F79YGMX1) | Overclocks well, tight timings, real workstation capacity |
 | Case | [ASUS ProArt PA602](https://www.amazon.com/dp/B0CPP3DWLX) | Big airflow, 420 mm rad support, GPU clearance |
 | CPU cooler | [ASUS ProArt LC 420](https://www.amazon.com/dp/B0CXLJ2N5B) | Oversized AIO for sustained loads |
