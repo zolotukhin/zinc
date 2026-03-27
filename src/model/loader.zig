@@ -38,6 +38,8 @@ pub const ModelConfig = struct {
     // MoE fields
     n_experts: u32,
     n_experts_used: u32,
+    // RoPE
+    rope_dim: u32, // number of dimensions to rotate (0 = all)
     // SSM / delta-net fields (hybrid models)
     ssm_d_conv: u32, // conv kernel size (typically 4)
     ssm_d_inner: u32, // inner dimension (typically 4096)
@@ -128,7 +130,11 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         break :blk gf.getU32(key) orelse 0;
     };
 
-    const head_dim = if (n_heads > 0) hidden_dim / n_heads else 0;
+    // head_dim: prefer attention.key_length from GGUF (Qwen3.5 uses 256, not hidden_dim/n_heads=128)
+    const head_dim = blk: {
+        const key = std.fmt.bufPrint(&key_buf, "{s}.attention.key_length", .{prefix}) catch break :blk if (n_heads > 0) hidden_dim / n_heads else @as(u32, 0);
+        break :blk gf.getU32(key) orelse (if (n_heads > 0) hidden_dim / n_heads else 0);
+    };
 
     const intermediate_dim = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
@@ -161,6 +167,9 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         break :blk gf.getU32(key) orelse 0;
     };
 
+    // RoPE dimension count (partial rotation / IMRoPE)
+    const rope_dim = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.dimension_count", .{prefix}) catch "") orelse 0;
+
     // SSM parameters (hybrid models like Qwen3.5)
     const ssm_d_conv = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.conv_kernel", .{prefix}) catch "") orelse 0;
     const ssm_d_inner = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.inner_size", .{prefix}) catch "") orelse 0;
@@ -171,6 +180,19 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
         arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
     });
+    if (rope_dim > 0) {
+        log.info("RoPE: dim={d}/{d} freq_base={d:.0}", .{ rope_dim, head_dim, @as(f64, @floatCast(blk: {
+            const key3 = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
+            const val2 = gf.metadata.get(key3);
+            if (val2) |v| {
+                switch (v) {
+                    .float32 => |fv| break :blk fv,
+                    else => {},
+                }
+            }
+            break :blk @as(f32, 10000.0);
+        })) });
+    }
     if (ssm_d_inner > 0) {
         log.info("SSM: d_conv={d} d_inner={d} d_state={d} dt_rank={d} n_group={d}", .{
             ssm_d_conv, ssm_d_inner, ssm_d_state, ssm_dt_rank, ssm_n_group,
@@ -201,6 +223,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         },
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,
+        .rope_dim = rope_dim,
         .ssm_d_conv = ssm_d_conv,
         .ssm_d_inner = ssm_d_inner,
         .ssm_d_state = ssm_d_state,

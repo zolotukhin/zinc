@@ -844,17 +844,18 @@ pub const InferenceEngine = struct {
                 }
                 self.decode_cmd.computeBarrier();
 
-                // Bug fix #6: Use correct rope_freq_base from model config
+                // Bug fix #5+#6: IMRoPE — only rotate rope_dim of head_dim dimensions
                 const rope_freq = config.rope_freq_base;
+                const rope_dim: u32 = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
                     const q_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size);
-                    try self.elementwise.recordRope(&self.decode_cmd, q_ds, config.head_dim, config.n_heads, state.position, rope_freq);
+                    try self.elementwise.recordRope(&self.decode_cmd, q_ds, config.head_dim, rope_dim, config.n_heads, state.position, rope_freq);
 
                     const k_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size);
-                    try self.elementwise.recordRope(&self.decode_cmd, k_ds, config.head_dim, config.n_kv_heads, state.position, rope_freq);
+                    try self.elementwise.recordRope(&self.decode_cmd, k_ds, config.head_dim, rope_dim, config.n_kv_heads, state.position, rope_freq);
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -884,10 +885,15 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 // Bug fix #2: Attention gating — attn_output = attn_output * sigmoid(gate)
-                // gate_buf already has the gate values extracted above
-                // We need a shader for element-wise: out[i] = attn[i] * sigmoid(gate[i])
-                // Reuse scale_accumulate concept: for now, skip gating (TODO: add sigmoid_mul shader)
-                // This is still a known issue but less critical than the other fixes
+                // gate_buf has the per-head gate values, attn_out_buf has the attention output
+                if (self.elementwise.pipeline_sigmoid_mul) |*pip| {
+                    const gds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(gds, self.attn_out_buf.handle, self.attn_out_buf.size,
+                        self.gate_buf.handle, self.gate_buf.size,
+                        self.attn_out_buf.handle, self.attn_out_buf.size); // in-place
+                    try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, q_dim);
+                    self.decode_cmd.computeBarrier();
+                }
 
                 // Output projection: attn_output.weight
                 const o_tensor = self.findLayerTensor(layer, "attn_output.weight") orelse return error.TensorNotFound;

@@ -27,15 +27,21 @@ const VaddPush = extern struct {
     N: u32,
 };
 
+/// Push constants for sigmoid multiply shader.
+const SigmoidMulPush = extern struct {
+    N: u32,
+};
+
 /// Push constants for scale-accumulate shader.
 const ScaleAccPush = extern struct {
     N: u32,
     scale_bits: u32, // float reinterpreted as u32
 };
 
-/// Push constants for RoPE shader.
+/// Push constants for RoPE shader (with partial rotation / IMRoPE support).
 const RopePush = extern struct {
-    head_dim: u32,
+    stride: u32, // full head dimension (distance between heads in memory)
+    rope_dim: u32, // number of dimensions to rotate (<= stride)
     n_heads: u32,
     position: u32,
     freq_base_bits: u32, // float bits reinterpreted as u32
@@ -46,6 +52,7 @@ pub const ElementwiseDispatch = struct {
     pipeline_rms_norm: ?Pipeline,
     pipeline_swiglu: ?Pipeline,
     pipeline_rope: ?Pipeline,
+    pipeline_sigmoid_mul: ?Pipeline,
     pipeline_vadd: ?Pipeline,
     pipeline_scale_acc: ?Pipeline,
     descriptor_pool: vk.c.VkDescriptorPool,
@@ -100,6 +107,13 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // sigmoid_mul: 2 inputs + 1 output = 3 bindings
+        const sigmoid_path = std.fmt.bufPrint(&path_buf, "{s}/sigmoid_mul.spv", .{shader_dir}) catch unreachable;
+        const pipeline_sigmoid_mul = pipeline_mod.createFromSpirv(instance, sigmoid_path, 3, @sizeOf(SigmoidMulPush), &.{}, allocator) catch |err| blk: {
+            log.warn("sigmoid_mul shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // vadd: 2 inputs + 1 output = 3 bindings
         const vadd_path = std.fmt.bufPrint(&path_buf, "{s}/vadd.spv", .{shader_dir}) catch unreachable;
         const pipeline_vadd = pipeline_mod.createFromSpirv(instance, vadd_path, 3, @sizeOf(VaddPush), &.{}, allocator) catch |err| blk: {
@@ -118,6 +132,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
             .pipeline_rope = pipeline_rope,
+            .pipeline_sigmoid_mul = pipeline_sigmoid_mul,
             .pipeline_vadd = pipeline_vadd,
             .pipeline_scale_acc = pipeline_scale_acc,
             .descriptor_pool = descriptor_pool,
@@ -186,24 +201,41 @@ pub const ElementwiseDispatch = struct {
     /// @param freq_base Base rotary frequency parameter.
     /// @returns `error.ShaderNotLoaded` when the RoPE pipeline is unavailable.
     /// @note The helper dispatches one workgroup per head.
+    /// Record a RoPE dispatch with partial rotation support (IMRoPE).
+    /// @param stride Full head dimension (distance between heads in buffer).
+    /// @param rope_dim Number of dimensions to rotate (rest copied unchanged).
     pub fn recordRope(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
-        head_dim: u32,
+        stride: u32,
+        rope_dim: u32,
         n_heads: u32,
         position: u32,
         freq_base: f32,
     ) !void {
         const pip = if (self.pipeline_rope) |*p| p else return error.ShaderNotLoaded;
         const push = RopePush{
-            .head_dim = head_dim,
+            .stride = stride,
+            .rope_dim = rope_dim,
             .n_heads = n_heads,
             .position = position,
             .freq_base_bits = @bitCast(freq_base),
         };
-        // One workgroup per head
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
+    }
+
+    /// Record a sigmoid multiply dispatch: out = input * sigmoid(gate).
+    pub fn recordSigmoidMul(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+    ) !void {
+        const pip = if (self.pipeline_sigmoid_mul) |*p| p else return error.ShaderNotLoaded;
+        const push = SigmoidMulPush{ .N = n_elements };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
     /// Record a vector add dispatch: c = a + b.
@@ -239,6 +271,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_rms_norm) |*p| p.deinit();
         if (self.pipeline_swiglu) |*p| p.deinit();
         if (self.pipeline_rope) |*p| p.deinit();
+        if (self.pipeline_sigmoid_mul) |*p| p.deinit();
         if (self.pipeline_vadd) |*p| p.deinit();
         if (self.pipeline_scale_acc) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);

@@ -1,5 +1,18 @@
 #version 460
-// Placeholder — Fused sigmoid(x) * y for SSM gating
-// TODO: implement
+// Fused sigmoid gate: out[i] = input[i] * sigmoid(gate[i])
+// Used for attention gating in Qwen3.5 full attention layers
 layout(local_size_x = 64) in;
-void main() {}
+
+layout(set = 0, binding = 0) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1) readonly buffer Gate  { float g[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform PC { uint N; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < N) {
+        float gate_val = 1.0 / (1.0 + exp(-g[i]));
+        y[i] = x[i] * gate_val;
+    }
+}
