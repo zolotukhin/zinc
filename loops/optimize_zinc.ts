@@ -48,12 +48,13 @@ const SEP = "─".repeat(64);
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const PROJECT_ROOT = resolve(import.meta.dir, "..");
-const RESULTS_DIR = resolve(PROJECT_ROOT, ".zinc_optimize");
+const REPO_ROOT = resolve(import.meta.dir, "..");
+let PROJECT_ROOT = REPO_ROOT;
+let RESULTS_DIR = resolve(REPO_ROOT, ".zinc_optimize");
 
 // Load .env
 function loadEnv(): Record<string, string> {
-  const envPath = join(PROJECT_ROOT, ".env");
+  const envPath = join(REPO_ROOT, ".env");
   const vars: Record<string, string> = {};
   if (existsSync(envPath)) {
     const content = require("fs").readFileSync(envPath, "utf8") as string;
@@ -69,7 +70,7 @@ const ENV = loadEnv();
 const ZINC_HOST = process.env.ZINC_HOST ?? ENV.ZINC_HOST ?? "127.0.0.1";
 const ZINC_PORT = Number(process.env.ZINC_PORT ?? ENV.ZINC_PORT ?? "22");
 const ZINC_USER = process.env.ZINC_USER ?? ENV.ZINC_USER ?? "root";
-const REMOTE_ZINC_DIR = "/root/zinc";
+let REMOTE_ZINC_DIR = "/root/zinc";
 const DEFAULT_MODEL = "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf";
 
 const BLOCKED_GIT_OPS = [
@@ -319,16 +320,18 @@ async function remoteRun(
   modelPath: string,
   prompt: string,
 ): Promise<{ exitCode: number; output: string }> {
-  console.log(clr("2", "  Running ZINC on remote node..."));
+  console.log(clr("2", "  Running ZINC on remote node (acquiring GPU lock)..."));
+  const runCmd = `cd ${REMOTE_ZINC_DIR} && RADV_PERFTEST=coop_matrix timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" 2>&1`;
   const { stdout, stderr, exitCode } = await runCommand(
     "ssh",
     [
       "-p", String(ZINC_PORT),
       "-o", "StrictHostKeyChecking=no",
       `${ZINC_USER}@${ZINC_HOST}`,
-      `cd ${REMOTE_ZINC_DIR} && RADV_PERFTEST=coop_matrix timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" 2>&1`,
+      // flock serializes GPU access — only one inference run at a time
+      `flock /tmp/zinc-gpu.lock -c '${runCmd.replace(/'/g, "'\\''")}'`,
     ],
-    { streamOutput: true, timeout: 120_000 },
+    { streamOutput: true, timeout: 180_000 }, // extra time to wait for lock
   );
   return { exitCode, output: stdout + "\n" + stderr };
 }
@@ -890,14 +893,27 @@ async function runCycle(
   state: RunState,
   agent: AgentKind,
   modelPath: string,
+  worktreeName?: string,
 ): Promise<CycleResult> {
   const cycleNum = state.cycles.length + 1;
   const cycleDir = join(runDir, `cycle-${String(cycleNum).padStart(3, "0")}`);
   await mkdir(cycleDir, { recursive: true });
 
   console.log(clr("1;35", "\n" + "═".repeat(64)));
-  console.log(clr("1;35", `  CYCLE ${cycleNum}`));
+  console.log(clr("1;35", `  CYCLE ${cycleNum}${worktreeName ? ` [${worktreeName}]` : ""}`));
   console.log(clr("1;35", "═".repeat(64)));
+
+  // Step 0 (worktree only): Rebase on main to pick up changes from the other loop
+  if (worktreeName) {
+    const rebase = await runCommand(
+      "git", ["rebase", "main"],
+      { cwd: PROJECT_ROOT },
+    ).catch(() => null);
+    if (rebase && rebase.exitCode !== 0) {
+      await runCommand("git", ["rebase", "--abort"], { cwd: PROJECT_ROOT }).catch(() => {});
+      console.log(clr("1;33", "  ⚠ Rebase on main had conflicts — continuing with current state"));
+    }
+  }
 
   // Step 1: rsync + build + run
   try {
@@ -1139,7 +1155,8 @@ async function runCycle(
   }
 
   // Quality gate: block keeping changes that degrade output quality
-  if (keep && verifyResult.garbageOutput && !buildRun.garbageOutput) {
+  // But don't penalize garbage output when baseline was crashing — garbage > crash
+  if (keep && verifyResult.garbageOutput && !buildRun.garbageOutput && buildRun.runExitCode === 0) {
     console.log(clr("1;33", "  ⚠ Agent introduced garbage output — reverting"));
     keep = false;
   }
@@ -1164,6 +1181,30 @@ async function runCycle(
       ["commit", "--allow-empty", "-m", `zinc-loop: ${description}`],
       { cwd: PROJECT_ROOT },
     ).catch(() => {});
+
+    // Cherry-pick to main so the other loop can pick up the fix
+    if (worktreeName) {
+      const commitHash = await runCommand("git", ["rev-parse", "HEAD"], { cwd: PROJECT_ROOT });
+      const hash = commitHash.stdout.trim();
+      if (hash) {
+        const cp = await runCommand(
+          "git", ["cherry-pick", "--no-commit", hash],
+          { cwd: REPO_ROOT },
+        ).catch(() => null);
+        if (cp && cp.exitCode === 0) {
+          await runCommand(
+            "git", ["commit", "-m", `zinc-loop(${worktreeName}): ${description}`],
+            { cwd: REPO_ROOT },
+          ).catch(() => {});
+          console.log(clr("1;36", `  ↗ Cherry-picked to main: ${description.slice(0, 60)}`));
+        } else {
+          // Conflict — abort and skip merge-back, worktree keeps the change
+          await runCommand("git", ["cherry-pick", "--abort"], { cwd: REPO_ROOT }).catch(() => {});
+          await runCommand("git", ["reset", "--hard"], { cwd: REPO_ROOT }).catch(() => {});
+          console.log(clr("1;33", `  ↗ Cherry-pick to main had conflicts — skipped`));
+        }
+      }
+    }
 
     // Update best metrics
     if (verifyResult.tokPerSec != null) {
@@ -1206,6 +1247,7 @@ async function main() {
   let modelPath = DEFAULT_MODEL;
   let dryRun = false;
   let resumeDir: string | undefined;
+  let worktreeName: string | undefined;
 
   for (let i = 0; i < rawArgs.length; i++) {
     switch (rawArgs[i]) {
@@ -1224,6 +1266,9 @@ async function main() {
       case "--resume":
         resumeDir = rawArgs[++i];
         break;
+      case "--worktree":
+        worktreeName = rawArgs[++i];
+        break;
       case "--help":
         console.log(
           [
@@ -1235,20 +1280,56 @@ async function main() {
             "  --model-path <path>      GGUF model path on remote node",
             "  --dry-run                Build+run only, no agent",
             "  --resume <dir>           Resume from a previous run directory",
+            "  --worktree <name>        Run in a git worktree (enables parallel loops)",
           ].join("\n"),
         );
         process.exit(0);
     }
   }
 
-  const runId = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  // ── Worktree setup ───────────────────────────────────────────────
+  if (worktreeName) {
+    const branchName = `zinc-loop-${worktreeName}`;
+    const worktreePath = join(REPO_ROOT, ".worktrees", `zinc-${worktreeName}`);
+
+    // Create branch from current HEAD if it doesn't exist
+    await runCommand("git", ["branch", branchName], { cwd: REPO_ROOT }).catch(() => {});
+
+    // Create worktree if it doesn't exist
+    if (!existsSync(worktreePath)) {
+      await mkdir(join(REPO_ROOT, ".worktrees"), { recursive: true });
+      const wt = await runCommand("git", ["worktree", "add", worktreePath, branchName], { cwd: REPO_ROOT });
+      if (wt.exitCode !== 0) {
+        console.error(clr("31", `\n  ❌ Failed to create worktree: ${wt.stderr}`));
+        process.exit(1);
+      }
+      console.log(clr("1;32", `  Created worktree: ${worktreePath} (branch: ${branchName})`));
+    } else {
+      console.log(clr("1;33", `  Using existing worktree: ${worktreePath}`));
+    }
+
+    // Point all operations at the worktree
+    PROJECT_ROOT = worktreePath;
+    REMOTE_ZINC_DIR = `/root/zinc-${worktreeName}`;
+  }
+
+  // Results always in main repo so all sessions are visible in one place
+  RESULTS_DIR = resolve(REPO_ROOT, ".zinc_optimize");
+
+  const runId = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)
+    + (worktreeName ? `-${worktreeName}` : "");
   const runDir = resumeDir ?? join(RESULTS_DIR, runId);
   await mkdir(runDir, { recursive: true });
 
   console.log(clr("1;35", "═".repeat(64)));
   console.log(clr("1;35", "  ZINC SELF-IMPROVING LOOP"));
   console.log(clr("1;35", "═".repeat(64)));
+  if (worktreeName) {
+    console.log(`  Worktree: ${clr("1", `${worktreeName} (${PROJECT_ROOT})`)}`);
+    console.log(`  Branch:   ${clr("1", `zinc-loop-${worktreeName}`)}`);
+  }
   console.log(`  Remote:   ${clr("1", `${ZINC_USER}@${ZINC_HOST}:${ZINC_PORT}`)}`);
+  console.log(`  RemDir:   ${clr("1", REMOTE_ZINC_DIR)}`);
   console.log(`  Model:    ${clr("1", modelPath)}`);
   console.log(`  Agent:    ${clr("1", agent)}`);
   console.log(`  Cycles:   ${maxCycles === Infinity ? "infinite" : String(maxCycles)}`);
@@ -1331,7 +1412,7 @@ async function main() {
       continue;
     }
 
-    const cycleResult = await runCycle(runDir, state, agent, modelPath);
+    const cycleResult = await runCycle(runDir, state, agent, modelPath, worktreeName);
     state.cycles.push(cycleResult);
 
     // Update failed approaches

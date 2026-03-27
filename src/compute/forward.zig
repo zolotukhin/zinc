@@ -748,8 +748,6 @@ pub const InferenceEngine = struct {
         // 1. CPU: dequantize embedding
         try self.embedToken(token_id);
 
-        // For each layer, we need a submission boundary for MoE routing (CPU readback).
-        // Strategy: record attention block + router → submit → CPU top-k → record FFN → continue
         for (0..config.n_layers) |layer_idx| {
             const layer: u32 = @intCast(layer_idx);
 
@@ -765,6 +763,7 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.transferToComputeBarrier();
 
             }
+
 
             // --- Input RMS norm: hidden_buf → norm_buf ---
             const attn_norm = self.findLayerTensor(layer, "attn_norm.weight") orelse {

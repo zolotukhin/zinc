@@ -17,6 +17,7 @@ bun.lockb
 # Optimization loop state
 .llm_optimize/
 .zinc_optimize/
+.worktrees/
 
 # Environment
 .env

@@ -137,6 +137,11 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     };
 
     const intermediate_dim = blk: {
+        // For MoE models: use expert_feed_forward_length (per-expert intermediate dim)
+        // Falls back to feed_forward_length, then 0
+        const exp_key = std.fmt.bufPrint(&key_buf, "{s}.expert_feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
+        const exp_val = gf.getU32(exp_key);
+        if (exp_val) |v| if (v > 0) break :blk v;
         const key = std.fmt.bufPrint(&key_buf, "{s}.feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
