@@ -114,9 +114,25 @@ flowchart TB
 
 This is one of those choices that sounds excessive until you spend a few weeks moving multi-gigabyte model files around. Large local AI workflows are brutally good at revealing bad storage layouts. If the OS drive is also holding your models, build cache, logs, and random downloaded checkpoints, the machine eventually turns into a junk drawer. Keeping `/base` as the place where heavy assets live means I can wipe, reshuffle, or benchmark aggressively without destabilizing the system volume.
 
-## Why I chose the R9700 instead of pretending 16 GB is enough
+## The GPU that changed everything
 
-The most important decision in the whole setup is still the GPU. I built this node around the AI PRO R9700 because 32 GB of VRAM changes what is practical. It gives enough headroom for serious 35B-class experiments, larger KV cache budgets, and a much more honest development target for the serving work ZINC is trying to do.
+The previous card in my daily machine was an NVIDIA GeForce RTX 4080 Founders Edition. If you have ever held a 4080 FE, you know the thing: it is a massive slab of metal and fans, triple-slot, weighs like a brick, and dominates whatever case it lives in. You build around it.
+
+When the AI PRO R9700 arrived, I pulled it out of the anti-static bag and genuinely thought they had shipped the wrong card. It is a compact dual-slot blower design. Workstation-plain. No RGB, no attitude. It practically disappears inside the ProArt PA602.
+
+![The R9700 out of the box — ASRock Creator edition, blower cooler, surprisingly compact](/blog/gpu_2.jpg)
+
+![Back side of the R9700 — "AMD RADEON AI PRO" branding, single blower fan, workstation-plain](/blog/gpu_3.jpg)
+
+I held it in one hand and thought: this is the card with 32 GB of VRAM and 576 GB/s of memory bandwidth. This small thing is supposed to run 35-billion-parameter models. After years of GPUs that try to look like they belong in a spaceship, there is something satisfying about a card that just looks like a tool.
+
+![The R9700 sitting on the desk next to cabling — for scale, this is a dual-slot card](/blog/gpu_1.jpg)
+
+It slots into the X870E Taichi and looks almost lost. The ProArt case was designed for cards twice this size. That extra space turns out to be a feature: the blower has room to breathe, and the whole thermal situation is dramatically calmer than any build I have done with triple-slot gaming cards.
+
+![R9700 installed in the case — almost lost inside the ProArt PA602, which is exactly what you want](/blog/gpu_4.jpg)
+
+I built this node around the AI PRO R9700 because 32 GB of VRAM changes what is practical. It gives enough headroom for serious 35B-class experiments, larger KV cache budgets, and a much more honest development target for the serving work ZINC is trying to do.
 
 That does not mean everyone should start here. If your real goal is to run smaller local models cheaply, a 16 GB RDNA4 card is a much easier answer. But ZINC is not aimed at toy workloads. The project is trying to make AMD consumer and workstation-class RDNA3 and RDNA4 hardware viable for real local inference, including serving and larger-context workloads. For that, 32 GB is not luxury. It is room to work.
 
