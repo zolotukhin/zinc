@@ -96,6 +96,7 @@ export type BuildRunResult = {
   tokPerSec: number | null;
   tokensGenerated: number;
   garbageOutput: boolean;
+  coherentText: boolean; // true if decoded text contains real words
   bandwidthUtil: number | null; // % of theoretical bandwidth
   effectiveBW: number | null; // GB/s
   error: string | null;
@@ -137,7 +138,36 @@ export function isGarbageOutput(output: string): boolean {
   const counts = new Map<string, number>();
   for (const t of tokens) counts.set(t, (counts.get(t) ?? 0) + 1);
   const maxCount = Math.max(...counts.values());
-  return maxCount / tokens.length > 0.8;
+  if (maxCount / tokens.length > 0.8) return true;
+  // Check for short repeating patterns (e.g. ABCABC...)
+  if (tokens.length >= 12) {
+    for (const plen of [2, 3, 4, 5, 6]) {
+      const pattern = tokens.slice(2, 2 + plen).join(",");
+      let repeats = 0;
+      for (let i = 2; i + plen <= tokens.length; i += plen) {
+        if (tokens.slice(i, i + plen).join(",") === pattern) repeats++;
+      }
+      if (repeats >= 3 && (repeats * plen) / (tokens.length - 2) > 0.7) return true;
+    }
+  }
+  return false;
+}
+
+/** Check if decoded output text looks like coherent language (not random BPE subwords). */
+export function isCoherentText(output: string): boolean {
+  const m = output.match(/Output text:\s*(.+)/i);
+  if (!m) return false; // no text output, can't tell
+  const text = m[1].trim();
+  if (text.length < 10) return false;
+  // Check for common English words (at least 3 should appear in the first 200 chars)
+  const sample = text.slice(0, 200).toLowerCase();
+  const commonWords = ["the", "is", "of", "and", "to", "in", "a", "that", "it", "for", "was", "on", "are", "as", "with", "his", "they", "be", "at", "one", "have", "this", "from", "or", "an", "but", "not", "what", "all", "were", "we", "when", "your", "can", "said", "there", "each", "which", "she", "do", "how", "if", "will", "up", "about", "out", "many", "then", "them", "would", "like", "so", "these", "her", "think", "paris", "france", "capital", "city"];
+  let found = 0;
+  for (const w of commonWords) {
+    // Match as whole word or surrounded by non-alpha
+    if (new RegExp(`(^|[^a-z])${w}([^a-z]|$)`).test(sample)) found++;
+  }
+  return found >= 3;
 }
 
 /** Parse bandwidth utilization percentage from ZINC output. */
@@ -314,6 +344,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
       tokPerSec: null,
       tokensGenerated: 0,
       garbageOutput: false,
+      coherentText: false,
       bandwidthUtil: null,
       effectiveBW: null,
       error: "Build failed",
@@ -325,6 +356,7 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
   const tps = parseTokPerSec(run.output);
   const tokensGenerated = parseTokensGenerated(run.output);
   const garbage = isGarbageOutput(run.output);
+  const coherent = isCoherentText(run.output);
   const bwUtil = parseBandwidthUtil(run.output);
   const effBW = parseEffectiveBW(run.output);
 
@@ -336,7 +368,8 @@ async function buildAndRun(modelPath: string): Promise<BuildRunResult> {
     phase: "fix",
     tokPerSec: tps,
     tokensGenerated,
-    garbageOutput: garbage,
+    garbageOutput: garbage || (!coherent && tokensGenerated > 10),
+    coherentText: coherent,
     bandwidthUtil: bwUtil,
     effectiveBW: effBW,
     error: run.exitCode !== 0 ? `Runtime exit code ${run.exitCode}` : null,
@@ -628,15 +661,32 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
       ? ` | ${lastResult.effectiveBW?.toFixed(0) ?? "?"} GB/s (${lastResult.bandwidthUtil.toFixed(0)}% of 576 GB/s)`
       : "";
     diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s (DECODE), ${lastResult.tokensGenerated} tokens${bwInfo}`);
-    if (lastResult.garbageOutput) {
+    if (lastResult.garbageOutput && !lastResult.coherentText) {
       diagnosis.push("");
-      diagnosis.push("⚠ WARNING: Output tokens are GARBAGE (same token repeated). The model is not producing");
-      diagnosis.push("  coherent output. This likely means the forward pass computation is incorrect —");
-      diagnosis.push("  check buffer bindings, push constant dimensions, and shader math.");
+      diagnosis.push("⚠ CRITICAL: Output is GARBAGE — decoded text contains no recognizable words.");
+      diagnosis.push("  The forward pass is executing but producing incorrect values.");
+      diagnosis.push("  Common causes for this Qwen3.5 hybrid (attention+SSM+MoE) model:");
+      diagnosis.push("  - Q/K/V split from fused attn_q.weight is wrong (Q includes gate, needs proper stride extraction)");
+      diagnosis.push("  - RoPE freq_base or section dimensions incorrect");
+      diagnosis.push("  - Flash attention shader bugs (scaling, causal mask, GQA head mapping)");
+      diagnosis.push("  - SSM delta-net state dimensions mismatched (head_k_dim vs head_v_dim)");
+      diagnosis.push("  - MoE expert weight offset calculation wrong for stacked tensors");
+      diagnosis.push("  - Missing shared expert path (ffn_*_shexp tensors not dispatched)");
+      diagnosis.push("  - Post-attention norm applied to wrong buffer");
+      diagnosis.push("  FIXING OUTPUT CORRECTNESS is THE #1 PRIORITY. Do NOT optimize tok/s until output is coherent.");
+      diagnosis.push("  Compare against llama.cpp's qwen35moe.cpp for the correct computation flow.");
+    } else if (lastResult.garbageOutput) {
+      diagnosis.push("");
+      diagnosis.push("⚠ WARNING: Output tokens are repetitive but text partially recognizable.");
       diagnosis.push("  Fixing output quality is HIGHER PRIORITY than optimizing tok/s.");
     }
     diagnosis.push("");
-    diagnosis.push("ZINC is generating tokens. Optimize for DECODE throughput (not prefill).");
+    if (lastResult.coherentText) {
+      diagnosis.push("✅ Output is COHERENT — decoded text contains recognizable language.");
+      diagnosis.push("ZINC is generating meaningful tokens. Optimize for DECODE throughput (not prefill).");
+    } else {
+      diagnosis.push("ZINC is generating tokens but output is NOT coherent. Fix correctness first.");
+    }
     if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 70) {
       diagnosis.push(`Memory bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — well below the 90%+ target.`);
       diagnosis.push("This means the GPU is stalling on something other than raw VRAM reads.");
@@ -817,7 +867,9 @@ async function runCycle(
   } else if (buildRun.runExitCode !== 0 && buildRun.runExitCode !== null) {
     console.log(clr("1;31", `  ❌ RUNTIME CRASH (exit ${buildRun.runExitCode})`));
   } else if (buildRun.tokPerSec != null && buildRun.tokPerSec > 0) {
-    const qualityTag = buildRun.garbageOutput ? clr("1;33", " [GARBAGE OUTPUT]") : "";
+    const qualityTag = buildRun.garbageOutput
+      ? (buildRun.coherentText ? clr("1;33", " [REPETITIVE]") : clr("1;31", " [GARBAGE - NOT COHERENT]"))
+      : (buildRun.coherentText ? clr("1;32", " [COHERENT ✓]") : "");
     const bwTag = buildRun.bandwidthUtil != null ? `, ${buildRun.effectiveBW?.toFixed(0) ?? "?"} GB/s (${buildRun.bandwidthUtil.toFixed(0)}% BW)` : "";
     console.log(clr("1;32", `  ✅ RUNNING — ${buildRun.tokPerSec.toFixed(1)} tok/s, ${buildRun.tokensGenerated} tokens${bwTag}`) + qualityTag);
   } else {
@@ -894,6 +946,7 @@ async function runCycle(
       tokPerSec: null,
       tokensGenerated: 0,
       garbageOutput: false,
+      coherentText: false,
       bandwidthUtil: null,
       effectiveBW: null,
       error: String(e),
@@ -985,9 +1038,13 @@ async function runCycle(
     }
   }
 
-  // Quality gate: block keeping changes that produce garbage output
+  // Quality gate: block keeping changes that degrade output quality
   if (keep && verifyResult.garbageOutput && !buildRun.garbageOutput) {
-    console.log(clr("1;33", "  ⚠ Agent introduced garbage output (repeated tokens) — reverting"));
+    console.log(clr("1;33", "  ⚠ Agent introduced garbage output — reverting"));
+    keep = false;
+  }
+  if (keep && buildRun.coherentText && !verifyResult.coherentText) {
+    console.log(clr("1;33", "  ⚠ Agent broke text coherence — reverting"));
     keep = false;
   }
 

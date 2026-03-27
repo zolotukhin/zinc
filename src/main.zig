@@ -281,11 +281,25 @@ pub fn main() !void {
         const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator);
         defer allocator.free(output_tokens);
 
-        // Output token IDs (detokenization requires external tokenizer)
+        // Output token IDs
         log.info("Output tokens ({d}): {any}", .{
             output_tokens.len,
             output_tokens[0..@min(output_tokens.len, 20)],
         });
+
+        // Decode tokens to text using the vocabulary
+        {
+            var text_buf: std.ArrayList(u8) = .{};
+            defer text_buf.deinit(allocator);
+            for (output_tokens) |tid| {
+                if (tid < tokenizer.vocab.len) {
+                    try text_buf.appendSlice(allocator, tokenizer.vocab[tid]);
+                } else {
+                    try text_buf.appendSlice(allocator, "<?>");
+                }
+            }
+            log.info("Output text: {s}", .{text_buf.items});
+        }
     } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
         // TODO: start HTTP server (Phase 4)

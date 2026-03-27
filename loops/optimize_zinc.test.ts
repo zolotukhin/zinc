@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTokPerSec, parseTokensGenerated, detectPhase, isGarbageOutput } from "./optimize_zinc";
+import { parseTokPerSec, parseTokensGenerated, detectPhase, isGarbageOutput, isCoherentText } from "./optimize_zinc";
 import type { BuildRunResult, Phase } from "./optimize_zinc";
 
 describe("parseTokPerSec", () => {
@@ -82,6 +82,36 @@ describe("isGarbageOutput", () => {
   test("handles short token lists", () => {
     expect(isGarbageOutput("info(zinc): Output tokens (2): { 100, 100 }")).toBe(false);
   });
+
+  test("detects short repeating patterns", () => {
+    expect(isGarbageOutput(
+      "info(zinc): Output tokens (20): { 7471, 6852, 4547, 7398, 514, 4402, 536, 4547, 7398, 514, 4402, 536, 4547, 7398, 514, 4402, 536, 4547, 7398, 514 }"
+    )).toBe(true);
+  });
+});
+
+describe("isCoherentText", () => {
+  test("detects garbage BPE subwords", () => {
+    expect(isCoherentText(
+      "info(zinc): Output text: endregionoeseriescpyĠintandidieseriescpyĠintandid"
+    )).toBe(false);
+  });
+
+  test("detects coherent English", () => {
+    expect(isCoherentText(
+      "info(zinc): Output text: The capital of France is Paris. It is the largest city in the country and one of the most visited cities in the world."
+    )).toBe(true);
+  });
+
+  test("detects reasoning output", () => {
+    expect(isCoherentText(
+      "info(zinc): Output text: <think>The user is asking about the capital of France. The answer is Paris, which is the capital and largest city of France.</think>Paris."
+    )).toBe(true);
+  });
+
+  test("returns false for no text line", () => {
+    expect(isCoherentText("info(forward): Generated 256 tokens")).toBe(false);
+  });
 });
 
 describe("detectPhase", () => {
@@ -94,6 +124,9 @@ describe("detectPhase", () => {
     tokPerSec: null,
     tokensGenerated: 0,
     garbageOutput: false,
+    coherentText: false,
+    bandwidthUtil: null,
+    effectiveBW: null,
     error: null,
   };
 
