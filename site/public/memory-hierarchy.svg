@@ -7,14 +7,14 @@
   <rect x="200" y="65" width="300" height="70" rx="8" fill="#1a1210" stroke="#e8722a" stroke-width="2"/>
   <text x="350" y="90" text-anchor="middle" fill="#e8722a" font-size="16" font-weight="700">VGPRs</text>
   <text x="350" y="110" text-anchor="middle" fill="#c0b0a0" font-size="13">192 KB / SIMD — 0 cycles</text>
-  <text x="350" y="126" text-anchor="middle" fill="#5a4a3a" font-size="11">256 regs × 32b × 32 or 64 lanes</text>
+  <text x="350" y="126" text-anchor="middle" fill="#9a8a7a" font-size="11">256 regs × 32b × 32 or 64 lanes</text>
 
   <!-- Arrow -->
   <text x="350" y="152" text-anchor="middle" fill="#8a7060" font-size="16">▼</text>
 
   <!-- SGPRs -->
-  <rect x="160" y="162" width="380" height="60" rx="8" fill="#1a1210" stroke="#d4854a" stroke-width="1.5"/>
-  <text x="350" y="187" text-anchor="middle" fill="#d4854a" font-size="15" font-weight="700">SGPRs — 32 KB / CU</text>
+  <rect x="160" y="162" width="380" height="60" rx="8" fill="#1a1210" stroke="#e8a060" stroke-width="1.5"/>
+  <text x="350" y="187" text-anchor="middle" fill="#e8a060" font-size="15" font-weight="700">SGPRs — 32 KB / CU</text>
   <text x="350" y="207" text-anchor="middle" fill="#c0b0a0" font-size="12">~2 cycles — Uniform values, descriptors, scales</text>
 
   <text x="350" y="240" text-anchor="middle" fill="#8a7060" font-size="16">▼</text>
@@ -30,31 +30,31 @@
   <rect x="80" y="338" width="540" height="70" rx="8" fill="#1a1210" stroke="#d08050" stroke-width="1.5"/>
   <text x="350" y="363" text-anchor="middle" fill="#d08050" font-size="15" font-weight="700">L0 Vector Cache — 32 KB / CU</text>
   <text x="350" y="383" text-anchor="middle" fill="#c0b0a0" font-size="12">~30 cycles — 64B lines — 64 B/clk — Per-CU private</text>
-  <text x="350" y="399" text-anchor="middle" fill="#5a4a3a" font-size="11">Also: L0 Scalar 16 KB + L0 Instruction 32 KB</text>
+  <text x="350" y="399" text-anchor="middle" fill="#9a8a7a" font-size="11">Also: L0 Scalar 16 KB + L0 Instruction 32 KB</text>
 
   <text x="350" y="426" text-anchor="middle" fill="#8a7060" font-size="16">▼</text>
 
   <!-- L2 -->
-  <rect x="40" y="436" width="620" height="60" rx="8" fill="#1a1210" stroke="#8a5030" stroke-width="1.5"/>
-  <text x="350" y="461" text-anchor="middle" fill="#8a5030" font-size="15" font-weight="700">L2 Cache — 8 MB (Navi 48)</text>
+  <rect x="40" y="436" width="620" height="60" rx="8" fill="#1a1210" stroke="#c08060" stroke-width="1.5"/>
+  <text x="350" y="461" text-anchor="middle" fill="#c08060" font-size="15" font-weight="700">L2 Cache — 8 MB (Navi 48)</text>
   <text x="350" y="481" text-anchor="middle" fill="#c0b0a0" font-size="12">~100 cycles — 128B lines — 2× BW vs RDNA3 — Shared per Shader Engine</text>
 
   <text x="350" y="514" text-anchor="middle" fill="#8a7060" font-size="16">▼</text>
 
   <!-- Infinity Cache -->
-  <rect x="20" y="524" width="660" height="60" rx="8" fill="#1a1210" stroke="#6a4020" stroke-width="1.5"/>
-  <text x="350" y="549" text-anchor="middle" fill="#6a4020" font-size="15" font-weight="700">Infinity Cache — 64 MB (Navi 48)</text>
+  <rect x="20" y="524" width="660" height="60" rx="8" fill="#1a1210" stroke="#b08050" stroke-width="1.5"/>
+  <text x="350" y="549" text-anchor="middle" fill="#b08050" font-size="15" font-weight="700">Infinity Cache — 64 MB (Navi 48)</text>
   <text x="350" y="569" text-anchor="middle" fill="#c0b0a0" font-size="12">~150 cycles — Victim cache between L2 and VRAM — Amplifies BW</text>
 
   <text x="350" y="602" text-anchor="middle" fill="#8a7060" font-size="16">▼</text>
 
   <!-- VRAM -->
-  <rect x="10" y="612" width="680" height="70" rx="8" fill="#1a1210" stroke="#4a3020" stroke-width="1.5"/>
-  <text x="350" y="637" text-anchor="middle" fill="#4a3020" font-size="15" font-weight="700">GDDR6 VRAM — 16–32 GB — 256-bit</text>
+  <rect x="10" y="612" width="680" height="70" rx="8" fill="#1a1210" stroke="#7a6050" stroke-width="1.5"/>
+  <text x="350" y="637" text-anchor="middle" fill="#7a6050" font-size="15" font-weight="700">GDDR6 VRAM — 16–32 GB — 256-bit</text>
   <text x="350" y="657" text-anchor="middle" fill="#c0b0a0" font-size="12">~300+ cycles — 576–640 GB/s — 67–93% achievable on large DMMV</text>
-  <text x="350" y="673" text-anchor="middle" fill="#5a4a3a" font-size="11">Weights + KV cache — PCIe 5.0 x16 (64 GB/s) from CPU</text>
+  <text x="350" y="673" text-anchor="middle" fill="#9a8a7a" font-size="11">Weights + KV cache — PCIe 5.0 x16 (64 GB/s) from CPU</text>
 
   <!-- Legend -->
-  <text x="350" y="715" text-anchor="middle" fill="#5a4a3a" font-size="12">▲ Faster, smaller — closer to compute</text>
-  <text x="350" y="735" text-anchor="middle" fill="#5a4a3a" font-size="12">▼ Slower, larger — farther from compute</text>
+  <text x="350" y="715" text-anchor="middle" fill="#9a8a7a" font-size="12">▲ Faster, smaller — closer to compute</text>
+  <text x="350" y="735" text-anchor="middle" fill="#9a8a7a" font-size="12">▼ Slower, larger — farther from compute</text>
 </svg>
