@@ -909,9 +909,7 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
             } else {
                 // === SSM / LINEAR ATTENTION LAYER (CPU-side delta-net) ===
-                // SSM disabled — produces wrong hidden state values that corrupt all downstream layers
-                // TODO: fix SSM delta-net computation (state update indexing, conv1d, gated norm)
-                _ = layer_idx;
+                try self.runSsmLayerCpu(state, layer, layer_idx);
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
