@@ -351,13 +351,15 @@ pub const InferenceEngine = struct {
 
         // Allocate intermediate buffers
         const hidden_size = @as(vk.c.VkDeviceSize, config.hidden_dim) * @sizeOf(f32);
-        var hidden_buf = try Buffer.initDeviceLocal(instance, hidden_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        // All intermediate buffers need TRANSFER_SRC|DST for debug readback and embedding upload
+        const buf_usage = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        var hidden_buf = try Buffer.initDeviceLocal(instance, hidden_size, buf_usage);
         errdefer hidden_buf.deinit();
 
-        var residual_buf = try Buffer.initDeviceLocal(instance, hidden_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        var residual_buf = try Buffer.initDeviceLocal(instance, hidden_size, buf_usage);
         errdefer residual_buf.deinit();
 
-        var norm_buf = try Buffer.initDeviceLocal(instance, hidden_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        var norm_buf = try Buffer.initDeviceLocal(instance, hidden_size, buf_usage);
         errdefer norm_buf.deinit();
 
         const logits_size = @as(vk.c.VkDeviceSize, config.vocab_size) * @sizeOf(f32);
@@ -907,7 +909,9 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
             } else {
                 // === SSM / LINEAR ATTENTION LAYER (CPU-side delta-net) ===
-                try self.runSsmLayerCpu(state, layer, layer_idx);
+                // SSM disabled — produces wrong hidden state values that corrupt all downstream layers
+                // TODO: fix SSM delta-net computation (state update indexing, conv1d, gated norm)
+                _ = layer_idx;
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
