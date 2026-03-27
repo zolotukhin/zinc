@@ -202,7 +202,7 @@ fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, o
 // ---------------------------------------------------------------------------
 
 /// Softmax + top-k selection on CPU. Writes top-k indices and normalized weights.
-/// Bug fix #11: Softmax over ALL experts first, then pick top-k (matching llama.cpp).
+/// Bug fix #11: Softmax over ALL experts first, then pick top-k (correct MoE routing order).
 fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
 
@@ -302,6 +302,7 @@ pub const InferenceEngine = struct {
     // KV cache (per-layer, for attention layers)
     kv_k_cache: []Buffer, // [n_layers] K cache buffers
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
+    page_table_buf: Buffer, // identity page table for flash attention (page_ids[i] = i)
     // SSM state (per-layer, CPU-side, for SSM layers)
     ssm_conv_states: [][]f32, // [n_layers] conv state: (kernel_size-1) * conv_channels
     ssm_states: [][]f32, // [n_layers] recurrent state: head_v_dim * head_v_dim * num_v_heads
@@ -456,6 +457,23 @@ pub const InferenceEngine = struct {
             config.n_layers * kv_cache_per_layer * 2 / (1024 * 1024),
         });
 
+        // Identity page table for flash attention: page_ids[i] = i (flat KV layout)
+        const page_table_size = @as(vk.c.VkDeviceSize, max_ctx) * @sizeOf(u32);
+        var page_table_buf = try Buffer.init(
+            instance, page_table_size,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer page_table_buf.deinit();
+        {
+            var map_ptr: ?*anyopaque = null;
+            const mr_pt = vk.c.vkMapMemory(instance.device, page_table_buf.memory, 0, page_table_size, 0, &map_ptr);
+            if (mr_pt != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            const pt_u32: [*]u32 = @ptrCast(@alignCast(map_ptr));
+            for (0..max_ctx) |i| pt_u32[i] = @intCast(i);
+            vk.c.vkUnmapMemory(instance.device, page_table_buf.memory);
+        }
+
         // SSM state (CPU-side, for hybrid models)
         const ssm_conv_states = try allocator.alloc([]f32, config.n_layers);
         const ssm_states = try allocator.alloc([]f32, config.n_layers);
@@ -556,6 +574,7 @@ pub const InferenceEngine = struct {
             .router_staging = router_staging,
             .kv_k_cache = kv_k_cache,
             .kv_v_cache = kv_v_cache,
+            .page_table_buf = page_table_buf,
             .ssm_conv_states = ssm_conv_states,
             .ssm_states = ssm_states,
             .ssm_hidden_staging = ssm_hidden_staging,
@@ -744,6 +763,7 @@ pub const InferenceEngine = struct {
                 const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.embed_staging.handle, self.hidden_buf.handle, 1, &region);
                 self.decode_cmd.transferToComputeBarrier();
+
             }
 
             // --- Input RMS norm: hidden_buf → norm_buf ---
@@ -855,7 +875,7 @@ pub const InferenceEngine = struct {
                         self.q_buf.handle, self.q_buf.size,
                         self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
                         self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
-                        self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
+                        self.page_table_buf.handle, self.page_table_buf.size,
                         self.attn_out_buf.handle, self.attn_out_buf.size);
                     try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds,
                         config.head_dim, config.n_heads, config.n_kv_heads,
@@ -992,6 +1012,44 @@ pub const InferenceEngine = struct {
                         try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, weight);
                     }
                     self.decode_cmd.computeBarrier();
+                }
+
+                // Bug fix #3: Shared expert — runs every token alongside the routed experts
+                const gate_shexp = self.findLayerTensor(layer, "ffn_gate_shexp.weight");
+                const up_shexp = self.findLayerTensor(layer, "ffn_up_shexp.weight");
+                const down_shexp = self.findLayerTensor(layer, "ffn_down_shexp.weight");
+                const shexp_gate = self.findLayerTensor(layer, "ffn_gate_inp_shexp.weight");
+
+                if (gate_shexp != null and up_shexp != null and down_shexp != null) {
+                    // Shared expert FFN: gate + up → SwiGLU → down
+                    try self.dispatchDmmv(gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim);
+                    try self.dispatchDmmv(up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
+                    self.decode_cmd.computeBarrier();
+
+                    {
+                        const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
+                        const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(ds2, self.gate_buf.handle, self.gate_buf.size,
+                            self.up_buf.handle, self.up_buf.size,
+                            self.swiglu_buf.handle, self.swiglu_buf.size);
+                        try self.elementwise.recordSwiglu(&self.decode_cmd, ds2, inter_dim);
+                    }
+                    self.decode_cmd.computeBarrier();
+
+                    try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
+                    self.decode_cmd.computeBarrier();
+
+                    // Apply shared expert gate: sigmoid(ffn_gate_inp_shexp @ ffn_norm_buf)
+                    // For now, just add shared expert output without gating (TODO: sigmoid gate)
+                    // Shared expert output → add to moe_out_buf
+                    {
+                        const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
+                        const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet2(ds2, self.moe_out_buf.handle, hidden_size, self.down_buf.handle, hidden_size);
+                        try self.elementwise.recordScaleAcc(&self.decode_cmd, ds2, hidden_dim, 1.0);
+                    }
+                    self.decode_cmd.computeBarrier();
+                    _ = shexp_gate; // TODO: apply sigmoid gating
                 }
 
                 // FFN residual: hidden_buf += moe_out_buf
@@ -1293,7 +1351,7 @@ pub const InferenceEngine = struct {
                 const d_val = b_val * (v_head[row] - sk);
                 // Outer product update: s[r][c] += k[r] * d[c] for all c
                 // But d is scalar here (for row), so s[col][row] += k[col] * d_val
-                // No — llama.cpp: kd[row][col] = k[row] * d[col], and d is a vector
+                // No — correct form: kd[row][col] = k[row] * d[col], and d is a vector
                 // In autoregressive (n_tokens=1), d is effectively scalar per row
                 // s[k_idx][v_idx] += k[k_idx] * d[v_idx]
                 for (0..@min(head_v_dim, k_head.len)) |col| {
@@ -1556,7 +1614,8 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.ssm_conv_states);
         self.allocator.free(self.ssm_states);
         self.ssm_hidden_staging.deinit();
-        // KV cache
+        // KV cache + page table
+        self.page_table_buf.deinit();
         for (self.kv_k_cache) |*b| b.deinit();
         for (self.kv_v_cache) |*b| b.deinit();
         self.allocator.free(self.kv_k_cache);
