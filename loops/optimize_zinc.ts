@@ -622,6 +622,17 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
           .join("\n")
       : "  (none yet)";
 
+  // Include the last cycle's self-analysis so the agent can build on its own reasoning
+  const lastCycle = cycles.length > 0 ? cycles[cycles.length - 1] : null;
+  const lastAnalysisBlock = lastCycle?.selfAnalysis
+    ? `## Last Cycle's Analysis (cycle #${lastCycle.cycle}, ${lastCycle.kept ? "KEPT" : "REVERTED"})\n${lastCycle.selfAnalysis}\n\nNext ideas from last cycle: ${lastCycle.nextIdeas.join(", ") || "(none)"}`
+    : "";
+
+  // Include accumulated ideas from all cycles
+  const ideasBlock = state.ideas.length > 0
+    ? state.ideas.slice(-15).map((idea, i) => `  ${i + 1}. ${trunc(idea, 120)}`).join("\n")
+    : "  (none yet)";
+
   const failedBlock =
     failedApproaches.length > 0
       ? failedApproaches
@@ -759,6 +770,11 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "",
     "## FAILED APPROACHES — DO NOT REPEAT",
     failedBlock,
+    "",
+    lastAnalysisBlock,
+    "",
+    "## Accumulated Ideas (from all previous cycles)",
+    ideasBlock,
     "",
     "## Rules",
     "1. Make ONE focused change. Do not try multiple things.",
@@ -994,6 +1010,27 @@ async function runCycle(
         keep = true;
         console.log(clr("1;33", `  ↔ No regression (${verifyResult.tokensGenerated} tokens). Keeping.`));
       }
+    } else if (
+      verifyResult.buildExitCode === 0 &&
+      buildRun.buildExitCode === 0 &&
+      buildRun.runExitCode !== 0 &&
+      verifyResult.runExitCode !== 0 &&
+      verifyResult.tokensGenerated > buildRun.tokensGenerated
+    ) {
+      // Both crash at runtime but fix produces more tokens — forward progress
+      keep = true;
+      console.log(clr("1;32", `  📈 Still crashing but more tokens: ${buildRun.tokensGenerated} → ${verifyResult.tokensGenerated}`));
+    } else if (
+      verifyResult.buildExitCode === 0 &&
+      buildRun.buildExitCode === 0 &&
+      buildRun.runExitCode !== 0 &&
+      verifyResult.runExitCode !== 0 &&
+      verifyResult.tokPerSec != null &&
+      buildRun.tokPerSec == null
+    ) {
+      // Baseline had no metrics, fix now reports tok/s — forward progress
+      keep = true;
+      console.log(clr("1;32", `  📈 Now reporting ${verifyResult.tokPerSec.toFixed(1)} tok/s (was: no metrics)`));
     } else if (verifyResult.buildExitCode !== 0 && buildRun.buildExitCode !== 0) {
       // Both fail — check if error changed (might be progress)
       const beforeErrors = (buildRun.buildOutput.match(/error:/g) ?? []).length;
