@@ -142,8 +142,12 @@ describe("detectPhase", () => {
     expect(detectPhase({ ...base, error: "segfault" })).toBe("fix");
   });
 
-  test("optimize when running with tok/s", () => {
-    expect(detectPhase({ ...base, tokPerSec: 110.5 })).toBe("optimize");
+  test("optimize when running with tok/s and coherent text", () => {
+    expect(detectPhase({ ...base, tokPerSec: 110.5, coherentText: true })).toBe("optimize");
+  });
+
+  test("fix when running with tok/s but NOT coherent", () => {
+    expect(detectPhase({ ...base, tokPerSec: 110.5, coherentText: false })).toBe("fix");
   });
 
   test("fix when running but no tok/s yet", () => {

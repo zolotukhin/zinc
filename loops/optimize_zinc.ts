@@ -187,6 +187,8 @@ export function detectPhase(result: BuildRunResult): Phase {
   if (result.buildExitCode !== 0) return "fix";
   if (result.runExitCode !== 0) return "fix";
   if (result.error) return "fix";
+  // Stay in fix phase if generating tokens but output is garbage/incoherent
+  if (result.tokPerSec != null && result.tokPerSec > 0 && !result.coherentText) return "fix";
   if (result.tokPerSec != null && result.tokPerSec > 0) return "optimize";
   return "fix";
 }
@@ -718,11 +720,56 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   }
 
   diagnosis.push("");
+  diagnosis.push("## Forward Pass Architecture (Qwen3.5-35B-A3B = hybrid attention+SSM+MoE)");
+  diagnosis.push("- 40 layers: every 4th (3,7,11,...,39) is full attention, rest are SSM/delta-net");
+  diagnosis.push("- Full attention layers: separate attn_q/k/v + Q/K norm + IMRoPE (64/256 dims) + flash attention + sigmoid gate + output proj");
+  diagnosis.push("- SSM layers: GPU DMMV for projections (wqkv, attn_gate, ssm_alpha, ssm_beta) → CPU conv1d + delta-net state → GPU ssm_out");
+  diagnosis.push("- MoE FFN (all layers): router → softmax → top-8 experts → gate/up/SwiGLU/down → weighted accumulate + shared expert");
+  diagnosis.push("- head_dim=256 (from attention.key_length), hidden_dim=2048, n_heads=16, n_kv_heads=2");
+  diagnosis.push("- rope_dim=64, rope_freq_base=10000000.0 (10M)");
+  diagnosis.push("");
+  diagnosis.push("## What's ALREADY FIXED (do not re-investigate)");
+  diagnosis.push("- ✅ Tokenizer: GPT-2 byte-to-unicode mapping, tokens match llama.cpp exactly");
+  diagnosis.push("- ✅ Q8_0/F16 DMMV dispatch: workgroup count (M+1)/2 not (M+63)/64");
+  diagnosis.push("- ✅ Flash attention page table: identity page_table_buf with page_size=1");
+  diagnosis.push("- ✅ Q+gate extraction: block-interleaved per head [Q_head, gate_head] (NOT element-interleaved)");
+  diagnosis.push("- ✅ Q/K per-head RMS norm using attn_q_norm/attn_k_norm weights");
+  diagnosis.push("- ✅ Attention gating: sigmoid_mul shader (attn_output * sigmoid(gate))");
+  diagnosis.push("- ✅ IMRoPE: rope_fused.comp with stride + rope_dim, only rotates 64/256 dims");
+  diagnosis.push("- ✅ head_dim from GGUF attention.key_length (256, not hidden_dim/n_heads=128)");
+  diagnosis.push("- ✅ rope_freq_base from GGUF (10M)");
+  diagnosis.push("- ✅ Shared expert: ffn_gate_shexp + ffn_up_shexp + ffn_down_shexp dispatched");
+  diagnosis.push("- ✅ MoE softmax over all experts before top-k selection");
+  diagnosis.push("- ✅ Conv1d kernel index: [ch * d_conv + ki] matching GGUF layout");
+  diagnosis.push("- ✅ Per-head L2 norm in SSM Q/K");
+  diagnosis.push("- ✅ Q scaling 1/sqrt(d_state) in delta-net");
+  diagnosis.push("- ✅ Prefill runs full transformer for each prompt token");
+  diagnosis.push("- ✅ Full 40-layer forward pass with per-layer descriptor pool reset");
+  diagnosis.push("");
+  diagnosis.push("## REMAINING ISSUES (likely causes of incoherent output)");
+  diagnosis.push("The tokenizer is correct. The model generates topically relevant but NOT coherent text.");
+  diagnosis.push("The logits are fully computed (mean_abs=2.4, no zeros). The model responds to different prompts.");
+  diagnosis.push("Remaining suspects:");
+  diagnosis.push("1. SSM delta-net state update indexing — the outer product s[col][row] += k[col]*d may be transposed");
+  diagnosis.push("2. SSM conv1d state shifting — verify the state window slides correctly across tokens");
+  diagnosis.push("3. Flash attention may need Q/K scaling (1/sqrt(head_dim)) applied differently for head_dim=256");
+  diagnosis.push("4. The attention Q+gate interleave might still be wrong — llama.cpp applies attn_q_norm BEFORE extracting Q from Q+gate");
+  diagnosis.push("5. Missing shared expert sigmoid gating (ffn_gate_inp_shexp)");
+  diagnosis.push("6. The SSM gated normalization order may be wrong — llama.cpp does RMSNorm(output, ssm_norm_weight) then multiplies by SiLU(z)");
+  diagnosis.push("7. Expert weight offset calculation may be wrong for Q5_K/Q6_K stacked tensors");
+  diagnosis.push("");
+  diagnosis.push("## REFERENCE: llama.cpp implementation");
+  diagnosis.push("On the remote node, the full Qwen3.5-MoE implementation is at:");
+  diagnosis.push("  /root/llama.cpp/src/models/qwen35moe.cpp — build_layer_attn, build_layer_attn_linear, build_layer_ffn");
+  diagnosis.push("  /root/llama.cpp/src/models/delta-net-base.cpp — build_delta_net_autoregressive");
+  diagnosis.push("You can read these files via SSH to understand the correct computation flow.");
+  diagnosis.push("Use `ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST 'cat /root/llama.cpp/src/models/qwen35moe.cpp'`");
+  diagnosis.push("");
   diagnosis.push("## RDNA4 Constraints");
   diagnosis.push("- RADV may not support all GL_KHR_cooperative_matrix features — stub out or use fallbacks");
   diagnosis.push("- Shared memory: 64KB max per workgroup");
   diagnosis.push("- glslc from Ubuntu 24.04 (shaderc 2023.8) — newer versions break RADV");
-  diagnosis.push("- wave64 optimal, workgroup size 64, 2 rows per WG for DMMV");
+  diagnosis.push("- wave64 optimal, workgroup size 64");
 
   const phaseLabel = phase === "fix" ? "FIX" : "OPTIMIZE";
 
@@ -758,9 +805,9 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "src/vulkan/   — vk.zig, instance.zig, buffer.zig, pipeline.zig, command.zig, gpu_detect.zig",
     "src/model/    — gguf.zig, loader.zig, architecture.zig, tokenizer.zig",
     "src/compute/  — graph.zig, dmmv.zig, elementwise.zig, attention.zig, forward.zig",
-    "src/shaders/  — dmmv_q4k.comp, dmmv_q8_0.comp, dmmv_f16.comp, rms_norm_mul.comp,",
-    "                swiglu.comp, rope_fused.comp, flash_attn.comp, coop_matmul.comp,",
-    "                sigmoid_mul.comp, softmax_topk.comp, tq_*.comp",
+    "src/shaders/  — dmmv_{q4k,q5k,q6k,q8_0,f16,f32}.comp, rms_norm_mul.comp,",
+    "                swiglu.comp, rope_fused.comp, flash_attn.comp, sigmoid_mul.comp,",
+    "                vadd.comp, scale_accumulate.comp, deinterleave.comp, coop_matmul.comp",
     "src/main.zig  — CLI, Vulkan init, model load, inference engine, forward pass",
     "build.zig     — build system with conditional shader compilation",
     "```",
@@ -785,6 +832,11 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "   StringHashMap → use StringHashMapUnmanaged, File.stdout() not io.getStdOut(),",
     "   writer() takes a buffer arg, process.Child StdIo uses .Pipe not .pipe.",
     "6. GLSL shaders must compile with `glslc --target-env=vulkan1.3 -O`.",
+    "7. For correctness issues: READ llama.cpp's qwen35moe.cpp on the remote node",
+    "   to understand the correct computation. Use the SSH command above.",
+    "8. When fixing the forward pass, focus on ONE layer type at a time (attention OR SSM).",
+    "9. Add log.info debug output to verify intermediate values when debugging correctness.",
+    "10. The Q8_0 DMMV shader dispatches (M+1)/2 workgroups (2 rows/WG), NOT (M+63)/64.",
     "",
     "## Output Format",
     "After making your change, print these 3 lines at the very end:",
@@ -973,10 +1025,15 @@ async function runCycle(
   let keep = false;
 
   if (buildRun.phase === "fix") {
-    // In fix mode: keep if we made progress (fewer errors, or moved to optimize phase)
+    // In fix mode: keep if we made progress (fewer errors, coherent output, or moved to optimize phase)
     if (verifyResult.phase === "optimize") {
       keep = true; // We fixed it!
-      console.log(clr("1;32", "  🎉 FIXED! Moving to optimize phase."));
+      console.log(clr("1;32", "  🎉 FIXED! Output is coherent. Moving to optimize phase."));
+    } else if (
+      verifyResult.coherentText && !buildRun.coherentText
+    ) {
+      keep = true; // Output became coherent!
+      console.log(clr("1;32", "  🎉 Output is now COHERENT! Major progress."));
     } else if (
       verifyResult.buildExitCode === 0 &&
       buildRun.buildExitCode !== 0
@@ -990,6 +1047,12 @@ async function runCycle(
     ) {
       keep = true; // Runtime now succeeds
       console.log(clr("1;32", "  ✅ Runtime now passes."));
+    } else if (
+      buildRun.garbageOutput && !verifyResult.garbageOutput &&
+      verifyResult.buildExitCode === 0 && verifyResult.runExitCode === 0
+    ) {
+      keep = true; // Output is no longer garbage
+      console.log(clr("1;32", "  📈 Output is no longer garbage! Progress."));
     } else if (
       verifyResult.buildExitCode === 0 &&
       verifyResult.runExitCode === 0 &&
