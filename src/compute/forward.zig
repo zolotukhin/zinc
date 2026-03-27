@@ -907,10 +907,10 @@ pub const InferenceEngine = struct {
                 }
                 self.decode_cmd.computeBarrier();
             } else {
-                // === SSM / LINEAR ATTENTION LAYER (CPU-side delta-net) ===
-                // Read hidden state from GPU, run SSM on CPU using mmap weights,
-                // upload result back to GPU. Avoids needing many new GPU shaders.
-                try self.runSsmLayerCpu(state, layer, layer_idx);
+                // === SSM / LINEAR ATTENTION LAYER ===
+                // EXPERIMENT: skip SSM entirely to test if attention-only layers work
+                // try self.runSsmLayerCpu(state, layer, layer_idx);
+                // Hidden state passes unchanged to FFN
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---

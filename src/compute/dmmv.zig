@@ -177,7 +177,7 @@ pub const DmmvDispatch = struct {
         // Workgroup count depends on shader: Q4_K uses 1 row/thread (64 rows/WG),
         // Q8_0 uses 2 rows/WG, others use 1 row/thread (64 rows/WG)
         const workgroups_x = switch (quant_type) {
-            .q8_0 => (M + 1) / 2, // 2 rows per workgroup
+            .q8_0, .f16 => (M + 1) / 2, // 2 rows per workgroup
             else => (M + 63) / 64, // 1 row per thread, 64 threads per WG
         };
 

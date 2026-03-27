@@ -143,6 +143,6 @@ The node runs Ubuntu 24.04.3 LTS with the Vulkan driver pinned to Mesa 25.0.7 (n
 
 I edit code on my laptop and push to this machine over SSH. The [ZINC optimization loop](/blog/2026-03-25-why-we-are-building-zinc) rsyncs source, builds, runs, measures, and iterates — sometimes overnight, sometimes for dozens of cycles. The machine needs to be thermally stable for that. Quiet enough that I forget it is running. And producing numbers I can trust.
 
-The fact that this started as a trading workstation turned out to be a feature. An overclocking-grade platform — fast CPU, tuned memory, real VRMs — is exactly the kind of foundation you want for sustained GPU inference work. The 9800X3D handles Zig compilation, SSH orchestration, and host-side decode overhead without breaking a sweat. The DDR5 stays out of the way. The VRMs stay cool.
+The fact that this started as a trading workstation turned out to be a feature. An overclocking-grade platform — fast CPU, tuned memory, real VRMs — is exactly the kind of foundation you want for sustained GPU inference work. The 9800X3D handles Zig compilation, SSH orchestration, and host-side decode overhead without breaking a sweat. The DDR5 stays out of the way — and the price of that RAM kit has tripled since I bought it, so I am glad I did not wait. The VRMs stay cool.
 
 One $1300 GPU card turned a platform I already had into the machine that is building [ZINC](https://github.com/zolotukhin/zinc). That is the kind of leverage local AI should feel like.
