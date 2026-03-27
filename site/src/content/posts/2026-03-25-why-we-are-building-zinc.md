@@ -110,7 +110,7 @@ If that happens, ZINC will not just be another inference engine. It will become 
 
 I am building ZINC because I think the next wave of local AI infrastructure will be won by projects that are brutally practical. The winners will load the models people already use, run on the hardware people already own, expose the APIs people already integrate, and attack the real bottlenecks instead of hiding from them.
 
-That is the bet here. If you want to see what the actual hardware looks like, I wrote about [building the home RDNA4 rig](/blog/2026-03-26-inside-the-home-rdna4-setup-behind-zinc) that serves as the ZINC development and benchmark node — including why it started as a trading workstation and how a single GPU changed its purpose entirely.
+That is the bet here. If you want to see what the actual hardware looks like, I wrote about [building the home AI rig](/blog/2026-03-26-building-a-local-ai-rig) that serves as the ZINC development and benchmark node — including why it started as a trading workstation and how a single GPU changed its purpose entirely.
 
 If you care about local LLM inference, AMD GPUs, Vulkan compute, Zig, KV cache compression, or building serious open infrastructure around open models, I want your help. ZINC has a clear mission, a hard technical core, and a real reason to exist right now. That combination is rare.
 
