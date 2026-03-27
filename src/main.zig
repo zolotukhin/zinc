@@ -287,6 +287,53 @@ pub fn main() !void {
             output_tokens[0..@min(output_tokens.len, 20)],
         });
 
+        // Debug: dump first generated token's logits + last token's logits
+        if (output_tokens.len > 0) {
+            log.info("First token: id={d} \"{s}\"", .{
+                output_tokens[0],
+                if (output_tokens[0] < tokenizer.vocab.len) tokenizer.vocab[output_tokens[0]] else "?",
+            });
+        }
+        // Debug: dump top-5 logits from the last decode step
+        {
+            const vocab_size = model.config.vocab_size;
+            const logits_ptr: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
+            const logits = logits_ptr[0..vocab_size];
+            // Find top 5
+            var top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };
+            var top_vals: [5]f32 = .{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+            for (logits, 0..) |v, i| {
+                if (v > top_vals[4]) {
+                    top_vals[4] = v;
+                    top_ids[4] = @intCast(i);
+                    // Bubble sort to maintain top 5
+                    var j: usize = 4;
+                    while (j > 0 and top_vals[j] > top_vals[j - 1]) : (j -= 1) {
+                        const tv = top_vals[j]; top_vals[j] = top_vals[j-1]; top_vals[j-1] = tv;
+                        const ti = top_ids[j]; top_ids[j] = top_ids[j-1]; top_ids[j-1] = ti;
+                    }
+                }
+            }
+            for (0..5) |k| {
+                const tok_str = if (top_ids[k] < tokenizer.vocab.len) tokenizer.vocab[top_ids[k]] else "?";
+                log.info("  logit #{d}: id={d} val={d:.4} \"{s}\"", .{ k, top_ids[k], top_vals[k], tok_str });
+            }
+            // Also check: are logits mostly zero? NaN? Inf?
+            var n_zero: u32 = 0;
+            var n_nan: u32 = 0;
+            var n_inf: u32 = 0;
+            var sum_abs: f64 = 0;
+            for (logits) |v| {
+                if (v == 0) n_zero += 1;
+                if (std.math.isNan(v)) n_nan += 1;
+                if (std.math.isInf(v)) n_inf += 1;
+                sum_abs += @abs(@as(f64, v));
+            }
+            log.info("  logit stats: zeros={d} NaN={d} Inf={d} mean_abs={d:.4}", .{
+                n_zero, n_nan, n_inf, sum_abs / @as(f64, @floatFromInt(vocab_size)),
+            });
+        }
+
         // Decode tokens to text using the vocabulary
         {
             var text_buf: std.ArrayList(u8) = .{};

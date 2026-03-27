@@ -174,8 +174,12 @@ pub const DmmvDispatch = struct {
             .y_offset = y_offset,
         };
 
-        // 64 rows per workgroup (1 thread = 1 row) → ceil(M/64) workgroups
-        const workgroups_x = (M + 63) / 64;
+        // Workgroup count depends on shader: Q4_K uses 1 row/thread (64 rows/WG),
+        // Q8_0 uses 2 rows/WG, others use 1 row/thread (64 rows/WG)
+        const workgroups_x = switch (quant_type) {
+            .q8_0 => (M + 1) / 2, // 2 rows per workgroup
+            else => (M + 63) / 64, // 1 row per thread, 64 threads per WG
+        };
 
         cmd.dispatchWithPush(
             pip,

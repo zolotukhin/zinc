@@ -3,14 +3,22 @@ import BaseLayout from './BaseLayout.astro';
 import Breadcrumbs from '../components/Breadcrumbs.astro';
 import { buildBreadcrumbList } from '../lib/structured-data';
 
+interface PostLink {
+  slug: string;
+  title: string;
+  excerpt: string;
+}
+
 interface Props {
   title: string;
   date: Date;
   excerpt: string;
   tags?: string[];
+  prevPost?: PostLink | null;
+  nextPost?: PostLink | null;
 }
 
-const { title, date, excerpt, tags } = Astro.props;
+const { title, date, excerpt, tags, prevPost, nextPost } = Astro.props;
 
 const formattedDate = date.toLocaleDateString('en-US', {
   year: 'numeric',
@@ -76,12 +84,54 @@ const jsonLd = {
       <slot />
     </div>
   </article>
+  {(prevPost || nextPost) && (
+    <nav class="post-nav-grid">
+      {prevPost ? (
+        <a href={`/blog/${prevPost.slug}`} class="nav-card nav-prev">
+          <span class="nav-label">&larr; Previous</span>
+          <span class="nav-title">{prevPost.title}</span>
+          <span class="nav-excerpt">{prevPost.excerpt.slice(0, 120)}{prevPost.excerpt.length > 120 ? '...' : ''}</span>
+        </a>
+      ) : <div />}
+      {nextPost ? (
+        <a href={`/blog/${nextPost.slug}`} class="nav-card nav-next">
+          <span class="nav-label">Next &rarr;</span>
+          <span class="nav-title">{nextPost.title}</span>
+          <span class="nav-excerpt">{nextPost.excerpt.slice(0, 120)}{nextPost.excerpt.length > 120 ? '...' : ''}</span>
+        </a>
+      ) : <div />}
+    </nav>
+  )}
   <nav class="post-nav">
     <a href="/blog">&larr; All posts</a>
   </nav>
+  <div class="lightbox" id="lightbox">
+    <img src="" alt="" />
+  </div>
 </BaseLayout>
 
-<style>
+<script is:inline>
+  (function() {
+    var lb = document.getElementById('lightbox');
+    if (!lb) return;
+    var lbImg = lb.querySelector('img');
+
+    document.querySelectorAll('.post-content img').forEach(function(img) {
+      img.style.cursor = 'zoom-in';
+      img.addEventListener('click', function() {
+        lbImg.src = img.src;
+        lbImg.alt = img.alt;
+        lb.classList.add('active');
+      });
+    });
+
+    lb.addEventListener('click', function() {
+      lb.classList.remove('active');
+    });
+  })();
+</script>
+
+<style is:global>
   .post-header {
     margin-bottom: var(--space-xl);
   }
@@ -114,39 +164,129 @@ const jsonLd = {
     line-height: 1.8;
   }
 
+  /* Single images: compact, centered */
   .post-content img {
-    max-width: 50%;
+    display: block;
+    max-width: 380px;
+    width: 100%;
     height: auto;
     border-radius: 6px;
-    margin: var(--space-sm) 0 var(--space-md);
+    margin: var(--space-md) auto;
   }
 
-  .post-content p:has(img) {
-    overflow: hidden;
+  /* Image pair grid: two images side by side */
+  .post-content .img-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-sm);
+    margin: var(--space-md) 0;
   }
 
-  .post-content p:has(img):nth-of-type(odd) img {
-    float: left;
-    margin-right: var(--space-lg);
+  /* Kill the <p> wrapper markdown inserts inside img-pair */
+  .post-content .img-pair p {
+    display: contents;
   }
 
-  .post-content p:has(img):nth-of-type(even) img {
-    float: right;
-    margin-left: var(--space-lg);
+  .post-content .img-pair img {
+    max-width: 100%;
+    margin: 0;
+    width: 100%;
+    object-fit: cover;
+    aspect-ratio: 4 / 3;
   }
 
-  @media (max-width: 700px) {
+  @media (max-width: 600px) {
     .post-content img {
       max-width: 100%;
-      float: none !important;
-      margin-left: 0 !important;
-      margin-right: 0 !important;
+    }
+    .post-content .img-pair {
+      grid-template-columns: 1fr;
+    }
+    .post-content .img-pair img {
+      aspect-ratio: auto;
+    }
+  }
+
+  .post-nav-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-md);
+    margin-top: var(--space-xl);
+    padding-top: var(--space-lg);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .nav-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: var(--space-md);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    color: var(--color-text);
+    transition: border-color 0.15s ease;
+  }
+
+  .nav-card:hover {
+    text-decoration: none;
+    border-color: var(--color-accent);
+  }
+
+  .nav-next {
+    text-align: right;
+  }
+
+  .nav-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .nav-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    line-height: 1.3;
+  }
+
+  .nav-excerpt {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
+  @media (max-width: 600px) {
+    .post-nav-grid {
+      grid-template-columns: 1fr;
     }
   }
 
   .post-nav {
-    margin-top: var(--space-xl);
-    padding-top: var(--space-lg);
-    border-top: 1px solid var(--color-border);
+    margin-top: var(--space-md);
+    padding-top: var(--space-md);
+    text-align: center;
+  }
+
+  .lightbox {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(0, 0, 0, 0.85);
+    cursor: zoom-out;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .lightbox.active {
+    display: flex;
+  }
+
+  .lightbox img {
+    max-width: 90vw;
+    max-height: 90vh;
+    border-radius: 8px;
+    object-fit: contain;
   }
 </style>
