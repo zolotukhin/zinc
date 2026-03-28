@@ -101,6 +101,7 @@ pub const Request = struct {
     }
 
     /// Release the generated token buffer owned by this request.
+    /// Release the generated token buffer owned by this request.
     pub fn deinit(self: *Request) void {
         self.generated_tokens.deinit(self.allocator);
     }

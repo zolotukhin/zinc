@@ -14,12 +14,14 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
 
     /// Parse an HTTP request from the client connection stream.
+    /// Parse an HTTP request from the client connection stream.
     pub fn readRequest(self: *Connection) !Request {
         _ = self;
         // TODO: parse HTTP request
         return Request{ .method = .GET, .path = "/health", .body = "" };
     }
 
+    /// Send an HTTP response with the given status, content type, and body.
     /// Send an HTTP response with the given status, content type, and body.
     pub fn sendResponse(self: *Connection, status: u16, content_type: []const u8, body: []const u8) !void {
         var buf: [4096]u8 = undefined;
@@ -29,15 +31,18 @@ pub const Connection = struct {
     }
 
     /// Close the TCP stream and release the connection.
+    /// Close the TCP stream and release the connection.
     pub fn close(self: *Connection) void {
         self.stream.close();
     }
 };
 
 /// HTTP request methods recognized by the server.
+/// HTTP request methods recognized by the server.
 pub const Method = enum { GET, POST, OPTIONS, UNKNOWN };
 
 /// Parsed HTTP request containing method, path, and body.
+/// Parsed HTTP request with method, path, and body.
 pub const Request = struct {
     /// HTTP method.
     method: Method,
@@ -70,6 +75,7 @@ pub const Server = struct {
         return Connection{ .stream = conn.stream, .allocator = self.allocator };
     }
 
+    /// Stop listening and release the TCP socket.
     /// Stop listening and release the TCP socket.
     pub fn deinit(self: *Server) void {
         self.listener.deinit();
