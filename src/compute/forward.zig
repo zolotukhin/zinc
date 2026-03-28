@@ -1889,11 +1889,13 @@ pub const InferenceEngine = struct {
         // norm_buf still has BOS embedding norm from STAGE 2 (STAGE 3 only read it)
         const wqkv_diag = self.findLayerTensor(0, "attn_qkv.weight");
         const gate_exps_diag = self.findLayerTensor(0, "ffn_gate_exps.weight");
+        const down_exps_diag = self.findLayerTensor(0, "ffn_down_exps.weight");
         const ssm_out_diag = self.findLayerTensor(0, "ssm_out.weight");
         const attn_q_diag = self.findLayerTensor(3, "attn_q.weight"); // layer 3 = first attn layer
-        dlog.info("QUANT: wqkv={s} gate_exps={s} ssm_out={s} attn_q={s}", .{
+        dlog.info("QUANT: wqkv={s} gate_exps={s} down_exps={s} ssm_out={s} attn_q={s}", .{
             if (wqkv_diag) |t| @tagName(t.info.type_) else "N/A",
             if (gate_exps_diag) |t| @tagName(t.info.type_) else "N/A",
+            if (down_exps_diag) |t| @tagName(t.info.type_) else "N/A",
             if (ssm_out_diag) |t| @tagName(t.info.type_) else "N/A",
             if (attn_q_diag) |t| @tagName(t.info.type_) else "N/A",
         });
