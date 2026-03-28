@@ -28,6 +28,9 @@ comptime {
     _ = @import("compute/elementwise.zig");
     _ = @import("compute/attention.zig");
     _ = @import("compute/forward.zig");
+    _ = @import("server/http.zig");
+    _ = @import("scheduler/request.zig");
+    _ = @import("scheduler/scheduler.zig");
 }
 
 /// Runtime configuration built from CLI flags and default values.
