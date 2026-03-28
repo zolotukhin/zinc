@@ -1286,6 +1286,13 @@ pub const InferenceEngine = struct {
                     }
                 }
 
+                // Dump hidden[0..8] after layer 0 for CPU reference comparison
+                if (layer == 0) {
+                    log.info("L0_HIDDEN[0..8]: [{d:.8},{d:.8},{d:.8},{d:.8},{d:.8},{d:.8},{d:.8},{d:.8}]", .{
+                        hptr[0], hptr[1], hptr[2], hptr[3], hptr[4], hptr[5], hptr[6], hptr[7],
+                    });
+                }
+
                 // Also log tensor quant types on first layer to identify untested DMMV paths
                 if (layer == 0) {
                     const qt_attn_norm = if (self.findLayerTensor(0, "attn_norm.weight")) |t| @tagName(t.info.type_) else "?";
