@@ -4,13 +4,9 @@ date: "2026-03-27"
 tags:
   - zinc
   - llm-inference
-<<<<<<< Updated upstream
-  - amd-gpu
-=======
->>>>>>> Stashed changes
   - rdna4
   - vulkan
-  - zig
+  - qwen3-5
   - flash-attention
   - page-attention
   - vllm
@@ -26,6 +22,7 @@ keywords:
   - state space model
   - RoPE
   - GGUF
+  - Qwen3.5-35B-A3B
   - llama.cpp alternative AMD
   - GPT-2 byte-level BPE
 excerpt: "Early ZINC failures in local LLM inference on AMD RDNA4: Vulkan bugs in flash attention, KV cache, RoPE, MoE, SSM, and tokenization."
@@ -35,7 +32,7 @@ The first version of ZINC, our local LLM inference engine for AMD RDNA4 GPUs, di
 
 I think these early local LLM inference failures are worth writing down because people tend to talk about inference engines as if the hard part starts with optimization. It does not. The hard part starts earlier, when you are still proving that the computation you think you are running is actually the computation the model needs.
 
-That was the real beginning of [ZINC](/zinc). It is the same project I introduced in [why we're building ZINC for local LLM inference on AMD GPUs](/blog/2026-03-25-why-we-are-building-zinc), but this was the less glamorous part of that story. Before any serious throughput work, before any clean benchmark story, the project had to survive a long sequence of correctness failures on the path to a working forward pass for Qwen3.5-35B-A3B on AMD RDNA4. By the time these fixes landed, ZINC was still only around 0.8 tok/s against a llama.cpp baseline of 107 tok/s on the same node. But for the first time, it was running something recognizably close to the right model.
+That was the real beginning of [ZINC](/zinc). It is the same project I introduced in [why we're building ZINC for local LLM inference on AMD GPUs](/blog/2026-03-25-why-we-are-building-zinc), but this was the less glamorous part of that story. Before any serious throughput work, before any clean benchmark story, the project had to survive a long sequence of correctness failures on the path to a working forward pass for Qwen3.5-35B-A3B on AMD RDNA4. The exact GGUF we were running was [Unsloth's `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/blob/main/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf). By the time these fixes landed, ZINC was still only around 0.8 tok/s against a llama.cpp baseline of 107 tok/s on the same node. But for the first time, it was running something recognizably close to the right model.
 
 ## The first mistake was thinking the model was simpler than it was
 
@@ -51,27 +48,6 @@ What matters in this sequence is that the failures were dependent. We could not 
 
 To make the debugging surface more concrete, this is where the failures sat in the Vulkan inference path. The tokenizer bug was upstream. The rotary position encoding, or RoPE, bug sat inside the attention math. The key-value cache, or KV cache, and flash attention bugs only appeared once decode started. The MoE and SSM bugs lived deeper in the 40-layer stack and were easy to misread as vague model-quality problems instead of plain wrong execution.
 
-<<<<<<< Updated upstream
-```mermaid
-flowchart TD
-    A[Prompt text] --> B[GPT-2 byte-level BPE tokenizer]
-    B --> C[Token embedding]
-    C --> D[40-layer decode stack]
-    D --> E[Attention layers]
-    D --> F[SSM recurrent layers]
-    E --> G[RoPE rotary position encoding]
-    G --> H[KV cache]
-    H --> I[Flash attention]
-    E --> J[MoE plus shared expert]
-    F --> J
-    F --> K[Persistent SSM state]
-    J --> L[LM head logits]
-```
-
-*Diagram: most of the early ZINC bugs were not random. They clustered around tokenization, attention state, recurrent state, and the final logits path.*
-
-=======
->>>>>>> Stashed changes
 This is also why the early work did not look much like a typical vLLM or TensorRT-LLM optimization story. Before scheduling or batching mattered, the bare Vulkan inference path had to become correct from prompt tokenization all the way to logits.
 
 ## The bugs got smaller and more dangerous
@@ -80,13 +56,6 @@ Once all 40 layers were finally running, the failure mode changed. ZINC started 
 
 That turned out to be one of the cleanest bugs in the whole project. The Q8_0 decode matmul-vector, or DMMV, shader processes two output rows per workgroup, but the dispatch logic was written as if each workgroup handled 64 rows. On the LM head, that mistake meant we were launching enough workgroups to compute only 7,760 of 248,320 vocabulary rows. The model was not making a bad choice across the whole vocabulary. It was only seeing about 3% of it.
 
-<<<<<<< Updated upstream
-![Original ZINC bug postcard: it looked alive, but only about 3% of vocabulary logits were actually non-zero.](/blog/zero-logits-meme.svg)
-
-*Image: the output looked busy enough to seem plausible, but the logits path was mostly empty. This was exactly the kind of bug that wastes time if you do not count rows.*
-
-=======
->>>>>>> Stashed changes
 ```zig
 const workgroups_x = switch (quant_type) {
     .q8_0, .f16 => (M + 1) / 2,
