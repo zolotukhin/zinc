@@ -14,17 +14,21 @@ interface Props {
   date: Date;
   excerpt: string;
   tags?: string[];
+  keywords?: string[];
   prevPost?: PostLink | null;
   nextPost?: PostLink | null;
 }
 
-const { title, date, excerpt, tags, prevPost, nextPost } = Astro.props;
+const { title, date, excerpt, tags, keywords, prevPost, nextPost } = Astro.props;
 
-const formattedDate = date.toLocaleDateString('en-US', {
+const isoDate = date.toISOString().split('T')[0];
+const formattedDate = new Intl.DateTimeFormat('en-US', {
   year: 'numeric',
   month: 'long',
   day: 'numeric',
-});
+  timeZone: 'UTC',
+}).format(date);
+const keywordList = keywords && keywords.length > 0 ? keywords : tags ?? [];
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const breadcrumbItems = [
@@ -39,7 +43,7 @@ const jsonLd = {
     {
       '@type': 'BlogPosting',
       headline: title,
-      datePublished: date.toISOString().split('T')[0],
+      datePublished: isoDate,
       author: {
         '@type': 'Person',
         name: 'Stepan Zolotukhin',
@@ -52,7 +56,7 @@ const jsonLd = {
       },
       description: excerpt,
       url: Astro.url.href,
-      keywords: tags,
+      keywords: keywordList,
       mainEntityOfPage: Astro.url.href,
     },
     buildBreadcrumbList(siteUrl, breadcrumbItems),
@@ -63,16 +67,16 @@ const jsonLd = {
 <BaseLayout
   title={title}
   description={excerpt}
-  keywords={tags?.join(', ')}
+  keywords={keywordList.length > 0 ? keywordList.join(', ') : undefined}
   ogType="article"
-  publishedDate={date.toISOString().split('T')[0]}
+  publishedDate={isoDate}
   tags={tags}
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
   <article class="post">
     <header class="post-header">
-      <time datetime={date.toISOString().split('T')[0]}>{formattedDate}</time>
+      <time datetime={isoDate}>{formattedDate}</time>
       <h1>{title}</h1>
       {tags && tags.length > 0 && (
         <div class="tags">
@@ -174,6 +178,34 @@ const jsonLd = {
     margin: var(--space-md) auto;
   }
 
+  .post-content figure.diagram-card {
+    margin: var(--space-lg) 0;
+    padding: var(--space-md);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    background: linear-gradient(180deg, var(--color-bg-alt) 0%, var(--color-bg) 100%);
+  }
+
+  .post-content figure.diagram-wide {
+    margin-left: -1rem;
+    margin-right: -1rem;
+  }
+
+  .post-content figure.diagram-card img {
+    max-width: 100%;
+    width: 100%;
+    margin: 0;
+    border-radius: 10px;
+  }
+
+  .post-content figure.diagram-card figcaption {
+    margin-top: var(--space-sm);
+    font-size: 0.82rem;
+    line-height: 1.6;
+    color: var(--color-text-muted);
+    text-align: center;
+  }
+
   /* Image pair grid: two images side by side */
   .post-content .img-pair {
     display: grid;
@@ -198,6 +230,10 @@ const jsonLd = {
   @media (max-width: 600px) {
     .post-content img {
       max-width: 100%;
+    }
+    .post-content figure.diagram-wide {
+      margin-left: 0;
+      margin-right: 0;
     }
     .post-content .img-pair {
       grid-template-columns: 1fr;

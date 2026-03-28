@@ -24,7 +24,7 @@ keywords:
   - GGUF model loading
   - vLLM paged attention
   - llama.cpp alternative AMD
-excerpt: "Early ZINC failures in local LLM inference on AMD RDNA4: Vulkan bugs in flash attention, KV cache, RoPE, MoE, SSM, and tokenization."
+excerpt: "Early ZINC failures in local LLM inference on AMD RDNA4: flash attention, KV cache, RoPE, MoE, SSM, tokenizer correctness, and benchmark drift."
 ---
 
 The first version of ZINC, our local LLM inference engine for AMD RDNA4 GPUs, did not fail in one impressive way. It failed in ten smaller, more humiliating ways. The forward pass skipped all 40 transformer layers. The tokenizer turned spaces into the wrong token. Flash attention read the K cache as a page table and hung the GPU. One dispatch bug quietly zeroed 97% of the vocabulary logits.
@@ -47,9 +47,10 @@ What matters in this sequence is that the failures were dependent. We could not 
 
 To make the debugging surface more concrete, this is where the failures sat in the Vulkan inference path. The tokenizer bug was upstream. The rotary position encoding, or RoPE, bug sat inside the attention math. The key-value cache, or KV cache, and flash attention bugs only appeared once decode started. The MoE and SSM bugs lived deeper in the 40-layer stack and were easy to misread as vague model-quality problems instead of plain wrong execution.
 
-![A clean bug-surface map showing where the early failures clustered in the inference pipeline.](/blog/bug-surface-map.svg)
-
-*Diagram: the failures were not random. They clustered around tokenization, architecture interpretation, attention state, recurrent state, and the final logits path.*
+<figure class="diagram-card diagram-wide">
+  <img src="/blog/bug-surface-map.svg" alt="A bug-surface map showing tokenizer, architecture, RoPE, KV cache, flash attention, MoE, SSM, and logits failures across the inference pipeline." loading="lazy" />
+  <figcaption>The failures were not random. They clustered around tokenization, architecture interpretation, attention state, recurrent state, and the final logits path.</figcaption>
+</figure>
 
 This is also why the early work did not look much like a typical vLLM or TensorRT-LLM optimization story. Before scheduling or batching mattered, the bare Vulkan inference path had to become correct from prompt tokenization all the way to logits.
 
@@ -94,9 +95,10 @@ The second bucket was decode state. The KV cache was empty when it should have b
 
 The third bucket was trust. The tokenizer looked plausible until we compared tokens. The logits looked varied until we counted how many were exactly zero. The baseline looked stable until Mesa changed underneath it. Those are the bugs that force you to stop trusting vibes and start measuring everything.
 
-![A staged ladder showing that correctness and state validation came before performance work.](/blog/correctness-before-speed.svg)
-
-*Diagram: the real sequence was architecture, state, numerics, reproducibility, and only then performance.*
+<figure class="diagram-card diagram-wide">
+  <img src="/blog/correctness-before-speed.svg" alt="A ladder showing architecture, state, numerics, reproducibility, and performance in that order." loading="lazy" />
+  <figcaption>The real sequence was architecture, state, numerics, reproducibility, and only then performance.</figcaption>
+</figure>
 
 ## Reproducibility became part of the engine
 
@@ -105,6 +107,11 @@ One of the more frustrating lessons from this stage had nothing to do with Zig o
 The answer was simpler and more annoying. Ubuntu had auto-updated Mesa from 25.0.7 to 25.2.8, and RADV performance on RDNA4 cooperative matrix workloads dropped by about 14%. That is not just a benchmark inconvenience. It changes how every optimization result gets interpreted. If the baseline is drifting under your feet, you stop learning from your measurements.
 
 That is why driver pinning ended up in the same category as tokenizer correctness and descriptor bindings. Reproducibility is not administrative overhead on a project like this. It is part of the engine. If the target environment moves too much, the development loop gets noisier and the wrong ideas survive longer than they should. I wrote the hardware and driver side of that setup down in the [home AI rig post](/blog/2026-03-26-building-a-local-ai-rig), and the lower-level environment details live in the [RDNA4 tuning notes](/zinc/docs/rdna4-tuning).
+
+<figure class="diagram-card diagram-wide">
+  <img src="/blog/early-zinc-timeline.svg" alt="A timeline showing the early ZINC debugging sequence from fake forward pass to pinned benchmark environment." loading="lazy" />
+  <figcaption>Seen in sequence, the early work was less random than it felt in the moment: first make the graph real, then make decode state real, then make the measurements trustworthy.</figcaption>
+</figure>
 
 ## What these early failures changed
 

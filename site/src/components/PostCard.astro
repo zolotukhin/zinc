@@ -9,15 +9,18 @@ interface Props {
 
 const { title, date, excerpt, slug, tags } = Astro.props;
 
-const formattedDate = date.toLocaleDateString('en-US', {
+const isoDate = date.toISOString().split('T')[0];
+
+const formattedDate = new Intl.DateTimeFormat('en-US', {
   year: 'numeric',
   month: 'long',
   day: 'numeric',
-});
+  timeZone: 'UTC',
+}).format(date);
 ---
 
 <article class="post-card">
-  <time datetime={date.toISOString().split('T')[0]}>{formattedDate}</time>
+  <time datetime={isoDate}>{formattedDate}</time>
   <h2><a href={`/blog/${slug}`}>{title}</a></h2>
   <p>{excerpt}</p>
   {tags && tags.length > 0 && (
