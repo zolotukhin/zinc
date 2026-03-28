@@ -180,30 +180,27 @@ const jsonLd = {
 
   .post-content figure.diagram-card {
     margin: var(--space-lg) 0;
-    padding: var(--space-md);
-    border: 1px solid var(--color-border);
-    border-radius: 14px;
-    background: linear-gradient(180deg, var(--color-bg-alt) 0%, var(--color-bg) 100%);
   }
 
   .post-content figure.diagram-wide {
-    margin-left: -1rem;
-    margin-right: -1rem;
+    margin-left: 0;
+    margin-right: 0;
   }
 
   .post-content figure.diagram-card img {
     max-width: 100%;
     width: 100%;
     margin: 0;
-    border-radius: 10px;
+    border-radius: 12px;
   }
 
   .post-content figure.diagram-card figcaption {
-    margin-top: var(--space-sm);
+    margin-top: 0.65rem;
+    padding: 0 0.15rem;
     font-size: 0.82rem;
     line-height: 1.6;
     color: var(--color-text-muted);
-    text-align: center;
+    text-align: left;
   }
 
   /* Image pair grid: two images side by side */
@@ -230,10 +227,6 @@ const jsonLd = {
   @media (max-width: 600px) {
     .post-content img {
       max-width: 100%;
-    }
-    .post-content figure.diagram-wide {
-      margin-left: 0;
-      margin-right: 0;
     }
     .post-content .img-pair {
       grid-template-columns: 1fr;
