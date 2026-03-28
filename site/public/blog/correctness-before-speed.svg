@@ -1,54 +1,61 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
   <title id="title">Correctness before speed</title>
-  <desc id="desc">A staged ladder showing the order in which the ZINC project had to solve problems before optimization mattered.</desc>
+  <desc id="desc">A simple five-step sequence showing that architecture, state, numerics, reproducibility, and only then performance mattered in that order.</desc>
   <defs>
-    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#fbfaf5"/>
-      <stop offset="100%" stop-color="#eef2f7"/>
-    </linearGradient>
-    <filter id="shadow2" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#0f172a" flood-opacity="0.12"/>
-    </filter>
     <style>
-      .title { font: 700 38px Georgia, serif; fill: #10233c; }
-      .subtitle { font: 500 18px Arial, sans-serif; fill: #53657b; }
-      .step { font: 700 22px Arial, sans-serif; fill: #10233c; }
-      .copy { font: 400 16px Arial, sans-serif; fill: #445567; }
-      .num { font: 700 34px Arial, sans-serif; fill: #ffffff; }
-      .card { stroke-width: 2; rx: 28; }
+      .title { font: 700 34px Georgia, serif; fill: #172033; }
+      .subtitle { font: 400 18px Arial, sans-serif; fill: #566272; }
+      .step { font: 700 20px Arial, sans-serif; fill: #172033; }
+      .copy { font: 400 15px Arial, sans-serif; fill: #4e5a69; }
+      .num { font: 700 16px Arial, sans-serif; fill: #fff; }
+      .pill { fill: #fbfaf6; stroke: #d8d3c8; stroke-width: 1.5; rx: 18; }
+      .line { stroke: #8a94a3; stroke-width: 2.5; fill: none; }
     </style>
   </defs>
 
-  <rect width="1200" height="620" fill="url(#bg2)"/>
-  <g transform="translate(72 58)">
-    <text class="title">Correctness before speed</text>
-    <text class="subtitle" x="0" y="34">The early project order was not optimize, optimize, optimize. It was make the model honest, make the state real, then trust the measurements.</text>
+  <rect width="1200" height="330" fill="#fffdf8"/>
+  <text class="title" x="72" y="62">Correctness before speed</text>
+  <text class="subtitle" x="72" y="92">The early work only got useful once these five steps happened in order.</text>
+
+  <path class="line" d="M146 188 H1054"/>
+
+  <g transform="translate(72 136)">
+    <circle cx="28" cy="52" r="20" fill="#a63a50"/><text class="num" x="22" y="58">1</text>
+    <rect class="pill" x="58" y="12" width="170" height="80"/>
+    <text class="step" x="78" y="46">Architecture</text>
+    <text class="copy" x="78" y="70">Run the real</text>
+    <text class="copy" x="78" y="88">40-layer model</text>
   </g>
 
-  <g filter="url(#shadow2)">
-    <rect class="card" x="90" y="160" width="1020" height="74" fill="#19324a" stroke="#19324a"/>
-    <circle cx="138" cy="197" r="24" fill="#c8465f"/><text class="num" x="129" y="209">1</text>
-    <text class="step" x="184" y="192" fill="#ffffff">Architecture first</text>
-    <text class="copy" x="184" y="215" fill="#d7e1ea">Run the actual 40-layer network, not a fake shortcut. Attention, MoE, shared expert, and SSM all had to be real.</text>
+  <g transform="translate(292 136)">
+    <circle cx="28" cy="52" r="20" fill="#cd6f36"/><text class="num" x="22" y="58">2</text>
+    <rect class="pill" x="58" y="12" width="170" height="80"/>
+    <text class="step" x="78" y="46">State</text>
+    <text class="copy" x="78" y="70">Populate KV and</text>
+    <text class="copy" x="78" y="88">SSM state honestly</text>
+  </g>
 
-    <rect class="card" x="130" y="250" width="980" height="74" fill="#244560" stroke="#244560"/>
-    <circle cx="178" cy="287" r="24" fill="#dd7e3b"/><text class="num" x="169" y="299">2</text>
-    <text class="step" x="224" y="282" fill="#ffffff">State second</text>
-    <text class="copy" x="224" y="305" fill="#d7e1ea">Prefill had to populate KV cache and SSM state, and the page table / descriptor bindings had to stop lying to the kernels.</text>
+  <g transform="translate(512 136)">
+    <circle cx="28" cy="52" r="20" fill="#4f8eb0"/><text class="num" x="22" y="58">3</text>
+    <rect class="pill" x="58" y="12" width="170" height="80"/>
+    <text class="step" x="78" y="46">Numerics</text>
+    <text class="copy" x="78" y="70">Count rows, compare</text>
+    <text class="copy" x="78" y="88">tokens, inspect logits</text>
+  </g>
 
-    <rect class="card" x="170" y="340" width="940" height="74" fill="#2f5877" stroke="#2f5877"/>
-    <circle cx="218" cy="377" r="24" fill="#5ea0c9"/><text class="num" x="209" y="389">3</text>
-    <text class="step" x="264" y="372" fill="#ffffff">Numerics third</text>
-    <text class="copy" x="264" y="395" fill="#d7e1ea">Count rows, inspect logits, compare tokens, verify RoPE and head dimensions. This is where the “97% zero logits” bug got exposed.</text>
+  <g transform="translate(732 136)">
+    <circle cx="28" cy="52" r="20" fill="#4f9b74"/><text class="num" x="22" y="58">4</text>
+    <rect class="pill" x="58" y="12" width="170" height="80"/>
+    <text class="step" x="78" y="46">Reproducibility</text>
+    <text class="copy" x="78" y="70">Pin the driver and</text>
+    <text class="copy" x="78" y="88">stabilize the baseline</text>
+  </g>
 
-    <rect class="card" x="210" y="430" width="900" height="74" fill="#3b6d8d" stroke="#3b6d8d"/>
-    <circle cx="258" cy="467" r="24" fill="#78bf7a"/><text class="num" x="249" y="479">4</text>
-    <text class="step" x="304" y="462" fill="#ffffff">Baseline and environment fourth</text>
-    <text class="copy" x="304" y="485" fill="#d7e1ea">Pin Mesa, stabilize the llama.cpp reference, and make the benchmark environment trustworthy enough to learn from.</text>
-
-    <rect class="card" x="250" y="520" width="860" height="74" fill="#4b86a7" stroke="#4b86a7"/>
-    <circle cx="298" cy="557" r="24" fill="#9b7bd0"/><text class="num" x="289" y="569">5</text>
-    <text class="step" x="344" y="552" fill="#ffffff">Only then: throughput work</text>
-    <text class="copy" x="344" y="575" fill="#d7e1ea">After that, optimizations started to mean something: GPU-side SSM, lower dispatch overhead, better decode scheduling, fewer lies.</text>
+  <g transform="translate(952 136)">
+    <circle cx="28" cy="52" r="20" fill="#6b63b7"/><text class="num" x="22" y="58">5</text>
+    <rect class="pill" x="58" y="12" width="150" height="80"/>
+    <text class="step" x="78" y="46">Performance</text>
+    <text class="copy" x="78" y="70">Only then did</text>
+    <text class="copy" x="78" y="88">throughput matter</text>
   </g>
 </svg>
