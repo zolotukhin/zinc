@@ -83,6 +83,12 @@ describe("isGarbageOutput", () => {
     expect(isGarbageOutput("info(zinc): Output tokens (2): { 100, 100 }")).toBe(false);
   });
 
+  test("detects numbers-only output as garbage", () => {
+    expect(isGarbageOutput(
+      "info(zinc): Output tokens (32): { 11, 220, 16, 16, 16 }\ninfo(zinc): Output text: ,Ġ11111Ġ110ĠĠ31Ġ311Ġ311111122Ġ3Ġ"
+    )).toBe(true);
+  });
+
   test("detects short repeating patterns", () => {
     expect(isGarbageOutput(
       "info(zinc): Output tokens (20): { 7471, 6852, 4547, 7398, 514, 4402, 536, 4547, 7398, 514, 4402, 536, 4547, 7398, 514, 4402, 536, 4547, 7398, 514 }"

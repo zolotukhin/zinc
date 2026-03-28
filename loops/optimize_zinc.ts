@@ -151,6 +151,14 @@ export function isGarbageOutput(output: string): boolean {
       if (repeats >= 3 && (repeats * plen) / (tokens.length - 2) > 0.7) return true;
     }
   }
+  // Also check via decoded text: if output is just numbers, punctuation, or BPE fragments
+  const textMatch = output.match(/Output text:\s*(.+)/i);
+  if (textMatch) {
+    const text = textMatch[1].trim().slice(0, 200);
+    // If >60% of characters are digits or single-char punctuation, it's garbage
+    const alphaCount = (text.match(/[a-zA-Z]{2,}/g) ?? []).join("").length;
+    if (text.length > 20 && alphaCount / text.length < 0.3) return true;
+  }
   return false;
 }
 
@@ -618,11 +626,13 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const historyBlock =
     cycles.length > 0
       ? cycles
-          .slice(-20)
+          .slice(-15)
           .map((h) => {
-            const desc = trunc(h.description, 80);
+            const desc = trunc(h.description, 70);
             const bw = h.bandwidthUtil != null ? `, ${h.bandwidthUtil.toFixed(0)}% BW` : "";
-            return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "✅ KEPT" : "❌ REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s${bw})` : ""}`;
+            const snippet = (h as any).outputSnippet ? ` out="${trunc((h as any).outputSnippet, 30)}"` : "";
+            const coherent = (h as any).coherentText ? " ✅COHERENT" : "";
+            return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "KEPT" : "REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s${bw})` : ""}${snippet}${coherent}`;
           })
           .join("\n")
       : "  (none yet)";
@@ -632,6 +642,19 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const lastAnalysisBlock = lastCycle?.selfAnalysis
     ? `## Last Cycle's Analysis (cycle #${lastCycle.cycle}, ${lastCycle.kept ? "KEPT" : "REVERTED"})\n${lastCycle.selfAnalysis}\n\nNext ideas from last cycle: ${lastCycle.nextIdeas.join(", ") || "(none)"}`
     : "";
+
+  // Detect stall: count consecutive cycles where output text didn't change
+  let stall_count = 0;
+  if (cycles.length >= 3) {
+    const currentSnippet = lastResult.runOutput.match(/Output text:\s*(.{0,80})/)?.[1]?.trim() ?? "";
+    // Count recent cycles with the same output snippet
+    for (let i = cycles.length - 1; i >= Math.max(0, cycles.length - 10); i--) {
+      const prev = (cycles[i] as any).outputSnippet ?? "";
+      if (prev === currentSnippet || !cycles[i].kept) {
+        stall_count++;
+      } else break;
+    }
+  }
 
   // Include accumulated ideas from all cycles
   const ideasBlock = state.ideas.length > 0
@@ -833,6 +856,18 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "",
     lastAnalysisBlock,
     "",
+    ...(stall_count >= 3 ? [
+      "## ⚠ STALL DETECTED — " + stall_count + " cycles with no meaningful output change",
+      "Your recent changes had NO EFFECT on the output. You must try a FUNDAMENTALLY DIFFERENT approach.",
+      "Do NOT make incremental tweaks. Instead:",
+      "- SSH into the remote node and READ llama.cpp's qwen35moe.cpp to understand the correct flow",
+      "- Add a CPU reference computation for one specific operation and compare against GPU",
+      "- Verify that GPU buffer contents match what you expect by adding readback + logging",
+      "- Check if the Q4_K DMMV shader's sub-block decoding matches GGML's reference implementation",
+      "- Try disabling entire subsystems (skip attention, skip MoE, skip SSM) to isolate which part is wrong",
+      "Previous approaches that were tried and had no effect should NOT be repeated.",
+      "",
+    ] : []),
     "## Accumulated Ideas (from all previous cycles)",
     ideasBlock,
     "",
@@ -872,6 +907,9 @@ type CycleResult = {
   effectiveBW: number | null;
   buildExitCode: number;
   runExitCode: number | null;
+  garbageOutput: boolean;
+  coherentText: boolean;
+  outputSnippet: string; // first 80 chars of output text for change detection
   error?: string;
   selfAnalysis: string;
   nextIdeas: string[];
@@ -1094,10 +1132,15 @@ async function runCycle(
       buildRun.buildExitCode === 0 &&
       buildRun.runExitCode === 0
     ) {
-      // Both succeed with same token count — keep if no regression (agent may have improved code quality)
-      if (verifyResult.tokensGenerated >= buildRun.tokensGenerated) {
+      // Both succeed with same token count — only keep if output actually CHANGED
+      // (prevents accepting no-op cycles that waste time)
+      const oldOut = buildRun.runOutput.match(/Output text:\s*(.+)/)?.[1]?.trim() ?? "";
+      const newOut = verifyResult.runOutput.match(/Output text:\s*(.+)/)?.[1]?.trim() ?? "";
+      if (newOut !== oldOut && newOut.length > 0) {
         keep = true;
-        console.log(clr("1;33", `  ↔ No regression (${verifyResult.tokensGenerated} tokens). Keeping.`));
+        console.log(clr("1;33", `  ↔ Output changed (${verifyResult.tokensGenerated} tokens). Keeping.`));
+      } else {
+        console.log(clr("2", `  ↔ Output unchanged — not keeping no-op change.`));
       }
     } else if (
       verifyResult.buildExitCode === 0 &&
@@ -1229,6 +1272,7 @@ async function runCycle(
     }
   }
 
+  const outputSnippet = (verifyResult.runOutput.match(/Output text:\s*(.{0,80})/)?.[1] ?? "").trim();
   const cycleResult: CycleResult = {
     cycle: cycleNum,
     timestamp: new Date().toISOString(),
@@ -1240,6 +1284,9 @@ async function runCycle(
     effectiveBW: verifyResult.effectiveBW,
     buildExitCode: verifyResult.buildExitCode,
     runExitCode: verifyResult.runExitCode,
+    garbageOutput: verifyResult.garbageOutput,
+    coherentText: verifyResult.coherentText,
+    outputSnippet,
     selfAnalysis,
     nextIdeas: newIdeas,
     error: verifyResult.error ?? undefined,
