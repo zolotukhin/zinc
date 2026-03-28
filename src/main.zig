@@ -52,6 +52,8 @@ pub const Config = struct {
     graph_report_path: ?[]const u8 = null,
     /// Graph DOT file path.
     graph_dot_path: ?[]const u8 = null,
+    /// Enable per-dispatch GPU profiling.
+    profile: bool = false,
     /// Print usage and exit.
     show_help: bool = false,
 };
@@ -69,6 +71,7 @@ const banner =
     \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
     \\  --graph-report <path>    Write decode-graph JSON report from GGUF metadata
     \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
+    \\  --profile                Enable per-dispatch GPU timing profiling
     \\  -h, --help               Show this help
     \\
 ;
@@ -125,6 +128,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.graph_dot_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            config.profile = true;
         } else {
             return error.UnknownArgument;
         }
@@ -266,6 +271,13 @@ pub fn main() !void {
     };
     defer engine.deinit();
 
+    // Enable profiling if requested
+    if (config.profile) {
+        engine.enableProfiling() catch |err| {
+            log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
+        };
+    }
+
     if (config.prompt) |prompt| {
         log.info("Prompt: {s}", .{prompt});
 
@@ -302,7 +314,7 @@ pub fn main() !void {
         }
 
         // Generate
-        const max_tokens: u32 = 32;
+        const max_tokens: u32 = 256;
         const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator);
         defer allocator.free(output_tokens);
 

@@ -1,0 +1,95 @@
+#version 460
+// ZINC — SSM 1D convolution with SiLU activation
+// Performs conv1d over a sliding state window and applies SiLU (x * sigmoid(x)).
+// Used in Mamba/SSM layers to convolve the QKV projection before state-space mixing.
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+//
+// Each thread processes one channel:
+//   1. Convolve: sum = Σ kernel[ch * d_conv + ki] * input[ki]
+//      where input[ki] = state[ki * conv_channels + ch] for ki < d_conv-1,
+//            input[d_conv-1] = current_input[ch]
+//   2. SiLU:    out[ch] = sum * sigmoid(sum)
+//   3. Shift state left and write current_input as newest entry.
+//
+// Dispatch: ceil(conv_channels / 64) × 1 × 1
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+// Current input vector (conv_channels floats) — QKV projection output
+layout(set = 0, binding = 0) readonly buffer CurrentInput {
+    float current_input[];
+};
+
+// Conv kernel weights: conv_channels * d_conv elements (f32 or f16)
+// When kernel_is_f16 == 1, read as float16_t; otherwise read as float.
+layout(set = 0, binding = 1) readonly buffer ConvKernelF32 {
+    float conv_kernel_f32[];
+};
+
+// Alias for f16 access to the same binding
+layout(set = 0, binding = 1) readonly buffer ConvKernelF16 {
+    float16_t conv_kernel_f16[];
+};
+
+// Persistent conv state: (d_conv - 1) * conv_channels floats, read+write
+layout(set = 0, binding = 2) buffer ConvState {
+    float state[];
+};
+
+// Output: conv_channels floats after conv1d + SiLU
+layout(set = 0, binding = 3) writeonly buffer Output {
+    float out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint conv_channels;  // number of channels (d_inner + 2 * n_group * d_state)
+    uint d_conv;         // kernel size (typically 4)
+    uint kernel_is_f16;  // 1 if kernel weights are stored as f16, 0 if f32
+};
+
+void main() {
+    uint ch = gl_GlobalInvocationID.x;
+    if (ch >= conv_channels) return;
+
+    uint d_conv_1 = d_conv - 1;  // number of state rows (typically 3)
+
+    // --- Convolution ---
+    float sum = 0.0;
+    for (uint ki = 0; ki < d_conv; ki++) {
+        // Kernel layout: [conv_channels, d_conv] — d_conv is the fast dimension
+        float kw;
+        uint k_idx = ch * d_conv + ki;
+        if (kernel_is_f16 != 0) {
+            kw = float(conv_kernel_f16[k_idx]);
+        } else {
+            kw = conv_kernel_f32[k_idx];
+        }
+
+        // Input: state rows for ki < d_conv-1, current input for the last position
+        float sv;
+        if (ki < d_conv_1) {
+            sv = state[ki * conv_channels + ch];
+        } else {
+            sv = current_input[ch];
+        }
+
+        sum += kw * sv;
+    }
+
+    // --- SiLU activation: sum * sigmoid(sum) ---
+    float sig = 1.0 / (1.0 + exp(-sum));
+    out_data[ch] = sum * sig;
+
+    // --- Update state: shift left, write current input as newest ---
+    // Move rows forward: state[ki] = state[ki+1] for ki = 0 .. d_conv-3
+    if (d_conv_1 > 1) {
+        for (uint ki = 0; ki < d_conv_1 - 1; ki++) {
+            state[ki * conv_channels + ch] = state[(ki + 1) * conv_channels + ch];
+        }
+    }
+    // Write current input into the last state row
+    state[(d_conv_1 - 1) * conv_channels + ch] = current_input[ch];
+}

@@ -53,6 +53,41 @@ const RopePush = extern struct {
     freq_base_bits: u32, // float bits reinterpreted as u32
 };
 
+/// Push constants for SSM conv1d + SiLU shader.
+pub const SsmConv1dPush = extern struct {
+    conv_channels: u32,
+    d_conv: u32,
+    kernel_is_f16: u32,
+};
+
+/// Push constants for SSM delta-net state update shader.
+pub const SsmDeltaNetPush = extern struct {
+    d_inner: u32,
+    dt_rank: u32,
+    head_v_dim: u32,
+    d_state: u32,
+    n_group: u32,
+    ssm_a_is_f16: u32,
+    dt_bias_is_f16: u32,
+    has_dt_bias: u32,
+    has_ssm_a: u32,
+};
+
+/// Push constants for SSM gated norm shader.
+pub const SsmGatedNormPush = extern struct {
+    d_inner: u32,
+    dt_rank: u32,
+    head_v_dim: u32,
+    d_state: u32,
+    norm_per_head: u32,
+};
+
+/// Push constants for softmax + top-k MoE router shader.
+pub const SoftmaxTopkPush = extern struct {
+    n_experts: u32,
+    k: u32,
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -69,6 +104,16 @@ pub const ElementwiseDispatch = struct {
     pipeline_vadd: ?Pipeline,
     /// SCALE ACC pipeline, or null.
     pipeline_scale_acc: ?Pipeline,
+    /// SSM CONV1D pipeline, or null.
+    pipeline_ssm_conv1d: ?Pipeline,
+    /// SSM DELTA NET pipeline, or null.
+    pipeline_ssm_delta_net: ?Pipeline,
+    /// SSM GATED NORM pipeline, or null.
+    pipeline_ssm_gated_norm: ?Pipeline,
+    /// SOFTMAX TOPK pipeline, or null.
+    pipeline_softmax_topk: ?Pipeline,
+    /// SIGMOID SCALE ACC pipeline: a[i] += sigmoid(c[0]) * b[i], 3 bindings.
+    pipeline_sigmoid_scale_acc: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -153,6 +198,41 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // SSM conv1d + SiLU: 4 bindings (input, kernel, state, output)
+        const conv1d_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_conv1d.spv", .{shader_dir}) catch unreachable;
+        const pipeline_ssm_conv1d = pipeline_mod.createFromSpirv(instance, conv1d_path, 4, @sizeOf(SsmConv1dPush), &.{}, allocator) catch |err| blk: {
+            log.warn("ssm_conv1d shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // SSM delta-net: 7 bindings (conv_out, dt_bias, alpha, beta, ssm_a, state, output)
+        const delta_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_delta_net.spv", .{shader_dir}) catch unreachable;
+        const pipeline_ssm_delta_net = pipeline_mod.createFromSpirv(instance, delta_path, 7, @sizeOf(SsmDeltaNetPush), &.{}, allocator) catch |err| blk: {
+            log.warn("ssm_delta_net shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // SSM gated norm: 4 bindings (delta_output, z_gate, norm_weights, output)
+        const gnorm_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_gated_norm.spv", .{shader_dir}) catch unreachable;
+        const pipeline_ssm_gated_norm = pipeline_mod.createFromSpirv(instance, gnorm_path, 4, @sizeOf(SsmGatedNormPush), &.{}, allocator) catch |err| blk: {
+            log.warn("ssm_gated_norm shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Softmax + top-k: 2 bindings (logits, output)
+        const topk_path = std.fmt.bufPrint(&path_buf, "{s}/softmax_topk.spv", .{shader_dir}) catch unreachable;
+        const pipeline_softmax_topk = pipeline_mod.createFromSpirv(instance, topk_path, 2, @sizeOf(SoftmaxTopkPush), &.{}, allocator) catch |err| blk: {
+            log.warn("softmax_topk shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // sigmoid_scale_acc: a[i] += sigmoid(c[0]) * b[i], 3 bindings (accum, src, gate)
+        const ssa_path = std.fmt.bufPrint(&path_buf, "{s}/sigmoid_scale_acc.spv", .{shader_dir}) catch unreachable;
+        const pipeline_sigmoid_scale_acc = pipeline_mod.createFromSpirv(instance, ssa_path, 3, @sizeOf(ScaleAccPush), &.{}, allocator) catch |err| blk: {
+            log.warn("sigmoid_scale_acc shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -161,6 +241,11 @@ pub const ElementwiseDispatch = struct {
             .pipeline_sigmoid_mul = pipeline_sigmoid_mul,
             .pipeline_vadd = pipeline_vadd,
             .pipeline_scale_acc = pipeline_scale_acc,
+            .pipeline_ssm_conv1d = pipeline_ssm_conv1d,
+            .pipeline_ssm_delta_net = pipeline_ssm_delta_net,
+            .pipeline_ssm_gated_norm = pipeline_ssm_gated_norm,
+            .pipeline_softmax_topk = pipeline_softmax_topk,
+            .pipeline_sigmoid_scale_acc = pipeline_sigmoid_scale_acc,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -319,6 +404,74 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
+    /// Record SSM conv1d + SiLU dispatch.
+    pub fn recordSsmConv1d(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        conv_channels: u32,
+        d_conv: u32,
+        kernel_is_f16: bool,
+    ) !void {
+        const pip = if (self.pipeline_ssm_conv1d) |*p| p else return error.ShaderNotLoaded;
+        const push = SsmConv1dPush{
+            .conv_channels = conv_channels,
+            .d_conv = d_conv,
+            .kernel_is_f16 = if (kernel_is_f16) 1 else 0,
+        };
+        const workgroups = (conv_channels + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
+    /// Record SSM delta-net state update dispatch.
+    pub fn recordSsmDeltaNet(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        push: SsmDeltaNetPush,
+    ) !void {
+        const pip = if (self.pipeline_ssm_delta_net) |*p| p else return error.ShaderNotLoaded;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), push.dt_rank, 1, 1);
+    }
+
+    /// Record SSM gated norm dispatch.
+    pub fn recordSsmGatedNorm(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        push: SsmGatedNormPush,
+    ) !void {
+        const pip = if (self.pipeline_ssm_gated_norm) |*p| p else return error.ShaderNotLoaded;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), push.dt_rank, 1, 1);
+    }
+
+    /// Record softmax + top-k MoE router dispatch.
+    pub fn recordSoftmaxTopk(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_experts: u32,
+        k: u32,
+    ) !void {
+        const pip = if (self.pipeline_softmax_topk) |*p| p else return error.ShaderNotLoaded;
+        const push = SoftmaxTopkPush{ .n_experts = n_experts, .k = k };
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), 1, 1, 1);
+    }
+
+    /// Record sigmoid-gated scale-accumulate: a[i] += sigmoid(c[0]) * b[i].
+    pub fn recordSigmoidScaleAcc(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+    ) !void {
+        const pip = if (self.pipeline_sigmoid_scale_acc) |*p| p else return error.ShaderNotLoaded;
+        // Push constant only needs N (uses same layout as ScaleAccPush but only N is read)
+        const push = ScaleAccPush{ .N = n_elements, .scale_bits = 0 };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *ElementwiseDispatch) void {
@@ -329,6 +482,11 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_sigmoid_mul) |*p| p.deinit();
         if (self.pipeline_vadd) |*p| p.deinit();
         if (self.pipeline_scale_acc) |*p| p.deinit();
+        if (self.pipeline_ssm_conv1d) |*p| p.deinit();
+        if (self.pipeline_ssm_delta_net) |*p| p.deinit();
+        if (self.pipeline_ssm_gated_norm) |*p| p.deinit();
+        if (self.pipeline_softmax_topk) |*p| p.deinit();
+        if (self.pipeline_sigmoid_scale_acc) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

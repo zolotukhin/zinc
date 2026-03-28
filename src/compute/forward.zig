@@ -379,17 +379,27 @@ pub const InferenceEngine = struct {
     kv_k_cache: []Buffer, // [n_layers] K cache buffers
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
     page_table_buf: Buffer, // identity page table for flash attention (page_ids[i] = i)
-    // SSM state (per-layer, CPU-side, for SSM layers)
+    // SSM state (per-layer, CPU-side, for SSM layers) — legacy, used until GPU SSM is integrated
     ssm_conv_states: [][]f32, // [n_layers] conv state: (kernel_size-1) * conv_channels
     ssm_states: [][]f32, // [n_layers] recurrent state: head_v_dim * head_v_dim * num_v_heads
     // Host-visible staging for SSM hidden state transfer
     ssm_hidden_staging: Buffer,
+    // GPU-side SSM state (persistent across tokens, for Phase 3c GPU SSM)
+    gpu_ssm_conv_states: []Buffer, // [n_layers] device-local conv state: (d_conv-1) * conv_channels * f32
+    gpu_ssm_states: []Buffer, // [n_layers] device-local recurrent state: num_heads * head_v_dim^2 * f32
+    // GPU-side MoE router output (for Phase 3c GPU router)
+    router_output_buf: Buffer, // host-visible: expert_ids[k] u32 + expert_weights[k] f32
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
     /// Vulkan instance.
     instance: *const Instance,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
+    // Profiling (Phase 3c, --profile flag)
+    profile_enabled: bool = false,
+    timestamp_query_pool: vk.c.VkQueryPool = null,
+    timestamp_period_ns: f64 = 1.0, // nanoseconds per timestamp tick
+    timestamp_count: u32 = 0, // number of timestamps written this token
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
     diag_summary_buf: [2048]u8 = .{0} ** 2048,
@@ -618,6 +628,62 @@ pub const InferenceEngine = struct {
             ssm_hidden_staging.mapped = @ptrCast(map_ptr);
         }
 
+        // GPU-side SSM state buffers (persistent across tokens, for Phase 3c decode perf)
+        const gpu_ssm_conv_states = try allocator.alloc(Buffer, config.n_layers);
+        errdefer allocator.free(gpu_ssm_conv_states);
+        const gpu_ssm_states = try allocator.alloc(Buffer, config.n_layers);
+        errdefer allocator.free(gpu_ssm_states);
+        if (has_ssm) {
+            const d_inner_g = config.ssm_d_inner;
+            const dt_rank_g = config.ssm_dt_rank;
+            const head_v_dim_g = d_inner_g / dt_rank_g;
+            const gpu_conv_ch = d_inner_g + 2 * config.ssm_n_group * config.ssm_d_state;
+            const gpu_conv_size = @as(vk.c.VkDeviceSize, (config.ssm_d_conv - 1) * gpu_conv_ch) * @sizeOf(f32);
+            const gpu_state_size = @as(vk.c.VkDeviceSize, dt_rank_g * head_v_dim_g * head_v_dim_g) * @sizeOf(f32);
+            for (0..config.n_layers) |i| {
+                gpu_ssm_conv_states[i] = try Buffer.initDeviceLocal(instance, gpu_conv_size,
+                    vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                gpu_ssm_states[i] = try Buffer.initDeviceLocal(instance, gpu_state_size,
+                    vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            }
+            // Zero-fill GPU SSM buffers via vkCmdFillBuffer
+            try decode_cmd.reset();
+            try decode_cmd.begin();
+            for (0..config.n_layers) |i| {
+                vk.c.vkCmdFillBuffer(decode_cmd.handle, gpu_ssm_conv_states[i].handle, 0, gpu_conv_size, 0);
+                vk.c.vkCmdFillBuffer(decode_cmd.handle, gpu_ssm_states[i].handle, 0, gpu_state_size, 0);
+            }
+            try decode_cmd.end();
+            try decode_cmd.submitAndWait(instance.compute_queue);
+            log.info("GPU SSM state: {d} layers × {d} KB conv + {d} KB recurrent = {d} MB total", .{
+                config.n_layers,
+                gpu_conv_size / 1024,
+                gpu_state_size / 1024,
+                (gpu_conv_size + gpu_state_size) * config.n_layers / (1024 * 1024),
+            });
+        } else {
+            for (0..config.n_layers) |i| {
+                gpu_ssm_conv_states[i] = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
+                gpu_ssm_states[i] = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
+            }
+        }
+
+        // GPU router output buffer: expert_ids[k] (u32) + expert_weights[k] (f32), host-visible for CPU readback
+        const n_used_experts = if (config.n_experts_used > 0) config.n_experts_used else 8;
+        const router_out_size = @as(vk.c.VkDeviceSize, n_used_experts) * (@sizeOf(u32) + @sizeOf(f32));
+        var router_output_buf = try Buffer.init(
+            instance, router_out_size,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer router_output_buf.deinit();
+        {
+            var map_ptr: ?*anyopaque = null;
+            const mr3 = vk.c.vkMapMemory(instance.device, router_output_buf.memory, 0, router_out_size, 0, &map_ptr);
+            if (mr3 != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            router_output_buf.mapped = @ptrCast(map_ptr);
+        }
+
         // Descriptor pool: need many sets for all layers + MoE experts
         // Per layer: ~15 descriptor sets; MoE adds ~32 per layer (8 experts × 4 ops)
         // Total: 40 layers × 47 ≈ 2000 sets, each up to 5 bindings
@@ -676,6 +742,9 @@ pub const InferenceEngine = struct {
             .ssm_conv_states = ssm_conv_states,
             .ssm_states = ssm_states,
             .ssm_hidden_staging = ssm_hidden_staging,
+            .gpu_ssm_conv_states = gpu_ssm_conv_states,
+            .gpu_ssm_states = gpu_ssm_states,
+            .router_output_buf = router_output_buf,
             .shared_pool = shared_pool,
             .instance = instance,
             .allocator = allocator,
@@ -683,10 +752,75 @@ pub const InferenceEngine = struct {
     }
 
     // -----------------------------------------------------------------------
+    // Profiling
+    // -----------------------------------------------------------------------
+
+    /// Enable GPU timestamp profiling. Creates a Vulkan query pool for timestamp queries.
+    pub fn enableProfiling(self: *InferenceEngine) !void {
+        const max_timestamps: u32 = 2048; // enough for ~1000 dispatches per token
+        const pool_info = vk.c.VkQueryPoolCreateInfo{
+            .sType = vk.c.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .queryType = vk.c.VK_QUERY_TYPE_TIMESTAMP,
+            .queryCount = max_timestamps,
+            .pipelineStatistics = 0,
+        };
+        var pool: vk.c.VkQueryPool = null;
+        const result = vk.c.vkCreateQueryPool(self.instance.device, &pool_info, null, &pool);
+        if (result != vk.c.VK_SUCCESS) return error.QueryPoolCreateFailed;
+        self.timestamp_query_pool = pool;
+        self.timestamp_period_ns = @as(f64, self.instance.device_props.limits.timestampPeriod);
+        self.profile_enabled = true;
+        log.info("Profiling enabled: {d} timestamp queries, period={d:.2}ns", .{ max_timestamps, self.timestamp_period_ns });
+    }
+
+    /// Write a timestamp to the query pool (if profiling enabled).
+    fn writeTimestamp(self: *InferenceEngine, stage: vk.c.VkPipelineStageFlags) ?u32 {
+        if (!self.profile_enabled) return null;
+        const idx = self.timestamp_count;
+        if (idx >= 2048) return null;
+        vk.c.vkCmdWriteTimestamp(self.decode_cmd.handle, stage, self.timestamp_query_pool, idx);
+        self.timestamp_count = idx + 1;
+        return idx;
+    }
+
+    /// Reset timestamp counter for a new token.
+    fn resetTimestamps(self: *InferenceEngine) void {
+        if (!self.profile_enabled) return;
+        self.timestamp_count = 0;
+        vk.c.vkCmdResetQueryPool(self.decode_cmd.handle, self.timestamp_query_pool, 0, 2048);
+    }
+
+    /// Read back all timestamps and print a summary.
+    pub fn printProfilingSummary(self: *const InferenceEngine) void {
+        if (!self.profile_enabled or self.timestamp_count == 0) return;
+        const count = self.timestamp_count;
+        var timestamps: [2048]u64 = undefined;
+        const qr = vk.c.vkGetQueryPoolResults(
+            self.instance.device, self.timestamp_query_pool,
+            0, count,
+            count * @sizeOf(u64), &timestamps, @sizeOf(u64),
+            vk.c.VK_QUERY_RESULT_64_BIT | vk.c.VK_QUERY_RESULT_WAIT_BIT,
+        );
+        if (qr != vk.c.VK_SUCCESS) {
+            log.warn("Failed to read timestamp queries: {d}", .{qr});
+            return;
+        }
+        if (count >= 2) {
+            const first = timestamps[0];
+            const last = timestamps[count - 1];
+            const elapsed_ns = @as(f64, @floatFromInt(last -| first)) * self.timestamp_period_ns;
+            log.info("PROFILE: {d} timestamps, GPU total={d:.2}ms", .{ count, elapsed_ns / 1e6 });
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Descriptor set helpers
     // -----------------------------------------------------------------------
 
     /// Allocate a descriptor set from the shared pool with the given layout.
+    /// If pool is exhausted (VK_ERROR_OUT_OF_POOL_MEMORY), logs a warning.
     fn allocDescSet(self: *const InferenceEngine, layout: vk.c.VkDescriptorSetLayout) !vk.c.VkDescriptorSet {
         const alloc_info = vk.c.VkDescriptorSetAllocateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -697,6 +831,10 @@ pub const InferenceEngine = struct {
         };
         var ds: vk.c.VkDescriptorSet = null;
         const result = vk.c.vkAllocateDescriptorSets(self.instance.device, &alloc_info, &ds);
+        if (result == vk.c.VK_ERROR_OUT_OF_POOL_MEMORY or result == vk.c.VK_ERROR_FRAGMENTED_POOL) {
+            log.err("Descriptor pool exhausted (4096 sets). Consider increasing pool size or adding mid-batch flush.", .{});
+            return error.DescriptorSetAllocFailed;
+        }
         if (result != vk.c.VK_SUCCESS) return error.DescriptorSetAllocFailed;
         return ds;
     }
@@ -801,6 +939,66 @@ pub const InferenceEngine = struct {
         vk.c.vkUpdateDescriptorSets(self.instance.device, 5, &writes, 0, null);
     }
 
+    fn writeDescSet4(
+        self: *const InferenceEngine,
+        ds: vk.c.VkDescriptorSet,
+        buf0: vk.c.VkBuffer, size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer, size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer, size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer, size3: vk.c.VkDeviceSize,
+    ) void {
+        var buffer_infos = [4]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+            .{ .buffer = buf1, .offset = 0, .range = size1 },
+            .{ .buffer = buf2, .offset = 0, .range = size2 },
+            .{ .buffer = buf3, .offset = 0, .range = size3 },
+        };
+        var writes: [4]vk.c.VkWriteDescriptorSet = undefined;
+        for (0..4) |i| {
+            writes[i] = .{
+                .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = null, .dstSet = ds, .dstBinding = @intCast(i),
+                .dstArrayElement = 0, .descriptorCount = 1,
+                .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = null, .pBufferInfo = &buffer_infos[i], .pTexelBufferView = null,
+            };
+        }
+        vk.c.vkUpdateDescriptorSets(self.instance.device, 4, &writes, 0, null);
+    }
+
+    fn writeDescSet7(
+        self: *const InferenceEngine,
+        ds: vk.c.VkDescriptorSet,
+        buf0: vk.c.VkBuffer, size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer, size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer, size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer, size3: vk.c.VkDeviceSize,
+        buf4: vk.c.VkBuffer, size4: vk.c.VkDeviceSize,
+        buf5: vk.c.VkBuffer, size5: vk.c.VkDeviceSize,
+        buf6: vk.c.VkBuffer, size6: vk.c.VkDeviceSize,
+    ) void {
+        var buffer_infos = [7]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+            .{ .buffer = buf1, .offset = 0, .range = size1 },
+            .{ .buffer = buf2, .offset = 0, .range = size2 },
+            .{ .buffer = buf3, .offset = 0, .range = size3 },
+            .{ .buffer = buf4, .offset = 0, .range = size4 },
+            .{ .buffer = buf5, .offset = 0, .range = size5 },
+            .{ .buffer = buf6, .offset = 0, .range = size6 },
+        };
+        var writes: [7]vk.c.VkWriteDescriptorSet = undefined;
+        for (0..7) |i| {
+            writes[i] = .{
+                .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = null, .dstSet = ds, .dstBinding = @intCast(i),
+                .dstArrayElement = 0, .descriptorCount = 1,
+                .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = null, .pBufferInfo = &buffer_infos[i], .pTexelBufferView = null,
+            };
+        }
+        vk.c.vkUpdateDescriptorSets(self.instance.device, 7, &writes, 0, null);
+    }
+
     // -----------------------------------------------------------------------
     // Embedding
     // -----------------------------------------------------------------------
@@ -856,13 +1054,17 @@ pub const InferenceEngine = struct {
         var diag_logit5 = [_]f32{0} ** 64;
         var diag_rms_arr = [_]f32{0} ** 64;
 
+        // Begin single command buffer for all layers (Phase 3c batching)
+        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        try self.decode_cmd.reset();
+        try self.decode_cmd.begin();
+
+        // Reset profiling timestamps for this token
+        self.resetTimestamps();
+        _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+
         for (0..config.n_layers) |layer_idx| {
             const layer: u32 = @intCast(layer_idx);
-
-            // Reset descriptor pool for this layer's work
-            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-            try self.decode_cmd.reset();
-            try self.decode_cmd.begin();
 
             // --- Upload embedding (only first layer) ---
             if (layer == 0) {
@@ -1013,9 +1215,49 @@ pub const InferenceEngine = struct {
                     try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
                 }
                 self.decode_cmd.computeBarrier();
+
+                // --- Mid-layer diagnostic: o_proj RMS at attention layers (BOS only) ---
+                // Single readback per attention layer — reads o_proj_buf (before residual add)
+                if (state.position == 0 and is_full_attn and self.profile_enabled) {
+                    // Flush current work so o_proj_buf is valid
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    // Read o_proj_buf
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.o_proj_buf.handle, self.embed_staging.handle, 1,
+                        &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    const op: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+                    var op_sq: f64 = 0;
+                    var op_max: f32 = 0;
+                    for (0..hidden_dim) |i| {
+                        op_sq += @as(f64, op[i]) * @as(f64, op[i]);
+                        const a = @abs(op[i]);
+                        if (a > op_max) op_max = a;
+                    }
+                    const op_rms: f32 = @floatCast(@sqrt(op_sq / @as(f64, @floatFromInt(hidden_dim))));
+                    log.info("L{d} o_proj: rms={d:.6} max={d:.4} [0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                        layer, op_rms, op_max, op[0], op[1], op[2], op[3],
+                    });
+
+                    // Restart command buffer
+                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                }
             } else {
-                // === SSM / LINEAR ATTENTION LAYER (CPU-side delta-net) ===
-                try self.runSsmLayerCpu(state, layer, layer_idx);
+                // === SSM / LINEAR ATTENTION LAYER ===
+                if (self.elementwise.pipeline_ssm_conv1d != null) {
+                    // GPU path (Phase 3c): all computation on GPU, no readback
+                    try self.runSsmLayerGpu(state, layer, layer_idx);
+                } else {
+                    // CPU fallback: readback + CPU conv1d/delta-net/gated-norm
+                    try self.runSsmLayerCpu(state, layer, layer_idx);
+                }
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
@@ -1032,37 +1274,64 @@ pub const InferenceEngine = struct {
             self.decode_cmd.computeBarrier();
 
             if (is_moe) {
-                // --- MoE: router DMMV → readback → CPU top-k → expert dispatch ---
+                // --- MoE: router DMMV → top-k → expert dispatch ---
                 const router_tensor = self.findLayerTensor(layer, "ffn_gate_inp.weight") orelse return error.TensorNotFound;
                 try self.dispatchDmmv(router_tensor, self.ffn_norm_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
+                self.decode_cmd.computeBarrier();
 
-                // Readback router logits for CPU top-k
-                {
-                    const barrier = vk.c.VkMemoryBarrier{
-                        .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
-                        .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
-                        .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
-                    };
-                    vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                        vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        0, 1, &barrier, 0, null, 0, null);
-                    const router_size = @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32);
-                    const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = router_size };
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &region);
-                }
-
-                // Submit and wait — need router logits on CPU for top-k
-                try self.decode_cmd.end();
-                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-
-                // CPU: softmax + top-k expert selection
                 const n_used = config.n_experts_used;
-                const router_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
-                const router_logits = router_ptr[0..config.n_experts];
-
-                var expert_ids: [16]u32 = undefined; // max 16 experts
+                var expert_ids: [16]u32 = undefined;
                 var expert_weights: [16]f32 = undefined;
-                topKSoftmax(router_logits, n_used, expert_ids[0..n_used], expert_weights[0..n_used]);
+
+                if (false) { // GPU softmax_topk disabled — shader crashes RADV
+                    // GPU path: softmax+topk on GPU, readback only 64 bytes of results
+                    const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet2(ds,
+                        self.router_logits_buf.handle, @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32),
+                        self.router_output_buf.handle, self.router_output_buf.size,
+                    );
+                    try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
+                    // Barrier: shader write → host read
+                    {
+                        const barrier = vk.c.VkMemoryBarrier{
+                            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                            .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                            .dstAccessMask = vk.c.VK_ACCESS_HOST_READ_BIT,
+                        };
+                        vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
+                            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_HOST_BIT,
+                            0, 1, &barrier, 0, null, 0, null);
+                    }
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                    // Read expert_ids and weights from host-visible router_output_buf
+                    const out_ptr: [*]const u32 = @ptrCast(@alignCast(self.router_output_buf.mapped.?));
+                    for (0..n_used) |ei| {
+                        expert_ids[ei] = out_ptr[ei];
+                        expert_weights[ei] = @bitCast(out_ptr[n_used + ei]);
+                    }
+                } else {
+                    // CPU fallback: readback all router logits, CPU softmax+topk
+                    {
+                        const barrier = vk.c.VkMemoryBarrier{
+                            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                            .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                            .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                        };
+                        vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
+                            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0, 1, &barrier, 0, null, 0, null);
+                        const router_size = @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32);
+                        const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = router_size };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &region);
+                    }
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                    const router_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
+                    const router_logits = router_ptr[0..config.n_experts];
+                    topKSoftmax(router_logits, n_used, expert_ids[0..n_used], expert_weights[0..n_used]);
+                }
 
                 // New command buffer for expert FFN dispatch
                 _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
@@ -1155,10 +1424,19 @@ pub const InferenceEngine = struct {
                     try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
                     self.decode_cmd.computeBarrier();
 
-                    // Apply shared expert gate: sigmoid(ffn_gate_inp_shexp @ ffn_norm_buf)
-                    var shexp_weight: f32 = 1.0;
-                    if (shexp_gate != null) {
-                        // Readback gate scalar from router_logits_buf
+                    // Apply shared expert gate: moe_out_buf += sigmoid(gate) * down_buf
+                    if (shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
+                        // GPU path: sigmoid_scale_acc reads gate from router_logits_buf[0]
+                        const pip = &(self.elementwise.pipeline_sigmoid_scale_acc orelse unreachable);
+                        const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(ds2,
+                            self.moe_out_buf.handle, hidden_size, // binding 0: accum
+                            self.down_buf.handle, hidden_size, // binding 1: src
+                            self.router_logits_buf.handle, @sizeOf(f32), // binding 2: gate scalar
+                        );
+                        try self.elementwise.recordSigmoidScaleAcc(&self.decode_cmd, ds2, hidden_dim);
+                    } else if (shexp_gate != null) {
+                        // CPU fallback: readback gate scalar, compute sigmoid on CPU
                         {
                             const bar = vk.c.VkMemoryBarrier{
                                 .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
@@ -1173,20 +1451,21 @@ pub const InferenceEngine = struct {
                         }
                         try self.decode_cmd.end();
                         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-
                         const gate_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
-                        shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
-
+                        const shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
                         _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                         try self.decode_cmd.reset();
                         try self.decode_cmd.begin();
-                    }
-                    // Shared expert output → add to moe_out_buf with gated weight
-                    {
+                        const pip2 = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
+                        const ds2 = try self.allocDescSet(pip2.descriptor_set_layout);
+                        self.writeDescSet2(ds2, self.moe_out_buf.handle, hidden_size, self.down_buf.handle, hidden_size);
+                        try self.elementwise.recordScaleAcc(&self.decode_cmd, ds2, hidden_dim, shexp_weight);
+                    } else {
+                        // No shared expert gate — just accumulate with weight 1.0
                         const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
                         const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
                         self.writeDescSet2(ds2, self.moe_out_buf.handle, hidden_size, self.down_buf.handle, hidden_size);
-                        try self.elementwise.recordScaleAcc(&self.decode_cmd, ds2, hidden_dim, shexp_weight);
+                        try self.elementwise.recordScaleAcc(&self.decode_cmd, ds2, hidden_dim, 1.0);
                     }
                     self.decode_cmd.computeBarrier();
                 }
@@ -1230,18 +1509,15 @@ pub const InferenceEngine = struct {
                 }
             }
 
-            // If not MoE (command buffer still open), or after MoE expert dispatch
-            if (!is_moe) {
-                try self.decode_cmd.end();
-                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-            } else {
-                // MoE path: command buffer is still open from expert dispatch
-                try self.decode_cmd.end();
-                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-            }
+            // Command buffer stays open across layers (Phase 3c batching).
+            // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
 
-            // --- Debug: per-layer hidden_buf diagnostics (BOS token only for compact output) ---
-            if (state.position == 0) {
+            // --- Debug: per-layer hidden_buf diagnostics (BOS token only, gated behind --profile) ---
+            if (state.position == 0 and self.profile_enabled) {
+                // Flush current batched cmd buffer for diagnostic readback
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                 try self.decode_cmd.reset();
                 try self.decode_cmd.begin();
                 const diag_rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
@@ -1314,11 +1590,15 @@ pub const InferenceEngine = struct {
                     if (is_full_attn) @as([]const u8, "A") else @as([]const u8, "S"),
                     diag_rms, diag_max_abs, hptr[0], logit5,
                 });
+                // Re-open cmd buffer for next layer (diagnostic closed it)
+                _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                try self.decode_cmd.reset();
+                try self.decode_cmd.begin();
             }
         }
 
         // === Per-layer diagnostic summary (stored for printing after generation) ===
-        if (state.position == 0 and config.n_layers <= 64) {
+        if (state.position == 0 and config.n_layers <= 64 and self.profile_enabled) {
             // Store compact logit5 trajectory — shows how logit for token 5 evolves through layers
             // Reference: without layers, logit5=2.5385. With correct layers, should converge to model's prediction.
             var pos: usize = 0;
@@ -1335,6 +1615,11 @@ pub const InferenceEngine = struct {
         }
 
         // === Final norm + LM head (after all layers) ===
+        // Submit batched layer work, then start final cmd buffer
+        _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        self.printProfilingSummary();
         _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
         try self.decode_cmd.begin();
@@ -1708,6 +1993,141 @@ pub const InferenceEngine = struct {
         }
         self.decode_cmd.transferToComputeBarrier();
 
+        const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+        try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
+        self.decode_cmd.computeBarrier();
+
+        // Residual: hidden_buf += o_proj_buf
+        {
+            const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
+            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+            self.writeDescSet2(ds, self.hidden_buf.handle, hidden_size, self.o_proj_buf.handle, hidden_size);
+            try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
+        }
+        self.decode_cmd.computeBarrier();
+    }
+
+    /// Run one SSM layer entirely on GPU via compute shaders (Phase 3c).
+    /// Replaces runSsmLayerCpu — no readback, no CPU computation, no submitAndWait.
+    /// Command buffer remains open after this function returns.
+    fn runSsmLayerGpu(self: *InferenceEngine, _: *DecodeState, layer: u32, layer_idx: usize) !void {
+        const config = &self.model.config;
+        const hidden_dim = config.hidden_dim;
+        const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+        const d_inner = config.ssm_d_inner;
+        const d_conv = config.ssm_d_conv;
+        const d_state = config.ssm_d_state;
+        const n_group = config.ssm_n_group;
+        const dt_rank = config.ssm_dt_rank;
+
+        if (d_inner == 0) return;
+
+        const head_v_dim: u32 = d_inner / dt_rank;
+        const conv_channels: u32 = d_inner + 2 * n_group * d_state;
+        const qkv_bytes = @as(vk.c.VkDeviceSize, conv_channels) * @sizeOf(f32);
+        const z_bytes = @as(vk.c.VkDeviceSize, d_inner) * @sizeOf(f32);
+        const ab_bytes = @as(vk.c.VkDeviceSize, dt_rank) * @sizeOf(f32);
+
+        // --- GPU: 4 DMMV projections (same as CPU path) ---
+        const wqkv_tensor = self.findLayerTensor(layer, "attn_qkv.weight") orelse return;
+        try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+
+        const z_tensor = self.findLayerTensor(layer, "attn_gate.weight") orelse return;
+        try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+
+        const alpha_tensor = self.findLayerTensor(layer, "ssm_alpha.weight") orelse return;
+        try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
+
+        const beta_tensor = self.findLayerTensor(layer, "ssm_beta.weight") orelse return;
+        try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
+        self.decode_cmd.computeBarrier();
+
+        // --- GPU: conv1d + SiLU ---
+        // Input: attn_out_buf (QKV projection), conv kernel from GPU tensor, persistent conv state
+        // Output: swiglu_buf (reused as conv1d output)
+        const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
+        const conv_kernel_is_f16 = conv_tensor.info.type_ == .f16;
+        {
+            const pip = &(self.elementwise.pipeline_ssm_conv1d orelse return error.ShaderNotLoaded);
+            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+            self.writeDescSet4(ds,
+                self.attn_out_buf.handle, qkv_bytes, // binding 0: current_input
+                conv_tensor.gpu_buffer.handle, conv_tensor.gpu_buffer.size, // binding 1: conv kernel
+                self.gpu_ssm_conv_states[layer_idx].handle, self.gpu_ssm_conv_states[layer_idx].size, // binding 2: state
+                self.swiglu_buf.handle, qkv_bytes, // binding 3: output
+            );
+            try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16);
+        }
+        self.decode_cmd.computeBarrier();
+
+        // --- GPU: delta-net state update ---
+        // Input: conv1d output (swiglu_buf), alpha (router_logits_buf), beta (down_buf), ssm_a + dt_bias from tensors
+        // Output: attn_out_buf (reused, now free after conv1d consumed it)
+        const dt_bias_tensor = self.findLayerTensor(layer, "ssm_dt.bias");
+        const ssm_a_tensor = self.findLayerTensor(layer, "ssm_a");
+        // Use a dummy zero buffer for missing tensors (dt_bias or ssm_a)
+        const dt_bias_buf = if (dt_bias_tensor) |t| t.gpu_buffer.handle else self.down_buf.handle;
+        const dt_bias_size = if (dt_bias_tensor) |t| t.gpu_buffer.size else ab_bytes;
+        const ssm_a_buf = if (ssm_a_tensor) |t| t.gpu_buffer.handle else self.down_buf.handle;
+        const ssm_a_size = if (ssm_a_tensor) |t| t.gpu_buffer.size else ab_bytes;
+        {
+            const pip = &(self.elementwise.pipeline_ssm_delta_net orelse return error.ShaderNotLoaded);
+            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+            // (ElementwiseDispatch imported at file scope)
+            self.writeDescSet7(ds,
+                self.swiglu_buf.handle, qkv_bytes, // binding 0: conv_out
+                dt_bias_buf, dt_bias_size, // binding 1: dt_bias
+                self.router_logits_buf.handle, ab_bytes, // binding 2: alpha
+                self.down_buf.handle, ab_bytes, // binding 3: beta
+                ssm_a_buf, ssm_a_size, // binding 4: ssm_a
+                self.gpu_ssm_states[layer_idx].handle, self.gpu_ssm_states[layer_idx].size, // binding 5: state
+                self.attn_out_buf.handle, z_bytes, // binding 6: output (d_inner floats)
+            );
+            const push = @import("elementwise.zig").SsmDeltaNetPush{
+                .d_inner = d_inner,
+                .dt_rank = dt_rank,
+                .head_v_dim = head_v_dim,
+                .d_state = d_state,
+                .n_group = n_group,
+                .ssm_a_is_f16 = if (ssm_a_tensor) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                .dt_bias_is_f16 = if (dt_bias_tensor) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                .has_dt_bias = if (dt_bias_tensor != null) 1 else 0,
+                .has_ssm_a = if (ssm_a_tensor != null) 1 else 0,
+            };
+            try self.elementwise.recordSsmDeltaNet(&self.decode_cmd, ds, push);
+        }
+        self.decode_cmd.computeBarrier();
+
+        // --- GPU: gated norm ---
+        // Input: delta_net output (attn_out_buf), z gate (gate_buf), norm weights from tensor
+        // Output: swiglu_buf (reused, now free after delta_net consumed it)
+        const norm_tensor = self.findLayerTensor(layer, "ssm_norm.weight");
+        const norm_elems: u32 = if (norm_tensor) |t| @intCast(t.info.numElements()) else 0;
+        const norm_per_head = norm_elems >= d_inner;
+        const norm_buf_handle = if (norm_tensor) |t| t.gpu_buffer.handle else self.down_buf.handle;
+        const norm_buf_size = if (norm_tensor) |t| t.gpu_buffer.size else ab_bytes;
+        {
+            const pip = &(self.elementwise.pipeline_ssm_gated_norm orelse return error.ShaderNotLoaded);
+            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+            // (ElementwiseDispatch imported at file scope)
+            self.writeDescSet4(ds,
+                self.attn_out_buf.handle, z_bytes, // binding 0: delta_net output
+                self.gate_buf.handle, z_bytes, // binding 1: z_gate
+                norm_buf_handle, norm_buf_size, // binding 2: norm weights
+                self.swiglu_buf.handle, z_bytes, // binding 3: output
+            );
+            const push = @import("elementwise.zig").SsmGatedNormPush{
+                .d_inner = d_inner,
+                .dt_rank = dt_rank,
+                .head_v_dim = head_v_dim,
+                .d_state = d_state,
+                .norm_per_head = if (norm_per_head) 1 else 0,
+            };
+            try self.elementwise.recordSsmGatedNorm(&self.decode_cmd, ds, push);
+        }
+        self.decode_cmd.computeBarrier();
+
+        // --- GPU: ssm_out DMMV + residual (same as CPU path's GPU phase 2) ---
         const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
         try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
         self.decode_cmd.computeBarrier();
@@ -2107,6 +2527,7 @@ pub const InferenceEngine = struct {
 
     /// Release GPU buffers, graphs, command objects, and dispatch helpers owned by the engine.
     pub fn deinit(self: *InferenceEngine) void {
+        if (self.timestamp_query_pool != null) vk.c.vkDestroyQueryPool(self.instance.device, self.timestamp_query_pool, null);
         vk.c.vkDestroyDescriptorPool(self.instance.device, self.shared_pool, null);
         // SSM state
         for (self.ssm_conv_states) |s| if (s.len > 0) self.allocator.free(s);
@@ -2114,6 +2535,12 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.ssm_conv_states);
         self.allocator.free(self.ssm_states);
         self.ssm_hidden_staging.deinit();
+        // GPU SSM state + router output
+        for (self.gpu_ssm_conv_states) |*b| if (b.handle != null) b.deinit();
+        for (self.gpu_ssm_states) |*b| if (b.handle != null) b.deinit();
+        self.allocator.free(self.gpu_ssm_conv_states);
+        self.allocator.free(self.gpu_ssm_states);
+        self.router_output_buf.deinit();
         // KV cache + page table
         self.page_table_buf.deinit();
         for (self.kv_k_cache) |*b| b.deinit();
@@ -2150,6 +2577,35 @@ pub const InferenceEngine = struct {
         self.* = undefined;
     }
 };
+
+/// Dump top-5 logits for a given decode step (for comparing with llama.cpp).
+fn dumpTop5Logits(engine: *const InferenceEngine, step: u32) void {
+    const vocab_size = engine.model.config.vocab_size;
+    const logits_ptr: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
+    const logits = logits_ptr[0..vocab_size];
+
+    // Find top-5 by value
+    var top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };
+    var top_vals: [5]f32 = .{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+    for (logits, 0..) |val, i| {
+        if (val > top_vals[4]) {
+            top_vals[4] = val;
+            top_ids[4] = @intCast(i);
+            // Bubble up
+            var j: usize = 4;
+            while (j > 0 and top_vals[j] > top_vals[j - 1]) : (j -= 1) {
+                std.mem.swap(f32, &top_vals[j], &top_vals[j - 1]);
+                std.mem.swap(u32, &top_ids[j], &top_ids[j - 1]);
+            }
+        }
+    }
+    log.info("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
+        step,
+        top_ids[0], top_vals[0], top_ids[1], top_vals[1],
+        top_ids[2], top_vals[2], top_ids[3], top_vals[3],
+        top_ids[4], top_vals[4],
+    });
+}
 
 /// Run single-request inference: prefill the prompt, decode greedily, and return generated token IDs.
 /// @param engine Initialized inference engine.
@@ -2201,6 +2657,8 @@ pub fn generate(
         log.info("decode[0]: token={d} pos={d} (from prefill logits)", .{
             first_token, state.position,
         });
+        // Dump top-5 logits from prefill for comparison with llama.cpp
+        dumpTop5Logits(engine, 0);
         generated = 1;
         if (first_token == eos_token_id) generated = max_tokens; // stop early
     }
@@ -2214,6 +2672,10 @@ pub fn generate(
         try engine.decodeStep(&state, input_token);
         const token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, token);
+        // Top-5 logits per token for first 5 tokens + last token
+        if (generated < 5 or generated == max_tokens - 1) {
+            dumpTop5Logits(engine, generated);
+        }
 
         const tok_end = std.time.nanoTimestamp();
         const tok_ms = @as(f64, @floatFromInt(@as(u64, @intCast(tok_end - tok_start)))) / 1_000_000.0;
@@ -2324,6 +2786,244 @@ test "expertSliceBytes computes correct byte offsets for Q5_K" {
     // bytes = 2048 * 2 * 176 = 720,896
     const result = expertSliceBytes(.q5_k, 2048, 512);
     try std.testing.expectEqual(@as(u32, 720_896), result);
+}
+
+// ---------------------------------------------------------------------------
+// dequantRow tests — lock down the quant formats that had bugs
+// ---------------------------------------------------------------------------
+
+test "dequantRow Q4_K sub-block pairing: low nibble then high nibble" {
+    // Q4_K block: d[2] dmin[2] scales[12] qs[128] = 144 bytes, 256 elements
+    // Bug found: sub-block pairing was (sp, sp+4) instead of (2*sp, 2*sp+1).
+    // The correct layout processes 32 consecutive bytes at a time:
+    //   first 32 outputs from low nibbles, next 32 from high nibbles.
+    var block: [144]u8 = [_]u8{0} ** 144;
+    // d = 1.0 as f16
+    const d_bits = @as(u16, @bitCast(@as(f16, 1.0)));
+    block[0] = @truncate(d_bits);
+    block[1] = @truncate(d_bits >> 8);
+    // dmin = 0 as f16 (simplifies: output = d * scale * nibble)
+    block[2] = 0;
+    block[3] = 0;
+    // scales[0] = scale=1, scales[4] = min=0 (for j=0 pair: sc=1, m=0)
+    block[4] = 1; // scales[0]: low 6 bits = 1
+    block[8] = 0; // scales[4]: low 6 bits = 0 (min)
+    // scales[1] = scale=2 for high-nibble sub-block
+    block[5] = 2; // scales[1]: low 6 bits = 2
+    block[9] = 0; // scales[5]: min = 0
+    // qs[0..31]: first 32 bytes, low nibble for first 32 outputs, high nibble for next 32
+    block[16] = 0x53; // low nibble=3, high nibble=5
+    block[17] = 0x97; // low nibble=7, high nibble=9
+
+    var output: [256]f32 = undefined;
+    dequantRow(&block, 0, 256, .q4_k, &output);
+
+    // First sub-block: scale=1, so output = 1.0 * 1 * nibble = nibble
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[0], 0.01);  // low nibble of 0x53
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), output[1], 0.01);  // low nibble of 0x97
+    // Second sub-block: scale=2, output = 1.0 * 2 * nibble
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), output[32], 0.01); // high nibble of 0x53 = 5, * 2
+    try std.testing.expectApproxEqAbs(@as(f32, 18.0), output[33], 0.01); // high nibble of 0x97 = 9, * 2
+}
+
+test "dequantRow Q5_K interleaved element ordering: y[2l] and y[2l+1]" {
+    // Q5_K block: d[2] dmin[2] scales[12] qh[32] qs[128] = 176 bytes, 256 elements
+    // Bug found: was using contiguous (e, 32+e) instead of interleaved (2e, 2e+1).
+    // Correct ordering: for each byte qs[l], low nibble → output[2l], high nibble → output[2l+1].
+    var block: [176]u8 = [_]u8{0} ** 176;
+    // d = 1.0 as f16
+    const d_bits = @as(u16, @bitCast(@as(f16, 1.0)));
+    block[0] = @truncate(d_bits);
+    block[1] = @truncate(d_bits >> 8);
+    // dmin = 0 (simplifies output)
+    block[2] = 0;
+    block[3] = 0;
+    // scales[0] = 1 (sc for sub-block 0), scales[4] = 0 (min)
+    block[4] = 1;
+    block[8] = 0;
+    // scales[1] = 1 (sc for sub-block 1)
+    block[5] = 1;
+    block[9] = 0;
+    // qh = all 0 (no high bits set, so values are pure 4-bit)
+    // qs[0] at block[48]: low=0xA (10), high=0x3 (3)
+    block[48] = 0x3A; // low nibble=0xA=10, high nibble=0x3=3
+
+    var output: [256]f32 = undefined;
+    dequantRow(&block, 0, 256, .q5_k, &output);
+
+    // Interleaved: output[0] from low nibble, output[1] from high nibble
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), output[0], 0.01); // d*sc*10 - 0 = 10
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[1], 0.01);  // d*sc*3 - 0 = 3
+}
+
+test "dequantRow Q8_0 correct scale and signed values" {
+    // Q8_0 block: scale[2 bytes f16] + 32×i8 = 34 bytes per block of 32 elements
+    // Bug found: wave32 subgroup lost half the dot product.
+    // This tests the CPU dequant path (used for embeddings).
+    var block: [34]u8 = [_]u8{0} ** 34;
+    // scale = 0.5 as f16
+    const scale_bits = @as(u16, @bitCast(@as(f16, 0.5)));
+    block[0] = @truncate(scale_bits);
+    block[1] = @truncate(scale_bits >> 8);
+    // quant values: +1, -1, +127, -128
+    block[2] = @bitCast(@as(i8, 1));
+    block[3] = @bitCast(@as(i8, -1));
+    block[4] = @bitCast(@as(i8, 127));
+    block[5] = @bitCast(@as(i8, -128));
+
+    var output: [32]f32 = undefined;
+    dequantRow(&block, 0, 32, .q8_0, &output);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), output[0], 0.001);   // 1 * 0.5
+    try std.testing.expectApproxEqAbs(@as(f32, -0.5), output[1], 0.001);  // -1 * 0.5
+    try std.testing.expectApproxEqAbs(@as(f32, 63.5), output[2], 0.001);  // 127 * 0.5
+    try std.testing.expectApproxEqAbs(@as(f32, -64.0), output[3], 0.001); // -128 * 0.5
+    // Remaining should be 0
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), output[6], 0.001);
+}
+
+test "dequantRow F16 round-trip preserves values" {
+    // Write known f16 values and verify dequant produces correct f32
+    var raw: [8]u8 = undefined;
+    const vals = [_]f16{ 1.5, -3.25, 0.0, 42.0 };
+    for (vals, 0..) |v, i| {
+        const bits = @as(u16, @bitCast(v));
+        raw[i * 2] = @truncate(bits);
+        raw[i * 2 + 1] = @truncate(bits >> 8);
+    }
+    var output: [4]f32 = undefined;
+    dequantRow(&raw, 0, 4, .f16, &output);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), output[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.25), output[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), output[2], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 42.0), output[3], 0.01);
+}
+
+test "dequantRow F32 direct copy" {
+    var raw: [16]u8 align(4) = undefined;
+    const src: *[4]f32 = @ptrCast(@alignCast(&raw));
+    src.* = .{ 1.0, -2.0, 3.14, 0.0 };
+    var output: [4]f32 = undefined;
+    dequantRow(&raw, 0, 4, .f32, &output);
+
+    try std.testing.expectEqual(@as(f32, 1.0), output[0]);
+    try std.testing.expectEqual(@as(f32, -2.0), output[1]);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.14), output[2], 0.001);
+    try std.testing.expectEqual(@as(f32, 0.0), output[3]);
+}
+
+// ---------------------------------------------------------------------------
+// getScaleMinK4 tests — bit extraction used by Q4_K and Q5_K
+// ---------------------------------------------------------------------------
+
+test "getScaleMinK4 low indices extract 6-bit fields" {
+    // For j < 4: sc = scales[j] & 63, m = scales[j+4] & 63
+    var scales: [12]u8 = [_]u8{0} ** 12;
+    scales[0] = 0xFF; // 0b11_111111 → sc = 63
+    scales[4] = 0xC5; // 0b11_000101 → m = 5
+
+    const sm = getScaleMinK4(0, &scales);
+    try std.testing.expectEqual(@as(u8, 63), sm.sc);
+    try std.testing.expectEqual(@as(u8, 5), sm.m);
+}
+
+test "getScaleMinK4 high indices combine nibbles and top bits" {
+    // For j >= 4: sc = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4)
+    //             m  = (scales[j+4] >> 4)   | ((scales[j]   >> 6) << 4)
+    var scales: [12]u8 = [_]u8{0} ** 12;
+    // j=4: sc uses scales[8] low nibble + scales[0] top 2 bits
+    //       m uses scales[8] high nibble + scales[4] top 2 bits
+    scales[0] = 0xC0; // top 2 bits = 0b11 → contributes 0b11_0000 = 48 to sc
+    scales[4] = 0x80; // top 2 bits = 0b10 → contributes 0b10_0000 = 32 to m
+    scales[8] = 0x72; // low nibble = 0x2, high nibble = 0x7
+
+    const sm = getScaleMinK4(4, &scales);
+    try std.testing.expectEqual(@as(u8, 0x2 | (3 << 4)), sm.sc); // 2 + 48 = 50
+    try std.testing.expectEqual(@as(u8, 0x7 | (2 << 4)), sm.m);  // 7 + 32 = 39
+}
+
+// ---------------------------------------------------------------------------
+// topKSoftmax edge cases
+// ---------------------------------------------------------------------------
+
+test "topKSoftmax with uniform logits returns equal weights" {
+    const logits = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+    var ids: [2]u32 = undefined;
+    var weights: [2]f32 = undefined;
+    topKSoftmax(&logits, 2, &ids, &weights);
+    // All logits equal → weights should be equal (0.5 each after renorm)
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), weights[0], 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), weights[1], 0.01);
+}
+
+test "topKSoftmax k=1 picks argmax with weight 1.0" {
+    const logits = [_]f32{ -1.0, 5.0, 2.0 };
+    var ids: [1]u32 = undefined;
+    var weights: [1]f32 = undefined;
+    topKSoftmax(&logits, 1, &ids, &weights);
+    try std.testing.expectEqual(@as(u32, 1), ids[0]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), weights[0], 0.001);
+}
+
+test "topKSoftmax with large logit spread avoids overflow" {
+    // exp(100) overflows f32, but softmax with max subtraction should handle it
+    const logits = [_]f32{ 100.0, 0.0, -100.0 };
+    var ids: [2]u32 = undefined;
+    var weights: [2]f32 = undefined;
+    topKSoftmax(&logits, 2, &ids, &weights);
+    try std.testing.expectEqual(@as(u32, 0), ids[0]);
+    try std.testing.expectEqual(@as(u32, 1), ids[1]);
+    // First weight should dominate
+    try std.testing.expect(weights[0] > 0.99);
+    const wsum = weights[0] + weights[1];
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), wsum, 0.001);
+}
+
+// ---------------------------------------------------------------------------
+// expertSliceBytes — additional quant types
+// ---------------------------------------------------------------------------
+
+test "expertSliceBytes Q6_K" {
+    // Q6_K: block_size=256, bytes_per_block=210
+    const result = expertSliceBytes(.q6_k, 256, 2048);
+    // blocks_per_row = 2048/256 = 8, bytes = 256 * 8 * 210 = 430,080
+    try std.testing.expectEqual(@as(u32, 430_080), result);
+}
+
+test "expertSliceBytes Q8_0" {
+    // Q8_0: block_size=32, bytes_per_block=34
+    const result = expertSliceBytes(.q8_0, 2048, 2048);
+    // blocks_per_row = 2048/32 = 64, bytes = 2048 * 64 * 34 = 4,456,448
+    try std.testing.expectEqual(@as(u32, 4_456_448), result);
+}
+
+test "expertSliceBytes F16" {
+    // F16: block_size=1, bytes_per_block=2
+    const result = expertSliceBytes(.f16, 512, 2048);
+    // blocks_per_row = 2048/1 = 2048, bytes = 512 * 2048 * 2 = 2,097,152
+    try std.testing.expectEqual(@as(u32, 2_097_152), result);
+}
+
+// ---------------------------------------------------------------------------
+// readMmapFloats — f16/f32 tensor reading
+// ---------------------------------------------------------------------------
+
+test "readMmapFloats f16 matches dequantRow f16" {
+    var raw: [8]u8 = undefined;
+    const vals = [_]f16{ 1.0, -0.5, 0.25, 100.0 };
+    for (vals, 0..) |v, i| {
+        const bits = @as(u16, @bitCast(v));
+        raw[i * 2] = @truncate(bits);
+        raw[i * 2 + 1] = @truncate(bits >> 8);
+    }
+    var out_mmap: [4]f32 = undefined;
+    var out_dequant: [4]f32 = undefined;
+    readMmapFloats(&raw, 0, .f16, &out_mmap);
+    dequantRow(&raw, 0, 4, .f16, &out_dequant);
+    for (0..4) |i| {
+        try std.testing.expectEqual(out_mmap[i], out_dequant[i]);
+    }
 }
 
 test "delta-net zero state produces beta*v*(k.q) output" {

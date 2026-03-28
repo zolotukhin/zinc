@@ -1,0 +1,8 @@
+# Reference tokens for correctness validation
+# Record by running on RDNA4 test node:
+#   ./zig-out/bin/zinc --model /path/to/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+#     --prompt "The capital of France is" --max-tokens 32
+# Paste the 32 generated tokens below (one per line or space-separated):
+#
+# Pre-optimization baseline (4 tok/s):
+# TODO: Record on test node before starting Phase 3

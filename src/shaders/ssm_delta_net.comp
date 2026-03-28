@@ -1,0 +1,231 @@
+#version 460
+// ZINC — SSM delta-net recurrent state update
+// Performs the delta-net autoregressive state update for Mamba/SSM layers,
+// replacing the CPU-side computation with a fully GPU-resident kernel.
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+//
+// Each workgroup handles one head (dispatch dt_rank workgroups).
+// State per head is head_v_dim × head_v_dim (128×128 = 16384 floats).
+// With 64 threads, each thread owns head_v_dim / 64 = 2 rows of state,
+// processing all head_v_dim columns per row.
+//
+// Algorithm per head h:
+//   1. Extract Q, K, V slices from conv_out
+//      conv_out layout: [Q(n_group*d_state), K(n_group*d_state), V(d_inner)]
+//   2. L2 normalize Q and K per group, scale Q by 1/sqrt(d_state)
+//   3. Compute gate = exp(softplus(alpha + dt_bias) * ssm_a), beta_val = sigmoid(beta)
+//   4. Decay state: s *= gate
+//   5. For each row: sk = dot(s[row], k), d = beta_val * (v[row] - sk)
+//      then s[row][col] += k[col] * d
+//   6. Readout: output[h*head_v_dim + row] = dot(s[row], q)
+//
+// Dispatch: dt_rank × 1 × 1 workgroups
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+// conv_out: output of conv1d+SiLU, layout [Q(n_group*d_state), K(n_group*d_state), V(d_inner)]
+layout(set = 0, binding = 0) readonly buffer ConvOut {
+    float conv_out[];
+};
+
+// dt_bias: per-head bias for DT (dt_rank floats)
+layout(set = 0, binding = 1) readonly buffer DtBiasF32 {
+    float dt_bias_f32[];
+};
+layout(set = 0, binding = 1) readonly buffer DtBiasF16 {
+    float16_t dt_bias_f16[];
+};
+
+// alpha: per-head DT projection (dt_rank floats)
+layout(set = 0, binding = 2) readonly buffer Alpha {
+    float alpha[];
+};
+
+// beta: per-head beta projection (dt_rank floats)
+layout(set = 0, binding = 3) readonly buffer Beta {
+    float beta[];
+};
+
+// ssm_a weights: decay factors per head (dt_rank floats, may be f16)
+layout(set = 0, binding = 4) readonly buffer SsmAF32 {
+    float ssm_a_f32[];
+};
+layout(set = 0, binding = 4) readonly buffer SsmAF16 {
+    float16_t ssm_a_f16[];
+};
+
+// Persistent recurrent state: dt_rank * head_v_dim * head_v_dim floats, read+write
+layout(set = 0, binding = 5) buffer State {
+    float state[];
+};
+
+// Output: d_inner floats — delta-net readout
+layout(set = 0, binding = 6) writeonly buffer Output {
+    float out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint d_inner;       // total inner dimension (dt_rank * head_v_dim)
+    uint dt_rank;       // number of heads
+    uint head_v_dim;    // per-head value dimension (d_inner / dt_rank)
+    uint d_state;       // state dimension per group (for Q/K)
+    uint n_group;       // number of Q/K groups
+    uint ssm_a_is_f16;  // 1 if ssm_a stored as f16, 0 if f32
+    uint dt_bias_is_f16; // 1 if dt_bias stored as f16, 0 if f32
+    uint has_dt_bias;    // 1 if dt_bias tensor exists, 0 otherwise
+    uint has_ssm_a;      // 1 if ssm_a tensor exists, 0 otherwise
+};
+
+// Shared memory for Q, K, V vectors (up to 128 elements each)
+shared float s_q[128];
+shared float s_k[128];
+shared float s_v[128];
+// Shared scalar values broadcast from thread 0
+shared float s_gate;
+shared float s_beta_val;
+
+void main() {
+    uint h = gl_WorkGroupID.x;    // head index
+    uint tid = gl_LocalInvocationID.x;  // 0..63
+
+    if (h >= dt_rank) return;
+
+    uint qk_dim = d_state * n_group;
+
+    // --- Step 1: Load Q, K, V into shared memory ---
+    // conv_out layout: [Q(qk_dim), K(qk_dim), V(d_inner)]
+    // Q and K are grouped: group index for this head
+    uint k_hi = (n_group == dt_rank) ? h : (h % n_group);
+    uint q_offset = k_hi * d_state;
+    uint k_offset = qk_dim + k_hi * d_state;
+    uint v_offset = 2 * qk_dim + h * head_v_dim;
+
+    // Load Q (d_state elements from this head's group)
+    for (uint i = tid; i < d_state && i < head_v_dim; i += 64) {
+        s_q[i] = conv_out[q_offset + i];
+    }
+    // Zero-fill Q beyond d_state if head_v_dim > d_state
+    for (uint i = tid + d_state; i < head_v_dim; i += 64) {
+        s_q[i] = 0.0;
+    }
+
+    // Load K (d_state elements from this head's group)
+    for (uint i = tid; i < d_state && i < head_v_dim; i += 64) {
+        s_k[i] = conv_out[k_offset + i];
+    }
+    // Zero-fill K beyond d_state
+    for (uint i = tid + d_state; i < head_v_dim; i += 64) {
+        s_k[i] = 0.0;
+    }
+
+    // Load V (head_v_dim elements)
+    for (uint i = tid; i < head_v_dim; i += 64) {
+        s_v[i] = conv_out[v_offset + i];
+    }
+    barrier();
+
+    // --- Step 2: L2 normalize Q and K, scale Q by 1/sqrt(d_state) ---
+    // L2 normalize Q
+    {
+        uint len = min(d_state, head_v_dim);
+        float partial = 0.0;
+        for (uint i = tid; i < len; i += 64) {
+            partial += s_q[i] * s_q[i];
+        }
+        partial = subgroupAdd(partial);
+        float inv_norm = inversesqrt(max(partial, 1e-12));
+        float q_scale = inv_norm / sqrt(float(d_state));
+        for (uint i = tid; i < len; i += 64) {
+            s_q[i] *= q_scale;
+        }
+    }
+    barrier();
+
+    // L2 normalize K
+    {
+        uint len = min(d_state, head_v_dim);
+        float partial = 0.0;
+        for (uint i = tid; i < len; i += 64) {
+            partial += s_k[i] * s_k[i];
+        }
+        partial = subgroupAdd(partial);
+        float inv_norm = inversesqrt(max(partial, 1e-12));
+        for (uint i = tid; i < len; i += 64) {
+            s_k[i] *= inv_norm;
+        }
+    }
+    barrier();
+
+    // --- Step 3: Compute gate and beta_val (single thread, broadcast via shared) ---
+    if (tid == 0) {
+        float a = alpha[h];
+        if (has_dt_bias != 0) {
+            if (dt_bias_is_f16 != 0) {
+                a += float(dt_bias_f16[h]);
+            } else {
+                a += dt_bias_f32[h];
+            }
+        }
+        // softplus: log(1 + exp(a))
+        float sp = log(1.0 + exp(a));
+        float gate_val;
+        if (has_ssm_a != 0) {
+            float ssm_a_val;
+            if (ssm_a_is_f16 != 0) {
+                ssm_a_val = float(ssm_a_f16[h]);
+            } else {
+                ssm_a_val = ssm_a_f32[h];
+            }
+            gate_val = sp * ssm_a_val;
+        } else {
+            gate_val = -sp;
+        }
+        s_gate = exp(gate_val);
+        // sigmoid(beta)
+        s_beta_val = 1.0 / (1.0 + exp(-beta[h]));
+    }
+    barrier();
+
+    float g_val = s_gate;
+    float b_val = s_beta_val;
+
+    // --- Steps 4-6: State update and readout ---
+    // State layout: state[h * head_v_dim * head_v_dim + row * head_v_dim + col]
+    // Each thread processes multiple rows (head_v_dim / 64 = 2 rows per thread when head_v_dim=128)
+    uint s_base = h * head_v_dim * head_v_dim;
+    uint k_len = min(head_v_dim, d_state);
+
+    for (uint row = tid; row < head_v_dim; row += 64) {
+        uint row_base = s_base + row * head_v_dim;
+
+        // Step 4: Decay state for this row
+        for (uint col = 0; col < head_v_dim; col++) {
+            state[row_base + col] *= g_val;
+        }
+
+        // Step 5: Compute sk = dot(state[row], k)
+        float sk = 0.0;
+        for (uint col = 0; col < k_len; col++) {
+            sk += state[row_base + col] * s_k[col];
+        }
+
+        // d = beta * (v[row] - sk)
+        float d_val = b_val * (s_v[row] - sk);
+
+        // Update state: s[row][col] += k[col] * d_val
+        for (uint col = 0; col < k_len; col++) {
+            state[row_base + col] += s_k[col] * d_val;
+        }
+
+        // Step 6: Readout: output[h*head_v_dim + row] = dot(state[row], q)
+        float o_val = 0.0;
+        for (uint col = 0; col < k_len; col++) {
+            o_val += state[row_base + col] * s_q[col];
+        }
+        out_data[h * head_v_dim + row] = o_val;
+    }
+}

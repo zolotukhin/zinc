@@ -1,0 +1,85 @@
+#version 460
+// Fused RMS normalization × SiLU gating for SSM layers
+// result = (o / rms) * norm_weight * silu(z), per head
+// Each workgroup processes one head (head_v_dim elements, 2 per thread).
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer DeltaNetOutput {
+    float delta_net_output[];
+};
+
+layout(set = 0, binding = 1) readonly buffer ZGate {
+    float z_gate[];
+};
+
+layout(set = 0, binding = 2) readonly buffer NormWeights {
+    float norm_weight[];
+};
+
+layout(set = 0, binding = 3) writeonly buffer Output {
+    float out_buf[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint d_inner;      // total elements (dt_rank * head_v_dim)
+    uint dt_rank;      // number of heads (32)
+    uint head_v_dim;   // elements per head (128)
+    uint d_state;      // state dimension (for shared norm indexing)
+    uint norm_per_head; // 1 = per-head (d_inner weights), 0 = shared (d_state weights)
+};
+
+shared float s_partial[64];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint h = gl_WorkGroupID.x;            // head index
+    uint base = h * head_v_dim;           // offset into d_inner-sized buffers
+
+    // --- Pass 1: compute sum of squares for RMS ---
+    // 64 threads, 128 elements => 2 elements per thread
+    float sum_sq = 0.0;
+    for (uint i = tid; i < head_v_dim; i += 64) {
+        float val = delta_net_output[base + i];
+        sum_sq += val * val;
+    }
+
+    // Reduce within the subgroup (wave64 covers the full workgroup on RDNA4).
+    sum_sq = subgroupAdd(sum_sq);
+
+    // Fallback for architectures where subgroup size < workgroup size.
+    if (gl_SubgroupSize < 64) {
+        s_partial[tid] = sum_sq;
+        barrier();
+        if (tid == 0) {
+            float total = 0.0;
+            uint num_subgroups = (64 + gl_SubgroupSize - 1) / gl_SubgroupSize;
+            for (uint s = 0; s < num_subgroups; s++) {
+                total += s_partial[s * gl_SubgroupSize];
+            }
+            s_partial[0] = total;
+        }
+        barrier();
+        sum_sq = s_partial[0];
+    }
+
+    // rms = sqrt(mean(o^2) + eps)
+    float rms_inv = inversesqrt(sum_sq / float(head_v_dim) + 1e-6);
+
+    // --- Pass 2: normalize, apply norm weight, and SiLU gate ---
+    for (uint i = tid; i < head_v_dim; i += 64) {
+        float nv = delta_net_output[base + i] * rms_inv;
+
+        // Apply norm weight: per-head uses global index, shared uses i % d_state
+        uint norm_idx = (norm_per_head != 0) ? (base + i) : (i % d_state);
+        nv *= norm_weight[norm_idx];
+
+        // SiLU gate: zv / (1.0 + exp(-zv))
+        float zv = z_gate[base + i];
+        float gate = zv / (1.0 + exp(-zv));
+
+        out_buf[base + i] = nv * gate;
+    }
+}

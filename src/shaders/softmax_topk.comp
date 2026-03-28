@@ -1,5 +1,121 @@
 #version 460
-// Placeholder — Fused softmax + top-k for MoE routing
-// TODO: implement
+// ZINC — Fused softmax + top-k for MoE expert routing
+// Computes softmax over all expert logits, selects top-k experts by probability,
+// and renormalizes the selected weights. Replaces CPU topKSoftmax.
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+// Single workgroup dispatch — n_experts (256) fits in shared memory.
+
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
 layout(local_size_x = 64) in;
-void main() {}
+
+layout(set = 0, binding = 0) readonly buffer Logits {
+    float logits[];
+};
+
+// Output: expert_ids[k] followed by expert_weights[k], packed as uint then float
+layout(set = 0, binding = 1) buffer RouterOutput {
+    uint output_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint n_experts;   // total experts (e.g. 256)
+    uint k;           // top-k to select (e.g. 8)
+};
+
+shared float s_probs[256];
+shared float s_max_val;
+shared float s_sum;
+shared float s_wsum;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // --- Step 1: Load logits and find global max ---
+    // Each thread handles ceil(n_experts/64) elements
+    float local_max = -1.0 / 0.0; // -inf
+    for (uint i = tid; i < n_experts; i += 64) {
+        float v = logits[i];
+        s_probs[i] = v;
+        local_max = max(local_max, v);
+    }
+    float wave_max = subgroupMax(local_max);
+    if (tid == 0) s_max_val = wave_max;
+    barrier();
+
+    float gmax = s_max_val;
+
+    // --- Step 2: Compute exp(logit - max) and sum ---
+    float local_sum = 0.0;
+    for (uint i = tid; i < n_experts; i += 64) {
+        float e = exp(s_probs[i] - gmax);
+        s_probs[i] = e;
+        local_sum += e;
+    }
+    float wave_sum = subgroupAdd(local_sum);
+    if (tid == 0) s_sum = wave_sum;
+    barrier();
+
+    float inv_sum = 1.0 / s_sum;
+
+    // --- Step 3: Normalize to probabilities ---
+    for (uint i = tid; i < n_experts; i += 64) {
+        s_probs[i] *= inv_sum;
+    }
+    barrier();
+
+    // --- Step 4: Top-k selection via repeated parallel max ---
+    // For each of k rounds, find the max probability, record it, mask it out.
+    // k is small (typically 8), so k sequential rounds are fine.
+    for (uint ki = 0; ki < k; ki++) {
+        // Each thread finds its local max across its elements
+        float local_best = -1.0;
+        uint local_best_idx = 0;
+        for (uint i = tid; i < n_experts; i += 64) {
+            if (s_probs[i] > local_best) {
+                local_best = s_probs[i];
+                local_best_idx = i;
+            }
+        }
+
+        // Wave-wide max reduction
+        float wave_best = subgroupMax(local_best);
+
+        // Find which thread has the winning index
+        // (handle ties by taking the first thread that matches)
+        bool is_winner = (local_best == wave_best) && (local_best >= 0.0);
+        uvec4 ballot = subgroupBallot(is_winner);
+        uint first_winner = subgroupBallotFindLSB(ballot);
+
+        uint winning_idx = subgroupBroadcast(local_best_idx, first_winner);
+        float winning_val = wave_best;
+
+        // Thread 0 writes the result
+        if (tid == 0) {
+            output_data[ki] = winning_idx;
+            // Write weight as float reinterpreted as uint (bitcast)
+            output_data[k + ki] = floatBitsToUint(winning_val);
+        }
+
+        // Mask out the selected expert so it's not picked again
+        // All threads see the same winning_idx; shared memory write is safe
+        if (tid == 0) {
+            s_probs[winning_idx] = -1.0;
+        }
+        barrier();
+    }
+
+    // --- Step 5: Renormalize selected weights ---
+    if (tid == 0) {
+        float wsum_local = 0.0;
+        for (uint i = 0; i < k; i++) {
+            wsum_local += uintBitsToFloat(output_data[k + i]);
+        }
+        float inv_wsum = (wsum_local > 0.0) ? (1.0 / wsum_local) : 0.0;
+        for (uint i = 0; i < k; i++) {
+            float w = uintBitsToFloat(output_data[k + i]) * inv_wsum;
+            output_data[k + i] = floatBitsToUint(w);
+        }
+    }
+}
