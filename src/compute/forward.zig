@@ -1477,10 +1477,11 @@ pub const InferenceEngine = struct {
         const conv_kernel_buf = try self.allocator.alloc(f32, conv_kernel_len);
         defer self.allocator.free(conv_kernel_buf);
         readMmapFloats(mmap, conv_data_off, conv_tensor.info.type_, conv_kernel_buf);
-        if (layer == 0) log.info("SSM tensor types: conv1d={s} dt_bias={s} ssm_a={s}", .{
+        if (layer == 0) log.info("SSM tensor types: conv1d={s} dt_bias={s} ssm_a={s} n_group={d} dt_rank={d} d_state={d} head_v={d}", .{
             @tagName(conv_tensor.info.type_),
             if (self.findLayerTensor(layer, "ssm_dt.bias")) |t| @tagName(t.info.type_) else "N/A",
             if (self.findLayerTensor(layer, "ssm_a")) |t| @tagName(t.info.type_) else "N/A",
+            n_group, dt_rank, d_state, head_v_dim,
         });
 
         // Bug fix #12: Convolve BEFORE updating state to avoid double-counting the current input.
@@ -1561,7 +1562,7 @@ pub const InferenceEngine = struct {
             const s_base = h * head_v_dim * head_v_dim;
             const g_val = @exp(gate_arr[h]);
             const b_val = beta_arr[h];
-            const k_hi = if (n_group == dt_rank) h else h / (dt_rank / n_group);
+            const k_hi = if (n_group == dt_rank) h else h % n_group;
             const k_head = k_ssm[k_hi * d_state ..][0..@min(d_state, head_v_dim)];
             const v_head = v_ssm[h * head_v_dim ..][0..head_v_dim];
 
@@ -1589,7 +1590,7 @@ pub const InferenceEngine = struct {
         defer self.allocator.free(ssm_output);
         for (0..dt_rank) |h| {
             const s_base = h * head_v_dim * head_v_dim;
-            const q_hi = if (n_group == dt_rank) h else h / (dt_rank / n_group);
+            const q_hi = if (n_group == dt_rank) h else h % n_group;
             const q_head = q_ssm[q_hi * d_state ..][0..@min(d_state, head_v_dim)];
             for (0..head_v_dim) |row| {
                 var val: f32 = 0;
