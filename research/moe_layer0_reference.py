@@ -450,10 +450,17 @@ def dmmv_q4k(raw_data, x_vec, M, K, a_byte_offset=0):
     """Q4_K DMMV: raw_data[a_byte_offset:] contains M rows of K elements in Q4_K format.
     Returns list of M output values.
     """
+    # Ensure bytearray for faster indexing in CPython
+    if not isinstance(raw_data, (bytearray, memoryview)):
+        raw_data = bytearray(raw_data)
     bpb = 144
     bpr = K // 256
     out = [0.0] * M
+    t_report = time.time()
     for row in range(M):
+        if M > 64 and row % 64 == 0 and time.time() - t_report > 2.0:
+            print(f"    Q4K DMMV progress: row {row}/{M}", flush=True)
+            t_report = time.time()
         row_off = a_byte_offset + row * bpr * bpb
         acc = 0.0
         xi = 0  # index into x_vec
@@ -498,10 +505,16 @@ def dmmv_q5k(raw_data, x_vec, M, K, a_byte_offset=0):
     Q5_K is INTERLEAVED: x[2l] from low nibble, x[2l+1] from high nibble.
     Returns list of M output values.
     """
+    if not isinstance(raw_data, (bytearray, memoryview)):
+        raw_data = bytearray(raw_data)
     bpb = 176
     bpr = K // 256
     out = [0.0] * M
+    t_report = time.time()
     for row in range(M):
+        if M > 64 and row % 64 == 0 and time.time() - t_report > 2.0:
+            print(f"    Q5K DMMV progress: row {row}/{M}", flush=True)
+            t_report = time.time()
         row_off = a_byte_offset + row * bpr * bpb
         acc = 0.0
         xi = 0  # element offset into x_vec
@@ -550,10 +563,16 @@ def dmmv_q5k(raw_data, x_vec, M, K, a_byte_offset=0):
 
 def dmmv_q8_0(raw_data, x_vec, M, K, a_byte_offset=0):
     """Q8_0 DMMV: standard layout. Returns list of M output values."""
+    if not isinstance(raw_data, (bytearray, memoryview)):
+        raw_data = bytearray(raw_data)
     bpb = 34
     bpr = K // 32
     out = [0.0] * M
+    t_report = time.time()
     for row in range(M):
+        if M > 64 and row % 64 == 0 and time.time() - t_report > 2.0:
+            print(f"    Q8_0 DMMV progress: row {row}/{M}", flush=True)
+            t_report = time.time()
         row_off = a_byte_offset + row * bpr * bpb
         acc = 0.0
         for blk in range(bpr):
@@ -606,6 +625,7 @@ def expert_slice_bytes(type_id, rows, cols):
 def main():
     model_path = sys.argv[1] if len(sys.argv) > 1 else "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
     print(f"Loading GGUF: {model_path}")
+    print("NOTE: Pure Python DMMV is slow. Expert FFN pass takes ~5-30 min on CPU.")
 
     t0 = time.time()
     metadata, tensors, tensor_data_offset, f = parse_gguf_header(model_path)
@@ -981,7 +1001,8 @@ def main():
         print(f"  [{i:4d}] = {final_hidden[i]:.8f}")
 
     f.close()
-    print("\nDone.")
+    print(f"\nTotal time: {time.time() - t0:.1f}s")
+    print("Done.")
 
 
 if __name__ == '__main__':

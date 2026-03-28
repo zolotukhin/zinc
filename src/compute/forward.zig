@@ -1631,6 +1631,17 @@ pub const InferenceEngine = struct {
             }
         }
 
+        // Debug: dump SSM delta-net output before gated norm
+        if (layer == 0) {
+            var ssm_l2: f64 = 0;
+            for (ssm_output) |v| ssm_l2 += @as(f64, v) * @as(f64, v);
+            ssm_l2 = @sqrt(ssm_l2);
+            log.info("SSM_DBG L0 delta_out[0..4]=[{d:.8},{d:.8},{d:.8},{d:.8}] L2={d:.6}", .{
+                ssm_output[0], ssm_output[1], ssm_output[2], ssm_output[3], ssm_l2,
+            });
+            // CPU ref: [4.84e-06, 4.69e-06, 1.369e-05, -9.25e-06] L2=0.009320
+        }
+
         // Gated normalization: RMS_norm(o) * SiLU(z)
         const norm_tensor = self.findLayerTensor(layer, "ssm_norm.weight");
         // Determine norm weight indexing: per-head (d_inner elements) vs shared (d_state elements)
@@ -1674,6 +1685,17 @@ pub const InferenceEngine = struct {
 
         // --- GPU phase 2: ssm_out DMMV + residual ---
         const out_staging: [*]f32 = @ptrCast(@alignCast(self.ssm_hidden_staging.mapped.?));
+        // Debug: dump after gated norm
+        if (layer == 0) {
+            var gn_l2: f64 = 0;
+            for (ssm_output) |v| gn_l2 += @as(f64, v) * @as(f64, v);
+            gn_l2 = @sqrt(gn_l2);
+            log.info("SSM_DBG L0 gated_norm[0..4]=[{d:.8},{d:.8},{d:.8},{d:.8}] L2={d:.6}", .{
+                ssm_output[0], ssm_output[1], ssm_output[2], ssm_output[3], gn_l2,
+            });
+            // CPU ref: [-0.00017421, -0.00023175, -0.00166175, -0.00414048] L2=?
+        }
+
         @memcpy(out_staging[0..d_inner], ssm_output);
 
         _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);

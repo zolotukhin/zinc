@@ -5,7 +5,6 @@ tags:
   - zinc
   - llm-inference
   - rdna4
-  - vulkan
   - qwen3-5
   - flash-attention
   - page-attention
@@ -13,18 +12,18 @@ tags:
   - llama-cpp
 keywords:
   - local LLM inference
-  - AMD GPU inference
-  - RDNA4 LLM
-  - Vulkan inference
+  - AMD RDNA4 inference
+  - Qwen3.5-35B-A3B GGUF
   - flash attention
-  - KV cache
+  - paged KV cache
   - mixture of experts
   - state space model
   - RoPE
-  - GGUF
-  - Qwen3.5-35B-A3B
-  - llama.cpp alternative AMD
+  - tokenizer correctness
   - GPT-2 byte-level BPE
+  - GGUF model loading
+  - vLLM paged attention
+  - llama.cpp alternative AMD
 excerpt: "Early ZINC failures in local LLM inference on AMD RDNA4: Vulkan bugs in flash attention, KV cache, RoPE, MoE, SSM, and tokenization."
 ---
 
@@ -47,6 +46,10 @@ What matters in this sequence is that the failures were dependent. We could not 
 ## Where the local LLM inference pipeline was actually failing
 
 To make the debugging surface more concrete, this is where the failures sat in the Vulkan inference path. The tokenizer bug was upstream. The rotary position encoding, or RoPE, bug sat inside the attention math. The key-value cache, or KV cache, and flash attention bugs only appeared once decode started. The MoE and SSM bugs lived deeper in the 40-layer stack and were easy to misread as vague model-quality problems instead of plain wrong execution.
+
+![A clean bug-surface map showing where the early failures clustered in the inference pipeline.](/blog/bug-surface-map.svg)
+
+*Diagram: the failures were not random. They clustered around tokenization, architecture interpretation, attention state, recurrent state, and the final logits path.*
 
 This is also why the early work did not look much like a typical vLLM or TensorRT-LLM optimization story. Before scheduling or batching mattered, the bare Vulkan inference path had to become correct from prompt tokenization all the way to logits.
 
@@ -90,6 +93,10 @@ The first bucket was model interpretation. We were reading the architecture wron
 The second bucket was decode state. The KV cache was empty when it should have been populated. The flash attention path was wired to the wrong buffer. Prefill was pretending to do work it had not really done. Those are the bugs that only show up once generation begins, which makes them much harder to isolate than a clean compile failure.
 
 The third bucket was trust. The tokenizer looked plausible until we compared tokens. The logits looked varied until we counted how many were exactly zero. The baseline looked stable until Mesa changed underneath it. Those are the bugs that force you to stop trusting vibes and start measuring everything.
+
+![A staged ladder showing that correctness and state validation came before performance work.](/blog/correctness-before-speed.svg)
+
+*Diagram: the real sequence was architecture, state, numerics, reproducibility, and only then performance.*
 
 ## Reproducibility became part of the engine
 
