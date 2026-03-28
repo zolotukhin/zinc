@@ -84,6 +84,7 @@ pub const Scheduler = struct {
         }
     }
 
+    /// Tear down all active requests and free the slot array.
     pub fn deinit(self: *Scheduler) void {
         for (self.slots) |*slot| {
             if (slot.*) |*req| req.deinit();

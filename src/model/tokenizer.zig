@@ -165,6 +165,7 @@ pub const Tokenizer = struct {
         }
     }
 
+    /// Encode UTF-8 text into a token ID slice using BPE merges from the GGUF vocabulary.
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
 
