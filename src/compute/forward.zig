@@ -150,6 +150,48 @@ fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, o
                 }
             }
         },
+        .q5_k => {
+            // Q5_K block: d[2] dmin[2] scales[12] qh[32] qs[128] = 176 bytes / 256 elems
+            // Element ordering is INTERLEAVED: y[2l] from low nibble, y[2l+1] from high nibble
+            const bpb5: usize = 176;
+            const bpr5 = @as(usize, cols) / 256;
+            const row_off5 = @as(usize, row) * bpr5 * bpb5;
+
+            var out_i5: usize = 0;
+            for (0..bpr5) |bi5| {
+                const bb5 = row_off5 + bi5 * bpb5;
+                const d5_bits = std.mem.readInt(u16, raw_data[bb5..][0..2], .little);
+                const d5: f32 = @floatCast(@as(f16, @bitCast(d5_bits)));
+                const dm5_bits = std.mem.readInt(u16, raw_data[bb5 + 2 ..][0..2], .little);
+                const dmin5: f32 = @floatCast(@as(f16, @bitCast(dm5_bits)));
+
+                const scales5 = raw_data[bb5 + 4 .. bb5 + 16];
+                const qh5 = raw_data[bb5 + 16 .. bb5 + 48];
+                const qs5 = raw_data[bb5 + 48 .. bb5 + 176];
+
+                var is5: usize = 0;
+                for (0..4) |j5| {
+                    const sm0_5 = getScaleMinK4(is5, scales5);
+                    const d1_5 = d5 * @as(f32, @floatFromInt(sm0_5.sc));
+                    const m1_5 = dmin5 * @as(f32, @floatFromInt(sm0_5.m));
+                    const sm1_5 = getScaleMinK4(is5 + 1, scales5);
+                    const d2_5 = d5 * @as(f32, @floatFromInt(sm1_5.sc));
+                    const m2_5 = dmin5 * @as(f32, @floatFromInt(sm1_5.m));
+
+                    for (0..32) |l5| {
+                        const ql_lo5: u8 = qs5[j5 * 32 + l5] & 0xF;
+                        const ql_hi5: u8 = qs5[j5 * 32 + l5] >> 4;
+                        const hb_lo5: u8 = (qh5[l5] >> @intCast(j5 * 2)) & 1;
+                        const hb_hi5: u8 = (qh5[l5] >> @intCast(j5 * 2 + 1)) & 1;
+                        output[out_i5] = d1_5 * @as(f32, @floatFromInt(ql_lo5 | (hb_lo5 << 4))) - m1_5;
+                        out_i5 += 1;
+                        output[out_i5] = d2_5 * @as(f32, @floatFromInt(ql_hi5 | (hb_hi5 << 4))) - m2_5;
+                        out_i5 += 1;
+                    }
+                    is5 += 2;
+                }
+            }
+        },
         .q4_k => {
             // Q4_K block: d[2] dmin[2] scales[12] qs[128] = 144 bytes / 256 elems
             const bpb: usize = 144;
