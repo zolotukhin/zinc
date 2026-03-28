@@ -78,8 +78,8 @@ void main() {
             uint qs_base = bb + 48 + g * 32;   // 32 qs bytes per group
             uint qh_bit_lo = sb_lo;             // = g*2
             uint qh_bit_hi = sb_hi;             // = g*2+1
-            // Q5_K element ordering is INTERLEAVED (unlike Q4_K's contiguous layout):
-            // GGML dequantize_row_q5_K outputs y[2l] from low nibble, y[2l+1] from high nibble.
+            // Q5_K element ordering is CONTIGUOUS (same as Q4_K):
+            // GGML dequantize_row_q5_K outputs y[l+0] from low nibble, y[l+32] from high nibble.
             uint x_grp = x_base + xi;           // start of 64-element group
 
             for (uint e = 0; e < 32; e++) {
@@ -95,8 +95,8 @@ void main() {
                 float v_lo = float(q_lo | (hb_lo << 4));
                 float v_hi = float(q_hi | (hb_hi << 4));
 
-                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + 2u * e];
-                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 2u * e + 1u];
+                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + e];
+                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 32u + e];
             }
             xi += 64;
         }

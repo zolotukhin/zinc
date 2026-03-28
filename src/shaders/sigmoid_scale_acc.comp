@@ -1,0 +1,21 @@
+#version 460
+// Sigmoid-gated scale-accumulate: a[i] += sigmoid(c[0]) * b[i]
+// Used for shared expert gating in MoE layers — reads gate scalar from buffer,
+// applies sigmoid, and accumulates into output. Eliminates CPU readback.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer Accum { float a[]; };
+layout(set = 0, binding = 1) readonly buffer Src { float b[]; };
+layout(set = 0, binding = 2) readonly buffer Gate { float c[]; };
+
+layout(push_constant) uniform PC {
+    uint N;
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < N) {
+        float gate_val = 1.0 / (1.0 + exp(-c[0]));
+        a[i] += gate_val * b[i];
+    }
+}

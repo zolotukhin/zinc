@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
+  <title id="title">How the early ZINC debugging sequence unfolded</title>
+  <desc id="desc">A visual timeline showing the debugging order from fake forward pass, to real architecture, to logits coverage, to KV cache and flash attention fixes, to real prefill, to reproducible benchmarks.</desc>
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#faf7f0"/>
+      <stop offset="100%" stop-color="#eef3f8"/>
+    </linearGradient>
+    <filter id="shadow3" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .title { font: 700 38px Georgia, serif; fill: #13253e; }
+      .subtitle { font: 500 18px Arial, sans-serif; fill: #54657a; }
+      .step { font: 700 22px Arial, sans-serif; fill: #13253e; }
+      .copy { font: 400 16px Arial, sans-serif; fill: #475569; }
+      .meta { font: 700 14px Arial, sans-serif; fill: #8f2748; letter-spacing: 0.06em; }
+      .num { font: 700 32px Arial, sans-serif; fill: #ffffff; }
+      .line { stroke: #708090; stroke-width: 5; fill: none; stroke-linecap: round; }
+      .card { fill: #fffdf9; stroke: #d7d1c5; stroke-width: 2; rx: 22; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="680" fill="url(#bg3)"/>
+  <g transform="translate(70 56)">
+    <text class="title">How the early debugging sequence actually unfolded</text>
+    <text class="subtitle" x="0" y="34">It felt like random breakage while we were inside it. In hindsight, it was a fairly clear chain: make the graph real, fix decode state, then trust the benchmark.</text>
+  </g>
+
+  <path class="line" d="M130 300 H1070"/>
+
+  <g filter="url(#shadow3)">
+    <circle cx="150" cy="300" r="30" fill="#c84d63"/>
+    <text class="num" x="141" y="312">1</text>
+    <rect class="card" x="90" y="360" width="180" height="140"/>
+    <text class="meta" x="112" y="392">START</text>
+    <text class="step" x="112" y="425">Fake forward pass</text>
+    <text class="copy" x="112" y="454">No real 40-layer stack.</text>
+    <text class="copy" x="112" y="478">Token -> norm -> LM head.</text>
+    <text class="copy" x="112" y="502">Looked alive. Was not.</text>
+
+    <circle cx="330" cy="300" r="30" fill="#df8342"/>
+    <text class="num" x="321" y="312">2</text>
+    <rect class="card" x="270" y="120" width="190" height="140"/>
+    <text class="meta" x="292" y="152">MODEL</text>
+    <text class="step" x="292" y="185">Real architecture</text>
+    <text class="copy" x="292" y="214">Attention plus MoE plus</text>
+    <text class="copy" x="292" y="238">SSM, not one clean path.</text>
+    <text class="copy" x="292" y="262">30 recurrent layers.</text>
+
+    <circle cx="510" cy="300" r="30" fill="#5f9fc7"/>
+    <text class="num" x="501" y="312">3</text>
+    <rect class="card" x="450" y="360" width="200" height="140"/>
+    <text class="meta" x="472" y="392">NUMERICS</text>
+    <text class="step" x="472" y="425">Logits coverage</text>
+    <text class="copy" x="472" y="454">LM head saw only 7,760 of</text>
+    <text class="copy" x="472" y="478">248,320 rows.</text>
+    <text class="copy" x="472" y="502">About 97% zero logits.</text>
+
+    <circle cx="690" cy="300" r="30" fill="#7ab97b"/>
+    <text class="num" x="681" y="312">4</text>
+    <rect class="card" x="630" y="120" width="210" height="140"/>
+    <text class="meta" x="652" y="152">DECODE STATE</text>
+    <text class="step" x="652" y="185">KV and page table</text>
+    <text class="copy" x="652" y="214">Flash attention was reading</text>
+    <text class="copy" x="652" y="238">the wrong binding and hanging.</text>
+    <text class="copy" x="652" y="262">Identity mapping first.</text>
+
+    <circle cx="870" cy="300" r="30" fill="#8a78cf"/>
+    <text class="num" x="861" y="312">5</text>
+    <rect class="card" x="810" y="360" width="200" height="140"/>
+    <text class="meta" x="832" y="392">PREFILL</text>
+    <text class="step" x="832" y="425">Real prompt pass</text>
+    <text class="copy" x="832" y="454">KV cache and SSM state</text>
+    <text class="copy" x="832" y="478">had to be populated before</text>
+    <text class="copy" x="832" y="502">decode meant anything.</text>
+
+    <circle cx="1050" cy="300" r="30" fill="#2e6f95"/>
+    <text class="num" x="1041" y="312">6</text>
+    <rect class="card" x="990" y="120" width="150" height="140"/>
+    <text class="meta" x="1012" y="152">BASELINE</text>
+    <text class="step" x="1012" y="185">Pin Mesa</text>
+    <text class="copy" x="1012" y="214">25.0.7 -> 25.2.8</text>
+    <text class="copy" x="1012" y="238">meant about 14% drift.</text>
+    <text class="copy" x="1012" y="262">Noisy numbers teach less.</text>
+  </g>
+</svg>

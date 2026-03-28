@@ -2187,18 +2187,29 @@ pub fn generate(
     });
 
     // Decode: generate tokens one at a time
+    // After prefill, logits_staging already has the logits for the first output
+    // token (from the last prompt token's forward pass). Sample directly from
+    // those logits instead of reprocessing the last prompt token — that would
+    // duplicate its KV cache entry and shift the entire context.
     var generated: u32 = 0;
     const decode_start = std.time.nanoTimestamp();
+
+    // Sample the first output token from prefill logits (no extra decodeStep)
+    if (prompt_tokens.len > 0 and max_tokens > 0) {
+        const first_token = engine.sampleGreedy();
+        try state.generated_tokens.append(allocator, first_token);
+        log.info("decode[0]: token={d} pos={d} (from prefill logits)", .{
+            first_token, state.position,
+        });
+        generated = 1;
+        if (first_token == eos_token_id) generated = max_tokens; // stop early
+    }
+
     while (generated < max_tokens) : (generated += 1) {
         const tok_start = std.time.nanoTimestamp();
 
-        // Feed the last token (from prompt or generation) as input
-        const input_token = if (state.generated_tokens.items.len > 0)
-            state.generated_tokens.items[state.generated_tokens.items.len - 1]
-        else if (prompt_tokens.len > 0)
-            prompt_tokens[prompt_tokens.len - 1]
-        else
-            0;
+        // Feed the last generated token as input
+        const input_token = state.generated_tokens.items[state.generated_tokens.items.len - 1];
 
         try engine.decodeStep(&state, input_token);
         const token = engine.sampleGreedy();
