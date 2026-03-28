@@ -115,6 +115,12 @@ describe("isCoherentText", () => {
     )).toBe(true);
   });
 
+  test("rejects repeating-prompt output", () => {
+    expect(isCoherentText(
+      "info(zinc): Output text: The capital of France is is not. The capital of France is is not. The capital of France is is not."
+    )).toBe(false);
+  });
+
   test("returns false for no text line", () => {
     expect(isCoherentText("info(forward): Generated 256 tokens")).toBe(false);
   });

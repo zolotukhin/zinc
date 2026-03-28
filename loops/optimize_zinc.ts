@@ -162,13 +162,27 @@ export function isGarbageOutput(output: string): boolean {
   return false;
 }
 
-/** Check if decoded output text looks like coherent language (not random BPE subwords). */
+/** Check if decoded output text looks like coherent, CORRECT language (not just echoing the prompt). */
 export function isCoherentText(output: string): boolean {
   const m = output.match(/Output text:\s*(.+)/i);
-  if (!m) return false; // no text output, can't tell
+  if (!m) return false;
   const text = m[1].trim();
   if (text.length < 10) return false;
-  // Check for common English words (at least 3 should appear in the first 200 chars)
+
+  // Reject: output that just repeats the prompt or a short pattern
+  // (e.g., "The capital of France is is not. The capital of France is is not.")
+  const deduped = text.slice(0, 200).replace(/[\u0120\u010A]/g, ' ').trim(); // Ġ→space, Ċ→space
+  const words = deduped.split(/\s+/).filter(w => w.length > 0);
+  if (words.length >= 8) {
+    // Check if the first 4 words repeat in a cycle
+    const prefix = words.slice(0, Math.min(8, words.length)).join(' ');
+    const rest = words.slice(8).join(' ');
+    if (rest.length > 0 && rest.includes(prefix.slice(0, Math.min(20, prefix.length)))) {
+      return false; // repeating pattern
+    }
+  }
+
+  // Must contain varied content words (not just function words)
   const sample = text.slice(0, 200).toLowerCase();
   const commonWords = ["the", "is", "of", "and", "to", "in", "a", "that", "it", "for", "was", "on", "are", "as", "with", "his", "they", "be", "at", "one", "have", "this", "from", "or", "an", "but", "not", "what", "all", "were", "we", "when", "your", "can", "said", "there", "each", "which", "she", "do", "how", "if", "will", "up", "about", "out", "many", "then", "them", "would", "like", "so", "these", "her", "think", "paris", "france", "capital", "city"];
   let found = 0;
@@ -322,6 +336,29 @@ async function remoteBuild(): Promise<{ exitCode: number; output: string }> {
     { streamOutput: true, timeout: 300_000 },
   );
   return { exitCode, output: stdout + "\n" + stderr };
+}
+
+/** Run `zig build test` on the remote node. Returns true if all tests pass. */
+async function remoteTest(): Promise<{ passed: boolean; output: string }> {
+  console.log(clr("2", "  Running tests..."));
+  const { stdout, stderr, exitCode } = await runCommand(
+    "ssh",
+    [
+      "-p", String(ZINC_PORT),
+      "-o", "StrictHostKeyChecking=no",
+      `${ZINC_USER}@${ZINC_HOST}`,
+      `cd ${REMOTE_ZINC_DIR} && zig build test --summary all 2>&1`,
+    ],
+    { streamOutput: false, timeout: 120_000 },
+  );
+  const testPassed = stdout.match(/(\d+)\/\d+ tests passed/);
+  if (testPassed) {
+    console.log(clr("2", `  ✅ ${testPassed[0]}`));
+  }
+  if (exitCode !== 0) {
+    console.log(clr("1;31", "  ❌ Tests failed!"));
+  }
+  return { passed: exitCode === 0, output: stdout + "\n" + stderr };
 }
 
 async function remoteRun(
@@ -772,27 +809,34 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   diagnosis.push("- ✅ Prefill runs full transformer for each prompt token");
   diagnosis.push("- ✅ Full 40-layer forward pass with per-layer descriptor pool reset");
   diagnosis.push("");
-  diagnosis.push("## REMAINING ISSUES — DEEP DEBUGGING RESULTS (2026-03-27)");
-  diagnosis.push("The tokenizer is correct. Embedding + RMS norm are VERIFIED CORRECT against CPU reference.");
-  diagnosis.push("The model generates multilingual incoherent text. Logits are fully computed (no zeros).");
+  diagnosis.push("## REMAINING ISSUES — DEEP DEBUGGING RESULTS (2026-03-28)");
+  diagnosis.push("VERIFIED CORRECT (bit-identical against CPU reference):");
+  diagnosis.push("  - Tokenizer, embedding dequant, RMS norm, LM head Q8_0 DMMV");
+  diagnosis.push("  - SSM delta-net output (conv1d + state update + gated norm)");
+  diagnosis.push("  - topKSoftmax, expertSliceBytes (tested, 26 tests pass)");
   diagnosis.push("");
-  diagnosis.push("KEY FINDING: The embed→norm→LM_head path (without transformer layers) produces WRONG logits.");
-  diagnosis.push("CPU reference says token 5 should have logit 2.54 for BOS input, but GPU picks token 48976.");
-  diagnosis.push("This means either:");
-  diagnosis.push("  1. The Q8_0 DMMV shader for the LM head produces wrong dot products");
-  diagnosis.push("  2. The output_norm weights on GPU don't match the GGUF file");
-  diagnosis.push("  3. There's a buffer offset or alignment issue in tensor loading");
+  diagnosis.push("CURRENT OUTPUT: coherent English that ECHOES the prompt but gives WRONG answers.");
+  diagnosis.push("  'The capital of France is' → 'not. The capital of France is is not...' (repeating)");
+  diagnosis.push("  First token: 'not' (logit=13.53) instead of 'Paris' (logit=4.58)");
+  diagnosis.push("  llama.cpp produces 'Paris' (logprob=-0.86) for the same prompt.");
+  diagnosis.push("  THIS IS A CORRECTNESS BUG, NOT A PERFORMANCE ISSUE.");
+  diagnosis.push("  Do NOT optimize tok/s — fix the logit distribution first.");
+  diagnosis.push("");
+  diagnosis.push("ROOT CAUSE: accumulated per-layer errors shift logit distribution.");
+  diagnosis.push("  Common words ('not','the','a') score ~13, 'Paris' only 4.58.");
+  diagnosis.push("  No single component is broken — each layer adds a small error that cascades.");
   diagnosis.push("");
   diagnosis.push("DEBUGGING STRATEGY:");
-  diagnosis.push("  A. Add a diagnostic that computes BOS_embed→output_norm→LM_head on CPU (using mmap'd weights)");
-  diagnosis.push("     and compares against the GPU computation. This isolates the exact operation that diverges.");
-  diagnosis.push("  B. Check: is the Q8_0 DMMV shader's dot product accumulation correct for large K=2048?");
-  diagnosis.push("     The shader uses wave-level subgroupAdd — verify this works for 64 blocks per row.");
-  diagnosis.push("  C. Check: does the output_norm GPU buffer contain the same values as the mmap'd GGUF data?");
-  diagnosis.push("  D. Check: is hidden_buf correctly initialized from the embedding before the final norm runs?");
+  diagnosis.push("  1. Compare hidden state after EACH layer against a CPU reference");
+  diagnosis.push("     (scripts/cpu_reference_layer0.py does this for layer 0)");
+  diagnosis.push("  2. Find the FIRST layer where GPU diverges significantly from CPU");
+  diagnosis.push("  3. Within that layer, compare individual operations (norm, DMMV, SwiGLU)");
+  diagnosis.push("  4. The Q4_K DMMV for MoE experts is the most likely source since it runs");
+  diagnosis.push("     512×2048 matmuls with complex sub-block pairing");
+  diagnosis.push("  5. Check if expert weight offsets into stacked 3D tensors are byte-aligned");
+  diagnosis.push("     correctly for each quant type");
   diagnosis.push("");
-  diagnosis.push("The Q4_K DMMV (used for MoE experts) should be verified AFTER Q8_0 is confirmed correct,");
-  diagnosis.push("since the LM head uses Q8_0 and is the simplest path to test.");
+  diagnosis.push("IMPORTANT: All changes MUST pass `zig build test` (26 tests).");
   diagnosis.push("");
   diagnosis.push("## REFERENCE: llama.cpp implementation");
   diagnosis.push("On the remote node, the full Qwen3.5-MoE implementation is at:");
@@ -1061,12 +1105,33 @@ async function runCycle(
       .map((s) => s.trim())
       .filter((s) => s.length > 3 && s.length < 120 && !isGarbageString(s)) ?? [];
 
-  // Step 4: Verify — rsync + build + run again
+  // Step 4: Verify — rsync + build + test + run
   console.log(clr("1;33", "\n  📊 Verifying agent's changes..."));
   let verifyResult: BuildRunResult;
   try {
     await rsyncToRemote();
-    verifyResult = await buildAndRun(modelPath);
+    // Run tests first — if tests break, treat as build failure
+    const testResult = await remoteTest();
+    if (!testResult.passed) {
+      console.log(clr("1;31", "  ❌ Tests broken by agent's changes — reverting"));
+      verifyResult = {
+        buildExitCode: 1,
+        buildOutput: "Tests failed:\n" + testResult.output,
+        runExitCode: null,
+        runOutput: "",
+        phase: "fix",
+        tokPerSec: null,
+        tokensGenerated: 0,
+        garbageOutput: false,
+        coherentText: false,
+        bandwidthUtil: null,
+        effectiveBW: null,
+        error: "Tests failed after agent changes",
+      };
+      // Skip buildAndRun — go straight to keep/revert decision
+    } else {
+      verifyResult = await buildAndRun(modelPath);
+    }
   } catch (e) {
     console.log(clr("1;31", `  ❌ Verification failed: ${e}`));
     verifyResult = {
