@@ -69,9 +69,9 @@ pub const DmmvDispatch = struct {
         // Load pipelines (3 bindings: A matrix, x vector, y output)
         const push_size = @sizeOf(DmmvPushConstants);
 
-        // Specialization constant: SPEC_K (id=1) = hidden_dim to right-size
-        // the shared memory array in the Q4_K shader (s_x[SPEC_K]).
-        // Default SPEC_K=4096 wastes LDS when hidden_dim=2048, halving occupancy.
+        // Specialization constant: SPEC_K (id=1) = max_k to size the shared memory
+        // array in the Q4_K shader (s_x[SPEC_K]). Must be >= the largest K value
+        // used in any Q4_K dispatch (hidden_dim, inter_dim, q_dim, d_inner).
         const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = hidden_dim }};
 
         var path_buf: [512]u8 = undefined;

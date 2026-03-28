@@ -46,40 +46,58 @@ void main() {
         // 32 bytes of high bits at offset 16
         // 128 bytes of low nibbles at offset 48
 
-        for (uint j = 0; j < 256; j++) {
-            uint sub_block = j / 32;
-            uint in_block = j % 32;
+        // Process 4 groups of 64 elements each (matching GGML's dequantize_row_q5_K).
+        // Each group uses 32 bytes of qs: low nibble → first 32 elements,
+        // high nibble → next 32 elements. qh bits: group*2 for low, group*2+1 for high.
+        for (uint g = 0; g < 4; g++) {
+            uint sb_lo = g * 2;       // sub-block index for low-nibble half
+            uint sb_hi = g * 2 + 1;   // sub-block index for high-nibble half
 
-            // Get scale and min for this sub-block (simplified)
-            uint sc_idx = sub_block;
-            uint sc_byte;
-            uint m_byte;
-            if (sc_idx < 4) {
-                sc_byte = uint(w[bb + 4 + sc_idx]) & 63u;
-                m_byte = uint(w[bb + 4 + sc_idx + 4]) & 63u;
+            // Decode scale/min for both sub-blocks in this group
+            uint sc_lo, m_lo, sc_hi, m_hi;
+            if (sb_lo < 4) {
+                sc_lo = uint(w[bb + 4 + sb_lo]) & 63u;
+                m_lo  = uint(w[bb + 4 + sb_lo + 4]) & 63u;
             } else {
-                sc_byte = (uint(w[bb + 4 + sc_idx + 4]) & 0xFu) | ((uint(w[bb + 4 + sc_idx - 4]) >> 6) << 4);
-                m_byte = (uint(w[bb + 4 + sc_idx + 4]) >> 4) | ((uint(w[bb + 4 + sc_idx]) >> 6) << 4);
+                sc_lo = (uint(w[bb + 4 + sb_lo + 4]) & 0xFu) | ((uint(w[bb + 4 + sb_lo - 4]) >> 6) << 4);
+                m_lo  = (uint(w[bb + 4 + sb_lo + 4]) >> 4) | ((uint(w[bb + 4 + sb_lo]) >> 6) << 4);
+            }
+            if (sb_hi < 4) {
+                sc_hi = uint(w[bb + 4 + sb_hi]) & 63u;
+                m_hi  = uint(w[bb + 4 + sb_hi + 4]) & 63u;
+            } else {
+                sc_hi = (uint(w[bb + 4 + sb_hi + 4]) & 0xFu) | ((uint(w[bb + 4 + sb_hi - 4]) >> 6) << 4);
+                m_hi  = (uint(w[bb + 4 + sb_hi + 4]) >> 4) | ((uint(w[bb + 4 + sb_hi]) >> 6) << 4);
             }
 
-            float sc = d * float(sc_byte);
-            float m = dmin * float(m_byte);
+            float factor_lo = d * float(sc_lo);
+            float bias_lo   = dmin * float(m_lo);
+            float factor_hi = d * float(sc_hi);
+            float bias_hi   = dmin * float(m_hi);
 
-            // Get quantized value: 5 bits = 4-bit low nibble + 1-bit high
-            uint qh_byte_idx = in_block;
-            uint qh_bit = (uint(w[bb + 16 + qh_byte_idx]) >> (j / 32)) & 1u;
+            uint qs_base = bb + 48 + g * 32;   // 32 qs bytes per group
+            uint qh_bit_lo = sb_lo;             // = g*2
+            uint qh_bit_hi = sb_hi;             // = g*2+1
+            uint x_lo = x_base + xi;            // first 32 elements
+            uint x_hi = x_base + xi + 32;       // second 32 elements
 
-            uint qs_idx = j / 2;
-            uint qs_val;
-            if ((j & 1) == 0) {
-                qs_val = uint(w[bb + 48 + qs_idx]) & 0xFu;
-            } else {
-                qs_val = uint(w[bb + 48 + qs_idx]) >> 4;
+            for (uint e = 0; e < 32; e++) {
+                uint byte_val = uint(w[qs_base + e]);
+                uint q_lo = byte_val & 0xFu;
+                uint q_hi = byte_val >> 4;
+
+                // High bit from qh[e], different bit position per sub-block
+                uint qh_val = uint(w[bb + 16 + e]);
+                uint hb_lo = (qh_val >> qh_bit_lo) & 1u;
+                uint hb_hi = (qh_val >> qh_bit_hi) & 1u;
+
+                float v_lo = float(q_lo | (hb_lo << 4));
+                float v_hi = float(q_hi | (hb_hi << 4));
+
+                sum += (factor_lo * v_lo - bias_lo) * x[x_lo + e];
+                sum += (factor_hi * v_hi - bias_hi) * x[x_hi + e];
             }
-
-            float q = float(qs_val | (qh_bit << 4));
-            sum += (sc * q - m) * x[x_base + xi];
-            xi++;
+            xi += 64;
         }
     }
 

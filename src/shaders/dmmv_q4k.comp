@@ -16,9 +16,9 @@
 //   [4..15]   k_scales   — 12 bytes encoding 8 six-bit scales + 8 six-bit mins
 //   [16..143] qs         — 128 bytes of 4-bit quantized values
 //
-// Quantized data layout in qs[0..127]:
-//   qs[j] & 0x0F  = q for element j       (j = 0..127, sub-blocks 0..3)
-//   qs[j] >> 4    = q for element j + 128  (j = 0..127, sub-blocks 4..7)
+// Quantized data layout in qs[0..127] — consecutive sub-block pairs share 32 bytes:
+//   For group g (0..3): qs[g*32+l] & 0x0F = element (2g)*32+l    (sub-block 2g)
+//                       qs[g*32+l] >> 4   = element (2g+1)*32+l  (sub-block 2g+1)
 //
 // k_scales packing (12 bytes encode 8 scales and 8 mins, each 6 bits):
 //   bytes [0..3]  bits [5:0] = scales[0..3]
@@ -91,26 +91,28 @@ float decode_min(uint ks_off, uint sb) {
 // d_val, dmin_val: super-block scales
 // x_local: element offset into s_x[] for this block's 256 elements
 //
-// Optimization: fuse paired sub-blocks (sb, sb+4) to read each qs byte once
-// and extract both nibbles. Sub-blocks 0-3 use the low nibble, sub-blocks 4-7
-// use the high nibble of the same qs[0..127]. This halves qs memory traffic.
+// Optimization: fuse consecutive sub-block pairs (2*sp, 2*sp+1) to read each
+// qs byte once and extract both nibbles. Each 32-byte qs chunk encodes two
+// consecutive sub-blocks: low nibble → sub-block 2*sp, high → sub-block 2*sp+1.
 void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
                  uint x_local, inout float acc) {
     for (uint sp = 0u; sp < 4u; sp++) {
-        // Low sub-block (sp): elements sp*32..(sp+1)*32-1
-        float sc_lo = decode_scale(ks_off, sp);
-        float mn_lo = decode_min(ks_off, sp);
+        // Consecutive sub-block pair: low nibble = sub-block 2*sp, high = 2*sp+1
+        uint sb_lo = sp * 2u;
+        uint sb_hi = sp * 2u + 1u;
+
+        float sc_lo = decode_scale(ks_off, sb_lo);
+        float mn_lo = decode_min(ks_off, sb_lo);
         float factor_lo = d_val * sc_lo;
         float bias_lo   = dmin_val * mn_lo;
 
-        // High sub-block (sp+4): elements (sp+4)*32..(sp+5)*32-1
-        float sc_hi = decode_scale(ks_off, sp + 4u);
-        float mn_hi = decode_min(ks_off, sp + 4u);
+        float sc_hi = decode_scale(ks_off, sb_hi);
+        float mn_hi = decode_min(ks_off, sb_hi);
         float factor_hi = d_val * sc_hi;
         float bias_hi   = dmin_val * mn_hi;
 
-        uint x_sb_lo = x_local + sp * 32u;
-        uint x_sb_hi = x_local + (sp + 4u) * 32u;
+        uint x_sb_lo = x_local + sb_lo * 32u;
+        uint x_sb_hi = x_local + sb_hi * 32u;
         uint qs_base = qs_off + sp * 32u;
 
         for (uint e = 0u; e < 32u; e++) {
@@ -127,17 +129,15 @@ void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
 void main() {
     uint tid = gl_LocalInvocationID.x;
 
-    // Use compile-time SPEC_K (specialization constant = hidden_dim) instead of
-    // push-constant K for loop bounds. Both are set to hidden_dim by the host,
-    // but SPEC_K lets the compiler unroll loops and interleave loads across blocks
-    // to hide VRAM latency. Key wins: block loop (8 iters) and LDS load (32 iters)
-    // become compile-time bounded, enabling full unrolling + instruction scheduling.
-    const uint blocks_per_row = SPEC_K / Q4K_BLOCK_SIZE;
+    // Use push-constant K for loop bounds (not SPEC_K) because K varies across
+    // dispatches: gate/up use K=hidden_dim, down uses K=inter_dim, O proj uses
+    // K=q_dim. SPEC_K only sizes the shared memory array to fit the largest K.
+    const uint blocks_per_row = K / Q4K_BLOCK_SIZE;
 
     // Cooperatively load input vector into shared memory (all threads participate)
-    // 64 threads × (SPEC_K/64) iterations = full vector loaded
+    // 64 threads × (K/64) iterations = full vector loaded
     uint x_global_base = x_offset / 4u;
-    for (uint i = tid; i < SPEC_K; i += 64u) {
+    for (uint i = tid; i < K; i += 64u) {
         s_x[i] = x_data[x_global_base + i];
     }
     barrier();

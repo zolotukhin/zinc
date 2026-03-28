@@ -290,7 +290,7 @@ pub fn main() !void {
         }
 
         // Generate
-        const max_tokens: u32 = 256;
+        const max_tokens: u32 = 32;
         const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator);
         defer allocator.free(output_tokens);
 

@@ -333,6 +333,7 @@ test "buildDecodeGraph: llama 2 layers" {
         .ssm_dt_rank = 0,
         .ssm_n_group = 0,
         .full_attn_interval = 0,
+        .shared_expert_intermediate_dim = 0,
     };
 
     var g = try buildDecodeGraph(&config, allocator);
@@ -369,6 +370,7 @@ test "buildDecodeGraph: moe 1 layer" {
         .ssm_dt_rank = 0,
         .ssm_n_group = 0,
         .full_attn_interval = 0,
+        .shared_expert_intermediate_dim = 0,
     };
 
     var g = try buildDecodeGraph(&config, allocator);

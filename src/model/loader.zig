@@ -47,6 +47,7 @@ pub const ModelConfig = struct {
     ssm_dt_rank: u32, // number of V heads (typically 32)
     ssm_n_group: u32, // number of K heads / groups (typically 16)
     full_attn_interval: u32, // every Nth layer is full attention (typically 4)
+    shared_expert_intermediate_dim: u32, // shared expert FFN dim (may differ from per-expert)
 };
 
 /// A tensor descriptor paired with the GPU buffer that stores its contents.
@@ -146,6 +147,12 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         break :blk gf.getU32(key) orelse 0;
     };
 
+    // Shared expert intermediate dim: feed_forward_length (different from per-expert dim in MoE models)
+    const shared_expert_intermediate_dim = blk: {
+        const key = std.fmt.bufPrint(&key_buf, "{s}.feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
+        break :blk gf.getU32(key) orelse 0;
+    };
+
     const vocab_size = blk: {
         // Try metadata first
         const key = std.fmt.bufPrint(&key_buf, "{s}.vocab_size", .{prefix}) catch break :blk @as(u32, 0);
@@ -235,6 +242,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .ssm_dt_rank = ssm_dt_rank,
         .ssm_n_group = ssm_n_group,
         .full_attn_interval = 4, // default for Qwen3.5
+        .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
     };
 }
 
