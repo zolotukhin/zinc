@@ -6,62 +6,90 @@ const std = @import("std");
 
 const log = std.log.scoped(.graph);
 
-/// Operation types in the compute graph.
+/// Operation types that a compute graph node can represent.
+///
+/// Each variant maps to one GPU shader dispatch or fused kernel invocation
+/// during decode-time execution.
 pub const OpType = enum {
-    // Matrix operations
-    matmul, // Dense matrix multiply (prefill, cooperative matrix)
-    dmmv, // Decode matmul-vec (single token)
+    /// Dense matrix multiply used during prefill with cooperative matrices.
+    matmul,
+    /// Decode-time matrix-vector product for single-token projection.
+    dmmv,
 
-    // Element-wise fused operations
-    rms_norm_mul, // RMS normalization + scale multiply
-    swiglu, // SiLU(x) * y
-    sigmoid_mul, // sigmoid(x) * y (SSM gating)
-    rope, // Rotary position embedding + reshape + cache write
-    softmax, // Softmax (for attention scores)
-    softmax_topk, // Softmax + top-k (MoE routing)
+    /// Fused RMS normalization followed by element-wise scale multiply.
+    rms_norm_mul,
+    /// SwiGLU activation: SiLU(x) * y.
+    swiglu,
+    /// Sigmoid gating: sigmoid(x) * y, used by SSM layers.
+    sigmoid_mul,
+    /// Rotary position embedding with reshape and KV-cache write.
+    rope,
+    /// Row-wise softmax over attention scores.
+    softmax,
+    /// Softmax followed by top-k selection for MoE expert routing.
+    softmax_topk,
 
-    // Attention
-    flash_attn, // Paged flash attention with GQA
+    /// Paged flash attention with grouped-query attention (GQA) support.
+    flash_attn,
 
-    // KV cache
-    kv_cache_write, // Write K/V to paged cache
-    kv_cache_read, // Read K/V from paged cache
+    /// Write key/value vectors into the paged KV cache.
+    kv_cache_write,
+    /// Read key/value vectors from the paged KV cache.
+    kv_cache_read,
 
-    // TurboQuant
-    tq_compress_keys, // Quantize keys
-    tq_compress_values, // Quantize values
-    tq_attention, // Asymmetric attention on compressed KV
-    tq_decompress_values, // Decompress + weighted accumulation
+    /// TurboQuant: quantize key vectors for compressed KV storage.
+    tq_compress_keys,
+    /// TurboQuant: quantize value vectors for compressed KV storage.
+    tq_compress_values,
+    /// TurboQuant: asymmetric attention computed over compressed KV pairs.
+    tq_attention,
+    /// TurboQuant: decompress values and perform weighted accumulation.
+    tq_decompress_values,
 
-    // MoE
-    moe_gate, // Expert routing
-    moe_gather, // Gather expert outputs
+    /// MoE expert routing gate that selects active experts per token.
+    moe_gate,
+    /// Gather and combine outputs from the selected MoE experts.
+    moe_gather,
 
-    // Utility
-    add, // Element-wise add
-    copy, // Buffer copy
-    embed, // Token embedding lookup
+    /// Element-wise vector addition.
+    add,
+    /// Raw buffer-to-buffer copy.
+    copy,
+    /// Token embedding table lookup.
+    embed,
 };
 
-/// A node in the compute graph.
+/// A single operation node in the compute dependency graph.
+///
+/// Each node carries dispatch metadata (workgroups, push constants) and
+/// dependency edges so the graph can be topologically sorted before recording.
 pub const Node = struct {
+    /// Unique dense identifier assigned in insertion order.
     id: u32,
+    /// Operation type this node performs when dispatched.
     op: OpType,
+    /// Human-readable label used in logs and diagnostic output.
     name: []const u8,
 
-    // Input/output buffer references (indices into a buffer table)
-    inputs: [4]?u32, // up to 4 input buffers
-    output: ?u32, // output buffer
+    /// Buffer table indices consumed by the shader (up to 4 input buffers).
+    inputs: [4]?u32,
+    /// Buffer table index produced by the shader, if any.
+    output: ?u32,
+    /// Number of valid entries in the `inputs` array.
     n_inputs: u8,
 
-    // Dispatch parameters
-    workgroup_count: [3]u32, // x, y, z
-    push_constants: [64]u8, // raw push constant data
+    /// Workgroup counts in the x, y, z dimensions for compute dispatch.
+    workgroup_count: [3]u32,
+    /// Raw push constant payload copied into the command buffer at dispatch time.
+    push_constants: [64]u8,
+    /// Number of bytes actually used in `push_constants`.
     push_constant_size: u8,
 
-    // Execution metadata
-    pipeline_index: ?u32, // index into pipeline table
-    depends_on: [8]?u32, // node IDs this depends on
+    /// Index into the pipeline table, or null when not yet assigned.
+    pipeline_index: ?u32,
+    /// Node IDs that must complete before this node may execute (up to 8).
+    depends_on: [8]?u32,
+    /// Number of valid entries in the `depends_on` array.
     n_deps: u8,
 };
 
