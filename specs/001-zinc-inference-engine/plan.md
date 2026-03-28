@@ -16,8 +16,10 @@ Build a full-stack LLM inference engine in Zig + Vulkan compute shaders, targeti
 **Target Platform**: Linux (primary), macOS (build only — no GPU inference)
 **Project Type**: Inference server (daemon with HTTP API) + CLI tool
 **Performance Goals**: 110+ tok/s single-request, 432+ tok/s aggregate (4 concurrent), 2800+ tok/s prefill, 90%+ DMMV bandwidth utilization
-**Constraints**: GPU memory-bound (576 GB/s RDNA4), wave64 optimal, system glslc only (newer versions cause 5x regression), RADV_PERFTEST=coop_matrix required
+**Current State (2026-03-27)**: Full 40-layer forward pass running at 4 tok/s. Output not yet coherent (ASCII numbers instead of English). 8 critical bugs found and fixed by optimization loop. Tokenizer verified correct, embedding+norm verified bit-identical to CPU reference.
+**Constraints**: GPU memory-bound (576 GB/s RDNA4), wave64 optimal but RADV may use wave32 (shaders must handle both), system glslc only (newer versions cause 5x regression), RADV_PERFTEST=coop_matrix required, Mesa 25.0.7 pinned (25.2.8 has 14% regression)
 **Scale/Scope**: 4-8 concurrent requests, 8K-32K context, models up to 70B Q4_K on 32GB VRAM
+**Target Model**: Qwen3.5-35B-A3B Q4_K_XL (hybrid attention+SSM+MoE, 40 layers, 256 experts top-8, delta-net recurrent blocks)
 
 ## Constitution Check
 
