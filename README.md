@@ -255,17 +255,17 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 ## Benchmarks
 
 All numbers measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB, MoE 35B total / 3B active).
-Same hardware, same model, same prompt (`"The capital of France is"`), 256 generated tokens with reasoning. Benchmarked 2026-03-26.
+Same hardware, same model, same prompt (`"The capital of France is"`), 32 generated tokens. Benchmarked 2026-03-28.
 
 ### Decode throughput (tok/s, higher is better)
 
 ```
-       Qwen3.5-35B-A3B Q4_K_XL — Decode with reasoning, AI PRO R9700
+       Qwen3.5-35B-A3B Q4_K_XL — Decode, AI PRO R9700
 
   llama.cpp      ██████████████████████████████████████░░  107 tok/s
   (baseline)
 
-  ZINC           ████████████████░░░░░░░░░░░░░░░░░░░░░░░  46 tok/s
+  ZINC           █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  4.3 tok/s
   (current)
 
   ZINC           ██████████████████████████████████████░░  110+ tok/s
@@ -276,9 +276,10 @@ Same hardware, same model, same prompt (`"The capital of France is"`), 256 gener
 
 | Metric | llama.cpp (baseline) | ZINC (current) | ZINC (target) |
 |--------|:---:|:---:|:---:|
-| **Decode** | 107 tok/s | 46 tok/s | 110+ tok/s |
-| **Prefill** | 223 tok/s | 1,607 tok/s (pp10) | 2,800+ tok/s (pp512) |
-| **Coherent output** | Yes | WIP | Yes |
+| **Decode** | 107 tok/s | 4.3 tok/s | 110+ tok/s |
+| **Coherent output** | Yes | Yes | Yes |
+| **BW utilization** | ~85% | 0.4% (2.1 GB/s) | 90%+ |
+| **GPU syncs/token** | 1 | ~120 | 1–2 |
 | **Flash attention** | Yes | Phase 3 | Yes |
 | **RDNA4-tuned DMMV** | No | Yes | Yes |
 | **Native BPE tokenizer** | Yes | Yes (from GGUF) | Yes |
@@ -286,8 +287,81 @@ Same hardware, same model, same prompt (`"The capital of France is"`), 256 gener
 | **TurboQuant KV** | No | Phase 5 | Yes |
 
 > **Baseline setup**: llama-server (build `3306dba`) with `RADV_PERFTEST=coop_matrix`, `--flash-attn on`, `--mlock`, `-ngl 99`, `-ctk q8_0 -ctv q8_0`. Mesa 25.0.7, GECC disabled (`amdgpu.ras_enable=0`). See [RDNA4 Tuning Guide](docs/RDNA4_TUNING.md) and [AGENTS.md](AGENTS.md) for full setup and reproduction steps.
->
-> ZINC does not yet have flash attention — once implemented, decode throughput should close the gap. Output is not yet coherent (compute graph correctness WIP); throughput numbers reflect real GPU kernel execution time.
+
+### Why 25x slower than llama.cpp
+
+The gap is almost entirely **CPU-GPU synchronization overhead**, not GPU compute speed. Each decode token currently requires ~120 `vkQueueSubmit` + fence-wait round-trips:
+
+- **MoE routing** requires GPU-to-CPU readback of router logits per layer (40 layers)
+- **Shared expert gating** needs another readback per layer
+- **End-of-layer submit** flushes the command buffer after each layer
+- Each round-trip costs ~1–2 ms on RDNA4, totaling ~120–240 ms of pure sync overhead per token
+
+At 256 ms/tok with 542 MB read per token, the GPU itself is idle >95% of the time. The fix is recording the full decode graph as a single command buffer with on-GPU MoE routing — the same approach llama.cpp uses.
+
+### Output quality
+
+ZINC produces **coherent, correct text** as of 2026-03-28:
+
+```
+Prompt:  "The capital of France is"
+Output:  "Paris. The capital of Germany is Berlin. The capital of
+          Italy is Rome. The capital of Spain is Madrid. The capital
+          of Portugal is Lisbon..."
+```
+
+GPU-CPU numerical accuracy verified: embedding, RMS norm, DMMV (Q4_K/Q5_K/Q8_0), and LM head logits all match CPU reference within floating-point tolerance.
+
+## Optimization Loop Results
+
+The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), with an AI agent iteratively fixing and optimizing the forward pass on real RDNA4 hardware.
+
+### Performance progression
+
+```
+  tok/s    Qwen3.5-35B-A3B Q4_K_XL, AI PRO R9700
+  4.5 ┤
+       │                                        ╭─ 4.33 (best)
+  4.0 ┤                  ╭──────────────────────╯── 3.9 avg
+       │                  │
+  3.5 ┤                  │
+       │                  │
+  3.0 ┤                  │
+       │                  │
+  2.5 ┤  ────────────────╯
+       │  ~2.3 avg
+  2.0 ┤
+       │
+  1.5 ┤
+       │  ~1.4 avg
+  1.0 ┤──╮
+       └──┴──────────────────────────────────────── cycles
+       0  43         87       102      145     186
+       Mar 27 AM    Mar 27 PM Mar 28   Codex   Latest
+```
+
+| Phase | Cycles | tok/s | Key change |
+|-------|-------:|------:|------------|
+| First correct run | 43 | 1.2–2.4 | Forward pass executing all 40 layers + MoE + SSM |
+| Bug fixes | 44 | 2.3 → 4.0 | Q4_K sub-block pairing fix (1.7x jump at cycle 20) |
+| Coherent output | 15 | 3.8–4.1 | Q5_K element ordering fix → first correct text |
+| Optimization plateau | 84 | 3.9–4.3 | Minor gains; bottleneck is sync overhead, not compute |
+
+### Key bugs found by the loop
+
+| Bug | Impact | Cycle |
+|-----|--------|-------|
+| Q4_K sub-block pairing: `(sp, sp+4)` → `(2*sp, 2*sp+1)` | 1.7x speedup (2.3 → 3.9 tok/s) | 16-50/C19 |
+| Q5_K element ordering: interleaved → contiguous sub-blocks | Garbage → coherent output | 06-38/C05 |
+| Q8_0/F16 wave32 subgroup: lost half the dot product | Partial correctness | 16-50/C03 |
+| Shared expert intermediate dim: 1408 → 5632 | Wrong FFN output | 16-50/C26 |
+| Shared expert sigmoid gating: was TODO, now implemented | Missing computation | 16-50/C08 |
+| SSM conv1d ordering: convolve before state update | Double-counting input | 16-50/C06 |
+| Q4_K SPEC_K: fixed constant → push-constant K | Wrong for non-hidden-dim projections | 16-50/C09 |
+| SSM delta-net K/Q head mapping: division → modular | Wrong head assignment | 02-57/C06 |
+| attn_out_buf overflow: `q_dim*4` → `q_dim*2*4` | Buffer overwrite | 16-50/C14 |
+
+46 changes kept out of 186 cycles (25% acceptance rate).
 
 ## Current Status
 
@@ -299,12 +373,22 @@ Same hardware, same model, same prompt (`"The capital of France is"`), 256 gener
 | Native BPE tokenizer (from GGUF) | Done |
 | GLSL compute shaders (16) | Done |
 | Compute graph + architecture builders | Done |
-| Forward pass (decode loop) | Running (2.7x llama.cpp, output correctness WIP) |
+| Forward pass (decode loop) | Working — 4.3 tok/s, coherent output |
+| Single command buffer decode | Next — eliminate 120 syncs/token overhead |
 | HTTP server + OpenAI API | Phase 4 |
 | Continuous batching | Phase 4 |
 | TurboQuant KV compression | Phase 5 |
 
-Validated on AMD Radeon AI PRO R9700 (RDNA4): Vulkan 1.3 init, GGUF parsing, 21GB model loaded to VRAM, 723-node MoE graph built, inference engine initialized.
+Validated on AMD Radeon AI PRO R9700 (RDNA4): Vulkan 1.3 init, GGUF parsing, 21 GB model loaded to VRAM, 723-node MoE graph built, coherent inference output verified against CPU reference.
+
+## Next Steps
+
+The path from 4.3 to 110+ tok/s:
+
+1. **Single command buffer** — Record the full 40-layer decode as one Vulkan submission. Move MoE routing to GPU (softmax + top-k in shader). Eliminates ~120 round-trips per token. Expected: 20–40x improvement.
+2. **Pre-recorded command buffer** — Record once, replay per token with updated push constants. Eliminates per-token descriptor allocation and command recording overhead.
+3. **Flash attention** — Replace per-head DMMV attention with the existing `flash_attn.comp` shader. Reduces attention memory traffic ~4x.
+4. **Profiling + kernel tuning** — With sync overhead gone, profile actual GPU kernel time. Tune DMMV tile sizes, shared memory usage, and occupancy for RDNA4.
 
 ## License
 

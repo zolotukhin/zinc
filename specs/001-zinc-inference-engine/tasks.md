@@ -112,35 +112,69 @@ Bugs found and fixed (13 total, by self-improving loop + manual debugging):
 
 **Goal**: Achieve 107+ tok/s decode on RDNA4 (matching llama.cpp baseline). Currently 4 tok/s at 0.4% bandwidth utilization.
 
-**Root Cause**: ~1600 vkQueueSubmit+vkWaitForFences per token. Each submit has ~0.1-0.5ms kernel overhead = ~200ms wasted. GPU is idle 99.6% of the time. Theoretical throughput at 576 GB/s is ~27 tok/s for this 21GB model.
+**Root Cause** (updated 2026-03-28 from code analysis):
+- **~151 vkQueueSubmit+vkWaitForFences per token** (not 1600 — earlier estimate was wrong).
+  Breakdown: 10 attention layers × 3 submits + 30 SSM layers × 4 submits + 1 final = 151.
+  Model has `full_attn_interval=4` → 30 SSM layers, 10 full-attention layers, all with MoE (256 experts, top-8).
+- **CPU-side SSM is likely the dominant bottleneck**: 30 SSM layers per token, each doing:
+  alloc+mmap-read 128KB conv kernel (conv_channels=8192 × d_conv=4), CPU conv1d+SiLU over 8192 channels,
+  CPU delta-net state update (32 heads × 128×128 state matrices — decay, outer product, readout),
+  CPU gated norm, plus alloc/free of temp buffers per layer.
+- **Submit overhead**: ~151 × 0.1-0.5ms = 15-75ms per token. Significant but not the whole story.
+- **GPU pipeline bubbles**: tiny dispatches separated by CPU-GPU sync points starve the GPU.
+- Theoretical throughput at 576 GB/s is ~27 tok/s for this 21GB model (memory-bound floor).
 
 **Independent Test**: Run `zinc --prompt "The capital of France is" --max-tokens 256` and measure decode tok/s. Target: ≥107 tok/s.
 
-### Command Buffer Batching (highest impact)
+**Submit points per layer** (reference):
+- Attention+MoE: (1) router readback L1056, (2) shared expert gate readback L1175, (3) end-of-layer L1240 = 3
+- SSM+MoE: (1) SSM projection readback L1490, (2) router readback L1056, (3) shared expert gate L1175, (4) end-of-layer L1240 = 4
+- Final: norm + LM head + logits readback L1375 = 1
 
-- [ ] T029a [US1] Batch command buffers across attention layers — keep one cmd buffer open for norm + Q/K/V DMMV + RoPE + KV cache write + flash attention + gate + O-proj + residual + post-norm + MoE. Only submit for router readback. Target: 1 submit per attention layer (was ~15). File: src/compute/forward.zig
-- [ ] T029b [US1] Batch command buffers across MoE expert dispatch — record all 8 experts (gate+up+SwiGLU+down+accumulate) in one cmd buffer before submitting. Currently submits per-expert. File: src/compute/forward.zig
-- [ ] T029c [US1] Pre-allocate descriptor pool per layer — eliminate per-operation vkResetDescriptorPool + allocation. File: src/compute/forward.zig
+### Step 0: Measure (DO FIRST)
 
-### GPU-Side Router (eliminates 40 readbacks)
+- [ ] T029j [US1] Profile per-dispatch and per-phase timing — add Vulkan timestamp queries around each shader dispatch AND `std.time.Timer` around CPU SSM phases (conv1d, delta-net, gated norm, alloc/free). Print per-layer breakdown on first token and summary stats on subsequent tokens. Determines whether CPU SSM or GPU submit overhead dominates. File: src/compute/forward.zig
 
-- [ ] T029d [US1] Write softmax+top-k compute shader — takes router logits buffer, outputs expert_ids[k] + expert_weights[k] to GPU buffer. CPU never sees router logits. File: src/shaders/softmax_topk.comp
-- [ ] T029e [US1] Integrate GPU router into forward pass — dispatch softmax_topk shader, read expert IDs from GPU buffer for expert dispatch. File: src/compute/forward.zig
+### Step 1: GPU-Side SSM (highest likely impact — eliminates 30 submits + CPU bottleneck)
 
-### GPU-Side SSM (eliminates 30 roundtrips)
+30 SSM layers currently do: GPU projections → readback → CPU conv1d + delta-net + gated norm → upload → GPU output projection. Moving all CPU work to GPU eliminates 30 submits AND removes the likely-dominant CPU computation.
 
-- [ ] T029f [US1] Write conv1d + SiLU compute shader — fused convolution with state buffer on GPU. State is persistent GPU buffer, no CPU readback. File: src/shaders/ssm_conv1d.comp
-- [ ] T029g [US1] Write delta-net state update shader — decay + outer product + readout as GPU compute. State buffer stays on GPU. File: src/shaders/ssm_delta_net.comp
-- [ ] T029h [US1] Write SSM gated norm shader — fused RMS_norm(output) * SiLU(gate). File: src/shaders/ssm_gated_norm.comp
-- [ ] T029i [US1] Integrate GPU SSM into forward pass — replace runSsmLayerCpu with GPU dispatch chain. Eliminate logits_staging readback for SSM. File: src/compute/forward.zig
+- [ ] T029f [US1] Write conv1d + SiLU compute shader — 1D convolution over conv_channels=8192 with d_conv=4 taps, persistent GPU state buffer (no CPU readback). State holds previous d_conv-1 inputs; kernel shifts state and convolves. Fused with SiLU: out = sum * sigmoid(sum). Must handle f16 conv kernel weights (read from GPU tensor buffer, not mmap). File: src/shaders/ssm_conv1d.comp
+- [ ] T029g [US1] Write delta-net state update shader — per-head (32 heads, head_v_dim=128): exponential decay via ssm_a, outer product of key×value vectors, state accumulation, readout via query. State buffer (32 × 128 × 128 = 512K floats) stays on GPU across tokens. Includes L2 normalization of Q/K vectors. File: src/shaders/ssm_delta_net.comp
+- [ ] T029h [US1] Write SSM gated norm shader — per-head RMS norm of delta-net output × SiLU(gate). Reads ssm_norm.weight (per-head indexing if d_inner elements, else shared d_state). Fused: out[i] = (o[i]/rms) * w[i] * (z[i] * sigmoid(z[i])). File: src/shaders/ssm_gated_norm.comp
+- [ ] T029i [US1] Integrate GPU SSM into forward pass — replace runSsmLayerCpu with GPU dispatch chain: conv1d_silu → delta_net_update → gated_norm, all within the existing command buffer (no submit needed between them). Allocate persistent GPU buffers for conv state and recurrent state in init(). Remove per-call alloc/free of conv_kernel_buf and ssm_output. Eliminate the submit at L1490. File: src/compute/forward.zig
 
-### Shader Performance
+### Step 2: GPU-Side Router (eliminates 40 submits)
 
-- [ ] T029j [US1] Profile per-dispatch timing — add Vulkan timestamp queries around each shader dispatch to identify which shaders dominate runtime. File: src/compute/forward.zig
-- [ ] T029k [US1] Optimize Q4_K DMMV occupancy — with batched submits, GPU utilization should approach 90%+. Tune workgroup sizes if needed. File: src/shaders/dmmv_q4k.comp
-- [ ] T029l [US1] Increase max_tokens to 256 — once performance allows <60s generation. File: src/main.zig
+CPU top-k softmax over 256 experts forces a readback+submit on every MoE layer (all 40). GPU shader does this entirely on-device.
 
-**Checkpoint**: Decode throughput ≥27 tok/s (bandwidth-limited). Ready for further optimization toward 107 tok/s.
+- [ ] T029d [US1] Write softmax+top-k compute shader — input: router_logits_buf (256 floats). Output: expert_ids[8] (u32) + expert_weights[8] (f32) in a GPU buffer. Single workgroup (64 threads): find top-8 via parallel reduction, then softmax-normalize only the selected weights. Placeholder exists at src/shaders/softmax_topk.comp — replace empty main(). File: src/shaders/softmax_topk.comp
+- [ ] T029e [US1] Integrate GPU router into forward pass — dispatch softmax_topk shader after router DMMV, read expert_ids+weights from GPU buffer (host-visible or device-local with staging). Remove the readback copy + submitAndWait at L1056 and CPU topKSoftmax call. Expert dispatch loop reads from the GPU output buffer. File: src/compute/forward.zig
+
+### Step 3: GPU-Side Shared Expert Gate (eliminates 40 submits)
+
+Shared expert gate sigmoid forces a readback of 1 scalar per MoE layer. Replace with existing sigmoid_scale_acc or sigmoid_mul shader.
+
+- [ ] T029m [US1] Move shared expert gate to GPU — replace the readback+CPU sigmoid at L1158-1183 with a GPU sigmoid_scale_acc dispatch. The gate scalar is already in router_logits_buf after DMMV at L1141; dispatch sigmoid_scale_acc(moe_out_buf, down_buf, gate=router_logits_buf[0]) to accumulate the shared expert output with sigmoid gating entirely on GPU. Eliminates submitAndWait at L1175. File: src/compute/forward.zig
+
+### Step 4: Command Buffer Batching (merge remaining submits)
+
+After Steps 1-3, submits drop from 151 to ~41 (1 per layer + 1 final). This step merges operations across layers to reduce further.
+
+- [ ] T029a [US1] Batch command buffers across full layer boundaries — keep one cmd buffer open across multiple consecutive layers that no longer need CPU readback (post Steps 1-3). For attention layers: norm → Q/K/V DMMV → RoPE → KV cache → flash attn → gate → O-proj → residual → post-norm → router DMMV → softmax_topk → expert dispatch → shared expert → FFN residual can all be one cmd buffer with only pipeline barriers between dispatches. Submit only when descriptor pool fills (4096 sets). Target: 1 submit per ~10 layers. File: src/compute/forward.zig
+- [X] T029b [US1] ~~Batch MoE expert dispatch~~ — ALREADY DONE. All 8 experts are recorded in one cmd buffer (L1068-1124) with a single submit at L1240. No per-expert submit.
+- [ ] T029c [US1] Eliminate per-layer descriptor pool reset — pool is already pre-allocated (4096 sets, 16384 bindings) but reset at L863 every layer (~15 descriptor sets used per layer, well within budget). Remove the per-layer vkResetDescriptorPool call; only reset when pool fills or between multi-layer batches. File: src/compute/forward.zig
+
+### Step 5: Shader Performance Tuning
+
+- [ ] T029k [US1] Optimize Q4_K DMMV occupancy — with batched submits and reduced bubble time, GPU utilization should approach memory-bandwidth limit. Profile with timestamp queries from T029j to identify if DMMV or elementwise kernels dominate. Tune workgroup sizes and shared memory usage if needed. File: src/shaders/dmmv_q4k.comp
+- [ ] T029l [US1] Increase max_tokens to 256 — once performance allows <60s total generation time. Currently hardcoded lower. File: src/main.zig
+- [ ] T029n [US1] Disable BOS diagnostic submits in production — the per-layer hidden_buf readback at L1244-1316 adds 40 extra submits on the first token. Gate behind a --debug flag or remove entirely once correctness is validated. File: src/compute/forward.zig
+
+**Checkpoint 1**: After Steps 0-1, decode throughput should reach ≥10 tok/s (CPU SSM bottleneck removed).
+**Checkpoint 2**: After Steps 2-3, submits drop to ~41/token. Throughput should reach ≥20 tok/s.
+**Checkpoint 3**: After Step 4, submits drop to ~5-10/token. Throughput should approach ≥27 tok/s (memory-bandwidth floor).
+**Checkpoint 4**: After Step 5 tuning, target ≥107 tok/s (matching llama.cpp, which may use additional tricks like persistent threads or multi-queue overlap).
 
 ---
 
