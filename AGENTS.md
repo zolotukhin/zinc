@@ -223,3 +223,188 @@ If llama.cpp baseline drops below ~100 tok/s, check in order:
 2. **GECC** — `cat /sys/module/amdgpu/parameters/ras_enable` must show 0
 3. **coop_matrix** — server log must show `matrix cores: KHR_coopmat`
 4. **Reboot** — Mesa/driver changes need a reboot to take full effect
+
+## Code Reference
+
+Quick lookup for key types, functions, and their locations. Use this to navigate directly instead of searching.
+
+### forward.zig — Inference Runtime (~2000 lines)
+
+The main file. Contains the decode loop, all layer dispatch, MoE routing, SSM state.
+
+| Symbol | Line | What it does |
+|--------|------|-------------|
+| `DecodeState` | ~26 | Per-request state: position counter, generated tokens list |
+| `dequantRow()` | ~69 | CPU dequant: F32/F16/Q8_0/Q6_K/Q5_K/Q4_K row → f32 buffer |
+| `topKSoftmax()` | ~280 | CPU MoE routing: softmax all experts → pick top-k → renormalize |
+| `InferenceEngine` | ~200 | **Core runtime object** — owns all GPU buffers, dispatchers, KV cache, SSM state |
+| `InferenceEngine.init()` | ~250 | Allocates everything: intermediate buffers, KV cache (40 layers), SSM state, descriptor pools |
+| `InferenceEngine.decodeStep()` | ~430 | **One token**: embed → 40 layers (attn/SSM + MoE FFN) → final norm → LM head → logits readback |
+| `InferenceEngine.prefillBatch()` | ~555 | Batch all prompt tokens in single GPU submission |
+| `InferenceEngine.sampleGreedy()` | ~700 | CPU argmax over mapped logits staging buffer |
+| `generate()` | ~750 | **Top-level**: prefill → decode loop → return token IDs |
+
+**Decode step per layer** (inside `decodeStep`):
+1. `attn_norm` — RMS norm of hidden state
+2. **Attention layers** (every 4th layer): QKV projection → deinterleave Q+gate → sigmoid gate → RoPE → KV cache write → flash attention → output projection → residual add
+3. **SSM layers** (other layers): QKV projection → conv1d → delta-net state update → gated RMS norm → output projection → residual add
+4. **FFN (all layers)**: ffn_norm → MoE gate (GPU) → readback router logits (CPU) → topKSoftmax → dispatch top-k experts (gate+up → SwiGLU → down) → accumulate → shared expert → residual add
+
+**Key buffers**: `hidden_buf`, `residual_buf`, `norm_buf`, `q_buf`, `k_buf`, `v_buf`, `attn_out_buf`, `gate_buf`, `up_buf`, `swiglu_buf`, `down_buf`, `moe_out_buf`, `router_logits_buf`, `router_staging`, `logits_buf`, `logits_staging`, `embed_staging`
+
+**KV cache**: `kv_k_cache[layer]`, `kv_v_cache[layer]` — flat F32, [context_length × kv_dim]
+
+**SSM state**: `ssm_conv_states[layer]` (CPU f32), `ssm_states[layer]` (CPU f32) — updated on CPU each token
+
+### dmmv.zig — Matrix-Vector Dispatch
+
+| Symbol | What it does |
+|--------|-------------|
+| `DmmvPushConstants` | Push constants: M (rows), K (cols), a_offset, x_offset, y_offset |
+| `DmmvDispatch.init()` | Load pipelines for Q4_K/Q5_K/Q6_K/Q8_0/F16/F32; sets SPEC_K=hidden_dim |
+| `DmmvDispatch.recordDispatch()` | Bind descriptor set + push constants, dispatch (M+63)/64 workgroups |
+| `DmmvDispatch.pipelineForType()` | Select pipeline by GGMLType enum |
+
+### elementwise.zig — Fused Ops
+
+| Function | Push Constants | Workgroups |
+|----------|---------------|------------|
+| `recordRmsNorm()` | hidden_dim, n_tokens, eps | 1 per token |
+| `recordSwiglu()` | n_elements | (n+63)/64 |
+| `recordRope()` | stride, rope_dim, n_heads, position, freq_base | 1 per head |
+| `recordDeinterleave()` | head_dim, n_heads | (n_heads+63)/64 |
+| `recordSigmoidMul()` | n_elements | (n+63)/64 |
+| `recordVadd()` | n_elements | (n+63)/64 |
+| `recordScaleAcc()` | n_elements, scale | (n+63)/64 |
+
+### attention.zig — Flash Attention
+
+| Symbol | What it does |
+|--------|-------------|
+| `FlashAttnPush` | head_dim, n_heads, n_kv_heads, seq_len, page_size |
+| `recordFlashAttn()` | 1 workgroup per query head, 256-token blocks, online softmax |
+
+### graph.zig — Compute Graph IR
+
+| Symbol | What it does |
+|--------|-------------|
+| `OpType` | 28 operation types (dmmv, flash_attn, rms_norm_mul, swiglu, rope, moe_gate, etc.) |
+| `Graph.addNode()` | Add operation node, returns ID |
+| `Graph.addDependency()` | Wire node ordering |
+| `Graph.topologicalOrder()` | Sort for execution |
+| `Graph.writeJsonReport()` | Export for analysis |
+
+### gguf.zig — GGUF Parser
+
+| Symbol | What it does |
+|--------|-------------|
+| `GGMLType` | Enum: f32, f16, q4_0..q8_k (31 formats) |
+| `GGMLType.blockSize()` | Elements per block (1 for scalar, 256 for K-quants) |
+| `GGMLType.bytesPerBlock()` | Bytes per block (e.g. Q4_K=144, Q8_0=34, F16=2) |
+| `GGUFFile.getString/getU32/getF32()` | Metadata access |
+| `GGUFFile.findTensor(name)` | Lookup tensor by name → TensorInfo (dims, type, offset) |
+
+### loader.zig — Model Loading
+
+| Symbol | What it does |
+|--------|-------------|
+| `ModelConfig` | All model dimensions: n_layers, n_heads, n_kv_heads, head_dim, hidden_dim, vocab_size, rope_dim, n_experts, SSM params |
+| `Model` | Config + loaded tensors + mmap data |
+| `load(path, instance, cmd_pool, allocator)` | Parse GGUF → extract config → mmap file → upload tensors to GPU |
+
+### architecture.zig — Graph Builders
+
+| Function | What it builds |
+|----------|---------------|
+| `buildDecodeGraph()` | Dispatch to arch-specific builder |
+| `buildLlamaDecodeGraph()` | Standard transformer: norm → QKV → RoPE → attn → FFN |
+| `buildMoeDecodeGraph()` | Transformer + MoE FFN with expert routing |
+| `buildMambaDecodeGraph()` | Hybrid: interleave SSM + full-attention layers |
+
+### tokenizer.zig — BPE Tokenizer
+
+| Symbol | What it does |
+|--------|-------------|
+| `Tokenizer.initFromGGUF()` | Load vocab + merges from GGUF metadata |
+| `Tokenizer.encode(text)` | UTF-8 → GPT-2 byte-level → BPE merges → token IDs |
+| `gpt2ByteToUnicode()` | Byte-to-unicode mapping (printable=self, others=U+0100+) |
+
+### Vulkan Layer
+
+| File | Key Type | What it does |
+|------|----------|-------------|
+| `instance.zig` | `Instance` | Vulkan init, device selection, queue families |
+| `buffer.zig` | `Buffer` | GPU memory: `initDeviceLocal()`, `initStaging()`, `upload()` |
+| `pipeline.zig` | `Pipeline` | SPIR-V → compute pipeline with descriptor layout |
+| `command.zig` | `CommandBuffer` | `begin()`, `dispatchWithPush()`, `computeBarrier()`, `submitAndWait()` |
+| `gpu_detect.zig` | `GpuConfig` | Vendor classify → tuning params (wave_size, bandwidth_gbps, tile sizes) |
+
+### Shaders
+
+| Shader | Format | Workgroup | Notes |
+|--------|--------|-----------|-------|
+| `dmmv_q4k.comp` | Q4_K | 64 threads, 1 row/thread | Shared memory for input vector, SPEC_K specialization |
+| `dmmv_q5k.comp` | Q5_K | 64 threads | Interleaved element layout (2e, 2e+1) |
+| `dmmv_q6k.comp` | Q6_K | 64 threads | 210 bytes/block |
+| `dmmv_q8_0.comp` | Q8_0 | 64 threads, 2 rows/WG | Simpler layout, good cache behavior |
+| `dmmv_f16.comp` | F16 | 64 threads, 2 rows/WG | Direct multiply, no dequant |
+| `dmmv_f32.comp` | F32 | 64 threads | Baseline, no quantization |
+| `flash_attn.comp` | — | 1 WG/head | Paged KV, 256-token blocks, online softmax, GQA |
+| `rms_norm_mul.comp` | — | 1 WG/token | y = weight * (x / sqrt(mean(x²) + eps)) |
+| `swiglu.comp` | — | 64 threads | y = silu(gate) * up |
+| `rope_fused.comp` | — | 1 WG/head | Partial rotation (IMRoPE): rotate rope_dim dims, copy rest |
+| `deinterleave.comp` | — | 64 threads | Split [Q,gate] interleaved → separate Q, gate buffers |
+| `sigmoid_mul.comp` | — | 64 threads | y = sigmoid(gate) * x (SSM gating) |
+| `vadd.comp` | — | 64 threads | c = a + b |
+| `scale_accumulate.comp` | — | 64 threads | a[i] += scale * b[i] (MoE expert accumulation) |
+| `softmax_topk.comp` | — | 64 threads | Expert routing (not currently used — CPU routing) |
+| `coop_matmul.comp` | — | 16×16 | Cooperative matrix for batched prefill (future) |
+
+### Critical Constants
+
+| Constant | Value | Location |
+|----------|-------|----------|
+| KV cache max context | 4096 tokens | forward.zig |
+| Push constant limit | 64 bytes | graph.zig |
+| Page size (flash attn) | 16 tokens | forward.zig |
+| Default workgroup size | 64 threads | all shaders |
+| SPEC_K | hidden_dim (2048) | dmmv.zig init |
+| Agent timeout | 30 min | optimize_zinc.ts:606 |
+| Keep threshold | max(+3 tok/s, +2%) | optimize_zinc.ts |
+| GPU lock file | /tmp/zinc-gpu.lock | optimize_zinc.ts |
+
+### Decode Loop Data Flow
+
+```
+Token ID
+  → CPU dequant embedding (token_embd.weight)
+  → Upload to hidden_buf via staging
+  → For each layer 0..39:
+      ├─ RMS norm (hidden → norm_buf)
+      ├─ QKV projection (DMMV: attn_q.weight × norm_buf → q/k/v)
+      ├─ IF attention layer (every 4th):
+      │   ├─ Deinterleave Q+gate → separate buffers
+      │   ├─ Sigmoid gate × Q
+      │   ├─ RoPE on Q and K (partial, rope_dim=64 of head_dim=256)
+      │   ├─ Write K,V to KV cache at position
+      │   ├─ Flash attention (Q × cached K/V → attn_out)
+      │   └─ Output projection (DMMV: o_proj × attn_out)
+      ├─ ELSE SSM layer:
+      │   ├─ Conv1d (CPU, sliding window)
+      │   ├─ Delta-net state update (CPU, d_state=128)
+      │   ├─ Gated RMS norm (GPU)
+      │   └─ Output projection (DMMV: ssm_out × ssm_hidden)
+      ├─ Residual add (hidden += layer_output)
+      ├─ FFN norm (RMS norm)
+      ├─ MoE routing:
+      │   ├─ Gate projection (DMMV: gate_exps × ffn_norm → router_logits)
+      │   ├─ GPU→CPU readback of router logits
+      │   ├─ CPU topKSoftmax → 8 expert IDs + weights
+      │   └─ For each expert: gate+up (DMMV) → SwiGLU → down (DMMV) → scale_accumulate
+      ├─ Shared expert: same as above but single expert, added to MoE output
+      └─ Residual add (hidden += ffn_output)
+  → Final RMS norm
+  → LM head projection (DMMV: output.weight × norm → logits)
+  → GPU→CPU readback logits
+  → CPU argmax → next token ID
+```
