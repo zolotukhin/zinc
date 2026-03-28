@@ -759,23 +759,44 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     diagnosis.push("");
     if (lastResult.coherentText) {
       diagnosis.push("✅ Output is COHERENT — decoded text contains recognizable language.");
-      diagnosis.push("ZINC is generating meaningful tokens. Optimize for DECODE throughput (not prefill).");
+      diagnosis.push("");
+      if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 10) {
+        diagnosis.push("## ⚠ CRITICAL BOTTLENECK: VULKAN SUBMISSION OVERHEAD");
+        diagnosis.push(`Bandwidth utilization is only ${lastResult.bandwidthUtil.toFixed(1)}% — GPU is IDLE 99%+ of the time.`);
+        diagnosis.push("The model is 21GB. At 576 GB/s, theoretical decode = ~37ms/tok (27 tok/s).");
+        diagnosis.push(`Current: ${(1000 / (lastResult.tokPerSec ?? 1)).toFixed(0)}ms/tok — ${((1000 / (lastResult.tokPerSec ?? 1)) / 37).toFixed(0)}x slower than theoretical.`);
+        diagnosis.push("");
+        diagnosis.push("ROOT CAUSE: ~1600 vkQueueSubmit+vkWaitForFences per token");
+        diagnosis.push("  Each layer does: norm_submit → (attn or SSM) → router_submit_readback → expert_dispatch → shexp_submit_readback");
+        diagnosis.push("  Each submit has ~0.1-0.5ms kernel overhead → 200+ms of pure Vulkan overhead.");
+        diagnosis.push("");
+        diagnosis.push("## OPTIMIZATION PRIORITY (in order):");
+        diagnosis.push("1. **Batch command buffers across layers** — keep one cmd buffer open, only submit when CPU readback is needed");
+        diagnosis.push("   Current: reset+begin+end+submit per operation. Target: 1-2 submits per layer max.");
+        diagnosis.push("2. **Move SSM conv1d+delta-net to GPU** — eliminates 30 GPU→CPU→GPU roundtrips per token");
+        diagnosis.push("   SSM layers currently: GPU projections → readback → CPU conv1d+delta-net → upload → GPU ssm_out");
+        diagnosis.push("   Target: entire SSM layer stays on GPU with compute shaders");
+        diagnosis.push("3. **Move router top-k to GPU** — eliminates 40 readback submissions per token");
+        diagnosis.push("   Current: GPU softmax → readback → CPU argmax → GPU expert dispatch");
+        diagnosis.push("   Target: GPU computes softmax+top-k, writes expert IDs to buffer, CPU never sees router logits");
+        diagnosis.push("4. **Pre-allocate descriptor sets** — eliminate per-dispatch allocation overhead");
+        diagnosis.push("");
+        diagnosis.push("## IMPORTANT: You CAN make multi-file changes. This is an ARCHITECTURE optimization.");
+        diagnosis.push("Do NOT make tiny tweaks. Make ONE meaningful architectural change (e.g., batch submits across all MoE experts).");
+      } else if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 70) {
+        diagnosis.push(`Bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — below the 90%+ target.`);
+        diagnosis.push("Focus on reducing Vulkan overhead and improving GPU occupancy.");
+      } else if (lastResult.bandwidthUtil != null) {
+        diagnosis.push(`Bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — approaching hardware limit.`);
+        diagnosis.push("Further gains require reducing bytes read or algorithmic changes.");
+      }
     } else {
       diagnosis.push("ZINC is generating tokens but output is NOT coherent. Fix correctness first.");
+      diagnosis.push("Focus on:");
+      diagnosis.push("1. Check DMMV shader correctness for each quant type");
+      diagnosis.push("2. Verify buffer bindings and descriptor set wiring");
+      diagnosis.push("3. Compare against llama.cpp's qwen35moe.cpp for the correct computation flow");
     }
-    if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 70) {
-      diagnosis.push(`Memory bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — well below the 90%+ target.`);
-      diagnosis.push("This means the GPU is stalling on something other than raw VRAM reads.");
-      diagnosis.push("Likely causes: Vulkan submission overhead, barriers, descriptor management, CPU-side work.");
-    } else if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil >= 70) {
-      diagnosis.push(`Memory bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — approaching the hardware limit.`);
-      diagnosis.push("Further gains require reducing bytes read (better quant packing) or algorithmic changes.");
-    }
-    diagnosis.push("");
-    diagnosis.push("Focus on:");
-    diagnosis.push("1. DMMV shader bandwidth utilization (target: 90%+ on large matmuls)");
-    diagnosis.push("2. Correct buffer bindings and descriptor set wiring in the forward pass");
-    diagnosis.push("3. Memory access patterns in shaders (coalesced reads, wave64 optimization)");
   } else {
     diagnosis.push(`## Status: RUNNING BUT NO METRICS (${lastResult.tokensGenerated} tokens generated)`);
     diagnosis.push("The engine runs and generates tokens but isn't reporting tok/s metrics.");
@@ -809,34 +830,28 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   diagnosis.push("- ✅ Prefill runs full transformer for each prompt token");
   diagnosis.push("- ✅ Full 40-layer forward pass with per-layer descriptor pool reset");
   diagnosis.push("");
-  diagnosis.push("## REMAINING ISSUES — DEEP DEBUGGING RESULTS (2026-03-28)");
-  diagnosis.push("VERIFIED CORRECT (bit-identical against CPU reference):");
-  diagnosis.push("  - Tokenizer, embedding dequant, RMS norm, LM head Q8_0 DMMV");
-  diagnosis.push("  - SSM delta-net output (conv1d + state update + gated norm)");
-  diagnosis.push("  - topKSoftmax, expertSliceBytes (tested, 26 tests pass)");
+  diagnosis.push("## CURRENT STATE (2026-03-28)");
+  diagnosis.push("Output is CORRECT: 'The capital of France is' → 'Paris. The capital of Germany is Berlin...'");
+  diagnosis.push("All correctness bugs are FIXED. Do NOT change correctness-related code.");
+  diagnosis.push("All 26 tests pass. All changes MUST pass `zig build test`.");
   diagnosis.push("");
-  diagnosis.push("CURRENT OUTPUT: coherent English that ECHOES the prompt but gives WRONG answers.");
-  diagnosis.push("  'The capital of France is' → 'not. The capital of France is is not...' (repeating)");
-  diagnosis.push("  First token: 'not' (logit=13.53) instead of 'Paris' (logit=4.58)");
-  diagnosis.push("  llama.cpp produces 'Paris' (logprob=-0.86) for the same prompt.");
-  diagnosis.push("  THIS IS A CORRECTNESS BUG, NOT A PERFORMANCE ISSUE.");
-  diagnosis.push("  Do NOT optimize tok/s — fix the logit distribution first.");
+  diagnosis.push("## PERFORMANCE BOTTLENECK ANALYSIS");
+  diagnosis.push("At ~4 tok/s with 0.4% bandwidth utilization, the GPU is IDLE almost all the time.");
+  diagnosis.push("The bottleneck is NOT shader speed — it's Vulkan command submission overhead.");
+  diagnosis.push("Each token requires ~1600 vkQueueSubmit calls (40 layers × ~40 ops/layer).");
+  diagnosis.push("Each submit has ~0.1-0.5ms kernel overhead → ~200ms wasted on fence management.");
+  diagnosis.push("Target: batch operations to achieve 5-10 submits/token → 27+ tok/s.");
   diagnosis.push("");
-  diagnosis.push("ROOT CAUSE: accumulated per-layer errors shift logit distribution.");
-  diagnosis.push("  Common words ('not','the','a') score ~13, 'Paris' only 4.58.");
-  diagnosis.push("  No single component is broken — each layer adds a small error that cascades.");
+  diagnosis.push("## APPROACHES THAT FAILED (do not retry):");
+  diagnosis.push("- Spin-wait on fences (vkGetFenceStatus) — no improvement");
+  diagnosis.push("- Simple submit elimination within existing architecture — too small an effect");
+  diagnosis.push("- Pre-allocating SSM buffers — saves <1ms, irrelevant vs 200ms overhead");
   diagnosis.push("");
-  diagnosis.push("DEBUGGING STRATEGY:");
-  diagnosis.push("  1. Compare hidden state after EACH layer against a CPU reference");
-  diagnosis.push("     (scripts/cpu_reference_layer0.py does this for layer 0)");
-  diagnosis.push("  2. Find the FIRST layer where GPU diverges significantly from CPU");
-  diagnosis.push("  3. Within that layer, compare individual operations (norm, DMMV, SwiGLU)");
-  diagnosis.push("  4. The Q4_K DMMV for MoE experts is the most likely source since it runs");
-  diagnosis.push("     512×2048 matmuls with complex sub-block pairing");
-  diagnosis.push("  5. Check if expert weight offsets into stacked 3D tensors are byte-aligned");
-  diagnosis.push("     correctly for each quant type");
-  diagnosis.push("");
-  diagnosis.push("IMPORTANT: All changes MUST pass `zig build test` (26 tests).");
+  diagnosis.push("## APPROACHES THAT SHOULD WORK:");
+  diagnosis.push("- Keep command buffer open across multiple layers (only submit for CPU readbacks)");
+  diagnosis.push("- Move SSM conv1d+delta-net to GPU compute shaders (eliminates 30 roundtrips)");
+  diagnosis.push("- Move router top-k to GPU (eliminates 40 readbacks)");
+  diagnosis.push("- Batch all 8 MoE expert DMMVs into 3 dispatches (gate_all, up_all, down_all)");
   diagnosis.push("");
   diagnosis.push("## REFERENCE: llama.cpp implementation");
   diagnosis.push("On the remote node, the full Qwen3.5-MoE implementation is at:");
@@ -916,7 +931,7 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     ideasBlock,
     "",
     "## Rules",
-    "1. Make ONE focused change. Do not try multiple things.",
+    `1. Make ONE focused ${phase === "optimize" ? "architectural" : ""} change.${phase === "optimize" ? " You MAY edit multiple files if they're all part of the same optimization (e.g., new shader + dispatch changes)." : " Do not try multiple things."}`,
     "2. Edit LOCAL source files only (this machine's working copy).",
     "3. The loop will rsync your changes and rebuild on the remote node.",
     "4. Do NOT modify .env, loops/, or files outside src/ and build.zig.",
@@ -1238,15 +1253,18 @@ async function runCycle(
       }
     }
   } else {
-    // In optimize mode: keep if tok/s improved vs cycle baseline AND vs global best
-    const minThreshold = Math.max(3.0, buildRun.tokPerSec! * 0.02); // at least +2% or +3 tok/s
+    // In optimize mode: keep if tok/s improved meaningfully
+    // When below 10 tok/s, accept any improvement ≥ 0.5 tok/s (noise floor is ~0.2)
+    // When above 10 tok/s, require +2% or +3 tok/s (whichever is larger)
     const globalBest = state.currentBest?.tokPerSec ?? 0;
+    const minThreshold = (buildRun.tokPerSec ?? 0) < 10
+      ? 0.5  // large architectural changes should produce at least +0.5 tok/s
+      : Math.max(3.0, buildRun.tokPerSec! * 0.02);
     if (
       verifyResult.phase === "optimize" &&
       verifyResult.tokPerSec != null &&
       buildRun.tokPerSec != null &&
-      verifyResult.tokPerSec >= buildRun.tokPerSec + minThreshold &&
-      verifyResult.tokPerSec >= globalBest // never regress below the known best
+      verifyResult.tokPerSec >= buildRun.tokPerSec + minThreshold
     ) {
       if (verifyResult.garbageOutput) {
         console.log(clr("1;33", `  ⚠ Output is garbage (repeated tokens) — not keeping despite tok/s improvement`));
