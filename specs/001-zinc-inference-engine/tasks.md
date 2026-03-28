@@ -81,7 +81,45 @@
 - [X] T027 [US1] Create dispatch overhead benchmark in benchmarks/dispatch.zig — measure single dispatch, 1500 dispatches, and pre-recorded replay
 - [X] T028 [US1] Create logit comparison test — generate tokens with ZINC and llama.cpp on same model/prompt/seed, compute cosine similarity (target >99.5%)
 
-**Checkpoint**: Single-request inference works end-to-end. Can generate coherent text at target speed with measured bandwidth utilization.
+**Checkpoint**: Infrastructure complete — shaders compile, dispatch wrappers work, forward pass executes all 40 layers with MoE routing and SSM state. Output not yet coherent.
+
+---
+
+## Phase 3b: Forward Pass Correctness (Priority: P0 — BLOCKING)
+
+**Goal**: Achieve coherent text output from Qwen3.5-35B-A3B that matches llama.cpp quality. Currently outputs ASCII numbers/punctuation instead of English.
+
+**Independent Test**: Run `zinc --prompt "The capital of France is"` and verify output contains "Paris" or coherent reasoning text. Compare first 10 generated tokens against llama.cpp's output for the same prompt.
+
+**Status**: Embedding + RMS norm verified bit-identical against CPU reference. Tokenizer matches llama.cpp. The optimization loop found and fixed 8 critical bugs (wave32 subgroup, Q4_K/Q5_K pairing, SPEC_K bounds, shared expert dim, conv1d split, buffer overflow). Output improved from multilingual garbage → ASCII numbers but coherence not achieved.
+
+### Remaining Dequantization Verification
+
+- [ ] T028a [US1] Verify Q4_K DMMV against CPU reference — dequantize one expert row on CPU, dispatch single-row GPU DMMV with same input, compare dot product (tolerance <0.1%). File: src/shaders/dmmv_q4k.comp
+- [ ] T028b [P] [US1] Verify Q5_K DMMV against CPU reference — same test for expert down-projection weights (Q5_K uses different interleave than Q4_K). File: src/shaders/dmmv_q5k.comp
+- [ ] T028c [P] [US1] Verify Q6_K DMMV against CPU reference — some expert layers use Q6_K. File: src/shaders/dmmv_q6k.comp
+- [ ] T028d [P] [US1] Verify F32 DMMV against CPU reference — router weights are F32. File: src/shaders/dmmv_f32.comp
+
+### Layer-by-Layer Comparison
+
+- [ ] T028e [US1] Add per-layer CPU reference comparison — compute one full layer (norm + MoE FFN) on CPU using mmap'd weights, compare hidden_buf after layer against GPU result. Identifies exact divergence point. File: src/compute/forward.zig
+- [ ] T028f [US1] Compare MoE expert selection — dump top-8 expert IDs and weights from GPU router, compare against CPU softmax+top-k on same input. Verify expert offsets into stacked 3D tensors. File: src/compute/forward.zig
+- [ ] T028g [US1] Verify attention layer output — for layer 3 (first full attention layer), compare GPU flash_attn output against CPU reference attention (Q·K^T scaled, causal mask, softmax, ·V). File: src/shaders/flash_attn.comp
+
+### SSM Delta-Net Correctness
+
+- [ ] T028h [US1] Compare SSM layer 0 output against llama.cpp reference — SSH to remote node, read qwen35moe.cpp's build_layer_attn_linear, trace exact computation for BOS token, compare against ZINC's CPU-side SSM. File: src/compute/forward.zig (runSsmLayerCpu)
+- [ ] T028i [US1] Verify SSM conv1d against reference — compute conv1d on CPU with known weights+state, compare against ZINC's conv_out values. Check kernel index order [ch*d_conv+ki] vs [ki*channels+ch]. File: src/compute/forward.zig
+- [ ] T028j [US1] Verify SSM gated normalization — compare RMS_norm(output) * SiLU(z) against llama.cpp's build_norm_gated for same input values. File: src/compute/forward.zig
+
+### Performance Optimization (after correctness)
+
+- [ ] T028k [US1] Reduce per-layer GPU submit/wait — batch multiple layers per command buffer submission. Current: 40+ submits per token. Target: 1-2 submits for attention layers, 1 per SSM layer (for router readback). File: src/compute/forward.zig
+- [ ] T028l [US1] Move SSM projections fully to GPU — eliminate CPU-side readback for conv1d/delta-net by implementing GPU shaders for conv1d, state decay, and delta update. File: src/shaders/ (new shaders)
+- [ ] T028m [US1] Optimize Q4_K DMMV bandwidth — target 90%+ of 576 GB/s theoretical. Current: ~4.3% utilization. Profile with per-dispatch timing. File: src/shaders/dmmv_q4k.comp
+- [ ] T028n [US1] Increase max_tokens back to 256+ once correctness is confirmed and performance allows <5min generation. File: src/main.zig
+
+**Checkpoint**: Output is coherent English matching llama.cpp quality. Ready for performance optimization toward 107 tok/s target.
 
 ---
 
