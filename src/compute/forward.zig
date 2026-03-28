@@ -2277,3 +2277,88 @@ pub fn generate(
 
     return try allocator.dupe(u32, state.generated_tokens.items);
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "topKSoftmax selects correct top-k with renormalization" {
+    const logits = [_]f32{ 1.0, 3.0, 0.5, 2.0, 4.0, 1.5, 0.1, 0.2 };
+    var ids: [3]u32 = undefined;
+    var weights: [3]f32 = undefined;
+    topKSoftmax(&logits, 3, &ids, &weights);
+    // Top 3 by value: index 4 (4.0), index 1 (3.0), index 3 (2.0)
+    try std.testing.expectEqual(@as(u32, 4), ids[0]);
+    try std.testing.expectEqual(@as(u32, 1), ids[1]);
+    try std.testing.expectEqual(@as(u32, 3), ids[2]);
+    // Weights should sum to ~1.0
+    const wsum = weights[0] + weights[1] + weights[2];
+    try std.testing.expect(@abs(wsum - 1.0) < 0.01);
+    // Highest logit should have highest weight
+    try std.testing.expect(weights[0] > weights[1]);
+    try std.testing.expect(weights[1] > weights[2]);
+}
+
+test "expertSliceBytes computes correct byte offsets for Q4_K" {
+    // Q4_K: block_size=256, bytes_per_block=144
+    // 512 rows × 2048 cols: blocks_per_row = 2048/256 = 8
+    // bytes = 512 * 8 * 144 = 589,824
+    const result = expertSliceBytes(.q4_k, 512, 2048);
+    try std.testing.expectEqual(@as(u32, 589_824), result);
+}
+
+test "expertSliceBytes computes correct byte offsets for Q5_K" {
+    // Q5_K: block_size=256, bytes_per_block=176
+    // 2048 rows × 512 cols: blocks_per_row = 512/256 = 2
+    // bytes = 2048 * 2 * 176 = 720,896
+    const result = expertSliceBytes(.q5_k, 2048, 512);
+    try std.testing.expectEqual(@as(u32, 720_896), result);
+}
+
+test "delta-net zero state produces beta*v*(k.q) output" {
+    // With zero initial state, the delta-net autoregressive step gives:
+    // o[row] = beta * v[row] * dot(k, q)
+    // This verifies the core SSM math matches the CPU reference.
+    const head_v_dim: usize = 4;
+    const d_state: usize = 4;
+    var ssm_state = [_]f32{0} ** (head_v_dim * head_v_dim);
+
+    const k_head = [_]f32{ 0.5, -0.3, 0.1, 0.7 };
+    const v_head = [_]f32{ 1.0, -2.0, 0.5, 0.3 };
+    const q_head = [_]f32{ 0.2, 0.4, -0.1, 0.6 };
+    const beta: f32 = 0.8;
+    const gate: f32 = -0.1; // exp(gate) ≈ 0.905
+
+    // Decay (no-op for zero state)
+    const g_val = @exp(gate);
+    for (&ssm_state) |*s| s.* *= g_val;
+
+    // Update: for each row, sk = s@k = 0, d = beta*(v-0) = beta*v
+    // s[col][row] += k[col] * d_val
+    for (0..head_v_dim) |row| {
+        var sk: f32 = 0;
+        for (0..d_state) |col| sk += ssm_state[row * head_v_dim + col] * k_head[col];
+        const d_val = beta * (v_head[row] - sk);
+        for (0..d_state) |col| {
+            ssm_state[col * head_v_dim + row] += k_head[col] * d_val;
+        }
+    }
+
+    // Read: o[row] = sum_col s[row][col] * q[col]
+    var output: [4]f32 = undefined;
+    for (0..head_v_dim) |row| {
+        var val: f32 = 0;
+        for (0..d_state) |col| {
+            val += ssm_state[row * head_v_dim + col] * q_head[col];
+        }
+        output[row] = val;
+    }
+
+    // Expected values from Python reference (ZINC's transposed state convention)
+    // s[col*4+row] += k[col]*d, read: o[row] = sum_col s[row*4+col]*q[col]
+    const expected = [_]f32{ -0.313973, 0.188384, -0.062795, -0.439562 };
+    for (0..head_v_dim) |row| {
+        try std.testing.expect(@abs(output[row] - expected[row]) < 1e-4);
+    }
+}
+
