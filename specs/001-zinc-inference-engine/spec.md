@@ -15,7 +15,7 @@ A developer loads a GGUF model onto an AMD RDNA4 GPU and generates text from a p
 
 **Independent Test**: Load Qwen3.5-35B-A3B Q4_K_XL GGUF on an RDNA4 GPU, generate 256 tokens from a fixed prompt, verify output is coherent English matching llama.cpp quality. Compare first 10 generated tokens against llama.cpp server output for the same prompt.
 
-**Current State (2026-03-27)**: Forward pass runs all 40 layers (10 attention + 30 SSM + 40 MoE FFN) at 4 tok/s. Tokenizer matches llama.cpp exactly. Embedding + RMS norm verified bit-identical to CPU reference. Output is ASCII numbers/punctuation instead of coherent English — correctness debugging in progress. 8 critical bugs found and fixed by the self-improving optimization loop (wave32 subgroup reduction, Q4_K/Q5_K sub-block pairing, SPEC_K bounds, shared expert dimension, conv1d split order, buffer overflow, SSM conv ordering).
+**Current State (2026-03-28)**: Forward pass is CORRECT — generates "Paris. The capital of Germany is Berlin..." matching llama.cpp quality. All 13 correctness bugs found and fixed (8 by self-improving loop, 5 manual). 26 build tests pass. Performance: 4 tok/s at 0.4% bandwidth utilization — bottleneck is Vulkan submission overhead (~1600 submits/token), not GPU compute. Phase 3c (decode performance) is the current priority.
 
 **Acceptance Scenarios**:
 
