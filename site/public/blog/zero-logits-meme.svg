@@ -1,0 +1,37 @@
+<svg width="720" height="420" viewBox="0 0 720 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">It looked alive. It was not. Original ZINC bug graphic.</title>
+  <desc id="desc">An original humorous chart showing that only a tiny slice of vocabulary logits were non-zero while most remained flat.</desc>
+  <rect width="720" height="420" rx="24" fill="#FFF8F2"/>
+  <rect x="18" y="18" width="684" height="384" rx="18" fill="#FFFFFF" stroke="#E9D5C7" stroke-width="2"/>
+  <text x="48" y="72" fill="#1A1A2E" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="28" font-weight="700">It looked alive. It was not.</text>
+  <text x="48" y="106" fill="#7A5A46" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="18">The model was generating tokens, but 97% of the vocabulary logits were exactly zero.</text>
+
+  <rect x="48" y="140" width="286" height="210" rx="14" fill="#FFF4EA" stroke="#F4D9C3"/>
+  <text x="68" y="176" fill="#B34700" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="18" font-weight="700">What it felt like</text>
+  <text x="68" y="202" fill="#7A5A46" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="15">"Interesting output, maybe we're close."</text>
+  <path d="M78 298 C118 252, 148 286, 188 246 C226 208, 258 232, 298 184" stroke="#D35400" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="298" cy="184" r="10" fill="#D35400"/>
+  <text x="78" y="330" fill="#7A5A46" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14">Top tokens looked varied enough to fool us for a while.</text>
+
+  <rect x="384" y="140" width="286" height="210" rx="14" fill="#F9FAFB" stroke="#D1D9E0"/>
+  <text x="404" y="176" fill="#1A1A2E" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="18" font-weight="700">What was actually happening</text>
+  <text x="404" y="202" fill="#57606A" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="15">Only ~3% of rows got computed in the LM head.</text>
+
+  <line x1="416" y1="314" x2="648" y2="314" stroke="#CBD5E1" stroke-width="2"/>
+  <line x1="416" y1="230" x2="416" y2="314" stroke="#CBD5E1" stroke-width="2"/>
+  <rect x="430" y="292" width="12" height="22" rx="3" fill="#CBD5E1"/>
+  <rect x="448" y="294" width="12" height="20" rx="3" fill="#CBD5E1"/>
+  <rect x="466" y="295" width="12" height="19" rx="3" fill="#CBD5E1"/>
+  <rect x="484" y="293" width="12" height="21" rx="3" fill="#CBD5E1"/>
+  <rect x="502" y="296" width="12" height="18" rx="3" fill="#CBD5E1"/>
+  <rect x="520" y="294" width="12" height="20" rx="3" fill="#CBD5E1"/>
+  <rect x="538" y="258" width="14" height="56" rx="3" fill="#D35400"/>
+  <rect x="558" y="248" width="14" height="66" rx="3" fill="#D35400"/>
+  <rect x="578" y="240" width="14" height="74" rx="3" fill="#D35400"/>
+  <rect x="598" y="294" width="12" height="20" rx="3" fill="#CBD5E1"/>
+  <rect x="616" y="293" width="12" height="21" rx="3" fill="#CBD5E1"/>
+  <text x="404" y="338" fill="#57606A" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14">248,320 vocab rows</text>
+  <text x="546" y="228" fill="#B34700" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="700">7,760 non-zero</text>
+
+  <text x="48" y="382" fill="#7A5A46" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14">Original bug postcard for the ZINC blog, not a reused meme template.</text>
+</svg>

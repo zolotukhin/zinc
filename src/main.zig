@@ -311,6 +311,13 @@ pub fn main() !void {
                 log.info("  gen[{d}]: id={d} \"{s}\"", .{ ti, output_tokens[ti], tok_str });
             }
         }
+        // Check specific token logits (Paris=11751, not=524)
+        {
+            const logits_ptr2: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
+            log.info("  logit[11751 'Paris']={d:.4} logit[524 'not']={d:.4} logit[264 'a']={d:.4}", .{
+                logits_ptr2[11751], logits_ptr2[524], logits_ptr2[264],
+            });
+        }
         // Debug: dump top-5 logits from the last decode step
         {
             const vocab_size = model.config.vocab_size;
