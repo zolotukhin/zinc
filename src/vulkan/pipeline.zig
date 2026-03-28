@@ -10,10 +10,15 @@ const log = std.log.scoped(.pipeline);
 
 /// A compute pipeline wrapping a SPIR-V shader module.
 pub const Pipeline = struct {
+    /// Compiled SPIR-V shader module.
     shader_module: vk.c.VkShaderModule,
+    /// Descriptor set layout for buffer bindings.
     descriptor_set_layout: vk.c.VkDescriptorSetLayout,
+    /// Pipeline layout with push-constant ranges.
     pipeline_layout: vk.c.VkPipelineLayout,
+    /// Vulkan compute pipeline, or null if unavailable.
     pipeline: vk.c.VkPipeline,
+    /// Logical device.
     device: vk.c.VkDevice,
 
     /// Destroy the shader module, descriptor layout, pipeline layout, and pipeline.
@@ -29,7 +34,9 @@ pub const Pipeline = struct {
 
 /// Specialization constant entry for compute pipelines.
 pub const SpecConst = struct {
+    /// Unique identifier.
     id: u32,
+    /// Integer value.
     value: u32,
 };
 

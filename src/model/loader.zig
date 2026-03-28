@@ -25,18 +25,30 @@ pub const Architecture = enum {
 
 /// Normalized model dimensions and routing metadata extracted from GGUF fields.
 pub const ModelConfig = struct {
+    /// Model architecture family.
     architecture: Architecture,
+    /// Number of layers.
     n_layers: u32,
+    /// Number of query heads.
     n_heads: u32,
+    /// Number of KV heads (GQA).
     n_kv_heads: u32,
+    /// Per-head dimension.
     head_dim: u32,
+    /// Hidden state width.
     hidden_dim: u32,
+    /// FFN intermediate width.
     intermediate_dim: u32,
+    /// Vocabulary size.
     vocab_size: u32,
+    /// Max sequence length.
     context_length: u32,
+    /// RoPE base frequency.
     rope_freq_base: f32,
     // MoE fields
+    /// Total MoE experts (0 for dense).
     n_experts: u32,
+    /// Active experts per token.
     n_experts_used: u32,
     // RoPE
     rope_dim: u32, // number of dimensions to rotate (0 = all)
@@ -52,17 +64,25 @@ pub const ModelConfig = struct {
 
 /// A tensor descriptor paired with the GPU buffer that stores its contents.
 pub const LoadedTensor = struct {
+    /// GGUF tensor descriptor.
     info: gguf.TensorInfo,
+    /// Device-local GPU buffer.
     gpu_buffer: Buffer,
 };
 
 /// Runtime model state backed by a memory-mapped GGUF file and uploaded tensor buffers.
 pub const Model = struct {
+    /// Model dimensions and metadata.
     config: ModelConfig,
+    /// Parsed GGUF header.
     gguf_file: gguf.GGUFFile,
+    /// Tensor descriptors.
     tensors: std.ArrayList(LoadedTensor),
+    /// Memory-mapped GGUF file view.
     mmap_data: ?[]align(std.heap.page_size_min) const u8,
+    /// File handle for mmap.
     mmap_file: ?std.fs.File,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Release tensor buffers, GGUF metadata, and the backing file mapping owned by the model.

@@ -24,8 +24,11 @@ const log = std.log.scoped(.forward);
 
 /// Runtime state for the decode loop.
 pub const DecodeState = struct {
+    /// Current token position.
     position: u32,
+    /// Generated token IDs.
     generated_tokens: std.ArrayList(u32),
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Initialize decode state for a fresh generation request.
@@ -335,13 +338,21 @@ fn findLoadedTensor(model: *const Model, name: []const u8) ?*const LoadedTensor 
 
 /// Inference engine combining model, pipelines, and dispatch.
 pub const InferenceEngine = struct {
+    /// Loaded model.
     model: *Model,
+    /// GPU capabilities.
     gpu_config: GpuConfig,
+    /// DMMV pipelines.
     dmmv: DmmvDispatch,
+    /// Element-wise pipelines.
     elementwise: ElementwiseDispatch,
+    /// Flash attention dispatch.
     attention: AttentionDispatch,
+    /// Command pool.
     cmd_pool: CommandPool,
+    /// Decode command buffer.
     decode_cmd: CommandBuffer,
+    /// Decode compute graph.
     decode_graph: Graph,
     // Intermediate buffers
     hidden_buf: Buffer, // hidden state / residual stream (hidden_dim f32)
@@ -375,9 +386,12 @@ pub const InferenceEngine = struct {
     ssm_hidden_staging: Buffer,
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
+    /// Vulkan instance.
     instance: *const Instance,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
     // Diagnostic summary stored during BOS processing, printed after generation
+    /// GPU buffer for diag summary buf.
     diag_summary_buf: [2048]u8 = .{0} ** 2048,
     diag_summary_len: usize = 0,
 
@@ -390,10 +404,14 @@ pub const InferenceEngine = struct {
     /// @returns An initialized inference engine ready to prefill prompts and run decode steps.
     /// @note This allocates shared descriptor pools, staging buffers, intermediate activations, and dispatch wrappers up front.
     pub fn init(
+        /// Loaded model.
         model: *Model,
+        /// Vulkan instance.
         instance: *const Instance,
+        /// GPU capabilities.
         gpu_config: GpuConfig,
         shader_dir: []const u8,
+        /// Allocator for owned resources.
         allocator: std.mem.Allocator,
     ) !InferenceEngine {
         const config = &model.config;
@@ -1360,7 +1378,9 @@ pub const InferenceEngine = struct {
     fn dispatchDmmv(
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
+        /// GPU buffer for input buf.
         input_buf: Buffer, input_size: vk.c.VkDeviceSize,
+        /// GPU buffer for output buf.
         output_buf: Buffer,
         M: u32, K: u32,
     ) !void {
@@ -1381,9 +1401,12 @@ pub const InferenceEngine = struct {
     fn dispatchDmmvWithOffset(
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
+        /// GPU buffer for input buf.
         input_buf: Buffer, input_size: vk.c.VkDeviceSize,
+        /// GPU buffer for output buf.
         output_buf: Buffer,
         M: u32, K: u32,
+        /// Weight buffer byte offset.
         a_offset: u32,
     ) !void {
         const qt = tensor.info.type_;

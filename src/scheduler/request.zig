@@ -18,26 +18,41 @@ pub const RequestState = enum {
 
 /// Generation parameters from the API request.
 pub const GenerationParams = struct {
+    /// Max tokens to generate.
     max_tokens: u32 = 256,
+    /// Sampling temperature.
     temperature: f32 = 1.0,
+    /// Nucleus sampling threshold.
     top_p: f32 = 1.0,
+    /// Top-k candidates.
     top_k: u32 = 50,
+    /// Enable SSE streaming.
     stream: bool = true,
+    /// Custom stop sequences.
     stop_sequences: []const []const u8 = &.{},
 };
 
 /// A single inference request with its lifecycle state.
 pub const Request = struct {
+    /// Unique identifier.
     id: u64,
+    /// Current lifecycle state.
     state: RequestState,
+    /// Tokenized prompt.
     prompt_tokens: []const u32,
+    /// Generated token IDs.
     generated_tokens: std.ArrayList(u32),
+    /// Generation parameters.
     params: GenerationParams,
     // KV cache slot assignment (set by scheduler)
+    /// KV cache slot, or null.
     slot_id: ?u32,
     // Timing
+    /// Creation timestamp.
     created_at_ns: i128,
+    /// First token timestamp.
     first_token_ns: ?i128,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Create a new request in pending state.

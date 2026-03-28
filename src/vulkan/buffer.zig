@@ -10,10 +10,15 @@ const log = std.log.scoped(.buffer);
 
 /// Vulkan buffer allocation paired with its device memory and optional mapped pointer.
 pub const Buffer = struct {
+    /// Vulkan handle.
     handle: vk.c.VkBuffer,
+    /// Device memory backing the buffer.
     memory: vk.c.VkDeviceMemory,
+    /// Allocated size in bytes.
     size: vk.c.VkDeviceSize,
+    /// Host-mapped pointer, or null for device-local.
     mapped: ?[*]u8,
+    /// Logical device.
     device: vk.c.VkDevice,
 
     /// Create a Vulkan buffer and allocate backing device memory for it.
@@ -24,7 +29,9 @@ pub const Buffer = struct {
     /// @returns A Buffer with memory bound but not automatically mapped.
     /// @note Use `initStaging()` when you need an immediately mapped upload buffer.
     pub fn init(
+        /// Vulkan instance.
         instance: *const Instance,
+        /// Allocated size in bytes.
         size: vk.c.VkDeviceSize,
         usage: vk.c.VkBufferUsageFlags,
         mem_properties: vk.c.VkMemoryPropertyFlags,

@@ -20,25 +20,41 @@ pub const GpuVendor = enum {
 
 /// Auto-detected GPU capabilities and derived tuning parameters.
 pub const GpuConfig = struct {
+    /// GPU vendor and architecture.
     vendor: GpuVendor,
+    /// Device name bytes (null-padded).
     device_name: [256]u8,
+    /// Valid bytes in device_name.
     device_name_len: usize,
+    /// Total VRAM in MB.
     vram_mb: u32,
+    /// Memory bandwidth in GB/s.
     bandwidth_gbps: u32,
+    /// Number of compute units.
     compute_units: u32,
+    /// SIMD wave width (32 or 64).
     wave_size: u32,
+    /// Cooperative matrix support.
     coopmat_support: bool,
 
     // Cache hierarchy
+    /// L0/L1 cache per CU in KB.
     l1_cache_kb: u32,
+    /// L2 cache in MB.
     l2_cache_mb: u32,
+    /// Max workgroup size.
     max_workgroup_size: u32,
 
     // Derived tuning parameters
+    /// DMMV workgroup size.
     dmmv_workgroup_size: u32,
+    /// Rows per DMMV workgroup.
     dmmv_rows_per_workgroup: u32,
+    /// Coop matrix tile height.
     matmul_tile_m: u32,
+    /// Coop matrix tile width.
     matmul_tile_n: u32,
+    /// Flash attention block size.
     flash_attn_block_size: u32,
 
     /// Return the active device name as a trimmed byte slice.

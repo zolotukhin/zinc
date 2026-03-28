@@ -22,8 +22,11 @@ const FlashAttnPush = extern struct {
 
 /// Manages flash attention pipeline and dispatch.
 pub const AttentionDispatch = struct {
+    /// Vulkan compute pipeline, or null if unavailable.
     pipeline: ?Pipeline,
+    /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
+    /// Logical device.
     device: vk.c.VkDevice,
 
     /// Create the flash-attention dispatch wrapper and load its shader pipeline.
@@ -32,8 +35,10 @@ pub const AttentionDispatch = struct {
     /// @param allocator Allocator used for temporary pipeline creation state.
     /// @returns An AttentionDispatch ready to record flash-attention passes.
     pub fn init(
+        /// Vulkan instance.
         instance: *const Instance,
         shader_dir: []const u8,
+        /// Allocator for owned resources.
         allocator: std.mem.Allocator,
     ) !AttentionDispatch {
         const pool_size = vk.c.VkDescriptorPoolSize{
@@ -82,11 +87,17 @@ pub const AttentionDispatch = struct {
     pub fn recordFlashAttn(
         self: *const AttentionDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
+        /// Per-head dimension.
         head_dim: u32,
+        /// Number of query heads.
         n_heads: u32,
+        /// Number of KV heads (GQA).
         n_kv_heads: u32,
+        /// Sequence length.
         seq_len: u32,
+        /// KV cache page size.
         page_size: u32,
     ) !void {
         const pip = if (self.pipeline) |*p| p else return error.ShaderNotLoaded;

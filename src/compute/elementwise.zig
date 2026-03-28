@@ -55,14 +55,23 @@ const RopePush = extern struct {
 
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
+    /// RMS NORM pipeline, or null.
     pipeline_rms_norm: ?Pipeline,
+    /// SWIGLU pipeline, or null.
     pipeline_swiglu: ?Pipeline,
+    /// ROPE pipeline, or null.
     pipeline_rope: ?Pipeline,
+    /// DEINTERLEAVE pipeline, or null.
     pipeline_deinterleave: ?Pipeline,
+    /// SIGMOID MUL pipeline, or null.
     pipeline_sigmoid_mul: ?Pipeline,
+    /// VADD pipeline, or null.
     pipeline_vadd: ?Pipeline,
+    /// SCALE ACC pipeline, or null.
     pipeline_scale_acc: ?Pipeline,
+    /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
+    /// Logical device.
     device: vk.c.VkDevice,
 
     /// Create the fused element-wise dispatch wrapper and load its shaders.
@@ -71,8 +80,10 @@ pub const ElementwiseDispatch = struct {
     /// @param allocator Allocator used for temporary pipeline creation state.
     /// @returns An ElementwiseDispatch ready to record element-wise passes.
     pub fn init(
+        /// Vulkan instance.
         instance: *const Instance,
         shader_dir: []const u8,
+        /// Allocator for owned resources.
         allocator: std.mem.Allocator,
     ) !ElementwiseDispatch {
         const pool_size = vk.c.VkDescriptorPoolSize{
@@ -170,7 +181,9 @@ pub const ElementwiseDispatch = struct {
     pub fn recordRmsNorm(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
+        /// Hidden state width.
         hidden_dim: u32,
         n_tokens: u32,
         eps: f32,
@@ -194,6 +207,7 @@ pub const ElementwiseDispatch = struct {
     pub fn recordSwiglu(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
     ) !void {
@@ -222,10 +236,14 @@ pub const ElementwiseDispatch = struct {
     pub fn recordRope(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         stride: u32,
+        /// RoPE dimensions (0 = all).
         rope_dim: u32,
+        /// Number of query heads.
         n_heads: u32,
+        /// Current token position.
         position: u32,
         freq_base: f32,
     ) !void {
@@ -244,8 +262,11 @@ pub const ElementwiseDispatch = struct {
     pub fn recordDeinterleave(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
+        /// Per-head dimension.
         head_dim: u32,
+        /// Number of query heads.
         n_heads: u32,
     ) !void {
         const pip = if (self.pipeline_deinterleave) |*p| p else return error.ShaderNotLoaded;
@@ -259,6 +280,7 @@ pub const ElementwiseDispatch = struct {
     pub fn recordSigmoidMul(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
     ) !void {
@@ -272,6 +294,7 @@ pub const ElementwiseDispatch = struct {
     pub fn recordVadd(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
     ) !void {
@@ -285,6 +308,7 @@ pub const ElementwiseDispatch = struct {
     pub fn recordScaleAcc(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
         scale: f32,

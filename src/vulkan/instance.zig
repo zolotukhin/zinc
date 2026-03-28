@@ -9,13 +9,21 @@ const log = std.log.scoped(.vulkan);
 
 /// Active Vulkan instance, selected physical device, logical device, and memory metadata.
 pub const Instance = struct {
+    /// Vulkan handle.
     handle: vk.c.VkInstance,
+    /// Selected physical device (GPU).
     physical_device: vk.c.VkPhysicalDevice,
+    /// Logical device.
     device: vk.c.VkDevice,
+    /// Compute queue for dispatch.
     compute_queue: vk.c.VkQueue,
+    /// Compute queue family index.
     compute_queue_family: u32,
+    /// Physical device properties.
     device_props: vk.c.VkPhysicalDeviceProperties,
+    /// Device memory properties.
     mem_props: vk.c.VkPhysicalDeviceMemoryProperties,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Create a Vulkan instance and select a compute-capable device.

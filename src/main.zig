@@ -35,15 +35,24 @@ comptime {
 
 /// Runtime configuration built from CLI flags and default values.
 pub const Config = struct {
+    /// Path to GGUF model file.
     model_path: ?[]const u8 = null,
+    /// HTTP server port.
     port: u16 = 8080,
+    /// Vulkan device index.
     device_index: u32 = 0,
+    /// Max sequence length.
     context_length: u32 = 4096,
+    /// Max concurrent requests.
     max_parallel: u32 = 4,
+    /// CLI prompt text.
     prompt: ?[]const u8 = null,
     kv_quant: u8 = 0, // 0=disabled, 2/3/4=TurboQuant bits
+    /// Graph JSON report path.
     graph_report_path: ?[]const u8 = null,
+    /// Graph DOT file path.
     graph_dot_path: ?[]const u8 = null,
+    /// Print usage and exit.
     show_help: bool = false,
 };
 

@@ -25,13 +25,21 @@ const DmmvPushConstants = extern struct {
 
 /// Manages DMMV pipelines for different quantization types.
 pub const DmmvDispatch = struct {
+    /// Q4K pipeline, or null.
     pipeline_q4k: ?Pipeline,
+    /// Q5K pipeline, or null.
     pipeline_q5k: ?Pipeline,
+    /// Q6K pipeline, or null.
     pipeline_q6k: ?Pipeline,
+    /// Q8 0 pipeline, or null.
     pipeline_q8_0: ?Pipeline,
+    /// F16 pipeline, or null.
     pipeline_f16: ?Pipeline,
+    /// F32 pipeline, or null.
     pipeline_f32: ?Pipeline,
+    /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
+    /// Logical device.
     device: vk.c.VkDevice,
 
     /// Create the DMMV dispatch wrapper and load the supported quantized pipelines.
@@ -41,10 +49,14 @@ pub const DmmvDispatch = struct {
     /// @param allocator Allocator used for temporary pipeline creation state.
     /// @returns A DmmvDispatch ready to record projection work.
     pub fn init(
+        /// Vulkan instance.
         instance: *const Instance,
+        /// GPU capabilities.
         gpu_config: *const GpuConfig,
         shader_dir: []const u8,
+        /// Hidden state width.
         hidden_dim: u32,
+        /// Allocator for owned resources.
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
         _ = gpu_config;
@@ -156,12 +168,17 @@ pub const DmmvDispatch = struct {
     pub fn recordDispatch(
         self: *const DmmvDispatch,
         cmd: *const CommandBuffer,
+        /// Quantization type.
         quant_type: GGMLType,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         M: u32,
         K: u32,
+        /// Weight buffer byte offset.
         a_offset: u32,
+        /// Input buffer byte offset.
         x_offset: u32,
+        /// Output buffer byte offset.
         y_offset: u32,
     ) !void {
         const pip = self.pipelineForType(quant_type) orelse return error.UnsupportedQuantType;

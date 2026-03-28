@@ -11,7 +11,9 @@ const log = std.log.scoped(.command);
 
 /// Command pool for allocating command buffers.
 pub const CommandPool = struct {
+    /// Vulkan handle.
     handle: vk.c.VkCommandPool,
+    /// Logical device.
     device: vk.c.VkDevice,
 
     /// Create a command pool bound to the selected compute queue family.
@@ -48,8 +50,11 @@ pub const CommandPool = struct {
 
 /// A recorded command buffer that can be submitted and replayed.
 pub const CommandBuffer = struct {
+    /// Vulkan handle.
     handle: vk.c.VkCommandBuffer,
+    /// Fence for command buffer completion sync.
     fence: vk.c.VkFence,
+    /// Logical device.
     device: vk.c.VkDevice,
 
     /// Allocate a primary command buffer and fence from a compute command pool.
@@ -132,7 +137,9 @@ pub const CommandBuffer = struct {
     /// @note This helper binds pipeline and descriptors only; required barriers must be recorded separately.
     pub fn dispatch(
         self: *const CommandBuffer,
+        /// Vulkan compute pipeline, or null if unavailable.
         pipeline: *const Pipeline,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         group_count_x: u32,
         group_count_y: u32,
@@ -163,7 +170,9 @@ pub const CommandBuffer = struct {
     /// @note The caller is responsible for matching `push_data` to the shader layout declared by `pipeline`.
     pub fn dispatchWithPush(
         self: *const CommandBuffer,
+        /// Vulkan compute pipeline, or null if unavailable.
         pipeline: *const Pipeline,
+        /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         push_data: []const u8,
         group_count_x: u32,

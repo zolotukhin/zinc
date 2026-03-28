@@ -20,6 +20,7 @@ pub const Tokenizer = struct {
     eos_id: u32,
     /// Token scores (used for SentencePiece-style merge priority)
     scores: ?[]const f32,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     const Merge = struct {

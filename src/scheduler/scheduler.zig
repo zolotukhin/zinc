@@ -17,6 +17,7 @@ pub const Scheduler = struct {
     max_parallel: u32,
     /// Next request ID counter.
     next_id: u64,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Initialize the scheduler with a fixed number of slots.

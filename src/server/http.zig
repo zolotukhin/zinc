@@ -8,7 +8,9 @@ const log = std.log.scoped(.http);
 
 /// Active client connection with request state.
 pub const Connection = struct {
+    /// Enable SSE streaming.
     stream: std.net.Stream,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     pub fn readRequest(self: *Connection) !Request {
@@ -32,14 +34,19 @@ pub const Connection = struct {
 pub const Method = enum { GET, POST, OPTIONS, UNKNOWN };
 
 pub const Request = struct {
+    /// HTTP method.
     method: Method,
+    /// Request path.
     path: []const u8,
+    /// Request body bytes.
     body: []const u8,
 };
 
 /// HTTP server that accepts connections and dispatches to a handler.
 pub const Server = struct {
+    /// TCP listener socket.
     listener: std.net.Server,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Bind to the given port and start listening.

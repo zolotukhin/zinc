@@ -95,33 +95,48 @@ pub const Node = struct {
 
 /// Directed dependency edge between two graph nodes.
 pub const Edge = struct {
+    /// Producer node ID.
     from_id: u32,
+    /// Consumer node ID.
     to_id: u32,
 };
 
 /// Count of nodes that share the same operation type.
 pub const OpCount = struct {
+    /// Operation type.
     op: OpType,
+    /// Number of occurrences.
     count: u32,
 };
 
 /// Critical-path node annotated with its dependency depth.
 pub const CriticalPathNode = struct {
+    /// Unique identifier.
     id: u32,
+    /// Name identifier.
     name: []const u8,
+    /// Operation type.
     op: OpType,
+    /// Depth from nearest root.
     depth: u32,
 };
 
 /// Per-node structural metrics derived from the dependency graph.
 pub const NodeAnalysis = struct {
+    /// Unique identifier.
     id: u32,
+    /// Name identifier.
     name: []const u8,
+    /// Operation type.
     op: OpType,
+    /// Upstream dependencies.
     dependency_count: u32,
     dependent_count: u32,
+    /// Depth from nearest root.
     depth: u32,
+    /// True if no dependencies.
     is_root: bool,
+    /// True if nothing depends on this.
     is_leaf: bool,
     is_on_critical_path: bool,
     workgroups: [3]u32,
@@ -129,7 +144,9 @@ pub const NodeAnalysis = struct {
 
 /// Computed summary of the graph structure used by visualization and debugging tools.
 pub const GraphAnalysis = struct {
+    /// Name identifier.
     name: []const u8,
+    /// Total nodes in graph.
     node_count: u32,
     edge_count: u32,
     root_count: u32,
@@ -141,8 +158,10 @@ pub const GraphAnalysis = struct {
     depth_widths: []u32,
     op_counts: []OpCount,
     critical_path: []CriticalPathNode,
+    /// Graph nodes.
     nodes: []NodeAnalysis,
     edges: []Edge,
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Release the arrays allocated for the analysis result.
@@ -159,8 +178,11 @@ pub const GraphAnalysis = struct {
 
 /// Static compute graph for a transformer layer or full decode pass.
 pub const Graph = struct {
+    /// Graph nodes.
     nodes: std.ArrayList(Node) = .{},
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
+    /// Name identifier.
     name: []const u8,
 
     /// Initialize an empty graph with a human-readable name.

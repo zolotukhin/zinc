@@ -179,9 +179,13 @@ pub const MetadataValue = union(enum) {
 
 /// Tensor descriptor read from the GGUF header.
 pub const TensorInfo = struct {
+    /// Name identifier.
     name: []const u8,
+    /// Number of dimensions (1-4).
     n_dims: u32,
+    /// Tensor dimensions.
     dims: [4]u64,
+    /// GGML quantization type.
     type_: GGMLType,
     offset: u64, // offset from start of tensor data section
 
@@ -212,11 +216,16 @@ pub const TensorInfo = struct {
 
 /// Parsed GGUF header state, metadata map, and tensor table.
 pub const GGUFFile = struct {
+    /// GGUF container version.
     version: GGUFVersion,
+    /// Number of tensor descriptors.
     tensor_count: u64,
+    /// Key-value metadata map.
     metadata: std.StringHashMapUnmanaged(MetadataValue),
+    /// Tensor descriptors.
     tensors: std.ArrayList(TensorInfo),
     tensor_data_offset: u64, // file offset where tensor data begins
+    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
     /// Release metadata keys, metadata payloads, and tensor names owned by the parsed file.
