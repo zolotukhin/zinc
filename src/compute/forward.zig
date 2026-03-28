@@ -1283,7 +1283,7 @@ pub const InferenceEngine = struct {
                 var expert_ids: [16]u32 = undefined;
                 var expert_weights: [16]f32 = undefined;
 
-                if (false) { // GPU softmax_topk disabled — shader crashes RADV
+                if (self.elementwise.pipeline_softmax_topk != null) {
                     // GPU path: softmax+topk on GPU, readback only 64 bytes of results
                     const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
