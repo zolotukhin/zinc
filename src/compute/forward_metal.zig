@@ -37,6 +37,21 @@ const ScaleAccPush = extern struct {
     scale_bits: u32, // float reinterpreted as uint32 (SPIRV-Cross convention)
 };
 
+/// Push constants for fused MoE accumulate dispatch (matches moe_accumulate.metal: buffer(10)).
+/// Replaces 8+1 sequential scale_accumulate dispatches, eliminating 8 barriers per layer.
+const MoeAccPush = extern struct {
+    n: u32,
+    w0: f32,
+    w1: f32,
+    w2: f32,
+    w3: f32,
+    w4: f32,
+    w5: f32,
+    w6: f32,
+    w7: f32,
+    w_sh: f32,
+};
+
 /// Push constants for RMS norm dispatch (matches rms_norm_mul.metal: buffer(0)).
 const RmsNormPush = extern struct {
     n: u32, // elements per group
@@ -127,6 +142,7 @@ pub const InferenceEngine = struct {
     swiglu_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
     rms_norm_pipe: MetalPipeline,
+    moe_acc_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -251,6 +267,7 @@ pub const InferenceEngine = struct {
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
         self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
+        self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -452,6 +469,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
         metal_pipeline.freePipeline(&self.rms_norm_pipe);
+        metal_pipeline.freePipeline(&self.moe_acc_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
@@ -1203,22 +1221,50 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 }
                 cmd.barrier();
 
-                // Phase 4: GPU weighted accumulate — hidden += weight[i] * expert_down[i]
-                // Replaces CPU accumulate + FFN residual (eliminates moe_out_buf intermediary)
-                for (0..cfg.n_experts_used) |ei| {
-                    const w = expert_weights[ei];
-                    const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(w)) };
-                    const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.expert_down_bufs[ei] };
-                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+                // Phase 4: Fused MoE weighted accumulate — hidden += sum(w[i] * expert_down[i]) + w_sh * shared_down
+                // Single dispatch replaces 8+1 sequential scale_accumulate + barriers (eliminates 8 pipeline flushes per layer)
+                if (cfg.n_experts_used == 8) {
+                    const moe_push = MoeAccPush{
+                        .n = hidden_dim,
+                        .w0 = expert_weights[0],
+                        .w1 = expert_weights[1],
+                        .w2 = expert_weights[2],
+                        .w3 = expert_weights[3],
+                        .w4 = expert_weights[4],
+                        .w5 = expert_weights[5],
+                        .w6 = expert_weights[6],
+                        .w7 = expert_weights[7],
+                        .w_sh = if (has_shexp) shexp_gate_weight else 0.0,
+                    };
+                    const moe_bufs = [_]*const MetalBuffer{
+                        &engine.hidden_buf,
+                        &engine.expert_down_bufs[0],
+                        &engine.expert_down_bufs[1],
+                        &engine.expert_down_bufs[2],
+                        &engine.expert_down_bufs[3],
+                        &engine.expert_down_bufs[4],
+                        &engine.expert_down_bufs[5],
+                        &engine.expert_down_bufs[6],
+                        &engine.expert_down_bufs[7],
+                        &engine.down_buf,
+                    };
+                    cmd.dispatchV2(&engine.moe_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &moe_bufs, &moe_push, @sizeOf(MoeAccPush), 10);
                     cmd.barrier();
-                }
-
-                // Shared expert accumulate — uses CPU-computed gate weight (no mid-MoE commit needed)
-                if (has_shexp) {
-                    const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(shexp_gate_weight)) };
-                    const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
-                    cmd.barrier();
+                } else {
+                    // Fallback for non-8-expert models: sequential accumulate
+                    for (0..cfg.n_experts_used) |ei| {
+                        const w = expert_weights[ei];
+                        const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(w)) };
+                        const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.expert_down_bufs[ei] };
+                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+                        cmd.barrier();
+                    }
+                    if (has_shexp) {
+                        const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(shexp_gate_weight)) };
+                        const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
+                        cmd.barrier();
+                    }
                 }
 
                 // Phase 5: Chain next layer's batch1 (norm + projections) — saves 1 commitAndWait per layer
