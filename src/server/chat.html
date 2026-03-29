@@ -83,20 +83,28 @@ async function init(){
 }
 
 function md(s){
-  // Simple markdown: code blocks, inline code, bold, italic
+  // Extract code blocks BEFORE escaping HTML
+  let blocks=[];
+  s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,function(_,lang,code){
+    let i=blocks.length;
+    blocks.push('<pre><code class="lang-'+(lang||'text')+'">'+code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code></pre>');
+    return '\x00BLOCK'+i+'\x00';
+  });
+  // Now escape remaining HTML
   s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  // Code blocks: ```lang\n...\n```
-  s=s.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');
   // Inline code
   s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
   // Bold
   s=s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  // Italic
-  s=s.replace(/\*(.+?)\*/g,'<em>$1</em>');
-  // Paragraphs
+  // Italic (but not inside words or after *)
+  s=s.replace(/(?<!\*)\*([^\*]+?)\*(?!\*)/g,'<em>$1</em>');
+  // Line breaks within paragraphs
   s=s.replace(/\n\n/g,'</p><p>');
+  s=s.replace(/\n/g,'<br>');
   s='<p>'+s+'</p>';
   s=s.replace(/<p><\/p>/g,'');
+  // Restore code blocks
+  for(let i=0;i<blocks.length;i++) s=s.replace('\x00BLOCK'+i+'\x00',blocks[i]);
   return s;
 }
 
