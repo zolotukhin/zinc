@@ -48,7 +48,7 @@
     const pres = document.querySelectorAll('pre');
     for (const pre of pres) {
       if (pre.dataset.codeEnhanced === 'true') continue;
-      if (pre.closest('.code-shell')) continue;
+      if (pre.closest('.code-shell') || pre.closest('[data-terminal-window]')) continue;
 
       const code = pre.querySelector('code');
       const rawText = code?.textContent?.replace(/\s+$/, '') ?? pre.textContent?.replace(/\s+$/, '') ?? '';

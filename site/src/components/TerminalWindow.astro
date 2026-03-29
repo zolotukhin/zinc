@@ -1,0 +1,181 @@
+---
+interface Props {
+  title?: string;
+  code: string;
+}
+
+const { title = 'Terminal', code } = Astro.props;
+---
+
+<div class="terminal-window" data-terminal-window>
+  <div class="terminal-window__header">
+    <div class="terminal-window__left">
+      <span class="terminal-window__dots" aria-hidden="true">
+        <i></i><i></i><i></i>
+      </span>
+      <span class="terminal-window__title">{title}</span>
+    </div>
+    <button type="button" class="terminal-window__copy" data-terminal-copy>
+      Copy
+    </button>
+  </div>
+
+  <pre><code>{code}</code></pre>
+</div>
+
+<script is:inline>
+  if (!window.__zincTerminalCopyInit) {
+    window.__zincTerminalCopyInit = true;
+
+    document.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-terminal-copy]');
+      if (!button) return;
+
+      const root = button.closest('[data-terminal-window]');
+      const code = root?.querySelector('code')?.textContent?.replace(/\s+$/, '') ?? '';
+      if (!code) return;
+
+      try {
+        await navigator.clipboard.writeText(code);
+        const original = button.textContent;
+        button.textContent = 'Copied';
+        button.classList.add('is-copied');
+        window.setTimeout(() => {
+          button.textContent = original ?? 'Copy';
+          button.classList.remove('is-copied');
+        }, 1400);
+      } catch (error) {
+        console.warn('Terminal copy failed', error);
+      }
+    });
+  }
+</script>
+
+<style>
+  .terminal-window {
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(211, 84, 0, 0.06), transparent 90px),
+      var(--color-bg-alt);
+    box-shadow: 0 16px 32px rgba(18, 24, 40, 0.1);
+  }
+
+  .terminal-window__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding: 0.7rem 0.9rem;
+    border-bottom: 1px solid var(--color-border);
+    background: rgba(255, 255, 255, 0.68);
+    backdrop-filter: blur(10px);
+  }
+
+  .terminal-window__left {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    min-width: 0;
+  }
+
+  .terminal-window__dots {
+    display: inline-flex;
+    gap: 0.32rem;
+  }
+
+  .terminal-window__dots i {
+    width: 0.62rem;
+    height: 0.62rem;
+    border-radius: 999px;
+    display: block;
+  }
+
+  .terminal-window__dots i:nth-child(1) { background: #ff6b57; }
+  .terminal-window__dots i:nth-child(2) { background: #ffbd2e; }
+  .terminal-window__dots i:nth-child(3) { background: #28c840; }
+
+  .terminal-window__title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .terminal-window__copy {
+    appearance: none;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    color: var(--color-text-muted);
+    border-radius: 999px;
+    padding: 0.28rem 0.68rem;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  }
+
+  .terminal-window__copy:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .terminal-window__copy.is-copied {
+    border-color: var(--color-accent);
+    background: var(--color-tag-bg);
+    color: var(--color-tag-text);
+  }
+
+  .terminal-window pre {
+    margin: 0;
+    padding: 1rem 1.05rem 1.1rem;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    overflow: visible;
+  }
+
+  .terminal-window pre code {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: none;
+    color: var(--color-text);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .terminal-window {
+      background:
+        linear-gradient(180deg, rgba(232, 114, 42, 0.1), transparent 90px),
+        #151112;
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+    }
+
+    .terminal-window__header {
+      background: rgba(18, 14, 12, 0.84);
+      border-bottom-color: #2b201b;
+    }
+
+    .terminal-window__copy {
+      background: #171111;
+      border-color: #34261f;
+      color: #c9b8a8;
+    }
+
+    .terminal-window__copy:hover,
+    .terminal-window__copy.is-copied {
+      border-color: #e8722a;
+      color: #f0a76f;
+    }
+
+    .terminal-window pre code {
+      color: #dbd7ca;
+    }
+  }
+</style>

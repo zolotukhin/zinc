@@ -1,6 +1,7 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import Breadcrumbs from '../../components/Breadcrumbs.astro';
+import TerminalWindow from '../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
@@ -88,23 +89,24 @@ const jsonLd = {
   </section>
 
   <section class="start-panel">
-    <div class="start-card">
-      <p class="eyebrow">Start Here</p>
-      <h2>Use the docs like an operator, not a spectator</h2>
-      <p>If you want to know whether ZINC actually fits your machine, start with the practical docs first: what hardware it expects, how to build it, and how to run the first prompt. The generated Zig API and internal specs are there once the runtime path is already clear.</p>
-      <div class="start-links">
-        <a href="/zinc/docs/getting-started">Getting Started</a>
-        <a href="/zinc/docs/hardware-requirements">Hardware Requirements</a>
-        <a href="/zinc/docs/running-zinc">Running ZINC</a>
-        <a href="/zinc/docs">All Docs</a>
-      </div>
-    </div>
-
-    <pre data-code-label="First Run"><code class="language-bash">git clone https://github.com/zolotukhin/zinc.git
+    <TerminalWindow
+      title="bash"
+      code={`# First run on Linux with an AMD GPU.
+# Build ZINC, then run one GGUF prompt end to end.
+git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 zig build
 export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"</code></pre>
+./zig-out/bin/zinc \\
+  -m /path/to/model.gguf \\
+  --prompt "The capital of France is"`}
+    />
+    <div class="start-links">
+      <a href="/zinc/docs/getting-started">Getting Started</a>
+      <a href="/zinc/docs/hardware-requirements">Hardware Requirements</a>
+      <a href="/zinc/docs/running-zinc">Running ZINC</a>
+      <a href="/zinc/docs">All Docs</a>
+    </div>
   </section>
 
   <section>
@@ -242,42 +244,15 @@ export RADV_PERFTEST=coop_matrix
 
   .start-panel {
     display: grid;
-    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
     gap: var(--space-md);
     margin-bottom: var(--space-xl);
-  }
-
-  .start-card {
-    padding: var(--space-md);
-    border: 1px solid var(--color-border);
-    border-radius: 14px;
-    background:
-      radial-gradient(circle at top right, rgba(211, 84, 0, 0.1), transparent 35%),
-      var(--color-bg-alt);
-  }
-
-  .eyebrow {
-    margin: 0 0 var(--space-xs);
-    font-size: 0.75rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--color-accent);
-  }
-
-  .start-card h2 {
-    margin-top: 0;
-    margin-bottom: var(--space-sm);
-  }
-
-  .start-card p {
-    color: var(--color-text-muted);
   }
 
   .start-links {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-sm);
+    justify-content: center;
   }
 
   .start-links a {
@@ -303,11 +278,5 @@ export RADV_PERFTEST=coop_matrix
   .arch-diagram img {
     max-width: 100%;
     height: auto;
-  }
-
-  @media (max-width: 850px) {
-    .start-panel {
-      grid-template-columns: 1fr;
-    }
   }
 </style>

@@ -99,17 +99,16 @@ function isActive(slug: string): boolean {
 <style>
   .doc-layout {
     display: grid;
-    grid-template-columns: 180px 1fr;
+    grid-template-columns: 220px minmax(0, 1fr);
     gap: var(--space-xl);
-    max-width: var(--max-width-wide);
+    max-width: 1220px;
     margin: 0 auto;
   }
 
   .wide {
-    /* Break out of the narrow .container */
     width: 100vw;
-    max-width: var(--max-width-wide);
-    margin-left: calc(50% - min(50vw, var(--max-width-wide) / 2));
+    max-width: 1220px;
+    margin-left: calc(50% - min(50vw, 610px));
     padding: 0 var(--space-md);
   }
 
@@ -170,6 +169,18 @@ function isActive(slug: string): boolean {
 
   .doc-content {
     min-width: 0;
+  }
+
+  @media (max-width: 1024px) {
+    .doc-layout {
+      grid-template-columns: 190px minmax(0, 1fr);
+      max-width: 1080px;
+    }
+
+    .wide {
+      max-width: 1080px;
+      margin-left: calc(50% - min(50vw, 540px));
+    }
   }
 
   @media (max-width: 700px) {

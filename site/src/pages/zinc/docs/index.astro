@@ -1,6 +1,7 @@
 ---
 import BaseLayout from '../../../layouts/BaseLayout.astro';
 import Breadcrumbs from '../../../components/Breadcrumbs.astro';
+import TerminalWindow from '../../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../../lib/structured-data';
 import { loadDocs } from '../../../lib/docs-loader';
 import { loadZigApi } from '../../../lib/zig-api-loader';
@@ -82,16 +83,18 @@ const jsonLd = {
     </section>
 
     <section class="quickstart-panel">
-      <div class="quickstart-copy">
-        <p class="kicker">Fastest Path</p>
-        <h2>Get a first prompt through ZINC</h2>
-        <p>Use this first if you want to answer the real question: does ZINC build on this machine, does Vulkan see the GPU, and can one GGUF model run end to end?</p>
-      </div>
-      <pre data-code-label="Quick Start"><code class="language-bash">git clone https://github.com/zolotukhin/zinc.git
+      <TerminalWindow
+        title="bash"
+        code={`# Fastest path: build ZINC, confirm Vulkan sees the GPU,
+# and run one GGUF model end to end.
+git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 zig build
 export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"</code></pre>
+./zig-out/bin/zinc \\
+  -m /path/to/model.gguf \\
+  --prompt "The capital of France is"`}
+      />
     </section>
 
     <section class="group">
@@ -154,19 +157,22 @@ export RADV_PERFTEST=coop_matrix
 </BaseLayout>
 
 <style>
-  .docs-hub { max-width: 960px; margin: 0 auto; }
+  .docs-hub {
+    width: 100vw;
+    max-width: 1220px;
+    margin-left: calc(50% - min(50vw, 610px));
+    padding: 0 var(--space-lg);
+  }
   .hub-header { margin-bottom: var(--space-lg); }
   .hub-header h1 { margin-bottom: var(--space-xs); }
-  .hub-header p, .group-head p, .status-banner p, .quickstart-copy p { margin: 0; color: var(--color-text-muted); }
+  .hub-header p, .group-head p, .status-banner p { margin: 0; color: var(--color-text-muted); }
   .kicker { margin: 0 0 var(--space-xs); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-accent); }
   .status-banner { display: grid; grid-template-columns: 1fr auto; gap: var(--space-md); align-items: start; padding: var(--space-md); margin: var(--space-lg) 0; border: 1px solid var(--color-border); border-radius: 14px; background: radial-gradient(circle at top right, rgba(211, 84, 0, 0.12), transparent 38%), var(--color-bg-alt); }
-  .status-banner h2, .quickstart-copy h2, .group-head h2 { margin: 0 0 var(--space-xs); font-size: 1.2rem; }
+  .status-banner h2, .group-head h2 { margin: 0 0 var(--space-xs); font-size: 1.2rem; }
   .status-link, .card, .section-link { color: var(--color-text); }
   .status-link { display: inline-flex; align-items: center; justify-content: center; align-self: center; padding: 0.55rem 0.9rem; border: 1px solid var(--color-border); border-radius: 999px; white-space: nowrap; }
   .status-link:hover, .card:hover, .section-link:hover { text-decoration: none; border-color: var(--color-accent); }
-  .quickstart-panel { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: var(--space-md); margin-bottom: var(--space-xl); }
-  .quickstart-copy { padding: var(--space-md); border: 1px solid var(--color-border); border-radius: 14px; background: var(--color-bg); }
-  .quickstart-panel pre { height: 100%; }
+  .quickstart-panel { margin-bottom: var(--space-xl); }
   .group + .group { margin-top: var(--space-xl); }
   .group-head { margin-bottom: var(--space-md); }
   .grid { display: grid; gap: var(--space-sm); }
@@ -188,6 +194,13 @@ export RADV_PERFTEST=coop_matrix
   .section-link:hover { background: var(--color-bg-alt); }
   .section-name { font-weight: 500; }
   .section-meta { font-size: 0.75rem; color: var(--color-text-muted); white-space: nowrap; margin-left: var(--space-sm); }
-  @media (max-width: 900px) { .quickstart-panel, .start-grid, .deep-grid, .section-list { grid-template-columns: 1fr; } }
+  @media (max-width: 1100px) {
+    .docs-hub {
+      max-width: 1080px;
+      margin-left: calc(50% - min(50vw, 540px));
+      padding: 0 var(--space-md);
+    }
+  }
+  @media (max-width: 900px) { .start-grid, .deep-grid, .section-list { grid-template-columns: 1fr; } }
   @media (max-width: 700px) { .status-banner { grid-template-columns: 1fr; } }
 </style>
