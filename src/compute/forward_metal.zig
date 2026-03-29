@@ -762,7 +762,9 @@ pub const InferenceEngine = struct {
 
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
     /// Q4_K: native Metal kernel — 32 threads (1 simdgroup) per row, 8 rows per threadgroup (256 threads).
-    /// Q4_K LM head: specialized large-M kernel — 16 rows per threadgroup (512 threads).
+    /// Q4_K wide: specialized large-M kernel — 16 rows per threadgroup (512 threads).
+    /// Reusing the wider shape outside the LM head improves staged-vector reuse on
+    /// the large decode-side Q4_K projections that still dominate token time.
     /// Q5_K/Q6_K/F32: SPIRV-Cross — each thread handles 1 row (64 rows per workgroup, 64 threads).
     /// Q8_0/F16: SPIRV-Cross — each workgroup handles 2 rows (64 threads cooperate via simd_sum).
     fn dmmvPipelineForType(
@@ -771,7 +773,8 @@ pub const InferenceEngine = struct {
         M: u32,
     ) ?struct { pipe: *const MetalPipeline, push_idx: u32, rows_per_wg: u32, block_size: u32 } {
         return switch (tensor.info.type_) {
-            .q4_k => if (tensor == self.lm_head and M >= 65536 and self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512)
+            .q4_k => if (self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
+                ((tensor == self.lm_head and M >= 65536) or M >= 1024))
                 .{ .pipe = &self.dmmv_q4k_lmhead_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 }
             else
                 .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 },
