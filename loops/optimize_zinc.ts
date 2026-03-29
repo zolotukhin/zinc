@@ -82,6 +82,30 @@ const BLOCKED_GIT_OPS = [
   "Bash(git clean:*)",
 ];
 
+// Prevent the agent from editing files outside the engine codebase
+const BLOCKED_FILE_OPS = [
+  "Edit(site/*)",
+  "Write(site/*)",
+  "Edit(loops/*)",
+  "Write(loops/*)",
+  "Edit(docs/*)",
+  "Write(docs/*)",
+  "Edit(specs/*)",
+  "Write(specs/*)",
+  "Edit(writing/*)",
+  "Write(writing/*)",
+  "Edit(.github/*)",
+  "Write(.github/*)",
+  "Edit(.env)",
+  "Write(.env)",
+  "Edit(AGENTS.md)",
+  "Write(AGENTS.md)",
+  "Edit(CLAUDE.md)",
+  "Write(CLAUDE.md)",
+  "Edit(README.md)",
+  "Write(README.md)",
+];
+
 type AgentKind = "claude" | "codex";
 
 // ── Phase detection ──────────────────────────────────────────────────
@@ -597,7 +621,7 @@ function buildClaudeArgs(prompt: string): string[] {
     "--verbose",
     "--output-format", "stream-json",
     "--include-partial-messages",
-    `--disallowed-tools=${BLOCKED_GIT_OPS.join(",")}`,
+    `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
     "--permission-mode", "bypassPermissions",
     "--effort", "high",
     prompt,
