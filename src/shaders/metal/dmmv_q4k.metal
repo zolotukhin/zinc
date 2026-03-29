@@ -29,7 +29,7 @@ inline float2 get_scale_min_k4(uint j, device const uchar* sc) {
 // dot products — no threadgroup reduction barrier needed.
 //
 // Threadgroup: 256 threads = 8 simdgroups = 8 rows per threadgroup.
-// Shared memory: input vector (K floats, max 4096 = 16 KB).
+// No threadgroup memory — input vector read from device memory (SLC-cached).
 //
 // Q4_K block layout (144 bytes, 256 elements):
 //   [0..1]   d    (float16)  — super-block scale
@@ -51,13 +51,10 @@ kernel void main0(
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    threadgroup float sx[4096];
-
-    // Cooperatively load input vector into threadgroup memory
-    for (uint i = local_id; i < p.K; i += TG_SIZE) {
-        sx[i] = X[p.x_offset / 4 + i];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // On Apple Silicon, input vector (≤16KB) stays in SLC/L1 cache across all
+    // simdgroups — reading from device memory avoids the threadgroup_barrier
+    // and frees 16KB of threadgroup memory, improving occupancy.
+    device const float* input = X + (p.x_offset / 4);
 
     uint row = tg_id * ROWS_PER_TG + sg_idx;
     if (row >= p.M) return;
@@ -102,16 +99,16 @@ kernel void main0(
         uint col_hi = col_lo + 32;
 
         // Low nibbles → columns col_lo + {0,1,2,3}
-        acc += (d_sc_lo * float(qb0 & 0xF) - d_m_lo) * sx[col_lo];
-        acc += (d_sc_lo * float(qb1 & 0xF) - d_m_lo) * sx[col_lo + 1];
-        acc += (d_sc_lo * float(qb2 & 0xF) - d_m_lo) * sx[col_lo + 2];
-        acc += (d_sc_lo * float(qb3 & 0xF) - d_m_lo) * sx[col_lo + 3];
+        acc += (d_sc_lo * float(qb0 & 0xF) - d_m_lo) * input[col_lo];
+        acc += (d_sc_lo * float(qb1 & 0xF) - d_m_lo) * input[col_lo + 1];
+        acc += (d_sc_lo * float(qb2 & 0xF) - d_m_lo) * input[col_lo + 2];
+        acc += (d_sc_lo * float(qb3 & 0xF) - d_m_lo) * input[col_lo + 3];
 
         // High nibbles → columns col_hi + {0,1,2,3}
-        acc += (d_sc_hi * float(qb0 >> 4) - d_m_hi) * sx[col_hi];
-        acc += (d_sc_hi * float(qb1 >> 4) - d_m_hi) * sx[col_hi + 1];
-        acc += (d_sc_hi * float(qb2 >> 4) - d_m_hi) * sx[col_hi + 2];
-        acc += (d_sc_hi * float(qb3 >> 4) - d_m_hi) * sx[col_hi + 3];
+        acc += (d_sc_hi * float(qb0 >> 4) - d_m_hi) * input[col_hi];
+        acc += (d_sc_hi * float(qb1 >> 4) - d_m_hi) * input[col_hi + 1];
+        acc += (d_sc_hi * float(qb2 >> 4) - d_m_hi) * input[col_hi + 2];
+        acc += (d_sc_hi * float(qb3 >> 4) - d_m_hi) * input[col_hi + 3];
     }
 
     // Reduce across simdgroup and write result
