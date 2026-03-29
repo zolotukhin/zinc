@@ -231,6 +231,7 @@ pub const InferenceEngine = struct {
 
     // DMMV compute pipelines (one per quant type)
     dmmv_q4k_pipe: MetalPipeline,
+    dmmv_q4k_k2048_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
@@ -238,6 +239,7 @@ pub const InferenceEngine = struct {
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
+    dmmv_q4k_moe_k2048_pipe: MetalPipeline,
 
     // Elementwise compute pipelines (for batched GPU dispatch)
     deinterleave_pipe: MetalPipeline,
@@ -375,6 +377,7 @@ pub const InferenceEngine = struct {
 
         // Load DMMV compute pipelines for all quant types
         self.dmmv_q4k_pipe = try loadShaderPipeline(ctx, "dmmv_q4k");
+        self.dmmv_q4k_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
@@ -382,6 +385,7 @@ pub const InferenceEngine = struct {
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
+        self.dmmv_q4k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048");
 
         // Elementwise pipelines for batched GPU dispatch
         self.deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
@@ -567,17 +571,28 @@ pub const InferenceEngine = struct {
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
         });
         log.info(
-            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | lmhead tw={d} max={d} stgmem={d} | dmmv_q4k_moe tw={d} max={d} stgmem={d}",
+            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_pipe.thread_execution_width,
                 self.dmmv_q4k_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_pipe.static_threadgroup_memory_length,
+                self.dmmv_q4k_k2048_pipe.thread_execution_width,
+                self.dmmv_q4k_k2048_pipe.max_threads_per_threadgroup,
+                self.dmmv_q4k_k2048_pipe.static_threadgroup_memory_length,
                 self.dmmv_q4k_lmhead_pipe.thread_execution_width,
                 self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_lmhead_pipe.static_threadgroup_memory_length,
+            },
+        );
+        log.info(
+            "Metal pipeline caps: dmmv_q4k_moe tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048 tw={d} max={d} stgmem={d}",
+            .{
                 self.dmmv_q4k_moe_pipe.thread_execution_width,
                 self.dmmv_q4k_moe_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_moe_pipe.static_threadgroup_memory_length,
+                self.dmmv_q4k_moe_k2048_pipe.thread_execution_width,
+                self.dmmv_q4k_moe_k2048_pipe.max_threads_per_threadgroup,
+                self.dmmv_q4k_moe_k2048_pipe.static_threadgroup_memory_length,
             },
         );
         log.info(
@@ -638,6 +653,7 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.kv_v_cache);
 
         metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
@@ -645,6 +661,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_pipe);
         metal_pipeline.freePipeline(&self.deinterleave_pipe);
         metal_pipeline.freePipeline(&self.rope_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
@@ -771,13 +788,22 @@ pub const InferenceEngine = struct {
         self: *InferenceEngine,
         tensor: *const metal_loader.LoadedTensor,
         M: u32,
+        K: u32,
     ) ?struct { pipe: *const MetalPipeline, push_idx: u32, rows_per_wg: u32, block_size: u32 } {
         return switch (tensor.info.type_) {
-            .q4_k => if (self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
-                ((tensor == self.lm_head and M >= 65536) or M >= 1024))
-                .{ .pipe = &self.dmmv_q4k_lmhead_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 }
-            else
-                .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 },
+            .q4_k => blk: {
+                const k2048_or_less = K <= 2048;
+                if (k2048_or_less and
+                    self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
+                    ((tensor == self.lm_head and M >= 65536) or M >= 1024))
+                {
+                    break :blk .{ .pipe = &self.dmmv_q4k_lmhead_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
+                }
+                if (k2048_or_less) {
+                    break :blk .{ .pipe = &self.dmmv_q4k_k2048_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 };
+                }
+                break :blk .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 };
+            },
             .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
@@ -848,7 +874,7 @@ fn dispatchDmmvOnCmd(
     K: u32,
     extra_byte_offset: u32,
 ) void {
-    const pip = engine.dmmvPipelineForType(tensor, M) orelse {
+    const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
         return;
     };
@@ -911,7 +937,8 @@ fn dispatchDmmvMoeQ4kOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
     const wgs = (M + 7) / 8;
-    cmd.dispatchV2(&engine.dmmv_q4k_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    const pipe = if (K <= 2048) &engine.dmmv_q4k_moe_k2048_pipe else &engine.dmmv_q4k_moe_pipe;
+    cmd.dispatchV2(pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
 }
 
 /// Preload norm weights from mmap into an f32 Metal buffer (done once at init).
@@ -1857,6 +1884,12 @@ test "batched MoE Metal shaders compile" {
     var dmmv_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
     defer metal_pipeline.freePipeline(&dmmv_pipe);
 
+    var dmmv_pipe_k2048 = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
+    defer metal_pipeline.freePipeline(&dmmv_pipe_k2048);
+
+    var dmmv_moe_pipe_k2048 = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048");
+    defer metal_pipeline.freePipeline(&dmmv_moe_pipe_k2048);
+
     var swiglu_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
     defer metal_pipeline.freePipeline(&swiglu_pipe);
 
@@ -1869,6 +1902,8 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(deinterleave_pipe.handle != null);
     try std.testing.expect(rope_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
+    try std.testing.expect(dmmv_pipe_k2048.handle != null);
+    try std.testing.expect(dmmv_moe_pipe_k2048.handle != null);
     try std.testing.expect(swiglu_pipe.handle != null);
     try std.testing.expect(acc_pipe.handle != null);
     try std.testing.expect(lmhead_pipe.handle != null);

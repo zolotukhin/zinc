@@ -1,7 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Push constants for DMMV dispatch (matches Zig DmmvPush layout).
 struct DmmvPush {
     uint M;
     uint K;
@@ -20,11 +19,10 @@ inline float2 get_scale_min_k4(uint j, device const uchar* sc) {
     );
 }
 
-// Large-M specialization for K <= 2048: more rows per threadgroup than the
-// generic kernel so the staged input vector is reused across a wider row slice.
-// The wider row slice is now restricted to K <= 2048, which keeps threadgroup
-// memory at 8 KiB and avoids the occupancy regression seen on K=4096 paths.
-#define TG_SIZE 512
+// Decode-specialized Q4_K path for K <= 2048.
+// This keeps the staged input vector at 8 KiB instead of the generic kernel's
+// 16 KiB fallback for K up to 4096, improving workgroup residency on Apple GPU.
+#define TG_SIZE 256
 #define ROWS_PER_TG (TG_SIZE / 32)
 #define MAX_K_VEC4 512
 

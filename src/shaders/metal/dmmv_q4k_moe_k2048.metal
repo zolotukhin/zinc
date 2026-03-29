@@ -1,11 +1,12 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Push constants for DMMV dispatch (matches Zig DmmvPush layout).
-struct DmmvPush {
+struct MoeDmmvPush {
     uint M;
     uint K;
     uint a_offset;
+    uint expert_stride;
+    uint x_expert_stride;
     uint x_offset;
     uint y_offset;
 };
@@ -15,31 +16,35 @@ inline float2 get_scale_min_k4(uint j, device const uchar* sc) {
         return float2(float(sc[j] & 63), float(sc[j + 4] & 63));
     }
     return float2(
-        float((sc[j + 4] & 0xF) | ((sc[j - 4] >> 6) << 4)),
-        float(((sc[j + 4] >> 4) & 0xF) | ((sc[j] >> 6) << 4))
+        float((sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4)),
+        float(((sc[j + 4] >> 4) & 0x0F) | ((sc[j] >> 6) << 4))
     );
 }
 
-// Large-M specialization for K <= 2048: more rows per threadgroup than the
-// generic kernel so the staged input vector is reused across a wider row slice.
-// The wider row slice is now restricted to K <= 2048, which keeps threadgroup
-// memory at 8 KiB and avoids the occupancy regression seen on K=4096 paths.
-#define TG_SIZE 512
+// Batched MoE specialization for K <= 2048. The hot MoE gate/up/down decode
+// paths on Qwen3.5 all fit here, so the staged expert input vector only
+// reserves 8 KiB of threadgroup memory instead of 16 KiB.
+#define TG_SIZE 256
 #define ROWS_PER_TG (TG_SIZE / 32)
 #define MAX_K_VEC4 512
 
 kernel void main0(
     device const uchar* W [[buffer(0)]],
-    constant DmmvPush& p [[buffer(1)]],
+    constant MoeDmmvPush& p [[buffer(1)]],
     device const float* X [[buffer(2)]],
     device float* Y [[buffer(3)]],
-    uint tg_id [[threadgroup_position_in_grid]],
-    uint local_id [[thread_position_in_threadgroup]],
-    uint sg_idx [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]
+    device const uint* expert_ids [[buffer(4)]],
+    uint3 tg_pos [[threadgroup_position_in_grid]],
+    uint3 local_pos [[thread_position_in_threadgroup]]
 ) {
-    device const float* input = X + (p.x_offset / 4);
+    const uint expert_slot = tg_pos.y;
+    const uint expert_id = expert_ids[expert_slot];
+    device const float* input = X + (p.x_offset / 4) + expert_slot * p.x_expert_stride;
     threadgroup float4 x_cache4[MAX_K_VEC4];
+
+    const uint local_id = local_pos.x;
+    const uint sg_idx = local_id / 32;
+    const uint lane = local_id % 32;
 
     const uint k_vec4 = p.K >> 2;
     for (uint i = local_id; i < k_vec4; i += TG_SIZE) {
@@ -47,11 +52,12 @@ kernel void main0(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    uint row = tg_id * ROWS_PER_TG + sg_idx;
+    uint row = tg_pos.x * ROWS_PER_TG + sg_idx;
     if (row >= p.M) return;
 
     uint bpr = p.K / 256;
-    device const uchar* row_ptr = W + p.a_offset + ulong(row) * ulong(bpr) * 144;
+    ulong expert_base = ulong(p.a_offset) + ulong(expert_id) * ulong(p.expert_stride);
+    device const uchar* row_ptr = W + expert_base + ulong(row) * ulong(bpr) * 144;
 
     float acc = 0.0f;
 
@@ -106,6 +112,6 @@ kernel void main0(
 
     float sum = simd_sum(acc);
     if (lane == 0) {
-        Y[p.y_offset / 4 + row] = sum;
+        Y[p.y_offset / 4 + expert_slot * p.M + row] = sum;
     }
 }
