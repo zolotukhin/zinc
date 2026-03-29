@@ -149,6 +149,9 @@ pub const InferenceEngine = struct {
     ssm_beta_scratch: ?[]f32,
     ssm_output_scratch: ?[]f32,
 
+    // Preloaded shared expert gate weights (per-layer, f32 — eliminates mid-MoE commitAndWait)
+    shexp_gate_weights: ?[][]f32,
+
     // Cached per-layer tensor pointers (init-time, eliminates per-token O(733) scans)
     layer_tensors: []LayerTensors,
     lm_head: *const metal_loader.LoadedTensor,
@@ -343,6 +346,25 @@ pub const InferenceEngine = struct {
             self.ssm_output_scratch = null;
         }
 
+        // Preload shared expert gate weights (1 × hidden_dim per layer, avoids mid-MoE commitAndWait)
+        if (cfg.n_experts > 0) {
+            self.shexp_gate_weights = try allocator.alloc([]f32, cfg.n_layers);
+            for (0..cfg.n_layers) |i| {
+                const layer_i: u32 = @intCast(i);
+                if (findLayerTensor(model, layer_i, "ffn_gate_inp_shexp.weight")) |t| {
+                    const shexp_mmap = model.mmap_data orelse return error.NoMmapData;
+                    self.shexp_gate_weights.?[i] = try allocator.alloc(f32, cfg.hidden_dim);
+                    const off: usize = @intCast(model.gguf_file.tensor_data_offset + t.info.offset);
+                    readMmapFloats(shexp_mmap, off, t.info.type_, self.shexp_gate_weights.?[i]);
+                } else {
+                    self.shexp_gate_weights.?[i] = try allocator.alloc(f32, 1);
+                    self.shexp_gate_weights.?[i][0] = 0;
+                }
+            }
+        } else {
+            self.shexp_gate_weights = null;
+        }
+
         // Cache per-layer tensor pointers (eliminates 652 O(733) linear scans per token)
         self.layer_tensors = try allocator.alloc(LayerTensors, cfg.n_layers);
         for (0..cfg.n_layers) |i| {
@@ -469,6 +491,10 @@ pub const InferenceEngine = struct {
         if (self.ssm_gate_scratch) |s| self.allocator.free(s);
         if (self.ssm_beta_scratch) |s| self.allocator.free(s);
         if (self.ssm_output_scratch) |s| self.allocator.free(s);
+        if (self.shexp_gate_weights) |arr| {
+            for (arr) |s| self.allocator.free(s);
+            self.allocator.free(arr);
+        }
     }
 
     /// Sample the next token greedily (argmax over logits).
@@ -1108,6 +1134,21 @@ fn decodeStep(engine: *InferenceEngine) !void {
             var expert_weights: [16]f32 = undefined;
             topKSoftmax(router_ptr[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
 
+            // CPU shared expert gate: dot(gate_weights, norm_buf) → sigmoid
+            // Eliminates mid-MoE commitAndWait (40 per token) — 2048-dim dot product on CPU (<1µs)
+            var shexp_gate_weight: f32 = 1.0;
+            if (lt.ffn_gate_inp_shexp != null) {
+                if (engine.shexp_gate_weights) |sgw| {
+                    const gate_w = sgw[layer_idx];
+                    if (gate_w.len >= hidden_dim) {
+                        const norm_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+                        var dot: f32 = 0;
+                        for (0..hidden_dim) |i| dot += gate_w[i] * norm_ptr[i];
+                        shexp_gate_weight = 1.0 / (1.0 + @exp(-dot));
+                    }
+                }
+            }
+
             // Expert dispatch — GPU: gate+up → SwiGLU → down → accumulate → [next batch1]
             const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
             const up_exps = lt.ffn_up_exps orelse return error.MissingTensor;
@@ -1122,7 +1163,6 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 const gate_shexp = lt.ffn_gate_shexp;
                 const up_shexp = lt.ffn_up_shexp;
                 const down_shexp = lt.ffn_down_shexp;
-                const shexp_gate_t = lt.ffn_gate_inp_shexp;
                 const has_shexp = gate_shexp != null and up_shexp != null and down_shexp != null;
 
                 // Phase 1: All expert gate+up DMMVs in parallel (+ shared expert)
@@ -1136,9 +1176,6 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 if (has_shexp) {
                     dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
                     dispatchDmmvOnCmd(engine, &cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
-                    if (shexp_gate_t) |sg| {
-                        dispatchDmmvOnCmd(engine, &cmd, sg, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
-                    }
                 }
                 cmd.barrier();
 
@@ -1176,24 +1213,12 @@ fn decodeStep(engine: *InferenceEngine) !void {
                     cmd.barrier();
                 }
 
-                // Shared expert accumulate (if present)
+                // Shared expert accumulate — uses CPU-computed gate weight (no mid-MoE commit needed)
                 if (has_shexp) {
-                    if (shexp_gate_t != null) {
-                        // Sigmoid weight from GPU-computed value — must commit to read
-                        cmd.commitAndWait();
-                        const sg_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
-                        const shexp_w = 1.0 / (1.0 + @exp(-sg_ptr[0]));
-                        cmd = try metal_command.beginCommand(engine.device.ctx);
-                        const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(shexp_w)) };
-                        const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
-                        cmd.barrier();
-                    } else {
-                        const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                        const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
-                        cmd.barrier();
-                    }
+                    const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(shexp_gate_weight)) };
+                    const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
+                    cmd.barrier();
                 }
 
                 // Phase 5: Chain next layer's batch1 (norm + projections) — saves 1 commitAndWait per layer
