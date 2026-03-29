@@ -35,6 +35,11 @@ void mtl_dispatch(MetalCmd* cmd, MetalPipe* pipe,
                   const uint32_t grid[3], const uint32_t block[3],
                   MetalBuf** bufs, uint32_t n_bufs,
                   const void* push_data, size_t push_size);
+void mtl_dispatch_v2(MetalCmd* cmd, MetalPipe* pipe,
+                     const uint32_t grid[3], const uint32_t block[3],
+                     MetalBuf** bufs, uint32_t n_bufs,
+                     const void* push_data, size_t push_size,
+                     uint32_t push_idx);
 void mtl_barrier(MetalCmd* cmd);
 void mtl_commit_and_wait(MetalCmd* cmd);
 void mtl_commit_async(MetalCmd* cmd);

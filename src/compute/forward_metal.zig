@@ -26,32 +26,7 @@ const DmmvPush = extern struct {
     y_offset: u32,
 };
 
-/// Push constants for RMS norm.
-const RmsNormPush = extern struct {
-    hidden_dim: u32,
-    n_tokens: u32,
-    eps: f32,
-};
-
-/// Push constants for elementwise ops.
-const ElementwisePush = extern struct {
-    n_elements: u32,
-};
-
-/// Push constants for RoPE.
-const RopePush = extern struct {
-    stride: u32,
-    rope_dim: u32,
-    n_heads: u32,
-    position: u32,
-    freq_base: f32,
-};
-
-/// Push constants for scale_accumulate.
-const ScaleAccPush = extern struct {
-    n_elements: u32,
-    scale: f32,
-};
+const GGMLType = gguf.GGMLType;
 
 /// Metal inference engine — owns GPU buffers, pipelines, and KV cache.
 pub const InferenceEngine = struct {
@@ -81,16 +56,17 @@ pub const InferenceEngine = struct {
     kv_k_cache: []MetalBuffer,
     kv_v_cache: []MetalBuffer,
 
-    // Compute pipelines
+    // DMMV compute pipelines (one per quant type)
     dmmv_q4k_pipe: MetalPipeline,
-    rms_norm_pipe: MetalPipeline,
-    swiglu_pipe: MetalPipeline,
-    rope_pipe: MetalPipeline,
-    flash_attn_pipe: MetalPipeline,
-    vadd_pipe: MetalPipeline,
-    scale_acc_pipe: MetalPipeline,
-    sigmoid_mul_pipe: MetalPipeline,
-    deinterleave_pipe: MetalPipeline,
+    dmmv_q5k_pipe: MetalPipeline,
+    dmmv_q6k_pipe: MetalPipeline,
+    dmmv_q8_0_pipe: MetalPipeline,
+    dmmv_f16_pipe: MetalPipeline,
+    dmmv_f32_pipe: MetalPipeline,
+
+    // SSM state (CPU-side, allocated only if model has SSM layers)
+    ssm_conv_states: ?[][]f32,
+    ssm_states: ?[][]f32,
 
     // Decode state
     position: u32,
@@ -103,13 +79,26 @@ pub const InferenceEngine = struct {
         const cfg = model.config;
         const ctx = device.ctx;
 
-        // Buffer sizes
-        const hidden_size = cfg.hidden_dim * @sizeOf(f32);
-        const head_total = cfg.n_heads * cfg.head_dim * @sizeOf(f32);
-        const kv_total = cfg.n_kv_heads * cfg.head_dim * @sizeOf(f32);
-        const intermediate_size = cfg.intermediate_dim * @sizeOf(f32);
-        const vocab_size = cfg.vocab_size * @sizeOf(f32);
-        const kv_cache_size: usize = @as(usize, 4096) * cfg.n_kv_heads * cfg.head_dim * @sizeOf(f32);
+        // Compute dimension-dependent sizes
+        const q_dim: u32 = cfg.n_heads * cfg.head_dim;
+        const kv_dim: u32 = cfg.n_kv_heads * cfg.head_dim;
+        const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else cfg.hidden_dim * 4;
+        const shexp_inter_dim: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
+        const d_inner: u32 = cfg.ssm_d_inner;
+        const conv_channels: u32 = if (d_inner > 0) d_inner + 2 * cfg.ssm_n_group * cfg.ssm_d_state else 0;
+
+        // Buffer sizes (max across all uses)
+        const hidden_size: usize = @as(usize, cfg.hidden_dim) * @sizeOf(f32);
+        const q_gate_size: usize = @as(usize, q_dim) * 2 * @sizeOf(f32);
+        const attn_out_size: usize = @max(q_gate_size, @as(usize, conv_channels) * @sizeOf(f32));
+        const head_total: usize = @as(usize, q_dim) * @sizeOf(f32);
+        const kv_total: usize = @as(usize, kv_dim) * @sizeOf(f32);
+        const gate_size: usize = @max(@max(head_total, @as(usize, inter_dim) * @sizeOf(f32)), @as(usize, d_inner) * @sizeOf(f32));
+        const up_size: usize = @max(@as(usize, inter_dim) * @sizeOf(f32), @as(usize, shexp_inter_dim) * @sizeOf(f32));
+        const swiglu_size: usize = @max(up_size, @as(usize, conv_channels) * @sizeOf(f32));
+        const vocab_size: usize = @as(usize, cfg.vocab_size) * @sizeOf(f32);
+        const kv_cache_size: usize = @as(usize, 4096) * kv_dim * @sizeOf(f32);
+        const router_size: usize = @max(@as(usize, cfg.n_experts), @as(usize, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1)) * @sizeOf(f32);
 
         // Allocate intermediate buffers
         var self: InferenceEngine = undefined;
@@ -125,13 +114,13 @@ pub const InferenceEngine = struct {
         self.q_buf = try metal_buffer.createBuffer(ctx, head_total);
         self.k_buf = try metal_buffer.createBuffer(ctx, kv_total);
         self.v_buf = try metal_buffer.createBuffer(ctx, kv_total);
-        self.attn_out_buf = try metal_buffer.createBuffer(ctx, head_total);
-        self.gate_buf = try metal_buffer.createBuffer(ctx, intermediate_size);
-        self.up_buf = try metal_buffer.createBuffer(ctx, intermediate_size);
-        self.swiglu_buf = try metal_buffer.createBuffer(ctx, intermediate_size);
+        self.attn_out_buf = try metal_buffer.createBuffer(ctx, @max(attn_out_size, 4));
+        self.gate_buf = try metal_buffer.createBuffer(ctx, @max(gate_size, 4));
+        self.up_buf = try metal_buffer.createBuffer(ctx, @max(up_size, 4));
+        self.swiglu_buf = try metal_buffer.createBuffer(ctx, @max(swiglu_size, 4));
         self.down_buf = try metal_buffer.createBuffer(ctx, hidden_size);
         self.moe_out_buf = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.router_logits_buf = try metal_buffer.createBuffer(ctx, @max(cfg.n_experts, 1) * @sizeOf(f32));
+        self.router_logits_buf = try metal_buffer.createBuffer(ctx, @max(router_size, 4));
         self.logits_buf = try metal_buffer.createBuffer(ctx, vocab_size);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
 
@@ -143,16 +132,30 @@ pub const InferenceEngine = struct {
             self.kv_v_cache[i] = try metal_buffer.createBuffer(ctx, kv_cache_size);
         }
 
-        // Load compute pipelines from cross-compiled MSL
+        // Load DMMV compute pipelines for all quant types
         self.dmmv_q4k_pipe = try loadShaderPipeline(ctx, "dmmv_q4k");
-        self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
-        self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
-        self.rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
-        self.flash_attn_pipe = try loadShaderPipeline(ctx, "flash_attn");
-        self.vadd_pipe = try loadShaderPipeline(ctx, "vadd");
-        self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
-        self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
-        self.deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
+        self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
+        self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
+        self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+        self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
+        self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
+
+        // SSM state allocation
+        if (d_inner > 0 and cfg.ssm_d_conv > 0) {
+            const d_conv_1 = cfg.ssm_d_conv - 1;
+            const head_v_dim = d_inner / @max(cfg.ssm_dt_rank, 1);
+            self.ssm_conv_states = try allocator.alloc([]f32, cfg.n_layers);
+            self.ssm_states = try allocator.alloc([]f32, cfg.n_layers);
+            for (0..cfg.n_layers) |i| {
+                self.ssm_conv_states.?[i] = try allocator.alloc(f32, @as(usize, d_conv_1) * conv_channels);
+                @memset(self.ssm_conv_states.?[i], 0);
+                self.ssm_states.?[i] = try allocator.alloc(f32, @as(usize, cfg.ssm_dt_rank) * head_v_dim * head_v_dim);
+                @memset(self.ssm_states.?[i], 0);
+            }
+        } else {
+            self.ssm_conv_states = null;
+            self.ssm_states = null;
+        }
 
         log.info("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
@@ -184,6 +187,22 @@ pub const InferenceEngine = struct {
         }
         self.allocator.free(self.kv_k_cache);
         self.allocator.free(self.kv_v_cache);
+
+        metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
+
+        if (self.ssm_conv_states) |cs| {
+            for (cs) |s| self.allocator.free(s);
+            self.allocator.free(cs);
+        }
+        if (self.ssm_states) |ss| {
+            for (ss) |s| self.allocator.free(s);
+            self.allocator.free(ss);
+        }
     }
 
     /// Sample the next token greedily (argmax over logits).
@@ -200,39 +219,280 @@ pub const InferenceEngine = struct {
         }
         return max_idx;
     }
+
+    /// Get the DMMV pipeline and push constant buffer index for a quant type.
+    fn dmmvPipelineForType(self: *InferenceEngine, qt: GGMLType) ?struct { pipe: *const MetalPipeline, push_idx: u32 } {
+        return switch (qt) {
+            .q4_k => .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1 },
+            .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0 },
+            .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0 },
+            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0 },
+            .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0 },
+            .f32 => .{ .pipe = &self.dmmv_f32_pipe, .push_idx = 0 },
+            else => null,
+        };
+    }
 };
 
-/// Load an MSL shader from src/shaders/metal/ and compile it at runtime.
+// ---------------------------------------------------------------------------
+// Shader loading
+// ---------------------------------------------------------------------------
+
 fn loadShaderPipeline(ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
-    // Read the .metal file from the shader directory
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "src/shaders/metal/{s}.metal", .{name}) catch return error.PathTooLong;
-
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
         log.err("Failed to open shader '{s}': {s}", .{ name, @errorName(err) });
         return error.ShaderNotFound;
     };
     defer file.close();
-
     const stat = try file.stat();
-    if (stat.size > 1024 * 1024) return error.ShaderTooLarge; // 1MB limit
-
+    if (stat.size > 1024 * 1024) return error.ShaderTooLarge;
     var source_buf: [1024 * 1024]u8 = undefined;
     const bytes_read = try file.readAll(&source_buf);
-    source_buf[bytes_read] = 0; // null-terminate for C string
-
+    source_buf[bytes_read] = 0;
     var fn_buf: [128]u8 = undefined;
-    // SPIRV-Cross names the entry point "main0"
     const fn_name = std.fmt.bufPrintZ(&fn_buf, "main0", .{}) catch return error.NameTooLong;
-
     return metal_pipeline.createPipeline(ctx, @ptrCast(&source_buf), fn_name);
 }
 
 // ---------------------------------------------------------------------------
-// CPU-side dequantization helpers (shared logic with forward.zig)
+// Tensor lookup helpers
 // ---------------------------------------------------------------------------
 
-const GGMLType = gguf.GGMLType;
+fn findTensorByName(model: *const metal_loader.Model, name: []const u8) ?*const metal_loader.LoadedTensor {
+    for (model.tensors.items) |*t| {
+        if (std.mem.eql(u8, t.info.name, name)) return t;
+    }
+    return null;
+}
+
+fn findLayerTensor(model: *const metal_loader.Model, layer: u32, suffix: []const u8) ?*const metal_loader.LoadedTensor {
+    var name_buf: [128]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "blk.{d}.{s}", .{ layer, suffix }) catch return null;
+    return findTensorByName(model, name);
+}
+
+fn tensorPageOffset(model: *const metal_loader.Model, tensor: *const metal_loader.LoadedTensor) u32 {
+    const data_offset: u64 = model.gguf_file.tensor_data_offset + tensor.info.offset;
+    const aligned_offset = (data_offset / 4096) * 4096;
+    return @intCast(data_offset - aligned_offset);
+}
+
+// ---------------------------------------------------------------------------
+// DMMV dispatch helpers
+// ---------------------------------------------------------------------------
+
+/// Dispatch a DMMV on an existing command buffer (does NOT commit).
+fn dispatchDmmvOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+) void {
+    const pip = engine.dmmvPipelineForType(tensor.info.type_) orelse {
+        log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
+        return;
+    };
+    const page_off = tensorPageOffset(engine.model, tensor);
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = page_off + extra_byte_offset,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf };
+    cmd.dispatchV2(pip.pipe, .{ (M + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), pip.push_idx);
+}
+
+/// Dispatch a single DMMV and wait for completion.
+fn dispatchDmmvAndWait(
+    engine: *InferenceEngine,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+) !void {
+    var cmd = try metal_command.beginCommand(engine.device.ctx);
+    dispatchDmmvOnCmd(engine, &cmd, tensor, input_buf, output_buf, M, K, extra_byte_offset);
+    cmd.commitAndWait();
+}
+
+/// CPU fallback DMMV for K > shared memory limit (4096).
+fn cpuDmmvFallback(
+    mmap: []const u8,
+    tensor: *const metal_loader.LoadedTensor,
+    data_offset: u64,
+    input: [*]const f32,
+    output: [*]f32,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+    allocator: std.mem.Allocator,
+) !void {
+    const off: usize = @intCast(data_offset + tensor.info.offset + extra_byte_offset);
+    const raw = mmap[off..];
+    const row_buf = try allocator.alloc(f32, K);
+    defer allocator.free(row_buf);
+    for (0..M) |row| {
+        dequantRow(raw, @intCast(row), K, tensor.info.type_, row_buf);
+        var dot: f32 = 0;
+        for (0..K) |d| dot += row_buf[d] * input[d];
+        output[row] = dot;
+    }
+}
+
+/// Smart DMMV: GPU for K <= 4096, CPU fallback for larger K.
+fn smartDmmv(
+    engine: *InferenceEngine,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+) !void {
+    if (K <= 4096) {
+        try dispatchDmmvAndWait(engine, tensor, input_buf, output_buf, M, K, extra_byte_offset);
+    } else {
+        const input_ptr: [*]const f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+        const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+        try cpuDmmvFallback(
+            engine.model.mmap_data orelse return error.NoMmapData,
+            tensor,
+            engine.model.gguf_file.tensor_data_offset,
+            input_ptr,
+            output_ptr,
+            M,
+            K,
+            extra_byte_offset,
+            engine.allocator,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CPU math helpers (all via UMA shared buffers)
+// ---------------------------------------------------------------------------
+
+/// RMS norm with weight multiply: output[i] = weight[i] * (input[i] / rms)
+fn cpuRmsNormMul(input: [*]const f32, weight: []const f32, output: [*]f32, n: u32, n_groups: u32, eps: f32) void {
+    for (0..n_groups) |g| {
+        const off = g * n;
+        var sq: f32 = 0;
+        for (0..n) |i| sq += input[off + i] * input[off + i];
+        const rms_inv = 1.0 / @sqrt(sq / @as(f32, @floatFromInt(n)) + eps);
+        for (0..n) |i| output[off + i] = weight[i % weight.len] * (input[off + i] * rms_inv);
+    }
+}
+
+/// Per-head RMS norm with weight multiply (in-place).
+fn cpuPerHeadRmsNormMul(data: [*]f32, weight: []const f32, head_dim: u32, n_heads: u32, eps: f32) void {
+    for (0..n_heads) |h| {
+        const off = h * head_dim;
+        var sq: f32 = 0;
+        for (0..head_dim) |i| sq += data[off + i] * data[off + i];
+        const rms_inv = 1.0 / @sqrt(sq / @as(f32, @floatFromInt(head_dim)) + eps);
+        for (0..head_dim) |i| data[off + i] = data[off + i] * rms_inv * weight[i];
+    }
+}
+
+/// RoPE: apply rotary position embedding.
+fn cpuRope(data: [*]f32, stride: u32, rope_dim: u32, n_heads: u32, position: u32, freq_base: f32) void {
+    const half_rot = rope_dim / 2;
+    for (0..n_heads) |h| {
+        const base_idx = @as(u32, @intCast(h)) * stride;
+        for (0..half_rot) |i| {
+            const exponent = @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(rope_dim));
+            const freq_i = 1.0 / std.math.pow(f32, freq_base, exponent);
+            const theta = @as(f32, @floatFromInt(position)) * freq_i;
+            const cos_t = @cos(theta);
+            const sin_t = @sin(theta);
+            const idx0 = base_idx + @as(u32, @intCast(i));
+            const idx1 = idx0 + half_rot;
+            const x0 = data[idx0];
+            const x1 = data[idx1];
+            data[idx0] = x0 * cos_t - x1 * sin_t;
+            data[idx1] = x0 * sin_t + x1 * cos_t;
+        }
+        // Copy remaining dimensions unchanged (IMRoPE: only first rope_dim dims rotated)
+    }
+}
+
+/// SwiGLU: output[i] = SiLU(gate[i]) * up[i]
+fn cpuSwiGLU(gate: [*]const f32, up: [*]const f32, output: [*]f32, n: u32) void {
+    for (0..n) |i| {
+        const x = gate[i];
+        output[i] = (x / (1.0 + @exp(-x))) * up[i];
+    }
+}
+
+/// L2 normalize a vector in-place.
+fn cpuL2Normalize(data: []f32) void {
+    var sq: f32 = 0;
+    for (data) |v| sq += v * v;
+    const inv = if (sq > 0) 1.0 / @sqrt(sq) else 1.0;
+    for (data) |*v| v.* *= inv;
+}
+
+/// CPU single-token attention (no paging, contiguous KV cache).
+fn cpuAttention(
+    q: [*]const f32,
+    k_cache: [*]const f32,
+    v_cache: [*]const f32,
+    output: [*]f32,
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    seq_len: u32,
+) void {
+    const gqa_ratio = n_heads / @max(n_kv_heads, 1);
+    const kv_dim = n_kv_heads * head_dim;
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+    for (0..n_heads) |h| {
+        const kv_h = @as(u32, @intCast(h)) / gqa_ratio;
+        const q_head = q + @as(u32, @intCast(h)) * head_dim;
+
+        var scores: [4096]f32 = undefined;
+        var max_score: f32 = -std.math.inf(f32);
+        for (0..seq_len) |t| {
+            const k_vec = k_cache + @as(usize, t) * kv_dim + @as(usize, kv_h) * head_dim;
+            var dot: f32 = 0;
+            for (0..head_dim) |d| dot += q_head[d] * k_vec[d];
+            scores[t] = dot * scale;
+            if (scores[t] > max_score) max_score = scores[t];
+        }
+
+        var sum: f32 = 0;
+        for (0..seq_len) |t| {
+            scores[t] = @exp(scores[t] - max_score);
+            sum += scores[t];
+        }
+        if (sum > 0) for (0..seq_len) |t| {
+            scores[t] /= sum;
+        };
+
+        const out_head = output + @as(u32, @intCast(h)) * head_dim;
+        for (0..head_dim) |d| {
+            var val: f32 = 0;
+            for (0..seq_len) |t| {
+                val += scores[t] * v_cache[@as(usize, t) * kv_dim + @as(usize, kv_h) * head_dim + d];
+            }
+            out_head[d] = val;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CPU-side dequantization helpers
+// ---------------------------------------------------------------------------
 
 fn getScaleMinK4(j: usize, scales: []const u8) struct { sc: u8, m: u8 } {
     if (j < 4) {
@@ -245,7 +505,6 @@ fn getScaleMinK4(j: usize, scales: []const u8) struct { sc: u8, m: u8 } {
     }
 }
 
-/// Dequantize a single row from a quantized tensor to f32.
 pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, output: []f32) void {
     switch (quant_type) {
         .f32 => {
@@ -315,13 +574,12 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
             }
         },
         else => {
-            log.warn("Unsupported embedding quant type {d}, using zeros", .{@intFromEnum(quant_type)});
+            log.warn("Unsupported quant type {d}, using zeros", .{@intFromEnum(quant_type)});
             @memset(output, 0);
         },
     }
 }
 
-/// Read tensor elements from mmap into an f32 buffer, handling f32 and f16 storage.
 fn readMmapFloats(mmap: []const u8, base_off: usize, tensor_type: GGMLType, output: []f32) void {
     switch (tensor_type) {
         .f32 => {
@@ -336,30 +594,27 @@ fn readMmapFloats(mmap: []const u8, base_off: usize, tensor_type: GGMLType, outp
             }
         },
         else => {
-            log.warn("readMmapFloats: unsupported type {s}, zeroing output", .{@tagName(tensor_type)});
+            log.warn("readMmapFloats: unsupported type {s}, zeroing", .{@tagName(tensor_type)});
             @memset(output, 0);
         },
     }
 }
 
-/// Softmax + top-k selection on CPU for MoE routing.
 pub fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
     var max_val: f32 = -std.math.inf(f32);
     for (logits) |v| if (v > max_val) {
         max_val = v;
     };
-
     var probs: [256]f32 = undefined;
     var sum: f32 = 0;
     for (0..n) |i| {
         probs[i] = @exp(logits[i] - max_val);
         sum += probs[i];
     }
-    if (sum > 0) {
-        for (0..n) |i| probs[i] /= sum;
-    }
-
+    if (sum > 0) for (0..n) |i| {
+        probs[i] /= sum;
+    };
     var used = [_]bool{false} ** 256;
     for (0..k) |ki| {
         var best_idx: u32 = 0;
@@ -374,15 +629,13 @@ pub fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f
         out_weights[ki] = best_val;
         used[best_idx] = true;
     }
-
     var wsum: f32 = 0;
     for (0..k) |i| wsum += out_weights[i];
-    if (wsum > 0) {
-        for (0..k) |i| out_weights[i] /= wsum;
-    }
+    if (wsum > 0) for (0..k) |i| {
+        out_weights[i] /= wsum;
+    };
 }
 
-/// Compute byte size of one expert slice in a stacked weight tensor.
 fn expertSliceBytes(quant_type: GGMLType, rows: u32, cols: u32) u32 {
     const bs = quant_type.blockSize();
     const bpb = quant_type.bytesPerBlock();
@@ -392,10 +645,479 @@ fn expertSliceBytes(quant_type: GGMLType, rows: u32, cols: u32) u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Decode step — runs all layers + final norm + LM head
+// ---------------------------------------------------------------------------
+
+fn decodeStep(engine: *InferenceEngine) !void {
+    const cfg = engine.config;
+    const hidden_dim = cfg.hidden_dim;
+    const q_dim: u32 = cfg.n_heads * cfg.head_dim;
+    const kv_dim: u32 = cfg.n_kv_heads * cfg.head_dim;
+    const is_moe = cfg.n_experts > 0;
+    const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
+    const shexp_inter_dim: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
+    const full_attn_interval: u32 = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const data_base = engine.model.gguf_file.tensor_data_offset;
+
+    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+    const norm_ptr: [*]f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+
+    for (0..cfg.n_layers) |layer_idx| {
+        const layer: u32 = @intCast(layer_idx);
+
+        // --- Input RMS norm: hidden_buf → norm_buf ---
+        const attn_norm = findLayerTensor(engine.model, layer, "attn_norm.weight") orelse return error.MissingTensor;
+        const norm_off: usize = @intCast(data_base + attn_norm.info.offset);
+        const norm_elems = @as(u32, @intCast(attn_norm.info.numElements()));
+        const norm_w = try engine.allocator.alloc(f32, norm_elems);
+        defer engine.allocator.free(norm_w);
+        readMmapFloats(mmap, norm_off, attn_norm.info.type_, norm_w);
+        cpuRmsNormMul(hidden_ptr, norm_w, norm_ptr, hidden_dim, 1, 1e-6);
+
+        const is_full_attn = ((layer + 1) % full_attn_interval == 0);
+
+        if (is_full_attn) {
+            // === FULL ATTENTION LAYER ===
+            const q_tensor = findLayerTensor(engine.model, layer, "attn_q.weight") orelse return error.MissingTensor;
+            const k_tensor = findLayerTensor(engine.model, layer, "attn_k.weight") orelse return error.MissingTensor;
+            const v_tensor = findLayerTensor(engine.model, layer, "attn_v.weight") orelse return error.MissingTensor;
+
+            // Q+gate, K, V projections (batched GPU dispatch)
+            const q_full_dim = q_dim * 2;
+            {
+                var cmd = try metal_command.beginCommand(engine.device.ctx);
+                dispatchDmmvOnCmd(engine, &cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, &cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, &cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+                cmd.commitAndWait();
+            }
+
+            // Deinterleave Q+gate → q_buf, gate_buf (CPU)
+            const attn_out_ptr: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
+            const q_ptr: [*]f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+            const gate_ptr: [*]f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+            for (0..cfg.n_heads) |h| {
+                const src_off = h * cfg.head_dim * 2;
+                const dst_off = h * cfg.head_dim;
+                for (0..cfg.head_dim) |d| {
+                    q_ptr[dst_off + d] = attn_out_ptr[src_off + d];
+                    gate_ptr[dst_off + d] = attn_out_ptr[src_off + cfg.head_dim + d];
+                }
+            }
+
+            // Per-head Q/K norm (CPU)
+            const q_norm_t = findLayerTensor(engine.model, layer, "attn_q_norm.weight");
+            if (q_norm_t) |qn| {
+                const qn_off: usize = @intCast(data_base + qn.info.offset);
+                const qn_w = try engine.allocator.alloc(f32, cfg.head_dim);
+                defer engine.allocator.free(qn_w);
+                readMmapFloats(mmap, qn_off, qn.info.type_, qn_w);
+                cpuPerHeadRmsNormMul(q_ptr, qn_w, cfg.head_dim, cfg.n_heads, 1e-6);
+            }
+            const k_norm_t = findLayerTensor(engine.model, layer, "attn_k_norm.weight");
+            const k_ptr: [*]f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
+            if (k_norm_t) |kn| {
+                const kn_off: usize = @intCast(data_base + kn.info.offset);
+                const kn_w = try engine.allocator.alloc(f32, cfg.head_dim);
+                defer engine.allocator.free(kn_w);
+                readMmapFloats(mmap, kn_off, kn.info.type_, kn_w);
+                cpuPerHeadRmsNormMul(k_ptr, kn_w, cfg.head_dim, cfg.n_kv_heads, 1e-6);
+            }
+
+            // RoPE (CPU)
+            const rope_freq = cfg.rope_freq_base;
+            const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+            cpuRope(q_ptr, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, rope_freq);
+            cpuRope(k_ptr, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, rope_freq);
+
+            // KV cache write (CPU, via UMA)
+            const kc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
+            const vc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
+            const v_ptr: [*]const f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
+            const kv_offset: usize = @as(usize, engine.position) * kv_dim;
+            for (0..kv_dim) |d| {
+                kc_ptr[kv_offset + d] = k_ptr[d];
+                vc_ptr[kv_offset + d] = v_ptr[d];
+            }
+
+            // Attention (CPU)
+            const attn_out_w: [*]f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
+            cpuAttention(q_ptr, kc_ptr, vc_ptr, attn_out_w, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
+
+            // Sigmoid gate: attn_out *= sigmoid(gate) (CPU)
+            for (0..q_dim) |i| {
+                attn_out_w[i] *= 1.0 / (1.0 + @exp(-gate_ptr[i]));
+            }
+
+            // Output projection DMMV: attn_output.weight × attn_out → down_buf
+            const o_tensor = findLayerTensor(engine.model, layer, "attn_output.weight") orelse return error.MissingTensor;
+            try dispatchDmmvAndWait(engine, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
+
+            // Residual: hidden += down (CPU)
+            const down_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+            for (0..hidden_dim) |i| hidden_ptr[i] += down_ptr[i];
+        } else {
+            // === SSM / LINEAR ATTENTION LAYER ===
+            try runSsmLayerCpu(engine, layer, layer_idx, mmap, data_base);
+        }
+
+        // --- Post-attention norm ---
+        const ffn_norm_t = findLayerTensor(engine.model, layer, "post_attention_norm.weight") orelse
+            findLayerTensor(engine.model, layer, "ffn_norm.weight") orelse return error.MissingTensor;
+        {
+            const fn_off: usize = @intCast(data_base + ffn_norm_t.info.offset);
+            const fn_elems = @as(u32, @intCast(ffn_norm_t.info.numElements()));
+            const fn_w = try engine.allocator.alloc(f32, fn_elems);
+            defer engine.allocator.free(fn_w);
+            readMmapFloats(mmap, fn_off, ffn_norm_t.info.type_, fn_w);
+            cpuRmsNormMul(hidden_ptr, fn_w, norm_ptr, hidden_dim, 1, 1e-6);
+        }
+
+        if (is_moe) {
+            // --- MoE FFN ---
+            // Router DMMV
+            const router_t = findLayerTensor(engine.model, layer, "ffn_gate_inp.weight") orelse return error.MissingTensor;
+            try smartDmmv(engine, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+
+            // CPU topK softmax
+            const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+            var expert_ids: [16]u32 = undefined;
+            var expert_weights: [16]f32 = undefined;
+            topKSoftmax(router_ptr[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+
+            // Zero moe_out_buf
+            const moe_ptr: [*]f32 = @ptrCast(@alignCast(engine.moe_out_buf.cpu_ptr.?));
+            @memset(moe_ptr[0..hidden_dim], 0);
+
+            // Expert dispatch
+            const gate_exps = findLayerTensor(engine.model, layer, "ffn_gate_exps.weight") orelse return error.MissingTensor;
+            const up_exps = findLayerTensor(engine.model, layer, "ffn_up_exps.weight") orelse return error.MissingTensor;
+            const down_exps = findLayerTensor(engine.model, layer, "ffn_down_exps.weight") orelse return error.MissingTensor;
+            const gate_quant = gate_exps.info.type_;
+            const down_quant = down_exps.info.type_;
+            const expert_gate_bytes = expertSliceBytes(gate_quant, inter_dim, hidden_dim);
+            const expert_down_bytes = expertSliceBytes(down_quant, hidden_dim, inter_dim);
+
+            for (0..cfg.n_experts_used) |ei| {
+                const eid = expert_ids[ei];
+                const weight = expert_weights[ei];
+                const gate_offset = eid * expert_gate_bytes;
+                const up_offset = eid * expert_gate_bytes;
+                const down_offset = eid * expert_down_bytes;
+
+                // Gate + Up DMMVs (batched)
+                {
+                    var cmd = try metal_command.beginCommand(engine.device.ctx);
+                    dispatchDmmvOnCmd(engine, &cmd, gate_exps, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, gate_offset);
+                    dispatchDmmvOnCmd(engine, &cmd, up_exps, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, up_offset);
+                    cmd.commitAndWait();
+                }
+
+                // SwiGLU (CPU)
+                const g_ptr: [*]const f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+                const u_ptr: [*]const f32 = @ptrCast(@alignCast(engine.up_buf.cpu_ptr.?));
+                const sw_ptr: [*]f32 = @ptrCast(@alignCast(engine.swiglu_buf.cpu_ptr.?));
+                cpuSwiGLU(g_ptr, u_ptr, sw_ptr, inter_dim);
+
+                // Down DMMV
+                try smartDmmv(engine, down_exps, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, down_offset);
+
+                // Weighted accumulate (CPU)
+                const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+                for (0..hidden_dim) |i| moe_ptr[i] += weight * d_ptr[i];
+            }
+
+            // Shared expert
+            const gate_shexp = findLayerTensor(engine.model, layer, "ffn_gate_shexp.weight");
+            const up_shexp = findLayerTensor(engine.model, layer, "ffn_up_shexp.weight");
+            const down_shexp = findLayerTensor(engine.model, layer, "ffn_down_shexp.weight");
+            const shexp_gate_t = findLayerTensor(engine.model, layer, "ffn_gate_inp_shexp.weight");
+
+            if (gate_shexp != null and up_shexp != null and down_shexp != null) {
+                // Gate + Up DMMVs
+                {
+                    var cmd = try metal_command.beginCommand(engine.device.ctx);
+                    dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
+                    dispatchDmmvOnCmd(engine, &cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
+                    if (shexp_gate_t) |sg| {
+                        dispatchDmmvOnCmd(engine, &cmd, sg, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
+                    }
+                    cmd.commitAndWait();
+                }
+
+                // SwiGLU (CPU)
+                const g_ptr: [*]const f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+                const u_ptr: [*]const f32 = @ptrCast(@alignCast(engine.up_buf.cpu_ptr.?));
+                const sw_ptr: [*]f32 = @ptrCast(@alignCast(engine.swiglu_buf.cpu_ptr.?));
+                cpuSwiGLU(g_ptr, u_ptr, sw_ptr, shexp_inter_dim);
+
+                // Down DMMV
+                try smartDmmv(engine, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
+
+                // Accumulate with sigmoid gate or scale=1.0
+                const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+                if (shexp_gate_t != null) {
+                    const sg_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+                    const shexp_weight = 1.0 / (1.0 + @exp(-sg_ptr[0]));
+                    for (0..hidden_dim) |i| moe_ptr[i] += shexp_weight * d_ptr[i];
+                } else {
+                    for (0..hidden_dim) |i| moe_ptr[i] += d_ptr[i];
+                }
+            }
+
+            // FFN residual: hidden += moe_out
+            for (0..hidden_dim) |i| hidden_ptr[i] += moe_ptr[i];
+        } else {
+            // Dense FFN (non-MoE)
+            const gate_t = findLayerTensor(engine.model, layer, "ffn_gate.weight") orelse return error.MissingTensor;
+            const up_t = findLayerTensor(engine.model, layer, "ffn_up.weight") orelse return error.MissingTensor;
+            const down_t = findLayerTensor(engine.model, layer, "ffn_down.weight") orelse return error.MissingTensor;
+
+            {
+                var cmd = try metal_command.beginCommand(engine.device.ctx);
+                dispatchDmmvOnCmd(engine, &cmd, gate_t, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, &cmd, up_t, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, 0);
+                cmd.commitAndWait();
+            }
+
+            const g_ptr: [*]const f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+            const u_ptr: [*]const f32 = @ptrCast(@alignCast(engine.up_buf.cpu_ptr.?));
+            const sw_ptr: [*]f32 = @ptrCast(@alignCast(engine.swiglu_buf.cpu_ptr.?));
+            cpuSwiGLU(g_ptr, u_ptr, sw_ptr, inter_dim);
+
+            try smartDmmv(engine, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
+
+            const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+            for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
+        }
+    }
+
+    // === Final RMS norm → LM head ===
+    const final_norm_t = findTensorByName(engine.model, "output_norm.weight") orelse return error.MissingTensor;
+    {
+        const fn_off: usize = @intCast(data_base + final_norm_t.info.offset);
+        const fn_elems = @as(u32, @intCast(final_norm_t.info.numElements()));
+        const fn_w = try engine.allocator.alloc(f32, fn_elems);
+        defer engine.allocator.free(fn_w);
+        readMmapFloats(mmap, fn_off, final_norm_t.info.type_, fn_w);
+        cpuRmsNormMul(hidden_ptr, fn_w, norm_ptr, hidden_dim, 1, 1e-6);
+    }
+
+    // LM head DMMV: output.weight × norm_buf → logits_buf
+    const lm_tensor = findTensorByName(engine.model, "output.weight") orelse
+        findTensorByName(engine.model, "token_embd.weight") orelse return error.MissingTensor;
+    try smartDmmv(engine, lm_tensor, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
+
+    engine.position += 1;
+}
+
+// ---------------------------------------------------------------------------
+// SSM layer (CPU-side with GPU DMMV for large projections)
+// ---------------------------------------------------------------------------
+
+fn runSsmLayerCpu(
+    engine: *InferenceEngine,
+    layer: u32,
+    layer_idx: usize,
+    mmap: []const u8,
+    data_base: u64,
+) !void {
+    const cfg = engine.config;
+    const hidden_dim = cfg.hidden_dim;
+    const d_inner = cfg.ssm_d_inner;
+    const d_conv = cfg.ssm_d_conv;
+    const d_state = cfg.ssm_d_state;
+    const n_group = cfg.ssm_n_group;
+    const dt_rank = cfg.ssm_dt_rank;
+
+    if (d_inner == 0) return;
+
+    const head_v_dim = d_inner / @max(dt_rank, 1);
+    const conv_channels: u32 = d_inner + 2 * n_group * d_state;
+
+    // GPU: 4 DMMV projections
+    const wqkv_t = findLayerTensor(engine.model, layer, "attn_qkv.weight") orelse return;
+    const z_t = findLayerTensor(engine.model, layer, "attn_gate.weight") orelse return;
+    const alpha_t = findLayerTensor(engine.model, layer, "ssm_alpha.weight") orelse return;
+    const beta_t = findLayerTensor(engine.model, layer, "ssm_beta.weight") orelse return;
+    {
+        var cmd = try metal_command.beginCommand(engine.device.ctx);
+        dispatchDmmvOnCmd(engine, &cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, &cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, &cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, &cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
+        cmd.commitAndWait();
+    }
+
+    // Read back from UMA buffers
+    const qkv_cpu: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
+    const z_cpu: [*]const f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+    const alpha_cpu: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+    const beta_cpu: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+
+    // Conv1d with state
+    const conv_state = engine.ssm_conv_states.?[layer_idx];
+    const d_conv_1 = d_conv - 1;
+
+    const conv_t = findLayerTensor(engine.model, layer, "ssm_conv1d.weight") orelse return;
+    const conv_off: usize = @intCast(data_base + conv_t.info.offset);
+    const conv_kernel_len: usize = @as(usize, conv_channels) * d_conv;
+    const conv_kernel = try engine.allocator.alloc(f32, conv_kernel_len);
+    defer engine.allocator.free(conv_kernel);
+    readMmapFloats(mmap, conv_off, conv_t.info.type_, conv_kernel);
+
+    const conv_out = try engine.allocator.alloc(f32, conv_channels);
+    defer engine.allocator.free(conv_out);
+    for (0..conv_channels) |ch| {
+        var sum: f32 = 0;
+        for (0..d_conv) |ki| {
+            const kw = conv_kernel[ch * d_conv + ki];
+            const sv = if (ki < d_conv_1) conv_state[ki * conv_channels + ch] else qkv_cpu[ch];
+            sum += kw * sv;
+        }
+        const sig = 1.0 / (1.0 + @exp(-sum));
+        conv_out[ch] = sum * sig;
+    }
+
+    // Update conv state: shift left, write current input
+    if (d_conv_1 > 1) {
+        const shift = (d_conv_1 - 1) * conv_channels;
+        std.mem.copyForwards(f32, conv_state[0..shift], conv_state[conv_channels .. shift + conv_channels]);
+    }
+    for (0..conv_channels) |ch| conv_state[(d_conv_1 - 1) * conv_channels + ch] = qkv_cpu[ch];
+
+    // Split Q/K/V from conv output
+    const qk_dim = d_state * n_group;
+    var q_ssm = conv_out[0..qk_dim];
+    var k_ssm = conv_out[qk_dim .. 2 * qk_dim];
+    const v_ssm = conv_out[2 * qk_dim .. 2 * qk_dim + d_inner];
+
+    // L2 normalize per group
+    for (0..n_group) |h| {
+        cpuL2Normalize(q_ssm[h * d_state ..][0..d_state]);
+        cpuL2Normalize(k_ssm[h * d_state ..][0..d_state]);
+    }
+
+    // Compute gate and beta
+    const dt_bias_t = findLayerTensor(engine.model, layer, "ssm_dt.bias");
+    const dt_bias = try engine.allocator.alloc(f32, dt_rank);
+    defer engine.allocator.free(dt_bias);
+    if (dt_bias_t) |t| {
+        const off: usize = @intCast(data_base + t.info.offset);
+        readMmapFloats(mmap, off, t.info.type_, dt_bias);
+    } else @memset(dt_bias, 0);
+
+    const ssm_a_t = findLayerTensor(engine.model, layer, "ssm_a");
+    const ssm_a = try engine.allocator.alloc(f32, dt_rank);
+    defer engine.allocator.free(ssm_a);
+    if (ssm_a_t) |t| {
+        const off: usize = @intCast(data_base + t.info.offset);
+        readMmapFloats(mmap, off, t.info.type_, ssm_a);
+    } else @memset(ssm_a, 0);
+
+    const gate_arr = try engine.allocator.alloc(f32, dt_rank);
+    defer engine.allocator.free(gate_arr);
+    const beta_arr = try engine.allocator.alloc(f32, dt_rank);
+    defer engine.allocator.free(beta_arr);
+    for (0..dt_rank) |i| {
+        var a = alpha_cpu[i];
+        if (dt_bias_t != null) a += dt_bias[i];
+        const sp = @log(1.0 + @exp(a));
+        gate_arr[i] = if (ssm_a_t != null) sp * ssm_a[i] else -sp;
+        beta_arr[i] = 1.0 / (1.0 + @exp(-beta_cpu[i]));
+    }
+
+    // Scale Q
+    const q_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_state)));
+    for (q_ssm) |*v| v.* *= q_scale;
+
+    // Delta-net state update
+    const ssm_state = engine.ssm_states.?[layer_idx];
+    for (0..dt_rank) |h| {
+        const s_base = h * head_v_dim * head_v_dim;
+        const g_val = @exp(gate_arr[h]);
+        const b_val = beta_arr[h];
+        const k_hi = if (n_group == dt_rank) h else h % n_group;
+        const k_head = k_ssm[k_hi * d_state ..][0..@min(d_state, head_v_dim)];
+        const v_head = v_ssm[h * head_v_dim ..][0..head_v_dim];
+
+        // Decay
+        for (0..head_v_dim * head_v_dim) |i| ssm_state[s_base + i] *= g_val;
+
+        // Update
+        for (0..head_v_dim) |row| {
+            var sk: f32 = 0;
+            for (0..@min(head_v_dim, k_head.len)) |col| {
+                sk += ssm_state[s_base + row * head_v_dim + col] * k_head[col];
+            }
+            const d_val = b_val * (v_head[row] - sk);
+            for (0..@min(head_v_dim, k_head.len)) |col| {
+                ssm_state[s_base + row * head_v_dim + col] += k_head[col] * d_val;
+            }
+        }
+    }
+
+    // Read from state
+    const ssm_output = try engine.allocator.alloc(f32, d_inner);
+    defer engine.allocator.free(ssm_output);
+    for (0..dt_rank) |h| {
+        const s_base = h * head_v_dim * head_v_dim;
+        const q_hi = if (n_group == dt_rank) h else h % n_group;
+        const q_head = q_ssm[q_hi * d_state ..][0..@min(d_state, head_v_dim)];
+        for (0..head_v_dim) |row| {
+            var val: f32 = 0;
+            for (0..@min(head_v_dim, q_head.len)) |col| {
+                val += ssm_state[s_base + row * head_v_dim + col] * q_head[col];
+            }
+            ssm_output[h * head_v_dim + row] = val;
+        }
+    }
+
+    // Gated normalization: RMS_norm(o) * SiLU(z)
+    const norm_t = findLayerTensor(engine.model, layer, "ssm_norm.weight");
+    const norm_elems_ssm: u32 = if (norm_t) |t| @intCast(t.info.numElements()) else 0;
+    const norm_per_head = norm_elems_ssm >= d_inner;
+    const norm_alloc_len: u32 = if (norm_elems_ssm > 0) norm_elems_ssm else 1;
+    const norm_w_ssm = try engine.allocator.alloc(f32, norm_alloc_len);
+    defer engine.allocator.free(norm_w_ssm);
+    if (norm_t) |t| {
+        const off: usize = @intCast(data_base + t.info.offset);
+        readMmapFloats(mmap, off, t.info.type_, norm_w_ssm[0..norm_elems_ssm]);
+    }
+
+    for (0..dt_rank) |h| {
+        const o_sl = ssm_output[h * head_v_dim ..][0..head_v_dim];
+        const z_sl_off = h * head_v_dim;
+        var sq: f32 = 0;
+        for (o_sl) |v| sq += v * v;
+        const rms = @sqrt(sq / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
+        for (0..head_v_dim) |i| {
+            var nv = o_sl[i] / rms;
+            if (norm_t != null) nv *= norm_w_ssm[if (norm_per_head) h * head_v_dim + i else i % d_state];
+            const zv = z_cpu[z_sl_off + i];
+            o_sl[i] = nv * (zv / (1.0 + @exp(-zv)));
+        }
+    }
+
+    // Write SSM output to swiglu_buf for DMMV input
+    const sw_ptr: [*]f32 = @ptrCast(@alignCast(engine.swiglu_buf.cpu_ptr.?));
+    for (0..d_inner) |i| sw_ptr[i] = ssm_output[i];
+
+    // ssm_out DMMV: ssm_out.weight × swiglu_buf → down_buf
+    const ssm_out_t = findLayerTensor(engine.model, layer, "ssm_out.weight") orelse return;
+    try smartDmmv(engine, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
+
+    // Residual: hidden += down
+    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+    const down_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+    for (0..hidden_dim) |i| hidden_ptr[i] += down_ptr[i];
+}
+
+// ---------------------------------------------------------------------------
 // Generate
 // ---------------------------------------------------------------------------
 
-/// Generate tokens using the Metal inference engine.
 pub fn generate(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
@@ -409,85 +1131,50 @@ pub fn generate(
     var output: std.ArrayList(u32) = .{};
     errdefer output.deinit(allocator);
 
-    // Embedding dequant buffer (CPU-side for now)
+    // Embedding dequant buffer
     const embed_buf = try allocator.alloc(f32, cfg.hidden_dim);
     defer allocator.free(embed_buf);
 
-    // Find embedding tensor
     const embed_tensor = engine.model.gguf_file.findTensor("token_embd.weight") orelse return error.MissingTensor;
     const embed_data_offset = engine.model.gguf_file.tensor_data_offset + embed_tensor.offset;
     const embed_raw = mmap[embed_data_offset..];
 
-    // Process prompt tokens (simplified single-token prefill for now)
+    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+
+    // Prefill: process each prompt token through all layers
     for (prompt_tokens) |token_id| {
-        // Dequant embedding for this token
         dequantRow(embed_raw, token_id, cfg.hidden_dim, embed_tensor.type_, embed_buf);
-
-        // Upload to GPU hidden buffer
-        const dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-        @memcpy(dst[0..cfg.hidden_dim], embed_buf);
-
-        engine.position += 1;
+        @memcpy(hidden_ptr[0..cfg.hidden_dim], embed_buf);
+        try decodeStep(engine);
     }
 
-    // Find output weight tensor (LM head)
-    const output_tensor = engine.model.gguf_file.findTensor("output.weight") orelse return error.MissingTensor;
-    const output_data_offset = engine.model.gguf_file.tensor_data_offset + output_tensor.offset;
-
-    // Find the output weight mmap'd Metal buffer
-    var output_weight_buf: ?*const MetalBuffer = null;
-    for (engine.model.tensors.items) |*t| {
-        if (std.mem.eql(u8, t.info.name, "output.weight")) {
-            output_weight_buf = &t.gpu_buffer;
-            break;
+    // Sample first output token from prefill logits
+    if (prompt_tokens.len > 0 and max_tokens > 0) {
+        const first_token = engine.sampleGreedy();
+        if (first_token == eos_id) {
+            log.info("Generated 0 tokens (EOS at first position)", .{});
+            return try output.toOwnedSlice(allocator);
         }
+        try output.append(allocator, first_token);
     }
-    _ = output_data_offset;
 
     // Decode loop
-    var tokens_generated: u32 = 0;
+    var tokens_generated: u32 = 1;
     while (tokens_generated < max_tokens) {
-        // TODO: Full per-layer dispatch (attention, SSM, MoE FFN)
-        // Current stub: skip 40-layer transform, directly project hidden→logits
-        // This produces wrong tokens but proves the DMMV pipeline works
+        const input_token = output.items[output.items.len - 1];
+        dequantRow(embed_raw, input_token, cfg.hidden_dim, embed_tensor.type_, embed_buf);
+        @memcpy(hidden_ptr[0..cfg.hidden_dim], embed_buf);
 
-        // LM head: output.weight × hidden_buf → logits_buf
-        // For now, do this on CPU since the DMMV shader binding isn't wired yet
-        {
-            const output_raw = mmap[engine.model.gguf_file.tensor_data_offset + output_tensor.offset ..];
-            const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-            const logits_ptr: [*]f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
+        try decodeStep(engine);
 
-            // CPU matmul: logits[v] = sum_d(output_weight[v][d] * hidden[d])
-            // This is slow but proves correctness. GPU DMMV will replace this.
-            var row_buf: [4096]f32 = undefined;
-            for (0..cfg.vocab_size) |v| {
-                dequantRow(output_raw, @intCast(v), cfg.hidden_dim, output_tensor.type_, row_buf[0..cfg.hidden_dim]);
-                var dot: f32 = 0;
-                for (0..cfg.hidden_dim) |d| {
-                    dot += row_buf[d] * hidden_ptr[d];
-                }
-                logits_ptr[v] = dot;
-            }
-        }
-
-        // Sample
         const next_token = engine.sampleGreedy();
         if (next_token == eos_id) break;
 
         try output.append(allocator, next_token);
         tokens_generated += 1;
-
-        // Dequant embedding for next token
-        dequantRow(embed_raw, next_token, cfg.hidden_dim, embed_tensor.type_, embed_buf);
-        const dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-        @memcpy(dst[0..cfg.hidden_dim], embed_buf);
-
-        engine.position += 1;
     }
 
     log.info("Generated {d} tokens", .{tokens_generated});
-
     return try output.toOwnedSlice(allocator);
 }
 
@@ -500,13 +1187,9 @@ test "topKSoftmax selects correct top-k with renormalization" {
     var weights: [4]f32 = undefined;
     const logits = [_]f32{ 1.0, 3.0, 2.0, 0.5, 4.0, 1.5, 0.1, 2.5 };
     topKSoftmax(&logits, 3, ids[0..3], weights[0..3]);
-
-    // Top-3 by logit value: index 4 (4.0), index 1 (3.0), index 7 (2.5)
     try std.testing.expectEqual(@as(u32, 4), ids[0]);
     try std.testing.expectEqual(@as(u32, 1), ids[1]);
     try std.testing.expectEqual(@as(u32, 7), ids[2]);
-
-    // Weights should sum to ~1.0
     const wsum = weights[0] + weights[1] + weights[2];
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), wsum, 0.01);
 }
@@ -516,15 +1199,12 @@ test "topKSoftmax with uniform logits returns equal weights" {
     var weights: [3]f32 = undefined;
     const logits = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
     topKSoftmax(&logits, 3, &ids, &weights);
-
-    // Uniform logits → each selected expert gets ~1/3
     try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), weights[0], 0.02);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), weights[1], 0.02);
 }
 
 test "expertSliceBytes Q4_K" {
     const bytes = expertSliceBytes(.q4_k, 1024, 2048);
-    // Q4_K: 256 elems/block, 144 bytes/block → 2048/256 = 8 blocks/row → 1024 * 8 * 144
     try std.testing.expectEqual(@as(u32, 1024 * 8 * 144), bytes);
 }
 
