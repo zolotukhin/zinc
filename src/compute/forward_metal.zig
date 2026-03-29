@@ -112,6 +112,11 @@ const RmsNormPush = extern struct {
     eps: f32, // epsilon
 };
 
+/// Push constants for sigmoid multiply dispatch (matches sigmoid_mul.metal: buffer(0)).
+const SigmoidMulPush = extern struct {
+    n: u32,
+};
+
 /// Push constants for RoPE dispatch (matches rope_fused.metal: buffer(0)).
 const RopePush = extern struct {
     stride: u32,
@@ -119,6 +124,15 @@ const RopePush = extern struct {
     n_heads: u32,
     position: u32,
     freq_base_bits: u32,
+};
+
+/// Push constants for flash attention dispatch (matches flash_attn.metal: buffer(0)).
+const FlashAttnPush = extern struct {
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    seq_len: u32,
+    page_size: u32,
 };
 
 /// Push constants for SSM conv1d + SiLU dispatch (SPIRV-Cross: buffer(0)).
@@ -228,6 +242,7 @@ pub const InferenceEngine = struct {
     // KV cache (per layer)
     kv_k_cache: []MetalBuffer,
     kv_v_cache: []MetalBuffer,
+    page_table_buf: MetalBuffer,
 
     // DMMV compute pipelines (one per quant type)
     dmmv_q4k_pipe: MetalPipeline,
@@ -244,7 +259,9 @@ pub const InferenceEngine = struct {
 
     // Elementwise compute pipelines (for batched GPU dispatch)
     deinterleave_pipe: MetalPipeline,
+    flash_attn_pipe: MetalPipeline,
     rope_pipe: MetalPipeline,
+    sigmoid_mul_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
     swiglu_batched_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
@@ -315,6 +332,7 @@ pub const InferenceEngine = struct {
         const swiglu_size: usize = @max(up_size, @as(usize, conv_channels) * @sizeOf(f32));
         const vocab_size: usize = @as(usize, cfg.vocab_size) * @sizeOf(f32);
         const kv_cache_size: usize = @as(usize, 4096) * kv_dim * @sizeOf(f32);
+        const page_table_size: usize = @as(usize, 4096) * @sizeOf(u32);
         const router_size: usize = @max(@as(usize, cfg.n_experts), @as(usize, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1)) * @sizeOf(f32);
         const expert_ids_size: usize = @max(@as(usize, cfg.n_experts_used) * @sizeOf(u32), 4);
         const expert_inter_batch_size: usize = @max(@as(usize, cfg.n_experts_used) * @as(usize, inter_dim) * @sizeOf(f32), 4);
@@ -375,6 +393,13 @@ pub const InferenceEngine = struct {
             self.kv_k_cache[i] = try metal_buffer.createBuffer(ctx, kv_cache_size);
             self.kv_v_cache[i] = try metal_buffer.createBuffer(ctx, kv_cache_size);
         }
+        self.page_table_buf = try metal_buffer.createBuffer(ctx, page_table_size);
+        {
+            const page_table_ptr: [*]u32 = @ptrCast(@alignCast(self.page_table_buf.cpu_ptr.?));
+            for (0..4096) |i| {
+                page_table_ptr[i] = @intCast(i);
+            }
+        }
 
         // Load DMMV compute pipelines for all quant types
         self.dmmv_q4k_pipe = try loadShaderPipeline(ctx, "dmmv_q4k");
@@ -391,7 +416,9 @@ pub const InferenceEngine = struct {
 
         // Elementwise pipelines for batched GPU dispatch
         self.deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
+        self.flash_attn_pipe = try loadShaderPipeline(ctx, "flash_attn");
         self.rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
+        self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
@@ -656,6 +683,7 @@ pub const InferenceEngine = struct {
         }
         self.allocator.free(self.kv_k_cache);
         self.allocator.free(self.kv_v_cache);
+        metal_buffer.freeBuffer(&self.page_table_buf);
 
         metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
@@ -669,7 +697,9 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_pipe);
         metal_pipeline.freePipeline(&self.deinterleave_pipe);
+        metal_pipeline.freePipeline(&self.flash_attn_pipe);
         metal_pipeline.freePipeline(&self.rope_pipe);
+        metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
@@ -1005,6 +1035,32 @@ fn dispatchDeinterleaveOnCmd(
     cmd.dispatchV2(&engine.deinterleave_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DeinterleavePush), 0);
 }
 
+fn dispatchFlashAttnOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    layer_idx: usize,
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    seq_len: u32,
+) void {
+    const push = FlashAttnPush{
+        .head_dim = head_dim,
+        .n_heads = n_heads,
+        .n_kv_heads = n_kv_heads,
+        .seq_len = seq_len,
+        .page_size = 1,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &engine.page_table_buf,
+        &engine.q_buf,
+        &engine.kv_k_cache[layer_idx],
+        &engine.kv_v_cache[layer_idx],
+        &engine.attn_out_buf,
+    };
+    cmd.dispatchV2(&engine.flash_attn_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
+}
+
 fn dispatchRopeOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -1025,6 +1081,18 @@ fn dispatchRopeOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ input, output };
     cmd.dispatchV2(&engine.rope_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopePush), 0);
+}
+
+fn dispatchSigmoidMulOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    gate: *const MetalBuffer,
+    data: *const MetalBuffer,
+    n: u32,
+) void {
+    const push = SigmoidMulPush{ .n = n };
+    const bufs = [_]*const MetalBuffer{ gate, data, data };
+    cmd.dispatchV2(&engine.sigmoid_mul_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SigmoidMulPush), 0);
 }
 
 fn dispatchFullAttnPrepOnCmd(
@@ -1415,9 +1483,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             try dispatchFullAttnPrepOnCmd(engine, &batch1_cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
             batch1_cmd.commitAndWait();
 
-            // ===== ATTENTION: CPU attention + GPU batch 2 =====
-            const q_ptr: [*]f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-            const gate_ptr: [*]f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+            // ===== ATTENTION: CPU KV-cache write + GPU flash attention =====
             const k_ptr: [*]f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
             const kc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
             const vc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
@@ -1427,15 +1493,14 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 kc_ptr[kv_offset + d] = k_ptr[d];
                 vc_ptr[kv_offset + d] = v_ptr[d];
             }
-            const attn_out_w: [*]f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
-            cpuAttention(q_ptr, kc_ptr, vc_ptr, attn_out_w, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
-            for (0..q_dim) |i| {
-                attn_out_w[i] *= 1.0 / (1.0 + @exp(-gate_ptr[i]));
-            }
 
-            // GPU batch2 for attention: output proj → residual → norm → router
+            // GPU batch2 for attention: flash attn → sigmoid gate → output proj → residual → norm → router
             {
                 var cmd = try metal_command.beginCommand(engine.device.ctx);
+                dispatchFlashAttnOnCmd(engine, &cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
+                cmd.barrier();
+                dispatchSigmoidMulOnCmd(engine, &cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+                cmd.barrier();
                 const o_tensor = lt.attn_output orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, &cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
                 cmd.barrier();
@@ -1878,8 +1943,14 @@ test "batched MoE Metal shaders compile" {
     var deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
     defer metal_pipeline.freePipeline(&deinterleave_pipe);
 
+    var flash_attn_pipe = try loadShaderPipeline(ctx, "flash_attn");
+    defer metal_pipeline.freePipeline(&flash_attn_pipe);
+
     var rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
     defer metal_pipeline.freePipeline(&rope_pipe);
+
+    var sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
+    defer metal_pipeline.freePipeline(&sigmoid_mul_pipe);
 
     var dmmv_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
     defer metal_pipeline.freePipeline(&dmmv_pipe);
@@ -1902,7 +1973,9 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&lmhead_pipe_1024);
 
     try std.testing.expect(deinterleave_pipe.handle != null);
+    try std.testing.expect(flash_attn_pipe.handle != null);
     try std.testing.expect(rope_pipe.handle != null);
+    try std.testing.expect(sigmoid_mul_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
     try std.testing.expect(dmmv_pipe_k2048.handle != null);
     try std.testing.expect(dmmv_moe_pipe_k2048.handle != null);
