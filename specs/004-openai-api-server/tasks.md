@@ -28,8 +28,8 @@
 
 - [X] T004 Implement SSE stream writer — chunked transfer encoding, write `data: {json}\n\n` events, `data: [DONE]\n\n`, detect client disconnect via write failure. File: src/server/sse.zig
 - [X] T005 [P] Implement route dispatcher — match method+path to handler functions. Routes: POST /v1/chat/completions, POST /v1/completions, GET /v1/models, GET /health. Return 404 for unknown routes. File: src/server/routes.zig
-- [ ] T006 [P] Implement chat template application — read `tokenizer.chat_template` from GGUF metadata, apply ChatML-style template to messages array (insert role tags, special tokens). Fallback to default ChatML if template missing. File: src/model/tokenizer.zig
-- [ ] T007 Implement paged KV cache manager — page pool with fixed-size pages (256 tokens), alloc/free per request, free list, exhaustion detection (return error when pool empty). File: src/scheduler/kv_cache.zig
+- [X] T006 [P] Implement chat template application — read `tokenizer.chat_template` from GGUF metadata, apply ChatML-style template to messages array (insert role tags, special tokens). Fallback to default ChatML if template missing. File: src/model/tokenizer.zig
+- [X] T007 Implement paged KV cache manager — page pool with fixed-size pages (256 tokens), alloc/free per request, free list, exhaustion detection (return error when pool empty). File: src/scheduler/kv_cache.zig
 - [ ] T008 Extend Scheduler with server integration — add methods: submitFromHttp (tokenize + allocate KV pages + create request), getSession (by slot_id), iterActiveSessions. Wire GenerationParams from parsed JSON. File: src/scheduler/scheduler.zig
 
 **Checkpoint**: SSE writer works, routes dispatch, chat templates applied, KV pages managed.
@@ -76,8 +76,8 @@
 
 - [X] T019 [US3] Implement POST /v1/completions handler — parse prompt (string), apply same generation logic as chat completions but without chat template. Return text_completion objects. File: src/server/routes.zig
 - [X] T020 [US3] Implement GET /v1/models handler — return list containing the loaded model with id, object, created, owned_by fields. Model name derived from GGUF filename. File: src/server/routes.zig
-- [ ] T021 [US3] Add OpenAI SDK compatibility fields — ensure all response objects include required fields the SDK validates: id (string), object (exact type string), created (unix timestamp), model (string). Verify choices array format matches SDK expectations. File: src/server/routes.zig
-- [ ] T022 [US3] Handle optional parameters gracefully — ignore unknown request fields (forward compatibility). Apply defaults for missing optional fields (temperature=1.0, top_p=1.0, max_tokens=256). Return 400 only for truly invalid values, not missing optional fields. File: src/server/routes.zig
+- [X] T021 [US3] Add OpenAI SDK compatibility fields — ensure all response objects include required fields the SDK validates: id (string), object (exact type string), created (unix timestamp), model (string). Verify choices array format matches SDK expectations. File: src/server/routes.zig
+- [X] T022 [US3] Handle optional parameters gracefully — ignore unknown request fields (forward compatibility). Apply defaults for missing optional fields (temperature=1.0, top_p=1.0, max_tokens=256). Return 400 only for truly invalid values, not missing optional fields. File: src/server/routes.zig
 - [ ] T023 [US3] Implement stop sequence detection — check generated text against stop[] array after each token. When matched, set finish_reason="stop" and halt generation. Handle multi-token stop sequences. File: src/compute/forward.zig
 
 **Checkpoint**: OpenAI Python SDK chat.completions.create works for both streaming and non-streaming.
@@ -91,7 +91,7 @@
 **Independent Test**: `curl http://localhost:8080/health` returns JSON with status, model, active count.
 
 - [X] T024 [US4] Implement GET /health handler — return status ("ok" or "loading"), model name, active_requests count from scheduler, max_parallel, uptime_seconds. Return 503 during model loading. File: src/server/routes.zig
-- [ ] T025 [US4] Add request logging — log each completed request with: timestamp, client IP, endpoint, model, prompt_tokens, completion_tokens, latency_ms, status_code. Use Zig's std.log. File: src/server/routes.zig
+- [X] T025 [US4] Add request logging — log each completed request with: timestamp, client IP, endpoint, model, prompt_tokens, completion_tokens, latency_ms, status_code. Use Zig's std.log. File: src/server/routes.zig
 
 **Checkpoint**: Health endpoint works, request logs appear in stderr.
 
