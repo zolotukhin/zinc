@@ -4,6 +4,7 @@ See [AGENTS.md](AGENTS.md)
 ## Active Technologies
 - Zig 0.14-dev (host), GLSL 4.60 (shaders) compiled to SPIR-V via system glslc (shaderc 2023.8) + Vulkan 1.3 (RADV driver, Mesa 25.0.7), VK_KHR_cooperative_matrix (003-decode-performance)
 - GGUF model files, memory-mapped with DMA to GPU VRAM (003-decode-performance)
+- Zig 0.14-dev + Zig std.net, std.json, existing ZINC inference engine (004-openai-api-server)
 
 ## Recent Changes
 - 003-decode-performance: Added Zig 0.14-dev (host), GLSL 4.60 (shaders) compiled to SPIR-V via system glslc (shaderc 2023.8) + Vulkan 1.3 (RADV driver, Mesa 25.0.7), VK_KHR_cooperative_matrix
