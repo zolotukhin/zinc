@@ -102,7 +102,7 @@ struct _562
     float _m0[1];
 };
 
-kernel void main0(constant _21& _23 [[buffer(0)]], device _105& _107 [[buffer(1)]], device _327& _329 [[buffer(2)]], device void* spvBufferAliasSet0Binding1 [[buffer(3)]], device void* spvBufferAliasSet0Binding4 [[buffer(4)]], device _414& _416 [[buffer(5)]], device _471& _473 [[buffer(6)]], device _562& _564 [[buffer(7)]], uint3 gl_WorkGroupID [[threadgroup_position_in_grid]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+kernel void main0(constant _21& _23 [[buffer(0)]], device _105& _107 [[buffer(1)]], device _327& _329 [[buffer(2)]], device void* spvBufferAliasSet0Binding1 [[buffer(3)]], device void* spvBufferAliasSet0Binding4 [[buffer(4)]], device _414& _416 [[buffer(5)]], device _471& _473 [[buffer(6)]], device _562& _564 [[buffer(7)]], uint3 gl_WorkGroupID [[threadgroup_position_in_grid]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]], uint gl_SubgroupSize [[thread_execution_width]])
 {
     device auto& _349 = *(device _347*)spvBufferAliasSet0Binding1;
     device auto& _389 = *(device _387*)spvBufferAliasSet0Binding4;
@@ -113,6 +113,7 @@ kernel void main0(constant _21& _23 [[buffer(0)]], device _105& _107 [[buffer(1)
     threadgroup spvUnsafeArray<float, 128> _196;
     threadgroup float _409;
     threadgroup float _412;
+    threadgroup float _sg_reduce[4];
     do
     {
         if (gl_WorkGroupID.x >= _23._m1)
@@ -211,6 +212,21 @@ kernel void main0(constant _21& _23 [[buffer(0)]], device _105& _107 [[buffer(1)
             continue;
         }
         float _238 = simd_sum(_590);
+        if (gl_SubgroupSize < 64u)
+        {
+            _sg_reduce[gl_LocalInvocationID.x / gl_SubgroupSize] = _238;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (gl_LocalInvocationID.x == 0u)
+            {
+                uint _n_sg = (64u + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+                float _total = 0.0;
+                for (uint _si = 0u; _si < _n_sg; _si++)
+                    _total += _sg_reduce[_si];
+                _sg_reduce[0] = _total;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            _238 = _sg_reduce[0];
+        }
         float _250 = rsqrt(fast::max(_238, 9.9999999600419720025001879548654e-13)) / sqrt(float(_23._m3));
         for (uint _591 = gl_LocalInvocationID.x; _591 < _212; )
         {
@@ -228,6 +244,21 @@ kernel void main0(constant _21& _23 [[buffer(0)]], device _105& _107 [[buffer(1)
             continue;
         }
         float _298 = simd_sum(_593);
+        if (gl_SubgroupSize < 64u)
+        {
+            _sg_reduce[gl_LocalInvocationID.x / gl_SubgroupSize] = _298;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (gl_LocalInvocationID.x == 0u)
+            {
+                uint _n_sg_k = (64u + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+                float _total_k = 0.0;
+                for (uint _si = 0u; _si < _n_sg_k; _si++)
+                    _total_k += _sg_reduce[_si];
+                _sg_reduce[0] = _total_k;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            _298 = _sg_reduce[0];
+        }
         float _302 = rsqrt(fast::max(_298, 9.9999999600419720025001879548654e-13));
         for (uint _594 = gl_LocalInvocationID.x; _594 < _212; )
         {
