@@ -119,14 +119,8 @@ fn handleChatCompletions(
     const req_id = "chatcmpl-zinc0001"; // TODO: T013 unique IDs
 
     if (parsed.stream) {
-        // Streaming path
+        // Streaming path — per-token SSE delivery
         conn.sendSseStart() catch return;
-
-        // Generate tokens one at a time, streaming each
-        const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator) catch {
-            return; // stream already started, can't send error
-        };
-        defer allocator.free(output_tokens);
 
         // Send first chunk with role
         {
@@ -137,17 +131,34 @@ fn handleChatCompletions(
             conn.writeSseEvent(chunk) catch return;
         }
 
-        // Send each token as a chunk
-        for (output_tokens) |tid| {
-            const token_text = if (tid < tokenizer.vocab.len) tokenizer.vocab[tid] else "<?>";
-            var chunk_buf: [1024]u8 = undefined;
-            // Escape JSON special chars in token text
-            var escaped_buf: [512]u8 = undefined;
-            const escaped = jsonEscape(token_text, &escaped_buf);
-            const chunk = std.fmt.bufPrint(&chunk_buf,
-                \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{"content":"{s}"}},"finish_reason":null}}]}}
-            , .{ req_id, ts, model_name, escaped }) catch continue;
-            conn.writeSseEvent(chunk) catch return;
+        // Prefill prompt tokens
+        var state = forward_mod.DecodeState.init(allocator);
+        defer state.deinit();
+        engine.prefillBatch(&state, prompt_tokens) catch {
+            conn.writeSseDone() catch {};
+            return;
+        };
+
+        // Decode loop: generate and stream one token at a time
+        const eos = tokenizer.eosId();
+        var generated: u32 = 0;
+        if (prompt_tokens.len > 0 and max_tokens > 0) {
+            // First token from prefill logits
+            const first = engine.sampleGreedy();
+            generated = 1;
+            if (first != eos) {
+                streamToken(conn, first, tokenizer, req_id, ts, model_name) catch return;
+            }
+            // Continue decoding
+            var prev_token = first;
+            while (generated < max_tokens and prev_token != eos) {
+                engine.decodeStep(&state, prev_token) catch break;
+                const next = engine.sampleGreedy();
+                generated += 1;
+                prev_token = next;
+                if (next == eos) break;
+                streamToken(conn, next, tokenizer, req_id, ts, model_name) catch return;
+            }
         }
 
         // Final chunk with finish_reason
@@ -360,6 +371,25 @@ fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
         }
     }
     return buf[0..out];
+}
+
+/// Send a single token as an SSE ChatCompletionChunk event.
+fn streamToken(
+    conn: *http.Connection,
+    token_id: u32,
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    req_id: []const u8,
+    ts: i64,
+    model_name: []const u8,
+) !void {
+    const token_text = if (token_id < tokenizer.vocab.len) tokenizer.vocab[token_id] else "<?>";
+    var escaped_buf: [512]u8 = undefined;
+    const escaped = jsonEscape(token_text, &escaped_buf);
+    var chunk_buf: [1024]u8 = undefined;
+    const chunk = std.fmt.bufPrint(&chunk_buf,
+        \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{"content":"{s}"}},"finish_reason":null}}]}}
+    , .{ req_id, ts, model_name, escaped }) catch return error.BufferTooSmall;
+    try conn.writeSseEvent(chunk);
 }
 
 fn modelName(model: *const Model) []const u8 {

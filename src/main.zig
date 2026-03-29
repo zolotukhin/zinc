@@ -412,6 +412,7 @@ pub fn main() !void {
         };
         defer server.deinit();
         log.info("Server listening on 0.0.0.0:{d}", .{config.port});
+        log.info("Press Ctrl+C to stop", .{});
 
         // Accept loop — single-threaded, blocking for now (US2 adds non-blocking)
         while (true) {

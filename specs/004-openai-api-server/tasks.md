@@ -30,7 +30,7 @@
 - [X] T005 [P] Implement route dispatcher — match method+path to handler functions. Routes: POST /v1/chat/completions, POST /v1/completions, GET /v1/models, GET /health. Return 404 for unknown routes. File: src/server/routes.zig
 - [X] T006 [P] Implement chat template application — read `tokenizer.chat_template` from GGUF metadata, apply ChatML-style template to messages array (insert role tags, special tokens). Fallback to default ChatML if template missing. File: src/model/tokenizer.zig
 - [X] T007 Implement paged KV cache manager — page pool with fixed-size pages (256 tokens), alloc/free per request, free list, exhaustion detection (return error when pool empty). File: src/scheduler/kv_cache.zig
-- [ ] T008 Extend Scheduler with server integration — add methods: submitFromHttp (tokenize + allocate KV pages + create request), getSession (by slot_id), iterActiveSessions. Wire GenerationParams from parsed JSON. File: src/scheduler/scheduler.zig
+- [X] T008 Extend Scheduler with server integration — add methods: submitFromHttp (tokenize + allocate KV pages + create request), getSession (by slot_id), iterActiveSessions. Wire GenerationParams from parsed JSON. File: src/scheduler/scheduler.zig
 
 **Checkpoint**: SSE writer works, routes dispatch, chat templates applied, KV pages managed.
 
@@ -45,7 +45,7 @@
 - [X] T009 [US1] Implement POST /v1/chat/completions handler — parse JSON request body (model, messages, stream, max_tokens, temperature, stop), validate required fields, return 400 on errors. Apply chat template to messages, tokenize prompt. File: src/server/routes.zig
 - [X] T010 [US1] Implement streaming response path — for stream:true, create SSE writer, submit request to scheduler, run decode loop sending ChatCompletionChunk events per token, send [DONE] on completion. Include id, object, created, model, choices[0].delta fields. File: src/server/routes.zig
 - [X] T011 [US1] Implement non-streaming response path — for stream:false or omitted, run full generation, build ChatCompletion response with complete message, usage (prompt_tokens, completion_tokens, total_tokens), finish_reason. File: src/server/routes.zig
-- [ ] T012 [US1] Implement single-request decode loop for server — adapt existing generate() to work with scheduler: call decodeStep per token, check shouldStop, write token to SSE stream or accumulate for non-streaming. Release KV pages on completion. File: src/compute/forward.zig
+- [X] T012 [US1] Implement single-request decode loop for server — adapt existing generate() to work with scheduler: call decodeStep per token, check shouldStop, write token to SSE stream or accumulate for non-streaming. Release KV pages on completion. File: src/compute/forward.zig
 - [X] T013 [US1] Generate unique request IDs — format "chatcmpl-{hex}" using timestamp + counter. Include in all response objects. File: src/server/routes.zig
 
 **Checkpoint**: Single streaming chat completion works end-to-end with curl.
@@ -78,7 +78,7 @@
 - [X] T020 [US3] Implement GET /v1/models handler — return list containing the loaded model with id, object, created, owned_by fields. Model name derived from GGUF filename. File: src/server/routes.zig
 - [X] T021 [US3] Add OpenAI SDK compatibility fields — ensure all response objects include required fields the SDK validates: id (string), object (exact type string), created (unix timestamp), model (string). Verify choices array format matches SDK expectations. File: src/server/routes.zig
 - [X] T022 [US3] Handle optional parameters gracefully — ignore unknown request fields (forward compatibility). Apply defaults for missing optional fields (temperature=1.0, top_p=1.0, max_tokens=256). Return 400 only for truly invalid values, not missing optional fields. File: src/server/routes.zig
-- [ ] T023 [US3] Implement stop sequence detection — check generated text against stop[] array after each token. When matched, set finish_reason="stop" and halt generation. Handle multi-token stop sequences. File: src/compute/forward.zig
+- [X] T023 [US3] Implement stop sequence detection — check generated text against stop[] array after each token. When matched, set finish_reason="stop" and halt generation. Handle multi-token stop sequences. File: src/compute/forward.zig
 
 **Checkpoint**: OpenAI Python SDK chat.completions.create works for both streaming and non-streaming.
 

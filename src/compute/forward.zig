@@ -2184,7 +2184,7 @@ pub const InferenceEngine = struct {
 
     /// Process all prompt tokens through the full transformer to populate
     /// KV cache and SSM state. Each token runs through all 40 layers.
-    fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+    pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         if (prompt_tokens.len == 0) return;
 
         // Run each prompt token through the full transformer (same as decodeStep)
