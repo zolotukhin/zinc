@@ -24,12 +24,12 @@ const DmmvPushConstants = extern struct {
 };
 
 /// Push constants for MoE DMMV shaders (must match GLSL layout).
-/// Expert offset is computed on GPU from routing buffer, not passed from CPU.
+/// Batched expert dispatch: workgroup Y dimension selects expert slot.
 const MoeDmmvPushConstants = extern struct {
     M: u32,
     K: u32,
     expert_stride: u32,
-    expert_index: u32,
+    x_expert_stride: u32,
     x_offset: u32,
     y_offset: u32,
 };
@@ -198,7 +198,10 @@ pub const DmmvDispatch = struct {
         };
     }
 
-    /// Record a MoE DMMV dispatch — expert offset computed on GPU from routing buffer.
+    /// Record a batched MoE DMMV dispatch — all experts run in parallel via Y workgroups.
+    /// expert_stride: bytes per expert in stacked weight tensor.
+    /// n_experts_y: number of experts to process (dispatched as Y workgroups).
+    /// x_expert_stride: elements between experts' inputs (0=shared input, K=per-expert).
     pub fn recordMoeDispatch(
         self: *const DmmvDispatch,
         cmd: *const CommandBuffer,
@@ -207,7 +210,8 @@ pub const DmmvDispatch = struct {
         M: u32,
         K: u32,
         expert_stride: u32,
-        expert_index: u32,
+        n_experts_y: u32,
+        x_expert_stride: u32,
         x_offset: u32,
         y_offset: u32,
     ) !void {
@@ -217,7 +221,7 @@ pub const DmmvDispatch = struct {
             .M = M,
             .K = K,
             .expert_stride = expert_stride,
-            .expert_index = expert_index,
+            .x_expert_stride = x_expert_stride,
             .x_offset = x_offset,
             .y_offset = y_offset,
         };
@@ -227,7 +231,7 @@ pub const DmmvDispatch = struct {
             else => (M + 63) / 64,
         };
 
-        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups_x, 1, 1);
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups_x, n_experts_y, 1);
     }
 
     /// Record a decode-time matrix-vector multiply dispatch.

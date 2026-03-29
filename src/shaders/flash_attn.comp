@@ -11,6 +11,7 @@
 //
 // Dispatch: one workgroup per query head (gl_WorkGroupID.x = head index)
 
+#extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_shader_subgroup_extended_types_float16 : enable
 
@@ -40,6 +41,8 @@ shared float s_out[256];  // supports head_dim up to 256
 // Running softmax state
 shared float s_max_old;
 shared float s_sum_old;
+shared float s_reduce[64];
+shared float s_reduce_scalar;
 
 void main() {
     uint head = gl_WorkGroupID.x;   // query head index
@@ -111,9 +114,21 @@ void main() {
             local_max = max(local_max, s_scores[i]);
         }
         float block_max = subgroupMax(local_max);
-
-        // Make block_max available to all threads
-        // On wave64, subgroup covers the entire workgroup, so block_max is uniform.
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) {
+                s_reduce[gl_SubgroupID] = block_max;
+            }
+            barrier();
+            if (tid == 0u) {
+                float merged_max = -1.0e30;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                    merged_max = max(merged_max, s_reduce[sg]);
+                }
+                s_reduce_scalar = merged_max;
+            }
+            barrier();
+            block_max = s_reduce_scalar;
+        }
 
         // New running max across all blocks seen so far
         float new_max = max(s_max_old, block_max);
@@ -126,6 +141,21 @@ void main() {
             local_sum += e;
         }
         float block_sum = subgroupAdd(local_sum);
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) {
+                s_reduce[gl_SubgroupID] = block_sum;
+            }
+            barrier();
+            if (tid == 0u) {
+                float merged_sum = 0.0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                    merged_sum += s_reduce[sg];
+                }
+                s_reduce_scalar = merged_sum;
+            }
+            barrier();
+            block_sum = s_reduce_scalar;
+        }
 
         // --- Phase 4: Rescale previous accumulator and add new contribution ---
         // Previous accum was weighted by sum_old * exp(max_old - max_old) relative

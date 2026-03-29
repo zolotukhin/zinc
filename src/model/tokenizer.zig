@@ -451,6 +451,42 @@ test "Tokenizer findByteToken" {
     try std.testing.expectEqual(@as(u32, 65), tok.findByteToken(65));
 }
 
+test "decodeToken converts GPT-2 leading-space marker back to ASCII space" {
+    const vocab = [_][]const u8{"\xC4\xA0Paris"};
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [32]u8 = undefined;
+    const decoded = tok.decodeToken(0, &buf);
+    try std.testing.expectEqualStrings(" Paris", decoded);
+}
+
+test "decodeToken converts GPT-2 remapped newline back to byte 0x0A" {
+    const vocab = [_][]const u8{"\xC4\x8A"};
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [8]u8 = undefined;
+    const decoded = tok.decodeToken(0, &buf);
+    try std.testing.expectEqualStrings("\n", decoded);
+}
+
 test "applyChatTemplate ChatML format" {
     const tok = Tokenizer{
         .vocab = &.{},
@@ -484,8 +520,8 @@ test "applyChatTemplate with im_start template uses ChatML" {
         .allocator = std.testing.allocator,
     };
     var buf: [1024]u8 = undefined;
-    const roles = [_][]const u8{"system", "user"};
-    const contents = [_][]const u8{"You help.", "Hi"};
+    const roles = [_][]const u8{ "system", "user" };
+    const contents = [_][]const u8{ "You help.", "Hi" };
     const result = try tok.applyChatTemplate(&roles, &contents, &buf);
     // Should have both messages
     try std.testing.expect(std.mem.indexOf(u8, result, "system") != null);

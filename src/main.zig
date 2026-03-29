@@ -3,10 +3,10 @@
 //! This module wires together GPU initialization, model loading, tokenization,
 //! and the single-process decode loop used for prompt-mode execution.
 const std = @import("std");
-const builtin = @import("builtin");
 const gpu = @import("gpu/interface.zig");
+const gguf_mod = @import("model/gguf.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
-const config_mod = @import("model/config.zig");
+const graph_mod = @import("compute/graph.zig");
 // These modules import vulkan/ transitively — only available on Linux until T010-T014 refactor.
 // On macOS they are stubbed out; the GPU abstraction refactor will make them platform-independent.
 const loader_mod = if (gpu.is_vulkan) @import("model/loader.zig") else struct {};
@@ -17,9 +17,12 @@ const forward_mod = if (gpu.is_vulkan) @import("compute/forward.zig") else struc
 const instance_mod = if (gpu.is_vulkan) @import("vulkan/instance.zig") else gpu.backend;
 const gpu_detect = if (gpu.is_vulkan) @import("vulkan/gpu_detect.zig") else struct {};
 const CommandPool = if (gpu.is_vulkan) @import("vulkan/command.zig").CommandPool else struct {
-    pub fn init(_: anytype) !@This() { return .{}; }
+    pub fn init(_: anytype) !@This() {
+        return .{};
+    }
     pub fn deinit(_: *@This()) void {}
 };
+const Graph = graph_mod.Graph;
 
 const log = std.log.scoped(.zinc);
 
@@ -55,6 +58,7 @@ comptime {
     _ = @import("model/gguf.zig");
     _ = @import("model/tokenizer.zig");
     _ = @import("compute/graph.zig");
+    _ = @import("regression_tests.zig");
     _ = @import("server/http.zig");
     _ = @import("server/routes.zig");
     _ = @import("server/session.zig");
@@ -79,6 +83,8 @@ pub const Config = struct {
     prompt: ?[]const u8 = null,
     /// Max tokens to generate.
     max_tokens: u32 = 256,
+    /// Wrap CLI prompt in the model's chat template before tokenization.
+    chat: bool = false,
     kv_quant: u8 = 0, // 0=disabled, 2/3/4=TurboQuant bits
     /// Graph JSON report path.
     graph_report_path: ?[]const u8 = null,
@@ -88,6 +94,16 @@ pub const Config = struct {
     profile: bool = false,
     /// Print usage and exit.
     show_help: bool = false,
+};
+
+const PreparedPrompt = struct {
+    text: []const u8,
+    owned_buf: ?[]u8 = null,
+
+    fn deinit(self: *PreparedPrompt, allocator: std.mem.Allocator) void {
+        if (self.owned_buf) |buf| allocator.free(buf);
+        self.* = undefined;
+    }
 };
 
 const banner =
@@ -100,8 +116,9 @@ const banner =
     \\  -c, --context <size>     Context length (default: 4096)
     \\  --parallel <n>           Max concurrent requests (default: 4)
     \\  --prompt <text>          Single prompt (CLI mode, no server)
+    \\  --chat                   Apply the model chat template to --prompt
     \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
-    \\  --graph-report <path>    Write decode-graph JSON report from GGUF metadata
+    \\  --graph-report <path>    Write decode-graph analysis JSON report
     \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
     \\  --profile                Enable per-dispatch GPU timing profiling
     \\  -h, --help               Show this help
@@ -146,6 +163,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.prompt = args[i];
+        } else if (std.mem.eql(u8, arg, "--chat")) {
+            config.chat = true;
         } else if (std.mem.eql(u8, arg, "--kv-quant")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -175,6 +194,32 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
     return config;
 }
 
+fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8, chat: bool, allocator: std.mem.Allocator) !PreparedPrompt {
+    if (!chat) {
+        return .{ .text = prompt };
+    }
+
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{prompt};
+    const chat_capacity = prompt.len + 256;
+    const chat_buf = try allocator.alloc(u8, chat_capacity);
+    errdefer allocator.free(chat_buf);
+
+    const formatted = try tokenizer.applyChatTemplate(&roles, &contents, chat_buf);
+    return .{
+        .text = formatted,
+        .owned_buf = chat_buf,
+    };
+}
+
+fn trimCliOutputText(text: []const u8, chat: bool) []const u8 {
+    if (!chat) return text;
+    if (std.mem.indexOf(u8, text, "<|im_end|>")) |stop_pos| {
+        return text[0..stop_pos];
+    }
+    return text;
+}
+
 /// Build the static decode graph from GGUF metadata and write debugging artifacts.
 /// Only available on Vulkan backend (loader.zig depends on Vulkan until T010-T014 refactor).
 const exportDecodeGraphArtifacts = if (gpu.is_vulkan) exportDecodeGraphArtifactsImpl else (struct {
@@ -190,9 +235,37 @@ fn exportDecodeGraphArtifactsImpl(
     allocator: std.mem.Allocator,
 ) !void {
     const model_config = try loader_mod.inspectConfig(model_path, allocator);
-    var decode_graph = try architecture_mod.buildDecodeGraph(&model_config, allocator);
-    defer decode_graph.deinit();
+    const file = try std.fs.cwd().openFile(model_path, .{});
+    defer {
+        var close_file = file;
+        close_file.close();
+    }
 
+    const stat = try file.stat();
+    const mmap_data = try std.posix.mmap(
+        null,
+        stat.size,
+        std.posix.PROT.READ,
+        .{ .TYPE = .PRIVATE },
+        file.handle,
+        0,
+    );
+    defer std.posix.munmap(mmap_data);
+
+    var gguf_file = try gguf_mod.parse(mmap_data, allocator);
+    defer gguf_file.deinit();
+
+    var decode_graph = try architecture_mod.buildDecodeGraphDetailed(&model_config, allocator, &gguf_file);
+    defer decode_graph.deinit();
+    try writeDecodeGraphArtifacts(&decode_graph, report_path, dot_path, allocator);
+}
+
+fn writeDecodeGraphArtifacts(
+    decode_graph: *const Graph,
+    report_path: ?[]const u8,
+    dot_path: ?[]const u8,
+    allocator: std.mem.Allocator,
+) !void {
     if (report_path) |path| {
         const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
         defer {
@@ -240,6 +313,21 @@ fn exportDecodeGraphArtifactsImpl(
     for (analysis.op_counts[0..top_n]) |entry| {
         log.info("  op {s}: {d}", .{ @tagName(entry.op), entry.count });
     }
+
+    const hotspot_n = @min(analysis.hotspots.len, 5);
+    for (analysis.hotspots[0..hotspot_n]) |entry| {
+        const bw_time = if (entry.estimated_bandwidth_time_us) |us|
+            us
+        else
+            0.0;
+        log.info("  hot {s}: {d:.1}% | {d:.2} MB | {d:.2} us bw-floor | {s}", .{
+            entry.name,
+            entry.estimated_share_pct,
+            @as(f64, @floatFromInt(entry.total_bytes)) / 1_000_000.0,
+            bw_time,
+            @tagName(entry.bottleneck),
+        });
+    }
 }
 
 /// Start the ZINC process in prompt mode or server mode.
@@ -271,13 +359,13 @@ pub fn main() !void {
     const model_path = config.model_path.?;
     log.info("Model: {s}", .{model_path});
 
-    if (config.graph_report_path != null or config.graph_dot_path != null) {
+    const wants_graph_artifacts = config.graph_report_path != null or config.graph_dot_path != null;
+    if (wants_graph_artifacts and config.prompt == null) {
         exportDecodeGraphArtifacts(model_path, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
             log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
-
-        if (config.prompt == null) return;
+        return;
     }
 
     // Initialize GPU backend
@@ -392,6 +480,13 @@ pub fn main() !void {
     };
     defer engine.deinit();
 
+    if (wants_graph_artifacts) {
+        writeDecodeGraphArtifacts(&engine.decode_graph, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
+            log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+    }
+
     // Enable profiling if requested
     if (config.profile) {
         engine.enableProfiling() catch |err| {
@@ -409,8 +504,14 @@ pub fn main() !void {
         };
         defer tokenizer.deinit();
 
+        var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, config.chat, allocator);
+        defer prepared_prompt.deinit(allocator);
+        if (config.chat) {
+            log.info("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
+        }
+
         // Tokenize prompt
-        const raw_tokens = try tokenizer.encode(prompt);
+        const raw_tokens = try tokenizer.encode(prepared_prompt.text);
         defer allocator.free(raw_tokens);
 
         // Prepend BOS token
@@ -419,7 +520,7 @@ pub fn main() !void {
         @memcpy(prompt_tokens[1..], raw_tokens);
         defer allocator.free(prompt_tokens);
 
-        log.info("Prompt tokens ({d}): {any}", .{prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)]});
+        log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
         // Decode prompt tokens for verification
         {
             var pt_buf: std.ArrayList(u8) = .{};
@@ -475,8 +576,12 @@ pub fn main() !void {
                     // Bubble sort to maintain top 5
                     var j: usize = 4;
                     while (j > 0 and top_vals[j] > top_vals[j - 1]) : (j -= 1) {
-                        const tv = top_vals[j]; top_vals[j] = top_vals[j-1]; top_vals[j-1] = tv;
-                        const ti = top_ids[j]; top_ids[j] = top_ids[j-1]; top_ids[j-1] = ti;
+                        const tv = top_vals[j];
+                        top_vals[j] = top_vals[j - 1];
+                        top_vals[j - 1] = tv;
+                        const ti = top_ids[j];
+                        top_ids[j] = top_ids[j - 1];
+                        top_ids[j - 1] = ti;
                     }
                 }
             }
@@ -505,13 +610,16 @@ pub fn main() !void {
             var text_buf: std.ArrayList(u8) = .{};
             defer text_buf.deinit(allocator);
             for (output_tokens) |tid| {
-                if (tid < tokenizer.vocab.len) {
-                    try text_buf.appendSlice(allocator, tokenizer.vocab[tid]);
+                var dec_buf: [256]u8 = undefined;
+                const decoded = tokenizer.decodeToken(tid, &dec_buf);
+                if (decoded.len > 0) {
+                    try text_buf.appendSlice(allocator, decoded);
                 } else {
                     try text_buf.appendSlice(allocator, "<?>");
                 }
             }
-            log.info("Output text: {s}", .{text_buf.items});
+            const output_text = trimCliOutputText(text_buf.items, config.chat);
+            log.info("Output text: {s}", .{output_text});
         }
     } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
@@ -579,14 +687,15 @@ test "parseArgs: defaults" {
     try std.testing.expectEqual(@as(u8, 0), config.kv_quant);
     try std.testing.expect(config.model_path == null);
     try std.testing.expect(config.prompt == null);
+    try std.testing.expect(!config.chat);
 }
 
 test "parseArgs: full args" {
     const args = [_][:0]const u8{
-        "zinc",          "-m",       "model.gguf", "-p",     "9090",
-        "-d",            "1",        "-c",         "8192",   "--parallel",
-        "8",             "--prompt",  "hello",      "--kv-quant", "3",
-        "--graph-report", "graph.json", "--graph-dot", "graph.dot",
+        "zinc", "-m",             "model.gguf", "-p",          "9090",
+        "-d",   "1",              "-c",         "8192",        "--parallel",
+        "8",    "--prompt",       "hello",      "--chat",      "--kv-quant",
+        "3",    "--graph-report", "graph.json", "--graph-dot", "graph.dot",
     };
     const config = try parseArgs(&args);
     try std.testing.expectEqualStrings("model.gguf", config.model_path.?);
@@ -595,6 +704,7 @@ test "parseArgs: full args" {
     try std.testing.expectEqual(@as(u32, 8192), config.context_length);
     try std.testing.expectEqual(@as(u32, 8), config.max_parallel);
     try std.testing.expectEqualStrings("hello", config.prompt.?);
+    try std.testing.expect(config.chat);
     try std.testing.expectEqual(@as(u8, 3), config.kv_quant);
     try std.testing.expectEqualStrings("graph.json", config.graph_report_path.?);
     try std.testing.expectEqualStrings("graph.dot", config.graph_dot_path.?);
@@ -627,4 +737,54 @@ test "parseArgs: profile defaults to false" {
     const args = [_][:0]const u8{ "zinc", "--prompt", "hi" };
     const config = try parseArgs(&args);
     try std.testing.expect(!config.profile);
+}
+
+test "parseArgs: chat flag" {
+    const args = [_][:0]const u8{ "zinc", "--prompt", "hi", "--chat" };
+    const config = try parseArgs(&args);
+    try std.testing.expect(config.chat);
+    try std.testing.expectEqualStrings("hi", config.prompt.?);
+}
+
+fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {
+    return .{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .chat_template = chat_template,
+        .allocator = std.testing.allocator,
+    };
+}
+
+test "prepareCliPrompt leaves non-chat prompts unowned" {
+    var tok = makeTestTokenizer(null);
+    defer tok.token_to_id.deinit();
+
+    var prepared = try prepareCliPrompt(&tok, "hello", false, std.testing.allocator);
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("hello", prepared.text);
+    try std.testing.expect(prepared.owned_buf == null);
+}
+
+test "prepareCliPrompt returns full owned chat buffer" {
+    var tok = makeTestTokenizer(null);
+    defer tok.token_to_id.deinit();
+
+    var prepared = try prepareCliPrompt(&tok, "Hello", true, std.testing.allocator);
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expect(prepared.owned_buf != null);
+    try std.testing.expect(prepared.text.ptr == prepared.owned_buf.?.ptr);
+    try std.testing.expect(prepared.owned_buf.?.len >= prepared.text.len);
+    try std.testing.expectEqualStrings("<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n", prepared.text);
+}
+
+test "trimCliOutputText strips chat terminator only in chat mode" {
+    try std.testing.expectEqualStrings("Paris", trimCliOutputText("Paris<|im_end|>", true));
+    try std.testing.expectEqualStrings("Paris<|im_end|>", trimCliOutputText("Paris<|im_end|>", false));
+    try std.testing.expectEqualStrings("Paris", trimCliOutputText("Paris", true));
 }

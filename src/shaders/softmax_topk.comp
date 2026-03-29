@@ -8,7 +8,8 @@
 // RADV compatibility: uses only subgroupMax/subgroupAdd for reductions.
 // Top-k selection uses shared memory (no subgroupBallot/subgroupBroadcast).
 
-#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
 
@@ -29,6 +30,7 @@ layout(push_constant) uniform PushConstants {
 shared float s_probs[256];
 shared float s_max_val;
 shared float s_sum;
+shared float s_reduce_val[64];
 
 // Per-thread local max for top-k reduction
 shared float s_local_val[64];
@@ -45,7 +47,21 @@ void main() {
         local_max = max(local_max, v);
     }
     float wave_max = subgroupMax(local_max);
-    if (tid == 0) s_max_val = wave_max;
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            s_reduce_val[gl_SubgroupID] = wave_max;
+        }
+        barrier();
+        if (tid == 0u) {
+            float merged_max = -1.0 / 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                merged_max = max(merged_max, s_reduce_val[sg]);
+            }
+            s_max_val = merged_max;
+        }
+    } else if (tid == 0u) {
+        s_max_val = wave_max;
+    }
     barrier();
 
     float gmax = s_max_val;
@@ -58,7 +74,21 @@ void main() {
         local_sum += e;
     }
     float wave_sum = subgroupAdd(local_sum);
-    if (tid == 0) s_sum = wave_sum;
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            s_reduce_val[gl_SubgroupID] = wave_sum;
+        }
+        barrier();
+        if (tid == 0u) {
+            float merged_sum = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                merged_sum += s_reduce_val[sg];
+            }
+            s_sum = merged_sum;
+        }
+    } else if (tid == 0u) {
+        s_sum = wave_sum;
+    }
     barrier();
 
     float inv_sum = 1.0 / s_sum;

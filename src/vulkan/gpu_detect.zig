@@ -12,6 +12,12 @@ const log = std.log.scoped(.gpu_detect);
 pub const GpuVendor = enum {
     amd_rdna3,
     amd_rdna4,
+    /// AMD RDNA4 iGPU in a unified-memory APU (e.g. Strix Halo / gfx1151).
+    /// Same ISA and cooperative-matrix support as discrete RDNA4, but bandwidth
+    /// is constrained by the shared LPDDR5X system-memory bus (~256 GB/s on
+    /// 128 GB configs) rather than dedicated GDDR6.  Tuning defaults differ
+    /// from amd_rdna4 accordingly.
+    amd_rdna4_apu,
     amd_other,
     nvidia,
     intel_arc,
@@ -120,11 +126,27 @@ pub fn detect(instance: *const Instance) GpuConfig {
 
         switch (config.vendor) {
             .amd_rdna4 => {
-                // RDNA4: 32KB L1/CU, 6MB L2, 64 CUs (9070 XT), 576 GB/s
+                // Discrete RDNA4 (Navi 48/44): RX 9070 XT / R9700
+                // 32KB L1/CU, 6MB L2, up to 64 CUs, 576-640 GB/s GDDR6
                 config.l1_cache_kb = 32;
                 config.l2_cache_mb = 6;
                 config.bandwidth_gbps = 576;
                 config.compute_units = 64;
+                config.coopmat_support = true;
+                config.flash_attn_block_size = 256;
+                config.matmul_tile_m = 16;
+                config.matmul_tile_n = 16;
+            },
+            .amd_rdna4_apu => {
+                // RDNA4 iGPU in unified-memory APU (gfx1151 / Strix Halo)
+                // Same ISA and CoopMat support as discrete RDNA4, but memory
+                // bandwidth is limited by the shared LPDDR5X-8000/8533 bus.
+                // Radeon 8060S (32 CUs, 256-bit bus): ~256 GB/s peak.
+                // Higher-end Strix Halo SKUs use the same gfx1151 target.
+                config.l1_cache_kb = 32;
+                config.l2_cache_mb = 4;
+                config.bandwidth_gbps = 256; // shared LPDDR5X, not GDDR6
+                config.compute_units = 32;
                 config.coopmat_support = true;
                 config.flash_attn_block_size = 256;
                 config.matmul_tile_m = 16;
@@ -171,7 +193,18 @@ fn classifyAmd(device_id: u32, name: []const u8) GpuVendor {
     // Device IDs: RDNA4 starts at 0x15xx range
     _ = device_id;
 
-    // Heuristic: check for RDNA4 keywords in device name
+    // RDNA4 iGPU: Strix Halo APU (gfx1151)
+    // Covers Radeon 8060S / 8050S and any other Strix Halo iGPU variant.
+    // Must be checked before the discrete RDNA4 branch because the device
+    // name contains neither "9070" nor "R9700".
+    if (containsIgnoreCase(name, "gfx1151") or
+        containsIgnoreCase(name, "8060") or
+        containsIgnoreCase(name, "8050"))
+    {
+        return .amd_rdna4_apu;
+    }
+
+    // Discrete RDNA4: Navi 48 (gfx1200 / RX 9070) and Navi 44 (gfx1201 / RX 9060 / R9700)
     if (containsIgnoreCase(name, "gfx1200") or
         containsIgnoreCase(name, "gfx1201") or
         containsIgnoreCase(name, "9070") or
@@ -217,6 +250,25 @@ test "containsIgnoreCase" {
     try std.testing.expect(containsIgnoreCase("AMD Radeon RX 9070 XT", "9070"));
     try std.testing.expect(containsIgnoreCase("RADV GFX1201", "gfx1201"));
     try std.testing.expect(!containsIgnoreCase("NVIDIA RTX 4090", "9070"));
+}
+
+test "classifyAmd — discrete RDNA4" {
+    try std.testing.expectEqual(GpuVendor.amd_rdna4, classifyAmd(0x7480, "AMD Radeon RX 9070 XT (RADV GFX1200)"));
+    try std.testing.expectEqual(GpuVendor.amd_rdna4, classifyAmd(0x7481, "Radeon RX 9060 XT (RADV GFX1201)"));
+    try std.testing.expectEqual(GpuVendor.amd_rdna4, classifyAmd(0x7461, "Radeon AI PRO R9700 (RADV GFX1201)"));
+}
+
+test "classifyAmd — Strix Halo RDNA4 iGPU" {
+    // Real RADV device name reported on a Minisforum MS-S1 / AMD Ryzen AI MAX+ 395
+    try std.testing.expectEqual(GpuVendor.amd_rdna4_apu, classifyAmd(0x1586, "Radeon 8060S Graphics (RADV GFX1151)"));
+    try std.testing.expectEqual(GpuVendor.amd_rdna4_apu, classifyAmd(0x1585, "Radeon 8050S Graphics (RADV GFX1151)"));
+    // Ensure iGPU is NOT mis-classified as discrete RDNA4
+    const vendor = classifyAmd(0x1586, "Radeon 8060S Graphics (RADV GFX1151)");
+    try std.testing.expect(vendor != .amd_rdna4);
+}
+
+test "classifyAmd — RDNA3" {
+    try std.testing.expectEqual(GpuVendor.amd_rdna3, classifyAmd(0x744C, "AMD Radeon RX 7900 XTX (RADV GFX1100)"));
 }
 
 test "GpuConfig name" {

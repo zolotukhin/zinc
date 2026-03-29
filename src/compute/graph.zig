@@ -6,6 +6,29 @@ const std = @import("std");
 
 const log = std.log.scoped(.graph);
 
+pub const ExecDomain = enum {
+    gpu_compute,
+    gpu_transfer,
+    cpu_host,
+};
+
+pub const BottleneckKind = enum {
+    memory_bandwidth,
+    occupancy,
+    launch_latency,
+    host_sync,
+    transfer,
+    compute,
+    unknown,
+};
+
+pub const HardwareInfo = struct {
+    bandwidth_gbps: u32 = 0,
+    compute_units: u32 = 0,
+    wave_size: u32 = 64,
+    preferred_workgroup_size: u32 = 64,
+};
+
 /// Operation types that a compute graph node can represent.
 ///
 /// Each variant maps to one GPU shader dispatch or fused kernel invocation
@@ -70,6 +93,10 @@ pub const Node = struct {
     op: OpType,
     /// Human-readable label used in logs and diagnostic output.
     name: []const u8,
+    /// Decode layer index when the node is layer-local.
+    layer_index: ?u32,
+    /// Where the work executes.
+    domain: ExecDomain,
 
     /// Buffer table indices consumed by the shader (up to 4 input buffers).
     inputs: [4]?u32,
@@ -84,6 +111,20 @@ pub const Node = struct {
     push_constants: [64]u8,
     /// Number of bytes actually used in `push_constants`.
     push_constant_size: u8,
+    /// Threads launched per workgroup for occupancy estimates.
+    threads_per_workgroup: u32,
+    /// Estimated activation reads per dispatch.
+    read_bytes: u64,
+    /// Estimated writes per dispatch.
+    write_bytes: u64,
+    /// Estimated weight / tensor payload bytes streamed by the op.
+    weight_bytes: u64,
+    /// Approximate floating-point work.
+    flops: u64,
+    /// True when this node forces host-visible synchronization or readback.
+    requires_host_sync: bool,
+    /// Optional static note for diagnostics.
+    note: ?[]const u8,
 
     /// Index into the pipeline table, or null when not yet assigned.
     pipeline_index: ?u32,
@@ -139,7 +180,36 @@ pub const NodeAnalysis = struct {
     /// True if nothing depends on this.
     is_leaf: bool,
     is_on_critical_path: bool,
+    layer_index: ?u32,
+    domain: ExecDomain,
     workgroups: [3]u32,
+    threads_per_workgroup: u32,
+    total_workgroups: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    weight_bytes: u64,
+    total_bytes: u64,
+    flops: u64,
+    arithmetic_intensity: f64,
+    estimated_bandwidth_time_us: ?f64,
+    bandwidth_ceiling_pct: ?f64,
+    bottleneck: BottleneckKind,
+    requires_host_sync: bool,
+    bottleneck_reason: []const u8,
+    note: ?[]const u8,
+};
+
+pub const Hotspot = struct {
+    id: u32,
+    name: []const u8,
+    op: OpType,
+    layer_index: ?u32,
+    estimated_share_pct: f64,
+    estimated_bandwidth_time_us: ?f64,
+    total_bytes: u64,
+    flops: u64,
+    bottleneck: BottleneckKind,
+    bottleneck_reason: []const u8,
 };
 
 /// Computed summary of the graph structure used by visualization and debugging tools.
@@ -155,9 +225,17 @@ pub const GraphAnalysis = struct {
     critical_path_node_count: u32,
     critical_path_edge_count: u32,
     max_parallel_width: u32,
+    assumed_decode_seq_len: u32,
+    hardware: HardwareInfo,
+    total_read_bytes: u64,
+    total_write_bytes: u64,
+    total_weight_bytes: u64,
+    total_bytes: u64,
+    total_flops: u64,
     depth_widths: []u32,
     op_counts: []OpCount,
     critical_path: []CriticalPathNode,
+    hotspots: []Hotspot,
     /// Graph nodes.
     nodes: []NodeAnalysis,
     edges: []Edge,
@@ -170,11 +248,93 @@ pub const GraphAnalysis = struct {
         self.allocator.free(self.depth_widths);
         self.allocator.free(self.op_counts);
         self.allocator.free(self.critical_path);
+        self.allocator.free(self.hotspots);
         self.allocator.free(self.nodes);
         self.allocator.free(self.edges);
         self.* = undefined;
     }
 };
+
+fn totalWorkgroups(workgroups: [3]u32) u64 {
+    return @as(u64, workgroups[0]) * @as(u64, workgroups[1]) * @as(u64, workgroups[2]);
+}
+
+fn totalBytes(node: *const Node) u64 {
+    return node.read_bytes + node.write_bytes + node.weight_bytes;
+}
+
+fn arithmeticIntensity(node: *const Node) f64 {
+    const bytes = totalBytes(node);
+    if (bytes == 0) return 0.0;
+    return @as(f64, @floatFromInt(node.flops)) / @as(f64, @floatFromInt(bytes));
+}
+
+fn estimateBandwidthTimeUs(bytes: u64, bandwidth_gbps: u32) ?f64 {
+    if (bytes == 0 or bandwidth_gbps == 0) return null;
+    const bytes_per_sec = @as(f64, @floatFromInt(bandwidth_gbps)) * 1_000_000_000.0;
+    return @as(f64, @floatFromInt(bytes)) / bytes_per_sec * 1_000_000.0;
+}
+
+fn estimateBandwidthCeilingPct(node: *const Node, hardware: HardwareInfo) ?f64 {
+    if (node.domain != .gpu_compute or hardware.compute_units == 0 or hardware.wave_size == 0) return null;
+
+    const total_wgs = totalWorkgroups(node.workgroup_count);
+    if (total_wgs == 0) return 0.0;
+
+    const waves_per_workgroup = @max(@as(u64, 1), std.math.divCeil(u64, node.threads_per_workgroup, hardware.wave_size) catch 1);
+    const total_waves = total_wgs * waves_per_workgroup;
+    const target_waves = @as(f64, @floatFromInt(hardware.compute_units)) * 4.0;
+    if (target_waves <= 0.0) return null;
+    return @min(100.0, @as(f64, @floatFromInt(total_waves)) / target_waves * 100.0);
+}
+
+fn classifyNode(node: *const Node, hardware: HardwareInfo) struct { kind: BottleneckKind, reason: []const u8 } {
+    const wg_total = totalWorkgroups(node.workgroup_count);
+    const bytes = totalBytes(node);
+    const intensity = arithmeticIntensity(node);
+    const ceiling = estimateBandwidthCeilingPct(node, hardware);
+
+    if (node.requires_host_sync or node.domain == .cpu_host) {
+        return .{
+            .kind = .host_sync,
+            .reason = "CPU-visible work or synchronization breaks queue overlap.",
+        };
+    }
+    if (node.domain == .gpu_transfer) {
+        return .{
+            .kind = .transfer,
+            .reason = "Copy/readback traffic moves bytes but does not saturate compute units.",
+        };
+    }
+    if (ceiling != null and ceiling.? < 35.0) {
+        return .{
+            .kind = .occupancy,
+            .reason = "Too few waves/workgroups to keep most CUs busy.",
+        };
+    }
+    if (wg_total <= 8 or (bytes <= 256 * 1024 and wg_total <= 32)) {
+        return .{
+            .kind = .launch_latency,
+            .reason = "Dispatch is too small to ramp memory bandwidth to peak.",
+        };
+    }
+    if (intensity < 2.0) {
+        return .{
+            .kind = .memory_bandwidth,
+            .reason = "Low arithmetic intensity means memory traffic dominates runtime.",
+        };
+    }
+    if (intensity >= 8.0) {
+        return .{
+            .kind = .compute,
+            .reason = "Higher arithmetic intensity may shift the bottleneck toward ALU/reduction work.",
+        };
+    }
+    return .{
+        .kind = .unknown,
+        .reason = "Mixed characteristics; inspect bytes, workgroups, and dependencies together.",
+    };
+}
 
 /// Static compute graph for a transformer layer or full decode pass.
 pub const Graph = struct {
@@ -184,6 +344,10 @@ pub const Graph = struct {
     allocator: std.mem.Allocator,
     /// Name identifier.
     name: []const u8,
+    /// Sequence length assumed by decode-time cost estimates.
+    assumed_decode_seq_len: u32 = 0,
+    /// Optional hardware context used for utilization heuristics.
+    hardware: HardwareInfo = .{},
 
     /// Initialize an empty graph with a human-readable name.
     /// @param allocator Allocator used for node storage.
@@ -199,6 +363,7 @@ pub const Graph = struct {
     /// Release all graph nodes owned by the graph.
     /// @param self Graph to tear down in place.
     pub fn deinit(self: *Graph) void {
+        for (self.nodes.items) |node| self.allocator.free(node.name);
         self.nodes.deinit(self.allocator);
         self.* = undefined;
     }
@@ -211,16 +376,26 @@ pub const Graph = struct {
     /// @note IDs are stable for the lifetime of the graph and match insertion order.
     pub fn addNode(self: *Graph, op: OpType, name: []const u8) !u32 {
         const id: u32 = @intCast(self.nodes.items.len);
+        const owned_name = try self.allocator.dupe(u8, name);
         try self.nodes.append(self.allocator, .{
             .id = id,
             .op = op,
-            .name = name,
+            .name = owned_name,
+            .layer_index = null,
+            .domain = .gpu_compute,
             .inputs = .{ null, null, null, null },
             .output = null,
             .n_inputs = 0,
             .workgroup_count = .{ 1, 1, 1 },
             .push_constants = undefined,
             .push_constant_size = 0,
+            .threads_per_workgroup = 64,
+            .read_bytes = 0,
+            .write_bytes = 0,
+            .weight_bytes = 0,
+            .flops = 0,
+            .requires_host_sync = false,
+            .note = null,
             .pipeline_index = null,
             .depends_on = .{ null, null, null, null, null, null, null, null },
             .n_deps = 0,
@@ -257,6 +432,42 @@ pub const Graph = struct {
     /// @param z Workgroup count in the Z dimension.
     pub fn setWorkgroups(self: *Graph, node_id: u32, x: u32, y: u32, z: u32) void {
         self.nodes.items[node_id].workgroup_count = .{ x, y, z };
+    }
+
+    pub fn setLayerIndex(self: *Graph, node_id: u32, layer_index: ?u32) void {
+        self.nodes.items[node_id].layer_index = layer_index;
+    }
+
+    pub fn setExecDomain(self: *Graph, node_id: u32, domain: ExecDomain) void {
+        self.nodes.items[node_id].domain = domain;
+    }
+
+    pub fn setThreadsPerWorkgroup(self: *Graph, node_id: u32, threads_per_workgroup: u32) void {
+        self.nodes.items[node_id].threads_per_workgroup = threads_per_workgroup;
+    }
+
+    pub fn setCostEstimate(self: *Graph, node_id: u32, read_bytes: u64, write_bytes: u64, weight_bytes: u64, flops: u64) void {
+        var node = &self.nodes.items[node_id];
+        node.read_bytes = read_bytes;
+        node.write_bytes = write_bytes;
+        node.weight_bytes = weight_bytes;
+        node.flops = flops;
+    }
+
+    pub fn setHostSync(self: *Graph, node_id: u32, requires_host_sync: bool) void {
+        self.nodes.items[node_id].requires_host_sync = requires_host_sync;
+    }
+
+    pub fn setNote(self: *Graph, node_id: u32, note: ?[]const u8) void {
+        self.nodes.items[node_id].note = note;
+    }
+
+    pub fn setAssumedDecodeSeqLen(self: *Graph, assumed_decode_seq_len: u32) void {
+        self.assumed_decode_seq_len = assumed_decode_seq_len;
+    }
+
+    pub fn setHardwareContext(self: *Graph, hardware: HardwareInfo) void {
+        self.hardware = hardware;
     }
 
     /// Declare that one node must execute after another.
@@ -351,9 +562,17 @@ pub const Graph = struct {
                 .critical_path_node_count = 0,
                 .critical_path_edge_count = 0,
                 .max_parallel_width = 0,
+                .assumed_decode_seq_len = self.assumed_decode_seq_len,
+                .hardware = self.hardware,
+                .total_read_bytes = 0,
+                .total_write_bytes = 0,
+                .total_weight_bytes = 0,
+                .total_bytes = 0,
+                .total_flops = 0,
                 .depth_widths = try allocator.alloc(u32, 0),
                 .op_counts = try allocator.alloc(OpCount, 0),
                 .critical_path = try allocator.alloc(CriticalPathNode, 0),
+                .hotspots = try allocator.alloc(Hotspot, 0),
                 .nodes = try allocator.alloc(NodeAnalysis, 0),
                 .edges = try allocator.alloc(Edge, 0),
                 .allocator = allocator,
@@ -487,7 +706,23 @@ pub const Graph = struct {
 
         var nodes = try allocator.alloc(NodeAnalysis, n);
         errdefer allocator.free(nodes);
+        var total_read_bytes_: u64 = 0;
+        var total_write_bytes_: u64 = 0;
+        var total_weight_bytes_: u64 = 0;
+        var total_flops_: u64 = 0;
         for (self.nodes.items, 0..) |node, idx| {
+            const node_total_bytes = totalBytes(&node);
+            const node_total_workgroups = totalWorkgroups(node.workgroup_count);
+            const node_intensity = arithmeticIntensity(&node);
+            const bw_time_us = estimateBandwidthTimeUs(node_total_bytes, self.hardware.bandwidth_gbps);
+            const bw_ceiling_pct = estimateBandwidthCeilingPct(&node, self.hardware);
+            const bottleneck = classifyNode(&node, self.hardware);
+
+            total_read_bytes_ += node.read_bytes;
+            total_write_bytes_ += node.write_bytes;
+            total_weight_bytes_ += node.weight_bytes;
+            total_flops_ += node.flops;
+
             nodes[idx] = .{
                 .id = node.id,
                 .name = node.name,
@@ -498,7 +733,23 @@ pub const Graph = struct {
                 .is_root = node.n_deps == 0,
                 .is_leaf = dependent_counts[idx] == 0,
                 .is_on_critical_path = critical_mask[idx],
+                .layer_index = node.layer_index,
+                .domain = node.domain,
                 .workgroups = node.workgroup_count,
+                .threads_per_workgroup = node.threads_per_workgroup,
+                .total_workgroups = node_total_workgroups,
+                .read_bytes = node.read_bytes,
+                .write_bytes = node.write_bytes,
+                .weight_bytes = node.weight_bytes,
+                .total_bytes = node_total_bytes,
+                .flops = node.flops,
+                .arithmetic_intensity = node_intensity,
+                .estimated_bandwidth_time_us = bw_time_us,
+                .bandwidth_ceiling_pct = bw_ceiling_pct,
+                .bottleneck = bottleneck.kind,
+                .requires_host_sync = node.requires_host_sync,
+                .bottleneck_reason = bottleneck.reason,
+                .note = node.note,
             };
         }
 
@@ -517,6 +768,66 @@ pub const Graph = struct {
             }
         }
 
+        const total_bytes_ = total_read_bytes_ + total_write_bytes_ + total_weight_bytes_;
+        const hotspot_count = @min(n, 12);
+        var hotspot_indices = try allocator.alloc(usize, n);
+        defer allocator.free(hotspot_indices);
+        for (0..n) |idx| hotspot_indices[idx] = idx;
+
+        const has_hw_score = self.hardware.bandwidth_gbps > 0;
+        const total_score: f64 = blk: {
+            var score: f64 = 0.0;
+            for (nodes) |node| {
+                score += if (has_hw_score)
+                    (node.estimated_bandwidth_time_us orelse 0.0)
+                else
+                    @as(f64, @floatFromInt(node.total_bytes));
+            }
+            break :blk score;
+        };
+
+        for (0..hotspot_indices.len) |i| {
+            for (i + 1..hotspot_indices.len) |j| {
+                const lhs = nodes[hotspot_indices[i]];
+                const rhs = nodes[hotspot_indices[j]];
+                const lhs_score = if (has_hw_score)
+                    (lhs.estimated_bandwidth_time_us orelse 0.0)
+                else
+                    @as(f64, @floatFromInt(lhs.total_bytes));
+                const rhs_score = if (has_hw_score)
+                    (rhs.estimated_bandwidth_time_us orelse 0.0)
+                else
+                    @as(f64, @floatFromInt(rhs.total_bytes));
+                if (rhs_score > lhs_score) {
+                    const tmp = hotspot_indices[i];
+                    hotspot_indices[i] = hotspot_indices[j];
+                    hotspot_indices[j] = tmp;
+                }
+            }
+        }
+
+        var hotspots = try allocator.alloc(Hotspot, hotspot_count);
+        errdefer allocator.free(hotspots);
+        for (0..hotspot_count) |i| {
+            const node = nodes[hotspot_indices[i]];
+            const score = if (has_hw_score)
+                (node.estimated_bandwidth_time_us orelse 0.0)
+            else
+                @as(f64, @floatFromInt(node.total_bytes));
+            hotspots[i] = .{
+                .id = node.id,
+                .name = node.name,
+                .op = node.op,
+                .layer_index = node.layer_index,
+                .estimated_share_pct = if (total_score > 0.0) score / total_score * 100.0 else 0.0,
+                .estimated_bandwidth_time_us = node.estimated_bandwidth_time_us,
+                .total_bytes = node.total_bytes,
+                .flops = node.flops,
+                .bottleneck = node.bottleneck,
+                .bottleneck_reason = node.bottleneck_reason,
+            };
+        }
+
         return GraphAnalysis{
             .name = self.name,
             .node_count = node_count,
@@ -527,9 +838,17 @@ pub const Graph = struct {
             .critical_path_node_count = critical_path_node_count,
             .critical_path_edge_count = max_depth,
             .max_parallel_width = max_parallel_width,
+            .assumed_decode_seq_len = self.assumed_decode_seq_len,
+            .hardware = self.hardware,
+            .total_read_bytes = total_read_bytes_,
+            .total_write_bytes = total_write_bytes_,
+            .total_weight_bytes = total_weight_bytes_,
+            .total_bytes = total_bytes_,
+            .total_flops = total_flops_,
             .depth_widths = depth_widths,
             .op_counts = op_counts,
             .critical_path = critical_path,
+            .hotspots = hotspots,
             .nodes = nodes,
             .edges = edges,
             .allocator = allocator,
@@ -554,9 +873,17 @@ pub const Graph = struct {
             .critical_path_node_count = analysis.critical_path_node_count,
             .critical_path_edge_count = analysis.critical_path_edge_count,
             .max_parallel_width = analysis.max_parallel_width,
+            .assumed_decode_seq_len = analysis.assumed_decode_seq_len,
+            .hardware = analysis.hardware,
+            .total_read_bytes = analysis.total_read_bytes,
+            .total_write_bytes = analysis.total_write_bytes,
+            .total_weight_bytes = analysis.total_weight_bytes,
+            .total_bytes = analysis.total_bytes,
+            .total_flops = analysis.total_flops,
             .depth_widths = analysis.depth_widths,
             .op_counts = analysis.op_counts,
             .critical_path = analysis.critical_path,
+            .hotspots = analysis.hotspots,
             .nodes = analysis.nodes,
             .edges = analysis.edges,
         }, .{ .whitespace = .indent_2 }, writer);
@@ -576,11 +903,12 @@ pub const Graph = struct {
         try writer.writeAll("  graph [fontname=\"Menlo\", labelloc=\"t\"];\n");
         try writer.writeAll("  node [shape=box, style=\"rounded\", fontname=\"Menlo\"];\n");
         try writer.writeAll("  edge [fontname=\"Menlo\"];\n");
-        try writer.print("  label=\"{s}: {d} nodes, {d} edges, critical path {d} nodes\";\n", .{
+        try writer.print("  label=\"{s}: {d} nodes, {d} edges, critical path {d} nodes, ~{d:.1} MB/token\";\n", .{
             analysis.name,
             analysis.node_count,
             analysis.edge_count,
             analysis.critical_path_node_count,
+            @as(f64, @floatFromInt(analysis.total_bytes)) / 1_000_000.0,
         });
 
         for (analysis.nodes) |node| {
@@ -588,12 +916,15 @@ pub const Graph = struct {
                 ", color=\"#b91c1c\", penwidth=2, fillcolor=\"#fee2e2\", style=\"rounded,filled\""
             else
                 "";
-            try writer.print("  n{d} [label=\"{d}: {s}\\n{s}\\ndepth={d}\"{s}];\n", .{
+            try writer.print("  n{d} [label=\"{d}: {s}\\n{s}\\ndepth={d} wg={d}\\n{d:.2} MB {s}\"{s}];\n", .{
                 node.id,
                 node.id,
                 @tagName(node.op),
                 node.name,
                 node.depth,
+                node.total_workgroups,
+                @as(f64, @floatFromInt(node.total_bytes)) / 1_000_000.0,
+                @tagName(node.bottleneck),
                 critical_attrs,
             });
         }
@@ -693,6 +1024,36 @@ test "Graph: analyze returns op counts and critical path" {
     try std.testing.expectEqual(@as(?u32, 2), dmmv_count);
 }
 
+test "Graph: performance analysis ranks hotspots and occupancy" {
+    const allocator = std.testing.allocator;
+    var g = Graph.init(allocator, "perf");
+    defer g.deinit();
+
+    g.setHardwareContext(.{
+        .bandwidth_gbps = 500,
+        .compute_units = 64,
+        .wave_size = 64,
+        .preferred_workgroup_size = 64,
+    });
+
+    const tiny = try g.addNode(.dmmv, "tiny_proj");
+    g.setWorkgroups(tiny, 2, 1, 1);
+    g.setCostEstimate(tiny, 4 * 1024, 4 * 1024, 64 * 1024, 64 * 1024);
+
+    const heavy = try g.addNode(.dmmv, "lm_head");
+    g.setWorkgroups(heavy, 256, 1, 1);
+    g.setCostEstimate(heavy, 16 * 1024, 512 * 1024, 64 * 1024 * 1024, 256 * 1024 * 1024);
+    g.addDependency(heavy, tiny);
+
+    var analysis = try g.analyze(allocator);
+    defer analysis.deinit();
+
+    try std.testing.expect(analysis.hotspots.len >= 1);
+    try std.testing.expectEqualStrings("lm_head", analysis.hotspots[0].name);
+    try std.testing.expectEqual(BottleneckKind.occupancy, analysis.nodes[0].bottleneck);
+    try std.testing.expect(analysis.nodes[1].estimated_bandwidth_time_us != null);
+}
+
 test "Graph: dot and json exports include node labels" {
     const allocator = std.testing.allocator;
     var g = Graph.init(allocator, "export");
@@ -706,6 +1067,7 @@ test "Graph: dot and json exports include node labels" {
     defer json_buf.deinit();
     try g.writeJsonReport(&json_buf.writer, allocator);
     try std.testing.expect(std.mem.indexOf(u8, json_buf.written(), "\"critical_path\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_buf.written(), "\"hotspots\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_buf.written(), "\"op\": \"dmmv\"") != null);
 
     var dot_buf: std.Io.Writer.Allocating = .init(allocator);

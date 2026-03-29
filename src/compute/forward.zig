@@ -276,7 +276,9 @@ fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) 
 
     // Step 1: Softmax over all expert logits
     var max_val: f32 = -std.math.inf(f32);
-    for (logits) |v| if (v > max_val) { max_val = v; };
+    for (logits) |v| if (v > max_val) {
+        max_val = v;
+    };
 
     var probs: [256]f32 = undefined;
     var sum: f32 = 0;
@@ -449,7 +451,13 @@ pub const InferenceEngine = struct {
         errdefer attention.deinit();
 
         // Build the decode graph (for diagnostics / future full-graph dispatch)
-        var decode_graph = try architecture.buildDecodeGraph(config, allocator);
+        var decode_graph = try architecture.buildDecodeGraphDetailed(config, allocator, &model.gguf_file);
+        decode_graph.setHardwareContext(.{
+            .bandwidth_gbps = gpu_config.bandwidth_gbps,
+            .compute_units = gpu_config.compute_units,
+            .wave_size = gpu_config.wave_size,
+            .preferred_workgroup_size = gpu_config.dmmv_workgroup_size,
+        });
         errdefer decode_graph.deinit();
 
         // Allocate intermediate buffers
@@ -501,6 +509,14 @@ pub const InferenceEngine = struct {
         const max_inter = @max(@max(inter_dim, shexp_inter), @max(if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim, ssm_conv_channels));
         const inter_size = @as(vk.c.VkDeviceSize, max_inter) * @sizeOf(f32);
         const n_experts_total = if (config.n_experts > 0) config.n_experts else @as(u32, 1);
+        const n_experts_used: u32 = if (config.n_experts_used > 0) config.n_experts_used else 8;
+
+        // Batched MoE: gate/up/swiglu buffers must fit n_experts_used * inter_dim,
+        // down_buf must fit n_experts_used * hidden_dim (all experts processed in parallel).
+        const batched_inter_size = @as(vk.c.VkDeviceSize, n_experts_used) * @as(vk.c.VkDeviceSize, inter_dim) * @sizeOf(f32);
+        const batched_down_size = @as(vk.c.VkDeviceSize, n_experts_used) * hidden_size;
+        const gate_buf_size = @max(inter_size, batched_inter_size);
+        const down_buf_size = @max(hidden_size, batched_down_size);
 
         const storage_xfer = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
@@ -521,13 +537,13 @@ pub const InferenceEngine = struct {
         errdefer o_proj_buf.deinit();
         var ffn_norm_buf = try Buffer.initDeviceLocal(instance, hidden_size, storage_xfer);
         errdefer ffn_norm_buf.deinit();
-        var gate_buf = try Buffer.initDeviceLocal(instance, inter_size, storage_xfer);
+        var gate_buf = try Buffer.initDeviceLocal(instance, gate_buf_size, storage_xfer);
         errdefer gate_buf.deinit();
-        var up_buf = try Buffer.initDeviceLocal(instance, inter_size, storage_xfer);
+        var up_buf = try Buffer.initDeviceLocal(instance, gate_buf_size, storage_xfer);
         errdefer up_buf.deinit();
-        var swiglu_buf = try Buffer.initDeviceLocal(instance, inter_size, storage_xfer);
+        var swiglu_buf = try Buffer.initDeviceLocal(instance, gate_buf_size, storage_xfer);
         errdefer swiglu_buf.deinit();
-        var down_buf = try Buffer.initDeviceLocal(instance, hidden_size, storage_xfer);
+        var down_buf = try Buffer.initDeviceLocal(instance, down_buf_size, storage_xfer);
         errdefer down_buf.deinit();
         var moe_out_buf = try Buffer.initDeviceLocal(instance, hidden_size, storage_xfer);
         errdefer moe_out_buf.deinit();
@@ -536,7 +552,8 @@ pub const InferenceEngine = struct {
         var router_logits_buf = try Buffer.initDeviceLocal(instance, router_size, storage_xfer);
         errdefer router_logits_buf.deinit();
         var router_staging = try Buffer.init(
-            instance, router_size,
+            instance,
+            router_size,
             vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
@@ -570,7 +587,8 @@ pub const InferenceEngine = struct {
         // Identity page table for flash attention: page_ids[i] = i (flat KV layout)
         const page_table_size = @as(vk.c.VkDeviceSize, max_ctx) * @sizeOf(u32);
         var page_table_buf = try Buffer.init(
-            instance, page_table_size,
+            instance,
+            page_table_size,
             vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
@@ -618,7 +636,8 @@ pub const InferenceEngine = struct {
         // Size for d_inner (SSM output) which may be larger than hidden_dim
         const ssm_staging_size = @max(hidden_size, @as(vk.c.VkDeviceSize, if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim) * @sizeOf(f32));
         var ssm_hidden_staging = try Buffer.init(
-            instance, ssm_staging_size,
+            instance,
+            ssm_staging_size,
             vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
@@ -643,10 +662,8 @@ pub const InferenceEngine = struct {
             const gpu_conv_size = @as(vk.c.VkDeviceSize, (config.ssm_d_conv - 1) * gpu_conv_ch) * @sizeOf(f32);
             const gpu_state_size = @as(vk.c.VkDeviceSize, dt_rank_g * head_v_dim_g * head_v_dim_g) * @sizeOf(f32);
             for (0..config.n_layers) |i| {
-                gpu_ssm_conv_states[i] = try Buffer.initDeviceLocal(instance, gpu_conv_size,
-                    vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-                gpu_ssm_states[i] = try Buffer.initDeviceLocal(instance, gpu_state_size,
-                    vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                gpu_ssm_conv_states[i] = try Buffer.initDeviceLocal(instance, gpu_conv_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                gpu_ssm_states[i] = try Buffer.initDeviceLocal(instance, gpu_state_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             }
             // Zero-fill GPU SSM buffers via vkCmdFillBuffer
             try decode_cmd.reset();
@@ -674,7 +691,8 @@ pub const InferenceEngine = struct {
         const n_used_experts = if (config.n_experts_used > 0) config.n_experts_used else 8;
         const router_out_size = @as(vk.c.VkDeviceSize, n_used_experts) * (@sizeOf(u32) + @sizeOf(f32));
         var router_output_buf = try Buffer.init(
-            instance, router_out_size,
+            instance,
+            router_out_size,
             vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
@@ -794,15 +812,52 @@ pub const InferenceEngine = struct {
         vk.c.vkCmdResetQueryPool(self.decode_cmd.handle, self.timestamp_query_pool, 0, 2048);
     }
 
+    fn resetRequestState(self: *InferenceEngine) !void {
+        for (self.ssm_conv_states) |state_buf| {
+            if (state_buf.len > 0) @memset(state_buf, 0);
+        }
+        for (self.ssm_states) |state_buf| {
+            if (state_buf.len > 0) @memset(state_buf, 0);
+        }
+
+        var has_gpu_ssm = false;
+        for (self.gpu_ssm_conv_states) |buf| {
+            if (buf.handle != null and buf.size > 0) {
+                has_gpu_ssm = true;
+                break;
+            }
+        }
+        if (!has_gpu_ssm) return;
+
+        try self.decode_cmd.reset();
+        try self.decode_cmd.begin();
+        for (self.gpu_ssm_conv_states) |buf| {
+            if (buf.handle != null and buf.size > 0) {
+                vk.c.vkCmdFillBuffer(self.decode_cmd.handle, buf.handle, 0, buf.size, 0);
+            }
+        }
+        for (self.gpu_ssm_states) |buf| {
+            if (buf.handle != null and buf.size > 0) {
+                vk.c.vkCmdFillBuffer(self.decode_cmd.handle, buf.handle, 0, buf.size, 0);
+            }
+        }
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+    }
+
     /// Read back all timestamps and print a summary.
     pub fn printProfilingSummary(self: *const InferenceEngine) void {
         if (!self.profile_enabled or self.timestamp_count == 0) return;
         const count = self.timestamp_count;
         var timestamps: [2048]u64 = undefined;
         const qr = vk.c.vkGetQueryPoolResults(
-            self.instance.device, self.timestamp_query_pool,
-            0, count,
-            count * @sizeOf(u64), &timestamps, @sizeOf(u64),
+            self.instance.device,
+            self.timestamp_query_pool,
+            0,
+            count,
+            count * @sizeOf(u64),
+            &timestamps,
+            @sizeOf(u64),
             vk.c.VK_QUERY_RESULT_64_BIT | vk.c.VK_QUERY_RESULT_WAIT_BIT,
         );
         if (qr != vk.c.VK_SUCCESS) {
@@ -892,8 +947,10 @@ pub const InferenceEngine = struct {
     fn writeDescSet2(
         self: *const InferenceEngine,
         ds: vk.c.VkDescriptorSet,
-        buf0: vk.c.VkBuffer, size0: vk.c.VkDeviceSize,
-        buf1: vk.c.VkBuffer, size1: vk.c.VkDeviceSize,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
     ) void {
         var buffer_infos = [2]vk.c.VkDescriptorBufferInfo{
             .{ .buffer = buf0, .offset = 0, .range = size0 },
@@ -903,10 +960,15 @@ pub const InferenceEngine = struct {
         for (0..2) |i| {
             writes[i] = .{
                 .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .pNext = null, .dstSet = ds, .dstBinding = @intCast(i),
-                .dstArrayElement = 0, .descriptorCount = 1,
+                .pNext = null,
+                .dstSet = ds,
+                .dstBinding = @intCast(i),
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
                 .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .pImageInfo = null, .pBufferInfo = &buffer_infos[i], .pTexelBufferView = null,
+                .pImageInfo = null,
+                .pBufferInfo = &buffer_infos[i],
+                .pTexelBufferView = null,
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 2, &writes, 0, null);
@@ -915,11 +977,16 @@ pub const InferenceEngine = struct {
     fn writeDescSet5(
         self: *const InferenceEngine,
         ds: vk.c.VkDescriptorSet,
-        buf0: vk.c.VkBuffer, size0: vk.c.VkDeviceSize,
-        buf1: vk.c.VkBuffer, size1: vk.c.VkDeviceSize,
-        buf2: vk.c.VkBuffer, size2: vk.c.VkDeviceSize,
-        buf3: vk.c.VkBuffer, size3: vk.c.VkDeviceSize,
-        buf4: vk.c.VkBuffer, size4: vk.c.VkDeviceSize,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
+        buf4: vk.c.VkBuffer,
+        size4: vk.c.VkDeviceSize,
     ) void {
         var buffer_infos = [5]vk.c.VkDescriptorBufferInfo{
             .{ .buffer = buf0, .offset = 0, .range = size0 },
@@ -932,10 +999,15 @@ pub const InferenceEngine = struct {
         for (0..5) |i| {
             writes[i] = .{
                 .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .pNext = null, .dstSet = ds, .dstBinding = @intCast(i),
-                .dstArrayElement = 0, .descriptorCount = 1,
+                .pNext = null,
+                .dstSet = ds,
+                .dstBinding = @intCast(i),
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
                 .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .pImageInfo = null, .pBufferInfo = &buffer_infos[i], .pTexelBufferView = null,
+                .pImageInfo = null,
+                .pBufferInfo = &buffer_infos[i],
+                .pTexelBufferView = null,
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 5, &writes, 0, null);
@@ -944,10 +1016,14 @@ pub const InferenceEngine = struct {
     fn writeDescSet4(
         self: *const InferenceEngine,
         ds: vk.c.VkDescriptorSet,
-        buf0: vk.c.VkBuffer, size0: vk.c.VkDeviceSize,
-        buf1: vk.c.VkBuffer, size1: vk.c.VkDeviceSize,
-        buf2: vk.c.VkBuffer, size2: vk.c.VkDeviceSize,
-        buf3: vk.c.VkBuffer, size3: vk.c.VkDeviceSize,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
     ) void {
         var buffer_infos = [4]vk.c.VkDescriptorBufferInfo{
             .{ .buffer = buf0, .offset = 0, .range = size0 },
@@ -959,10 +1035,15 @@ pub const InferenceEngine = struct {
         for (0..4) |i| {
             writes[i] = .{
                 .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .pNext = null, .dstSet = ds, .dstBinding = @intCast(i),
-                .dstArrayElement = 0, .descriptorCount = 1,
+                .pNext = null,
+                .dstSet = ds,
+                .dstBinding = @intCast(i),
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
                 .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .pImageInfo = null, .pBufferInfo = &buffer_infos[i], .pTexelBufferView = null,
+                .pImageInfo = null,
+                .pBufferInfo = &buffer_infos[i],
+                .pTexelBufferView = null,
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 4, &writes, 0, null);
@@ -971,13 +1052,20 @@ pub const InferenceEngine = struct {
     fn writeDescSet7(
         self: *const InferenceEngine,
         ds: vk.c.VkDescriptorSet,
-        buf0: vk.c.VkBuffer, size0: vk.c.VkDeviceSize,
-        buf1: vk.c.VkBuffer, size1: vk.c.VkDeviceSize,
-        buf2: vk.c.VkBuffer, size2: vk.c.VkDeviceSize,
-        buf3: vk.c.VkBuffer, size3: vk.c.VkDeviceSize,
-        buf4: vk.c.VkBuffer, size4: vk.c.VkDeviceSize,
-        buf5: vk.c.VkBuffer, size5: vk.c.VkDeviceSize,
-        buf6: vk.c.VkBuffer, size6: vk.c.VkDeviceSize,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
+        buf4: vk.c.VkBuffer,
+        size4: vk.c.VkDeviceSize,
+        buf5: vk.c.VkBuffer,
+        size5: vk.c.VkDeviceSize,
+        buf6: vk.c.VkBuffer,
+        size6: vk.c.VkDeviceSize,
     ) void {
         var buffer_infos = [7]vk.c.VkDescriptorBufferInfo{
             .{ .buffer = buf0, .offset = 0, .range = size0 },
@@ -992,10 +1080,15 @@ pub const InferenceEngine = struct {
         for (0..7) |i| {
             writes[i] = .{
                 .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .pNext = null, .dstSet = ds, .dstBinding = @intCast(i),
-                .dstArrayElement = 0, .descriptorCount = 1,
+                .pNext = null,
+                .dstSet = ds,
+                .dstBinding = @intCast(i),
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
                 .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .pImageInfo = null, .pBufferInfo = &buffer_infos[i], .pTexelBufferView = null,
+                .pImageInfo = null,
+                .pBufferInfo = &buffer_infos[i],
+                .pTexelBufferView = null,
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 7, &writes, 0, null);
@@ -1073,9 +1166,7 @@ pub const InferenceEngine = struct {
                 const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.embed_staging.handle, self.hidden_buf.handle, 1, &region);
                 self.decode_cmd.transferToComputeBarrier();
-
             }
-
 
             // --- Input RMS norm: hidden_buf → norm_buf ---
             const attn_norm = self.findLayerTensor(layer, "attn_norm.weight") orelse {
@@ -1085,9 +1176,7 @@ pub const InferenceEngine = struct {
             {
                 const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                 const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size,
-                    attn_norm.gpu_buffer.handle, attn_norm.gpu_buffer.size,
-                    self.norm_buf.handle, hidden_size);
+                self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, attn_norm.gpu_buffer.handle, attn_norm.gpu_buffer.size, self.norm_buf.handle, hidden_size);
                 try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
             }
             self.decode_cmd.computeBarrier();
@@ -1110,7 +1199,8 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
                 try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
                 try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
-                self.decode_cmd.computeBarrier();
+                // The next step is a transfer copy, so compute→compute is not sufficient.
+                self.decode_cmd.computeToTransferBarrier();
 
                 // Q+gate are block-interleaved per head:
                 // [head0_Q(head_dim), head0_gate(head_dim), head1_Q(head_dim), head1_gate(head_dim), ...]
@@ -1138,17 +1228,13 @@ pub const InferenceEngine = struct {
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     // Apply RMS norm to each Q head (n_heads workgroups, head_dim elements each)
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet3(ds, self.q_buf.handle, self.q_buf.size,
-                        qn.gpu_buffer.handle, qn.gpu_buffer.size,
-                        self.q_buf.handle, self.q_buf.size); // in-place via same output
+                    self.writeDescSet3(ds, self.q_buf.handle, self.q_buf.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, self.q_buf.handle, self.q_buf.size); // in-place via same output
                     try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_heads, 1e-6);
                 }
                 if (k_norm_tensor) |kn| {
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet3(ds, self.k_buf.handle, self.k_buf.size,
-                        kn.gpu_buffer.handle, kn.gpu_buffer.size,
-                        self.k_buf.handle, self.k_buf.size);
+                    self.writeDescSet3(ds, self.k_buf.handle, self.k_buf.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, self.k_buf.handle, self.k_buf.size);
                     try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_kv_heads, 1e-6);
                 }
                 self.decode_cmd.computeBarrier();
@@ -1169,6 +1255,7 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 // KV cache write
+                self.decode_cmd.computeToTransferBarrier();
                 {
                     const kv_offset = @as(vk.c.VkDeviceSize, state.position) * kv_vec_size;
                     const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
@@ -1181,15 +1268,8 @@ pub const InferenceEngine = struct {
                 // Flash attention
                 if (self.attention.pipeline) |*pip| {
                     const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet5(attn_ds,
-                        self.q_buf.handle, self.q_buf.size,
-                        self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
-                        self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
-                        self.page_table_buf.handle, self.page_table_buf.size,
-                        self.attn_out_buf.handle, self.attn_out_buf.size);
-                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds,
-                        config.head_dim, config.n_heads, config.n_kv_heads,
-                        state.position + 1, 1);
+                    self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
+                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, 1);
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -1197,9 +1277,7 @@ pub const InferenceEngine = struct {
                 // gate_buf has the per-head gate values, attn_out_buf has the attention output
                 if (self.elementwise.pipeline_sigmoid_mul) |*pip| {
                     const gds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet3(gds, self.attn_out_buf.handle, self.attn_out_buf.size,
-                        self.gate_buf.handle, self.gate_buf.size,
-                        self.attn_out_buf.handle, self.attn_out_buf.size); // in-place
+                    self.writeDescSet3(gds, self.attn_out_buf.handle, self.attn_out_buf.size, self.gate_buf.handle, self.gate_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size); // in-place
                     try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, q_dim);
                     self.decode_cmd.computeBarrier();
                 }
@@ -1228,8 +1306,7 @@ pub const InferenceEngine = struct {
                     // Read o_proj_buf
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.o_proj_buf.handle, self.embed_staging.handle, 1,
-                        &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.o_proj_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
                     try self.decode_cmd.end();
                     try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
@@ -1266,9 +1343,7 @@ pub const InferenceEngine = struct {
             {
                 const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                 const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size,
-                    ffn_norm_tensor.gpu_buffer.handle, ffn_norm_tensor.gpu_buffer.size,
-                    self.ffn_norm_buf.handle, hidden_size);
+                self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, ffn_norm_tensor.gpu_buffer.handle, ffn_norm_tensor.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size);
                 try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
             }
             self.decode_cmd.computeBarrier();
@@ -1300,75 +1375,87 @@ pub const InferenceEngine = struct {
                     self.elementwise.pipeline_moe_weighted_acc != null;
 
                 if (use_gpu_moe) {
-                    // === GPU MoE path: NO readback, NO submit — everything stays on GPU ===
+                    // === GPU MoE path: BATCHED expert dispatch — all experts in parallel ===
+                    // All 8 experts' gate/up/down DMMVs run as Y workgroups in a single dispatch.
+                    // This gives ~8× better GPU utilization vs serial per-expert dispatch.
+                    // Reduces dispatches from 32 to 5, barriers from 32 to 4 per MoE layer.
+
                     // softmax_topk writes expert_ids + weights to router_output_buf
                     {
                         const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
                         const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet2(ds,
-                            self.router_logits_buf.handle, @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32),
-                            self.router_output_buf.handle, self.router_output_buf.size,
+                        self.writeDescSet2(
+                            ds,
+                            self.router_logits_buf.handle,
+                            @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32),
+                            self.router_output_buf.handle,
+                            self.router_output_buf.size,
                         );
                         try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
                     }
-                    // Barrier: softmax_topk shader write → MoE DMMV shader read
                     self.decode_cmd.computeBarrier();
 
-                    // Zero moe_out_buf (transfer op, parallel with barrier above)
-                    vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.moe_out_buf.handle, 0, hidden_size, 0);
-                    self.decode_cmd.transferToComputeBarrier();
-
-                    // MoE DMMV: each dispatch reads expert_ids[ei] from GPU routing buffer
-                    for (0..n_used) |ei| {
-                        const ei_u32: u32 = @intCast(ei);
-
-                        // gate DMMV: ffn_gate_exps[expert] × ffn_norm_buf → gate_buf
-                        try self.dispatchMoeDmmv(gate_exps, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim, expert_gate_row_bytes, ei_u32);
-                        // up DMMV: ffn_up_exps[expert] × ffn_norm_buf → up_buf
-                        try self.dispatchMoeDmmv(up_exps, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, expert_gate_row_bytes, ei_u32);
-                        self.decode_cmd.computeBarrier();
-
-                        // SwiGLU: gate_buf, up_buf → swiglu_buf
-                        {
-                            const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
-                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size,
-                                self.up_buf.handle, self.up_buf.size,
-                                self.swiglu_buf.handle, self.swiglu_buf.size);
-                            try self.elementwise.recordSwiglu(&self.decode_cmd, ds, inter_dim);
-                        }
-                        self.decode_cmd.computeBarrier();
-
-                        // down DMMV: ffn_down_exps[expert] × swiglu_buf → down_buf
-                        try self.dispatchMoeDmmv(down_exps, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim, expert_down_row_bytes, ei_u32);
-                        self.decode_cmd.computeBarrier();
-
-                        // Weighted accumulate: moe_out_buf += routing_weight[ei] * down_buf
-                        // Weight is read from GPU routing buffer (no CPU readback)
-                        {
-                            const pip = &(self.elementwise.pipeline_moe_weighted_acc orelse unreachable);
-                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet3(ds,
-                                self.moe_out_buf.handle, hidden_size,
-                                self.down_buf.handle, hidden_size,
-                                self.router_output_buf.handle, self.router_output_buf.size);
-                            try self.elementwise.recordMoeWeightedAcc(&self.decode_cmd, ds, hidden_dim, n_used, ei_u32);
-                        }
-                        self.decode_cmd.computeBarrier();
+                    // gate DMMV: ALL experts at once (Y=n_used workgroups)
+                    // gate_exps[expert] × ffn_norm_buf → gate_buf[expert*inter_dim..]
+                    // x_expert_stride=0: all experts read same input (ffn_norm_buf)
+                    {
+                        const qt = gate_exps.info.type_;
+                        const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
+                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet4(ds, gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
                     }
+                    // up DMMV: ALL experts at once
+                    {
+                        const qt = up_exps.info.type_;
+                        const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
+                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet4(ds, up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                    }
+                    self.decode_cmd.computeBarrier();
+
+                    // SwiGLU: ALL experts at once (N = n_used * inter_dim)
+                    {
+                        const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
+                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
+                        try self.elementwise.recordSwiglu(&self.decode_cmd, ds, n_used * inter_dim);
+                    }
+                    self.decode_cmd.computeBarrier();
+
+                    // down DMMV: ALL experts at once
+                    // x_expert_stride=inter_dim: each expert reads from its own swiglu section
+                    {
+                        const qt = down_exps.info.type_;
+                        const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
+                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet4(ds, down_exps.gpu_buffer.handle, down_exps.gpu_buffer.size, self.swiglu_buf.handle, self.swiglu_buf.size, self.down_buf.handle, self.down_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, hidden_dim, inter_dim, expert_down_row_bytes, n_used, inter_dim, 0, 0);
+                    }
+                    self.decode_cmd.computeBarrier();
+
+                    // Weighted accumulation: sum ALL experts at once (writes result, no zero needed)
+                    // moe_out_buf[i] = sum_j(weight_j * down_buf[j * hidden_dim + i])
+                    {
+                        const pip = &(self.elementwise.pipeline_moe_weighted_acc orelse unreachable);
+                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(ds, self.moe_out_buf.handle, hidden_size, self.down_buf.handle, self.down_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                        try self.elementwise.recordMoeWeightedAcc(&self.decode_cmd, ds, hidden_dim, n_used, hidden_dim);
+                    }
+                    self.decode_cmd.computeBarrier();
                 } else {
                     // === CPU fallback: readback router logits, CPU softmax+topk ===
                     var expert_ids: [16]u32 = undefined;
                     var expert_weights: [16]f32 = undefined;
                     {
                         const barrier = vk.c.VkMemoryBarrier{
-                            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                            .pNext = null,
                             .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                             .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
                         };
-                        vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            0, 1, &barrier, 0, null, 0, null);
+                        vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
                         const router_size = @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32);
                         const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = router_size };
                         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &region);
@@ -1402,9 +1489,7 @@ pub const InferenceEngine = struct {
                         {
                             const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                             const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size,
-                                self.up_buf.handle, self.up_buf.size,
-                                self.swiglu_buf.handle, self.swiglu_buf.size);
+                            self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
                             try self.elementwise.recordSwiglu(&self.decode_cmd, ds, inter_dim);
                         }
                         self.decode_cmd.computeBarrier();
@@ -1444,9 +1529,7 @@ pub const InferenceEngine = struct {
                     {
                         const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                         const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet3(ds2, self.gate_buf.handle, self.gate_buf.size,
-                            self.up_buf.handle, self.up_buf.size,
-                            self.swiglu_buf.handle, self.swiglu_buf.size);
+                        self.writeDescSet3(ds2, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
                         try self.elementwise.recordSwiglu(&self.decode_cmd, ds2, shexp_inter_dim);
                     }
                     self.decode_cmd.computeBarrier();
@@ -1459,23 +1542,26 @@ pub const InferenceEngine = struct {
                         // GPU path: sigmoid_scale_acc reads gate from router_logits_buf[0]
                         const pip = &(self.elementwise.pipeline_sigmoid_scale_acc orelse unreachable);
                         const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet3(ds2,
-                            self.moe_out_buf.handle, hidden_size, // binding 0: accum
-                            self.down_buf.handle, hidden_size, // binding 1: src
-                            self.router_logits_buf.handle, @sizeOf(f32), // binding 2: gate scalar
+                        self.writeDescSet3(
+                            ds2,
+                            self.moe_out_buf.handle,
+                            hidden_size, // binding 0: accum
+                            self.down_buf.handle,
+                            hidden_size, // binding 1: src
+                            self.router_logits_buf.handle,
+                            @sizeOf(f32), // binding 2: gate scalar
                         );
                         try self.elementwise.recordSigmoidScaleAcc(&self.decode_cmd, ds2, hidden_dim);
                     } else if (shexp_gate != null) {
                         // CPU fallback: readback gate scalar, compute sigmoid on CPU
                         {
                             const bar = vk.c.VkMemoryBarrier{
-                                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                .pNext = null,
                                 .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
                             };
-                            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                0, 1, &bar, 0, null, 0, null);
+                            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
                             const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(f32) };
                             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &rgn);
                         }
@@ -1520,9 +1606,7 @@ pub const InferenceEngine = struct {
                 {
                     const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size,
-                        self.up_buf.handle, self.up_buf.size,
-                        self.swiglu_buf.handle, self.swiglu_buf.size);
+                    self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
                     try self.elementwise.recordSwiglu(&self.decode_cmd, ds, inter_dim);
                 }
                 self.decode_cmd.computeBarrier();
@@ -1538,6 +1622,9 @@ pub const InferenceEngine = struct {
                     try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
                 }
             }
+
+            // The next layer immediately reads hidden_buf as its input.
+            self.decode_cmd.computeBarrier();
 
             // Command buffer stays open across layers (Phase 3c batching).
             // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
@@ -1618,7 +1705,10 @@ pub const InferenceEngine = struct {
                 log.info("L{d} {s}: rms={d:.4} max={d:.4} h0={d:.6} logit5={d:.4}", .{
                     layer,
                     if (is_full_attn) @as([]const u8, "A") else @as([]const u8, "S"),
-                    diag_rms, diag_max_abs, hptr[0], logit5,
+                    diag_rms,
+                    diag_max_abs,
+                    hptr[0],
+                    logit5,
                 });
                 // Re-open cmd buffer for next layer (diagnostic closed it)
                 _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
@@ -1659,9 +1749,7 @@ pub const InferenceEngine = struct {
         {
             const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
-            self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size,
-                final_norm_tensor.gpu_buffer.handle, final_norm_tensor.gpu_buffer.size,
-                self.norm_buf.handle, hidden_size);
+            self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, final_norm_tensor.gpu_buffer.handle, final_norm_tensor.gpu_buffer.size, self.norm_buf.handle, hidden_size);
             try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
         }
         self.decode_cmd.computeBarrier();
@@ -1674,13 +1762,12 @@ pub const InferenceEngine = struct {
         // Readback logits
         {
             const barrier = vk.c.VkMemoryBarrier{
-                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
                 .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
             };
-            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 1, &barrier, 0, null, 0, null);
+            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
             const logits_copy_size = @as(vk.c.VkDeviceSize, self.model.config.vocab_size) * @sizeOf(f32);
             const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_copy_size };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &region);
@@ -1701,10 +1788,12 @@ pub const InferenceEngine = struct {
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
         /// GPU buffer for input buf.
-        input_buf: Buffer, input_size: vk.c.VkDeviceSize,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
         /// GPU buffer for output buf.
         output_buf: Buffer,
-        M: u32, K: u32,
+        M: u32,
+        K: u32,
     ) !void {
         const qt = tensor.info.type_;
         const pip = self.dmmv.pipelineForType(qt) orelse {
@@ -1712,10 +1801,7 @@ pub const InferenceEngine = struct {
             return error.UnsupportedQuantType;
         };
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
-        self.writeDescSet3(ds,
-            tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
-            input_buf.handle, input_size,
-            output_buf.handle, output_buf.size);
+        self.writeDescSet3(ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, input_buf.handle, input_size, output_buf.handle, output_buf.size);
         try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, 0, 0, 0);
     }
 
@@ -1724,10 +1810,12 @@ pub const InferenceEngine = struct {
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
         /// GPU buffer for input buf.
-        input_buf: Buffer, input_size: vk.c.VkDeviceSize,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
         /// GPU buffer for output buf.
         output_buf: Buffer,
-        M: u32, K: u32,
+        M: u32,
+        K: u32,
         /// Weight buffer byte offset.
         a_offset: u32,
     ) !void {
@@ -1737,38 +1825,11 @@ pub const InferenceEngine = struct {
             return error.UnsupportedQuantType;
         };
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
-        self.writeDescSet3(ds,
-            tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
-            input_buf.handle, input_size,
-            output_buf.handle, output_buf.size);
+        self.writeDescSet3(ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, input_buf.handle, input_size, output_buf.handle, output_buf.size);
         try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, a_offset, 0, 0);
     }
 
     /// Dispatch a MoE DMMV — expert offset computed on GPU from routing buffer.
-    /// The shader reads expert_ids[expert_index] from router_output_buf to compute
-    /// the weight tensor offset, eliminating CPU readback.
-    fn dispatchMoeDmmv(
-        self: *InferenceEngine,
-        tensor: *const LoadedTensor,
-        input_buf: Buffer, input_size: vk.c.VkDeviceSize,
-        output_buf: Buffer,
-        M: u32, K: u32,
-        expert_stride: u32,
-        expert_index: u32,
-    ) !void {
-        const qt = tensor.info.type_;
-        const pip = self.dmmv.moePipelineForType(qt) orelse {
-            log.err("No MoE DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(qt), tensor.info.name });
-            return error.UnsupportedQuantType;
-        };
-        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-        self.writeDescSet4(ds,
-            tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
-            input_buf.handle, input_size,
-            output_buf.handle, output_buf.size,
-            self.router_output_buf.handle, self.router_output_buf.size);
-        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, M, K, expert_stride, expert_index, 0, 0);
-    }
 
     // -----------------------------------------------------------------------
     // CPU-side SSM / delta-net layer
@@ -1810,13 +1871,12 @@ pub const InferenceEngine = struct {
         const ab_bytes = @as(vk.c.VkDeviceSize, dt_rank) * @sizeOf(f32);
         {
             const barrier = vk.c.VkMemoryBarrier{
-                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
                 .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
             };
-            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 1, &barrier, 0, null, 0, null);
+            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
 
             const r1 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.logits_staging.handle, 1, &r1);
@@ -1852,7 +1912,10 @@ pub const InferenceEngine = struct {
             @tagName(conv_tensor.info.type_),
             if (self.findLayerTensor(layer, "ssm_dt.bias")) |t| @tagName(t.info.type_) else "N/A",
             if (self.findLayerTensor(layer, "ssm_a")) |t| @tagName(t.info.type_) else "N/A",
-            n_group, dt_rank, d_state, head_v_dim,
+            n_group,
+            dt_rank,
+            d_state,
+            head_v_dim,
         });
 
         // Bug fix #12: Convolve BEFORE updating state to avoid double-counting the current input.
@@ -1874,7 +1937,7 @@ pub const InferenceEngine = struct {
         // Now update conv state: shift left and write current input as newest entry
         if (d_conv_1 > 1) {
             const shift = (d_conv_1 - 1) * conv_channels;
-            std.mem.copyForwards(f32, conv_state[0..shift], conv_state[conv_channels..shift + conv_channels]);
+            std.mem.copyForwards(f32, conv_state[0..shift], conv_state[conv_channels .. shift + conv_channels]);
         }
         @memcpy(conv_state[(d_conv_1 - 1) * conv_channels ..][0..conv_channels], qkv_cpu);
 
@@ -2001,8 +2064,14 @@ pub const InferenceEngine = struct {
             if (norm_tensor) |t| {
                 log.info("ssm_norm.weight: type={s} n_dims={d} dims=[{d},{d}] elems={d} d_state={d} d_inner={d} head_v={d} per_head={}", .{
                     @tagName(t.info.type_),
-                    t.info.n_dims, t.info.dims[0], t.info.dims[1],
-                    t.info.numElements(), d_state, d_inner, head_v_dim, norm_per_head,
+                    t.info.n_dims,
+                    t.info.dims[0],
+                    t.info.dims[1],
+                    t.info.numElements(),
+                    d_state,
+                    d_inner,
+                    head_v_dim,
+                    norm_per_head,
                 });
             } else {
                 log.info("ssm_norm.weight: NOT FOUND for layer 0", .{});
@@ -2106,11 +2175,16 @@ pub const InferenceEngine = struct {
         {
             const pip = &(self.elementwise.pipeline_ssm_conv1d orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
-            self.writeDescSet4(ds,
-                self.attn_out_buf.handle, qkv_bytes, // binding 0: current_input
-                conv_tensor.gpu_buffer.handle, conv_tensor.gpu_buffer.size, // binding 1: conv kernel
-                self.gpu_ssm_conv_states[layer_idx].handle, self.gpu_ssm_conv_states[layer_idx].size, // binding 2: state
-                self.swiglu_buf.handle, qkv_bytes, // binding 3: output
+            self.writeDescSet4(
+                ds,
+                self.attn_out_buf.handle,
+                qkv_bytes, // binding 0: current_input
+                conv_tensor.gpu_buffer.handle,
+                conv_tensor.gpu_buffer.size, // binding 1: conv kernel
+                self.gpu_ssm_conv_states[layer_idx].handle,
+                self.gpu_ssm_conv_states[layer_idx].size, // binding 2: state
+                self.swiglu_buf.handle,
+                qkv_bytes, // binding 3: output
             );
             try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16);
         }
@@ -2121,13 +2195,12 @@ pub const InferenceEngine = struct {
             // Flush to read conv1d output
             {
                 const bar = vk.c.VkMemoryBarrier{
-                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
                     .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                     .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
                 };
-                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    0, 1, &bar, 0, null, 0, null);
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
                 const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @min(qkv_bytes, self.logits_staging.size) };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.logits_staging.handle, 1, &rgn);
             }
@@ -2160,14 +2233,22 @@ pub const InferenceEngine = struct {
             const pip = &(self.elementwise.pipeline_ssm_delta_net orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
             // (ElementwiseDispatch imported at file scope)
-            self.writeDescSet7(ds,
-                self.swiglu_buf.handle, qkv_bytes, // binding 0: conv_out
-                dt_bias_buf, dt_bias_size, // binding 1: dt_bias
-                self.router_logits_buf.handle, ab_bytes, // binding 2: alpha
-                self.down_buf.handle, ab_bytes, // binding 3: beta
-                ssm_a_buf, ssm_a_size, // binding 4: ssm_a
-                self.gpu_ssm_states[layer_idx].handle, self.gpu_ssm_states[layer_idx].size, // binding 5: state
-                self.attn_out_buf.handle, z_bytes, // binding 6: output (d_inner floats)
+            self.writeDescSet7(
+                ds,
+                self.swiglu_buf.handle,
+                qkv_bytes, // binding 0: conv_out
+                dt_bias_buf,
+                dt_bias_size, // binding 1: dt_bias
+                self.router_logits_buf.handle,
+                ab_bytes, // binding 2: alpha
+                self.down_buf.handle,
+                ab_bytes, // binding 3: beta
+                ssm_a_buf,
+                ssm_a_size, // binding 4: ssm_a
+                self.gpu_ssm_states[layer_idx].handle,
+                self.gpu_ssm_states[layer_idx].size, // binding 5: state
+                self.attn_out_buf.handle,
+                z_bytes, // binding 6: output (d_inner floats)
             );
             const push = @import("elementwise.zig").SsmDeltaNetPush{
                 .d_inner = d_inner,
@@ -2196,11 +2277,16 @@ pub const InferenceEngine = struct {
             const pip = &(self.elementwise.pipeline_ssm_gated_norm orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
             // (ElementwiseDispatch imported at file scope)
-            self.writeDescSet4(ds,
-                self.attn_out_buf.handle, z_bytes, // binding 0: delta_net output
-                self.gate_buf.handle, z_bytes, // binding 1: z_gate
-                norm_buf_handle, norm_buf_size, // binding 2: norm weights
-                self.swiglu_buf.handle, z_bytes, // binding 3: output
+            self.writeDescSet4(
+                ds,
+                self.attn_out_buf.handle,
+                z_bytes, // binding 0: delta_net output
+                self.gate_buf.handle,
+                z_bytes, // binding 1: z_gate
+                norm_buf_handle,
+                norm_buf_size, // binding 2: norm weights
+                self.swiglu_buf.handle,
+                z_bytes, // binding 3: output
             );
             const push = @import("elementwise.zig").SsmGatedNormPush{
                 .d_inner = d_inner,
@@ -2242,6 +2328,10 @@ pub const InferenceEngine = struct {
     /// KV cache and SSM state. Each token runs through all 40 layers.
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         if (prompt_tokens.len == 0) return;
+
+        if (state.position == 0 and state.generated_tokens.items.len == 0) {
+            try self.resetRequestState();
+        }
 
         // Run each prompt token through the full transformer (same as decodeStep)
         // This populates KV cache and SSM state so the first decode token has context.
@@ -2368,13 +2458,12 @@ pub const InferenceEngine = struct {
         // Barrier: transfer write → transfer read (for readback)
         {
             const barrier = vk.c.VkMemoryBarrier{
-                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
                 .srcAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
             };
-            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 1, &barrier, 0, null, 0, null);
+            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
         }
         // Readback hidden_buf → logits_staging
         {
@@ -2392,8 +2481,8 @@ pub const InferenceEngine = struct {
             if (d > embed_max_diff) embed_max_diff = d;
         }
         dlog.info("EMBED: CPU[0..3]={d:.6},{d:.6},{d:.6},{d:.6} GPU[0..3]={d:.6},{d:.6},{d:.6},{d:.6} max_diff={d:.9}", .{
-            cpu_embed[0],  cpu_embed[1],  cpu_embed[2],  cpu_embed[3],
-            gpu_e[0],      gpu_e[1],      gpu_e[2],      gpu_e[3],
+            cpu_embed[0],   cpu_embed[1], cpu_embed[2], cpu_embed[3],
+            gpu_e[0],       gpu_e[1],     gpu_e[2],     gpu_e[3],
             embed_max_diff,
         });
 
@@ -2405,21 +2494,18 @@ pub const InferenceEngine = struct {
         {
             const pip = &(self.elementwise.pipeline_rms_norm orelse return);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
-            self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size,
-                norm_t.gpu_buffer.handle, norm_t.gpu_buffer.size,
-                self.norm_buf.handle, hidden_size);
+            self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, norm_t.gpu_buffer.handle, norm_t.gpu_buffer.size, self.norm_buf.handle, hidden_size);
             try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
         }
         // Barrier: shader write → transfer read
         {
             const barrier = vk.c.VkMemoryBarrier{
-                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
                 .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
             };
-            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 1, &barrier, 0, null, 0, null);
+            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
         }
         // Readback norm_buf → logits_staging
         {
@@ -2450,13 +2536,12 @@ pub const InferenceEngine = struct {
         try self.dispatchDmmv(lm_t, self.norm_buf, hidden_size, self.logits_buf, config.vocab_size, hidden_dim);
         {
             const barrier = vk.c.VkMemoryBarrier{
-                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = null,
                 .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
             };
-            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 1, &barrier, 0, null, 0, null);
+            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
             const logits_copy = @as(vk.c.VkDeviceSize, config.vocab_size) * @sizeOf(f32);
             const copy_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_copy };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &copy_region);
@@ -2476,14 +2561,19 @@ pub const InferenceEngine = struct {
         var gpu_max: f32 = gpu[0];
         var gpu_max_idx: u32 = 0;
         for (1..config.vocab_size) |i| {
-            if (gpu[i] > gpu_max) { gpu_max = gpu[i]; gpu_max_idx = @intCast(i); }
+            if (gpu[i] > gpu_max) {
+                gpu_max = gpu[i];
+                gpu_max_idx = @intCast(i);
+            }
         }
 
         dlog.info("SUMMARY: embed_ok={s} norm_ok={s} GPU_argmax={d}({d:.4}) CPU_logit5={d:.4} GPU_logit5={d:.4}", .{
             if (embed_max_diff < 0.001) "YES" else "NO",
             if (norm_max_diff < 0.01) "YES" else "NO",
-            gpu_max_idx, gpu_max,
-            cpu_logits[5], gpu[5],
+            gpu_max_idx,
+            gpu_max,
+            cpu_logits[5],
+            gpu[5],
         });
 
         // ── STAGE 4: Verify DMMV for non-Q8_0 quant types ──
@@ -2525,13 +2615,12 @@ pub const InferenceEngine = struct {
             try self.dispatchDmmv(wt, self.norm_buf, hidden_size, self.logits_buf, conv_ch, hidden_dim);
             {
                 const bar4 = vk.c.VkMemoryBarrier{
-                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
                     .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                     .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
                 };
-                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    0, 1, &bar4, 0, null, 0, null);
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar4, 0, null, 0, null);
                 const wq_copy_sz = @as(vk.c.VkDeviceSize, conv_ch) * @sizeOf(f32);
                 const rgn4 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = wq_copy_sz };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn4);
@@ -2549,7 +2638,7 @@ pub const InferenceEngine = struct {
                 });
             }
             dlog.info("DMMV_CHECK: wqkv type={s} M={d} K={d} max_diff={d:.6} ok={s}", .{
-                @tagName(wt.info.type_), conv_ch, hidden_dim, wqkv_mdiff,
+                @tagName(wt.info.type_),                                                 conv_ch, hidden_dim, wqkv_mdiff,
                 if (wqkv_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
             });
         }
@@ -2575,13 +2664,12 @@ pub const InferenceEngine = struct {
             try self.dispatchDmmvWithOffset(gt, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim, 0);
             {
                 const bar5 = vk.c.VkMemoryBarrier{
-                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
                     .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
                     .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
                 };
-                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    0, 1, &bar5, 0, null, 0, null);
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar5, 0, null, 0, null);
                 const g_copy_sz = @as(vk.c.VkDeviceSize, 3) * @sizeOf(f32);
                 const rgn5 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = g_copy_sz };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn5);
@@ -2596,11 +2684,10 @@ pub const InferenceEngine = struct {
                 if (d5 > gate_mdiff) gate_mdiff = d5;
             }
             dlog.info("DMMV_CHECK: gate_exps type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
-                @tagName(gt.info.type_), inter_d, hidden_dim,
-                gpu_g[0], gpu_g[1], gpu_g[2],
-                cpu_gate_r[0], cpu_gate_r[1], cpu_gate_r[2],
-                gate_mdiff,
-                if (gate_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                @tagName(gt.info.type_), inter_d,                                                                 hidden_dim,
+                gpu_g[0],                gpu_g[1],                                                                gpu_g[2],
+                cpu_gate_r[0],           cpu_gate_r[1],                                                           cpu_gate_r[2],
+                gate_mdiff,              if (gate_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
             });
         }
 
@@ -2687,9 +2774,16 @@ fn dumpTop5Logits(engine: *const InferenceEngine, step: u32) void {
     }
     log.info("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
         step,
-        top_ids[0], top_vals[0], top_ids[1], top_vals[1],
-        top_ids[2], top_vals[2], top_ids[3], top_vals[3],
-        top_ids[4], top_vals[4],
+        top_ids[0],
+        top_vals[0],
+        top_ids[1],
+        top_vals[1],
+        top_ids[2],
+        top_vals[2],
+        top_ids[3],
+        top_vals[3],
+        top_ids[4],
+        top_vals[4],
     });
 }
 
@@ -2905,8 +2999,8 @@ test "dequantRow Q4_K sub-block pairing: low nibble then high nibble" {
     dequantRow(&block, 0, 256, .q4_k, &output);
 
     // First sub-block: scale=1, so output = 1.0 * 1 * nibble = nibble
-    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[0], 0.01);  // low nibble of 0x53
-    try std.testing.expectApproxEqAbs(@as(f32, 7.0), output[1], 0.01);  // low nibble of 0x97
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[0], 0.01); // low nibble of 0x53
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), output[1], 0.01); // low nibble of 0x97
     // Second sub-block: scale=2, output = 1.0 * 2 * nibble
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), output[32], 0.01); // high nibble of 0x53 = 5, * 2
     try std.testing.expectApproxEqAbs(@as(f32, 18.0), output[33], 0.01); // high nibble of 0x97 = 9, * 2
@@ -2939,7 +3033,7 @@ test "dequantRow Q5_K interleaved element ordering: y[2l] and y[2l+1]" {
 
     // Interleaved: output[0] from low nibble, output[1] from high nibble
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), output[0], 0.01); // d*sc*10 - 0 = 10
-    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[1], 0.01);  // d*sc*3 - 0 = 3
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[1], 0.01); // d*sc*3 - 0 = 3
 }
 
 test "dequantRow Q8_0 correct scale and signed values" {
@@ -2960,9 +3054,9 @@ test "dequantRow Q8_0 correct scale and signed values" {
     var output: [32]f32 = undefined;
     dequantRow(&block, 0, 32, .q8_0, &output);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), output[0], 0.001);   // 1 * 0.5
-    try std.testing.expectApproxEqAbs(@as(f32, -0.5), output[1], 0.001);  // -1 * 0.5
-    try std.testing.expectApproxEqAbs(@as(f32, 63.5), output[2], 0.001);  // 127 * 0.5
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), output[0], 0.001); // 1 * 0.5
+    try std.testing.expectApproxEqAbs(@as(f32, -0.5), output[1], 0.001); // -1 * 0.5
+    try std.testing.expectApproxEqAbs(@as(f32, 63.5), output[2], 0.001); // 127 * 0.5
     try std.testing.expectApproxEqAbs(@as(f32, -64.0), output[3], 0.001); // -128 * 0.5
     // Remaining should be 0
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), output[6], 0.001);
@@ -3026,7 +3120,7 @@ test "getScaleMinK4 high indices combine nibbles and top bits" {
 
     const sm = getScaleMinK4(4, &scales);
     try std.testing.expectEqual(@as(u8, 0x2 | (3 << 4)), sm.sc); // 2 + 48 = 50
-    try std.testing.expectEqual(@as(u8, 0x7 | (2 << 4)), sm.m);  // 7 + 32 = 39
+    try std.testing.expectEqual(@as(u8, 0x7 | (2 << 4)), sm.m); // 7 + 32 = 39
 }
 
 // ---------------------------------------------------------------------------
@@ -3165,7 +3259,9 @@ test "l2Normalize produces unit vector" {
     var sum_sq: f32 = 0;
     for (v) |x| sum_sq += x * x;
     const norm = @sqrt(sum_sq + 1e-12);
-    if (norm > 0) { for (&v) |*x| x.* /= norm; }
+    if (norm > 0) {
+        for (&v) |*x| x.* /= norm;
+    }
     try std.testing.expectApproxEqAbs(@as(f32, 0.6), v[0], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0.8), v[1], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), v[2], 1e-6);
@@ -3176,7 +3272,9 @@ test "l2Normalize zero vector stays zero" {
     var sum_sq: f32 = 0;
     for (v) |x| sum_sq += x * x;
     const norm = @sqrt(sum_sq + 1e-12);
-    if (norm > 0) { for (&v) |*x| x.* /= norm; }
+    if (norm > 0) {
+        for (&v) |*x| x.* /= norm;
+    }
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), v[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), v[1], 1e-12);
 }
@@ -3253,4 +3351,3 @@ test "push constant struct sizes match GLSL expectations" {
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(ew.SsmGatedNormPush));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(ew.SoftmaxTopkPush));
 }
-

@@ -76,6 +76,29 @@ fn handleModels(conn: *http.Connection, model: *const Model) !void {
 
 // ── /v1/chat/completions ─────────────────────────────────────
 
+const chat_stop_strs = [_][]const u8{
+    "<|im_end|>",
+    "<|im_start|>",
+};
+
+fn buildChatPrompt(tokenizer: *const tokenizer_mod.Tokenizer, user_content: []const u8, buf: []u8) ![]const u8 {
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{user_content};
+    return tokenizer.applyChatTemplate(&roles, &contents, buf);
+}
+
+fn findFirstStop(text: []const u8, stop_strs: []const []const u8) ?usize {
+    var first: ?usize = null;
+    for (stop_strs) |stop| {
+        if (std.mem.indexOf(u8, text, stop)) |pos| {
+            if (first == null or pos < first.?) {
+                first = pos;
+            }
+        }
+    }
+    return first;
+}
+
 fn handleChatCompletions(
     conn: *http.Connection,
     engine: *forward_mod.InferenceEngine,
@@ -95,15 +118,13 @@ fn handleChatCompletions(
         return;
     }
 
-    // Apply chat template: wrap content with ChatML tags
     var prompt_buf: [8192]u8 = undefined;
-    const prompt = std.fmt.bufPrint(&prompt_buf,
-        \\<|im_start|>user
-        \\{s}<|im_end|>
-        \\<|im_start|>assistant
-        \\
-    , .{parsed.messages_content}) catch {
-        try conn.sendError(400, "invalid_request_error", "Prompt too long");
+    const prompt = buildChatPrompt(tokenizer, parsed.messages_content, &prompt_buf) catch |err| {
+        if (err == error.BufferTooSmall) {
+            try conn.sendError(400, "invalid_request_error", "Prompt too long");
+            return;
+        }
+        try conn.sendError(500, "internal_error", "Prompt formatting failed");
         return;
     };
 
@@ -151,7 +172,7 @@ fn handleChatCompletions(
         // Decode loop with buffered stop detection.
         // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
         const eos = tokenizer.eosId();
-        const stop_strs = [_][]const u8{"<|im_end|>"};
+        const stop_strs = chat_stop_strs[0..];
         var pending_tokens: [16]u32 = undefined; // tokens waiting to be sent
         var pending_count: usize = 0;
         var gen_text_buf: [4096]u8 = undefined; // accumulated decoded text for stop check
@@ -180,11 +201,8 @@ fn handleChatCompletions(
                 }
 
                 // Check for full stop match against all stop strings
-                for (stop_strs) |ss| {
-                    if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], ss)) |_| {
-                        stopped = true;
-                        break;
-                    }
+                if (findFirstStop(gen_text_buf[0..gen_text_len], stop_strs)) |_| {
+                    stopped = true;
                 }
                 if (stopped) break;
 
@@ -250,7 +268,7 @@ fn handleChatCompletions(
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
         const ns_eos = tokenizer.eosId();
-        const ns_stops = [_][]const u8{"<|im_end|>"};
+        const ns_stops = chat_stop_strs[0..];
         if (prompt_tokens.len > 0 and max_tokens > 0) {
             var prev = engine.sampleGreedy();
             ns_gen = 1;
@@ -258,14 +276,10 @@ fn handleChatCompletions(
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
-                var hit = false;
-                for (ns_stops) |ns_stop| {
-                    if (std.mem.indexOf(u8, text_buf.items, ns_stop)) |pos| {
-                        text_buf.shrinkRetainingCapacity(pos);
-                        hit = true;
-                        break;
-                    }
-                }
+                const hit = if (findFirstStop(text_buf.items, ns_stops)) |pos| blk: {
+                    text_buf.shrinkRetainingCapacity(pos);
+                    break :blk true;
+                } else false;
                 if (hit) break;
                 engine.decodeStep(&state2, prev) catch break;
                 prev = engine.sampleGreedy();
@@ -281,9 +295,9 @@ fn handleChatCompletions(
         const resp = std.fmt.bufPrint(&resp_buf,
             \\{{"id":"{s}","object":"chat.completion","created":{d},"model":"{s}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{s}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
         , .{
-            req_id, ts, model_name,
-            escaped_text,
-            prompt_tokens.len, ns_gen, prompt_tokens.len + ns_gen,
+            req_id,                     ts,                model_name,
+            escaped_text,               prompt_tokens.len, ns_gen,
+            prompt_tokens.len + ns_gen,
         }) catch {
             try conn.sendError(500, "internal_error", "Response too large");
             return;
@@ -351,9 +365,9 @@ fn handleCompletions(
     const resp = std.fmt.bufPrint(&resp_buf,
         \\{{"id":"{s}","object":"text_completion","created":{d},"model":"{s}","choices":[{{"index":0,"text":"{s}","finish_reason":"stop"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
     , .{
-        req_id, ts, model_name,
-        escaped_text,
-        prompt_tokens.len, output_tokens.len, prompt_tokens.len + output_tokens.len,
+        req_id,                                ts,                model_name,
+        escaped_text,                          prompt_tokens.len, output_tokens.len,
+        prompt_tokens.len + output_tokens.len,
     }) catch {
         try conn.sendError(500, "internal_error", "Response too large");
         return;
@@ -437,7 +451,10 @@ fn findNumEnd(s: []const u8) usize {
 fn findStringEnd(s: []const u8) ?usize {
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
-        if (s[i] == '\\') { i += 1; continue; } // skip escaped chars
+        if (s[i] == '\\') {
+            i += 1;
+            continue;
+        } // skip escaped chars
         if (s[i] == '"') return i;
     }
     return null;
@@ -448,12 +465,35 @@ fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
     for (input) |c| {
         if (out + 2 >= buf.len) break;
         switch (c) {
-            '"' => { buf[out] = '\\'; buf[out + 1] = '"'; out += 2; },
-            '\\' => { buf[out] = '\\'; buf[out + 1] = '\\'; out += 2; },
-            '\n' => { buf[out] = '\\'; buf[out + 1] = 'n'; out += 2; },
-            '\r' => { buf[out] = '\\'; buf[out + 1] = 'r'; out += 2; },
-            '\t' => { buf[out] = '\\'; buf[out + 1] = 't'; out += 2; },
-            else => { buf[out] = c; out += 1; },
+            '"' => {
+                buf[out] = '\\';
+                buf[out + 1] = '"';
+                out += 2;
+            },
+            '\\' => {
+                buf[out] = '\\';
+                buf[out + 1] = '\\';
+                out += 2;
+            },
+            '\n' => {
+                buf[out] = '\\';
+                buf[out + 1] = 'n';
+                out += 2;
+            },
+            '\r' => {
+                buf[out] = '\\';
+                buf[out + 1] = 'r';
+                out += 2;
+            },
+            '\t' => {
+                buf[out] = '\\';
+                buf[out + 1] = 't';
+                out += 2;
+            },
+            else => {
+                buf[out] = c;
+                out += 1;
+            },
         }
     }
     return buf[0..out];
@@ -493,6 +533,19 @@ fn serveChatUi(conn: *http.Connection) !void {
 fn modelName(model: *const Model) []const u8 {
     _ = model;
     return "qwen3.5-35b"; // TODO: derive from GGUF metadata
+}
+
+fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {
+    return .{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .chat_template = chat_template,
+        .allocator = std.testing.allocator,
+    };
 }
 
 test "parseJsonFields extracts stream flag" {
@@ -614,4 +667,22 @@ test "findStringEnd no closing quote returns null" {
 
 test "findStringEnd immediate close" {
     try std.testing.expectEqual(@as(?usize, 0), findStringEnd("\"rest"));
+}
+
+test "buildChatPrompt uses tokenizer chat template helper" {
+    var tok = makeTestTokenizer(null);
+    defer tok.token_to_id.deinit();
+
+    var buf: [256]u8 = undefined;
+    const prompt = try buildChatPrompt(&tok, "hello", &buf);
+    try std.testing.expectEqualStrings("<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n", prompt);
+}
+
+test "findFirstStop picks earliest chat control marker" {
+    const text = "Hello<|im_start|>assistant<|im_end|>";
+    try std.testing.expectEqual(@as(?usize, 5), findFirstStop(text, chat_stop_strs[0..]));
+}
+
+test "findFirstStop returns null when no chat stop marker exists" {
+    try std.testing.expectEqual(@as(?usize, null), findFirstStop("Hello there", chat_stop_strs[0..]));
 }

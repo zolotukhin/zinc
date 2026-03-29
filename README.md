@@ -18,6 +18,9 @@
   <a href="https://zolotukhin.ai/zinc">
     <img src="https://img.shields.io/badge/web-zolotukhin.ai%2Fzinc-8B5CF6" alt="Website">
   </a>
+  <a href="https://discord.gg/tNDEgTG5s">
+    <img src="https://img.shields.io/badge/Discord-Join%20ZINC-5865F2?logo=discord&logoColor=white" alt="ZINC Discord">
+  </a>
 </p>
 
 > Making AMD consumer GPUs actually usable for LLM inference.
