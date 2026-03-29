@@ -1,203 +1,122 @@
-#pragma clang diagnostic ignored "-Wmissing-prototypes"
-#pragma clang diagnostic ignored "-Wmissing-braces"
-
 #include <metal_stdlib>
-#include <simd/simd.h>
-
 using namespace metal;
 
-template<typename T, size_t Num>
-struct spvUnsafeArray
-{
-    T elements[Num ? Num : 1];
-    
-    thread T& operator [] (size_t pos) thread
-    {
-        return elements[pos];
-    }
-    constexpr const thread T& operator [] (size_t pos) const thread
-    {
-        return elements[pos];
-    }
-    
-    device T& operator [] (size_t pos) device
-    {
-        return elements[pos];
-    }
-    constexpr const device T& operator [] (size_t pos) const device
-    {
-        return elements[pos];
-    }
-    
-    constexpr const constant T& operator [] (size_t pos) const constant
-    {
-        return elements[pos];
-    }
-    
-    threadgroup T& operator [] (size_t pos) threadgroup
-    {
-        return elements[pos];
-    }
-    constexpr const threadgroup T& operator [] (size_t pos) const threadgroup
-    {
-        return elements[pos];
-    }
+// Push constants for DMMV dispatch (matches Zig DmmvPush layout).
+struct DmmvPush {
+    uint M;        // rows
+    uint K;        // cols (max 4096)
+    uint a_offset; // byte offset into weight matrix
+    uint x_offset; // byte offset into input vector
+    uint y_offset; // byte offset into output vector
 };
 
-struct _36
-{
-    uchar _m0[1];
-};
-
-#ifndef SPIRV_CROSS_CONSTANT_ID_1
-#define SPIRV_CROSS_CONSTANT_ID_1 4096u
-#endif
-constant uint _226 = SPIRV_CROSS_CONSTANT_ID_1;
-
-struct _266
-{
-    uint _m0;
-    uint _m1;
-    uint _m2;
-    uint _m3;
-    uint _m4;
-};
-
-struct _292
-{
-    float _m0[1];
-};
-
-struct _406
-{
-    float _m0[1];
-};
-
-kernel void main0(device _36& _38 [[buffer(0)]], constant _266& _268 [[buffer(1)]], device _292& _294 [[buffer(2)]], device _406& _408 [[buffer(3)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]], uint3 gl_WorkGroupID [[threadgroup_position_in_grid]])
-{
-    threadgroup spvUnsafeArray<float, _226> _229;
-    do
-    {
-        uint _273 = _268._m1 / 256u;
-        uint _278 = _268._m3 / 4u;
-        for (uint _735 = gl_LocalInvocationID.x; _735 < _268._m1; )
-        {
-            _229[_735] = _294._m0[_278 + _735];
-            _735 += 64u;
-            continue;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        uint _312 = (gl_WorkGroupID.x * 64u) + gl_LocalInvocationID.x;
-        if (_312 >= _268._m0)
-        {
-            break;
-        }
-        float _737;
-        _737 = 0.0;
-        float _739;
-        for (uint _736 = 0u; _736 < _273; _737 = _739, _736++)
-        {
-            uint _333 = _736 * 256u;
-            uint _346 = (_268._m2 + ((_312 * _273) * 144u)) + (_736 * 144u);
-            float2 _376 = float2(as_type<half2>(uint(_38._m0[_346]) | (uint(_38._m0[_346 + 1u]) << uint(8))));
-            float _377 = _376.x;
-            float2 _380 = float2(as_type<half2>(uint(_38._m0[_346 + 2u]) | (uint(_38._m0[_346 + 3u]) << uint(8))));
-            float _381 = _380.x;
-            uint _384 = _346 + 16u;
-            uint _386 = _346 + 4u;
-            _739 = _737;
-            float _751;
-            for (uint _738 = 0u; _738 < 4u; _739 = _751, _738++)
-            {
-                bool _565;
-                uint _465 = _738 * 2u;
-                uint _468 = _465 + 1u;
-                float _741;
-                do
-                {
-                    _565 = _465 < 4u;
-                    if (_565)
-                    {
-                        _741 = float(uint(_38._m0[_386 + _465]) & 63u);
-                        break;
-                    }
-                    else
-                    {
-                        uint _578 = _386 + _465;
-                        _741 = float((uint(_38._m0[_578 + 4u]) & 15u) | (((uint(_38._m0[_578 - 4u]) >> uint(6)) & 3u) << uint(4)));
-                        break;
-                    }
-                    break; // unreachable workaround
-                } while(false);
-                float _742;
-                do
-                {
-                    if (_565)
-                    {
-                        _742 = float(uint(_38._m0[(_386 + _465) + 4u]) & 63u);
-                        break;
-                    }
-                    else
-                    {
-                        uint _623 = _386 + _465;
-                        _742 = float(((uint(_38._m0[_623 + 4u]) >> uint(4)) & 15u) | (((uint(_38._m0[_623]) >> uint(6)) & 3u) << uint(4)));
-                        break;
-                    }
-                    break; // unreachable workaround
-                } while(false);
-                bool _654;
-                float _477 = _377 * _741;
-                float _480 = _381 * _742;
-                float _743;
-                do
-                {
-                    _654 = _468 < 4u;
-                    if (_654)
-                    {
-                        _743 = float(uint(_38._m0[_386 + _468]) & 63u);
-                        break;
-                    }
-                    else
-                    {
-                        uint _667 = _386 + _468;
-                        _743 = float((uint(_38._m0[_667 + 4u]) & 15u) | (((uint(_38._m0[_667 - 4u]) >> uint(6)) & 3u) << uint(4)));
-                        break;
-                    }
-                    break; // unreachable workaround
-                } while(false);
-                float _744;
-                do
-                {
-                    if (_654)
-                    {
-                        _744 = float(uint(_38._m0[(_386 + _468) + 4u]) & 63u);
-                        break;
-                    }
-                    else
-                    {
-                        uint _712 = _386 + _468;
-                        _744 = float(((uint(_38._m0[_712 + 4u]) >> uint(4)) & 15u) | (((uint(_38._m0[_712]) >> uint(6)) & 3u) << uint(4)));
-                        break;
-                    }
-                    break; // unreachable workaround
-                } while(false);
-                float _489 = _377 * _743;
-                float _492 = _381 * _744;
-                uint _496 = _333 + (_738 * 64u);
-                uint _500 = _333 + (_468 * 32u);
-                uint _504 = _384 + (_738 * 32u);
-                _751 = _739;
-                for (uint _749 = 0u; _749 < 32u; )
-                {
-                    uint _515 = uint(_38._m0[_504 + _749]);
-                    _751 = (_751 + (((_477 * float(_515 & 15u)) - _480) * _229[_496 + _749])) + (((_489 * float((_515 >> uint(4)) & 15u)) - _492) * _229[_500 + _749]);
-                    _749++;
-                    continue;
-                }
-            }
-        }
-        _408._m0[(_268._m4 / 4u) + _312] = _737;
-        break;
-    } while(false);
+// Q4_K scale extraction — matches GGML Q4_K format.
+// Returns (scale, min) for sub-block j (0..7).
+inline float2 get_scale_min_k4(uint j, device const uchar* sc) {
+    if (j < 4) {
+        return float2(float(sc[j] & 63), float(sc[j + 4] & 63));
+    }
+    return float2(
+        float((sc[j + 4] & 0xF) | ((sc[j - 4] >> 6) << 4)),
+        float(((sc[j + 4] >> 4) & 0xF) | ((sc[j] >> 6) << 4))
+    );
 }
 
+// Native Metal Q4_K dequant matrix-vector multiply.
+//
+// One simdgroup (32 threads) processes one row. Adjacent threads read adjacent
+// quant bytes for coalesced device memory access. simd_sum reduces the partial
+// dot products — no threadgroup reduction barrier needed.
+//
+// Threadgroup: 256 threads = 8 simdgroups = 8 rows per threadgroup.
+// Shared memory: input vector (K floats, max 4096 = 16 KB).
+//
+// Q4_K block layout (144 bytes, 256 elements):
+//   [0..1]   d    (float16)  — super-block scale
+//   [2..3]   dmin (float16)  — super-block min
+//   [4..15]  scales (12 B)   — 8 sub-block scale/min pairs, packed 6-bit
+//   [16..143] quants (128 B) — 256 4-bit values: 4 groups of 32 bytes,
+//             low nibble = first 32 elements, high nibble = next 32
+
+#define TG_SIZE 256
+#define ROWS_PER_TG (TG_SIZE / 32)
+
+kernel void main0(
+    device const uchar* W [[buffer(0)]],
+    constant DmmvPush& p [[buffer(1)]],
+    device const float* X [[buffer(2)]],
+    device float* Y [[buffer(3)]],
+    uint tg_id [[threadgroup_position_in_grid]],
+    uint local_id [[thread_position_in_threadgroup]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float sx[4096];
+
+    // Cooperatively load input vector into threadgroup memory
+    for (uint i = local_id; i < p.K; i += TG_SIZE) {
+        sx[i] = X[p.x_offset / 4 + i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint row = tg_id * ROWS_PER_TG + sg_idx;
+    if (row >= p.M) return;
+
+    uint bpr = p.K / 256;  // Q4_K blocks per row
+    device const uchar* row_ptr = W + p.a_offset + ulong(row) * ulong(bpr) * 144;
+
+    float acc = 0.0f;
+
+    for (uint bi = 0; bi < bpr; bi++) {
+        device const uchar* block = row_ptr + bi * 144;
+
+        // Super-block scale and min (f16 → f32)
+        float d    = float(as_type<half>(*(device const ushort*)(block)));
+        float dmin = float(as_type<half>(*(device const ushort*)(block + 2)));
+
+        device const uchar* scales = block + 4;
+        device const uchar* quants = block + 16;
+
+        // Each lane reads 4 consecutive quant bytes (= 8 values: 4 low + 4 high nibble).
+        // 32 lanes × 4 bytes = 128 bytes = full quant region → perfectly coalesced.
+        uint byte_off  = lane * 4;
+        uint j         = byte_off / 32;         // quarter index (0..3)
+        uint local_off = byte_off % 32;         // offset within quarter
+
+        uchar qb0 = quants[byte_off];
+        uchar qb1 = quants[byte_off + 1];
+        uchar qb2 = quants[byte_off + 2];
+        uchar qb3 = quants[byte_off + 3];
+
+        // Sub-block scales: low nibble uses sub j*2, high nibble uses sub j*2+1
+        float2 sm_lo = get_scale_min_k4(j * 2,     scales);
+        float2 sm_hi = get_scale_min_k4(j * 2 + 1, scales);
+
+        float d_sc_lo = d * sm_lo.x;
+        float d_m_lo  = dmin * sm_lo.y;
+        float d_sc_hi = d * sm_hi.x;
+        float d_m_hi  = dmin * sm_hi.y;
+
+        // Column indices in the full row
+        uint col_lo = bi * 256 + j * 64 + local_off;
+        uint col_hi = col_lo + 32;
+
+        // Low nibbles → columns col_lo + {0,1,2,3}
+        acc += (d_sc_lo * float(qb0 & 0xF) - d_m_lo) * sx[col_lo];
+        acc += (d_sc_lo * float(qb1 & 0xF) - d_m_lo) * sx[col_lo + 1];
+        acc += (d_sc_lo * float(qb2 & 0xF) - d_m_lo) * sx[col_lo + 2];
+        acc += (d_sc_lo * float(qb3 & 0xF) - d_m_lo) * sx[col_lo + 3];
+
+        // High nibbles → columns col_hi + {0,1,2,3}
+        acc += (d_sc_hi * float(qb0 >> 4) - d_m_hi) * sx[col_hi];
+        acc += (d_sc_hi * float(qb1 >> 4) - d_m_hi) * sx[col_hi + 1];
+        acc += (d_sc_hi * float(qb2 >> 4) - d_m_hi) * sx[col_hi + 2];
+        acc += (d_sc_hi * float(qb3 >> 4) - d_m_hi) * sx[col_hi + 3];
+    }
+
+    // Reduce across simdgroup and write result
+    float sum = simd_sum(acc);
+    if (lane == 0) {
+        Y[p.y_offset / 4 + row] = sum;
+    }
+}

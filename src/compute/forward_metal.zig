@@ -486,17 +486,18 @@ pub const InferenceEngine = struct {
         return max_idx;
     }
 
-    /// Get the DMMV pipeline, push constant buffer index, and rows-per-workgroup for a quant type.
-    /// Q4_K/Q5_K/Q6_K/F32: each thread handles 1 row (64 rows per workgroup).
-    /// Q8_0/F16: each workgroup handles 2 rows (64 threads cooperate via simd_sum).
-    fn dmmvPipelineForType(self: *InferenceEngine, qt: GGMLType) ?struct { pipe: *const MetalPipeline, push_idx: u32, rows_per_wg: u32 } {
+    /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
+    /// Q4_K: native Metal kernel — 32 threads (1 simdgroup) per row, 8 rows per threadgroup (256 threads).
+    /// Q5_K/Q6_K/F32: SPIRV-Cross — each thread handles 1 row (64 rows per workgroup, 64 threads).
+    /// Q8_0/F16: SPIRV-Cross — each workgroup handles 2 rows (64 threads cooperate via simd_sum).
+    fn dmmvPipelineForType(self: *InferenceEngine, qt: GGMLType) ?struct { pipe: *const MetalPipeline, push_idx: u32, rows_per_wg: u32, block_size: u32 } {
         return switch (qt) {
-            .q4_k => .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 64 },
-            .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64 },
-            .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64 },
-            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2 },
-            .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0, .rows_per_wg = 2 },
-            .f32 => .{ .pipe = &self.dmmv_f32_pipe, .push_idx = 0, .rows_per_wg = 64 },
+            .q4_k => .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 },
+            .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
+            .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
+            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
+            .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
+            .f32 => .{ .pipe = &self.dmmv_f32_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             else => null,
         };
     }
@@ -576,7 +577,7 @@ fn dispatchDmmvOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf };
     const wgs = (M + pip.rows_per_wg - 1) / pip.rows_per_wg;
-    cmd.dispatchV2(pip.pipe, .{ wgs, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), pip.push_idx);
+    cmd.dispatchV2(pip.pipe, .{ wgs, 1, 1 }, .{ pip.block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), pip.push_idx);
 }
 
 /// Dispatch a single DMMV and wait for completion.
