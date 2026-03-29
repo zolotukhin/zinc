@@ -141,49 +141,76 @@ fn handleChatCompletions(
             return;
         };
 
-        // Decode loop: generate and stream one token at a time
+        // Decode loop with buffered stop detection.
+        // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
         const eos = tokenizer.eosId();
-        // Stop detection: accumulate generated text and check for <|im_end|>
-        var gen_text_buf: [4096]u8 = undefined;
-        var gen_text_len: usize = 0;
         const stop_str = "<|im_end|>";
+        var pending_tokens: [16]u32 = undefined; // tokens waiting to be sent
+        var pending_count: usize = 0;
+        var gen_text_buf: [4096]u8 = undefined; // accumulated decoded text for stop check
+        var gen_text_len: usize = 0;
+        var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
+        var stopped = false;
 
         var generated: u32 = 0;
         if (prompt_tokens.len > 0 and max_tokens > 0) {
-            const first = engine.sampleGreedy();
+            var prev_token = engine.sampleGreedy();
             generated = 1;
-            if (first != eos) {
-                const tok_text = if (first < tokenizer.vocab.len) tokenizer.vocab[first] else "";
-                // Accumulate text for stop detection
+
+            while (generated <= max_tokens and prev_token != eos and !stopped) {
+                // Accumulate this token's decoded text
+                var dec_buf: [256]u8 = undefined;
+                const tok_text = tokenizer.decodeToken(prev_token, &dec_buf);
                 if (gen_text_len + tok_text.len < gen_text_buf.len) {
                     @memcpy(gen_text_buf[gen_text_len..][0..tok_text.len], tok_text);
                     gen_text_len += tok_text.len;
                 }
-                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str) != null) {
-                    // Hit stop — don't send this token
-                } else {
-                    streamToken(conn, first, tokenizer, req_id, ts, model_name) catch return;
+
+                // Add to pending queue
+                if (pending_count < pending_tokens.len) {
+                    pending_tokens[pending_count] = prev_token;
+                    pending_count += 1;
                 }
+
+                // Check for full stop match
+                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str)) |_| {
+                    stopped = true;
+                    break;
+                }
+
+                // Check if tail of accumulated text could be a partial stop match
+                const tail_len = @min(gen_text_len - sent_text_len, stop_str.len - 1);
+                var is_partial = false;
+                if (tail_len > 0) {
+                    const tail = gen_text_buf[gen_text_len - tail_len .. gen_text_len];
+                    // Check if tail matches a prefix of stop_str
+                    if (std.mem.startsWith(u8, stop_str, tail)) {
+                        is_partial = true;
+                    }
+                }
+
+                if (!is_partial) {
+                    // Safe to send all pending tokens
+                    for (pending_tokens[0..pending_count]) |tid| {
+                        streamToken(conn, tid, tokenizer, req_id, ts, model_name) catch return;
+                    }
+                    pending_count = 0;
+                    sent_text_len = gen_text_len;
+                }
+
+                // Generate next token
+                if (generated < max_tokens) {
+                    engine.decodeStep(&state, prev_token) catch break;
+                    prev_token = engine.sampleGreedy();
+                    generated += 1;
+                } else break;
             }
-            var prev_token = first;
-            while (generated < max_tokens and prev_token != eos) {
-                // Check if we've hit the stop string
-                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str) != null) break;
 
-                engine.decodeStep(&state, prev_token) catch break;
-                const next = engine.sampleGreedy();
-                generated += 1;
-                prev_token = next;
-                if (next == eos) break;
-
-                const tok_text = if (next < tokenizer.vocab.len) tokenizer.vocab[next] else "";
-                if (gen_text_len + tok_text.len < gen_text_buf.len) {
-                    @memcpy(gen_text_buf[gen_text_len..][0..tok_text.len], tok_text);
-                    gen_text_len += tok_text.len;
+            // Flush any remaining pending tokens (only if we didn't hit stop)
+            if (!stopped) {
+                for (pending_tokens[0..pending_count]) |tid| {
+                    streamToken(conn, tid, tokenizer, req_id, ts, model_name) catch return;
                 }
-                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str) != null) break;
-
-                streamToken(conn, next, tokenizer, req_id, ts, model_name) catch return;
             }
         }
 
