@@ -131,6 +131,18 @@ pub const InferenceEngine = struct {
     ssm_conv_states: ?[][]f32,
     ssm_states: ?[][]f32,
 
+    // Preloaded SSM constants (per-layer, eliminates 120 mmap reads + 240 allocs per token)
+    ssm_conv_kernels: ?[][]f32,
+    ssm_dt_biases: ?[][]f32,
+    ssm_a_vals: ?[][]f32,
+    ssm_norm_weights: ?[][]f32,
+    ssm_norm_counts: ?[]u32,
+    // Shared SSM scratch buffers (reused across layers each token)
+    ssm_conv_out_scratch: ?[]f32,
+    ssm_gate_scratch: ?[]f32,
+    ssm_beta_scratch: ?[]f32,
+    ssm_output_scratch: ?[]f32,
+
     // Cached per-layer tensor pointers (init-time, eliminates per-token O(733) scans)
     layer_tensors: []LayerTensors,
     lm_head: *const metal_loader.LoadedTensor,
@@ -243,6 +255,69 @@ pub const InferenceEngine = struct {
             self.ssm_states = null;
         }
 
+        // Preload SSM constants: conv kernels, dt_bias, ssm_a, norm weights (once at init)
+        if (d_inner > 0 and cfg.ssm_d_conv > 0) {
+            const mmap_data = model.mmap_data orelse return error.NoMmapData;
+            const tensor_data_off = model.gguf_file.tensor_data_offset;
+            const conv_kernel_len: u32 = conv_channels * cfg.ssm_d_conv;
+            self.ssm_conv_kernels = try allocator.alloc([]f32, cfg.n_layers);
+            self.ssm_dt_biases = try allocator.alloc([]f32, cfg.n_layers);
+            self.ssm_a_vals = try allocator.alloc([]f32, cfg.n_layers);
+            self.ssm_norm_weights = try allocator.alloc([]f32, cfg.n_layers);
+            self.ssm_norm_counts = try allocator.alloc(u32, cfg.n_layers);
+            for (0..cfg.n_layers) |i| {
+                const layer_i: u32 = @intCast(i);
+                // Conv kernel
+                if (findLayerTensor(model, layer_i, "ssm_conv1d.weight")) |t| {
+                    self.ssm_conv_kernels.?[i] = try allocator.alloc(f32, conv_kernel_len);
+                    const off: usize = @intCast(tensor_data_off + t.info.offset);
+                    readMmapFloats(mmap_data, off, t.info.type_, self.ssm_conv_kernels.?[i]);
+                } else {
+                    self.ssm_conv_kernels.?[i] = try allocator.alloc(f32, 1);
+                    @memset(self.ssm_conv_kernels.?[i], 0);
+                }
+                // dt_bias
+                self.ssm_dt_biases.?[i] = try allocator.alloc(f32, cfg.ssm_dt_rank);
+                if (findLayerTensor(model, layer_i, "ssm_dt.bias")) |t| {
+                    const off: usize = @intCast(tensor_data_off + t.info.offset);
+                    readMmapFloats(mmap_data, off, t.info.type_, self.ssm_dt_biases.?[i]);
+                } else @memset(self.ssm_dt_biases.?[i], 0);
+                // ssm_a
+                self.ssm_a_vals.?[i] = try allocator.alloc(f32, cfg.ssm_dt_rank);
+                if (findLayerTensor(model, layer_i, "ssm_a")) |t| {
+                    const off: usize = @intCast(tensor_data_off + t.info.offset);
+                    readMmapFloats(mmap_data, off, t.info.type_, self.ssm_a_vals.?[i]);
+                } else @memset(self.ssm_a_vals.?[i], 0);
+                // norm weights
+                if (findLayerTensor(model, layer_i, "ssm_norm.weight")) |t| {
+                    const ne: u32 = @intCast(t.info.numElements());
+                    self.ssm_norm_weights.?[i] = try allocator.alloc(f32, ne);
+                    self.ssm_norm_counts.?[i] = ne;
+                    const off: usize = @intCast(tensor_data_off + t.info.offset);
+                    readMmapFloats(mmap_data, off, t.info.type_, self.ssm_norm_weights.?[i]);
+                } else {
+                    self.ssm_norm_weights.?[i] = try allocator.alloc(f32, 1);
+                    self.ssm_norm_counts.?[i] = 0;
+                    @memset(self.ssm_norm_weights.?[i], 0);
+                }
+            }
+            // Shared scratch buffers (reused across layers each token)
+            self.ssm_conv_out_scratch = try allocator.alloc(f32, conv_channels);
+            self.ssm_gate_scratch = try allocator.alloc(f32, cfg.ssm_dt_rank);
+            self.ssm_beta_scratch = try allocator.alloc(f32, cfg.ssm_dt_rank);
+            self.ssm_output_scratch = try allocator.alloc(f32, d_inner);
+        } else {
+            self.ssm_conv_kernels = null;
+            self.ssm_dt_biases = null;
+            self.ssm_a_vals = null;
+            self.ssm_norm_weights = null;
+            self.ssm_norm_counts = null;
+            self.ssm_conv_out_scratch = null;
+            self.ssm_gate_scratch = null;
+            self.ssm_beta_scratch = null;
+            self.ssm_output_scratch = null;
+        }
+
         // Cache per-layer tensor pointers (eliminates 652 O(733) linear scans per token)
         self.layer_tensors = try allocator.alloc(LayerTensors, cfg.n_layers);
         for (0..cfg.n_layers) |i| {
@@ -337,6 +412,27 @@ pub const InferenceEngine = struct {
             for (ss) |s| self.allocator.free(s);
             self.allocator.free(ss);
         }
+        if (self.ssm_conv_kernels) |arr| {
+            for (arr) |s| self.allocator.free(s);
+            self.allocator.free(arr);
+        }
+        if (self.ssm_dt_biases) |arr| {
+            for (arr) |s| self.allocator.free(s);
+            self.allocator.free(arr);
+        }
+        if (self.ssm_a_vals) |arr| {
+            for (arr) |s| self.allocator.free(s);
+            self.allocator.free(arr);
+        }
+        if (self.ssm_norm_weights) |arr| {
+            for (arr) |s| self.allocator.free(s);
+            self.allocator.free(arr);
+        }
+        if (self.ssm_norm_counts) |arr| self.allocator.free(arr);
+        if (self.ssm_conv_out_scratch) |s| self.allocator.free(s);
+        if (self.ssm_gate_scratch) |s| self.allocator.free(s);
+        if (self.ssm_beta_scratch) |s| self.allocator.free(s);
+        if (self.ssm_output_scratch) |s| self.allocator.free(s);
     }
 
     /// Sample the next token greedily (argmax over logits).
@@ -927,7 +1023,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
             }
         } else {
             // SSM CPU core: conv1d, state update, gated norm → swiglu_buf
-            try runSsmCpuCore(engine, layer_idx, mmap, data_base);
+            try runSsmCpuCore(engine, layer_idx);
         }
 
         // ===== GPU BATCH 2: output proj → residual → ffn_norm → router =====
@@ -1111,8 +1207,6 @@ fn decodeStep(engine: *InferenceEngine) !void {
 fn runSsmCpuCore(
     engine: *InferenceEngine,
     layer_idx: usize,
-    mmap: []const u8,
-    data_base: u64,
 ) !void {
     const cfg = engine.config;
     const d_inner = cfg.ssm_d_inner;
@@ -1132,20 +1226,15 @@ fn runSsmCpuCore(
     const alpha_cpu: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
     const beta_cpu: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
 
-    // Conv1d with state
+    // Conv1d with state (using preloaded kernel + shared scratch)
     const conv_state = engine.ssm_conv_states.?[layer_idx];
     const d_conv_1 = d_conv - 1;
 
     const lt = engine.layer_tensors[layer_idx];
-    const conv_t = lt.ssm_conv1d orelse return;
-    const conv_off: usize = @intCast(data_base + conv_t.info.offset);
-    const conv_kernel_len: usize = @as(usize, conv_channels) * d_conv;
-    const conv_kernel = try engine.allocator.alloc(f32, conv_kernel_len);
-    defer engine.allocator.free(conv_kernel);
-    readMmapFloats(mmap, conv_off, conv_t.info.type_, conv_kernel);
+    if (lt.ssm_conv1d == null) return;
+    const conv_kernel = engine.ssm_conv_kernels.?[layer_idx];
 
-    const conv_out = try engine.allocator.alloc(f32, conv_channels);
-    defer engine.allocator.free(conv_out);
+    const conv_out = engine.ssm_conv_out_scratch.?;
     for (0..conv_channels) |ch| {
         var sum: f32 = 0;
         for (0..d_conv) |ki| {
@@ -1176,32 +1265,18 @@ fn runSsmCpuCore(
         cpuL2Normalize(k_ssm[h * d_state ..][0..d_state]);
     }
 
-    // Compute gate and beta
-    const dt_bias_t = lt.ssm_dt_bias;
-    const dt_bias = try engine.allocator.alloc(f32, dt_rank);
-    defer engine.allocator.free(dt_bias);
-    if (dt_bias_t) |t| {
-        const off: usize = @intCast(data_base + t.info.offset);
-        readMmapFloats(mmap, off, t.info.type_, dt_bias);
-    } else @memset(dt_bias, 0);
-
-    const ssm_a_t = lt.ssm_a;
-    const ssm_a = try engine.allocator.alloc(f32, dt_rank);
-    defer engine.allocator.free(ssm_a);
-    if (ssm_a_t) |t| {
-        const off: usize = @intCast(data_base + t.info.offset);
-        readMmapFloats(mmap, off, t.info.type_, ssm_a);
-    } else @memset(ssm_a, 0);
-
-    const gate_arr = try engine.allocator.alloc(f32, dt_rank);
-    defer engine.allocator.free(gate_arr);
-    const beta_arr = try engine.allocator.alloc(f32, dt_rank);
-    defer engine.allocator.free(beta_arr);
+    // Compute gate and beta (using preloaded dt_bias + ssm_a + shared scratch)
+    const has_dt_bias = lt.ssm_dt_bias != null;
+    const dt_bias = engine.ssm_dt_biases.?[layer_idx];
+    const has_ssm_a = lt.ssm_a != null;
+    const ssm_a = engine.ssm_a_vals.?[layer_idx];
+    const gate_arr = engine.ssm_gate_scratch.?;
+    const beta_arr = engine.ssm_beta_scratch.?;
     for (0..dt_rank) |i| {
         var a = alpha_cpu[i];
-        if (dt_bias_t != null) a += dt_bias[i];
+        if (has_dt_bias) a += dt_bias[i];
         const sp = @log(1.0 + @exp(a));
-        gate_arr[i] = if (ssm_a_t != null) sp * ssm_a[i] else -sp;
+        gate_arr[i] = if (has_ssm_a) sp * ssm_a[i] else -sp;
         beta_arr[i] = 1.0 / (1.0 + @exp(-beta_cpu[i]));
     }
 
@@ -1235,9 +1310,8 @@ fn runSsmCpuCore(
         }
     }
 
-    // Read from state
-    const ssm_output = try engine.allocator.alloc(f32, d_inner);
-    defer engine.allocator.free(ssm_output);
+    // Read from state (using shared scratch)
+    const ssm_output = engine.ssm_output_scratch.?;
     for (0..dt_rank) |h| {
         const s_base = h * head_v_dim * head_v_dim;
         const q_hi = if (n_group == dt_rank) h else h % n_group;
@@ -1251,17 +1325,11 @@ fn runSsmCpuCore(
         }
     }
 
-    // Gated normalization: RMS_norm(o) * SiLU(z)
-    const norm_t = lt.ssm_norm;
-    const norm_elems_ssm: u32 = if (norm_t) |t| @intCast(t.info.numElements()) else 0;
+    // Gated normalization: RMS_norm(o) * SiLU(z) (using preloaded norm weights)
+    const norm_elems_ssm = engine.ssm_norm_counts.?[layer_idx];
+    const has_norm = norm_elems_ssm > 0;
     const norm_per_head = norm_elems_ssm >= d_inner;
-    const norm_alloc_len: u32 = if (norm_elems_ssm > 0) norm_elems_ssm else 1;
-    const norm_w_ssm = try engine.allocator.alloc(f32, norm_alloc_len);
-    defer engine.allocator.free(norm_w_ssm);
-    if (norm_t) |t| {
-        const off: usize = @intCast(data_base + t.info.offset);
-        readMmapFloats(mmap, off, t.info.type_, norm_w_ssm[0..norm_elems_ssm]);
-    }
+    const norm_w_ssm = engine.ssm_norm_weights.?[layer_idx];
 
     for (0..dt_rank) |h| {
         const o_sl = ssm_output[h * head_v_dim ..][0..head_v_dim];
@@ -1271,7 +1339,7 @@ fn runSsmCpuCore(
         const rms = @sqrt(sq / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
         for (0..head_v_dim) |i| {
             var nv = o_sl[i] / rms;
-            if (norm_t != null) nv *= norm_w_ssm[if (norm_per_head) h * head_v_dim + i else i % d_state];
+            if (has_norm) nv *= norm_w_ssm[if (norm_per_head) h * head_v_dim + i else i % d_state];
             const zv = z_cpu[z_sl_off + i];
             o_sl[i] = nv * (zv / (1.0 + @exp(-zv)));
         }
