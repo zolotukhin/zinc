@@ -21,10 +21,11 @@ inline float2 get_scale_min_k4(uint j, device const uchar* sc) {
     );
 }
 
-// Batched MoE specialization for K <= 2048. The hot MoE gate/up/down decode
-// paths on Qwen3.5 all fit here, so the staged expert input vector only
-// reserves 8 KiB of threadgroup memory instead of 16 KiB.
-#define TG_SIZE 256
+// Wide batched MoE specialization for K <= 2048. The hot MoE gate/up/down
+// decode paths on Qwen3.5 all fit here, so the staged expert input vector
+// still only reserves 8 KiB of threadgroup memory while being reused across
+// 16 rows per threadgroup instead of 8.
+#define TG_SIZE 512
 #define ROWS_PER_TG (TG_SIZE / 32)
 #define MAX_K_VEC4 512
 

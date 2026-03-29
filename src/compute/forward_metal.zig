@@ -936,9 +936,12 @@ fn dispatchDmmvMoeQ4kOnCmd(
         .y_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
-    const wgs = (M + 7) / 8;
-    const pipe = if (K <= 2048) &engine.dmmv_q4k_moe_k2048_pipe else &engine.dmmv_q4k_moe_pipe;
-    cmd.dispatchV2(pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    const k2048_or_less = K <= 2048;
+    const rows_per_wg: u32 = if (k2048_or_less) 16 else 8;
+    const block_size: u32 = if (k2048_or_less) 512 else 256;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    const pipe = if (k2048_or_less) &engine.dmmv_q4k_moe_k2048_pipe else &engine.dmmv_q4k_moe_pipe;
+    cmd.dispatchV2(pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
 }
 
 /// Preload norm weights from mmap into an f32 Metal buffer (done once at init).
