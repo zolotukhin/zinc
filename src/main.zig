@@ -1,33 +1,60 @@
 //! CLI entrypoints for configuring ZINC and starting local inference.
 //! @section CLI & Entrypoints
-//! This module wires together Vulkan initialization, model loading, tokenization,
+//! This module wires together GPU initialization, model loading, tokenization,
 //! and the single-process decode loop used for prompt-mode execution.
 const std = @import("std");
-const instance_mod = @import("vulkan/instance.zig");
-const gpu_detect = @import("vulkan/gpu_detect.zig");
-const loader_mod = @import("model/loader.zig");
-const architecture_mod = @import("model/architecture.zig");
+const builtin = @import("builtin");
+const gpu = @import("gpu/interface.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
-const forward_mod = @import("compute/forward.zig");
-const CommandPool = @import("vulkan/command.zig").CommandPool;
+const config_mod = @import("model/config.zig");
+// These modules import vulkan/ transitively — only available on Linux until T010-T014 refactor.
+// On macOS they are stubbed out; the GPU abstraction refactor will make them platform-independent.
+const loader_mod = if (gpu.is_vulkan) @import("model/loader.zig") else struct {};
+const architecture_mod = if (gpu.is_vulkan) @import("model/architecture.zig") else struct {};
+const forward_mod = if (gpu.is_vulkan) @import("compute/forward.zig") else struct {};
+
+// Backend-specific imports (only one branch compiles per platform)
+const instance_mod = if (gpu.is_vulkan) @import("vulkan/instance.zig") else gpu.backend;
+const gpu_detect = if (gpu.is_vulkan) @import("vulkan/gpu_detect.zig") else struct {};
+const CommandPool = if (gpu.is_vulkan) @import("vulkan/command.zig").CommandPool else struct {
+    pub fn init(_: anytype) !@This() { return .{}; }
+    pub fn deinit(_: *@This()) void {}
+};
 
 const log = std.log.scoped(.zinc);
 
-// Force compilation and testing of all modules
+// Force compilation and testing of all modules (platform-conditional).
+// Modules that directly import vulkan/ are only compiled on Linux.
+// On macOS, Metal-specific modules are compiled instead.
+// T010-T014 will refactor compute/ and model/ to use gpu/interface.zig,
+// after which all modules compile on both platforms.
 comptime {
-    _ = @import("vulkan/vk.zig");
-    _ = @import("vulkan/buffer.zig");
-    _ = @import("vulkan/pipeline.zig");
-    _ = @import("vulkan/command.zig");
+    if (gpu.is_vulkan) {
+        _ = @import("vulkan/vk.zig");
+        _ = @import("vulkan/buffer.zig");
+        _ = @import("vulkan/pipeline.zig");
+        _ = @import("vulkan/command.zig");
+        // These modules import vulkan/ directly — Vulkan-only until T010-T014 refactor
+        _ = @import("compute/dmmv.zig");
+        _ = @import("compute/elementwise.zig");
+        _ = @import("compute/attention.zig");
+        _ = @import("compute/forward.zig");
+        _ = @import("model/loader.zig");
+        _ = @import("model/architecture.zig");
+    }
+    if (gpu.is_metal) {
+        _ = @import("metal/device.zig");
+        _ = @import("metal/buffer.zig");
+        _ = @import("metal/pipeline.zig");
+        _ = @import("metal/command.zig");
+        _ = @import("model/loader_metal.zig");
+        _ = @import("compute/forward_metal.zig");
+    }
+    // Platform-independent modules
+    _ = @import("model/config.zig");
     _ = @import("model/gguf.zig");
-    _ = @import("model/loader.zig");
     _ = @import("model/tokenizer.zig");
-    _ = @import("model/architecture.zig");
     _ = @import("compute/graph.zig");
-    _ = @import("compute/dmmv.zig");
-    _ = @import("compute/elementwise.zig");
-    _ = @import("compute/attention.zig");
-    _ = @import("compute/forward.zig");
     _ = @import("server/http.zig");
     _ = @import("server/routes.zig");
     _ = @import("server/session.zig");
@@ -50,6 +77,8 @@ pub const Config = struct {
     max_parallel: u32 = 4,
     /// CLI prompt text.
     prompt: ?[]const u8 = null,
+    /// Max tokens to generate.
+    max_tokens: u32 = 256,
     kv_quant: u8 = 0, // 0=disabled, 2/3/4=TurboQuant bits
     /// Graph JSON report path.
     graph_report_path: ?[]const u8 = null,
@@ -108,6 +137,7 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.context_length = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidContext;
+            if (config.context_length > 32768) return error.InvalidContext;
         } else if (std.mem.eql(u8, arg, "--parallel")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -131,6 +161,10 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.graph_dot_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--max-tokens") or std.mem.eql(u8, arg, "-n")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            config.max_tokens = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidMaxTokens;
         } else if (std.mem.eql(u8, arg, "--profile")) {
             config.profile = true;
         } else {
@@ -142,11 +176,14 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
 }
 
 /// Build the static decode graph from GGUF metadata and write debugging artifacts.
-/// @param model_path Path to the GGUF file to inspect.
-/// @param report_path Optional JSON destination for the structural graph report.
-/// @param dot_path Optional DOT destination for Graphviz rendering.
-/// @param allocator Allocator used for GGUF parsing and graph analysis.
-fn exportDecodeGraphArtifacts(
+/// Only available on Vulkan backend (loader.zig depends on Vulkan until T010-T014 refactor).
+const exportDecodeGraphArtifacts = if (gpu.is_vulkan) exportDecodeGraphArtifactsImpl else (struct {
+    fn f(_: []const u8, _: ?[]const u8, _: ?[]const u8, _: std.mem.Allocator) !void {
+        log.warn("Graph export not yet available on Metal backend", .{});
+    }
+}).f;
+
+fn exportDecodeGraphArtifactsImpl(
     model_path: []const u8,
     report_path: ?[]const u8,
     dot_path: ?[]const u8,
@@ -243,7 +280,88 @@ pub fn main() !void {
         if (config.prompt == null) return;
     }
 
-    // Initialize Vulkan
+    // Initialize GPU backend
+    if (comptime gpu.is_metal) {
+        const metal_device = @import("metal/device.zig");
+        const metal_loader = @import("model/loader_metal.zig");
+        const forward_metal = @import("compute/forward_metal.zig");
+
+        var device = metal_device.MetalDevice.init(allocator, config.device_index) catch |err| {
+            log.err("Metal init failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer device.deinit();
+
+        log.info("ZINC Metal backend — Apple Silicon ({s})", .{@tagName(device.chip)});
+        log.info("Memory: {d} GB | Max buffer: {d} GB", .{
+            device.totalMemory() / (1024 * 1024 * 1024),
+            device.maxBufferSize() / (1024 * 1024 * 1024),
+        });
+
+        // Load model (zero-copy mmap)
+        var model = metal_loader.load(model_path, device.ctx, allocator) catch |err| {
+            log.err("Failed to load model: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer model.deinit();
+
+        if (config.prompt) |prompt| {
+            log.info("Prompt: {s}", .{prompt});
+
+            var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
+                log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer tokenizer.deinit();
+
+            const raw_tokens = try tokenizer.encode(prompt);
+            defer allocator.free(raw_tokens);
+
+            // Prepend BOS token
+            const prompt_tokens = try allocator.alloc(u32, raw_tokens.len + 1);
+            prompt_tokens[0] = tokenizer.bosId();
+            @memcpy(prompt_tokens[1..], raw_tokens);
+            defer allocator.free(prompt_tokens);
+
+            log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
+
+            // Initialize inference engine
+            var engine = forward_metal.InferenceEngine.init(&model, &device, allocator) catch |err| {
+                log.err("Failed to init Metal inference engine: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer engine.deinit();
+
+            // Generate
+            const max_tokens = config.max_tokens;
+            const output_tokens = forward_metal.generate(&engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator) catch |err| {
+                log.err("Failed to generate: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer allocator.free(output_tokens);
+
+            if (output_tokens.len == 0) {
+                log.warn("Metal decode loop not yet implemented. Engine initialized successfully with {d} pipelines.", .{9});
+            } else {
+                // Decode tokens to text
+                var text_buf: std.ArrayList(u8) = .{};
+                defer text_buf.deinit(allocator);
+                for (output_tokens) |tid| {
+                    if (tid < tokenizer.vocab.len) {
+                        try text_buf.appendSlice(allocator, tokenizer.vocab[tid]);
+                    } else {
+                        try text_buf.appendSlice(allocator, "<?>");
+                    }
+                }
+                log.info("Output ({d} tokens): {s}", .{ output_tokens.len, text_buf.items });
+            }
+        } else {
+            log.info("Server mode — port {d} (Metal server not yet implemented)", .{config.port});
+        }
+        return;
+    }
+
+    // Vulkan backend (Linux)
     var vk_instance = instance_mod.Instance.init(allocator, config.device_index) catch |err| {
         log.err("Vulkan init failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -317,7 +435,7 @@ pub fn main() !void {
         }
 
         // Generate
-        const max_tokens: u32 = 256;
+        const max_tokens = config.max_tokens;
         const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator);
         defer allocator.free(output_tokens);
 

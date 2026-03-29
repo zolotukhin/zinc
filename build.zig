@@ -2,9 +2,12 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // Default to ReleaseFast for inference performance (override with -Drelease=false for debug)
+    const release = b.option(bool, "release", "Build optimized binary (default: true)") orelse true;
+    const optimize: std.builtin.OptimizeMode = if (release) .ReleaseFast else .Debug;
 
     const is_linux = target.result.os.tag == .linux;
+    const is_macos = target.result.os.tag == .macos;
 
     // --- Shader compilation: GLSL .comp → SPIR-V .spv ---
     // Only compiled when glslc is available (Linux build node).
@@ -71,12 +74,20 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // Platform-specific Vulkan paths
-    if (target.result.os.tag == .macos) {
-        exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        exe_mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    // Platform-specific GPU backend
+    if (is_macos) {
+        // Metal backend: compile ObjC shim, link Apple frameworks
+        exe_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        exe_mod.addIncludePath(b.path("src/metal"));
+        exe_mod.linkFramework("Metal", .{});
+        exe_mod.linkFramework("Foundation", .{});
+    } else {
+        // Vulkan backend (Linux)
+        exe_mod.linkSystemLibrary("vulkan", .{});
     }
-    exe_mod.linkSystemLibrary("vulkan", .{});
 
     const exe = b.addExecutable(.{
         .name = "zinc",
@@ -101,11 +112,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    if (target.result.os.tag == .macos) {
-        test_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        test_mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    if (is_macos) {
+        test_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        test_mod.addIncludePath(b.path("src/metal"));
+        test_mod.linkFramework("Metal", .{});
+        test_mod.linkFramework("Foundation", .{});
+    } else {
+        test_mod.linkSystemLibrary("vulkan", .{});
     }
-    test_mod.linkSystemLibrary("vulkan", .{});
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
