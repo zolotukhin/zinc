@@ -80,10 +80,9 @@ kernel void main0(
         uint j         = byte_off / 32;         // quarter index (0..3)
         uint local_off = byte_off % 32;         // offset within quarter
 
-        uchar qb0 = quants[byte_off];
-        uchar qb1 = quants[byte_off + 1];
-        uchar qb2 = quants[byte_off + 2];
-        uchar qb3 = quants[byte_off + 3];
+        // lane*4 keeps both quant and input accesses 16-byte aligned, so load
+        // four packed quant bytes and four input floats at once.
+        uchar4 qbytes = *(device const uchar4*)(quants + byte_off);
 
         // Sub-block scales: low nibble uses sub j*2, high nibble uses sub j*2+1
         float2 sm_lo = get_scale_min_k4(j * 2,     scales);
@@ -98,17 +97,27 @@ kernel void main0(
         uint col_lo = bi * 256 + j * 64 + local_off;
         uint col_hi = col_lo + 32;
 
-        // Low nibbles → columns col_lo + {0,1,2,3}
-        acc += (d_sc_lo * float(qb0 & 0xF) - d_m_lo) * input[col_lo];
-        acc += (d_sc_lo * float(qb1 & 0xF) - d_m_lo) * input[col_lo + 1];
-        acc += (d_sc_lo * float(qb2 & 0xF) - d_m_lo) * input[col_lo + 2];
-        acc += (d_sc_lo * float(qb3 & 0xF) - d_m_lo) * input[col_lo + 3];
+        float4 x_lo = *(device const float4*)(input + col_lo);
+        float4 x_hi = *(device const float4*)(input + col_hi);
 
-        // High nibbles → columns col_hi + {0,1,2,3}
-        acc += (d_sc_hi * float(qb0 >> 4) - d_m_hi) * input[col_hi];
-        acc += (d_sc_hi * float(qb1 >> 4) - d_m_hi) * input[col_hi + 1];
-        acc += (d_sc_hi * float(qb2 >> 4) - d_m_hi) * input[col_hi + 2];
-        acc += (d_sc_hi * float(qb3 >> 4) - d_m_hi) * input[col_hi + 3];
+        uchar4 q_lo = uchar4(
+            qbytes.x & 0x0F,
+            qbytes.y & 0x0F,
+            qbytes.z & 0x0F,
+            qbytes.w & 0x0F
+        );
+        uchar4 q_hi = uchar4(
+            qbytes.x >> 4,
+            qbytes.y >> 4,
+            qbytes.z >> 4,
+            qbytes.w >> 4
+        );
+
+        float4 lo_vals = fma(float4(q_lo), float4(d_sc_lo), float4(-d_m_lo));
+        float4 hi_vals = fma(float4(q_hi), float4(d_sc_hi), float4(-d_m_hi));
+
+        acc += dot(lo_vals, x_lo);
+        acc += dot(hi_vals, x_hi);
     }
 
     // Reduce across simdgroup and write result
