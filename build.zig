@@ -2,7 +2,9 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // Default to ReleaseFast for inference performance (override with -Drelease=false for debug)
+    const release = b.option(bool, "release", "Build optimized binary (default: true)") orelse true;
+    const optimize: std.builtin.OptimizeMode = if (release) .ReleaseFast else .Debug;
 
     const is_linux = target.result.os.tag == .linux;
     const is_macos = target.result.os.tag == .macos;
