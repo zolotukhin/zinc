@@ -108,7 +108,10 @@ pub const Request = struct {
         try self.generated_tokens.append(self.allocator, token);
     }
 
-    /// Check if generation should stop (max_tokens or EOS).
+    /// Check if generation should stop (max_tokens reached or EOS token emitted).
+    /// @param self Request to check.
+    /// @param eos_token_id End-of-sequence token ID.
+    /// @returns True if generation should stop.
     pub fn shouldStop(self: *const Request, eos_token_id: u32) bool {
         if (self.generated_tokens.items.len >= self.params.max_tokens) return true;
         if (self.generated_tokens.items.len > 0) {
@@ -119,7 +122,7 @@ pub const Request = struct {
     }
 
     /// Release the generated token buffer owned by this request.
-    /// Release the generated token buffer owned by this request.
+    /// @param self Request to tear down.
     pub fn deinit(self: *Request) void {
         self.generated_tokens.deinit(self.allocator);
     }
