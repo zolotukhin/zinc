@@ -88,6 +88,14 @@ pub const SoftmaxTopkPush = extern struct {
     k: u32,
 };
 
+/// Push constants for MoE weighted accumulate shader.
+/// Weight is read from GPU routing buffer, not passed as push constant.
+pub const MoeWeightedAccPush = extern struct {
+    N: u32,
+    n_used: u32,
+    expert_index: u32,
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -114,6 +122,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_softmax_topk: ?Pipeline,
     /// SIGMOID SCALE ACC pipeline: a[i] += sigmoid(c[0]) * b[i], 3 bindings.
     pipeline_sigmoid_scale_acc: ?Pipeline,
+    /// MOE WEIGHTED ACC pipeline: a[i] += routing_weight * b[i], 3 bindings (accum, src, routing).
+    pipeline_moe_weighted_acc: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -233,6 +243,13 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // moe_weighted_acc: a[i] += routing_weight * b[i], 3 bindings (accum, src, routing)
+        const mwa_path = std.fmt.bufPrint(&path_buf, "{s}/moe_weighted_acc.spv", .{shader_dir}) catch unreachable;
+        const pipeline_moe_weighted_acc = pipeline_mod.createFromSpirv(instance, mwa_path, 3, @sizeOf(MoeWeightedAccPush), &.{}, allocator) catch |err| blk: {
+            log.warn("moe_weighted_acc shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -246,6 +263,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_ssm_gated_norm = pipeline_ssm_gated_norm,
             .pipeline_softmax_topk = pipeline_softmax_topk,
             .pipeline_sigmoid_scale_acc = pipeline_sigmoid_scale_acc,
+            .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -472,6 +490,22 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
+    /// Record MoE weighted accumulate: a[i] += routing_weight[expert_index] * b[i].
+    /// Weight is read from GPU routing buffer (binding 2), not from push constant.
+    pub fn recordMoeWeightedAcc(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+        n_used: u32,
+        expert_index: u32,
+    ) !void {
+        const pip = if (self.pipeline_moe_weighted_acc) |*p| p else return error.ShaderNotLoaded;
+        const push = MoeWeightedAccPush{ .N = n_elements, .n_used = n_used, .expert_index = expert_index };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *ElementwiseDispatch) void {
@@ -487,6 +521,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_ssm_gated_norm) |*p| p.deinit();
         if (self.pipeline_softmax_topk) |*p| p.deinit();
         if (self.pipeline_sigmoid_scale_acc) |*p| p.deinit();
+        if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

@@ -1280,39 +1280,86 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 const n_used = config.n_experts_used;
-                var expert_ids: [16]u32 = undefined;
-                var expert_weights: [16]f32 = undefined;
 
-                if (false) { // GPU softmax_topk disabled — crashes RADV, needs debugging
-                    // GPU path: softmax+topk on GPU, readback only 64 bytes of results
-                    const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
-                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet2(ds,
-                        self.router_logits_buf.handle, @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32),
-                        self.router_output_buf.handle, self.router_output_buf.size,
-                    );
-                    try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
-                    // Barrier: shader write → host read
+                // Dispatch each selected expert
+                const gate_exps = self.findLayerTensor(layer, "ffn_gate_exps.weight") orelse return error.TensorNotFound;
+                const up_exps = self.findLayerTensor(layer, "ffn_up_exps.weight") orelse return error.TensorNotFound;
+                const down_exps = self.findLayerTensor(layer, "ffn_down_exps.weight") orelse return error.TensorNotFound;
+
+                const gate_quant = gate_exps.info.type_;
+                const down_quant = down_exps.info.type_;
+                // Expert weight offset: each expert has inter_dim rows of K=hidden_dim
+                const expert_gate_row_bytes = expertSliceBytes(gate_quant, inter_dim, hidden_dim);
+                // Down projection: each expert has hidden_dim rows of K=inter_dim
+                const expert_down_row_bytes = expertSliceBytes(down_quant, hidden_dim, inter_dim);
+
+                // Check if full GPU MoE path is available (MoE DMMV + softmax_topk + weighted_acc)
+                const use_gpu_moe = self.dmmv.moePipelineForType(gate_quant) != null and
+                    self.dmmv.moePipelineForType(down_quant) != null and
+                    self.elementwise.pipeline_softmax_topk != null and
+                    self.elementwise.pipeline_moe_weighted_acc != null;
+
+                if (use_gpu_moe) {
+                    // === GPU MoE path: NO readback, NO submit — everything stays on GPU ===
+                    // softmax_topk writes expert_ids + weights to router_output_buf
                     {
-                        const barrier = vk.c.VkMemoryBarrier{
-                            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
-                            .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
-                            .dstAccessMask = vk.c.VK_ACCESS_HOST_READ_BIT,
-                        };
-                        vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
-                            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_HOST_BIT,
-                            0, 1, &barrier, 0, null, 0, null);
+                        const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
+                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet2(ds,
+                            self.router_logits_buf.handle, @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32),
+                            self.router_output_buf.handle, self.router_output_buf.size,
+                        );
+                        try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
                     }
-                    try self.decode_cmd.end();
-                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-                    // Read expert_ids and weights from host-visible router_output_buf
-                    const out_ptr: [*]const u32 = @ptrCast(@alignCast(self.router_output_buf.mapped.?));
+                    // Barrier: softmax_topk shader write → MoE DMMV shader read
+                    self.decode_cmd.computeBarrier();
+
+                    // Zero moe_out_buf (transfer op, parallel with barrier above)
+                    vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.moe_out_buf.handle, 0, hidden_size, 0);
+                    self.decode_cmd.transferToComputeBarrier();
+
+                    // MoE DMMV: each dispatch reads expert_ids[ei] from GPU routing buffer
                     for (0..n_used) |ei| {
-                        expert_ids[ei] = out_ptr[ei];
-                        expert_weights[ei] = @bitCast(out_ptr[n_used + ei]);
+                        const ei_u32: u32 = @intCast(ei);
+
+                        // gate DMMV: ffn_gate_exps[expert] × ffn_norm_buf → gate_buf
+                        try self.dispatchMoeDmmv(gate_exps, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim, expert_gate_row_bytes, ei_u32);
+                        // up DMMV: ffn_up_exps[expert] × ffn_norm_buf → up_buf
+                        try self.dispatchMoeDmmv(up_exps, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, expert_gate_row_bytes, ei_u32);
+                        self.decode_cmd.computeBarrier();
+
+                        // SwiGLU: gate_buf, up_buf → swiglu_buf
+                        {
+                            const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size,
+                                self.up_buf.handle, self.up_buf.size,
+                                self.swiglu_buf.handle, self.swiglu_buf.size);
+                            try self.elementwise.recordSwiglu(&self.decode_cmd, ds, inter_dim);
+                        }
+                        self.decode_cmd.computeBarrier();
+
+                        // down DMMV: ffn_down_exps[expert] × swiglu_buf → down_buf
+                        try self.dispatchMoeDmmv(down_exps, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim, expert_down_row_bytes, ei_u32);
+                        self.decode_cmd.computeBarrier();
+
+                        // Weighted accumulate: moe_out_buf += routing_weight[ei] * down_buf
+                        // Weight is read from GPU routing buffer (no CPU readback)
+                        {
+                            const pip = &(self.elementwise.pipeline_moe_weighted_acc orelse unreachable);
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet3(ds,
+                                self.moe_out_buf.handle, hidden_size,
+                                self.down_buf.handle, hidden_size,
+                                self.router_output_buf.handle, self.router_output_buf.size);
+                            try self.elementwise.recordMoeWeightedAcc(&self.decode_cmd, ds, hidden_dim, n_used, ei_u32);
+                        }
+                        self.decode_cmd.computeBarrier();
                     }
                 } else {
-                    // CPU fallback: readback all router logits, CPU softmax+topk
+                    // === CPU fallback: readback router logits, CPU softmax+topk ===
+                    var expert_ids: [16]u32 = undefined;
+                    var expert_weights: [16]f32 = undefined;
                     {
                         const barrier = vk.c.VkMemoryBarrier{
                             .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
@@ -1331,65 +1378,48 @@ pub const InferenceEngine = struct {
                     const router_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
                     const router_logits = router_ptr[0..config.n_experts];
                     topKSoftmax(router_logits, n_used, expert_ids[0..n_used], expert_weights[0..n_used]);
-                }
 
-                // New command buffer for expert FFN dispatch
-                _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-                try self.decode_cmd.reset();
-                try self.decode_cmd.begin();
+                    // New command buffer for expert FFN dispatch
+                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
 
-                // Zero moe_out_buf via fill
-                vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.moe_out_buf.handle, 0, hidden_size, 0);
-                self.decode_cmd.transferToComputeBarrier();
+                    // Zero moe_out_buf via fill
+                    vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.moe_out_buf.handle, 0, hidden_size, 0);
+                    self.decode_cmd.transferToComputeBarrier();
 
-                // Dispatch each selected expert
-                const gate_exps = self.findLayerTensor(layer, "ffn_gate_exps.weight") orelse return error.TensorNotFound;
-                const up_exps = self.findLayerTensor(layer, "ffn_up_exps.weight") orelse return error.TensorNotFound;
-                const down_exps = self.findLayerTensor(layer, "ffn_down_exps.weight") orelse return error.TensorNotFound;
+                    for (0..n_used) |ei| {
+                        const eid = expert_ids[ei];
+                        const weight = expert_weights[ei];
+                        const gate_offset = eid * expert_gate_row_bytes;
+                        const up_offset = eid * expert_gate_row_bytes;
+                        const down_offset = eid * expert_down_row_bytes;
 
-                const gate_quant = gate_exps.info.type_;
-                const down_quant = down_exps.info.type_;
-                // Expert weight offset: each expert has inter_dim rows of K=hidden_dim
-                const expert_gate_row_bytes = expertSliceBytes(gate_quant, inter_dim, hidden_dim);
-                // Down projection: each expert has hidden_dim rows of K=inter_dim
-                const expert_down_row_bytes = expertSliceBytes(down_quant, hidden_dim, inter_dim);
+                        try self.dispatchDmmvWithOffset(gate_exps, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim, gate_offset);
+                        try self.dispatchDmmvWithOffset(up_exps, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, up_offset);
+                        self.decode_cmd.computeBarrier();
 
-                for (0..n_used) |ei| {
-                    const eid = expert_ids[ei];
-                    const weight = expert_weights[ei];
-                    const gate_offset = eid * expert_gate_row_bytes;
-                    const up_offset = eid * expert_gate_row_bytes; // same shape as gate
-                    const down_offset = eid * expert_down_row_bytes;
+                        {
+                            const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size,
+                                self.up_buf.handle, self.up_buf.size,
+                                self.swiglu_buf.handle, self.swiglu_buf.size);
+                            try self.elementwise.recordSwiglu(&self.decode_cmd, ds, inter_dim);
+                        }
+                        self.decode_cmd.computeBarrier();
 
-                    // gate DMMV: ffn_gate_exps[expert] × ffn_norm_buf → gate_buf
-                    try self.dispatchDmmvWithOffset(gate_exps, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim, gate_offset);
-                    // up DMMV: ffn_up_exps[expert] × ffn_norm_buf → up_buf
-                    try self.dispatchDmmvWithOffset(up_exps, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, up_offset);
-                    self.decode_cmd.computeBarrier();
+                        try self.dispatchDmmvWithOffset(down_exps, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim, down_offset);
+                        self.decode_cmd.computeBarrier();
 
-                    // SwiGLU: gate_buf, up_buf → swiglu_buf
-                    {
-                        const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
-                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size,
-                            self.up_buf.handle, self.up_buf.size,
-                            self.swiglu_buf.handle, self.swiglu_buf.size);
-                        try self.elementwise.recordSwiglu(&self.decode_cmd, ds, inter_dim);
+                        {
+                            const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet2(ds, self.moe_out_buf.handle, hidden_size, self.down_buf.handle, hidden_size);
+                            try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, weight);
+                        }
+                        self.decode_cmd.computeBarrier();
                     }
-                    self.decode_cmd.computeBarrier();
-
-                    // down DMMV: ffn_down_exps[expert] × swiglu_buf → down_buf
-                    try self.dispatchDmmvWithOffset(down_exps, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim, down_offset);
-                    self.decode_cmd.computeBarrier();
-
-                    // Weighted accumulate: moe_out_buf += weight * down_buf
-                    {
-                        const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
-                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet2(ds, self.moe_out_buf.handle, hidden_size, self.down_buf.handle, hidden_size);
-                        try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, weight);
-                    }
-                    self.decode_cmd.computeBarrier();
                 }
 
                 // Bug fix #3: Shared expert — runs every token alongside the routed experts
@@ -1712,6 +1742,32 @@ pub const InferenceEngine = struct {
             input_buf.handle, input_size,
             output_buf.handle, output_buf.size);
         try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, a_offset, 0, 0);
+    }
+
+    /// Dispatch a MoE DMMV — expert offset computed on GPU from routing buffer.
+    /// The shader reads expert_ids[expert_index] from router_output_buf to compute
+    /// the weight tensor offset, eliminating CPU readback.
+    fn dispatchMoeDmmv(
+        self: *InferenceEngine,
+        tensor: *const LoadedTensor,
+        input_buf: Buffer, input_size: vk.c.VkDeviceSize,
+        output_buf: Buffer,
+        M: u32, K: u32,
+        expert_stride: u32,
+        expert_index: u32,
+    ) !void {
+        const qt = tensor.info.type_;
+        const pip = self.dmmv.moePipelineForType(qt) orelse {
+            log.err("No MoE DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(qt), tensor.info.name });
+            return error.UnsupportedQuantType;
+        };
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet4(ds,
+            tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
+            input_buf.handle, input_size,
+            output_buf.handle, output_buf.size,
+            self.router_output_buf.handle, self.router_output_buf.size);
+        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, M, K, expert_stride, expert_index, 0, 0);
     }
 
     // -----------------------------------------------------------------------

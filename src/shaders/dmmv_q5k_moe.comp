@@ -1,0 +1,100 @@
+#version 460
+// ZINC — Q5_K MoE DMMV: reads expert_id from GPU routing buffer (no CPU readback).
+// Identical to dmmv_q5k.comp except a_offset is computed from expert routing data.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
+layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint expert_stride;   // bytes per expert in stacked weight tensor
+    uint expert_index;    // which selected expert (0..k-1)
+    uint x_offset;
+    uint y_offset;
+};
+
+float fp16_to_fp32(uint h) {
+    return unpackHalf2x16(h).x;
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= M) return;
+
+    // Read expert_id from GPU routing buffer — no CPU readback needed
+    uint expert_id = routing_data[expert_index];
+    uint a_offset = expert_id * expert_stride;
+
+    uint blocks_per_row = K / 256;
+    uint row_offset = a_offset + row * blocks_per_row * 176;
+    uint x_base = x_offset / 4;
+    uint y_base = y_offset / 4;
+
+    float sum = 0.0;
+    uint xi = 0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint bb = row_offset + b * 176;
+
+        uint d_bits = uint(w[bb]) | (uint(w[bb + 1]) << 8);
+        float d = fp16_to_fp32(d_bits);
+        uint dm_bits = uint(w[bb + 2]) | (uint(w[bb + 3]) << 8);
+        float dmin = fp16_to_fp32(dm_bits);
+
+        for (uint g = 0; g < 4; g++) {
+            uint sb_lo = g * 2;
+            uint sb_hi = g * 2 + 1;
+
+            uint sc_lo, m_lo, sc_hi, m_hi;
+            if (sb_lo < 4) {
+                sc_lo = uint(w[bb + 4 + sb_lo]) & 63u;
+                m_lo  = uint(w[bb + 4 + sb_lo + 4]) & 63u;
+            } else {
+                sc_lo = (uint(w[bb + 4 + sb_lo + 4]) & 0xFu) | ((uint(w[bb + 4 + sb_lo - 4]) >> 6) << 4);
+                m_lo  = (uint(w[bb + 4 + sb_lo + 4]) >> 4) | ((uint(w[bb + 4 + sb_lo]) >> 6) << 4);
+            }
+            if (sb_hi < 4) {
+                sc_hi = uint(w[bb + 4 + sb_hi]) & 63u;
+                m_hi  = uint(w[bb + 4 + sb_hi + 4]) & 63u;
+            } else {
+                sc_hi = (uint(w[bb + 4 + sb_hi + 4]) & 0xFu) | ((uint(w[bb + 4 + sb_hi - 4]) >> 6) << 4);
+                m_hi  = (uint(w[bb + 4 + sb_hi + 4]) >> 4) | ((uint(w[bb + 4 + sb_hi]) >> 6) << 4);
+            }
+
+            float factor_lo = d * float(sc_lo);
+            float bias_lo   = dmin * float(m_lo);
+            float factor_hi = d * float(sc_hi);
+            float bias_hi   = dmin * float(m_hi);
+
+            uint qs_base = bb + 48 + g * 32;
+            uint qh_bit_lo = sb_lo;
+            uint qh_bit_hi = sb_hi;
+            uint x_grp = x_base + xi;
+
+            for (uint e = 0; e < 32; e++) {
+                uint byte_val = uint(w[qs_base + e]);
+                uint q_lo = byte_val & 0xFu;
+                uint q_hi = byte_val >> 4;
+
+                uint qh_val = uint(w[bb + 16 + e]);
+                uint hb_lo = (qh_val >> qh_bit_lo) & 1u;
+                uint hb_hi = (qh_val >> qh_bit_hi) & 1u;
+
+                float v_lo = float(q_lo | (hb_lo << 4));
+                float v_hi = float(q_hi | (hb_hi << 4));
+
+                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + e];
+                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 32u + e];
+            }
+            xi += 64;
+        }
+    }
+
+    y[y_base + row] = sum;
+}

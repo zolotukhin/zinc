@@ -38,6 +38,9 @@ pub fn build(b: *std.Build) void {
         "tq_quantize_values",
         "tq_attention_scores",
         "tq_decompress_values",
+        "dmmv_q4k_moe",
+        "dmmv_q5k_moe",
+        "moe_weighted_acc",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

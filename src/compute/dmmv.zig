@@ -23,6 +23,17 @@ const DmmvPushConstants = extern struct {
     y_offset: u32,
 };
 
+/// Push constants for MoE DMMV shaders (must match GLSL layout).
+/// Expert offset is computed on GPU from routing buffer, not passed from CPU.
+const MoeDmmvPushConstants = extern struct {
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    expert_index: u32,
+    x_offset: u32,
+    y_offset: u32,
+};
+
 /// Manages DMMV pipelines for different quantization types.
 pub const DmmvDispatch = struct {
     /// Q4K pipeline, or null.
@@ -37,6 +48,10 @@ pub const DmmvDispatch = struct {
     pipeline_f16: ?Pipeline,
     /// F32 pipeline, or null.
     pipeline_f32: ?Pipeline,
+    /// MoE Q4K pipeline (4 bindings: A, x, y, routing), or null.
+    pipeline_q4k_moe: ?Pipeline,
+    /// MoE Q5K pipeline (4 bindings: A, x, y, routing), or null.
+    pipeline_q5k_moe: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -124,6 +139,25 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // MoE DMMV pipelines: 4 bindings (A, x, y, routing), different push constants
+        const moe_push_size = @sizeOf(MoeDmmvPushConstants);
+
+        const q4k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_moe = pipeline_mod.createFromSpirv(instance, q4k_moe_path, 4, moe_push_size, &spec_k, allocator) catch |err| blk: {
+            log.warn("Q4_K MoE shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        const q5k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q5k_moe = pipeline_mod.createFromSpirv(instance, q5k_moe_path, 4, moe_push_size, &.{}, allocator) catch |err| blk: {
+            log.warn("Q5_K MoE shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        if (pipeline_q4k_moe != null and pipeline_q5k_moe != null) {
+            log.info("MoE DMMV pipelines loaded — GPU expert dispatch enabled (no readback)", .{});
+        }
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q5k = pipeline_q5k,
@@ -131,6 +165,8 @@ pub const DmmvDispatch = struct {
             .pipeline_q8_0 = pipeline_q8_0,
             .pipeline_f16 = pipeline_f16,
             .pipeline_f32 = pipeline_f32,
+            .pipeline_q4k_moe = pipeline_q4k_moe,
+            .pipeline_q5k_moe = pipeline_q5k_moe,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -151,6 +187,47 @@ pub const DmmvDispatch = struct {
             .f32 => if (self.pipeline_f32) |*p| p else null,
             else => null,
         };
+    }
+
+    /// Select the MoE quantization-specific pipeline (4 bindings: A, x, y, routing).
+    pub fn moePipelineForType(self: *const DmmvDispatch, quant_type: GGMLType) ?*const Pipeline {
+        return switch (quant_type) {
+            .q4_k => if (self.pipeline_q4k_moe) |*p| p else null,
+            .q5_k => if (self.pipeline_q5k_moe) |*p| p else null,
+            else => null,
+        };
+    }
+
+    /// Record a MoE DMMV dispatch — expert offset computed on GPU from routing buffer.
+    pub fn recordMoeDispatch(
+        self: *const DmmvDispatch,
+        cmd: *const CommandBuffer,
+        quant_type: GGMLType,
+        descriptor_set: vk.c.VkDescriptorSet,
+        M: u32,
+        K: u32,
+        expert_stride: u32,
+        expert_index: u32,
+        x_offset: u32,
+        y_offset: u32,
+    ) !void {
+        const pip = self.moePipelineForType(quant_type) orelse return error.UnsupportedQuantType;
+
+        const push = MoeDmmvPushConstants{
+            .M = M,
+            .K = K,
+            .expert_stride = expert_stride,
+            .expert_index = expert_index,
+            .x_offset = x_offset,
+            .y_offset = y_offset,
+        };
+
+        const workgroups_x = switch (quant_type) {
+            .q8_0, .f16 => (M + 1) / 2,
+            else => (M + 63) / 64,
+        };
+
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups_x, 1, 1);
     }
 
     /// Record a decode-time matrix-vector multiply dispatch.
@@ -217,6 +294,8 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q8_0) |*p| p.deinit();
         if (self.pipeline_f16) |*p| p.deinit();
         if (self.pipeline_f32) |*p| p.deinit();
+        if (self.pipeline_q4k_moe) |*p| p.deinit();
+        if (self.pipeline_q5k_moe) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

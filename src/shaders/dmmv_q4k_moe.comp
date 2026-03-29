@@ -1,0 +1,122 @@
+#version 460
+// ZINC — Q4_K MoE DMMV: reads expert_id from GPU routing buffer (no CPU readback).
+// Identical to dmmv_q4k.comp except a_offset is computed from expert routing data
+// written by softmax_topk.comp, eliminating the per-layer vkQueueSubmit.
+//
+// Binding 3: MoE routing buffer from softmax_topk output:
+//   routing_data[0..k-1]   = expert_ids (uint32)
+//   routing_data[k..2k-1]  = expert_weights (floatBitsToUint)
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 0) const uint SPEC_M = 4096;
+layout(constant_id = 1) const uint SPEC_K = 4096;
+
+layout(push_constant) uniform PushConstants {
+    uint M;              // output rows (per expert)
+    uint K;              // input columns
+    uint expert_stride;  // bytes per expert in stacked weight tensor
+    uint expert_index;   // which selected expert (0..k-1)
+    uint x_offset;
+    uint y_offset;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[];   };
+layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];  };
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+const uint Q4K_BLOCK_SIZE = 256;
+const uint Q4K_BYTES      = 144;
+
+shared float s_x[SPEC_K];
+
+float decode_scale(uint ks_off, uint sb) {
+    if (sb < 4u) {
+        return float(uint(a_data[ks_off + sb]) & 0x3Fu);
+    } else {
+        uint lo = uint(a_data[ks_off + sb + 4u]) & 0x0Fu;
+        uint hi = (uint(a_data[ks_off + sb - 4u]) >> 6) & 0x03u;
+        return float(lo | (hi << 4));
+    }
+}
+
+float decode_min(uint ks_off, uint sb) {
+    if (sb < 4u) {
+        return float(uint(a_data[ks_off + sb + 4u]) & 0x3Fu);
+    } else {
+        uint lo = (uint(a_data[ks_off + sb + 4u]) >> 4) & 0x0Fu;
+        uint hi = (uint(a_data[ks_off + sb]) >> 6) & 0x03u;
+        return float(lo | (hi << 4));
+    }
+}
+
+void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
+                 uint x_local, inout float acc) {
+    for (uint sp = 0u; sp < 4u; sp++) {
+        uint sb_lo = sp * 2u;
+        uint sb_hi = sp * 2u + 1u;
+
+        float sc_lo = decode_scale(ks_off, sb_lo);
+        float mn_lo = decode_min(ks_off, sb_lo);
+        float factor_lo = d_val * sc_lo;
+        float bias_lo   = dmin_val * mn_lo;
+
+        float sc_hi = decode_scale(ks_off, sb_hi);
+        float mn_hi = decode_min(ks_off, sb_hi);
+        float factor_hi = d_val * sc_hi;
+        float bias_hi   = dmin_val * mn_hi;
+
+        uint x_sb_lo = x_local + sb_lo * 32u;
+        uint x_sb_hi = x_local + sb_hi * 32u;
+        uint qs_base = qs_off + sp * 32u;
+
+        for (uint e = 0u; e < 32u; e++) {
+            uint byte_val = uint(a_data[qs_base + e]);
+            uint q_lo = byte_val & 0x0Fu;
+            uint q_hi = (byte_val >> 4) & 0x0Fu;
+
+            acc += (factor_lo * float(q_lo) - bias_lo) * s_x[x_sb_lo + e];
+            acc += (factor_hi * float(q_hi) - bias_hi) * s_x[x_sb_hi + e];
+        }
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Read expert_id from GPU routing buffer — no CPU readback needed
+    uint expert_id = routing_data[expert_index];
+    uint a_offset = expert_id * expert_stride;
+
+    const uint blocks_per_row = K / Q4K_BLOCK_SIZE;
+
+    uint x_global_base = x_offset / 4u;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x_data[x_global_base + i];
+    }
+    barrier();
+
+    uint row = gl_WorkGroupID.x * 64u + tid;
+    if (row >= M) return;
+
+    float sum = 0.0;
+
+    for (uint blk = 0u; blk < blocks_per_row; blk++) {
+        uint x_local = blk * Q4K_BLOCK_SIZE;
+        uint byte_off = a_offset + row * blocks_per_row * Q4K_BYTES + blk * Q4K_BYTES;
+
+        uint d_bits    = uint(a_data[byte_off])      | (uint(a_data[byte_off + 1u]) << 8);
+        uint dmin_bits = uint(a_data[byte_off + 2u]) | (uint(a_data[byte_off + 3u]) << 8);
+        float d_val    = unpackHalf2x16(d_bits).x;
+        float dmin_val = unpackHalf2x16(dmin_bits).x;
+
+        accum_block(byte_off + 16u, byte_off + 4u, d_val, dmin_val, x_local, sum);
+    }
+
+    uint y_base = y_offset / 4u;
+    y_data[y_base + row] = sum;
+}
