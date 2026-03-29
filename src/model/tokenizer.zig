@@ -395,3 +395,85 @@ test "Tokenizer findByteToken" {
     // With empty vocab, should fall back to byte value
     try std.testing.expectEqual(@as(u32, 65), tok.findByteToken(65));
 }
+
+test "applyChatTemplate ChatML format" {
+    const tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .chat_template = null, // null defaults to ChatML
+        .allocator = std.testing.allocator,
+    };
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"Hello"};
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|im_start|>user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|im_end|>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|im_start|>assistant") != null);
+}
+
+test "applyChatTemplate with im_start template uses ChatML" {
+    const tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .chat_template = "{%- for m in messages %}<|im_start|>{{m.role}}\n{{m.content}}<|im_end|>{%- endfor %}",
+        .allocator = std.testing.allocator,
+    };
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{"system", "user"};
+    const contents = [_][]const u8{"You help.", "Hi"};
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+    // Should have both messages
+    try std.testing.expect(std.mem.indexOf(u8, result, "system") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "You help.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Hi") != null);
+}
+
+test "applyChatTemplate non-ChatML fallback" {
+    const tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .chat_template = "some other template without im tags",
+        .allocator = std.testing.allocator,
+    };
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"test"};
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+    // Should use [role]: content format
+    try std.testing.expect(std.mem.indexOf(u8, result, "[user]: test") != null);
+    // Should NOT have ChatML tags
+    try std.testing.expect(std.mem.indexOf(u8, result, "im_start") == null);
+}
+
+test "applyChatTemplate empty messages" {
+    const tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .chat_template = null,
+        .allocator = std.testing.allocator,
+    };
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{};
+    const contents = [_][]const u8{};
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+    // Should just have the assistant prefix
+    try std.testing.expectEqualStrings("<|im_start|>assistant\n", result);
+}

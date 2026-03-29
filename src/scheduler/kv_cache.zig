@@ -111,3 +111,51 @@ test "KvPagePool exhaustion" {
     defer allocator.free(p2);
     try std.testing.expectEqual(@as(u32, 1), pool.freeCount());
 }
+
+test "KvPagePool multiple requests isolated" {
+    const allocator = std.testing.allocator;
+    var pool = try KvPagePool.init(allocator, 8, 256);
+    defer pool.deinit();
+
+    const p1 = try pool.allocPages(100, 3);
+    defer allocator.free(p1);
+    const p2 = try pool.allocPages(200, 2);
+    defer allocator.free(p2);
+    try std.testing.expectEqual(@as(u32, 3), pool.freeCount());
+
+    // Freeing request 100 only frees its 3 pages, not request 200's
+    pool.freePages(100);
+    try std.testing.expectEqual(@as(u32, 6), pool.freeCount());
+
+    // Request 200's pages still allocated
+    pool.freePages(200);
+    try std.testing.expectEqual(@as(u32, 8), pool.freeCount());
+}
+
+test "KvPagePool pages have correct owner after alloc" {
+    const allocator = std.testing.allocator;
+    var pool = try KvPagePool.init(allocator, 4, 256);
+    defer pool.deinit();
+
+    const pages = try pool.allocPages(42, 2);
+    defer allocator.free(pages);
+
+    for (pages) |pid| {
+        try std.testing.expectEqual(@as(?u64, 42), pool.pages[pid].owner);
+    }
+
+    pool.freePages(42);
+    for (pages) |pid| {
+        try std.testing.expectEqual(@as(?u64, null), pool.pages[pid].owner);
+    }
+}
+
+test "KvPagePool free nonexistent request is no-op" {
+    const allocator = std.testing.allocator;
+    var pool = try KvPagePool.init(allocator, 4, 256);
+    defer pool.deinit();
+
+    // Freeing a request that never allocated should not change free count
+    pool.freePages(999);
+    try std.testing.expectEqual(@as(u32, 4), pool.freeCount());
+}

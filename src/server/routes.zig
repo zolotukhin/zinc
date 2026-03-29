@@ -416,3 +416,57 @@ test "jsonEscape handles special characters" {
     const result = jsonEscape("hello \"world\"\nfoo", &buf);
     try std.testing.expectEqualStrings("hello \\\"world\\\"\\nfoo", result);
 }
+
+test "jsonEscape handles tabs and backslashes" {
+    var buf: [64]u8 = undefined;
+    const result = jsonEscape("a\\b\tc", &buf);
+    try std.testing.expectEqualStrings("a\\\\b\\tc", result);
+}
+
+test "jsonEscape empty string" {
+    var buf: [64]u8 = undefined;
+    const result = jsonEscape("", &buf);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "parseJsonFields defaults when fields missing" {
+    const body = "{\"model\":\"qwen\"}";
+    const parsed = try parseJsonFields(body);
+    try std.testing.expect(!parsed.stream);
+    try std.testing.expectEqual(@as(u32, 256), parsed.max_tokens);
+    try std.testing.expectEqualStrings("", parsed.messages_content);
+    try std.testing.expectEqualStrings("", parsed.prompt_text);
+}
+
+test "parseJsonFields stream false explicit" {
+    const body = "{\"model\":\"qwen\",\"stream\":false}";
+    const parsed = try parseJsonFields(body);
+    try std.testing.expect(!parsed.stream);
+}
+
+test "parseJsonFields extracts content with spaces" {
+    const body = "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\": \"hello world\"}],\"stream\": true}";
+    const parsed = try parseJsonFields(body);
+    try std.testing.expect(parsed.stream);
+    try std.testing.expectEqualStrings("hello world", parsed.messages_content);
+}
+
+test "parseJsonFields max_tokens with spaces" {
+    const body = "{\"max_tokens\": 64}";
+    const parsed = try parseJsonFields(body);
+    try std.testing.expectEqual(@as(u32, 64), parsed.max_tokens);
+}
+
+test "findStringEnd handles escaped quotes" {
+    // Input after opening quote: hello \"inner\" end"rest
+    // Escaped \" at positions 6-7 and 14-15, real " at position 19
+    const s = "hello \\\"inner\\\" end\"rest";
+    const end = findStringEnd(s);
+    try std.testing.expectEqual(@as(?usize, 19), end);
+}
+
+test "findNumEnd extracts digits" {
+    try std.testing.expectEqual(@as(usize, 3), findNumEnd("123abc"));
+    try std.testing.expectEqual(@as(usize, 0), findNumEnd("abc"));
+    try std.testing.expectEqual(@as(usize, 5), findNumEnd("99999"));
+}

@@ -199,4 +199,18 @@ test "Server struct size" {
 
 test "Method enum has expected values" {
     try std.testing.expect(@intFromEnum(Method.GET) != @intFromEnum(Method.POST));
+    try std.testing.expect(@intFromEnum(Method.OPTIONS) != @intFromEnum(Method.UNKNOWN));
+}
+
+test "Connection struct has expected fields" {
+    try std.testing.expect(@sizeOf(Connection) > 0);
+    // read_buf is 64KB
+    try std.testing.expect(@sizeOf(Connection) >= 65536);
+}
+
+test "Request struct stores method and path" {
+    const req = Request{ .method = .POST, .path = "/v1/chat/completions", .body = "{}" };
+    try std.testing.expectEqual(Method.POST, req.method);
+    try std.testing.expectEqualStrings("/v1/chat/completions", req.path);
+    try std.testing.expectEqualStrings("{}", req.body);
 }
