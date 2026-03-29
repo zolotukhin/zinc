@@ -49,6 +49,22 @@ ZINC takes the hardware these cards already have — 576 GB/s memory bandwidth, 
 
 **Drop-in compatible.** The API is OpenAI-compatible — point your existing client at it and it works. No ROCm, no CUDA, no driver stack to fight. One binary, one GPU, production inference on a $550 card.
 
+## Supported Models
+
+ZINC runs GGUF models. The following architectures are supported:
+
+| Architecture | Models | Recommended GGUF |
+|-------------|--------|-----------------|
+| **Qwen3.5 MoE** (hybrid SSM+attention) | [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) (21 GB) |
+| **Qwen3 MoE** | [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | [Q4_K_M](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF) |
+| **Qwen2 MoE** | [Qwen2.5-32B](https://huggingface.co/Qwen/Qwen2.5-32B) | [Q4_K_M](https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF) |
+| **LLaMA / Mistral** | [LLaMA 3.1 8B](https://huggingface.co/meta-llama/Llama-3.1-8B), [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.3) | [Q4_K_M](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF) |
+| **Mamba / Jamba** (SSM hybrid) | [Jamba-v0.1](https://huggingface.co/ai21labs/Jamba-v0.1) | GGUF via llama.cpp convert |
+
+> **Primary test model**: [Qwen3.5-35B-A3B-UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) — a hybrid attention+SSM+MoE model (35B total, 3B active per token). Fits in 21 GB VRAM with full context.
+
+**Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, F16
+
 ## Quick Start
 
 ### Prerequisites

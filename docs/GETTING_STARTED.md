@@ -16,8 +16,19 @@ ZINC is currently aimed at:
 
 - **Linux** for real GPU inference
 - **AMD RDNA3 / RDNA4 GPUs** through Vulkan 1.3
-- **GGUF models**
+- **GGUF models** (Q4_K, Q5_K, Q6_K, Q8_0, F16 quantizations)
 - developers who want to run CLI inference first, then experiment with serving
+
+### Supported models
+
+| Architecture | Example models |
+|-------------|---------------|
+| Qwen3.5 MoE (hybrid SSM+attention) | [Qwen3.5-35B-A3B](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
+| Qwen3 / Qwen2 MoE | [Qwen3-30B-A3B](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF), [Qwen2.5-32B](https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF) |
+| LLaMA / Mistral | [LLaMA 3.1 8B](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF), [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.3) |
+| Mamba / Jamba (SSM) | [Jamba-v0.1](https://huggingface.co/ai21labs/Jamba-v0.1) |
+
+The primary test model is **Qwen3.5-35B-A3B** — download [Q4_K_XL from unsloth](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) (21 GB, fits in 32 GB VRAM).
 
 macOS can build the project, but it is not the target environment for actual ZINC GPU inference. If you want the shortest path to success, use Linux on AMD hardware.
 
