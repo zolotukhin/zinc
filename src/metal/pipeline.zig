@@ -5,6 +5,8 @@ const shim = @import("c.zig").shim;
 pub const MetalPipeline = struct {
     handle: ?*shim.MetalPipe,
     max_threads_per_threadgroup: u32,
+    thread_execution_width: u32,
+    static_threadgroup_memory_length: u32,
 };
 
 pub fn createPipeline(ctx: ?*shim.MetalCtx, msl_source: [*:0]const u8, fn_name: [*:0]const u8) !MetalPipeline {
@@ -13,6 +15,8 @@ pub fn createPipeline(ctx: ?*shim.MetalCtx, msl_source: [*:0]const u8, fn_name: 
     return .{
         .handle = handle,
         .max_threads_per_threadgroup = shim.mtl_pipeline_max_threads(handle),
+        .thread_execution_width = shim.mtl_pipeline_thread_execution_width(handle),
+        .static_threadgroup_memory_length = shim.mtl_pipeline_static_threadgroup_memory_length(handle),
     };
 }
 
@@ -22,6 +26,8 @@ pub fn createPipelineFromLib(ctx: ?*shim.MetalCtx, lib_data: [*]const u8, lib_si
     return .{
         .handle = handle,
         .max_threads_per_threadgroup = shim.mtl_pipeline_max_threads(handle),
+        .thread_execution_width = shim.mtl_pipeline_thread_execution_width(handle),
+        .static_threadgroup_memory_length = shim.mtl_pipeline_static_threadgroup_memory_length(handle),
     };
 }
 
@@ -33,7 +39,7 @@ pub fn freePipeline(pipe: *MetalPipeline) void {
 }
 
 test "MetalPipeline struct size" {
-    try std.testing.expect(@sizeOf(MetalPipeline) <= 16);
+    try std.testing.expect(@sizeOf(MetalPipeline) <= 24);
 }
 
 test "createPipeline compiles simple MSL kernel" {
@@ -56,6 +62,8 @@ test "createPipeline compiles simple MSL kernel" {
 
     try std.testing.expect(pipe.handle != null);
     try std.testing.expect(pipe.max_threads_per_threadgroup > 0);
+    try std.testing.expect(pipe.thread_execution_width > 0);
+    try std.testing.expect(pipe.max_threads_per_threadgroup >= pipe.thread_execution_width);
     try std.testing.expect(pipe.max_threads_per_threadgroup >= 32); // Apple GPU minimum
 }
 
@@ -93,6 +101,11 @@ test "createPipeline fails on wrong function name" {
 }
 
 test "freePipeline with null handle is safe" {
-    var pipe = MetalPipeline{ .handle = null, .max_threads_per_threadgroup = 0 };
+    var pipe = MetalPipeline{
+        .handle = null,
+        .max_threads_per_threadgroup = 0,
+        .thread_execution_width = 0,
+        .static_threadgroup_memory_length = 0,
+    };
     freePipeline(&pipe); // should not crash
 }

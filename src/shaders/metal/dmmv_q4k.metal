@@ -29,7 +29,8 @@ inline float2 get_scale_min_k4(uint j, device const uchar* sc) {
 // dot products — no threadgroup reduction barrier needed.
 //
 // Threadgroup: 256 threads = 8 simdgroups = 8 rows per threadgroup.
-// No threadgroup memory — input vector read from device memory (SLC-cached).
+// The input vector is staged once into threadgroup memory and then reused by
+// all 8 rows, avoiding repeated device reads of the same 8-16 KB vector.
 //
 // Q4_K block layout (144 bytes, 256 elements):
 //   [0..1]   d    (float16)  — super-block scale
@@ -51,10 +52,16 @@ kernel void main0(
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    // On Apple Silicon, input vector (≤16KB) stays in SLC/L1 cache across all
-    // simdgroups — reading from device memory avoids the threadgroup_barrier
-    // and frees 16KB of threadgroup memory, improving occupancy.
     device const float* input = X + (p.x_offset / 4);
+    threadgroup float4 x_cache4[1024];
+
+    // Q4_K rows are multiples of 256 elements, so all current K values are
+    // 16-byte aligned and can be staged as float4 chunks.
+    const uint k_vec4 = p.K >> 2;
+    for (uint i = local_id; i < k_vec4; i += TG_SIZE) {
+        x_cache4[i] = *(device const float4*)(input + (i << 2));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     uint row = tg_id * ROWS_PER_TG + sg_idx;
     if (row >= p.M) return;
@@ -97,8 +104,8 @@ kernel void main0(
         uint col_lo = bi * 256 + j * 64 + local_off;
         uint col_hi = col_lo + 32;
 
-        float4 x_lo = *(device const float4*)(input + col_lo);
-        float4 x_hi = *(device const float4*)(input + col_hi);
+        float4 x_lo = x_cache4[col_lo >> 2];
+        float4 x_hi = x_cache4[col_hi >> 2];
 
         uchar4 q_lo = uchar4(
             qbytes.x & 0x0F,

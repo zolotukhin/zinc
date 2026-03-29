@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <mach/mach.h>
 
+#ifndef MTLGPUFamilyApple10
+#define MTLGPUFamilyApple10 ((MTLGPUFamily)1010)
+#endif
+
 // --- Opaque struct definitions ---
 
 struct MetalCtx {
@@ -83,19 +87,37 @@ uint64_t mtl_total_memory(MetalCtx* ctx) {
 uint32_t mtl_chip_family(MetalCtx* ctx) {
     if (!ctx) return 0; // unknown
 
-    // Detect Apple Silicon generation via GPU family support.
-    // Apple9 = M4, Apple8 = M3, Apple7+ = M2 (approximate via feature sets).
-    if ([ctx->device supportsFamily:MTLGPUFamilyApple9]) return 4; // M4
-    if ([ctx->device supportsFamily:MTLGPUFamilyApple8]) {
-        // M2 and M3 both support Apple8. Distinguish by max threadgroup memory.
-        // M3 has dynamic caching → larger effective threadgroup memory.
-        // Heuristic: M3+ supports Apple8 and has maxThreadgroupMemoryLength >= 32768.
-        if ([ctx->device maxThreadgroupMemoryLength] >= 32768) return 3; // M3
-        return 2; // M2
-    }
-    if ([ctx->device supportsFamily:MTLGPUFamilyApple7]) return 1; // M1
+    if ([ctx->device supportsFamily:MTLGPUFamilyApple10]) return 10;
+    if ([ctx->device supportsFamily:MTLGPUFamilyApple9]) return 9;
+    if ([ctx->device supportsFamily:MTLGPUFamilyApple8]) return 8;
+    if ([ctx->device supportsFamily:MTLGPUFamilyApple7]) return 7;
 
     return 0; // unknown / pre-M1
+}
+
+uint8_t mtl_supports_family(MetalCtx* ctx, uint32_t family) {
+    if (!ctx) return 0;
+    return [ctx->device supportsFamily:(MTLGPUFamily)family] ? 1 : 0;
+}
+
+uint8_t mtl_has_unified_memory(MetalCtx* ctx) {
+    if (!ctx) return 0;
+    return [ctx->device hasUnifiedMemory] ? 1 : 0;
+}
+
+uint8_t mtl_supports_raytracing(MetalCtx* ctx) {
+    if (!ctx) return 0;
+    return [ctx->device supportsRaytracing] ? 1 : 0;
+}
+
+uint64_t mtl_recommended_max_working_set_size(MetalCtx* ctx) {
+    if (!ctx) return 0;
+    return (uint64_t)[ctx->device recommendedMaxWorkingSetSize];
+}
+
+uint64_t mtl_max_threadgroup_memory_length(MetalCtx* ctx) {
+    if (!ctx) return 0;
+    return (uint64_t)[ctx->device maxThreadgroupMemoryLength];
 }
 
 // --- Buffer management ---
@@ -238,6 +260,16 @@ MetalPipe* mtl_create_pipeline_from_lib(MetalCtx* ctx, const void* lib_data, siz
 uint32_t mtl_pipeline_max_threads(MetalPipe* pipe) {
     if (!pipe) return 0;
     return (uint32_t)[pipe->state maxTotalThreadsPerThreadgroup];
+}
+
+uint32_t mtl_pipeline_thread_execution_width(MetalPipe* pipe) {
+    if (!pipe) return 0;
+    return (uint32_t)[pipe->state threadExecutionWidth];
+}
+
+uint32_t mtl_pipeline_static_threadgroup_memory_length(MetalPipe* pipe) {
+    if (!pipe) return 0;
+    return (uint32_t)[pipe->state staticThreadgroupMemoryLength];
 }
 
 void mtl_free_pipeline(MetalPipe* pipe) {

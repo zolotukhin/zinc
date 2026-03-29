@@ -3,21 +3,41 @@
 const std = @import("std");
 const shim = @import("c.zig").shim;
 
-pub const ChipFamily = enum(u32) {
-    m1 = 1,
-    m2 = 2,
-    m3 = 3,
-    m4 = 4,
+pub const GpuFamily = enum(u32) {
+    apple7 = 7,
+    apple8 = 8,
+    apple9 = 9,
+    apple10 = 10,
     unknown = 0,
 
-    pub fn hasAsyncCopy(self: @This()) bool {
-        return self != .m1 and self != .unknown;
+    pub fn isApple9OrNewer(self: @This()) bool {
+        return switch (self) {
+            .apple9, .apple10 => true,
+            else => false,
+        };
     }
+
+    pub fn isM5Class(self: @This()) bool {
+        return self == .apple10;
+    }
+};
+
+pub const MetalCapabilities = struct {
+    supports_apple7: bool,
+    supports_apple8: bool,
+    supports_apple9: bool,
+    supports_apple10: bool,
+    supports_mac2: bool,
+    has_unified_memory: bool,
+    supports_raytracing: bool,
+    recommended_max_working_set_size: u64,
+    max_threadgroup_memory_length: u64,
 };
 
 pub const MetalDevice = struct {
     ctx: ?*shim.MetalCtx,
-    chip: ChipFamily,
+    chip: GpuFamily,
+    caps: MetalCapabilities,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, _: u32) !MetalDevice {
@@ -26,13 +46,24 @@ pub const MetalDevice = struct {
             return error.MetalInitFailed;
         }
         const family_raw = shim.mtl_chip_family(ctx);
-        const chip: ChipFamily = if (family_raw >= 1 and family_raw <= 4)
+        const chip: GpuFamily = if (family_raw == 7 or family_raw == 8 or family_raw == 9 or family_raw == 10)
             @enumFromInt(family_raw)
         else
             .unknown;
         return .{
             .ctx = ctx,
             .chip = chip,
+            .caps = .{
+                .supports_apple7 = shim.mtl_supports_family(ctx, shim.ZINC_MTL_GPU_FAMILY_APPLE7) != 0,
+                .supports_apple8 = shim.mtl_supports_family(ctx, shim.ZINC_MTL_GPU_FAMILY_APPLE8) != 0,
+                .supports_apple9 = shim.mtl_supports_family(ctx, shim.ZINC_MTL_GPU_FAMILY_APPLE9) != 0,
+                .supports_apple10 = shim.mtl_supports_family(ctx, shim.ZINC_MTL_GPU_FAMILY_APPLE10) != 0,
+                .supports_mac2 = shim.mtl_supports_family(ctx, shim.ZINC_MTL_GPU_FAMILY_MAC2) != 0,
+                .has_unified_memory = shim.mtl_has_unified_memory(ctx) != 0,
+                .supports_raytracing = shim.mtl_supports_raytracing(ctx) != 0,
+                .recommended_max_working_set_size = shim.mtl_recommended_max_working_set_size(ctx),
+                .max_threadgroup_memory_length = shim.mtl_max_threadgroup_memory_length(ctx),
+            },
             .allocator = allocator,
         };
     }
@@ -53,15 +84,23 @@ pub const MetalDevice = struct {
         if (self.ctx) |ctx| return shim.mtl_total_memory(ctx);
         return 0;
     }
-};
 
-test "ChipFamily hasAsyncCopy" {
-    try std.testing.expect(!ChipFamily.m1.hasAsyncCopy());
-    try std.testing.expect(ChipFamily.m2.hasAsyncCopy());
-    try std.testing.expect(ChipFamily.m3.hasAsyncCopy());
-    try std.testing.expect(ChipFamily.m4.hasAsyncCopy());
-    try std.testing.expect(!ChipFamily.unknown.hasAsyncCopy());
-}
+    pub fn recommendedMaxWorkingSetSize(self: *const MetalDevice) u64 {
+        return self.caps.recommended_max_working_set_size;
+    }
+
+    pub fn maxThreadgroupMemoryLength(self: *const MetalDevice) u64 {
+        return self.caps.max_threadgroup_memory_length;
+    }
+
+    pub fn hasUnifiedMemory(self: *const MetalDevice) bool {
+        return self.caps.has_unified_memory;
+    }
+
+    pub fn supportsRaytracing(self: *const MetalDevice) bool {
+        return self.caps.supports_raytracing;
+    }
+};
 
 test "MetalDevice init and deinit" {
     var device = try MetalDevice.init(std.testing.allocator, 0);
@@ -87,6 +126,10 @@ test "MetalDevice reports nonzero memory" {
     const max_buf = device.maxBufferSize();
     try std.testing.expect(max_buf > 0);
     try std.testing.expect(max_buf <= total);
+
+    try std.testing.expect(device.hasUnifiedMemory());
+    try std.testing.expect(device.maxThreadgroupMemoryLength() > 0);
+    try std.testing.expect(device.recommendedMaxWorkingSetSize() > 0);
 }
 
 test "MetalDevice double deinit is safe" {
@@ -94,4 +137,13 @@ test "MetalDevice double deinit is safe" {
     device.deinit();
     // Second deinit should be a no-op (ctx is null)
     device.deinit();
+}
+
+test "GpuFamily helpers" {
+    try std.testing.expect(!GpuFamily.apple7.isApple9OrNewer());
+    try std.testing.expect(!GpuFamily.apple8.isApple9OrNewer());
+    try std.testing.expect(GpuFamily.apple9.isApple9OrNewer());
+    try std.testing.expect(GpuFamily.apple10.isApple9OrNewer());
+    try std.testing.expect(!GpuFamily.apple9.isM5Class());
+    try std.testing.expect(GpuFamily.apple10.isM5Class());
 }

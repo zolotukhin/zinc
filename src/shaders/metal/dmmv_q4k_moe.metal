@@ -36,10 +36,17 @@ kernel void main0(
     const uint expert_slot = tg_pos.y;
     const uint expert_id = expert_ids[expert_slot];
     device const float* input = X + (p.x_offset / 4) + expert_slot * p.x_expert_stride;
+    threadgroup float4 x_cache4[1024];
 
     const uint local_id = local_pos.x;
     const uint sg_idx = local_id / 32;
     const uint lane = local_id % 32;
+
+    const uint k_vec4 = p.K >> 2;
+    for (uint i = local_id; i < k_vec4; i += TG_SIZE) {
+        x_cache4[i] = *(device const float4*)(input + (i << 2));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     uint row = tg_pos.x * ROWS_PER_TG + sg_idx;
     if (row >= p.M) return;
@@ -76,8 +83,8 @@ kernel void main0(
         uint col_lo = bi * 256 + j * 64 + local_off;
         uint col_hi = col_lo + 32;
 
-        float4 x_lo = *(device const float4*)(input + col_lo);
-        float4 x_hi = *(device const float4*)(input + col_hi);
+        float4 x_lo = x_cache4[col_lo >> 2];
+        float4 x_hi = x_cache4[col_hi >> 2];
 
         uchar4 q_lo = uchar4(
             qbytes.x & 0x0F,
