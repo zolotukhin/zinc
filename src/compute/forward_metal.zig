@@ -37,6 +37,12 @@ const ScaleAccPush = extern struct {
     scale_bits: u32, // float reinterpreted as uint32 (SPIRV-Cross convention)
 };
 
+/// Push constants for RMS norm dispatch (matches rms_norm_mul.metal: buffer(0)).
+const RmsNormPush = extern struct {
+    n: u32, // elements per group
+    eps: f32, // epsilon
+};
+
 const GGMLType = gguf.GGMLType;
 
 /// Metal inference engine — owns GPU buffers, pipelines, and KV cache.
@@ -78,6 +84,12 @@ pub const InferenceEngine = struct {
     // Elementwise compute pipelines (for batched GPU dispatch)
     swiglu_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
+    rms_norm_pipe: MetalPipeline,
+
+    // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
+    attn_norm_bufs: []MetalBuffer,
+    ffn_norm_bufs: []MetalBuffer,
+    final_norm_gpu: MetalBuffer,
 
     // SSM state (CPU-side, allocated only if model has SSM layers)
     ssm_conv_states: ?[][]f32,
@@ -158,6 +170,21 @@ pub const InferenceEngine = struct {
         // Elementwise pipelines for batched GPU dispatch
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
+        self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
+
+        // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
+        self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.ffn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        for (0..cfg.n_layers) |i| {
+            const layer: u32 = @intCast(i);
+            const an = findLayerTensor(model, layer, "attn_norm.weight") orelse return error.MissingTensor;
+            self.attn_norm_bufs[i] = try preloadNormWeights(ctx, model, an, cfg.hidden_dim);
+            const fn_t = findLayerTensor(model, layer, "post_attention_norm.weight") orelse
+                findLayerTensor(model, layer, "ffn_norm.weight") orelse return error.MissingTensor;
+            self.ffn_norm_bufs[i] = try preloadNormWeights(ctx, model, fn_t, cfg.hidden_dim);
+        }
+        const final_t = findTensorByName(model, "output_norm.weight") orelse return error.MissingTensor;
+        self.final_norm_gpu = try preloadNormWeights(ctx, model, final_t, cfg.hidden_dim);
 
         // SSM state allocation
         if (d_inner > 0 and cfg.ssm_d_conv > 0) {
@@ -215,6 +242,15 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
+        metal_pipeline.freePipeline(&self.rms_norm_pipe);
+
+        for (0..self.config.n_layers) |i| {
+            metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
+            metal_buffer.freeBuffer(&self.ffn_norm_bufs[i]);
+        }
+        self.allocator.free(self.attn_norm_bufs);
+        self.allocator.free(self.ffn_norm_bufs);
+        metal_buffer.freeBuffer(&self.final_norm_gpu);
 
         if (self.ssm_conv_states) |cs| {
             for (cs) |s| self.allocator.free(s);
@@ -347,6 +383,38 @@ fn dispatchDmmvAndWait(
     var cmd = try metal_command.beginCommand(engine.device.ctx);
     dispatchDmmvOnCmd(engine, &cmd, tensor, input_buf, output_buf, M, K, extra_byte_offset);
     cmd.commitAndWait();
+}
+
+/// Preload norm weights from mmap into an f32 Metal buffer (done once at init).
+fn preloadNormWeights(
+    ctx: ?*shim.MetalCtx,
+    model: *const metal_loader.Model,
+    tensor: *const metal_loader.LoadedTensor,
+    n: u32,
+) !MetalBuffer {
+    const mmap = model.mmap_data orelse return error.NoMmapData;
+    const buf = try metal_buffer.createBuffer(ctx, @as(usize, n) * @sizeOf(f32));
+    const dst: [*]f32 = @ptrCast(@alignCast(buf.cpu_ptr.?));
+    const off: usize = @intCast(model.gguf_file.tensor_data_offset + tensor.info.offset);
+    readMmapFloats(mmap, off, tensor.info.type_, dst[0..n]);
+    return buf;
+}
+
+/// Dispatch GPU RMS norm on an existing command buffer (does NOT commit).
+/// rms_norm_mul.metal: buffer(0)=push, buffer(1)=input, buffer(2)=output, buffer(3)=weights.
+/// Block size 64 (hardcoded in shader). Grid = (n_groups, 1, 1).
+fn dispatchRmsNormOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    weights: *const MetalBuffer,
+    n: u32,
+    n_groups: u32,
+) void {
+    const push = RmsNormPush{ .n = n, .eps = 1e-6 };
+    const bufs = [_]*const MetalBuffer{ input, output, weights };
+    cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
@@ -684,39 +752,47 @@ fn decodeStep(engine: *InferenceEngine) !void {
     const mmap = engine.model.mmap_data orelse return error.NoMmapData;
     const data_base = engine.model.gguf_file.tensor_data_offset;
 
-    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-    const norm_ptr: [*]f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+    // SSM constants (needed for GPU batch 1 dispatch sizing)
+    const d_inner: u32 = cfg.ssm_d_inner;
+    const d_state: u32 = cfg.ssm_d_state;
+    const n_group: u32 = cfg.ssm_n_group;
+    const dt_rank: u32 = cfg.ssm_dt_rank;
+    const conv_channels: u32 = if (d_inner > 0) d_inner + 2 * n_group * d_state else 0;
 
     for (0..cfg.n_layers) |layer_idx| {
         const layer: u32 = @intCast(layer_idx);
-
-        // --- Input RMS norm: hidden_buf → norm_buf ---
-        const attn_norm = findLayerTensor(engine.model, layer, "attn_norm.weight") orelse return error.MissingTensor;
-        const norm_off: usize = @intCast(data_base + attn_norm.info.offset);
-        const norm_elems = @as(u32, @intCast(attn_norm.info.numElements()));
-        const norm_w = try engine.allocator.alloc(f32, norm_elems);
-        defer engine.allocator.free(norm_w);
-        readMmapFloats(mmap, norm_off, attn_norm.info.type_, norm_w);
-        cpuRmsNormMul(hidden_ptr, norm_w, norm_ptr, hidden_dim, 1, 1e-6);
-
         const is_full_attn = ((layer + 1) % full_attn_interval == 0);
 
-        if (is_full_attn) {
-            // === FULL ATTENTION LAYER ===
-            const q_tensor = findLayerTensor(engine.model, layer, "attn_q.weight") orelse return error.MissingTensor;
-            const k_tensor = findLayerTensor(engine.model, layer, "attn_k.weight") orelse return error.MissingTensor;
-            const v_tensor = findLayerTensor(engine.model, layer, "attn_v.weight") orelse return error.MissingTensor;
+        // ===== GPU BATCH 1: attn_norm → projections =====
+        // Batches RMS norm with following DMMVs — eliminates CPU norm + alloc.
+        {
+            var cmd = try metal_command.beginCommand(engine.device.ctx);
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
 
-            // Q+gate, K, V projections (batched GPU dispatch)
-            const q_full_dim = q_dim * 2;
-            {
-                var cmd = try metal_command.beginCommand(engine.device.ctx);
+            if (is_full_attn) {
+                const q_tensor = findLayerTensor(engine.model, layer, "attn_q.weight") orelse return error.MissingTensor;
+                const k_tensor = findLayerTensor(engine.model, layer, "attn_k.weight") orelse return error.MissingTensor;
+                const v_tensor = findLayerTensor(engine.model, layer, "attn_v.weight") orelse return error.MissingTensor;
+                const q_full_dim = q_dim * 2;
                 dispatchDmmvOnCmd(engine, &cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
                 dispatchDmmvOnCmd(engine, &cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
                 dispatchDmmvOnCmd(engine, &cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
-                cmd.commitAndWait();
+            } else {
+                const wqkv_t = findLayerTensor(engine.model, layer, "attn_qkv.weight") orelse return error.MissingTensor;
+                const z_t = findLayerTensor(engine.model, layer, "attn_gate.weight") orelse return error.MissingTensor;
+                const alpha_t = findLayerTensor(engine.model, layer, "ssm_alpha.weight") orelse return error.MissingTensor;
+                const beta_t = findLayerTensor(engine.model, layer, "ssm_beta.weight") orelse return error.MissingTensor;
+                dispatchDmmvOnCmd(engine, &cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, &cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, &cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, &cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
             }
+            cmd.commitAndWait();
+        }
 
+        // ===== CPU WORK: attention or SSM =====
+        if (is_full_attn) {
             // Deinterleave Q+gate → q_buf, gate_buf (CPU)
             const attn_out_ptr: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
             const q_ptr: [*]f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
@@ -730,7 +806,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 }
             }
 
-            // Per-head Q/K norm (CPU)
+            // Per-head Q/K norm (CPU — small data, not worth GPU dispatch overhead)
             const q_norm_t = findLayerTensor(engine.model, layer, "attn_q_norm.weight");
             if (q_norm_t) |qn| {
                 const qn_off: usize = @intCast(data_base + qn.info.offset);
@@ -773,37 +849,48 @@ fn decodeStep(engine: *InferenceEngine) !void {
             for (0..q_dim) |i| {
                 attn_out_w[i] *= 1.0 / (1.0 + @exp(-gate_ptr[i]));
             }
-
-            // Output projection DMMV: attn_output.weight × attn_out → down_buf
-            const o_tensor = findLayerTensor(engine.model, layer, "attn_output.weight") orelse return error.MissingTensor;
-            try dispatchDmmvAndWait(engine, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
-
-            // Residual: hidden += down (CPU)
-            const down_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
-            for (0..hidden_dim) |i| hidden_ptr[i] += down_ptr[i];
         } else {
-            // === SSM / LINEAR ATTENTION LAYER ===
-            try runSsmLayerCpu(engine, layer, layer_idx, mmap, data_base);
+            // SSM CPU core: conv1d, state update, gated norm → swiglu_buf
+            try runSsmCpuCore(engine, layer, layer_idx, mmap, data_base);
         }
 
-        // --- Post-attention norm ---
-        const ffn_norm_t = findLayerTensor(engine.model, layer, "post_attention_norm.weight") orelse
-            findLayerTensor(engine.model, layer, "ffn_norm.weight") orelse return error.MissingTensor;
+        // ===== GPU BATCH 2: output proj → residual → ffn_norm → router =====
+        // Batches 4 operations that were previously 2 separate commits + CPU ops.
         {
-            const fn_off: usize = @intCast(data_base + ffn_norm_t.info.offset);
-            const fn_elems = @as(u32, @intCast(ffn_norm_t.info.numElements()));
-            const fn_w = try engine.allocator.alloc(f32, fn_elems);
-            defer engine.allocator.free(fn_w);
-            readMmapFloats(mmap, fn_off, ffn_norm_t.info.type_, fn_w);
-            cpuRmsNormMul(hidden_ptr, fn_w, norm_ptr, hidden_dim, 1, 1e-6);
+            var cmd = try metal_command.beginCommand(engine.device.ctx);
+
+            // Output / SSM-out projection DMMV
+            if (is_full_attn) {
+                const o_tensor = findLayerTensor(engine.model, layer, "attn_output.weight") orelse return error.MissingTensor;
+                dispatchDmmvOnCmd(engine, &cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
+            } else {
+                const ssm_out_t = findLayerTensor(engine.model, layer, "ssm_out.weight") orelse return error.MissingTensor;
+                dispatchDmmvOnCmd(engine, &cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
+            }
+            cmd.barrier();
+
+            // GPU residual: hidden += down
+            {
+                const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
+            }
+            cmd.barrier();
+
+            // GPU FFN norm: hidden → norm
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
+
+            // Router DMMV (MoE only — norm_buf → router_logits_buf)
+            if (is_moe) {
+                const router_t = findLayerTensor(engine.model, layer, "ffn_gate_inp.weight") orelse return error.MissingTensor;
+                dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+            }
+            cmd.commitAndWait();
         }
 
+        // ===== MoE / Dense FFN =====
         if (is_moe) {
-            // --- MoE FFN ---
-            // Router DMMV
-            const router_t = findLayerTensor(engine.model, layer, "ffn_gate_inp.weight") orelse return error.MissingTensor;
-            try smartDmmv(engine, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
-
             // CPU topK softmax
             const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
             var expert_ids: [16]u32 = undefined;
@@ -814,9 +901,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
             const moe_ptr: [*]f32 = @ptrCast(@alignCast(engine.moe_out_buf.cpu_ptr.?));
             @memset(moe_ptr[0..hidden_dim], 0);
 
-            // Expert dispatch — all experts batched into ONE GPU command buffer.
-            // Previous: 2 GPU syncs per expert × 8 = 16 syncs per layer.
-            // Now: 1 GPU sync for all experts + shared expert per layer.
+            // Expert dispatch — all experts batched into ONE GPU command buffer
             const gate_exps = findLayerTensor(engine.model, layer, "ffn_gate_exps.weight") orelse return error.MissingTensor;
             const up_exps = findLayerTensor(engine.model, layer, "ffn_up_exps.weight") orelse return error.MissingTensor;
             const down_exps = findLayerTensor(engine.model, layer, "ffn_down_exps.weight") orelse return error.MissingTensor;
@@ -864,7 +949,6 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 const shexp_gate_t = findLayerTensor(engine.model, layer, "ffn_gate_inp_shexp.weight");
 
                 if (gate_shexp != null and up_shexp != null and down_shexp != null) {
-                    // Gate + Up + optional gate scalar DMMVs
                     dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
                     dispatchDmmvOnCmd(engine, &cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
                     if (shexp_gate_t) |sg| {
@@ -897,13 +981,14 @@ fn decodeStep(engine: *InferenceEngine) !void {
                     }
                 }
 
-                cmd.commitAndWait(); // no-op if already committed in shared expert gate branch
+                cmd.commitAndWait();
             }
 
             // FFN residual: hidden += moe_out (CPU, via UMA)
+            const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
             for (0..hidden_dim) |i| hidden_ptr[i] += moe_ptr[i];
         } else {
-            // Dense FFN (non-MoE) — batched GPU dispatch
+            // Dense FFN (non-MoE) — norm_buf already set by GPU batch 2
             const gate_t = findLayerTensor(engine.model, layer, "ffn_gate.weight") orelse return error.MissingTensor;
             const up_t = findLayerTensor(engine.model, layer, "ffn_up.weight") orelse return error.MissingTensor;
             const down_t = findLayerTensor(engine.model, layer, "ffn_down.weight") orelse return error.MissingTensor;
@@ -914,7 +999,6 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 dispatchDmmvOnCmd(engine, &cmd, up_t, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, 0);
                 cmd.barrier();
 
-                // SwiGLU on GPU
                 const swiglu_push = SwiGLUPush{ .n = inter_dim };
                 const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
                 cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
@@ -924,35 +1008,33 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 cmd.commitAndWait();
             }
 
+            const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
             const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
             for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
         }
     }
 
-    // === Final RMS norm → LM head ===
-    const final_norm_t = findTensorByName(engine.model, "output_norm.weight") orelse return error.MissingTensor;
+    // ===== Final: GPU norm → LM head (batched) =====
     {
-        const fn_off: usize = @intCast(data_base + final_norm_t.info.offset);
-        const fn_elems = @as(u32, @intCast(final_norm_t.info.numElements()));
-        const fn_w = try engine.allocator.alloc(f32, fn_elems);
-        defer engine.allocator.free(fn_w);
-        readMmapFloats(mmap, fn_off, final_norm_t.info.type_, fn_w);
-        cpuRmsNormMul(hidden_ptr, fn_w, norm_ptr, hidden_dim, 1, 1e-6);
+        var cmd = try metal_command.beginCommand(engine.device.ctx);
+        dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
+        cmd.barrier();
+        const lm_tensor = findTensorByName(engine.model, "output.weight") orelse
+            findTensorByName(engine.model, "token_embd.weight") orelse return error.MissingTensor;
+        dispatchDmmvOnCmd(engine, &cmd, lm_tensor, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
+        cmd.commitAndWait();
     }
-
-    // LM head DMMV: output.weight × norm_buf → logits_buf
-    const lm_tensor = findTensorByName(engine.model, "output.weight") orelse
-        findTensorByName(engine.model, "token_embd.weight") orelse return error.MissingTensor;
-    try smartDmmv(engine, lm_tensor, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
 
     engine.position += 1;
 }
 
 // ---------------------------------------------------------------------------
-// SSM layer (CPU-side with GPU DMMV for large projections)
+// SSM CPU core — conv1d, state update, gated norm.
+// Assumes projection results already in UMA buffers (from GPU batch 1).
+// Writes SSM output to swiglu_buf for subsequent GPU SSM out DMMV.
 // ---------------------------------------------------------------------------
 
-fn runSsmLayerCpu(
+fn runSsmCpuCore(
     engine: *InferenceEngine,
     layer: u32,
     layer_idx: usize,
@@ -960,7 +1042,6 @@ fn runSsmLayerCpu(
     data_base: u64,
 ) !void {
     const cfg = engine.config;
-    const hidden_dim = cfg.hidden_dim;
     const d_inner = cfg.ssm_d_inner;
     const d_conv = cfg.ssm_d_conv;
     const d_state = cfg.ssm_d_state;
@@ -972,21 +1053,7 @@ fn runSsmLayerCpu(
     const head_v_dim = d_inner / @max(dt_rank, 1);
     const conv_channels: u32 = d_inner + 2 * n_group * d_state;
 
-    // GPU: 4 DMMV projections
-    const wqkv_t = findLayerTensor(engine.model, layer, "attn_qkv.weight") orelse return;
-    const z_t = findLayerTensor(engine.model, layer, "attn_gate.weight") orelse return;
-    const alpha_t = findLayerTensor(engine.model, layer, "ssm_alpha.weight") orelse return;
-    const beta_t = findLayerTensor(engine.model, layer, "ssm_beta.weight") orelse return;
-    {
-        var cmd = try metal_command.beginCommand(engine.device.ctx);
-        dispatchDmmvOnCmd(engine, &cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
-        dispatchDmmvOnCmd(engine, &cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
-        dispatchDmmvOnCmd(engine, &cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
-        dispatchDmmvOnCmd(engine, &cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
-        cmd.commitAndWait();
-    }
-
-    // Read back from UMA buffers
+    // Read projection results from UMA buffers (written by GPU batch 1)
     const qkv_cpu: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
     const z_cpu: [*]const f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
     const alpha_cpu: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
@@ -1136,18 +1203,9 @@ fn runSsmLayerCpu(
         }
     }
 
-    // Write SSM output to swiglu_buf for DMMV input
+    // Write SSM output to swiglu_buf for subsequent GPU SSM out DMMV
     const sw_ptr: [*]f32 = @ptrCast(@alignCast(engine.swiglu_buf.cpu_ptr.?));
     for (0..d_inner) |i| sw_ptr[i] = ssm_output[i];
-
-    // ssm_out DMMV: ssm_out.weight × swiglu_buf → down_buf
-    const ssm_out_t = findLayerTensor(engine.model, layer, "ssm_out.weight") orelse return;
-    try smartDmmv(engine, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
-
-    // Residual: hidden += down
-    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-    const down_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
-    for (0..hidden_dim) |i| hidden_ptr[i] += down_ptr[i];
 }
 
 // ---------------------------------------------------------------------------
