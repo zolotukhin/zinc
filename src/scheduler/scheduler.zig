@@ -128,3 +128,47 @@ test "Scheduler full" {
     _ = try sched.submit(&.{2}, .{});
     try std.testing.expectError(error.AllSlotsBusy, sched.submit(&.{3}, .{}));
 }
+
+test "Scheduler isFull" {
+    const allocator = std.testing.allocator;
+    var sched = try Scheduler.init(allocator, 2);
+    defer sched.deinit();
+
+    try std.testing.expect(!sched.isFull());
+    _ = try sched.submit(&.{1}, .{});
+    try std.testing.expect(!sched.isFull());
+    _ = try sched.submit(&.{2}, .{});
+    try std.testing.expect(sched.isFull());
+    sched.release(0);
+    try std.testing.expect(!sched.isFull());
+}
+
+test "Scheduler release and reuse slot" {
+    const allocator = std.testing.allocator;
+    var sched = try Scheduler.init(allocator, 1);
+    defer sched.deinit();
+
+    const s1 = try sched.submit(&.{10}, .{});
+    try std.testing.expectEqual(@as(u32, 0), s1);
+    sched.release(s1);
+
+    // Same slot should be reusable
+    const s2 = try sched.submit(&.{20}, .{});
+    try std.testing.expectEqual(@as(u32, 0), s2);
+    sched.release(s2);
+}
+
+test "Scheduler request IDs increment" {
+    const allocator = std.testing.allocator;
+    var sched = try Scheduler.init(allocator, 4);
+    defer sched.deinit();
+
+    _ = try sched.submit(&.{1}, .{});
+    _ = try sched.submit(&.{2}, .{});
+
+    // Request IDs should be 0 and 1 (or some incrementing sequence)
+    // Check slots have different request objects
+    try std.testing.expect(sched.slots[0] != null);
+    try std.testing.expect(sched.slots[1] != null);
+    try std.testing.expect(sched.slots[0].?.id != sched.slots[1].?.id);
+}

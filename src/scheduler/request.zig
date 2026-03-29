@@ -131,3 +131,42 @@ test "Request stops at max_tokens" {
     try req.appendToken(300);
     try std.testing.expect(req.shouldStop(999));
 }
+
+test "Request stops at EOS token" {
+    const allocator = std.testing.allocator;
+    var req = Request.init(allocator, 1, &.{}, .{ .max_tokens = 100 });
+    defer req.deinit();
+    try req.appendToken(10);
+    try std.testing.expect(!req.shouldStop(42));
+    try req.appendToken(42); // EOS
+    try std.testing.expect(req.shouldStop(42));
+}
+
+test "Request appendToken records first token time" {
+    const allocator = std.testing.allocator;
+    var req = Request.init(allocator, 1, &.{}, .{});
+    defer req.deinit();
+    try std.testing.expect(req.first_token_ns == null);
+    try req.appendToken(1);
+    try std.testing.expect(req.first_token_ns != null);
+    // Second append should not change first_token_ns
+    const first = req.first_token_ns.?;
+    try req.appendToken(2);
+    try std.testing.expectEqual(first, req.first_token_ns.?);
+}
+
+test "Request invalid state transition fails" {
+    const allocator = std.testing.allocator;
+    var req = Request.init(allocator, 1, &.{}, .{});
+    defer req.deinit();
+    // pending → completed should fail (must go through prefilling/decoding)
+    try std.testing.expectError(error.InvalidTransition, req.transition(.completed));
+}
+
+test "Request generation params defaults" {
+    const params = GenerationParams{};
+    try std.testing.expectEqual(@as(u32, 256), params.max_tokens);
+    try std.testing.expectEqual(@as(f32, 1.0), params.temperature);
+    try std.testing.expectEqual(@as(f32, 1.0), params.top_p);
+    try std.testing.expect(params.stream);
+}

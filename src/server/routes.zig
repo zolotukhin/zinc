@@ -470,3 +470,50 @@ test "findNumEnd extracts digits" {
     try std.testing.expectEqual(@as(usize, 0), findNumEnd("abc"));
     try std.testing.expectEqual(@as(usize, 5), findNumEnd("99999"));
 }
+
+test "parseJsonFields handles multiline content" {
+    const body = "{\"messages\":[{\"role\":\"user\",\"content\":\"line1\\nline2\"}]}";
+    const parsed = try parseJsonFields(body);
+    try std.testing.expectEqualStrings("line1\\nline2", parsed.messages_content);
+}
+
+test "parseJsonFields handles multiple messages picks last content" {
+    const body =
+        \\{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"usr"}]}
+    ;
+    const parsed = try parseJsonFields(body);
+    // lastIndexOf should find the last "content" which is "usr"
+    try std.testing.expectEqualStrings("usr", parsed.messages_content);
+}
+
+test "parseJsonFields max_tokens large value" {
+    const body = "{\"max_tokens\":4096}";
+    const parsed = try parseJsonFields(body);
+    try std.testing.expectEqual(@as(u32, 4096), parsed.max_tokens);
+}
+
+test "parseJsonFields prompt with special chars" {
+    const body = "{\"prompt\":\"What is 2+2?\"}";
+    const parsed = try parseJsonFields(body);
+    try std.testing.expectEqualStrings("What is 2+2?", parsed.prompt_text);
+}
+
+test "jsonEscape carriage return" {
+    var buf: [32]u8 = undefined;
+    const result = jsonEscape("a\rb", &buf);
+    try std.testing.expectEqualStrings("a\\rb", result);
+}
+
+test "jsonEscape plain ASCII passthrough" {
+    var buf: [64]u8 = undefined;
+    const result = jsonEscape("Hello, World! 123", &buf);
+    try std.testing.expectEqualStrings("Hello, World! 123", result);
+}
+
+test "findStringEnd no closing quote returns null" {
+    try std.testing.expectEqual(@as(?usize, null), findStringEnd("no close"));
+}
+
+test "findStringEnd immediate close" {
+    try std.testing.expectEqual(@as(?usize, 0), findStringEnd("\"rest"));
+}
