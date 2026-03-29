@@ -58,6 +58,8 @@ const BLOCKED_GIT_OPS = [
   "Bash(git clean:*)",
 ];
 
+type AgentKind = "claude" | "codex";
+
 // ── Phase detection ──────────────────────────────────────────────────
 
 type Phase = "fix" | "implement" | "optimize";
@@ -131,6 +133,7 @@ async function runCommand(
     timeout?: number;
     streamOutput?: boolean;
     stdoutLineFormatter?: (line: string) => string | null;
+    stderrLineFormatter?: (line: string) => string | null;
   } = {},
 ): Promise<RunResult> {
   return new Promise((res) => {
@@ -139,7 +142,7 @@ async function runCommand(
       stdio: ["ignore", "pipe", "pipe"],
       timeout: opts.timeout,
     });
-    let stdout = "", stderr = "", lineBuffer = "";
+    let stdout = "", stderr = "", lineBuffer = "", stderrLineBuffer = "";
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
@@ -159,10 +162,31 @@ async function runCommand(
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stderr += text;
-      if (opts.streamOutput) process.stderr.write(text);
+      if (!opts.streamOutput) return;
+      if (opts.stderrLineFormatter) {
+        stderrLineBuffer += text;
+        const lines = stderrLineBuffer.split("\n");
+        stderrLineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const formatted = opts.stderrLineFormatter(line);
+          if (formatted != null) process.stderr.write(formatted);
+        }
+      } else {
+        process.stderr.write(text);
+      }
     });
     child.on("error", () => res({ exitCode: -1, stdout, stderr }));
-    child.on("close", (code) => res({ exitCode: code ?? -1, stdout, stderr }));
+    child.on("close", (code) => {
+      if (opts.streamOutput && opts.stdoutLineFormatter && lineBuffer.trim()) {
+        const formatted = opts.stdoutLineFormatter(lineBuffer);
+        if (formatted != null) process.stdout.write(formatted);
+      }
+      if (opts.streamOutput && opts.stderrLineFormatter && stderrLineBuffer.trim()) {
+        const formatted = opts.stderrLineFormatter(stderrLineBuffer);
+        if (formatted != null) process.stderr.write(formatted);
+      }
+      res({ exitCode: code ?? -1, stdout, stderr });
+    });
   });
 }
 
@@ -260,15 +284,47 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
   return result;
 }
 
-// ── Claude stream-JSON formatter ─────────────────────────────────────
+// ── Agent stream formatters ──────────────────────────────────────────
 
-type StreamState = {
+type ClaudeStreamState = {
   currentToolName: string | null;
   currentBlockIsToolUse: boolean;
   inputJsonBuffer: string;
   inTextBlock: boolean;
   sawTextDelta: boolean;
 };
+
+type CodexStreamState = {
+  startedCommandIds: Set<string>;
+};
+
+function coerceDisplayText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const parts = value.map((entry) => coerceDisplayText(entry)).filter((entry) => entry.trim());
+    if (parts.length > 0) return parts.join("\n");
+    try { return JSON.stringify(value, null, 2); } catch { return ""; }
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const parts = [
+      record.text,
+      record.message,
+      record.output,
+      record.stdout,
+      record.stderr,
+      record.content,
+      record.result,
+      record.summary,
+      record.output_text,
+    ].map((entry) => coerceDisplayText(entry)).filter((entry) => entry.trim());
+    if (parts.length > 0) return parts.join("\n");
+    try { return JSON.stringify(record, null, 2); } catch { return ""; }
+  }
+  return "";
+}
 
 function formatToolInput(name: string, jsonBuf: string): string {
   let input: Record<string, unknown> = {};
@@ -304,7 +360,7 @@ function formatToolInput(name: string, jsonBuf: string): string {
   return out.length > 0 ? out.join("\n") + "\n" : "";
 }
 
-function formatClaudeStreamLine(rawLine: string, state: StreamState): string | null {
+function formatClaudeStreamLine(rawLine: string, state: ClaudeStreamState): string | null {
   if (!rawLine.trim()) return null;
   let event: Record<string, unknown>;
   try { event = JSON.parse(rawLine) as Record<string, unknown>; } catch { return null; }
@@ -388,11 +444,157 @@ function formatClaudeStreamLine(rawLine: string, state: StreamState): string | n
   return null;
 }
 
+function formatCodexJsonEvent(
+  rawLine: string,
+  state: CodexStreamState,
+): string | null | undefined {
+  if (!rawLine.trim()) return null;
+  let event: Record<string, unknown>;
+  try { event = JSON.parse(rawLine) as Record<string, unknown>; } catch { return undefined; }
+
+  const eventType = typeof event.type === "string" ? event.type : "";
+  if (eventType === "thread.started" || eventType === "turn.started" || eventType === "turn.completed")
+    return null;
+  if (eventType === "error") {
+    const message = coerceDisplayText(event.message);
+    return message ? `${clr("31", message)}\n` : null;
+  }
+  if (!eventType.startsWith("item.")) return null;
+
+  const item = event.item as Record<string, unknown> | undefined;
+  if (!item) return null;
+
+  const itemType = typeof item.type === "string" ? item.type : "";
+  const itemId = typeof item.id === "string" ? item.id : "";
+  const phase = eventType.slice("item.".length);
+
+  if (itemType === "reasoning" && phase === "completed") {
+    const text = coerceDisplayText(item.summary ?? item.text ?? item.message ?? item.content);
+    return text ? `${clr("2", `thinking: ${text}`)}\n` : null;
+  }
+
+  if (itemType === "command_execution") {
+    const input = item.input as Record<string, unknown> | undefined;
+    const cmd = coerceDisplayText(item.command ?? input?.command ?? "").trim();
+    const output = coerceDisplayText(item.aggregated_output ?? item.output ?? item.stdout ?? "");
+    const exitCode = typeof item.exit_code === "number" ? item.exit_code : null;
+    const startedAlready = itemId ? state.startedCommandIds.has(itemId) : false;
+
+    if (phase === "started") {
+      if (itemId) state.startedCommandIds.add(itemId);
+      return cmd
+        ? `\n${clr("33", "🔧 bash")}\n${clr("2", `   $ ${cmd}`)}\n`
+        : `\n${clr("33", "🔧 bash")}\n`;
+    }
+
+    let out = "";
+    if (!startedAlready) {
+      out += `\n${clr("33", "🔧 bash")}\n`;
+      if (cmd) out += clr("2", `   $ ${cmd}`) + "\n";
+    }
+    if (phase === "completed") {
+      const lines = output.split("\n").filter((line) => line.trim());
+      const tail = lines.slice(-3);
+      const statusColor = exitCode === 0 ? "32" : exitCode == null ? "33" : "31";
+      const statusText = exitCode === 0
+        ? "   ☑ accepted"
+        : exitCode == null
+          ? "   ⚠ completed"
+          : `   ✖ exit ${exitCode}`;
+      const body = tail.length > 0
+        ? (lines.length > 3 ? clr("2", "   …\n") : "") +
+          tail.map((line) => clr("2", `   ${line.trim()}`)).join("\n") +
+          "\n"
+        : "";
+      out += `${clr(statusColor, statusText)}\n${body}`;
+    }
+    if (itemId) state.startedCommandIds.delete(itemId);
+    return out || null;
+  }
+
+  if (itemType === "file_change" && phase === "completed") {
+    const changesSource = [item.changes, item.file_changes, item.files];
+    const changes = changesSource.flatMap((value) => {
+      if (!Array.isArray(value)) return [];
+      return value.map((entry) => {
+        const change = entry as Record<string, unknown>;
+        return {
+          path: coerceDisplayText(change.path ?? change.file_path ?? "?"),
+          action: coerceDisplayText(change.change_type ?? change.kind ?? ""),
+        };
+      });
+    });
+    if (changes.length === 0) return null;
+    let out = `\n${clr("35", "📝 file change")}\n`;
+    for (const change of changes.slice(0, 6)) {
+      out += clr("2", `   ${change.action ? `${change.action}: ` : ""}${change.path}`) + "\n";
+    }
+    return out;
+  }
+
+  if (itemType === "agent_message" && phase === "completed") {
+    const text = coerceDisplayText(item.text ?? item.message ?? item.output_text ?? item.content);
+    return text ? `${clr("96", text)}\n` : null;
+  }
+
+  if (itemType === "error" && phase === "completed") {
+    const text = coerceDisplayText(item.text ?? item.message ?? item.content);
+    return text ? `${clr("33", text)}\n` : null;
+  }
+
+  return null;
+}
+
+function formatCodexStreamLine(rawLine: string, state: CodexStreamState): string | null {
+  const jsonFormatted = formatCodexJsonEvent(rawLine, state);
+  if (jsonFormatted !== undefined) return jsonFormatted;
+  if (!rawLine.trim()) return "\n";
+  if (rawLine === "thinking") return `${clr("2", rawLine)}\n`;
+  if (rawLine === "codex") return `${clr("1;35", rawLine)}\n`;
+  if (rawLine.includes("still running")) return `${clr("2", rawLine)}\n`;
+  return `${clr("2", `[codex] ${rawLine}`)}\n`;
+}
+
+function formatCodexStderrLine(rawLine: string): string | null {
+  if (!rawLine.trim()) return "\n";
+  return `${clr("2", `[codex] ${rawLine}`)}\n`;
+}
+
 // ── Agent invocation ─────────────────────────────────────────────────
 
-async function runAgent(prompt: string): Promise<RunResult> {
+function buildClaudeArgs(prompt: string, model?: string): string[] {
+  const args = [
+    "-p",
+    "--verbose",
+    "--output-format", "stream-json",
+    "--include-partial-messages",
+    `--disallowed-tools=${BLOCKED_GIT_OPS.join(",")}`,
+    "--permission-mode", "bypassPermissions",
+    "--effort", "high",
+  ];
+  if (model) args.push("--model", model);
+  args.push(prompt);
+  return args;
+}
+
+function buildCodexArgs(prompt: string, model?: string): string[] {
+  const args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--json",
+    "--color", "never",
+    "--sandbox", "workspace-write",
+    "--cd", REPO_ROOT,
+  ];
+  if (model) args.push("--model", model);
+  args.push(prompt);
+  return args;
+}
+
+async function runAgent(agent: AgentKind, prompt: string, model?: string): Promise<RunResult> {
+  const label = agent === "codex" ? "Codex" : "Claude";
   console.log(clr("1;34", SEP));
-  console.log(clr("1;34", "  🧠 AGENT PROMPT"));
+  console.log(clr("1;34", `  🧠 AGENT PROMPT (${label})`));
   console.log(clr("1;34", SEP));
   const lines = prompt.split("\n");
   for (const line of lines.slice(0, 20)) process.stdout.write(clr("2", line) + "\n");
@@ -404,36 +606,39 @@ async function runAgent(prompt: string): Promise<RunResult> {
     process.stdout.write(clr("2", `\n⏳ agent running (${formatElapsed(startedAt)})...\n`));
   }, 30_000);
 
-  const streamState: StreamState = {
-    currentToolName: null,
-    currentBlockIsToolUse: false,
-    inputJsonBuffer: "",
-    inTextBlock: false,
-    sawTextDelta: false,
-  };
-
   console.log(clr("1;36", SEP));
-  console.log(clr("1;36", "  💬 AGENT RESPONSE"));
+  console.log(clr("1;36", `  💬 AGENT RESPONSE (${label})`));
   console.log(clr("1;36", SEP));
 
-  const result = await runCommand("claude", [
-    "-p",
-    "--verbose",
-    "--output-format", "stream-json",
-    "--include-partial-messages",
-    `--disallowed-tools=${BLOCKED_GIT_OPS.join(",")}`,
-    "--permission-mode", "bypassPermissions",
-    "--effort", "high",
-    prompt,
-  ], {
-    streamOutput: true,
-    timeout: 1_800_000, // 30 min
-    stdoutLineFormatter: (line) => formatClaudeStreamLine(line, streamState),
-  });
+  let result: RunResult;
+  if (agent === "codex") {
+    const streamState: CodexStreamState = {
+      startedCommandIds: new Set(),
+    };
+    result = await runCommand("codex", buildCodexArgs(prompt, model), {
+      streamOutput: true,
+      timeout: 1_800_000, // 30 min
+      stdoutLineFormatter: (line) => formatCodexStreamLine(line, streamState),
+      stderrLineFormatter: formatCodexStderrLine,
+    });
+  } else {
+    const streamState: ClaudeStreamState = {
+      currentToolName: null,
+      currentBlockIsToolUse: false,
+      inputJsonBuffer: "",
+      inTextBlock: false,
+      sawTextDelta: false,
+    };
+    result = await runCommand("claude", buildClaudeArgs(prompt, model), {
+      streamOutput: true,
+      timeout: 1_800_000, // 30 min
+      stdoutLineFormatter: (line) => formatClaudeStreamLine(line, streamState),
+    });
+  }
 
   clearInterval(heartbeat);
   console.log(clr("1;36", SEP));
-  console.log(clr("1;32", `  ✅ Agent done in ${formatElapsed(startedAt)}`));
+  console.log(clr("1;32", `  ✅ ${label} done in ${formatElapsed(startedAt)}`));
   return result;
 }
 
@@ -646,7 +851,6 @@ async function saveState(runDir: string, state: RunState): Promise<void> {
 }
 
 function extractAgentText(stdout: string): string {
-  // Extract text from Claude stream-json format
   const lines = stdout.split("\n");
   const texts: string[] = [];
   for (const line of lines) {
@@ -662,6 +866,12 @@ function extractAgentText(stdout: string): string {
           }
         }
       }
+      if (evt?.type === "item.completed" && evt?.item?.type === "agent_message") {
+        const text = coerceDisplayText(
+          evt.item.text ?? evt.item.message ?? evt.item.output_text ?? evt.item.content,
+        );
+        if (text.trim()) texts.push(text);
+      }
     } catch { /* not JSON */ }
   }
   return texts.join("\n");
@@ -671,18 +881,57 @@ function extractAgentText(stdout: string): string {
 
 async function main() {
   const args = process.argv.slice(2);
-  const maxCycles = parseInt(args.find((_, i, a) => a[i - 1] === "--cycles") ?? "999", 10);
-  const dryRun = args.includes("--dry-run");
+  let maxCycles = 999;
+  let dryRun = false;
+  let agent: AgentKind = "claude";
+  let model: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case "--agent": {
+        const value = args[++i];
+        if (value !== "claude" && value !== "codex") {
+          console.error(`Invalid --agent: ${value}. Use claude or codex.`);
+          process.exit(1);
+        }
+        agent = value;
+        break;
+      }
+      case "--model":
+        model = args[++i];
+        break;
+      case "--cycles":
+        maxCycles = parseInt(args[++i] ?? "999", 10);
+        break;
+      case "--dry-run":
+        dryRun = true;
+        break;
+      case "--help":
+        console.log([
+          "Usage: bun loops/implement_metal.ts [options]",
+          "",
+          "Options:",
+          "  --agent <claude|codex>  Agent to use (default: claude)",
+          "  --model <name>          Model override for selected agent",
+          "  --cycles N              Max cycles (default: 999)",
+          "  --dry-run               Build+run only, no agent",
+        ].join("\n"));
+        process.exit(0);
+    }
+  }
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const runDir = join(RESULTS_DIR, runId);
   await mkdir(runDir, { recursive: true });
+  const agentLabel = agent === "codex" ? "Codex" : "Claude";
 
   console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
   console.log(clr("1;36", "║  ZINC Metal Implementation Loop                              ║"));
   console.log(clr("1;36", `║  Run: ${runId}                                  ║`));
   console.log(clr("1;36", `║  Max cycles: ${maxCycles}  |  Model: ${MODEL_PATH.split("/").pop()}  ║`));
   console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
+  console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
+  console.log(`  Results: ${clr("2", runDir)}`);
 
   let state: RunState = {
     runId,
@@ -741,7 +990,7 @@ async function main() {
     const prompt = buildPrompt(state, result);
     await writeFile(join(cycleDir, "prompt.md"), prompt);
 
-    const agentResult = await runAgent(prompt);
+    const agentResult = await runAgent(agent, prompt, model);
     await writeFile(join(cycleDir, "agent.log"), agentResult.stdout + agentResult.stderr);
 
     // Extract markers
