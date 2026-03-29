@@ -415,24 +415,24 @@ The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), wi
 
 ```
   tok/s    Qwen3.5-35B-A3B Q4_K_XL, AI PRO R9700
-  4.5 ┤
-       │                                        ╭─ 4.33 (best)
-  4.0 ┤                  ╭──────────────────────╯── 3.9 avg
-       │                  │
-  3.5 ┤                  │
+  8.0 ┤                                                      ╭─ 7.64 (best)
+       │                                                ╭────╯
+  7.0 ┤                                                │
+       │                                                │
+  6.0 ┤                                                │
+       │                                                │
+  5.0 ┤                                                │
+       │                                        ╭──────╯ GPU SSM + batching
+  4.0 ┤                  ╭──────────────────────╯── 4.3
        │                  │
   3.0 ┤                  │
        │                  │
-  2.5 ┤  ────────────────╯
-       │  ~2.3 avg
-  2.0 ┤
+  2.0 ┤  ────────────────╯
        │
-  1.5 ┤
-       │  ~1.4 avg
   1.0 ┤──╮
-       └──┴──────────────────────────────────────── cycles
-       0  43         87       102      145     186
-       Mar 27 AM    Mar 27 PM Mar 28   Codex   Latest
+       └──┴──────────────────────────────────────────────── cycles
+       0  43         87       102      145     186    200+
+       Mar 27 AM    Mar 27 PM Mar 28   Codex   Phase 3c
 ```
 
 | Phase | Cycles | tok/s | Key change |
@@ -441,6 +441,7 @@ The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), wi
 | Bug fixes | 44 | 2.3 → 4.0 | Q4_K sub-block pairing fix (1.7x jump at cycle 20) |
 | Coherent output | 15 | 3.8–4.1 | Q5_K element ordering fix → first correct text |
 | Optimization plateau | 84 | 3.9–4.3 | Minor gains; bottleneck is sync overhead, not compute |
+| GPU SSM + batching | 15+ | 4.3 → 7.6 | GPU SSM shaders, cmd buffer batching, swiglu_buf overflow fix |
 
 ### Key bugs found by the loop
 
