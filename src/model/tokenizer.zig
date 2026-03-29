@@ -173,6 +173,7 @@ pub const Tokenizer = struct {
         // Start with GPT-2 byte-level encoding: each raw byte maps to a Unicode char
         var symbols: std.ArrayList([]const u8) = .{};
         defer symbols.deinit(self.allocator);
+        defer for (symbols.items) |sym| self.allocator.free(@constCast(sym));
 
         for (text) |byte| {
             const unicode_char = gpt2ByteToUnicode(byte);
@@ -259,15 +260,17 @@ pub const Tokenizer = struct {
             if (best_rank == std.math.maxInt(u32)) break; // No more merges possible
 
             // Merge the pair: concatenate symbols[best_pos] and symbols[best_pos+1]
+            const old_left = symbols.items[best_pos];
+            const old_right = symbols.items[best_pos + 1];
             const merged = try std.mem.concat(self.allocator, u8, &.{
-                symbols.items[best_pos],
-                symbols.items[best_pos + 1],
+                old_left,
+                old_right,
             });
+            self.allocator.free(@constCast(old_left));
+            self.allocator.free(@constCast(old_right));
 
             symbols.items[best_pos] = merged;
             _ = symbols.orderedRemove(best_pos + 1);
-            // Note: merged strings leak here. Acceptable for a short-lived encode call.
-            // A proper fix would track allocated slices separately from input slices.
         }
     }
 
@@ -300,10 +303,14 @@ pub const Tokenizer = struct {
 
             if (!found) break;
 
+            const old_left = symbols.items[best_pos];
+            const old_right = symbols.items[best_pos + 1];
             const merged = try std.mem.concat(self.allocator, u8, &.{
-                symbols.items[best_pos],
-                symbols.items[best_pos + 1],
+                old_left,
+                old_right,
             });
+            self.allocator.free(@constCast(old_left));
+            self.allocator.free(@constCast(old_right));
 
             symbols.items[best_pos] = merged;
             _ = symbols.orderedRemove(best_pos + 1);
