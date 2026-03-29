@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZINC Chat</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;height:100vh;display:flex;flex-direction:column}
+header{padding:10px 16px;background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;gap:10px}
+header h1{font-size:16px;color:#f0883e;font-weight:700}
+header .st{font-size:12px;color:#484f58}
+header .st.ok{color:#3fb950}
+header .model{font-size:12px;color:#8b949e}
+#messages{flex:1;overflow-y:auto;padding:16px}
+.m{margin-bottom:12px;max-width:80%}
+.m.u{margin-left:auto}
+.m .r{font-size:11px;color:#484f58;margin-bottom:3px}
+.m.u .r{text-align:right}
+.m .b{padding:8px 12px;border-radius:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;font-size:14px}
+.m.u .b{background:#1f6feb;color:#fff}
+.m.a .b{background:#161b22;border:1px solid #30363d}
+.m.a .b.s{border-color:#f0883e}
+#ia{padding:10px 16px;background:#161b22;border-top:1px solid #30363d;display:flex;gap:8px}
+#ia textarea{flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px;border-radius:8px;font-size:14px;font-family:inherit;resize:none;min-height:40px;max-height:120px}
+#ia textarea:focus{outline:none;border-color:#f0883e}
+#ia button{background:#f0883e;color:#fff;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600}
+#ia button:hover{background:#d47533}
+#ia button:disabled{opacity:.3;cursor:not-allowed}
+</style>
+</head>
+<body>
+<header>
+<h1>ZINC</h1>
+<span id="st" class="st">...</span>
+<span id="mn" class="model"></span>
+</header>
+<div id="messages"></div>
+<div id="ia">
+<textarea id="i" placeholder="Message..." rows="1"></textarea>
+<button id="sb" onclick="send()">Send</button>
+</div>
+<script>
+const M=document.getElementById('messages'),I=document.getElementById('i'),B=document.getElementById('sb');
+const S=document.getElementById('st'),N=document.getElementById('mn');
+let H=[],base=location.origin+'/v1';
+async function ck(){
+  try{
+    let r=await fetch(base.replace('/v1','/health'));let d=await r.json();
+    if(d.status==='ok'){S.textContent='Connected';S.className='st ok';
+      let mr=await fetch(base+'/models');let md=await mr.json();
+      if(md.data&&md.data[0])N.textContent=md.data[0].id;
+    }
+  }catch(e){S.textContent='Offline';S.className='st'}
+}
+function add(r,c){
+  let d=document.createElement('div');d.className='m '+(r==='user'?'u':'a');
+  d.innerHTML='<div class="r">'+(r==='user'?'You':'ZINC')+'</div><div class="b">'+esc(c)+'</div>';
+  M.appendChild(d);M.scrollTop=M.scrollHeight;return d.querySelector('.b');
+}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+async function send(){
+  let t=I.value.trim();if(!t)return;I.value='';I.style.height='auto';B.disabled=true;
+  add('user',t);H.push({role:'user',content:t});
+  let b=add('assistant','');b.classList.add('s');let f='';
+  try{
+    let r=await fetch(base+'/chat/completions',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:N.textContent||'qwen',messages:H,stream:true,max_tokens:512,temperature:0.7})});
+    let rd=r.body.getReader(),dc=new TextDecoder(),buf='';
+    while(true){
+      let{done,value}=await rd.read();if(done)break;
+      buf+=dc.decode(value,{stream:true});let ls=buf.split('\n');buf=ls.pop()||'';
+      for(let l of ls){
+        if(!l.startsWith('data: '))continue;let p=l.slice(6);
+        if(p==='[DONE]')break;
+        try{let c=JSON.parse(p).choices?.[0]?.delta?.content;
+          if(c&&!c.includes('<|im_end')&&!c.includes('<|im_start')){f+=c;b.textContent=f;M.scrollTop=M.scrollHeight}
+        }catch(e){}
+      }
+    }
+    H.push({role:'assistant',content:f});
+  }catch(e){b.textContent='Error: '+e.message}
+  b.classList.remove('s');B.disabled=false;I.focus();
+}
+I.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
+I.addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px'});
+ck();
+</script>
+</body>
+</html>

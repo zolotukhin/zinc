@@ -36,6 +36,8 @@ pub fn handleConnection(
     } else if (request.method == .OPTIONS) {
         // CORS preflight
         try conn.sendJson(200, "{}");
+    } else if (request.method == .GET and (std.mem.eql(u8, request.path, "/") or std.mem.eql(u8, request.path, "/chat"))) {
+        try serveChatUi(conn);
     } else {
         try conn.sendError(404, "not_found", "Unknown endpoint");
     }
@@ -430,6 +432,16 @@ fn streamToken(
         \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{"content":"{s}"}},"finish_reason":null}}]}}
     , .{ req_id, ts, model_name, escaped }) catch return error.BufferTooSmall;
     try conn.writeSseEvent(chunk);
+}
+
+// ── Built-in Chat UI ─────────────────────────────────────────
+
+fn serveChatUi(conn: *http.Connection) !void {
+    const html = @embedFile("chat.html");
+    var buf: [256]u8 = undefined;
+    const header = std.fmt.bufPrint(&buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{html.len}) catch return error.HeaderTooLarge;
+    try conn.stream.writeAll(header);
+    try conn.stream.writeAll(html);
 }
 
 fn modelName(model: *const Model) []const u8 {
