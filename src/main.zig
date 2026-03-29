@@ -394,7 +394,36 @@ pub fn main() !void {
         }
     } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
-        // TODO: start HTTP server (Phase 4)
+
+        // Initialize tokenizer for chat template + prompt encoding
+        var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
+            log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer tokenizer.deinit();
+
+        // Start HTTP server
+        const http_mod = @import("server/http.zig");
+        var server = http_mod.Server.init(allocator, config.port) catch |err| {
+            log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer server.deinit();
+        log.info("Server listening on 0.0.0.0:{d}", .{config.port});
+
+        // Accept loop — single-threaded, blocking for now (US2 adds non-blocking)
+        while (true) {
+            var conn = server.accept() catch |err| {
+                log.warn("Accept failed: {s}", .{@errorName(err)});
+                continue;
+            };
+
+            const routes = @import("server/routes.zig");
+            routes.handleConnection(&conn, &engine, &tokenizer, &model, allocator) catch |err| {
+                log.warn("Request failed: {s}", .{@errorName(err)});
+            };
+            conn.close();
+        }
     }
 }
 
