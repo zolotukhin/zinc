@@ -233,6 +233,7 @@ pub const InferenceEngine = struct {
     dmmv_q4k_pipe: MetalPipeline,
     dmmv_q4k_k2048_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
+    dmmv_q4k_lmhead_1024_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
     dmmv_q8_0_pipe: MetalPipeline,
@@ -379,6 +380,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_pipe = try loadShaderPipeline(ctx, "dmmv_q4k");
         self.dmmv_q4k_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
+        self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
         self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
@@ -571,7 +573,7 @@ pub const InferenceEngine = struct {
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
         });
         log.info(
-            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead tw={d} max={d} stgmem={d}",
+            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_pipe.thread_execution_width,
                 self.dmmv_q4k_pipe.max_threads_per_threadgroup,
@@ -582,6 +584,9 @@ pub const InferenceEngine = struct {
                 self.dmmv_q4k_lmhead_pipe.thread_execution_width,
                 self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_lmhead_pipe.static_threadgroup_memory_length,
+                self.dmmv_q4k_lmhead_1024_pipe.thread_execution_width,
+                self.dmmv_q4k_lmhead_1024_pipe.max_threads_per_threadgroup,
+                self.dmmv_q4k_lmhead_1024_pipe.static_threadgroup_memory_length,
             },
         );
         log.info(
@@ -655,6 +660,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_1024_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
@@ -780,6 +786,7 @@ pub const InferenceEngine = struct {
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
     /// Q4_K: native Metal kernel — 32 threads (1 simdgroup) per row, 8 rows per threadgroup (256 threads).
     /// Q4_K wide: specialized large-M kernel — 16 rows per threadgroup (512 threads).
+    /// Q4_K LM head 1024: dedicated vocab projection kernel — 32 rows per threadgroup (1024 threads).
     /// Reusing the wider shape outside the LM head improves staged-vector reuse on
     /// the large decode-side Q4_K projections that still dominate token time.
     /// Q5_K/Q6_K/F32: SPIRV-Cross — each thread handles 1 row (64 rows per workgroup, 64 threads).
@@ -793,6 +800,13 @@ pub const InferenceEngine = struct {
         return switch (tensor.info.type_) {
             .q4_k => blk: {
                 const k2048_or_less = K <= 2048;
+                if (k2048_or_less and
+                    tensor == self.lm_head and
+                    M >= 65536 and
+                    self.dmmv_q4k_lmhead_1024_pipe.max_threads_per_threadgroup >= 1024)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q4k_lmhead_1024_pipe, .push_idx = 1, .rows_per_wg = 32, .block_size = 1024 };
+                }
                 if (k2048_or_less and
                     self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
                     ((tensor == self.lm_head and M >= 65536) or M >= 1024))
@@ -1884,6 +1898,8 @@ test "batched MoE Metal shaders compile" {
 
     var lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
     defer metal_pipeline.freePipeline(&lmhead_pipe);
+    var lmhead_pipe_1024 = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
+    defer metal_pipeline.freePipeline(&lmhead_pipe_1024);
 
     try std.testing.expect(deinterleave_pipe.handle != null);
     try std.testing.expect(rope_pipe.handle != null);
@@ -1893,6 +1909,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(swiglu_pipe.handle != null);
     try std.testing.expect(acc_pipe.handle != null);
     try std.testing.expect(lmhead_pipe.handle != null);
+    try std.testing.expect(lmhead_pipe_1024.handle != null);
 }
 
 test "deinterleave shader splits block-interleaved Q and gate" {
