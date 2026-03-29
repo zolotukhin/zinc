@@ -1870,3 +1870,45 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(acc_pipe.handle != null);
     try std.testing.expect(lmhead_pipe.handle != null);
 }
+
+test "deinterleave shader splits block-interleaved Q and gate" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "deinterleave");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const head_dim: u32 = 4;
+    const n_heads: u32 = 2;
+    const total: u32 = head_dim * n_heads;
+
+    var input_buf = try metal_buffer.createBuffer(ctx, total * 2 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var q_buf = try metal_buffer.createBuffer(ctx, total * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&q_buf);
+    var gate_buf = try metal_buffer.createBuffer(ctx, total * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&gate_buf);
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    const q_ptr: [*]const f32 = @ptrCast(@alignCast(q_buf.cpu_ptr.?));
+    const gate_ptr: [*]const f32 = @ptrCast(@alignCast(gate_buf.cpu_ptr.?));
+
+    const src = [_]f32{
+        10, 11, 12, 13, 20, 21, 22, 23,
+        30, 31, 32, 33, 40, 41, 42, 43,
+    };
+    @memcpy(input_ptr[0..src.len], &src);
+    @memset(q_buf.cpu_ptr.?[0..q_buf.size], 0);
+    @memset(gate_buf.cpu_ptr.?[0..gate_buf.size], 0);
+
+    const push = DeinterleavePush{ .head_dim = head_dim, .n_heads = n_heads };
+    const bufs = [_]*const MetalBuffer{ &q_buf, &input_buf, &gate_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DeinterleavePush), 0);
+    cmd.commitAndWait();
+
+    try std.testing.expectEqualSlices(f32, &.{ 10, 11, 12, 13, 30, 31, 32, 33 }, q_ptr[0..total]);
+    try std.testing.expectEqualSlices(f32, &.{ 20, 21, 22, 23, 40, 41, 42, 43 }, gate_ptr[0..total]);
+}
