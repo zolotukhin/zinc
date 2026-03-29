@@ -70,6 +70,18 @@ pub const KvPagePool = struct {
         }
     }
 
+    /// Get the KV cache token position base for a request's allocated pages.
+    /// Each request's tokens start at page_id * page_size, giving non-overlapping regions.
+    pub fn positionBase(self: *const KvPagePool, page_ids: []const u32) u32 {
+        if (page_ids.len == 0) return 0;
+        return page_ids[0] * self.page_size;
+    }
+
+    /// Maximum context tokens a request can use (based on allocated pages).
+    pub fn maxContext(self: *const KvPagePool, page_count: u32) u32 {
+        return page_count * self.page_size;
+    }
+
     /// Number of free pages available.
     pub fn freeCount(self: *const KvPagePool) u32 {
         return @intCast(self.free_list.items.len);
@@ -148,6 +160,24 @@ test "KvPagePool pages have correct owner after alloc" {
     for (pages) |pid| {
         try std.testing.expectEqual(@as(?u64, null), pool.pages[pid].owner);
     }
+}
+
+test "KvPagePool positionBase gives non-overlapping regions" {
+    const allocator = std.testing.allocator;
+    var pool = try KvPagePool.init(allocator, 8, 256);
+    defer pool.deinit();
+
+    const p1 = try pool.allocPages(1, 2);
+    defer allocator.free(p1);
+    const p2 = try pool.allocPages(2, 2);
+    defer allocator.free(p2);
+
+    const base1 = pool.positionBase(p1);
+    const base2 = pool.positionBase(p2);
+    // Regions should not overlap: base1 + 2*256 <= base2 or vice versa
+    const end1 = base1 + pool.maxContext(2);
+    const end2 = base2 + pool.maxContext(2);
+    try std.testing.expect(end1 <= base2 or end2 <= base1);
 }
 
 test "KvPagePool free nonexistent request is no-op" {
