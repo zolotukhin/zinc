@@ -88,12 +88,12 @@ pub const SoftmaxTopkPush = extern struct {
     k: u32,
 };
 
-/// Push constants for MoE weighted accumulate shader.
-/// Weight is read from GPU routing buffer, not passed as push constant.
+/// Push constants for batched MoE weighted accumulate shader.
+/// Sums all expert outputs at once: a[i] = sum_j(weight_j * b[j*src_stride+i]).
 pub const MoeWeightedAccPush = extern struct {
     N: u32,
     n_used: u32,
-    expert_index: u32,
+    src_stride: u32,
 };
 
 /// Manages element-wise fused kernel pipelines.
@@ -492,16 +492,18 @@ pub const ElementwiseDispatch = struct {
 
     /// Record MoE weighted accumulate: a[i] += routing_weight[expert_index] * b[i].
     /// Weight is read from GPU routing buffer (binding 2), not from push constant.
+    /// Record batched MoE weighted accumulate: sums all expert outputs at once.
+    /// src_stride: elements per expert in the source buffer (typically = n_elements).
     pub fn recordMoeWeightedAcc(
         self: *const ElementwiseDispatch,
         cmd: *const CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
         n_used: u32,
-        expert_index: u32,
+        src_stride: u32,
     ) !void {
         const pip = if (self.pipeline_moe_weighted_acc) |*p| p else return error.ShaderNotLoaded;
-        const push = MoeWeightedAccPush{ .N = n_elements, .n_used = n_used, .expert_index = expert_index };
+        const push = MoeWeightedAccPush{ .N = n_elements, .n_used = n_used, .src_stride = src_stride };
         const workgroups = (n_elements + 63) / 64;
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
