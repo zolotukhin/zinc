@@ -50,6 +50,11 @@ pub const Scheduler = struct {
         return error.AllSlotsBusy;
     }
 
+    /// Check if all slots are occupied.
+    pub fn isFull(self: *const Scheduler) bool {
+        return self.activeCount() >= self.max_parallel;
+    }
+
     /// Get the number of active (non-null) requests.
     pub fn activeCount(self: *const Scheduler) u32 {
         var count: u32 = 0;

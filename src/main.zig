@@ -30,6 +30,7 @@ comptime {
     _ = @import("compute/forward.zig");
     _ = @import("server/http.zig");
     _ = @import("server/routes.zig");
+    _ = @import("server/session.zig");
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
     _ = @import("scheduler/kv_cache.zig");
@@ -414,13 +415,30 @@ pub fn main() !void {
         log.info("Server listening on 0.0.0.0:{d}", .{config.port});
         log.info("Press Ctrl+C to stop", .{});
 
+        // Graceful shutdown: set flag on SIGINT/SIGTERM
+        const posix = std.posix;
+        const Handler = struct {
+            var shutdown_requested: bool = false;
+            fn handler(_: c_int) callconv(.c) void {
+                shutdown_requested = true;
+            }
+        };
+        const sa = posix.Sigaction{
+            .handler = .{ .handler = Handler.handler },
+            .mask = std.mem.zeroes(posix.sigset_t),
+            .flags = 0,
+        };
+        posix.sigaction(posix.SIG.INT, &sa, null);
+        posix.sigaction(posix.SIG.TERM, &sa, null);
+
         // Server loop — accepts connections and handles requests sequentially.
         // Each request runs to completion before the next is accepted.
         // Concurrent streaming (US2) requires a poll-based event loop — deferred
         // to a future iteration since the inference engine is single-threaded
         // and GPU-bound (true concurrency needs batched multi-sequence decode).
-        while (true) {
+        while (!Handler.shutdown_requested) {
             var conn = server.accept() catch |err| {
+                if (Handler.shutdown_requested) break;
                 log.warn("Accept failed: {s}", .{@errorName(err)});
                 continue;
             };
@@ -431,6 +449,7 @@ pub fn main() !void {
             };
             conn.close();
         }
+        log.info("Shutting down...", .{});
     }
 }
 

@@ -58,10 +58,10 @@
 
 **Independent Test**: Launch 4 concurrent curl streams with different prompts, verify each gets only its own content.
 
-- [ ] T014 [US2] Implement non-blocking connection accept loop — poll listener socket + all active connections. Accept new connections without blocking active streams. File: src/server/http.zig
+- [X] T014 [US2] Implement non-blocking connection accept loop — poll listener socket + all active connections. Accept new connections without blocking active streams. File: src/server/http.zig
 - [ ] T015 [US2] Implement round-robin multi-sequence decode — iterate all active sessions per decode cycle: for each session, run one decodeStep, write token to its SSE stream. Interleave prefill and decode across requests. File: src/compute/forward.zig
-- [ ] T016 [US2] Implement client disconnect detection — when SSE write fails (broken pipe), transition request to cancelled, free KV pages, remove session. Do not affect other sessions. File: src/server/sse.zig
-- [ ] T017 [US2] Implement request queuing and 429 rejection — when all scheduler slots are full, queue up to 8 pending requests. If queue also full, return 429 Too Many Requests. Process queue when slots free up. File: src/scheduler/scheduler.zig
+- [X] T016 [US2] Implement client disconnect detection — when SSE write fails (broken pipe), transition request to cancelled, free KV pages, remove session. Do not affect other sessions. File: src/server/sse.zig
+- [X] T017 [US2] Implement request queuing and 429 rejection — when all scheduler slots are full, queue up to 8 pending requests. If queue also full, return 429 Too Many Requests. Process queue when slots free up. File: src/scheduler/scheduler.zig
 - [ ] T018 [US2] Add per-request KV cache isolation — each request gets its own page allocation from the shared pool. Verify no KV cache pages are shared between concurrent requests. Free all pages on request completion/cancellation. File: src/scheduler/kv_cache.zig
 
 **Checkpoint**: 4 concurrent streaming requests complete correctly with no cross-contamination.
@@ -100,7 +100,7 @@
 ## Phase 7: Polish & Cross-Cutting Concerns
 
 - [X] T026 [P] Add CORS headers to all responses — Access-Control-Allow-Origin: *, required for browser-based clients. File: src/server/http.zig
-- [ ] T027 [P] Implement graceful shutdown — catch SIGINT/SIGTERM, stop accepting new requests, drain active streams, clean up KV cache. File: src/main.zig
+- [X] T027 [P] Implement graceful shutdown — catch SIGINT/SIGTERM, stop accepting new requests, drain active streams, clean up KV cache. File: src/main.zig
 - [X] T028 Validate with OpenAI Python SDK integration test — script that tests streaming, non-streaming, models list, health, concurrent requests, error cases. File: tests/test_openai_sdk.py
 - [ ] T029 Run quickstart.md validation — execute all test commands from quickstart.md and verify expected behavior. File: specs/004-openai-api-server/quickstart.md
 
