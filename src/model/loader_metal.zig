@@ -1,54 +1,33 @@
-//! Build runtime model state from GGUF metadata and GPU-resident tensor buffers.
-//! @section Model Format & Loading
-//! This module translates an on-disk GGUF file into the normalized model
-//! configuration and uploaded tensors consumed by the inference runtime.
+//! Metal-specific model loading — zero-copy via mmap + newBufferWithBytesNoCopy.
+//! This replaces the Vulkan loader's staging-buffer DMA with direct mmap wrapping.
 const std = @import("std");
 const gguf = @import("gguf.zig");
 const config_mod = @import("config.zig");
-const vk = @import("../vulkan/vk.zig");
-const Instance = @import("../vulkan/instance.zig").Instance;
-const Buffer = @import("../vulkan/buffer.zig").Buffer;
-const buffer_mod = @import("../vulkan/buffer.zig");
-const CommandPool = @import("../vulkan/command.zig").CommandPool;
+const ModelConfig = config_mod.ModelConfig;
+const shim = @import("../metal/c.zig").shim;
+const metal_buffer = @import("../metal/buffer.zig");
+const MetalBuffer = metal_buffer.MetalBuffer;
 
 const log = std.log.scoped(.loader);
 
-// Re-export from config.zig for backward compatibility
-pub const Architecture = config_mod.Architecture;
-
-pub const ModelConfig = config_mod.ModelConfig;
-
-/// A tensor descriptor paired with the GPU buffer that stores its contents.
+/// A tensor descriptor paired with a Metal buffer wrapping its mmap'd data.
 pub const LoadedTensor = struct {
-    /// GGUF tensor descriptor.
     info: gguf.TensorInfo,
-    /// Device-local GPU buffer.
-    gpu_buffer: Buffer,
+    gpu_buffer: MetalBuffer,
 };
 
-/// Runtime model state backed by a memory-mapped GGUF file and uploaded tensor buffers.
+/// Runtime model state backed by a memory-mapped GGUF file and zero-copy Metal buffers.
 pub const Model = struct {
-    /// Model dimensions and metadata.
     config: ModelConfig,
-    /// Parsed GGUF header.
     gguf_file: gguf.GGUFFile,
-    /// Tensor descriptors.
     tensors: std.ArrayList(LoadedTensor),
-    /// Memory-mapped GGUF file view.
     mmap_data: ?[]align(std.heap.page_size_min) const u8,
-    /// File handle for mmap.
     mmap_file: ?std.fs.File,
-    /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
-    /// Release tensor buffers, GGUF metadata, and the backing file mapping owned by the model.
-    /// @param self Model instance to tear down in place.
-    /// @param instance Active Vulkan instance that created the device resources.
-    pub fn deinit(self: *Model, instance: *const Instance) void {
-        _ = instance;
+    pub fn deinit(self: *Model) void {
         for (self.tensors.items) |*t| {
-            var buf = t.gpu_buffer;
-            buf.deinit();
+            metal_buffer.freeBuffer(&t.gpu_buffer);
         }
         self.tensors.deinit(self.allocator);
 
@@ -65,110 +44,92 @@ pub const Model = struct {
     }
 };
 
-const parseArchitecture = config_mod.parseArchitecture;
-
-/// Extract model configuration from GGUF metadata.
+/// Extract model configuration from GGUF metadata (platform-independent).
 fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     const arch_str = gf.getString("general.architecture") orelse "unknown";
-    const arch = parseArchitecture(arch_str);
+    const arch = config_mod.parseArchitecture(arch_str);
     const prefix = arch_str;
 
-    // Helper to look up arch-prefixed metadata keys
     var key_buf: [128]u8 = undefined;
 
     const n_layers = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.block_count", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
-
     const n_heads = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.head_count", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
-
     const n_kv_heads = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.head_count_kv", .{prefix}) catch break :blk n_heads;
         break :blk gf.getU32(key) orelse n_heads;
     };
-
     const hidden_dim = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.embedding_length", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
-
-    // head_dim: prefer attention.key_length from GGUF (Qwen3.5 uses 256, not hidden_dim/n_heads=128)
     const head_dim = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.key_length", .{prefix}) catch break :blk if (n_heads > 0) hidden_dim / n_heads else @as(u32, 0);
         break :blk gf.getU32(key) orelse (if (n_heads > 0) hidden_dim / n_heads else 0);
     };
-
     const intermediate_dim = blk: {
-        // For MoE models: use expert_feed_forward_length (per-expert intermediate dim)
-        // Falls back to feed_forward_length, then 0
         const exp_key = std.fmt.bufPrint(&key_buf, "{s}.expert_feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
         const exp_val = gf.getU32(exp_key);
         if (exp_val) |v| if (v > 0) break :blk v;
         const key = std.fmt.bufPrint(&key_buf, "{s}.feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
-
-    // Shared expert intermediate dim: feed_forward_length (different from per-expert dim in MoE models)
     const shared_expert_intermediate_dim = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
-
     const vocab_size = blk: {
-        // Try metadata first
         const key = std.fmt.bufPrint(&key_buf, "{s}.vocab_size", .{prefix}) catch break :blk @as(u32, 0);
         const from_meta = gf.getU32(key);
         if (from_meta) |v| if (v > 0) break :blk v;
-        // Infer from output.weight or token_embd.weight tensor
         if (gf.findTensor("output.weight")) |t| break :blk @as(u32, @intCast(t.dims[1]));
         if (gf.findTensor("token_embd.weight")) |t| break :blk @as(u32, @intCast(t.dims[1]));
         break :blk @as(u32, 0);
     };
-
     const context_length = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.context_length", .{prefix}) catch break :blk @as(u32, 4096);
         break :blk gf.getU32(key) orelse 4096;
     };
-
     const n_experts = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.expert_count", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
-
     const n_experts_used = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.expert_used_count", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
-
-    // RoPE dimension count (partial rotation / IMRoPE)
     const rope_dim = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.dimension_count", .{prefix}) catch "") orelse 0;
-
-    // SSM parameters (hybrid models like Qwen3.5)
     const ssm_d_conv = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.conv_kernel", .{prefix}) catch "") orelse 0;
     const ssm_d_inner = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.inner_size", .{prefix}) catch "") orelse 0;
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
 
+    const rope_freq_base: f32 = blk: {
+        const key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
+        const val = gf.metadata.get(key);
+        if (val) |v| {
+            switch (v) {
+                .float32 => |f| break :blk f,
+                .uint32 => |u| break :blk @floatFromInt(u),
+                else => {},
+            }
+        }
+        break :blk @as(f32, 10000.0);
+    };
+
     log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
         arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
     });
-    if (rope_dim > 0) {
-        log.info("RoPE: dim={d}/{d} freq_base={d:.0}", .{ rope_dim, head_dim, @as(f64, @floatCast(blk: {
-            const key3 = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
-            const val2 = gf.metadata.get(key3);
-            if (val2) |v| {
-                switch (v) {
-                    .float32 => |fv| break :blk fv,
-                    else => {},
-                }
-            }
-            break :blk @as(f32, 10000.0);
-        })) });
+    if (n_experts > 0) {
+        log.info("MoE: {d} experts, {d} active | intermediate {d} | shared expert {d}", .{
+            n_experts, n_experts_used, intermediate_dim, shared_expert_intermediate_dim,
+        });
     }
     if (ssm_d_inner > 0) {
         log.info("SSM: d_conv={d} d_inner={d} d_state={d} dt_rank={d} n_group={d}", .{
@@ -186,18 +147,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .intermediate_dim = intermediate_dim,
         .vocab_size = vocab_size,
         .context_length = context_length,
-        .rope_freq_base = blk: {
-            const key2 = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
-            const val = gf.metadata.get(key2);
-            if (val) |v| {
-                switch (v) {
-                    .float32 => |f| break :blk f,
-                    .uint32 => |u| break :blk @floatFromInt(u),
-                    else => {},
-                }
-            }
-            break :blk @as(f32, 10000.0);
-        },
+        .rope_freq_base = rope_freq_base,
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,
         .rope_dim = rope_dim,
@@ -206,15 +156,12 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .ssm_d_state = ssm_d_state,
         .ssm_dt_rank = ssm_dt_rank,
         .ssm_n_group = ssm_n_group,
-        .full_attn_interval = 4, // default for Qwen3.5
+        .full_attn_interval = 4,
         .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
     };
 }
 
-/// Inspect a GGUF file and extract only the normalized model configuration.
-/// @param path Path to the GGUF file on disk.
-/// @param allocator Allocator used for the parsed metadata structures.
-/// @returns A ModelConfig derived from GGUF metadata without uploading tensors to the GPU.
+/// Inspect a GGUF file and extract only the model configuration (no GPU operations).
 pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfig {
     const file = try std.fs.cwd().openFile(path, .{});
     defer {
@@ -239,21 +186,14 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     return extractConfig(&gf);
 }
 
-/// Load a GGUF model: memory-map the file, parse headers, and DMA tensors to GPU VRAM.
-/// @param path Path to the GGUF file on disk.
-/// @param instance Active Vulkan instance used for buffer allocation.
-/// @param cmd_pool Command pool used for staging copy operations.
-/// @param allocator Allocator used for metadata, tensor lists, and temporary state.
-/// @returns A fully populated Model with parsed metadata and uploaded tensors.
+/// Load a GGUF model with zero-copy Metal buffers wrapping mmap'd tensor data.
 pub fn load(
     path: []const u8,
-    instance: *const Instance,
-    cmd_pool: *const CommandPool,
+    metal_ctx: ?*shim.MetalCtx,
     allocator: std.mem.Allocator,
 ) !Model {
     log.info("Loading model: {s}", .{path});
 
-    // Open and memory-map the file
     const file = try std.fs.cwd().openFile(path, .{});
     errdefer file.close();
 
@@ -271,54 +211,51 @@ pub fn load(
     );
     errdefer std.posix.munmap(mmap_data);
 
-    // Parse GGUF headers
     var gf = try gguf.parse(mmap_data, allocator);
     errdefer gf.deinit();
 
     const config = extractConfig(&gf);
 
-    // Load tensors to GPU
+    // Wrap tensor data as Metal shared buffers (zero-copy from mmap)
     var loaded_tensors: std.ArrayList(LoadedTensor) = .{};
     errdefer {
         for (loaded_tensors.items) |*t| {
-            var buf = t.gpu_buffer;
-            buf.deinit();
+            metal_buffer.freeBuffer(&t.gpu_buffer);
         }
         loaded_tensors.deinit(allocator);
     }
 
-    var total_vram: u64 = 0;
+    var total_size: u64 = 0;
     for (gf.tensors.items) |tensor_info| {
         const tensor_size = tensor_info.sizeBytes();
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
 
-        // Create device-local buffer
-        var gpu_buf = try Buffer.initDeviceLocal(
-            instance,
-            tensor_size,
-            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        );
-        errdefer gpu_buf.deinit();
+        // Page-align the offset for Metal buffer wrapping
+        const page_size: u64 = 4096;
+        const aligned_offset = (data_offset / page_size) * page_size;
+        const offset_within_page = data_offset - aligned_offset;
+        const aligned_size = ((tensor_size + offset_within_page + page_size - 1) / page_size) * page_size;
 
-        // Stage and copy data to GPU
-        const src_data = mmap_data[data_offset..][0..@intCast(tensor_size)];
-        var staging = try Buffer.initStaging(instance, tensor_size);
-        defer staging.deinit();
-
-        staging.upload(src_data);
-        try buffer_mod.copyBuffer(instance, cmd_pool.handle, &staging, &gpu_buf, tensor_size);
+        // Wrap the mmap'd region as a Metal buffer
+        const ptr: [*]u8 = @ptrCast(@constCast(mmap_data.ptr + aligned_offset));
+        const gpu_buf = metal_buffer.wrapMmap(metal_ctx, ptr, @intCast(aligned_size)) catch |err| {
+            log.err("Failed to wrap tensor at offset {d} ({d} bytes): {s}", .{
+                data_offset, tensor_size, @errorName(err),
+            });
+            return err;
+        };
 
         try loaded_tensors.append(allocator, .{
             .info = tensor_info,
             .gpu_buffer = gpu_buf,
         });
 
-        total_vram += tensor_size;
+        total_size += tensor_size;
     }
 
-    log.info("Loaded {d} tensors | {d} MB VRAM", .{
+    log.info("Loaded {d} tensors | {d} MB (zero-copy mmap)", .{
         loaded_tensors.items.len,
-        total_vram / (1024 * 1024),
+        total_size / (1024 * 1024),
     });
 
     return Model{
@@ -329,12 +266,4 @@ pub fn load(
         .mmap_file = file,
         .allocator = allocator,
     };
-}
-
-test "parseArchitecture" {
-    try std.testing.expectEqual(Architecture.llama, parseArchitecture("llama"));
-    try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen2"));
-    try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
-    try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
-    try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }
