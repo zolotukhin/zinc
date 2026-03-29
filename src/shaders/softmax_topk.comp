@@ -4,9 +4,11 @@
 // and renormalizes the selected weights. Replaces CPU topKSoftmax.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 // Single workgroup dispatch — n_experts (256) fits in shared memory.
+//
+// RADV compatibility: uses only subgroupMax/subgroupAdd for reductions.
+// Top-k selection uses shared memory (no subgroupBallot/subgroupBroadcast).
 
 #extension GL_KHR_shader_subgroup_arithmetic : enable
-#extension GL_KHR_shader_subgroup_ballot : enable
 
 layout(local_size_x = 64) in;
 
@@ -14,7 +16,7 @@ layout(set = 0, binding = 0) readonly buffer Logits {
     float logits[];
 };
 
-// Output: expert_ids[k] followed by expert_weights[k], packed as uint then float
+// Output: expert_ids[k] as uint, then expert_weights[k] as floatBitsToUint
 layout(set = 0, binding = 1) buffer RouterOutput {
     uint output_data[];
 };
@@ -27,13 +29,15 @@ layout(push_constant) uniform PushConstants {
 shared float s_probs[256];
 shared float s_max_val;
 shared float s_sum;
-shared float s_wsum;
+
+// Per-thread local max for top-k reduction
+shared float s_local_val[64];
+shared uint  s_local_idx[64];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
 
     // --- Step 1: Load logits and find global max ---
-    // Each thread handles ceil(n_experts/64) elements
     float local_max = -1.0 / 0.0; // -inf
     for (uint i = tid; i < n_experts; i += 64) {
         float v = logits[i];
@@ -65,43 +69,40 @@ void main() {
     }
     barrier();
 
-    // --- Step 4: Top-k selection via repeated parallel max ---
-    // For each of k rounds, find the max probability, record it, mask it out.
-    // k is small (typically 8), so k sequential rounds are fine.
+    // --- Step 4: Top-k selection via shared memory reduction ---
+    // For each of k rounds: each thread finds its local max, writes to shared,
+    // thread 0 scans all 64 entries to find the global winner.
+    // No ballot/broadcast — fully RADV compatible.
     for (uint ki = 0; ki < k; ki++) {
-        // Each thread finds its local max across its elements
-        float local_best = -1.0;
-        uint local_best_idx = 0;
+        // Each thread finds its local max across its strided elements
+        float best_val = -1.0;
+        uint best_idx = 0;
         for (uint i = tid; i < n_experts; i += 64) {
-            if (s_probs[i] > local_best) {
-                local_best = s_probs[i];
-                local_best_idx = i;
+            if (s_probs[i] > best_val) {
+                best_val = s_probs[i];
+                best_idx = i;
             }
         }
 
-        // Wave-wide max reduction
-        float wave_best = subgroupMax(local_best);
+        // Write local max to shared memory
+        s_local_val[tid] = best_val;
+        s_local_idx[tid] = best_idx;
+        barrier();
 
-        // Find which thread has the winning index
-        // (handle ties by taking the first thread that matches)
-        bool is_winner = (local_best == wave_best) && (local_best >= 0.0);
-        uvec4 ballot = subgroupBallot(is_winner);
-        uint first_winner = subgroupBallotFindLSB(ballot);
-
-        uint winning_idx = subgroupBroadcast(local_best_idx, first_winner);
-        float winning_val = wave_best;
-
-        // Thread 0 writes the result
+        // Thread 0 scans all 64 entries to find global winner
         if (tid == 0) {
-            output_data[ki] = winning_idx;
-            // Write weight as float reinterpreted as uint (bitcast)
-            output_data[k + ki] = floatBitsToUint(winning_val);
-        }
-
-        // Mask out the selected expert so it's not picked again
-        // All threads see the same winning_idx; shared memory write is safe
-        if (tid == 0) {
-            s_probs[winning_idx] = -1.0;
+            float global_best = -1.0;
+            uint global_idx = 0;
+            for (uint t = 0; t < 64; t++) {
+                if (s_local_val[t] > global_best) {
+                    global_best = s_local_val[t];
+                    global_idx = s_local_idx[t];
+                }
+            }
+            output_data[ki] = global_idx;
+            output_data[k + ki] = floatBitsToUint(global_best);
+            // Mask out selected expert
+            s_probs[global_idx] = -1.0;
         }
         barrier();
     }

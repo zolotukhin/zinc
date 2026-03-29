@@ -2060,6 +2060,36 @@ pub const InferenceEngine = struct {
         }
         self.decode_cmd.computeBarrier();
 
+        // --- GPU SSM diagnostic: readback conv1d output at layer 0 for comparison with CPU SSM_DBG ---
+        if (layer == 0 and self.profile_enabled) {
+            // Flush to read conv1d output
+            {
+                const bar = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle,
+                    vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0, 1, &bar, 0, null, 0, null);
+                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @min(qkv_bytes, self.logits_staging.size) };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.logits_staging.handle, 1, &rgn);
+            }
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+            const ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var l2: f64 = 0;
+            for (0..@min(conv_channels, 4096)) |i| l2 += @as(f64, ptr[i]) * @as(f64, ptr[i]);
+            l2 = @sqrt(l2);
+            log.info("GPU_SSM_DBG L0 conv1d_out[0..4]=[{d:.8},{d:.8},{d:.8},{d:.8}] L2={d:.6}", .{
+                ptr[0], ptr[1], ptr[2], ptr[3], l2,
+            });
+            // Restart cmd buffer
+            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.begin();
+        }
+
         // --- GPU: delta-net state update ---
         // Input: conv1d output (swiglu_buf), alpha (router_logits_buf), beta (down_buf), ssm_a + dt_bias from tensors
         // Output: attn_out_buf (reused, now free after conv1d consumed it)
