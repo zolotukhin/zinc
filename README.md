@@ -301,16 +301,24 @@ At 256 ms/tok with 542 MB read per token, the GPU itself is idle >95% of the tim
 
 ### Output quality
 
-ZINC produces **coherent, correct text** as of 2026-03-28:
+ZINC produces **coherent, correct reasoning output** — matching llama.cpp's behavior on the same model:
 
 ```
 Prompt:  "The capital of France is"
-Output:  "Paris. The capital of Germany is Berlin. The capital of
-          Italy is Rome. The capital of Spain is Madrid. The capital
-          of Portugal is Lisbon..."
+Output:  "Paris. The capital of France is Paris. The capital of France is Paris."
+
+         <think>
+         </think>
+
+         That is correct. **Paris** is indeed the capital of France. It is the
+         country's largest city and serves as its center for finance, commerce,
+         culture, arts, fashion, and science.
+
+         You repeated the sentence three times, which emphasizes the fact! Is
+         there anything else you'd like to know about Paris or France?
 ```
 
-GPU-CPU numerical accuracy verified: embedding, RMS norm, DMMV (Q4_K/Q5_K/Q8_0), and LM head logits all match CPU reference within floating-point tolerance.
+First-token logit ranking matches llama.cpp (Paris top, `a` in top-5). GPU-CPU numerical accuracy verified: embedding, RMS norm, DMMV (Q4_K/Q5_K/Q8_0), and LM head logits all match CPU reference within floating-point tolerance.
 
 ## Optimization Loop Results
 

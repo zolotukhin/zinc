@@ -1251,11 +1251,9 @@ pub const InferenceEngine = struct {
                 }
             } else {
                 // === SSM / LINEAR ATTENTION LAYER ===
-                if (self.elementwise.pipeline_ssm_conv1d != null) {
-                    try self.runSsmLayerGpu(state, layer, layer_idx);
-                } else {
-                    try self.runSsmLayerCpu(state, layer, layer_idx);
-                }
+                // GPU SSM path disabled — produces wrong output, needs validation
+                // against CPU reference before enabling. See runSsmLayerGpu().
+                try self.runSsmLayerCpu(state, layer, layer_idx);
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
@@ -1281,7 +1279,7 @@ pub const InferenceEngine = struct {
                 var expert_ids: [16]u32 = undefined;
                 var expert_weights: [16]f32 = undefined;
 
-                if (self.elementwise.pipeline_softmax_topk != null) {
+                if (false) { // GPU softmax_topk disabled — crashes RADV, needs debugging
                     // GPU path: softmax+topk on GPU, readback only 64 bytes of results
                     const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
