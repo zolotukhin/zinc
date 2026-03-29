@@ -1,27 +1,45 @@
 //! Paged KV cache manager for concurrent request serving.
+//! @section Scheduler
 //! Manages a pool of fixed-size pages that are allocated per-request
-//! and freed on completion or cancellation.
+//! and freed on completion or cancellation. Each page maps to a contiguous
+//! region of the GPU KV cache buffer, giving each request non-overlapping
+//! token storage.
 const std = @import("std");
 
 const log = std.log.scoped(.kv_cache);
 
 /// A single page in the KV cache pool.
+/// Each page maps to a contiguous region of the GPU KV buffer.
 pub const KvPage = struct {
+    /// Index of this page in the pool.
     page_id: u32,
-    owner: ?u64, // request ID that owns this page, null if free
-    token_start: u32, // first token position in this page
-    token_count: u32, // tokens currently stored (≤ page_size)
+    /// Request ID that owns this page, or null if the page is free.
+    owner: ?u64,
+    /// First token position stored in this page.
+    token_start: u32,
+    /// Number of tokens currently stored (at most page_size).
+    token_count: u32,
 };
 
-/// Manages allocation and deallocation of KV cache pages.
+/// Pool-based allocator for KV cache pages.
+/// Tracks which pages are free and which are owned by active requests.
 pub const KvPagePool = struct {
+    /// All pages in the pool, indexed by page_id.
     pages: []KvPage,
+    /// Stack of free page IDs available for allocation.
     free_list: std.ArrayList(u32),
-    page_size: u32, // tokens per page
+    /// Number of tokens each page can hold.
+    page_size: u32,
+    /// Total number of pages in the pool.
     total_pages: u32,
+    /// Allocator for the page array and free list.
     allocator: std.mem.Allocator,
 
-    /// Initialize a page pool with the given capacity.
+    /// Initialize a page pool with the given number of pages and tokens per page.
+    /// @param allocator Allocator for the page array and free list.
+    /// @param total_pages Number of pages to create.
+    /// @param page_size Number of tokens each page can hold.
+    /// @returns A KvPagePool with all pages initially free.
     pub fn init(allocator: std.mem.Allocator, total_pages: u32, page_size: u32) !KvPagePool {
         const pages = try allocator.alloc(KvPage, total_pages);
         var free_list: std.ArrayList(u32) = .{};
@@ -46,7 +64,12 @@ pub const KvPagePool = struct {
         };
     }
 
-    /// Allocate N pages for a request. Returns page IDs or error if pool exhausted.
+    /// Allocate N pages for a request.
+    /// @param self Pool to allocate from.
+    /// @param request_id Owner request ID to stamp on allocated pages.
+    /// @param count Number of pages to allocate.
+    /// @returns Slice of allocated page IDs (caller-owned).
+    /// @note Returns error.KvCacheExhausted if not enough free pages remain.
     pub fn allocPages(self: *KvPagePool, request_id: u64, count: u32) ![]u32 {
         if (self.free_list.items.len < count) return error.KvCacheExhausted;
         const result = try self.allocator.alloc(u32, count);
@@ -59,7 +82,9 @@ pub const KvPagePool = struct {
         return result;
     }
 
-    /// Free all pages owned by a request.
+    /// Free all pages owned by a request, returning them to the free list.
+    /// @param self Pool to return pages to.
+    /// @param request_id Request whose pages should be freed.
     pub fn freePages(self: *KvPagePool, request_id: u64) void {
         for (self.pages) |*page| {
             if (page.owner == request_id) {
@@ -72,21 +97,31 @@ pub const KvPagePool = struct {
 
     /// Get the KV cache token position base for a request's allocated pages.
     /// Each request's tokens start at page_id * page_size, giving non-overlapping regions.
+    /// @param self Pool to query.
+    /// @param page_ids Allocated page IDs for the request.
+    /// @returns Token position offset for the first page.
     pub fn positionBase(self: *const KvPagePool, page_ids: []const u32) u32 {
         if (page_ids.len == 0) return 0;
         return page_ids[0] * self.page_size;
     }
 
-    /// Maximum context tokens a request can use (based on allocated pages).
+    /// Maximum context length a request can use based on the number of allocated pages.
+    /// @param self Pool to query.
+    /// @param page_count Number of pages allocated to the request.
+    /// @returns Maximum number of tokens that fit in the allocated pages.
     pub fn maxContext(self: *const KvPagePool, page_count: u32) u32 {
         return page_count * self.page_size;
     }
 
-    /// Number of free pages available.
+    /// Number of free pages available for allocation.
+    /// @param self Pool to query.
+    /// @returns Count of unallocated pages.
     pub fn freeCount(self: *const KvPagePool) u32 {
         return @intCast(self.free_list.items.len);
     }
 
+    /// Release the page array and free list.
+    /// @param self Pool to tear down.
     pub fn deinit(self: *KvPagePool) void {
         self.free_list.deinit(self.allocator);
         self.allocator.free(self.pages);

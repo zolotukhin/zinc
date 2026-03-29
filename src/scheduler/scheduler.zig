@@ -20,7 +20,10 @@ pub const Scheduler = struct {
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
-    /// Initialize the scheduler with a fixed number of slots.
+    /// Initialize the scheduler with a fixed number of concurrent request slots.
+    /// @param allocator Allocator for the slot array.
+    /// @param max_parallel Maximum number of concurrent requests.
+    /// @returns A Scheduler with all slots initially empty.
     pub fn init(allocator: std.mem.Allocator, max_parallel: u32) !Scheduler {
         const slots = try allocator.alloc(?Request, max_parallel);
         @memset(slots, null);
@@ -33,7 +36,12 @@ pub const Scheduler = struct {
         };
     }
 
-    /// Submit a new request. Returns the assigned slot ID, or error if full.
+    /// Submit a new request and assign it to a free slot.
+    /// @param self Scheduler to submit to.
+    /// @param prompt_tokens Tokenized prompt for the request.
+    /// @param params Generation parameters (max_tokens, temperature, etc.).
+    /// @returns The assigned slot ID.
+    /// @note Returns error.AllSlotsBusy if no free slots are available.
     pub fn submit(self: *Scheduler, prompt_tokens: []const u32, params: GenerationParams) !u32 {
         // Find a free slot
         for (self.slots, 0..) |*slot, i| {
@@ -51,11 +59,15 @@ pub const Scheduler = struct {
     }
 
     /// Check if all slots are occupied.
+    /// @param self Scheduler to query.
+    /// @returns True if every slot holds an active request.
     pub fn isFull(self: *const Scheduler) bool {
         return self.activeCount() >= self.max_parallel;
     }
 
     /// Get the number of active (non-null) requests.
+    /// @param self Scheduler to query.
+    /// @returns Count of occupied slots.
     pub fn activeCount(self: *const Scheduler) u32 {
         var count: u32 = 0;
         for (self.slots) |slot| {
@@ -80,7 +92,9 @@ pub const Scheduler = struct {
         return &.{};
     }
 
-    /// Release a completed/cancelled request's slot.
+    /// Release a completed or cancelled request's slot, freeing its resources.
+    /// @param self Scheduler to release from.
+    /// @param slot_id Slot index to free.
     pub fn release(self: *Scheduler, slot_id: u32) void {
         if (slot_id < self.slots.len) {
             if (self.slots[slot_id]) |*req| {
@@ -92,6 +106,7 @@ pub const Scheduler = struct {
     }
 
     /// Tear down all active requests and free the slot array.
+    /// @param self Scheduler to destroy.
     pub fn deinit(self: *Scheduler) void {
         for (self.slots) |*slot| {
             if (slot.*) |*req| req.deinit();
