@@ -141,22 +141,46 @@ fn handleChatCompletions(
 
         // Decode loop: generate and stream one token at a time
         const eos = tokenizer.eosId();
+        // Stop detection: accumulate generated text and check for <|im_end|>
+        var gen_text_buf: [4096]u8 = undefined;
+        var gen_text_len: usize = 0;
+        const stop_str = "<|im_end|>";
+
         var generated: u32 = 0;
         if (prompt_tokens.len > 0 and max_tokens > 0) {
-            // First token from prefill logits
             const first = engine.sampleGreedy();
             generated = 1;
             if (first != eos) {
-                streamToken(conn, first, tokenizer, req_id, ts, model_name) catch return;
+                const tok_text = if (first < tokenizer.vocab.len) tokenizer.vocab[first] else "";
+                // Accumulate text for stop detection
+                if (gen_text_len + tok_text.len < gen_text_buf.len) {
+                    @memcpy(gen_text_buf[gen_text_len..][0..tok_text.len], tok_text);
+                    gen_text_len += tok_text.len;
+                }
+                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str) != null) {
+                    // Hit stop — don't send this token
+                } else {
+                    streamToken(conn, first, tokenizer, req_id, ts, model_name) catch return;
+                }
             }
-            // Continue decoding
             var prev_token = first;
             while (generated < max_tokens and prev_token != eos) {
+                // Check if we've hit the stop string
+                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str) != null) break;
+
                 engine.decodeStep(&state, prev_token) catch break;
                 const next = engine.sampleGreedy();
                 generated += 1;
                 prev_token = next;
                 if (next == eos) break;
+
+                const tok_text = if (next < tokenizer.vocab.len) tokenizer.vocab[next] else "";
+                if (gen_text_len + tok_text.len < gen_text_buf.len) {
+                    @memcpy(gen_text_buf[gen_text_len..][0..tok_text.len], tok_text);
+                    gen_text_len += tok_text.len;
+                }
+                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str) != null) break;
+
                 streamToken(conn, next, tokenizer, req_id, ts, model_name) catch return;
             }
         }
@@ -179,12 +203,20 @@ fn handleChatCompletions(
         };
         defer allocator.free(output_tokens);
 
-        // Decode tokens to text
+        // Decode tokens to text, stopping at <|im_end|> in accumulated text
         var text_buf: std.ArrayList(u8) = .{};
         defer text_buf.deinit(allocator);
         for (output_tokens) |tid| {
             const t = if (tid < tokenizer.vocab.len) tokenizer.vocab[tid] else "<?>";
             text_buf.appendSlice(allocator, t) catch break;
+            // Check if accumulated text contains stop string
+            if (std.mem.indexOf(u8, text_buf.items, "<|im_end|>") != null) {
+                // Trim at the stop string
+                if (std.mem.indexOf(u8, text_buf.items, "<|im_end|>")) |pos| {
+                    text_buf.shrinkRetainingCapacity(pos);
+                }
+                break;
+            }
         }
 
         // Escape the full text for JSON
