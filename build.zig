@@ -1,5 +1,32 @@
 const std = @import("std");
 
+fn configureVulkanModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    module: *std.Build.Module,
+) void {
+    switch (target.result.os.tag) {
+        .macos => {
+            module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+            module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            module.linkSystemLibrary("vulkan", .{});
+        },
+        .windows => {
+            const vulkan_sdk = b.graph.env_map.get("VULKAN_SDK") orelse
+                b.graph.env_map.get("VK_SDK_PATH") orelse
+                @panic("Windows builds require the LunarG Vulkan SDK. Install it and restart your shell so VULKAN_SDK is available.");
+            const lib_dir = if (target.result.cpu.arch == .x86) "Lib32" else "Lib";
+
+            module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ vulkan_sdk, "Include" }) });
+            module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ vulkan_sdk, lib_dir }) });
+            module.linkSystemLibrary("vulkan-1", .{});
+        },
+        else => {
+            module.linkSystemLibrary("vulkan", .{});
+        },
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -71,12 +98,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // Platform-specific Vulkan paths
-    if (target.result.os.tag == .macos) {
-        exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        exe_mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-    }
-    exe_mod.linkSystemLibrary("vulkan", .{});
+    configureVulkanModule(b, target, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "zinc",
@@ -84,6 +106,15 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(exe);
+
+    // --- Documentation ---
+    const docs_step = b.step("docs", "Generate Zig documentation");
+    const docs_install = b.addInstallDirectory(.{
+        .source_dir = exe.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    docs_step.dependOn(&docs_install.step);
 
     // --- Run step ---
     const run_cmd = b.addRunArtifact(exe);
@@ -101,11 +132,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    if (target.result.os.tag == .macos) {
-        test_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        test_mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-    }
-    test_mod.linkSystemLibrary("vulkan", .{});
+    configureVulkanModule(b, target, test_mod);
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,

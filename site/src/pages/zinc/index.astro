@@ -9,6 +9,7 @@ const breadcrumbItems = [
   { name: 'Home', href: '/' },
   { name: 'ZINC' },
 ];
+const discordUrl = 'https://discord.gg/tNDEgTG5s';
 
 const jsonLd = {
   '@context': 'https://schema.org',
@@ -81,10 +82,16 @@ const jsonLd = {
     <img src="/zinc-logo.png" alt="ZINC inference engine logo — lightning bolt on circuit board" class="logo" width="120" height="120" />
     <h1>ZINC — LLM Inference Engine for AMD GPUs</h1>
     <p class="tagline">Fast local LLM inference on AMD consumer GPUs. Not a fallback — a first-class target.</p>
-    <a href="https://github.com/zolotukhin/zinc" class="github-link">
-      <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-      View on GitHub
-    </a>
+    <div class="hero-links">
+      <a href="https://github.com/zolotukhin/zinc" class="hero-link">
+        <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+      <a href={discordUrl} class="hero-link hero-link-discord">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M20.317 4.369A19.791 19.791 0 0015.558 3c-.206.375-.446.872-.61 1.264a18.27 18.27 0 00-5.896 0A12.64 12.64 0 008.44 3a19.736 19.736 0 00-4.76 1.369C.533 9.091-.32 13.699.099 18.243a19.9 19.9 0 005.993 3.03c.486-.665.918-1.368 1.288-2.109-.709-.268-1.388-.602-2.028-.99.17-.124.336-.252.496-.385 3.915 1.84 8.163 1.84 12.032 0 .162.133.328.261.496.385-.642.39-1.323.724-2.033.992.37.739.8 1.442 1.288 2.107a19.861 19.861 0 005.995-3.03c.492-5.265-.84-9.831-3.31-13.874zM8.02 15.331c-1.182 0-2.157-1.085-2.157-2.419 0-1.334.956-2.419 2.157-2.419 1.209 0 2.176 1.094 2.157 2.419 0 1.334-.956 2.419-2.157 2.419zm7.96 0c-1.182 0-2.157-1.085-2.157-2.419 0-1.334.956-2.419 2.157-2.419 1.209 0 2.176 1.094 2.157 2.419 0 1.334-.948 2.419-2.157 2.419z"/></svg>
+        Join ZINC Discord
+      </a>
+    </div>
   </section>
 
   <section class="demo-panel">
@@ -196,11 +203,18 @@ const jsonLd = {
     color: var(--color-text-muted);
   }
 
-  .github-link {
+  .hero-links {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: var(--space-sm);
+  }
+
+  .hero-link {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    margin-top: var(--space-sm);
     padding: 0.35rem 0.85rem;
     border: 1px solid var(--color-border);
     border-radius: 999px;
@@ -209,10 +223,20 @@ const jsonLd = {
     transition: border-color 0.15s ease, color 0.15s ease;
   }
 
-  .github-link:hover {
+  .hero-link:hover {
     text-decoration: none;
     border-color: var(--color-text);
     color: var(--color-text);
+  }
+
+  .hero-link-discord {
+    border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border));
+    color: var(--color-accent);
+  }
+
+  .hero-link-discord:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
 
   .btn-outline:hover {

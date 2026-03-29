@@ -171,7 +171,7 @@ The full API contract is documented in [Serving HTTP API](/zinc/docs/api).
 
 ## Export the decode graph
 
-ZINC can emit structural graph artifacts directly from GGUF metadata.
+ZINC can emit decode-graph artifacts directly from GGUF metadata. The JSON report is model-aware: it includes estimated bytes moved, FLOPs, hotspot ranking, and bottleneck hints for each node.
 
 ```bash
 ./zig-out/bin/zinc \
@@ -183,7 +183,7 @@ ZINC can emit structural graph artifacts directly from GGUF metadata.
 That is useful for:
 
 - graph inspection
-- performance analysis
+- hotspot and bandwidth analysis
 - custom tooling
 - Graphviz rendering
 

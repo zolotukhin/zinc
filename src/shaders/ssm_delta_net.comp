@@ -21,6 +21,7 @@
 //
 // Dispatch: dt_rank × 1 × 1 workgroups
 
+#extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
@@ -87,6 +88,8 @@ shared float s_v[128];
 // Shared scalar values broadcast from thread 0
 shared float s_gate;
 shared float s_beta_val;
+shared float s_reduce[64];
+shared float s_reduce_scalar;
 
 void main() {
     uint h = gl_WorkGroupID.x;    // head index
@@ -137,6 +140,21 @@ void main() {
             partial += s_q[i] * s_q[i];
         }
         partial = subgroupAdd(partial);
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) {
+                s_reduce[gl_SubgroupID] = partial;
+            }
+            barrier();
+            if (tid == 0u) {
+                float merged = 0.0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                    merged += s_reduce[sg];
+                }
+                s_reduce_scalar = merged;
+            }
+            barrier();
+            partial = s_reduce_scalar;
+        }
         float inv_norm = inversesqrt(max(partial, 1e-12));
         float q_scale = inv_norm / sqrt(float(d_state));
         for (uint i = tid; i < len; i += 64) {
@@ -153,6 +171,21 @@ void main() {
             partial += s_k[i] * s_k[i];
         }
         partial = subgroupAdd(partial);
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) {
+                s_reduce[gl_SubgroupID] = partial;
+            }
+            barrier();
+            if (tid == 0u) {
+                float merged = 0.0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                    merged += s_reduce[sg];
+                }
+                s_reduce_scalar = merged;
+            }
+            barrier();
+            partial = s_reduce_scalar;
+        }
         float inv_norm = inversesqrt(max(partial, 1e-12));
         for (uint i = tid; i < len; i += 64) {
             s_k[i] *= inv_norm;

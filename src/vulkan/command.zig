@@ -9,6 +9,40 @@ const Pipeline = @import("pipeline.zig").Pipeline;
 
 const log = std.log.scoped(.command);
 
+const MemoryBarrierSpec = struct {
+    src_stage: vk.c.VkPipelineStageFlags,
+    dst_stage: vk.c.VkPipelineStageFlags,
+    src_access: vk.c.VkAccessFlags,
+    dst_access: vk.c.VkAccessFlags,
+};
+
+fn computeBarrierSpec() MemoryBarrierSpec {
+    return .{
+        .src_stage = vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        .dst_stage = vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        .src_access = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+        .dst_access = vk.c.VK_ACCESS_SHADER_READ_BIT,
+    };
+}
+
+fn computeToTransferBarrierSpec() MemoryBarrierSpec {
+    return .{
+        .src_stage = vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        .dst_stage = vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .src_access = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+        .dst_access = vk.c.VK_ACCESS_TRANSFER_READ_BIT | vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
+    };
+}
+
+fn transferToComputeBarrierSpec() MemoryBarrierSpec {
+    return .{
+        .src_stage = vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .dst_stage = vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        .src_access = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dst_access = vk.c.VK_ACCESS_SHADER_READ_BIT,
+    };
+}
+
 /// Command pool for allocating command buffers.
 pub const CommandPool = struct {
     /// Vulkan handle.
@@ -201,20 +235,17 @@ pub const CommandBuffer = struct {
         vk.c.vkCmdDispatch(self.handle, group_count_x, group_count_y, group_count_z);
     }
 
-    /// Insert a compute-to-compute pipeline barrier (shader write → shader read).
-    /// @param self Command buffer currently being recorded.
-    /// @note Uses a coarse global memory barrier; prefer buffer barriers for fine-grained sync.
-    pub fn computeBarrier(self: *const CommandBuffer) void {
+    fn recordMemoryBarrier(self: *const CommandBuffer, spec: MemoryBarrierSpec) void {
         const barrier = vk.c.VkMemoryBarrier{
             .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = null,
-            .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
-            .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
+            .srcAccessMask = spec.src_access,
+            .dstAccessMask = spec.dst_access,
         };
         vk.c.vkCmdPipelineBarrier(
             self.handle,
-            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            spec.src_stage,
+            spec.dst_stage,
             0,
             1,
             &barrier,
@@ -225,22 +256,25 @@ pub const CommandBuffer = struct {
         );
     }
 
+    /// Insert a compute-to-compute pipeline barrier (shader write → shader read).
+    /// @param self Command buffer currently being recorded.
+    /// @note Uses a coarse global memory barrier; prefer buffer barriers for fine-grained sync.
+    pub fn computeBarrier(self: *const CommandBuffer) void {
+        self.recordMemoryBarrier(computeBarrierSpec());
+    }
+
+    /// Insert a compute-to-transfer pipeline barrier (shader write → transfer read/write).
+    /// @param self Command buffer currently being recorded.
+    /// @note Use this before copying from or into buffers produced by compute shaders.
+    pub fn computeToTransferBarrier(self: *const CommandBuffer) void {
+        self.recordMemoryBarrier(computeToTransferBarrierSpec());
+    }
+
     /// Insert a transfer-to-compute pipeline barrier (copy/upload → shader read).
     /// @param self Command buffer currently being recorded.
     /// @note Ensures prior transfer writes are visible before subsequent compute dispatches.
     pub fn transferToComputeBarrier(self: *const CommandBuffer) void {
-        const barrier = vk.c.VkMemoryBarrier{
-            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = null,
-            .srcAccessMask = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
-            .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
-        };
-        vk.c.vkCmdPipelineBarrier(
-            self.handle,
-            vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, &barrier, 0, null, 0, null,
-        );
+        self.recordMemoryBarrier(transferToComputeBarrierSpec());
     }
 
     /// Finalize command recording so the buffer can be submitted.
@@ -335,3 +369,27 @@ pub const CommandBuffer = struct {
         self.* = undefined;
     }
 };
+
+test "compute barrier spec stays shader-write to shader-read" {
+    const spec = computeBarrierSpec();
+    try std.testing.expectEqual(@as(@TypeOf(spec.src_stage), vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT), spec.src_stage);
+    try std.testing.expectEqual(@as(@TypeOf(spec.dst_stage), vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT), spec.dst_stage);
+    try std.testing.expectEqual(@as(@TypeOf(spec.src_access), vk.c.VK_ACCESS_SHADER_WRITE_BIT), spec.src_access);
+    try std.testing.expectEqual(@as(@TypeOf(spec.dst_access), vk.c.VK_ACCESS_SHADER_READ_BIT), spec.dst_access);
+}
+
+test "compute-to-transfer barrier spec exposes shader writes to copies" {
+    const spec = computeToTransferBarrierSpec();
+    try std.testing.expectEqual(@as(@TypeOf(spec.src_stage), vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT), spec.src_stage);
+    try std.testing.expectEqual(@as(@TypeOf(spec.dst_stage), vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT), spec.dst_stage);
+    try std.testing.expectEqual(@as(@TypeOf(spec.src_access), vk.c.VK_ACCESS_SHADER_WRITE_BIT), spec.src_access);
+    try std.testing.expectEqual(@as(@TypeOf(spec.dst_access), vk.c.VK_ACCESS_TRANSFER_READ_BIT | vk.c.VK_ACCESS_TRANSFER_WRITE_BIT), spec.dst_access);
+}
+
+test "transfer-to-compute barrier spec exposes copy writes to shaders" {
+    const spec = transferToComputeBarrierSpec();
+    try std.testing.expectEqual(@as(@TypeOf(spec.src_stage), vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT), spec.src_stage);
+    try std.testing.expectEqual(@as(@TypeOf(spec.dst_stage), vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT), spec.dst_stage);
+    try std.testing.expectEqual(@as(@TypeOf(spec.src_access), vk.c.VK_ACCESS_TRANSFER_WRITE_BIT), spec.src_access);
+    try std.testing.expectEqual(@as(@TypeOf(spec.dst_access), vk.c.VK_ACCESS_SHADER_READ_BIT), spec.dst_access);
+}
