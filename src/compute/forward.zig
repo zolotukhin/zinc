@@ -578,7 +578,7 @@ pub const InferenceEngine = struct {
             kv_v_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_per_layer, storage_xfer);
         }
 
-        log.info("KV cache: {d} layers × {d} MB = {d} MB total", .{
+        log.debug("KV cache: {d} layers × {d} MB = {d} MB total", .{
             config.n_layers,
             kv_cache_per_layer * 2 / (1024 * 1024),
             config.n_layers * kv_cache_per_layer * 2 / (1024 * 1024),
@@ -620,7 +620,7 @@ pub const InferenceEngine = struct {
                 ssm_states[i] = try allocator.alloc(f32, ssm_state_size);
                 @memset(ssm_states[i], 0);
             }
-            log.info("SSM state: {d} layers × {d} KB conv + {d} KB recurrent", .{
+            log.debug("SSM state: {d} layers × {d} KB conv + {d} KB recurrent", .{
                 config.n_layers,
                 conv_state_size * 4 / 1024,
                 ssm_state_size * 4 / 1024,
@@ -674,7 +674,7 @@ pub const InferenceEngine = struct {
             }
             try decode_cmd.end();
             try decode_cmd.submitAndWait(instance.compute_queue);
-            log.info("GPU SSM state: {d} layers × {d} KB conv + {d} KB recurrent = {d} MB total", .{
+            log.debug("GPU SSM state: {d} layers × {d} KB conv + {d} KB recurrent = {d} MB total", .{
                 config.n_layers,
                 gpu_conv_size / 1024,
                 gpu_state_size / 1024,
@@ -724,7 +724,7 @@ pub const InferenceEngine = struct {
         if (pool_result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
         errdefer vk.c.vkDestroyDescriptorPool(instance.device, shared_pool, null);
 
-        log.info("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}", .{
+        log.debug("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}", .{
             decode_graph.nodeCount(), config.hidden_dim, config.vocab_size,
         });
 
@@ -792,7 +792,7 @@ pub const InferenceEngine = struct {
         self.timestamp_query_pool = pool;
         self.timestamp_period_ns = @as(f64, self.instance.device_props.limits.timestampPeriod);
         self.profile_enabled = true;
-        log.info("Profiling enabled: {d} timestamp queries, period={d:.2}ns", .{ max_timestamps, self.timestamp_period_ns });
+        log.debug("Profiling enabled: {d} timestamp queries, period={d:.2}ns", .{ max_timestamps, self.timestamp_period_ns });
     }
 
     /// Write a timestamp to the query pool (if profiling enabled).
@@ -868,7 +868,7 @@ pub const InferenceEngine = struct {
             const first = timestamps[0];
             const last = timestamps[count - 1];
             const elapsed_ns = @as(f64, @floatFromInt(last -| first)) * self.timestamp_period_ns;
-            log.info("PROFILE: {d} timestamps, GPU total={d:.2}ms", .{ count, elapsed_ns / 1e6 });
+            log.debug("PROFILE: {d} timestamps, GPU total={d:.2}ms", .{ count, elapsed_ns / 1e6 });
         }
     }
 
@@ -1139,7 +1139,7 @@ pub const InferenceEngine = struct {
 
         // Log MoE dimensions once (first decode)
         if (state.generated_tokens.items.len == 0 and is_moe) {
-            log.info("MoE dims: expert_inter={d} shared_expert_inter={d} hidden={d}", .{ inter_dim, shexp_inter_dim, hidden_dim });
+            log.debug("MoE dims: expert_inter={d} shared_expert_inter={d} hidden={d}", .{ inter_dim, shexp_inter_dim, hidden_dim });
         }
 
         // 1. CPU: dequantize embedding
@@ -1185,45 +1185,79 @@ pub const InferenceEngine = struct {
 
             if (is_full_attn) {
                 // === FULL ATTENTION LAYER ===
-                // Q+gate projection → strided Q extraction → Q/K norm → K/V proj → RoPE →
-                // KV cache → flash attention → sigmoid gate → output projection → residual
+                // Q/gate projection → Q/K norm → K/V proj → RoPE → KV cache → flash attention
+                // → sigmoid gate → output projection → residual
 
                 const q_tensor = self.findLayerTensor(layer, "attn_q.weight") orelse return error.TensorNotFound;
                 const k_tensor = self.findLayerTensor(layer, "attn_k.weight") orelse return error.TensorNotFound;
                 const v_tensor = self.findLayerTensor(layer, "attn_v.weight") orelse return error.TensorNotFound;
+                const attn_gate_tensor = self.findLayerTensor(layer, "attn_gate.weight");
+                const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
+                const packed_q_gate = q_rows == q_dim * 2;
+                const separate_attn_gate = q_rows == q_dim and attn_gate_tensor != null;
+                const apply_attn_gate = packed_q_gate or separate_attn_gate;
+                if (state.position == 0 and layer == full_attn_interval - 1) {
+                    log.debug("ATTN_Q layout L{d}: rows={d} q_dim={d} packed_q_gate={} separate_gate={} gate_tensor={}", .{
+                        layer,
+                        q_rows,
+                        q_dim,
+                        packed_q_gate,
+                        separate_attn_gate,
+                        attn_gate_tensor != null,
+                    });
+                }
 
-                // Bug fix #4: Q+gate are interleaved per head as [Q_head, gate_head, Q_head, gate_head, ...]
-                // attn_q outputs (head_dim * 2) * n_heads. Q is at stride-2 offsets.
-                // For now, project Q+gate together, then extract Q with strided copy.
-                const q_full_dim = q_dim * 2;
-                try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
-                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
-                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
-                // The next step is a transfer copy, so compute→compute is not sufficient.
-                self.decode_cmd.computeToTransferBarrier();
-
-                // Q+gate are block-interleaved per head:
-                // [head0_Q(head_dim), head0_gate(head_dim), head1_Q(head_dim), head1_gate(head_dim), ...]
-                // Extract Q and gate into separate buffers using per-head copies
-                {
-                    const hd = config.head_dim;
-                    const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
-                    const stride_bytes = hd_bytes * 2;
-                    for (0..config.n_heads) |h| {
-                        const src_off = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
-                        const dst_off = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
-                        const qr = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = dst_off, .size = hd_bytes };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &qr);
-                        const gr = vk.c.VkBufferCopy{ .srcOffset = src_off + hd_bytes, .dstOffset = dst_off, .size = hd_bytes };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.gate_buf.handle, 1, &gr);
+                if (packed_q_gate) {
+                    // Packed attention layout: attn_q projects interleaved [Q_head, gate_head]
+                    // blocks, so project into a temporary buffer then split them out.
+                    const q_full_dim = q_dim * 2;
+                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
+                } else {
+                    // Dense qwen35 may store Q and gate as separate tensors.
+                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, q_dim, hidden_dim);
+                    if (attn_gate_tensor) |gate_tensor| {
+                        try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, q_dim, hidden_dim);
                     }
                 }
-                self.decode_cmd.transferToComputeBarrier();
+                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
+                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
+                if (packed_q_gate) {
+                    // Legacy packed layout per head:
+                    // [head0_Q(head_dim), head0_gate(head_dim), head1_Q(head_dim), head1_gate(head_dim), ...]
+                    // Extract Q/gate with per-head copies.
+                    self.decode_cmd.computeToTransferBarrier();
+                    {
+                        const hd = config.head_dim;
+                        const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
+                        const stride_bytes = hd_bytes * 2;
+                        for (0..config.n_heads) |h| {
+                            const src_off = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
+                            const dst_off = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
+                            const qr = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = dst_off, .size = hd_bytes };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &qr);
+                            const gr = vk.c.VkBufferCopy{ .srcOffset = src_off + hd_bytes, .dstOffset = dst_off, .size = hd_bytes };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.gate_buf.handle, 1, &gr);
+                        }
+                    }
+                    self.decode_cmd.transferToComputeBarrier();
+                } else {
+                    self.decode_cmd.computeBarrier();
+                }
 
                 // Bug fix #1: Q/K normalization (per-head RMS norm)
                 // attn_q_norm and attn_k_norm are per-head norms with head_dim weights
                 const q_norm_tensor = self.findLayerTensor(layer, "attn_q_norm.weight");
                 const k_norm_tensor = self.findLayerTensor(layer, "attn_k_norm.weight");
+                if (state.position == 0 and layer == full_attn_interval - 1) {
+                    log.debug("ATTN_NORM layout L{d}: q_norm_elems={d} k_norm_elems={d} head_dim={d} n_heads={d} n_kv_heads={d}", .{
+                        layer,
+                        if (q_norm_tensor) |qn| qn.info.numElements() else 0,
+                        if (k_norm_tensor) |kn| kn.info.numElements() else 0,
+                        config.head_dim,
+                        config.n_heads,
+                        config.n_kv_heads,
+                    });
+                }
                 if (q_norm_tensor) |qn| {
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     // Apply RMS norm to each Q head (n_heads workgroups, head_dim elements each)
@@ -1238,6 +1272,16 @@ pub const InferenceEngine = struct {
                     try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_kv_heads, 1e-6);
                 }
                 self.decode_cmd.computeBarrier();
+
+                // Attention gating applies to Q before RoPE/flash attention.
+                if (apply_attn_gate) {
+                    if (self.elementwise.pipeline_sigmoid_mul) |*pip| {
+                        const gds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(gds, self.q_buf.handle, self.q_buf.size, self.gate_buf.handle, self.gate_buf.size, self.q_buf.handle, self.q_buf.size); // in-place on Q
+                        try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, q_dim);
+                        self.decode_cmd.computeBarrier();
+                    }
+                }
 
                 // Bug fix #5+#6: IMRoPE — only rotate rope_dim of head_dim dimensions
                 const rope_freq = config.rope_freq_base;
@@ -1272,15 +1316,6 @@ pub const InferenceEngine = struct {
                     try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, 1);
                 }
                 self.decode_cmd.computeBarrier();
-
-                // Bug fix #2: Attention gating — attn_output = attn_output * sigmoid(gate)
-                // gate_buf has the per-head gate values, attn_out_buf has the attention output
-                if (self.elementwise.pipeline_sigmoid_mul) |*pip| {
-                    const gds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet3(gds, self.attn_out_buf.handle, self.attn_out_buf.size, self.gate_buf.handle, self.gate_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size); // in-place
-                    try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, q_dim);
-                    self.decode_cmd.computeBarrier();
-                }
 
                 // Output projection: attn_output.weight
                 const o_tensor = self.findLayerTensor(layer, "attn_output.weight") orelse return error.TensorNotFound;
@@ -1330,7 +1365,8 @@ pub const InferenceEngine = struct {
                 }
             } else {
                 // === SSM / LINEAR ATTENTION LAYER ===
-                if (self.elementwise.pipeline_ssm_conv1d != null) {
+                const use_gpu_ssm = self.elementwise.pipeline_ssm_conv1d != null and config.architecture != .qwen35;
+                if (use_gpu_ssm) {
                     try self.runSsmLayerGpu(state, layer, layer_idx);
                 } else {
                     try self.runSsmLayerCpu(state, layer, layer_idx);
@@ -1836,7 +1872,7 @@ pub const InferenceEngine = struct {
     // -----------------------------------------------------------------------
 
     /// Run one SSM layer: GPU for large projections, CPU for small state ops.
-    fn runSsmLayerCpu(self: *InferenceEngine, _: *DecodeState, layer: u32, layer_idx: usize) !void {
+    fn runSsmLayerCpu(self: *InferenceEngine, state: *DecodeState, layer: u32, layer_idx: usize) !void {
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
@@ -1981,6 +2017,35 @@ pub const InferenceEngine = struct {
             gate_arr[i] = if (ssm_a_tensor != null) sp * ssm_a_f32[i] else -sp;
             beta_arr[i] = 1.0 / (1.0 + @exp(-beta_cpu[i]));
         }
+        if (layer == 0 and (state.position == 0 or state.position == 64 or state.position == 128 or state.position == 192)) {
+            var gate_min: f32 = std.math.inf(f32);
+            var gate_max: f32 = -std.math.inf(f32);
+            var beta_min: f32 = std.math.inf(f32);
+            var beta_max: f32 = -std.math.inf(f32);
+            var decay_min: f32 = std.math.inf(f32);
+            var decay_max: f32 = -std.math.inf(f32);
+            for (0..dt_rank) |i| {
+                gate_min = @min(gate_min, gate_arr[i]);
+                gate_max = @max(gate_max, gate_arr[i]);
+                beta_min = @min(beta_min, beta_arr[i]);
+                beta_max = @max(beta_max, beta_arr[i]);
+                const decay = @exp(gate_arr[i]);
+                decay_min = @min(decay_min, decay);
+                decay_max = @max(decay_max, decay);
+            }
+            log.debug("SSM gate L0 pos={d}: alpha0={d:.6} dt_bias0={d:.6} ssm_a0={d:.6} gate_log=[{d:.6},{d:.6}] decay=[{d:.6},{d:.6}] beta=[{d:.6},{d:.6}]", .{
+                state.position,
+                alpha_cpu[0],
+                if (dt_bias_tensor != null) dt_bias_f32[0] else 0.0,
+                if (ssm_a_tensor != null) ssm_a_f32[0] else 0.0,
+                gate_min,
+                gate_max,
+                decay_min,
+                decay_max,
+                beta_min,
+                beta_max,
+            });
+        }
 
         // Bug fix #9: Scale Q by 1/sqrt(head_k_dim) before state readout
         const q_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_state)));
@@ -2003,16 +2068,14 @@ pub const InferenceEngine = struct {
             // Decay: s *= exp(gate)
             for (0..head_v_dim * head_v_dim) |i| ssm_state[s_base + i] *= g_val;
 
-            // sk = s @ k (per-row dot with k vector)
-            // d = beta * (v - sk), then s += outer(k, d) = k[row] * d[col]
+            // Match the GPU delta-net shader: each row is decayed, corrected with
+            // d[row] = beta * (v[row] - dot(state[row], k)), then updated in-place.
             for (0..head_v_dim) |row| {
                 var sk: f32 = 0;
                 for (0..@min(head_v_dim, k_head.len)) |col| {
                     sk += ssm_state[s_base + row * head_v_dim + col] * k_head[col];
                 }
                 const d_val = b_val * (v_head[row] - sk);
-                // Bug fix #13: Outer product s[row][col] += k[col] * d[row]
-                // d_val is d[row] (scalar for this row), update row's slice of state
                 for (0..@min(head_v_dim, k_head.len)) |col| {
                     ssm_state[s_base + row * head_v_dim + col] += k_head[col] * d_val;
                 }
@@ -2579,12 +2642,16 @@ pub const InferenceEngine = struct {
         // ── STAGE 4: Verify DMMV for non-Q8_0 quant types ──
         // norm_buf still has BOS embedding norm from STAGE 2 (STAGE 3 only read it)
         const wqkv_diag = self.findLayerTensor(0, "attn_qkv.weight");
+        const ffn_gate_diag = self.findLayerTensor(0, "ffn_gate.weight");
+        const ffn_up_diag = self.findLayerTensor(0, "ffn_up.weight");
         const gate_exps_diag = self.findLayerTensor(0, "ffn_gate_exps.weight");
         const down_exps_diag = self.findLayerTensor(0, "ffn_down_exps.weight");
         const ssm_out_diag = self.findLayerTensor(0, "ssm_out.weight");
         const attn_q_diag = self.findLayerTensor(3, "attn_q.weight"); // layer 3 = first attn layer
-        dlog.info("QUANT: wqkv={s} gate_exps={s} down_exps={s} ssm_out={s} attn_q={s}", .{
+        dlog.info("QUANT: wqkv={s} ffn_gate={s} ffn_up={s} gate_exps={s} down_exps={s} ssm_out={s} attn_q={s}", .{
             if (wqkv_diag) |t| @tagName(t.info.type_) else "N/A",
+            if (ffn_gate_diag) |t| @tagName(t.info.type_) else "N/A",
+            if (ffn_up_diag) |t| @tagName(t.info.type_) else "N/A",
             if (gate_exps_diag) |t| @tagName(t.info.type_) else "N/A",
             if (down_exps_diag) |t| @tagName(t.info.type_) else "N/A",
             if (ssm_out_diag) |t| @tagName(t.info.type_) else "N/A",
@@ -2691,6 +2758,144 @@ pub const InferenceEngine = struct {
             });
         }
 
+        if (ffn_gate_diag) |gt| {
+            const inter_d = if (config.intermediate_dim > 0) config.intermediate_dim else hidden_dim * 4;
+            const gate_off_d: usize = @intCast(self.model.gguf_file.tensor_data_offset + gt.info.offset);
+
+            var cpu_gate_r: [3]f32 = undefined;
+            for (0..3) |row| {
+                dequantRow(mmap[gate_off_d..], @intCast(row), hidden_dim, gt.info.type_, cpu_row_buf[0..hidden_dim]);
+                var dot_d: f64 = 0.0;
+                for (0..hidden_dim) |ii| dot_d += @as(f64, cpu_row_buf[ii]) * @as(f64, cpu_normed[ii]);
+                cpu_gate_r[row] = @floatCast(dot_d);
+            }
+
+            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.begin();
+            try self.dispatchDmmv(gt, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim);
+            {
+                const bar = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                const copy_sz = @as(vk.c.VkDeviceSize, 3) * @sizeOf(f32);
+                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = copy_sz };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn);
+            }
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+            const gpu_g: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var gate_mdiff: f32 = 0;
+            for (0..3) |ii| {
+                const d = @abs(gpu_g[ii] - cpu_gate_r[ii]);
+                if (d > gate_mdiff) gate_mdiff = d;
+            }
+            dlog.info("DMMV_CHECK: ffn_gate type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
+                @tagName(gt.info.type_), inter_d, hidden_dim,
+                gpu_g[0], gpu_g[1], gpu_g[2],
+                cpu_gate_r[0], cpu_gate_r[1], cpu_gate_r[2],
+                gate_mdiff,
+                if (gate_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+            });
+        }
+
+        if (ffn_up_diag) |ut| {
+            const inter_d = if (config.intermediate_dim > 0) config.intermediate_dim else hidden_dim * 4;
+            const up_off_d: usize = @intCast(self.model.gguf_file.tensor_data_offset + ut.info.offset);
+
+            var cpu_up_r: [3]f32 = undefined;
+            for (0..3) |row| {
+                dequantRow(mmap[up_off_d..], @intCast(row), hidden_dim, ut.info.type_, cpu_row_buf[0..hidden_dim]);
+                var dot_d: f64 = 0.0;
+                for (0..hidden_dim) |ii| dot_d += @as(f64, cpu_row_buf[ii]) * @as(f64, cpu_normed[ii]);
+                cpu_up_r[row] = @floatCast(dot_d);
+            }
+
+            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.begin();
+            try self.dispatchDmmv(ut, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim);
+            {
+                const bar = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                const copy_sz = @as(vk.c.VkDeviceSize, 3) * @sizeOf(f32);
+                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = copy_sz };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn);
+            }
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+            const gpu_u: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var up_mdiff: f32 = 0;
+            for (0..3) |ii| {
+                const d = @abs(gpu_u[ii] - cpu_up_r[ii]);
+                if (d > up_mdiff) up_mdiff = d;
+            }
+            dlog.info("DMMV_CHECK: ffn_up type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
+                @tagName(ut.info.type_), inter_d, hidden_dim,
+                gpu_u[0], gpu_u[1], gpu_u[2],
+                cpu_up_r[0], cpu_up_r[1], cpu_up_r[2],
+                up_mdiff,
+                if (up_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+            });
+        }
+
+        if (attn_q_diag) |qt| {
+            const q_dim = config.n_heads * config.head_dim;
+            const q_off_d: usize = @intCast(self.model.gguf_file.tensor_data_offset + qt.info.offset);
+
+            var cpu_q_r: [3]f32 = undefined;
+            for (0..3) |row| {
+                dequantRow(mmap[q_off_d..], @intCast(row), hidden_dim, qt.info.type_, cpu_row_buf[0..hidden_dim]);
+                var dot_d: f64 = 0.0;
+                for (0..hidden_dim) |ii| dot_d += @as(f64, cpu_row_buf[ii]) * @as(f64, cpu_normed[ii]);
+                cpu_q_r[row] = @floatCast(dot_d);
+            }
+
+            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.begin();
+            try self.dispatchDmmv(qt, self.norm_buf, hidden_size, self.logits_buf, q_dim, hidden_dim);
+            {
+                const bar = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                const copy_sz = @as(vk.c.VkDeviceSize, 3) * @sizeOf(f32);
+                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = copy_sz };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn);
+            }
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+            const gpu_q: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var q_mdiff: f32 = 0;
+            for (0..3) |ii| {
+                const d = @abs(gpu_q[ii] - cpu_q_r[ii]);
+                if (d > q_mdiff) q_mdiff = d;
+            }
+            dlog.info("DMMV_CHECK: attn_q type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
+                @tagName(qt.info.type_), q_dim, hidden_dim,
+                gpu_q[0], gpu_q[1], gpu_q[2],
+                cpu_q_r[0], cpu_q_r[1], cpu_q_r[2],
+                q_mdiff,
+                if (q_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+            });
+        }
+
         dlog.info("=== END DIAG ===", .{});
     }
 
@@ -2772,7 +2977,7 @@ fn dumpTop5Logits(engine: *const InferenceEngine, step: u32) void {
             }
         }
     }
-    log.info("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
+    log.debug("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
         step,
         top_ids[0],
         top_vals[0],
@@ -2804,7 +3009,7 @@ pub fn generate(
     var state = DecodeState.init(allocator);
     defer state.deinit();
 
-    log.info("Generating: {d} prompt tokens, max {d} output tokens", .{
+    log.debug("Generating: {d} prompt tokens, max {d} output tokens", .{
         prompt_tokens.len, max_tokens,
     });
 
@@ -2818,7 +3023,7 @@ pub fn generate(
     else
         0.0;
 
-    log.info("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
+    log.debug("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
         prompt_tokens.len, @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0, prefill_tok_per_sec,
     });
 
@@ -2834,7 +3039,7 @@ pub fn generate(
     if (prompt_tokens.len > 0 and max_tokens > 0) {
         const first_token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, first_token);
-        log.info("decode[0]: token={d} pos={d} (from prefill logits)", .{
+        log.debug("decode[0]: token={d} pos={d} (from prefill logits)", .{
             first_token, state.position,
         });
         // Dump top-5 logits from prefill for comparison with llama.cpp
@@ -2859,7 +3064,7 @@ pub fn generate(
 
         const tok_end = std.time.nanoTimestamp();
         const tok_ms = @as(f64, @floatFromInt(@as(u64, @intCast(tok_end - tok_start)))) / 1_000_000.0;
-        log.info("decode[{d}]: token={d} pos={d} ({d:.1} ms)", .{
+        log.debug("decode[{d}]: token={d} pos={d} ({d:.1} ms)", .{
             generated, token, state.position, tok_ms,
         });
 
@@ -2902,10 +3107,10 @@ pub fn generate(
             const theo_bw_gbs: f64 = @floatFromInt(engine.gpu_config.bandwidth_gbps);
             const utilization = if (theo_bw_gbs > 0) eff_bw_gbs / theo_bw_gbs * 100.0 else 0.0;
 
-            log.info("Bandwidth: {d:.1} GB/s effective, {d:.0} GB/s theoretical ({d:.1}% utilization)", .{
+            log.debug("Bandwidth: {d:.1} GB/s effective, {d:.0} GB/s theoretical ({d:.1}% utilization)", .{
                 eff_bw_gbs, theo_bw_gbs, utilization,
             });
-            log.info("Per-token: {d:.2} MB read ({s} LM head {d}x{d})", .{
+            log.debug("Per-token: {d:.2} MB read ({s} LM head {d}x{d})", .{
                 @as(f64, @floatFromInt(total_bytes_per_tok)) / 1_000_000.0,
                 @tagName(lm_quant),
                 config.vocab_size,
@@ -3225,13 +3430,13 @@ test "delta-net zero state produces beta*v*(k.q) output" {
     for (&ssm_state) |*s| s.* *= g_val;
 
     // Update: for each row, sk = s@k = 0, d = beta*(v-0) = beta*v
-    // s[col][row] += k[col] * d_val
+    // s[row][col] += k[col] * d_val
     for (0..head_v_dim) |row| {
         var sk: f32 = 0;
         for (0..d_state) |col| sk += ssm_state[row * head_v_dim + col] * k_head[col];
         const d_val = beta * (v_head[row] - sk);
         for (0..d_state) |col| {
-            ssm_state[col * head_v_dim + row] += k_head[col] * d_val;
+            ssm_state[row * head_v_dim + col] += k_head[col] * d_val;
         }
     }
 
@@ -3245,9 +3450,9 @@ test "delta-net zero state produces beta*v*(k.q) output" {
         output[row] = val;
     }
 
-    // Expected values from Python reference (ZINC's transposed state convention)
-    // s[col*4+row] += k[col]*d, read: o[row] = sum_col s[row*4+col]*q[col]
-    const expected = [_]f32{ -0.313973, 0.188384, -0.062795, -0.439562 };
+    // Expected values for the row-major delta-net update used by the GPU shader:
+    // s[row*4+col] += k[col]*d, read: o[row] = sum_col s[row*4+col]*q[col]
+    const expected = [_]f32{ 0.312, -0.624, 0.156, 0.0936 };
     for (0..head_v_dim) |row| {
         try std.testing.expect(@abs(output[row] - expected[row]) < 1e-4);
     }

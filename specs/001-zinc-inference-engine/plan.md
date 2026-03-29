@@ -30,7 +30,7 @@ Build a full-stack LLM inference engine in Zig + Vulkan compute shaders, targeti
 - [x] **Zig Systems Correctness (III)**: All host code in Zig; explicit GPU memory management; comptime for dispatch tables
 - [x] **Vulkan-First (IV)**: Vulkan compute only; GLSL→SPIR-V via system glslc; cooperative matrix leveraged
 - [x] **Production Serving (V)**: Continuous batching + paged KV cache + OpenAI API from Phase 2
-- [x] **Correctness Validation (VI)**: All outputs validated against llama.cpp/PyTorch reference; >99.5% cosine similarity
+- [x] **Correctness Validation (VI)**: All outputs validated against llama.cpp/reference baselines; >99.5% cosine similarity
 
 ## Project Structure
 
@@ -114,8 +114,7 @@ docs/
 └── API.md                   # API reference (existing)
 
 research/
-├── llama_cpp_analysis.md    # llama.cpp Vulkan backend analysis (existing)
-└── turboquant-pytorch-master/  # PyTorch reference implementation (existing)
+└── llama_cpp_analysis.md    # llama.cpp Vulkan backend analysis (existing)
 ```
 
 **Structure Decision**: Single project with Zig source tree. Shaders are compiled at build time via `build.zig`. The project is a single binary that acts as both CLI tool and HTTP server. No frontend; the interface is the HTTP API.

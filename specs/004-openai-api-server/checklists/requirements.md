@@ -33,5 +33,5 @@
 
 - Spec references "OpenAI" endpoint paths and schema fields (/v1/chat/completions, ChatCompletionChunk, etc). This is the contract standard being targeted, not an implementation detail — the feature IS compatibility with this specific API contract.
 - FR-001/FR-002 mention specific request fields (temperature, top_p, stop). These are part of the API contract, not implementation details.
-- SC-004 mentions the OpenAI Python SDK by name. This is a compatibility target (the SDK is the test tool), not a technology choice for ZINC itself.
+- SC-004 mentions the official OpenAI SDK by name. This is a compatibility target (the SDK is the test tool), not a technology choice for ZINC itself.
 - All items pass. Spec ready for /speckit.plan.

@@ -66,6 +66,8 @@ ZINC runs GGUF models. The following architectures are supported:
 
 > **Primary test model**: [Qwen3.5-35B-A3B-UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) — a hybrid attention+SSM+MoE model (35B total, 3B active per token). Fits in 21 GB VRAM with full context.
 
+> **Next model focus**: smaller Qwen3.5 variants. The current public roadmap calls out smaller Qwen3.5 support and validation as a near-term priority after the 35B-A3B path.
+
 **Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, F16
 
 ## Quick Start
@@ -137,18 +139,6 @@ curl http://localhost:8080/health
 
 #### Use with OpenAI SDKs
 
-```python
-# Python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
-for chunk in client.chat.completions.create(
-    model="qwen3.5-35b",
-    messages=[{"role": "user", "content": "Hello!"}],
-    stream=True,
-):
-    print(chunk.choices[0].delta.content or "", end="", flush=True)
-```
-
 ```javascript
 // Node.js
 import OpenAI from "openai";
@@ -168,7 +158,7 @@ for await (const chunk of stream) {
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Built-in chat interface |
-| GET | `/health` | Server status and model info |
+| GET | `/health` | Server status, model, active requests, queued requests, uptime |
 | GET | `/v1/models` | List loaded models |
 | POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
 | POST | `/v1/completions` | Text completion |
@@ -237,6 +227,23 @@ How to read the output:
 
 The DOT export highlights critical-path nodes in red so you can see the longest chain immediately. The JSON export is the better source for automated analysis or a future in-browser visualizer.
 
+## Contributing
+
+Outside help is useful, especially for:
+
+- bug reproduction on more hardware and operating systems
+- build and packaging fixes
+- docs and API polish
+- test coverage
+- performance diagnostics and benchmark tooling
+
+Start with [CONTRIBUTING.md](./CONTRIBUTING.md). If you are reporting a bug or regression, include the exact hardware, model, driver/runtime, and command you used.
+
+Project expectations and planning live here:
+
+- [Code of Conduct](./CODE_OF_CONDUCT.md)
+- [Roadmap](./docs/ROADMAP.md)
+
 ### CLI Reference
 
 ```
@@ -250,6 +257,7 @@ Usage: zinc [options]
   --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
   --graph-report <path>    Write decode-graph JSON report from GGUF metadata
   --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
+  --debug                  Enable verbose debug logging (or set ZINC_DEBUG=1)
   -h, --help               Show this help
 ```
 
@@ -258,14 +266,11 @@ The JSON report includes node/edge lists, op-type counts, per-node depth, root/l
 ### Tests
 
 ```bash
-# Zig unit tests (18 tests)
+# Zig + Bun tests
 zig build test
 
-# TypeScript loop tests (34 tests)
-bun test loops/
-
-# All tests
-zig build test && bun test loops/
+# Bun tests only
+bun test
 ```
 
 ## Self-Improving Optimization Loop

@@ -1,7 +1,7 @@
 //! Native BPE tokenizer that reads vocabulary and merge rules from GGUF metadata.
 //! @section Tokenization
 //! Implements byte-pair encoding directly in Zig using the tokenizer tables
-//! embedded in GGUF model files, eliminating the Python dependency.
+//! embedded in GGUF model files, eliminating external tokenizer dependencies.
 const std = @import("std");
 const gguf = @import("gguf.zig");
 
@@ -16,8 +16,10 @@ pub const Tokenizer = struct {
     /// BPE merge rules ordered by priority (lower index = higher priority)
     merges: []const Merge,
     /// Special token IDs
-    bos_id: u32,
+    bos_id: ?u32,
     eos_id: u32,
+    /// Whether prompts should be prefixed with BOS automatically.
+    prepend_bos: bool,
     /// Token scores (used for SentencePiece-style merge priority)
     scores: ?[]const f32,
     /// Chat template string from GGUF metadata, or null
@@ -44,7 +46,7 @@ pub const Tokenizer = struct {
         };
 
         const vocab_size = tokens_array.len;
-        log.info("Tokenizer: {d} tokens", .{vocab_size});
+        log.debug("Tokenizer: {d} tokens", .{vocab_size});
 
         // Build vocab table and reverse map
         const vocab = try allocator.alloc([]const u8, vocab_size);
@@ -104,21 +106,35 @@ pub const Tokenizer = struct {
                             });
                         }
                     }
-                    log.info("Tokenizer: {d} BPE merges", .{merges_list.items.len});
+                    log.debug("Tokenizer: {d} BPE merges", .{merges_list.items.len});
                 },
                 else => {},
             }
         }
 
         // Read special token IDs
-        const bos_id = gf.getU32("tokenizer.ggml.bos_token_id") orelse 1;
+        const bos_id = gf.getU32("tokenizer.ggml.bos_token_id");
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
+        const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse (bos_id != null);
 
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
-        log.info("Tokenizer type: {s} | BOS: {d} | EOS: {d}", .{ model_type, bos_id, eos_id });
+        if (bos_id) |id| {
+            log.debug("Tokenizer type: {s} | BOS: {d} | prepend_bos={} | EOS: {d}", .{
+                model_type,
+                id,
+                prepend_bos,
+                eos_id,
+            });
+        } else {
+            log.debug("Tokenizer type: {s} | BOS: none | prepend_bos={} | EOS: {d}", .{
+                model_type,
+                prepend_bos,
+                eos_id,
+            });
+        }
 
         const chat_template = gf.getString("tokenizer.chat_template");
-        if (chat_template) |tmpl| log.info("Chat template: {d} chars", .{tmpl.len});
+        if (chat_template) |tmpl| log.debug("Chat template: {d} chars", .{tmpl.len});
 
         return Tokenizer{
             .vocab = vocab,
@@ -127,6 +143,7 @@ pub const Tokenizer = struct {
             .scores = scores,
             .bos_id = bos_id,
             .eos_id = eos_id,
+            .prepend_bos = prepend_bos,
             .chat_template = chat_template,
             .allocator = allocator,
         };
@@ -180,6 +197,12 @@ pub const Tokenizer = struct {
         var symbols: std.ArrayList([]const u8) = .{};
         defer symbols.deinit(self.allocator);
 
+        var owned_symbols: std.ArrayList([]u8) = .{};
+        defer {
+            for (owned_symbols.items) |sym| self.allocator.free(sym);
+            owned_symbols.deinit(self.allocator);
+        }
+
         for (text) |byte| {
             const unicode_char = gpt2ByteToUnicode(byte);
             // Find length of UTF-8 encoding
@@ -187,15 +210,16 @@ pub const Tokenizer = struct {
             // We need to allocate a persistent copy since symbols stores slices
             const copy = try self.allocator.alloc(u8, len);
             @memcpy(copy, unicode_char[0..len]);
+            try owned_symbols.append(self.allocator, copy);
             try symbols.append(self.allocator, copy);
         }
 
         // If we have merges (GPT-2/tiktoken style), use merge-based BPE
         if (self.merges.len > 0) {
-            try self.applyMerges(&symbols);
+            try self.applyMerges(&symbols, &owned_symbols);
         } else if (self.scores != null) {
             // SentencePiece style: greedily merge the pair with highest combined score
-            try self.applySentencePieceMerges(&symbols);
+            try self.applySentencePieceMerges(&symbols, &owned_symbols);
         }
 
         // Convert symbol strings to token IDs
@@ -218,7 +242,7 @@ pub const Tokenizer = struct {
     }
 
     /// Apply BPE merges in priority order (GPT-2/tiktoken style).
-    fn applyMerges(self: *const Tokenizer, symbols: *std.ArrayList([]const u8)) !void {
+    fn applyMerges(self: *const Tokenizer, symbols: *std.ArrayList([]const u8), owned_symbols: *std.ArrayList([]u8)) !void {
         // Build a merge rank lookup for fast pair → rank queries
         var merge_ranks = std.StringHashMap(u32).init(self.allocator);
         defer merge_ranks.deinit();
@@ -269,16 +293,15 @@ pub const Tokenizer = struct {
                 symbols.items[best_pos],
                 symbols.items[best_pos + 1],
             });
+            try owned_symbols.append(self.allocator, merged);
 
             symbols.items[best_pos] = merged;
             _ = symbols.orderedRemove(best_pos + 1);
-            // Note: merged strings leak here. Acceptable for a short-lived encode call.
-            // A proper fix would track allocated slices separately from input slices.
         }
     }
 
     /// Apply SentencePiece-style merges using token scores.
-    fn applySentencePieceMerges(self: *const Tokenizer, symbols: *std.ArrayList([]const u8)) !void {
+    fn applySentencePieceMerges(self: *const Tokenizer, symbols: *std.ArrayList([]const u8), owned_symbols: *std.ArrayList([]u8)) !void {
         const scores_arr = self.scores orelse return;
 
         while (symbols.items.len > 1) {
@@ -310,6 +333,7 @@ pub const Tokenizer = struct {
                 symbols.items[best_pos],
                 symbols.items[best_pos + 1],
             });
+            try owned_symbols.append(self.allocator, merged);
 
             symbols.items[best_pos] = merged;
             _ = symbols.orderedRemove(best_pos + 1);
@@ -342,7 +366,12 @@ pub const Tokenizer = struct {
     /// @param self Tokenizer to inspect.
     /// @returns The BOS token ID loaded from GGUF metadata or the default fallback.
     pub fn bosId(self: *const Tokenizer) u32 {
-        return self.bos_id;
+        return self.bos_id orelse self.eos_id;
+    }
+
+    /// Whether prompt construction should prepend BOS automatically.
+    pub fn shouldPrependBos(self: *const Tokenizer) bool {
+        return self.prepend_bos and self.bos_id != null;
     }
 
     /// Release tokenizer-owned vocabulary tables, merges, and optional score arrays.
@@ -436,12 +465,30 @@ test "Tokenizer findByteToken" {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .allocator = std.testing.allocator,
     };
     defer tok.token_to_id.deinit();
 
     // With empty vocab, should fall back to byte value
     try std.testing.expectEqual(@as(u32, 65), tok.findByteToken(65));
+}
+
+test "shouldPrependBos is false when BOS metadata is absent" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 2,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try std.testing.expect(!tok.shouldPrependBos());
+    try std.testing.expectEqual(@as(u32, 2), tok.bosId());
 }
 
 test "decodeToken converts GPT-2 leading-space marker back to ASCII space" {
@@ -453,6 +500,7 @@ test "decodeToken converts GPT-2 leading-space marker back to ASCII space" {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .allocator = std.testing.allocator,
     };
     defer tok.token_to_id.deinit();
@@ -471,6 +519,7 @@ test "decodeToken converts GPT-2 remapped newline back to byte 0x0A" {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .allocator = std.testing.allocator,
     };
     defer tok.token_to_id.deinit();
@@ -488,6 +537,7 @@ test "applyChatTemplate ChatML format" {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .chat_template = null, // null defaults to ChatML
         .allocator = std.testing.allocator,
     };
@@ -509,6 +559,7 @@ test "applyChatTemplate with im_start template uses ChatML" {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .chat_template = "{%- for m in messages %}<|im_start|>{{m.role}}\n{{m.content}}<|im_end|>{%- endfor %}",
         .allocator = std.testing.allocator,
     };
@@ -530,6 +581,7 @@ test "applyChatTemplate non-ChatML fallback" {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .chat_template = "some other template without im tags",
         .allocator = std.testing.allocator,
     };
@@ -551,6 +603,7 @@ test "applyChatTemplate empty messages" {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .chat_template = null,
         .allocator = std.testing.allocator,
     };
@@ -560,4 +613,61 @@ test "applyChatTemplate empty messages" {
     const result = try tok.applyChatTemplate(&roles, &contents, &buf);
     // Should just have the assistant prefix
     try std.testing.expectEqualStrings("<|im_start|>assistant\n", result);
+}
+
+test "encode frees temporary buffers for BPE merges" {
+    const vocab = [_][]const u8{ "h", "i", "hi" };
+    const merges = [_]Tokenizer.Merge{.{
+        .first = "h",
+        .second = "i",
+        .rank = 0,
+    }};
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &merges,
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("h", 0);
+    try tok.token_to_id.put("i", 1);
+    try tok.token_to_id.put("hi", 2);
+
+    const tokens = try tok.encode("hi");
+    defer std.testing.allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 2), tokens[0]);
+}
+
+test "encode frees temporary buffers for sentencepiece merges" {
+    const vocab = [_][]const u8{ "a", "b", "ab" };
+    const scores = try std.testing.allocator.dupe(f32, &[_]f32{ -1.0, -1.0, 2.0 });
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = scores,
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+    defer std.testing.allocator.free(scores);
+
+    try tok.token_to_id.put("a", 0);
+    try tok.token_to_id.put("b", 1);
+    try tok.token_to_id.put("ab", 2);
+
+    const tokens = try tok.encode("ab");
+    defer std.testing.allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 2), tokens[0]);
 }

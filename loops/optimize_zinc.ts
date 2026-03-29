@@ -334,7 +334,6 @@ async function rsyncToRemote(): Promise<void> {
       "--exclude", ".llm_optimize",
       "--exclude", ".DS_Store",
       "--exclude", "site",
-      "--exclude", "research/turboquant-pytorch-master",
       `${PROJECT_ROOT}/`,
       `${ZINC_USER}@${ZINC_HOST}:${REMOTE_ZINC_DIR}/`,
     ],
@@ -390,7 +389,7 @@ async function remoteRun(
   prompt: string,
 ): Promise<{ exitCode: number; output: string }> {
   console.log(clr("2", "  Running ZINC on remote node (acquiring GPU lock)..."));
-  const runCmd = `cd ${REMOTE_ZINC_DIR} && RADV_PERFTEST=coop_matrix timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" 2>&1`;
+  const runCmd = `cd ${REMOTE_ZINC_DIR} && ZINC_DEBUG=1 RADV_PERFTEST=coop_matrix timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" --debug 2>&1`;
   const { stdout, stderr, exitCode } = await runCommand(
     "ssh",
     [
@@ -687,15 +686,15 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const historyBlock =
     cycles.length > 0
       ? cycles
-          .slice(-15)
-          .map((h) => {
-            const desc = trunc(h.description, 70);
-            const bw = h.bandwidthUtil != null ? `, ${h.bandwidthUtil.toFixed(0)}% BW` : "";
-            const snippet = (h as any).outputSnippet ? ` out="${trunc((h as any).outputSnippet, 30)}"` : "";
-            const coherent = (h as any).coherentText ? " ✅COHERENT" : "";
-            return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "KEPT" : "REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s${bw})` : ""}${snippet}${coherent}`;
-          })
-          .join("\n")
+        .slice(-15)
+        .map((h) => {
+          const desc = trunc(h.description, 70);
+          const bw = h.bandwidthUtil != null ? `, ${h.bandwidthUtil.toFixed(0)}% BW` : "";
+          const snippet = (h as any).outputSnippet ? ` out="${trunc((h as any).outputSnippet, 30)}"` : "";
+          const coherent = (h as any).coherentText ? " ✅COHERENT" : "";
+          return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "KEPT" : "REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s${bw})` : ""}${snippet}${coherent}`;
+        })
+        .join("\n")
       : "  (none yet)";
 
   // Include the last cycle's self-analysis so the agent can build on its own reasoning
@@ -725,9 +724,9 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const failedBlock =
     failedApproaches.length > 0
       ? failedApproaches
-          .slice(-20)
-          .map((f, n) => `  ${n + 1}. ${trunc(f, 120)}`)
-          .join("\n")
+        .slice(-20)
+        .map((f, n) => `  ${n + 1}. ${trunc(f, 120)}`)
+        .join("\n")
       : "  (none yet)";
 
   // Truncate build/run output to avoid blowing up prompt
@@ -918,12 +917,12 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "",
     ...(lastResult.runOutput
       ? [
-          "## Current Run Output (last 3000 chars)",
-          "```",
-          runOut,
-          "```",
-          "",
-        ]
+        "## Current Run Output (last 3000 chars)",
+        "```",
+        runOut,
+        "```",
+        "",
+      ]
       : []),
     "## Project Structure",
     "```",
@@ -1053,7 +1052,7 @@ async function runCycle(
       { cwd: PROJECT_ROOT },
     ).catch(() => null);
     if (rebase && rebase.exitCode !== 0) {
-      await runCommand("git", ["rebase", "--abort"], { cwd: PROJECT_ROOT }).catch(() => {});
+      await runCommand("git", ["rebase", "--abort"], { cwd: PROJECT_ROOT }).catch(() => { });
       console.log(clr("1;33", "  ⚠ Rebase on main had conflicts — continuing with current state"));
     }
   }
@@ -1104,8 +1103,8 @@ async function runCycle(
   }
 
   // Step 2: Git snapshot before agent changes — commit current state so we can revert cleanly
-  await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => {});
-  await runCommand("git", ["commit", "--allow-empty", "-m", `zinc-loop: pre-cycle-${cycleNum} checkpoint`], { cwd: PROJECT_ROOT }).catch(() => {});
+  await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => { });
+  await runCommand("git", ["commit", "--allow-empty", "-m", `zinc-loop: pre-cycle-${cycleNum} checkpoint`], { cwd: PROJECT_ROOT }).catch(() => { });
   const preCommit = await runCommand("git", ["rev-parse", "HEAD"], { cwd: PROJECT_ROOT });
   const preHash = preCommit.stdout.trim();
 
@@ -1344,15 +1343,15 @@ async function runCycle(
   if (!keep) {
     // Revert only the agent's changes — reset to pre-cycle checkpoint
     console.log(clr("2", `  Reverting to pre-cycle checkpoint (${preHash.slice(0, 8)})...`));
-    await runCommand("git", ["reset", "--hard", preHash], { cwd: PROJECT_ROOT }).catch(() => {});
+    await runCommand("git", ["reset", "--hard", preHash], { cwd: PROJECT_ROOT }).catch(() => { });
   } else {
     // Commit successful change on top of checkpoint
-    await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => {});
+    await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => { });
     await runCommand(
       "git",
       ["commit", "--allow-empty", "-m", `zinc-loop: ${description}`],
       { cwd: PROJECT_ROOT },
-    ).catch(() => {});
+    ).catch(() => { });
 
     // Cherry-pick to main so the other loop can pick up the fix
     if (worktreeName) {
@@ -1367,12 +1366,12 @@ async function runCycle(
           await runCommand(
             "git", ["commit", "-m", `zinc-loop(${worktreeName}): ${description}`],
             { cwd: REPO_ROOT },
-          ).catch(() => {});
+          ).catch(() => { });
           console.log(clr("1;36", `  ↗ Cherry-picked to main: ${description.slice(0, 60)}`));
         } else {
           // Conflict — abort and skip merge-back, worktree keeps the change
-          await runCommand("git", ["cherry-pick", "--abort"], { cwd: REPO_ROOT }).catch(() => {});
-          await runCommand("git", ["reset", "--hard"], { cwd: REPO_ROOT }).catch(() => {});
+          await runCommand("git", ["cherry-pick", "--abort"], { cwd: REPO_ROOT }).catch(() => { });
+          await runCommand("git", ["reset", "--hard"], { cwd: REPO_ROOT }).catch(() => { });
           console.log(clr("1;33", `  ↗ Cherry-pick to main had conflicts — skipped`));
         }
       }
@@ -1469,7 +1468,7 @@ async function main() {
     const worktreePath = join(REPO_ROOT, ".worktrees", `zinc-${worktreeName}`);
 
     // Create branch from current HEAD if it doesn't exist
-    await runCommand("git", ["branch", branchName], { cwd: REPO_ROOT }).catch(() => {});
+    await runCommand("git", ["branch", branchName], { cwd: REPO_ROOT }).catch(() => { });
 
     // Create worktree if it doesn't exist
     if (!existsSync(worktreePath)) {
@@ -1532,7 +1531,7 @@ async function main() {
   }
 
   // Ensure remote zinc dir exists
-  await ssh(`mkdir -p ${REMOTE_ZINC_DIR}`, 10_000).catch(() => {});
+  await ssh(`mkdir -p ${REMOTE_ZINC_DIR}`, 10_000).catch(() => { });
 
   // Dry run: just build+run once
   if (dryRun) {

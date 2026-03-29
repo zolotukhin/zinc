@@ -18,9 +18,9 @@ fn expectMultiSubgroupFallback(shader_src: []const u8, reduce_name: []const u8) 
     try expectContains(shader_src, "barrier();");
 }
 
-test "decode loop keeps compute-to-transfer barrier before Q and gate copies" {
+test "decode loop keeps transfer-copy split for packed Q and gate" {
     const src = @embedFile("compute/forward.zig");
-    try expectContainsNear(src, "The next step is a transfer copy", "self.decode_cmd.computeToTransferBarrier();", 160);
+    try expectContainsNear(src, "Legacy packed layout per head:", "self.decode_cmd.computeToTransferBarrier();", 400);
 }
 
 test "decode loop keeps compute-to-transfer barrier before KV cache writes" {

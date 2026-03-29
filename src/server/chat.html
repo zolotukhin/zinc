@@ -52,6 +52,8 @@ header h1 span{color:var(--accent)}
 #ia textarea::placeholder{color:var(--muted)}
 #ia button{background:var(--accent);color:#fff;border:none;width:42px;height:42px;border-radius:10px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:background .15s}
 #ia button:hover{background:var(--accent2)}
+#ia button.stop{background:#7a3020}
+#ia button.stop:hover{background:#8f3926}
 #ia button:disabled{opacity:.25;cursor:not-allowed}
 .hint{text-align:center;font-size:11px;color:var(--muted);margin-top:6px;max-width:720px;margin-left:auto;margin-right:auto}
 </style>
@@ -72,12 +74,12 @@ header h1 span{color:var(--accent)}
 <textarea id="i" placeholder="Message ZINC..." rows="1"></textarea>
 <button id="b" onclick="send()" title="Send">&#x2191;</button>
 </div>
-<div class="hint">Enter to send &middot; Shift+Enter for new line</div>
+<div class="hint">Enter to send or stop &middot; Shift+Enter for new line</div>
 </div>
 <script>
 const M=document.getElementById('messages'),I=document.getElementById('i'),B=document.getElementById('b');
 const ST=document.getElementById('st'),MN=document.getElementById('mn'),SS=document.getElementById('stats');
-let H=[],base=location.origin+'/v1';
+let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false;
 
 async function init(){
   try{
@@ -87,6 +89,24 @@ async function init(){
       if(md.data?.[0])MN.textContent=md.data[0].id;
     }
   }catch(e){ST.textContent='offline';ST.className='badge'}
+}
+
+function esc(s){
+  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function setGenerating(v){
+  isGenerating=v;
+  B.classList.toggle('stop',v);
+  B.innerHTML=v?'&#x25A0;':'&#x2191;';
+  B.title=v?'Stop generating':'Send';
+}
+
+function stopGeneration(){
+  if(!activeController||stopRequested)return;
+  stopRequested=true;
+  SS.textContent='stopping...';
+  activeController.abort();
 }
 
 function md(s){
@@ -138,23 +158,27 @@ function addMsg(role,text){
 }
 
 async function send(){
+  if(isGenerating){stopGeneration();return}
   let t=I.value.trim();if(!t)return;
-  I.value='';I.style.height='auto';B.disabled=true;
+  I.value='';I.style.height='auto';
   addMsg('user',t);H.push({role:'user',content:t});
   let bbl=addMsg('assistant','');
   let cur=document.createElement('span');cur.className='cursor';bbl.appendChild(cur);
-  let raw='',display='',tokens=0,t0=performance.now(),thinking=false;
+  let raw='',tokens=0,t0=performance.now(),thinking=false,stopped=false;
+  activeController=new AbortController();stopRequested=false;setGenerating(true);
   try{
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:MN.textContent||'qwen',messages:H,stream:true,max_tokens:512,temperature:0.7})});
-    if(!r.ok){let e=await r.json().catch(()=>({}));bbl.textContent='Error: '+(e.error?.message||r.statusText);B.disabled=false;return}
+      body:JSON.stringify({model:MN.textContent||'qwen',messages:H,stream:true,max_tokens:512,temperature:0.7}),
+      signal:activeController.signal});
+    if(!r.ok){let e=await r.json().catch(()=>({}));throw new Error(e.error?.message||r.statusText)}
+    if(!r.body)throw new Error('Streaming response missing body');
     let rd=r.body.getReader(),dc=new TextDecoder(),buf='';
-    while(true){
+    stream:while(true){
       let{done,value}=await rd.read();if(done)break;
       buf+=dc.decode(value,{stream:true});let ls=buf.split('\n');buf=ls.pop()||'';
       for(let l of ls){
-        if(!l.startsWith('data: '))continue;let p=l.slice(6);if(p==='[DONE]')break;
+        if(!l.startsWith('data: '))continue;let p=l.slice(6);if(p==='[DONE]')break stream;
         try{let c=JSON.parse(p).choices?.[0]?.delta?.content;
           if(c){tokens++;raw+=c;
             // Track <think>...</think> reasoning blocks
@@ -181,16 +205,36 @@ async function send(){
         }catch(e){}
       }
     }
-    // Final: store clean answer in history (no think tags)
-    let cleanAnswer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
-    H.push({role:'assistant',content:cleanAnswer});
+  }catch(e){
+    if(stopRequested||e.name==='AbortError'){stopped=true}
+    else bbl.textContent='Error: '+e.message
+  }
+  if(cur.parentNode)cur.remove();
+  highlightAll();
+  activeController=null;stopRequested=false;setGenerating(false);I.focus();
+  let cleanAnswer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
+  if(cleanAnswer)H.push({role:'assistant',content:cleanAnswer});
+  if(stopped){
+    let meta=document.createElement('div');meta.className='meta';
+    let el=(performance.now()-t0)/1000;
+    if(cleanAnswer){
+      SS.textContent=tokens+' tokens \u00b7 stopped';
+      meta.textContent=tokens+' tokens \u00b7 stopped \u00b7 '+el.toFixed(1)+'s';
+    }else{
+      bbl.innerHTML='<p><em>Stopped.</em></p>';
+      SS.textContent='stopped';
+      meta.textContent='stopped \u00b7 '+el.toFixed(1)+'s';
+    }
+    bbl.parentElement.appendChild(meta);
+    return;
+  }
+  if(cleanAnswer){
     let el=(performance.now()-t0)/1000,tps=tokens/el;
     SS.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s';
     let meta=document.createElement('div');meta.className='meta';
     meta.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s \u00b7 '+el.toFixed(1)+'s';
     bbl.parentElement.appendChild(meta);
-  }catch(e){bbl.textContent='Error: '+e.message}
-  if(cur.parentNode)cur.remove();highlightAll();B.disabled=false;I.focus();
+  }
 }
 
 function copyCode(btn){
@@ -205,7 +249,7 @@ function highlightAll(){document.querySelectorAll('pre code[class^="language-"]'
 })}
 I.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
 I.addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,140)+'px'});
-init();I.focus();
+init();setGenerating(false);I.focus();
 </script>
 </body>
 </html>

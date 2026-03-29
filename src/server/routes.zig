@@ -10,17 +10,65 @@ const Model = @import("../model/loader.zig").Model;
 
 const log = std.log.scoped(.routes);
 
+pub const ServerState = struct {
+    started_at: i64,
+    active_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    queued_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    generation_mutex: std.Thread.Mutex = .{},
+
+    pub fn init(started_at: i64) ServerState {
+        return .{ .started_at = started_at };
+    }
+
+    pub fn uptimeSeconds(self: *const ServerState, now: i64) u64 {
+        return @intCast(@max(now - self.started_at, 0));
+    }
+
+    pub fn snapshot(self: *const ServerState, now: i64) HealthSnapshot {
+        return .{
+            .active_requests = self.active_requests.load(.monotonic),
+            .queued_requests = self.queued_requests.load(.monotonic),
+            .uptime_seconds = self.uptimeSeconds(now),
+        };
+    }
+};
+
+const HealthSnapshot = struct {
+    active_requests: u32,
+    queued_requests: u32,
+    uptime_seconds: u64,
+};
+
+const GenerationGuard = struct {
+    state: *ServerState,
+
+    fn acquire(state: *ServerState) GenerationGuard {
+        _ = state.queued_requests.fetchAdd(1, .monotonic);
+        state.generation_mutex.lock();
+        _ = state.queued_requests.fetchSub(1, .monotonic);
+        _ = state.active_requests.fetchAdd(1, .monotonic);
+        return .{ .state = state };
+    }
+
+    fn release(self: *GenerationGuard) void {
+        _ = self.state.active_requests.fetchSub(1, .monotonic);
+        self.state.generation_mutex.unlock();
+    }
+};
+
 /// Handle one HTTP connection: parse request, dispatch to endpoint, send response.
 /// @param conn Active client connection to read from and write to.
 /// @param engine Inference engine for running generation.
 /// @param tokenizer Tokenizer for prompt encoding and token decoding.
 /// @param model Loaded model (used for model name in API responses).
+/// @param server_state Shared server metrics and generation lock.
 /// @param allocator Allocator for per-request temporaries.
 pub fn handleConnection(
     conn: *http.Connection,
     engine: *forward_mod.InferenceEngine,
     tokenizer: *tokenizer_mod.Tokenizer,
     model: *Model,
+    server_state: *ServerState,
     allocator: std.mem.Allocator,
 ) !void {
     const request = conn.readRequest() catch |err| {
@@ -33,13 +81,13 @@ pub fn handleConnection(
 
     // Route dispatch
     if (request.method == .GET and std.mem.eql(u8, request.path, "/health")) {
-        try handleHealth(conn, engine, model);
+        try handleHealth(conn, model, server_state);
     } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/models")) {
         try handleModels(conn, model);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/completions")) {
-        try handleChatCompletions(conn, engine, tokenizer, model, request.body, allocator);
+        try handleChatCompletions(conn, engine, tokenizer, model, server_state, request.body, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/completions")) {
-        try handleCompletions(conn, engine, tokenizer, model, request.body, allocator);
+        try handleCompletions(conn, engine, tokenizer, model, server_state, request.body, allocator);
     } else if (request.method == .OPTIONS) {
         // CORS preflight
         try conn.sendJson(200, "{}");
@@ -52,13 +100,17 @@ pub fn handleConnection(
 
 // ── /health ──────────────────────────────────────────────────
 
-fn handleHealth(conn: *http.Connection, engine: *const forward_mod.InferenceEngine, model: *const Model) !void {
-    _ = engine;
+fn buildHealthJson(server_state: *const ServerState, model_name: []const u8, buf: []u8) ![]const u8 {
+    const now = std.time.timestamp();
+    const snapshot = server_state.snapshot(now);
+    return std.fmt.bufPrint(buf,
+        \\{{"status":"ok","model":"{s}","active_requests":{d},"queued_requests":{d},"uptime_seconds":{d}}}
+    , .{ model_name, snapshot.active_requests, snapshot.queued_requests, snapshot.uptime_seconds });
+}
+
+fn handleHealth(conn: *http.Connection, model: *const Model, server_state: *const ServerState) !void {
     var buf: [1024]u8 = undefined;
-    const model_name = modelName(model);
-    const body = std.fmt.bufPrint(&buf,
-        \\{{"status":"ok","model":"{s}"}}
-    , .{model_name}) catch return error.BufferTooSmall;
+    const body = buildHealthJson(server_state, modelName(model), &buf) catch return error.BufferTooSmall;
     try conn.sendJson(200, body);
 }
 
@@ -104,6 +156,7 @@ fn handleChatCompletions(
     engine: *forward_mod.InferenceEngine,
     tokenizer: *tokenizer_mod.Tokenizer,
     model: *const Model,
+    server_state: *ServerState,
     body: []const u8,
     allocator: std.mem.Allocator,
 ) !void {
@@ -135,18 +188,26 @@ fn handleChatCompletions(
     };
     defer allocator.free(raw_tokens);
 
-    const prompt_tokens = allocator.alloc(u32, raw_tokens.len + 1) catch {
+    const prepend_bos = tokenizer.shouldPrependBos();
+    const bos_extra: usize = if (prepend_bos) 1 else 0;
+    const prompt_tokens = allocator.alloc(u32, raw_tokens.len + bos_extra) catch {
         try conn.sendError(500, "internal_error", "Out of memory");
         return;
     };
     defer allocator.free(prompt_tokens);
-    prompt_tokens[0] = tokenizer.bosId();
-    @memcpy(prompt_tokens[1..], raw_tokens);
+    if (prepend_bos) {
+        prompt_tokens[0] = tokenizer.bosId();
+        @memcpy(prompt_tokens[1..], raw_tokens);
+    } else {
+        @memcpy(prompt_tokens, raw_tokens);
+    }
 
     const model_name = modelName(model);
     const ts = @divTrunc(std.time.timestamp(), 1);
     const max_tokens = parsed.max_tokens;
     const req_id = "chatcmpl-zinc0001"; // TODO: T013 unique IDs
+    var generation_guard = GenerationGuard.acquire(server_state);
+    defer generation_guard.release();
 
     if (parsed.stream) {
         // Streaming path — per-token SSE delivery
@@ -160,6 +221,7 @@ fn handleChatCompletions(
             , .{ req_id, ts, model_name }) catch return;
             conn.writeSseEvent(chunk) catch return;
         }
+        if (conn.isPeerClosed()) return;
 
         // Prefill prompt tokens
         var state = forward_mod.DecodeState.init(allocator);
@@ -168,6 +230,7 @@ fn handleChatCompletions(
             conn.writeSseDone() catch {};
             return;
         };
+        if (conn.isPeerClosed()) return;
 
         // Decode loop with buffered stop detection.
         // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
@@ -186,6 +249,8 @@ fn handleChatCompletions(
             generated = 1;
 
             while (generated <= max_tokens and prev_token != eos and !stopped) {
+                if (conn.isPeerClosed()) return;
+
                 // Accumulate this token's decoded text
                 var dec_buf: [256]u8 = undefined;
                 const tok_text = tokenizer.decodeToken(prev_token, &dec_buf);
@@ -232,7 +297,9 @@ fn handleChatCompletions(
 
                 // Generate next token
                 if (generated < max_tokens) {
+                    if (conn.isPeerClosed()) return;
                     engine.decodeStep(&state, prev_token) catch break;
+                    if (conn.isPeerClosed()) return;
                     prev_token = engine.sampleGreedy();
                     generated += 1;
                 } else break;
@@ -313,6 +380,7 @@ fn handleCompletions(
     engine: *forward_mod.InferenceEngine,
     tokenizer: *tokenizer_mod.Tokenizer,
     model: *const Model,
+    server_state: *ServerState,
     body: []const u8,
     allocator: std.mem.Allocator,
 ) !void {
@@ -333,17 +401,25 @@ fn handleCompletions(
     };
     defer allocator.free(raw_tokens);
 
-    const prompt_tokens = allocator.alloc(u32, raw_tokens.len + 1) catch {
+    const prepend_bos = tokenizer.shouldPrependBos();
+    const bos_extra: usize = if (prepend_bos) 1 else 0;
+    const prompt_tokens = allocator.alloc(u32, raw_tokens.len + bos_extra) catch {
         try conn.sendError(500, "internal_error", "Out of memory");
         return;
     };
     defer allocator.free(prompt_tokens);
-    prompt_tokens[0] = tokenizer.bosId();
-    @memcpy(prompt_tokens[1..], raw_tokens);
+    if (prepend_bos) {
+        prompt_tokens[0] = tokenizer.bosId();
+        @memcpy(prompt_tokens[1..], raw_tokens);
+    } else {
+        @memcpy(prompt_tokens, raw_tokens);
+    }
 
     const model_name = modelName(model);
     const ts = @divTrunc(std.time.timestamp(), 1);
     const req_id = "cmpl-zinc0001";
+    var generation_guard = GenerationGuard.acquire(server_state);
+    defer generation_guard.release();
 
     const output_tokens = forward_mod.generate(engine, prompt_tokens, parsed.max_tokens, tokenizer.eosId(), allocator) catch {
         try conn.sendError(500, "internal_error", "Generation failed");
@@ -530,9 +606,23 @@ fn serveChatUi(conn: *http.Connection) !void {
     try conn.stream.writeAll(html);
 }
 
+fn fallbackModelName(model: *const Model) []const u8 {
+    return switch (model.config.architecture) {
+        .qwen35 => "qwen3.5",
+        .qwen2_moe => "qwen3.5-35b",
+        .qwen2 => "qwen2",
+        .llama => "llama",
+        .mistral => "mistral",
+        .mamba => "mamba",
+        .jamba => "jamba",
+        .unknown => "zinc-model",
+    };
+}
+
 fn modelName(model: *const Model) []const u8 {
-    _ = model;
-    return "qwen3.5-35b"; // TODO: derive from GGUF metadata
+    return model.gguf_file.getString("general.basename") orelse
+        model.gguf_file.getString("general.name") orelse
+        fallbackModelName(model);
 }
 
 fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {
@@ -543,6 +633,7 @@ fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .chat_template = chat_template,
         .allocator = std.testing.allocator,
     };
@@ -676,6 +767,31 @@ test "buildChatPrompt uses tokenizer chat template helper" {
     var buf: [256]u8 = undefined;
     const prompt = try buildChatPrompt(&tok, "hello", &buf);
     try std.testing.expectEqualStrings("<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n", prompt);
+}
+
+test "ServerState snapshot tracks active queued and uptime" {
+    var state = ServerState.init(100);
+    _ = state.active_requests.fetchAdd(1, .monotonic);
+    _ = state.queued_requests.fetchAdd(2, .monotonic);
+
+    const snapshot = state.snapshot(112);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.active_requests);
+    try std.testing.expectEqual(@as(u32, 2), snapshot.queued_requests);
+    try std.testing.expectEqual(@as(u64, 12), snapshot.uptime_seconds);
+}
+
+test "buildHealthJson includes request counts and uptime" {
+    var state = ServerState.init(std.time.timestamp() - 5);
+    _ = state.active_requests.fetchAdd(1, .monotonic);
+    _ = state.queued_requests.fetchAdd(1, .monotonic);
+
+    var buf: [256]u8 = undefined;
+    const body = try buildHealthJson(&state, "qwen3.5-35b", &buf);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"qwen3.5-35b\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"active_requests\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"queued_requests\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"uptime_seconds\":") != null);
 }
 
 test "findFirstStop picks earliest chat control marker" {

@@ -77,8 +77,8 @@ async function remoteRun(
   prompt: string,
 ): Promise<{ exitCode: number; output: string }> {
   const runCmd =
-    `cd ${REMOTE_ZINC_DIR} && RADV_PERFTEST=coop_matrix ` +
-    `timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" 2>&1`;
+    `cd ${REMOTE_ZINC_DIR} && ZINC_DEBUG=1 RADV_PERFTEST=coop_matrix ` +
+    `timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" --debug 2>&1`;
 
   const { stdout, stderr, exitCode } = await runCommand(
     "ssh",

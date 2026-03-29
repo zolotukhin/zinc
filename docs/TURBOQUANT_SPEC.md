@@ -6,8 +6,6 @@ TurboQuant (ICLR 2026) is a two-stage vector quantization algorithm that compres
 
 This spec describes how to implement TurboQuant as ZINC's KV cache compression layer, using Vulkan compute shaders on RDNA3/RDNA4 GPUs.
 
-**Reference implementation:** `research/turboquant-pytorch-master/` (PyTorch, validated on Qwen2.5-3B)
-
 **Paper:** "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate" (arXiv:2504.19874)
 
 ## Why TurboQuant for ZINC
@@ -433,7 +431,7 @@ Each vector's packed data is aligned to 16 bytes (4 uint32s) for coalesced memor
 1. `src/turboquant/lloyd_max.zig` — Lloyd-Max solver using Gaussian approximation
    - Trapezoidal numerical integration for E[X | X in partition]
    - Produces `[n_levels]f32` centroids for given d and bits
-   - Unit test: compare centroids against PyTorch reference values
+   - Unit test: compare centroids against archived reference values
 
 2. `src/turboquant/rotation.zig` — Random orthogonal matrix generation
    - Gaussian RNG (Ziggurat or Box-Muller from `std.Random`)
@@ -445,7 +443,7 @@ Each vector's packed data is aligned to 16 bytes (4 uint32s) for coalesced memor
    - d × m matrix of N(0,1) values from seeded PRNG
    - Upload to VulkanBuffer
 
-**Validation:** Generate codebooks and matrices, compare against PyTorch reference implementation values for same seeds.
+**Validation:** Generate codebooks and matrices, compare against archived reference values for the same seeds.
 
 ### Phase B: Key/Value Compression Shaders
 
@@ -455,7 +453,7 @@ Each vector's packed data is aligned to 16 bytes (4 uint32s) for coalesced memor
 3. `src/turboquant/compress.zig` — Zig dispatch code (buffer management, push constants)
 
 **Validation:**
-- Compress random vectors on GPU, download, compare MSE against PyTorch reference
+- Compress random vectors on GPU, download, compare MSE against archived reference values
 - Verify bit-packing roundtrip: pack → unpack → values match
 - Measure compression throughput (target: >1M vectors/sec on RDNA4)
 
@@ -498,7 +496,7 @@ Each vector's packed data is aligned to 16 bytes (4 uint32s) for coalesced memor
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Rotation matmul overhead per token | +10-15% decode latency | Fuse with attention; rotate query not key |
-| QR decomposition precision in Zig | Wrong rotation → bad quantization | Validate against PyTorch reference with same seeds |
+| QR decomposition precision in Zig | Wrong rotation → bad quantization | Validate against archived reference values with the same seeds |
 | 3-bit packing complexity on GPU | Complex bit manipulation in shaders | Start with 2-bit and 4-bit (power-of-2 aligned), add 3-bit after |
 | Memory allocation for compressed pages | Fragmentation with mixed FP16/TQ pages | Uniform page size; pad compressed pages to match alignment |
 | Accuracy degradation on some model architectures | Some models may be more sensitive to KV quantization | Make TQ optional with quality presets; default to 4-bit for conservative use |

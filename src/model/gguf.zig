@@ -265,6 +265,18 @@ pub const GGUFFile = struct {
         return val.asU32();
     }
 
+    /// Look up a metadata boolean by key.
+    /// @param self Parsed GGUF file.
+    /// @param key Metadata key to search for.
+    /// @returns The stored boolean when present and typed as `.bool_`.
+    pub fn getBool(self: *const GGUFFile, key: []const u8) ?bool {
+        const val = self.metadata.get(key) orelse return null;
+        return switch (val) {
+            .bool_ => |b| b,
+            else => null,
+        };
+    }
+
     /// Find a tensor descriptor by name.
     /// @param self Parsed GGUF file.
     /// @param name Tensor name to look up.

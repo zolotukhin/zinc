@@ -11,10 +11,32 @@ const architecture_mod = @import("model/architecture.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
 const forward_mod = @import("compute/forward.zig");
 const graph_mod = @import("compute/graph.zig");
+const diagnostics_mod = @import("diagnostics.zig");
+const http_mod = @import("server/http.zig");
+const routes_mod = @import("server/routes.zig");
 const CommandPool = @import("vulkan/command.zig").CommandPool;
 const Graph = graph_mod.Graph;
 
 const log = std.log.scoped(.zinc);
+
+pub var is_debug_mode: bool = false;
+
+pub const std_options = std.Options{
+    .log_level = .debug,
+    .logFn = myLogFn,
+};
+
+pub fn myLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (level == .debug and !is_debug_mode) return;
+    const scope_prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    const prefix = @tagName(level) ++ scope_prefix;
+    std.debug.print(prefix ++ format ++ "\n", args);
+}
 
 // Force compilation and testing of all modules
 comptime {
@@ -38,6 +60,7 @@ comptime {
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
     _ = @import("scheduler/kv_cache.zig");
+    _ = @import("diagnostics.zig");
 }
 
 /// Runtime configuration built from CLI flags and default values.
@@ -63,8 +86,36 @@ pub const Config = struct {
     graph_dot_path: ?[]const u8 = null,
     /// Enable per-dispatch GPU profiling.
     profile: bool = false,
+    /// Enable verbose debug logging.
+    debug: bool = false,
     /// Print usage and exit.
     show_help: bool = false,
+    /// Run diagnostics and exit.
+    check: bool = false,
+};
+
+const ConnectionWorker = struct {
+    conn: http_mod.Connection,
+    engine: *forward_mod.InferenceEngine,
+    tokenizer: *tokenizer_mod.Tokenizer,
+    model: *loader_mod.Model,
+    server_state: *routes_mod.ServerState,
+
+    fn run(self: *ConnectionWorker) void {
+        defer std.heap.page_allocator.destroy(self);
+        defer self.conn.close();
+
+        routes_mod.handleConnection(
+            &self.conn,
+            self.engine,
+            self.tokenizer,
+            self.model,
+            self.server_state,
+            std.heap.page_allocator,
+        ) catch |err| {
+            log.warn("Request failed: {s}", .{@errorName(err)});
+        };
+    }
 };
 
 const PreparedPrompt = struct {
@@ -92,6 +143,8 @@ const banner =
     \\  --graph-report <path>    Write decode-graph analysis JSON report
     \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
     \\  --profile                Enable per-dispatch GPU timing profiling
+    \\  --debug                  Enable verbose debug logging
+    \\  --check                  Run system diagnostics and verify dependencies
     \\  -h, --help               Show this help
     \\
 ;
@@ -152,6 +205,10 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             config.graph_dot_path = args[i];
         } else if (std.mem.eql(u8, arg, "--profile")) {
             config.profile = true;
+        } else if (std.mem.eql(u8, arg, "--debug")) {
+            config.debug = true;
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            config.check = true;
         } else {
             return error.UnknownArgument;
         }
@@ -314,6 +371,15 @@ pub fn main() !void {
         return;
     }
 
+    if (config.check) {
+        diagnostics_mod.run(allocator) catch |err| {
+            log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
+        };
+        return;
+    }
+
+    is_debug_mode = config.debug or std.posix.getenv("ZINC_DEBUG") != null;
+
     if (config.model_path == null) {
         log.warn("No model specified (-m). Use --help for usage.", .{});
         return;
@@ -377,7 +443,7 @@ pub fn main() !void {
     }
 
     if (config.prompt) |prompt| {
-        log.info("Prompt: {s}", .{prompt});
+        log.debug("Prompt: {s}", .{prompt});
 
         // Initialize native BPE tokenizer from GGUF metadata
         var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
@@ -389,7 +455,7 @@ pub fn main() !void {
         var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, config.chat, allocator);
         defer prepared_prompt.deinit(allocator);
         if (config.chat) {
-            log.info("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
+            log.debug("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
         }
 
         // Tokenize prompt
@@ -397,12 +463,18 @@ pub fn main() !void {
         defer allocator.free(raw_tokens);
 
         // Prepend BOS token
-        const prompt_tokens = try allocator.alloc(u32, raw_tokens.len + 1);
-        prompt_tokens[0] = tokenizer.bosId();
-        @memcpy(prompt_tokens[1..], raw_tokens);
+        const prepend_bos = tokenizer.shouldPrependBos();
+        const bos_extra: usize = if (prepend_bos) 1 else 0;
+        const prompt_tokens = try allocator.alloc(u32, raw_tokens.len + bos_extra);
+        if (prepend_bos) {
+            prompt_tokens[0] = tokenizer.bosId();
+            @memcpy(prompt_tokens[1..], raw_tokens);
+        } else {
+            @memcpy(prompt_tokens, raw_tokens);
+        }
         defer allocator.free(prompt_tokens);
 
-        log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
+        log.debug("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
         // Decode prompt tokens for verification
         {
             var pt_buf: std.ArrayList(u8) = .{};
@@ -414,7 +486,7 @@ pub fn main() !void {
                     try pt_buf.appendSlice(allocator, "<?>");
                 }
             }
-            log.info("Prompt decoded: \"{s}\"", .{pt_buf.items});
+            log.debug("Prompt decoded: \"{s}\"", .{pt_buf.items});
         }
 
         // Generate
@@ -423,7 +495,7 @@ pub fn main() !void {
         defer allocator.free(output_tokens);
 
         // Output token IDs
-        log.info("Output tokens ({d}): {any}", .{
+        log.debug("Output tokens ({d}): {any}", .{
             output_tokens.len,
             output_tokens[0..@min(output_tokens.len, 20)],
         });
@@ -433,13 +505,13 @@ pub fn main() !void {
             const show_n = @min(output_tokens.len, 5);
             for (0..show_n) |ti| {
                 const tok_str = if (output_tokens[ti] < tokenizer.vocab.len) tokenizer.vocab[output_tokens[ti]] else "?";
-                log.info("  gen[{d}]: id={d} \"{s}\"", .{ ti, output_tokens[ti], tok_str });
+                log.debug("  gen[{d}]: id={d} \"{s}\"", .{ ti, output_tokens[ti], tok_str });
             }
         }
         // Check specific token logits (Paris=11751, not=524)
         {
             const logits_ptr2: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
-            log.info("  logit[11751 'Paris']={d:.4} logit[524 'not']={d:.4} logit[264 'a']={d:.4}", .{
+            log.debug("  logit[11751 'Paris']={d:.4} logit[524 'not']={d:.4} logit[264 'a']={d:.4}", .{
                 logits_ptr2[11751], logits_ptr2[524], logits_ptr2[264],
             });
         }
@@ -469,7 +541,7 @@ pub fn main() !void {
             }
             for (0..5) |k| {
                 const tok_str = if (top_ids[k] < tokenizer.vocab.len) tokenizer.vocab[top_ids[k]] else "?";
-                log.info("  logit #{d}: id={d} val={d:.4} \"{s}\"", .{ k, top_ids[k], top_vals[k], tok_str });
+                log.debug("  logit #{d}: id={d} val={d:.4} \"{s}\"", .{ k, top_ids[k], top_vals[k], tok_str });
             }
             // Also check: are logits mostly zero? NaN? Inf?
             var n_zero: u32 = 0;
@@ -482,7 +554,7 @@ pub fn main() !void {
                 if (std.math.isInf(v)) n_inf += 1;
                 sum_abs += @abs(@as(f64, v));
             }
-            log.info("  logit stats: zeros={d} NaN={d} Inf={d} mean_abs={d:.4}", .{
+            log.debug("  logit stats: zeros={d} NaN={d} Inf={d} mean_abs={d:.4}", .{
                 n_zero, n_nan, n_inf, sum_abs / @as(f64, @floatFromInt(vocab_size)),
             });
         }
@@ -513,8 +585,6 @@ pub fn main() !void {
         };
         defer tokenizer.deinit();
 
-        // Start HTTP server
-        const http_mod = @import("server/http.zig");
         var server = http_mod.Server.init(allocator, config.port) catch |err| {
             log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
             std.process.exit(1);
@@ -539,11 +609,11 @@ pub fn main() !void {
         posix.sigaction(posix.SIG.INT, &sa, null);
         posix.sigaction(posix.SIG.TERM, &sa, null);
 
-        // Server loop — accepts connections and handles requests sequentially.
-        // Each request runs to completion before the next is accepted.
-        // Concurrent streaming (US2) requires a poll-based event loop — deferred
-        // to a future iteration since the inference engine is single-threaded
-        // and GPU-bound (true concurrency needs batched multi-sequence decode).
+        var server_state = routes_mod.ServerState.init(std.time.timestamp());
+
+        // Server loop — accepts connections concurrently so operational endpoints
+        // like /health remain responsive, while generation itself is serialized
+        // behind a shared lock inside the route handlers.
         while (!Handler.shutdown_requested) {
             var conn = server.accept() catch |err| {
                 if (Handler.shutdown_requested) break;
@@ -551,11 +621,32 @@ pub fn main() !void {
                 continue;
             };
 
-            const routes = @import("server/routes.zig");
-            routes.handleConnection(&conn, &engine, &tokenizer, &model, allocator) catch |err| {
-                log.warn("Request failed: {s}", .{@errorName(err)});
+            const worker = std.heap.page_allocator.create(ConnectionWorker) catch |err| {
+                log.warn("Failed to allocate connection worker: {s}", .{@errorName(err)});
+                conn.close();
+                continue;
             };
-            conn.close();
+            worker.* = .{
+                .conn = conn,
+                .engine = &engine,
+                .tokenizer = &tokenizer,
+                .model = &model,
+                .server_state = &server_state,
+            };
+
+            const thread = std.Thread.spawn(.{}, ConnectionWorker.run, .{worker}) catch |err| {
+                log.warn("Failed to spawn connection worker: {s}", .{@errorName(err)});
+                std.heap.page_allocator.destroy(worker);
+                conn.close();
+                continue;
+            };
+            thread.detach();
+        }
+
+        while (server_state.active_requests.load(.monotonic) != 0 or
+            server_state.queued_requests.load(.monotonic) != 0)
+        {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
         }
         log.info("Shutting down...", .{});
     }
@@ -636,6 +727,7 @@ fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {
         .scores = null,
         .bos_id = 1,
         .eos_id = 2,
+        .prepend_bos = true,
         .chat_template = chat_template,
         .allocator = std.testing.allocator,
     };

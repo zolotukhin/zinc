@@ -175,7 +175,7 @@ pub fn buildDecodeGraphDetailed(config: *const ModelConfig, allocator: std.mem.A
     return switch (config.architecture) {
         .llama, .mistral, .qwen2 => try buildLlamaDecodeGraph(config, allocator, gf),
         .qwen2_moe => try buildMoeDecodeGraph(config, allocator, gf),
-        .mamba, .jamba => try buildMambaDecodeGraph(config, allocator, gf),
+        .qwen35, .mamba, .jamba => try buildMambaDecodeGraph(config, allocator, gf),
         .unknown => error.UnsupportedArchitecture,
     };
 }
@@ -799,6 +799,41 @@ test "buildDecodeGraph: moe 1 layer" {
         .ssm_dt_rank = 0,
         .ssm_n_group = 0,
         .full_attn_interval = 0,
+        .shared_expert_intermediate_dim = 0,
+    };
+
+    var g = try buildDecodeGraph(&config, allocator);
+    defer g.deinit();
+
+    try std.testing.expect(g.nodeCount() > 0);
+
+    const order = try g.topologicalOrder(allocator);
+    defer allocator.free(order);
+    try std.testing.expectEqual(g.nodeCount(), order.len);
+}
+
+test "buildDecodeGraph: qwen35 dense hybrid 1 layer" {
+    const allocator = std.testing.allocator;
+    const config = ModelConfig{
+        .architecture = .qwen35,
+        .n_layers = 1,
+        .n_heads = 16,
+        .n_kv_heads = 4,
+        .head_dim = 256,
+        .hidden_dim = 4096,
+        .intermediate_dim = 12288,
+        .vocab_size = 248320,
+        .context_length = 262144,
+        .rope_freq_base = 10000000.0,
+        .n_experts = 0,
+        .n_experts_used = 0,
+        .rope_dim = 64,
+        .ssm_d_conv = 4,
+        .ssm_d_inner = 4096,
+        .ssm_d_state = 128,
+        .ssm_dt_rank = 32,
+        .ssm_n_group = 16,
+        .full_attn_interval = 4,
         .shared_expert_intermediate_dim = 0,
     };
 

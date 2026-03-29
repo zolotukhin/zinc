@@ -812,7 +812,7 @@ export function summarizeFromSSHCommands(cmds: string[]): string {
   const writeCmds = cmds.filter(c =>
     c.includes("sed -i") || c.includes("tee") || c.includes("patch") ||
     c.includes("cmake --build") || c.includes("cat >") || c.includes("echo ") && c.includes(">") ||
-    c.includes("systemctl") || c.includes("python3 -c")
+    c.includes("systemctl") || c.includes("node -e")
   );
   if (writeCmds.length > 0) {
     // Extract the essence of the last modification
@@ -960,7 +960,7 @@ async function runBenchmark(): Promise<BenchResult> {
 
   // 1. Prefill (large prompt, small output)
   const prefillResult = await callLLM(
-    "You are a helpful coding assistant. Analyze this Python code:\n\n" +
+    "You are a helpful coding assistant. Analyze this async service code:\n\n" +
       "import asyncio, aiohttp, time, hashlib, json, logging\n" +
       "from dataclasses import dataclass, field\nfrom typing import Optional, List, Dict, Any\n" +
       "from collections import defaultdict\n\nlogger = logging.getLogger(__name__)\n\n" +
@@ -982,7 +982,7 @@ async function runBenchmark(): Promise<BenchResult> {
 
   // 2. Generation (long output)
   const genResult = await callLLM(
-    "Write a Python BST with insert, delete, search, all traversals. Type hints.",
+    "Write a TypeScript BST with insert, delete, search, all traversals. Type annotations.",
     { thinking: false, maxTokens: 1024 },
   );
   details.push(

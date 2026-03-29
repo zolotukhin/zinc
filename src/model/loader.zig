@@ -18,6 +18,7 @@ pub const Architecture = enum {
     mistral,
     qwen2,
     qwen2_moe,
+    qwen35,
     mamba,
     jamba,
     unknown,
@@ -117,6 +118,7 @@ fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "qwen2moe")) return .qwen2_moe;
     if (std.mem.eql(u8, arch_str, "qwen3moe")) return .qwen2_moe;
     if (std.mem.eql(u8, arch_str, "qwen35moe")) return .qwen2_moe;
+    if (std.mem.eql(u8, arch_str, "qwen35")) return .qwen35;
     if (std.mem.eql(u8, arch_str, "mamba")) return .mamba;
     if (std.mem.eql(u8, arch_str, "jamba")) return .jamba;
     return .unknown;
@@ -208,6 +210,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
+    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse 4;
 
     log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
         arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
@@ -261,7 +264,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .ssm_d_state = ssm_d_state,
         .ssm_dt_rank = ssm_dt_rank,
         .ssm_n_group = ssm_n_group,
-        .full_attn_interval = 4, // default for Qwen3.5
+        .full_attn_interval = full_attn_interval,
         .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
     };
 }
@@ -390,6 +393,7 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.llama, parseArchitecture("llama"));
     try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen2"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
+    try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));
     try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }

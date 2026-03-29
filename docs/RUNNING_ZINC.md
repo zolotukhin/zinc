@@ -90,6 +90,25 @@ Once you see `Server listening on 0.0.0.0:8080`, open your browser:
 - **Chat UI**: [http://localhost:8080/](http://localhost:8080/) — a ChatGPT-like interface with streaming, markdown rendering, syntax highlighting, and copy buttons on code blocks.
 - **Health**: [http://localhost:8080/health](http://localhost:8080/health)
 
+### RDNA4 test-node deploy
+
+If you want to rebuild and restart the shared RDNA4 test server from your current checkout, use the helper script:
+
+```bash
+./scripts/deploy_rdna4_server.sh
+```
+
+That script uses `.env` for `ZINC_HOST`, `ZINC_USER`, and `ZINC_PORT`, syncs the repo to `/root/zinc`, rebuilds it, restarts port `9090`, and finishes with a remote `/health` check.
+
+Useful flags:
+
+- `--no-sync` when the remote checkout is already current
+- `--no-build` when you only want a restart
+- `--no-restart` when you only want to push code and compile
+- `--no-healthcheck` when you will validate separately
+
+Current limitation: generation is still serialized behind one engine lock. Overlapping clients complete cleanly, `/health` stays responsive, and queued generation work is reported, but decode itself is not yet parallel.
+
 ## OpenAI-compatible API
 
 The server exposes `/v1` endpoints that work as a drop-in replacement for OpenAI and llama-server clients.
@@ -127,21 +146,6 @@ curl http://localhost:8080/v1/models
 
 ### Use with OpenAI SDKs
 
-Python:
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
-
-# Streaming
-for chunk in client.chat.completions.create(
-    model="qwen3.5-35b",
-    messages=[{"role": "user", "content": "Hello!"}],
-    stream=True,
-):
-    print(chunk.choices[0].delta.content or "", end="", flush=True)
-```
-
 Node.js:
 
 ```javascript
@@ -162,7 +166,7 @@ for await (const chunk of stream) {
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Built-in chat interface |
-| GET | `/health` | Server status and loaded model |
+| GET | `/health` | Server status, loaded model, active/queued requests, uptime |
 | GET | `/v1/models` | List available models |
 | POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
 | POST | `/v1/completions` | Text completion |
@@ -219,7 +223,7 @@ Use `-d` to pick the GPU you actually want.
 
 ### The model path is wrong
 
-ZINC expects a GGUF file, not a Hugging Face directory or PyTorch checkpoint.
+ZINC expects a GGUF file, not a Hugging Face directory or a framework checkpoint.
 
 ### The machine builds, but runtime is unstable
 

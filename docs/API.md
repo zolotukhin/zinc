@@ -3,7 +3,7 @@
 ZINC exposes an OpenAI-compatible HTTP API. Point any OpenAI SDK client at ZINC by changing the base URL — no code changes required.
 
 ```bash
-# Start the server
+# Start the server (append --debug or use ZINC_DEBUG=1 for diagnostic logs)
 ./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
 
 # Use with any OpenAI client
@@ -123,33 +123,6 @@ curl -N http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-### Example: Python (OpenAI SDK)
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
-
-# Non-streaming
-response = client.chat.completions.create(
-    model="qwen",
-    messages=[{"role": "user", "content": "What is 2+2?"}],
-    max_tokens=128,
-)
-print(response.choices[0].message.content)
-
-# Streaming
-stream = client.chat.completions.create(
-    model="qwen",
-    messages=[{"role": "user", "content": "Explain gravity"}],
-    max_tokens=256,
-    stream=True,
-)
-for chunk in stream:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="", flush=True)
-```
-
 ### Example: Node.js (OpenAI SDK)
 
 ```typescript
@@ -264,29 +237,10 @@ Server health check for monitoring and load balancers. Returns 200 when ready, 5
 ```json
 {
   "status": "ok",
-  "gpu": {
-    "name": "AMD Radeon Graphics (RADV GFX1201)",
-    "vendor": "amd_rdna4",
-    "vram_total_mb": 32624,
-    "vram_used_mb": 21504,
-    "bandwidth_gbps": 576,
-    "compute_units": 64
-  },
-  "model": {
-    "name": "Qwen3.5-35B-A3B-Q4_K",
-    "architecture": "qwen35moe",
-    "parameters": "34.66B",
-    "layers": 40,
-    "context_length": 32768,
-    "quantization": "Q4_K"
-  },
-  "inference": {
-    "active_requests": 2,
-    "max_parallel": 4,
-    "tokens_generated": 142857,
-    "avg_decode_tps": 108.5,
-    "uptime_seconds": 3600
-  }
+  "model": "qwen3.5-35b",
+  "active_requests": 1,
+  "queued_requests": 0,
+  "uptime_seconds": 3600
 }
 ```
 

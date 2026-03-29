@@ -4,6 +4,7 @@
   "private": true,
   "author": "Stepan Zolotukhin",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "test:api": "bun tests/test_openai_sdk.ts"
   }
 }

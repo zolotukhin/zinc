@@ -57,6 +57,7 @@ Typical RDNA4 runtime setup:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
+# Optional: append --debug or use ZINC_DEBUG=1 for diagnostic logs
 ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "hello"
 ```
 

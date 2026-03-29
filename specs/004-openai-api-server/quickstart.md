@@ -21,9 +21,13 @@ curl http://localhost:8080/v1/models
 ```
 
 ## OpenAI SDK
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
-r = client.chat.completions.create(model="qwen", messages=[{"role":"user","content":"Hi"}])
-print(r.choices[0].message.content)
+```typescript
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "unused" });
+const r = await client.chat.completions.create({
+  model: "qwen",
+  messages: [{ role: "user", content: "Hi" }],
+});
+console.log(r.choices[0]?.message?.content);
 ```

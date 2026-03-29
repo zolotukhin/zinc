@@ -9,7 +9,7 @@ Instructions for AI coding agents working on this repository.
 zig build
 
 # Run inference
-./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3]
+ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3] [--debug]
 
 # Run unit tests
 zig build test
@@ -41,7 +41,7 @@ src/
 │   ├── gguf.zig                #   GGUF format parser (header, metadata, tensors)
 │   ├── loader.zig              #   Load GGUF → GPU buffers (mmap + DMA)
 │   ├── architecture.zig        #   Compute graph builders per arch (Llama, Qwen, Mamba)
-│   └── tokenizer.zig           #   Text ↔ tokens (shells to Python, native Zig planned)
+│   └── tokenizer.zig           #   Native Zig text ↔ token conversion and chat templating
 ├── compute/                    # Inference dispatch
 │   ├── graph.zig               #   Static compute graph IR (nodes, deps, topo sort)
 │   ├── dmmv.zig                #   Decode matmul-vec dispatch (Q4_K, Q8_0, F16)
@@ -193,10 +193,13 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST '
     -H "Content-Type: application/json" \
     -d "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" > /dev/null
   for i in 1 2 3; do
-    curl -s http://localhost:8088/v1/chat/completions \
+    out=$(curl -s http://localhost:8088/v1/chat/completions \
       -H "Content-Type: application/json" \
       -d "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\":\"The capital of France is\"}],\"max_tokens\":256,\"stream\":false}" \
-      | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get(\"timings\",{}); print(f\"Run {i}: gen {t.get(\"predicted_per_second\",0):.1f} tok/s | prompt {t.get(\"prompt_per_second\",0):.1f} tok/s\")"
+    )
+    gen=$(printf "%s" "$out" | jq -r ".timings.predicted_per_second // 0")
+    prompt=$(printf "%s" "$out" | jq -r ".timings.prompt_per_second // 0")
+    printf "Run %d: gen %s tok/s | prompt %s tok/s\n" "$i" "$gen" "$prompt"
   done
 '
 # Expected: ~107 tok/s generation, ~220 tok/s prompt (runs 2-3, after warmup)
@@ -209,7 +212,7 @@ source .env
 
 # Sync source to test node
 rsync -az --delete --exclude '.zig-cache' --exclude 'zig-out' --exclude 'node_modules' \
-  --exclude '.DS_Store' --exclude 'site' --exclude 'research/turboquant-pytorch-master' \
+  --exclude '.DS_Store' --exclude 'site' \
   -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/root/zinc/
 
 # Build and run

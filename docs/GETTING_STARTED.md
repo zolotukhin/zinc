@@ -108,6 +108,7 @@ Once CLI mode works, start the server to get a ChatGPT-like web UI:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
+# Optional: append --debug or use ZINC_DEBUG=1 for diagnostic logs
 ./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
 ```
 

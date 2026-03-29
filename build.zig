@@ -138,7 +138,10 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_bun_tests = b.addSystemCommand(&.{ "bun", "test" });
+    run_bun_tests.setCwd(b.path("."));
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_bun_tests.step);
 }
