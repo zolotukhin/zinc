@@ -144,7 +144,7 @@ fn handleChatCompletions(
         // Decode loop with buffered stop detection.
         // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
         const eos = tokenizer.eosId();
-        const stop_str = "<|im_end|>";
+        const stop_strs = [_][]const u8{ "<|im_end|>", "<|im_start|>" };
         var pending_tokens: [16]u32 = undefined; // tokens waiting to be sent
         var pending_count: usize = 0;
         var gen_text_buf: [4096]u8 = undefined; // accumulated decoded text for stop check
@@ -172,24 +172,28 @@ fn handleChatCompletions(
                     pending_count += 1;
                 }
 
-                // Check for full stop match
-                if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], stop_str)) |_| {
-                    stopped = true;
-                    break;
+                // Check for full stop match against all stop strings
+                for (stop_strs) |ss| {
+                    if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], ss)) |_| {
+                        stopped = true;
+                        break;
+                    }
                 }
+                if (stopped) break;
 
-                // Check if any suffix of the accumulated text could be a prefix of the stop string
+                // Check if any suffix could be a prefix of any stop string
                 var is_partial = false;
-                {
-                    const check_len = @min(gen_text_len, stop_str.len - 1);
+                for (stop_strs) |ss| {
+                    const check_len = @min(gen_text_len, ss.len - 1);
                     var sl: usize = 1;
                     while (sl <= check_len) : (sl += 1) {
                         const suffix = gen_text_buf[gen_text_len - sl .. gen_text_len];
-                        if (std.mem.startsWith(u8, stop_str, suffix)) {
+                        if (std.mem.startsWith(u8, ss, suffix)) {
                             is_partial = true;
                             break;
                         }
                     }
+                    if (is_partial) break;
                 }
 
                 if (!is_partial) {
@@ -239,7 +243,7 @@ fn handleChatCompletions(
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
         const ns_eos = tokenizer.eosId();
-        const ns_stop = "<|im_end|>";
+        const ns_stops = [_][]const u8{ "<|im_end|>", "<|im_start|>" };
         if (prompt_tokens.len > 0 and max_tokens > 0) {
             var prev = engine.sampleGreedy();
             ns_gen = 1;
@@ -247,10 +251,15 @@ fn handleChatCompletions(
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
-                if (std.mem.indexOf(u8, text_buf.items, ns_stop)) |pos| {
-                    text_buf.shrinkRetainingCapacity(pos);
-                    break;
+                var hit = false;
+                for (ns_stops) |ns_stop| {
+                    if (std.mem.indexOf(u8, text_buf.items, ns_stop)) |pos| {
+                        text_buf.shrinkRetainingCapacity(pos);
+                        hit = true;
+                        break;
+                    }
                 }
+                if (hit) break;
                 engine.decodeStep(&state2, prev) catch break;
                 prev = engine.sampleGreedy();
                 ns_gen += 1;
