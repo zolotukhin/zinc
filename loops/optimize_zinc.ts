@@ -807,51 +807,66 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   diagnosis.push("## Forward Pass Architecture (Qwen3.5-35B-A3B = hybrid attention+SSM+MoE)");
   diagnosis.push("- 40 layers: every 4th (3,7,11,...,39) is full attention, rest are SSM/delta-net");
   diagnosis.push("- Full attention layers: separate attn_q/k/v + Q/K norm + IMRoPE (64/256 dims) + flash attention + sigmoid gate + output proj");
-  diagnosis.push("- SSM layers: GPU DMMV for projections (wqkv, attn_gate, ssm_alpha, ssm_beta) → CPU conv1d + delta-net state → GPU ssm_out");
-  diagnosis.push("- MoE FFN (all layers): router → softmax → top-8 experts → gate/up/SwiGLU/down → weighted accumulate + shared expert");
+  diagnosis.push("- SSM layers: TWO PATHS available (selected at runtime by pipeline availability):");
+  diagnosis.push("  - GPU path (runSsmLayerGpu): conv1d_silu.comp → delta_net.comp → gated_norm.comp → ssm_out DMMV — NO readback");
+  diagnosis.push("  - CPU fallback (runSsmLayerCpu): GPU projections → readback → CPU conv1d+delta-net → upload → GPU ssm_out");
+  diagnosis.push("  GPU path is gated by: if (self.elementwise.pipeline_ssm_conv1d != null)");
+  diagnosis.push("- MoE FFN (all layers): router → softmax_topk (GPU or CPU) → top-8 experts → gate/up/SwiGLU/down → weighted accumulate + shared expert");
+  diagnosis.push("  GPU router gated by: if (self.elementwise.pipeline_softmax_topk != null)");
+  diagnosis.push("  Shared expert gate: GPU sigmoid_scale_acc (gated by pipeline availability) or CPU readback fallback");
+  diagnosis.push("- Command buffer batching: single cmd buffer for all 40 layers, only submit for MoE expert ID readback");
   diagnosis.push("- head_dim=256 (from attention.key_length), hidden_dim=2048, n_heads=16, n_kv_heads=2");
   diagnosis.push("- rope_dim=64, rope_freq_base=10000000.0 (10M)");
+  diagnosis.push("- Profiling: --profile flag enables Vulkan timestamp queries + per-token GPU timing summary");
   diagnosis.push("");
-  diagnosis.push("## What's ALREADY FIXED (do not re-investigate)");
-  diagnosis.push("- ✅ Tokenizer: GPT-2 byte-to-unicode mapping, tokens match llama.cpp exactly");
-  diagnosis.push("- ✅ Q8_0/F16 DMMV dispatch: workgroup count (M+1)/2 not (M+63)/64");
-  diagnosis.push("- ✅ Flash attention page table: identity page_table_buf with page_size=1");
-  diagnosis.push("- ✅ Q+gate extraction: block-interleaved per head [Q_head, gate_head] (NOT element-interleaved)");
-  diagnosis.push("- ✅ Q/K per-head RMS norm using attn_q_norm/attn_k_norm weights");
-  diagnosis.push("- ✅ Attention gating: sigmoid_mul shader (attn_output * sigmoid(gate))");
-  diagnosis.push("- ✅ IMRoPE: rope_fused.comp with stride + rope_dim, only rotates 64/256 dims");
-  diagnosis.push("- ✅ head_dim from GGUF attention.key_length (256, not hidden_dim/n_heads=128)");
-  diagnosis.push("- ✅ rope_freq_base from GGUF (10M)");
-  diagnosis.push("- ✅ Shared expert: ffn_gate_shexp + ffn_up_shexp + ffn_down_shexp dispatched");
-  diagnosis.push("- ✅ MoE softmax over all experts before top-k selection");
-  diagnosis.push("- ✅ Conv1d kernel index: [ch * d_conv + ki] matching GGUF layout");
-  diagnosis.push("- ✅ Per-head L2 norm in SSM Q/K");
-  diagnosis.push("- ✅ Q scaling 1/sqrt(d_state) in delta-net");
-  diagnosis.push("- ✅ Prefill runs full transformer for each prompt token");
-  diagnosis.push("- ✅ Full 40-layer forward pass with per-layer descriptor pool reset");
+  diagnosis.push("## What's ALREADY IMPLEMENTED (do not re-implement)");
+  diagnosis.push("- ✅ CPU forward pass: all 40 layers produce correct coherent output at ~4 tok/s");
+  diagnosis.push("- ✅ GPU SSM shaders (ssm_conv1d.comp, ssm_delta_net.comp, ssm_gated_norm.comp) — written but PRODUCE WRONG OUTPUT");
+  diagnosis.push("- ✅ GPU softmax_topk.comp router shader — written but CRASHES RADV");
+  diagnosis.push("- ✅ GPU sigmoid_scale_acc.comp shared expert gate — written, status unknown");
+  diagnosis.push("- ✅ Command buffer batching across layers (single cmd buffer, pool reset once)");
+  diagnosis.push("- ✅ Persistent GPU SSM state buffers (conv: 3.75MB, recurrent: 80MB, allocated+zeroed at init)");
+  diagnosis.push("- ✅ Router output buffer (64 bytes host-visible for expert_ids+weights)");
+  diagnosis.push("- ✅ Pipeline infrastructure: 6 new pipelines in elementwise.zig with record methods");
+  diagnosis.push("- ✅ Descriptor set helpers: writeDescSet4, writeDescSet7 for new shaders");
+  diagnosis.push("- ✅ All 40 tests pass. Build clean on macOS (shaders skip) and Linux (shaders compile).");
   diagnosis.push("");
   diagnosis.push("## CURRENT STATE (2026-03-28)");
-  diagnosis.push("Output is CORRECT: 'The capital of France is' → 'Paris. The capital of Germany is Berlin...'");
-  diagnosis.push("All correctness bugs are FIXED. Do NOT change correctness-related code.");
-  diagnosis.push("All 26 tests pass. All changes MUST pass `zig build test`.");
+  diagnosis.push("CPU path: CORRECT output at ~4 tok/s. 'The capital of France is' → coherent reasoning.");
+  diagnosis.push("GPU SSM path: PRODUCES WRONG OUTPUT — shaders execute but numerical results are wrong.");
+  diagnosis.push("GPU softmax_topk: CRASHES RADV — shader may have subgroup/ballot incompatibility.");
+  diagnosis.push("All 40 tests pass. All changes MUST pass `zig build test`.");
   diagnosis.push("");
-  diagnosis.push("## PERFORMANCE BOTTLENECK ANALYSIS");
-  diagnosis.push("At ~4 tok/s with 0.4% bandwidth utilization, the GPU is IDLE almost all the time.");
-  diagnosis.push("The bottleneck is NOT shader speed — it's Vulkan command submission overhead.");
-  diagnosis.push("Each token requires ~1600 vkQueueSubmit calls (40 layers × ~40 ops/layer).");
-  diagnosis.push("Each submit has ~0.1-0.5ms kernel overhead → ~200ms wasted on fence management.");
-  diagnosis.push("Target: batch operations to achieve 5-10 submits/token → 27+ tok/s.");
+  diagnosis.push("## PRIORITY: DEBUG GPU SHADERS (this is the ONLY thing blocking 27+ tok/s)");
+  diagnosis.push("The GPU infrastructure is COMPLETE. The problem is shader correctness.");
+  diagnosis.push("");
+  diagnosis.push("### Bug 1: softmax_topk.comp crashes RADV");
+  diagnosis.push("- Uses GL_KHR_shader_subgroup_ballot (subgroupBallot, subgroupBallotFindLSB, subgroupBroadcast)");
+  diagnosis.push("- RADV may not support subgroupBroadcast with non-uniform index from subgroupBallotFindLSB");
+  diagnosis.push("- FIX APPROACH: simplify to use only subgroupMax + shared memory instead of ballot operations");
+  diagnosis.push("- Or use atomic operations in shared memory for top-k selection");
+  diagnosis.push("- Test by enabling the GPU router: change `if (false)` at the softmax_topk check to `if (self.elementwise.pipeline_softmax_topk != null)`");
+  diagnosis.push("");
+  diagnosis.push("### Bug 2: GPU SSM shaders produce wrong output");
+  diagnosis.push("- Three shaders in chain: ssm_conv1d → ssm_delta_net → ssm_gated_norm");
+  diagnosis.push("- To debug: add readback after EACH shader and compare vs CPU reference (runSsmLayerCpu logs SSM_DBG values)");
+  diagnosis.push("- Common issues: wrong buffer binding order, incorrect conv_out layout indexing in delta_net,");
+  diagnosis.push("  f16/f32 type detection wrong for conv kernel or ssm_a weights, state buffer not being updated correctly");
+  diagnosis.push("- CPU reference values are logged at layer 0: SSM_DBG L0 conv_out, delta_out, gated_norm");
+  diagnosis.push("- The conv_out buffer layout is: [x(d_inner)][k_groups(n_group*d_state)][v_groups(n_group*d_state)]");
+  diagnosis.push("  where conv_channels = d_inner + 2*n_group*d_state = 8192");
+  diagnosis.push("- Verify delta_net shader's Q/K/V extraction matches this layout");
+  diagnosis.push("");
+  diagnosis.push("### After fixing GPU shaders:");
+  diagnosis.push("- Enable GPU SSM path (runtime-gated by pipeline availability, no code change needed)");
+  diagnosis.push("- Enable GPU router (runtime-gated by pipeline availability)");
+  diagnosis.push("- Expected: ~151 submits → ~42 submits → significant tok/s improvement");
   diagnosis.push("");
   diagnosis.push("## APPROACHES THAT FAILED (do not retry):");
   diagnosis.push("- Spin-wait on fences (vkGetFenceStatus) — no improvement");
   diagnosis.push("- Simple submit elimination within existing architecture — too small an effect");
   diagnosis.push("- Pre-allocating SSM buffers — saves <1ms, irrelevant vs 200ms overhead");
-  diagnosis.push("");
-  diagnosis.push("## APPROACHES THAT SHOULD WORK:");
-  diagnosis.push("- Keep command buffer open across multiple layers (only submit for CPU readbacks)");
-  diagnosis.push("- Move SSM conv1d+delta-net to GPU compute shaders (eliminates 30 roundtrips)");
-  diagnosis.push("- Move router top-k to GPU (eliminates 40 readbacks)");
-  diagnosis.push("- Batch all 8 MoE expert DMMVs into 3 dispatches (gate_all, up_all, down_all)");
+  diagnosis.push("- Enabling GPU SSM/router without fixing shader bugs — produces wrong output/crashes");
   diagnosis.push("");
   diagnosis.push("## REFERENCE: llama.cpp implementation");
   diagnosis.push("On the remote node, the full Qwen3.5-MoE implementation is at:");
@@ -902,9 +917,13 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "src/compute/  — graph.zig, dmmv.zig, elementwise.zig, attention.zig, forward.zig",
     "src/shaders/  — dmmv_{q4k,q5k,q6k,q8_0,f16,f32}.comp, rms_norm_mul.comp,",
     "                swiglu.comp, rope_fused.comp, flash_attn.comp, sigmoid_mul.comp,",
-    "                vadd.comp, scale_accumulate.comp, deinterleave.comp, coop_matmul.comp",
-    "src/main.zig  — CLI, Vulkan init, model load, inference engine, forward pass",
-    "build.zig     — build system with conditional shader compilation",
+    "                vadd.comp, scale_accumulate.comp, deinterleave.comp, coop_matmul.comp,",
+    "                ssm_conv1d.comp, ssm_delta_net.comp, ssm_gated_norm.comp (NEW — GPU SSM),",
+    "                softmax_topk.comp (NEW — GPU MoE router),",
+    "                sigmoid_scale_acc.comp, scale_acc_sigmoid.comp (shared expert gate),",
+    "                argmax.comp, embed_dequant_q4k.comp",
+    "src/main.zig  — CLI (--profile flag), Vulkan init, model load, forward pass",
+    "build.zig     — build system with conditional shader compilation (27 shaders)",
     "```",
     "",
     "## Optimization History (last 20 cycles)",
