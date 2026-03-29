@@ -969,16 +969,18 @@ fn decodeStep(engine: *InferenceEngine) !void {
     const dt_rank: u32 = cfg.ssm_dt_rank;
     const conv_channels: u32 = if (d_inner > 0) d_inner + 2 * n_group * d_state else 0;
 
+    var batch1_chained = false; // true when previous MoE already dispatched this layer's batch1
+
     for (0..cfg.n_layers) |layer_idx| {
         const layer: u32 = @intCast(layer_idx);
         const lt = engine.layer_tensors[layer_idx];
         const is_full_attn = ((layer + 1) % full_attn_interval == 0);
 
         // ===== GPU BATCH 1: attn_norm → projections =====
-        // Batches RMS norm with following DMMVs — eliminates CPU norm + alloc.
-        {
+        // Skip if already dispatched by previous layer's merged MoE command.
+        if (!batch1_chained) {
             var cmd = try metal_command.beginCommand(engine.device.ctx);
-            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[0], hidden_dim, 1);
             cmd.barrier();
 
             if (is_full_attn) {
@@ -1106,11 +1108,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
             var expert_weights: [16]f32 = undefined;
             topKSoftmax(router_ptr[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
 
-            // Zero moe_out_buf
-            const moe_ptr: [*]f32 = @ptrCast(@alignCast(engine.moe_out_buf.cpu_ptr.?));
-            @memset(moe_ptr[0..hidden_dim], 0);
-
-            // Expert dispatch — parallel 3-phase: all gate+up → all SwiGLU → all down
+            // Expert dispatch — GPU: gate+up → SwiGLU → down → accumulate → [next batch1]
             const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
             const up_exps = lt.ffn_up_exps orelse return error.MissingTensor;
             const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
@@ -1166,29 +1164,72 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 if (down_shexp != null) {
                     dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
                 }
-                cmd.commitAndWait();
+                cmd.barrier();
 
-                // CPU weighted accumulate all expert outputs (trivial: n_experts × hidden_dim multiply-adds)
+                // Phase 4: GPU weighted accumulate — hidden += weight[i] * expert_down[i]
+                // Replaces CPU accumulate + FFN residual (eliminates moe_out_buf intermediary)
                 for (0..cfg.n_experts_used) |ei| {
-                    const weight = expert_weights[ei];
-                    const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?));
-                    for (0..hidden_dim) |i| moe_ptr[i] += weight * d_ptr[i];
+                    const w = expert_weights[ei];
+                    const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(w)) };
+                    const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.expert_down_bufs[ei] };
+                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+                    cmd.barrier();
                 }
+
+                // Shared expert accumulate (if present)
                 if (has_shexp) {
-                    const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
                     if (shexp_gate_t != null) {
+                        // Sigmoid weight from GPU-computed value — must commit to read
+                        cmd.commitAndWait();
                         const sg_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
-                        const shexp_weight = 1.0 / (1.0 + @exp(-sg_ptr[0]));
-                        for (0..hidden_dim) |i| moe_ptr[i] += shexp_weight * d_ptr[i];
+                        const shexp_w = 1.0 / (1.0 + @exp(-sg_ptr[0]));
+                        cmd = try metal_command.beginCommand(engine.device.ctx);
+                        const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(shexp_w)) };
+                        const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
+                        cmd.barrier();
                     } else {
-                        for (0..hidden_dim) |i| moe_ptr[i] += d_ptr[i];
+                        const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                        const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
+                        cmd.barrier();
                     }
                 }
-            }
 
-            // FFN residual: hidden += moe_out (CPU, via UMA)
-            const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-            for (0..hidden_dim) |i| hidden_ptr[i] += moe_ptr[i];
+                // Phase 5: Chain next layer's batch1 (norm + projections) — saves 1 commitAndWait per layer
+                if (layer_idx + 1 < cfg.n_layers) {
+                    const next_layer: u32 = layer + 1;
+                    const next_lt = engine.layer_tensors[layer_idx + 1];
+                    const next_full_attn = ((next_layer + 1) % full_attn_interval == 0);
+
+                    dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx + 1], hidden_dim, 1);
+                    cmd.barrier();
+
+                    if (next_full_attn) {
+                        const q_tensor = next_lt.attn_q orelse return error.MissingTensor;
+                        const k_tensor = next_lt.attn_k orelse return error.MissingTensor;
+                        const v_tensor = next_lt.attn_v orelse return error.MissingTensor;
+                        const q_full_dim = q_dim * 2;
+                        dispatchDmmvOnCmd(engine, &cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
+                        dispatchDmmvOnCmd(engine, &cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
+                        dispatchDmmvOnCmd(engine, &cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+                    } else {
+                        const wqkv_t = next_lt.attn_qkv orelse return error.MissingTensor;
+                        const z_t = next_lt.attn_gate orelse return error.MissingTensor;
+                        const alpha_t = next_lt.ssm_alpha orelse return error.MissingTensor;
+                        const beta_t = next_lt.ssm_beta orelse return error.MissingTensor;
+                        dispatchDmmvOnCmd(engine, &cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
+                        dispatchDmmvOnCmd(engine, &cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+                        dispatchDmmvOnCmd(engine, &cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
+                        dispatchDmmvOnCmd(engine, &cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
+                    }
+                    batch1_chained = true;
+                } else {
+                    batch1_chained = false;
+                }
+
+                cmd.commitAndWait();
+            }
         } else {
             // Dense FFN (non-MoE) — norm_buf already set by GPU batch 2
             const gate_t = lt.ffn_gate orelse return error.MissingTensor;
@@ -1213,6 +1254,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
             const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
             const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
             for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
+            batch1_chained = false;
         }
     }
 
