@@ -12,6 +12,21 @@ import rehypeStringify from 'rehype-stringify';
 
 export async function getStaticPaths() {
   const docMeta: Record<string, { title: string; description: string; keywords: string }> = {
+    'getting-started': {
+      title: 'Getting Started with ZINC',
+      description: 'How to build ZINC, verify the Vulkan environment, load a GGUF model, and run your first prompt on AMD GPUs. Includes the current experimental caveats and recommended first steps.',
+      keywords: 'ZINC getting started, how to use ZINC, run ZINC, build ZINC, ZINC quick start, AMD GPU inference setup, GGUF on AMD GPU, Vulkan inference getting started',
+    },
+    'hardware-requirements': {
+      title: 'ZINC Hardware Requirements',
+      description: 'Supported AMD GPUs, Vulkan requirements, Linux expectations, VRAM guidance, and machine sizing for running ZINC locally.',
+      keywords: 'ZINC hardware requirements, AMD GPU requirements, RX 9070 XT inference, Radeon AI PRO R9700 inference, ZINC Vulkan requirements, ZINC Linux requirements, GGUF hardware guide',
+    },
+    'running-zinc': {
+      title: 'Running ZINC',
+      description: 'CLI usage, GPU selection, KV quantization, graph export, and the current experimental server path for ZINC on AMD GPUs.',
+      keywords: 'running ZINC, ZINC CLI, ZINC server, ZINC --prompt, ZINC kv quant, ZINC graph export, ZINC OpenAI API, AMD Vulkan inference CLI',
+    },
     'spec': {
       title: 'ZINC Technical Specification',
       description: 'GPU kernel library, model loading, request scheduler, paged KV cache, and OpenAI-compatible API for AMD RDNA3/RDNA4 Vulkan inference.',

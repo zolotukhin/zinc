@@ -1,0 +1,236 @@
+<script>
+  const LABELS = {
+    bash: 'Terminal',
+    sh: 'Terminal',
+    shell: 'Terminal',
+    zsh: 'Terminal',
+    console: 'Terminal',
+    zig: 'Zig',
+    glsl: 'GLSL',
+    json: 'JSON',
+    js: 'JavaScript',
+    javascript: 'JavaScript',
+    ts: 'TypeScript',
+    typescript: 'TypeScript',
+    yaml: 'YAML',
+    yml: 'YAML',
+    text: 'Text',
+    plaintext: 'Text',
+  };
+
+  function inferLanguage(pre, code) {
+    const candidates = [
+      pre.getAttribute('data-language'),
+      code?.getAttribute('data-language'),
+      ...Array.from(pre.classList),
+      ...Array.from(code?.classList ?? []),
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      const match = String(candidate).match(/language-([a-z0-9_-]+)/i);
+      if (match) return match[1].toLowerCase();
+      if (LABELS[String(candidate).toLowerCase()]) return String(candidate).toLowerCase();
+    }
+
+    return '';
+  }
+
+  function inferLabelFromText(text) {
+    const trimmed = text.trim();
+    if (!trimmed) return 'Code';
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'JSON';
+    if (/^(sudo|git|cd |zig |curl |export |\.\/|vulkaninfo|glslc|lspci|dot )/m.test(trimmed)) return 'Terminal';
+    if (/^info\([^)]+\):/m.test(trimmed)) return 'Terminal';
+    return 'Code';
+  }
+
+  function enhanceCodeBlocks() {
+    const pres = document.querySelectorAll('pre');
+    for (const pre of pres) {
+      if (pre.dataset.codeEnhanced === 'true') continue;
+      if (pre.closest('.code-shell')) continue;
+
+      const code = pre.querySelector('code');
+      const rawText = code?.textContent?.replace(/\s+$/, '') ?? pre.textContent?.replace(/\s+$/, '') ?? '';
+      if (!rawText) continue;
+
+      const language = inferLanguage(pre, code);
+      const label = pre.dataset.codeLabel || LABELS[language] || inferLabelFromText(rawText);
+      const isTerminal = label === 'Terminal';
+
+      const wrapper = document.createElement('div');
+      wrapper.className = `code-shell${isTerminal ? ' code-shell--terminal' : ''}`;
+
+      const header = document.createElement('div');
+      header.className = 'code-shell__header';
+
+      const headerLeft = document.createElement('div');
+      headerLeft.className = 'code-shell__header-left';
+
+      if (isTerminal) {
+        const dots = document.createElement('span');
+        dots.className = 'code-shell__dots';
+        dots.innerHTML = '<i></i><i></i><i></i>';
+        headerLeft.appendChild(dots);
+      }
+
+      const title = document.createElement('span');
+      title.className = 'code-shell__label';
+      title.textContent = label;
+      headerLeft.appendChild(title);
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'code-shell__copy';
+      button.setAttribute('aria-label', `Copy ${label} block`);
+      button.textContent = 'Copy';
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(rawText);
+          const original = button.textContent;
+          button.textContent = 'Copied';
+          button.classList.add('is-copied');
+          window.setTimeout(() => {
+            button.textContent = original ?? 'Copy';
+            button.classList.remove('is-copied');
+          }, 1400);
+        } catch (error) {
+          console.warn('Clipboard copy failed', error);
+        }
+      });
+
+      header.append(headerLeft, button);
+      pre.dataset.codeEnhanced = 'true';
+
+      const parent = pre.parentNode;
+      if (!parent) continue;
+      parent.insertBefore(wrapper, pre);
+      wrapper.append(header, pre);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', enhanceCodeBlocks, { once: true });
+  } else {
+    enhanceCodeBlocks();
+  }
+</script>
+
+<style is:global>
+  .code-shell {
+    margin: 0 0 var(--space-md);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(211, 84, 0, 0.05), transparent 80px),
+      var(--color-bg-alt);
+    box-shadow: 0 14px 28px rgba(18, 24, 40, 0.08);
+  }
+
+  .code-shell__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding: 0.65rem 0.85rem;
+    border-bottom: 1px solid var(--color-border);
+    background: rgba(255, 255, 255, 0.65);
+    backdrop-filter: blur(10px);
+  }
+
+  .code-shell__header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-width: 0;
+  }
+
+  .code-shell__dots {
+    display: inline-flex;
+    gap: 0.32rem;
+  }
+
+  .code-shell__dots i {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 999px;
+    background: #c4cad3;
+    display: block;
+  }
+
+  .code-shell__dots i:nth-child(1) { background: #ff6b57; }
+  .code-shell__dots i:nth-child(2) { background: #ffbd2e; }
+  .code-shell__dots i:nth-child(3) { background: #28c840; }
+
+  .code-shell__label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .code-shell__copy {
+    appearance: none;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    color: var(--color-text-muted);
+    border-radius: 999px;
+    padding: 0.28rem 0.65rem;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  }
+
+  .code-shell__copy:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .code-shell__copy.is-copied {
+    border-color: var(--color-accent);
+    background: var(--color-tag-bg);
+    color: var(--color-tag-text);
+  }
+
+  .code-shell pre {
+    margin: 0;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .code-shell pre code {
+    background: none;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .code-shell {
+      background:
+        linear-gradient(180deg, rgba(232, 114, 42, 0.09), transparent 80px),
+        #151112;
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+    }
+
+    .code-shell__header {
+      background: rgba(18, 14, 12, 0.82);
+      border-bottom-color: #2b201b;
+    }
+
+    .code-shell__copy {
+      background: #171111;
+      border-color: #34261f;
+      color: #c9b8a8;
+    }
+
+    .code-shell__copy:hover,
+    .code-shell__copy.is-copied {
+      border-color: #e8722a;
+      color: #f0a76f;
+    }
+  }
+</style>

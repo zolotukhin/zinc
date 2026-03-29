@@ -15,50 +15,24 @@ const breadcrumbItems = [
 ];
 
 const docMeta: Record<string, { label: string; description: string; order: number }> = {
-  spec: {
-    label: 'Technical Specification',
-    description: 'Architecture, GPU kernels, model support, scheduler behavior',
-    order: 1,
-  },
-  'turboquant-spec': {
-    label: 'TurboQuant Compression',
-    description: 'Two-stage vector quantization and KV cache memory reduction',
-    order: 2,
-  },
-  'rdna4-tuning': {
-    label: 'RDNA4 Tuning Guide',
-    description: 'Cooperative matrix, bandwidth tuning, SPIR-V toolchain',
-    order: 3,
-  },
-  api: {
-    label: 'Serving HTTP API',
-    description: 'OpenAI-compatible request/response shapes for clients',
-    order: 4,
-  },
-  'gpu-reference': {
-    label: 'GPU Reference',
-    description: 'RDNA3/RDNA4 hardware specs, ISA, memory hierarchy',
-    order: 5,
-  },
+  'getting-started': { label: 'Getting Started', description: 'Build ZINC, verify Vulkan, and run the first prompt.', order: 1 },
+  'hardware-requirements': { label: 'Hardware Requirements', description: 'Linux, AMD GPU, Vulkan, VRAM, and system expectations.', order: 2 },
+  'running-zinc': { label: 'Running ZINC', description: 'CLI usage, server mode, KV quantization, and graph exports.', order: 3 },
+  api: { label: 'Serving HTTP API', description: 'OpenAI-compatible request and response shapes.', order: 4 },
+  spec: { label: 'Technical Specification', description: 'Architecture, kernels, model support, and scheduler behavior.', order: 10 },
+  'rdna4-tuning': { label: 'RDNA4 Tuning Guide', description: 'Cooperative matrix, bandwidth tuning, and toolchain notes.', order: 11 },
+  'gpu-reference': { label: 'GPU Reference', description: 'RDNA3 and RDNA4 hardware specs, ISA, and memory hierarchy.', order: 12 },
+  'turboquant-spec': { label: 'TurboQuant Compression', description: 'Two-stage vector quantization and KV cache reduction.', order: 13 },
 };
 
-const supplementalDocs = [...docs].sort((a, b) => {
-  const aOrder = docMeta[a.slug]?.order ?? 99;
-  const bOrder = docMeta[b.slug]?.order ?? 99;
-  return aOrder - bOrder;
-});
+const orderedDocs = [...docs].sort((a, b) => (docMeta[a.slug]?.order ?? 99) - (docMeta[b.slug]?.order ?? 99));
+const startHere = orderedDocs.filter(doc => ['getting-started', 'hardware-requirements', 'running-zinc', 'api'].includes(doc.slug));
+const deepDocs = orderedDocs.filter(doc => !['getting-started', 'hardware-requirements', 'running-zinc', 'api'].includes(doc.slug));
 
 const combinedDocs = [
-  {
-    label: 'ZINC Zig API',
-    href: '/zinc/docs/zig-api',
-    description: 'Primary generated reference built from src/**/*.zig with module sections, symbol anchors, and source links.',
-  },
-  ...supplementalDocs.map(doc => ({
-    label: docMeta[doc.slug]?.label ?? doc.title,
-    href: `/zinc/docs/${doc.slug}`,
-    description: docMeta[doc.slug]?.description ?? 'ZINC documentation',
-  })),
+  ...startHere.map(doc => ({ label: docMeta[doc.slug]?.label ?? doc.title, href: `/zinc/docs/${doc.slug}` })),
+  ...deepDocs.map(doc => ({ label: docMeta[doc.slug]?.label ?? doc.title, href: `/zinc/docs/${doc.slug}` })),
+  { label: 'ZINC Zig API', href: '/zinc/docs/zig-api' },
 ];
 
 const jsonLd = {
@@ -67,7 +41,7 @@ const jsonLd = {
     {
       '@type': 'CollectionPage',
       name: 'ZINC Documentation',
-      description: 'Documentation for the ZINC inference engine centered on the generated Zig API reference, with supplemental architecture, tuning, and protocol docs.',
+      description: 'Documentation for using ZINC on AMD GPUs: getting started, hardware requirements, running the engine, then deeper tuning and reference material.',
       url: `${siteUrl}/zinc/docs`,
       mainEntity: {
         '@type': 'ItemList',
@@ -86,8 +60,8 @@ const jsonLd = {
 
 <BaseLayout
   title="ZINC Documentation"
-  description="Documentation for the ZINC inference engine centered on the generated Zig API reference, with supplemental architecture, tuning, and protocol docs."
-  keywords="ZINC documentation, Zig API, Vulkan compute, GGUF, AMD GPU inference, TurboQuant, RDNA4 tuning, OpenAI-compatible API"
+  description="Documentation for using ZINC on AMD GPUs: getting started, hardware requirements, running the CLI and server, plus architecture, tuning, and API reference."
+  keywords="ZINC docs, ZINC getting started, ZINC hardware requirements, how to run ZINC, AMD GPU inference docs, Vulkan GGUF docs, ZINC API, RDNA4 tuning"
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
@@ -95,33 +69,78 @@ const jsonLd = {
   <div class="docs-hub">
     <header class="hub-header">
       <h1>Documentation</h1>
-      <p>Start with the Zig API for the runtime internals, or jump to any spec below.</p>
+      <p>Start with how to actually use ZINC: confirm the hardware, build the binary, run one model, then go deeper into tuning and internals.</p>
     </header>
 
-    <div class="hub-grid">
-      <a href="/zinc/docs/zig-api" class="card card-primary">
-        <div class="card-head">
-          <h2>Zig API Reference</h2>
-          <span class="badge">Primary</span>
-        </div>
-        <p>Generated from <code>src/**/*.zig</code></p>
-        <div class="card-stats">
-          <span>{zigApi.sections.length} sections</span>
-          <span>{zigApi.moduleCount} modules</span>
-          <span>{zigApi.exportCount} exports</span>
-        </div>
-      </a>
+    <section class="status-banner">
+      <div>
+        <p class="kicker">Current Status</p>
+        <h2>Experimental and under active development</h2>
+        <p>The CLI path is the best-supported way to use ZINC today. Linux on AMD RDNA3 or RDNA4 is the intended environment. Server mode and broader model coverage are still evolving.</p>
+      </div>
+      <a href="https://github.com/zolotukhin/zinc" class="status-link">View source</a>
+    </section>
 
-      {supplementalDocs.map(doc => (
-        <a href={`/zinc/docs/${doc.slug}`} class="card">
-          <h2>{docMeta[doc.slug]?.label ?? doc.title}</h2>
-          <p>{docMeta[doc.slug]?.description}</p>
+    <section class="quickstart-panel">
+      <div class="quickstart-copy">
+        <p class="kicker">Fastest Path</p>
+        <h2>Get a first prompt through ZINC</h2>
+        <p>Use this first if you want to answer the real question: does ZINC build on this machine, does Vulkan see the GPU, and can one GGUF model run end to end?</p>
+      </div>
+      <pre data-code-label="Quick Start"><code class="language-bash">git clone https://github.com/zolotukhin/zinc.git
+cd zinc
+zig build
+export RADV_PERFTEST=coop_matrix
+./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"</code></pre>
+    </section>
+
+    <section class="group">
+      <div class="group-head">
+        <h2>Start Here</h2>
+        <p>The practical docs for getting ZINC onto a real machine and actually running it.</p>
+      </div>
+      <div class="grid start-grid">
+        {startHere.map(doc => (
+          <a href={`/zinc/docs/${doc.slug}`} class:list={['card', { primary: doc.slug === 'getting-started' }]}>
+            <div class="card-head">
+              <h3>{docMeta[doc.slug]?.label ?? doc.title}</h3>
+              {doc.slug === 'getting-started' && <span class="badge">First</span>}
+            </div>
+            <p>{docMeta[doc.slug]?.description}</p>
+          </a>
+        ))}
+      </div>
+    </section>
+
+    <section class="group">
+      <div class="group-head">
+        <h2>Deep Docs</h2>
+        <p>The architecture, tuning, and reference material once the runtime path is already clear.</p>
+      </div>
+      <div class="grid deep-grid">
+        {deepDocs.map(doc => (
+          <a href={`/zinc/docs/${doc.slug}`} class="card">
+            <h3>{docMeta[doc.slug]?.label ?? doc.title}</h3>
+            <p>{docMeta[doc.slug]?.description}</p>
+          </a>
+        ))}
+        <a href="/zinc/docs/zig-api" class="card api-card">
+          <div class="card-head">
+            <h3>Zig API Reference</h3>
+            <span class="badge">Generated</span>
+          </div>
+          <p>Reference built from <code>src/**/*.zig</code>, with module pages, symbol anchors, and source links.</p>
+          <div class="card-stats">
+            <span>{zigApi.sections.length} sections</span>
+            <span>{zigApi.moduleCount} modules</span>
+            <span>{zigApi.exportCount} exports</span>
+          </div>
         </a>
-      ))}
-    </div>
+      </div>
+    </section>
 
-    <div class="hub-sections">
-      <h3>API Sections</h3>
+    <section class="api-sections">
+      <h3>Zig API Sections</h3>
       <div class="section-list">
         {zigApi.sections.map(section => (
           <a href={`/zinc/docs/zig-api#${section.slug}`} class="section-link">
@@ -130,168 +149,45 @@ const jsonLd = {
           </a>
         ))}
       </div>
-    </div>
+    </section>
   </div>
 </BaseLayout>
 
 <style>
-  .docs-hub {
-    max-width: 960px;
-    margin: 0 auto;
-  }
-
-  .hub-header {
-    margin-bottom: var(--space-lg);
-  }
-
-  .hub-header h1 {
-    margin-bottom: var(--space-xs);
-  }
-
-  .hub-header p {
-    color: var(--color-text-muted);
-    margin: 0;
-  }
-
-  .hub-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--space-sm);
-    margin-bottom: var(--space-lg);
-  }
-
-  .card {
-    display: flex;
-    flex-direction: column;
-    padding: var(--space-md);
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    color: var(--color-text);
-    transition: border-color 0.15s ease;
-  }
-
-  .card:hover {
-    text-decoration: none;
-    border-color: var(--color-accent);
-  }
-
-  .card-primary {
-    grid-column: 1 / -1;
-    background:
-      linear-gradient(135deg, rgba(211, 84, 0, 0.08), transparent 50%),
-      var(--color-bg);
-  }
-
-  .card-head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-  }
-
-  .card h2 {
-    font-size: 1rem;
-    margin: 0 0 var(--space-xs);
-  }
-
-  .card-primary h2 {
-    font-size: 1.15rem;
-    margin: 0;
-  }
-
-  .badge {
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    padding: 0.15rem 0.5rem;
-    border-radius: 999px;
-    background: var(--color-accent);
-    color: white;
-  }
-
-  .card p {
-    font-size: 0.85rem;
-    color: var(--color-text-muted);
-    margin: var(--space-xs) 0 0;
-    flex: 1;
-  }
-
-  .card-stats {
-    display: flex;
-    gap: var(--space-xs);
-    flex-wrap: wrap;
-    margin-top: var(--space-sm);
-  }
-
-  .card-stats span {
-    font-size: 0.75rem;
-    padding: 0.15rem 0.55rem;
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-    color: var(--color-text-muted);
-    background: var(--color-bg-alt);
-  }
-
-  .hub-sections {
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    padding: var(--space-md);
-  }
-
-  .hub-sections h3 {
-    font-size: 0.85rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--color-text-muted);
-    margin: 0 0 var(--space-sm);
-  }
-
-  .section-list {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1px;
-    background: var(--color-border);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-
-  .section-link {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.55rem 0.75rem;
-    background: var(--color-bg);
-    color: var(--color-text);
-    font-size: 0.88rem;
-    transition: background 0.1s ease;
-  }
-
-  .section-link:hover {
-    text-decoration: none;
-    background: var(--color-bg-alt);
-  }
-
-  .section-name {
-    font-weight: 500;
-  }
-
-  .section-meta {
-    font-size: 0.75rem;
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    margin-left: var(--space-sm);
-  }
-
-  @media (max-width: 700px) {
-    .hub-grid {
-      grid-template-columns: 1fr;
-    }
-    .card-primary {
-      grid-column: 1;
-    }
-    .section-list {
-      grid-template-columns: 1fr;
-    }
-  }
+  .docs-hub { max-width: 960px; margin: 0 auto; }
+  .hub-header { margin-bottom: var(--space-lg); }
+  .hub-header h1 { margin-bottom: var(--space-xs); }
+  .hub-header p, .group-head p, .status-banner p, .quickstart-copy p { margin: 0; color: var(--color-text-muted); }
+  .kicker { margin: 0 0 var(--space-xs); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-accent); }
+  .status-banner { display: grid; grid-template-columns: 1fr auto; gap: var(--space-md); align-items: start; padding: var(--space-md); margin: var(--space-lg) 0; border: 1px solid var(--color-border); border-radius: 14px; background: radial-gradient(circle at top right, rgba(211, 84, 0, 0.12), transparent 38%), var(--color-bg-alt); }
+  .status-banner h2, .quickstart-copy h2, .group-head h2 { margin: 0 0 var(--space-xs); font-size: 1.2rem; }
+  .status-link, .card, .section-link { color: var(--color-text); }
+  .status-link { display: inline-flex; align-items: center; justify-content: center; align-self: center; padding: 0.55rem 0.9rem; border: 1px solid var(--color-border); border-radius: 999px; white-space: nowrap; }
+  .status-link:hover, .card:hover, .section-link:hover { text-decoration: none; border-color: var(--color-accent); }
+  .quickstart-panel { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: var(--space-md); margin-bottom: var(--space-xl); }
+  .quickstart-copy { padding: var(--space-md); border: 1px solid var(--color-border); border-radius: 14px; background: var(--color-bg); }
+  .quickstart-panel pre { height: 100%; }
+  .group + .group { margin-top: var(--space-xl); }
+  .group-head { margin-bottom: var(--space-md); }
+  .grid { display: grid; gap: var(--space-sm); }
+  .start-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .deep-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .card { display: flex; flex-direction: column; padding: var(--space-md); border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-bg); transition: border-color 0.15s ease; }
+  .card.primary { background: linear-gradient(135deg, rgba(211, 84, 0, 0.08), transparent 50%), var(--color-bg); }
+  .api-card { background: linear-gradient(135deg, rgba(211, 84, 0, 0.06), transparent 55%), var(--color-bg); }
+  .card-head { display: flex; align-items: center; gap: var(--space-sm); }
+  .card h3 { font-size: 1rem; margin: 0 0 var(--space-xs); }
+  .card p { margin: var(--space-xs) 0 0; font-size: 0.85rem; color: var(--color-text-muted); flex: 1; }
+  .badge { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 999px; background: var(--color-accent); color: white; }
+  .card-stats { display: flex; gap: var(--space-xs); flex-wrap: wrap; margin-top: var(--space-sm); }
+  .card-stats span { font-size: 0.75rem; padding: 0.15rem 0.55rem; border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-text-muted); background: var(--color-bg-alt); }
+  .api-sections { margin-top: var(--space-xl); border: 1px solid var(--color-border); border-radius: 10px; padding: var(--space-md); }
+  .api-sections h3 { font-size: 0.85rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-muted); margin: 0 0 var(--space-sm); }
+  .section-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--color-border); border-radius: 6px; overflow: hidden; }
+  .section-link { display: flex; justify-content: space-between; align-items: center; padding: 0.55rem 0.75rem; background: var(--color-bg); font-size: 0.88rem; transition: background 0.1s ease; }
+  .section-link:hover { background: var(--color-bg-alt); }
+  .section-name { font-weight: 500; }
+  .section-meta { font-size: 0.75rem; color: var(--color-text-muted); white-space: nowrap; margin-left: var(--space-sm); }
+  @media (max-width: 900px) { .quickstart-panel, .start-grid, .deep-grid, .section-list { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .status-banner { grid-template-columns: 1fr; } }
 </style>
