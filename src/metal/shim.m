@@ -324,10 +324,11 @@ void mtl_dispatch_v2(MetalCmd* cmd, MetalPipe* pipe,
 
 void mtl_barrier(MetalCmd* cmd) {
     if (!cmd) return;
-    // End the current encoder and start a new one — this creates a full barrier
-    // (all previous dispatches complete before any subsequent dispatch begins).
-    [cmd->encoder endEncoding];
-    cmd->encoder = [cmd->cmd_buf computeCommandEncoder];
+    // Lightweight in-encoder memory barrier — ensures all buffer writes from
+    // previous dispatches are visible to subsequent dispatches, without
+    // destroying and recreating the compute command encoder.
+    // Available since macOS 10.14; Apple Silicon requires macOS 11+.
+    [cmd->encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
 }
 
 void mtl_commit_and_wait(MetalCmd* cmd) {
