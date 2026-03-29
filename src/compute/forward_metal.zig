@@ -105,6 +105,12 @@ pub const InferenceEngine = struct {
     logits_buf: MetalBuffer,
     embed_staging: MetalBuffer,
 
+    // Per-expert intermediate buffers for parallel MoE dispatch
+    expert_gate_bufs: []MetalBuffer,
+    expert_up_bufs: []MetalBuffer,
+    expert_swiglu_bufs: []MetalBuffer,
+    expert_down_bufs: []MetalBuffer,
+
     // KV cache (per layer)
     kv_k_cache: []MetalBuffer,
     kv_v_cache: []MetalBuffer,
@@ -202,6 +208,25 @@ pub const InferenceEngine = struct {
         self.router_logits_buf = try metal_buffer.createBuffer(ctx, @max(router_size, 4));
         self.logits_buf = try metal_buffer.createBuffer(ctx, vocab_size);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
+
+        // Per-expert intermediate buffers for parallel MoE dispatch (reduces barriers from ~35 to 2 per layer)
+        if (cfg.n_experts_used > 0) {
+            self.expert_gate_bufs = try allocator.alloc(MetalBuffer, cfg.n_experts_used);
+            self.expert_up_bufs = try allocator.alloc(MetalBuffer, cfg.n_experts_used);
+            self.expert_swiglu_bufs = try allocator.alloc(MetalBuffer, cfg.n_experts_used);
+            self.expert_down_bufs = try allocator.alloc(MetalBuffer, cfg.n_experts_used);
+            for (0..cfg.n_experts_used) |i| {
+                self.expert_gate_bufs[i] = try metal_buffer.createBuffer(ctx, @max(@as(usize, inter_dim) * @sizeOf(f32), 4));
+                self.expert_up_bufs[i] = try metal_buffer.createBuffer(ctx, @max(@as(usize, inter_dim) * @sizeOf(f32), 4));
+                self.expert_swiglu_bufs[i] = try metal_buffer.createBuffer(ctx, @max(@as(usize, inter_dim) * @sizeOf(f32), 4));
+                self.expert_down_bufs[i] = try metal_buffer.createBuffer(ctx, @max(hidden_size, 4));
+            }
+        } else {
+            self.expert_gate_bufs = try allocator.alloc(MetalBuffer, 0);
+            self.expert_up_bufs = try allocator.alloc(MetalBuffer, 0);
+            self.expert_swiglu_bufs = try allocator.alloc(MetalBuffer, 0);
+            self.expert_down_bufs = try allocator.alloc(MetalBuffer, 0);
+        }
 
         // Allocate KV cache per layer
         self.kv_k_cache = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -377,6 +402,17 @@ pub const InferenceEngine = struct {
         metal_buffer.freeBuffer(&self.router_logits_buf);
         metal_buffer.freeBuffer(&self.logits_buf);
         metal_buffer.freeBuffer(&self.embed_staging);
+
+        for (0..self.expert_gate_bufs.len) |i| {
+            metal_buffer.freeBuffer(&self.expert_gate_bufs[i]);
+            metal_buffer.freeBuffer(&self.expert_up_bufs[i]);
+            metal_buffer.freeBuffer(&self.expert_swiglu_bufs[i]);
+            metal_buffer.freeBuffer(&self.expert_down_bufs[i]);
+        }
+        self.allocator.free(self.expert_gate_bufs);
+        self.allocator.free(self.expert_up_bufs);
+        self.allocator.free(self.expert_swiglu_bufs);
+        self.allocator.free(self.expert_down_bufs);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.kv_k_cache[i]);
@@ -1073,7 +1109,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
             const moe_ptr: [*]f32 = @ptrCast(@alignCast(engine.moe_out_buf.cpu_ptr.?));
             @memset(moe_ptr[0..hidden_dim], 0);
 
-            // Expert dispatch — all experts batched into ONE GPU command buffer
+            // Expert dispatch — parallel 3-phase: all gate+up → all SwiGLU → all down
             const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
             const up_exps = lt.ffn_up_exps orelse return error.MissingTensor;
             const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
@@ -1084,76 +1120,69 @@ fn decodeStep(engine: *InferenceEngine) !void {
 
             {
                 var cmd = try metal_command.beginCommand(engine.device.ctx);
-
-                for (0..cfg.n_experts_used) |ei| {
-                    const eid = expert_ids[ei];
-                    const weight = expert_weights[ei];
-                    const gate_offset = eid * expert_gate_bytes;
-                    const up_offset = eid * expert_gate_bytes;
-                    const down_offset = eid * expert_down_bytes;
-
-                    // Gate + Up DMMVs (parallel — different output buffers)
-                    dispatchDmmvOnCmd(engine, &cmd, gate_exps, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, gate_offset);
-                    dispatchDmmvOnCmd(engine, &cmd, up_exps, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, up_offset);
-                    cmd.barrier();
-
-                    // SwiGLU on GPU: output = SiLU(gate) * up
-                    const swiglu_push = SwiGLUPush{ .n = inter_dim };
-                    const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                    cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
-                    cmd.barrier();
-
-                    // Down DMMV: swiglu_buf → down_buf
-                    dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, down_offset);
-                    cmd.barrier();
-
-                    // Weighted accumulate on GPU: moe_out_buf += weight * down_buf
-                    const scale_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(weight)) };
-                    const sa_bufs = [_]*const MetalBuffer{ &engine.moe_out_buf, &engine.down_buf };
-                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sa_bufs, &scale_push, @sizeOf(ScaleAccPush), 0);
-                    cmd.barrier();
-                }
-
-                // Shared expert (if present) — also batched in same command buffer
                 const gate_shexp = lt.ffn_gate_shexp;
                 const up_shexp = lt.ffn_up_shexp;
                 const down_shexp = lt.ffn_down_shexp;
                 const shexp_gate_t = lt.ffn_gate_inp_shexp;
+                const has_shexp = gate_shexp != null and up_shexp != null and down_shexp != null;
 
-                if (gate_shexp != null and up_shexp != null and down_shexp != null) {
+                // Phase 1: All expert gate+up DMMVs in parallel (+ shared expert)
+                for (0..cfg.n_experts_used) |ei| {
+                    const eid = expert_ids[ei];
+                    const gate_offset = eid * expert_gate_bytes;
+                    const up_offset = eid * expert_gate_bytes;
+                    dispatchDmmvOnCmd(engine, &cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_bufs[ei], inter_dim, hidden_dim, gate_offset);
+                    dispatchDmmvOnCmd(engine, &cmd, up_exps, &engine.norm_buf, &engine.expert_up_bufs[ei], inter_dim, hidden_dim, up_offset);
+                }
+                if (has_shexp) {
                     dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
                     dispatchDmmvOnCmd(engine, &cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
                     if (shexp_gate_t) |sg| {
                         dispatchDmmvOnCmd(engine, &cmd, sg, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
                     }
-                    cmd.barrier();
+                }
+                cmd.barrier();
 
-                    // SwiGLU on GPU
+                // Phase 2: All SwiGLU operations in parallel
+                for (0..cfg.n_experts_used) |ei| {
+                    const swiglu_push = SwiGLUPush{ .n = inter_dim };
+                    const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
+                    cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                }
+                if (has_shexp) {
                     const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
                     const sw_bufs2 = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
                     cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
-                    cmd.barrier();
+                }
+                cmd.barrier();
 
-                    // Down DMMV
+                // Phase 3: All down DMMVs in parallel
+                for (0..cfg.n_experts_used) |ei| {
+                    const eid = expert_ids[ei];
+                    const down_offset = eid * expert_down_bytes;
+                    dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_bufs[ei], &engine.expert_down_bufs[ei], hidden_dim, inter_dim, down_offset);
+                }
+                if (down_shexp != null) {
                     dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
-                    cmd.barrier();
+                }
+                cmd.commitAndWait();
 
+                // CPU weighted accumulate all expert outputs (trivial: n_experts × hidden_dim multiply-adds)
+                for (0..cfg.n_experts_used) |ei| {
+                    const weight = expert_weights[ei];
+                    const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?));
+                    for (0..hidden_dim) |i| moe_ptr[i] += weight * d_ptr[i];
+                }
+                if (has_shexp) {
+                    const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
                     if (shexp_gate_t != null) {
-                        // Need gate scalar readback — commit batch, CPU sigmoid, CPU accumulate
-                        cmd.commitAndWait();
                         const sg_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
                         const shexp_weight = 1.0 / (1.0 + @exp(-sg_ptr[0]));
-                        const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
                         for (0..hidden_dim) |i| moe_ptr[i] += shexp_weight * d_ptr[i];
                     } else {
-                        // No gate — accumulate with scale=1.0 on GPU
-                        const one_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                        const sa_bufs2 = [_]*const MetalBuffer{ &engine.moe_out_buf, &engine.down_buf };
-                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sa_bufs2, &one_push, @sizeOf(ScaleAccPush), 0);
+                        for (0..hidden_dim) |i| moe_ptr[i] += d_ptr[i];
                     }
                 }
-
-                cmd.commitAndWait();
             }
 
             // FFN residual: hidden += moe_out (CPU, via UMA)
