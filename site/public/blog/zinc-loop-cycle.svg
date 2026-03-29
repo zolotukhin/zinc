@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">How the ZINC loop closes</title>
+  <desc id="desc">A circular diagram showing ship, build, run, diagnose, mutate, and keep or revert around a central memory controller.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fcfbf7"/>
+      <stop offset="100%" stop-color="#eef2f8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#1f2937" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#738496"/>
+    </marker>
+    <style>
+      .title { font: 700 40px Georgia, serif; fill: #14213d; }
+      .subtitle { font: 500 19px Arial, sans-serif; fill: #5b6776; }
+      .orbit { fill: none; stroke: #d8e0ea; stroke-width: 3; }
+      .flow { fill: none; stroke: #738496; stroke-width: 4; stroke-linecap: round; marker-end: url(#arrow); }
+      .memory-link { fill: none; stroke: #c65a73; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 10 10; }
+      .node { stroke-width: 2; }
+      .node-warm { fill: #f8f3ea; stroke: #d8d0bf; }
+      .node-cool { fill: #eef5ff; stroke: #97b3da; }
+      .node-plain { fill: #fffdf9; stroke: #d8d0bf; }
+      .center { fill: #17324d; stroke: #17324d; }
+      .step { font: 700 30px Arial, sans-serif; fill: #14213d; text-anchor: middle; }
+      .label-dark { font: 700 15px Arial, sans-serif; fill: #a8c0d7; letter-spacing: 0.08em; }
+      .step-dark { font: 700 30px Arial, sans-serif; fill: #ffffff; text-anchor: middle; }
+      .copy-dark { font: 400 18px Arial, sans-serif; fill: #d7e1ea; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" fill="url(#bg)"/>
+
+  <g transform="translate(76 58)">
+    <text class="title">How the ZINC loop closes</text>
+    <text class="subtitle" x="0" y="36">One cycle, one measured change, one hard decision, then the evidence feeds the next lap.</text>
+  </g>
+
+  <circle class="orbit" cx="600" cy="430" r="252"/>
+
+  <g filter="url(#shadow)">
+    <circle class="node node-warm" cx="600" cy="186" r="78"/>
+    <text class="step" x="600" y="196">Ship</text>
+
+    <circle class="node node-plain" cx="920" cy="318" r="78"/>
+    <text class="step" x="920" y="328">Build</text>
+
+    <circle class="node node-cool" cx="930" cy="548" r="78"/>
+    <text class="step" x="930" y="558">Run</text>
+
+    <circle class="node node-plain" cx="600" cy="674" r="82"/>
+    <text class="step" x="600" y="684">Diagnose</text>
+
+    <circle class="node node-cool" cx="270" cy="548" r="82"/>
+    <text class="step" x="270" y="558">Mutate</text>
+
+    <circle class="node node-warm" cx="280" cy="318" r="92"/>
+    <text class="step" x="280" y="308">Keep</text>
+    <text class="step" x="280" y="342">or revert</text>
+
+    <circle class="center" cx="600" cy="430" r="138"/>
+    <text class="label-dark" x="543" y="382">CONTROLLER</text>
+    <text class="step-dark" x="600" y="426">Memory</text>
+    <text class="copy-dark" x="600" y="464">history, failures,</text>
+    <text class="copy-dark" x="600" y="490">self-analysis, stalls</text>
+  </g>
+
+  <path class="flow" d="M675 204 C790 222 866 254 904 292"/>
+  <path class="flow" d="M982 386 C1006 436 1003 486 976 522"/>
+  <path class="flow" d="M850 620 C776 670 698 699 628 698"/>
+  <path class="flow" d="M488 698 C396 692 320 666 272 620"/>
+  <path class="flow" d="M176 516 C142 458 145 394 182 336"/>
+  <path class="flow" d="M370 244 C446 206 512 188 556 186"/>
+
+  <path class="memory-link" d="M600 292 L600 264"/>
+  <path class="memory-link" d="M726 364 L846 328"/>
+  <path class="memory-link" d="M726 496 L850 536"/>
+  <path class="memory-link" d="M600 568 L600 592"/>
+  <path class="memory-link" d="M476 496 L354 536"/>
+  <path class="memory-link" d="M474 364 L372 328"/>
+</svg>

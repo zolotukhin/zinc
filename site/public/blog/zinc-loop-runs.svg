@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">What changed across the ZINC loop runs</title>
+  <desc id="desc">Three scorecards showing how the ZINC loop improved once context, memory, and stricter keep rules were added.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#f1f5fb"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#1f2937" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .title { font: 700 38px Georgia, serif; fill: #14213d; }
+      .subtitle { font: 500 18px Arial, sans-serif; fill: #5b6776; }
+      .card { stroke-width: 2; rx: 26; }
+      .head { font: 700 15px Arial, sans-serif; letter-spacing: 0.08em; }
+      .run { font: 700 30px Arial, sans-serif; }
+      .metric { font: 700 48px Arial, sans-serif; }
+      .metric-label { font: 700 14px Arial, sans-serif; letter-spacing: 0.08em; }
+      .copy { font: 400 16px Arial, sans-serif; }
+      .badge { font: 700 14px Arial, sans-serif; }
+      .arrow { stroke: #7b8794; stroke-width: 4; fill: none; stroke-linecap: round; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="620" fill="url(#bg)"/>
+
+  <g transform="translate(74 56)">
+    <text class="title">The same agent became useful once the loop changed</text>
+    <text class="subtitle" x="0" y="34">The dramatic jump was controller quality, not some sudden model miracle.</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect class="card" x="80" y="168" width="306" height="326" fill="#fffdf9" stroke="#d7cfbe"/>
+    <text class="head" x="112" y="206" fill="#7a6656">RUN 1</text>
+    <text class="run" x="112" y="248" fill="#14213d">Performance first</text>
+    <text class="metric" x="112" y="318" fill="#17324d">29</text>
+    <text class="metric-label" x="202" y="318" fill="#6b7280">CYCLES</text>
+    <text class="metric" x="112" y="384" fill="#c1556d">9</text>
+    <text class="metric-label" x="168" y="384" fill="#6b7280">KEPT</text>
+    <text class="badge" x="112" y="436" fill="#17324d">What it proved</text>
+    <text class="copy" x="112" y="466" fill="#4d5d6d">The loop could already find real</text>
+    <text class="copy" x="112" y="490" fill="#4d5d6d">throughput wins in DMMV and prefill.</text>
+
+    <rect class="card" x="446" y="168" width="306" height="326" fill="#fff4f0" stroke="#efc0b5"/>
+    <text class="head" x="478" y="206" fill="#b0584a">RUN 2</text>
+    <text class="run" x="478" y="248" fill="#14213d">Weak context</text>
+    <text class="metric" x="478" y="318" fill="#17324d">43</text>
+    <text class="metric-label" x="568" y="318" fill="#6b7280">CYCLES</text>
+    <text class="metric" x="478" y="384" fill="#b43b2c">0</text>
+    <text class="metric-label" x="534" y="384" fill="#6b7280">KEPT</text>
+    <text class="badge" x="478" y="436" fill="#b43b2c">What it exposed</text>
+    <text class="copy" x="478" y="466" fill="#5f4d49">Without architecture and bug history,</text>
+    <text class="copy" x="478" y="490" fill="#5f4d49">the agent thrashed and rediscovered noise.</text>
+
+    <rect class="card" x="812" y="168" width="306" height="326" fill="#f1f8f1" stroke="#b9d8bd"/>
+    <text class="head" x="844" y="206" fill="#4a7b58">RUN 3</text>
+    <text class="run" x="844" y="248" fill="#14213d">Full memory + strict gates</text>
+    <text class="metric" x="844" y="318" fill="#17324d">44</text>
+    <text class="metric-label" x="934" y="318" fill="#6b7280">CYCLES</text>
+    <text class="metric" x="844" y="384" fill="#2c8a45">40</text>
+    <text class="metric-label" x="920" y="384" fill="#6b7280">KEPT</text>
+    <text class="badge" x="844" y="436" fill="#2c8a45">What changed</text>
+    <text class="copy" x="844" y="466" fill="#4d5d6d">The loop started finding real correctness</text>
+    <text class="copy" x="844" y="490" fill="#4d5d6d">bugs at the shader and model boundary.</text>
+  </g>
+
+  <path class="arrow" d="M386 332 H446"/>
+  <path class="arrow" d="M752 332 H812"/>
+  <circle cx="386" cy="332" r="6" fill="#7b8794"/>
+  <circle cx="752" cy="332" r="6" fill="#7b8794"/>
+</svg>
