@@ -72,6 +72,34 @@ const MoeAccPush = extern struct {
     w_sh: f32,
 };
 
+/// Push constants for batched Q4_K MoE DMMV.
+/// Expert IDs are provided via a small CPU-written Metal buffer.
+const MoeDmmvPush = extern struct {
+    M: u32,
+    K: u32,
+    a_offset: u32,
+    expert_stride: u32,
+    x_expert_stride: u32,
+    x_offset: u32,
+    y_offset: u32,
+};
+
+/// Push constants for fused batched MoE weighted accumulate.
+/// Reads expert outputs from a contiguous [n_experts_used][hidden_dim] buffer.
+const MoeAccBatchedPush = extern struct {
+    n: u32,
+    expert_stride: u32,
+    w0: f32,
+    w1: f32,
+    w2: f32,
+    w3: f32,
+    w4: f32,
+    w5: f32,
+    w6: f32,
+    w7: f32,
+    w_sh: f32,
+};
+
 /// Push constants for RMS norm dispatch (matches rms_norm_mul.metal: buffer(0)).
 const RmsNormPush = extern struct {
     n: u32, // elements per group
@@ -168,6 +196,13 @@ pub const InferenceEngine = struct {
     router_logits_buf: MetalBuffer,
     logits_buf: MetalBuffer,
     embed_staging: MetalBuffer,
+    expert_ids_buf: MetalBuffer,
+
+    // Batched MoE buffers ([n_experts_used][dim], contiguous)
+    expert_gate_batch_buf: MetalBuffer,
+    expert_up_batch_buf: MetalBuffer,
+    expert_swiglu_batch_buf: MetalBuffer,
+    expert_down_batch_buf: MetalBuffer,
 
     // Per-expert intermediate buffers for parallel MoE dispatch
     expert_gate_bufs: []MetalBuffer,
@@ -186,12 +221,15 @@ pub const InferenceEngine = struct {
     dmmv_q8_0_pipe: MetalPipeline,
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
+    dmmv_q4k_moe_pipe: MetalPipeline,
 
     // Elementwise compute pipelines (for batched GPU dispatch)
     swiglu_pipe: MetalPipeline,
+    swiglu_batched_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
     rms_norm_pipe: MetalPipeline,
     moe_acc_pipe: MetalPipeline,
+    moe_acc_batched_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -253,6 +291,9 @@ pub const InferenceEngine = struct {
         const vocab_size: usize = @as(usize, cfg.vocab_size) * @sizeOf(f32);
         const kv_cache_size: usize = @as(usize, 4096) * kv_dim * @sizeOf(f32);
         const router_size: usize = @max(@as(usize, cfg.n_experts), @as(usize, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1)) * @sizeOf(f32);
+        const expert_ids_size: usize = @max(@as(usize, cfg.n_experts_used) * @sizeOf(u32), 4);
+        const expert_inter_batch_size: usize = @max(@as(usize, cfg.n_experts_used) * @as(usize, inter_dim) * @sizeOf(f32), 4);
+        const expert_hidden_batch_size: usize = @max(@as(usize, cfg.n_experts_used) * @as(usize, cfg.hidden_dim) * @sizeOf(f32), 4);
 
         // Allocate intermediate buffers
         var self: InferenceEngine = undefined;
@@ -277,6 +318,11 @@ pub const InferenceEngine = struct {
         self.router_logits_buf = try metal_buffer.createBuffer(ctx, @max(router_size, 4));
         self.logits_buf = try metal_buffer.createBuffer(ctx, vocab_size);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
+        self.expert_ids_buf = try metal_buffer.createBuffer(ctx, expert_ids_size);
+        self.expert_gate_batch_buf = try metal_buffer.createBuffer(ctx, expert_inter_batch_size);
+        self.expert_up_batch_buf = try metal_buffer.createBuffer(ctx, expert_inter_batch_size);
+        self.expert_swiglu_batch_buf = try metal_buffer.createBuffer(ctx, expert_inter_batch_size);
+        self.expert_down_batch_buf = try metal_buffer.createBuffer(ctx, expert_hidden_batch_size);
 
         // Per-expert intermediate buffers for parallel MoE dispatch (reduces barriers from ~35 to 2 per layer)
         if (cfg.n_experts_used > 0) {
@@ -312,12 +358,15 @@ pub const InferenceEngine = struct {
         self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
+        self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
 
         // Elementwise pipelines for batched GPU dispatch
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
+        self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
         self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
         self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
+        self.moe_acc_batched_pipe = try loadShaderPipeline(ctx, "moe_accumulate_batched");
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -492,6 +541,11 @@ pub const InferenceEngine = struct {
         metal_buffer.freeBuffer(&self.router_logits_buf);
         metal_buffer.freeBuffer(&self.logits_buf);
         metal_buffer.freeBuffer(&self.embed_staging);
+        metal_buffer.freeBuffer(&self.expert_ids_buf);
+        metal_buffer.freeBuffer(&self.expert_gate_batch_buf);
+        metal_buffer.freeBuffer(&self.expert_up_batch_buf);
+        metal_buffer.freeBuffer(&self.expert_swiglu_batch_buf);
+        metal_buffer.freeBuffer(&self.expert_down_batch_buf);
 
         for (0..self.expert_gate_bufs.len) |i| {
             metal_buffer.freeBuffer(&self.expert_gate_bufs[i]);
@@ -517,10 +571,13 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
+        metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
         metal_pipeline.freePipeline(&self.rms_norm_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_pipe);
+        metal_pipeline.freePipeline(&self.moe_acc_batched_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
@@ -729,6 +786,40 @@ fn dispatchDmmvAndWait(
     var cmd = try metal_command.beginCommand(engine.device.ctx);
     dispatchDmmvOnCmd(engine, &cmd, tensor, input_buf, output_buf, M, K, extra_byte_offset);
     cmd.commitAndWait();
+}
+
+/// Dispatch a batched Q4_K MoE DMMV on an existing command buffer.
+/// grid.y selects the expert slot; expert IDs come from routing_buf.
+fn dispatchDmmvMoeQ4kOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    routing_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    x_expert_stride: u32,
+    extra_byte_offset: u32,
+) void {
+    if (tensor.info.type_ != .q4_k) {
+        log.err("Batched MoE DMMV only supports Q4_K (tensor {s})", .{tensor.info.name});
+        return;
+    }
+
+    const push = MoeDmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+        .expert_stride = expert_stride,
+        .x_expert_stride = x_expert_stride,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
+    const wgs = (M + 7) / 8;
+    cmd.dispatchV2(&engine.dmmv_q4k_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
 }
 
 /// Preload norm weights from mmap into an f32 Metal buffer (done once at init).
@@ -1074,6 +1165,10 @@ fn expertSliceBytes(quant_type: GGMLType, rows: u32, cols: u32) u32 {
     return rows * blocks_per_row * bpb;
 }
 
+fn canUseBatchedQ4kMoe(engine: *const InferenceEngine, gate_quant: GGMLType, down_quant: GGMLType) bool {
+    return engine.config.n_experts_used == 8 and gate_quant == .q4_k and down_quant == .q4_k;
+}
+
 // ---------------------------------------------------------------------------
 // Decode step — runs all layers + final norm + LM head
 // ---------------------------------------------------------------------------
@@ -1310,6 +1405,12 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const down_quant = down_exps.info.type_;
             const expert_gate_bytes = expertSliceBytes(gate_quant, inter_dim, hidden_dim);
             const expert_down_bytes = expertSliceBytes(down_quant, hidden_dim, inter_dim);
+            const use_batched_q4k_moe = canUseBatchedQ4kMoe(engine, gate_quant, down_quant);
+
+            {
+                const expert_ids_ptr: [*]u32 = @ptrCast(@alignCast(engine.expert_ids_buf.cpu_ptr.?));
+                @memcpy(expert_ids_ptr[0..cfg.n_experts_used], expert_ids[0..cfg.n_experts_used]);
+            }
 
             {
                 var cmd = try metal_command.beginCommand(engine.device.ctx);
@@ -1318,49 +1419,40 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const down_shexp = lt.ffn_down_shexp;
                 const has_shexp = gate_shexp != null and up_shexp != null and down_shexp != null;
 
-                // Phase 1: All expert gate+up DMMVs in parallel (+ shared expert)
-                for (0..cfg.n_experts_used) |ei| {
-                    const eid = expert_ids[ei];
-                    const gate_offset = eid * expert_gate_bytes;
-                    const up_offset = eid * expert_gate_bytes;
-                    dispatchDmmvOnCmd(engine, &cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_bufs[ei], inter_dim, hidden_dim, gate_offset);
-                    dispatchDmmvOnCmd(engine, &cmd, up_exps, &engine.norm_buf, &engine.expert_up_bufs[ei], inter_dim, hidden_dim, up_offset);
-                }
-                if (has_shexp) {
-                    dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
-                    dispatchDmmvOnCmd(engine, &cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
-                }
-                cmd.barrier();
+                if (use_batched_q4k_moe) {
+                    // Phase 1: Batched gate+up expert projections (+ shared expert)
+                    dispatchDmmvMoeQ4kOnCmd(engine, &cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.expert_ids_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
+                    dispatchDmmvMoeQ4kOnCmd(engine, &cmd, up_exps, &engine.norm_buf, &engine.expert_up_batch_buf, &engine.expert_ids_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
+                    if (has_shexp) {
+                        dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
+                        dispatchDmmvOnCmd(engine, &cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
+                    }
+                    cmd.barrier();
 
-                // Phase 2: All SwiGLU operations in parallel
-                for (0..cfg.n_experts_used) |ei| {
-                    const swiglu_push = SwiGLUPush{ .n = inter_dim };
-                    const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
-                    cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
-                }
-                if (has_shexp) {
-                    const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
-                    const sw_bufs2 = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                    cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
-                }
-                cmd.barrier();
+                    // Phase 2: Batched SwiGLU over all selected experts (+ shared expert)
+                    {
+                        const swiglu_push = SwiGLUPush{ .n = inter_dim };
+                        const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
+                        cmd.dispatchV2(&engine.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                    }
+                    if (has_shexp) {
+                        const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
+                        const sw_bufs2 = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
+                        cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
+                    }
+                    cmd.barrier();
 
-                // Phase 3: All down DMMVs in parallel
-                for (0..cfg.n_experts_used) |ei| {
-                    const eid = expert_ids[ei];
-                    const down_offset = eid * expert_down_bytes;
-                    dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_bufs[ei], &engine.expert_down_bufs[ei], hidden_dim, inter_dim, down_offset);
-                }
-                if (down_shexp != null) {
-                    dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
-                }
-                cmd.barrier();
+                    // Phase 3: Batched down expert projection (+ shared expert)
+                    dispatchDmmvMoeQ4kOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.expert_ids_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
+                    if (down_shexp != null) {
+                        dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
+                    }
+                    cmd.barrier();
 
-                // Phase 4: Fused MoE weighted accumulate — hidden += sum(w[i] * expert_down[i]) + w_sh * shared_down
-                // Single dispatch replaces 8+1 sequential scale_accumulate + barriers (eliminates 8 pipeline flushes per layer)
-                if (cfg.n_experts_used == 8) {
-                    const moe_push = MoeAccPush{
+                    // Phase 4: Fused accumulate from contiguous expert-down buffer (+ shared expert)
+                    const moe_push = MoeAccBatchedPush{
                         .n = hidden_dim,
+                        .expert_stride = hidden_dim,
                         .w0 = expert_weights[0],
                         .w1 = expert_weights[1],
                         .w2 = expert_weights[2],
@@ -1373,32 +1465,94 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     };
                     const moe_bufs = [_]*const MetalBuffer{
                         &engine.hidden_buf,
-                        &engine.expert_down_bufs[0],
-                        &engine.expert_down_bufs[1],
-                        &engine.expert_down_bufs[2],
-                        &engine.expert_down_bufs[3],
-                        &engine.expert_down_bufs[4],
-                        &engine.expert_down_bufs[5],
-                        &engine.expert_down_bufs[6],
-                        &engine.expert_down_bufs[7],
+                        &engine.expert_down_batch_buf,
                         &engine.down_buf,
                     };
-                    cmd.dispatchV2(&engine.moe_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &moe_bufs, &moe_push, @sizeOf(MoeAccPush), 10);
+                    cmd.dispatchV2(&engine.moe_acc_batched_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &moe_bufs, &moe_push, @sizeOf(MoeAccBatchedPush), 3);
                     cmd.barrier();
                 } else {
-                    // Fallback for non-8-expert models: sequential accumulate
+                    // Phase 1: All expert gate+up DMMVs in parallel (+ shared expert)
                     for (0..cfg.n_experts_used) |ei| {
-                        const w = expert_weights[ei];
-                        const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(w)) };
-                        const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.expert_down_bufs[ei] };
-                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
-                        cmd.barrier();
+                        const eid = expert_ids[ei];
+                        const gate_offset = eid * expert_gate_bytes;
+                        const up_offset = eid * expert_gate_bytes;
+                        dispatchDmmvOnCmd(engine, &cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_bufs[ei], inter_dim, hidden_dim, gate_offset);
+                        dispatchDmmvOnCmd(engine, &cmd, up_exps, &engine.norm_buf, &engine.expert_up_bufs[ei], inter_dim, hidden_dim, up_offset);
                     }
                     if (has_shexp) {
-                        const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(shexp_gate_weight)) };
-                        const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
+                        dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
+                        dispatchDmmvOnCmd(engine, &cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
+                    }
+                    cmd.barrier();
+
+                    // Phase 2: All SwiGLU operations in parallel
+                    for (0..cfg.n_experts_used) |ei| {
+                        const swiglu_push = SwiGLUPush{ .n = inter_dim };
+                        const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
+                        cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                    }
+                    if (has_shexp) {
+                        const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
+                        const sw_bufs2 = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
+                        cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
+                    }
+                    cmd.barrier();
+
+                    // Phase 3: All down DMMVs in parallel
+                    for (0..cfg.n_experts_used) |ei| {
+                        const eid = expert_ids[ei];
+                        const down_offset = eid * expert_down_bytes;
+                        dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_bufs[ei], &engine.expert_down_bufs[ei], hidden_dim, inter_dim, down_offset);
+                    }
+                    if (down_shexp != null) {
+                        dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
+                    }
+                    cmd.barrier();
+
+                    // Phase 4: Fused MoE weighted accumulate — hidden += sum(w[i] * expert_down[i]) + w_sh * shared_down
+                    // Single dispatch replaces 8+1 sequential scale_accumulate + barriers (eliminates 8 pipeline flushes per layer)
+                    if (cfg.n_experts_used == 8) {
+                        const moe_push = MoeAccPush{
+                            .n = hidden_dim,
+                            .w0 = expert_weights[0],
+                            .w1 = expert_weights[1],
+                            .w2 = expert_weights[2],
+                            .w3 = expert_weights[3],
+                            .w4 = expert_weights[4],
+                            .w5 = expert_weights[5],
+                            .w6 = expert_weights[6],
+                            .w7 = expert_weights[7],
+                            .w_sh = if (has_shexp) shexp_gate_weight else 0.0,
+                        };
+                        const moe_bufs = [_]*const MetalBuffer{
+                            &engine.hidden_buf,
+                            &engine.expert_down_bufs[0],
+                            &engine.expert_down_bufs[1],
+                            &engine.expert_down_bufs[2],
+                            &engine.expert_down_bufs[3],
+                            &engine.expert_down_bufs[4],
+                            &engine.expert_down_bufs[5],
+                            &engine.expert_down_bufs[6],
+                            &engine.expert_down_bufs[7],
+                            &engine.down_buf,
+                        };
+                        cmd.dispatchV2(&engine.moe_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &moe_bufs, &moe_push, @sizeOf(MoeAccPush), 10);
                         cmd.barrier();
+                    } else {
+                        // Fallback for non-8-expert models: sequential accumulate
+                        for (0..cfg.n_experts_used) |ei| {
+                            const w = expert_weights[ei];
+                            const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(w)) };
+                            const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.expert_down_bufs[ei] };
+                            cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+                            cmd.barrier();
+                        }
+                        if (has_shexp) {
+                            const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(shexp_gate_weight)) };
+                            const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                            cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
+                            cmd.barrier();
+                        }
                     }
                 }
 
@@ -1652,4 +1806,23 @@ test "dequantRow F32 direct copy" {
     dequantRow(&raw, 0, 4, .f32, &out);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[0], 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), out[3], 0.001);
+}
+
+test "batched MoE Metal shaders compile" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var dmmv_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
+    defer metal_pipeline.freePipeline(&dmmv_pipe);
+
+    var swiglu_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
+    defer metal_pipeline.freePipeline(&swiglu_pipe);
+
+    var acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate_batched");
+    defer metal_pipeline.freePipeline(&acc_pipe);
+
+    try std.testing.expect(dmmv_pipe.handle != null);
+    try std.testing.expect(swiglu_pipe.handle != null);
+    try std.testing.expect(acc_pipe.handle != null);
 }
