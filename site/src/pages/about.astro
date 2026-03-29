@@ -3,19 +3,249 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 
 <BaseLayout title="About" description="Stepan Zolotukhin — systems engineer working on ZINC, with a background in storage infrastructure, Linux systems, and AWS." keywords="Stepan Zolotukhin, systems engineer, ZINC, AMD GPU, Vulkan, Zig, AWS, Linux kernel, storage infrastructure, GPU computing">
-  <h1>About</h1>
+  <section class="about-hero">
+    <aside class="about-profile-card">
+      <img
+        src="/stepan-portrait.jpg"
+        alt="Portrait of Stepan Zolotukhin"
+        class="about-portrait"
+        width="320"
+        height="320"
+      />
 
-  <p>I'm Stepan Zolotukhin. I'm a systems engineer. Right now I spend most of my time on GPU compute and local AI inference.</p>
+      <div class="about-profile-copy">
+        <p class="about-kicker">About</p>
+        <h1>Stepan Zolotukhin</h1>
+        <p class="about-role">Systems engineer focused on GPU compute, Zig, Vulkan, and local AI inference.</p>
+      </div>
 
-  <p>I spent seven years building infrastructure for storage systems. For the past six years, I've worked at AWS on low-level systems problems across Linux kernels, userland, cross-compilation, glibc, and adjacent platform work.</p>
+      <div class="about-tags" aria-label="Areas of focus">
+        <span>GPU Compute</span>
+        <span>Zig + Vulkan</span>
+        <span>Local Inference</span>
+      </div>
+    </aside>
 
-  <p>I'm building <a href="/zinc">ZINC</a>, an inference engine for AMD consumer GPUs that the mainstream AI stack does not support. It uses Zig and Vulkan compute shaders instead of ROCm or CUDA. The goal is to make a $500 GPU as useful for local LLM inference as hardware that costs 30x more.</p>
+    <div class="about-story-card">
+      <div class="about-facts" aria-label="Experience summary">
+        <div class="about-fact">
+          <span class="about-fact-value">7 Years</span>
+          <span class="about-fact-label">Storage infrastructure</span>
+        </div>
+        <div class="about-fact">
+          <span class="about-fact-value">6 Years</span>
+          <span class="about-fact-label">AWS systems work</span>
+        </div>
+        <div class="about-fact">
+          <span class="about-fact-value">Now</span>
+          <span class="about-fact-label">Building ZINC</span>
+        </div>
+      </div>
 
-  <p>I write about the work here — how the GPU kernels are tuned, what the quantization tradeoffs look like, and the systems engineering decisions behind ZINC.</p>
+      <p class="about-lede">I&apos;m building an inference engine for AMD consumer GPUs because the mainstream local AI stack mostly ignores them.</p>
 
-  <h2>Find me</h2>
-  <ul>
-    <li><a href="https://github.com/zolotukhin">GitHub</a></li>
-    <li><a href="/feed.xml">RSS feed</a></li>
-  </ul>
+      <div class="about-copy">
+        <p>Right now I spend most of my time on GPU compute, Vulkan, and local AI inference.</p>
+
+        <p>I spent seven years building infrastructure for storage systems. For the past six years, I&apos;ve worked at AWS on low-level systems problems across Linux kernels, userland, cross-compilation, glibc, and adjacent platform work.</p>
+
+        <p>I&apos;m building <a href="/zinc">ZINC</a>, an inference engine for AMD consumer GPUs that the mainstream AI stack does not support. It uses Zig and Vulkan compute shaders instead of ROCm or CUDA. The goal is to make a $500 GPU as useful for local LLM inference as hardware that costs 30x more.</p>
+
+        <p>I write about the work here: how the GPU kernels are tuned, what the quantization tradeoffs look like, and the systems engineering decisions behind ZINC.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="about-links">
+    <h2>Find Me</h2>
+    <div class="about-link-grid">
+      <a href="https://github.com/zolotukhin" class="about-link-card">
+        <span class="about-link-label">GitHub</span>
+        <span class="about-link-value">github.com/zolotukhin</span>
+      </a>
+      <a href="/feed.xml" class="about-link-card">
+        <span class="about-link-label">RSS</span>
+        <span class="about-link-value">zolotukhin.ai/feed.xml</span>
+      </a>
+    </div>
+  </section>
 </BaseLayout>
+
+<style>
+  .about-hero {
+    display: grid;
+    grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+    gap: var(--space-xl);
+    align-items: start;
+  }
+
+  .about-profile-card,
+  .about-story-card {
+    border: 1px solid var(--color-border);
+    border-radius: 20px;
+    background:
+      radial-gradient(circle at top right, rgba(211, 84, 0, 0.08), transparent 34%),
+      var(--color-bg-alt);
+  }
+
+  .about-profile-card {
+    padding: 1.25rem;
+    text-align: center;
+  }
+
+  .about-profile-copy h1 {
+    margin-bottom: var(--space-xs);
+    font-size: 1.8rem;
+  }
+
+  .about-portrait {
+    width: min(232px, 100%);
+    aspect-ratio: 1;
+    object-fit: cover;
+    object-position: center 32%;
+    border-radius: 50%;
+    border: 1px solid var(--color-border);
+    box-shadow: 0 18px 40px rgba(18, 24, 40, 0.14);
+    margin: 0 auto var(--space-md);
+  }
+
+  .about-kicker {
+    margin-bottom: var(--space-xs);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+  }
+
+  .about-role {
+    margin-bottom: 0;
+    color: var(--color-text-muted);
+  }
+
+  .about-tags {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.45rem;
+    margin-top: var(--space-md);
+  }
+
+  .about-tags span {
+    padding: 0.38rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: var(--color-text-muted);
+  }
+
+  .about-story-card {
+    padding: 1.5rem;
+  }
+
+  .about-lede {
+    font-size: 1.12rem;
+    line-height: 1.6;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-lg);
+  }
+
+  .about-facts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
+  }
+
+  .about-fact {
+    padding: 0.85rem 0.9rem;
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    background: var(--color-bg);
+  }
+
+  .about-fact-value,
+  .about-fact-label {
+    display: block;
+  }
+
+  .about-fact-value {
+    font-size: 1rem;
+    font-weight: 700;
+  }
+
+  .about-fact-label {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  .about-copy p:last-child {
+    margin-bottom: 0;
+  }
+
+  .about-links {
+    margin-top: var(--space-xl);
+  }
+
+  .about-link-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-sm);
+  }
+
+  .about-link-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: var(--space-md);
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    background:
+      radial-gradient(circle at top right, rgba(211, 84, 0, 0.08), transparent 38%),
+      var(--color-bg-alt);
+    color: var(--color-text);
+  }
+
+  .about-link-card:hover {
+    text-decoration: none;
+    border-color: var(--color-accent);
+  }
+
+  .about-link-label {
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .about-link-value {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+  }
+
+  @media (max-width: 780px) {
+    .about-hero,
+    .about-facts,
+    .about-link-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .about-hero {
+      gap: var(--space-lg);
+    }
+
+    .about-story-card,
+    .about-profile-card {
+      padding: var(--space-md);
+    }
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .about-portrait {
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.32);
+    }
+  }
+</style>

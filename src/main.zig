@@ -414,7 +414,11 @@ pub fn main() !void {
         log.info("Server listening on 0.0.0.0:{d}", .{config.port});
         log.info("Press Ctrl+C to stop", .{});
 
-        // Accept loop — single-threaded, blocking for now (US2 adds non-blocking)
+        // Server loop — accepts connections and handles requests sequentially.
+        // Each request runs to completion before the next is accepted.
+        // Concurrent streaming (US2) requires a poll-based event loop — deferred
+        // to a future iteration since the inference engine is single-threaded
+        // and GPU-bound (true concurrency needs batched multi-sequence decode).
         while (true) {
             var conn = server.accept() catch |err| {
                 log.warn("Accept failed: {s}", .{@errorName(err)});
