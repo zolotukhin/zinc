@@ -220,15 +220,17 @@ pub const InferenceEngine = struct {
         return max_idx;
     }
 
-    /// Get the DMMV pipeline and push constant buffer index for a quant type.
-    fn dmmvPipelineForType(self: *InferenceEngine, qt: GGMLType) ?struct { pipe: *const MetalPipeline, push_idx: u32 } {
+    /// Get the DMMV pipeline, push constant buffer index, and rows-per-workgroup for a quant type.
+    /// Q4_K/Q5_K/Q6_K/F32: each thread handles 1 row (64 rows per workgroup).
+    /// Q8_0/F16: each workgroup handles 2 rows (64 threads cooperate via simd_sum).
+    fn dmmvPipelineForType(self: *InferenceEngine, qt: GGMLType) ?struct { pipe: *const MetalPipeline, push_idx: u32, rows_per_wg: u32 } {
         return switch (qt) {
-            .q4_k => .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1 },
-            .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0 },
-            .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0 },
-            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0 },
-            .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0 },
-            .f32 => .{ .pipe = &self.dmmv_f32_pipe, .push_idx = 0 },
+            .q4_k => .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 64 },
+            .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64 },
+            .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64 },
+            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2 },
+            .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0, .rows_per_wg = 2 },
+            .f32 => .{ .pipe = &self.dmmv_f32_pipe, .push_idx = 0, .rows_per_wg = 64 },
             else => null,
         };
     }
@@ -307,7 +309,8 @@ fn dispatchDmmvOnCmd(
         .y_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf };
-    cmd.dispatchV2(pip.pipe, .{ (M + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), pip.push_idx);
+    const wgs = (M + pip.rows_per_wg - 1) / pip.rows_per_wg;
+    cmd.dispatchV2(pip.pipe, .{ wgs, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), pip.push_idx);
 }
 
 /// Dispatch a single DMMV and wait for completion.
