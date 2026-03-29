@@ -78,11 +78,75 @@ The binary is placed in `zig-out/bin/zinc`. Compiled SPIR-V shaders go to `zig-o
 ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"
 ```
 
-### Run as Server (Phase 4 — in progress)
+### Run as Server
+
+Start the server — no `--prompt` flag means server mode:
 
 ```bash
 ./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
 ```
+
+Then open **http://localhost:8080/** in your browser for the built-in chat interface.
+
+#### OpenAI-Compatible API
+
+The server exposes an OpenAI-compatible API at `/v1`. Use it as a drop-in replacement for any OpenAI client:
+
+```bash
+# Chat completion (streaming)
+curl -N http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3.5-35b","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+
+# Chat completion (non-streaming)
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3.5-35b","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":32}'
+
+# List models
+curl http://localhost:8080/v1/models
+
+# Health check
+curl http://localhost:8080/health
+```
+
+#### Use with OpenAI SDKs
+
+```python
+# Python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
+for chunk in client.chat.completions.create(
+    model="qwen3.5-35b",
+    messages=[{"role": "user", "content": "Hello!"}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+```javascript
+// Node.js
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "unused" });
+const stream = await client.chat.completions.create({
+  model: "qwen3.5-35b",
+  messages: [{ role: "user", content: "Hello!" }],
+  stream: true,
+});
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content || "");
+}
+```
+
+#### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Built-in chat interface |
+| GET | `/health` | Server status and model info |
+| GET | `/v1/models` | List loaded models |
+| POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
+| POST | `/v1/completions` | Text completion |
 
 ### Export Decode Graph Artifacts
 
@@ -392,12 +456,12 @@ Validated on AMD Radeon AI PRO R9700 (RDNA4): Vulkan 1.3 init, GGUF parsing, 21 
 
 ## Next Steps
 
-The path from 4.3 to 110+ tok/s:
+The path from 7.6 to 110+ tok/s:
 
-1. **Single command buffer** — Record the full 40-layer decode as one Vulkan submission. Move MoE routing to GPU (softmax + top-k in shader). Eliminates ~120 round-trips per token. Expected: 20–40x improvement.
-2. **Pre-recorded command buffer** — Record once, replay per token with updated push constants. Eliminates per-token descriptor allocation and command recording overhead.
-3. **Flash attention** — Replace per-head DMMV attention with the existing `flash_attn.comp` shader. Reduces attention memory traffic ~4x.
-4. **Profiling + kernel tuning** — With sync overhead gone, profile actual GPU kernel time. Tune DMMV tile sizes, shared memory usage, and occupancy for RDNA4.
+1. **Fix GPU SSM shader correctness** — GPU SSM shaders are implemented but produce wrong output on some paths. Debug delta-net state update indexing.
+2. **GPU-side MoE expert dispatch** — Eliminate the remaining ~40 submits/token for expert ID readback.
+3. **Profiling + kernel tuning** — With sync overhead gone, profile actual GPU kernel time. Tune DMMV tile sizes, shared memory usage, and occupancy for RDNA4.
+4. **Continuous batching** — Serve multiple concurrent requests with interleaved prefill/decode.
 
 ## License
 
