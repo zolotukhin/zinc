@@ -91,13 +91,22 @@ vulkaninfo --summary
 
 If `vulkaninfo` does not see your AMD GPU, fix that first. ZINC sits on top of the Vulkan stack you already have.
 
+## Start the chat interface
+
+Once CLI mode works, start the server to get a ChatGPT-like web UI:
+
+```bash
+export RADV_PERFTEST=coop_matrix
+./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
+```
+
+Then open **http://localhost:8080/** in your browser. The chat interface is built into the ZINC binary — no separate install needed.
+
+The server also exposes an OpenAI-compatible API at `http://localhost:8080/v1` that works with any OpenAI SDK client.
+
 ## What to read next
 
+- [Running ZINC](/zinc/docs/running-zinc) for CLI flags, server mode, API endpoints, and SDK examples
 - [Hardware requirements](/zinc/docs/hardware-requirements) for GPU, VRAM, and OS expectations
-- [Running ZINC](/zinc/docs/running-zinc) for CLI flags, server mode, and graph exports
-- [Serving HTTP API](/zinc/docs/api) if you want the OpenAI-compatible endpoint shape
+- [Serving HTTP API](/zinc/docs/api) for the full endpoint reference
 - [RDNA4 tuning](/zinc/docs/rdna4-tuning) if you are chasing performance on Linux
-
-## Current reality
-
-ZINC is not positioned as a finished plug-and-play runtime yet. It is a fast-moving systems project with a working inference core, evolving serving path, and aggressive hardware-specific tuning. If you treat it as experimental software and start from the CLI, the experience is much better.

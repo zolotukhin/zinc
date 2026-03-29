@@ -77,7 +77,7 @@ If you are experimenting with constrained VRAM, `3` is the natural first value t
 
 ## Run ZINC as a server
 
-Server mode uses the same binary:
+When you omit `--prompt`, ZINC starts an HTTP server with a built-in chat interface and an OpenAI-compatible API:
 
 ```bash
 ./zig-out/bin/zinc \
@@ -85,24 +85,89 @@ Server mode uses the same binary:
   -p 8080
 ```
 
-Important caveat: the serving path is still under development. If you are testing correctness, benchmarking the core engine, or trying to eliminate environment issues, start with CLI mode first and treat server mode as the next step.
+Once you see `Server listening on 0.0.0.0:8080`, open your browser:
 
-## Call the OpenAI-compatible endpoint
+- **Chat UI**: [http://localhost:8080/](http://localhost:8080/) — a ChatGPT-like interface with streaming, markdown rendering, syntax highlighting, and copy buttons on code blocks.
+- **Health**: [http://localhost:8080/health](http://localhost:8080/health)
 
-When server mode is running:
+## OpenAI-compatible API
+
+The server exposes `/v1` endpoints that work as a drop-in replacement for OpenAI and llama-server clients.
+
+### Streaming chat completion
+
+```bash
+curl -N http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.5-35b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true,
+    "max_tokens": 256
+  }'
+```
+
+### Non-streaming chat completion
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 64,
-    "stream": false
+    "model": "qwen3.5-35b",
+    "messages": [{"role": "user", "content": "What is 2+2?"}],
+    "max_tokens": 32
   }'
 ```
 
-The network shapes live in the [Serving HTTP API](/zinc/docs/api) reference.
+### List models
+
+```bash
+curl http://localhost:8080/v1/models
+```
+
+### Use with OpenAI SDKs
+
+Python:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
+
+# Streaming
+for chunk in client.chat.completions.create(
+    model="qwen3.5-35b",
+    messages=[{"role": "user", "content": "Hello!"}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+Node.js:
+
+```javascript
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "unused" });
+const stream = await client.chat.completions.create({
+  model: "qwen3.5-35b",
+  messages: [{ role: "user", content: "Hello!" }],
+  stream: true,
+});
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content || "");
+}
+```
+
+### All endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Built-in chat interface |
+| GET | `/health` | Server status and loaded model |
+| GET | `/v1/models` | List available models |
+| POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
+| POST | `/v1/completions` | Text completion |
+
+The full API contract is documented in [Serving HTTP API](/zinc/docs/api).
 
 ## Export the decode graph
 
