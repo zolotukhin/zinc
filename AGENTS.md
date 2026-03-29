@@ -58,7 +58,14 @@ src/
     ├── swiglu.comp             #   SiLU-gated linear unit (fused)
     ├── rope_fused.comp         #   Rotary position embedding (fused)
     ├── sigmoid_mul.comp        #   Sigmoid * element-wise (SSM gating)
-    ├── softmax_topk.comp       #   Softmax + top-k (MoE routing)
+    ├── scale_acc_sigmoid.comp  #   a += sigmoid(gate) * b (shared expert gating)
+    ├── sigmoid_scale_acc.comp  #   Variant sigmoid-gated scale-accumulate
+    ├── softmax_topk.comp       #   Softmax + top-k (MoE routing on GPU)
+    ├── ssm_conv1d.comp         #   1D causal conv for SSM layers
+    ├── ssm_delta_net.comp      #   Delta-net recurrent state update
+    ├── ssm_gated_norm.comp     #   Gated RMS norm for SSM output
+    ├── argmax.comp             #   GPU-side argmax
+    ├── embed_dequant_q4k.comp  #   Token embedding dequant on GPU
     ├── tq_quantize_keys.comp   #   TurboQuant: quantize K cache
     ├── tq_quantize_values.comp #   TurboQuant: quantize V cache
     ├── tq_attention_scores.comp#   TurboQuant: attention on quantized KV
@@ -276,6 +283,11 @@ The main file. Contains the decode loop, all layer dispatch, MoE routing, SSM st
 | `recordSigmoidMul()` | n_elements | (n+63)/64 |
 | `recordVadd()` | n_elements | (n+63)/64 |
 | `recordScaleAcc()` | n_elements, scale | (n+63)/64 |
+| `recordSsmConv1d()` | d_inner, d_conv | (d_inner+63)/64 — 1D causal conv for SSM layers |
+| `recordSsmDeltaNet()` | d_inner, d_state, n_heads | 1 per head — delta-net recurrent state update |
+| `recordSsmGatedNorm()` | n_elements, eps | (n+63)/64 — gated RMS norm for SSM output |
+| `recordSoftmaxTopk()` | n_experts, k | 1 WG — softmax + top-k expert selection |
+| `recordSigmoidScaleAcc()` | n_elements | (n+63)/64 — a[i] += sigmoid(gate[i]) * b[i] (shared expert gating) |
 
 ### attention.zig — Flash Attention
 
@@ -357,7 +369,14 @@ The main file. Contains the decode loop, all layer dispatch, MoE routing, SSM st
 | `sigmoid_mul.comp` | — | 64 threads | y = sigmoid(gate) * x (SSM gating) |
 | `vadd.comp` | — | 64 threads | c = a + b |
 | `scale_accumulate.comp` | — | 64 threads | a[i] += scale * b[i] (MoE expert accumulation) |
-| `softmax_topk.comp` | — | 64 threads | Expert routing (not currently used — CPU routing) |
+| `softmax_topk.comp` | — | 64 threads | Expert routing (GPU-side, used by recordSoftmaxTopk) |
+| `ssm_conv1d.comp` | — | 64 threads | 1D causal convolution for SSM layers (d_conv=4 window) |
+| `ssm_delta_net.comp` | — | 1 WG/head | Delta-net recurrent state update (decay + gate + input) |
+| `ssm_gated_norm.comp` | — | 64 threads | Gated RMS norm: out = gate * rms_norm(x) |
+| `scale_acc_sigmoid.comp` | — | 64 threads | a[i] += sigmoid(gate[i]) * b[i] (shared expert gating) |
+| `sigmoid_scale_acc.comp` | — | 64 threads | Variant: sigmoid-gated scale-accumulate |
+| `argmax.comp` | — | 64 threads | GPU-side argmax over logits |
+| `embed_dequant_q4k.comp` | Q4_K | 64 threads | Token embedding dequant on GPU (future) |
 | `coop_matmul.comp` | — | 16×16 | Cooperative matrix for batched prefill (future) |
 
 ### Critical Constants
