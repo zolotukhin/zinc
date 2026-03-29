@@ -143,7 +143,7 @@ async function send(){
   addMsg('user',t);H.push({role:'user',content:t});
   let bbl=addMsg('assistant','');
   let cur=document.createElement('span');cur.className='cursor';bbl.appendChild(cur);
-  let full='',tokens=0,t0=performance.now();
+  let raw='',display='',tokens=0,t0=performance.now(),thinking=false;
   try{
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -156,23 +156,41 @@ async function send(){
       for(let l of ls){
         if(!l.startsWith('data: '))continue;let p=l.slice(6);if(p==='[DONE]')break;
         try{let c=JSON.parse(p).choices?.[0]?.delta?.content;
-          if(c){tokens++;full+=c;
-            bbl.innerHTML=md(full);bbl.appendChild(cur);
-            highlightAll();M.scrollTop=M.scrollHeight;
+          if(c){tokens++;raw+=c;
+            // Track <think>...</think> reasoning blocks
+            if(!thinking&&raw.includes('<think>')){thinking=true}
+            if(thinking&&raw.includes('</think>')){thinking=false}
+            // Filter stop tokens from display
+            if(c.includes('<|im_end')||c.includes('<|im_start'))continue;
+            // Build display: reasoning in collapsible, answer after </think>
+            let thinkMatch=raw.match(/<think>([\s\S]*?)<\/think>/);
+            let thinkPartial=!thinkMatch&&raw.match(/<think>([\s\S]*)$/);
+            let answer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
+            let html='';
+            if(thinkMatch||thinkPartial){
+              let thinkText=thinkMatch?thinkMatch[1]:(thinkPartial?thinkPartial[1]:'');
+              let open=thinking?' open':'';
+              html+='<details'+open+' style="margin-bottom:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px;user-select:none">'+(thinking?'Thinking...':'Reasoning')+'</summary><div style="font-size:13px;color:var(--muted);padding:6px 0;line-height:1.5;white-space:pre-wrap">'+esc(thinkText.trim())+'</div></details>';
+            }
+            if(answer) html+=md(answer);
+            else if(!thinkMatch&&!thinkPartial) html+=md(raw.trim());
+            if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();M.scrollTop=M.scrollHeight}
             let el=(performance.now()-t0)/1000;
             if(el>0.3)SS.textContent=((tokens/el).toFixed(1))+' tok/s';
           }
         }catch(e){}
       }
     }
-    H.push({role:'assistant',content:full});
+    // Final: store clean answer in history (no think tags)
+    let cleanAnswer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
+    H.push({role:'assistant',content:cleanAnswer});
     let el=(performance.now()-t0)/1000,tps=tokens/el;
     SS.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s';
     let meta=document.createElement('div');meta.className='meta';
     meta.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s \u00b7 '+el.toFixed(1)+'s';
     bbl.parentElement.appendChild(meta);
   }catch(e){bbl.textContent='Error: '+e.message}
-  if(cur.parentNode)cur.remove();bbl.innerHTML=md(full);highlightAll();B.disabled=false;I.focus();
+  if(cur.parentNode)cur.remove();highlightAll();B.disabled=false;I.focus();
 }
 
 function copyCode(btn){
