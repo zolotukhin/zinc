@@ -36,3 +36,4 @@ bun.lockb
 Thumbs.db
 
 research/turboquant-pytorch-master/
+.metal_optimize/
