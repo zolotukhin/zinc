@@ -2,6 +2,7 @@
 import Header from '../components/Header.astro';
 import SEOHead from '../components/SEOHead.astro';
 import Mermaid from '../components/Mermaid.astro';
+import CodeBlockEnhancer from '../components/CodeBlockEnhancer.astro';
 import '../styles/global.css';
 
 interface Props {
@@ -20,6 +21,14 @@ const props = Astro.props;
 <!doctype html>
 <html lang="en">
   <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-YQJXC9G6B4"></script>
+    <script is:inline>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-YQJXC9G6B4');
+    </script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="/favicon.ico" sizes="48x48" />
@@ -42,6 +51,7 @@ const props = Astro.props;
       <p>Stepan Zolotukhin · <a href="/zinc">ZINC</a> · <a href="/blog">Blog</a> · <a href="/feed.xml">RSS</a></p>
     </footer>
     <Mermaid />
+    <CodeBlockEnhancer />
   </body>
 </html>
 
