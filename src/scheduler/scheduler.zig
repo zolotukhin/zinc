@@ -59,7 +59,8 @@ pub const Scheduler = struct {
         return count;
     }
 
-    /// Get requests that are ready for prefill (pending state).
+    /// Return slot IDs of requests in the prefilling state.
+    /// @returns Empty slice (stub — allocation strategy TBD).
     pub fn pendingPrefill(self: *Scheduler) []u32 {
         // Returns slot IDs of pending requests
         // TODO: implement with proper allocation
@@ -67,7 +68,8 @@ pub const Scheduler = struct {
         return &.{};
     }
 
-    /// Get requests that are ready for decode (decoding state).
+    /// Return slot IDs of requests in the decoding state.
+    /// @returns Empty slice (stub — allocation strategy TBD).
     pub fn activeDecoding(self: *Scheduler) []u32 {
         _ = self;
         return &.{};
@@ -84,7 +86,6 @@ pub const Scheduler = struct {
         }
     }
 
-    /// Tear down all active requests and free the slot array.
     /// Tear down all active requests and free the slot array.
     pub fn deinit(self: *Scheduler) void {
         for (self.slots) |*slot| {

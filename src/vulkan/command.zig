@@ -201,9 +201,9 @@ pub const CommandBuffer = struct {
         vk.c.vkCmdDispatch(self.handle, group_count_x, group_count_y, group_count_z);
     }
 
-    /// Record a coarse compute-to-compute memory barrier.
+    /// Insert a compute-to-compute pipeline barrier (shader write → shader read).
     /// @param self Command buffer currently being recorded.
-    /// @note This synchronizes shader writes with later shader reads when a full buffer barrier is not needed.
+    /// @note Uses a coarse global memory barrier; prefer buffer barriers for fine-grained sync.
     pub fn computeBarrier(self: *const CommandBuffer) void {
         const barrier = vk.c.VkMemoryBarrier{
             .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -225,7 +225,9 @@ pub const CommandBuffer = struct {
         );
     }
 
-    /// Record a transfer-to-compute memory barrier.
+    /// Insert a transfer-to-compute pipeline barrier (copy/upload → shader read).
+    /// @param self Command buffer currently being recorded.
+    /// @note Ensures prior transfer writes are visible before subsequent compute dispatches.
     pub fn transferToComputeBarrier(self: *const CommandBuffer) void {
         const barrier = vk.c.VkMemoryBarrier{
             .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
