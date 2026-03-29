@@ -144,7 +144,7 @@ fn handleChatCompletions(
         // Decode loop with buffered stop detection.
         // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
         const eos = tokenizer.eosId();
-        const stop_strs = [_][]const u8{ "<|im_end|>", "<|im_start|>" };
+        const stop_strs = [_][]const u8{"<|im_end|>"};
         var pending_tokens: [16]u32 = undefined; // tokens waiting to be sent
         var pending_count: usize = 0;
         var gen_text_buf: [4096]u8 = undefined; // accumulated decoded text for stop check
@@ -243,7 +243,7 @@ fn handleChatCompletions(
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
         const ns_eos = tokenizer.eosId();
-        const ns_stops = [_][]const u8{ "<|im_end|>", "<|im_start|>" };
+        const ns_stops = [_][]const u8{"<|im_end|>"};
         if (prompt_tokens.len > 0 and max_tokens > 0) {
             var prev = engine.sampleGreedy();
             ns_gen = 1;
