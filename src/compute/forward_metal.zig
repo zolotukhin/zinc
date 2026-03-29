@@ -106,6 +106,19 @@ const MoeAccBatchedPush = extern struct {
     w_sh: f32,
 };
 
+/// Push constants for GPU softmax + top-k routing.
+const SoftmaxTopkPush = extern struct {
+    n_experts: u32,
+    k: u32,
+};
+
+/// Push constants for GPU-weighted batched MoE accumulation.
+const MoeWeightedAccPush = extern struct {
+    n: u32,
+    n_used: u32,
+    src_stride: u32,
+};
+
 /// Push constants for RMS norm dispatch (matches rms_norm_mul.metal: buffer(0)).
 const RmsNormPush = extern struct {
     n: u32, // elements per group
@@ -223,6 +236,7 @@ pub const InferenceEngine = struct {
     down_buf: MetalBuffer,
     moe_out_buf: MetalBuffer,
     router_logits_buf: MetalBuffer,
+    router_output_buf: MetalBuffer,
     logits_buf: MetalBuffer,
     embed_staging: MetalBuffer,
     expert_ids_buf: MetalBuffer,
@@ -268,6 +282,9 @@ pub const InferenceEngine = struct {
     rms_norm_pipe: MetalPipeline,
     moe_acc_pipe: MetalPipeline,
     moe_acc_batched_pipe: MetalPipeline,
+    softmax_topk_pipe: MetalPipeline,
+    sigmoid_scale_acc_pipe: MetalPipeline,
+    moe_weighted_acc_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -334,6 +351,7 @@ pub const InferenceEngine = struct {
         const kv_cache_size: usize = @as(usize, 4096) * kv_dim * @sizeOf(f32);
         const page_table_size: usize = @as(usize, 4096) * @sizeOf(u32);
         const router_size: usize = @max(@as(usize, cfg.n_experts), @as(usize, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1)) * @sizeOf(f32);
+        const router_output_size: usize = @max(@as(usize, cfg.n_experts_used) * 2 * @sizeOf(u32), 8);
         const expert_ids_size: usize = @max(@as(usize, cfg.n_experts_used) * @sizeOf(u32), 4);
         const expert_inter_batch_size: usize = @max(@as(usize, cfg.n_experts_used) * @as(usize, inter_dim) * @sizeOf(f32), 4);
         const expert_hidden_batch_size: usize = @max(@as(usize, cfg.n_experts_used) * @as(usize, cfg.hidden_dim) * @sizeOf(f32), 4);
@@ -359,6 +377,7 @@ pub const InferenceEngine = struct {
         self.down_buf = try metal_buffer.createBuffer(ctx, hidden_size);
         self.moe_out_buf = try metal_buffer.createBuffer(ctx, hidden_size);
         self.router_logits_buf = try metal_buffer.createBuffer(ctx, @max(router_size, 4));
+        self.router_output_buf = try metal_buffer.createBuffer(ctx, router_output_size);
         self.logits_buf = try metal_buffer.createBuffer(ctx, vocab_size);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
         self.expert_ids_buf = try metal_buffer.createBuffer(ctx, expert_ids_size);
@@ -425,6 +444,9 @@ pub const InferenceEngine = struct {
         self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
         self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
         self.moe_acc_batched_pipe = try loadShaderPipeline(ctx, "moe_accumulate_batched");
+        self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
+        self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
+        self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -658,6 +680,7 @@ pub const InferenceEngine = struct {
         metal_buffer.freeBuffer(&self.down_buf);
         metal_buffer.freeBuffer(&self.moe_out_buf);
         metal_buffer.freeBuffer(&self.router_logits_buf);
+        metal_buffer.freeBuffer(&self.router_output_buf);
         metal_buffer.freeBuffer(&self.logits_buf);
         metal_buffer.freeBuffer(&self.embed_staging);
         metal_buffer.freeBuffer(&self.expert_ids_buf);
@@ -706,6 +729,9 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.rms_norm_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_batched_pipe);
+        metal_pipeline.freePipeline(&self.softmax_topk_pipe);
+        metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
+        metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
@@ -1095,6 +1121,51 @@ fn dispatchSigmoidMulOnCmd(
     cmd.dispatchV2(&engine.sigmoid_mul_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SigmoidMulPush), 0);
 }
 
+fn dispatchSoftmaxTopkOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    logits: *const MetalBuffer,
+    output: *const MetalBuffer,
+    n_experts: u32,
+    k: u32,
+) void {
+    const push = SoftmaxTopkPush{ .n_experts = n_experts, .k = k };
+    const bufs = [_]*const MetalBuffer{ logits, output };
+    cmd.dispatchV2(&engine.softmax_topk_pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkPush), 0);
+}
+
+fn dispatchSigmoidScaleAccOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    accum: *const MetalBuffer,
+    src: *const MetalBuffer,
+    gate: *const MetalBuffer,
+    n: u32,
+) void {
+    const push = ScaleAccPush{ .n = n, .scale_bits = 0 };
+    const bufs = [_]*const MetalBuffer{ accum, src, gate };
+    cmd.dispatchV2(&engine.sigmoid_scale_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 3);
+}
+
+fn dispatchMoeWeightedAccOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    accum: *const MetalBuffer,
+    src: *const MetalBuffer,
+    routing: *const MetalBuffer,
+    n: u32,
+    n_used: u32,
+    src_stride: u32,
+) void {
+    const push = MoeWeightedAccPush{
+        .n = n,
+        .n_used = n_used,
+        .src_stride = src_stride,
+    };
+    const bufs = [_]*const MetalBuffer{ accum, src, routing };
+    cmd.dispatchV2(&engine.moe_weighted_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccPush), 3);
+}
+
 fn dispatchFullAttnPrepOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -1446,6 +1517,92 @@ fn canUseBatchedQ4kMoe(engine: *const InferenceEngine, gate_quant: GGMLType, dow
     return engine.config.n_experts_used == 8 and gate_quant == .q4_k and down_quant == .q4_k;
 }
 
+fn canUseGpuRoutedBatchedMoe(engine: *const InferenceEngine, lt: LayerTensors) bool {
+    const gate_exps = lt.ffn_gate_exps orelse return false;
+    const up_exps = lt.ffn_up_exps orelse return false;
+    const down_exps = lt.ffn_down_exps orelse return false;
+
+    if (!canUseBatchedQ4kMoe(engine, gate_exps.info.type_, down_exps.info.type_)) return false;
+    if (up_exps.info.type_ != .q4_k) return false;
+
+    const has_shexp = lt.ffn_gate_shexp != null and lt.ffn_up_shexp != null and lt.ffn_down_shexp != null;
+    if (has_shexp and lt.ffn_gate_inp_shexp != null and engine.sigmoid_scale_acc_pipe.handle == null) return false;
+
+    return engine.softmax_topk_pipe.handle != null and engine.moe_weighted_acc_pipe.handle != null;
+}
+
+fn recordGpuRoutedBatchedMoeOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    lt: LayerTensors,
+    hidden_dim: u32,
+    inter_dim: u32,
+    shexp_inter_dim: u32,
+) !void {
+    const cfg = engine.config;
+    const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
+    const up_exps = lt.ffn_up_exps orelse return error.MissingTensor;
+    const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
+    const gate_shexp = lt.ffn_gate_shexp;
+    const up_shexp = lt.ffn_up_shexp;
+    const down_shexp = lt.ffn_down_shexp;
+    const gate_inp_shexp = lt.ffn_gate_inp_shexp;
+    const has_shexp = gate_shexp != null and up_shexp != null and down_shexp != null;
+    const expert_gate_bytes = expertSliceBytes(gate_exps.info.type_, inter_dim, hidden_dim);
+    const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
+
+    cmd.barrier();
+    dispatchSoftmaxTopkOnCmd(engine, cmd, &engine.router_logits_buf, &engine.router_output_buf, cfg.n_experts, cfg.n_experts_used);
+    cmd.barrier();
+
+    dispatchDmmvMoeQ4kOnCmd(engine, cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
+    dispatchDmmvMoeQ4kOnCmd(engine, cmd, up_exps, &engine.norm_buf, &engine.expert_up_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
+    if (has_shexp) {
+        dispatchDmmvOnCmd(engine, cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
+        if (gate_inp_shexp) |tensor| {
+            dispatchDmmvOnCmd(engine, cmd, tensor, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
+        }
+    }
+    cmd.barrier();
+
+    {
+        const swiglu_push = SwiGLUPush{ .n = inter_dim };
+        const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
+        cmd.dispatchV2(&engine.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+    }
+    if (has_shexp) {
+        const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
+        const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
+        cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
+    }
+    cmd.barrier();
+
+    dispatchDmmvMoeQ4kOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
+    if (has_shexp) {
+        dispatchDmmvOnCmd(engine, cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
+    }
+    cmd.barrier();
+
+    dispatchMoeWeightedAccOnCmd(engine, cmd, &engine.moe_out_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, cfg.n_experts_used, hidden_dim);
+    if (has_shexp) {
+        if (gate_inp_shexp != null) {
+            dispatchSigmoidScaleAccOnCmd(engine, cmd, &engine.moe_out_buf, &engine.down_buf, &engine.router_logits_buf, hidden_dim);
+        } else {
+            const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+            const shexp_bufs = [_]*const MetalBuffer{ &engine.moe_out_buf, &engine.down_buf };
+            cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
+        }
+    }
+    cmd.barrier();
+
+    {
+        const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+        const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.moe_out_buf };
+        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Decode step — runs all layers + final norm + LM head
 // ---------------------------------------------------------------------------
@@ -1474,6 +1631,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         const layer: u32 = @intCast(layer_idx);
         const lt = engine.layer_tensors[layer_idx];
         const is_full_attn = ((layer + 1) % full_attn_interval == 0);
+        const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
 
         if (is_full_attn) {
             // ===== GPU BATCH 1: attn_norm → projections =====
@@ -1515,6 +1673,9 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 if (is_moe) {
                     const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                     dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+                    if (use_gpu_routed_moe) {
+                        try recordGpuRoutedBatchedMoeOnCmd(engine, &cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    }
                 }
                 cmd.commitAndWait();
             }
@@ -1601,12 +1762,15 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+                if (use_gpu_routed_moe) {
+                    try recordGpuRoutedBatchedMoeOnCmd(engine, &cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                }
             }
             cmd.commitAndWait();
         }
 
         // ===== MoE / Dense FFN =====
-        if (is_moe) {
+        if (is_moe and !use_gpu_routed_moe) {
             // CPU topK softmax
             const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
             var expert_ids: [16]u32 = undefined;
@@ -1789,7 +1953,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
                 cmd.commitAndWait();
             }
-        } else {
+        } else if (!is_moe) {
             // Dense FFN (non-MoE) — norm_buf already set by GPU batch 2
             const gate_t = lt.ffn_gate orelse return error.MissingTensor;
             const up_t = lt.ffn_up orelse return error.MissingTensor;
@@ -1971,6 +2135,12 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&lmhead_pipe);
     var lmhead_pipe_1024 = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
     defer metal_pipeline.freePipeline(&lmhead_pipe_1024);
+    var topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
+    defer metal_pipeline.freePipeline(&topk_pipe);
+    var sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
+    defer metal_pipeline.freePipeline(&sigmoid_scale_acc_pipe);
+    var moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
+    defer metal_pipeline.freePipeline(&moe_weighted_acc_pipe);
 
     try std.testing.expect(deinterleave_pipe.handle != null);
     try std.testing.expect(flash_attn_pipe.handle != null);
@@ -1983,6 +2153,9 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(acc_pipe.handle != null);
     try std.testing.expect(lmhead_pipe.handle != null);
     try std.testing.expect(lmhead_pipe_1024.handle != null);
+    try std.testing.expect(topk_pipe.handle != null);
+    try std.testing.expect(sigmoid_scale_acc_pipe.handle != null);
+    try std.testing.expect(moe_weighted_acc_pipe.handle != null);
 }
 
 test "deinterleave shader splits block-interleaved Q and gate" {
@@ -2025,4 +2198,39 @@ test "deinterleave shader splits block-interleaved Q and gate" {
 
     try std.testing.expectEqualSlices(f32, &.{ 10, 11, 12, 13, 30, 31, 32, 33 }, q_ptr[0..total]);
     try std.testing.expectEqualSlices(f32, &.{ 20, 21, 22, 23, 40, 41, 42, 43 }, gate_ptr[0..total]);
+}
+
+test "softmax_topk shader selects top experts and normalized weights" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "softmax_topk");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    var logits_buf = try metal_buffer.createBuffer(ctx, 8 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&logits_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, 6 * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const logits_ptr: [*]f32 = @ptrCast(@alignCast(logits_buf.cpu_ptr.?));
+    @memcpy(logits_ptr[0..8], &[_]f32{ 1.0, 3.0, 2.0, 0.5, 4.0, 1.5, 0.1, 2.5 });
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const push = SoftmaxTopkPush{ .n_experts = 8, .k = 3 };
+    const bufs = [_]*const MetalBuffer{ &logits_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkPush), 0);
+    cmd.commitAndWait();
+
+    const out_ptr: [*]const u32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    try std.testing.expectEqual(@as(u32, 4), out_ptr[0]);
+    try std.testing.expectEqual(@as(u32, 1), out_ptr[1]);
+    try std.testing.expectEqual(@as(u32, 7), out_ptr[2]);
+
+    const w0: f32 = @bitCast(out_ptr[3]);
+    const w1: f32 = @bitCast(out_ptr[4]);
+    const w2: f32 = @bitCast(out_ptr[5]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), w0 + w1 + w2, 0.01);
 }
