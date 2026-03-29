@@ -496,7 +496,9 @@ pub const InferenceEngine = struct {
         const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
         // SSM d_inner or shared expert FFN may be larger than per-expert intermediate_dim; buffers must fit all
         const shexp_inter = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_dim;
-        const max_inter = @max(@max(inter_dim, shexp_inter), if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim);
+        // GPU SSM conv1d output is conv_channels = d_inner + 2*n_group*d_state, which exceeds d_inner
+        const ssm_conv_channels: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
+        const max_inter = @max(@max(inter_dim, shexp_inter), @max(if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim, ssm_conv_channels));
         const inter_size = @as(vk.c.VkDeviceSize, max_inter) * @sizeOf(f32);
         const n_experts_total = if (config.n_experts > 0) config.n_experts else @as(u32, 1);
 
@@ -1251,9 +1253,11 @@ pub const InferenceEngine = struct {
                 }
             } else {
                 // === SSM / LINEAR ATTENTION LAYER ===
-                // GPU SSM path disabled — produces wrong output, needs validation
-                // against CPU reference before enabling. See runSsmLayerGpu().
-                try self.runSsmLayerCpu(state, layer, layer_idx);
+                if (self.elementwise.pipeline_ssm_conv1d != null) {
+                    try self.runSsmLayerGpu(state, layer, layer_idx);
+                } else {
+                    try self.runSsmLayerCpu(state, layer, layer_idx);
+                }
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
