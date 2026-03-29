@@ -17,6 +17,26 @@ const shim = @import("../metal/c.zig").shim;
 
 const log = std.log.scoped(.forward);
 
+/// Runtime state for the decode loop.
+pub const DecodeState = struct {
+    position: u32,
+    generated_tokens: std.ArrayList(u32),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) DecodeState {
+        return .{
+            .position = 0,
+            .generated_tokens = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *DecodeState) void {
+        self.generated_tokens.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
 /// Push constants for DMMV dispatch (matches GLSL layout).
 const DmmvPush = extern struct {
     M: u32, // rows
@@ -199,6 +219,7 @@ pub const InferenceEngine = struct {
 
     // Cached per-layer tensor pointers (init-time, eliminates per-token O(733) scans)
     layer_tensors: []LayerTensors,
+    token_embed: *const metal_loader.LoadedTensor,
     lm_head: *const metal_loader.LoadedTensor,
 
     // Decode state
@@ -446,6 +467,7 @@ pub const InferenceEngine = struct {
         }
         self.lm_head = findTensorByName(model, "output.weight") orelse
             findTensorByName(model, "token_embd.weight") orelse return error.MissingTensor;
+        self.token_embed = findTensorByName(model, "token_embd.weight") orelse return error.MissingTensor;
 
         log.info("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
@@ -557,6 +579,47 @@ pub const InferenceEngine = struct {
             }
         }
         return max_idx;
+    }
+
+    pub fn resetRequestState(self: *InferenceEngine) void {
+        self.position = 0;
+
+        if (self.ssm_conv_state_bufs) |bufs| {
+            for (bufs) |buf| {
+                @memset(buf.cpu_ptr.?[0..buf.size], 0);
+            }
+        }
+        if (self.ssm_state_bufs) |bufs| {
+            for (bufs) |buf| {
+                @memset(buf.cpu_ptr.?[0..buf.size], 0);
+            }
+        }
+    }
+
+    pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        self.resetRequestState();
+        state.position = 0;
+        state.generated_tokens.clearRetainingCapacity();
+
+        for (prompt_tokens) |token_id| {
+            try self.loadTokenEmbedding(token_id);
+            try runDecodeStep(self);
+        }
+        state.position = self.position;
+    }
+
+    pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32) !void {
+        try self.loadTokenEmbedding(token_id);
+        try runDecodeStep(self);
+        state.position = self.position;
+    }
+
+    fn loadTokenEmbedding(self: *InferenceEngine, token_id: u32) !void {
+        const mmap = self.model.mmap_data orelse return error.NoMmapData;
+        const embed_data_offset = self.model.gguf_file.tensor_data_offset + self.token_embed.info.offset;
+        const embed_raw = mmap[embed_data_offset..];
+        const hidden_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
+        dequantRow(embed_raw, token_id, self.config.hidden_dim, self.token_embed.info.type_, hidden_ptr[0..self.config.hidden_dim]);
     }
 
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
@@ -1015,7 +1078,7 @@ fn expertSliceBytes(quant_type: GGMLType, rows: u32, cols: u32) u32 {
 // Decode step — runs all layers + final norm + LM head
 // ---------------------------------------------------------------------------
 
-fn decodeStep(engine: *InferenceEngine) !void {
+fn runDecodeStep(engine: *InferenceEngine) !void {
     const cfg = engine.config;
     const hidden_dim = cfg.hidden_dim;
     const q_dim: u32 = cfg.n_heads * cfg.head_dim;
@@ -1155,16 +1218,21 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 // Delta-net: swiglu_buf → attn_out_buf
                 {
                     const push = SsmDeltaNetPush{
-                        .d_inner = d_inner, .dt_rank = dt_rank, .head_v_dim = head_v_dim,
-                        .d_state = d_state, .n_group = n_group,
-                        .ssm_a_is_f16 = 0, .dt_bias_is_f16 = 0,
+                        .d_inner = d_inner,
+                        .dt_rank = dt_rank,
+                        .head_v_dim = head_v_dim,
+                        .d_state = d_state,
+                        .n_group = n_group,
+                        .ssm_a_is_f16 = 0,
+                        .dt_bias_is_f16 = 0,
                         .has_dt_bias = if (lt.ssm_dt_bias != null) @as(u32, 1) else 0,
                         .has_ssm_a = if (lt.ssm_a != null) @as(u32, 1) else 0,
                     };
                     const dn_bufs = [_]*const MetalBuffer{
-                        &engine.swiglu_buf, &engine.router_logits_buf,
+                        &engine.swiglu_buf,                    &engine.router_logits_buf,
                         &engine.ssm_dt_bias_bufs.?[layer_idx], &engine.ssm_a_bufs.?[layer_idx],
-                        &engine.down_buf, &engine.ssm_state_bufs.?[layer_idx], &engine.attn_out_buf,
+                        &engine.down_buf,                      &engine.ssm_state_bufs.?[layer_idx],
+                        &engine.attn_out_buf,
                     };
                     cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
                 }
@@ -1173,12 +1241,15 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 // Gated norm: attn_out_buf → swiglu_buf
                 {
                     const push = SsmGatedNormPush{
-                        .d_inner = d_inner, .dt_rank = dt_rank, .head_v_dim = head_v_dim,
-                        .d_state = d_state, .norm_per_head = if (engine.ssm_norm_per_head.?[layer_idx]) @as(u32, 1) else 0,
+                        .d_inner = d_inner,
+                        .dt_rank = dt_rank,
+                        .head_v_dim = head_v_dim,
+                        .d_state = d_state,
+                        .norm_per_head = if (engine.ssm_norm_per_head.?[layer_idx]) @as(u32, 1) else 0,
                     };
                     const gn_bufs = [_]*const MetalBuffer{
                         &engine.attn_out_buf, &engine.ssm_norm_weight_bufs.?[layer_idx],
-                        &engine.gate_buf, &engine.swiglu_buf,
+                        &engine.gate_buf,     &engine.swiglu_buf,
                     };
                     cmd.dispatchV2(&engine.ssm_gated_norm_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &gn_bufs, &push, @sizeOf(SsmGatedNormPush), 0);
                 }
@@ -1373,16 +1444,21 @@ fn decodeStep(engine: *InferenceEngine) !void {
                         // Delta-net
                         {
                             const dn_push = SsmDeltaNetPush{
-                                .d_inner = d_inner, .dt_rank = dt_rank, .head_v_dim = head_v_dim,
-                                .d_state = d_state, .n_group = n_group,
-                                .ssm_a_is_f16 = 0, .dt_bias_is_f16 = 0,
+                                .d_inner = d_inner,
+                                .dt_rank = dt_rank,
+                                .head_v_dim = head_v_dim,
+                                .d_state = d_state,
+                                .n_group = n_group,
+                                .ssm_a_is_f16 = 0,
+                                .dt_bias_is_f16 = 0,
                                 .has_dt_bias = if (next_lt.ssm_dt_bias != null) @as(u32, 1) else 0,
                                 .has_ssm_a = if (next_lt.ssm_a != null) @as(u32, 1) else 0,
                             };
                             const dn_bufs = [_]*const MetalBuffer{
-                                &engine.swiglu_buf, &engine.router_logits_buf,
+                                &engine.swiglu_buf,                  &engine.router_logits_buf,
                                 &engine.ssm_dt_bias_bufs.?[next_li], &engine.ssm_a_bufs.?[next_li],
-                                &engine.down_buf, &engine.ssm_state_bufs.?[next_li], &engine.attn_out_buf,
+                                &engine.down_buf,                    &engine.ssm_state_bufs.?[next_li],
+                                &engine.attn_out_buf,
                             };
                             cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &dn_bufs, &dn_push, @sizeOf(SsmDeltaNetPush), 0);
                         }
@@ -1390,12 +1466,15 @@ fn decodeStep(engine: *InferenceEngine) !void {
                         // Gated norm
                         {
                             const gn_push = SsmGatedNormPush{
-                                .d_inner = d_inner, .dt_rank = dt_rank, .head_v_dim = head_v_dim,
-                                .d_state = d_state, .norm_per_head = if (engine.ssm_norm_per_head.?[next_li]) @as(u32, 1) else 0,
+                                .d_inner = d_inner,
+                                .dt_rank = dt_rank,
+                                .head_v_dim = head_v_dim,
+                                .d_state = d_state,
+                                .norm_per_head = if (engine.ssm_norm_per_head.?[next_li]) @as(u32, 1) else 0,
                             };
                             const gn_bufs = [_]*const MetalBuffer{
                                 &engine.attn_out_buf, &engine.ssm_norm_weight_bufs.?[next_li],
-                                &engine.gate_buf, &engine.swiglu_buf,
+                                &engine.gate_buf,     &engine.swiglu_buf,
                             };
                             cmd.dispatchV2(&engine.ssm_gated_norm_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &gn_bufs, &gn_push, @sizeOf(SsmGatedNormPush), 0);
                         }
@@ -1479,28 +1558,16 @@ pub fn generate(
     eos_id: u32,
     allocator: std.mem.Allocator,
 ) ![]u32 {
-    const cfg = engine.config;
-    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
-
     var output: std.ArrayList(u32) = .{};
     errdefer output.deinit(allocator);
 
-    // Embedding dequant buffer
-    const embed_buf = try allocator.alloc(f32, cfg.hidden_dim);
-    defer allocator.free(embed_buf);
-
-    const embed_tensor = engine.model.gguf_file.findTensor("token_embd.weight") orelse return error.MissingTensor;
-    const embed_data_offset = engine.model.gguf_file.tensor_data_offset + embed_tensor.offset;
-    const embed_raw = mmap[embed_data_offset..];
-
-    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+    engine.resetRequestState();
 
     // Prefill: process each prompt token through all layers
     const prefill_start = std.time.nanoTimestamp();
     for (prompt_tokens) |token_id| {
-        dequantRow(embed_raw, token_id, cfg.hidden_dim, embed_tensor.type_, embed_buf);
-        @memcpy(hidden_ptr[0..cfg.hidden_dim], embed_buf);
-        try decodeStep(engine);
+        try engine.loadTokenEmbedding(token_id);
+        try runDecodeStep(engine);
     }
     const prefill_end = std.time.nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
@@ -1526,10 +1593,8 @@ pub fn generate(
     var tokens_generated: u32 = 1;
     while (tokens_generated < max_tokens) {
         const input_token = output.items[output.items.len - 1];
-        dequantRow(embed_raw, input_token, cfg.hidden_dim, embed_tensor.type_, embed_buf);
-        @memcpy(hidden_ptr[0..cfg.hidden_dim], embed_buf);
-
-        try decodeStep(engine);
+        try engine.loadTokenEmbedding(input_token);
+        try runDecodeStep(engine);
 
         const next_token = engine.sampleGreedy();
         if (next_token == eos_id) break;

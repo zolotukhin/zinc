@@ -228,6 +228,55 @@ const exportDecodeGraphArtifacts = if (gpu.is_vulkan) exportDecodeGraphArtifacts
     }
 }).f;
 
+fn runServer(
+    engine: anytype,
+    tokenizer: *tokenizer_mod.Tokenizer,
+    model: anytype,
+    config: Config,
+    allocator: std.mem.Allocator,
+) !void {
+    log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
+
+    const http_mod = @import("server/http.zig");
+    var server = http_mod.Server.init(allocator, config.port) catch |err| {
+        log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer server.deinit();
+    log.info("Server listening on 0.0.0.0:{d}", .{config.port});
+    log.info("Press Ctrl+C to stop", .{});
+
+    const posix = std.posix;
+    const Handler = struct {
+        var shutdown_requested: bool = false;
+        fn handler(_: c_int) callconv(.c) void {
+            shutdown_requested = true;
+        }
+    };
+    const sa = posix.Sigaction{
+        .handler = .{ .handler = Handler.handler },
+        .mask = std.mem.zeroes(posix.sigset_t),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.INT, &sa, null);
+    posix.sigaction(posix.SIG.TERM, &sa, null);
+
+    while (!Handler.shutdown_requested) {
+        var conn = server.accept() catch |err| {
+            if (Handler.shutdown_requested) break;
+            log.warn("Accept failed: {s}", .{@errorName(err)});
+            continue;
+        };
+
+        const routes = @import("server/routes.zig");
+        routes.handleConnection(&conn, engine, tokenizer, model, allocator) catch |err| {
+            log.warn("Request failed: {s}", .{@errorName(err)});
+        };
+        conn.close();
+    }
+    log.info("Shutting down...", .{});
+}
+
 fn exportDecodeGraphArtifactsImpl(
     model_path: []const u8,
     report_path: ?[]const u8,
@@ -444,7 +493,19 @@ pub fn main() !void {
                 log.info("Output ({d} tokens): {s}", .{ output_tokens.len, text_buf.items });
             }
         } else {
-            log.info("Server mode — port {d} (Metal server not yet implemented)", .{config.port});
+            var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
+                log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer tokenizer.deinit();
+
+            var engine = forward_metal.InferenceEngine.init(&model, &device, allocator) catch |err| {
+                log.err("Failed to init Metal inference engine: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer engine.deinit();
+
+            try runServer(&engine, &tokenizer, &model, config, allocator);
         }
         return;
     }
@@ -622,60 +683,12 @@ pub fn main() !void {
             log.info("Output text: {s}", .{output_text});
         }
     } else {
-        log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
-
-        // Initialize tokenizer for chat template + prompt encoding
         var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
             log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
         defer tokenizer.deinit();
-
-        // Start HTTP server
-        const http_mod = @import("server/http.zig");
-        var server = http_mod.Server.init(allocator, config.port) catch |err| {
-            log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        defer server.deinit();
-        log.info("Server listening on 0.0.0.0:{d}", .{config.port});
-        log.info("Press Ctrl+C to stop", .{});
-
-        // Graceful shutdown: set flag on SIGINT/SIGTERM
-        const posix = std.posix;
-        const Handler = struct {
-            var shutdown_requested: bool = false;
-            fn handler(_: c_int) callconv(.c) void {
-                shutdown_requested = true;
-            }
-        };
-        const sa = posix.Sigaction{
-            .handler = .{ .handler = Handler.handler },
-            .mask = std.mem.zeroes(posix.sigset_t),
-            .flags = 0,
-        };
-        posix.sigaction(posix.SIG.INT, &sa, null);
-        posix.sigaction(posix.SIG.TERM, &sa, null);
-
-        // Server loop — accepts connections and handles requests sequentially.
-        // Each request runs to completion before the next is accepted.
-        // Concurrent streaming (US2) requires a poll-based event loop — deferred
-        // to a future iteration since the inference engine is single-threaded
-        // and GPU-bound (true concurrency needs batched multi-sequence decode).
-        while (!Handler.shutdown_requested) {
-            var conn = server.accept() catch |err| {
-                if (Handler.shutdown_requested) break;
-                log.warn("Accept failed: {s}", .{@errorName(err)});
-                continue;
-            };
-
-            const routes = @import("server/routes.zig");
-            routes.handleConnection(&conn, &engine, &tokenizer, &model, allocator) catch |err| {
-                log.warn("Request failed: {s}", .{@errorName(err)});
-            };
-            conn.close();
-        }
-        log.info("Shutting down...", .{});
+        try runServer(&engine, &tokenizer, &model, config, allocator);
     }
 }
 

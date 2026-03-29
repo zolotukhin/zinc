@@ -41,6 +41,12 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl pre{background:var(--bg);padding:10px 12px;margin:0;overflow-x:auto;border-radius:0}
 .msg.a .bbl pre code{background:none;padding:0;font-size:13px}
 .msg.a .bbl pre code.hljs{background:none;padding:0}
+.reasoning{margin:0 0 10px;border:1px solid var(--border);border-radius:10px;background:var(--bg3);overflow:hidden}
+.reasoning summary{cursor:pointer;color:var(--muted);font-size:12px;user-select:none;list-style:none;padding:8px 12px}
+.reasoning summary::-webkit-details-marker{display:none}
+.reasoning[open] summary{color:var(--text)}
+.reasoning .body{padding:0 12px 12px;color:var(--muted);font-size:13px;line-height:1.6;white-space:pre-wrap;border-top:1px solid var(--border)}
+.reasoning .placeholder{opacity:.8;font-style:italic}
 .msg .meta{font-size:11px;color:var(--muted);margin-top:4px}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
@@ -125,6 +131,103 @@ function md(s){
   return s;
 }
 
+function escapeHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderReasoningBlock(text,isPartial){
+  const trimmed=text.trim();
+  if(!trimmed&&!isPartial)return '';
+  const label=isPartial?'Thinking...':'Reasoning';
+  const body=trimmed?escapeHtml(trimmed):'<span class="placeholder">Waiting for reasoning...</span>';
+  return '<details class="reasoning"'+(isPartial?' open':'')+'><summary>'+label+'</summary><div class="body">'+body+'</div></details>';
+}
+
+function stripLeadingThinkNoise(text){
+  const firstThink=text.indexOf('<think>');
+  if(firstThink<=0||firstThink>24)return text;
+  const prefix=text.slice(0,firstThink).trim();
+  if(!prefix)return text.slice(firstThink);
+  if(prefix.length<=8&&!/\s/.test(prefix))return text.slice(firstThink);
+  return text;
+}
+
+function renderAssistant(raw){
+  const normalized=stripLeadingThinkNoise(raw
+    .replace(/<\|im_start\|>\w*\n?/g,'')
+    .replace(/<\|im_end\|>/g,''));
+  let html='';
+  let cursor=0;
+  let partialThinking=false;
+  while(cursor<normalized.length){
+    const thinkStart=normalized.indexOf('<think>',cursor);
+    if(thinkStart===-1){
+      const tail=normalized.slice(cursor).trim();
+      if(tail)html+=md(tail);
+      break;
+    }
+
+    const before=normalized.slice(cursor,thinkStart).trim();
+    if(before)html+=md(before);
+
+    const bodyStart=thinkStart+'<think>'.length;
+    const thinkEnd=normalized.indexOf('</think>',bodyStart);
+    if(thinkEnd===-1){
+      html+=renderReasoningBlock(normalized.slice(bodyStart),true);
+      partialThinking=true;
+      break;
+    }
+
+    html+=renderReasoningBlock(normalized.slice(bodyStart,thinkEnd),false);
+    cursor=thinkEnd+'</think>'.length;
+  }
+
+  const cleanAnswer=normalized
+    .replace(/<think>[\s\S]*?<\/think>\s*/g,' ')
+    .replace(/<think>[\s\S]*$/,' ')
+    .replace(/\n{3,}/g,'\n\n')
+    .trim();
+  if(!html&&cleanAnswer)html=md(cleanAnswer);
+  return {html,cleanAnswer,partialThinking};
+}
+
+function formatDuration(ms){
+  const secs=Math.max(ms,0)/1000;
+  return (secs>=10?secs.toFixed(0):secs.toFixed(1))+'s';
+}
+
+function formatRate(tokens,ms){
+  if(tokens<=0||ms<=0)return null;
+  return (tokens/(ms/1000)).toFixed(1);
+}
+
+function buildLiveStats(startedAt,firstTokenAt,streamedTokens){
+  const now=performance.now();
+  if(!firstTokenAt)return 'Prefill '+formatDuration(now-startedAt);
+  const parts=['TTFT '+formatDuration(firstTokenAt-startedAt)];
+  const rate=formatRate(Math.max(streamedTokens-1,0),now-firstTokenAt);
+  parts.push(rate?rate+' tok/s':'Generating...');
+  return parts.join(' \u00b7 ');
+}
+
+function buildFinalStats(startedAt,firstTokenAt,streamedTokens){
+  const endedAt=performance.now();
+  const totalMs=endedAt-startedAt;
+  if(!firstTokenAt){
+    return {
+      header:'No output \u00b7 '+formatDuration(totalMs),
+      meta:'0 streamed \u00b7 '+formatDuration(totalMs)+' total',
+    };
+  }
+  const ttftMs=firstTokenAt-startedAt;
+  const genMs=endedAt-firstTokenAt;
+  const rate=formatRate(Math.max(streamedTokens-1,0),genMs);
+  return {
+    header:'TTFT '+formatDuration(ttftMs)+(rate?' \u00b7 '+rate+' tok/s':''),
+    meta:streamedTokens+' streamed \u00b7 TTFT '+formatDuration(ttftMs)+(rate?' \u00b7 '+rate+' gen tok/s':'')+' \u00b7 '+formatDuration(totalMs)+' total',
+  };
+}
+
 function addMsg(role,text){
   let w=document.getElementById('w');if(w)w.remove();
   let d=document.createElement('div');d.className='msg '+(role==='user'?'u':'a');
@@ -143,7 +246,8 @@ async function send(){
   addMsg('user',t);H.push({role:'user',content:t});
   let bbl=addMsg('assistant','');
   let cur=document.createElement('span');cur.className='cursor';bbl.appendChild(cur);
-  let raw='',display='',tokens=0,t0=performance.now(),thinking=false;
+  let raw='',streamedTokens=0,requestStartedAt=performance.now(),firstTokenAt=0;
+  SS.textContent='Prefill 0.0s';
   try{
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -156,38 +260,26 @@ async function send(){
       for(let l of ls){
         if(!l.startsWith('data: '))continue;let p=l.slice(6);if(p==='[DONE]')break;
         try{let c=JSON.parse(p).choices?.[0]?.delta?.content;
-          if(c){tokens++;raw+=c;
-            // Track <think>...</think> reasoning blocks
-            if(!thinking&&raw.includes('<think>')){thinking=true}
-            if(thinking&&raw.includes('</think>')){thinking=false}
-            // Filter stop tokens from display
+          if(c){
             if(c.includes('<|im_end')||c.includes('<|im_start'))continue;
-            // Build display: reasoning in collapsible, answer after </think>
-            let thinkMatch=raw.match(/<think>([\s\S]*?)<\/think>/);
-            let thinkPartial=!thinkMatch&&raw.match(/<think>([\s\S]*)$/);
-            let answer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
-            let html='';
-            if(thinkMatch||thinkPartial){
-              let thinkText=thinkMatch?thinkMatch[1]:(thinkPartial?thinkPartial[1]:'');
-              let open=thinking?' open':'';
-              html+='<details'+open+' style="margin-bottom:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px;user-select:none">'+(thinking?'Thinking...':'Reasoning')+'</summary><div style="font-size:13px;color:var(--muted);padding:6px 0;line-height:1.5;white-space:pre-wrap">'+esc(thinkText.trim())+'</div></details>';
-            }
-            if(answer) html+=md(answer);
-            else if(!thinkMatch&&!thinkPartial) html+=md(raw.trim());
-            if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();M.scrollTop=M.scrollHeight}
-            let el=(performance.now()-t0)/1000;
-            if(el>0.3)SS.textContent=((tokens/el).toFixed(1))+' tok/s';
+            if(!firstTokenAt)firstTokenAt=performance.now();
+            streamedTokens++;raw+=c;
+            const rendered=renderAssistant(raw);
+            if(rendered.html){bbl.innerHTML=rendered.html;bbl.appendChild(cur);highlightAll();M.scrollTop=M.scrollHeight}
+            SS.textContent=buildLiveStats(requestStartedAt,firstTokenAt,streamedTokens);
           }
         }catch(e){}
       }
+      if(!firstTokenAt)SS.textContent=buildLiveStats(requestStartedAt,firstTokenAt,streamedTokens);
     }
-    // Final: store clean answer in history (no think tags)
-    let cleanAnswer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
+    const rendered=renderAssistant(raw);
+    if(rendered.html){bbl.innerHTML=rendered.html;highlightAll()}
+    let cleanAnswer=rendered.cleanAnswer;
     H.push({role:'assistant',content:cleanAnswer});
-    let el=(performance.now()-t0)/1000,tps=tokens/el;
-    SS.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s';
+    const stats=buildFinalStats(requestStartedAt,firstTokenAt,streamedTokens);
+    SS.textContent=stats.header;
     let meta=document.createElement('div');meta.className='meta';
-    meta.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s \u00b7 '+el.toFixed(1)+'s';
+    meta.textContent=stats.meta;
     bbl.parentElement.appendChild(meta);
   }catch(e){bbl.textContent='Error: '+e.message}
   if(cur.parentNode)cur.remove();highlightAll();B.disabled=false;I.focus();
