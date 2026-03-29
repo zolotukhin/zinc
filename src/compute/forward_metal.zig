@@ -45,6 +45,42 @@ const RmsNormPush = extern struct {
 
 const GGMLType = gguf.GGMLType;
 
+/// Cached per-layer tensor pointers (resolved once at init, not per token).
+/// Eliminates 652 O(733) linear scans per token.
+const LayerTensors = struct {
+    // Attention projections (full attention layers)
+    attn_q: ?*const metal_loader.LoadedTensor = null,
+    attn_k: ?*const metal_loader.LoadedTensor = null,
+    attn_v: ?*const metal_loader.LoadedTensor = null,
+    attn_q_norm: ?*const metal_loader.LoadedTensor = null,
+    attn_k_norm: ?*const metal_loader.LoadedTensor = null,
+    attn_output: ?*const metal_loader.LoadedTensor = null,
+    // SSM projections (SSM/delta-net layers)
+    attn_qkv: ?*const metal_loader.LoadedTensor = null,
+    attn_gate: ?*const metal_loader.LoadedTensor = null,
+    ssm_alpha: ?*const metal_loader.LoadedTensor = null,
+    ssm_beta: ?*const metal_loader.LoadedTensor = null,
+    ssm_conv1d: ?*const metal_loader.LoadedTensor = null,
+    ssm_dt_bias: ?*const metal_loader.LoadedTensor = null,
+    ssm_a: ?*const metal_loader.LoadedTensor = null,
+    ssm_norm: ?*const metal_loader.LoadedTensor = null,
+    ssm_out: ?*const metal_loader.LoadedTensor = null,
+    // MoE FFN
+    ffn_gate_inp: ?*const metal_loader.LoadedTensor = null,
+    ffn_gate_exps: ?*const metal_loader.LoadedTensor = null,
+    ffn_up_exps: ?*const metal_loader.LoadedTensor = null,
+    ffn_down_exps: ?*const metal_loader.LoadedTensor = null,
+    // Shared expert
+    ffn_gate_shexp: ?*const metal_loader.LoadedTensor = null,
+    ffn_up_shexp: ?*const metal_loader.LoadedTensor = null,
+    ffn_down_shexp: ?*const metal_loader.LoadedTensor = null,
+    ffn_gate_inp_shexp: ?*const metal_loader.LoadedTensor = null,
+    // Dense FFN (non-MoE)
+    ffn_gate: ?*const metal_loader.LoadedTensor = null,
+    ffn_up: ?*const metal_loader.LoadedTensor = null,
+    ffn_down: ?*const metal_loader.LoadedTensor = null,
+};
+
 /// Metal inference engine — owns GPU buffers, pipelines, and KV cache.
 pub const InferenceEngine = struct {
     model: *const metal_loader.Model,
@@ -94,6 +130,10 @@ pub const InferenceEngine = struct {
     // SSM state (CPU-side, allocated only if model has SSM layers)
     ssm_conv_states: ?[][]f32,
     ssm_states: ?[][]f32,
+
+    // Cached per-layer tensor pointers (init-time, eliminates per-token O(733) scans)
+    layer_tensors: []LayerTensors,
+    lm_head: *const metal_loader.LoadedTensor,
 
     // Decode state
     position: u32,
@@ -203,6 +243,42 @@ pub const InferenceEngine = struct {
             self.ssm_states = null;
         }
 
+        // Cache per-layer tensor pointers (eliminates 652 O(733) linear scans per token)
+        self.layer_tensors = try allocator.alloc(LayerTensors, cfg.n_layers);
+        for (0..cfg.n_layers) |i| {
+            const layer: u32 = @intCast(i);
+            self.layer_tensors[i] = .{
+                .attn_q = findLayerTensor(model, layer, "attn_q.weight"),
+                .attn_k = findLayerTensor(model, layer, "attn_k.weight"),
+                .attn_v = findLayerTensor(model, layer, "attn_v.weight"),
+                .attn_q_norm = findLayerTensor(model, layer, "attn_q_norm.weight"),
+                .attn_k_norm = findLayerTensor(model, layer, "attn_k_norm.weight"),
+                .attn_output = findLayerTensor(model, layer, "attn_output.weight"),
+                .attn_qkv = findLayerTensor(model, layer, "attn_qkv.weight"),
+                .attn_gate = findLayerTensor(model, layer, "attn_gate.weight"),
+                .ssm_alpha = findLayerTensor(model, layer, "ssm_alpha.weight"),
+                .ssm_beta = findLayerTensor(model, layer, "ssm_beta.weight"),
+                .ssm_conv1d = findLayerTensor(model, layer, "ssm_conv1d.weight"),
+                .ssm_dt_bias = findLayerTensor(model, layer, "ssm_dt.bias"),
+                .ssm_a = findLayerTensor(model, layer, "ssm_a"),
+                .ssm_norm = findLayerTensor(model, layer, "ssm_norm.weight"),
+                .ssm_out = findLayerTensor(model, layer, "ssm_out.weight"),
+                .ffn_gate_inp = findLayerTensor(model, layer, "ffn_gate_inp.weight"),
+                .ffn_gate_exps = findLayerTensor(model, layer, "ffn_gate_exps.weight"),
+                .ffn_up_exps = findLayerTensor(model, layer, "ffn_up_exps.weight"),
+                .ffn_down_exps = findLayerTensor(model, layer, "ffn_down_exps.weight"),
+                .ffn_gate_shexp = findLayerTensor(model, layer, "ffn_gate_shexp.weight"),
+                .ffn_up_shexp = findLayerTensor(model, layer, "ffn_up_shexp.weight"),
+                .ffn_down_shexp = findLayerTensor(model, layer, "ffn_down_shexp.weight"),
+                .ffn_gate_inp_shexp = findLayerTensor(model, layer, "ffn_gate_inp_shexp.weight"),
+                .ffn_gate = findLayerTensor(model, layer, "ffn_gate.weight"),
+                .ffn_up = findLayerTensor(model, layer, "ffn_up.weight"),
+                .ffn_down = findLayerTensor(model, layer, "ffn_down.weight"),
+            };
+        }
+        self.lm_head = findTensorByName(model, "output.weight") orelse
+            findTensorByName(model, "token_embd.weight") orelse return error.MissingTensor;
+
         log.info("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
         });
@@ -251,6 +327,7 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.attn_norm_bufs);
         self.allocator.free(self.ffn_norm_bufs);
         metal_buffer.freeBuffer(&self.final_norm_gpu);
+        self.allocator.free(self.layer_tensors);
 
         if (self.ssm_conv_states) |cs| {
             for (cs) |s| self.allocator.free(s);
@@ -761,6 +838,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
 
     for (0..cfg.n_layers) |layer_idx| {
         const layer: u32 = @intCast(layer_idx);
+        const lt = engine.layer_tensors[layer_idx];
         const is_full_attn = ((layer + 1) % full_attn_interval == 0);
 
         // ===== GPU BATCH 1: attn_norm → projections =====
@@ -771,18 +849,18 @@ fn decodeStep(engine: *InferenceEngine) !void {
             cmd.barrier();
 
             if (is_full_attn) {
-                const q_tensor = findLayerTensor(engine.model, layer, "attn_q.weight") orelse return error.MissingTensor;
-                const k_tensor = findLayerTensor(engine.model, layer, "attn_k.weight") orelse return error.MissingTensor;
-                const v_tensor = findLayerTensor(engine.model, layer, "attn_v.weight") orelse return error.MissingTensor;
+                const q_tensor = lt.attn_q orelse return error.MissingTensor;
+                const k_tensor = lt.attn_k orelse return error.MissingTensor;
+                const v_tensor = lt.attn_v orelse return error.MissingTensor;
                 const q_full_dim = q_dim * 2;
                 dispatchDmmvOnCmd(engine, &cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
                 dispatchDmmvOnCmd(engine, &cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
                 dispatchDmmvOnCmd(engine, &cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
             } else {
-                const wqkv_t = findLayerTensor(engine.model, layer, "attn_qkv.weight") orelse return error.MissingTensor;
-                const z_t = findLayerTensor(engine.model, layer, "attn_gate.weight") orelse return error.MissingTensor;
-                const alpha_t = findLayerTensor(engine.model, layer, "ssm_alpha.weight") orelse return error.MissingTensor;
-                const beta_t = findLayerTensor(engine.model, layer, "ssm_beta.weight") orelse return error.MissingTensor;
+                const wqkv_t = lt.attn_qkv orelse return error.MissingTensor;
+                const z_t = lt.attn_gate orelse return error.MissingTensor;
+                const alpha_t = lt.ssm_alpha orelse return error.MissingTensor;
+                const beta_t = lt.ssm_beta orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, &cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
                 dispatchDmmvOnCmd(engine, &cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
                 dispatchDmmvOnCmd(engine, &cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
@@ -807,17 +885,15 @@ fn decodeStep(engine: *InferenceEngine) !void {
             }
 
             // Per-head Q/K norm (CPU — small data, not worth GPU dispatch overhead)
-            const q_norm_t = findLayerTensor(engine.model, layer, "attn_q_norm.weight");
-            if (q_norm_t) |qn| {
+            if (lt.attn_q_norm) |qn| {
                 const qn_off: usize = @intCast(data_base + qn.info.offset);
                 const qn_w = try engine.allocator.alloc(f32, cfg.head_dim);
                 defer engine.allocator.free(qn_w);
                 readMmapFloats(mmap, qn_off, qn.info.type_, qn_w);
                 cpuPerHeadRmsNormMul(q_ptr, qn_w, cfg.head_dim, cfg.n_heads, 1e-6);
             }
-            const k_norm_t = findLayerTensor(engine.model, layer, "attn_k_norm.weight");
             const k_ptr: [*]f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
-            if (k_norm_t) |kn| {
+            if (lt.attn_k_norm) |kn| {
                 const kn_off: usize = @intCast(data_base + kn.info.offset);
                 const kn_w = try engine.allocator.alloc(f32, cfg.head_dim);
                 defer engine.allocator.free(kn_w);
@@ -851,7 +927,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
             }
         } else {
             // SSM CPU core: conv1d, state update, gated norm → swiglu_buf
-            try runSsmCpuCore(engine, layer, layer_idx, mmap, data_base);
+            try runSsmCpuCore(engine, layer_idx, mmap, data_base);
         }
 
         // ===== GPU BATCH 2: output proj → residual → ffn_norm → router =====
@@ -861,10 +937,10 @@ fn decodeStep(engine: *InferenceEngine) !void {
 
             // Output / SSM-out projection DMMV
             if (is_full_attn) {
-                const o_tensor = findLayerTensor(engine.model, layer, "attn_output.weight") orelse return error.MissingTensor;
+                const o_tensor = lt.attn_output orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, &cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             } else {
-                const ssm_out_t = findLayerTensor(engine.model, layer, "ssm_out.weight") orelse return error.MissingTensor;
+                const ssm_out_t = lt.ssm_out orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, &cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
             }
             cmd.barrier();
@@ -883,7 +959,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
 
             // Router DMMV (MoE only — norm_buf → router_logits_buf)
             if (is_moe) {
-                const router_t = findLayerTensor(engine.model, layer, "ffn_gate_inp.weight") orelse return error.MissingTensor;
+                const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
             }
             cmd.commitAndWait();
@@ -902,9 +978,9 @@ fn decodeStep(engine: *InferenceEngine) !void {
             @memset(moe_ptr[0..hidden_dim], 0);
 
             // Expert dispatch — all experts batched into ONE GPU command buffer
-            const gate_exps = findLayerTensor(engine.model, layer, "ffn_gate_exps.weight") orelse return error.MissingTensor;
-            const up_exps = findLayerTensor(engine.model, layer, "ffn_up_exps.weight") orelse return error.MissingTensor;
-            const down_exps = findLayerTensor(engine.model, layer, "ffn_down_exps.weight") orelse return error.MissingTensor;
+            const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
+            const up_exps = lt.ffn_up_exps orelse return error.MissingTensor;
+            const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
             const gate_quant = gate_exps.info.type_;
             const down_quant = down_exps.info.type_;
             const expert_gate_bytes = expertSliceBytes(gate_quant, inter_dim, hidden_dim);
@@ -943,10 +1019,10 @@ fn decodeStep(engine: *InferenceEngine) !void {
                 }
 
                 // Shared expert (if present) — also batched in same command buffer
-                const gate_shexp = findLayerTensor(engine.model, layer, "ffn_gate_shexp.weight");
-                const up_shexp = findLayerTensor(engine.model, layer, "ffn_up_shexp.weight");
-                const down_shexp = findLayerTensor(engine.model, layer, "ffn_down_shexp.weight");
-                const shexp_gate_t = findLayerTensor(engine.model, layer, "ffn_gate_inp_shexp.weight");
+                const gate_shexp = lt.ffn_gate_shexp;
+                const up_shexp = lt.ffn_up_shexp;
+                const down_shexp = lt.ffn_down_shexp;
+                const shexp_gate_t = lt.ffn_gate_inp_shexp;
 
                 if (gate_shexp != null and up_shexp != null and down_shexp != null) {
                     dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
@@ -989,9 +1065,9 @@ fn decodeStep(engine: *InferenceEngine) !void {
             for (0..hidden_dim) |i| hidden_ptr[i] += moe_ptr[i];
         } else {
             // Dense FFN (non-MoE) — norm_buf already set by GPU batch 2
-            const gate_t = findLayerTensor(engine.model, layer, "ffn_gate.weight") orelse return error.MissingTensor;
-            const up_t = findLayerTensor(engine.model, layer, "ffn_up.weight") orelse return error.MissingTensor;
-            const down_t = findLayerTensor(engine.model, layer, "ffn_down.weight") orelse return error.MissingTensor;
+            const gate_t = lt.ffn_gate orelse return error.MissingTensor;
+            const up_t = lt.ffn_up orelse return error.MissingTensor;
+            const down_t = lt.ffn_down orelse return error.MissingTensor;
 
             {
                 var cmd = try metal_command.beginCommand(engine.device.ctx);
@@ -1019,9 +1095,7 @@ fn decodeStep(engine: *InferenceEngine) !void {
         var cmd = try metal_command.beginCommand(engine.device.ctx);
         dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
         cmd.barrier();
-        const lm_tensor = findTensorByName(engine.model, "output.weight") orelse
-            findTensorByName(engine.model, "token_embd.weight") orelse return error.MissingTensor;
-        dispatchDmmvOnCmd(engine, &cmd, lm_tensor, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, &cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
         cmd.commitAndWait();
     }
 
@@ -1036,7 +1110,6 @@ fn decodeStep(engine: *InferenceEngine) !void {
 
 fn runSsmCpuCore(
     engine: *InferenceEngine,
-    layer: u32,
     layer_idx: usize,
     mmap: []const u8,
     data_base: u64,
@@ -1063,7 +1136,8 @@ fn runSsmCpuCore(
     const conv_state = engine.ssm_conv_states.?[layer_idx];
     const d_conv_1 = d_conv - 1;
 
-    const conv_t = findLayerTensor(engine.model, layer, "ssm_conv1d.weight") orelse return;
+    const lt = engine.layer_tensors[layer_idx];
+    const conv_t = lt.ssm_conv1d orelse return;
     const conv_off: usize = @intCast(data_base + conv_t.info.offset);
     const conv_kernel_len: usize = @as(usize, conv_channels) * d_conv;
     const conv_kernel = try engine.allocator.alloc(f32, conv_kernel_len);
@@ -1103,7 +1177,7 @@ fn runSsmCpuCore(
     }
 
     // Compute gate and beta
-    const dt_bias_t = findLayerTensor(engine.model, layer, "ssm_dt.bias");
+    const dt_bias_t = lt.ssm_dt_bias;
     const dt_bias = try engine.allocator.alloc(f32, dt_rank);
     defer engine.allocator.free(dt_bias);
     if (dt_bias_t) |t| {
@@ -1111,7 +1185,7 @@ fn runSsmCpuCore(
         readMmapFloats(mmap, off, t.info.type_, dt_bias);
     } else @memset(dt_bias, 0);
 
-    const ssm_a_t = findLayerTensor(engine.model, layer, "ssm_a");
+    const ssm_a_t = lt.ssm_a;
     const ssm_a = try engine.allocator.alloc(f32, dt_rank);
     defer engine.allocator.free(ssm_a);
     if (ssm_a_t) |t| {
@@ -1178,7 +1252,7 @@ fn runSsmCpuCore(
     }
 
     // Gated normalization: RMS_norm(o) * SiLU(z)
-    const norm_t = findLayerTensor(engine.model, layer, "ssm_norm.weight");
+    const norm_t = lt.ssm_norm;
     const norm_elems_ssm: u32 = if (norm_t) |t| @intCast(t.info.numElements()) else 0;
     const norm_per_head = norm_elems_ssm >= d_inner;
     const norm_alloc_len: u32 = if (norm_elems_ssm > 0) norm_elems_ssm else 1;
