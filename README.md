@@ -179,6 +179,14 @@ bun test loops/
 zig build test && bun test loops/
 ```
 
+## Spec Kit
+
+This repo keeps its Spec Kit workflow in `.specify/`.
+
+- Claude uses the existing command docs in `.claude/commands/speckit.*.md`.
+- Codex uses skills in `.agents/skills/speckit-*`, matching Spec Kit `--ai-skills` mode.
+- For Codex, prefer the `speckit-*` skills over custom prompt files.
+
 ## Self-Improving Optimization Loop
 
 ZINC includes an AI-powered self-improving loop that iteratively builds, deploys, and fixes/optimizes the engine on real RDNA4 hardware.
