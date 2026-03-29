@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZINC Chat</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
 :root{--bg:#0d0d0f;--bg2:#18181b;--bg3:#1e1e22;--border:#27272a;--text:#c9c9d1;--muted:#7a7a88;--accent:#e8722a;--accent2:#d35400;--user:#3d2410}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -31,8 +33,14 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl strong{color:#fff}
 .msg.a .bbl em{color:var(--accent)}
 .msg.a .bbl code{background:var(--bg3);padding:1px 5px;border-radius:4px;font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:13px}
-.msg.a .bbl pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:8px 0;overflow-x:auto}
-.msg.a .bbl pre code{background:none;padding:0;font-size:13px;color:var(--text)}
+.msg.a .bbl .code-block{position:relative;margin:8px 0;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.msg.a .bbl .code-header{display:flex;justify-content:space-between;align-items:center;padding:4px 12px;background:var(--bg3);border-bottom:1px solid var(--border);font-size:11px;color:var(--muted)}
+.msg.a .bbl .code-header .copy-btn{background:none;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px}
+.msg.a .bbl .code-header .copy-btn:hover{color:var(--text);border-color:var(--text)}
+.msg.a .bbl .code-header .copy-btn.copied{color:var(--accent);border-color:var(--accent)}
+.msg.a .bbl pre{background:var(--bg);padding:10px 12px;margin:0;overflow-x:auto;border-radius:0}
+.msg.a .bbl pre code{background:none;padding:0;font-size:13px}
+.msg.a .bbl pre code.hljs{background:none;padding:0}
 .msg .meta{font-size:11px;color:var(--muted);margin-top:4px}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
@@ -84,17 +92,20 @@ async function init(){
 function md(s){
   // Extract code blocks BEFORE escaping HTML (complete and incomplete)
   let blocks=[];
+  function makeBlock(lang,code,complete){
+    let esc=code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let label=lang||'code';
+    let copyAttr=complete?'onclick="copyCode(this)"':'';
+    let btn=complete?'<button class="copy-btn" '+copyAttr+'>Copy</button>':'';
+    return '<div class="code-block"><div class="code-header"><span>'+label+'</span>'+btn+'</div><pre><code class="language-'+(lang||'plaintext')+'">'+esc+'</code></pre></div>';
+  }
   // Complete code blocks: ```lang\ncode```
   s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,function(_,lang,code){
-    let i=blocks.length;
-    blocks.push('<pre><code class="lang-'+(lang||'text')+'">'+code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code></pre>');
-    return '\x00BLOCK'+i+'\x00';
+    let i=blocks.length;blocks.push(makeBlock(lang,code,true));return '\x00BLOCK'+i+'\x00';
   });
   // Incomplete code block (streaming — opened but not yet closed)
   s=s.replace(/```(\w*)\n?([\s\S]*)$/,function(_,lang,code){
-    let i=blocks.length;
-    blocks.push('<pre><code class="lang-'+(lang||'text')+'">'+code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code></pre>');
-    return '\x00BLOCK'+i+'\x00';
+    let i=blocks.length;blocks.push(makeBlock(lang,code,false));return '\x00BLOCK'+i+'\x00';
   });
   // Now escape remaining HTML
   s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -147,7 +158,7 @@ async function send(){
         try{let c=JSON.parse(p).choices?.[0]?.delta?.content;
           if(c){tokens++;full+=c;
             bbl.innerHTML=md(full);bbl.appendChild(cur);
-            M.scrollTop=M.scrollHeight;
+            highlightAll();M.scrollTop=M.scrollHeight;
             let el=(performance.now()-t0)/1000;
             if(el>0.3)SS.textContent=((tokens/el).toFixed(1))+' tok/s';
           }
@@ -161,9 +172,19 @@ async function send(){
     meta.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s \u00b7 '+el.toFixed(1)+'s';
     bbl.parentElement.appendChild(meta);
   }catch(e){bbl.textContent='Error: '+e.message}
-  if(cur.parentNode)cur.remove();B.disabled=false;I.focus();
+  if(cur.parentNode)cur.remove();bbl.innerHTML=md(full);highlightAll();B.disabled=false;I.focus();
 }
 
+function copyCode(btn){
+  let pre=btn.closest('.code-block').querySelector('code');
+  navigator.clipboard.writeText(pre.textContent).then(()=>{
+    btn.textContent='Copied!';btn.classList.add('copied');
+    setTimeout(()=>{btn.textContent='Copy';btn.classList.remove('copied')},1500);
+  });
+}
+function highlightAll(){document.querySelectorAll('pre code[class^="language-"]').forEach(el=>{
+  if(!el.dataset.highlighted){try{hljs.highlightElement(el)}catch(e){}}
+})}
 I.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
 I.addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,140)+'px'});
 init();I.focus();
