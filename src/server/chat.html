@@ -83,9 +83,16 @@ async function init(){
 }
 
 function md(s){
-  // Extract code blocks BEFORE escaping HTML
+  // Extract code blocks BEFORE escaping HTML (complete and incomplete)
   let blocks=[];
+  // Complete code blocks: ```lang\ncode```
   s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,function(_,lang,code){
+    let i=blocks.length;
+    blocks.push('<pre><code class="lang-'+(lang||'text')+'">'+code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code></pre>');
+    return '\x00BLOCK'+i+'\x00';
+  });
+  // Incomplete code block (streaming — opened but not yet closed)
+  s=s.replace(/```(\w*)\n?([\s\S]*)$/,function(_,lang,code){
     let i=blocks.length;
     blocks.push('<pre><code class="lang-'+(lang||'text')+'">'+code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code></pre>');
     return '\x00BLOCK'+i+'\x00';
