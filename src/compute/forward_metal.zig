@@ -521,6 +521,30 @@ pub const InferenceEngine = struct {
         log.info("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
         });
+        log.info(
+            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_moe tw={d} max={d} stgmem={d}",
+            .{
+                self.dmmv_q4k_pipe.thread_execution_width,
+                self.dmmv_q4k_pipe.max_threads_per_threadgroup,
+                self.dmmv_q4k_pipe.static_threadgroup_memory_length,
+                self.dmmv_q4k_moe_pipe.thread_execution_width,
+                self.dmmv_q4k_moe_pipe.max_threads_per_threadgroup,
+                self.dmmv_q4k_moe_pipe.static_threadgroup_memory_length,
+            },
+        );
+        log.info(
+            "Metal pipeline caps: rms_norm tw={d} max={d} | swiglu tw={d} max={d} | swiglu_batched tw={d} max={d} | moe_acc_batched tw={d} max={d}",
+            .{
+                self.rms_norm_pipe.thread_execution_width,
+                self.rms_norm_pipe.max_threads_per_threadgroup,
+                self.swiglu_pipe.thread_execution_width,
+                self.swiglu_pipe.max_threads_per_threadgroup,
+                self.swiglu_batched_pipe.thread_execution_width,
+                self.swiglu_batched_pipe.max_threads_per_threadgroup,
+                self.moe_acc_batched_pipe.thread_execution_width,
+                self.moe_acc_batched_pipe.max_threads_per_threadgroup,
+            },
+        );
 
         return self;
     }

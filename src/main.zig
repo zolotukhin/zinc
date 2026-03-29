@@ -429,11 +429,29 @@ pub fn main() !void {
         };
         defer device.deinit();
 
-        log.info("ZINC Metal backend — Apple Silicon ({s})", .{@tagName(device.chip)});
+        log.info("ZINC Metal backend — Apple Silicon (public GPU family {s})", .{@tagName(device.chip)});
         log.info("Memory: {d} GB | Max buffer: {d} GB", .{
             device.totalMemory() / (1024 * 1024 * 1024),
             device.maxBufferSize() / (1024 * 1024 * 1024),
         });
+        log.info(
+            "Metal caps: apple7={any} apple8={any} apple9={any} apple10={any} mac2={any} unified={any} raytracing={any} tgmem={d} KiB working-set={d} GiB",
+            .{
+                device.caps.supports_apple7,
+                device.caps.supports_apple8,
+                device.caps.supports_apple9,
+                device.caps.supports_apple10,
+                device.caps.supports_mac2,
+                device.caps.has_unified_memory,
+                device.caps.supports_raytracing,
+                device.maxThreadgroupMemoryLength() / 1024,
+                device.recommendedMaxWorkingSetSize() / (1024 * 1024 * 1024),
+            },
+        );
+        log.info(
+            "Inference hints: simdgroup-width comes from pipeline threadExecutionWidth; apple10 => investigate TensorOps/M5 neural accelerators for large GEMMs; unified memory => avoid staging copies; raytracing is irrelevant for inference",
+            .{},
+        );
 
         // Load model (zero-copy mmap)
         var model = metal_loader.load(model_path, device.ctx, allocator) catch |err| {
