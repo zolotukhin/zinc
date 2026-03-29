@@ -178,14 +178,17 @@ fn handleChatCompletions(
                     break;
                 }
 
-                // Check if tail of accumulated text could be a partial stop match
-                const tail_len = @min(gen_text_len - sent_text_len, stop_str.len - 1);
+                // Check if any suffix of the accumulated text could be a prefix of the stop string
                 var is_partial = false;
-                if (tail_len > 0) {
-                    const tail = gen_text_buf[gen_text_len - tail_len .. gen_text_len];
-                    // Check if tail matches a prefix of stop_str
-                    if (std.mem.startsWith(u8, stop_str, tail)) {
-                        is_partial = true;
+                {
+                    const check_len = @min(gen_text_len, stop_str.len - 1);
+                    var sl: usize = 1;
+                    while (sl <= check_len) : (sl += 1) {
+                        const suffix = gen_text_buf[gen_text_len - sl .. gen_text_len];
+                        if (std.mem.startsWith(u8, stop_str, suffix)) {
+                            is_partial = true;
+                            break;
+                        }
                     }
                 }
 
