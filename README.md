@@ -22,6 +22,12 @@
 
 > Making AMD consumer GPUs actually usable for LLM inference.
 
+<p align="center">
+  <img src="assets/zinc-chat-demo.gif" alt="ZINC Chat Demo — streaming inference on AMD RDNA4" width="720">
+  <br>
+  <em>Qwen3.5-35B running on AMD Radeon AI PRO R9700 (RDNA4) via ZINC</em>
+</p>
+
 ## The Problem
 
 AMD's RDNA3/RDNA4 GPUs (RX 9070, Radeon AI PRO R9700, etc.) have excellent memory bandwidth (576+ GB/s) and hardware features (cooperative matrix, integer dot product), but:
