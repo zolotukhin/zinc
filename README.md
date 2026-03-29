@@ -25,7 +25,7 @@
 <p align="center">
   <img src="assets/zinc-chat-demo.gif" alt="ZINC Chat Demo — streaming inference on AMD RDNA4" width="720">
   <br>
-  <em>Qwen3.5-35B running on AMD Radeon AI PRO R9700 (RDNA4) via ZINC</em>
+  <em>35B parameter model running locally on a single AMD GPU — Zig + Vulkan, no ROCm, no CUDA</em>
 </p>
 
 ## The Problem
