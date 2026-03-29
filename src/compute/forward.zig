@@ -1252,10 +1252,8 @@ pub const InferenceEngine = struct {
             } else {
                 // === SSM / LINEAR ATTENTION LAYER ===
                 if (self.elementwise.pipeline_ssm_conv1d != null) {
-                    // GPU path (Phase 3c): all computation on GPU, no readback
                     try self.runSsmLayerGpu(state, layer, layer_idx);
                 } else {
-                    // CPU fallback: readback + CPU conv1d/delta-net/gated-norm
                     try self.runSsmLayerCpu(state, layer, layer_idx);
                 }
             }
