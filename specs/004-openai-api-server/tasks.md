@@ -101,7 +101,7 @@
 
 - [X] T026 [P] Add CORS headers to all responses — Access-Control-Allow-Origin: *, required for browser-based clients. File: src/server/http.zig
 - [ ] T027 [P] Implement graceful shutdown — catch SIGINT/SIGTERM, stop accepting new requests, drain active streams, clean up KV cache. File: src/main.zig
-- [ ] T028 Validate with OpenAI Python SDK integration test — script that tests streaming, non-streaming, models list, health, concurrent requests, error cases. File: tests/test_openai_sdk.py
+- [X] T028 Validate with OpenAI Python SDK integration test — script that tests streaming, non-streaming, models list, health, concurrent requests, error cases. File: tests/test_openai_sdk.py
 - [ ] T029 Run quickstart.md validation — execute all test commands from quickstart.md and verify expected behavior. File: specs/004-openai-api-server/quickstart.md
 
 ---
