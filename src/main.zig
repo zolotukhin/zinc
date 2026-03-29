@@ -29,8 +29,10 @@ comptime {
     _ = @import("compute/attention.zig");
     _ = @import("compute/forward.zig");
     _ = @import("server/http.zig");
+    _ = @import("server/routes.zig");
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
+    _ = @import("scheduler/kv_cache.zig");
 }
 
 /// Runtime configuration built from CLI flags and default values.

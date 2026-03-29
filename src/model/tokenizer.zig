@@ -20,6 +20,8 @@ pub const Tokenizer = struct {
     eos_id: u32,
     /// Token scores (used for SentencePiece-style merge priority)
     scores: ?[]const f32,
+    /// Chat template string from GGUF metadata, or null
+    chat_template: ?[]const u8 = null,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
@@ -115,6 +117,9 @@ pub const Tokenizer = struct {
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
         log.info("Tokenizer type: {s} | BOS: {d} | EOS: {d}", .{ model_type, bos_id, eos_id });
 
+        const chat_template = gf.getString("tokenizer.chat_template");
+        if (chat_template) |tmpl| log.info("Chat template: {d} chars", .{tmpl.len});
+
         return Tokenizer{
             .vocab = vocab,
             .token_to_id = token_to_id,
@@ -122,6 +127,7 @@ pub const Tokenizer = struct {
             .scores = scores,
             .bos_id = bos_id,
             .eos_id = eos_id,
+            .chat_template = chat_template,
             .allocator = allocator,
         };
     }
@@ -342,6 +348,30 @@ pub const Tokenizer = struct {
     /// Release tokenizer-owned vocabulary tables, merges, and optional score arrays.
     /// @param self Tokenizer to tear down in place.
     /// @note This does not free any source GGUF storage because the tokenizer owns duplicated tables.
+    /// Apply chat template to role/content pairs. Returns formatted prompt in buf.
+    pub fn applyChatTemplate(self: *const Tokenizer, roles: []const []const u8, contents: []const []const u8, buf: []u8) ![]const u8 {
+        var pos: usize = 0;
+        const use_chatml = if (self.chat_template) |tmpl|
+            std.mem.indexOf(u8, tmpl, "im_start") != null
+        else
+            true;
+        const n = @min(roles.len, contents.len);
+        if (use_chatml) {
+            for (0..n) |i| {
+                const written = std.fmt.bufPrint(buf[pos..], "<|im_start|>{s}\n{s}<|im_end|>\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
+                pos += written.len;
+            }
+            const suffix = std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{}) catch return error.BufferTooSmall;
+            pos += suffix.len;
+        } else {
+            for (0..n) |i| {
+                const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
+                pos += written.len;
+            }
+        }
+        return buf[0..pos];
+    }
+
     pub fn deinit(self: *Tokenizer) void {
         if (self.scores) |s| self.allocator.free(s);
         self.allocator.free(self.merges);
