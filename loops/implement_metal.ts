@@ -126,7 +126,12 @@ function formatElapsed(startMs: number): string {
 async function runCommand(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; timeout?: number; streamOutput?: boolean } = {},
+  opts: {
+    cwd?: string;
+    timeout?: number;
+    streamOutput?: boolean;
+    stdoutLineFormatter?: (line: string) => string | null;
+  } = {},
 ): Promise<RunResult> {
   return new Promise((res) => {
     const child = spawn(cmd, args, {
@@ -134,11 +139,22 @@ async function runCommand(
       stdio: ["ignore", "pipe", "pipe"],
       timeout: opts.timeout,
     });
-    let stdout = "", stderr = "";
+    let stdout = "", stderr = "", lineBuffer = "";
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
-      if (opts.streamOutput) process.stdout.write(text);
+      if (!opts.streamOutput) return;
+      if (opts.stdoutLineFormatter) {
+        lineBuffer += text;
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const formatted = opts.stdoutLineFormatter(line);
+          if (formatted != null) process.stdout.write(formatted);
+        }
+      } else {
+        process.stdout.write(text);
+      }
     });
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
@@ -244,6 +260,134 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
   return result;
 }
 
+// ── Claude stream-JSON formatter ─────────────────────────────────────
+
+type StreamState = {
+  currentToolName: string | null;
+  currentBlockIsToolUse: boolean;
+  inputJsonBuffer: string;
+  inTextBlock: boolean;
+  sawTextDelta: boolean;
+};
+
+function formatToolInput(name: string, jsonBuf: string): string {
+  let input: Record<string, unknown> = {};
+  try { input = JSON.parse(jsonBuf); } catch { return ""; }
+  const out: string[] = [];
+  const MAX_DIFF = 5;
+
+  if (name === "edit") {
+    const fp = (input.file_path as string | undefined) ?? "?";
+    out.push(clr("2", ` → ${fp.split("/").slice(-3).join("/")}`));
+    const oldLines = ((input.old_string as string | undefined) ?? "").split("\n");
+    const newLines = ((input.new_string as string | undefined) ?? "").split("\n");
+    for (const l of oldLines.slice(0, MAX_DIFF)) out.push(clr("31", `   - ${l}`));
+    if (oldLines.length > MAX_DIFF) out.push(clr("2", `   - … (${oldLines.length - MAX_DIFF} more)`));
+    for (const l of newLines.slice(0, MAX_DIFF)) out.push(clr("32", `   + ${l}`));
+    if (newLines.length > MAX_DIFF) out.push(clr("2", `   + … (${newLines.length - MAX_DIFF} more)`));
+  } else if (name === "write") {
+    const fp = (input.file_path as string | undefined) ?? "?";
+    const lineCount = ((input.content as string | undefined) ?? "").split("\n").length;
+    out.push(clr("2", ` → ${fp.split("/").slice(-3).join("/")} (${lineCount} lines)`));
+  } else if (name === "bash") {
+    const cmd = (input.command as string | undefined) ?? "?";
+    out.push(clr("2", `   $ ${cmd.length > 120 ? cmd.slice(0, 120) + "…" : cmd}`));
+  } else if (name === "read") {
+    const fp = (input.file_path as string | undefined) ?? "?";
+    out.push(clr("2", ` → ${fp.split("/").slice(-3).join("/")}`));
+  } else if (name === "grep") {
+    const pattern = (input.pattern as string | undefined) ?? "?";
+    out.push(clr("2", ` → /${pattern}/`));
+  } else if (name === "glob") {
+    out.push(clr("2", ` → ${(input.pattern as string | undefined) ?? "?"}`));
+  }
+  return out.length > 0 ? out.join("\n") + "\n" : "";
+}
+
+function formatClaudeStreamLine(rawLine: string, state: StreamState): string | null {
+  if (!rawLine.trim()) return null;
+  let event: Record<string, unknown>;
+  try { event = JSON.parse(rawLine) as Record<string, unknown>; } catch { return null; }
+
+  if (event.type === "stream_event") {
+    const e = event.event as Record<string, unknown> | undefined;
+    if (!e) return null;
+
+    if (e.type === "content_block_start") {
+      const block = e.content_block as Record<string, unknown> | undefined;
+      if (block?.type === "tool_use") {
+        state.currentToolName = (block.name as string) ?? "tool";
+        state.currentBlockIsToolUse = true;
+        state.inputJsonBuffer = "";
+        state.inTextBlock = false;
+        return `\n${clr("33", `🔧 ${state.currentToolName}`)}`;
+      }
+      if (block?.type === "text") {
+        state.inTextBlock = true;
+        state.currentBlockIsToolUse = false;
+        return COLOR_ENABLED ? "\n\x1b[96m" : "\n";
+      }
+      state.inTextBlock = false;
+      state.currentBlockIsToolUse = false;
+      return null;
+    }
+    if (e.type === "content_block_delta") {
+      const delta = e.delta as Record<string, unknown> | undefined;
+      if (delta?.type === "input_json_delta") {
+        state.inputJsonBuffer += (delta.partial_json as string) ?? "";
+        return null;
+      }
+      if (delta?.type === "text_delta" && state.inTextBlock) {
+        state.sawTextDelta = true;
+        return delta.text as string;
+      }
+      return null;
+    }
+    if (e.type === "content_block_stop") {
+      if (state.currentBlockIsToolUse) {
+        state.currentBlockIsToolUse = false;
+        const detail = formatToolInput(state.currentToolName ?? "", state.inputJsonBuffer);
+        state.inputJsonBuffer = "";
+        return detail || null;
+      }
+      if (state.inTextBlock) {
+        state.inTextBlock = false;
+        return COLOR_ENABLED ? "\x1b[0m\n" : "\n";
+      }
+      return null;
+    }
+    return null;
+  }
+
+  if (event.type === "user") {
+    const result = event.tool_use_result as Record<string, unknown> | undefined;
+    if (result) return clr("32", "   ☑ accepted") + "\n";
+    return null;
+  }
+
+  if (event.type === "assistant") {
+    const msg = event.message as Record<string, unknown> | undefined;
+    if (!msg) return null;
+    const content = msg.content;
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const block of content) {
+        const b = block as Record<string, unknown>;
+        if (b?.type === "text" && typeof b.text === "string" && b.text.trim())
+          parts.push(b.text);
+      }
+      const text = parts.join("\n");
+      if (!text.trim() || state.sawTextDelta) {
+        state.sawTextDelta = false;
+        return null;
+      }
+      return clr("96", text) + "\n";
+    }
+    return null;
+  }
+  return null;
+}
+
 // ── Agent invocation ─────────────────────────────────────────────────
 
 async function runAgent(prompt: string): Promise<RunResult> {
@@ -258,20 +402,38 @@ async function runAgent(prompt: string): Promise<RunResult> {
   const startedAt = Date.now();
   const heartbeat = setInterval(() => {
     process.stdout.write(clr("2", `\n⏳ agent running (${formatElapsed(startedAt)})...\n`));
-  }, 60_000);
+  }, 30_000);
+
+  const streamState: StreamState = {
+    currentToolName: null,
+    currentBlockIsToolUse: false,
+    inputJsonBuffer: "",
+    inTextBlock: false,
+    sawTextDelta: false,
+  };
+
+  console.log(clr("1;36", SEP));
+  console.log(clr("1;36", "  💬 AGENT RESPONSE"));
+  console.log(clr("1;36", SEP));
 
   const result = await runCommand("claude", [
     "-p",
     "--verbose",
     "--output-format", "stream-json",
+    "--include-partial-messages",
     `--disallowed-tools=${BLOCKED_GIT_OPS.join(",")}`,
     "--permission-mode", "bypassPermissions",
     "--effort", "high",
     prompt,
-  ], { streamOutput: true, timeout: 1_800_000 }); // 30 min
+  ], {
+    streamOutput: true,
+    timeout: 1_800_000, // 30 min
+    stdoutLineFormatter: (line) => formatClaudeStreamLine(line, streamState),
+  });
 
   clearInterval(heartbeat);
-  console.log(clr("1;32", `\n  ✅ Agent done in ${formatElapsed(startedAt)}`));
+  console.log(clr("1;36", SEP));
+  console.log(clr("1;32", `  ✅ Agent done in ${formatElapsed(startedAt)}`));
   return result;
 }
 
