@@ -265,7 +265,7 @@ Same hardware, same model, same prompt (`"The capital of France is"`), 32 genera
   llama.cpp      ██████████████████████████████████████░░  107 tok/s
   (baseline)
 
-  ZINC           █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  4.3 tok/s
+  ZINC           ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  7.6 tok/s
   (current)
 
   ZINC           ██████████████████████████████████████░░  110+ tok/s
@@ -276,13 +276,14 @@ Same hardware, same model, same prompt (`"The capital of France is"`), 32 genera
 
 | Metric | llama.cpp (baseline) | ZINC (current) | ZINC (target) |
 |--------|:---:|:---:|:---:|
-| **Decode** | 107 tok/s | 4.3 tok/s | 110+ tok/s |
+| **Decode** | 107 tok/s | 7.6 tok/s | 110+ tok/s |
 | **Coherent output** | Yes | Yes | Yes |
-| **BW utilization** | ~85% | 0.4% (2.1 GB/s) | 90%+ |
-| **GPU syncs/token** | 1 | ~120 | 1–2 |
-| **Flash attention** | Yes | Phase 3 | Yes |
+| **BW utilization** | ~85% | 0.7% (4.1 GB/s) | 90%+ |
+| **GPU syncs/token** | 1 | ~42 | 1–2 |
+| **Flash attention** | Yes | Yes | Yes |
 | **RDNA4-tuned DMMV** | No | Yes | Yes |
 | **Native BPE tokenizer** | Yes | Yes (from GGUF) | Yes |
+| **OpenAI API server** | Yes | Yes (streaming) | Yes |
 | **Continuous batching** | Yes | Phase 4 | Yes |
 | **TurboQuant KV** | No | Phase 5 | Yes |
 
@@ -381,9 +382,9 @@ The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), wi
 | Native BPE tokenizer (from GGUF) | Done |
 | GLSL compute shaders (16) | Done |
 | Compute graph + architecture builders | Done |
-| Forward pass (decode loop) | Working — 4.3 tok/s, coherent output |
-| Single command buffer decode | Next — eliminate 120 syncs/token overhead |
-| HTTP server + OpenAI API | Phase 4 |
+| Forward pass (decode loop) | Working — 7.6 tok/s, coherent output |
+| GPU SSM shaders + cmd batching | Done — 42 syncs/token (was 151) |
+| HTTP server + OpenAI API | Done — streaming SSE, chat completions |
 | Continuous batching | Phase 4 |
 | TurboQuant KV compression | Phase 5 |
 
