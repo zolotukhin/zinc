@@ -57,6 +57,12 @@ const ScaleAccPush = extern struct {
     scale_bits: u32, // float reinterpreted as uint32 (SPIRV-Cross convention)
 };
 
+/// Push constants for deinterleave dispatch (matches deinterleave.metal: buffer(0)).
+const DeinterleavePush = extern struct {
+    head_dim: u32,
+    n_heads: u32,
+};
+
 /// Push constants for fused MoE accumulate dispatch (matches moe_accumulate.metal: buffer(10)).
 /// Replaces 8+1 sequential scale_accumulate dispatches, eliminating 8 barriers per layer.
 const MoeAccPush = extern struct {
@@ -104,6 +110,15 @@ const MoeAccBatchedPush = extern struct {
 const RmsNormPush = extern struct {
     n: u32, // elements per group
     eps: f32, // epsilon
+};
+
+/// Push constants for RoPE dispatch (matches rope_fused.metal: buffer(0)).
+const RopePush = extern struct {
+    stride: u32,
+    rope_dim: u32,
+    n_heads: u32,
+    position: u32,
+    freq_base_bits: u32,
 };
 
 /// Push constants for SSM conv1d + SiLU dispatch (SPIRV-Cross: buffer(0)).
@@ -225,6 +240,8 @@ pub const InferenceEngine = struct {
     dmmv_q4k_moe_pipe: MetalPipeline,
 
     // Elementwise compute pipelines (for batched GPU dispatch)
+    deinterleave_pipe: MetalPipeline,
+    rope_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
     swiglu_batched_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
@@ -234,6 +251,10 @@ pub const InferenceEngine = struct {
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
+    attn_q_norm_bufs: []MetalBuffer,
+    attn_k_norm_bufs: []MetalBuffer,
+    attn_q_norm_present: []bool,
+    attn_k_norm_present: []bool,
     ffn_norm_bufs: []MetalBuffer,
     final_norm_gpu: MetalBuffer,
 
@@ -363,6 +384,8 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
 
         // Elementwise pipelines for batched GPU dispatch
+        self.deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
+        self.rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
@@ -372,11 +395,31 @@ pub const InferenceEngine = struct {
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.attn_q_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.attn_k_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.attn_q_norm_present = try allocator.alloc(bool, cfg.n_layers);
+        self.attn_k_norm_present = try allocator.alloc(bool, cfg.n_layers);
         self.ffn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
         for (0..cfg.n_layers) |i| {
             const layer: u32 = @intCast(i);
             const an = findLayerTensor(model, layer, "attn_norm.weight") orelse return error.MissingTensor;
             self.attn_norm_bufs[i] = try preloadNormWeights(ctx, model, an, cfg.hidden_dim);
+            if (findLayerTensor(model, layer, "attn_q_norm.weight")) |qn| {
+                self.attn_q_norm_bufs[i] = try preloadNormWeights(ctx, model, qn, cfg.head_dim);
+                self.attn_q_norm_present[i] = true;
+            } else {
+                self.attn_q_norm_bufs[i] = try metal_buffer.createBuffer(ctx, 4);
+                @memset(self.attn_q_norm_bufs[i].cpu_ptr.?[0..4], 0);
+                self.attn_q_norm_present[i] = false;
+            }
+            if (findLayerTensor(model, layer, "attn_k_norm.weight")) |kn| {
+                self.attn_k_norm_bufs[i] = try preloadNormWeights(ctx, model, kn, cfg.head_dim);
+                self.attn_k_norm_present[i] = true;
+            } else {
+                self.attn_k_norm_bufs[i] = try metal_buffer.createBuffer(ctx, 4);
+                @memset(self.attn_k_norm_bufs[i].cpu_ptr.?[0..4], 0);
+                self.attn_k_norm_present[i] = false;
+            }
             const fn_t = findLayerTensor(model, layer, "post_attention_norm.weight") orelse
                 findLayerTensor(model, layer, "ffn_norm.weight") orelse return error.MissingTensor;
             self.ffn_norm_bufs[i] = try preloadNormWeights(ctx, model, fn_t, cfg.hidden_dim);
@@ -602,6 +645,8 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
+        metal_pipeline.freePipeline(&self.deinterleave_pipe);
+        metal_pipeline.freePipeline(&self.rope_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
@@ -611,9 +656,15 @@ pub const InferenceEngine = struct {
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
+            metal_buffer.freeBuffer(&self.attn_q_norm_bufs[i]);
+            metal_buffer.freeBuffer(&self.attn_k_norm_bufs[i]);
             metal_buffer.freeBuffer(&self.ffn_norm_bufs[i]);
         }
         self.allocator.free(self.attn_norm_bufs);
+        self.allocator.free(self.attn_q_norm_bufs);
+        self.allocator.free(self.attn_k_norm_bufs);
+        self.allocator.free(self.attn_q_norm_present);
+        self.allocator.free(self.attn_k_norm_present);
         self.allocator.free(self.ffn_norm_bufs);
         metal_buffer.freeBuffer(&self.final_norm_gpu);
         self.allocator.free(self.layer_tensors);
@@ -890,6 +941,79 @@ fn dispatchRmsNormOnCmd(
     const push = RmsNormPush{ .n = n, .eps = 1e-6 };
     const bufs = [_]*const MetalBuffer{ input, output, weights };
     cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
+}
+
+fn dispatchDeinterleaveOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    input: *const MetalBuffer,
+    q_output: *const MetalBuffer,
+    gate_output: *const MetalBuffer,
+    head_dim: u32,
+    n_heads: u32,
+) void {
+    const push = DeinterleavePush{ .head_dim = head_dim, .n_heads = n_heads };
+    const bufs = [_]*const MetalBuffer{ q_output, input, gate_output };
+    const total = head_dim * n_heads;
+    cmd.dispatchV2(&engine.deinterleave_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DeinterleavePush), 0);
+}
+
+fn dispatchRopeOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    stride: u32,
+    rope_dim: u32,
+    n_heads: u32,
+    position: u32,
+    freq_base: f32,
+) void {
+    const push = RopePush{
+        .stride = stride,
+        .rope_dim = rope_dim,
+        .n_heads = n_heads,
+        .position = position,
+        .freq_base_bits = @bitCast(freq_base),
+    };
+    const bufs = [_]*const MetalBuffer{ input, output };
+    cmd.dispatchV2(&engine.rope_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopePush), 0);
+}
+
+fn dispatchFullAttnPrepOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    layer_idx: usize,
+    lt: LayerTensors,
+    q_dim: u32,
+    kv_dim: u32,
+    hidden_dim: u32,
+) !void {
+    const cfg = engine.config;
+    const q_tensor = lt.attn_q orelse return error.MissingTensor;
+    const k_tensor = lt.attn_k orelse return error.MissingTensor;
+    const v_tensor = lt.attn_v orelse return error.MissingTensor;
+    const q_full_dim = q_dim * 2;
+    const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+
+    dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
+    dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
+    dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+    cmd.barrier();
+
+    dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, cfg.head_dim, cfg.n_heads);
+    cmd.barrier();
+
+    if (engine.attn_q_norm_present[layer_idx]) {
+        dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], cfg.head_dim, cfg.n_heads);
+    }
+    if (engine.attn_k_norm_present[layer_idx]) {
+        dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], cfg.head_dim, cfg.n_kv_heads);
+    }
+    cmd.barrier();
+
+    dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
+    dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
@@ -1220,8 +1344,6 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
     const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
     const shexp_inter_dim: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
     const full_attn_interval: u32 = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
-    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
-    const data_base = engine.model.gguf_file.tensor_data_offset;
 
     // SSM constants (needed for GPU batch 1 dispatch sizing)
     const d_inner: u32 = cfg.ssm_d_inner;
@@ -1248,13 +1370,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             cmd.barrier();
 
             if (is_full_attn) {
-                const q_tensor = lt.attn_q orelse return error.MissingTensor;
-                const k_tensor = lt.attn_k orelse return error.MissingTensor;
-                const v_tensor = lt.attn_v orelse return error.MissingTensor;
-                const q_full_dim = q_dim * 2;
-                dispatchDmmvOnCmd(engine, &cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
-                dispatchDmmvOnCmd(engine, &cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
-                dispatchDmmvOnCmd(engine, &cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+                try dispatchFullAttnPrepOnCmd(engine, &cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
             } else {
                 const wqkv_t = lt.attn_qkv orelse return error.MissingTensor;
                 const z_t = lt.attn_gate orelse return error.MissingTensor;
@@ -1271,36 +1387,9 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         // ===== ATTENTION (CPU) or SSM (GPU) + BATCH 2 =====
         if (is_full_attn) {
             // --- CPU Attention path ---
-            const attn_out_ptr: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
             const q_ptr: [*]f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
             const gate_ptr: [*]f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
-            for (0..cfg.n_heads) |h| {
-                const src_off = h * cfg.head_dim * 2;
-                const dst_off = h * cfg.head_dim;
-                for (0..cfg.head_dim) |d| {
-                    q_ptr[dst_off + d] = attn_out_ptr[src_off + d];
-                    gate_ptr[dst_off + d] = attn_out_ptr[src_off + cfg.head_dim + d];
-                }
-            }
-            if (lt.attn_q_norm) |qn| {
-                const qn_off: usize = @intCast(data_base + qn.info.offset);
-                const qn_w = try engine.allocator.alloc(f32, cfg.head_dim);
-                defer engine.allocator.free(qn_w);
-                readMmapFloats(mmap, qn_off, qn.info.type_, qn_w);
-                cpuPerHeadRmsNormMul(q_ptr, qn_w, cfg.head_dim, cfg.n_heads, 1e-6);
-            }
             const k_ptr: [*]f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
-            if (lt.attn_k_norm) |kn| {
-                const kn_off: usize = @intCast(data_base + kn.info.offset);
-                const kn_w = try engine.allocator.alloc(f32, cfg.head_dim);
-                defer engine.allocator.free(kn_w);
-                readMmapFloats(mmap, kn_off, kn.info.type_, kn_w);
-                cpuPerHeadRmsNormMul(k_ptr, kn_w, cfg.head_dim, cfg.n_kv_heads, 1e-6);
-            }
-            const rope_freq = cfg.rope_freq_base;
-            const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
-            cpuRope(q_ptr, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, rope_freq);
-            cpuRope(k_ptr, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, rope_freq);
             const kc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
             const vc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
             const v_ptr: [*]const f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
@@ -1606,12 +1695,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     cmd.barrier();
 
                     if (next_full_attn) {
-                        const q_tensor = next_lt.attn_q orelse return error.MissingTensor;
-                        const k_tensor = next_lt.attn_k orelse return error.MissingTensor;
-                        const v_tensor = next_lt.attn_v orelse return error.MissingTensor;
-                        dispatchDmmvOnCmd(engine, &cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_dim * 2, hidden_dim, 0);
-                        dispatchDmmvOnCmd(engine, &cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
-                        dispatchDmmvOnCmd(engine, &cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+                        try dispatchFullAttnPrepOnCmd(engine, &cmd, next_li, next_lt, q_dim, kv_dim, hidden_dim);
                         ssm_batch2_chained = false;
                     } else {
                         // SSM batch1 projections
@@ -1851,6 +1935,12 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
 
+    var deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
+    defer metal_pipeline.freePipeline(&deinterleave_pipe);
+
+    var rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
+    defer metal_pipeline.freePipeline(&rope_pipe);
+
     var dmmv_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
     defer metal_pipeline.freePipeline(&dmmv_pipe);
 
@@ -1863,6 +1953,8 @@ test "batched MoE Metal shaders compile" {
     var lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
     defer metal_pipeline.freePipeline(&lmhead_pipe);
 
+    try std.testing.expect(deinterleave_pipe.handle != null);
+    try std.testing.expect(rope_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
     try std.testing.expect(swiglu_pipe.handle != null);
     try std.testing.expect(acc_pipe.handle != null);
