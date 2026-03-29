@@ -21,5 +21,5 @@ kernel void main0(
         const float weight = as_type<float>(routing[p.n_used + expert]);
         sum += weight * src[expert * p.src_stride + id];
     }
-    accum[id] = sum;
+    accum[id] += sum;
 }

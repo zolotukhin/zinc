@@ -1584,22 +1584,17 @@ fn recordGpuRoutedBatchedMoeOnCmd(
     }
     cmd.barrier();
 
-    dispatchMoeWeightedAccOnCmd(engine, cmd, &engine.moe_out_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, cfg.n_experts_used, hidden_dim);
+    // Fold the MoE residual add into the weighted accumulation shader so the
+    // fast GPU-routed path does not bounce through an extra hidden-sized buffer.
+    dispatchMoeWeightedAccOnCmd(engine, cmd, &engine.hidden_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, cfg.n_experts_used, hidden_dim);
     if (has_shexp) {
         if (gate_inp_shexp != null) {
-            dispatchSigmoidScaleAccOnCmd(engine, cmd, &engine.moe_out_buf, &engine.down_buf, &engine.router_logits_buf, hidden_dim);
+            dispatchSigmoidScaleAccOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.router_logits_buf, hidden_dim);
         } else {
             const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-            const shexp_bufs = [_]*const MetalBuffer{ &engine.moe_out_buf, &engine.down_buf };
+            const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
             cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
         }
-    }
-    cmd.barrier();
-
-    {
-        const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-        const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.moe_out_buf };
-        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
     }
 }
 
@@ -2233,4 +2228,54 @@ test "softmax_topk shader selects top experts and normalized weights" {
     const w1: f32 = @bitCast(out_ptr[4]);
     const w2: f32 = @bitCast(out_ptr[5]);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), w0 + w1 + w2, 0.01);
+}
+
+test "moe_weighted_acc shader adds weighted experts into destination" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const n: u32 = 4;
+    const n_used: u32 = 2;
+
+    var accum_buf = try metal_buffer.createBuffer(ctx, n * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&accum_buf);
+    var src_buf = try metal_buffer.createBuffer(ctx, n_used * n * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&src_buf);
+    var routing_buf = try metal_buffer.createBuffer(ctx, n_used * 2 * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&routing_buf);
+
+    const accum_ptr: [*]f32 = @ptrCast(@alignCast(accum_buf.cpu_ptr.?));
+    @memcpy(accum_ptr[0..n], &[_]f32{ 10.0, 20.0, 30.0, 40.0 });
+
+    const src_ptr: [*]f32 = @ptrCast(@alignCast(src_buf.cpu_ptr.?));
+    @memcpy(src_ptr[0 .. n_used * n], &[_]f32{
+        1.0, 2.0, 3.0, 4.0,
+        5.0, 6.0, 7.0, 8.0,
+    });
+
+    const routing_ptr: [*]u32 = @ptrCast(@alignCast(routing_buf.cpu_ptr.?));
+    routing_ptr[0] = 11;
+    routing_ptr[1] = 29;
+    routing_ptr[2] = @bitCast(@as(f32, 0.25));
+    routing_ptr[3] = @bitCast(@as(f32, 0.75));
+
+    const push = MoeWeightedAccPush{
+        .n = n,
+        .n_used = n_used,
+        .src_stride = n,
+    };
+    const bufs = [_]*const MetalBuffer{ &accum_buf, &src_buf, &routing_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccPush), 3);
+    cmd.commitAndWait();
+
+    try std.testing.expectApproxEqAbs(@as(f32, 14.0), accum_ptr[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 25.0), accum_ptr[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 36.0), accum_ptr[2], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 47.0), accum_ptr[3], 0.001);
 }
