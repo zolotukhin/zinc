@@ -87,19 +87,9 @@ const jsonLd = {
     </a>
   </section>
 
-  <section class="start-panel">
-    <TerminalWindow
-      title="bash"
-      code={`# First run on Linux with an AMD GPU.
-# Build ZINC, then run one GGUF prompt end to end.
-git clone https://github.com/zolotukhin/zinc.git
-cd zinc
-zig build
-export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc \\
-  -m /path/to/model.gguf \\
-  --prompt "The capital of France is"`}
-    />
+  <section class="demo-panel">
+    <img src="/zinc-chat-demo.gif" alt="ZINC Chat — streaming LLM inference on AMD RDNA4 GPU" class="demo-gif" />
+    <p class="demo-caption">Qwen3.5-35B streaming on AMD Radeon AI PRO R9700 — built-in chat UI with syntax highlighting</p>
     <div class="start-links">
       <a href="/zinc/docs/getting-started">Getting Started</a>
       <a href="/zinc/docs/hardware-requirements">Hardware Requirements</a>
@@ -227,6 +217,25 @@ export RADV_PERFTEST=coop_matrix
 
   .btn-outline:hover {
     border-color: var(--color-accent);
+  }
+
+  .demo-panel {
+    text-align: center;
+    margin-bottom: var(--space-xl);
+  }
+
+  .demo-gif {
+    width: 100%;
+    max-width: 720px;
+    border-radius: 12px;
+    border: 1px solid var(--color-border);
+    margin-bottom: var(--space-sm);
+  }
+
+  .demo-caption {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-md);
   }
 
   .start-panel {
