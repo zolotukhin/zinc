@@ -3103,3 +3103,98 @@ test "delta-net zero state produces beta*v*(k.q) output" {
     }
 }
 
+test "l2Normalize produces unit vector" {
+    var v = [_]f32{ 3.0, 4.0, 0.0 };
+    // Inline l2Normalize (it's a private struct method)
+    var sum_sq: f32 = 0;
+    for (v) |x| sum_sq += x * x;
+    const norm = @sqrt(sum_sq + 1e-12);
+    if (norm > 0) { for (&v) |*x| x.* /= norm; }
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), v[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8), v[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), v[2], 1e-6);
+}
+
+test "l2Normalize zero vector stays zero" {
+    var v = [_]f32{ 0.0, 0.0, 0.0 };
+    var sum_sq: f32 = 0;
+    for (v) |x| sum_sq += x * x;
+    const norm = @sqrt(sum_sq + 1e-12);
+    if (norm > 0) { for (&v) |*x| x.* /= norm; }
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), v[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), v[1], 1e-12);
+}
+
+test "SiLU activation: x * sigmoid(x)" {
+    const silu = struct {
+        fn f(x: f32) f32 {
+            return x / (1.0 + @exp(-x));
+        }
+    }.f;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), silu(0.0), 1e-7);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7310586), silu(1.0), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.2689414), silu(-1.0), 1e-5);
+    try std.testing.expect(@abs(silu(10.0) - 10.0) < 0.001);
+}
+
+test "gated norm: RMS_norm(o) * weight * SiLU(z)" {
+    const head_v_dim: usize = 4;
+    const o = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const z = [_]f32{ 0.5, -0.5, 1.0, -1.0 };
+    const w = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+    var sq: f32 = 0;
+    for (o) |v| sq += v * v;
+    const rms = @sqrt(sq / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
+    var result: [4]f32 = undefined;
+    for (0..head_v_dim) |i| {
+        const nv = (o[i] / rms) * w[i];
+        const zv = z[i];
+        const gate = zv / (1.0 + @exp(-zv));
+        result[i] = nv * gate;
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 2.7386), rms, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1137), result[0], 0.01);
+    try std.testing.expect(result[3] < 0);
+}
+
+test "conv1d sliding window: convolve then shift state" {
+    const conv_channels: usize = 3;
+    const d_conv: usize = 3;
+    const d_conv_1 = d_conv - 1;
+    var state = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
+    const current = [_]f32{ 7.0, 8.0, 9.0 };
+    const kernel = [_]f32{ 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 };
+    var conv_out: [3]f32 = undefined;
+    for (0..conv_channels) |ch| {
+        var sum: f32 = 0;
+        for (0..d_conv) |ki| {
+            const kw = kernel[ch * d_conv + ki];
+            const sv = if (ki < d_conv_1) state[ki * conv_channels + ch] else current[ch];
+            sum += kw * sv;
+        }
+        conv_out[ch] = sum;
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), conv_out[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), conv_out[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), conv_out[2], 1e-6);
+    if (d_conv_1 > 1) {
+        const shift = (d_conv_1 - 1) * conv_channels;
+        std.mem.copyForwards(f32, state[0..shift], state[conv_channels .. shift + conv_channels]);
+    }
+    @memcpy(state[(d_conv_1 - 1) * conv_channels ..][0..conv_channels], &current);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), state[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), state[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), state[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), state[3], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.0), state[4], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), state[5], 1e-6);
+}
+
+test "push constant struct sizes match GLSL expectations" {
+    const ew = @import("elementwise.zig");
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(ew.SsmConv1dPush));
+    try std.testing.expectEqual(@as(usize, 36), @sizeOf(ew.SsmDeltaNetPush));
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(ew.SsmGatedNormPush));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(ew.SoftmaxTopkPush));
+}
+

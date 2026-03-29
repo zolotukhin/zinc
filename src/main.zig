@@ -442,3 +442,16 @@ test "parseArgs: unknown argument" {
     const args = [_][:0]const u8{ "zinc", "--foo" };
     try std.testing.expectError(error.UnknownArgument, parseArgs(&args));
 }
+
+test "parseArgs: profile flag" {
+    const args = [_][:0]const u8{ "zinc", "--profile", "--prompt", "test" };
+    const config = try parseArgs(&args);
+    try std.testing.expect(config.profile);
+    try std.testing.expectEqualStrings("test", config.prompt.?);
+}
+
+test "parseArgs: profile defaults to false" {
+    const args = [_][:0]const u8{ "zinc", "--prompt", "hi" };
+    const config = try parseArgs(&args);
+    try std.testing.expect(!config.profile);
+}
