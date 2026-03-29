@@ -5,6 +5,52 @@ interface Props {
 }
 
 const { title = 'Terminal', code } = Astro.props;
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function span(cls: string, value: string): string {
+  return `<span class="${cls}">${escapeHtml(value)}</span>`;
+}
+
+function highlightTail(input: string): string {
+  const tokens = input.match(/"[^"]*"|'[^']*'|\$[A-Za-z_][A-Za-z0-9_]*|\\$|--?[A-Za-z0-9._-]+|[A-Z_][A-Z0-9_]*=[^\s]+|\s+|[^\s]+/g) ?? [];
+
+  return tokens.map((token) => {
+    if (/^\s+$/.test(token)) return escapeHtml(token);
+    if (/^"[^"]*"|'[^']*'$/.test(token)) return span('token-string', token);
+    if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(token)) return span('token-variable', token);
+    if (/^\\$/.test(token)) return span('token-muted', token);
+    if (/^--?[A-Za-z0-9._-]+$/.test(token)) return span('token-flag', token);
+
+    const assignment = token.match(/^([A-Z_][A-Z0-9_]*)(=)(.+)$/);
+    if (assignment) {
+      const [, name, equals, value] = assignment;
+      return `${span('token-variable', name)}${escapeHtml(equals)}${span('token-value', value)}`;
+    }
+
+    return escapeHtml(token);
+  }).join('');
+}
+
+function highlightShellLine(line: string): string {
+  if (!line.trim()) return '';
+  if (/^\s*#/.test(line)) return span('token-comment', line);
+
+  const match = line.match(/^(\s*)(\S+)(.*)$/);
+  if (!match) return escapeHtml(line);
+
+  const [, indent, head, tail] = match;
+  return `${escapeHtml(indent)}${span('token-command', head)}${highlightTail(tail)}`;
+}
+
+const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
 ---
 
 <div class="terminal-window" data-terminal-window>
@@ -20,7 +66,7 @@ const { title = 'Terminal', code } = Astro.props;
     </button>
   </div>
 
-  <pre><code>{code}</code></pre>
+  <pre><code set:html={highlightedCode}></code></pre>
 </div>
 
 <script is:inline>
@@ -149,6 +195,36 @@ const { title = 'Terminal', code } = Astro.props;
     color: var(--color-text);
   }
 
+  .terminal-window :global(.token-comment) {
+    color: #5c7788;
+    font-style: italic;
+  }
+
+  .terminal-window :global(.token-command) {
+    color: #a54810;
+    font-weight: 700;
+  }
+
+  .terminal-window :global(.token-flag) {
+    color: #b06017;
+  }
+
+  .terminal-window :global(.token-string) {
+    color: #1f7a55;
+  }
+
+  .terminal-window :global(.token-variable) {
+    color: #a1335b;
+  }
+
+  .terminal-window :global(.token-value) {
+    color: #7c5c25;
+  }
+
+  .terminal-window :global(.token-muted) {
+    color: var(--color-text-muted);
+  }
+
   @media (prefers-color-scheme: dark) {
     .terminal-window {
       background:
@@ -176,6 +252,30 @@ const { title = 'Terminal', code } = Astro.props;
 
     .terminal-window pre code {
       color: #dbd7ca;
+    }
+
+    .terminal-window :global(.token-comment) {
+      color: #8db7c8;
+    }
+
+    .terminal-window :global(.token-command) {
+      color: #f08a43;
+    }
+
+    .terminal-window :global(.token-flag) {
+      color: #e7b268;
+    }
+
+    .terminal-window :global(.token-string) {
+      color: #7fd1a7;
+    }
+
+    .terminal-window :global(.token-variable) {
+      color: #ef8ab0;
+    }
+
+    .terminal-window :global(.token-value) {
+      color: #d7b173;
     }
   }
 </style>
