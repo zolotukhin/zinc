@@ -196,26 +196,32 @@ fn handleChatCompletions(
 
         conn.writeSseDone() catch return;
     } else {
-        // Non-streaming: generate all tokens, return single response
-        const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator) catch {
-            try conn.sendError(500, "internal_error", "Generation failed");
+        // Non-streaming: use same prefill+decode loop with stop detection
+        var state2 = forward_mod.DecodeState.init(allocator);
+        defer state2.deinit();
+        engine.prefillBatch(&state2, prompt_tokens) catch {
+            try conn.sendError(500, "internal_error", "Prefill failed");
             return;
         };
-        defer allocator.free(output_tokens);
-
-        // Decode tokens to text, stopping at <|im_end|> in accumulated text
         var text_buf: std.ArrayList(u8) = .{};
         defer text_buf.deinit(allocator);
-        for (output_tokens) |tid| {
-            const t = if (tid < tokenizer.vocab.len) tokenizer.vocab[tid] else "<?>";
-            text_buf.appendSlice(allocator, t) catch break;
-            // Check if accumulated text contains stop string
-            if (std.mem.indexOf(u8, text_buf.items, "<|im_end|>") != null) {
-                // Trim at the stop string
-                if (std.mem.indexOf(u8, text_buf.items, "<|im_end|>")) |pos| {
+        var ns_gen: u32 = 0;
+        const ns_eos = tokenizer.eosId();
+        const ns_stop = "<|im_end|>";
+        if (prompt_tokens.len > 0 and max_tokens > 0) {
+            var prev = engine.sampleGreedy();
+            ns_gen = 1;
+            while (ns_gen <= max_tokens and prev != ns_eos) {
+                var decode_buf2: [256]u8 = undefined;
+                const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
+                text_buf.appendSlice(allocator, tok_utf8) catch break;
+                if (std.mem.indexOf(u8, text_buf.items, ns_stop)) |pos| {
                     text_buf.shrinkRetainingCapacity(pos);
+                    break;
                 }
-                break;
+                engine.decodeStep(&state2, prev) catch break;
+                prev = engine.sampleGreedy();
+                ns_gen += 1;
             }
         }
 
@@ -229,7 +235,7 @@ fn handleChatCompletions(
         , .{
             req_id, ts, model_name,
             escaped_text,
-            prompt_tokens.len, output_tokens.len, prompt_tokens.len + output_tokens.len,
+            prompt_tokens.len, ns_gen, prompt_tokens.len + ns_gen,
         }) catch {
             try conn.sendError(500, "internal_error", "Response too large");
             return;
@@ -414,7 +420,9 @@ fn streamToken(
     ts: i64,
     model_name: []const u8,
 ) !void {
-    const token_text = if (token_id < tokenizer.vocab.len) tokenizer.vocab[token_id] else "<?>";
+    // Decode GPT-2 byte encoding to real UTF-8
+    var decode_buf: [256]u8 = undefined;
+    const token_text = tokenizer.decodeToken(token_id, &decode_buf);
     var escaped_buf: [512]u8 = undefined;
     const escaped = jsonEscape(token_text, &escaped_buf);
     var chunk_buf: [1024]u8 = undefined;

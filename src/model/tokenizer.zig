@@ -348,6 +348,54 @@ pub const Tokenizer = struct {
     /// Release tokenizer-owned vocabulary tables, merges, and optional score arrays.
     /// @param self Tokenizer to tear down in place.
     /// @note This does not free any source GGUF storage because the tokenizer owns duplicated tables.
+    /// Decode a token to UTF-8 text, reversing GPT-2 byte encoding.
+    /// The vocab stores tokens in GPT-2 Unicode representation where each original byte
+    /// is mapped to a Unicode character. This reverses that mapping.
+    pub fn decodeToken(self: *const Tokenizer, token_id: u32, buf: []u8) []const u8 {
+        if (token_id >= self.vocab.len) return "";
+        const gpt2_text = self.vocab[token_id];
+        var out: usize = 0;
+        var i: usize = 0;
+        while (i < gpt2_text.len and out < buf.len) {
+            // Parse one UTF-8 codepoint from the GPT-2 encoded token
+            const byte0 = gpt2_text[i];
+            var cp: u21 = 0;
+            var cp_len: usize = 1;
+            if (byte0 < 0x80) {
+                cp = byte0;
+            } else if (byte0 < 0xE0 and i + 1 < gpt2_text.len) {
+                cp = (@as(u21, byte0 & 0x1F) << 6) | @as(u21, gpt2_text[i + 1] & 0x3F);
+                cp_len = 2;
+            } else if (byte0 < 0xF0 and i + 2 < gpt2_text.len) {
+                cp = (@as(u21, byte0 & 0x0F) << 12) | (@as(u21, gpt2_text[i + 1] & 0x3F) << 6) | @as(u21, gpt2_text[i + 2] & 0x3F);
+                cp_len = 3;
+            } else {
+                i += 1;
+                continue;
+            }
+            i += cp_len;
+            // Reverse the GPT-2 byte-to-unicode mapping
+            const orig_byte: u8 = if (cp < 256) blk: {
+                // Direct mapping: printable ASCII and high bytes
+                break :blk @intCast(cp);
+            } else if (cp >= 256 and cp < 256 + 33) blk: {
+                // 0-32 were mapped to U+0100..U+0120
+                break :blk @intCast(cp - 256);
+            } else if (cp >= 256 + 33 and cp < 256 + 33 + 34) blk: {
+                // 127-160 were mapped to U+0121..U+0142
+                break :blk @intCast(cp - 256 - 33 + 0x7F);
+            } else if (cp == 256 + 33 + 34) blk: {
+                // 173 (0xAD) was mapped to U+0143
+                break :blk 0xAD;
+            } else blk: {
+                break :blk '?';
+            };
+            buf[out] = orig_byte;
+            out += 1;
+        }
+        return buf[0..out];
+    }
+
     /// Apply chat template to role/content pairs. Returns formatted prompt in buf.
     pub fn applyChatTemplate(self: *const Tokenizer, roles: []const []const u8, contents: []const []const u8, buf: []u8) ![]const u8 {
         var pos: usize = 0;
