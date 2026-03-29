@@ -1,18 +1,29 @@
 //! Minimal HTTP/1.1 server for the OpenAI-compatible inference API.
-//! Supports request parsing, JSON responses, SSE streaming headers, and error responses.
+//! @section API Server
+//! Provides connection-level request parsing, JSON and SSE response helpers,
+//! and a TCP listener that hands off accepted connections to the route dispatcher.
 const std = @import("std");
 
 const log = std.log.scoped(.http);
 
 /// Active client connection with request/response capabilities.
+/// Wraps a TCP stream and provides helpers for reading HTTP requests
+/// and writing JSON, error, and SSE responses.
 pub const Connection = struct {
+    /// Underlying TCP stream to the client.
     stream: std.net.Stream,
+    /// Allocator used for per-connection allocations.
     allocator: std.mem.Allocator,
-    // Read buffer for request parsing
+    /// Internal read buffer for request parsing (64 KiB).
     read_buf: [65536]u8 = undefined,
+    /// Number of valid bytes currently in read_buf.
     read_len: usize = 0,
 
-    /// Read and parse an HTTP/1.1 request. Reads headers + body based on Content-Length.
+    /// Read and parse an HTTP/1.1 request from the connection.
+    /// Reads headers until `\r\n\r\n`, extracts method/path/Content-Length,
+    /// then reads the remaining body bytes.
+    /// @param self Active connection to read from.
+    /// @returns Parsed request with method, path, and body.
     pub fn readRequest(self: *Connection) !Request {
         // Read data until we find \r\n\r\n (end of headers)
         var total: usize = 0;
@@ -107,7 +118,10 @@ pub const Connection = struct {
         return Request{ .method = method, .path = path, .body = body };
     }
 
-    /// Send a JSON response with status code.
+    /// Send a JSON response with the given HTTP status code.
+    /// @param self Active connection to write to.
+    /// @param status HTTP status code (200, 400, 404, etc.).
+    /// @param body JSON-encoded response body.
     pub fn sendJson(self: *Connection, status: u16, body: []const u8) !void {
         var buf: [512]u8 = undefined;
         const status_text = switch (status) {
@@ -120,20 +134,28 @@ pub const Connection = struct {
         try self.stream.writeAll(body);
     }
 
-    /// Send an OpenAI-format error response.
+    /// Send an OpenAI-format JSON error response.
+    /// @param self Active connection to write to.
+    /// @param status HTTP status code for the error.
+    /// @param err_type OpenAI error type string (e.g. "invalid_request_error").
+    /// @param message Human-readable error message.
     pub fn sendError(self: *Connection, status: u16, err_type: []const u8, message: []const u8) !void {
         var buf: [2048]u8 = undefined;
         const body = std.fmt.bufPrint(&buf, "{{\"error\":{{\"message\":\"{s}\",\"type\":\"{s}\",\"code\":{d}}}}}", .{ message, err_type, status }) catch return error.HeaderTooLarge;
         try self.sendJson(status, body);
     }
 
-    /// Send SSE streaming response headers (no body yet — caller writes events via stream).
+    /// Send SSE streaming response headers with chunked transfer encoding.
+    /// After this call, use writeSseEvent to send individual events.
+    /// @param self Active connection to write to.
     pub fn sendSseStart(self: *Connection) !void {
         const header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n";
         try self.stream.writeAll(header);
     }
 
-    /// Write a single SSE chunk (chunked transfer encoding).
+    /// Write a single SSE event as a chunked transfer-encoding frame.
+    /// @param self Active connection to write to.
+    /// @param data Event payload (typically JSON), sent as `data: {payload}\n\n`.
     pub fn writeSseEvent(self: *Connection, data: []const u8) !void {
         // Chunked format: {size_hex}\r\n{data}\r\n
         var size_buf: [16]u8 = undefined;
@@ -149,14 +171,16 @@ pub const Connection = struct {
         try self.stream.writeAll("\r\n");
     }
 
-    /// Write the final SSE [DONE] event and close the chunked stream.
+    /// Write the final SSE `[DONE]` event and send the chunked transfer terminator.
+    /// @param self Active connection to write to.
     pub fn writeSseDone(self: *Connection) !void {
         try self.writeSseEvent("[DONE]");
         // Chunked terminator: 0\r\n\r\n
         try self.stream.writeAll("0\r\n\r\n");
     }
 
-    /// Close the connection stream.
+    /// Close the underlying TCP stream.
+    /// @param self Connection to close.
     pub fn close(self: *Connection) void {
         self.stream.close();
     }
@@ -173,21 +197,33 @@ pub const Request = struct {
 };
 
 /// HTTP server that binds and listens on a TCP port.
+/// Accepts connections and wraps them in Connection structs for request handling.
 pub const Server = struct {
+    /// Underlying TCP listener.
     listener: std.net.Server,
+    /// Allocator passed to accepted connections.
     allocator: std.mem.Allocator,
 
+    /// Bind to all interfaces on the given port and start listening.
+    /// @param allocator Allocator for connection resources.
+    /// @param port TCP port to listen on.
+    /// @returns A Server ready to accept connections.
     pub fn init(allocator: std.mem.Allocator, port: u16) !Server {
         const address = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
         const listener = try address.listen(.{ .reuse_address = true });
         return Server{ .listener = listener, .allocator = allocator };
     }
 
+    /// Block until a client connects, then return a Connection for that client.
+    /// @param self Active server to accept on.
+    /// @returns A new Connection wrapping the accepted TCP stream.
     pub fn accept(self: *Server) !Connection {
         const conn = try self.listener.accept();
         return Connection{ .stream = conn.stream, .allocator = self.allocator };
     }
 
+    /// Stop listening and release the server socket.
+    /// @param self Server to tear down.
     pub fn deinit(self: *Server) void {
         self.listener.deinit();
     }

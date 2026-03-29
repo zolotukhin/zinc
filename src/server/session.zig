@@ -1,5 +1,8 @@
 //! Active generation session for a streaming request.
+//! @section API Server
 //! Each session owns a connection, decode state, and generation progress.
+//! Sessions are created per-request and track the full lifecycle from
+//! prefill through token generation to completion.
 const std = @import("std");
 const http = @import("http.zig");
 const forward_mod = @import("../compute/forward.zig");
@@ -7,31 +10,59 @@ const tokenizer_mod = @import("../model/tokenizer.zig");
 
 const log = std.log.scoped(.session);
 
+/// Lifecycle state of a generation session.
 pub const SessionState = enum {
+    /// Prompt tokens are being processed.
     prefilling,
+    /// Output tokens are being generated.
     decoding,
+    /// Generation finished normally.
     completed,
+    /// Generation terminated due to an error.
     failed,
 };
 
-/// An active streaming generation session.
+/// An active generation session that owns a connection and decode state.
+/// Handles both streaming (SSE) and non-streaming response modes.
 pub const Session = struct {
+    /// Client connection for sending responses.
     conn: http.Connection,
+    /// Current lifecycle state.
     state: SessionState,
+    /// GPU decode state for this session's generation.
     decode_state: forward_mod.DecodeState,
+    /// Last generated token ID.
     prev_token: u32,
+    /// Number of tokens generated so far.
     tokens_generated: u32,
+    /// Maximum tokens to generate before stopping.
     max_tokens: u32,
+    /// End-of-sequence token ID for stop detection.
     eos_token_id: u32,
+    /// Unique request ID (e.g. "chatcmpl-{hex_timestamp}").
     req_id: [32]u8,
+    /// Length of the valid portion of req_id.
     req_id_len: usize,
+    /// Model name included in API responses.
     model_name: []const u8,
+    /// Unix timestamp of session creation.
     created_ts: i64,
+    /// Whether to stream tokens as SSE events.
     is_streaming: bool,
-    // Non-streaming: accumulate tokens
+    /// Accumulated output tokens for non-streaming mode.
     output_tokens: std.ArrayList(u32),
+    /// Allocator for session-owned resources.
     allocator: std.mem.Allocator,
 
+    /// Create a new session in the prefilling state.
+    /// Generates a unique request ID from the current timestamp.
+    /// @param conn Client connection to send responses on.
+    /// @param max_tokens Maximum tokens to generate.
+    /// @param eos_token_id Token ID that signals end of sequence.
+    /// @param model_name Model name for API response fields.
+    /// @param is_streaming Whether to deliver tokens as SSE events.
+    /// @param allocator Allocator for the decode state and token buffer.
+    /// @returns A Session ready for prefill.
     pub fn init(
         conn: http.Connection,
         max_tokens: u32,
@@ -61,11 +92,18 @@ pub const Session = struct {
         };
     }
 
+    /// Return the generated request ID as a string slice.
+    /// @param self Session to query.
+    /// @returns The request ID (e.g. "chatcmpl-1a2b3c").
     pub fn reqId(self: *const Session) []const u8 {
         return self.req_id[0..self.req_id_len];
     }
 
-    /// Send one token as an SSE event. Returns false if connection is broken.
+    /// Send one token as an SSE event, or buffer it for non-streaming mode.
+    /// @param self Active session.
+    /// @param token_id Token to send or buffer.
+    /// @param tokenizer Tokenizer for decoding the token to text.
+    /// @returns True on success, false if the connection is broken or allocation fails.
     pub fn sendToken(self: *Session, token_id: u32, tokenizer: *const tokenizer_mod.Tokenizer) bool {
         if (!self.is_streaming) {
             self.output_tokens.append(self.allocator, token_id) catch return false;
@@ -82,7 +120,8 @@ pub const Session = struct {
         return true;
     }
 
-    /// Send the final [DONE] event and close the stream.
+    /// Send the final SSE `[DONE]` event (streaming mode) and mark the session as completed.
+    /// @param self Session to finalize.
     pub fn finish(self: *Session) void {
         if (self.is_streaming) {
             var chunk_buf: [512]u8 = undefined;
@@ -95,6 +134,8 @@ pub const Session = struct {
         self.state = .completed;
     }
 
+    /// Release the decode state, token buffer, and close the connection.
+    /// @param self Session to tear down.
     pub fn deinit(self: *Session) void {
         self.decode_state.deinit();
         self.output_tokens.deinit(self.allocator);

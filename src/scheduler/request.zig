@@ -7,13 +7,21 @@ const std = @import("std");
 const log = std.log.scoped(.request);
 
 /// Request processing state machine.
+/// Valid transitions: pending → prefilling → decoding → completed,
+/// with cancelled or failed reachable from any active state.
 pub const RequestState = enum {
-    pending, // queued, waiting for prefill
-    prefilling, // prompt tokens being processed
-    decoding, // generating output tokens
-    completed, // finished (EOS or max_tokens)
-    cancelled, // client disconnected
-    failed, // runtime error
+    /// Queued, waiting for a prefill slot.
+    pending,
+    /// Prompt tokens are being processed.
+    prefilling,
+    /// Output tokens are being generated.
+    decoding,
+    /// Finished normally (EOS or max_tokens reached).
+    completed,
+    /// Client disconnected before completion.
+    cancelled,
+    /// Generation terminated due to a runtime error.
+    failed,
 };
 
 /// Generation parameters from the API request.
@@ -55,7 +63,12 @@ pub const Request = struct {
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
-    /// Create a new request in pending state.
+    /// Create a new request in the pending state with the given prompt and parameters.
+    /// @param allocator Allocator for the generated token buffer.
+    /// @param id Unique request identifier.
+    /// @param prompt_tokens Tokenized prompt (owned by the caller).
+    /// @param params Generation parameters (max_tokens, temperature, etc.).
+    /// @returns A Request ready to be submitted to the scheduler.
     pub fn init(allocator: std.mem.Allocator, id: u64, prompt_tokens: []const u32, params: GenerationParams) Request {
         return .{
             .id = id,
@@ -70,7 +83,10 @@ pub const Request = struct {
         };
     }
 
-    /// Transition to the next state. Returns error if transition is invalid.
+    /// Transition to the next lifecycle state.
+    /// @param self Request to transition.
+    /// @param new_state Target state (must be a valid successor of the current state).
+    /// @note Returns error.InvalidTransition if the state change is not allowed.
     pub fn transition(self: *Request, new_state: RequestState) !void {
         const valid = switch (self.state) {
             .pending => new_state == .prefilling or new_state == .cancelled,
@@ -82,7 +98,9 @@ pub const Request = struct {
         self.state = new_state;
     }
 
-    /// Append a generated token. Records first-token time.
+    /// Append a generated token and record the first-token timestamp if unset.
+    /// @param self Request to append to.
+    /// @param token Generated token ID to add.
     pub fn appendToken(self: *Request, token: u32) !void {
         if (self.first_token_ns == null) {
             self.first_token_ns = std.time.nanoTimestamp();

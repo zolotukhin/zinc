@@ -1,5 +1,7 @@
 //! Route dispatcher and endpoint handlers for the OpenAI-compatible API.
-//! Handles /v1/chat/completions, /v1/completions, /v1/models, /health.
+//! @section API Server
+//! Handles /v1/chat/completions, /v1/completions, /v1/models, /health,
+//! and a built-in chat UI. Supports both streaming (SSE) and non-streaming responses.
 const std = @import("std");
 const http = @import("http.zig");
 const forward_mod = @import("../compute/forward.zig");
@@ -9,6 +11,11 @@ const Model = @import("../model/loader.zig").Model;
 const log = std.log.scoped(.routes);
 
 /// Handle one HTTP connection: parse request, dispatch to endpoint, send response.
+/// @param conn Active client connection to read from and write to.
+/// @param engine Inference engine for running generation.
+/// @param tokenizer Tokenizer for prompt encoding and token decoding.
+/// @param model Loaded model (used for model name in API responses).
+/// @param allocator Allocator for per-request temporaries.
 pub fn handleConnection(
     conn: *http.Connection,
     engine: *forward_mod.InferenceEngine,

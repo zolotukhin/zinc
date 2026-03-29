@@ -150,6 +150,22 @@ const SECTION_META = new Map<string, { title: string; description: string; order
       order: 7,
     },
   ],
+  [
+    'scheduler',
+    {
+      title: 'Scheduler',
+      description: 'Continuous batching scheduler, paged KV cache management, and request lifecycle tracking for concurrent inference serving.',
+      order: 8,
+    },
+  ],
+  [
+    'api-server',
+    {
+      title: 'API Server',
+      description: 'OpenAI-compatible HTTP server, route dispatch, SSE streaming, and session management for serving inference over the network.',
+      order: 9,
+    },
+  ],
 ]);
 
 function resolveSiteRoot(): string {
@@ -482,6 +498,14 @@ function defaultSectionForPath(relativePath: string): string {
       return 'Shader Dispatch';
     case 'vulkan/gpu_detect.zig':
       return 'Hardware Detection';
+    case 'scheduler/scheduler.zig':
+    case 'scheduler/request.zig':
+    case 'scheduler/kv_cache.zig':
+      return 'Scheduler';
+    case 'server/http.zig':
+    case 'server/routes.zig':
+    case 'server/session.zig':
+      return 'API Server';
     default:
       return 'Vulkan Runtime';
   }
