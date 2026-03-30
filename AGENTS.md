@@ -226,6 +226,77 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && zig build && \
 #   info(forward): Generated N tokens in X ms — Y tok/s (Z ms/tok)
 ```
 
+### Measure ZINC API endpoints
+
+Use the HTTP benchmarks when you need end-to-end API latency, queueing behavior, or to compare the chat endpoint against the raw completions path.
+
+Important caveats before you trust the numbers:
+
+1. Bench a clean node. Other `zinc`, `llama-server`, and `llama-cli` processes on the RDNA4 host will contaminate both latency and throughput.
+2. `POST /v1/chat/completions` is an end-user latency benchmark, not a pure decode-throughput benchmark. The chat route applies templates and stop handling, so many prompts stop after only a handful of tokens.
+3. Use `POST /v1/completions` for sustained HTTP decode throughput. It avoids chat stop-sequence behavior and is the closest HTTP-side equivalent to the CLI `--prompt` path.
+4. ZINC server generation is still serialized. With `concurrency > 1`, aggregate throughput stays roughly flat while per-request latency grows because requests queue behind one active decode.
+
+Clean-server setup:
+
+```bash
+source .env
+
+# 1. Stop stale GPU users on the test node.
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  pkill -f 'zig-out/bin/zinc' || true; \
+  pkill -f 'llama-server' || true; \
+  pkill -f 'llama-cli' || true"
+
+# 2. Sync, build, and restart one clean ZINC server on :9090.
+rsync -az --delete --exclude '.zig-cache' --exclude 'zig-out' --exclude 'node_modules' \
+  --exclude '.DS_Store' --exclude 'site' \
+  -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/root/zinc/
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && zig build && \
+  nohup env RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
+    -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --port 9090 >/tmp/zinc_9090.log 2>&1 < /dev/null &"
+
+# 3. Wait for health.
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  until curl -fsS http://127.0.0.1:9090/health >/dev/null; do sleep 1; done; \
+  curl -sS http://127.0.0.1:9090/health"
+```
+
+Chat-endpoint latency matrix:
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  /root/.bun/bin/bun tools/benchmark_api.mjs \
+    --base http://127.0.0.1:9090/v1 \
+    --mode chat \
+    --output /tmp/zinc_api_chat_benchmark.json"
+```
+
+Raw sustained-throughput benchmark:
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  /root/.bun/bin/bun tools/benchmark_api.mjs \
+    --base http://127.0.0.1:9090/v1 \
+    --mode raw \
+    --output /tmp/zinc_api_raw_benchmark.json"
+```
+
+Reference result from a clean RDNA4 node on 2026-03-30:
+
+- `POST /v1/chat/completions` with the short prompt completed in about `5.6s` at `concurrency=1`, but usually stopped after `9` completion tokens, so it is useful for end-user latency, not decode TPS.
+- `POST /v1/completions` with `max_tokens=256` sustained about `16.8 tok/s` at `concurrency=1`.
+- `POST /v1/completions` with `max_tokens=256` and `concurrency=4` held aggregate throughput at about `16.8 tok/s`, while average per-request latency rose to about `38s` because generation is serialized.
+
 ### Troubleshooting performance
 
 If llama.cpp baseline drops below ~100 tok/s, check in order:
@@ -233,6 +304,9 @@ If llama.cpp baseline drops below ~100 tok/s, check in order:
 2. **GECC** — `cat /sys/module/amdgpu/parameters/ras_enable` must show 0
 3. **coop_matrix** — server log must show `matrix cores: KHR_coopmat`
 4. **Reboot** — Mesa/driver changes need a reboot to take full effect
+5. **Dirty benchmark node** — stop stray `zinc` / `llama-*` processes before comparing runs
+6. **Wrong endpoint for the question** — use `/v1/chat/completions` for chat latency and queueing, `/v1/completions` for sustained HTTP decode throughput
+7. **Early chat stops** — if chat completions are ending after a handful of tokens, change the prompt or switch to `/v1/completions`; otherwise the reported completion TPS is mostly prompt+HTTP overhead
 
 ## Code Reference
 
