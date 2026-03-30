@@ -30,6 +30,11 @@ import {
   isGarbageString,
   formatElapsed,
   extractTextFromStreamJson,
+  buildCodexArgs,
+  finalizeCodexStream,
+  formatCodexStderrLine,
+  formatCodexStreamLine,
+  type CodexStreamState,
 } from "./optimize_llm_tps";
 
 // ── Color & display ──────────────────────────────────────────────────
@@ -107,6 +112,22 @@ const BLOCKED_FILE_OPS = [
 ];
 
 type AgentKind = "claude" | "codex";
+
+export function buildAgentInvocation(agent: AgentKind, prompt: string): {
+  cmd: string;
+  args: string[];
+} {
+  if (agent === "codex") {
+    return {
+      cmd: "codex",
+      args: buildCodexArgs(prompt),
+    };
+  }
+  return {
+    cmd: "claude",
+    args: buildClaudeArgs(prompt),
+  };
+}
 
 // ── Phase detection ──────────────────────────────────────────────────
 
@@ -253,6 +274,7 @@ async function runCommand(
     streamOutput?: boolean;
     timeout?: number;
     stdoutLineFormatter?: (line: string) => string | null;
+    stderrLineFormatter?: (line: string) => string | null;
   } = {},
 ): Promise<RunResult> {
   const streamOutput = opts.streamOutput ?? false;
@@ -265,7 +287,8 @@ async function runCommand(
     });
     let stdout = "",
       stderr = "",
-      lineBuffer = "";
+      lineBuffer = "",
+      stderrLineBuffer = "";
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
@@ -285,13 +308,32 @@ async function runCommand(
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stderr += text;
-      if (streamOutput) process.stderr.write(text);
+      if (!streamOutput) return;
+      if (opts.stderrLineFormatter) {
+        stderrLineBuffer += text;
+        const lines = stderrLineBuffer.split("\n");
+        stderrLineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const f = opts.stderrLineFormatter(line);
+          if (f !== null) process.stderr.write(f);
+        }
+      } else {
+        process.stderr.write(text);
+      }
     });
     child.on("error", rej);
     child.on("close", (code) => {
       if (streamOutput && opts.stdoutLineFormatter && lineBuffer.trim()) {
         const f = opts.stdoutLineFormatter(lineBuffer);
         if (f !== null) process.stdout.write(f);
+      }
+      if (
+        streamOutput &&
+        opts.stderrLineFormatter &&
+        stderrLineBuffer.trim()
+      ) {
+        const f = opts.stderrLineFormatter(stderrLineBuffer);
+        if (f !== null) process.stderr.write(f);
       }
       res({ exitCode: code ?? 1, stdout, stderr });
     });
@@ -375,10 +417,18 @@ async function remoteTest(): Promise<{ passed: boolean; output: string }> {
     { streamOutput: false, timeout: 120_000 },
   );
   const testPassed = stdout.match(/(\d+)\/\d+ tests passed/);
-  if (testPassed) {
+  if (testPassed && exitCode === 0) {
     console.log(clr("2", `  ✅ ${testPassed[0]}`));
   }
   if (exitCode !== 0) {
+    if (testPassed) {
+      console.log(
+        clr(
+          "1;33",
+          `  ⚠ ${testPassed[0]} but command exited ${exitCode}`,
+        ),
+      );
+    }
     console.log(clr("1;31", "  ❌ Tests failed!"));
   }
   return { passed: exitCode === 0, output: stdout + "\n" + stderr };
@@ -660,12 +710,30 @@ async function runAgent(
     inTextBlock: false,
     sawTextDeltaInCurrentMessage: false,
   };
-
-  const result = await runCommand("claude", buildClaudeArgs(prompt), {
-    streamOutput: true,
-    timeout: 900_000, // 15 min max per agent call
-    stdoutLineFormatter: (line) => formatClaudeStreamLine(line, claudeState),
-  });
+  let result: RunResult;
+  if (agent === "codex") {
+    const codexState: CodexStreamState = {
+      inDiffBlock: false,
+      diffLines: [],
+      lastDiffHash: null,
+      suppressedDuplicateBlocks: 0,
+      startedCommandIds: new Set(),
+    };
+    result = await runCommand("codex", buildCodexArgs(prompt), {
+      streamOutput: true,
+      timeout: 900_000, // 15 min max per agent call
+      stdoutLineFormatter: (line) => formatCodexStreamLine(line, codexState),
+      stderrLineFormatter: formatCodexStderrLine,
+    });
+    const tail = finalizeCodexStream(codexState);
+    if (tail) process.stdout.write(tail);
+  } else {
+    result = await runCommand("claude", buildClaudeArgs(prompt), {
+      streamOutput: true,
+      timeout: 900_000, // 15 min max per agent call
+      stdoutLineFormatter: (line) => formatClaudeStreamLine(line, claudeState),
+    });
+  }
 
   clearInterval(heartbeat);
   console.log(clr("1;36", SEP));

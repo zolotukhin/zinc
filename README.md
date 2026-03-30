@@ -58,8 +58,8 @@ The table below is intentionally narrow: it lists the exact GGUFs we have revali
 
 | Model | Exact GGUF tested | Measured throughput on AI PRO R9700 |
 |------|--------------------|-------------------------------------|
-| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf?download=true) ([model page](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF)) | 8.33 tok/s prefill, 7.17 tok/s decode |
-| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf?download=true) ([model page](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF)) | 12.67 tok/s prefill, 10.10 tok/s decode |
+| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 8.33 tok/s prefill, 7.17 tok/s decode |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 12.67 tok/s prefill, 10.10 tok/s decode |
 
 Benchmark details for the numbers above:
 

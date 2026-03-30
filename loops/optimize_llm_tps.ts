@@ -304,7 +304,7 @@ function formatClaudeStreamLine(
 
 // ── Codex stream formatter ───────────────────────────────────────────
 
-type CodexStreamState = {
+export type CodexStreamState = {
   inDiffBlock: boolean;
   diffLines: string[];
   lastDiffHash: string | null;
@@ -371,7 +371,7 @@ function flushCodexDiffBlock(state: CodexStreamState): string | null {
   return out;
 }
 
-function finalizeCodexStream(state: CodexStreamState): string | null {
+export function finalizeCodexStream(state: CodexStreamState): string | null {
   let out = "";
   const flushed = flushCodexDiffBlock(state);
   if (flushed) out += flushed;
@@ -492,7 +492,7 @@ function formatCodexJsonEvent(
   return null;
 }
 
-function formatCodexStreamLine(
+export function formatCodexStreamLine(
   rawLine: string,
   state: CodexStreamState,
 ): string | null {
@@ -520,7 +520,7 @@ function formatCodexStreamLine(
   return `${clr("2", `[codex] ${rawLine}`)}\n`;
 }
 
-function formatCodexStderrLine(rawLine: string): string | null {
+export function formatCodexStderrLine(rawLine: string): string | null {
   if (!rawLine.trim()) return "\n";
   return `${clr("2", `[codex] ${rawLine}`)}\n`;
 }
@@ -624,7 +624,7 @@ function buildClaudeArgs(prompt: string, model?: string): string[] {
   return args;
 }
 
-function buildCodexArgs(prompt: string, model?: string): string[] {
+export function buildCodexArgs(prompt: string, model?: string): string[] {
   const args = [
     "exec",
     "--skip-git-repo-check",
