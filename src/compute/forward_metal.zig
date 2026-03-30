@@ -1732,11 +1732,12 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             // ===== SSM: fused batch 1 + recurrent body + batch 2 =====
             // There is no CPU dependency between the SSM projections and the
             // recurrent kernels, so keep the whole path in one command buffer.
+            // Match the attention/MoE fast paths and rely on Metal's in-order
+            // dispatch execution for these direct producer->consumer steps.
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
             const cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
-            cmd.barrier();
 
             const wqkv_t = lt.attn_qkv orelse return error.MissingTensor;
             const z_t = lt.attn_gate orelse return error.MissingTensor;
@@ -1746,7 +1747,6 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             dispatchDmmvOnCmd(engine, cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
             dispatchDmmvOnCmd(engine, cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
             dispatchDmmvOnCmd(engine, cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
-            cmd.barrier();
 
             // Conv1d: attn_out_buf → swiglu_buf
             {
@@ -1754,7 +1754,6 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const c1_bufs = [_]*const MetalBuffer{ &engine.ssm_conv_kernel_bufs.?[layer_idx], &engine.ssm_conv_state_bufs.?[layer_idx], &engine.attn_out_buf, &engine.swiglu_buf };
                 cmd.dispatchV2(&engine.ssm_conv1d_pipe, .{ (conv_channels + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &c1_bufs, &push, @sizeOf(SsmConv1dPush), 0);
             }
-            cmd.barrier();
 
             // Delta-net: swiglu_buf → attn_out_buf
             {
@@ -1777,7 +1776,6 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 };
                 cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
             }
-            cmd.barrier();
 
             // Gated norm: attn_out_buf → swiglu_buf
             {
@@ -1794,12 +1792,10 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 };
                 cmd.dispatchV2(&engine.ssm_gated_norm_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &gn_bufs, &push, @sizeOf(SsmGatedNormPush), 0);
             }
-            cmd.barrier();
 
             // SSM out DMMV: swiglu_buf → down_buf
             const ssm_out_t = lt.ssm_out orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
-            cmd.barrier();
 
             // Residual + FFN norm + router (same as attention batch2)
             {
@@ -1807,9 +1803,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
                 cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
-            cmd.barrier();
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
-            cmd.barrier();
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
