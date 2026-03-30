@@ -854,6 +854,9 @@ pub fn main() !void {
                 log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
             };
         }
+        if (config.debug) {
+            engine.enableLogitsReadback();
+        }
 
         // Initialize native BPE tokenizer from GGUF metadata
         var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
@@ -899,7 +902,7 @@ pub fn main() !void {
         });
 
         // Debug: dump first 5 generated tokens with their vocabulary text
-        {
+        if (config.debug) {
             const show_n = @min(output_tokens.len, 5);
             for (0..show_n) |ti| {
                 const tok_str = if (output_tokens[ti] < tokenizer.vocab.len) tokenizer.vocab[output_tokens[ti]] else "?";
@@ -907,14 +910,14 @@ pub fn main() !void {
             }
         }
         // Check specific token logits (Paris=11751, not=524)
-        {
+        if (config.debug) {
             const logits_ptr2: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
             log.debug("  logit[11751 'Paris']={d:.4} logit[524 'not']={d:.4} logit[264 'a']={d:.4}", .{
                 logits_ptr2[11751], logits_ptr2[524], logits_ptr2[264],
             });
         }
         // Debug: dump top-5 logits from the last decode step
-        {
+        if (config.debug) {
             const vocab_size = model.config.vocab_size;
             const logits_ptr: [*]const f32 = @ptrCast(@alignCast(engine.logits_staging.mapped.?));
             const logits = logits_ptr[0..vocab_size];
@@ -986,6 +989,9 @@ pub fn main() !void {
             manager.currentResources().engine.enableProfiling() catch |err| {
                 log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
             };
+        }
+        if (config.debug) {
+            manager.currentResources().engine.enableLogitsReadback();
         }
 
         var server = http_mod.Server.init(allocator, config.port) catch |err| {

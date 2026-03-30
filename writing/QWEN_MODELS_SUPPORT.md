@@ -24,7 +24,7 @@ Primary validation prompt:
 
 Primary remote node:
 
-- `root@71.212.158.115:2223`
+- ``$ZINC_USER@$ZINC_HOST:$ZINC_PORT``
 
 Known-good 35B baseline commit used as a reference:
 
@@ -554,7 +554,7 @@ The `Q5_K` regression was too easy to reintroduce. It needed:
 Remote CLI smoke:
 
 ```bash
-ssh -p 2223 root@71.212.158.115 \
+ssh -p "$ZINC_PORT" "$ZINC_USER@$ZINC_HOST" \
   'cd /tmp/zinc-qwen35-clean && \
    RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
    --model /root/models/Qwen3.5-2B-Q4_K_M.gguf \
@@ -563,7 +563,7 @@ ssh -p 2223 root@71.212.158.115 \
 ```
 
 ```bash
-ssh -p 2223 root@71.212.158.115 \
+ssh -p "$ZINC_PORT" "$ZINC_USER@$ZINC_HOST" \
   'cd /tmp/zinc-qwen35-clean && \
    RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
@@ -582,7 +582,7 @@ bun test tests/test_qwen_smoke.test.ts
 Live server health:
 
 ```bash
-curl -fsS http://71.212.158.115:9090/health
+curl -fsS "http://$ZINC_HOST:9090/health"
 ```
 
 ## Best Candidate Narrative For The Article

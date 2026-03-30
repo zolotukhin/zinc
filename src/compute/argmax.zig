@@ -79,6 +79,54 @@ pub const ArgmaxDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&phase1), 1, 1, 1);
     }
 
+    pub fn allocDescriptorSet(self: *const ArgmaxDispatch) !vk.c.VkDescriptorSet {
+        const pip = if (self.pipeline) |*p| p else return error.ShaderNotLoaded;
+        const alloc_info = vk.c.VkDescriptorSetAllocateInfo{
+            .sType = vk.c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .pNext = null,
+            .descriptorPool = self.descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &pip.descriptor_set_layout,
+        };
+        var ds: vk.c.VkDescriptorSet = null;
+        const result = vk.c.vkAllocateDescriptorSets(self.device, &alloc_info, &ds);
+        if (result != vk.c.VK_SUCCESS) return error.DescriptorSetAllocFailed;
+        return ds;
+    }
+
+    pub fn writeDescriptorSet(
+        self: *const ArgmaxDispatch,
+        descriptor_set: vk.c.VkDescriptorSet,
+        logits_buf: vk.c.VkBuffer,
+        logits_size: vk.c.VkDeviceSize,
+        partials_buf: vk.c.VkBuffer,
+        partials_size: vk.c.VkDeviceSize,
+        result_buf: vk.c.VkBuffer,
+        result_size: vk.c.VkDeviceSize,
+    ) void {
+        var buffer_infos = [3]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = logits_buf, .offset = 0, .range = logits_size },
+            .{ .buffer = partials_buf, .offset = 0, .range = partials_size },
+            .{ .buffer = result_buf, .offset = 0, .range = result_size },
+        };
+        var writes: [3]vk.c.VkWriteDescriptorSet = undefined;
+        for (0..3) |i| {
+            writes[i] = .{
+                .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = null,
+                .dstSet = descriptor_set,
+                .dstBinding = @intCast(i),
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = null,
+                .pBufferInfo = &buffer_infos[i],
+                .pTexelBufferView = null,
+            };
+        }
+        vk.c.vkUpdateDescriptorSets(self.device, writes.len, &writes, 0, null);
+    }
+
     pub fn deinit(self: *ArgmaxDispatch) void {
         if (self.pipeline) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);

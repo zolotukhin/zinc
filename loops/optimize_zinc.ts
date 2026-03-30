@@ -217,13 +217,13 @@ export function isCoherentText(output: string): boolean {
   return found >= 3;
 }
 
-/** Parse bandwidth utilization percentage from ZINC output. */
+/** Parse modeled bandwidth utilization percentage from ZINC output. */
 export function parseBandwidthUtil(output: string): number | null {
   const m = output.match(/(\d+\.?\d*)%\s*utilization/i);
   return m ? parseFloat(m[1]) : null;
 }
 
-/** Parse effective bandwidth in GB/s from ZINC output. */
+/** Parse modeled effective bandwidth in GB/s from ZINC output. */
 export function parseEffectiveBW(output: string): number | null {
   const m = output.match(/(\d+\.?\d*)\s*GB\/s\s*effective/i);
   return m ? parseFloat(m[1]) : null;
@@ -389,7 +389,7 @@ async function remoteRun(
   prompt: string,
 ): Promise<{ exitCode: number; output: string }> {
   console.log(clr("2", "  Running ZINC on remote node (acquiring GPU lock)..."));
-  const runCmd = `cd ${REMOTE_ZINC_DIR} && ZINC_DEBUG=1 RADV_PERFTEST=coop_matrix timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" --debug 2>&1`;
+  const runCmd = `cd ${REMOTE_ZINC_DIR} && RADV_PERFTEST=coop_matrix timeout 90 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" 2>&1`;
   const { stdout, stderr, exitCode } = await runCommand(
     "ssh",
     [
@@ -757,7 +757,7 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     diagnosis.push("- Actual DMMV dispatches for QKV projections, FFN layers");
   } else if (lastResult.tokPerSec != null && lastResult.tokPerSec > 0) {
     const bwInfo = lastResult.bandwidthUtil != null
-      ? ` | ${lastResult.effectiveBW?.toFixed(0) ?? "?"} GB/s (${lastResult.bandwidthUtil.toFixed(0)}% of 576 GB/s)`
+      ? ` | modeled ${lastResult.effectiveBW?.toFixed(0) ?? "?"} GB/s (${lastResult.bandwidthUtil.toFixed(0)}% of 576 GB/s)`
       : "";
     diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s (DECODE), ${lastResult.tokensGenerated} tokens${bwInfo}`);
     if (lastResult.garbageOutput && !lastResult.coherentText) {
@@ -783,30 +783,25 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     if (lastResult.coherentText) {
       diagnosis.push("✅ Output is COHERENT — decoded text contains recognizable language.");
       diagnosis.push("");
-      if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 10) {
-        diagnosis.push("## BOTTLENECK: VULKAN SUBMISSION OVERHEAD (~42 submits/token)");
-        diagnosis.push(`Bandwidth utilization is only ${lastResult.bandwidthUtil.toFixed(1)}% — GPU is mostly idle.`);
-        diagnosis.push("The model is 21GB. At 576 GB/s, theoretical decode = ~37ms/tok (27 tok/s).");
-        diagnosis.push(`Current: ${(1000 / (lastResult.tokPerSec ?? 1)).toFixed(0)}ms/tok — ${((1000 / (lastResult.tokPerSec ?? 1)) / 37).toFixed(0)}x slower than theoretical.`);
-        diagnosis.push("");
-        diagnosis.push("GPU SSM and command buffer batching are ALREADY DONE. The remaining ~42 submits are:");
-        diagnosis.push("  - 40 MoE expert ID readbacks (1 per layer — GPU softmax_topk → host read → CPU expert dispatch)");
-        diagnosis.push("  - 1 final logits readback");
-        diagnosis.push("  - 1 batched layer submit");
+      if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 15) {
+        diagnosis.push("## BOTTLENECK: LOW GPU UTILIZATION, NOT A HARD BANDWIDTH WALL");
+        diagnosis.push(`Modeled decode bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(1)}%, so single-stream decode is not close to saturating DRAM.`);
+        diagnosis.push(`Current latency is ${(1000 / (lastResult.tokPerSec ?? 1)).toFixed(0)}ms/tok, which points at dispatch/setup/sync overhead plus fragmented decode work.`);
         diagnosis.push("");
         diagnosis.push("## OPTIMIZATION PRIORITY:");
-        diagnosis.push("1. **Eliminate MoE expert ID readback** — GPU writes expert_ids, dispatch reads from GPU buffer");
-        diagnosis.push("   OR dispatch all 8 experts unconditionally and mask inactive ones (simpler, wastes some compute)");
-        diagnosis.push("2. **Profile with --profile flag** — Vulkan timestamps already implemented, find actual hotspot");
-        diagnosis.push("3. **Tune Q4_K DMMV occupancy** — workgroup size, shared memory, tile dimensions for RDNA4");
+        diagnosis.push("1. **Benchmark the clean path** — do not force `--debug` in throughput runs");
+        diagnosis.push("2. **Use low-perturbation `--profile` output** — find full-token GPU time before changing kernels");
+        diagnosis.push("3. **Reduce tail and sync overhead** — GPU argmax / less logits readback for greedy sampling");
+        diagnosis.push("4. **Reduce Vulkan setup overhead** — descriptor reuse, fewer barriers, less per-token recording churn");
+        diagnosis.push("5. **Fuse same-input decode work** — especially MoE gate/up and related projection fans");
         diagnosis.push("");
         diagnosis.push("## IMPORTANT: Make ONE meaningful architectural change per cycle.");
         diagnosis.push("Multi-file changes are OK if they're part of the same optimization.");
       } else if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 70) {
-        diagnosis.push(`Bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — below the 90%+ target.`);
-        diagnosis.push("Focus on reducing Vulkan overhead and improving GPU occupancy.");
+        diagnosis.push(`Modeled decode bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — still well below saturation.`);
+        diagnosis.push("Focus on reducing Vulkan overhead, cutting host-visible sync, and improving decode kernel occupancy.");
       } else if (lastResult.bandwidthUtil != null) {
-        diagnosis.push(`Bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — approaching hardware limit.`);
+        diagnosis.push(`Modeled decode bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — approaching the point where algorithmic byte reduction matters.`);
         diagnosis.push("Further gains require reducing bytes read or algorithmic changes.");
       }
     } else {

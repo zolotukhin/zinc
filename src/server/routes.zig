@@ -644,7 +644,7 @@ fn handleChatCompletions(
                 if (isReplacementArtifact(tok_text)) {
                     if (generated < max_tokens) {
                         if (conn.isPeerClosed()) return;
-                        engine.decodeStep(&state, prev_token) catch break;
+                        engine.decodeStep(&state, prev_token, true) catch break;
                         if (conn.isPeerClosed()) return;
                         prev_token = engine.sampleGreedy();
                         generated += 1;
@@ -699,7 +699,7 @@ fn handleChatCompletions(
                 // Generate next token
                 if (generated < max_tokens) {
                     if (conn.isPeerClosed()) return;
-                    engine.decodeStep(&state, prev_token) catch break;
+                    engine.decodeStep(&state, prev_token, true) catch break;
                     if (conn.isPeerClosed()) return;
                     prev_token = engine.sampleGreedy();
                     generated += 1;
@@ -746,7 +746,7 @@ fn handleChatCompletions(
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
-                    engine.decodeStep(&state2, prev) catch break;
+                    engine.decodeStep(&state2, prev, true) catch break;
                     prev = engine.sampleGreedy();
                     ns_gen += 1;
                     continue;
@@ -757,7 +757,7 @@ fn handleChatCompletions(
                     break :blk true;
                 } else false;
                 if (hit) break;
-                engine.decodeStep(&state2, prev) catch break;
+                engine.decodeStep(&state2, prev, true) catch break;
                 prev = engine.sampleGreedy();
                 ns_gen += 1;
             }

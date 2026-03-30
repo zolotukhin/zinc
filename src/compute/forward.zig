@@ -18,6 +18,7 @@ const Graph = @import("graph.zig").Graph;
 const DmmvDispatch = @import("dmmv.zig").DmmvDispatch;
 const ElementwiseDispatch = @import("elementwise.zig").ElementwiseDispatch;
 const AttentionDispatch = @import("attention.zig").AttentionDispatch;
+const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 
 const log = std.log.scoped(.forward);
@@ -352,6 +353,8 @@ pub const InferenceEngine = struct {
     elementwise: ElementwiseDispatch,
     /// Flash attention dispatch.
     attention: AttentionDispatch,
+    /// GPU argmax dispatch for greedy sampling.
+    argmax: ArgmaxDispatch,
     /// Command pool.
     cmd_pool: CommandPool,
     /// Decode command buffer.
@@ -364,6 +367,11 @@ pub const InferenceEngine = struct {
     norm_buf: Buffer, // RMS norm output
     logits_buf: Buffer, // output logits (vocab_size f32)
     logits_staging: Buffer, // pre-allocated logits readback staging
+    argmax_partials_buf: Buffer, // per-workgroup argmax partials
+    argmax_result_buf: Buffer, // device-local token-id result
+    argmax_result_staging: Buffer, // host-visible token-id readback
+    argmax_descriptor_set: ?vk.c.VkDescriptorSet, // static [logits, partials, result] binding set
+    argmax_phase0_workgroups: u32, // ceil(vocab_size / 64)
     embed_staging: Buffer, // pre-allocated embedding upload staging
     // Transformer layer intermediates
     q_buf: Buffer, // Q projection: n_heads * head_dim f32
@@ -401,9 +409,15 @@ pub const InferenceEngine = struct {
     allocator: std.mem.Allocator,
     // Profiling (Phase 3c, --profile flag)
     profile_enabled: bool = false,
+    logits_readback_enabled: bool = false,
+    validation_diagnostics_enabled: bool = false,
     timestamp_query_pool: vk.c.VkQueryPool = null,
     timestamp_period_ns: f64 = 1.0, // nanoseconds per timestamp tick
     timestamp_count: u32 = 0, // number of timestamps written this token
+    profile_total_gpu_ms: f64 = 0.0,
+    profile_max_gpu_ms: f64 = 0.0,
+    profile_sample_count: u32 = 0,
+    modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
     diag_summary_buf: [2048]u8 = .{0} ** 2048,
@@ -451,6 +465,8 @@ pub const InferenceEngine = struct {
 
         var attention = try AttentionDispatch.init(instance, shader_dir, allocator);
         errdefer attention.deinit();
+        var argmax = try ArgmaxDispatch.init(instance, shader_dir, allocator);
+        errdefer argmax.deinit();
 
         // Build the decode graph (for diagnostics / future full-graph dispatch)
         var decode_graph = try architecture.buildDecodeGraphDetailed(config, allocator, &model.gguf_file);
@@ -461,6 +477,9 @@ pub const InferenceEngine = struct {
             .preferred_workgroup_size = gpu_config.dmmv_workgroup_size,
         });
         errdefer decode_graph.deinit();
+        var decode_analysis = try decode_graph.analyze(allocator);
+        defer decode_analysis.deinit();
+        const modeled_decode_bytes_per_token = decode_analysis.total_bytes;
 
         // Allocate intermediate buffers
         const hidden_size = @as(vk.c.VkDeviceSize, config.hidden_dim) * @sizeOf(f32);
@@ -492,6 +511,51 @@ pub const InferenceEngine = struct {
             const map_result = vk.c.vkMapMemory(instance.device, logits_staging.memory, 0, logits_size, 0, &map_ptr);
             if (map_result != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
             logits_staging.mapped = @ptrCast(map_ptr);
+        }
+
+        const argmax_phase0_workgroups: u32 = @max(@as(u32, 1), (config.vocab_size + 63) / 64);
+        const argmax_partials_size = @as(vk.c.VkDeviceSize, argmax_phase0_workgroups) * 2 * @sizeOf(u32);
+        var argmax_partials_buf = try Buffer.initDeviceLocal(
+            instance,
+            argmax_partials_size,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        );
+        errdefer argmax_partials_buf.deinit();
+
+        var argmax_result_buf = try Buffer.initDeviceLocal(
+            instance,
+            @sizeOf(u32),
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        );
+        errdefer argmax_result_buf.deinit();
+
+        var argmax_result_staging = try Buffer.init(
+            instance,
+            @sizeOf(u32),
+            vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer argmax_result_staging.deinit();
+        {
+            var map_ptr: ?*anyopaque = null;
+            const map_result = vk.c.vkMapMemory(instance.device, argmax_result_staging.memory, 0, @sizeOf(u32), 0, &map_ptr);
+            if (map_result != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            argmax_result_staging.mapped = @ptrCast(map_ptr);
+        }
+
+        var argmax_descriptor_set: ?vk.c.VkDescriptorSet = null;
+        if (argmax.pipeline != null) {
+            const ds = try argmax.allocDescriptorSet();
+            argmax.writeDescriptorSet(
+                ds,
+                logits_buf.handle,
+                logits_buf.size,
+                argmax_partials_buf.handle,
+                argmax_partials_buf.size,
+                argmax_result_buf.handle,
+                argmax_result_buf.size,
+            );
+            argmax_descriptor_set = ds;
         }
 
         // Pre-allocate upload staging for embeddings (avoids per-token vkAllocateMemory)
@@ -736,6 +800,7 @@ pub const InferenceEngine = struct {
             .dmmv = dmmv,
             .elementwise = elementwise,
             .attention = attention,
+            .argmax = argmax,
             .cmd_pool = cmd_pool,
             .decode_cmd = decode_cmd,
             .decode_graph = decode_graph,
@@ -744,6 +809,11 @@ pub const InferenceEngine = struct {
             .norm_buf = norm_buf,
             .logits_buf = logits_buf,
             .logits_staging = logits_staging,
+            .argmax_partials_buf = argmax_partials_buf,
+            .argmax_result_buf = argmax_result_buf,
+            .argmax_result_staging = argmax_result_staging,
+            .argmax_descriptor_set = argmax_descriptor_set,
+            .argmax_phase0_workgroups = argmax_phase0_workgroups,
             .embed_staging = embed_staging,
             .q_buf = q_buf,
             .k_buf = k_buf,
@@ -770,6 +840,7 @@ pub const InferenceEngine = struct {
             .shared_pool = shared_pool,
             .instance = instance,
             .allocator = allocator,
+            .modeled_decode_bytes_per_token = modeled_decode_bytes_per_token,
         };
     }
 
@@ -797,6 +868,16 @@ pub const InferenceEngine = struct {
         log.debug("Profiling enabled: {d} timestamp queries, period={d:.2}ns", .{ max_timestamps, self.timestamp_period_ns });
     }
 
+    /// Enable the expensive CPU-vs-GPU validation readbacks used for debugging kernel correctness.
+    pub fn enableValidationDiagnostics(self: *InferenceEngine) void {
+        self.validation_diagnostics_enabled = true;
+    }
+
+    /// Preserve full logits on the host for debug dumps and diagnostic inspection.
+    pub fn enableLogitsReadback(self: *InferenceEngine) void {
+        self.logits_readback_enabled = true;
+    }
+
     /// Write a timestamp to the query pool (if profiling enabled).
     fn writeTimestamp(self: *InferenceEngine, stage: vk.c.VkPipelineStageFlags) ?u32 {
         if (!self.profile_enabled) return null;
@@ -812,6 +893,12 @@ pub const InferenceEngine = struct {
         if (!self.profile_enabled) return;
         self.timestamp_count = 0;
         vk.c.vkCmdResetQueryPool(self.decode_cmd.handle, self.timestamp_query_pool, 0, 2048);
+    }
+
+    fn resetProfilingSamples(self: *InferenceEngine) void {
+        self.profile_total_gpu_ms = 0.0;
+        self.profile_max_gpu_ms = 0.0;
+        self.profile_sample_count = 0;
     }
 
     fn resetRequestState(self: *InferenceEngine) !void {
@@ -847,8 +934,8 @@ pub const InferenceEngine = struct {
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
     }
 
-    /// Read back all timestamps and print a summary.
-    pub fn printProfilingSummary(self: *const InferenceEngine) void {
+    /// Read back all timestamps for the current token and fold them into request-wide profiling stats.
+    pub fn recordProfilingSample(self: *InferenceEngine) void {
         if (!self.profile_enabled or self.timestamp_count == 0) return;
         const count = self.timestamp_count;
         var timestamps: [2048]u64 = undefined;
@@ -870,7 +957,11 @@ pub const InferenceEngine = struct {
             const first = timestamps[0];
             const last = timestamps[count - 1];
             const elapsed_ns = @as(f64, @floatFromInt(last -| first)) * self.timestamp_period_ns;
-            log.debug("PROFILE: {d} timestamps, GPU total={d:.2}ms", .{ count, elapsed_ns / 1e6 });
+            const elapsed_ms = elapsed_ns / 1e6;
+            self.profile_total_gpu_ms += elapsed_ms;
+            if (elapsed_ms > self.profile_max_gpu_ms) self.profile_max_gpu_ms = elapsed_ms;
+            self.profile_sample_count += 1;
+            log.debug("PROFILE: {d} timestamps, GPU decode token={d:.2}ms", .{ count, elapsed_ms });
         }
     }
 
@@ -1126,7 +1217,7 @@ pub const InferenceEngine = struct {
     /// Run a single decode step through all transformer layers.
     /// embed → [per-layer: norm → QKV → RoPE → KV write → attention → O proj → residual
     ///          → FFN norm → MoE routing → expert DMMVs → residual] → final norm → LM head → logits
-    pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32) !void {
+    pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32, collect_output: bool) !void {
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
@@ -1268,7 +1359,7 @@ pub const InferenceEngine = struct {
                         config.n_heads,
                         config.n_kv_heads,
                     });
-                    if (self.profile_enabled) {
+                    if (self.validation_diagnostics_enabled) {
                         const mmap = self.model.mmap_data orelse return error.NoMmapData;
                         if (self.findLayerTensor(layer, "attn_norm.weight")) |attn_norm_tensor| {
                             var attn_norm_preview = [_]f32{0} ** 4;
@@ -1362,7 +1453,7 @@ pub const InferenceEngine = struct {
 
                 // Self-check the first attention layer at seq_len=1: with only one KV token,
                 // flash attention must reproduce the current V slice for each query head's KV group.
-                if (state.position == 0 and is_full_attn and self.profile_enabled) {
+                if (state.position == 0 and is_full_attn and self.validation_diagnostics_enabled) {
                     try self.decode_cmd.end();
                     try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
@@ -1416,7 +1507,7 @@ pub const InferenceEngine = struct {
 
                 // Validate multi-token flash attention against a naive CPU reference on the
                 // first full-attention layer once the 5-token prompt is fully prefilling.
-                if (state.position == 4 and layer == full_attn_interval - 1 and self.profile_enabled) {
+                if (state.position == 4 and layer == full_attn_interval - 1 and self.validation_diagnostics_enabled) {
                     const seq_len_dbg: u32 = state.position + 1;
                     const q_bytes = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32);
                     const kv_dbg_bytes = @as(vk.c.VkDeviceSize, seq_len_dbg * kv_dim) * @sizeOf(f32);
@@ -1548,7 +1639,7 @@ pub const InferenceEngine = struct {
 
                 // --- Mid-layer diagnostic: o_proj RMS at attention layers (BOS only) ---
                 // Single readback per attention layer — reads o_proj_buf (before residual add)
-                if (state.position == 0 and is_full_attn and self.profile_enabled) {
+                if (state.position == 0 and is_full_attn and self.validation_diagnostics_enabled) {
                     // Flush current work so o_proj_buf is valid
                     try self.decode_cmd.end();
                     try self.decode_cmd.submitAndWait(self.instance.compute_queue);
@@ -1904,7 +1995,7 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
                 self.decode_cmd.computeBarrier();
 
-                if (state.position == 0 and self.profile_enabled and layer == 0 and inter_dim <= 8192) {
+                if (state.position == 0 and self.validation_diagnostics_enabled and layer == 0 and inter_dim <= 8192) {
                     try self.decode_cmd.end();
                     try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
@@ -1976,8 +2067,8 @@ pub const InferenceEngine = struct {
             // Command buffer stays open across layers (Phase 3c batching).
             // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
 
-            // --- Debug: per-layer hidden_buf diagnostics (BOS token only, gated behind --profile) ---
-            if (state.position == 0 and self.profile_enabled) {
+            // --- Debug: per-layer hidden_buf diagnostics (BOS token only, gated behind validation diagnostics) ---
+            if (state.position == 0 and self.validation_diagnostics_enabled) {
                 // Flush current batched cmd buffer for diagnostic readback
                 try self.decode_cmd.end();
                 try self.decode_cmd.submitAndWait(self.instance.compute_queue);
@@ -2065,7 +2156,7 @@ pub const InferenceEngine = struct {
         }
 
         // === Per-layer diagnostic summary (stored for printing after generation) ===
-        if (state.position == 0 and config.n_layers <= 64 and self.profile_enabled) {
+        if (state.position == 0 and config.n_layers <= 64 and self.validation_diagnostics_enabled) {
             // Store compact logit5 trajectory — shows how logit for token 5 evolves through layers
             // Reference: without layers, logit5=2.5385. With correct layers, should converge to model's prediction.
             var pos: usize = 0;
@@ -2082,14 +2173,7 @@ pub const InferenceEngine = struct {
         }
 
         // === Final norm + LM head (after all layers) ===
-        // Submit batched layer work, then start final cmd buffer
-        _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        try self.decode_cmd.end();
-        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-        self.printProfilingSummary();
-        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-        try self.decode_cmd.reset();
-        try self.decode_cmd.begin();
+        // Stay in the same command buffer so decode uses a single queue submit.
 
         // Final RMS norm: hidden_buf → norm_buf
         const final_norm_tensor = findLoadedTensor(self.model, "output_norm.weight") orelse return error.TensorNotFound;
@@ -2106,8 +2190,21 @@ pub const InferenceEngine = struct {
             findLoadedTensor(self.model, "token_embd.weight") orelse return error.TensorNotFound;
         try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
 
-        // Readback logits
-        {
+        const use_gpu_argmax = collect_output and self.argmax.pipeline != null and self.argmax_descriptor_set != null;
+        if (use_gpu_argmax) {
+            self.decode_cmd.computeBarrier();
+            try self.argmax.record(
+                &self.decode_cmd,
+                self.argmax_descriptor_set.?,
+                self.model.config.vocab_size,
+                self.argmax_phase0_workgroups,
+            );
+        }
+
+        // Read back the 4-byte token id result every token, and full logits only when debugging
+        // or when GPU argmax is unavailable and we must fall back to CPU greedy sampling.
+        const need_logits_readback = collect_output and (self.logits_readback_enabled or self.validation_diagnostics_enabled or !use_gpu_argmax);
+        if (collect_output) {
             const barrier = vk.c.VkMemoryBarrier{
                 .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .pNext = null,
@@ -2115,13 +2212,21 @@ pub const InferenceEngine = struct {
                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
             };
             vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
-            const logits_copy_size = @as(vk.c.VkDeviceSize, self.model.config.vocab_size) * @sizeOf(f32);
-            const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_copy_size };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &region);
+            if (use_gpu_argmax) {
+                const token_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(u32) };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.argmax_result_buf.handle, self.argmax_result_staging.handle, 1, &token_region);
+            }
+            if (need_logits_readback) {
+                const logits_copy_size = @as(vk.c.VkDeviceSize, self.model.config.vocab_size) * @sizeOf(f32);
+                const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_copy_size };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &region);
+            }
         }
+        _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        self.recordProfilingSample();
 
         state.position += 1;
     }
@@ -2581,7 +2686,7 @@ pub const InferenceEngine = struct {
         self.decode_cmd.computeBarrier();
 
         // --- GPU SSM diagnostic: readback conv1d output at layer 0 for comparison with CPU SSM_DBG ---
-        if (layer == 0 and self.profile_enabled) {
+        if (layer == 0 and self.validation_diagnostics_enabled) {
             // Flush to read conv1d output
             {
                 const bar = vk.c.VkMemoryBarrier{
@@ -2725,8 +2830,9 @@ pub const InferenceEngine = struct {
 
         // Run each prompt token through the full transformer (same as decodeStep)
         // This populates KV cache and SSM state so the first decode token has context.
-        for (prompt_tokens) |token_id| {
-            try self.decodeStep(state, token_id);
+        for (prompt_tokens, 0..) |token_id, i| {
+            const collect_output = i + 1 == prompt_tokens.len;
+            try self.decodeStep(state, token_id, collect_output);
         }
 
         // Upload last token's embedding
@@ -2736,9 +2842,13 @@ pub const InferenceEngine = struct {
     // Sampling
     // -----------------------------------------------------------------------
 
-    /// Sample a token from the pre-copied logits staging buffer (greedy argmax).
-    /// The logits were already copied to staging during decodeStep — zero alloc here.
+    /// Sample a token greedily. Uses GPU argmax when available, otherwise falls back to CPU scan.
     pub fn sampleGreedy(self: *const InferenceEngine) u32 {
+        if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
+            const token_ptr: [*]const u32 = @ptrCast(@alignCast(self.argmax_result_staging.mapped.?));
+            return token_ptr[0];
+        }
+
         const vocab_size = self.model.config.vocab_size;
         const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
         const logits = logits_ptr[0..vocab_size];
@@ -3268,12 +3378,16 @@ pub const InferenceEngine = struct {
         self.q_buf.deinit();
         // Core buffers
         self.embed_staging.deinit();
+        self.argmax_result_staging.deinit();
+        self.argmax_result_buf.deinit();
+        self.argmax_partials_buf.deinit();
         self.logits_staging.deinit();
         self.logits_buf.deinit();
         self.norm_buf.deinit();
         self.residual_buf.deinit();
         self.hidden_buf.deinit();
         self.decode_graph.deinit();
+        self.argmax.deinit();
         self.attention.deinit();
         self.elementwise.deinit();
         self.dmmv.deinit();
@@ -3335,6 +3449,8 @@ pub fn generate(
 ) ![]u32 {
     var state = DecodeState.init(allocator);
     defer state.deinit();
+    engine.diag_summary_len = 0;
+    engine.resetProfilingSamples();
 
     log.debug("Generating: {d} prompt tokens, max {d} output tokens", .{
         prompt_tokens.len, max_tokens,
@@ -3353,6 +3469,8 @@ pub fn generate(
     log.debug("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
         prompt_tokens.len, @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0, prefill_tok_per_sec,
     });
+    // Decode profiling should describe only generated tokens, not the prompt prefill steps.
+    engine.resetProfilingSamples();
 
     // Decode: generate tokens one at a time
     // After prefill, logits_staging already has the logits for the first output
@@ -3370,7 +3488,7 @@ pub fn generate(
             first_token, state.position,
         });
         // Dump top-5 logits from prefill for comparison with llama.cpp
-        dumpTop5Logits(engine, 0);
+        if (engine.logits_readback_enabled) dumpTop5Logits(engine, 0);
         generated = 1;
         if (first_token == eos_token_id) generated = max_tokens; // stop early
     }
@@ -3381,12 +3499,12 @@ pub fn generate(
         // Feed the last generated token as input
         const input_token = state.generated_tokens.items[state.generated_tokens.items.len - 1];
 
-        try engine.decodeStep(&state, input_token);
+        try engine.decodeStep(&state, input_token, true);
         const token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, token);
         // Top-5 logits per token for first 5 tokens + last token
         if (generated < 5 or generated == max_tokens - 1) {
-            dumpTop5Logits(engine, generated);
+            if (engine.logits_readback_enabled) dumpTop5Logits(engine, generated);
         }
 
         const tok_end = std.time.nanoTimestamp();
@@ -3409,39 +3527,26 @@ pub fn generate(
             decode_tokens, @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0, tok_per_sec, ms_per_tok,
         });
 
-        // Bandwidth metrics: compute bytes read per decode token
-        const config = &engine.model.config;
-        const lm_tensor = findLoadedTensor(engine.model, "output.weight") orelse
-            findLoadedTensor(engine.model, "token_embd.weight");
-        if (lm_tensor) |t| {
-            const lm_quant = t.info.type_;
-            const bpb = lm_quant.bytesPerBlock();
-            const bs = lm_quant.blockSize();
-            // LM head: vocab_size rows x hidden_dim cols
-            const lm_blocks_per_row = @as(u64, config.hidden_dim) / @as(u64, bs);
-            const lm_bytes: u64 = @as(u64, config.vocab_size) * lm_blocks_per_row * @as(u64, bpb);
-            // Norm weights: hidden_dim * 4 bytes (f32)
-            const norm_bytes: u64 = @as(u64, config.hidden_dim) * 4;
-            // Input/output vectors: hidden_dim * 4 + vocab_size * 4
-            const vec_bytes: u64 = (@as(u64, config.hidden_dim) + @as(u64, config.vocab_size)) * 4;
-            // Logits readback: vocab_size * 4
-            const readback_bytes: u64 = @as(u64, config.vocab_size) * 4;
-            const total_bytes_per_tok = lm_bytes + norm_bytes + vec_bytes + readback_bytes;
-            const total_bytes_all = total_bytes_per_tok * @as(u64, @intCast(decode_tokens));
-
+        if (engine.modeled_decode_bytes_per_token > 0) {
+            const total_bytes_all = engine.modeled_decode_bytes_per_token * @as(u64, @intCast(decode_tokens));
             const decode_secs = @as(f64, @floatFromInt(decode_ns)) / 1_000_000_000.0;
             const eff_bw_gbs = @as(f64, @floatFromInt(total_bytes_all)) / decode_secs / 1_000_000_000.0;
             const theo_bw_gbs: f64 = @floatFromInt(engine.gpu_config.bandwidth_gbps);
             const utilization = if (theo_bw_gbs > 0) eff_bw_gbs / theo_bw_gbs * 100.0 else 0.0;
 
-            log.debug("Bandwidth: {d:.1} GB/s effective, {d:.0} GB/s theoretical ({d:.1}% utilization)", .{
-                eff_bw_gbs, theo_bw_gbs, utilization,
+            log.info("Modeled decode bandwidth: {d:.1} GB/s effective, {d:.0} GB/s theoretical ({d:.1}% utilization, ~{d:.1} MB/token)", .{
+                eff_bw_gbs,
+                theo_bw_gbs,
+                utilization,
+                @as(f64, @floatFromInt(engine.modeled_decode_bytes_per_token)) / 1_000_000.0,
             });
-            log.debug("Per-token: {d:.2} MB read ({s} LM head {d}x{d})", .{
-                @as(f64, @floatFromInt(total_bytes_per_tok)) / 1_000_000.0,
-                @tagName(lm_quant),
-                config.vocab_size,
-                config.hidden_dim,
+        }
+        if (engine.profile_enabled and engine.profile_sample_count > 0) {
+            const avg_gpu_ms = engine.profile_total_gpu_ms / @as(f64, @floatFromInt(engine.profile_sample_count));
+            log.info("PROFILE: avg GPU decode token={d:.2} ms over {d} sampled decode steps (max={d:.2} ms)", .{
+                avg_gpu_ms,
+                engine.profile_sample_count,
+                engine.profile_max_gpu_ms,
             });
         }
     } else {
@@ -3449,12 +3554,12 @@ pub fn generate(
     }
 
     // Print per-layer diagnostic summary (stored during BOS processing)
-    if (engine.diag_summary_len > 0) {
+    if (engine.validation_diagnostics_enabled and engine.diag_summary_len > 0) {
         log.info("LOGIT5_SUMMARY: {s}", .{engine.diag_summary_buf[0..engine.diag_summary_len]});
     }
 
     // Run diagnostic AFTER generation so output appears at the end (not truncated)
-    if (prompt_tokens.len > 0) {
+    if (engine.validation_diagnostics_enabled and prompt_tokens.len > 0) {
         engine.diagEmbedToLogits(prompt_tokens[0]) catch |err| {
             log.warn("Diagnostic failed: {s}", .{@errorName(err)});
         };
