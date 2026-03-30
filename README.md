@@ -178,6 +178,61 @@ For the actual request examples and SDK usage, use the website docs instead of t
 
 The built-in chat UI is served at `/`, the API is under `/v1`, and the health endpoint is `/health`.
 
+## Architecture
+
+<p align="center">
+  <img src="assets/architecture.svg" alt="ZINC Architecture" width="680">
+</p>
+
+## Benchmarks
+
+All numbers measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB, MoE 35B total / 3B active).
+This section is the historical 35B optimization snapshot from 2026-03-28. For the latest validated per-model throughput, see [Tested Models](#tested-models) above.
+Same hardware, same model, same prompt (`"The capital of France is"`), 32 generated tokens. Benchmarked 2026-03-28.
+
+### Decode throughput (tok/s, higher is better)
+
+```
+       Qwen3.5-35B-A3B Q4_K_XL — Decode, AI PRO R9700
+
+  llama.cpp      ██████████████████████████████████████░░  107 tok/s
+  (baseline)
+
+  ZINC           ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  7.6 tok/s
+  (current)
+
+  ZINC           ██████████████████████████████████████░░  110+ tok/s
+  (target)
+```
+
+### Comparison
+
+| Metric | llama.cpp (baseline) | ZINC (current) | ZINC (target) |
+|--------|:---:|:---:|:---:|
+| **Decode** | 107 tok/s | 7.6 tok/s | 110+ tok/s |
+| **Coherent output** | Yes | Yes | Yes |
+| **BW utilization** | ~85% | 0.7% (4.1 GB/s) | 90%+ |
+| **GPU syncs/token** | 1 | ~42 | 1–2 |
+| **Flash attention** | Yes | Yes | Yes |
+| **RDNA4-tuned DMMV** | No | Yes | Yes |
+| **Native BPE tokenizer** | Yes | Yes (from GGUF) | Yes |
+| **OpenAI API server** | Yes | Yes (streaming) | Yes |
+| **Continuous batching** | Yes | Phase 4 | Yes |
+| **TurboQuant KV** | No | Phase 5 | Yes |
+
+> **Baseline setup**: llama-server (build `3306dba`) with `RADV_PERFTEST=coop_matrix`, `--flash-attn on`, `--mlock`, `-ngl 99`, `-ctk q8_0 -ctv q8_0`. Mesa 25.0.7, GECC disabled (`amdgpu.ras_enable=0`). See [RDNA4 Tuning Guide](docs/RDNA4_TUNING.md) and [AGENTS.md](AGENTS.md) for full setup and reproduction steps.
+
+### Why 25x slower than llama.cpp
+
+The gap is almost entirely **CPU-GPU synchronization overhead**, not GPU compute speed. Each decode token currently requires ~120 `vkQueueSubmit` + fence-wait round-trips:
+
+- **MoE routing** requires GPU-to-CPU readback of router logits per layer (40 layers)
+- **Shared expert gating** needs another readback per layer
+- **End-of-layer submit** flushes the command buffer after each layer
+- Each round-trip costs ~1–2 ms on RDNA4, totaling ~120–240 ms of pure sync overhead per token
+
+At 256 ms/tok with 542 MB read per token, the GPU itself is idle >95% of the time. The fix is recording the full decode graph as a single command buffer with on-GPU MoE routing — the same approach llama.cpp uses.
+
 ## Development
 
 ### Development Setup
@@ -288,41 +343,12 @@ How to read the output:
 
 The DOT export highlights critical-path nodes in red so you can see the longest chain immediately. The JSON export is the better source for automated analysis or a future in-browser visualizer.
 
-## Contributing
-
-Outside help is useful, especially for:
-
-- bug reproduction on more hardware and operating systems
-- build and packaging fixes
-- docs and API polish
-- test coverage
-- performance diagnostics and benchmark tooling
-
-Start with [CONTRIBUTING.md](./CONTRIBUTING.md). If you are reporting a bug or regression, include the exact hardware, model, driver/runtime, and command you used.
-
-Project expectations and planning live here:
-
-- [Code of Conduct](./CODE_OF_CONDUCT.md)
-- [Roadmap](./docs/ROADMAP.md)
-
 ## CLI Reference
 
-```
-Usage: zinc [options]
-  -m, --model <path>       Path to GGUF model file (required)
-  -p, --port <port>        Server port (default: 8080)
-  -d, --device <id>        Vulkan device index (default: 0)
-  -c, --context <size>     Context length (default: 4096)
-  --parallel <n>           Max concurrent requests (default: 4)
-  --prompt <text>          Single prompt (CLI mode, no server)
-  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
-  --graph-report <path>    Write decode-graph JSON report from GGUF metadata
-  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
-  --debug                  Enable verbose debug logging (or set ZINC_DEBUG=1)
-  -h, --help               Show this help
-```
+Use the website docs for current CLI usage and server examples:
 
-The JSON report includes node/edge lists, op-type counts, per-node depth, root/leaf flags, and the structural critical path. The DOT export is intended for Graphviz or downstream visualization tools.
+- [Running ZINC](https://zolotukhin.ai/zinc/docs/running-zinc)
+- [Serving HTTP API](https://zolotukhin.ai/zinc/docs/api)
 
 ## Self-Improving Optimization Loop
 
@@ -390,82 +416,6 @@ export RADV_PERFTEST=coop_matrix
 GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 # Then: update-grub && reboot
 ```
-
-## Architecture
-
-<p align="center">
-  <img src="assets/architecture.svg" alt="ZINC Architecture" width="680">
-</p>
-
-## Benchmarks
-
-All numbers measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB, MoE 35B total / 3B active).
-This section is the historical 35B optimization snapshot from 2026-03-28. For the latest validated per-model throughput, see [Tested Models](#tested-models) above.
-Same hardware, same model, same prompt (`"The capital of France is"`), 32 generated tokens. Benchmarked 2026-03-28.
-
-### Decode throughput (tok/s, higher is better)
-
-```
-       Qwen3.5-35B-A3B Q4_K_XL — Decode, AI PRO R9700
-
-  llama.cpp      ██████████████████████████████████████░░  107 tok/s
-  (baseline)
-
-  ZINC           ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  7.6 tok/s
-  (current)
-
-  ZINC           ██████████████████████████████████████░░  110+ tok/s
-  (target)
-```
-
-### Comparison
-
-| Metric | llama.cpp (baseline) | ZINC (current) | ZINC (target) |
-|--------|:---:|:---:|:---:|
-| **Decode** | 107 tok/s | 7.6 tok/s | 110+ tok/s |
-| **Coherent output** | Yes | Yes | Yes |
-| **BW utilization** | ~85% | 0.7% (4.1 GB/s) | 90%+ |
-| **GPU syncs/token** | 1 | ~42 | 1–2 |
-| **Flash attention** | Yes | Yes | Yes |
-| **RDNA4-tuned DMMV** | No | Yes | Yes |
-| **Native BPE tokenizer** | Yes | Yes (from GGUF) | Yes |
-| **OpenAI API server** | Yes | Yes (streaming) | Yes |
-| **Continuous batching** | Yes | Phase 4 | Yes |
-| **TurboQuant KV** | No | Phase 5 | Yes |
-
-> **Baseline setup**: llama-server (build `3306dba`) with `RADV_PERFTEST=coop_matrix`, `--flash-attn on`, `--mlock`, `-ngl 99`, `-ctk q8_0 -ctv q8_0`. Mesa 25.0.7, GECC disabled (`amdgpu.ras_enable=0`). See [RDNA4 Tuning Guide](docs/RDNA4_TUNING.md) and [AGENTS.md](AGENTS.md) for full setup and reproduction steps.
-
-### Why 25x slower than llama.cpp
-
-The gap is almost entirely **CPU-GPU synchronization overhead**, not GPU compute speed. Each decode token currently requires ~120 `vkQueueSubmit` + fence-wait round-trips:
-
-- **MoE routing** requires GPU-to-CPU readback of router logits per layer (40 layers)
-- **Shared expert gating** needs another readback per layer
-- **End-of-layer submit** flushes the command buffer after each layer
-- Each round-trip costs ~1–2 ms on RDNA4, totaling ~120–240 ms of pure sync overhead per token
-
-At 256 ms/tok with 542 MB read per token, the GPU itself is idle >95% of the time. The fix is recording the full decode graph as a single command buffer with on-GPU MoE routing — the same approach llama.cpp uses.
-
-### Output quality
-
-ZINC produces **coherent, correct reasoning output** — matching llama.cpp's behavior on the same model:
-
-```
-Prompt:  "The capital of France is"
-Output:  "Paris. The capital of France is Paris. The capital of France is Paris."
-
-         <think>
-         </think>
-
-         That is correct. **Paris** is indeed the capital of France. It is the
-         country's largest city and serves as its center for finance, commerce,
-         culture, arts, fashion, and science.
-
-         You repeated the sentence three times, which emphasizes the fact! Is
-         there anything else you'd like to know about Paris or France?
-```
-
-First-token logit ranking matches llama.cpp (Paris top, `a` in top-5). GPU-CPU numerical accuracy verified: embedding, RMS norm, DMMV (Q4_K/Q5_K/Q8_0), and LM head logits all match CPU reference within floating-point tolerance.
 
 ## Optimization Loop Results
 
