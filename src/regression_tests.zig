@@ -87,12 +87,22 @@ test "Q5_K MoE shader keeps GGML contiguous half ordering" {
 
 test "chat UI derives the model link from the reported model name" {
     const src = @embedFile("server/chat.html");
+    try expectContains(src, "const chatStateKey='zinc.chat.state.v1';");
+    try expectContains(src, "function restoreChatState()");
+    try expectContains(src, "function clearConversation()");
+    try expectContains(src, "id=\"cb\" class=\"btn btn-clear\"");
+    try expectContains(src, "@media (max-width:720px)");
     try expectContains(src, "function modelHrefForName(name)");
     try expectContains(src, "function switchableModels()");
     try expectContains(src, "function activeModel()");
+    try expectContains(src, "function scheduleHealthRefresh(delay)");
+    try expectContains(src, "function refreshHealth()");
     try expectContains(src, "setModelTag(d.model)");
+    try expectContains(src, "setGpuMemory(d.gpu_memory_used_bytes||0,d.gpu_memory_budget_bytes||0);");
+    try expectContains(src, "restoreChatState();");
+    try expectContains(src, "CB.addEventListener('click',clearConversation);");
     try expectContains(src, "setCurrentModel(current);");
-    try expectContains(src, "await refreshModels();");
+    try expectContains(src, "await Promise.allSettled([refreshHealth(),refreshModels()]);");
     try expectContains(src, "fetch(base+'/models/activate'");
     try expectContains(src, "m.managed&&m.installed&&m.supported_on_current_gpu&&m.fits_current_gpu");
     try expectNotContains(src, "setCurrentModel(selectedModel());");
