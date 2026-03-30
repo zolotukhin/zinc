@@ -1723,8 +1723,11 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
                 if (use_gpu_routed_moe) {
+                    // The shared decode command already preserves dispatch order,
+                    // and the GPU-routed MoE fast path finishes by updating
+                    // hidden_buf in place. Let the next layer consume that
+                    // result directly without an extra per-layer fence.
                     try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
-                    if (shared_cmd != null) cmd.barrier();
                 }
             }
             if (using_local_cmd) cmd.commitAndWait();
@@ -1809,7 +1812,6 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
                 if (use_gpu_routed_moe) {
                     try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
-                    if (shared_cmd != null) cmd.barrier();
                 }
             }
             if (using_local_cmd) cmd.commitAndWait();
