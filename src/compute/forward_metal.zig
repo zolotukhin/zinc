@@ -858,6 +858,8 @@ pub const InferenceEngine = struct {
     /// Q4_K: native Metal kernel — 32 threads (1 simdgroup) per row, 8 rows per threadgroup (256 threads).
     /// Q4_K wide: specialized large-M kernel — 16 rows per threadgroup (512 threads).
     /// Q4_K LM head 1024: dedicated vocab projection kernel — 32 rows per threadgroup (1024 threads).
+    /// On Apple9/M4, the 1024-thread shape tends to trade away too much
+    /// occupancy for reuse, so keep that path reserved for Apple10-class parts.
     /// Reusing the wider shape outside the LM head improves staged-vector reuse on
     /// the large decode-side Q4_K projections that still dominate token time.
     /// Q5_K/Q6_K/F32: SPIRV-Cross — each thread handles 1 row (64 rows per workgroup, 64 threads).
@@ -872,6 +874,7 @@ pub const InferenceEngine = struct {
             .q4_k => blk: {
                 const k2048_or_less = K <= 2048;
                 if (k2048_or_less and
+                    self.device.chip.isM5Class() and
                     tensor == self.lm_head and
                     M >= 65536 and
                     self.dmmv_q4k_lmhead_1024_pipe.max_threads_per_threadgroup >= 1024)
@@ -1024,6 +1027,7 @@ fn dispatchDmmvMoeQ4kOnCmd(
     const k2048_or_less = K <= 2048;
     const use_1024_k2048 =
         k2048_or_less and
+        engine.device.chip.isM5Class() and
         x_expert_stride != 0 and
         M >= 1024 and
         engine.dmmv_q4k_moe_k2048_1024_pipe.max_threads_per_threadgroup >= 1024;
