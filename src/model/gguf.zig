@@ -265,6 +265,15 @@ pub const GGUFFile = struct {
         return val.asU32();
     }
 
+    /// Look up a metadata value as `f32` when it can be normalized to that type.
+    /// @param self Parsed GGUF file.
+    /// @param key Metadata key to search for.
+    /// @returns The normalized floating-point value when present.
+    pub fn getF32(self: *const GGUFFile, key: []const u8) ?f32 {
+        const val = self.metadata.get(key) orelse return null;
+        return val.asF32();
+    }
+
     /// Look up a metadata boolean by key.
     /// @param self Parsed GGUF file.
     /// @param key Metadata key to search for.
@@ -302,11 +311,20 @@ fn freeMetadataValue(allocator: std.mem.Allocator, val: MetadataValue) void {
     }
 }
 
+pub const ParseOptions = struct {
+    log_summary: bool = true,
+};
+
 /// Parse a GGUF file from a byte slice.
 /// @param data Raw GGUF bytes, typically from a memory-mapped file.
 /// @param allocator Allocator used for metadata strings, arrays, and tensor descriptors.
 /// @returns A parsed GGUFFile that borrows from `data` for numeric fields and owns copied strings.
 pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
+    return parseWithOptions(data, allocator, .{});
+}
+
+/// Parse a GGUF file from a byte slice with optional logging control.
+pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options: ParseOptions) !GGUFFile {
     var reader = Reader{ .data = data, .pos = 0 };
 
     // Header
@@ -320,9 +338,11 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !GGUFFile {
     const tensor_count = reader.readU64();
     const metadata_count = reader.readU64();
 
-    log.info("GGUF v{d}: {d} tensors, {d} metadata entries", .{
-        @intFromEnum(version), tensor_count, metadata_count,
-    });
+    if (options.log_summary) {
+        log.info("GGUF v{d}: {d} tensors, {d} metadata entries", .{
+            @intFromEnum(version), tensor_count, metadata_count,
+        });
+    }
 
     // Parse metadata
     var metadata: std.StringHashMapUnmanaged(MetadataValue) = .{};

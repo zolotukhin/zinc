@@ -47,8 +47,9 @@ void main() {
         // 128 bytes of low nibbles at offset 48
 
         // Process 4 groups of 64 elements each (matching GGML's dequantize_row_q5_K).
-        // Q5_K output order is interleaved inside each 64-element group:
-        // y[2*l + 0] comes from the low nibble, y[2*l + 1] comes from the high nibble.
+        // GGML dequantize_row_q5_K outputs contiguous halves inside each group:
+        // y[l + 0] comes from the low nibble, y[l + 32] comes from the high nibble.
+        // Do not interleave these lookups; Qwen3.5 MoE down projections rely on this.
         // Each group uses 32 bytes of qs. qh bits: group*2 for low, group*2+1 for high.
         for (uint g = 0; g < 4; g++) {
             uint sb_lo = g * 2;       // sub-block index for low-nibble half
@@ -94,8 +95,8 @@ void main() {
                 float v_lo = float(q_lo | (hb_lo << 4));
                 float v_hi = float(q_hi | (hb_hi << 4));
 
-                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + 2u * e];
-                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 2u * e + 1u];
+                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + e];
+                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 32u + e];
             }
             xi += 64;
         }

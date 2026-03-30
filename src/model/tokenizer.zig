@@ -112,10 +112,17 @@ pub const Tokenizer = struct {
             }
         }
 
-        // Read special token IDs
-        const bos_id = gf.getU32("tokenizer.ggml.bos_token_id");
+        // Read special token IDs.
+        // Qwen3.5 GGUFs observed in this repo omit BOS metadata but still expect
+        // the historical leading BOS=1 behavior that older working revisions used.
+        const arch = gf.getString("general.architecture") orelse "";
+        const is_qwen35_family =
+            std.mem.eql(u8, arch, "qwen35") or
+            std.mem.eql(u8, arch, "qwen35moe");
+        const bos_id = gf.getU32("tokenizer.ggml.bos_token_id") orelse
+            if (is_qwen35_family) @as(u32, 1) else null;
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
-        const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse (bos_id != null);
+        const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse is_qwen35_family or (bos_id != null);
 
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
         if (bos_id) |id| {
@@ -188,8 +195,8 @@ pub const Tokenizer = struct {
         }
     }
 
-    /// Encode UTF-8 text into a token ID slice using BPE merges from the GGUF vocabulary.
-    /// Encode UTF-8 text into token IDs using BPE merges from the GGUF vocabulary.
+    /// Encode UTF-8 text into a token ID slice using the tokenizer's own allocator.
+    /// Callers must free the returned slice with `freeEncoded`, not an arbitrary request allocator.
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
 
@@ -239,6 +246,32 @@ pub const Tokenizer = struct {
         }
 
         return try tokens.toOwnedSlice(self.allocator);
+    }
+
+    /// Release a token slice returned by `encode`.
+    pub fn freeEncoded(self: *const Tokenizer, tokens: []u32) void {
+        self.allocator.free(tokens);
+    }
+
+    /// Encode a prompt and prepend BOS when the model expects it.
+    /// The returned slice is allocated with `allocator`, so server routes can use a
+    /// per-request allocator while the tokenizer keeps owning its internal scratch buffers.
+    pub fn encodePrompt(self: *const Tokenizer, text: []const u8, allocator: std.mem.Allocator) ![]u32 {
+        const raw_tokens = try self.encode(text);
+        defer self.freeEncoded(raw_tokens);
+
+        const prepend_bos = self.shouldPrependBos();
+        const bos_extra: usize = if (prepend_bos) 1 else 0;
+        const prompt_tokens = try allocator.alloc(u32, raw_tokens.len + bos_extra);
+
+        if (prepend_bos) {
+            prompt_tokens[0] = self.bosId();
+            @memcpy(prompt_tokens[1..], raw_tokens);
+        } else {
+            @memcpy(prompt_tokens, raw_tokens);
+        }
+
+        return prompt_tokens;
     }
 
     /// Apply BPE merges in priority order (GPT-2/tiktoken style).
@@ -432,13 +465,21 @@ pub const Tokenizer = struct {
             std.mem.indexOf(u8, tmpl, "im_start") != null
         else
             true;
+        const qwen_no_thinking = if (self.chat_template) |tmpl|
+            std.mem.indexOf(u8, tmpl, "enable_thinking") != null and
+                std.mem.indexOf(u8, tmpl, "<think>") != null
+        else
+            false;
         const n = @min(roles.len, contents.len);
         if (use_chatml) {
             for (0..n) |i| {
                 const written = std.fmt.bufPrint(buf[pos..], "<|im_start|>{s}\n{s}<|im_end|>\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
                 pos += written.len;
             }
-            const suffix = std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{}) catch return error.BufferTooSmall;
+            const suffix = (if (qwen_no_thinking)
+                std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n\n</think>\n\n", .{})
+            else
+                std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{})) catch return error.BufferTooSmall;
             pos += suffix.len;
         } else {
             for (0..n) |i| {
@@ -491,6 +532,36 @@ test "shouldPrependBos is false when BOS metadata is absent" {
     try std.testing.expectEqual(@as(u32, 2), tok.bosId());
 }
 
+test "initFromGGUF restores BOS fallback for qwen35 family" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    const tokens = try allocator.alloc(gguf.MetadataValue, 3);
+    tokens[0] = .{ .string = try allocator.dupe(u8, "a") };
+    tokens[1] = .{ .string = try allocator.dupe(u8, "b") };
+    tokens[2] = .{ .string = try allocator.dupe(u8, "c") };
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.tokens"), .{ .array = tokens });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.model"), .{ .string = try allocator.dupe(u8, "gpt2") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "qwen35") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.eos_token_id"), .{ .uint32 = 2 });
+
+    var tok = try Tokenizer.initFromGGUF(&gf, allocator);
+    defer tok.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), tok.bosId());
+    try std.testing.expect(tok.shouldPrependBos());
+}
+
 test "decodeToken converts GPT-2 leading-space marker back to ASCII space" {
     const vocab = [_][]const u8{"\xC4\xA0Paris"};
     var tok = Tokenizer{
@@ -527,6 +598,31 @@ test "decodeToken converts GPT-2 remapped newline back to byte 0x0A" {
     var buf: [8]u8 = undefined;
     const decoded = tok.decodeToken(0, &buf);
     try std.testing.expectEqualStrings("\n", decoded);
+}
+
+test "encodePrompt supports distinct tokenizer and output allocators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var tok = Tokenizer{
+        .vocab = &.{ "h", "i" },
+        .token_to_id = std.StringHashMap(u32).init(arena.allocator()),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .allocator = arena.allocator(),
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("h", 10);
+    try tok.token_to_id.put("i", 11);
+
+    const prompt_tokens = try tok.encodePrompt("hi", std.testing.allocator);
+    defer std.testing.allocator.free(prompt_tokens);
+
+    try std.testing.expectEqualSlices(u32, &.{ 1, 10, 11 }, prompt_tokens);
 }
 
 test "applyChatTemplate ChatML format" {
@@ -571,6 +667,37 @@ test "applyChatTemplate with im_start template uses ChatML" {
     try std.testing.expect(std.mem.indexOf(u8, result, "system") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "You help.") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "Hi") != null);
+}
+
+test "applyChatTemplate qwen thinking template emits empty think block for generation" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .chat_template =
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+        ,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"Hello"};
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|im_start|>user\nHello<|im_end|>\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, result, "<|im_start|>assistant\n<think>\n\n</think>\n\n"));
 }
 
 test "applyChatTemplate non-ChatML fallback" {

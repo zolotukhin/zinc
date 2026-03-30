@@ -5,14 +5,17 @@
 const std = @import("std");
 const instance_mod = @import("vulkan/instance.zig");
 const gpu_detect = @import("vulkan/gpu_detect.zig");
+const catalog_mod = @import("model/catalog.zig");
 const loader_mod = @import("model/loader.zig");
 const gguf_mod = @import("model/gguf.zig");
+const managed_mod = @import("model/managed.zig");
 const architecture_mod = @import("model/architecture.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
 const forward_mod = @import("compute/forward.zig");
 const graph_mod = @import("compute/graph.zig");
 const diagnostics_mod = @import("diagnostics.zig");
 const http_mod = @import("server/http.zig");
+const model_manager_mod = @import("server/model_manager.zig");
 const routes_mod = @import("server/routes.zig");
 const CommandPool = @import("vulkan/command.zig").CommandPool;
 const Graph = graph_mod.Graph;
@@ -44,8 +47,10 @@ comptime {
     _ = @import("vulkan/buffer.zig");
     _ = @import("vulkan/pipeline.zig");
     _ = @import("vulkan/command.zig");
+    _ = @import("model/catalog.zig");
     _ = @import("model/gguf.zig");
     _ = @import("model/loader.zig");
+    _ = @import("model/managed.zig");
     _ = @import("model/tokenizer.zig");
     _ = @import("model/architecture.zig");
     _ = @import("compute/graph.zig");
@@ -55,6 +60,7 @@ comptime {
     _ = @import("compute/forward.zig");
     _ = @import("regression_tests.zig");
     _ = @import("server/http.zig");
+    _ = @import("server/model_manager.zig");
     _ = @import("server/routes.zig");
     _ = @import("server/session.zig");
     _ = @import("scheduler/request.zig");
@@ -67,6 +73,8 @@ comptime {
 pub const Config = struct {
     /// Path to GGUF model file.
     model_path: ?[]const u8 = null,
+    /// Managed model identifier from the built-in catalog/cache.
+    model_id: ?[]const u8 = null,
     /// HTTP server port.
     port: u16 = 8080,
     /// Vulkan device index.
@@ -77,6 +85,8 @@ pub const Config = struct {
     max_parallel: u32 = 4,
     /// CLI prompt text.
     prompt: ?[]const u8 = null,
+    /// Maximum CLI decode tokens.
+    max_tokens: u32 = 256,
     /// Wrap CLI prompt in the model's chat template before tokenization.
     chat: bool = false,
     kv_quant: u8 = 0, // 0=disabled, 2/3/4=TurboQuant bits
@@ -90,15 +100,29 @@ pub const Config = struct {
     debug: bool = false,
     /// Print usage and exit.
     show_help: bool = false,
+    /// Show extended help including developer-only flags.
+    show_help_all: bool = false,
     /// Run diagnostics and exit.
     check: bool = false,
+    /// Optional model-management command.
+    command: Command = .run,
+    /// Positional model id for `zinc model ...`.
+    command_model_id: ?[]const u8 = null,
+    /// Show unsupported catalog entries in `zinc model list`.
+    show_all_models: bool = false,
+};
+
+pub const Command = enum {
+    run,
+    model_list,
+    model_pull,
+    model_use,
+    model_active,
 };
 
 const ConnectionWorker = struct {
     conn: http_mod.Connection,
-    engine: *forward_mod.InferenceEngine,
-    tokenizer: *tokenizer_mod.Tokenizer,
-    model: *loader_mod.Model,
+    manager: *model_manager_mod.ModelManager,
     server_state: *routes_mod.ServerState,
 
     fn run(self: *ConnectionWorker) void {
@@ -107,9 +131,7 @@ const ConnectionWorker = struct {
 
         routes_mod.handleConnection(
             &self.conn,
-            self.engine,
-            self.tokenizer,
-            self.model,
+            self.manager,
             self.server_state,
             std.heap.page_allocator,
         ) catch |err| {
@@ -128,26 +150,116 @@ const PreparedPrompt = struct {
     }
 };
 
+const ResolvedStartupModel = struct {
+    spec: model_manager_mod.LoadSpec,
+    owned_path: ?[]u8 = null,
+    owned_managed_id: ?[]u8 = null,
+
+    fn deinit(self: *ResolvedStartupModel, allocator: std.mem.Allocator) void {
+        if (self.owned_path) |path| allocator.free(path);
+        if (self.owned_managed_id) |id| allocator.free(id);
+        self.* = undefined;
+    }
+};
+
+const ResolvedCheckTarget = struct {
+    model_path: ?[]const u8 = null,
+    managed_model: ?diagnostics_mod.ManagedModelInfo = null,
+    owned_path: ?[]u8 = null,
+
+    fn deinit(self: *ResolvedCheckTarget, allocator: std.mem.Allocator) void {
+        if (self.owned_path) |path| allocator.free(path);
+        self.* = undefined;
+    }
+};
+
 const banner =
     \\ZINC — Zig INferenCe Engine for AMD GPUs
     \\
-    \\Usage: zinc [options]
-    \\  -m, --model <path>       Path to GGUF model file
-    \\  -p, --port <port>        Server port (default: 8080)
+    \\Usage:
+    \\  zinc -m <model.gguf> --prompt "Hello"
+    \\  zinc -m <model.gguf> [-p 8080]
+    \\  zinc --model-id <id> [--prompt "Hello"]
+    \\  zinc --check [-m <model.gguf> | --model-id <id>]
+    \\  zinc model <list|pull|use|active> [args]
+    \\
+    \\Common options:
+    \\  -m, --model <path>       GGUF model file to load
+    \\  --model-id <id>          Managed model id from the local catalog/cache
+    \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
+    \\  --chat                   Apply the model chat template to --prompt
+    \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
     \\  -d, --device <id>        Vulkan device index (default: 0)
     \\  -c, --context <size>     Context length (default: 4096)
+    \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0)
+    \\
+    \\Server options:
+    \\  -p, --port <port>        Server port (default: 8080)
     \\  --parallel <n>           Max concurrent requests (default: 4)
-    \\  --prompt <text>          Single prompt (CLI mode, no server)
+    \\
+    \\Model management:
+    \\  model list [--all]       List managed models for the detected GPU
+    \\  model pull <id>          Download a supported managed model into the local cache
+    \\  model use <id>           Set the active managed model for future runs
+    \\  model active             Print the active managed model
+    \\
+    \\Diagnostics:
+    \\  --check                  Run system diagnostics and verify dependencies
+    \\  -h, --help               Show this help
+    \\  --help-all               Show diagnostics and developer-only flags too
+    \\
+    \\Use `--help-all` to show graph export, profiling, and debug flags.
+    \\
+;
+
+const banner_full =
+    \\ZINC — Zig INferenCe Engine for AMD GPUs
+    \\
+    \\Usage:
+    \\  zinc -m <model.gguf> --prompt "Hello"
+    \\  zinc -m <model.gguf> [-p 8080]
+    \\  zinc --model-id <id> [--prompt "Hello"]
+    \\  zinc --check [-m <model.gguf> | --model-id <id>]
+    \\  zinc model <list|pull|use|active> [args]
+    \\
+    \\Common options:
+    \\  -m, --model <path>       GGUF model file to load
+    \\  --model-id <id>          Managed model id from the local catalog/cache
+    \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
     \\  --chat                   Apply the model chat template to --prompt
-    \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
+    \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
+    \\  -d, --device <id>        Vulkan device index (default: 0)
+    \\  -c, --context <size>     Context length (default: 4096)
+    \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0)
+    \\
+    \\Server options:
+    \\  -p, --port <port>        Server port (default: 8080)
+    \\  --parallel <n>           Max concurrent requests (default: 4)
+    \\
+    \\Model management:
+    \\  model list [--all]       List managed models for the detected GPU
+    \\  model pull <id>          Download a supported managed model into the local cache
+    \\  model use <id>           Set the active managed model for future runs
+    \\  model active             Print the active managed model
+    \\
+    \\Diagnostics:
+    \\  --check                  Run system diagnostics and verify dependencies
+    \\
+    \\Analysis and developer options:
     \\  --graph-report <path>    Write decode-graph analysis JSON report
     \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
     \\  --profile                Enable per-dispatch GPU timing profiling
     \\  --debug                  Enable verbose debug logging
-    \\  --check                  Run system diagnostics and verify dependencies
-    \\  -h, --help               Show this help
+    \\
+    \\Help:
+    \\  -h, --help               Show the short help
+    \\  --help-all               Show the full help
     \\
 ;
+
+fn helpText(show_all: bool) []const u8 {
+    return if (show_all) banner_full else banner;
+}
 
 /// Parse the process argument vector into a validated runtime configuration.
 /// @param args Raw argv slice, including argv[0].
@@ -162,10 +274,39 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             config.show_help = true;
             return config;
+        } else if (std.mem.eql(u8, arg, "--help-all")) {
+            config.show_help = true;
+            config.show_help_all = true;
+            return config;
+        } else if (std.mem.eql(u8, arg, "model")) {
+            i += 1;
+            if (i >= args.len) return error.MissingModelSubcommand;
+            const sub = args[i];
+            if (std.mem.eql(u8, sub, "list")) {
+                config.command = .model_list;
+            } else if (std.mem.eql(u8, sub, "pull")) {
+                config.command = .model_pull;
+                i += 1;
+                if (i >= args.len) return error.MissingArgValue;
+                config.command_model_id = args[i];
+            } else if (std.mem.eql(u8, sub, "use")) {
+                config.command = .model_use;
+                i += 1;
+                if (i >= args.len) return error.MissingArgValue;
+                config.command_model_id = args[i];
+            } else if (std.mem.eql(u8, sub, "active")) {
+                config.command = .model_active;
+            } else {
+                return error.UnknownArgument;
+            }
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--model")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.model_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--model-id")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            config.model_id = args[i];
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--port")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -186,6 +327,10 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.prompt = args[i];
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-tokens")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            config.max_tokens = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidMaxTokens;
         } else if (std.mem.eql(u8, arg, "--chat")) {
             config.chat = true;
         } else if (std.mem.eql(u8, arg, "--kv-quant")) {
@@ -209,6 +354,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             config.debug = true;
         } else if (std.mem.eql(u8, arg, "--check")) {
             config.check = true;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            config.show_all_models = true;
         } else {
             return error.UnknownArgument;
         }
@@ -241,6 +388,244 @@ fn trimCliOutputText(text: []const u8, chat: bool) []const u8 {
         return text[0..stop_pos];
     }
     return text;
+}
+
+fn resolveStartupModel(config: Config, allocator: std.mem.Allocator) !ResolvedStartupModel {
+    if (config.model_id) |model_id| {
+        const path = try managed_mod.resolveInstalledModelPath(model_id, allocator);
+        const model_id_copy = try allocator.dupe(u8, model_id);
+        return .{
+            .spec = .{ .model_path = path, .managed_id = model_id_copy },
+            .owned_path = path,
+            .owned_managed_id = model_id_copy,
+        };
+    }
+
+    if (config.model_path) |model_path| {
+        return .{ .spec = .{ .model_path = model_path } };
+    }
+
+    const active = try managed_mod.readActiveSelection(allocator);
+    if (active) |selection| {
+        const path = try managed_mod.resolveInstalledModelPath(selection.model_id, allocator);
+        return .{
+            .spec = .{ .model_path = path, .managed_id = selection.model_id },
+            .owned_path = path,
+            .owned_managed_id = selection.model_id,
+        };
+    }
+
+    return error.NoModelSpecified;
+}
+
+fn resolveCheckTarget(config: Config, allocator: std.mem.Allocator) !ResolvedCheckTarget {
+    if (config.model_id) |model_id| {
+        const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
+
+        var resolved = ResolvedCheckTarget{
+            .managed_model = .{
+                .id = entry.id,
+                .display_name = entry.display_name,
+                .file_name = entry.file_name,
+                .size_bytes = entry.size_bytes,
+                .required_vram_bytes = entry.required_vram_bytes,
+                .status_label = @tagName(entry.status),
+            },
+        };
+
+        if (managed_mod.isInstalled(model_id, allocator)) {
+            const path = try managed_mod.resolveInstalledModelPath(model_id, allocator);
+            resolved.model_path = path;
+            resolved.owned_path = path;
+        }
+
+        return resolved;
+    }
+
+    if (config.model_path) |model_path| {
+        return .{ .model_path = model_path };
+    }
+
+    return .{};
+}
+
+const ManagedGpuSupport = struct {
+    profile: []u8,
+    vram_budget_bytes: u64,
+    from_cache: bool,
+
+    fn deinit(self: *ManagedGpuSupport, allocator: std.mem.Allocator) void {
+        allocator.free(self.profile);
+        self.* = undefined;
+    }
+};
+
+fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !ManagedGpuSupport {
+    if (try managed_mod.readCachedGpuProfile(device_index, allocator)) |cached| {
+        defer {
+            var owned = cached;
+            owned.deinit(allocator);
+        }
+        return .{
+            .profile = try allocator.dupe(u8, cached.profile),
+            .vram_budget_bytes = cached.vram_budget_bytes,
+            .from_cache = true,
+        };
+    }
+
+    var vk_instance = try instance_mod.Instance.init(allocator, device_index);
+    defer vk_instance.deinit();
+
+    const gpu_config = gpu_detect.detect(&vk_instance);
+    const profile = catalog_mod.profileForGpu(gpu_config);
+    const vram_budget_bytes = vk_instance.vramBytes();
+
+    try managed_mod.writeCachedGpuProfile(device_index, profile, gpu_config.nameSlice(), vram_budget_bytes, allocator);
+
+    return .{
+        .profile = try allocator.dupe(u8, profile),
+        .vram_budget_bytes = vram_budget_bytes,
+        .from_cache = false,
+    };
+}
+
+fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
+    var active = try managed_mod.readActiveSelection(allocator);
+    defer if (active) |*selection| selection.deinit(allocator);
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    const active_model_id = if (active) |selection| selection.model_id else null;
+
+    const support = resolveManagedGpuSupport(config.device_index, allocator) catch |err| {
+        if (!config.show_all_models) {
+            var stderr_buffer: [1024]u8 = undefined;
+            var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
+            try stderr.interface.print("Unable to initialize Vulkan for GPU detection: {s}\n", .{@errorName(err)});
+            try stderr.interface.writeAll("Use `zinc model list --all` to inspect the catalog without live fit checks.\n");
+            try stderr.interface.flush();
+            return error.GpuDetectionUnavailable;
+        }
+
+        try stdout.interface.print("Vulkan GPU detection unavailable ({s}). Showing the full catalog without live fit checks.\n\n", .{@errorName(err)});
+        try stdout.interface.writeAll("ID                             Status      Fit    Installed   Active   Notes\n");
+        for (catalog_mod.entries) |entry| {
+            const installed = managed_mod.isInstalled(entry.id, allocator);
+            const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
+            try stdout.interface.print(
+                "{s: <30} {s: <11} {s: <6} {s: <11} {s: <8} {s}\n",
+                .{
+                    entry.id,
+                    "catalog",
+                    "n/a",
+                    if (installed) "yes" else "no",
+                    if (is_active) "yes" else "no",
+                    "fit unavailable without Vulkan",
+                },
+            );
+        }
+        try stdout.interface.flush();
+        return;
+    };
+    defer {
+        var owned = support;
+        owned.deinit(allocator);
+    }
+
+    try stdout.interface.print(
+        "Detected GPU profile: {s}{s}\n\n",
+        .{
+            support.profile,
+            if (support.from_cache) " (cached)" else "",
+        },
+    );
+    try stdout.interface.writeAll("ID                             Status      Fit    Installed   Active   Notes\n");
+
+    var rendered_any = false;
+    for (catalog_mod.entries) |entry| {
+        const tested_profile_match = catalog_mod.supportsProfile(entry, support.profile);
+        const installed = managed_mod.isInstalled(entry.id, allocator);
+        const fit = managed_mod.describeFit(entry, support.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
+            .required_vram_bytes = entry.required_vram_bytes,
+            .fits_current_gpu = catalog_mod.fitsGpu(entry, support.vram_budget_bytes),
+            .exact = false,
+        };
+        const supported_now = tested_profile_match and fit.fits_current_gpu;
+        if (!config.show_all_models and !supported_now) continue;
+
+        rendered_any = true;
+        const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
+        const status_label = if (supported_now)
+            "supported"
+        else if (tested_profile_match)
+            "too-large"
+        else
+            "hidden";
+        try stdout.interface.print(
+            "{s: <30} {s: <11} {s: <6} {s: <11} {s: <8} {s}\n",
+            .{
+                entry.id,
+                status_label,
+                if (fit.fits_current_gpu) "yes" else "no",
+                if (installed) "yes" else "no",
+                if (is_active) "yes" else "no",
+                if (fit.exact) "tested + exact fit" else "tested + catalog fit",
+            },
+        );
+    }
+
+    if (!rendered_any) {
+        try stdout.interface.writeAll("No managed models are currently marked supported and fitting for this GPU profile.\n");
+    }
+
+    try stdout.interface.flush();
+}
+
+fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
+    switch (config.command) {
+        .model_active => {
+            var active = try managed_mod.readActiveSelection(allocator);
+            defer if (active) |*selection| selection.deinit(allocator);
+
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+            if (active) |selection| {
+                try stdout.interface.print("{s}\n", .{selection.model_id});
+            } else {
+                try stdout.interface.writeAll("No active managed model configured.\n");
+            }
+            try stdout.interface.flush();
+        },
+        .model_list => try printManagedModelList(config, allocator),
+        .model_pull, .model_use => {
+            const model_id = config.command_model_id orelse return error.MissingArgValue;
+            const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
+
+            var support = try resolveManagedGpuSupport(config.device_index, allocator);
+            defer support.deinit(allocator);
+
+            if (!catalog_mod.supportsProfile(entry.*, support.profile)) return error.ModelUnsupportedOnThisGpu;
+
+            if (config.command == .model_pull) {
+                var stdout_buffer: [4096]u8 = undefined;
+                var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+                try managed_mod.pullModel(entry.*, allocator, &stdout.interface);
+                try stdout.interface.flush();
+                return;
+            }
+
+            if (!managed_mod.isInstalled(model_id, allocator)) return error.ModelNotInstalled;
+            const fit = try managed_mod.verifyActiveSelectionFits(model_id, support.vram_budget_bytes, allocator);
+            if (!fit.fits_current_gpu) return error.ModelDoesNotFit;
+            try managed_mod.writeActiveSelection(model_id, allocator);
+
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+            try stdout.interface.print("Active model set to {s}\n", .{model_id});
+            try stdout.interface.flush();
+        },
+        .run => {},
+    }
 }
 
 /// Build the static decode graph from GGUF metadata and write debugging artifacts.
@@ -362,30 +747,58 @@ pub fn main() !void {
 
     const config = parseArgs(args) catch |err| {
         log.err("Argument error: {s}", .{@errorName(err)});
-        std.fs.File.stderr().writeAll(banner) catch {};
+        std.fs.File.stderr().writeAll(helpText(false)) catch {};
         std.process.exit(1);
     };
 
     if (config.show_help) {
-        std.fs.File.stdout().writeAll(banner) catch {};
+        std.fs.File.stdout().writeAll(helpText(config.show_help_all)) catch {};
         return;
     }
 
     if (config.check) {
-        diagnostics_mod.run(allocator) catch |err| {
+        var check_target = resolveCheckTarget(config, allocator) catch |err| {
+            log.err("Failed to resolve model for diagnostics: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer check_target.deinit(allocator);
+
+        diagnostics_mod.run(.{
+            .device_index = config.device_index,
+            .model_path = check_target.model_path,
+            .managed_model = check_target.managed_model,
+            .shader_dir = "zig-out/share/zinc/shaders",
+        }, allocator) catch |err| {
             log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        return;
+    }
+
+    if (config.command != .run) {
+        runModelCommand(config, allocator) catch |err| {
+            if (err == error.GpuDetectionUnavailable) {
+                std.process.exit(1);
+            }
+            log.err("Model command failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
         };
         return;
     }
 
     is_debug_mode = config.debug or std.posix.getenv("ZINC_DEBUG") != null;
 
-    if (config.model_path == null) {
-        log.warn("No model specified (-m). Use --help for usage.", .{});
-        return;
-    }
+    var resolved_model = resolveStartupModel(config, allocator) catch |err| {
+        if (err == error.NoModelSpecified) {
+            log.warn("No model specified (-m/--model or --model-id) and no active managed model is configured. Use --help for common usage or --help-all for developer flags.", .{});
+            return;
+        }
+        log.err("Failed to resolve model: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer resolved_model.deinit(allocator);
 
-    const model_path = config.model_path.?;
+    const model_path = resolved_model.spec.model_path;
     log.info("Model: {s}", .{model_path});
 
     const wants_graph_artifacts = config.graph_report_path != null or config.graph_dot_path != null;
@@ -408,42 +821,39 @@ pub fn main() !void {
     const gpu_config = gpu_detect.detect(&vk_instance);
     gpu_config.log_info();
 
-    // Load model
-    var cmd_pool = try CommandPool.init(&vk_instance);
-    defer cmd_pool.deinit();
-
-    var model = loader_mod.load(model_path, &vk_instance, &cmd_pool, allocator) catch |err| {
-        log.err("Failed to load model: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    defer model.deinit(&vk_instance);
-
     // Determine shader directory
     const shader_dir = "zig-out/share/zinc/shaders";
 
-    // Initialize inference engine
-    var engine = forward_mod.InferenceEngine.init(&model, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
-        log.err("Failed to init inference engine: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    defer engine.deinit();
-
-    if (wants_graph_artifacts) {
-        writeDecodeGraphArtifacts(&engine.decode_graph, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
-            log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-    }
-
-    // Enable profiling if requested
-    if (config.profile) {
-        engine.enableProfiling() catch |err| {
-            log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
-        };
-    }
-
     if (config.prompt) |prompt| {
         log.debug("Prompt: {s}", .{prompt});
+
+        var cmd_pool = try CommandPool.init(&vk_instance);
+        defer cmd_pool.deinit();
+
+        var model = loader_mod.load(model_path, &vk_instance, &cmd_pool, allocator) catch |err| {
+            log.err("Failed to load model: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer model.deinit(&vk_instance);
+
+        var engine = forward_mod.InferenceEngine.init(&model, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
+            log.err("Failed to init inference engine: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer engine.deinit();
+
+        if (wants_graph_artifacts) {
+            writeDecodeGraphArtifacts(&engine.decode_graph, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
+                log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+        }
+
+        if (config.profile) {
+            engine.enableProfiling() catch |err| {
+                log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
+            };
+        }
 
         // Initialize native BPE tokenizer from GGUF metadata
         var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
@@ -458,20 +868,9 @@ pub fn main() !void {
             log.debug("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
         }
 
-        // Tokenize prompt
-        const raw_tokens = try tokenizer.encode(prepared_prompt.text);
-        defer allocator.free(raw_tokens);
-
-        // Prepend BOS token
-        const prepend_bos = tokenizer.shouldPrependBos();
-        const bos_extra: usize = if (prepend_bos) 1 else 0;
-        const prompt_tokens = try allocator.alloc(u32, raw_tokens.len + bos_extra);
-        if (prepend_bos) {
-            prompt_tokens[0] = tokenizer.bosId();
-            @memcpy(prompt_tokens[1..], raw_tokens);
-        } else {
-            @memcpy(prompt_tokens, raw_tokens);
-        }
+        // Tokenize prompt into caller-owned storage. This keeps CLI and server
+        // prompt construction on the same code path, including BOS handling.
+        const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
         defer allocator.free(prompt_tokens);
 
         log.debug("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
@@ -490,8 +889,7 @@ pub fn main() !void {
         }
 
         // Generate
-        const max_tokens: u32 = 256;
-        const output_tokens = try forward_mod.generate(&engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator);
+        const output_tokens = try forward_mod.generate(&engine, prompt_tokens, config.max_tokens, tokenizer.eosId(), allocator);
         defer allocator.free(output_tokens);
 
         // Output token IDs
@@ -578,12 +976,17 @@ pub fn main() !void {
     } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
 
-        // Initialize tokenizer for chat template + prompt encoding
-        var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
-            log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
+        var manager = model_manager_mod.ModelManager.init(resolved_model.spec, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
+            log.err("Failed to init model manager: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
-        defer tokenizer.deinit();
+        defer manager.deinit();
+
+        if (config.profile) {
+            manager.currentResources().engine.enableProfiling() catch |err| {
+                log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
+            };
+        }
 
         var server = http_mod.Server.init(allocator, config.port) catch |err| {
             log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
@@ -628,9 +1031,7 @@ pub fn main() !void {
             };
             worker.* = .{
                 .conn = conn,
-                .engine = &engine,
-                .tokenizer = &tokenizer,
-                .model = &model,
+                .manager = &manager,
                 .server_state = &server_state,
             };
 
@@ -659,24 +1060,29 @@ test "parseArgs: defaults" {
     try std.testing.expectEqual(@as(u32, 4096), config.context_length);
     try std.testing.expectEqual(@as(u8, 0), config.kv_quant);
     try std.testing.expect(config.model_path == null);
+    try std.testing.expect(config.model_id == null);
     try std.testing.expect(config.prompt == null);
     try std.testing.expect(!config.chat);
+    try std.testing.expectEqual(Command.run, config.command);
 }
 
 test "parseArgs: full args" {
     const args = [_][:0]const u8{
-        "zinc", "-m",             "model.gguf", "-p",          "9090",
-        "-d",   "1",              "-c",         "8192",        "--parallel",
-        "8",    "--prompt",       "hello",      "--chat",      "--kv-quant",
-        "3",    "--graph-report", "graph.json", "--graph-dot", "graph.dot",
+        "zinc",           "-m",         "model.gguf",  "--model-id", "qwen35-2b-q4k-m",
+        "-p",             "9090",       "-d",          "1",          "-c",
+        "8192",           "--parallel", "8",           "--prompt",   "hello",
+        "--max-tokens",   "32",         "--chat",      "--kv-quant", "3",
+        "--graph-report", "graph.json", "--graph-dot", "graph.dot",
     };
     const config = try parseArgs(&args);
     try std.testing.expectEqualStrings("model.gguf", config.model_path.?);
+    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", config.model_id.?);
     try std.testing.expectEqual(@as(u16, 9090), config.port);
     try std.testing.expectEqual(@as(u32, 1), config.device_index);
     try std.testing.expectEqual(@as(u32, 8192), config.context_length);
     try std.testing.expectEqual(@as(u32, 8), config.max_parallel);
     try std.testing.expectEqualStrings("hello", config.prompt.?);
+    try std.testing.expectEqual(@as(u32, 32), config.max_tokens);
     try std.testing.expect(config.chat);
     try std.testing.expectEqual(@as(u8, 3), config.kv_quant);
     try std.testing.expectEqualStrings("graph.json", config.graph_report_path.?);
@@ -687,6 +1093,14 @@ test "parseArgs: help flag" {
     const args = [_][:0]const u8{ "zinc", "--help" };
     const config = try parseArgs(&args);
     try std.testing.expect(config.show_help);
+    try std.testing.expect(!config.show_help_all);
+}
+
+test "parseArgs: help-all flag" {
+    const args = [_][:0]const u8{ "zinc", "--help-all" };
+    const config = try parseArgs(&args);
+    try std.testing.expect(config.show_help);
+    try std.testing.expect(config.show_help_all);
 }
 
 test "parseArgs: invalid kv-quant" {
@@ -712,11 +1126,83 @@ test "parseArgs: profile defaults to false" {
     try std.testing.expect(!config.profile);
 }
 
+test "parseArgs: max tokens flag" {
+    const args = [_][:0]const u8{ "zinc", "--prompt", "hi", "-n", "12" };
+    const config = try parseArgs(&args);
+    try std.testing.expectEqual(@as(u32, 12), config.max_tokens);
+}
+
 test "parseArgs: chat flag" {
     const args = [_][:0]const u8{ "zinc", "--prompt", "hi", "--chat" };
     const config = try parseArgs(&args);
     try std.testing.expect(config.chat);
     try std.testing.expectEqualStrings("hi", config.prompt.?);
+}
+
+test "helpText: short help hides developer-only flags" {
+    const text = helpText(false);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--help-all") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Common options:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--graph-report") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--profile") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--debug") == null);
+}
+
+test "helpText: full help includes developer-only flags" {
+    const text = helpText(true);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Analysis and developer options:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--graph-report") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--profile") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--debug") != null);
+}
+
+test "parseArgs: managed model subcommands" {
+    const list_args = [_][:0]const u8{ "zinc", "model", "list", "--all" };
+    const list_config = try parseArgs(&list_args);
+    try std.testing.expectEqual(Command.model_list, list_config.command);
+    try std.testing.expect(list_config.show_all_models);
+
+    const pull_args = [_][:0]const u8{ "zinc", "model", "pull", "qwen35-2b-q4k-m" };
+    const pull_config = try parseArgs(&pull_args);
+    try std.testing.expectEqual(Command.model_pull, pull_config.command);
+    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", pull_config.command_model_id.?);
+
+    const active_args = [_][:0]const u8{ "zinc", "model", "active" };
+    const active_config = try parseArgs(&active_args);
+    try std.testing.expectEqual(Command.model_active, active_config.command);
+}
+
+test "resolveCheckTarget returns general diagnostics target when no model is specified" {
+    const config = Config{};
+    var target = try resolveCheckTarget(config, std.testing.allocator);
+    defer target.deinit(std.testing.allocator);
+
+    try std.testing.expect(target.model_path == null);
+    try std.testing.expect(target.managed_model == null);
+}
+
+test "resolveCheckTarget uses raw gguf path when no managed id is provided" {
+    const config = Config{ .model_path = "model.gguf" };
+    var target = try resolveCheckTarget(config, std.testing.allocator);
+    defer target.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("model.gguf", target.model_path.?);
+    try std.testing.expect(target.managed_model == null);
+}
+
+test "resolveCheckTarget prefers managed model id over raw gguf path" {
+    const config = Config{
+        .model_id = "qwen35-2b-q4k-m",
+        .model_path = "raw.gguf",
+    };
+    var target = try resolveCheckTarget(config, std.testing.allocator);
+    defer target.deinit(std.testing.allocator);
+
+    try std.testing.expect(target.managed_model != null);
+    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", target.managed_model.?.id);
+    if (target.model_path) |path| {
+        try std.testing.expect(!std.mem.eql(u8, path, "raw.gguf"));
+    }
 }
 
 fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {

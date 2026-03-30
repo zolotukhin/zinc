@@ -5,6 +5,7 @@ tags:
   - zinc
   - vulkan
   - radv
+  - gpu-shader
   - shader-debugging
   - glsl-compute
   - rdna4
@@ -14,11 +15,11 @@ tags:
   - moe
 keywords:
   - Vulkan shader debugging
+  - GPU shader debugging
   - AMD RDNA4 inference
   - local LLM inference
   - GLSL compute shader debugging
   - Vulkan compute shaders for AI inference
-  - shader debugging on AMD GPUs
   - RADV driver crash
   - Mesa RADV
   - MoE routing shader

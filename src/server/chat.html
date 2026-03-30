@@ -10,14 +10,29 @@
 :root{--bg:#0d0d0f;--bg2:#18181b;--bg3:#1e1e22;--border:#27272a;--text:#c9c9d1;--muted:#7a7a88;--accent:#e8722a;--accent2:#d35400;--user:#3d2410}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
-header{padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+header{padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 header h1{font-size:17px;font-weight:700;letter-spacing:-.3px}
 header h1 span{color:var(--accent)}
 .badge{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);color:var(--muted)}
 .badge.ok{border-color:#3fb950;color:#3fb950}
 .spacer{flex:1}
+.model-controls{display:flex;align-items:center;gap:8px}
+.model-select{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;min-width:220px}
+.model-select:focus{outline:none;border-color:var(--accent)}
+.model-select:disabled{opacity:.5}
+.model-action{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;min-width:86px;transition:border-color .15s,color .15s,background .15s}
+.model-action:hover{border-color:var(--accent);color:#fff}
+.model-action.download{border-color:var(--accent);color:var(--accent)}
+.model-action.active{opacity:.7;cursor:default}
+.model-action:disabled{opacity:.4;cursor:not-allowed}
 .model-tag{font-size:12px;color:var(--muted);background:var(--bg3);padding:3px 10px;border-radius:6px}
 .stats{font-size:11px;color:var(--muted)}
+.top-status{padding:8px 20px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.model-progress{position:relative;flex:1 1 220px;min-width:180px;height:8px;background:var(--bg3);border:1px solid var(--border);border-radius:999px;overflow:hidden}
+.model-progress[hidden]{display:none}
+.model-progress-fill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),#ffb15c);transition:width .2s ease}
+.model-progress.indeterminate .model-progress-fill{width:35%;animation:slide 1.15s linear infinite}
+@keyframes slide{from{transform:translateX(-120%)}to{transform:translateX(320%)}}
 #messages{flex:1;overflow-y:auto;padding:20px;scroll-behavior:smooth}
 .msg{display:flex;gap:10px;margin-bottom:14px;max-width:720px;margin-left:auto;margin-right:auto;animation:fadeIn .2s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
@@ -30,6 +45,13 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl{background:var(--bg2);border:1px solid var(--border);border-bottom-left-radius:4px}
 .msg.a .bbl p{margin:0 0 8px}
 .msg.a .bbl p:last-child{margin:0}
+.msg.a .bbl h1,.msg.a .bbl h2,.msg.a .bbl h3,.msg.a .bbl h4{margin:0 0 10px;color:#fff;line-height:1.25}
+.msg.a .bbl h1{font-size:20px}
+.msg.a .bbl h2{font-size:18px}
+.msg.a .bbl h3,.msg.a .bbl h4{font-size:16px}
+.msg.a .bbl ol,.msg.a .bbl ul{margin:0 0 10px 22px;padding:0}
+.msg.a .bbl li{margin:0 0 4px}
+.msg.a .bbl li:last-child{margin-bottom:0}
 .msg.a .bbl strong{color:#fff}
 .msg.a .bbl em{color:var(--accent)}
 .msg.a .bbl code{background:var(--bg3);padding:1px 5px;border-radius:4px;font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:13px}
@@ -41,6 +63,9 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl pre{background:var(--bg);padding:10px 12px;margin:0;overflow-x:auto;border-radius:0}
 .msg.a .bbl pre code{background:none;padding:0;font-size:13px}
 .msg.a .bbl pre code.hljs{background:none;padding:0}
+.msg.a .bbl .reasoning-block{margin-bottom:8px}
+.msg.a .bbl .reasoning-block summary{cursor:pointer;color:var(--muted);font-size:12px;user-select:none}
+.msg.a .bbl .reasoning-body{font-size:13px;color:var(--muted);padding:6px 0;line-height:1.5}
 .msg .meta{font-size:11px;color:var(--muted);margin-top:4px}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
@@ -64,8 +89,17 @@ header h1 span{color:var(--accent)}
 <span id="st" class="badge">...</span>
 <span class="spacer"></span>
 <span id="stats" class="stats"></span>
-<a id="mn" class="model-tag" href="https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF" target="_blank" style="text-decoration:none;color:var(--muted)">-</a>
+<div class="model-controls">
+<select id="ms" class="model-select" title="Model"></select>
+<button id="mbtn" class="model-action active" type="button">Active</button>
+</div>
+<a id="mn" class="model-tag" href="https://huggingface.co/" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:var(--muted)">-</a>
 </header>
+<div class="top-status">
+<span id="gpu" class="stats"></span>
+<span id="dl" class="stats"></span>
+<div id="mp" class="model-progress" hidden><div id="mpf" class="model-progress-fill"></div></div>
+</div>
 <div id="messages">
 <div class="empty" id="w"><strong>ZINC Inference Engine</strong>AMD RDNA4 GPU &middot; Vulkan Compute<br>Type a message to start</div>
 </div>
@@ -78,15 +112,195 @@ header h1 span{color:var(--accent)}
 </div>
 <script>
 const M=document.getElementById('messages'),I=document.getElementById('i'),B=document.getElementById('b');
-const ST=document.getElementById('st'),MN=document.getElementById('mn'),SS=document.getElementById('stats');
-let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false;
+const ST=document.getElementById('st'),MN=document.getElementById('mn'),SS=document.getElementById('stats'),MS=document.getElementById('ms');
+const MB=document.getElementById('mbtn'),GM=document.getElementById('gpu'),DL=document.getElementById('dl'),MP=document.getElementById('mp'),MPF=document.getElementById('mpf');
+let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false,models=[],modelPollTimer=null;
+
+function switchableModels(){
+  return models.filter(m=>m.managed&&m.installed&&m.supported_on_current_gpu&&m.fits_current_gpu);
+}
+
+function fmtGiB(bytes){
+  return (bytes/(1024*1024*1024)).toFixed(2);
+}
+
+function selectedModel(){
+  return models.find(m=>m.id===MS.value)||models.find(m=>m.active)||models[0]||null;
+}
+
+function activeModel(){
+  return models.find(m=>m.active)||models[0]||null;
+}
+
+function hasActiveDownload(){
+  return models.some(m=>m.downloading||m.download_phase==='verifying');
+}
+
+function currentDownloadModel(){
+  return models.find(m=>m.downloading||m.download_phase==='verifying'||m.download_phase==='failed')||null;
+}
+
+function scheduleModelRefresh(delay){
+  clearTimeout(modelPollTimer);
+  modelPollTimer=setTimeout(()=>refreshModels().catch(()=>{}),delay);
+}
+
+function stopModelRefresh(){
+  clearTimeout(modelPollTimer);
+  modelPollTimer=null;
+}
+
+function modelHrefForName(name){
+  const n=(name||'').toLowerCase();
+  if(n.includes('qwen3.5-2b')) return 'https://huggingface.co/unsloth/Qwen3.5-2B-GGUF';
+  if(n.includes('qwen3.5-35b')||n.includes('qwen3.5-35b-a3b')) return 'https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF';
+  if(n.includes('qwen3-30b-a3b')) return 'https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF';
+  if(n.includes('qwen2.5-32b')||n.includes('qwen2-32b')) return 'https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF';
+  if(n.includes('llama-3.1-8b')||n.includes('llama 3.1 8b')) return 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF';
+  return 'https://huggingface.co/';
+}
+
+function setModelTag(name){
+  const label=name&&name.trim()?name:'-';
+  MN.textContent=label;
+  MN.href=modelHrefForName(label);
+}
+
+function resetConversation(note){
+  H=[];
+  M.innerHTML='<div class="empty" id="w"><strong>ZINC Inference Engine</strong>AMD RDNA4 GPU &middot; Vulkan Compute<br>Type a message to start</div>';
+  if(note)addMsg('assistant',note);
+}
+
+function setCurrentModel(model){
+  if(!model){setModelTag('-');return}
+  MN.textContent=model.display_name||model.id;
+  MN.href=model.homepage_url||modelHrefForName(model.display_name||model.id);
+}
+
+function setGpuMemory(used,budget){
+  if(!used||!budget){GM.textContent='';return}
+  GM.textContent='VRAM '+fmtGiB(used)+' / '+fmtGiB(budget)+' GiB';
+}
+
+function updateDownloadUi(){
+  let m=currentDownloadModel();
+  if(!m){
+    DL.textContent='';
+    MP.hidden=true;
+    MP.classList.remove('indeterminate');
+    MPF.style.width='0%';
+    stopModelRefresh();
+    return;
+  }
+  if(m.download_phase==='failed'){
+    DL.textContent='Download failed: '+(m.download_error||m.display_name||m.id);
+    MP.hidden=true;
+    stopModelRefresh();
+    return;
+  }
+  if(m.download_phase==='verifying'){
+    DL.textContent='Verifying '+(m.display_name||m.id)+'...';
+    MP.hidden=false;
+    MP.classList.add('indeterminate');
+    MPF.style.width='35%';
+    scheduleModelRefresh(800);
+    return;
+  }
+  let done=m.downloaded_bytes||0,total=m.download_total_bytes||0;
+  DL.textContent='Downloading '+(m.display_name||m.id)+(total>0?' · '+Math.max(0,Math.min(100,Math.round(done*100/total)))+'%':'');
+  MP.hidden=false;
+  if(total>0){
+    MP.classList.remove('indeterminate');
+    MPF.style.width=Math.max(2,Math.min(100,done*100/total))+'%';
+  }else{
+    MP.classList.add('indeterminate');
+    MPF.style.width='35%';
+  }
+  scheduleModelRefresh(800);
+}
+
+function updateModelAction(){
+  let m=selectedModel();
+  MB.hidden=!m;
+  if(!m){MB.textContent='Model';MB.disabled=true;return}
+  MB.className='model-action';
+  if(!m.managed){
+    MB.textContent='Manual';
+    MB.disabled=true;
+    MB.classList.add('active');
+    return;
+  }
+  if(m.download_phase==='failed'){
+    MB.textContent='Retry';
+    MB.disabled=hasActiveDownload();
+    MB.classList.add('download');
+    return;
+  }
+  if(m.downloading){
+    MB.textContent='Downloading';
+    MB.disabled=true;
+    MB.classList.add('download');
+    return;
+  }
+  if(m.download_phase==='verifying'){
+    MB.textContent='Verifying';
+    MB.disabled=true;
+    MB.classList.add('download');
+    return;
+  }
+  if(m.active){
+    MB.textContent='Active';
+    MB.disabled=true;
+    MB.classList.add('active');
+    return;
+  }
+  if(m.installed){
+    MB.textContent='Switch';
+    MB.disabled=isGenerating||hasActiveDownload();
+    return;
+  }
+  MB.textContent='Download';
+  MB.disabled=hasActiveDownload();
+  MB.classList.add('download');
+}
+
+async function refreshModels(){
+  let mr=await fetch(base+'/models');let md=await mr.json();
+  models=Array.isArray(md.data)?md.data:[];
+  let selectedId=MS.value;
+  let current=activeModel();
+  let selected=models.find(m=>m.id===selectedId)||current||models[0]||null;
+  MS.innerHTML='';
+  if(!models.length){
+    let opt=document.createElement('option');opt.value='';opt.textContent='No models available';MS.appendChild(opt);
+  }
+  for(let m of models){
+    let opt=document.createElement('option');
+    opt.value=m.id;
+    let label=m.display_name||m.id;
+    if(m.active)label+=' · active';
+    else if(!m.managed)label+=' · manual';
+    else if(m.downloading)label+=' · downloading';
+    else if(m.download_phase==='verifying')label+=' · verifying';
+    else if(m.installed)label+=' · installed';
+    else label+=' · download';
+    opt.textContent=label;
+    if(selected&&selected.id===m.id)opt.selected=true;
+    MS.appendChild(opt);
+  }
+  setGpuMemory(md.active_memory_used_bytes||0,md.active_memory_budget_bytes||0);
+  setCurrentModel(current);
+  updateDownloadUi();
+  updateModelAction();
+  MS.disabled=isGenerating||models.length<=1;
+}
 
 async function init(){
   try{
     let r=await fetch(base.replace('/v1','/health'));let d=await r.json();
-    if(d.status==='ok'){ST.textContent='online';ST.className='badge ok';
-      let mr=await fetch(base+'/models');let md=await mr.json();
-      if(md.data?.[0])MN.textContent=md.data[0].id;
+    if(d.status==='ok'){ST.textContent='online';ST.className='badge ok';setModelTag(d.model);
+      await refreshModels();
     }
   }catch(e){ST.textContent='offline';ST.className='badge'}
 }
@@ -100,6 +314,8 @@ function setGenerating(v){
   B.classList.toggle('stop',v);
   B.innerHTML=v?'&#x25A0;':'&#x2191;';
   B.title=v?'Stop generating':'Send';
+  MS.disabled=v||models.length<=1;
+  updateModelAction();
 }
 
 function stopGeneration(){
@@ -107,6 +323,102 @@ function stopGeneration(){
   stopRequested=true;
   SS.textContent='stopping...';
   activeController.abort();
+}
+
+function fmtInline(s){
+  s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
+  s=s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  s=s.replace(/(?<!\*)\*([^\*]+?)\*(?!\*)/g,'<em>$1</em>');
+  return s;
+}
+
+function renderParagraph(lines){
+  return '<p>'+lines.map(fmtInline).join('<br>')+'</p>';
+}
+
+function renderNestedList(items,ordered){
+  if(!items.length)return '';
+  let tag=ordered?'ol':'ul';
+  return '<'+tag+'>'+items.map(item=>'<li>'+item.map(fmtInline).join('<br>')+'</li>').join('')+'</'+tag+'>';
+}
+
+function renderList(lines,ordered){
+  let items=[],current=null;
+  let marker=ordered?/^\s*\d+\.\s+(.*)$/:/^\s*[-*]\s+(.*)$/;
+  function pushCurrent(){
+    if(!current)return;
+    items.push(current);
+    current=null;
+  }
+  for(let line of lines){
+    if(!line.trim())continue;
+    let match=line.match(marker);
+    if(match){
+      pushCurrent();
+      current={lines:[match[1]],nestedUnordered:[],nestedOrdered:[]};
+      continue;
+    }
+    if(!current)return '';
+    let nestedUnordered=line.match(/^\s*[-*]\s+(.*)$/);
+    if(ordered&&nestedUnordered){
+      let last=current.nestedUnordered[current.nestedUnordered.length-1];
+      if(last&&line.match(/^\s{2,}\S/)&&!line.match(/^\s{2,}[-*]\s+/)){
+        last.push(line.trim());
+      }else{
+        current.nestedUnordered.push([nestedUnordered[1]]);
+      }
+      continue;
+    }
+    let nestedOrdered=line.match(/^\s*\d+\.\s+(.*)$/);
+    if(!ordered&&nestedOrdered){
+      let last=current.nestedOrdered[current.nestedOrdered.length-1];
+      if(last&&line.match(/^\s{2,}\S/)&&!line.match(/^\s{2,}\d+\.\s+/)){
+        last.push(line.trim());
+      }else{
+        current.nestedOrdered.push([nestedOrdered[1]]);
+      }
+      continue;
+    }
+    if(current.nestedUnordered.length&&line.match(/^\s{2,}\S/)){
+      current.nestedUnordered[current.nestedUnordered.length-1].push(line.trim());
+      continue;
+    }
+    if(current.nestedOrdered.length&&line.match(/^\s{2,}\S/)){
+      current.nestedOrdered[current.nestedOrdered.length-1].push(line.trim());
+      continue;
+    }
+    current.lines.push(line.trim());
+  }
+  pushCurrent();
+  if(!items.length)return '';
+  let tag=ordered?'ol':'ul';
+  return '<'+tag+'>'+items.map(item=>{
+    let html=item.lines.map(fmtInline).join('<br>');
+    html+=renderNestedList(item.nestedUnordered,false);
+    html+=renderNestedList(item.nestedOrdered,true);
+    return '<li>'+html+'</li>';
+  }).join('')+'</'+tag+'>';
+}
+
+function renderBlock(block){
+  let trimmed=block.trim();
+  if(!trimmed)return '';
+  if(/^\x00BLOCK\d+\x00$/.test(trimmed))return trimmed;
+  let heading=trimmed.match(/^(#{1,4})\s+(.+)$/);
+  if(heading){
+    let level=heading[1].length;
+    return '<h'+level+'>'+fmtInline(heading[2])+'</h'+level+'>';
+  }
+  let lines=block.split('\n');
+  if(/^\s*\d+\.\s+/.test(trimmed)){
+    let list=renderList(lines,true);
+    if(list)return list;
+  }
+  if(/^\s*[-*]\s+/.test(trimmed)){
+    let list=renderList(lines,false);
+    if(list)return list;
+  }
+  return renderParagraph(lines);
 }
 
 function md(s){
@@ -129,20 +441,71 @@ function md(s){
   });
   // Now escape remaining HTML
   s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  // Inline code
-  s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
-  // Bold
-  s=s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  // Italic (but not inside words or after *)
-  s=s.replace(/(?<!\*)\*([^\*]+?)\*(?!\*)/g,'<em>$1</em>');
-  // Line breaks within paragraphs
-  s=s.replace(/\n\n/g,'</p><p>');
-  s=s.replace(/\n/g,'<br>');
-  s='<p>'+s+'</p>';
-  s=s.replace(/<p><\/p>/g,'');
+  s=s.split(/\n{2,}/).map(renderBlock).filter(Boolean).join('');
+  if(!s)return '';
   // Restore code blocks
   for(let i=0;i<blocks.length;i++) s=s.replace('\x00BLOCK'+i+'\x00',blocks[i]);
   return s;
+}
+
+function renderReasoning(thinkText,isThinking){
+  let open=isThinking?' open':'';
+  let body=md((thinkText||'').trim());
+  return '<details'+open+' class="reasoning-block"><summary>'+(isThinking?'Thinking...':'Reasoning')+'</summary><div class="reasoning-body">'+body+'</div></details>';
+}
+
+function stripTrailingStandaloneQuote(text){
+  let s=(text||'').replace(/\s+$/,'');
+  if(/(^|\n)"$/.test(s)) s=s.replace(/(^|\n)"$/,'').replace(/\s+$/,'');
+  let quoteCount=(s.match(/"/g)||[]).length;
+  if(quoteCount===1&&/[.!?,:;]"$/.test(s)) s=s.slice(0,-1).replace(/\s+$/,'');
+  return s;
+}
+
+function stripTrailingArtifacts(text){
+  let s=text||'';
+  s=s.replace(/<\|endoftext\|>\s*$/u,'');
+  s=s.replace(/(?:[\s\uFFFD])+$/gu,'');
+  return stripTrailingStandaloneQuote(s);
+}
+
+function looksLikePlainReasoning(text){
+  let s=(text||'').trimStart();
+  return s.startsWith('Thinking Process:')||
+    /^\d+\.\s+\*\*Analyze the Request:\*\*/.test(s)||
+    /^\d+\.\s+Analyze the Request:/.test(s);
+}
+
+function splitDisplayContent(raw,isThinking){
+  let text=raw||'';
+  let thinkMatch=text.match(/<think>([\s\S]*?)<\/think>/);
+  let thinkPartial=!thinkMatch&&text.match(/<think>([\s\S]*)$/);
+  let answer=stripTrailingArtifacts(
+    text.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim()
+  );
+  if(thinkMatch||thinkPartial){
+    return {
+      reasoning:(thinkMatch?thinkMatch[1]:(thinkPartial?thinkPartial[1]:'')).trim(),
+      answer,
+      showReasoning:true,
+      isThinking,
+    };
+  }
+  let trimmed=stripTrailingArtifacts(text.trim());
+  if(looksLikePlainReasoning(trimmed)){
+    return {
+      reasoning:trimmed,
+      answer:'',
+      showReasoning:true,
+      isThinking:true,
+    };
+  }
+  return {
+    reasoning:'',
+    answer:trimmed,
+    showReasoning:false,
+    isThinking:false,
+  };
 }
 
 function addMsg(role,text){
@@ -167,9 +530,11 @@ async function send(){
   let raw='',tokens=0,t0=performance.now(),thinking=false,stopped=false;
   activeController=new AbortController();stopRequested=false;setGenerating(true);
   try{
+    let currentModel=selectedModel();
+    let selectedModelId=currentModel?.id||MN.textContent||'zinc';
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:MN.textContent||'qwen',messages:H,stream:true,max_tokens:512,temperature:0.7}),
+      body:JSON.stringify({model:selectedModelId,messages:H,stream:true,max_tokens:512,temperature:0.7}),
       signal:activeController.signal});
     if(!r.ok){let e=await r.json().catch(()=>({}));throw new Error(e.error?.message||r.statusText)}
     if(!r.body)throw new Error('Streaming response missing body');
@@ -186,18 +551,10 @@ async function send(){
             if(thinking&&raw.includes('</think>')){thinking=false}
             // Filter stop tokens from display
             if(c.includes('<|im_end')||c.includes('<|im_start'))continue;
-            // Build display: reasoning in collapsible, answer after </think>
-            let thinkMatch=raw.match(/<think>([\s\S]*?)<\/think>/);
-            let thinkPartial=!thinkMatch&&raw.match(/<think>([\s\S]*)$/);
-            let answer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
+            let view=splitDisplayContent(raw,thinking);
             let html='';
-            if(thinkMatch||thinkPartial){
-              let thinkText=thinkMatch?thinkMatch[1]:(thinkPartial?thinkPartial[1]:'');
-              let open=thinking?' open':'';
-              html+='<details'+open+' style="margin-bottom:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px;user-select:none">'+(thinking?'Thinking...':'Reasoning')+'</summary><div style="font-size:13px;color:var(--muted);padding:6px 0;line-height:1.5;white-space:pre-wrap">'+esc(thinkText.trim())+'</div></details>';
-            }
-            if(answer) html+=md(answer);
-            else if(!thinkMatch&&!thinkPartial) html+=md(raw.trim());
+            if(view.showReasoning) html+=renderReasoning(view.reasoning,view.isThinking);
+            if(view.answer) html+=md(view.answer);
             if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();M.scrollTop=M.scrollHeight}
             let el=(performance.now()-t0)/1000;
             if(el>0.3)SS.textContent=((tokens/el).toFixed(1))+' tok/s';
@@ -212,7 +569,8 @@ async function send(){
   if(cur.parentNode)cur.remove();
   highlightAll();
   activeController=null;stopRequested=false;setGenerating(false);I.focus();
-  let cleanAnswer=raw.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim();
+  let finalView=splitDisplayContent(raw,false);
+  let cleanAnswer=finalView.answer;
   if(cleanAnswer)H.push({role:'assistant',content:cleanAnswer});
   if(stopped){
     let meta=document.createElement('div');meta.className='meta';
@@ -227,6 +585,10 @@ async function send(){
     }
     bbl.parentElement.appendChild(meta);
     return;
+  }
+  if(!cleanAnswer&&finalView.showReasoning){
+    bbl.innerHTML=renderReasoning(finalView.reasoning,false)+'<p><em>No final answer returned.</em></p>';
+    highlightAll();
   }
   if(cleanAnswer){
     let el=(performance.now()-t0)/1000,tps=tokens/el;
@@ -247,6 +609,35 @@ function copyCode(btn){
 function highlightAll(){document.querySelectorAll('pre code[class^="language-"]').forEach(el=>{
   if(!el.dataset.highlighted){try{hljs.highlightElement(el)}catch(e){}}
 })}
+MS.addEventListener('change',()=>{
+  updateDownloadUi();
+  updateModelAction();
+});
+MB.addEventListener('click',async()=>{
+  let m=selectedModel();if(!m||!m.managed||m.active||m.downloading||m.download_phase==='verifying')return;
+  MB.disabled=true;
+  try{
+    if(m.installed){
+      SS.textContent='switching model...';
+      let r=await fetch(base+'/models/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m.id})});
+      if(!r.ok){let er=await r.json().catch(()=>({}));throw new Error(er.error?.message||r.statusText)}
+      await refreshModels();
+      let active=models.find(x=>x.active);
+      resetConversation('Switched to **'+esc(active?.display_name||m.id)+'**. Started a new conversation.');
+      SS.textContent='model switched';
+      return;
+    }
+    SS.textContent='starting download...';
+    let r=await fetch(base+'/models/pull',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m.id})});
+    if(!r.ok){let er=await r.json().catch(()=>({}));throw new Error(er.error?.message||r.statusText)}
+    await refreshModels();
+    SS.textContent='download started';
+  }catch(err){
+    SS.textContent='model action failed';
+    alert(err.message||String(err));
+    await refreshModels().catch(()=>{});
+  }
+});
 I.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
 I.addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,140)+'px'});
 init();setGenerating(false);I.focus();

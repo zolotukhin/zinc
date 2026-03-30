@@ -96,8 +96,8 @@ void main() {
                 float v_lo = float(q_lo | (hb_lo << 4));
                 float v_hi = float(q_hi | (hb_hi << 4));
 
-                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + 2u * e];
-                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 2u * e + 1u];
+                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + e];
+                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 32u + e];
             }
             xi += 64;
         }

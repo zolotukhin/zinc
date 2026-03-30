@@ -37,7 +37,7 @@ Typical local workflow:
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 zig build
-zig build test
+zig build test --summary all
 ```
 
 On Linux, `zig build` also compiles shaders. On macOS, shader compilation is skipped and GPU inference is not the primary target environment.
@@ -65,10 +65,19 @@ For performance changes:
 Before opening a PR, run at minimum:
 
 ```bash
-zig build test
+zig build test --summary all
 ```
 
-`zig build test` now runs both the Zig test suite and the Bun test suite.
+`zig build test --summary all` now runs both the Zig test suite and the Bun test suite.
+
+If you want to require the integration smoke tests instead of letting them skip when their env is missing:
+
+```bash
+ZINC_QWEN35_2B_MODEL=/path/to/Qwen3.5-2B-Q4_K_M.gguf \
+ZINC_QWEN35_35B_MODEL=/path/to/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+ZINC_API_BASE_URL=http://localhost:8080/v1 \
+zig build test --summary all -Dfull-tests=true
+```
 
 If you want to run the Bun suite by itself:
 

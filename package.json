@@ -4,7 +4,9 @@
   "private": true,
   "author": "Stepan Zolotukhin",
   "scripts": {
+    "graph:render": "bun tools/render_graph_report.ts",
     "test": "bun test",
-    "test:api": "bun tests/test_openai_sdk.ts"
+    "test:api": "bun tests/test_openai_sdk.ts",
+    "test:qwen-smoke": "bun tests/test_qwen_smoke.ts"
   }
 }
