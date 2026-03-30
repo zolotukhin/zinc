@@ -1060,7 +1060,8 @@ fn preloadNormWeights(
 
 /// Dispatch GPU RMS norm on an existing command buffer (does NOT commit).
 /// rms_norm_mul.metal: buffer(0)=push, buffer(1)=input, buffer(2)=output, buffer(3)=weights.
-/// Block size 64 (hardcoded in shader). Grid = (n_groups, 1, 1).
+/// Use one simdgroup per threadgroup so the native Metal kernel stays on the
+/// fast simdgroup reduction path without threadgroup-memory barriers.
 fn dispatchRmsNormOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -1072,7 +1073,12 @@ fn dispatchRmsNormOnCmd(
 ) void {
     const push = RmsNormPush{ .n = n, .eps = 1e-6 };
     const bufs = [_]*const MetalBuffer{ input, output, weights };
-    cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
+    const simd_width = if (engine.rms_norm_pipe.thread_execution_width > 0 and
+        engine.rms_norm_pipe.thread_execution_width <= engine.rms_norm_pipe.max_threads_per_threadgroup)
+        engine.rms_norm_pipe.thread_execution_width
+    else
+        @as(u32, 32);
+    cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ simd_width, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
 }
 
 fn dispatchDeinterleaveOnCmd(
@@ -2265,6 +2271,64 @@ test "deinterleave shader splits block-interleaved Q and gate" {
 
     try std.testing.expectEqualSlices(f32, &.{ 10, 11, 12, 13, 30, 31, 32, 33 }, q_ptr[0..total]);
     try std.testing.expectEqualSlices(f32, &.{ 20, 21, 22, 23, 40, 41, 42, 43 }, gate_ptr[0..total]);
+}
+
+test "rms_norm shader normalizes each token slice with shared weights" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const n: u32 = 8;
+    const groups: u32 = 2;
+    const eps: f32 = 1e-6;
+    const total = n * groups;
+
+    var input_buf = try metal_buffer.createBuffer(ctx, total * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, total * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    var weight_buf = try metal_buffer.createBuffer(ctx, n * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&weight_buf);
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    const weight_ptr: [*]f32 = @ptrCast(@alignCast(weight_buf.cpu_ptr.?));
+
+    @memcpy(input_ptr[0..total], &[_]f32{
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0,
+    });
+    @memcpy(weight_ptr[0..n], &[_]f32{ 1.0, 0.5, 1.5, 0.25, 1.0, 0.5, 1.5, 0.25 });
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const push = RmsNormPush{ .n = n, .eps = eps };
+    const bufs = [_]*const MetalBuffer{ &input_buf, &output_buf, &weight_buf };
+    const simd_width = if (pipe.thread_execution_width > 0) pipe.thread_execution_width else @as(u32, 32);
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ groups, 1, 1 }, .{ simd_width, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
+    cmd.commitAndWait();
+
+    var expected: [16]f32 = undefined;
+    for (0..groups) |group| {
+        const base = group * n;
+        var sum_sq: f32 = 0.0;
+        for (0..n) |i| {
+            const v = input_ptr[base + i];
+            sum_sq += v * v;
+        }
+        const rms_inv = 1.0 / @sqrt(sum_sq / @as(f32, @floatFromInt(n)) + eps);
+        for (0..n) |i| {
+            expected[base + i] = weight_ptr[i] * (input_ptr[base + i] * rms_inv);
+        }
+    }
+
+    for (0..total) |i| {
+        try std.testing.expectApproxEqAbs(expected[i], output_ptr[i], 0.001);
+    }
 }
 
 test "softmax_topk shader selects top experts and normalized weights" {
