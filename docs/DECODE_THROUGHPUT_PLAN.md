@@ -6,12 +6,13 @@ Target GPU: RDNA4 test node (`AMD Radeon Graphics (RADV GFX1201)`, `576 GB/s`, `
 
 ## Goal
 
-Raise single-stream decode throughput from the current debug-loop behavior to a stable clean-run baseline above `10 tok/s`, then push toward `12-15 tok/s` without breaking correctness.
+Keep the clean ReleaseFast decode path stably above `30 tok/s`, push the chat/reasoning path above `30 tok/s`, and improve aggregate GPU utilization without breaking correctness.
 
 This plan separates two different goals that were previously mixed together:
 
-1. `Single-stream latency / tok/s`
-2. `Aggregate GPU bandwidth utilization`
+1. `Single-stream raw decode latency / tok/s`
+2. `Reasoning chat latency / tok/s`
+3. `Aggregate GPU bandwidth utilization`
 
 Those are related, but they are not the same target. A single decode stream is not expected to saturate `576 GB/s` of DRAM bandwidth on this workload.
 
@@ -23,57 +24,37 @@ Measured on March 30, 2026 on the RDNA4 test node from the current checkout sync
 
 After clearing the RDNA4 node of competing `zinc` and `llama` processes and re-running the current checkout:
 
-- clean run: `22.14 tok/s`
-- repeat clean run: `22.21 tok/s`
-- profiled run: `22.21 tok/s`
-- profiled GPU decode time: `43.87 ms/token`
-- end-to-end decode time: `45.0 ms/token`
-- modeled decode bandwidth: `74.4 GB/s`, about `12.9%` of `576 GB/s`
+- clean `ReleaseFast` CLI run: `33.58 tok/s`
+- raw `/v1/completions` on the same server path: `33.55 tok/s`
+- raw `/v1/completions` at `concurrency=4`: `33.98 tok/s` aggregate
+- one longer reasoning chat sample: `28.40 tok/s`
+- modeled decode bandwidth at `33.58 tok/s`: `112.5 GB/s`, about `19.5%` of `576 GB/s`
 
-This means the current tree already exceeds the original `15 tok/s` target on a clean node.
-The remaining gap is no longer "how do we get to 15"; it is "how do we stabilize above 20 and drive utilization higher without breaking quality."
+This means the current tree already exceeds the old `15 tok/s` target and also clears the new `30 tok/s` target on the raw decode path.
+The remaining gap is no longer "how do we get above 15"; it is "how do we keep reasoning chat above 30 and drive utilization higher without regressing quality."
 
 ### Clean CLI run
 
 Command shape:
 
 ```bash
+zig build -Doptimize=ReleaseFast
 RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
   -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
   --prompt "The capital of France is"
 ```
 
-Observed earlier during this analysis, before the node was fully cleaned:
+Observed on the cleaned node:
 
-- `Generated 256 tokens in 23792.8 ms`
-- `10.76 tok/s`
-- `92.9 ms/tok`
+- `Generated 256 tokens in 7624.7 ms`
+- `33.58 tok/s`
+- `29.8 ms/tok`
 
-### Earlier loop benchmark path
+### Current interpretation
 
-Current loop command in [optimize_zinc.ts](/Users/stepan/Workspace/zinc/loops/optimize_zinc.ts#L392):
-
-```bash
-timeout 60 ./zig-out/bin/zinc ... --debug
-```
-
-Observed earlier on the same model and node:
-
-- `8.89 tok/s`
-- `112.5 ms/tok`
-
-This means the loop is benchmarking a slower diagnostic-heavy path, not the clean throughput path.
-
-### Earlier profiling path
-
-Observed earlier with `--profile --debug`:
-
-- `5.52 tok/s`
-- `181.2 ms/tok`
-
-This slowdown is too large for a useful profiler. The current profiling mode is invasive enough to distort the workload it is trying to measure.
-
-That earlier profiling behavior has now been fixed. On the cleaned node, `--profile` is effectively throughput-neutral.
+- The raw decode problem is no longer "stuck at 7 tok/s"
+- The next performance problem is specifically the reasoning chat path and aggregate GPU utilization
+- `--profile` still needs work in `ReleaseFast`; it is too intrusive for leaderboard-style comparisons
 
 ## What The Current Numbers Mean
 
@@ -87,14 +68,14 @@ It does not represent full-token decode traffic. Treating it as whole-model memo
 
 The decode graph artifact at `/tmp/zinc-decode-graph.json` models roughly `3.35 GB/token` for this graph. Using that model:
 
-- `10.76 tok/s` implies about `36 GB/s`
-- `15 tok/s` implies about `50 GB/s`
-- `50 GB/s` is only about `8.7%` of `576 GB/s`
+- `28.40 tok/s` implies about `95 GB/s`
+- `33.58 tok/s` implies about `112.5 GB/s`
+- `112.5 GB/s` is only about `19.5%` of `576 GB/s`
 
 Conclusion:
 
-- `15 tok/s` is plausible for a single stream
-- `15 tok/s` is now already achieved on the current tree when the node is idle
+- `30 tok/s` is plausible for a single stream and already achieved on the raw decode path
+- the remaining target is the chat/reasoning path, not basic decode throughput
 - `100%` DRAM-bandwidth utilization is not a realistic single-stream target here
 - if the real goal is to drive memory bandwidth higher, that requires batching or concurrent decode streams
 

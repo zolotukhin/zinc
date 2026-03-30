@@ -27,7 +27,7 @@ Usage: scripts/deploy_rdna4_server.sh [options]
 
 Options:
   --no-sync         Skip rsync to the remote node
-  --no-build        Skip remote zig build
+  --no-build        Skip remote ReleaseFast zig build
   --no-restart      Skip restarting the remote server
   --no-healthcheck  Skip final /health check
   --help            Show this help
@@ -85,7 +85,7 @@ fi
 
 if (( do_build )); then
   echo "==> Building on remote node"
-  "${ssh_cmd[@]}" "cd '$REMOTE_DIR' && zig build"
+  "${ssh_cmd[@]}" "cd '$REMOTE_DIR' && zig build -Doptimize=ReleaseFast"
 fi
 
 if (( do_restart )); then

@@ -6,7 +6,7 @@ Instructions for AI coding agents working on this repository.
 
 ```bash
 # Build (shaders compile on Linux only; macOS skips GPU inference)
-zig build
+zig build -Doptimize=ReleaseFast
 
 # Run inference
 ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3] [--debug]
@@ -216,7 +216,7 @@ rsync -az --delete --exclude '.zig-cache' --exclude 'zig-out' --exclude 'node_mo
   -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/root/zinc/
 
 # Build and run
-ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && zig build && \
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && zig build -Doptimize=ReleaseFast && \
   RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
   -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
   --prompt 'The capital of France is'"
@@ -254,7 +254,7 @@ rsync -az --delete --exclude '.zig-cache' --exclude 'zig-out' --exclude 'node_mo
   -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/root/zinc/
 
 ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
-  cd /root/zinc && zig build && \
+  cd /root/zinc && zig build -Doptimize=ReleaseFast && \
   nohup env RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
     -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
     --port 9090 >/tmp/zinc_9090.log 2>&1 < /dev/null &"
@@ -291,11 +291,12 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
     --output /tmp/zinc_api_raw_benchmark.json"
 ```
 
-Reference result from a clean RDNA4 node on 2026-03-30:
+Reference result from a clean RDNA4 node on 2026-03-30 with `zig build -Doptimize=ReleaseFast`:
 
-- `POST /v1/chat/completions` with the short prompt completed in about `5.6s` at `concurrency=1`, but usually stopped after `9` completion tokens, so it is useful for end-user latency, not decode TPS.
-- `POST /v1/completions` with `max_tokens=256` sustained about `16.8 tok/s` at `concurrency=1`.
-- `POST /v1/completions` with `max_tokens=256` and `concurrency=4` held aggregate throughput at about `16.8 tok/s`, while average per-request latency rose to about `38s` because generation is serialized.
+- CLI decode on `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`: `33.58 tok/s`, `29.8 ms/tok`
+- `POST /v1/completions` with `max_tokens=256` sustained about `33.55 tok/s` at `concurrency=1`
+- `POST /v1/completions` with `max_tokens=256` and `concurrency=4` held aggregate throughput at about `33.98 tok/s`, while average per-request latency rose to about `18.84s`
+- One longer reasoning-style `POST /v1/chat/completions` sample produced `257` completion tokens at about `28.40 tok/s`
 
 ### Troubleshooting performance
 

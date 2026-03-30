@@ -57,7 +57,7 @@ Then install **Zig 0.15.2 or newer** from the official Zig downloads page:
 ```bash
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
-zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 The compiled binary ends up at:
@@ -66,7 +66,7 @@ The compiled binary ends up at:
 ./zig-out/bin/zinc
 ```
 
-On Linux, `zig build` also compiles the GLSL shaders into SPIR-V. On macOS, shader compilation is skipped, which is one of the reasons Linux is the real runtime target.
+On Linux, `zig build -Doptimize=ReleaseFast` also compiles the GLSL shaders into SPIR-V. On macOS, shader compilation is skipped, which is one of the reasons Linux is the real runtime target.
 
 ## Run the preflight before your first prompt
 

@@ -59,15 +59,18 @@ The table below is intentionally narrow: it lists the exact GGUFs we have revali
 | Model | Exact GGUF tested | Measured throughput on AI PRO R9700 |
 |------|--------------------|-------------------------------------|
 | **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 8.33 tok/s prefill, 7.17 tok/s decode |
-| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 12.67 tok/s prefill, 10.10 tok/s decode |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 33.58 tok/s decode (CLI), 33.55 tok/s raw API, 28.40 tok/s reasoning chat |
 
 Benchmark details for the numbers above:
 
 - Hardware: AMD Radeon AI PRO R9700 (RDNA4, 32 GB)
-- Prompt: `"The capital of France is"`
-- Run shape: 32 generated tokens with `RADV_PERFTEST=coop_matrix`
-- Date: 2026-03-29
-- Validation: both runs produced first token `11751` (`Paris`)
+- Build: `zig build -Doptimize=ReleaseFast`
+- Prompt: CLI and raw API use `"The capital of France is"`; the reasoning chat sample used a step-by-step arithmetic prompt
+- Run shape: 256 generated tokens for the 35B CLI and raw API numbers, with `RADV_PERFTEST=coop_matrix`
+- Latest 35B validation date: 2026-03-30
+- Validation: coherent output on CLI, raw `/v1/completions`, and `/v1/chat/completions`
+
+The 2B row above still reflects the earlier 2026-03-29 single-stream CLI validation. The 35B row is the latest clean-node ReleaseFast remeasurement.
 
 **Quantization formats implemented in the current kernels**: Q4_K, Q5_K, Q6_K, Q8_0, F16
 
@@ -93,10 +96,11 @@ cd zinc
 # Build the CLI and server
 # macOS: shaders are skipped
 # Linux: shaders are compiled automatically
-zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 The binary is placed in `zig-out/bin/zinc`. Compiled SPIR-V shaders go to `zig-out/share/zinc/shaders/`.
+Use `ReleaseFast` for any performance measurement or server deployment. Plain `zig build` is not a fair throughput baseline.
 
 ### Run a Preflight Check First
 
@@ -189,7 +193,7 @@ git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 
 # Build the project
-zig build
+zig build -Doptimize=ReleaseFast
 
 # Run Zig + Bun tests
 zig build test --summary all
@@ -363,7 +367,7 @@ bun loops/optimize_zinc.ts --resume .zinc_optimize/2026-03-26T...
 
 Each cycle:
 1. **rsync** local source to the remote RDNA4 node
-2. **Build** via `zig build` (compiles Zig + GLSL shaders)
+2. **Build** via `zig build -Doptimize=ReleaseFast` (compiles Zig + GLSL shaders)
 3. **Run** `zinc --prompt ...` and capture output
 4. **Analyze** — build errors? runtime crash? tok/s metrics?
 5. **Spawn Claude** with full context (errors, history, RDNA4 constraints)
@@ -399,125 +403,34 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 
 ## Benchmarks
 
-All numbers measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB, MoE 35B total / 3B active).
-This section is the historical 35B optimization snapshot from 2026-03-28. For the latest validated per-model throughput, see [Tested Models](#tested-models) above.
-Same hardware, same model, same prompt (`"The capital of France is"`), 32 generated tokens. Benchmarked 2026-03-28.
+All numbers below were measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B-UD Q4_K_XL** on a clean RDNA4 node using `RADV_PERFTEST=coop_matrix` and `zig build -Doptimize=ReleaseFast`.
 
-### Decode throughput (tok/s, higher is better)
+### Current 35B Snapshot (2026-03-30)
 
-```
-       Qwen3.5-35B-A3B Q4_K_XL — Decode, AI PRO R9700
+| Path | Shape | Result |
+|------|-------|--------|
+| CLI decode | `--prompt "The capital of France is"`; 256 generated tokens | **33.58 tok/s**, `29.8 ms/tok` |
+| Raw HTTP | `POST /v1/completions`, `concurrency=1`, `max_tokens=256` | **33.55 tok/s** |
+| Raw HTTP | `POST /v1/completions`, `concurrency=4`, `max_tokens=256` | **33.98 tok/s aggregate**, `18.84s` avg latency, `29.01s` p95 |
+| Reasoning chat sample | `POST /v1/chat/completions`, 257-token step-by-step arithmetic answer | **28.40 tok/s** |
 
-  llama.cpp      ██████████████████████████████████████░░  107 tok/s
-  (baseline)
+For reference, the current llama.cpp baseline on the same node and model is about **107 tok/s decode**.
 
-  ZINC           ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  7.6 tok/s
-  (current)
+### What These Numbers Mean
 
-  ZINC           ██████████████████████████████████████░░  110+ tok/s
-  (target)
-```
+- The clean ReleaseFast decode path is already above the `30 tok/s` mark on this 35B model.
+- The raw OpenAI-compatible `/v1/completions` route is now essentially at CLI speed, so server overhead is no longer the main story on the non-chat path.
+- The remaining gap is the chat/reasoning route: longer templated chat answers are still slower than raw decode, and that is where the next round of work is focused.
 
-### Comparison
+### Why GPU Bandwidth Is Still Not "Full"
 
-| Metric | llama.cpp (baseline) | ZINC (current) | ZINC (target) |
-|--------|:---:|:---:|:---:|
-| **Decode** | 107 tok/s | 7.6 tok/s | 110+ tok/s |
-| **Coherent output** | Yes | Yes | Yes |
-| **BW utilization** | ~85% | 0.7% (4.1 GB/s) | 90%+ |
-| **GPU syncs/token** | 1 | ~42 | 1–2 |
-| **Flash attention** | Yes | Yes | Yes |
-| **RDNA4-tuned DMMV** | No | Yes | Yes |
-| **Native BPE tokenizer** | Yes | Yes (from GGUF) | Yes |
-| **OpenAI API server** | Yes | Yes (streaming) | Yes |
-| **Continuous batching** | Yes | Phase 4 | Yes |
-| **TurboQuant KV** | No | Phase 5 | Yes |
+At `33.58 tok/s`, the modeled full-token decode bandwidth is about **112.5 GB/s**, or **19.5%** of the card's `576 GB/s` peak.
 
-> **Baseline setup**: llama-server (build `3306dba`) with `RADV_PERFTEST=coop_matrix`, `--flash-attn on`, `--mlock`, `-ngl 99`, `-ctk q8_0 -ctv q8_0`. Mesa 25.0.7, GECC disabled (`amdgpu.ras_enable=0`). See [RDNA4 Tuning Guide](docs/RDNA4_TUNING.md) and [AGENTS.md](AGENTS.md) for full setup and reproduction steps.
+That is not a contradiction. Single-stream decode is not a pure DRAM-streaming workload. The remaining headroom is dominated by serialized medium/small kernels and graph depth, not by large host-side stalls. If the goal is to drive memory bandwidth materially higher than this, the next lever is **concurrent decode / batching**, not expecting one stream to saturate all DRAM bandwidth on its own.
 
-### Why 25x slower than llama.cpp
+### Historical Note
 
-The gap is almost entirely **CPU-GPU synchronization overhead**, not GPU compute speed. Each decode token currently requires ~120 `vkQueueSubmit` + fence-wait round-trips:
-
-- **MoE routing** requires GPU-to-CPU readback of router logits per layer (40 layers)
-- **Shared expert gating** needs another readback per layer
-- **End-of-layer submit** flushes the command buffer after each layer
-- Each round-trip costs ~1–2 ms on RDNA4, totaling ~120–240 ms of pure sync overhead per token
-
-At 256 ms/tok with 542 MB read per token, the GPU itself is idle >95% of the time. The fix is recording the full decode graph as a single command buffer with on-GPU MoE routing — the same approach llama.cpp uses.
-
-### Output quality
-
-ZINC produces **coherent, correct reasoning output** — matching llama.cpp's behavior on the same model:
-
-```
-Prompt:  "The capital of France is"
-Output:  "Paris. The capital of France is Paris. The capital of France is Paris."
-
-         <think>
-         </think>
-
-         That is correct. **Paris** is indeed the capital of France. It is the
-         country's largest city and serves as its center for finance, commerce,
-         culture, arts, fashion, and science.
-
-         You repeated the sentence three times, which emphasizes the fact! Is
-         there anything else you'd like to know about Paris or France?
-```
-
-First-token logit ranking matches llama.cpp (Paris top, `a` in top-5). GPU-CPU numerical accuracy verified: embedding, RMS norm, DMMV (Q4_K/Q5_K/Q8_0), and LM head logits all match CPU reference within floating-point tolerance.
-
-## Optimization Loop Results
-
-The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), with an AI agent iteratively fixing and optimizing the forward pass on real RDNA4 hardware.
-
-### Performance progression
-
-```
-  tok/s    Qwen3.5-35B-A3B Q4_K_XL, AI PRO R9700
-  8.0 ┤                                                      ╭─ 7.64 (best)
-       │                                                ╭────╯
-  7.0 ┤                                                │
-       │                                                │
-  6.0 ┤                                                │
-       │                                                │
-  5.0 ┤                                                │
-       │                                        ╭──────╯ GPU SSM + batching
-  4.0 ┤                  ╭──────────────────────╯── 4.3
-       │                  │
-  3.0 ┤                  │
-       │                  │
-  2.0 ┤  ────────────────╯
-       │
-  1.0 ┤──╮
-       └──┴──────────────────────────────────────────────── cycles
-       0  43         87       102      145     186    200+
-       Mar 27 AM    Mar 27 PM Mar 28   Codex   Phase 3c
-```
-
-| Phase | Cycles | tok/s | Key change |
-|-------|-------:|------:|------------|
-| First correct run | 43 | 1.2–2.4 | Forward pass executing all 40 layers + MoE + SSM |
-| Bug fixes | 44 | 2.3 → 4.0 | Q4_K sub-block pairing fix (1.7x jump at cycle 20) |
-| Coherent output | 15 | 3.8–4.1 | Q5_K element ordering fix → first correct text |
-| Optimization plateau | 84 | 3.9–4.3 | Minor gains; bottleneck is sync overhead, not compute |
-| GPU SSM + batching | 15+ | 4.3 → 7.6 | GPU SSM shaders, cmd buffer batching, swiglu_buf overflow fix |
-
-### Key bugs found by the loop
-
-| Bug | Impact | Cycle |
-|-----|--------|-------|
-| Q4_K sub-block pairing: `(sp, sp+4)` → `(2*sp, 2*sp+1)` | 1.7x speedup (2.3 → 3.9 tok/s) | 16-50/C19 |
-| Q5_K element ordering: interleaved → contiguous sub-blocks | Garbage → coherent output | 06-38/C05 |
-| Q8_0/F16 wave32 subgroup: lost half the dot product | Partial correctness | 16-50/C03 |
-| Shared expert intermediate dim: 1408 → 5632 | Wrong FFN output | 16-50/C26 |
-| Shared expert sigmoid gating: was TODO, now implemented | Missing computation | 16-50/C08 |
-| SSM conv1d ordering: convolve before state update | Double-counting input | 16-50/C06 |
-| Q4_K SPEC_K: fixed constant → push-constant K | Wrong for non-hidden-dim projections | 16-50/C09 |
-| SSM delta-net K/Q head mapping: division → modular | Wrong head assignment | 02-57/C06 |
-| attn_out_buf overflow: `q_dim*4` → `q_dim*2*4` | Buffer overwrite | 16-50/C14 |
-
-46 changes kept out of 186 cycles (25% acceptance rate).
+The older March 27–29 optimization logs in `.zinc_optimize/` were useful for correctness and early performance work, but many of the old `7–16 tok/s` figures came from debug-heavy or non-`ReleaseFast` builds. The snapshot above is the current clean baseline to compare against.
 
 ## Current Status
 
@@ -529,9 +442,9 @@ The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), wi
 | Native BPE tokenizer (from GGUF) | Done |
 | GLSL compute shaders (16) | Done |
 | Compute graph + architecture builders | Done |
-| Forward pass (decode loop) | Working — 7.6 tok/s, coherent output |
-| GPU SSM shaders + cmd batching | Done — 42 syncs/token (was 151) |
-| HTTP server + OpenAI API | Done — streaming SSE, chat completions |
+| Forward pass (decode loop) | Working — 33.58 tok/s clean CLI on Qwen3.5-35B-A3B-UD |
+| GPU SSM shaders + cmd batching | Done — clean ReleaseFast path is above 30 tok/s |
+| HTTP server + OpenAI API | Done — raw API ~33.5 tok/s, reasoning chat sample 28.4 tok/s |
 | Continuous batching | Phase 4 |
 | TurboQuant KV compression | Phase 5 |
 
@@ -539,12 +452,13 @@ Validated on AMD Radeon AI PRO R9700 (RDNA4): Vulkan 1.3 init, GGUF parsing, 21 
 
 ## Next Steps
 
-The path from 7.6 to 110+ tok/s:
+The next push is from "raw decode above 30" to "reasoning workloads above 30 and better aggregate GPU utilization":
 
-1. **Fix GPU SSM shader correctness** — GPU SSM shaders are implemented but produce wrong output on some paths. Debug delta-net state update indexing.
-2. **GPU-side MoE expert dispatch** — Eliminate the remaining ~40 submits/token for expert ID readback.
-3. **Profiling + kernel tuning** — With sync overhead gone, profile actual GPU kernel time. Tune DMMV tile sizes, shared memory usage, and occupancy for RDNA4.
-4. **Continuous batching** — Serve multiple concurrent requests with interleaved prefill/decode.
+1. **Close the chat/reasoning gap** — benchmark longer chat prompts, template overhead, stop behavior, and TTFT so `/v1/chat/completions` tracks closer to the raw decode path.
+2. **Make profiling representative** — `--profile` is still too intrusive in `ReleaseFast`, so it is not yet the right leaderboard tool for apples-to-apples throughput claims.
+3. **Reduce hot-path descriptor churn** — reuse bindings and trim per-token Vulkan setup in the decode loop.
+4. **Tune the actual hot shapes** — focus on medium/small decode kernels, not just the vocab projection.
+5. **Increase aggregate throughput with batching** — if the goal is to drive bandwidth utilization much higher, concurrency is the right lever.
 
 ## License
 

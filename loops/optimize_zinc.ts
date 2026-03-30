@@ -5,7 +5,7 @@
  * Iteratively builds, deploys, and improves the ZINC inference engine on an
  * RDNA4 test node. Each cycle:
  *   1. rsync source to remote node
- *   2. Build (zig build)
+ *   2. Build (zig build -Doptimize=ReleaseFast)
  *   3. Run (zinc --prompt ...)
  *   4. Analyze output (build errors? runtime crash? tok/s?)
  *   5. Spawn AI agent to make ONE fix or optimization
@@ -834,40 +834,47 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   diagnosis.push("- Profiling: --profile flag enables Vulkan timestamp queries + per-token GPU timing summary");
   diagnosis.push("");
   diagnosis.push("## What's ALREADY WORKING (do not break)");
-  diagnosis.push("- ✅ Forward pass: coherent output at 7.6 tok/s (up from 4.3), all 40 layers correct");
+  diagnosis.push("- ✅ Forward pass: coherent output at 33.6 tok/s clean CLI on an idle RDNA4 node, all 40 layers correct");
   diagnosis.push("- ✅ GPU SSM path: conv1d + delta-net + gated_norm shaders WORKING after swiglu_buf overflow fix");
   diagnosis.push("- ✅ GPU softmax_topk.comp: rewritten with shared memory (no subgroupBallot), RADV-compatible");
   diagnosis.push("- ✅ GPU sigmoid_scale_acc.comp: shared expert gate on GPU, no readback");
-  diagnosis.push("- ✅ Command buffer batching: single cmd buffer for all 40 layers, ~42 submits/token");
+  diagnosis.push("- ✅ GPU argmax fast path: greedy decode reads back one token id instead of full logits on the fast path");
+  diagnosis.push("- ✅ Command buffer batching: fast path stays in one submission through final norm + LM head + argmax");
   diagnosis.push("- ✅ Persistent GPU SSM state buffers (conv: 3.75MB, recurrent: 80MB)");
-  diagnosis.push("- ✅ OpenAI-compatible API server with SSE streaming, chat UI at GET /");
-  diagnosis.push("- ✅ 89 unit tests pass. Build clean on macOS and Linux.");
+  diagnosis.push("- ✅ OpenAI-compatible API server with SSE streaming, chat UI at GET /, raw /v1/completions at ~33.5 tok/s");
+  diagnosis.push("- ✅ zig build test passes. Build clean on macOS and Linux.");
   diagnosis.push("");
-  diagnosis.push("## CURRENT STATE (2026-03-28, updated)");
-  diagnosis.push("Output: CORRECT at 7.6 tok/s. GPU SSM + batching active. OpenAI API server working.");
-  diagnosis.push("Remaining bottleneck: ~42 vkQueueSubmit per token (MoE expert ID readback per layer).");
-  diagnosis.push("Memory bandwidth utilization: ~0.7% (4.1 GB/s of 576 GB/s). GPU still mostly idle.");
-  diagnosis.push("All 89 tests pass. All changes MUST pass `zig build test`.");
+  diagnosis.push("## CURRENT STATE (2026-03-30, updated)");
+  diagnosis.push("Output: CORRECT at 33.6 tok/s clean CLI and ~33.5 tok/s raw API on a clean ReleaseFast build.");
+  diagnosis.push("Reasoning chat is still slower: one longer chat sample produced 257 completion tokens at ~28.4 tok/s.");
+  diagnosis.push("Modeled decode bandwidth at 33.58 tok/s is ~112.5 GB/s (~19.5% of 576 GB/s). Single-stream decode will not saturate DRAM.");
+  diagnosis.push("Remaining bottlenecks are medium/small decode kernels, chat template/stop-path overhead, and still-intrusive profiling.");
+  diagnosis.push("All changes MUST pass `zig build test`.");
   diagnosis.push("");
   diagnosis.push("## OPTIMIZATION PRIORITY (in order):");
-  diagnosis.push("The path from 7.6 to 27+ tok/s:");
+  diagnosis.push("The path from today's >30 tok/s raw decode to >30 tok/s reasoning chat and higher aggregate GPU utilization:");
   diagnosis.push("");
-  diagnosis.push("### 1. Eliminate MoE expert ID readback (40 submits → 1)");
-  diagnosis.push("- Currently: GPU softmax_topk → readback expert_ids to CPU → CPU dispatches expert DMMVs");
-  diagnosis.push("- Target: GPU softmax_topk writes expert_ids to GPU buffer, expert dispatch reads from GPU buffer");
-  diagnosis.push("- This requires GPU-side indirect dispatch OR pre-computing all expert offsets on GPU");
-  diagnosis.push("- Alternative: batch all expert DMMVs for all 8 experts unconditionally, mask inactive ones");
+  diagnosis.push("### 1. Benchmark and close the reasoning chat gap");
+  diagnosis.push("- Compare `/v1/chat/completions` against raw `/v1/completions` with longer reasoning prompts");
+  diagnosis.push("- Measure where chat loses throughput: template application, stop handling, or extra server-side work");
+  diagnosis.push("- Prefer changes that preserve raw decode throughput while lifting the templated chat path above 30 tok/s");
   diagnosis.push("");
-  diagnosis.push("### 2. Profile actual GPU kernel time");
-  diagnosis.push("- Use --profile flag (Vulkan timestamp queries already implemented)");
-  diagnosis.push("- Identify: is DMMV the bottleneck or is it submit overhead?");
-  diagnosis.push("- If DMMV: tune workgroup sizes, shared memory, occupancy");
-  diagnosis.push("- If submit: further batching needed");
+  diagnosis.push("### 2. Make profiling representative");
+  diagnosis.push("- Use `--profile`, but first reduce its own overhead so it does not cut ReleaseFast throughput in half");
+  diagnosis.push("- Profile full-token GPU time, not partial decode work");
+  diagnosis.push("- Use the result to separate DMMV cost from elementwise and control overhead");
   diagnosis.push("");
-  diagnosis.push("### 3. Shader occupancy tuning");
-  diagnosis.push("- Q4_K DMMV is the hottest shader (runs for every weight matrix)");
-  diagnosis.push("- Current: 64 threads per workgroup, 1 row per thread");
-  diagnosis.push("- RDNA4: 64 CUs × 16 waves/SIMD × 2 SIMDs = 2048 concurrent waves");
+  diagnosis.push("### 3. Reduce hot-path Vulkan setup and binding churn");
+  diagnosis.push("- Reuse descriptor sets and static bindings where possible");
+  diagnosis.push("- Trim per-token descriptor updates and other host work that does not contribute useful math");
+  diagnosis.push("");
+  diagnosis.push("### 4. Tune the real hot decode shapes");
+  diagnosis.push("- Focus on the medium/small decode projections that dominate single-token latency");
+  diagnosis.push("- LM head matters, but it is not the only or even the main remaining limiter");
+  diagnosis.push("");
+  diagnosis.push("### 5. Use batching for higher aggregate bandwidth");
+  diagnosis.push("- Single-stream decode above 30 tok/s is already achieved");
+  diagnosis.push("- If the goal is materially higher memory-bandwidth utilization, add concurrent decode / batching");
   diagnosis.push("- Profile actual occupancy and tune tile sizes");
   diagnosis.push("");
   diagnosis.push("## APPROACHES THAT FAILED (do not retry):");

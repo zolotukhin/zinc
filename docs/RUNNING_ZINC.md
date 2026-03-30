@@ -9,7 +9,7 @@ This page is the shortest path from “the project builds” to “I can actuall
 From the repo root:
 
 ```bash
-zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 The executable will be here:
