@@ -1104,7 +1104,10 @@ fn dispatchFlashAttnOnCmd(
         .n_heads = n_heads,
         .n_kv_heads = n_kv_heads,
         .seq_len = seq_len,
-        .page_size = 1,
+        // Metal currently keeps the KV cache as a flat contiguous
+        // [token][kv_head][head_dim] buffer. Use page_size=0 to select the
+        // shader's contiguous-addressing fast path and skip page-table math.
+        .page_size = 0,
     };
     const bufs = [_]*const MetalBuffer{
         &engine.page_table_buf,
@@ -2341,6 +2344,82 @@ test "kv_cache_write shader writes K and V slices at token offset" {
 
     try std.testing.expectEqualSlices(f32, &.{ 1.0, 2.0, 3.0, 4.0 }, dst_k_ptr[dst_offset .. dst_offset + kv_dim]);
     try std.testing.expectEqualSlices(f32, &.{ 5.0, 6.0, 7.0, 8.0 }, dst_v_ptr[dst_offset .. dst_offset + kv_dim]);
+}
+
+test "flash_attn shader handles contiguous Metal KV cache fast path" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "flash_attn");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const head_dim: u32 = 4;
+    const n_heads: u32 = 1;
+    const n_kv_heads: u32 = 1;
+    const seq_len: u32 = 2;
+
+    var page_table_buf = try metal_buffer.createBuffer(ctx, seq_len * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&page_table_buf);
+    var q_buf = try metal_buffer.createBuffer(ctx, n_heads * head_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&q_buf);
+    var k_cache_buf = try metal_buffer.createBuffer(ctx, seq_len * n_kv_heads * head_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&k_cache_buf);
+    var v_cache_buf = try metal_buffer.createBuffer(ctx, seq_len * n_kv_heads * head_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&v_cache_buf);
+    var out_buf = try metal_buffer.createBuffer(ctx, n_heads * head_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&out_buf);
+
+    const page_table_ptr: [*]u32 = @ptrCast(@alignCast(page_table_buf.cpu_ptr.?));
+    page_table_ptr[0] = 0;
+    page_table_ptr[1] = 1;
+
+    const q_ptr: [*]f32 = @ptrCast(@alignCast(q_buf.cpu_ptr.?));
+    @memcpy(q_ptr[0 .. n_heads * head_dim], &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+
+    const k_ptr: [*]f32 = @ptrCast(@alignCast(k_cache_buf.cpu_ptr.?));
+    @memcpy(k_ptr[0 .. seq_len * n_kv_heads * head_dim], &[_]f32{
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+    });
+
+    const v_ptr: [*]f32 = @ptrCast(@alignCast(v_cache_buf.cpu_ptr.?));
+    @memcpy(v_ptr[0 .. seq_len * n_kv_heads * head_dim], &[_]f32{
+        10.0, 20.0, 30.0, 40.0,
+        50.0, 60.0, 70.0, 80.0,
+    });
+
+    @memset(out_buf.cpu_ptr.?[0..out_buf.size], 0);
+
+    const push = FlashAttnPush{
+        .head_dim = head_dim,
+        .n_heads = n_heads,
+        .n_kv_heads = n_kv_heads,
+        .seq_len = seq_len,
+        .page_size = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &page_table_buf, &q_buf, &k_cache_buf, &v_cache_buf, &out_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
+    cmd.commitAndWait();
+
+    var expected: [4]f32 = undefined;
+    cpuAttention(
+        q_ptr,
+        k_ptr,
+        v_ptr,
+        &expected,
+        head_dim,
+        n_heads,
+        n_kv_heads,
+        seq_len,
+    );
+
+    const out_ptr: [*]const f32 = @ptrCast(@alignCast(out_buf.cpu_ptr.?));
+    for (0..head_dim) |i| {
+        try std.testing.expectApproxEqAbs(expected[i], out_ptr[i], 0.001);
+    }
 }
 
 test "moe_weighted_acc shader adds weighted experts into destination" {

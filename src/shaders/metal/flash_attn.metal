@@ -101,11 +101,12 @@ kernel void main0(
     const uint q_base = head * p.head_dim;
     const uint vec4_dim = p.head_dim >> 2;
     const float scale = rsqrt((float)p.head_dim);
+    const bool contiguous_kv = p.page_size == 0u;
+    const uint token_stride = p.n_kv_heads * p.head_dim;
 
     threadgroup float4 q_cache4[FLASH_MAX_HEAD_VEC4];
     threadgroup float4 acc_cache4[FLASH_MAX_HEAD_VEC4];
     threadgroup float scores[FLASH_BLOCK_TOKENS];
-    threadgroup uint kv_bases[FLASH_BLOCK_TOKENS];
     threadgroup float reduce[FLASH_TG_SIZE];
     threadgroup float running_max;
     threadgroup float running_sum;
@@ -122,12 +123,14 @@ kernel void main0(
 
     for (uint block_start = 0; block_start < p.seq_len; block_start += FLASH_BLOCK_TOKENS) {
         const uint block_tokens = min(FLASH_BLOCK_TOKENS, p.seq_len - block_start);
+        const uint block_base = (block_start * token_stride) + kv_head * p.head_dim;
         float local_max = -INFINITY;
 
         for (uint token_offset = tid; token_offset < block_tokens; token_offset += FLASH_TG_SIZE) {
             const uint token_idx = block_start + token_offset;
-            const uint kv_base = kvBaseForToken(page_table, p, kv_head, token_idx);
-            kv_bases[token_offset] = kv_base;
+            const uint kv_base = contiguous_kv
+                ? (block_base + token_offset * token_stride)
+                : kvBaseForToken(page_table, p, kv_head, token_idx);
 
             float score = 0.0f;
             for (uint i = 0; i < vec4_dim; i++) {
@@ -159,10 +162,17 @@ kernel void main0(
             float4 acc = acc_cache4[tid] * rescale;
             const uint dim_base = tid << 2;
 
-            for (uint token_offset = 0; token_offset < block_tokens; token_offset++) {
-                const float weight = scores[token_offset];
-                const float4 vv = *(device const float4*)(v_cache + kv_bases[token_offset] + dim_base);
-                acc += vv * weight;
+            if (contiguous_kv) {
+                uint kv_base = block_base + dim_base;
+                for (uint token_offset = 0; token_offset < block_tokens; token_offset++) {
+                    acc += *(device const float4*)(v_cache + kv_base) * scores[token_offset];
+                    kv_base += token_stride;
+                }
+            } else {
+                for (uint token_offset = 0; token_offset < block_tokens; token_offset++) {
+                    const uint kv_base = kvBaseForToken(page_table, p, kv_head, block_start + token_offset);
+                    acc += *(device const float4*)(v_cache + kv_base + dim_base) * scores[token_offset];
+                }
             }
 
             acc_cache4[tid] = acc;
