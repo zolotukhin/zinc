@@ -14,6 +14,62 @@ constant uint FLASH_BLOCK_TOKENS = 256;
 constant uint FLASH_MAX_HEAD_DIM = 256;
 constant uint FLASH_MAX_HEAD_VEC4 = FLASH_MAX_HEAD_DIM / 4;
 
+inline float reduceThreadgroupMax(
+    float local_value,
+    threadgroup float* scratch,
+    uint tid,
+    uint subgroup_size,
+    uint simd_lane,
+    uint simd_group
+) {
+    const float wave_max = simd_max(local_value);
+    if (subgroup_size < FLASH_TG_SIZE) {
+        if (simd_lane == 0u) {
+            scratch[simd_group] = wave_max;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            const uint n_groups = (FLASH_TG_SIZE + subgroup_size - 1u) / subgroup_size;
+            float merged = -INFINITY;
+            for (uint sg = 0u; sg < n_groups; ++sg) {
+                merged = fast::max(merged, scratch[sg]);
+            }
+            scratch[0] = merged;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        return scratch[0];
+    }
+    return wave_max;
+}
+
+inline float reduceThreadgroupSum(
+    float local_value,
+    threadgroup float* scratch,
+    uint tid,
+    uint subgroup_size,
+    uint simd_lane,
+    uint simd_group
+) {
+    const float wave_sum = simd_sum(local_value);
+    if (subgroup_size < FLASH_TG_SIZE) {
+        if (simd_lane == 0u) {
+            scratch[simd_group] = wave_sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            const uint n_groups = (FLASH_TG_SIZE + subgroup_size - 1u) / subgroup_size;
+            float merged = 0.0f;
+            for (uint sg = 0u; sg < n_groups; ++sg) {
+                merged += scratch[sg];
+            }
+            scratch[0] = merged;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        return scratch[0];
+    }
+    return wave_sum;
+}
+
 inline uint kvBaseForToken(
     device const uint* page_table,
     constant FlashAttnPush& p,
@@ -35,7 +91,10 @@ kernel void main0(
     device const float* v_cache [[buffer(4)]],
     device float* out [[buffer(5)]],
     uint head [[threadgroup_position_in_grid]],
-    uint tid [[thread_position_in_threadgroup]]
+    uint tid [[thread_position_in_threadgroup]],
+    uint subgroup_size [[thread_execution_width]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
     const uint q_per_kv = max(p.n_heads / max(p.n_kv_heads, 1u), 1u);
     const uint kv_head = head / q_per_kv;
@@ -82,15 +141,7 @@ kernel void main0(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        reduce[tid] = local_max;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint stride = FLASH_TG_SIZE >> 1; stride > 0; stride >>= 1) {
-            if (tid < stride) {
-                reduce[tid] = fast::max(reduce[tid], reduce[tid + stride]);
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-        }
-        const float block_max = reduce[0];
+        const float block_max = reduceThreadgroupMax(local_max, reduce, tid, subgroup_size, simd_lane, simd_group);
         const float next_max = fast::max(running_max, block_max);
 
         float local_sum = 0.0f;
@@ -101,15 +152,7 @@ kernel void main0(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        reduce[tid] = local_sum;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint stride = FLASH_TG_SIZE >> 1; stride > 0; stride >>= 1) {
-            if (tid < stride) {
-                reduce[tid] += reduce[tid + stride];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-        }
-        const float block_sum = reduce[0];
+        const float block_sum = reduceThreadgroupSum(local_sum, reduce, tid, subgroup_size, simd_lane, simd_group);
         const float rescale = running_sum > 0.0f ? fast::exp(running_max - next_max) : 0.0f;
 
         if (tid < vec4_dim) {
