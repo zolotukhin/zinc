@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTokPerSec, parseTokensGenerated, detectPhase, isGarbageOutput, isCoherentText, buildAgentInvocation } from "./optimize_zinc";
+import { parseTokPerSec, parseTokensGenerated, detectPhase, isGarbageOutput, isCoherentText } from "./optimize_zinc";
 import type { BuildRunResult, Phase } from "./optimize_zinc";
 
 describe("parseTokPerSec", () => {
@@ -175,21 +175,5 @@ describe("no hardcoded private info", () => {
     expect(src).toContain("ZINC_USER");
     expect(src).not.toContain('"71.');
     expect(src).not.toContain("'71.");
-  });
-});
-
-describe("buildAgentInvocation", () => {
-  test("uses codex exec for codex agent", () => {
-    const invocation = buildAgentInvocation("codex", "Reply with OK");
-    expect(invocation.cmd).toBe("codex");
-    expect(invocation.args[0]).toBe("exec");
-    expect(invocation.args).toContain("--json");
-  });
-
-  test("uses claude for claude agent", () => {
-    const invocation = buildAgentInvocation("claude", "Reply with OK");
-    expect(invocation.cmd).toBe("claude");
-    expect(invocation.args[0]).toBe("-p");
-    expect(invocation.args).toContain("--output-format");
   });
 });
