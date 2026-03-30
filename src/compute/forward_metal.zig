@@ -1647,6 +1647,22 @@ fn recordGpuRoutedBatchedMoeOnCmd(
     }
 }
 
+fn acquireLayerCommand(
+    engine: *InferenceEngine,
+    shared_cmd: ?*MetalCommand,
+    local_cmd_storage: *MetalCommand,
+    using_local_cmd: *bool,
+) !*MetalCommand {
+    if (shared_cmd) |cmd| {
+        using_local_cmd.* = false;
+        return cmd;
+    }
+
+    local_cmd_storage.* = try metal_command.beginCommand(engine.device.ctx);
+    using_local_cmd.* = true;
+    return local_cmd_storage;
+}
+
 // ---------------------------------------------------------------------------
 // Decode step — runs all layers + final norm + LM head
 // ---------------------------------------------------------------------------
@@ -1670,6 +1686,17 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
     const head_v_dim: u32 = if (d_inner > 0) d_inner / @max(dt_rank, 1) else 0;
     const d_conv: u32 = cfg.ssm_d_conv;
+    const use_single_gpu_cmd = is_moe and blk: {
+        for (engine.layer_tensors) |lt| {
+            if (!canUseGpuRoutedBatchedMoe(engine, lt)) break :blk false;
+        }
+        break :blk true;
+    };
+    var shared_cmd_storage: MetalCommand = undefined;
+    const shared_cmd: ?*MetalCommand = if (use_single_gpu_cmd) blk: {
+        shared_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+        break :blk &shared_cmd_storage;
+    } else null;
 
     for (0..cfg.n_layers) |layer_idx| {
         const layer: u32 = @intCast(layer_idx);
@@ -1680,16 +1707,18 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (is_full_attn) {
             // Keep full attention on-GPU end-to-end so decode does not stall on
             // a CPU-side KV-cache copy between the prep and flash-attention steps.
-            var cmd = try metal_command.beginCommand(engine.device.ctx);
-            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            var local_cmd_storage: MetalCommand = undefined;
+            var using_local_cmd = false;
+            const cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
+            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
             cmd.barrier();
-            try dispatchFullAttnPrepOnCmd(engine, &cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
-            dispatchFlashAttnOnCmd(engine, &cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
+            try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
+            dispatchFlashAttnOnCmd(engine, cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
             cmd.barrier();
-            dispatchSigmoidMulOnCmd(engine, &cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+            dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
             cmd.barrier();
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
-            dispatchDmmvOnCmd(engine, &cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
+            dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
             {
                 const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
@@ -1697,32 +1726,35 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
             cmd.barrier();
-            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
             cmd.barrier();
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
-                dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
                 if (use_gpu_routed_moe) {
-                    try recordGpuRoutedBatchedMoeOnCmd(engine, &cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    if (shared_cmd != null) cmd.barrier();
                 }
             }
-            cmd.commitAndWait();
+            if (using_local_cmd) cmd.commitAndWait();
         } else {
             // ===== SSM: fused batch 1 + recurrent body + batch 2 =====
             // There is no CPU dependency between the SSM projections and the
             // recurrent kernels, so keep the whole path in one command buffer.
-            var cmd = try metal_command.beginCommand(engine.device.ctx);
-            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            var local_cmd_storage: MetalCommand = undefined;
+            var using_local_cmd = false;
+            const cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
+            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
             cmd.barrier();
 
             const wqkv_t = lt.attn_qkv orelse return error.MissingTensor;
             const z_t = lt.attn_gate orelse return error.MissingTensor;
             const alpha_t = lt.ssm_alpha orelse return error.MissingTensor;
             const beta_t = lt.ssm_beta orelse return error.MissingTensor;
-            dispatchDmmvOnCmd(engine, &cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
-            dispatchDmmvOnCmd(engine, &cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
-            dispatchDmmvOnCmd(engine, &cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
-            dispatchDmmvOnCmd(engine, &cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
+            dispatchDmmvOnCmd(engine, cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
+            dispatchDmmvOnCmd(engine, cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+            dispatchDmmvOnCmd(engine, cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
+            dispatchDmmvOnCmd(engine, cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
             cmd.barrier();
 
             // Conv1d: attn_out_buf → swiglu_buf
@@ -1775,7 +1807,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
             // SSM out DMMV: swiglu_buf → down_buf
             const ssm_out_t = lt.ssm_out orelse return error.MissingTensor;
-            dispatchDmmvOnCmd(engine, &cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
+            dispatchDmmvOnCmd(engine, cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
             cmd.barrier();
 
             // Residual + FFN norm + router (same as attention batch2)
@@ -1785,16 +1817,17 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
             cmd.barrier();
-            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
             cmd.barrier();
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
-                dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
                 if (use_gpu_routed_moe) {
-                    try recordGpuRoutedBatchedMoeOnCmd(engine, &cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    if (shared_cmd != null) cmd.barrier();
                 }
             }
-            cmd.commitAndWait();
+            if (using_local_cmd) cmd.commitAndWait();
         }
 
         // ===== MoE / Dense FFN =====
@@ -2009,7 +2042,12 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
     }
 
     // ===== Final: GPU norm → LM head (batched) =====
-    {
+    if (shared_cmd) |cmd| {
+        dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
+        cmd.barrier();
+        dispatchDmmvOnCmd(engine, cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
+        cmd.commitAndWait();
+    } else {
         var cmd = try metal_command.beginCommand(engine.device.ctx);
         dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
         cmd.barrier();
