@@ -148,6 +148,12 @@ const FlashAttnPush = extern struct {
     page_size: u32,
 };
 
+/// Push constants for GPU KV-cache writes.
+const KvCacheWritePush = extern struct {
+    n: u32,
+    dst_offset: u32,
+};
+
 /// Push constants for SSM conv1d + SiLU dispatch (SPIRV-Cross: buffer(0)).
 const SsmConv1dPush = extern struct {
     conv_channels: u32,
@@ -275,6 +281,7 @@ pub const InferenceEngine = struct {
     // Elementwise compute pipelines (for batched GPU dispatch)
     deinterleave_pipe: MetalPipeline,
     flash_attn_pipe: MetalPipeline,
+    kv_cache_write_pipe: MetalPipeline,
     rope_pipe: MetalPipeline,
     sigmoid_mul_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
@@ -438,6 +445,7 @@ pub const InferenceEngine = struct {
         // Elementwise pipelines for batched GPU dispatch
         self.deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
         self.flash_attn_pipe = try loadShaderPipeline(ctx, "flash_attn");
+        self.kv_cache_write_pipe = try loadShaderPipeline(ctx, "kv_cache_write");
         self.rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
         self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
@@ -727,6 +735,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_1024_pipe);
         metal_pipeline.freePipeline(&self.deinterleave_pipe);
         metal_pipeline.freePipeline(&self.flash_attn_pipe);
+        metal_pipeline.freePipeline(&self.kv_cache_write_pipe);
         metal_pipeline.freePipeline(&self.rope_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
@@ -1103,6 +1112,26 @@ fn dispatchFlashAttnOnCmd(
     cmd.dispatchV2(&engine.flash_attn_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
 }
 
+fn dispatchKvCacheWriteOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    layer_idx: usize,
+    kv_dim: u32,
+    dst_offset: u32,
+) void {
+    const push = KvCacheWritePush{
+        .n = kv_dim,
+        .dst_offset = dst_offset,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &engine.k_buf,
+        &engine.v_buf,
+        &engine.kv_k_cache[layer_idx],
+        &engine.kv_v_cache[layer_idx],
+    };
+    cmd.dispatchV2(&engine.kv_cache_write_pipe, .{ (kv_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
+}
+
 fn dispatchRopeOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -1216,6 +1245,10 @@ fn dispatchFullAttnPrepOnCmd(
 
     dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
     dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
+    cmd.barrier();
+
+    dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
+    cmd.barrier();
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
@@ -1645,51 +1678,35 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
 
         if (is_full_attn) {
-            // ===== GPU BATCH 1: attn_norm → projections =====
-            var batch1_cmd = try metal_command.beginCommand(engine.device.ctx);
-            dispatchRmsNormOnCmd(engine, &batch1_cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
-            batch1_cmd.barrier();
-            try dispatchFullAttnPrepOnCmd(engine, &batch1_cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
-            batch1_cmd.commitAndWait();
-
-            // ===== ATTENTION: CPU KV-cache write + GPU flash attention =====
-            const k_ptr: [*]f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
-            const kc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
-            const vc_ptr: [*]f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
-            const v_ptr: [*]const f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
-            const kv_offset: usize = @as(usize, engine.position) * kv_dim;
-            for (0..kv_dim) |d| {
-                kc_ptr[kv_offset + d] = k_ptr[d];
-                vc_ptr[kv_offset + d] = v_ptr[d];
-            }
-
-            // GPU batch2 for attention: flash attn → sigmoid gate → output proj → residual → norm → router
+            // Keep full attention on-GPU end-to-end so decode does not stall on
+            // a CPU-side KV-cache copy between the prep and flash-attention steps.
+            var cmd = try metal_command.beginCommand(engine.device.ctx);
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
+            try dispatchFullAttnPrepOnCmd(engine, &cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
+            dispatchFlashAttnOnCmd(engine, &cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
+            cmd.barrier();
+            dispatchSigmoidMulOnCmd(engine, &cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+            cmd.barrier();
+            const o_tensor = lt.attn_output orelse return error.MissingTensor;
+            dispatchDmmvOnCmd(engine, &cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
+            cmd.barrier();
             {
-                var cmd = try metal_command.beginCommand(engine.device.ctx);
-                dispatchFlashAttnOnCmd(engine, &cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
-                cmd.barrier();
-                dispatchSigmoidMulOnCmd(engine, &cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
-                cmd.barrier();
-                const o_tensor = lt.attn_output orelse return error.MissingTensor;
-                dispatchDmmvOnCmd(engine, &cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
-                cmd.barrier();
-                {
-                    const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                    const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
-                }
-                cmd.barrier();
-                dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
-                cmd.barrier();
-                if (is_moe) {
-                    const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
-                    dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
-                    if (use_gpu_routed_moe) {
-                        try recordGpuRoutedBatchedMoeOnCmd(engine, &cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
-                    }
-                }
-                cmd.commitAndWait();
+                const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
+            cmd.barrier();
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
+            if (is_moe) {
+                const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
+                dispatchDmmvOnCmd(engine, &cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+                if (use_gpu_routed_moe) {
+                    try recordGpuRoutedBatchedMoeOnCmd(engine, &cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                }
+            }
+            cmd.commitAndWait();
         } else {
             // ===== SSM: fused batch 1 + recurrent body + batch 2 =====
             // There is no CPU dependency between the SSM projections and the
@@ -2121,6 +2138,9 @@ test "batched MoE Metal shaders compile" {
     var flash_attn_pipe = try loadShaderPipeline(ctx, "flash_attn");
     defer metal_pipeline.freePipeline(&flash_attn_pipe);
 
+    var kv_cache_write_pipe = try loadShaderPipeline(ctx, "kv_cache_write");
+    defer metal_pipeline.freePipeline(&kv_cache_write_pipe);
+
     var rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
     defer metal_pipeline.freePipeline(&rope_pipe);
 
@@ -2157,6 +2177,7 @@ test "batched MoE Metal shaders compile" {
 
     try std.testing.expect(deinterleave_pipe.handle != null);
     try std.testing.expect(flash_attn_pipe.handle != null);
+    try std.testing.expect(kv_cache_write_pipe.handle != null);
     try std.testing.expect(rope_pipe.handle != null);
     try std.testing.expect(sigmoid_mul_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
@@ -2247,6 +2268,50 @@ test "softmax_topk shader selects top experts and normalized weights" {
     const w1: f32 = @bitCast(out_ptr[4]);
     const w2: f32 = @bitCast(out_ptr[5]);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), w0 + w1 + w2, 0.01);
+}
+
+test "kv_cache_write shader writes K and V slices at token offset" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "kv_cache_write");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const kv_dim: u32 = 4;
+    const dst_offset: u32 = 8;
+
+    var src_k = try metal_buffer.createBuffer(ctx, kv_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&src_k);
+    var src_v = try metal_buffer.createBuffer(ctx, kv_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&src_v);
+    var dst_k = try metal_buffer.createBuffer(ctx, 16 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dst_k);
+    var dst_v = try metal_buffer.createBuffer(ctx, 16 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dst_v);
+
+    const src_k_ptr: [*]f32 = @ptrCast(@alignCast(src_k.cpu_ptr.?));
+    const src_v_ptr: [*]f32 = @ptrCast(@alignCast(src_v.cpu_ptr.?));
+    const dst_k_ptr: [*]f32 = @ptrCast(@alignCast(dst_k.cpu_ptr.?));
+    const dst_v_ptr: [*]f32 = @ptrCast(@alignCast(dst_v.cpu_ptr.?));
+
+    @memcpy(src_k_ptr[0..kv_dim], &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
+    @memcpy(src_v_ptr[0..kv_dim], &[_]f32{ 5.0, 6.0, 7.0, 8.0 });
+    @memset(dst_k.cpu_ptr.?[0..dst_k.size], 0);
+    @memset(dst_v.cpu_ptr.?[0..dst_v.size], 0);
+
+    const push = KvCacheWritePush{
+        .n = kv_dim,
+        .dst_offset = dst_offset,
+    };
+    const bufs = [_]*const MetalBuffer{ &src_k, &src_v, &dst_k, &dst_v };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
+    cmd.commitAndWait();
+
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 2.0, 3.0, 4.0 }, dst_k_ptr[dst_offset .. dst_offset + kv_dim]);
+    try std.testing.expectEqualSlices(f32, &.{ 5.0, 6.0, 7.0, 8.0 }, dst_v_ptr[dst_offset .. dst_offset + kv_dim]);
 }
 
 test "moe_weighted_acc shader adds weighted experts into destination" {
