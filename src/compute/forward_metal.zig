@@ -1227,13 +1227,13 @@ fn dispatchFullAttnPrepOnCmd(
     const q_full_dim = q_dim * 2;
     const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
 
+    // Keep the full-attention prep in a single compute encoder and rely on
+    // Metal's in-order dispatch execution for the straight write->read chain.
     dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
     dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
     dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
-    cmd.barrier();
 
     dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, cfg.head_dim, cfg.n_heads);
-    cmd.barrier();
 
     if (engine.attn_q_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], cfg.head_dim, cfg.n_heads);
@@ -1241,14 +1241,11 @@ fn dispatchFullAttnPrepOnCmd(
     if (engine.attn_k_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], cfg.head_dim, cfg.n_kv_heads);
     }
-    cmd.barrier();
 
     dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
     dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
-    cmd.barrier();
 
     dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
-    cmd.barrier();
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
@@ -1705,27 +1702,23 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (is_full_attn) {
             // Keep full attention on-GPU end-to-end so decode does not stall on
             // a CPU-side KV-cache copy between the prep and flash-attention steps.
+            // This is a straight producer->consumer chain in one encoder, so
+            // avoid explicit buffer barriers between the dispatches here.
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
             const cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
-            cmd.barrier();
             try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
             dispatchFlashAttnOnCmd(engine, cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
-            cmd.barrier();
             dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
-            cmd.barrier();
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
-            cmd.barrier();
             {
                 const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
                 const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
                 cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
-            cmd.barrier();
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
-            cmd.barrier();
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
