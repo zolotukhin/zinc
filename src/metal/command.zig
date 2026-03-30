@@ -247,3 +247,49 @@ test "barrier separates dispatches" {
     try std.testing.expectApproxEqAbs(@as(f32, 20.0), result[10], 0.001); // 10*2
     try std.testing.expectApproxEqAbs(@as(f32, 126.0), result[63], 0.001); // 63*2
 }
+
+test "encoder dispatch order preserves buffer write-read chains without barrier" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    const n: u32 = 64;
+    var buf = try buffer_mod.createBuffer(ctx, n * @sizeOf(f32));
+    defer buffer_mod.freeBuffer(&buf);
+    @memset(buf.cpu_ptr.?[0 .. n * @sizeOf(f32)], 0);
+
+    const msl_write =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\kernel void main0(device float* data [[buffer(0)]],
+        \\                   uint id [[thread_position_in_grid]]) {
+        \\    data[id] = float(id);
+        \\}
+    ;
+    const msl_add =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\kernel void main0(device float* data [[buffer(0)]],
+        \\                   uint id [[thread_position_in_grid]]) {
+        \\    data[id] = data[id] + 1.0;
+        \\}
+    ;
+
+    var pipe_write = try pipeline_mod.createPipeline(ctx, msl_write, "main0");
+    defer pipeline_mod.freePipeline(&pipe_write);
+    var pipe_add = try pipeline_mod.createPipeline(ctx, msl_add, "main0");
+    defer pipeline_mod.freePipeline(&pipe_add);
+
+    var cmd = try beginCommand(ctx);
+    const bufs = [_]*const MetalBuffer{&buf};
+
+    cmd.dispatch(&pipe_write, .{ 2, 1, 1 }, .{ 32, 1, 1 }, &bufs, null, 0);
+    cmd.dispatch(&pipe_add, .{ 2, 1, 1 }, .{ 32, 1, 1 }, &bufs, null, 0);
+    cmd.commitAndWait();
+
+    const result: [*]const f32 = @ptrCast(@alignCast(buf.cpu_ptr.?));
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), result[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), result[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 11.0), result[10], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 64.0), result[63], 0.001);
+}

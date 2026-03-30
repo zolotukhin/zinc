@@ -1600,9 +1600,10 @@ fn recordGpuRoutedBatchedMoeOnCmd(
     const expert_gate_bytes = expertSliceBytes(gate_exps.info.type_, inter_dim, hidden_dim);
     const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
 
-    cmd.barrier();
+    // The GPU-routed MoE fast path is a straight producer->consumer chain in a
+    // single compute encoder. Rely on Metal's in-order dispatch execution here
+    // instead of forcing a full buffer-scope barrier between every phase.
     dispatchSoftmaxTopkOnCmd(engine, cmd, &engine.router_logits_buf, &engine.router_output_buf, cfg.n_experts, cfg.n_experts_used);
-    cmd.barrier();
 
     dispatchDmmvMoeQ4kOnCmd(engine, cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
     dispatchDmmvMoeQ4kOnCmd(engine, cmd, up_exps, &engine.norm_buf, &engine.expert_up_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
@@ -1613,7 +1614,6 @@ fn recordGpuRoutedBatchedMoeOnCmd(
             dispatchDmmvOnCmd(engine, cmd, tensor, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
         }
     }
-    cmd.barrier();
 
     {
         const swiglu_push = SwiGLUPush{ .n = inter_dim };
@@ -1625,13 +1625,11 @@ fn recordGpuRoutedBatchedMoeOnCmd(
         const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
         cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
     }
-    cmd.barrier();
 
     dispatchDmmvMoeQ4kOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
     }
-    cmd.barrier();
 
     // Fold the MoE residual add into the weighted accumulation shader so the
     // fast GPU-routed path does not bounce through an extra hidden-sized buffer.
