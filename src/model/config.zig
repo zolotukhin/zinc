@@ -10,6 +10,7 @@ pub const Architecture = enum {
     mistral,
     qwen2,
     qwen2_moe,
+    qwen35,
     mamba,
     jamba,
     unknown,
@@ -27,6 +28,7 @@ pub const ModelConfig = struct {
     vocab_size: u32,
     context_length: u32,
     rope_freq_base: f32,
+    rms_norm_eps: f32 = 1e-6,
     n_experts: u32,
     n_experts_used: u32,
     rope_dim: u32,
@@ -47,6 +49,7 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "qwen2moe")) return .qwen2_moe;
     if (std.mem.eql(u8, arch_str, "qwen3moe")) return .qwen2_moe;
     if (std.mem.eql(u8, arch_str, "qwen35moe")) return .qwen2_moe;
+    if (std.mem.eql(u8, arch_str, "qwen35")) return .qwen35;
     if (std.mem.eql(u8, arch_str, "mamba")) return .mamba;
     if (std.mem.eql(u8, arch_str, "jamba")) return .jamba;
     return .unknown;
@@ -58,6 +61,7 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen3moe"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen35moe"));
+    try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));
     try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }

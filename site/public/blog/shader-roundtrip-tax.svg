@@ -1,0 +1,62 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="760" rx="28" fill="#F7F4EF"/>
+  <rect x="36" y="36" width="1128" height="688" rx="24" fill="#FFFDF9" stroke="#DCCFBE" stroke-width="2"/>
+
+  <text x="72" y="96" fill="#1D1D1F" font-family="SF Pro Display, Inter, sans-serif" font-size="34" font-weight="700">The performance tax was CPU round trips, not raw GPU math</text>
+  <text x="72" y="130" fill="#6A635B" font-family="SF Pro Text, Inter, sans-serif" font-size="18">Before the shader move, decode kept crossing the PCIe boundary in the middle of every token.</text>
+
+  <rect x="72" y="176" width="492" height="472" rx="26" fill="#FFF6F3" stroke="#E7C9BE" stroke-width="2"/>
+  <text x="104" y="222" fill="#9A3E1A" font-family="SF Pro Display, Inter, sans-serif" font-size="28" font-weight="700">Old path</text>
+  <text x="104" y="252" fill="#7B685D" font-family="SF Pro Text, Inter, sans-serif" font-size="17">GPU work kept handing control back to host code.</text>
+
+  <rect x="128" y="294" width="380" height="74" rx="18" fill="#FFFFFF" stroke="#E5D6CA"/>
+  <text x="158" y="338" fill="#242529" font-family="SF Pro Text, Inter, sans-serif" font-size="21" font-weight="600">GPU projections</text>
+
+  <rect x="128" y="412" width="380" height="88" rx="18" fill="#FFFFFF" stroke="#E5D6CA"/>
+  <text x="158" y="448" fill="#242529" font-family="SF Pro Text, Inter, sans-serif" font-size="21" font-weight="600">CPU SSM work</text>
+  <text x="158" y="474" fill="#776F68" font-family="SF Pro Text, Inter, sans-serif" font-size="15">conv1d, delta-net state update, gated norm</text>
+
+  <rect x="128" y="544" width="380" height="74" rx="18" fill="#FFFFFF" stroke="#E5D6CA"/>
+  <text x="158" y="588" fill="#242529" font-family="SF Pro Text, Inter, sans-serif" font-size="21" font-weight="600">CPU router top-k</text>
+
+  <path d="M318 368V404" stroke="#C97855" stroke-width="4" stroke-linecap="round"/>
+  <path d="M306 392L318 412L330 392" fill="#C97855"/>
+  <path d="M318 500V536" stroke="#C97855" stroke-width="4" stroke-linecap="round"/>
+  <path d="M306 524L318 544L330 524" fill="#C97855"/>
+
+  <text x="352" y="392" fill="#9A3E1A" font-family="SF Pro Text, Inter, sans-serif" font-size="14" font-weight="700">read back, touch on CPU, upload again</text>
+  <text x="352" y="524" fill="#9A3E1A" font-family="SF Pro Text, Inter, sans-serif" font-size="14" font-weight="700">another host decision in the decode loop</text>
+
+  <rect x="128" y="646" width="380" height="56" rx="16" fill="#9A3E1A"/>
+  <text x="157" y="681" fill="#FFF7F3" font-family="SF Pro Display, Inter, sans-serif" font-size="28" font-weight="700">~151 submits / token</text>
+
+  <rect x="636" y="176" width="492" height="472" rx="26" fill="#F5FBF8" stroke="#C8DED2" stroke-width="2"/>
+  <text x="668" y="222" fill="#1D7A53" font-family="SF Pro Display, Inter, sans-serif" font-size="28" font-weight="700">New path</text>
+  <text x="668" y="252" fill="#61756C" font-family="SF Pro Text, Inter, sans-serif" font-size="17">Keep the SSM chain and routing decisions on-device.</text>
+
+  <rect x="692" y="286" width="118" height="66" rx="18" fill="#FFFFFF" stroke="#D5E7DE"/>
+  <text x="718" y="327" fill="#21352D" font-family="SF Pro Text, Inter, sans-serif" font-size="18" font-weight="600">conv1d</text>
+
+  <rect x="824" y="286" width="118" height="66" rx="18" fill="#FFFFFF" stroke="#D5E7DE"/>
+  <text x="840" y="327" fill="#21352D" font-family="SF Pro Text, Inter, sans-serif" font-size="18" font-weight="600">delta-net</text>
+
+  <rect x="956" y="286" width="118" height="66" rx="18" fill="#FFFFFF" stroke="#D5E7DE"/>
+  <text x="974" y="327" fill="#21352D" font-family="SF Pro Text, Inter, sans-serif" font-size="18" font-weight="600">gated norm</text>
+
+  <path d="M810 319H822" stroke="#55A57F" stroke-width="4" stroke-linecap="round"/>
+  <path d="M814 309L830 319L814 329" fill="#55A57F"/>
+  <path d="M942 319H954" stroke="#55A57F" stroke-width="4" stroke-linecap="round"/>
+  <path d="M946 309L962 319L946 329" fill="#55A57F"/>
+
+  <rect x="724" y="430" width="316" height="82" rx="20" fill="#FFFFFF" stroke="#D5E7DE"/>
+  <text x="756" y="468" fill="#21352D" font-family="SF Pro Text, Inter, sans-serif" font-size="22" font-weight="600">GPU router top-k</text>
+  <text x="756" y="494" fill="#667A71" font-family="SF Pro Text, Inter, sans-serif" font-size="15">Softmax and expert IDs stay in device memory</text>
+
+  <path d="M882 352V420" stroke="#55A57F" stroke-width="4" stroke-linecap="round"/>
+  <path d="M870 408L882 428L894 408" fill="#55A57F"/>
+
+  <rect x="692" y="560" width="380" height="58" rx="16" fill="#1D7A53"/>
+  <text x="721" y="596" fill="#F5FFF9" font-family="SF Pro Display, Inter, sans-serif" font-size="28" font-weight="700">~42 submits / token</text>
+
+  <text x="668" y="664" fill="#61756C" font-family="SF Pro Text, Inter, sans-serif" font-size="16">Same model. Same GPU. Much less waiting on the host.</text>
+</svg>

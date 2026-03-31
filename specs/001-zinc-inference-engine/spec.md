@@ -118,7 +118,7 @@ A user loads a Qwen MoE or Mamba/Jamba hybrid model. The engine correctly handle
 - **SC-004**: DMMV bandwidth utilization is 93%+ for large matrices (m >= 248320) and 83%+ for medium matrices (m >= 8192).
 - **SC-005**: TurboQuant 3-bit KV compression achieves 5x memory reduction with >99.5% attention cosine similarity vs FP16 baseline.
 - **SC-006**: RX 9070 XT (16GB) serves 8+ concurrent 8K-context sessions on Qwen3-8B Q4_K with TQ-3bit enabled.
-- **SC-007**: All GPU kernel outputs achieve >99.5% cosine similarity against llama.cpp or PyTorch reference implementation.
+- **SC-007**: All GPU kernel outputs achieve >99.5% cosine similarity against llama.cpp or the archived reference implementation.
 - **SC-008**: OpenAI API compatibility allows drop-in replacement for existing clients using /v1/chat/completions with streaming.
 
 ## Assumptions

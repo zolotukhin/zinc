@@ -52,58 +52,116 @@ ZINC takes the hardware these cards already have — 576 GB/s memory bandwidth, 
 
 **Drop-in compatible.** The API is OpenAI-compatible — point your existing client at it and it works. No ROCm, no CUDA, no driver stack to fight. One binary, one GPU, production inference on a $550 card.
 
-## Supported Models
+## Tested Models
 
-ZINC runs GGUF models. The following architectures are supported:
+The table below is intentionally narrow: it lists the exact GGUFs we have revalidated end-to-end, not a broader wishlist of architectures that might work.
 
-| Architecture | Models | Recommended GGUF |
-|-------------|--------|-----------------|
-| **Qwen3.5 MoE** (hybrid SSM+attention) | [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) (21 GB) |
-| **Qwen3 MoE** | [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | [Q4_K_M](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF) |
-| **Qwen2 MoE** | [Qwen2.5-32B](https://huggingface.co/Qwen/Qwen2.5-32B) | [Q4_K_M](https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF) |
-| **LLaMA / Mistral** | [LLaMA 3.1 8B](https://huggingface.co/meta-llama/Llama-3.1-8B), [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.3) | [Q4_K_M](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF) |
-| **Mamba / Jamba** (SSM hybrid) | [Jamba-v0.1](https://huggingface.co/ai21labs/Jamba-v0.1) | GGUF via llama.cpp convert |
+| Model | Exact GGUF tested | Measured throughput on AI PRO R9700 |
+|------|--------------------|-------------------------------------|
+| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 8.33 tok/s prefill, 7.17 tok/s decode |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 33.58 tok/s decode (CLI), 33.55 tok/s raw API, 28.40 tok/s reasoning chat |
 
-> **Primary test model**: [Qwen3.5-35B-A3B-UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) — a hybrid attention+SSM+MoE model (35B total, 3B active per token). Fits in 21 GB VRAM with full context.
+Benchmark details for the numbers above:
 
-**Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, F16
+- Hardware: AMD Radeon AI PRO R9700 (RDNA4, 32 GB)
+- Build: `zig build -Doptimize=ReleaseFast`
+- Prompt: CLI and raw API use `"The capital of France is"`; the reasoning chat sample used a step-by-step arithmetic prompt
+- Run shape: 256 generated tokens for the 35B CLI and raw API numbers, with `RADV_PERFTEST=coop_matrix`
+- Latest 35B validation date: 2026-03-30
+- Validation: coherent output on CLI, raw `/v1/completions`, and `/v1/chat/completions`
+
+The 2B row above still reflects the earlier 2026-03-29 single-stream CLI validation. The 35B row is the latest clean-node ReleaseFast remeasurement.
+
+**Quantization formats implemented in the current kernels**: Q4_K, Q5_K, Q6_K, Q8_0, F16
 
 ## Quick Start
 
 ### Prerequisites
 
-| Tool | Version | Install |
-|------|---------|---------|
-| Zig | 0.15.2+ | [ziglang.org/download](https://ziglang.org/download/) |
-| Vulkan SDK | 1.3+ | `apt install libvulkan-dev vulkan-tools` (Linux) or `brew install vulkan-loader vulkan-headers` (macOS) |
-| glslc | shaderc 2023.8 | `apt install glslc` (Linux only, Ubuntu 24.04) |
-| Bun | 1.0+ | `curl -fsSL https://bun.sh/install \| bash` |
+| Tool | Install |
+|------|---------|
+| Zig 0.15.2+ | [ziglang.org/download](https://ziglang.org/download/) |
+| Vulkan loader + tools | `apt install libvulkan-dev vulkan-tools` (Linux) or `brew install vulkan-loader vulkan-headers` (macOS) |
+| `glslc` on Linux | `apt install glslc` |
+| Bun for tests and the docs site | `curl -fsSL https://bun.sh/install \| bash` |
 
-**Important**: On Linux with RDNA4, newer glslc versions (v2026.2+) cause a 5x performance regression. Use the system package version only.
+**Important**: On Linux with RDNA4, newer `glslc` releases can cause a large regression. Use the system package version.
 
-### Build
+### Build ZINC
 
 ```bash
-# Clone
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 
-# Build (macOS: shaders skipped; Linux: shaders compiled automatically)
-zig build
-
-# Force shader compilation on any platform
-zig build -Dshaders=true
+# Build the CLI and server
+# macOS: shaders are skipped
+# Linux: shaders are compiled automatically
+zig build -Doptimize=ReleaseFast
 ```
 
 The binary is placed in `zig-out/bin/zinc`. Compiled SPIR-V shaders go to `zig-out/share/zinc/shaders/`.
+Use `ReleaseFast` for any performance measurement or server deployment. Plain `zig build` is not a fair throughput baseline.
 
-### Run Inference (CLI mode)
+### Run a Preflight Check First
+
+Before your first prompt, run `--check`. The target state is a clean `READY [OK]` run with no warnings.
+
+```bash
+# General machine + Vulkan + shader preflight
+./zig-out/bin/zinc --check
+
+# Recommended on RDNA4 before measuring performance
+export RADV_PERFTEST=coop_matrix
+./zig-out/bin/zinc --check
+
+# Check one exact GGUF file
+./zig-out/bin/zinc --check -m /path/to/model.gguf
+
+# Check one managed catalog model by id
+./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
+```
+
+`--check` verifies:
+
+- host environment and RDNA4-specific shell hints
+- compiled shader assets
+- Vulkan device discovery and the selected GPU
+- GGUF metadata when you pass `-m /path/to/model.gguf`
+- managed-model compatibility when you pass `--model-id <id>`
+- estimated single-GPU VRAM fit for the current runtime
+
+If `--check` reports warnings, treat them as setup work to finish before judging runtime behavior. For the full walkthrough, see [Running ZINC](docs/RUNNING_ZINC.md) and [Hardware requirements](docs/HARDWARE_REQUIREMENTS.md).
+
+### Pick a Model
+
+ZINC now ships with a small built-in managed catalog of models that have been explicitly revalidated on specific GPU profiles.
+
+```bash
+# Show only models that are both tested for the detected GPU
+# and estimated to fit the current VRAM budget
+./zig-out/bin/zinc model list
+
+# Download one managed model into the local cache
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+
+# Set the default managed model for future runs
+./zig-out/bin/zinc model use qwen35-2b-q4k-m
+
+# See the current default selection
+./zig-out/bin/zinc model active
+```
+
+On the shared RDNA4 host on March 29, 2026, `./zig-out/bin/zinc model list` reported both built-in Qwen3.5 entries as `supported` with `Fit yes`.
+
+If you want the full catalog even when Vulkan is unavailable locally, run `./zig-out/bin/zinc model list --all`.
+
+### Run a Prompt
 
 ```bash
 ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"
 ```
 
-### Run as Server
+### Run the Server
 
 Start the server — no `--prompt` flag means server mode:
 
@@ -113,65 +171,56 @@ Start the server — no `--prompt` flag means server mode:
 
 Then open **http://localhost:8080/** in your browser for the built-in chat interface.
 
-#### OpenAI-Compatible API
+### Use the API
 
-The server exposes an OpenAI-compatible API at `/v1`. Use it as a drop-in replacement for any OpenAI client:
+ZINC exposes an OpenAI-compatible API at `/v1`.
+
+For the actual request examples and SDK usage, use the website docs instead of the README:
+
+- [Running ZINC](https://zolotukhin.ai/zinc/docs/running-zinc) for CLI, server mode, and first-run examples
+- [Serving HTTP API](https://zolotukhin.ai/zinc/docs/api) for `curl`, OpenAI SDK examples, endpoint behavior, and response shapes
+
+The built-in chat UI is served at `/`, the API is under `/v1`, and the health endpoint is `/health`.
+
+## Development
+
+### Development Setup
+
+If you are working on ZINC itself, install Bun too. Zig is required for the engine, and Bun is used for repo tooling, tests, and the docs site.
 
 ```bash
-# Chat completion (streaming)
-curl -N http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.5-35b","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+git clone https://github.com/zolotukhin/zinc.git
+cd zinc
 
-# Chat completion (non-streaming)
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.5-35b","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":32}'
+# Build the project
+zig build -Doptimize=ReleaseFast
 
-# List models
-curl http://localhost:8080/v1/models
+# Run Zig + Bun tests
+zig build test --summary all
 
-# Health check
-curl http://localhost:8080/health
+# Require the integration smoke tests too
+# Fails if the smoke env vars below are missing
+ZINC_QWEN35_2B_MODEL=/path/to/Qwen3.5-2B-Q4_K_M.gguf \
+ZINC_QWEN35_35B_MODEL=/path/to/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+ZINC_API_BASE_URL=http://localhost:8080/v1 \
+zig build test --summary all -Dfull-tests=true
 ```
 
-#### Use with OpenAI SDKs
+If you only want the Bun suite:
 
-```python
-# Python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
-for chunk in client.chat.completions.create(
-    model="qwen3.5-35b",
-    messages=[{"role": "user", "content": "Hello!"}],
-    stream=True,
-):
-    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```bash
+bun test
 ```
 
-```javascript
-// Node.js
-import OpenAI from "openai";
-const client = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "unused" });
-const stream = await client.chat.completions.create({
-  model: "qwen3.5-35b",
-  messages: [{ role: "user", content: "Hello!" }],
-  stream: true,
-});
-for await (const chunk of stream) {
-  process.stdout.write(chunk.choices[0]?.delta?.content || "");
-}
+If you are changing website docs in `site/`:
+
+```bash
+cd site
+bun install
+bun run dev
 ```
 
-#### Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Built-in chat interface |
-| GET | `/health` | Server status and model info |
-| GET | `/v1/models` | List loaded models |
-| POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
-| POST | `/v1/completions` | Text completion |
+For contributor workflow and expectations, see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ### Export Decode Graph Artifacts
 
@@ -190,25 +239,31 @@ for await (const chunk of stream) {
 
 ### Visualize the Decode Graph
 
-The graph export is intended for debugging and performance work before adding a richer runtime profiler. The two outputs serve different purposes:
+The graph export is intended for debugging and performance work before adding a richer runtime profiler. The JSON report is the main analysis artifact, and the DOT file is optional.
 
-- `decode-graph.json`: machine-readable structure for scripts, dashboards, or a future custom viewer
-- `decode-graph.dot`: quick visual rendering through Graphviz
+- `decode-graph.json`: model-aware analysis report with bytes, FLOPs, hotspots, and bottleneck labels
+- `decode-graph.dot`: full dependency graph for Graphviz rendering
 
 Typical workflow:
 
 ```bash
-# 1. Export both artifacts
+# 1. Export the analysis JSON, and DOT if you want the raw structure too
 ./zig-out/bin/zinc -m /path/to/model.gguf \
   --graph-report decode-graph.json \
   --graph-dot decode-graph.dot
 
-# 2. Render the DOT file to SVG
-dot -Tsvg decode-graph.dot -o decode-graph.svg
+# 2. Render the readable HTML dashboard with Bun
+bun run graph:render -- decode-graph.json decode-graph-report.html
 
-# 3. Open the rendered graph
-open decode-graph.svg   # macOS
-# xdg-open decode-graph.svg   # Linux
+# 3. Open the report
+open decode-graph-report.html   # macOS
+# xdg-open decode-graph-report.html   # Linux
+```
+
+If you want the raw dependency graph as an image and have Graphviz installed:
+
+```bash
+dot -Tsvg decode-graph.dot -o decode-graph.svg
 ```
 
 Useful JSON inspection commands:
@@ -237,7 +292,24 @@ How to read the output:
 
 The DOT export highlights critical-path nodes in red so you can see the longest chain immediately. The JSON export is the better source for automated analysis or a future in-browser visualizer.
 
-### CLI Reference
+## Contributing
+
+Outside help is useful, especially for:
+
+- bug reproduction on more hardware and operating systems
+- build and packaging fixes
+- docs and API polish
+- test coverage
+- performance diagnostics and benchmark tooling
+
+Start with [CONTRIBUTING.md](./CONTRIBUTING.md). If you are reporting a bug or regression, include the exact hardware, model, driver/runtime, and command you used.
+
+Project expectations and planning live here:
+
+- [Code of Conduct](./CODE_OF_CONDUCT.md)
+- [Roadmap](./docs/ROADMAP.md)
+
+## CLI Reference
 
 ```
 Usage: zinc [options]
@@ -250,6 +322,7 @@ Usage: zinc [options]
   --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
   --graph-report <path>    Write decode-graph JSON report from GGUF metadata
   --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
+  --debug                  Enable verbose debug logging (or set ZINC_DEBUG=1)
   -h, --help               Show this help
 ```
 
@@ -275,7 +348,6 @@ This repo keeps its Spec Kit workflow in `.specify/`.
 - Claude uses the existing command docs in `.claude/commands/speckit.*.md`.
 - Codex uses skills in `.agents/skills/speckit-*`, matching Spec Kit `--ai-skills` mode.
 - For Codex, prefer the `speckit-*` skills over custom prompt files.
-
 ## Self-Improving Optimization Loop
 
 ZINC includes an AI-powered self-improving loop that iteratively builds, deploys, and fixes/optimizes the engine on real RDNA4 hardware.
@@ -315,7 +387,7 @@ bun loops/optimize_zinc.ts --resume .zinc_optimize/2026-03-26T...
 
 Each cycle:
 1. **rsync** local source to the remote RDNA4 node
-2. **Build** via `zig build` (compiles Zig + GLSL shaders)
+2. **Build** via `zig build -Doptimize=ReleaseFast` (compiles Zig + GLSL shaders)
 3. **Run** `zinc --prompt ...` and capture output
 4. **Analyze** — build errors? runtime crash? tok/s metrics?
 5. **Spawn Claude** with full context (errors, history, RDNA4 constraints)
@@ -351,124 +423,34 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 
 ## Benchmarks
 
-All numbers measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B Q4_K_XL** (20.7 GiB, MoE 35B total / 3B active).
-Same hardware, same model, same prompt (`"The capital of France is"`), 32 generated tokens. Benchmarked 2026-03-28.
+All numbers below were measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) with **Qwen3.5-35B-A3B-UD Q4_K_XL** on a clean RDNA4 node using `RADV_PERFTEST=coop_matrix` and `zig build -Doptimize=ReleaseFast`.
 
-### Decode throughput (tok/s, higher is better)
+### Current 35B Snapshot (2026-03-30)
 
-```
-       Qwen3.5-35B-A3B Q4_K_XL — Decode, AI PRO R9700
+| Path | Shape | Result |
+|------|-------|--------|
+| CLI decode | `--prompt "The capital of France is"`; 256 generated tokens | **33.58 tok/s**, `29.8 ms/tok` |
+| Raw HTTP | `POST /v1/completions`, `concurrency=1`, `max_tokens=256` | **33.55 tok/s** |
+| Raw HTTP | `POST /v1/completions`, `concurrency=4`, `max_tokens=256` | **33.98 tok/s aggregate**, `18.84s` avg latency, `29.01s` p95 |
+| Reasoning chat sample | `POST /v1/chat/completions`, 257-token step-by-step arithmetic answer | **28.40 tok/s** |
 
-  llama.cpp      ██████████████████████████████████████░░  107 tok/s
-  (baseline)
+For reference, the current llama.cpp baseline on the same node and model is about **107 tok/s decode**.
 
-  ZINC           ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  7.6 tok/s
-  (current)
+### What These Numbers Mean
 
-  ZINC           ██████████████████████████████████████░░  110+ tok/s
-  (target)
-```
+- The clean ReleaseFast decode path is already above the `30 tok/s` mark on this 35B model.
+- The raw OpenAI-compatible `/v1/completions` route is now essentially at CLI speed, so server overhead is no longer the main story on the non-chat path.
+- The remaining gap is the chat/reasoning route: longer templated chat answers are still slower than raw decode, and that is where the next round of work is focused.
 
-### Comparison
+### Why GPU Bandwidth Is Still Not "Full"
 
-| Metric | llama.cpp (baseline) | ZINC (current) | ZINC (target) |
-|--------|:---:|:---:|:---:|
-| **Decode** | 107 tok/s | 7.6 tok/s | 110+ tok/s |
-| **Coherent output** | Yes | Yes | Yes |
-| **BW utilization** | ~85% | 0.7% (4.1 GB/s) | 90%+ |
-| **GPU syncs/token** | 1 | ~42 | 1–2 |
-| **Flash attention** | Yes | Yes | Yes |
-| **RDNA4-tuned DMMV** | No | Yes | Yes |
-| **Native BPE tokenizer** | Yes | Yes (from GGUF) | Yes |
-| **OpenAI API server** | Yes | Yes (streaming) | Yes |
-| **Continuous batching** | Yes | Phase 4 | Yes |
-| **TurboQuant KV** | No | Phase 5 | Yes |
+At `33.58 tok/s`, the modeled full-token decode bandwidth is about **112.5 GB/s**, or **19.5%** of the card's `576 GB/s` peak.
 
-> **Baseline setup**: llama-server (build `3306dba`) with `RADV_PERFTEST=coop_matrix`, `--flash-attn on`, `--mlock`, `-ngl 99`, `-ctk q8_0 -ctv q8_0`. Mesa 25.0.7, GECC disabled (`amdgpu.ras_enable=0`). See [RDNA4 Tuning Guide](docs/RDNA4_TUNING.md) and [AGENTS.md](AGENTS.md) for full setup and reproduction steps.
+That is not a contradiction. Single-stream decode is not a pure DRAM-streaming workload. The remaining headroom is dominated by serialized medium/small kernels and graph depth, not by large host-side stalls. If the goal is to drive memory bandwidth materially higher than this, the next lever is **concurrent decode / batching**, not expecting one stream to saturate all DRAM bandwidth on its own.
 
-### Why 25x slower than llama.cpp
+### Historical Note
 
-The gap is almost entirely **CPU-GPU synchronization overhead**, not GPU compute speed. Each decode token currently requires ~120 `vkQueueSubmit` + fence-wait round-trips:
-
-- **MoE routing** requires GPU-to-CPU readback of router logits per layer (40 layers)
-- **Shared expert gating** needs another readback per layer
-- **End-of-layer submit** flushes the command buffer after each layer
-- Each round-trip costs ~1–2 ms on RDNA4, totaling ~120–240 ms of pure sync overhead per token
-
-At 256 ms/tok with 542 MB read per token, the GPU itself is idle >95% of the time. The fix is recording the full decode graph as a single command buffer with on-GPU MoE routing — the same approach llama.cpp uses.
-
-### Output quality
-
-ZINC produces **coherent, correct reasoning output** — matching llama.cpp's behavior on the same model:
-
-```
-Prompt:  "The capital of France is"
-Output:  "Paris. The capital of France is Paris. The capital of France is Paris."
-
-         <think>
-         </think>
-
-         That is correct. **Paris** is indeed the capital of France. It is the
-         country's largest city and serves as its center for finance, commerce,
-         culture, arts, fashion, and science.
-
-         You repeated the sentence three times, which emphasizes the fact! Is
-         there anything else you'd like to know about Paris or France?
-```
-
-First-token logit ranking matches llama.cpp (Paris top, `a` in top-5). GPU-CPU numerical accuracy verified: embedding, RMS norm, DMMV (Q4_K/Q5_K/Q8_0), and LM head logits all match CPU reference within floating-point tolerance.
-
-## Optimization Loop Results
-
-The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), with an AI agent iteratively fixing and optimizing the forward pass on real RDNA4 hardware.
-
-### Performance progression
-
-```
-  tok/s    Qwen3.5-35B-A3B Q4_K_XL, AI PRO R9700
-  8.0 ┤                                                      ╭─ 7.64 (best)
-       │                                                ╭────╯
-  7.0 ┤                                                │
-       │                                                │
-  6.0 ┤                                                │
-       │                                                │
-  5.0 ┤                                                │
-       │                                        ╭──────╯ GPU SSM + batching
-  4.0 ┤                  ╭──────────────────────╯── 4.3
-       │                  │
-  3.0 ┤                  │
-       │                  │
-  2.0 ┤  ────────────────╯
-       │
-  1.0 ┤──╮
-       └──┴──────────────────────────────────────────────── cycles
-       0  43         87       102      145     186    200+
-       Mar 27 AM    Mar 27 PM Mar 28   Codex   Phase 3c
-```
-
-| Phase | Cycles | tok/s | Key change |
-|-------|-------:|------:|------------|
-| First correct run | 43 | 1.2–2.4 | Forward pass executing all 40 layers + MoE + SSM |
-| Bug fixes | 44 | 2.3 → 4.0 | Q4_K sub-block pairing fix (1.7x jump at cycle 20) |
-| Coherent output | 15 | 3.8–4.1 | Q5_K element ordering fix → first correct text |
-| Optimization plateau | 84 | 3.9–4.3 | Minor gains; bottleneck is sync overhead, not compute |
-| GPU SSM + batching | 15+ | 4.3 → 7.6 | GPU SSM shaders, cmd buffer batching, swiglu_buf overflow fix |
-
-### Key bugs found by the loop
-
-| Bug | Impact | Cycle |
-|-----|--------|-------|
-| Q4_K sub-block pairing: `(sp, sp+4)` → `(2*sp, 2*sp+1)` | 1.7x speedup (2.3 → 3.9 tok/s) | 16-50/C19 |
-| Q5_K element ordering: interleaved → contiguous sub-blocks | Garbage → coherent output | 06-38/C05 |
-| Q8_0/F16 wave32 subgroup: lost half the dot product | Partial correctness | 16-50/C03 |
-| Shared expert intermediate dim: 1408 → 5632 | Wrong FFN output | 16-50/C26 |
-| Shared expert sigmoid gating: was TODO, now implemented | Missing computation | 16-50/C08 |
-| SSM conv1d ordering: convolve before state update | Double-counting input | 16-50/C06 |
-| Q4_K SPEC_K: fixed constant → push-constant K | Wrong for non-hidden-dim projections | 16-50/C09 |
-| SSM delta-net K/Q head mapping: division → modular | Wrong head assignment | 02-57/C06 |
-| attn_out_buf overflow: `q_dim*4` → `q_dim*2*4` | Buffer overwrite | 16-50/C14 |
-
-46 changes kept out of 186 cycles (25% acceptance rate).
+The older March 27–29 optimization logs in `.zinc_optimize/` were useful for correctness and early performance work, but many of the old `7–16 tok/s` figures came from debug-heavy or non-`ReleaseFast` builds. The snapshot above is the current clean baseline to compare against.
 
 ## Current Status
 
@@ -480,9 +462,9 @@ The self-improving loop ran **186 cycles** across 6 sessions (March 27–28), wi
 | Native BPE tokenizer (from GGUF) | Done |
 | GLSL compute shaders (16) | Done |
 | Compute graph + architecture builders | Done |
-| Forward pass (decode loop) | Working — 7.6 tok/s, coherent output |
-| GPU SSM shaders + cmd batching | Done — 42 syncs/token (was 151) |
-| HTTP server + OpenAI API | Done — streaming SSE, chat completions |
+| Forward pass (decode loop) | Working — 33.58 tok/s clean CLI on Qwen3.5-35B-A3B-UD |
+| GPU SSM shaders + cmd batching | Done — clean ReleaseFast path is above 30 tok/s |
+| HTTP server + OpenAI API | Done — raw API ~33.5 tok/s, reasoning chat sample 28.4 tok/s |
 | Continuous batching | Phase 4 |
 | TurboQuant KV compression | Phase 5 |
 
@@ -490,12 +472,13 @@ Validated on AMD Radeon AI PRO R9700 (RDNA4): Vulkan 1.3 init, GGUF parsing, 21 
 
 ## Next Steps
 
-The path from 7.6 to 110+ tok/s:
+The next push is from "raw decode above 30" to "reasoning workloads above 30 and better aggregate GPU utilization":
 
-1. **Fix GPU SSM shader correctness** — GPU SSM shaders are implemented but produce wrong output on some paths. Debug delta-net state update indexing.
-2. **GPU-side MoE expert dispatch** — Eliminate the remaining ~40 submits/token for expert ID readback.
-3. **Profiling + kernel tuning** — With sync overhead gone, profile actual GPU kernel time. Tune DMMV tile sizes, shared memory usage, and occupancy for RDNA4.
-4. **Continuous batching** — Serve multiple concurrent requests with interleaved prefill/decode.
+1. **Close the chat/reasoning gap** — benchmark longer chat prompts, template overhead, stop behavior, and TTFT so `/v1/chat/completions` tracks closer to the raw decode path.
+2. **Make profiling representative** — `--profile` is still too intrusive in `ReleaseFast`, so it is not yet the right leaderboard tool for apples-to-apples throughput claims.
+3. **Reduce hot-path descriptor churn** — reuse bindings and trim per-token Vulkan setup in the decode loop.
+4. **Tune the actual hot shapes** — focus on medium/small decode kernels, not just the vocab projection.
+5. **Increase aggregate throughput with batching** — if the goal is to drive bandwidth utilization much higher, concurrency is the right lever.
 
 ## License
 

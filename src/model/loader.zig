@@ -18,6 +18,14 @@ pub const Architecture = config_mod.Architecture;
 
 pub const ModelConfig = config_mod.ModelConfig;
 
+pub const ModelInspection = struct {
+    config: ModelConfig,
+    file_size: u64,
+    tensor_bytes: u64,
+    tensor_count: u64,
+    metadata_count: usize,
+};
+
 /// A tensor descriptor paired with the GPU buffer that stores its contents.
 pub const LoadedTensor = struct {
     /// GGUF tensor descriptor.
@@ -68,7 +76,7 @@ pub const Model = struct {
 const parseArchitecture = config_mod.parseArchitecture;
 
 /// Extract model configuration from GGUF metadata.
-fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
+fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelConfig {
     const arch_str = gf.getString("general.architecture") orelse "unknown";
     const arch = parseArchitecture(arch_str);
     const prefix = arch_str;
@@ -146,6 +154,10 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
 
     // RoPE dimension count (partial rotation / IMRoPE)
     const rope_dim = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.dimension_count", .{prefix}) catch "") orelse 0;
+    const rms_norm_eps = blk: {
+        const key = std.fmt.bufPrint(&key_buf, "{s}.attention.layer_norm_rms_epsilon", .{prefix}) catch break :blk @as(f32, 1e-6);
+        break :blk gf.getF32(key) orelse 1e-6;
+    };
 
     // SSM parameters (hybrid models like Qwen3.5)
     const ssm_d_conv = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.conv_kernel", .{prefix}) catch "") orelse 0;
@@ -153,27 +165,52 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
+    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse 4;
 
-    log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
-        arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
-    });
-    if (rope_dim > 0) {
-        log.info("RoPE: dim={d}/{d} freq_base={d:.0}", .{ rope_dim, head_dim, @as(f64, @floatCast(blk: {
-            const key3 = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
-            const val2 = gf.metadata.get(key3);
-            if (val2) |v| {
-                switch (v) {
-                    .float32 => |fv| break :blk fv,
-                    else => {},
-                }
-            }
-            break :blk @as(f32, 10000.0);
-        })) });
-    }
-    if (ssm_d_inner > 0) {
-        log.info("SSM: d_conv={d} d_inner={d} d_state={d} dt_rank={d} n_group={d}", .{
-            ssm_d_conv, ssm_d_inner, ssm_d_state, ssm_dt_rank, ssm_n_group,
+    if (log_metadata) {
+        log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
+            arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
         });
+        if (rope_dim > 0) {
+            log.info("RoPE: dim={d}/{d} freq_base={d:.0}", .{ rope_dim, head_dim, @as(f64, @floatCast(blk: {
+                const key3 = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
+                const val2 = gf.metadata.get(key3);
+                if (val2) |v| {
+                    switch (v) {
+                        .float32 => |fv| break :blk fv,
+                        else => {},
+                    }
+                }
+                break :blk @as(f32, 10000.0);
+            })) });
+        }
+        if (gf.metadata.get(std.fmt.bufPrint(&key_buf, "{s}.rope.dimension_sections", .{prefix}) catch "")) |sections_val| {
+            switch (sections_val) {
+                .array => |arr| {
+                    var vals: [8]u32 = [_]u32{0} ** 8;
+                    const n = @min(arr.len, vals.len);
+                    for (arr[0..n], 0..) |item, i| vals[i] = item.asU32() orelse 0;
+                    log.info("RoPE sections ({d}): [{d},{d},{d},{d},{d},{d},{d},{d}]", .{
+                        arr.len,
+                        vals[0],
+                        vals[1],
+                        vals[2],
+                        vals[3],
+                        vals[4],
+                        vals[5],
+                        vals[6],
+                        vals[7],
+                    });
+                },
+                else => {},
+            }
+        }
+        log.info("RMSNorm epsilon: {d:.8}", .{rms_norm_eps});
+        if (ssm_d_inner > 0) {
+            log.info("SSM: d_conv={d} d_inner={d} d_state={d} dt_rank={d} n_group={d}", .{
+                ssm_d_conv, ssm_d_inner, ssm_d_state, ssm_dt_rank, ssm_n_group,
+            });
+        }
     }
 
     return ModelConfig{
@@ -198,6 +235,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
             }
             break :blk @as(f32, 10000.0);
         },
+        .rms_norm_eps = rms_norm_eps,
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,
         .rope_dim = rope_dim,
@@ -206,9 +244,13 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .ssm_d_state = ssm_d_state,
         .ssm_dt_rank = ssm_dt_rank,
         .ssm_n_group = ssm_n_group,
-        .full_attn_interval = 4, // default for Qwen3.5
+        .full_attn_interval = full_attn_interval,
         .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
     };
+}
+
+fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
+    return extractConfigWithLogging(gf, true);
 }
 
 /// Inspect a GGUF file and extract only the normalized model configuration.
@@ -233,10 +275,46 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     );
     defer std.posix.munmap(mmap_data);
 
-    var gf = try gguf.parse(mmap_data, allocator);
+    var gf = try gguf.parseWithOptions(mmap_data, allocator, .{ .log_summary = false });
     defer gf.deinit();
 
-    return extractConfig(&gf);
+    return extractConfigWithLogging(&gf, false);
+}
+
+/// Inspect a GGUF file and return exact tensor upload bytes plus normalized config.
+pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspection {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer {
+        var close_file = file;
+        close_file.close();
+    }
+
+    const stat = try file.stat();
+    const mmap_data = try std.posix.mmap(
+        null,
+        stat.size,
+        std.posix.PROT.READ,
+        .{ .TYPE = .PRIVATE },
+        file.handle,
+        0,
+    );
+    defer std.posix.munmap(mmap_data);
+
+    var gf = try gguf.parseWithOptions(mmap_data, allocator, .{ .log_summary = false });
+    defer gf.deinit();
+
+    var tensor_bytes: u64 = 0;
+    for (gf.tensors.items) |tensor_info| {
+        tensor_bytes += tensor_info.sizeBytes();
+    }
+
+    return .{
+        .config = extractConfigWithLogging(&gf, false),
+        .file_size = stat.size,
+        .tensor_bytes = tensor_bytes,
+        .tensor_count = gf.tensor_count,
+        .metadata_count = gf.metadata.count(),
+    };
 }
 
 /// Load a GGUF model: memory-map the file, parse headers, and DMA tensors to GPU VRAM.
@@ -335,6 +413,7 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.llama, parseArchitecture("llama"));
     try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen2"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
+    try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));
     try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }

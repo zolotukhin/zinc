@@ -49,7 +49,7 @@
 
 **Decision**: Shiki (build-time syntax highlighting) with support for Zig, GLSL, JSON, bash, and TypeScript.
 **Rationale**: Shiki produces static HTML with inline styles — no client-side JS needed. Supports all languages we need. Astro has native Shiki integration.
-**Alternatives considered**: Prism.js (requires client-side JS), highlight.js (same issue), server-side Pygments (Python dependency).
+**Alternatives considered**: Prism.js (requires client-side JS), highlight.js (same issue), server-side highlighters with extra runtime dependencies.
 
 ### D8: Design Approach
 

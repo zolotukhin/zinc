@@ -29,9 +29,11 @@ fn configureVulkanModule(
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // Default to ReleaseFast for inference performance (override with -Drelease=false for debug)
-    const release = b.option(bool, "release", "Build optimized binary (default: true)") orelse true;
-    const optimize: std.builtin.OptimizeMode = if (release) .ReleaseFast else .Debug;
+    var optimize = b.standardOptimizeOption(.{});
+    if (b.option(bool, "release", "Deprecated compatibility flag; prefer -Doptimize")) |release| {
+        optimize = if (release) .ReleaseFast else .Debug;
+    }
+    const full_tests = b.option(bool, "full-tests", "Require integration smoke tests and fail when their environment is missing") orelse false;
 
     const is_linux = target.result.os.tag == .linux;
     const is_macos = target.result.os.tag == .macos;
@@ -161,7 +163,16 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_bun_tests = b.addSystemCommand(&.{ "bun", "test" });
+    run_bun_tests.setCwd(b.path("."));
+    run_bun_tests.setEnvironmentVariable("ZINC_REQUIRE_FULL_TESTS", if (full_tests) "1" else "0");
+
+    const print_summary = b.addSystemCommand(&.{ "bun", "tools/print_test_summary.ts" });
+    print_summary.setCwd(b.path("."));
+    print_summary.setEnvironmentVariable("ZINC_REQUIRE_FULL_TESTS", if (full_tests) "1" else "0");
+    print_summary.step.dependOn(&run_unit_tests.step);
+    print_summary.step.dependOn(&run_bun_tests.step);
 
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&print_summary.step);
 }

@@ -72,7 +72,7 @@
 
 **Goal**: OpenAI SDK and llama-server clients work without code changes.
 
-**Independent Test**: `python -c "from openai import OpenAI; c=OpenAI(base_url='http://localhost:8080/v1',api_key='x'); print(c.chat.completions.create(model='qwen',messages=[{'role':'user','content':'Hi'}]).choices[0].message.content)"`
+**Independent Test**: `bun run test:api -- --base-url http://localhost:8080/v1`
 
 - [X] T019 [US3] Implement POST /v1/completions handler — parse prompt (string), apply same generation logic as chat completions but without chat template. Return text_completion objects. File: src/server/routes.zig
 - [X] T020 [US3] Implement GET /v1/models handler — return list containing the loaded model with id, object, created, owned_by fields. Model name derived from GGUF filename. File: src/server/routes.zig
@@ -80,7 +80,7 @@
 - [X] T022 [US3] Handle optional parameters gracefully — ignore unknown request fields (forward compatibility). Apply defaults for missing optional fields (temperature=1.0, top_p=1.0, max_tokens=256). Return 400 only for truly invalid values, not missing optional fields. File: src/server/routes.zig
 - [X] T023 [US3] Implement stop sequence detection — check generated text against stop[] array after each token. When matched, set finish_reason="stop" and halt generation. Handle multi-token stop sequences. File: src/compute/forward.zig
 
-**Checkpoint**: OpenAI Python SDK chat.completions.create works for both streaming and non-streaming.
+**Checkpoint**: Official OpenAI SDK compatibility works for both streaming and non-streaming.
 
 ---
 
@@ -101,7 +101,7 @@
 
 - [X] T026 [P] Add CORS headers to all responses — Access-Control-Allow-Origin: *, required for browser-based clients. File: src/server/http.zig
 - [X] T027 [P] Implement graceful shutdown — catch SIGINT/SIGTERM, stop accepting new requests, drain active streams, clean up KV cache. File: src/main.zig
-- [X] T028 Validate with OpenAI Python SDK integration test — script that tests streaming, non-streaming, models list, health, concurrent requests, error cases. File: tests/test_openai_sdk.py
+- [X] T028 Validate with Bun integration smoke test — script that tests streaming, non-streaming, models list, health, concurrent requests, error cases, and optional OpenAI SDK compatibility. File: tests/test_openai_sdk.ts
 - [X] T029 Run quickstart.md validation — execute all test commands from quickstart.md and verify expected behavior. File: specs/004-openai-api-server/quickstart.md
 
 ---

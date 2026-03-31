@@ -4,6 +4,10 @@
   "private": true,
   "author": "Stepan Zolotukhin",
   "scripts": {
-    "test": "bun test"
+    "graph:render": "bun tools/render_graph_report.ts",
+    "bench:api": "bun tools/benchmark_api.mjs",
+    "test": "bun test",
+    "test:api": "bun tests/test_openai_sdk.ts",
+    "test:qwen-smoke": "bun tests/test_qwen_smoke.ts"
   }
 }

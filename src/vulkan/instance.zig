@@ -73,12 +73,13 @@ pub const Instance = struct {
         defer allocator.free(phys_devices);
         _ = vk.c.vkEnumeratePhysicalDevices(instance, &dev_count, phys_devices.ptr);
 
-        // Log all devices
+        // Device enumeration is useful when debugging selection issues, but
+        // normal user-facing commands like `model list` should stay quiet.
         for (phys_devices[0..dev_count], 0..) |pdev, i| {
             var props: vk.c.VkPhysicalDeviceProperties = undefined;
             vk.c.vkGetPhysicalDeviceProperties(pdev, &props);
             const name = std.mem.sliceTo(&props.deviceName, 0);
-            log.info("GPU {d}: {s} (vendor 0x{x:0>4})", .{ i, name, props.vendorID });
+            log.debug("GPU {d}: {s} (vendor 0x{x:0>4})", .{ i, name, props.vendorID });
         }
 
         // Select device
@@ -92,7 +93,7 @@ pub const Instance = struct {
         vk.c.vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
 
         const dev_name = std.mem.sliceTo(&device_props.deviceName, 0);
-        log.info("Selected GPU {d}: {s}", .{ dev_idx, dev_name });
+        log.debug("Selected GPU {d}: {s}", .{ dev_idx, dev_name });
 
         // Find compute queue family
         var qf_count: u32 = 0;
@@ -160,7 +161,7 @@ pub const Instance = struct {
         var compute_queue: vk.c.VkQueue = null;
         vk.c.vkGetDeviceQueue(device, compute_queue_family, 0, &compute_queue);
 
-        log.info("Vulkan device ready — compute queue family {d}", .{compute_queue_family});
+        log.debug("Vulkan device ready — compute queue family {d}", .{compute_queue_family});
 
         return Instance{
             .handle = instance,

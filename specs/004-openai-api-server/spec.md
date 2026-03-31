@@ -45,11 +45,11 @@ A developer currently using llama-server (llama.cpp's HTTP server) switches to Z
 
 **Why this priority**: Compatibility with the llama.cpp ecosystem means instant adoption by thousands of developers already using local LLM servers. No migration effort, no code changes.
 
-**Independent Test**: Run the OpenAI Python SDK test suite against ZINC's server: `openai.ChatCompletion.create(model="qwen", messages=[...], base_url="http://localhost:8080/v1")`. Verify it returns a valid response. Repeat with streaming. Repeat with the `/v1/models` endpoint.
+**Independent Test**: Run the official OpenAI SDK smoke suite against ZINC's server with only the base URL changed. Verify chat completions work for streaming and non-streaming modes, then verify `/v1/models`.
 
 **Acceptance Scenarios**:
 
-1. **Given** a client using the OpenAI Python SDK (`openai` package), **When** configured with `base_url="http://localhost:8080/v1"`, **Then** `chat.completions.create()` returns a valid response for both streaming and non-streaming modes.
+1. **Given** a client using the official OpenAI SDK, **When** configured with `base_url="http://localhost:8080/v1"`, **Then** `chat.completions.create()` returns a valid response for both streaming and non-streaming modes.
 2. **Given** a client using the OpenAI Node.js SDK (`openai` package), **When** configured with the ZINC server URL, **Then** streaming chat completions work identically to llama-server.
 3. **Given** a tool that queries `/v1/models`, **When** it receives the response, **Then** it gets a valid `List[Model]` response containing the loaded model's name.
 
@@ -115,7 +115,7 @@ An operator deploying ZINC as a service can check server health, monitor active 
 - **SC-001**: A single streaming chat completion request delivers the first token within 500ms of the request being received (time to first token).
 - **SC-002**: The server handles 4 concurrent streaming chat completions with aggregate decode throughput at least 80% of 4x single-request throughput.
 - **SC-003**: Zero cross-contamination across 1000 concurrent request pairs (verified by automated test checking each response contains only tokens from its own prompt context).
-- **SC-004**: The OpenAI Python SDK (`openai>=1.0`) successfully completes a chat completion (streaming and non-streaming) against ZINC without code changes beyond `base_url`.
+- **SC-004**: The official OpenAI SDK successfully completes a chat completion (streaming and non-streaming) against ZINC without code changes beyond `base_url`.
 - **SC-005**: Client disconnection during streaming frees all associated resources (KV cache pages, session state) within 1 second.
 - **SC-006**: The server processes 100 sequential chat completion requests without memory leaks (RSS growth < 5% from request 1 to request 100).
 - **SC-007**: All error responses conform to OpenAI's error schema: `{"error": {"message": "...", "type": "...", "code": "..."}}`.

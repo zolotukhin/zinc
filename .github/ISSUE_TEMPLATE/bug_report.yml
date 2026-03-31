@@ -1,0 +1,114 @@
+name: Bug report
+description: Report a reproducible problem in build, runtime, API, or model execution.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please make this reproducible. ZINC issues are much easier to fix when the exact hardware, driver, model, and command are included.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is broken?
+      placeholder: Short description of the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include the exact command or sequence of steps.
+      placeholder: |
+        1. Build with `zig build`
+        2. Run `./zig-out/bin/zinc ...`
+        3. Observe failure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste the error output, log snippet, or incorrect result.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Ubuntu 24.04, Windows 11, macOS 15.4
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      placeholder: RX 9070 XT, Radeon AI PRO R9700, Intel Arc A770
+    validations:
+      required: true
+
+  - type: input
+    id: vulkan
+    attributes:
+      label: Vulkan driver / runtime
+      placeholder: Mesa 25.0.7, AMD Windows driver version, vulkaninfo summary
+    validations:
+      required: true
+
+  - type: input
+    id: zig
+    attributes:
+      label: Zig version
+      placeholder: 0.15.2
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and quantization
+      placeholder: Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      render: shell
+      placeholder: ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "Hello"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: latest_main
+    attributes:
+      label: Reproduces on latest main?
+      options:
+        - "Yes"
+        - "No"
+        - "Not checked"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, benchmark context, related logs, or links.

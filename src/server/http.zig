@@ -65,9 +65,7 @@ pub const Connection = struct {
                 const end = if (c == ' ') i else i + 1;
                 const token = request_line[start..end];
                 if (part == 0) {
-                    if (std.mem.eql(u8, token, "GET")) method = .GET
-                    else if (std.mem.eql(u8, token, "POST")) method = .POST
-                    else if (std.mem.eql(u8, token, "OPTIONS")) method = .OPTIONS;
+                    if (std.mem.eql(u8, token, "GET")) method = .GET else if (std.mem.eql(u8, token, "POST")) method = .POST else if (std.mem.eql(u8, token, "OPTIONS")) method = .OPTIONS;
                 } else if (part == 1) {
                     path = token;
                 }
@@ -89,7 +87,10 @@ pub const Connection = struct {
                     var matches = true;
                     for (lower, 0..) |lc, ci| {
                         const hc = if (line[ci] >= 'A' and line[ci] <= 'Z') line[ci] + 32 else line[ci];
-                        if (hc != lc) { matches = false; break; }
+                        if (hc != lc) {
+                            matches = false;
+                            break;
+                        }
                     }
                     if (matches) {
                         content_length = std.fmt.parseInt(usize, std.mem.trim(u8, line[lower.len..], " \t"), 10) catch 0;
@@ -125,9 +126,13 @@ pub const Connection = struct {
     pub fn sendJson(self: *Connection, status: u16, body: []const u8) !void {
         var buf: [512]u8 = undefined;
         const status_text = switch (status) {
-            200 => "OK", 400 => "Bad Request", 404 => "Not Found",
-            429 => "Too Many Requests", 500 => "Internal Server Error",
-            503 => "Service Unavailable", else => "OK",
+            200 => "OK",
+            400 => "Bad Request",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            else => "OK",
         };
         const header = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", .{ status, status_text, body.len }) catch return error.HeaderTooLarge;
         try self.stream.writeAll(header);
@@ -177,6 +182,25 @@ pub const Connection = struct {
         try self.writeSseEvent("[DONE]");
         // Chunked terminator: 0\r\n\r\n
         try self.stream.writeAll("0\r\n\r\n");
+    }
+
+    /// Check whether the remote peer has already closed the streaming connection.
+    /// Uses a non-blocking poll + recv peek so the decode loop can stop without
+    /// waiting for the next write to fail.
+    /// @param self Active connection to inspect.
+    /// @returns True when the peer is gone, false when it still appears connected.
+    pub fn isPeerClosed(self: *Connection) bool {
+        var probe: [1]u8 = undefined;
+        const peek_flags = std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT;
+        const bytes = std.posix.recv(self.stream.handle, &probe, peek_flags) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            error.ConnectionResetByPeer,
+            error.ConnectionTimedOut,
+            error.SocketNotConnected,
+            => return true,
+            else => return false,
+        };
+        return bytes == 0;
     }
 
     /// Close the underlying TCP stream.

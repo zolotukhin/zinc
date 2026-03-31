@@ -10,7 +10,7 @@ Add an HTTP server to ZINC exposing OpenAI-compatible endpoints with SSE streami
 
 **Language/Version**: Zig 0.14-dev
 **Primary Dependencies**: Zig std.net, std.json, existing ZINC inference engine
-**Testing**: `zig build test` + curl + OpenAI Python SDK
+**Testing**: `zig build test` + curl + Bun API smoke test + official OpenAI SDK
 **Target Platform**: Linux, AMD RDNA4
 **Project Type**: Inference server with HTTP API
 **Performance Goals**: TTFT <500ms, 4 concurrent streams at 80%+ throughput

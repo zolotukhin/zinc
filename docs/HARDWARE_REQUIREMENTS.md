@@ -45,6 +45,50 @@ vulkaninfo --summary
 
 If that command does not show your AMD GPU, ZINC will not work yet no matter what model or command line you use.
 
+## Fastest preflight command
+
+Once the binary is built, the quickest end-to-end sanity check is:
+
+```bash
+# General machine + Vulkan + shader preflight
+./zig-out/bin/zinc --check
+
+# Check one exact GGUF file
+./zig-out/bin/zinc --check -m /path/to/model.gguf
+
+# Or check one managed model from the built-in catalog
+./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
+```
+
+That command combines the practical questions you usually care about:
+
+- does the Vulkan stack initialize?
+- did ZINC find the intended GPU?
+- are the runtime shader assets present?
+- is the GGUF file valid when you pass `-m`?
+- does the managed catalog entry look runnable here when you pass `--model-id`?
+- does the current single-GPU runtime appear to fit into device-local VRAM?
+
+For RDNA4 shells, use:
+
+```bash
+# Recommended on RDNA4 shells
+export RADV_PERFTEST=coop_matrix
+
+# Check one exact GGUF file
+./zig-out/bin/zinc --check -m /path/to/model.gguf
+```
+
+If you want to see which managed models ZINC currently marks as supported on the machine, use:
+
+```bash
+# Tested for this GPU profile and estimated to fit current VRAM
+./zig-out/bin/zinc model list
+
+# Full catalog, even if local GPU probing is unavailable
+./zig-out/bin/zinc model list --all
+```
+
 ## Driver and runtime notes
 
 For the best current path on AMD Linux:
@@ -57,6 +101,7 @@ Typical RDNA4 runtime setup:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
+# Optional: append --debug or use ZINC_DEBUG=1 for diagnostic logs
 ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "hello"
 ```
 
@@ -80,6 +125,14 @@ Exact fit depends on:
 - context length
 - whether KV compression is enabled
 - whether you are serving multiple sessions
+
+`--check -m ...` now prints a practical fit estimate for the current engine. The most important lines are:
+
+- `Tensor upload`: exact device-local weight bytes derived from GGUF tensors
+- `VRAM fit`: estimated device-local total versus the selected GPU's VRAM budget
+- `KV cache`: the current runtime estimate, with today's engine capped to a `4096` token KV budget
+
+Treat that estimate as operational guidance, not a formal allocator proof. It intentionally does not include every source of overhead, such as Vulkan allocation alignment, descriptor pools, query pools, or driver-side bookkeeping.
 
 If you are just getting started, treat **16 GB** as the lower comfortable floor and **32 GB** as the better target for the larger-model work shown in the repo.
 
@@ -111,13 +164,15 @@ Useful for editing, building, and some development workflows. Not the environmen
 lspci | rg -i "vga|display|amd|radeon"
 vulkaninfo --summary
 free -h
+./zig-out/bin/zinc --check -m /path/to/model.gguf
 ```
 
-Those three commands answer most early compatibility questions:
+Those four commands answer most early compatibility questions:
 
 - did Linux see the GPU?
 - did Vulkan see the GPU?
 - does the machine have enough memory to stage the workload?
+- does ZINC think the current runtime and model fit together?
 
 ## If you want the shortest path to success
 

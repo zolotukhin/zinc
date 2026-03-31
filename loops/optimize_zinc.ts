@@ -5,7 +5,7 @@
  * Iteratively builds, deploys, and improves the ZINC inference engine on an
  * RDNA4 test node. Each cycle:
  *   1. rsync source to remote node
- *   2. Build (zig build)
+ *   2. Build (zig build -Doptimize=ReleaseFast)
  *   3. Run (zinc --prompt ...)
  *   4. Analyze output (build errors? runtime crash? tok/s?)
  *   5. Spawn AI agent to make ONE fix or optimization
@@ -217,13 +217,13 @@ export function isCoherentText(output: string): boolean {
   return found >= 3;
 }
 
-/** Parse bandwidth utilization percentage from ZINC output. */
+/** Parse modeled bandwidth utilization percentage from ZINC output. */
 export function parseBandwidthUtil(output: string): number | null {
   const m = output.match(/(\d+\.?\d*)%\s*utilization/i);
   return m ? parseFloat(m[1]) : null;
 }
 
-/** Parse effective bandwidth in GB/s from ZINC output. */
+/** Parse modeled effective bandwidth in GB/s from ZINC output. */
 export function parseEffectiveBW(output: string): number | null {
   const m = output.match(/(\d+\.?\d*)\s*GB\/s\s*effective/i);
   return m ? parseFloat(m[1]) : null;
@@ -334,7 +334,6 @@ async function rsyncToRemote(): Promise<void> {
       "--exclude", ".llm_optimize",
       "--exclude", ".DS_Store",
       "--exclude", "site",
-      "--exclude", "research/turboquant-pytorch-master",
       `${PROJECT_ROOT}/`,
       `${ZINC_USER}@${ZINC_HOST}:${REMOTE_ZINC_DIR}/`,
     ],
@@ -390,7 +389,7 @@ async function remoteRun(
   prompt: string,
 ): Promise<{ exitCode: number; output: string }> {
   console.log(clr("2", "  Running ZINC on remote node (acquiring GPU lock)..."));
-  const runCmd = `cd ${REMOTE_ZINC_DIR} && RADV_PERFTEST=coop_matrix timeout 60 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" 2>&1`;
+  const runCmd = `cd ${REMOTE_ZINC_DIR} && RADV_PERFTEST=coop_matrix timeout 90 ./zig-out/bin/zinc -m ${modelPath} --prompt "${prompt}" 2>&1`;
   const { stdout, stderr, exitCode } = await runCommand(
     "ssh",
     [
@@ -687,15 +686,15 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const historyBlock =
     cycles.length > 0
       ? cycles
-          .slice(-15)
-          .map((h) => {
-            const desc = trunc(h.description, 70);
-            const bw = h.bandwidthUtil != null ? `, ${h.bandwidthUtil.toFixed(0)}% BW` : "";
-            const snippet = (h as any).outputSnippet ? ` out="${trunc((h as any).outputSnippet, 30)}"` : "";
-            const coherent = (h as any).coherentText ? " ✅COHERENT" : "";
-            return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "KEPT" : "REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s${bw})` : ""}${snippet}${coherent}`;
-          })
-          .join("\n")
+        .slice(-15)
+        .map((h) => {
+          const desc = trunc(h.description, 70);
+          const bw = h.bandwidthUtil != null ? `, ${h.bandwidthUtil.toFixed(0)}% BW` : "";
+          const snippet = (h as any).outputSnippet ? ` out="${trunc((h as any).outputSnippet, 30)}"` : "";
+          const coherent = (h as any).coherentText ? " ✅COHERENT" : "";
+          return `  #${h.cycle}: [${h.phase}] ${desc} → ${h.kept ? "KEPT" : "REVERTED"}${h.tokPerSec != null ? ` (${h.tokPerSec.toFixed(1)} tok/s${bw})` : ""}${snippet}${coherent}`;
+        })
+        .join("\n")
       : "  (none yet)";
 
   // Include the last cycle's self-analysis so the agent can build on its own reasoning
@@ -725,9 +724,9 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const failedBlock =
     failedApproaches.length > 0
       ? failedApproaches
-          .slice(-20)
-          .map((f, n) => `  ${n + 1}. ${trunc(f, 120)}`)
-          .join("\n")
+        .slice(-20)
+        .map((f, n) => `  ${n + 1}. ${trunc(f, 120)}`)
+        .join("\n")
       : "  (none yet)";
 
   // Truncate build/run output to avoid blowing up prompt
@@ -758,7 +757,7 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     diagnosis.push("- Actual DMMV dispatches for QKV projections, FFN layers");
   } else if (lastResult.tokPerSec != null && lastResult.tokPerSec > 0) {
     const bwInfo = lastResult.bandwidthUtil != null
-      ? ` | ${lastResult.effectiveBW?.toFixed(0) ?? "?"} GB/s (${lastResult.bandwidthUtil.toFixed(0)}% of 576 GB/s)`
+      ? ` | modeled ${lastResult.effectiveBW?.toFixed(0) ?? "?"} GB/s (${lastResult.bandwidthUtil.toFixed(0)}% of 576 GB/s)`
       : "";
     diagnosis.push(`## Status: RUNNING — ${lastResult.tokPerSec.toFixed(1)} tok/s (DECODE), ${lastResult.tokensGenerated} tokens${bwInfo}`);
     if (lastResult.garbageOutput && !lastResult.coherentText) {
@@ -784,30 +783,25 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     if (lastResult.coherentText) {
       diagnosis.push("✅ Output is COHERENT — decoded text contains recognizable language.");
       diagnosis.push("");
-      if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 10) {
-        diagnosis.push("## BOTTLENECK: VULKAN SUBMISSION OVERHEAD (~42 submits/token)");
-        diagnosis.push(`Bandwidth utilization is only ${lastResult.bandwidthUtil.toFixed(1)}% — GPU is mostly idle.`);
-        diagnosis.push("The model is 21GB. At 576 GB/s, theoretical decode = ~37ms/tok (27 tok/s).");
-        diagnosis.push(`Current: ${(1000 / (lastResult.tokPerSec ?? 1)).toFixed(0)}ms/tok — ${((1000 / (lastResult.tokPerSec ?? 1)) / 37).toFixed(0)}x slower than theoretical.`);
-        diagnosis.push("");
-        diagnosis.push("GPU SSM and command buffer batching are ALREADY DONE. The remaining ~42 submits are:");
-        diagnosis.push("  - 40 MoE expert ID readbacks (1 per layer — GPU softmax_topk → host read → CPU expert dispatch)");
-        diagnosis.push("  - 1 final logits readback");
-        diagnosis.push("  - 1 batched layer submit");
+      if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 15) {
+        diagnosis.push("## BOTTLENECK: LOW GPU UTILIZATION, NOT A HARD BANDWIDTH WALL");
+        diagnosis.push(`Modeled decode bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(1)}%, so single-stream decode is not close to saturating DRAM.`);
+        diagnosis.push(`Current latency is ${(1000 / (lastResult.tokPerSec ?? 1)).toFixed(0)}ms/tok, which points at dispatch/setup/sync overhead plus fragmented decode work.`);
         diagnosis.push("");
         diagnosis.push("## OPTIMIZATION PRIORITY:");
-        diagnosis.push("1. **Eliminate MoE expert ID readback** — GPU writes expert_ids, dispatch reads from GPU buffer");
-        diagnosis.push("   OR dispatch all 8 experts unconditionally and mask inactive ones (simpler, wastes some compute)");
-        diagnosis.push("2. **Profile with --profile flag** — Vulkan timestamps already implemented, find actual hotspot");
-        diagnosis.push("3. **Tune Q4_K DMMV occupancy** — workgroup size, shared memory, tile dimensions for RDNA4");
+        diagnosis.push("1. **Benchmark the clean path** — do not force `--debug` in throughput runs");
+        diagnosis.push("2. **Use low-perturbation `--profile` output** — find full-token GPU time before changing kernels");
+        diagnosis.push("3. **Reduce tail and sync overhead** — GPU argmax / less logits readback for greedy sampling");
+        diagnosis.push("4. **Reduce Vulkan setup overhead** — descriptor reuse, fewer barriers, less per-token recording churn");
+        diagnosis.push("5. **Fuse same-input decode work** — especially MoE gate/up and related projection fans");
         diagnosis.push("");
         diagnosis.push("## IMPORTANT: Make ONE meaningful architectural change per cycle.");
         diagnosis.push("Multi-file changes are OK if they're part of the same optimization.");
       } else if (lastResult.bandwidthUtil != null && lastResult.bandwidthUtil < 70) {
-        diagnosis.push(`Bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — below the 90%+ target.`);
-        diagnosis.push("Focus on reducing Vulkan overhead and improving GPU occupancy.");
+        diagnosis.push(`Modeled decode bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — still well below saturation.`);
+        diagnosis.push("Focus on reducing Vulkan overhead, cutting host-visible sync, and improving decode kernel occupancy.");
       } else if (lastResult.bandwidthUtil != null) {
-        diagnosis.push(`Bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — approaching hardware limit.`);
+        diagnosis.push(`Modeled decode bandwidth utilization is ${lastResult.bandwidthUtil.toFixed(0)}% — approaching the point where algorithmic byte reduction matters.`);
         diagnosis.push("Further gains require reducing bytes read or algorithmic changes.");
       }
     } else {
@@ -840,40 +834,47 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   diagnosis.push("- Profiling: --profile flag enables Vulkan timestamp queries + per-token GPU timing summary");
   diagnosis.push("");
   diagnosis.push("## What's ALREADY WORKING (do not break)");
-  diagnosis.push("- ✅ Forward pass: coherent output at 7.6 tok/s (up from 4.3), all 40 layers correct");
+  diagnosis.push("- ✅ Forward pass: coherent output at 33.6 tok/s clean CLI on an idle RDNA4 node, all 40 layers correct");
   diagnosis.push("- ✅ GPU SSM path: conv1d + delta-net + gated_norm shaders WORKING after swiglu_buf overflow fix");
   diagnosis.push("- ✅ GPU softmax_topk.comp: rewritten with shared memory (no subgroupBallot), RADV-compatible");
   diagnosis.push("- ✅ GPU sigmoid_scale_acc.comp: shared expert gate on GPU, no readback");
-  diagnosis.push("- ✅ Command buffer batching: single cmd buffer for all 40 layers, ~42 submits/token");
+  diagnosis.push("- ✅ GPU argmax fast path: greedy decode reads back one token id instead of full logits on the fast path");
+  diagnosis.push("- ✅ Command buffer batching: fast path stays in one submission through final norm + LM head + argmax");
   diagnosis.push("- ✅ Persistent GPU SSM state buffers (conv: 3.75MB, recurrent: 80MB)");
-  diagnosis.push("- ✅ OpenAI-compatible API server with SSE streaming, chat UI at GET /");
-  diagnosis.push("- ✅ 89 unit tests pass. Build clean on macOS and Linux.");
+  diagnosis.push("- ✅ OpenAI-compatible API server with SSE streaming, chat UI at GET /, raw /v1/completions at ~33.5 tok/s");
+  diagnosis.push("- ✅ zig build test passes. Build clean on macOS and Linux.");
   diagnosis.push("");
-  diagnosis.push("## CURRENT STATE (2026-03-28, updated)");
-  diagnosis.push("Output: CORRECT at 7.6 tok/s. GPU SSM + batching active. OpenAI API server working.");
-  diagnosis.push("Remaining bottleneck: ~42 vkQueueSubmit per token (MoE expert ID readback per layer).");
-  diagnosis.push("Memory bandwidth utilization: ~0.7% (4.1 GB/s of 576 GB/s). GPU still mostly idle.");
-  diagnosis.push("All 89 tests pass. All changes MUST pass `zig build test`.");
+  diagnosis.push("## CURRENT STATE (2026-03-30, updated)");
+  diagnosis.push("Output: CORRECT at 33.6 tok/s clean CLI and ~33.5 tok/s raw API on a clean ReleaseFast build.");
+  diagnosis.push("Reasoning chat is still slower: one longer chat sample produced 257 completion tokens at ~28.4 tok/s.");
+  diagnosis.push("Modeled decode bandwidth at 33.58 tok/s is ~112.5 GB/s (~19.5% of 576 GB/s). Single-stream decode will not saturate DRAM.");
+  diagnosis.push("Remaining bottlenecks are medium/small decode kernels, chat template/stop-path overhead, and still-intrusive profiling.");
+  diagnosis.push("All changes MUST pass `zig build test`.");
   diagnosis.push("");
   diagnosis.push("## OPTIMIZATION PRIORITY (in order):");
-  diagnosis.push("The path from 7.6 to 27+ tok/s:");
+  diagnosis.push("The path from today's >30 tok/s raw decode to >30 tok/s reasoning chat and higher aggregate GPU utilization:");
   diagnosis.push("");
-  diagnosis.push("### 1. Eliminate MoE expert ID readback (40 submits → 1)");
-  diagnosis.push("- Currently: GPU softmax_topk → readback expert_ids to CPU → CPU dispatches expert DMMVs");
-  diagnosis.push("- Target: GPU softmax_topk writes expert_ids to GPU buffer, expert dispatch reads from GPU buffer");
-  diagnosis.push("- This requires GPU-side indirect dispatch OR pre-computing all expert offsets on GPU");
-  diagnosis.push("- Alternative: batch all expert DMMVs for all 8 experts unconditionally, mask inactive ones");
+  diagnosis.push("### 1. Benchmark and close the reasoning chat gap");
+  diagnosis.push("- Compare `/v1/chat/completions` against raw `/v1/completions` with longer reasoning prompts");
+  diagnosis.push("- Measure where chat loses throughput: template application, stop handling, or extra server-side work");
+  diagnosis.push("- Prefer changes that preserve raw decode throughput while lifting the templated chat path above 30 tok/s");
   diagnosis.push("");
-  diagnosis.push("### 2. Profile actual GPU kernel time");
-  diagnosis.push("- Use --profile flag (Vulkan timestamp queries already implemented)");
-  diagnosis.push("- Identify: is DMMV the bottleneck or is it submit overhead?");
-  diagnosis.push("- If DMMV: tune workgroup sizes, shared memory, occupancy");
-  diagnosis.push("- If submit: further batching needed");
+  diagnosis.push("### 2. Make profiling representative");
+  diagnosis.push("- Use `--profile`, but first reduce its own overhead so it does not cut ReleaseFast throughput in half");
+  diagnosis.push("- Profile full-token GPU time, not partial decode work");
+  diagnosis.push("- Use the result to separate DMMV cost from elementwise and control overhead");
   diagnosis.push("");
-  diagnosis.push("### 3. Shader occupancy tuning");
-  diagnosis.push("- Q4_K DMMV is the hottest shader (runs for every weight matrix)");
-  diagnosis.push("- Current: 64 threads per workgroup, 1 row per thread");
-  diagnosis.push("- RDNA4: 64 CUs × 16 waves/SIMD × 2 SIMDs = 2048 concurrent waves");
+  diagnosis.push("### 3. Reduce hot-path Vulkan setup and binding churn");
+  diagnosis.push("- Reuse descriptor sets and static bindings where possible");
+  diagnosis.push("- Trim per-token descriptor updates and other host work that does not contribute useful math");
+  diagnosis.push("");
+  diagnosis.push("### 4. Tune the real hot decode shapes");
+  diagnosis.push("- Focus on the medium/small decode projections that dominate single-token latency");
+  diagnosis.push("- LM head matters, but it is not the only or even the main remaining limiter");
+  diagnosis.push("");
+  diagnosis.push("### 5. Use batching for higher aggregate bandwidth");
+  diagnosis.push("- Single-stream decode above 30 tok/s is already achieved");
+  diagnosis.push("- If the goal is materially higher memory-bandwidth utilization, add concurrent decode / batching");
   diagnosis.push("- Profile actual occupancy and tune tile sizes");
   diagnosis.push("");
   diagnosis.push("## APPROACHES THAT FAILED (do not retry):");
@@ -918,12 +919,12 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "",
     ...(lastResult.runOutput
       ? [
-          "## Current Run Output (last 3000 chars)",
-          "```",
-          runOut,
-          "```",
-          "",
-        ]
+        "## Current Run Output (last 3000 chars)",
+        "```",
+        runOut,
+        "```",
+        "",
+      ]
       : []),
     "## Project Structure",
     "```",
@@ -1053,7 +1054,7 @@ async function runCycle(
       { cwd: PROJECT_ROOT },
     ).catch(() => null);
     if (rebase && rebase.exitCode !== 0) {
-      await runCommand("git", ["rebase", "--abort"], { cwd: PROJECT_ROOT }).catch(() => {});
+      await runCommand("git", ["rebase", "--abort"], { cwd: PROJECT_ROOT }).catch(() => { });
       console.log(clr("1;33", "  ⚠ Rebase on main had conflicts — continuing with current state"));
     }
   }
@@ -1104,8 +1105,8 @@ async function runCycle(
   }
 
   // Step 2: Git snapshot before agent changes — commit current state so we can revert cleanly
-  await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => {});
-  await runCommand("git", ["commit", "--allow-empty", "-m", `zinc-loop: pre-cycle-${cycleNum} checkpoint`], { cwd: PROJECT_ROOT }).catch(() => {});
+  await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => { });
+  await runCommand("git", ["commit", "--allow-empty", "-m", `zinc-loop: pre-cycle-${cycleNum} checkpoint`], { cwd: PROJECT_ROOT }).catch(() => { });
   const preCommit = await runCommand("git", ["rev-parse", "HEAD"], { cwd: PROJECT_ROOT });
   const preHash = preCommit.stdout.trim();
 
@@ -1344,15 +1345,15 @@ async function runCycle(
   if (!keep) {
     // Revert only the agent's changes — reset to pre-cycle checkpoint
     console.log(clr("2", `  Reverting to pre-cycle checkpoint (${preHash.slice(0, 8)})...`));
-    await runCommand("git", ["reset", "--hard", preHash], { cwd: PROJECT_ROOT }).catch(() => {});
+    await runCommand("git", ["reset", "--hard", preHash], { cwd: PROJECT_ROOT }).catch(() => { });
   } else {
     // Commit successful change on top of checkpoint
-    await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => {});
+    await runCommand("git", ["add", "-A", "src/", "build.zig", "build.zig.zon", "benchmarks/"], { cwd: PROJECT_ROOT }).catch(() => { });
     await runCommand(
       "git",
       ["commit", "--allow-empty", "-m", `zinc-loop: ${description}`],
       { cwd: PROJECT_ROOT },
-    ).catch(() => {});
+    ).catch(() => { });
 
     // Cherry-pick to main so the other loop can pick up the fix
     if (worktreeName) {
@@ -1367,12 +1368,12 @@ async function runCycle(
           await runCommand(
             "git", ["commit", "-m", `zinc-loop(${worktreeName}): ${description}`],
             { cwd: REPO_ROOT },
-          ).catch(() => {});
+          ).catch(() => { });
           console.log(clr("1;36", `  ↗ Cherry-picked to main: ${description.slice(0, 60)}`));
         } else {
           // Conflict — abort and skip merge-back, worktree keeps the change
-          await runCommand("git", ["cherry-pick", "--abort"], { cwd: REPO_ROOT }).catch(() => {});
-          await runCommand("git", ["reset", "--hard"], { cwd: REPO_ROOT }).catch(() => {});
+          await runCommand("git", ["cherry-pick", "--abort"], { cwd: REPO_ROOT }).catch(() => { });
+          await runCommand("git", ["reset", "--hard"], { cwd: REPO_ROOT }).catch(() => { });
           console.log(clr("1;33", `  ↗ Cherry-pick to main had conflicts — skipped`));
         }
       }
@@ -1469,7 +1470,7 @@ async function main() {
     const worktreePath = join(REPO_ROOT, ".worktrees", `zinc-${worktreeName}`);
 
     // Create branch from current HEAD if it doesn't exist
-    await runCommand("git", ["branch", branchName], { cwd: REPO_ROOT }).catch(() => {});
+    await runCommand("git", ["branch", branchName], { cwd: REPO_ROOT }).catch(() => { });
 
     // Create worktree if it doesn't exist
     if (!existsSync(worktreePath)) {
@@ -1532,7 +1533,7 @@ async function main() {
   }
 
   // Ensure remote zinc dir exists
-  await ssh(`mkdir -p ${REMOTE_ZINC_DIR}`, 10_000).catch(() => {});
+  await ssh(`mkdir -p ${REMOTE_ZINC_DIR}`, 10_000).catch(() => { });
 
   // Dry run: just build+run once
   if (dryRun) {

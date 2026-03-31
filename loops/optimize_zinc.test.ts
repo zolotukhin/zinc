@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTokPerSec, parseTokensGenerated, detectPhase, isGarbageOutput, isCoherentText } from "./optimize_zinc";
+import { parseTokPerSec, parseTokensGenerated, parseBandwidthUtil, parseEffectiveBW, detectPhase, isGarbageOutput, isCoherentText } from "./optimize_zinc";
 import type { BuildRunResult, Phase } from "./optimize_zinc";
 
 describe("parseTokPerSec", () => {
@@ -59,6 +59,19 @@ info(forward): Generating: 0 prompt tokens, max 256 output tokens
 info(forward): Prefill complete at position 0
 info(forward): Generated 256 tokens`;
     expect(parseTokensGenerated(output)).toBe(256);
+  });
+});
+
+describe("modeled bandwidth parsing", () => {
+  test("extracts modeled utilization and effective bandwidth", () => {
+    const output = "info(forward): Modeled decode bandwidth: 36.0 GB/s effective, 576 GB/s theoretical (6.3% utilization, ~3.3 MB/token)";
+    expect(parseEffectiveBW(output)).toBeCloseTo(36.0, 1);
+    expect(parseBandwidthUtil(output)).toBeCloseTo(6.3, 1);
+  });
+
+  test("returns null when no modeled bandwidth line is present", () => {
+    expect(parseEffectiveBW("Generated 256 tokens in 23792.8 ms — 10.76 tok/s")).toBeNull();
+    expect(parseBandwidthUtil("Generated 256 tokens in 23792.8 ms — 10.76 tok/s")).toBeNull();
   });
 });
 

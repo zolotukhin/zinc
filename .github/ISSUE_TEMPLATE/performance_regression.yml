@@ -1,0 +1,98 @@
+name: Performance regression
+description: Report a measurable slowdown with a concrete baseline and environment.
+title: "[perf] "
+labels:
+  - performance
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Performance reports need numbers. Please include the baseline, current result, and the exact hardware and command used.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      placeholder: Decode tok/s dropped from 107 to 91 after updating branch X.
+    validations:
+      required: true
+
+  - type: input
+    id: baseline
+    attributes:
+      label: Baseline result
+      placeholder: 107 tok/s decode, 223 tok/s prefill
+    validations:
+      required: true
+
+  - type: input
+    id: current
+    attributes:
+      label: Current result
+      placeholder: 91 tok/s decode, 201 tok/s prefill
+    validations:
+      required: true
+
+  - type: input
+    id: comparison
+    attributes:
+      label: Compared against
+      placeholder: previous commit, main, llama.cpp baseline, older driver, older Mesa
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      placeholder: Radeon AI PRO R9700
+    validations:
+      required: true
+
+  - type: input
+    id: stack
+    attributes:
+      label: Driver / Vulkan stack
+      placeholder: Mesa 25.0.7, RADV_PERFTEST=coop_matrix
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and quantization
+      placeholder: Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact benchmark command
+      render: shell
+      placeholder: ./zig-out/bin/zinc -m /root/models/... --prompt "The capital of France is"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste the lines showing prefill and decode throughput.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Include commit hashes, profiler output, or anything else that helps narrow the regression.

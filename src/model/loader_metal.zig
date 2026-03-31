@@ -104,11 +104,16 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         break :blk gf.getU32(key) orelse 0;
     };
     const rope_dim = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.dimension_count", .{prefix}) catch "") orelse 0;
+    const rms_norm_eps = blk: {
+        const key = std.fmt.bufPrint(&key_buf, "{s}.attention.layer_norm_rms_epsilon", .{prefix}) catch break :blk @as(f32, 1e-6);
+        break :blk gf.getF32(key) orelse 1e-6;
+    };
     const ssm_d_conv = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.conv_kernel", .{prefix}) catch "") orelse 0;
     const ssm_d_inner = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.inner_size", .{prefix}) catch "") orelse 0;
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
+    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse 4;
 
     const rope_freq_base: f32 = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
@@ -148,6 +153,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .vocab_size = vocab_size,
         .context_length = context_length,
         .rope_freq_base = rope_freq_base,
+        .rms_norm_eps = rms_norm_eps,
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,
         .rope_dim = rope_dim,
@@ -156,7 +162,7 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         .ssm_d_state = ssm_d_state,
         .ssm_dt_rank = ssm_dt_rank,
         .ssm_n_group = ssm_n_group,
-        .full_attn_interval = 4,
+        .full_attn_interval = full_attn_interval,
         .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
     };
 }

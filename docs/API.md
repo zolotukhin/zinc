@@ -3,7 +3,7 @@
 ZINC exposes an OpenAI-compatible HTTP API. Point any OpenAI SDK client at ZINC by changing the base URL — no code changes required.
 
 ```bash
-# Start the server
+# Start the server (append --debug or use ZINC_DEBUG=1 for diagnostic logs)
 ./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
 
 # Use with any OpenAI client
@@ -16,8 +16,9 @@ export OPENAI_BASE_URL=http://localhost:8080/v1
 |--------|------|-------------|
 | POST | `/v1/chat/completions` | Chat inference (streaming and non-streaming) |
 | POST | `/v1/completions` | Text completion |
-| GET | `/v1/models` | List loaded models |
-| GET | `/health` | Server health, GPU stats, inference metrics |
+| GET | `/v1/models` | List managed models, fit status, install state, and the active entry |
+| POST | `/v1/models/activate` | Activate an installed managed model |
+| GET | `/health` | Server health, active requests, queued requests, and uptime |
 
 ---
 
@@ -36,6 +37,7 @@ Generate a chat completion from a conversation. Supports both streaming (SSE) an
   ],
   "max_tokens": 256,
   "temperature": 0.7,
+  "enable_thinking": true,
   "top_p": 0.9,
   "stream": true,
   "stop": ["\n\n"]
@@ -44,13 +46,16 @@ Generate a chat completion from a conversation. Supports both streaming (SSE) an
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | string | required | Model identifier (matches loaded model name or any string) |
+| `model` | string | required | OpenAI-compatibility field. Generation currently runs on the server's active model. |
 | `messages` | array | required | Conversation messages with `role` and `content` |
 | `max_tokens` | integer | 256 | Maximum tokens to generate |
 | `temperature` | float | 1.0 | Sampling temperature. `0` = greedy (deterministic) |
+| `enable_thinking` | boolean | false | When the active model's chat template supports it, request an open `<think>` block instead of the no-thinking generation suffix |
 | `top_p` | float | 1.0 | Nucleus sampling threshold |
 | `stream` | boolean | false | Enable Server-Sent Events streaming |
 | `stop` | string or array | null | Stop sequence(s) to halt generation |
+
+`enable_thinking` is currently model-dependent. Qwen-style templates that expose `enable_thinking` and `<think>` honor it; models without that template support ignore the flag.
 
 #### Message roles
 
@@ -109,7 +114,8 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "qwen",
     "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 128
+    "max_tokens": 128,
+    "enable_thinking": true
   }'
 
 # Streaming
@@ -119,35 +125,9 @@ curl -N http://localhost:8080/v1/chat/completions \
     "model": "qwen",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 128,
+    "enable_thinking": true,
     "stream": true
   }'
-```
-
-### Example: Python (OpenAI SDK)
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
-
-# Non-streaming
-response = client.chat.completions.create(
-    model="qwen",
-    messages=[{"role": "user", "content": "What is 2+2?"}],
-    max_tokens=128,
-)
-print(response.choices[0].message.content)
-
-# Streaming
-stream = client.chat.completions.create(
-    model="qwen",
-    messages=[{"role": "user", "content": "Explain gravity"}],
-    max_tokens=256,
-    stream=True,
-)
-for chunk in stream:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
 ### Example: Node.js (OpenAI SDK)
@@ -165,6 +145,7 @@ const response = await client.chat.completions.create({
   model: "qwen",
   messages: [{ role: "user", content: "What is 2+2?" }],
   max_tokens: 128,
+  enable_thinking: true,
 });
 console.log(response.choices[0].message.content);
 
@@ -173,6 +154,7 @@ const stream = await client.chat.completions.create({
   model: "qwen",
   messages: [{ role: "user", content: "Explain gravity" }],
   max_tokens: 256,
+  enable_thinking: true,
   stream: true,
 });
 for await (const chunk of stream) {
@@ -235,19 +217,30 @@ Generate a text completion from a raw prompt string. Same parameters as chat com
 
 ## GET /v1/models
 
-List all currently loaded models. ZINC loads one model at a time.
+List managed models, fit status, install state, and the active entry. ZINC still loads one model into memory at a time, but this endpoint exposes the built-in managed catalog for the current server GPU profile.
 
 ### Response
 
 ```json
 {
   "object": "list",
+  "profile": "amd-rdna4-32gb",
   "data": [
     {
-      "id": "Qwen3.5-35B-A3B-Q4_K",
+      "id": "qwen35-35b-a3b-q4k-xl",
       "object": "model",
       "created": 1711500000,
-      "owned_by": "zinc"
+      "owned_by": "zinc",
+      "display_name": "Qwen3.5 35B-A3B UD Q4_K_XL",
+      "homepage_url": "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF",
+      "installed": false,
+      "active": false,
+      "managed": true,
+      "supported_on_current_gpu": true,
+      "fits_current_gpu": true,
+      "required_vram_bytes": 22987514102,
+      "fit_source": "catalog",
+      "status": "supported"
     }
   ]
 }
@@ -255,47 +248,55 @@ List all currently loaded models. ZINC loads one model at a time.
 
 ---
 
+## POST /v1/models/activate
+
+Activate an installed managed model in a running server. The model must already exist in the local managed cache and must fit the current GPU budget.
+
+### Request
+
+```json
+{
+  "model": "qwen35-2b-q4k-m"
+}
+```
+
+### Response
+
+```json
+{
+  "object": "model.activation",
+  "id": "qwen35-2b-q4k-m",
+  "active": true
+}
+```
+
+### Example: curl
+
+```bash
+# Switch the running server to an installed managed model
+curl http://localhost:8080/v1/models/activate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen35-2b-q4k-m"
+  }'
+```
+
+---
+
 ## GET /health
 
-Server health check for monitoring and load balancers. Returns 200 when ready, 503 when the model is still loading.
+Server health check for monitoring and load balancers.
 
-### Response (ready)
+### Response
 
 ```json
 {
   "status": "ok",
-  "gpu": {
-    "name": "AMD Radeon Graphics (RADV GFX1201)",
-    "vendor": "amd_rdna4",
-    "vram_total_mb": 32624,
-    "vram_used_mb": 21504,
-    "bandwidth_gbps": 576,
-    "compute_units": 64
-  },
-  "model": {
-    "name": "Qwen3.5-35B-A3B-Q4_K",
-    "architecture": "qwen35moe",
-    "parameters": "34.66B",
-    "layers": 40,
-    "context_length": 32768,
-    "quantization": "Q4_K"
-  },
-  "inference": {
-    "active_requests": 2,
-    "max_parallel": 4,
-    "tokens_generated": 142857,
-    "avg_decode_tps": 108.5,
-    "uptime_seconds": 3600
-  }
+  "model": "qwen3.5-35b",
+  "active_requests": 1,
+  "queued_requests": 0,
+  "uptime_seconds": 3600
 }
-```
-
-### Response (loading)
-
-```
-HTTP/1.1 503 Service Unavailable
-
-{"status": "loading"}
 ```
 
 ---
@@ -317,10 +318,8 @@ All errors follow the OpenAI error schema:
 | Status | Type | When |
 |--------|------|------|
 | 400 | `invalid_request_error` | Malformed JSON, missing required fields, invalid parameters |
-| 404 | `model_not_found` | Requested model doesn't match loaded model |
-| 429 | `rate_limit_exceeded` | All request slots are occupied |
+| 400 | `invalid_request_error` | Unknown managed model id, model not installed, or model does not fit when activating |
 | 500 | `internal_error` | GPU error, inference failure |
-| 503 | `service_unavailable` | Model still loading, or KV cache pages exhausted |
 
 ---
 
@@ -336,18 +335,19 @@ All endpoints include `Access-Control-Allow-Origin: *` for browser-based clients
 
 ## Concurrency
 
-ZINC supports up to `--parallel N` concurrent requests (default: 4). Each request gets its own:
-- Decode state and token buffer
-- KV cache page allocation
-- Independent sampling state
+ZINC accepts overlapping requests, but generation is currently serialized behind one engine lock. That means:
 
-Requests are batched by the continuous batching scheduler — prefill and decode steps are interleaved across active requests in a single GPU submission. There is no per-slot throughput degradation at the designed concurrency level.
+- one request generates at a time
+- later requests queue behind the active generation
+- `/health` reports `active_requests` and `queued_requests`
+- the chat UI can switch models through `/v1/models/activate`, but the switch also takes the same generation lock
 
 ## Server configuration
 
 ```
 ./zig-out/bin/zinc [options]
-  -m, --model <path>       Path to GGUF model file (required)
+  -m, --model <path>       Path to GGUF model file
+  --model-id <id>         Managed model id from the built-in catalog/cache
   -p, --port <port>        Server port (default: 8080)
   -d, --device <id>        Vulkan device index (default: 0)
   -c, --context <size>     Context length (default: 4096)

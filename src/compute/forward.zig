@@ -18,6 +18,7 @@ const Graph = @import("graph.zig").Graph;
 const DmmvDispatch = @import("dmmv.zig").DmmvDispatch;
 const ElementwiseDispatch = @import("elementwise.zig").ElementwiseDispatch;
 const AttentionDispatch = @import("attention.zig").AttentionDispatch;
+const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 
 const log = std.log.scoped(.forward);
@@ -155,7 +156,10 @@ fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, o
         },
         .q5_k => {
             // Q5_K block: d[2] dmin[2] scales[12] qh[32] qs[128] = 176 bytes / 256 elems
-            // Element ordering is INTERLEAVED: y[2l] from low nibble, y[2l+1] from high nibble
+            // GGML lays each 64-element group out as two contiguous 32-element halves:
+            // low nibble -> y[l], high nibble -> y[32 + l].
+            // Keep this CPU reference in sync with dmmv_q5k*.comp. Interleaving the
+            // halves regresses Qwen3.5 expert down projections.
             const bpb5: usize = 176;
             const bpr5 = @as(usize, cols) / 256;
             const row_off5 = @as(usize, row) * bpr5 * bpb5;
@@ -186,11 +190,10 @@ fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, o
                         const ql_hi5: u8 = qs5[j5 * 32 + l5] >> 4;
                         const hb_lo5: u8 = (qh5[l5] >> @intCast(j5 * 2)) & 1;
                         const hb_hi5: u8 = (qh5[l5] >> @intCast(j5 * 2 + 1)) & 1;
-                        output[out_i5] = d1_5 * @as(f32, @floatFromInt(ql_lo5 | (hb_lo5 << 4))) - m1_5;
-                        out_i5 += 1;
-                        output[out_i5] = d2_5 * @as(f32, @floatFromInt(ql_hi5 | (hb_hi5 << 4))) - m2_5;
-                        out_i5 += 1;
+                        output[out_i5 + l5] = d1_5 * @as(f32, @floatFromInt(ql_lo5 | (hb_lo5 << 4))) - m1_5;
+                        output[out_i5 + 32 + l5] = d2_5 * @as(f32, @floatFromInt(ql_hi5 | (hb_hi5 << 4))) - m2_5;
                     }
+                    out_i5 += 64;
                     is5 += 2;
                 }
             }
@@ -350,6 +353,8 @@ pub const InferenceEngine = struct {
     elementwise: ElementwiseDispatch,
     /// Flash attention dispatch.
     attention: AttentionDispatch,
+    /// GPU argmax dispatch for greedy sampling.
+    argmax: ArgmaxDispatch,
     /// Command pool.
     cmd_pool: CommandPool,
     /// Decode command buffer.
@@ -362,6 +367,11 @@ pub const InferenceEngine = struct {
     norm_buf: Buffer, // RMS norm output
     logits_buf: Buffer, // output logits (vocab_size f32)
     logits_staging: Buffer, // pre-allocated logits readback staging
+    argmax_partials_buf: Buffer, // per-workgroup argmax partials
+    argmax_result_buf: Buffer, // device-local token-id result
+    argmax_result_staging: Buffer, // host-visible token-id readback
+    argmax_descriptor_set: ?vk.c.VkDescriptorSet, // static [logits, partials, result] binding set
+    argmax_phase0_workgroups: u32, // ceil(vocab_size / 64)
     embed_staging: Buffer, // pre-allocated embedding upload staging
     // Transformer layer intermediates
     q_buf: Buffer, // Q projection: n_heads * head_dim f32
@@ -399,9 +409,15 @@ pub const InferenceEngine = struct {
     allocator: std.mem.Allocator,
     // Profiling (Phase 3c, --profile flag)
     profile_enabled: bool = false,
+    logits_readback_enabled: bool = false,
+    validation_diagnostics_enabled: bool = false,
     timestamp_query_pool: vk.c.VkQueryPool = null,
     timestamp_period_ns: f64 = 1.0, // nanoseconds per timestamp tick
     timestamp_count: u32 = 0, // number of timestamps written this token
+    profile_total_gpu_ms: f64 = 0.0,
+    profile_max_gpu_ms: f64 = 0.0,
+    profile_sample_count: u32 = 0,
+    modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
     diag_summary_buf: [2048]u8 = .{0} ** 2048,
@@ -449,6 +465,8 @@ pub const InferenceEngine = struct {
 
         var attention = try AttentionDispatch.init(instance, shader_dir, allocator);
         errdefer attention.deinit();
+        var argmax = try ArgmaxDispatch.init(instance, shader_dir, allocator);
+        errdefer argmax.deinit();
 
         // Build the decode graph (for diagnostics / future full-graph dispatch)
         var decode_graph = try architecture.buildDecodeGraphDetailed(config, allocator, &model.gguf_file);
@@ -459,6 +477,9 @@ pub const InferenceEngine = struct {
             .preferred_workgroup_size = gpu_config.dmmv_workgroup_size,
         });
         errdefer decode_graph.deinit();
+        var decode_analysis = try decode_graph.analyze(allocator);
+        defer decode_analysis.deinit();
+        const modeled_decode_bytes_per_token = decode_analysis.total_bytes;
 
         // Allocate intermediate buffers
         const hidden_size = @as(vk.c.VkDeviceSize, config.hidden_dim) * @sizeOf(f32);
@@ -490,6 +511,51 @@ pub const InferenceEngine = struct {
             const map_result = vk.c.vkMapMemory(instance.device, logits_staging.memory, 0, logits_size, 0, &map_ptr);
             if (map_result != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
             logits_staging.mapped = @ptrCast(map_ptr);
+        }
+
+        const argmax_phase0_workgroups: u32 = @max(@as(u32, 1), (config.vocab_size + 63) / 64);
+        const argmax_partials_size = @as(vk.c.VkDeviceSize, argmax_phase0_workgroups) * 2 * @sizeOf(u32);
+        var argmax_partials_buf = try Buffer.initDeviceLocal(
+            instance,
+            argmax_partials_size,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        );
+        errdefer argmax_partials_buf.deinit();
+
+        var argmax_result_buf = try Buffer.initDeviceLocal(
+            instance,
+            @sizeOf(u32),
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        );
+        errdefer argmax_result_buf.deinit();
+
+        var argmax_result_staging = try Buffer.init(
+            instance,
+            @sizeOf(u32),
+            vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer argmax_result_staging.deinit();
+        {
+            var map_ptr: ?*anyopaque = null;
+            const map_result = vk.c.vkMapMemory(instance.device, argmax_result_staging.memory, 0, @sizeOf(u32), 0, &map_ptr);
+            if (map_result != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            argmax_result_staging.mapped = @ptrCast(map_ptr);
+        }
+
+        var argmax_descriptor_set: ?vk.c.VkDescriptorSet = null;
+        if (argmax.pipeline != null) {
+            const ds = try argmax.allocDescriptorSet();
+            argmax.writeDescriptorSet(
+                ds,
+                logits_buf.handle,
+                logits_buf.size,
+                argmax_partials_buf.handle,
+                argmax_partials_buf.size,
+                argmax_result_buf.handle,
+                argmax_result_buf.size,
+            );
+            argmax_descriptor_set = ds;
         }
 
         // Pre-allocate upload staging for embeddings (avoids per-token vkAllocateMemory)
@@ -578,7 +644,7 @@ pub const InferenceEngine = struct {
             kv_v_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_per_layer, storage_xfer);
         }
 
-        log.info("KV cache: {d} layers × {d} MB = {d} MB total", .{
+        log.debug("KV cache: {d} layers × {d} MB = {d} MB total", .{
             config.n_layers,
             kv_cache_per_layer * 2 / (1024 * 1024),
             config.n_layers * kv_cache_per_layer * 2 / (1024 * 1024),
@@ -620,7 +686,7 @@ pub const InferenceEngine = struct {
                 ssm_states[i] = try allocator.alloc(f32, ssm_state_size);
                 @memset(ssm_states[i], 0);
             }
-            log.info("SSM state: {d} layers × {d} KB conv + {d} KB recurrent", .{
+            log.debug("SSM state: {d} layers × {d} KB conv + {d} KB recurrent", .{
                 config.n_layers,
                 conv_state_size * 4 / 1024,
                 ssm_state_size * 4 / 1024,
@@ -674,7 +740,7 @@ pub const InferenceEngine = struct {
             }
             try decode_cmd.end();
             try decode_cmd.submitAndWait(instance.compute_queue);
-            log.info("GPU SSM state: {d} layers × {d} KB conv + {d} KB recurrent = {d} MB total", .{
+            log.debug("GPU SSM state: {d} layers × {d} KB conv + {d} KB recurrent = {d} MB total", .{
                 config.n_layers,
                 gpu_conv_size / 1024,
                 gpu_state_size / 1024,
@@ -724,7 +790,7 @@ pub const InferenceEngine = struct {
         if (pool_result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
         errdefer vk.c.vkDestroyDescriptorPool(instance.device, shared_pool, null);
 
-        log.info("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}", .{
+        log.debug("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}", .{
             decode_graph.nodeCount(), config.hidden_dim, config.vocab_size,
         });
 
@@ -734,6 +800,7 @@ pub const InferenceEngine = struct {
             .dmmv = dmmv,
             .elementwise = elementwise,
             .attention = attention,
+            .argmax = argmax,
             .cmd_pool = cmd_pool,
             .decode_cmd = decode_cmd,
             .decode_graph = decode_graph,
@@ -742,6 +809,11 @@ pub const InferenceEngine = struct {
             .norm_buf = norm_buf,
             .logits_buf = logits_buf,
             .logits_staging = logits_staging,
+            .argmax_partials_buf = argmax_partials_buf,
+            .argmax_result_buf = argmax_result_buf,
+            .argmax_result_staging = argmax_result_staging,
+            .argmax_descriptor_set = argmax_descriptor_set,
+            .argmax_phase0_workgroups = argmax_phase0_workgroups,
             .embed_staging = embed_staging,
             .q_buf = q_buf,
             .k_buf = k_buf,
@@ -768,6 +840,7 @@ pub const InferenceEngine = struct {
             .shared_pool = shared_pool,
             .instance = instance,
             .allocator = allocator,
+            .modeled_decode_bytes_per_token = modeled_decode_bytes_per_token,
         };
     }
 
@@ -792,7 +865,17 @@ pub const InferenceEngine = struct {
         self.timestamp_query_pool = pool;
         self.timestamp_period_ns = @as(f64, self.instance.device_props.limits.timestampPeriod);
         self.profile_enabled = true;
-        log.info("Profiling enabled: {d} timestamp queries, period={d:.2}ns", .{ max_timestamps, self.timestamp_period_ns });
+        log.debug("Profiling enabled: {d} timestamp queries, period={d:.2}ns", .{ max_timestamps, self.timestamp_period_ns });
+    }
+
+    /// Enable the expensive CPU-vs-GPU validation readbacks used for debugging kernel correctness.
+    pub fn enableValidationDiagnostics(self: *InferenceEngine) void {
+        self.validation_diagnostics_enabled = true;
+    }
+
+    /// Preserve full logits on the host for debug dumps and diagnostic inspection.
+    pub fn enableLogitsReadback(self: *InferenceEngine) void {
+        self.logits_readback_enabled = true;
     }
 
     /// Write a timestamp to the query pool (if profiling enabled).
@@ -810,6 +893,12 @@ pub const InferenceEngine = struct {
         if (!self.profile_enabled) return;
         self.timestamp_count = 0;
         vk.c.vkCmdResetQueryPool(self.decode_cmd.handle, self.timestamp_query_pool, 0, 2048);
+    }
+
+    fn resetProfilingSamples(self: *InferenceEngine) void {
+        self.profile_total_gpu_ms = 0.0;
+        self.profile_max_gpu_ms = 0.0;
+        self.profile_sample_count = 0;
     }
 
     fn resetRequestState(self: *InferenceEngine) !void {
@@ -845,8 +934,8 @@ pub const InferenceEngine = struct {
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
     }
 
-    /// Read back all timestamps and print a summary.
-    pub fn printProfilingSummary(self: *const InferenceEngine) void {
+    /// Read back all timestamps for the current token and fold them into request-wide profiling stats.
+    pub fn recordProfilingSample(self: *InferenceEngine) void {
         if (!self.profile_enabled or self.timestamp_count == 0) return;
         const count = self.timestamp_count;
         var timestamps: [2048]u64 = undefined;
@@ -868,7 +957,11 @@ pub const InferenceEngine = struct {
             const first = timestamps[0];
             const last = timestamps[count - 1];
             const elapsed_ns = @as(f64, @floatFromInt(last -| first)) * self.timestamp_period_ns;
-            log.info("PROFILE: {d} timestamps, GPU total={d:.2}ms", .{ count, elapsed_ns / 1e6 });
+            const elapsed_ms = elapsed_ns / 1e6;
+            self.profile_total_gpu_ms += elapsed_ms;
+            if (elapsed_ms > self.profile_max_gpu_ms) self.profile_max_gpu_ms = elapsed_ms;
+            self.profile_sample_count += 1;
+            log.debug("PROFILE: {d} timestamps, GPU decode token={d:.2}ms", .{ count, elapsed_ms });
         }
     }
 
@@ -1124,10 +1217,11 @@ pub const InferenceEngine = struct {
     /// Run a single decode step through all transformer layers.
     /// embed → [per-layer: norm → QKV → RoPE → KV write → attention → O proj → residual
     ///          → FFN norm → MoE routing → expert DMMVs → residual] → final norm → LM head → logits
-    pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32) !void {
+    pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32, collect_output: bool) !void {
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+        const rms_norm_eps = config.rms_norm_eps;
         const q_dim = @as(u32, config.n_heads) * config.head_dim;
         const kv_dim = @as(u32, config.n_kv_heads) * config.head_dim;
         const kv_vec_size = @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
@@ -1139,7 +1233,7 @@ pub const InferenceEngine = struct {
 
         // Log MoE dimensions once (first decode)
         if (state.generated_tokens.items.len == 0 and is_moe) {
-            log.info("MoE dims: expert_inter={d} shared_expert_inter={d} hidden={d}", .{ inter_dim, shexp_inter_dim, hidden_dim });
+            log.debug("MoE dims: expert_inter={d} shared_expert_inter={d} hidden={d}", .{ inter_dim, shexp_inter_dim, hidden_dim });
         }
 
         // 1. CPU: dequantize embedding
@@ -1177,7 +1271,7 @@ pub const InferenceEngine = struct {
                 const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                 const ds = try self.allocDescSet(pip.descriptor_set_layout);
                 self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, attn_norm.gpu_buffer.handle, attn_norm.gpu_buffer.size, self.norm_buf.handle, hidden_size);
-                try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
+                try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
             }
             self.decode_cmd.computeBarrier();
 
@@ -1185,57 +1279,141 @@ pub const InferenceEngine = struct {
 
             if (is_full_attn) {
                 // === FULL ATTENTION LAYER ===
-                // Q+gate projection → strided Q extraction → Q/K norm → K/V proj → RoPE →
-                // KV cache → flash attention → sigmoid gate → output projection → residual
+                // Q/gate projection → Q/K norm → K/V proj → RoPE → KV cache → flash attention
+                // → sigmoid gate → output projection → residual
 
                 const q_tensor = self.findLayerTensor(layer, "attn_q.weight") orelse return error.TensorNotFound;
                 const k_tensor = self.findLayerTensor(layer, "attn_k.weight") orelse return error.TensorNotFound;
                 const v_tensor = self.findLayerTensor(layer, "attn_v.weight") orelse return error.TensorNotFound;
+                const o_tensor = self.findLayerTensor(layer, "attn_output.weight") orelse return error.TensorNotFound;
+                const attn_gate_tensor = self.findLayerTensor(layer, "attn_gate.weight");
+                const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
+                const k_rows: u32 = @intCast(k_tensor.info.numElements() / hidden_dim);
+                const v_rows: u32 = @intCast(v_tensor.info.numElements() / hidden_dim);
+                const o_cols: u32 = @intCast(o_tensor.info.numElements() / hidden_dim);
+                const packed_q_gate = q_rows == q_dim * 2;
+                const separate_attn_gate = q_rows == q_dim and attn_gate_tensor != null;
+                const apply_attn_gate = packed_q_gate or separate_attn_gate;
+                if (state.position == 0 and layer == full_attn_interval - 1) {
+                    log.debug("ATTN_Q layout L{d}: q_rows={d} k_rows={d} v_rows={d} o_cols={d} q_dim={d} kv_dim={d} packed_q_gate={} separate_gate={} gate_tensor={} apply_attn_gate={}", .{
+                        layer,
+                        q_rows,
+                        k_rows,
+                        v_rows,
+                        o_cols,
+                        q_dim,
+                        kv_dim,
+                        packed_q_gate,
+                        separate_attn_gate,
+                        attn_gate_tensor != null,
+                        apply_attn_gate,
+                    });
+                }
 
-                // Bug fix #4: Q+gate are interleaved per head as [Q_head, gate_head, Q_head, gate_head, ...]
-                // attn_q outputs (head_dim * 2) * n_heads. Q is at stride-2 offsets.
-                // For now, project Q+gate together, then extract Q with strided copy.
-                const q_full_dim = q_dim * 2;
-                try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
-                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
-                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
-                // The next step is a transfer copy, so compute→compute is not sufficient.
-                self.decode_cmd.computeToTransferBarrier();
-
-                // Q+gate are block-interleaved per head:
-                // [head0_Q(head_dim), head0_gate(head_dim), head1_Q(head_dim), head1_gate(head_dim), ...]
-                // Extract Q and gate into separate buffers using per-head copies
-                {
-                    const hd = config.head_dim;
-                    const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
-                    const stride_bytes = hd_bytes * 2;
-                    for (0..config.n_heads) |h| {
-                        const src_off = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
-                        const dst_off = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
-                        const qr = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = dst_off, .size = hd_bytes };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &qr);
-                        const gr = vk.c.VkBufferCopy{ .srcOffset = src_off + hd_bytes, .dstOffset = dst_off, .size = hd_bytes };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.gate_buf.handle, 1, &gr);
+                if (packed_q_gate) {
+                    // Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.
+                    // Project into a temporary buffer and split each head block out.
+                    const q_full_dim = q_dim * 2;
+                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
+                } else {
+                    // Dense qwen35 may store Q and gate as separate tensors.
+                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, q_dim, hidden_dim);
+                    if (attn_gate_tensor) |gate_tensor| {
+                        try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, q_dim, hidden_dim);
                     }
                 }
-                self.decode_cmd.transferToComputeBarrier();
+                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
+                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
+                if (packed_q_gate) {
+                    self.decode_cmd.computeToTransferBarrier();
+                    {
+                        const hd = config.head_dim;
+                        const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
+                        const stride_bytes = hd_bytes * 2;
+                        for (0..config.n_heads) |h| {
+                            const src_off = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
+                            const dst_off = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
+                            const qr = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = dst_off, .size = hd_bytes };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &qr);
+                            const gr = vk.c.VkBufferCopy{ .srcOffset = src_off + hd_bytes, .dstOffset = dst_off, .size = hd_bytes };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.gate_buf.handle, 1, &gr);
+                        }
+                    }
+                    self.decode_cmd.transferToComputeBarrier();
+                } else {
+                    self.decode_cmd.computeBarrier();
+                }
 
                 // Bug fix #1: Q/K normalization (per-head RMS norm)
                 // attn_q_norm and attn_k_norm are per-head norms with head_dim weights
                 const q_norm_tensor = self.findLayerTensor(layer, "attn_q_norm.weight");
                 const k_norm_tensor = self.findLayerTensor(layer, "attn_k_norm.weight");
+                if (state.position == 0 and layer == full_attn_interval - 1) {
+                    log.debug("ATTN_NORM layout L{d}: q_norm_elems={d} k_norm_elems={d} q_norm_type={s} k_norm_type={s} head_dim={d} n_heads={d} n_kv_heads={d}", .{
+                        layer,
+                        if (q_norm_tensor) |qn| qn.info.numElements() else 0,
+                        if (k_norm_tensor) |kn| kn.info.numElements() else 0,
+                        if (q_norm_tensor) |qn| @tagName(qn.info.type_) else "none",
+                        if (k_norm_tensor) |kn| @tagName(kn.info.type_) else "none",
+                        config.head_dim,
+                        config.n_heads,
+                        config.n_kv_heads,
+                    });
+                    if (self.validation_diagnostics_enabled) {
+                        const mmap = self.model.mmap_data orelse return error.NoMmapData;
+                        if (self.findLayerTensor(layer, "attn_norm.weight")) |attn_norm_tensor| {
+                            var attn_norm_preview = [_]f32{0} ** 4;
+                            const n = @min(attn_norm_tensor.info.numElements(), attn_norm_preview.len);
+                            const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + attn_norm_tensor.info.offset);
+                            readMmapFloats(mmap, off, attn_norm_tensor.info.type_, attn_norm_preview[0..n]);
+                            log.info("ATTN_NORM_WEIGHTS L{d}: attn_norm[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                                layer,
+                                attn_norm_preview[0],
+                                attn_norm_preview[1],
+                                attn_norm_preview[2],
+                                attn_norm_preview[3],
+                            });
+                        }
+                        if (q_norm_tensor) |qn| {
+                            var q_norm_preview = [_]f32{0} ** 4;
+                            const n = @min(qn.info.numElements(), q_norm_preview.len);
+                            const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + qn.info.offset);
+                            readMmapFloats(mmap, off, qn.info.type_, q_norm_preview[0..n]);
+                            log.info("ATTN_NORM_WEIGHTS L{d}: q_norm[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                                layer,
+                                q_norm_preview[0],
+                                q_norm_preview[1],
+                                q_norm_preview[2],
+                                q_norm_preview[3],
+                            });
+                        }
+                        if (k_norm_tensor) |kn| {
+                            var k_norm_preview = [_]f32{0} ** 4;
+                            const n = @min(kn.info.numElements(), k_norm_preview.len);
+                            const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + kn.info.offset);
+                            readMmapFloats(mmap, off, kn.info.type_, k_norm_preview[0..n]);
+                            log.info("ATTN_NORM_WEIGHTS L{d}: k_norm[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                                layer,
+                                k_norm_preview[0],
+                                k_norm_preview[1],
+                                k_norm_preview[2],
+                                k_norm_preview[3],
+                            });
+                        }
+                    }
+                }
                 if (q_norm_tensor) |qn| {
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     // Apply RMS norm to each Q head (n_heads workgroups, head_dim elements each)
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet3(ds, self.q_buf.handle, self.q_buf.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, self.q_buf.handle, self.q_buf.size); // in-place via same output
-                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_heads, 1e-6);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_heads, rms_norm_eps);
                 }
                 if (k_norm_tensor) |kn| {
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet3(ds, self.k_buf.handle, self.k_buf.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, self.k_buf.handle, self.k_buf.size);
-                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_kv_heads, 1e-6);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_kv_heads, rms_norm_eps);
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -1273,17 +1451,180 @@ pub const InferenceEngine = struct {
                 }
                 self.decode_cmd.computeBarrier();
 
-                // Bug fix #2: Attention gating — attn_output = attn_output * sigmoid(gate)
-                // gate_buf has the per-head gate values, attn_out_buf has the attention output
-                if (self.elementwise.pipeline_sigmoid_mul) |*pip| {
-                    const gds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet3(gds, self.attn_out_buf.handle, self.attn_out_buf.size, self.gate_buf.handle, self.gate_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size); // in-place
-                    try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, q_dim);
-                    self.decode_cmd.computeBarrier();
+                // Self-check the first attention layer at seq_len=1: with only one KV token,
+                // flash attention must reproduce the current V slice for each query head's KV group.
+                if (state.position == 0 and is_full_attn and self.validation_diagnostics_enabled) {
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = 0,
+                        .size = self.attn_out_buf.size,
+                    });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = 0,
+                        .size = self.v_buf.size,
+                    });
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    const attn_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    const attn_vals = attn_ptr[0..q_dim];
+                    const v_ptr: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+                    const v_vals = v_ptr[0..kv_dim];
+
+                    var attn_v_max_diff: f32 = 0;
+                    for (0..config.n_heads) |h| {
+                        const kv_head = h / (config.n_heads / config.n_kv_heads);
+                        for (0..config.head_dim) |d| {
+                            const got = attn_vals[h * config.head_dim + d];
+                            const want = v_vals[kv_head * config.head_dim + d];
+                            const diff = @abs(got - want);
+                            if (diff > attn_v_max_diff) attn_v_max_diff = diff;
+                        }
+                    }
+                    log.info("ATTN_SELFTEST L{d}: seq_len=1 attn_vs_v max_diff={d:.6} attn_h0[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}] v_kv0[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                        layer,
+                        attn_v_max_diff,
+                        attn_vals[0],
+                        attn_vals[1],
+                        attn_vals[2],
+                        attn_vals[3],
+                        v_vals[0],
+                        v_vals[1],
+                        v_vals[2],
+                        v_vals[3],
+                    });
+
+                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                }
+
+                // Validate multi-token flash attention against a naive CPU reference on the
+                // first full-attention layer once the 5-token prompt is fully prefilling.
+                if (state.position == 4 and layer == full_attn_interval - 1 and self.validation_diagnostics_enabled) {
+                    const seq_len_dbg: u32 = state.position + 1;
+                    const q_bytes = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32);
+                    const kv_dbg_bytes = @as(vk.c.VkDeviceSize, seq_len_dbg * kv_dim) * @sizeOf(f32);
+                    const attn_bytes = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32);
+                    const k_off = q_bytes;
+                    const v_off = k_off + kv_dbg_bytes;
+                    const attn_off = v_off + kv_dbg_bytes;
+
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.q_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = 0,
+                        .size = q_bytes,
+                    });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.kv_k_cache[layer_idx].handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = k_off,
+                        .size = kv_dbg_bytes,
+                    });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.kv_v_cache[layer_idx].handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = v_off,
+                        .size = kv_dbg_bytes,
+                    });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = attn_off,
+                        .size = attn_bytes,
+                    });
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    const dbg_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    const q_vals = dbg_ptr[0..q_dim];
+                    const k_vals = dbg_ptr[@intCast(k_off / @sizeOf(f32)) ..][0 .. seq_len_dbg * kv_dim];
+                    const v_vals = dbg_ptr[@intCast(v_off / @sizeOf(f32)) ..][0 .. seq_len_dbg * kv_dim];
+                    const attn_vals = dbg_ptr[@intCast(attn_off / @sizeOf(f32)) ..][0..q_dim];
+
+                    const seq_len_usize: usize = @intCast(seq_len_dbg);
+                    const q_dim_usize: usize = @intCast(q_dim);
+                    var cpu_attn = try self.allocator.alloc(f32, q_dim_usize);
+                    defer self.allocator.free(cpu_attn);
+                    var scores = try self.allocator.alloc(f32, seq_len_usize);
+                    defer self.allocator.free(scores);
+                    var probs = try self.allocator.alloc(f32, seq_len_usize);
+                    defer self.allocator.free(probs);
+
+                    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.head_dim)));
+                    for (0..config.n_heads) |h| {
+                        const kv_head = h / (config.n_heads / config.n_kv_heads);
+                        const q_head = q_vals[h * config.head_dim ..][0..config.head_dim];
+
+                        var max_score: f32 = -std.math.inf(f32);
+                        for (0..seq_len_dbg) |tok| {
+                            const k_tok = k_vals[tok * kv_dim + kv_head * config.head_dim ..][0..config.head_dim];
+                            var dot: f32 = 0;
+                            for (0..config.head_dim) |d| dot += q_head[d] * k_tok[d];
+                            const s = dot * scale;
+                            scores[tok] = s;
+                            if (s > max_score) max_score = s;
+                        }
+
+                        var sum_exp: f32 = 0;
+                        for (0..seq_len_dbg) |tok| {
+                            const p = @exp(scores[tok] - max_score);
+                            probs[tok] = p;
+                            sum_exp += p;
+                        }
+                        const inv_sum = if (sum_exp > 0) 1.0 / sum_exp else 0.0;
+
+                        const out_head = cpu_attn[h * config.head_dim ..][0..config.head_dim];
+                        @memset(out_head, 0);
+                        for (0..seq_len_dbg) |tok| {
+                            const weight = probs[tok] * inv_sum;
+                            const v_tok = v_vals[tok * kv_dim + kv_head * config.head_dim ..][0..config.head_dim];
+                            for (0..config.head_dim) |d| out_head[d] += weight * v_tok[d];
+                        }
+                    }
+
+                    var attn_ref_max_diff: f32 = 0;
+                    for (0..q_dim) |i| {
+                        const diff = @abs(attn_vals[i] - cpu_attn[i]);
+                        if (diff > attn_ref_max_diff) attn_ref_max_diff = diff;
+                    }
+                    log.info("ATTN_REFTEST L{d}: seq_len={d} max_diff={d:.6} attn_h0[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}] cpu_h0[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                        layer,
+                        seq_len_dbg,
+                        attn_ref_max_diff,
+                        attn_vals[0],
+                        attn_vals[1],
+                        attn_vals[2],
+                        attn_vals[3],
+                        cpu_attn[0],
+                        cpu_attn[1],
+                        cpu_attn[2],
+                        cpu_attn[3],
+                    });
+
+                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                }
+
+                if (apply_attn_gate) {
+                    if (self.elementwise.pipeline_sigmoid_mul) |*pip| {
+                        const gds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(gds, self.attn_out_buf.handle, self.attn_out_buf.size, self.gate_buf.handle, self.gate_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
+                        try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, q_dim);
+                        self.decode_cmd.computeBarrier();
+                    }
                 }
 
                 // Output projection: attn_output.weight
-                const o_tensor = self.findLayerTensor(layer, "attn_output.weight") orelse return error.TensorNotFound;
                 try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, q_dim);
                 self.decode_cmd.computeBarrier();
 
@@ -1298,18 +1639,25 @@ pub const InferenceEngine = struct {
 
                 // --- Mid-layer diagnostic: o_proj RMS at attention layers (BOS only) ---
                 // Single readback per attention layer — reads o_proj_buf (before residual add)
-                if (state.position == 0 and is_full_attn and self.profile_enabled) {
+                if (state.position == 0 and is_full_attn and self.validation_diagnostics_enabled) {
                     // Flush current work so o_proj_buf is valid
                     try self.decode_cmd.end();
                     try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
-                    // Read o_proj_buf
+                    // Read attn_out_buf and o_proj_buf for a CPU-vs-GPU projection check.
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = 0,
+                        .size = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32),
+                    });
                     vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.o_proj_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
                     try self.decode_cmd.end();
                     try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
+                    const attn_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    const attn_vals = attn_ptr[0..q_dim];
                     const op: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
                     var op_sq: f64 = 0;
                     var op_max: f32 = 0;
@@ -1323,6 +1671,38 @@ pub const InferenceEngine = struct {
                         layer, op_rms, op_max, op[0], op[1], op[2], op[3],
                     });
 
+                    if (q_dim <= 8192) {
+                        const mmap = self.model.mmap_data orelse return error.NoMmapData;
+                        const o_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + o_tensor.info.offset);
+                        var cpu_row_buf: [8192]f32 = undefined;
+                        var cpu_vals: [4]f32 = [_]f32{0} ** 4;
+                        const o_rows: u32 = @min(hidden_dim, cpu_vals.len);
+                        var o_proj_max_diff: f32 = 0;
+                        for (0..o_rows) |row| {
+                            dequantRow(mmap[o_off..], @intCast(row), q_dim, o_tensor.info.type_, cpu_row_buf[0..q_dim]);
+                            var dot: f64 = 0;
+                            for (0..q_dim) |i| dot += @as(f64, cpu_row_buf[i]) * @as(f64, attn_vals[i]);
+                            cpu_vals[row] = @floatCast(dot);
+                            const diff = @abs(op[row] - cpu_vals[row]);
+                            if (diff > o_proj_max_diff) o_proj_max_diff = diff;
+                        }
+                        log.info("DMMV_CHECK: attn_output type={s} M={d} K={d} gpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] cpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] max_diff={d:.6} ok={s}", .{
+                            @tagName(o_tensor.info.type_),
+                            hidden_dim,
+                            q_dim,
+                            op[0],
+                            op[1],
+                            op[2],
+                            op[3],
+                            cpu_vals[0],
+                            cpu_vals[1],
+                            cpu_vals[2],
+                            cpu_vals[3],
+                            o_proj_max_diff,
+                            if (o_proj_max_diff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                        });
+                    }
+
                     // Restart command buffer
                     _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                     try self.decode_cmd.reset();
@@ -1330,7 +1710,8 @@ pub const InferenceEngine = struct {
                 }
             } else {
                 // === SSM / LINEAR ATTENTION LAYER ===
-                if (self.elementwise.pipeline_ssm_conv1d != null) {
+                const use_gpu_ssm = self.elementwise.pipeline_ssm_conv1d != null and config.architecture != .qwen35;
+                if (use_gpu_ssm) {
                     try self.runSsmLayerGpu(state, layer, layer_idx);
                 } else {
                     try self.runSsmLayerCpu(state, layer, layer_idx);
@@ -1344,7 +1725,7 @@ pub const InferenceEngine = struct {
                 const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                 const ds = try self.allocDescSet(pip.descriptor_set_layout);
                 self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, ffn_norm_tensor.gpu_buffer.handle, ffn_norm_tensor.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size);
-                try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
+                try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
             }
             self.decode_cmd.computeBarrier();
 
@@ -1614,6 +1995,63 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
                 self.decode_cmd.computeBarrier();
 
+                if (state.position == 0 and self.validation_diagnostics_enabled and layer == 0 and inter_dim <= 8192) {
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = 0,
+                        .size = @as(vk.c.VkDeviceSize, inter_dim) * @sizeOf(f32),
+                    });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{
+                        .srcOffset = 0,
+                        .dstOffset = 0,
+                        .size = hidden_size,
+                    });
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    const sw_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    const sw_vals = sw_ptr[0..inter_dim];
+                    const dn_ptr: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+                    const mmap = self.model.mmap_data orelse return error.NoMmapData;
+                    const down_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + down_tensor.info.offset);
+                    var cpu_row_buf: [8192]f32 = undefined;
+                    var cpu_vals: [4]f32 = [_]f32{0} ** 4;
+                    const down_rows: u32 = @min(hidden_dim, cpu_vals.len);
+                    var down_max_diff: f32 = 0;
+                    for (0..down_rows) |row| {
+                        dequantRow(mmap[down_off..], @intCast(row), inter_dim, down_tensor.info.type_, cpu_row_buf[0..inter_dim]);
+                        var dot: f64 = 0;
+                        for (0..inter_dim) |i| dot += @as(f64, cpu_row_buf[i]) * @as(f64, sw_vals[i]);
+                        cpu_vals[row] = @floatCast(dot);
+                        const diff = @abs(dn_ptr[row] - cpu_vals[row]);
+                        if (diff > down_max_diff) down_max_diff = diff;
+                    }
+                    log.info("DMMV_CHECK: ffn_down type={s} M={d} K={d} gpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] cpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] max_diff={d:.6} ok={s}", .{
+                        @tagName(down_tensor.info.type_),
+                        hidden_dim,
+                        inter_dim,
+                        dn_ptr[0],
+                        dn_ptr[1],
+                        dn_ptr[2],
+                        dn_ptr[3],
+                        cpu_vals[0],
+                        cpu_vals[1],
+                        cpu_vals[2],
+                        cpu_vals[3],
+                        down_max_diff,
+                        if (down_max_diff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                    });
+
+                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                }
+
                 // FFN residual: hidden_buf += down_buf
                 {
                     const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
@@ -1629,8 +2067,8 @@ pub const InferenceEngine = struct {
             // Command buffer stays open across layers (Phase 3c batching).
             // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
 
-            // --- Debug: per-layer hidden_buf diagnostics (BOS token only, gated behind --profile) ---
-            if (state.position == 0 and self.profile_enabled) {
+            // --- Debug: per-layer hidden_buf diagnostics (BOS token only, gated behind validation diagnostics) ---
+            if (state.position == 0 and self.validation_diagnostics_enabled) {
                 // Flush current batched cmd buffer for diagnostic readback
                 try self.decode_cmd.end();
                 try self.decode_cmd.submitAndWait(self.instance.compute_queue);
@@ -1658,7 +2096,7 @@ pub const InferenceEngine = struct {
                 var logit5: f32 = 0;
                 if (hidden_dim <= 8192) {
                     if (self.model.mmap_data) |m| {
-                        const rms_inv: f32 = @floatCast(1.0 / @sqrt(diag_sum_sq / @as(f64, @floatFromInt(hidden_dim)) + 1e-6));
+                        const rms_inv: f32 = @floatCast(1.0 / @sqrt(diag_sum_sq / @as(f64, @floatFromInt(hidden_dim)) + rms_norm_eps));
                         const norm_t = findLoadedTensor(self.model, "output_norm.weight");
                         const lm_t = findLoadedTensor(self.model, "output.weight") orelse
                             findLoadedTensor(self.model, "token_embd.weight");
@@ -1718,7 +2156,7 @@ pub const InferenceEngine = struct {
         }
 
         // === Per-layer diagnostic summary (stored for printing after generation) ===
-        if (state.position == 0 and config.n_layers <= 64 and self.profile_enabled) {
+        if (state.position == 0 and config.n_layers <= 64 and self.validation_diagnostics_enabled) {
             // Store compact logit5 trajectory — shows how logit for token 5 evolves through layers
             // Reference: without layers, logit5=2.5385. With correct layers, should converge to model's prediction.
             var pos: usize = 0;
@@ -1735,14 +2173,7 @@ pub const InferenceEngine = struct {
         }
 
         // === Final norm + LM head (after all layers) ===
-        // Submit batched layer work, then start final cmd buffer
-        _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        try self.decode_cmd.end();
-        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-        self.printProfilingSummary();
-        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-        try self.decode_cmd.reset();
-        try self.decode_cmd.begin();
+        // Stay in the same command buffer so decode uses a single queue submit.
 
         // Final RMS norm: hidden_buf → norm_buf
         const final_norm_tensor = findLoadedTensor(self.model, "output_norm.weight") orelse return error.TensorNotFound;
@@ -1750,7 +2181,7 @@ pub const InferenceEngine = struct {
             const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
             self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, final_norm_tensor.gpu_buffer.handle, final_norm_tensor.gpu_buffer.size, self.norm_buf.handle, hidden_size);
-            try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
+            try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
         }
         self.decode_cmd.computeBarrier();
 
@@ -1759,8 +2190,21 @@ pub const InferenceEngine = struct {
             findLoadedTensor(self.model, "token_embd.weight") orelse return error.TensorNotFound;
         try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
 
-        // Readback logits
-        {
+        const use_gpu_argmax = collect_output and self.argmax.pipeline != null and self.argmax_descriptor_set != null;
+        if (use_gpu_argmax) {
+            self.decode_cmd.computeBarrier();
+            try self.argmax.record(
+                &self.decode_cmd,
+                self.argmax_descriptor_set.?,
+                self.model.config.vocab_size,
+                self.argmax_phase0_workgroups,
+            );
+        }
+
+        // Read back the 4-byte token id result every token, and full logits only when debugging
+        // or when GPU argmax is unavailable and we must fall back to CPU greedy sampling.
+        const need_logits_readback = collect_output and (self.logits_readback_enabled or self.validation_diagnostics_enabled or !use_gpu_argmax);
+        if (collect_output) {
             const barrier = vk.c.VkMemoryBarrier{
                 .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .pNext = null,
@@ -1768,13 +2212,21 @@ pub const InferenceEngine = struct {
                 .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
             };
             vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
-            const logits_copy_size = @as(vk.c.VkDeviceSize, self.model.config.vocab_size) * @sizeOf(f32);
-            const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_copy_size };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &region);
+            if (use_gpu_argmax) {
+                const token_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(u32) };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.argmax_result_buf.handle, self.argmax_result_staging.handle, 1, &token_region);
+            }
+            if (need_logits_readback) {
+                const logits_copy_size = @as(vk.c.VkDeviceSize, self.model.config.vocab_size) * @sizeOf(f32);
+                const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_copy_size };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &region);
+            }
         }
+        _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        self.recordProfilingSample();
 
         state.position += 1;
     }
@@ -1836,7 +2288,7 @@ pub const InferenceEngine = struct {
     // -----------------------------------------------------------------------
 
     /// Run one SSM layer: GPU for large projections, CPU for small state ops.
-    fn runSsmLayerCpu(self: *InferenceEngine, _: *DecodeState, layer: u32, layer_idx: usize) !void {
+    fn runSsmLayerCpu(self: *InferenceEngine, state: *DecodeState, layer: u32, layer_idx: usize) !void {
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
@@ -1968,6 +2420,22 @@ pub const InferenceEngine = struct {
         if (ssm_a_tensor) |t| {
             const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + t.info.offset);
             readMmapFloats(mmap, off, t.info.type_, ssm_a_f32);
+            if (layer == 0 and state.position == 0) {
+                var ssm_a_min: f32 = std.math.inf(f32);
+                var ssm_a_max: f32 = -std.math.inf(f32);
+                for (ssm_a_f32[0..dt_rank]) |v| {
+                    ssm_a_min = @min(ssm_a_min, v);
+                    ssm_a_max = @max(ssm_a_max, v);
+                }
+                log.info("SSM_A_STATS L0: min={d:.6} max={d:.6} first4=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                    ssm_a_min,
+                    ssm_a_max,
+                    ssm_a_f32[0],
+                    ssm_a_f32[@min(@as(usize, 1), dt_rank - 1)],
+                    ssm_a_f32[@min(@as(usize, 2), dt_rank - 1)],
+                    ssm_a_f32[@min(@as(usize, 3), dt_rank - 1)],
+                });
+            }
         }
 
         const gate_arr = try self.allocator.alloc(f32, dt_rank);
@@ -1980,6 +2448,35 @@ pub const InferenceEngine = struct {
             const sp = @log(1.0 + @exp(a));
             gate_arr[i] = if (ssm_a_tensor != null) sp * ssm_a_f32[i] else -sp;
             beta_arr[i] = 1.0 / (1.0 + @exp(-beta_cpu[i]));
+        }
+        if (layer == 0 and (state.position == 0 or state.position == 64 or state.position == 128 or state.position == 192)) {
+            var gate_min: f32 = std.math.inf(f32);
+            var gate_max: f32 = -std.math.inf(f32);
+            var beta_min: f32 = std.math.inf(f32);
+            var beta_max: f32 = -std.math.inf(f32);
+            var decay_min: f32 = std.math.inf(f32);
+            var decay_max: f32 = -std.math.inf(f32);
+            for (0..dt_rank) |i| {
+                gate_min = @min(gate_min, gate_arr[i]);
+                gate_max = @max(gate_max, gate_arr[i]);
+                beta_min = @min(beta_min, beta_arr[i]);
+                beta_max = @max(beta_max, beta_arr[i]);
+                const decay = @exp(gate_arr[i]);
+                decay_min = @min(decay_min, decay);
+                decay_max = @max(decay_max, decay);
+            }
+            log.debug("SSM gate L0 pos={d}: alpha0={d:.6} dt_bias0={d:.6} ssm_a0={d:.6} gate_log=[{d:.6},{d:.6}] decay=[{d:.6},{d:.6}] beta=[{d:.6},{d:.6}]", .{
+                state.position,
+                alpha_cpu[0],
+                if (dt_bias_tensor != null) dt_bias_f32[0] else 0.0,
+                if (ssm_a_tensor != null) ssm_a_f32[0] else 0.0,
+                gate_min,
+                gate_max,
+                decay_min,
+                decay_max,
+                beta_min,
+                beta_max,
+            });
         }
 
         // Bug fix #9: Scale Q by 1/sqrt(head_k_dim) before state readout
@@ -2003,16 +2500,14 @@ pub const InferenceEngine = struct {
             // Decay: s *= exp(gate)
             for (0..head_v_dim * head_v_dim) |i| ssm_state[s_base + i] *= g_val;
 
-            // sk = s @ k (per-row dot with k vector)
-            // d = beta * (v - sk), then s += outer(k, d) = k[row] * d[col]
+            // Match the GPU delta-net shader: each row is decayed, corrected with
+            // d[row] = beta * (v[row] - dot(state[row], k)), then updated in-place.
             for (0..head_v_dim) |row| {
                 var sk: f32 = 0;
                 for (0..@min(head_v_dim, k_head.len)) |col| {
                     sk += ssm_state[s_base + row * head_v_dim + col] * k_head[col];
                 }
                 const d_val = b_val * (v_head[row] - sk);
-                // Bug fix #13: Outer product s[row][col] += k[col] * d[row]
-                // d_val is d[row] (scalar for this row), update row's slice of state
                 for (0..@min(head_v_dim, k_head.len)) |col| {
                     ssm_state[s_base + row * head_v_dim + col] += k_head[col] * d_val;
                 }
@@ -2083,7 +2578,7 @@ pub const InferenceEngine = struct {
             const z_sl = z_cpu[h * head_v_dim ..][0..head_v_dim];
             var sq: f32 = 0;
             for (o_sl) |v| sq += v * v;
-            const rms = @sqrt(sq / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
+            const rms = @sqrt(sq / @as(f32, @floatFromInt(head_v_dim)) + config.rms_norm_eps);
             for (0..head_v_dim) |i| {
                 var nv = o_sl[i] / rms;
                 // Use per-head indexing if tensor has d_inner elements, else shared d_state weights
@@ -2191,7 +2686,7 @@ pub const InferenceEngine = struct {
         self.decode_cmd.computeBarrier();
 
         // --- GPU SSM diagnostic: readback conv1d output at layer 0 for comparison with CPU SSM_DBG ---
-        if (layer == 0 and self.profile_enabled) {
+        if (layer == 0 and self.validation_diagnostics_enabled) {
             // Flush to read conv1d output
             {
                 const bar = vk.c.VkMemoryBarrier{
@@ -2335,8 +2830,9 @@ pub const InferenceEngine = struct {
 
         // Run each prompt token through the full transformer (same as decodeStep)
         // This populates KV cache and SSM state so the first decode token has context.
-        for (prompt_tokens) |token_id| {
-            try self.decodeStep(state, token_id);
+        for (prompt_tokens, 0..) |token_id, i| {
+            const collect_output = i + 1 == prompt_tokens.len;
+            try self.decodeStep(state, token_id, collect_output);
         }
 
         // Upload last token's embedding
@@ -2346,9 +2842,13 @@ pub const InferenceEngine = struct {
     // Sampling
     // -----------------------------------------------------------------------
 
-    /// Sample a token from the pre-copied logits staging buffer (greedy argmax).
-    /// The logits were already copied to staging during decodeStep — zero alloc here.
+    /// Sample a token greedily. Uses GPU argmax when available, otherwise falls back to CPU scan.
     pub fn sampleGreedy(self: *const InferenceEngine) u32 {
+        if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
+            const token_ptr: [*]const u32 = @ptrCast(@alignCast(self.argmax_result_staging.mapped.?));
+            return token_ptr[0];
+        }
+
         const vocab_size = self.model.config.vocab_size;
         const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
         const logits = logits_ptr[0..vocab_size];
@@ -2404,7 +2904,7 @@ pub const InferenceEngine = struct {
 
         var sum_sq: f64 = 0.0;
         for (cpu_embed) |v| sum_sq += @as(f64, v) * @as(f64, v);
-        const rms_inv: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + 1e-6));
+        const rms_inv: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + config.rms_norm_eps));
 
         var cpu_normed_buf: [8192]f32 = undefined;
         const cpu_normed = cpu_normed_buf[0..hidden_dim];
@@ -2495,7 +2995,7 @@ pub const InferenceEngine = struct {
             const pip = &(self.elementwise.pipeline_rms_norm orelse return);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
             self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, norm_t.gpu_buffer.handle, norm_t.gpu_buffer.size, self.norm_buf.handle, hidden_size);
-            try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, 1e-6);
+            try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, config.rms_norm_eps);
         }
         // Barrier: shader write → transfer read
         {
@@ -2579,12 +3079,16 @@ pub const InferenceEngine = struct {
         // ── STAGE 4: Verify DMMV for non-Q8_0 quant types ──
         // norm_buf still has BOS embedding norm from STAGE 2 (STAGE 3 only read it)
         const wqkv_diag = self.findLayerTensor(0, "attn_qkv.weight");
+        const ffn_gate_diag = self.findLayerTensor(0, "ffn_gate.weight");
+        const ffn_up_diag = self.findLayerTensor(0, "ffn_up.weight");
         const gate_exps_diag = self.findLayerTensor(0, "ffn_gate_exps.weight");
         const down_exps_diag = self.findLayerTensor(0, "ffn_down_exps.weight");
         const ssm_out_diag = self.findLayerTensor(0, "ssm_out.weight");
         const attn_q_diag = self.findLayerTensor(3, "attn_q.weight"); // layer 3 = first attn layer
-        dlog.info("QUANT: wqkv={s} gate_exps={s} down_exps={s} ssm_out={s} attn_q={s}", .{
+        dlog.info("QUANT: wqkv={s} ffn_gate={s} ffn_up={s} gate_exps={s} down_exps={s} ssm_out={s} attn_q={s}", .{
             if (wqkv_diag) |t| @tagName(t.info.type_) else "N/A",
+            if (ffn_gate_diag) |t| @tagName(t.info.type_) else "N/A",
+            if (ffn_up_diag) |t| @tagName(t.info.type_) else "N/A",
             if (gate_exps_diag) |t| @tagName(t.info.type_) else "N/A",
             if (down_exps_diag) |t| @tagName(t.info.type_) else "N/A",
             if (ssm_out_diag) |t| @tagName(t.info.type_) else "N/A",
@@ -2691,6 +3195,144 @@ pub const InferenceEngine = struct {
             });
         }
 
+        if (ffn_gate_diag) |gt| {
+            const inter_d = if (config.intermediate_dim > 0) config.intermediate_dim else hidden_dim * 4;
+            const gate_off_d: usize = @intCast(self.model.gguf_file.tensor_data_offset + gt.info.offset);
+
+            var cpu_gate_r: [3]f32 = undefined;
+            for (0..3) |row| {
+                dequantRow(mmap[gate_off_d..], @intCast(row), hidden_dim, gt.info.type_, cpu_row_buf[0..hidden_dim]);
+                var dot_d: f64 = 0.0;
+                for (0..hidden_dim) |ii| dot_d += @as(f64, cpu_row_buf[ii]) * @as(f64, cpu_normed[ii]);
+                cpu_gate_r[row] = @floatCast(dot_d);
+            }
+
+            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.begin();
+            try self.dispatchDmmv(gt, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim);
+            {
+                const bar = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                const copy_sz = @as(vk.c.VkDeviceSize, 3) * @sizeOf(f32);
+                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = copy_sz };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn);
+            }
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+            const gpu_g: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var gate_mdiff: f32 = 0;
+            for (0..3) |ii| {
+                const d = @abs(gpu_g[ii] - cpu_gate_r[ii]);
+                if (d > gate_mdiff) gate_mdiff = d;
+            }
+            dlog.info("DMMV_CHECK: ffn_gate type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
+                @tagName(gt.info.type_), inter_d, hidden_dim,
+                gpu_g[0], gpu_g[1], gpu_g[2],
+                cpu_gate_r[0], cpu_gate_r[1], cpu_gate_r[2],
+                gate_mdiff,
+                if (gate_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+            });
+        }
+
+        if (ffn_up_diag) |ut| {
+            const inter_d = if (config.intermediate_dim > 0) config.intermediate_dim else hidden_dim * 4;
+            const up_off_d: usize = @intCast(self.model.gguf_file.tensor_data_offset + ut.info.offset);
+
+            var cpu_up_r: [3]f32 = undefined;
+            for (0..3) |row| {
+                dequantRow(mmap[up_off_d..], @intCast(row), hidden_dim, ut.info.type_, cpu_row_buf[0..hidden_dim]);
+                var dot_d: f64 = 0.0;
+                for (0..hidden_dim) |ii| dot_d += @as(f64, cpu_row_buf[ii]) * @as(f64, cpu_normed[ii]);
+                cpu_up_r[row] = @floatCast(dot_d);
+            }
+
+            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.begin();
+            try self.dispatchDmmv(ut, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim);
+            {
+                const bar = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                const copy_sz = @as(vk.c.VkDeviceSize, 3) * @sizeOf(f32);
+                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = copy_sz };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn);
+            }
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+            const gpu_u: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var up_mdiff: f32 = 0;
+            for (0..3) |ii| {
+                const d = @abs(gpu_u[ii] - cpu_up_r[ii]);
+                if (d > up_mdiff) up_mdiff = d;
+            }
+            dlog.info("DMMV_CHECK: ffn_up type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
+                @tagName(ut.info.type_), inter_d, hidden_dim,
+                gpu_u[0], gpu_u[1], gpu_u[2],
+                cpu_up_r[0], cpu_up_r[1], cpu_up_r[2],
+                up_mdiff,
+                if (up_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+            });
+        }
+
+        if (attn_q_diag) |qt| {
+            const q_dim = config.n_heads * config.head_dim;
+            const q_off_d: usize = @intCast(self.model.gguf_file.tensor_data_offset + qt.info.offset);
+
+            var cpu_q_r: [3]f32 = undefined;
+            for (0..3) |row| {
+                dequantRow(mmap[q_off_d..], @intCast(row), hidden_dim, qt.info.type_, cpu_row_buf[0..hidden_dim]);
+                var dot_d: f64 = 0.0;
+                for (0..hidden_dim) |ii| dot_d += @as(f64, cpu_row_buf[ii]) * @as(f64, cpu_normed[ii]);
+                cpu_q_r[row] = @floatCast(dot_d);
+            }
+
+            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.begin();
+            try self.dispatchDmmv(qt, self.norm_buf, hidden_size, self.logits_buf, q_dim, hidden_dim);
+            {
+                const bar = vk.c.VkMemoryBarrier{
+                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                };
+                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                const copy_sz = @as(vk.c.VkDeviceSize, 3) * @sizeOf(f32);
+                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = copy_sz };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &rgn);
+            }
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+            const gpu_q: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var q_mdiff: f32 = 0;
+            for (0..3) |ii| {
+                const d = @abs(gpu_q[ii] - cpu_q_r[ii]);
+                if (d > q_mdiff) q_mdiff = d;
+            }
+            dlog.info("DMMV_CHECK: attn_q type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
+                @tagName(qt.info.type_), q_dim, hidden_dim,
+                gpu_q[0], gpu_q[1], gpu_q[2],
+                cpu_q_r[0], cpu_q_r[1], cpu_q_r[2],
+                q_mdiff,
+                if (q_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+            });
+        }
+
         dlog.info("=== END DIAG ===", .{});
     }
 
@@ -2736,12 +3378,16 @@ pub const InferenceEngine = struct {
         self.q_buf.deinit();
         // Core buffers
         self.embed_staging.deinit();
+        self.argmax_result_staging.deinit();
+        self.argmax_result_buf.deinit();
+        self.argmax_partials_buf.deinit();
         self.logits_staging.deinit();
         self.logits_buf.deinit();
         self.norm_buf.deinit();
         self.residual_buf.deinit();
         self.hidden_buf.deinit();
         self.decode_graph.deinit();
+        self.argmax.deinit();
         self.attention.deinit();
         self.elementwise.deinit();
         self.dmmv.deinit();
@@ -2772,7 +3418,7 @@ fn dumpTop5Logits(engine: *const InferenceEngine, step: u32) void {
             }
         }
     }
-    log.info("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
+    log.debug("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
         step,
         top_ids[0],
         top_vals[0],
@@ -2803,8 +3449,10 @@ pub fn generate(
 ) ![]u32 {
     var state = DecodeState.init(allocator);
     defer state.deinit();
+    engine.diag_summary_len = 0;
+    engine.resetProfilingSamples();
 
-    log.info("Generating: {d} prompt tokens, max {d} output tokens", .{
+    log.debug("Generating: {d} prompt tokens, max {d} output tokens", .{
         prompt_tokens.len, max_tokens,
     });
 
@@ -2818,9 +3466,11 @@ pub fn generate(
     else
         0.0;
 
-    log.info("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
+    log.debug("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
         prompt_tokens.len, @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0, prefill_tok_per_sec,
     });
+    // Decode profiling should describe only generated tokens, not the prompt prefill steps.
+    engine.resetProfilingSamples();
 
     // Decode: generate tokens one at a time
     // After prefill, logits_staging already has the logits for the first output
@@ -2834,11 +3484,11 @@ pub fn generate(
     if (prompt_tokens.len > 0 and max_tokens > 0) {
         const first_token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, first_token);
-        log.info("decode[0]: token={d} pos={d} (from prefill logits)", .{
+        log.debug("decode[0]: token={d} pos={d} (from prefill logits)", .{
             first_token, state.position,
         });
         // Dump top-5 logits from prefill for comparison with llama.cpp
-        dumpTop5Logits(engine, 0);
+        if (engine.logits_readback_enabled) dumpTop5Logits(engine, 0);
         generated = 1;
         if (first_token == eos_token_id) generated = max_tokens; // stop early
     }
@@ -2849,17 +3499,17 @@ pub fn generate(
         // Feed the last generated token as input
         const input_token = state.generated_tokens.items[state.generated_tokens.items.len - 1];
 
-        try engine.decodeStep(&state, input_token);
+        try engine.decodeStep(&state, input_token, true);
         const token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, token);
         // Top-5 logits per token for first 5 tokens + last token
         if (generated < 5 or generated == max_tokens - 1) {
-            dumpTop5Logits(engine, generated);
+            if (engine.logits_readback_enabled) dumpTop5Logits(engine, generated);
         }
 
         const tok_end = std.time.nanoTimestamp();
         const tok_ms = @as(f64, @floatFromInt(@as(u64, @intCast(tok_end - tok_start)))) / 1_000_000.0;
-        log.info("decode[{d}]: token={d} pos={d} ({d:.1} ms)", .{
+        log.debug("decode[{d}]: token={d} pos={d} ({d:.1} ms)", .{
             generated, token, state.position, tok_ms,
         });
 
@@ -2877,39 +3527,26 @@ pub fn generate(
             decode_tokens, @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0, tok_per_sec, ms_per_tok,
         });
 
-        // Bandwidth metrics: compute bytes read per decode token
-        const config = &engine.model.config;
-        const lm_tensor = findLoadedTensor(engine.model, "output.weight") orelse
-            findLoadedTensor(engine.model, "token_embd.weight");
-        if (lm_tensor) |t| {
-            const lm_quant = t.info.type_;
-            const bpb = lm_quant.bytesPerBlock();
-            const bs = lm_quant.blockSize();
-            // LM head: vocab_size rows x hidden_dim cols
-            const lm_blocks_per_row = @as(u64, config.hidden_dim) / @as(u64, bs);
-            const lm_bytes: u64 = @as(u64, config.vocab_size) * lm_blocks_per_row * @as(u64, bpb);
-            // Norm weights: hidden_dim * 4 bytes (f32)
-            const norm_bytes: u64 = @as(u64, config.hidden_dim) * 4;
-            // Input/output vectors: hidden_dim * 4 + vocab_size * 4
-            const vec_bytes: u64 = (@as(u64, config.hidden_dim) + @as(u64, config.vocab_size)) * 4;
-            // Logits readback: vocab_size * 4
-            const readback_bytes: u64 = @as(u64, config.vocab_size) * 4;
-            const total_bytes_per_tok = lm_bytes + norm_bytes + vec_bytes + readback_bytes;
-            const total_bytes_all = total_bytes_per_tok * @as(u64, @intCast(decode_tokens));
-
+        if (engine.modeled_decode_bytes_per_token > 0) {
+            const total_bytes_all = engine.modeled_decode_bytes_per_token * @as(u64, @intCast(decode_tokens));
             const decode_secs = @as(f64, @floatFromInt(decode_ns)) / 1_000_000_000.0;
             const eff_bw_gbs = @as(f64, @floatFromInt(total_bytes_all)) / decode_secs / 1_000_000_000.0;
             const theo_bw_gbs: f64 = @floatFromInt(engine.gpu_config.bandwidth_gbps);
             const utilization = if (theo_bw_gbs > 0) eff_bw_gbs / theo_bw_gbs * 100.0 else 0.0;
 
-            log.info("Bandwidth: {d:.1} GB/s effective, {d:.0} GB/s theoretical ({d:.1}% utilization)", .{
-                eff_bw_gbs, theo_bw_gbs, utilization,
+            log.info("Modeled decode bandwidth: {d:.1} GB/s effective, {d:.0} GB/s theoretical ({d:.1}% utilization, ~{d:.1} MB/token)", .{
+                eff_bw_gbs,
+                theo_bw_gbs,
+                utilization,
+                @as(f64, @floatFromInt(engine.modeled_decode_bytes_per_token)) / 1_000_000.0,
             });
-            log.info("Per-token: {d:.2} MB read ({s} LM head {d}x{d})", .{
-                @as(f64, @floatFromInt(total_bytes_per_tok)) / 1_000_000.0,
-                @tagName(lm_quant),
-                config.vocab_size,
-                config.hidden_dim,
+        }
+        if (engine.profile_enabled and engine.profile_sample_count > 0) {
+            const avg_gpu_ms = engine.profile_total_gpu_ms / @as(f64, @floatFromInt(engine.profile_sample_count));
+            log.info("PROFILE: avg GPU decode token={d:.2} ms over {d} sampled decode steps (max={d:.2} ms)", .{
+                avg_gpu_ms,
+                engine.profile_sample_count,
+                engine.profile_max_gpu_ms,
             });
         }
     } else {
@@ -2917,12 +3554,12 @@ pub fn generate(
     }
 
     // Print per-layer diagnostic summary (stored during BOS processing)
-    if (engine.diag_summary_len > 0) {
+    if (engine.validation_diagnostics_enabled and engine.diag_summary_len > 0) {
         log.info("LOGIT5_SUMMARY: {s}", .{engine.diag_summary_buf[0..engine.diag_summary_len]});
     }
 
     // Run diagnostic AFTER generation so output appears at the end (not truncated)
-    if (prompt_tokens.len > 0) {
+    if (engine.validation_diagnostics_enabled and prompt_tokens.len > 0) {
         engine.diagEmbedToLogits(prompt_tokens[0]) catch |err| {
             log.warn("Diagnostic failed: {s}", .{@errorName(err)});
         };
@@ -3006,10 +3643,10 @@ test "dequantRow Q4_K sub-block pairing: low nibble then high nibble" {
     try std.testing.expectApproxEqAbs(@as(f32, 18.0), output[33], 0.01); // high nibble of 0x97 = 9, * 2
 }
 
-test "dequantRow Q5_K interleaved element ordering: y[2l] and y[2l+1]" {
+test "dequantRow Q5_K keeps GGML contiguous half ordering" {
     // Q5_K block: d[2] dmin[2] scales[12] qh[32] qs[128] = 176 bytes, 256 elements
-    // Bug found: was using contiguous (e, 32+e) instead of interleaved (2e, 2e+1).
-    // Correct ordering: for each byte qs[l], low nibble → output[2l], high nibble → output[2l+1].
+    // GGML dequantizes each 64-element group as low-half first, then high-half:
+    // for byte qs[l], low nibble → output[l], high nibble → output[32 + l].
     var block: [176]u8 = [_]u8{0} ** 176;
     // d = 1.0 as f16
     const d_bits = @as(u16, @bitCast(@as(f16, 1.0)));
@@ -3031,9 +3668,9 @@ test "dequantRow Q5_K interleaved element ordering: y[2l] and y[2l+1]" {
     var output: [256]f32 = undefined;
     dequantRow(&block, 0, 256, .q5_k, &output);
 
-    // Interleaved: output[0] from low nibble, output[1] from high nibble
+    // Contiguous halves: output[0] from low nibble, output[32] from high nibble
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), output[0], 0.01); // d*sc*10 - 0 = 10
-    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[1], 0.01); // d*sc*3 - 0 = 3
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), output[32], 0.01); // d*sc*3 - 0 = 3
 }
 
 test "dequantRow Q8_0 correct scale and signed values" {
@@ -3225,13 +3862,13 @@ test "delta-net zero state produces beta*v*(k.q) output" {
     for (&ssm_state) |*s| s.* *= g_val;
 
     // Update: for each row, sk = s@k = 0, d = beta*(v-0) = beta*v
-    // s[col][row] += k[col] * d_val
+    // s[row][col] += k[col] * d_val
     for (0..head_v_dim) |row| {
         var sk: f32 = 0;
         for (0..d_state) |col| sk += ssm_state[row * head_v_dim + col] * k_head[col];
         const d_val = beta * (v_head[row] - sk);
         for (0..d_state) |col| {
-            ssm_state[col * head_v_dim + row] += k_head[col] * d_val;
+            ssm_state[row * head_v_dim + col] += k_head[col] * d_val;
         }
     }
 
@@ -3245,9 +3882,9 @@ test "delta-net zero state produces beta*v*(k.q) output" {
         output[row] = val;
     }
 
-    // Expected values from Python reference (ZINC's transposed state convention)
-    // s[col*4+row] += k[col]*d, read: o[row] = sum_col s[row*4+col]*q[col]
-    const expected = [_]f32{ -0.313973, 0.188384, -0.062795, -0.439562 };
+    // Expected values for the row-major delta-net update used by the GPU shader:
+    // s[row*4+col] += k[col]*d, read: o[row] = sum_col s[row*4+col]*q[col]
+    const expected = [_]f32{ 0.312, -0.624, 0.156, 0.0936 };
     for (0..head_v_dim) |row| {
         try std.testing.expect(@abs(output[row] - expected[row]) < 1e-4);
     }

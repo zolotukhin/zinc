@@ -1,0 +1,37 @@
+#version 460
+// ZINC — F32 MoE DMMV: batched expert dispatch via workgroup Y dimension.
+// Expert IDs are read directly from the GPU router output written by softmax_topk.
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint expert_stride;    // bytes per expert in stacked weight tensor
+    uint x_expert_stride;  // elements between experts' inputs (0=shared, K=per-expert)
+    uint x_offset;
+    uint y_offset;
+};
+
+layout(set = 0, binding = 0) readonly buffer Weight { float w[]; };
+layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= M) return;
+
+    uint expert_slot = gl_WorkGroupID.y;
+    uint expert_id = routing_data[expert_slot];
+
+    uint w_base = (expert_id * expert_stride) / 4u + row * K;
+    uint x_base = x_offset / 4u + expert_slot * x_expert_stride;
+    uint y_base = y_offset / 4u + expert_slot * M;
+
+    float sum = 0.0;
+    for (uint j = 0; j < K; j++) {
+        sum += w[w_base + j] * x[x_base + j];
+    }
+    y[y_base + row] = sum;
+}

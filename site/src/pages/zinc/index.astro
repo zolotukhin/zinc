@@ -17,7 +17,7 @@ const jsonLd = {
     {
       '@type': 'SoftwareApplication',
       name: 'ZINC',
-      description: 'LLM inference engine for AMD RDNA3/RDNA4 consumer GPUs built with Zig and Vulkan compute shaders. Features continuous batching, paged KV cache, TurboQuant KV compression, and an OpenAI-compatible API.',
+      description: 'LLM inference engine for AMD RDNA3/RDNA4 consumer GPUs built with Zig and Vulkan compute shaders. Current validated plain-decode performance on AI PRO R9700: 33.58 tok/s on Qwen3.5-35B-A3B-UD and 22.93 tok/s on Qwen3.5-2B-Q4_K_M.',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'Linux',
       url: `${siteUrl}/zinc`,
@@ -45,7 +45,7 @@ const jsonLd = {
           name: 'How does ZINC compare to llama.cpp and vLLM?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'vLLM requires ROCm which does not support RDNA3/RDNA4 consumer GPUs. llama.cpp supports Vulkan but treats RDNA4 as an afterthought with no architecture-specific tuning, no continuous batching, and no paged KV cache. ZINC is built from scratch for these GPUs with hand-tuned shaders, continuous batching, paged attention, and TurboQuant KV compression.',
+            text: 'vLLM requires ROCm which does not support RDNA3/RDNA4 consumer GPUs. llama.cpp supports Vulkan but treats RDNA4 as an afterthought with no architecture-specific tuning. ZINC is built from scratch for these GPUs with hand-tuned shaders, a native OpenAI-compatible API, graph analysis tooling, and roadmap work around batching and TurboQuant.',
           },
         },
         {
@@ -53,7 +53,7 @@ const jsonLd = {
           name: 'What performance does ZINC achieve on RDNA4?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), ZINC targets 110+ tokens/second on Qwen3.5-35B-A3B Q4_K for single requests, and 108+ tok/s per slot with 4 concurrent requests (432+ tok/s aggregate). DMMV bandwidth utilization is 67-93% of theoretical.',
+            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode numbers are 33.58 tok/s CLI decode on Qwen3.5-35B-A3B-UD-Q4_K_XL and 22.93 tok/s CLI decode on Qwen3.5-2B-Q4_K_M. Raw /v1/completions tracks close to CLI with no chat template or explicit thinking prompt, while reasoning chat is slower today.',
           },
         },
         {
@@ -61,7 +61,7 @@ const jsonLd = {
           name: 'What is TurboQuant and how does it help?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'TurboQuant is a two-stage vector quantization algorithm (ICLR 2026) that compresses LLM KV cache to 2-4 bits per coordinate. At 3-bit, it achieves 5x memory reduction while preserving 99.5% attention cosine similarity through mathematically unbiased inner products. On a 16GB RX 9070 XT, this means 8+ concurrent 8K-context sessions instead of 4.',
+            text: 'TurboQuant is ZINC\'s KV-compression direction and public implementation spec for 2-4 bit cache compression. It is part of the roadmap and not the reason for the current benchmark numbers on the public site.',
           },
         },
       ],
@@ -73,7 +73,7 @@ const jsonLd = {
 
 <BaseLayout
   title="ZINC — LLM Inference Engine for AMD GPUs"
-  description="ZINC is an inference engine for AMD consumer GPUs that ROCm ignores. Built with Zig and Vulkan, with hand-tuned RDNA4 shaders, continuous batching, and TurboQuant KV compression. 110+ tok/s on AI PRO R9700."
+  description="ZINC is an inference engine for AMD consumer GPUs that ROCm ignores. Built with Zig and Vulkan, with hand-tuned RDNA4 shaders and an OpenAI-compatible API. Current validated AI PRO R9700 plain-decode performance: 33.58 tok/s on Qwen3.5-35B-A3B-UD."
   keywords="ZINC, LLM inference engine, AMD GPU, RDNA4, RDNA3, RX 9070 XT, RX 7900 XTX, Radeon AI PRO R9700, Vulkan compute, Zig, TurboQuant, KV cache compression, vLLM alternative, llama.cpp alternative, ROCm alternative, OpenAI compatible API, local AI, continuous batching, paged KV cache, GGUF, LLaMA, Qwen, Mistral, Mamba"
   jsonLd={jsonLd}
 >
@@ -120,9 +120,9 @@ const jsonLd = {
       </thead>
       <tbody>
         <tr><td><strong>RDNA3/RDNA4 support</strong></td><td>First-class target</td><td>Not supported (needs ROCm)</td><td>Works, no RDNA4 tuning</td></tr>
-        <tr><td><strong>Continuous batching</strong></td><td>Built-in</td><td>Built-in</td><td>Server-bolted</td></tr>
+        <tr><td><strong>Continuous batching</strong></td><td>Roadmap</td><td>Built-in</td><td>Server-bolted</td></tr>
         <tr><td><strong>Paged KV cache</strong></td><td>vLLM-style PagedAttention</td><td>Yes</td><td>No (contiguous)</td></tr>
-        <tr><td><strong>KV cache compression</strong></td><td>TurboQuant 2/3/4-bit</td><td>No</td><td>No</td></tr>
+        <tr><td><strong>KV cache compression</strong></td><td>TurboQuant roadmap / experimental path</td><td>No</td><td>No</td></tr>
         <tr><td><strong>GPU kernel tuning</strong></td><td>RDNA4 wave64, coop matrix</td><td>ROCm/CUDA only</td><td>Generic Vulkan</td></tr>
         <tr><td><strong>OpenAI API</strong></td><td>Native</td><td>Native</td><td>Via server wrapper</td></tr>
       </tbody>
@@ -130,28 +130,31 @@ const jsonLd = {
 
     <h2>Performance on AMD RDNA4</h2>
 
-    <p>Measured and projected on real RDNA4 hardware. DMMV bandwidth utilization is 67–93% of theoretical. The GPU is the bottleneck, not the software.</p>
+    <p>Current validated numbers on a clean AI PRO R9700 node with `zig build -Doptimize=ReleaseFast`. These are measured results, not the older projected target state.</p>
 
     <table>
       <thead>
-        <tr><th>GPU</th><th>VRAM</th><th>Model</th><th>Single-req</th><th>4-concurrent</th><th>Aggregate</th></tr>
+        <tr><th>GPU</th><th>Model</th><th>Path</th><th>Result</th></tr>
       </thead>
       <tbody>
-        <tr><td><strong>RX 9070 XT</strong></td><td>16 GB</td><td>Qwen3-8B Q4_K</td><td>130+ tok/s</td><td>120+ each</td><td>480+ tok/s</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>32 GB</td><td>Qwen3-8B Q4_K</td><td>120+ tok/s</td><td>110+ each</td><td>440+ tok/s</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>32 GB</td><td>Llama-3.1-70B Q4_K</td><td>35+ tok/s</td><td>32+ each</td><td>128+ tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>CLI plain decode</td><td>33.58 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>Raw `/v1/completions` plain decode</td><td>33.55 tok/s (`c=1`), 33.98 tok/s aggregate (`c=4`)</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>Reasoning chat</td><td>24.94–28.56 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>CLI plain decode</td><td>22.93 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>Raw `/v1/completions` plain decode</td><td>21.88 tok/s (`c=1`), 21.36 tok/s aggregate (`c=4`)</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>Reasoning chat</td><td>17.35–17.50 tok/s</td></tr>
       </tbody>
     </table>
 
-    <p>Four concurrent requests run with zero per-slot degradation. The GPU stays memory-bandwidth bound at 4x parallelism. In practice, that means a single RX 9070 XT can serve a small team without anyone waiting.</p>
+    <p>Today the raw `/v1/completions` route tracks the CLI closely. Those numbers are plain decode, not thinking-enabled runs. The current proxy for thinking-style workloads is the reasoning-chat row; it is slower because prompt templating, stop handling, and other server-side work still matter. Aggregate throughput at `concurrency=4` stays roughly flat because decode is still serialized, so continuous batching should be read as roadmap work rather than a finished claim.</p>
 
     <h2>What ZINC does</h2>
 
     <p>The shaders are hand-tuned for RDNA4: <a href="/zinc/docs/rdna4-tuning">wave64, cooperative matrix 16x16x16</a>, architecture-aware tiling. Not generic GPU code that happens to run on AMD.</p>
 
-    <p>Serving uses vLLM-style PagedAttention with continuous batching. 16-token KV cache pages, copy-on-write for shared prefixes, and a scheduler that batches concurrent requests without per-slot degradation.</p>
+    <p>Serving already exposes a native OpenAI-compatible API and the built-in chat UI. The current server path is still serialized during generation, so the next performance step is to turn batching and better multi-request scheduling into measured behavior rather than roadmap language.</p>
 
-    <p><a href="/zinc/docs/turboquant-spec">TurboQuant</a> compresses the KV cache to 3 bits per coordinate with 5x memory reduction. It uses Lloyd-Max quantization with QJL residual correction, which keeps the inner product estimator mathematically unbiased. The attention mechanism sees the same distribution as FP16, just with controlled variance. That 5x saving is what lets an RX 9070 XT handle 8 concurrent sessions instead of 4.</p>
+    <p><a href="/zinc/docs/turboquant-spec">TurboQuant</a> is the public KV-compression spec and implementation track. It is part of where the project is going, but it is not the reason for the benchmark numbers on this page today.</p>
 
     <p>The API is OpenAI-compatible: <code>POST /v1/chat/completions</code> with SSE streaming. Point your existing client at ZINC and it works. <a href="/zinc/docs/api">API reference</a>.</p>
 

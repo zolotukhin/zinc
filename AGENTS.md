@@ -6,10 +6,10 @@ Instructions for AI coding agents working on this repository.
 
 ```bash
 # Build (shaders compile on Linux only; macOS skips GPU inference)
-zig build
+zig build -Doptimize=ReleaseFast
 
 # Run inference
-./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3]
+ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3] [--debug]
 
 # Run unit tests
 zig build test
@@ -41,7 +41,7 @@ src/
 │   ├── gguf.zig                #   GGUF format parser (header, metadata, tensors)
 │   ├── loader.zig              #   Load GGUF → GPU buffers (mmap + DMA)
 │   ├── architecture.zig        #   Compute graph builders per arch (Llama, Qwen, Mamba)
-│   └── tokenizer.zig           #   Text ↔ tokens (shells to Python, native Zig planned)
+│   └── tokenizer.zig           #   Native Zig text ↔ token conversion and chat templating
 ├── compute/                    # Inference dispatch
 │   ├── graph.zig               #   Static compute graph IR (nodes, deps, topo sort)
 │   ├── dmmv.zig                #   Decode matmul-vec dispatch (Q4_K, Q8_0, F16)
@@ -193,10 +193,13 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST '
     -H "Content-Type: application/json" \
     -d "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" > /dev/null
   for i in 1 2 3; do
-    curl -s http://localhost:8088/v1/chat/completions \
+    out=$(curl -s http://localhost:8088/v1/chat/completions \
       -H "Content-Type: application/json" \
       -d "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\":\"The capital of France is\"}],\"max_tokens\":256,\"stream\":false}" \
-      | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get(\"timings\",{}); print(f\"Run {i}: gen {t.get(\"predicted_per_second\",0):.1f} tok/s | prompt {t.get(\"prompt_per_second\",0):.1f} tok/s\")"
+    )
+    gen=$(printf "%s" "$out" | jq -r ".timings.predicted_per_second // 0")
+    prompt=$(printf "%s" "$out" | jq -r ".timings.prompt_per_second // 0")
+    printf "Run %d: gen %s tok/s | prompt %s tok/s\n" "$i" "$gen" "$prompt"
   done
 '
 # Expected: ~107 tok/s generation, ~220 tok/s prompt (runs 2-3, after warmup)
@@ -209,11 +212,11 @@ source .env
 
 # Sync source to test node
 rsync -az --delete --exclude '.zig-cache' --exclude 'zig-out' --exclude 'node_modules' \
-  --exclude '.DS_Store' --exclude 'site' --exclude 'research/turboquant-pytorch-master' \
+  --exclude '.DS_Store' --exclude 'site' \
   -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/root/zinc/
 
 # Build and run
-ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && zig build && \
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && zig build -Doptimize=ReleaseFast && \
   RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
   -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
   --prompt 'The capital of France is'"
@@ -223,6 +226,78 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && zig build && \
 #   info(forward): Generated N tokens in X ms — Y tok/s (Z ms/tok)
 ```
 
+### Measure ZINC API endpoints
+
+Use the HTTP benchmarks when you need end-to-end API latency, queueing behavior, or to compare the chat endpoint against the raw completions path.
+
+Important caveats before you trust the numbers:
+
+1. Bench a clean node. Other `zinc`, `llama-server`, and `llama-cli` processes on the RDNA4 host will contaminate both latency and throughput.
+2. `POST /v1/chat/completions` is an end-user latency benchmark, not a pure decode-throughput benchmark. The chat route applies templates and stop handling, so many prompts stop after only a handful of tokens.
+3. Use `POST /v1/completions` for sustained HTTP decode throughput. It avoids chat stop-sequence behavior and is the closest HTTP-side equivalent to the CLI `--prompt` path.
+4. ZINC server generation is still serialized. With `concurrency > 1`, aggregate throughput stays roughly flat while per-request latency grows because requests queue behind one active decode.
+
+Clean-server setup:
+
+```bash
+source .env
+
+# 1. Stop stale GPU users on the test node.
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  pkill -f 'zig-out/bin/zinc' || true; \
+  pkill -f 'llama-server' || true; \
+  pkill -f 'llama-cli' || true"
+
+# 2. Sync, build, and restart one clean ZINC server on :9090.
+rsync -az --delete --exclude '.zig-cache' --exclude 'zig-out' --exclude 'node_modules' \
+  --exclude '.DS_Store' --exclude 'site' \
+  -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/root/zinc/
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && zig build -Doptimize=ReleaseFast && \
+  nohup env RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
+    -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --port 9090 >/tmp/zinc_9090.log 2>&1 < /dev/null &"
+
+# 3. Wait for health.
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  until curl -fsS http://127.0.0.1:9090/health >/dev/null; do sleep 1; done; \
+  curl -sS http://127.0.0.1:9090/health"
+```
+
+Chat-endpoint latency matrix:
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  /root/.bun/bin/bun tools/benchmark_api.mjs \
+    --base http://127.0.0.1:9090/v1 \
+    --mode chat \
+    --output /tmp/zinc_api_chat_benchmark.json"
+```
+
+Raw sustained-throughput benchmark:
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  /root/.bun/bin/bun tools/benchmark_api.mjs \
+    --base http://127.0.0.1:9090/v1 \
+    --mode raw \
+    --output /tmp/zinc_api_raw_benchmark.json"
+```
+
+Reference result from a clean RDNA4 node on 2026-03-30 with `zig build -Doptimize=ReleaseFast`:
+
+- CLI decode on `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`: `33.58 tok/s`, `29.8 ms/tok`
+- `POST /v1/completions` with `max_tokens=256` sustained about `33.55 tok/s` at `concurrency=1`
+- `POST /v1/completions` with `max_tokens=256` and `concurrency=4` held aggregate throughput at about `33.98 tok/s`, while average per-request latency rose to about `18.84s`
+- One longer reasoning-style `POST /v1/chat/completions` sample produced `257` completion tokens at about `28.40 tok/s`
+
 ### Troubleshooting performance
 
 If llama.cpp baseline drops below ~100 tok/s, check in order:
@@ -230,6 +305,9 @@ If llama.cpp baseline drops below ~100 tok/s, check in order:
 2. **GECC** — `cat /sys/module/amdgpu/parameters/ras_enable` must show 0
 3. **coop_matrix** — server log must show `matrix cores: KHR_coopmat`
 4. **Reboot** — Mesa/driver changes need a reboot to take full effect
+5. **Dirty benchmark node** — stop stray `zinc` / `llama-*` processes before comparing runs
+6. **Wrong endpoint for the question** — use `/v1/chat/completions` for chat latency and queueing, `/v1/completions` for sustained HTTP decode throughput
+7. **Early chat stops** — if chat completions are ending after a handful of tokens, change the prompt or switch to `/v1/completions`; otherwise the reported completion TPS is mostly prompt+HTTP overhead
 
 ## Code Reference
 

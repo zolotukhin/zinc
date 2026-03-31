@@ -48,7 +48,7 @@
 
 **Decision**: Support a fixed set of common templates (ChatML, Llama, Mistral) with string-based substitution. Full Jinja2 deferred.
 **Rationale**: Full Jinja2 requires a template engine (complex to implement in Zig). The most common models use simple role-based templates. Covering ChatML + Llama + Mistral handles >90% of use cases.
-**Alternatives considered**: Full Jinja2 in Zig (massive effort), shell out to Python Jinja2 (adds Python dependency).
+**Alternatives considered**: Full Jinja2 in Zig (massive effort), shell out to an external templating runtime (adds an avoidable dependency).
 
 ## RDNA4-Specific Findings
 

@@ -28,7 +28,14 @@ ZINC is currently aimed at:
 | LLaMA / Mistral | [LLaMA 3.1 8B](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF), [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.3) |
 | Mamba / Jamba (SSM) | [Jamba-v0.1](https://huggingface.co/ai21labs/Jamba-v0.1) |
 
-The primary test model is **Qwen3.5-35B-A3B** — download [Q4_K_XL from unsloth](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) (21 GB, fits in 32 GB VRAM).
+### Validated models
+
+This list is intentionally narrow. It shows the exact GGUFs that have been revalidated in ZINC, not a broader architecture wishlist.
+
+| Model | Exact GGUF |
+|------|------------|
+| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
 
 macOS can build the project, but it is not the target environment for actual ZINC GPU inference. If you want the shortest path to success, use Linux on AMD hardware.
 
@@ -57,7 +64,7 @@ Then install **Zig 0.15.2 or newer** from the official Zig downloads page:
 ```bash
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
-zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 The compiled binary ends up at:
@@ -66,7 +73,53 @@ The compiled binary ends up at:
 ./zig-out/bin/zinc
 ```
 
-On Linux, `zig build` also compiles the GLSL shaders into SPIR-V. On macOS, shader compilation is skipped, which is one of the reasons Linux is the real runtime target.
+On Linux, `zig build -Doptimize=ReleaseFast` also compiles the GLSL shaders into SPIR-V. On macOS, shader compilation is skipped, which is one of the reasons Linux is the real runtime target.
+
+## Run the preflight before your first prompt
+
+Before running a full prompt, ask ZINC to validate the machine, model, and GPU budget:
+
+```bash
+# General machine + Vulkan + shader preflight
+./zig-out/bin/zinc --check
+
+# Recommended on RDNA4 shells
+export RADV_PERFTEST=coop_matrix
+
+# Check one exact GGUF file
+./zig-out/bin/zinc --check -m /path/to/model.gguf
+
+# Or check one managed model from the built-in catalog
+./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
+```
+
+That command verifies the Vulkan path, required shader assets, and the current single-GPU VRAM fit estimate. When you pass `-m`, it checks the exact GGUF file. When you pass `--model-id`, it checks the managed catalog entry by name. If it reports `NOT READY [FAIL]`, fix that first before trying prompt generation.
+
+## Inspect the managed model catalog
+
+If you want to see what ZINC currently marks as supported on the local machine:
+
+```bash
+# Show models that are both tested for the detected GPU profile
+# and estimated to fit the current VRAM budget
+./zig-out/bin/zinc model list
+
+# Show the full built-in catalog even if Vulkan is unavailable locally
+./zig-out/bin/zinc model list --all
+```
+
+If you want ZINC to manage downloads and default model selection for you:
+
+```bash
+# Download one managed model into the local cache
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+
+# Mark it as the active default for future runs
+./zig-out/bin/zinc model use qwen35-2b-q4k-m
+
+# Inspect the current managed default
+./zig-out/bin/zinc model active
+```
 
 ## Run your first prompt
 
@@ -95,9 +148,16 @@ If you get through model load, prefill, and at least one decode step, the core p
 These commands are useful before blaming ZINC:
 
 ```bash
+# Check the local toolchain and Vulkan stack
 zig version
 glslc --version
 vulkaninfo --summary
+
+# Ask ZINC for a general readiness check
+./zig-out/bin/zinc --check
+
+# Ask ZINC about one exact GGUF file
+./zig-out/bin/zinc --check -m /path/to/model.gguf
 ```
 
 If `vulkaninfo` does not see your AMD GPU, fix that first. ZINC sits on top of the Vulkan stack you already have.
@@ -108,6 +168,7 @@ Once CLI mode works, start the server to get a ChatGPT-like web UI:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
+# Optional: append --debug or use ZINC_DEBUG=1 for diagnostic logs
 ./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
 ```
 

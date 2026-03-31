@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a new capability, workflow, or model/runtime improvement.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do that ZINC cannot do yet?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Be concrete. What should change?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing workarounds, competing tools, or other design options.
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Are you willing to help implement this?
+      options:
+        - "Yes"
+        - "Maybe"
+        - "No"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, references, benchmark motivation, or model/hardware details.

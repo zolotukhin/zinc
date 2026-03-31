@@ -1,23 +1,28 @@
 name: Claude Auto Review
 on:
-  pull_request:
-    types: [opened, synchronize]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  id-token: write
 
 jobs:
   review:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     env:
       API_TIMEOUT_MS: 3000000
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-    permissions:
-      contents: read
-      pull-requests: write
-      id-token: write
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - uses: anthropics/claude-code-action@v1
         with:
@@ -32,7 +37,10 @@ jobs:
             - Security implications
             - Performance considerations
 
-            Note: The PR branch is already checked out in the current working directory.
+            The checked out workspace is the trusted base branch, not the PR branch.
+            Review the pull request via GitHub APIs and `gh pr diff` / `gh pr view`.
+            Do not checkout the PR branch.
+            Do not execute repository code from the PR.
 
             Use `gh pr comment` for top-level feedback.
             Use `mcp__github_inline_comment__create_inline_comment` to highlight specific code issues.

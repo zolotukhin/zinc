@@ -1,0 +1,54 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="760" rx="28" fill="#F6F5F2"/>
+  <rect x="36" y="36" width="1128" height="688" rx="24" fill="#FFFEFC" stroke="#DDD6CC" stroke-width="2"/>
+
+  <text x="72" y="96" fill="#1C1D21" font-family="SF Pro Display, Inter, sans-serif" font-size="34" font-weight="700">The shader bugs split into two very different classes</text>
+  <text x="72" y="130" fill="#6B675F" font-family="SF Pro Text, Inter, sans-serif" font-size="18">One path crashed immediately. The other stayed alive long enough to look almost believable.</text>
+
+  <rect x="82" y="180" width="488" height="500" rx="26" fill="#F6FBFF" stroke="#C9D9E7" stroke-width="2"/>
+  <text x="114" y="226" fill="#285D7A" font-family="SF Pro Display, Inter, sans-serif" font-size="28" font-weight="700">SSM chain: wrong output, no crash</text>
+  <text x="114" y="256" fill="#5E6E79" font-family="SF Pro Text, Inter, sans-serif" font-size="17">Harder to debug because every stage looked plausible enough.</text>
+
+  <rect x="120" y="304" width="150" height="74" rx="18" fill="#FFFFFF" stroke="#D7E4ED"/>
+  <text x="152" y="347" fill="#1F2A33" font-family="SF Pro Text, Inter, sans-serif" font-size="20" font-weight="600">conv1d</text>
+
+  <rect x="310" y="304" width="150" height="74" rx="18" fill="#FFFFFF" stroke="#D7E4ED"/>
+  <text x="328" y="347" fill="#1F2A33" font-family="SF Pro Text, Inter, sans-serif" font-size="20" font-weight="600">delta-net</text>
+
+  <rect x="215" y="436" width="150" height="74" rx="18" fill="#FFFFFF" stroke="#D7E4ED"/>
+  <text x="228" y="479" fill="#1F2A33" font-family="SF Pro Text, Inter, sans-serif" font-size="20" font-weight="600">gated norm</text>
+
+  <path d="M270 341H302" stroke="#6A9ABB" stroke-width="4" stroke-linecap="round"/>
+  <path d="M290 329L310 341L290 353" fill="#6A9ABB"/>
+  <path d="M385 378V424" stroke="#6A9ABB" stroke-width="4" stroke-linecap="round"/>
+  <path d="M373 412L385 432L397 412" fill="#6A9ABB"/>
+
+  <text x="120" y="560" fill="#285D7A" font-family="SF Pro Text, Inter, sans-serif" font-size="16" font-weight="700">Likely divergence points</text>
+  <text x="120" y="588" fill="#475C68" font-family="SF Pro Text, Inter, sans-serif" font-size="16">• `conv_out` Q/K/V slice layout</text>
+  <text x="120" y="614" fill="#475C68" font-family="SF Pro Text, Inter, sans-serif" font-size="16">• fused Q normalize + scale order</text>
+  <text x="120" y="640" fill="#475C68" font-family="SF Pro Text, Inter, sans-serif" font-size="16">• recurrent state update drift</text>
+
+  <rect x="630" y="180" width="488" height="500" rx="26" fill="#FFF7F3" stroke="#E8CDC1" stroke-width="2"/>
+  <text x="662" y="226" fill="#9A4021" font-family="SF Pro Display, Inter, sans-serif" font-size="28" font-weight="700">MoE router: fast crash on RADV</text>
+  <text x="662" y="256" fill="#7B685D" font-family="SF Pro Text, Inter, sans-serif" font-size="17">The algorithm was fine. The subgroup implementation was the problem.</text>
+
+  <rect x="692" y="314" width="364" height="98" rx="20" fill="#FFFFFF" stroke="#E7D8CF"/>
+  <text x="722" y="354" fill="#2A2A2E" font-family="SF Pro Text, Inter, sans-serif" font-size="22" font-weight="600">`softmax_topk.comp`</text>
+  <text x="722" y="382" fill="#69625A" font-family="SF Pro Text, Inter, sans-serif" font-size="16">256 logits → softmax → top-8 experts</text>
+
+  <rect x="692" y="458" width="160" height="108" rx="20" fill="#A64724"/>
+  <text x="718" y="497" fill="#FFF7F2" font-family="SF Pro Display, Inter, sans-serif" font-size="24" font-weight="700">Bad path</text>
+  <text x="718" y="527" fill="#F2D4C8" font-family="SF Pro Text, Inter, sans-serif" font-size="16">`subgroupBallot`</text>
+  <text x="718" y="551" fill="#F2D4C8" font-family="SF Pro Text, Inter, sans-serif" font-size="16">`subgroupBroadcast`</text>
+
+  <rect x="896" y="458" width="160" height="108" rx="20" fill="#FFFFFF" stroke="#E7D8CF"/>
+  <text x="922" y="497" fill="#2A2A2E" font-family="SF Pro Display, Inter, sans-serif" font-size="24" font-weight="700">Fix</text>
+  <text x="922" y="527" fill="#69625A" font-family="SF Pro Text, Inter, sans-serif" font-size="16">shared-memory</text>
+  <text x="922" y="551" fill="#69625A" font-family="SF Pro Text, Inter, sans-serif" font-size="16">winner reduction</text>
+
+  <path d="M852 512H888" stroke="#D07B5A" stroke-width="4" stroke-linecap="round"/>
+  <path d="M876 500L896 512L876 524" fill="#D07B5A"/>
+
+  <text x="692" y="624" fill="#9A4021" font-family="SF Pro Text, Inter, sans-serif" font-size="16" font-weight="700">Practical lesson</text>
+  <text x="692" y="652" fill="#5D524C" font-family="SF Pro Text, Inter, sans-serif" font-size="16">The prettier subgroup trick was worse than the simpler, boring fallback.</text>
+</svg>

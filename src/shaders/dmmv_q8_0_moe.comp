@@ -1,0 +1,97 @@
+#version 460
+// ZINC — Q8_0 MoE DMMV: batched expert dispatch via workgroup Y dimension.
+// Expert IDs are read directly from the GPU router output written by softmax_topk.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint expert_stride;    // bytes per expert in stacked weight tensor
+    uint x_expert_stride;  // elements between experts' inputs (0=shared, K=per-expert)
+    uint x_offset;
+    uint y_offset;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[];   };
+layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];  };
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+const uint Q8_0_BLOCK_SIZE = 32;
+const uint Q8_0_BYTES = 34;
+
+shared float s_sum0[2];
+shared float s_sum1[2];
+
+void main() {
+    uint expert_slot = gl_WorkGroupID.y;
+    uint expert_id = routing_data[expert_slot];
+    uint wg_id = gl_WorkGroupID.x;
+    uint row0 = wg_id * 2u;
+    uint row1 = row0 + 1u;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint blocks_per_row = K / Q8_0_BLOCK_SIZE;
+    uint a_offset = expert_id * expert_stride;
+    uint x_base_root = x_offset / 4u + expert_slot * x_expert_stride;
+
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+
+    for (uint blk = tid; blk < blocks_per_row; blk += 64u) {
+        uint x_base = x_base_root + blk * Q8_0_BLOCK_SIZE;
+
+        if (row0 < M) {
+            uint byte_off = a_offset + row0 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
+            float d = unpackHalf2x16(d_bits).x;
+            uint qs_off = byte_off + 2u;
+            float block_sum = 0.0;
+            for (uint e = 0u; e < 32u; e++) {
+                int8_t q = int8_t(a_data[qs_off + e]);
+                block_sum += float(q) * x_data[x_base + e];
+            }
+            sum0 += d * block_sum;
+        }
+
+        if (row1 < M) {
+            uint byte_off = a_offset + row1 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
+            float d = unpackHalf2x16(d_bits).x;
+            uint qs_off = byte_off + 2u;
+            float block_sum = 0.0;
+            for (uint e = 0u; e < 32u; e++) {
+                int8_t q = int8_t(a_data[qs_off + e]);
+                block_sum += float(q) * x_data[x_base + e];
+            }
+            sum1 += d * block_sum;
+        }
+    }
+
+    sum0 = subgroupAdd(sum0);
+    sum1 = subgroupAdd(sum1);
+
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect()) {
+            s_sum0[gl_SubgroupID] = sum0;
+            s_sum1[gl_SubgroupID] = sum1;
+        }
+        barrier();
+        if (tid == 0u) {
+            sum0 = s_sum0[0] + s_sum0[1];
+            sum1 = s_sum1[0] + s_sum1[1];
+        }
+    }
+
+    if (tid == 0u) {
+        uint y_base = y_offset / 4u + expert_slot * M;
+        if (row0 < M) y_data[y_base + row0] = sum0;
+        if (row1 < M) y_data[y_base + row1] = sum1;
+    }
+}

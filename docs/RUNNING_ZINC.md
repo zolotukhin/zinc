@@ -9,13 +9,164 @@ This page is the shortest path from “the project builds” to “I can actuall
 From the repo root:
 
 ```bash
-zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 The executable will be here:
 
 ```bash
 ./zig-out/bin/zinc
+```
+
+## Run a preflight check first
+
+This is the fastest way to answer "does this machine, Vulkan stack, and model look runnable at all?"
+
+```bash
+# General machine + Vulkan + shader preflight
+./zig-out/bin/zinc --check
+
+# Recommended on RDNA4 shells
+export RADV_PERFTEST=coop_matrix
+
+# Check one exact GGUF file
+./zig-out/bin/zinc --check -m /path/to/model.gguf
+
+# Or check one managed model from the built-in catalog
+./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
+```
+
+On the shared RDNA4 test node, the equivalent command is:
+
+```bash
+# SSH to the shared RDNA4 node
+cd /root/zinc
+
+# General preflight
+./zig-out/bin/zinc --check
+
+# Managed model compatibility by catalog id
+./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
+
+# Exact GGUF file check
+./zig-out/bin/zinc --check -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+```
+
+`--check` prints its progress as numbered sections and ends with a summary and verdict. The five sections are:
+
+- `Host Environment`: OS and the current shell's `RADV_PERFTEST`
+- `Linux AMD Prerequisites`: Mesa and GECC / RAS checks on Linux
+- `Runtime Assets`: compiled shader directory and required `.spv` files
+- `Vulkan Device`: loader init, GPU enumeration, selected device, and tuning summary
+- `Model File`: GGUF metadata plus an estimated VRAM fit for the current engine
+
+The model section is the most operationally useful one. It reports:
+
+- `Tensor upload`: exact device-local weight bytes derived from the GGUF tensors
+- `VRAM fit`: estimated device-local total against the selected GPU's VRAM
+- `KV cache`: current estimate for the active runtime, which is capped to a `4096` token context in today's engine
+- `GPU SSM state`: persistent device-local SSM state when the architecture uses it
+- `host-visible staging`: mapped/readback buffers, reported separately from device-local VRAM
+
+Important assumptions behind the fit estimate:
+
+- it reflects the current single-GPU runtime, not multi-GPU sharding
+- it reflects the current engine's `4096` KV cap even if the GGUF advertises a much larger context window
+- it excludes Vulkan allocation alignment, descriptor pools, query pools, and driver overhead
+
+Exit behavior:
+
+- `READY [OK]` and `READY WITH WARNINGS [WARN]` exit with code `0`
+- `NOT READY [FAIL]` exits non-zero
+
+One common point of confusion: `RADV_PERFTEST` is checked in the shell where you run `--check`. A plain SSH shell can warn even if your long-running service sets `RADV_PERFTEST=coop_matrix` correctly.
+
+### Sample outputs from the shared RDNA4 node
+
+These outputs were captured on **March 29, 2026** from `/root/zinc` on the shared RDNA4 host.
+
+General preflight:
+
+```bash
+# Command
+./zig-out/bin/zinc --check
+
+# Key output
+Summary       : 7 ok, 1 warn, 0 fail, 1 skip
+Verdict       : READY WITH WARNINGS [WARN]
+```
+
+Managed 35B catalog check:
+
+```bash
+# Command
+./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
+
+# Key output
+Managed model: Qwen3.5 35B-A3B UD Q4_K_XL (qwen35-35b-a3b-q4k-xl) [OK]
+VRAM fit (catalog): 21.41 / 31.86 GiB device-local (headroom 10.45 GiB) [OK]
+Summary       : 9 ok, 1 warn, 0 fail, 0 skip
+Verdict       : READY WITH WARNINGS [WARN]
+```
+
+Exact GGUF file check:
+
+```bash
+# Command
+./zig-out/bin/zinc --check -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+
+# Key output
+Model: /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf [OK]
+Tensor upload: 20.70 GiB device-local weights
+VRAM fit: 21.41 / 31.86 GiB device-local (headroom 10.45 GiB) [OK]
+Summary       : 9 ok, 1 warn, 0 fail, 0 skip
+Verdict       : READY WITH WARNINGS [WARN]
+```
+
+The warning in all three cases came from the shell environment, not from model fit:
+
+```bash
+# The shared host shell did not have this set during the sample run
+RADV_PERFTEST: Not set in current shell [WARN]
+```
+
+## Inspect the managed model catalog
+
+The built-in managed catalog only lists models ZINC has explicitly revalidated for specific GPU profiles. The default `model list` view is strict: a model only appears there if it is both tested for the detected GPU profile and estimated to fit current VRAM.
+
+```bash
+# Show models that are tested for the detected GPU profile
+# and estimated to fit current VRAM
+./zig-out/bin/zinc model list
+
+# Show the full built-in catalog even if local GPU probing is unavailable
+./zig-out/bin/zinc model list --all
+
+# Show the current managed default, if one is configured
+./zig-out/bin/zinc model active
+```
+
+On the shared RDNA4 host on March 29, 2026, `./zig-out/bin/zinc model list` returned:
+
+```bash
+Detected GPU profile: amd-rdna4-32gb
+
+ID                             Status      Fit    Installed   Active   Notes
+qwen35-2b-q4k-m                supported   yes    no          no       tested + catalog fit
+qwen35-35b-a3b-q4k-xl          supported   yes    no          no       tested + catalog fit
+```
+
+If you want ZINC to manage downloads and the default startup model for you:
+
+```bash
+# Download one managed model into the local cache
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+
+# Mark it as the default managed model for future runs
+./zig-out/bin/zinc model use qwen35-2b-q4k-m
+
+# Inspect the current managed default
+./zig-out/bin/zinc model active
 ```
 
 ## Run a single prompt from the terminal
@@ -90,6 +241,25 @@ Once you see `Server listening on 0.0.0.0:8080`, open your browser:
 - **Chat UI**: [http://localhost:8080/](http://localhost:8080/) — a ChatGPT-like interface with streaming, markdown rendering, syntax highlighting, and copy buttons on code blocks.
 - **Health**: [http://localhost:8080/health](http://localhost:8080/health)
 
+### RDNA4 test-node deploy
+
+If you want to rebuild and restart the shared RDNA4 test server from your current checkout, use the helper script:
+
+```bash
+./scripts/deploy_rdna4_server.sh
+```
+
+That script uses `.env` for `ZINC_HOST`, `ZINC_USER`, and `ZINC_PORT`, syncs the repo to `/root/zinc`, rebuilds it, restarts port `9090`, and finishes with a remote `/health` check.
+
+Useful flags:
+
+- `--no-sync` when the remote checkout is already current
+- `--no-build` when you only want a restart
+- `--no-restart` when you only want to push code and compile
+- `--no-healthcheck` when you will validate separately
+
+Current limitation: generation is still serialized behind one engine lock. Overlapping clients complete cleanly, `/health` stays responsive, and queued generation work is reported, but decode itself is not yet parallel.
+
 ## OpenAI-compatible API
 
 The server exposes `/v1` endpoints that work as a drop-in replacement for OpenAI and llama-server clients.
@@ -102,6 +272,7 @@ curl -N http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "qwen3.5-35b",
     "messages": [{"role": "user", "content": "Hello!"}],
+    "enable_thinking": true,
     "stream": true,
     "max_tokens": 256
   }'
@@ -115,32 +286,32 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "qwen3.5-35b",
     "messages": [{"role": "user", "content": "What is 2+2?"}],
+    "enable_thinking": true,
     "max_tokens": 32
   }'
 ```
 
+`enable_thinking` only has an effect when the active model's chat template exposes a thinking toggle. In the built-in chat UI, the Thinking checkbox is shown only for models that report this capability.
+
 ### List models
 
 ```bash
+# Show managed models, fit status, install state, and the active entry
 curl http://localhost:8080/v1/models
 ```
 
-### Use with OpenAI SDKs
+### Activate a managed model in a running server
 
-Python:
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
-
-# Streaming
-for chunk in client.chat.completions.create(
-    model="qwen3.5-35b",
-    messages=[{"role": "user", "content": "Hello!"}],
-    stream=True,
-):
-    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```bash
+# Switch the running server to an installed managed model
+curl http://localhost:8080/v1/models/activate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen35-2b-q4k-m"
+  }'
 ```
+
+### Use with OpenAI SDKs
 
 Node.js:
 
@@ -162,8 +333,9 @@ for await (const chunk of stream) {
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Built-in chat interface |
-| GET | `/health` | Server status and loaded model |
-| GET | `/v1/models` | List available models |
+| GET | `/health` | Server status, loaded model, active/queued requests, uptime |
+| GET | `/v1/models` | List managed models, fit status, install state, and the active entry |
+| POST | `/v1/models/activate` | Activate an installed managed model |
 | POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
 | POST | `/v1/completions` | Text completion |
 
@@ -186,8 +358,28 @@ That is useful for:
 - hotspot and bandwidth analysis
 - custom tooling
 - Graphviz rendering
+- Bun-based HTML dashboards
 
-If you have Graphviz installed:
+The fastest way to review the report is the HTML renderer:
+
+```bash
+bun run graph:render -- decode-graph.json decode-graph-report.html
+open decode-graph-report.html   # macOS
+# xdg-open decode-graph-report.html   # Linux
+```
+
+That dashboard is built by [`tools/render_graph_report.ts`](../tools/render_graph_report.ts). It groups the raw graph into:
+
+- top hotspots
+- bottleneck mix
+- layer pressure
+- op mix
+- critical-path excerpt
+- searchable full node table
+
+The renderer only needs the JSON report. The DOT file is optional and is still useful when you want the full dependency graph structure.
+
+If you have Graphviz installed, you can still render the DOT file:
 
 ```bash
 dot -Tsvg decode-graph.dot -o decode-graph.svg
@@ -219,7 +411,7 @@ Use `-d` to pick the GPU you actually want.
 
 ### The model path is wrong
 
-ZINC expects a GGUF file, not a Hugging Face directory or PyTorch checkpoint.
+ZINC expects a GGUF file, not a Hugging Face directory or a framework checkpoint.
 
 ### The machine builds, but runtime is unstable
 
@@ -234,13 +426,15 @@ That usually points to environment issues before it points to the model:
 
 ```bash
 ./zig-out/bin/zinc --help
-zig build test
+./zig-out/bin/zinc --check -m /path/to/model.gguf
+zig build test --summary all
 vulkaninfo --summary
 ```
 
-Those three commands answer most “why is this not working?” questions:
+Those four commands answer most “why is this not working?” questions:
 
 - is the CLI wired correctly?
+- does the machine/model preflight look sane?
 - does the codebase still pass its test suite?
 - does Vulkan actually see the GPU?
 

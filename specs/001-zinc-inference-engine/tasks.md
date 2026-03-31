@@ -219,7 +219,7 @@ After Steps 1-3, submits drop from 151 to ~41 (1 per layer + 1 final). This step
 
 ### CPU-Side Initialization
 
-- [ ] T040 [P] [US3] Implement Lloyd-Max codebook solver in src/turboquant/lloyd_max.zig — trapezoidal numerical integration for E[X | partition], Gaussian approximation for d≥64, produces n_levels centroids. Validate against PyTorch reference.
+- [ ] T040 [P] [US3] Implement Lloyd-Max codebook solver in src/turboquant/lloyd_max.zig — trapezoidal numerical integration for E[X | partition], Gaussian approximation for d≥64, produces n_levels centroids. Validate against archived reference values.
 - [ ] T041 [P] [US3] Implement random orthogonal matrix generation in src/turboquant/rotation.zig — Gaussian RNG, Householder QR decomposition, sign correction. Validate Pi @ Pi^T ≈ I.
 - [ ] T042 [P] [US3] Implement QJL projection matrix generation in src/turboquant/qjl.zig — d×m matrix of N(0,1) from seeded PRNG, upload to GPU buffer.
 - [ ] T043 [US3] Implement TurboQuant configuration and CLI parsing in src/turboquant/config.zig — TurboQuantOptions struct, `--kv-quant` flag (depends on T007)
