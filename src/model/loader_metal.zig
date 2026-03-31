@@ -80,8 +80,28 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         break :blk gf.getU32(key) orelse 0;
     };
     const shared_expert_intermediate_dim = blk: {
+        const shared_key = std.fmt.bufPrint(&key_buf, "{s}.expert_shared_feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
+        if (gf.getU32(shared_key)) |v| {
+            if (v > 0) break :blk v;
+        }
         const key = std.fmt.bufPrint(&key_buf, "{s}.feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
-        break :blk gf.getU32(key) orelse 0;
+        if (gf.getU32(key)) |v| {
+            if (v > 0) break :blk v;
+        }
+
+        var name_buf: [96]u8 = undefined;
+        for (0..n_layers) |layer| {
+            const gate_name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_gate_shexp.weight", .{layer}) catch break;
+            if (gf.findTensor(gate_name)) |t| break :blk @as(u32, @intCast(t.dims[1]));
+
+            const up_name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_up_shexp.weight", .{layer}) catch break;
+            if (gf.findTensor(up_name)) |t| break :blk @as(u32, @intCast(t.dims[1]));
+
+            const down_name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_down_shexp.weight", .{layer}) catch break;
+            if (gf.findTensor(down_name)) |t| break :blk @as(u32, @intCast(t.dims[0]));
+        }
+
+        break :blk @as(u32, 0);
     };
     const vocab_size = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.vocab_size", .{prefix}) catch break :blk @as(u32, 0);

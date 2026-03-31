@@ -50,4 +50,3 @@ kernel void main0(constant _23& _25 [[buffer(0)]], device _57& _59 [[buffer(1)]]
         continue;
     }
 }
-

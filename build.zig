@@ -140,6 +140,47 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run ZINC inference engine");
     run_step.dependOn(&run_cmd.step);
 
+    if (is_macos) {
+        const bench_mod = b.createModule(.{
+            .root_source_file = b.path("benchmarks/metal_inference.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        });
+        const bench_support_mod = b.createModule(.{
+            .root_source_file = b.path("src/bench_support.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        });
+        bench_support_mod.addIncludePath(b.path("src/metal"));
+        bench_mod.addImport("zinc_bench_support", bench_support_mod);
+        bench_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        bench_mod.addIncludePath(b.path("src/metal"));
+        bench_mod.linkFramework("Metal", .{});
+        bench_mod.linkFramework("Foundation", .{});
+
+        const bench_exe = b.addExecutable(.{
+            .name = "zinc-bench-metal",
+            .root_module = bench_mod,
+        });
+        b.installArtifact(bench_exe);
+
+        const bench_run = b.addRunArtifact(bench_exe);
+        if (b.args) |args| {
+            bench_run.addArgs(args);
+        }
+
+        const bench_metal_step = b.step("bench-metal", "Run the Metal inference benchmark (ReleaseFast)");
+        bench_metal_step.dependOn(&bench_run.step);
+
+        const bench_step = b.step("bench", "Run benchmarks");
+        bench_step.dependOn(&bench_run.step);
+    }
+
     // --- Unit tests ---
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

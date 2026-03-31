@@ -62,9 +62,18 @@ type AgentKind = "claude" | "codex";
 
 // ── Phase detection ──────────────────────────────────────────────────
 
-type Phase = "fix" | "implement" | "optimize";
+export type Phase = "fix" | "implement" | "optimize";
 
-type BuildRunResult = {
+export type OutputEvaluation = {
+  normalizedText: string;
+  containsReference: boolean;
+  strongAnswer: boolean;
+  outputQualityScore: number;
+  offTopic: boolean;
+  evaluationNotes: string[];
+};
+
+export type BuildRunResult = {
   buildExitCode: number;
   buildOutput: string;
   testExitCode: number;
@@ -73,10 +82,41 @@ type BuildRunResult = {
   runOutput: string;
   phase: Phase;
   tokPerSec: number | null;
+  tokPerSecSamples: number[];
   tokensGenerated: number;
   outputText: string;
-  containsReference: boolean; // true if output contains "Paris"
+  containsReference: boolean;
+  strongAnswer: boolean;
+  outputQualityScore: number;
+  offTopic: boolean;
+  evaluationNotes: string[];
   error: string | null;
+};
+
+export type ResultSnapshot = {
+  cycle: number;
+  phase: Phase;
+  tokPerSec: number | null;
+  tokPerSecSamples: number[];
+  tokensGenerated: number;
+  outputText: string;
+  containsReference: boolean;
+  strongAnswer: boolean;
+  outputQualityScore: number;
+  offTopic: boolean;
+  evaluationNotes: string[];
+};
+
+export type ControllerState = {
+  lastAccepted: ResultSnapshot | null;
+  bestSoFar: ResultSnapshot | null;
+  bestCorrect: ResultSnapshot | null;
+};
+
+type KeepDecision = {
+  keep: boolean;
+  improvedBestCorrect: boolean;
+  reason: string;
 };
 
 function parseTokPerSec(output: string): number | null {
@@ -101,18 +141,195 @@ function parseOutputText(output: string): string {
   return m ? m[1].trim().slice(0, 200) : "";
 }
 
-function detectPhase(result: BuildRunResult): Phase {
+function normalizeOutputText(text: string): string {
+  return text
+    .replaceAll("Ġ", " ")
+    .replaceAll("Ċ", "\n")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function evaluateOutputText(text: string): OutputEvaluation {
+  const normalizedText = normalizeOutputText(text);
+  const lower = normalizedText.toLowerCase();
+  const containsReference = lower.includes(REFERENCE_TEXT.toLowerCase());
+  const contradictoryCapitalTerms = [
+    "capital of germany",
+    "capital of italy",
+    "capital of spain",
+    "capital of portugal",
+    "berlin",
+    "rome",
+    "madrid",
+    "lisbon",
+  ].some((pattern) => lower.includes(pattern));
+  const offTopic = containsReference && contradictoryCapitalTerms;
+  const strongAnswer = containsReference && !offTopic &&
+    (/^paris\b/i.test(normalizedText) || /^paris[.!?,\s]/i.test(normalizedText));
+  const evaluationNotes: string[] = [];
+  if (offTopic) evaluationNotes.push("contains contradictory capital/country terms");
+  if (containsReference && normalizedText.toLowerCase().startsWith("paris")) {
+    evaluationNotes.push("starts with Paris");
+  }
+  const outputQualityScore = strongAnswer ? 4 : containsReference ? 1 : normalizedText ? 0 : 0;
+  return {
+    normalizedText,
+    containsReference,
+    strongAnswer,
+    outputQualityScore,
+    offTopic,
+    evaluationNotes,
+  };
+}
+
+export function detectPhase(result: BuildRunResult): Phase {
   if (result.buildExitCode !== 0) return "fix";
   if (result.testExitCode !== 0) return "fix";
   if (result.runExitCode !== 0 && result.runExitCode !== null) return "fix";
   if (result.error) return "fix";
-  // If generating tokens but output doesn't contain reference → implement
-  if (result.tokensGenerated > 0 && !result.containsReference) return "implement";
-  // If correct output but slow → optimize
-  if (result.containsReference && result.tokPerSec != null && result.tokPerSec < 80) return "optimize";
-  // If correct and fast → done!
-  if (result.containsReference && result.tokPerSec != null && result.tokPerSec >= 80) return "optimize";
+  if (result.strongAnswer) return "optimize";
+  if (result.tokensGenerated > 0) return "implement";
   return "implement";
+}
+
+function canonicalizeMemoryEntry(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[`"'()[\],.:;!?-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function mergeUniqueEntries(existing: string[], incoming: string[], maxEntries: number): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...existing, ...incoming]) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const key = canonicalizeMemoryEntry(trimmed)
+      .split(" ")
+      .filter(Boolean)
+      .sort()
+      .join(" ");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(trimmed);
+    if (merged.length >= maxEntries) break;
+  }
+  return merged;
+}
+
+export function snapshotFromResult(cycle: number, result: BuildRunResult): ResultSnapshot {
+  return {
+    cycle,
+    phase: result.phase,
+    tokPerSec: result.tokPerSec,
+    tokPerSecSamples: result.tokPerSecSamples,
+    tokensGenerated: result.tokensGenerated,
+    outputText: result.outputText,
+    containsReference: result.containsReference,
+    strongAnswer: result.strongAnswer,
+    outputQualityScore: result.outputQualityScore,
+    offTopic: result.offTopic,
+    evaluationNotes: result.evaluationNotes,
+  };
+}
+
+export function decideKeep(
+  verify: BuildRunResult,
+  baseline: ResultSnapshot,
+  state: ControllerState,
+): KeepDecision {
+  const bestCorrect = state.bestCorrect;
+  const baselineTokens = baseline.tokensGenerated ?? 0;
+
+  if (bestCorrect && !verify.strongAnswer) {
+    return {
+      keep: false,
+      improvedBestCorrect: false,
+      reason: "lost short-benchmark correctness relative to accepted baseline",
+    };
+  }
+
+  if (verify.strongAnswer) {
+    if (!bestCorrect) {
+      return {
+        keep: true,
+        improvedBestCorrect: true,
+        reason: "first strong correct output",
+      };
+    }
+    const bestTokPerSec = bestCorrect.tokPerSec ?? 0;
+    const verifyTokPerSec = verify.tokPerSec ?? 0;
+    const improvementThreshold = Math.max(0.5, bestTokPerSec * 0.02);
+    if (verifyTokPerSec > bestTokPerSec + improvementThreshold) {
+      return {
+        keep: true,
+        improvedBestCorrect: true,
+        reason: "significant correct-throughput improvement",
+      };
+    }
+    return {
+      keep: false,
+      improvedBestCorrect: false,
+      reason: "did not beat best correct throughput",
+    };
+  }
+
+  if (!bestCorrect && verify.tokensGenerated >= baselineTokens + 2) {
+    return {
+      keep: true,
+      improvedBestCorrect: false,
+      reason: "pre-correctness token-progress improvement",
+    };
+  }
+
+  return {
+    keep: false,
+    improvedBestCorrect: false,
+    reason: "no material progress",
+  };
+}
+
+export function buildReflectionSummary(state: {
+  cycles: Array<{
+    cycle: number;
+    outputText?: string;
+    shortOutputText?: string;
+    longOutputText?: string;
+    offTopic?: boolean;
+    evaluationNotes?: string[];
+    decisionReason?: string;
+    description?: string;
+    kept?: boolean;
+  }>;
+}): string {
+  const recentCycles = state.cycles.slice(-20);
+  const total = recentCycles.length;
+  const germanyDriftCount = recentCycles.filter((cycle) => {
+    const text = normalizeOutputText(
+      cycle.longOutputText ?? cycle.outputText ?? cycle.shortOutputText ?? "",
+    ).toLowerCase();
+    return text.includes("paris") && (text.includes("germany") || text.includes("berlin"));
+  }).length;
+  const failedCount = recentCycles.filter((cycle) => cycle.kept === false).length;
+
+  const lines = [
+    `Last 20 cycles: reviewed ${total} cycle${total === 1 ? "" : "s"}, ${failedCount} rejected.`,
+  ];
+
+  if (germanyDriftCount > 0) {
+    lines.push(`Repeated failure basin: Paris->Germany list drift (${germanyDriftCount}/${total} recent cycles).`);
+  }
+
+  const paritySignals = recentCycles.filter((cycle) =>
+    (cycle.evaluationNotes ?? []).some((note) => canonicalizeMemoryEntry(note).includes("contradictory capital country terms"))
+  ).length;
+  if (paritySignals > 0 || germanyDriftCount > 0) {
+    lines.push("Prioritize parity tests around the first wrong layer or expert-down path before more speculative speed work.");
+  }
+
+  return lines.join("\n");
 }
 
 // ── Command runner ───────────────────────────────────────────────────
@@ -206,9 +423,14 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
       runOutput: "",
       phase: "fix",
       tokPerSec: null,
+      tokPerSecSamples: [],
       tokensGenerated: 0,
       outputText: "",
       containsReference: false,
+      strongAnswer: false,
+      outputQualityScore: 0,
+      offTopic: false,
+      evaluationNotes: [],
       error: "Build failed",
     };
   }
@@ -227,9 +449,14 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
       runOutput: "",
       phase: "fix",
       tokPerSec: null,
+      tokPerSecSamples: [],
       tokensGenerated: 0,
       outputText: "",
       containsReference: false,
+      strongAnswer: false,
+      outputQualityScore: 0,
+      offTopic: false,
+      evaluationNotes: [],
       error: "Tests failed",
     };
   }
@@ -246,9 +473,14 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
       runOutput: "",
       phase: "implement",
       tokPerSec: null,
+      tokPerSecSamples: [],
       tokensGenerated: 0,
       outputText: "",
       containsReference: false,
+      strongAnswer: false,
+      outputQualityScore: 0,
+      offTopic: false,
+      evaluationNotes: [],
       error: null,
     };
   }
@@ -264,7 +496,7 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
   const tokPerSec = parseTokPerSec(combined);
   const tokensGenerated = parseTokensGenerated(combined);
   const outputText = parseOutputText(combined);
-  const containsReference = outputText.toLowerCase().includes(REFERENCE_TEXT.toLowerCase());
+  const evaluation = evaluateOutputText(outputText);
 
   const result: BuildRunResult = {
     buildExitCode: 0,
@@ -275,9 +507,14 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
     runOutput: combined,
     phase: "implement",
     tokPerSec,
+    tokPerSecSamples: tokPerSec != null ? [tokPerSec] : [],
     tokensGenerated,
     outputText,
-    containsReference,
+    containsReference: evaluation.containsReference,
+    strongAnswer: evaluation.strongAnswer,
+    outputQualityScore: evaluation.outputQualityScore,
+    offTopic: evaluation.offTopic,
+    evaluationNotes: evaluation.evaluationNotes,
     error: run.exitCode !== 0 ? `Runtime exit code ${run.exitCode}` : null,
   };
   result.phase = detectPhase(result);
@@ -1093,7 +1330,9 @@ async function main() {
   console.log(clr("1;36", `Best: ${state.currentBest?.tokPerSec?.toFixed(1) ?? "N/A"} tok/s, correct=${state.currentBest?.containsReference ?? false}`));
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

@@ -351,4 +351,3 @@ kernel void main0(constant _21& _23 [[buffer(0)]], device _105& _107 [[buffer(1)
         break;
     } while(false);
 }
-

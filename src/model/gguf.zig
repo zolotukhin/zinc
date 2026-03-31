@@ -175,6 +175,18 @@ pub const MetadataValue = union(enum) {
             else => null,
         };
     }
+
+    /// Interpret the metadata value as a boolean when possible.
+    /// @returns A normalized `bool` or `null` when the stored value is not boolean-like.
+    pub fn asBool(self: MetadataValue) ?bool {
+        return switch (self) {
+            .bool_ => |v| v,
+            .uint8 => |v| v != 0,
+            .uint32 => |v| v != 0,
+            .int32 => |v| v != 0,
+            else => null,
+        };
+    }
 };
 
 /// Tensor descriptor read from the GGUF header.
@@ -274,16 +286,13 @@ pub const GGUFFile = struct {
         return val.asF32();
     }
 
-    /// Look up a metadata boolean by key.
+    /// Look up a metadata value as `bool` when it can be normalized to that type.
     /// @param self Parsed GGUF file.
     /// @param key Metadata key to search for.
-    /// @returns The stored boolean when present and typed as `.bool_`.
+    /// @returns The normalized boolean value when present.
     pub fn getBool(self: *const GGUFFile, key: []const u8) ?bool {
         const val = self.metadata.get(key) orelse return null;
-        return switch (val) {
-            .bool_ => |b| b,
-            else => null,
-        };
+        return val.asBool();
     }
 
     /// Find a tensor descriptor by name.
@@ -570,4 +579,10 @@ test "MetadataValue conversions" {
     const v_u32 = MetadataValue{ .uint32 = 42 };
     try std.testing.expectEqual(@as(u32, 42), v_u32.asU32().?);
     try std.testing.expect(v_u32.asString() == null);
+
+    const v_bool = MetadataValue{ .bool_ = true };
+    try std.testing.expectEqual(true, v_bool.asBool().?);
+
+    const v_u32_bool = MetadataValue{ .uint32 = 0 };
+    try std.testing.expectEqual(false, v_u32_bool.asBool().?);
 }

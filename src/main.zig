@@ -5,7 +5,20 @@
 const std = @import("std");
 const gpu = @import("gpu/interface.zig");
 const catalog_mod = @import("model/catalog.zig");
-const diagnostics_mod = @import("diagnostics.zig");
+const diagnostics_mod = if (gpu.is_vulkan) @import("diagnostics.zig") else struct {
+    pub const ManagedModelInfo = struct {
+        id: []const u8,
+        display_name: []const u8,
+        file_name: []const u8,
+        size_bytes: u64,
+        required_vram_bytes: u64,
+        status_label: []const u8,
+    };
+
+    pub fn run(_: anytype, _: std.mem.Allocator) !void {
+        return error.DiagnosticsUnsupportedOnThisBackend;
+    }
+};
 const gguf_mod = @import("model/gguf.zig");
 const managed_mod = @import("model/managed.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
@@ -20,7 +33,12 @@ const forward_mod = if (gpu.is_vulkan) @import("compute/forward.zig") else struc
 const instance_mod = if (gpu.is_vulkan) @import("vulkan/instance.zig") else gpu.backend;
 const gpu_detect = if (gpu.is_vulkan) @import("vulkan/gpu_detect.zig") else struct {};
 const http_mod = @import("server/http.zig");
-const model_manager_mod = if (gpu.is_vulkan) @import("server/model_manager.zig") else struct {};
+const model_manager_mod = if (gpu.is_vulkan) @import("server/model_manager.zig") else struct {
+    pub const LoadSpec = struct {
+        model_path: []const u8,
+        managed_id: ?[]const u8 = null,
+    };
+};
 const routes_mod = if (gpu.is_vulkan) @import("server/routes.zig") else struct {};
 const CommandPool = if (gpu.is_vulkan) @import("vulkan/command.zig").CommandPool else struct {
     pub fn init(_: anytype) !@This() {
@@ -93,7 +111,9 @@ comptime {
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
     _ = @import("scheduler/kv_cache.zig");
-    _ = @import("diagnostics.zig");
+    if (gpu.is_vulkan) {
+        _ = @import("diagnostics.zig");
+    }
 }
 
 /// Runtime configuration built from CLI flags and default values.
@@ -505,20 +525,24 @@ fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !Ma
         };
     }
 
-    var vk_instance = try instance_mod.Instance.init(allocator, device_index);
-    defer vk_instance.deinit();
+    if (gpu.is_vulkan) {
+        var vk_instance = try instance_mod.Instance.init(allocator, device_index);
+        defer vk_instance.deinit();
 
-    const gpu_config = gpu_detect.detect(&vk_instance);
-    const profile = catalog_mod.profileForGpu(gpu_config);
-    const vram_budget_bytes = vk_instance.vramBytes();
+        const gpu_config = gpu_detect.detect(&vk_instance);
+        const profile = catalog_mod.profileForGpu(gpu_config);
+        const vram_budget_bytes = vk_instance.vramBytes();
 
-    try managed_mod.writeCachedGpuProfile(device_index, profile, gpu_config.nameSlice(), vram_budget_bytes, allocator);
+        try managed_mod.writeCachedGpuProfile(device_index, profile, gpu_config.nameSlice(), vram_budget_bytes, allocator);
 
-    return .{
-        .profile = try allocator.dupe(u8, profile),
-        .vram_budget_bytes = vram_budget_bytes,
-        .from_cache = false,
-    };
+        return .{
+            .profile = try allocator.dupe(u8, profile),
+            .vram_budget_bytes = vram_budget_bytes,
+            .from_cache = false,
+        };
+    }
+
+    return error.GpuDetectionUnavailable;
 }
 
 fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
@@ -909,6 +933,9 @@ pub fn main() !void {
 
             var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, config.chat, allocator);
             defer prepared_prompt.deinit(allocator);
+            if (config.chat) {
+                log.info("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
+            }
 
             const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
             defer allocator.free(prompt_tokens);
@@ -916,7 +943,7 @@ pub fn main() !void {
             log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
 
             // Initialize inference engine
-            var engine = forward_metal.InferenceEngine.init(&model, &device, allocator) catch |err| {
+            var engine = forward_metal.InferenceEngine.init(&model, &device, allocator, config.profile) catch |err| {
                 log.err("Failed to init Metal inference engine: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -932,17 +959,47 @@ pub fn main() !void {
             if (output_tokens.len == 0) {
                 log.warn("Metal decode loop not yet implemented. Engine initialized successfully with {d} pipelines.", .{9});
             } else {
+                if (config.profile) {
+                    const vocab_size = model.config.vocab_size;
+                    const logits_ptr: [*]const f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
+                    const logits = logits_ptr[0..vocab_size];
+                    var top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };
+                    var top_vals: [5]f32 = .{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+                    for (logits, 0..) |v, i| {
+                        if (v <= top_vals[4]) continue;
+                        top_vals[4] = v;
+                        top_ids[4] = @intCast(i);
+                        var j: usize = 4;
+                        while (j > 0 and top_vals[j] > top_vals[j - 1]) : (j -= 1) {
+                            const tv = top_vals[j];
+                            top_vals[j] = top_vals[j - 1];
+                            top_vals[j - 1] = tv;
+                            const ti = top_ids[j];
+                            top_ids[j] = top_ids[j - 1];
+                            top_ids[j - 1] = ti;
+                        }
+                    }
+                    for (0..5) |k| {
+                        var dec_buf: [256]u8 = undefined;
+                        const tok_str = tokenizer.decodeToken(top_ids[k], &dec_buf);
+                        log.info("  metal prefill logit #{d}: id={d} val={d:.4} \"{s}\"", .{ k, top_ids[k], top_vals[k], tok_str });
+                    }
+                }
+
                 // Decode tokens to text
                 var text_buf: std.ArrayList(u8) = .{};
                 defer text_buf.deinit(allocator);
                 for (output_tokens) |tid| {
-                    if (tid < tokenizer.vocab.len) {
-                        try text_buf.appendSlice(allocator, tokenizer.vocab[tid]);
+                    var dec_buf: [256]u8 = undefined;
+                    const decoded = tokenizer.decodeToken(tid, &dec_buf);
+                    if (decoded.len > 0) {
+                        try text_buf.appendSlice(allocator, decoded);
                     } else {
                         try text_buf.appendSlice(allocator, "<?>");
                     }
                 }
-                log.info("Output ({d} tokens): {s}", .{ output_tokens.len, text_buf.items });
+                const output_text = trimCliOutputText(text_buf.items, config.chat);
+                log.info("Output ({d} tokens): {s}", .{ output_tokens.len, output_text });
             }
         } else {
             log.err("HTTP server mode is currently only available on the Vulkan backend; use --prompt on Metal.", .{});

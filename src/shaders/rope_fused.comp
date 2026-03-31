@@ -22,8 +22,9 @@ void main() {
     uint head = gl_WorkGroupID.x;
 
     float freq_base = uintBitsToFloat(freq_base_bits);
-    uint half_rot = rope_dim / 2;
     uint base_idx = head * stride;
+
+    uint half_rot = rope_dim / 2;
 
     // Rotate the first rope_dim elements in pairs
     for (uint i = tid; i < half_rot; i += 64) {

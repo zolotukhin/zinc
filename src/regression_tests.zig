@@ -72,7 +72,7 @@ test "ssm_delta_net shader keeps multi-subgroup fallback" {
 
 test "Q5_K shader keeps GGML contiguous half ordering" {
     const src = @embedFile("shaders/dmmv_q5k.comp");
-    try expectContains(src, "y[l + 0] comes from the low nibble, y[l + 32] comes from the high nibble.");
+    try expectContains(src, "low nibble -> x[l], high nibble -> x[32 + l].");
     try expectContains(src, "x[x_grp + e]");
     try expectContains(src, "x[x_grp + 32u + e]");
     try expectNotContains(src, "2u * e");

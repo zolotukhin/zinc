@@ -37,6 +37,27 @@ pub const DecodeState = struct {
     }
 };
 
+pub const GenerateMetrics = struct {
+    prefill_tokens: usize,
+    prefill_ns: u64,
+    prefill_tps: f64,
+    generated_tokens: u32,
+    decode_ns: u64,
+    decode_tps: f64,
+    ms_per_token: f64,
+    eos_at_first_position: bool,
+};
+
+pub const GenerateResult = struct {
+    output_tokens: []u32,
+    metrics: GenerateMetrics,
+
+    pub fn deinit(self: *GenerateResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.output_tokens);
+        self.* = undefined;
+    }
+};
+
 /// Push constants for DMMV dispatch (matches GLSL layout).
 const DmmvPush = extern struct {
     M: u32, // rows
@@ -329,11 +350,13 @@ pub const InferenceEngine = struct {
 
     // Decode state
     position: u32,
+    profile_enabled: bool,
 
     pub fn init(
         model: *const metal_loader.Model,
         device: *const metal_device.MetalDevice,
         allocator: std.mem.Allocator,
+        profile_enabled: bool,
     ) !InferenceEngine {
         const cfg = model.config;
         const ctx = device.ctx;
@@ -371,6 +394,7 @@ pub const InferenceEngine = struct {
         self.config = cfg;
         self.allocator = allocator;
         self.position = 0;
+        self.profile_enabled = profile_enabled;
 
         self.hidden_buf = try metal_buffer.createBuffer(ctx, hidden_size);
         self.residual_buf = try metal_buffer.createBuffer(ctx, hidden_size);
@@ -1179,6 +1203,50 @@ fn dispatchSigmoidMulOnCmd(
     cmd.dispatchV2(&engine.sigmoid_mul_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SigmoidMulPush), 0);
 }
 
+fn dispatchSsmConv1dWithPipe(
+    cmd: *MetalCommand,
+    pipe: *const MetalPipeline,
+    kernel: *const MetalBuffer,
+    state: *const MetalBuffer,
+    current_input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    conv_channels: u32,
+    d_conv: u32,
+    kernel_is_f16: bool,
+) void {
+    const push = SsmConv1dPush{
+        .conv_channels = conv_channels,
+        .d_conv = d_conv,
+        .kernel_is_f16 = if (kernel_is_f16) 1 else 0,
+    };
+    const bufs = [_]*const MetalBuffer{ kernel, state, current_input, output };
+    cmd.dispatchV2(pipe, .{ (conv_channels + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SsmConv1dPush), 0);
+}
+
+fn dispatchSsmGatedNormWithPipe(
+    cmd: *MetalCommand,
+    pipe: *const MetalPipeline,
+    delta_net_output: *const MetalBuffer,
+    norm_weight: *const MetalBuffer,
+    z_gate: *const MetalBuffer,
+    output: *const MetalBuffer,
+    d_inner: u32,
+    dt_rank: u32,
+    head_v_dim: u32,
+    d_state: u32,
+    norm_per_head: bool,
+) void {
+    const push = SsmGatedNormPush{
+        .d_inner = d_inner,
+        .dt_rank = dt_rank,
+        .head_v_dim = head_v_dim,
+        .d_state = d_state,
+        .norm_per_head = if (norm_per_head) 1 else 0,
+    };
+    const bufs = [_]*const MetalBuffer{ delta_net_output, norm_weight, z_gate, output };
+    cmd.dispatchV2(pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SsmGatedNormPush), 0);
+}
+
 fn dispatchSoftmaxTopkOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -1466,6 +1534,42 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
                 }
             }
         },
+        .q5_k => {
+            const bpb: usize = 176;
+            const bpr = @as(usize, cols) / 256;
+            const row_off = @as(usize, row) * bpr * bpb;
+            var out_i: usize = 0;
+            for (0..bpr) |bi| {
+                const bb = row_off + bi * bpb;
+                const d_bits = std.mem.readInt(u16, raw_data[bb..][0..2], .little);
+                const d: f32 = @floatCast(@as(f16, @bitCast(d_bits)));
+                const dm_bits = std.mem.readInt(u16, raw_data[bb + 2 ..][0..2], .little);
+                const dmin: f32 = @floatCast(@as(f16, @bitCast(dm_bits)));
+                const scales = raw_data[bb + 4 .. bb + 16];
+                const qh = raw_data[bb + 16 .. bb + 48];
+                const qs = raw_data[bb + 48 .. bb + 176];
+                var is: usize = 0;
+                for (0..4) |j| {
+                    const sm0 = getScaleMinK4(is, scales);
+                    const d1 = d * @as(f32, @floatFromInt(sm0.sc));
+                    const m1 = dmin * @as(f32, @floatFromInt(sm0.m));
+                    const sm1 = getScaleMinK4(is + 1, scales);
+                    const d2 = d * @as(f32, @floatFromInt(sm1.sc));
+                    const m2 = dmin * @as(f32, @floatFromInt(sm1.m));
+
+                    for (0..32) |l| {
+                        const ql_lo: u8 = qs[j * 32 + l] & 0xF;
+                        const ql_hi: u8 = qs[j * 32 + l] >> 4;
+                        const hb_lo: u8 = (qh[l] >> @intCast(j * 2)) & 1;
+                        const hb_hi: u8 = (qh[l] >> @intCast(j * 2 + 1)) & 1;
+                        output[out_i + l] = d1 * @as(f32, @floatFromInt(ql_lo | (hb_lo << 4))) - m1;
+                        output[out_i + 32 + l] = d2 * @as(f32, @floatFromInt(ql_hi | (hb_hi << 4))) - m2;
+                    }
+                    out_i += 64;
+                    is += 2;
+                }
+            }
+        },
         .q4_k => {
             const bpb: usize = 144;
             const bpr = @as(usize, cols) / 256;
@@ -1610,9 +1714,6 @@ fn recordGpuRoutedBatchedMoeOnCmd(
     const expert_gate_bytes = expertSliceBytes(gate_exps.info.type_, inter_dim, hidden_dim);
     const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
 
-    // The GPU-routed MoE fast path is a straight producer->consumer chain in a
-    // single compute encoder. Rely on Metal's in-order dispatch execution here
-    // instead of forcing a full buffer-scope barrier between every phase.
     dispatchSoftmaxTopkOnCmd(engine, cmd, &engine.router_logits_buf, &engine.router_output_buf, cfg.n_experts, cfg.n_experts_used);
 
     dispatchDmmvMoeQ4kOnCmd(engine, cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
@@ -1624,7 +1725,6 @@ fn recordGpuRoutedBatchedMoeOnCmd(
             dispatchDmmvOnCmd(engine, cmd, tensor, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
         }
     }
-
     {
         const swiglu_push = SwiGLUPush{ .n = inter_dim };
         const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
@@ -1635,7 +1735,6 @@ fn recordGpuRoutedBatchedMoeOnCmd(
         const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
         cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
     }
-
     dispatchDmmvMoeQ4kOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
@@ -1713,19 +1812,23 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
 
         if (is_full_attn) {
-            // Keep full attention on-GPU end-to-end so decode does not stall on
-            // a CPU-side KV-cache copy between the prep and flash-attention steps.
-            // This is a straight producer->consumer chain in one encoder, so
-            // avoid explicit buffer barriers between the dispatches here.
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
-            const cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
+            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
             try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
             dispatchFlashAttnOnCmd(engine, cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
             dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
+            cmd.barrier();
+            const should_debug_attn_compare = engine.profile_enabled and using_local_cmd and (engine.position == 4 or engine.position == 5) and (layer_idx == 7 or layer_idx == 31);
+            if (should_debug_attn_compare) {
+                cmd.commitAndWait();
+                try debugCompareAttentionLayer(engine, layer, layer_idx, lt, hidden_dim, q_dim, kv_dim);
+                local_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+                cmd = &local_cmd_storage;
+            }
             {
                 const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
                 const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
@@ -1736,24 +1839,17 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
                 if (use_gpu_routed_moe) {
-                    // The shared decode command already preserves dispatch order,
-                    // and the GPU-routed MoE fast path finishes by updating
-                    // hidden_buf in place. Let the next layer consume that
-                    // result directly without an extra per-layer fence.
                     try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
                 }
             }
             if (using_local_cmd) cmd.commitAndWait();
         } else {
             // ===== SSM: fused batch 1 + recurrent body + batch 2 =====
-            // There is no CPU dependency between the SSM projections and the
-            // recurrent kernels, so keep the whole path in one command buffer.
-            // Match the attention/MoE fast paths and rely on Metal's in-order
-            // dispatch execution for these direct producer->consumer steps.
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
-            const cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
+            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
 
             const wqkv_t = lt.attn_qkv orelse return error.MissingTensor;
             const z_t = lt.attn_gate orelse return error.MissingTensor;
@@ -1763,13 +1859,23 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             dispatchDmmvOnCmd(engine, cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
             dispatchDmmvOnCmd(engine, cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
             dispatchDmmvOnCmd(engine, cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
+            cmd.barrier();
 
             // Conv1d: attn_out_buf → swiglu_buf
             {
-                const push = SsmConv1dPush{ .conv_channels = conv_channels, .d_conv = d_conv, .kernel_is_f16 = 0 };
-                const c1_bufs = [_]*const MetalBuffer{ &engine.ssm_conv_kernel_bufs.?[layer_idx], &engine.ssm_conv_state_bufs.?[layer_idx], &engine.attn_out_buf, &engine.swiglu_buf };
-                cmd.dispatchV2(&engine.ssm_conv1d_pipe, .{ (conv_channels + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &c1_bufs, &push, @sizeOf(SsmConv1dPush), 0);
+                dispatchSsmConv1dWithPipe(
+                    cmd,
+                    &engine.ssm_conv1d_pipe,
+                    &engine.ssm_conv_kernel_bufs.?[layer_idx],
+                    &engine.ssm_conv_state_bufs.?[layer_idx],
+                    &engine.attn_out_buf,
+                    &engine.swiglu_buf,
+                    conv_channels,
+                    d_conv,
+                    false,
+                );
             }
+            cmd.barrier();
 
             // Delta-net: swiglu_buf → attn_out_buf
             {
@@ -1792,26 +1898,76 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 };
                 cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
             }
+            cmd.barrier();
+            const should_debug_ssm_compare = engine.profile_enabled and engine.position == 0 and layer_idx == 6 and using_local_cmd;
+            if (should_debug_ssm_compare) {
+                cmd.commitAndWait();
+                try debugCompareSsmPreGatedNorm(
+                    engine,
+                    layer,
+                    layer_idx,
+                    wqkv_t,
+                    z_t,
+                    alpha_t,
+                    beta_t,
+                    hidden_dim,
+                    conv_channels,
+                    d_inner,
+                    d_conv,
+                    d_state,
+                    n_group,
+                    dt_rank,
+                    head_v_dim,
+                );
+                local_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+                cmd = &local_cmd_storage;
+            }
 
             // Gated norm: attn_out_buf → swiglu_buf
             {
-                const push = SsmGatedNormPush{
-                    .d_inner = d_inner,
-                    .dt_rank = dt_rank,
-                    .head_v_dim = head_v_dim,
-                    .d_state = d_state,
-                    .norm_per_head = if (engine.ssm_norm_per_head.?[layer_idx]) @as(u32, 1) else 0,
-                };
-                const gn_bufs = [_]*const MetalBuffer{
-                    &engine.attn_out_buf, &engine.ssm_norm_weight_bufs.?[layer_idx],
-                    &engine.gate_buf,     &engine.swiglu_buf,
-                };
-                cmd.dispatchV2(&engine.ssm_gated_norm_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &gn_bufs, &push, @sizeOf(SsmGatedNormPush), 0);
+                dispatchSsmGatedNormWithPipe(
+                    cmd,
+                    &engine.ssm_gated_norm_pipe,
+                    &engine.attn_out_buf,
+                    &engine.ssm_norm_weight_bufs.?[layer_idx],
+                    &engine.gate_buf,
+                    &engine.swiglu_buf,
+                    d_inner,
+                    dt_rank,
+                    head_v_dim,
+                    d_state,
+                    engine.ssm_norm_per_head.?[layer_idx],
+                );
             }
+            cmd.barrier();
 
             // SSM out DMMV: swiglu_buf → down_buf
             const ssm_out_t = lt.ssm_out orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
+            cmd.barrier();
+            if (should_debug_ssm_compare) {
+                cmd.commitAndWait();
+                try debugCompareSsmPostProjection(
+                    engine,
+                    layer,
+                    layer_idx,
+                    wqkv_t,
+                    z_t,
+                    alpha_t,
+                    beta_t,
+                    ssm_out_t,
+                    hidden_dim,
+                    conv_channels,
+                    d_inner,
+                    d_conv,
+                    d_state,
+                    n_group,
+                    dt_rank,
+                    head_v_dim,
+                );
+                local_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+                cmd = &local_cmd_storage;
+            }
 
             // Residual + FFN norm + router (same as attention batch2)
             {
@@ -1819,7 +1975,9 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
                 cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
+            cmd.barrier();
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
@@ -1830,6 +1988,10 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             if (using_local_cmd) cmd.commitAndWait();
         }
 
+        if (engine.profile_enabled and engine.position == 0) {
+            logLayerDiagnostics(engine, lt, layer, is_full_attn, "pre_ffn");
+        }
+
         // ===== MoE / Dense FFN =====
         if (is_moe and !use_gpu_routed_moe) {
             // CPU topK softmax
@@ -1837,6 +1999,14 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             var expert_ids: [16]u32 = undefined;
             var expert_weights: [16]f32 = undefined;
             topKSoftmax(router_ptr[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            const should_debug_moe_compare = engine.profile_enabled and engine.position == 0 and layer_idx == 6;
+            const hidden_before_snapshot: ?[]f32 = if (should_debug_moe_compare) blk: {
+                const snap = try engine.allocator.alloc(f32, hidden_dim);
+                const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+                @memcpy(snap, hidden_ptr[0..hidden_dim]);
+                break :blk snap;
+            } else null;
+            defer if (hidden_before_snapshot) |snap| engine.allocator.free(snap);
 
             // CPU shared expert gate: dot(gate_weights, norm_buf) → sigmoid
             // Eliminates mid-MoE commitAndWait (40 per token) — 2048-dim dot product on CPU (<1µs)
@@ -2013,6 +2183,20 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 }
 
                 cmd.commitAndWait();
+                if (hidden_before_snapshot) |snap| {
+                    try debugCompareMoeLayer(
+                        engine,
+                        layer,
+                        lt,
+                        expert_ids[0..cfg.n_experts_used],
+                        expert_weights[0..cfg.n_experts_used],
+                        shexp_gate_weight,
+                        snap,
+                        hidden_dim,
+                        inter_dim,
+                        shexp_inter_dim,
+                    );
+                }
             }
         } else if (!is_moe) {
             // Dense FFN (non-MoE) — norm_buf already set by GPU batch 2
@@ -2039,6 +2223,10 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
             for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
         }
+
+        if (engine.profile_enabled and engine.position == 0) {
+            logLayerDiagnostics(engine, lt, layer, is_full_attn, "post_ffn");
+        }
     }
 
     // ===== Final: GPU norm → LM head (batched) =====
@@ -2054,21 +2242,844 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         dispatchDmmvOnCmd(engine, &cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
         cmd.commitAndWait();
     }
+    if (engine.profile_enabled and engine.position == 5) {
+        try debugCompareFinalLogits(engine);
+    }
 
     engine.position += 1;
+}
+
+fn logDebugSliceDiff(layer: u32, label: []const u8, expected: []const f32, actual: []const f32) void {
+    if (expected.len == 0 or actual.len == 0) return;
+    const n = @min(expected.len, actual.len);
+    var max_abs: f32 = 0;
+    var max_idx: usize = 0;
+    var sum_sq: f64 = 0;
+    for (0..n) |i| {
+        const diff = actual[i] - expected[i];
+        const abs_diff = @abs(diff);
+        if (abs_diff > max_abs) {
+            max_abs = abs_diff;
+            max_idx = i;
+        }
+        sum_sq += @as(f64, diff) * @as(f64, diff);
+    }
+    const rms: f64 = @sqrt(sum_sq / @as(f64, @floatFromInt(n)));
+    log.info("SSM_REF L{d} {s}: max_diff={d:.6} idx={d} exp={d:.6} got={d:.6} rms_diff={d:.6}", .{
+        layer,
+        label,
+        max_abs,
+        max_idx,
+        expected[max_idx],
+        actual[max_idx],
+        rms,
+    });
+}
+
+fn insertTopLogit(top_ids: *[5]u32, top_vals: *[5]f32, token_id: u32, value: f32) void {
+    if (value <= top_vals[4]) return;
+    var pos: usize = 4;
+    while (pos > 0 and value > top_vals[pos - 1]) : (pos -= 1) {}
+    var i: usize = 4;
+    while (i > pos) : (i -= 1) {
+        top_vals[i] = top_vals[i - 1];
+        top_ids[i] = top_ids[i - 1];
+    }
+    top_vals[pos] = value;
+    top_ids[pos] = token_id;
+}
+
+fn debugCompareFinalLogits(engine: *InferenceEngine) !void {
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const hidden_dim = engine.config.hidden_dim;
+    const vocab_size = engine.config.vocab_size;
+    const norm_w: [*]const f32 = @ptrCast(@alignCast(engine.final_norm_gpu.cpu_ptr.?));
+    const hidden: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+    const gpu_logits: [*]const f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
+
+    const allocator = engine.allocator;
+    const normed = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(normed);
+    const row_buf = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(row_buf);
+
+    var sum_sq: f64 = 0;
+    for (0..hidden_dim) |i| {
+        const v = hidden[i];
+        sum_sq += @as(f64, v) * @as(f64, v);
+    }
+    const rms_inv: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + 1e-6));
+    for (0..hidden_dim) |i| {
+        normed[i] = norm_w[i] * hidden[i] * rms_inv;
+    }
+
+    const lm_off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + engine.lm_head.info.offset);
+    const lm_raw = mmap[lm_off..];
+
+    var cpu_top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };
+    var gpu_top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };
+    var cpu_top_vals = [_]f32{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+    var gpu_top_vals = [_]f32{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+
+    for (0..vocab_size) |row| {
+        dequantRow(lm_raw, @intCast(row), hidden_dim, engine.lm_head.info.type_, row_buf);
+        var dot: f64 = 0;
+        for (0..hidden_dim) |i| {
+            dot += @as(f64, row_buf[i]) * @as(f64, normed[i]);
+        }
+        const cpu_val: f32 = @floatCast(dot);
+        const gpu_val = gpu_logits[row];
+        insertTopLogit(&cpu_top_ids, &cpu_top_vals, @intCast(row), cpu_val);
+        insertTopLogit(&gpu_top_ids, &gpu_top_vals, @intCast(row), gpu_val);
+    }
+
+    log.info(
+        "LOGITS_REF pos={d}: cpu_top=[{d}:{d:.4},{d}:{d:.4},{d}:{d:.4},{d}:{d:.4},{d}:{d:.4}] gpu_top=[{d}:{d:.4},{d}:{d:.4},{d}:{d:.4},{d}:{d:.4},{d}:{d:.4}]",
+        .{
+            engine.position,
+            cpu_top_ids[0],
+            cpu_top_vals[0],
+            cpu_top_ids[1],
+            cpu_top_vals[1],
+            cpu_top_ids[2],
+            cpu_top_vals[2],
+            cpu_top_ids[3],
+            cpu_top_vals[3],
+            cpu_top_ids[4],
+            cpu_top_vals[4],
+            gpu_top_ids[0],
+            gpu_top_vals[0],
+            gpu_top_ids[1],
+            gpu_top_vals[1],
+            gpu_top_ids[2],
+            gpu_top_vals[2],
+            gpu_top_ids[3],
+            gpu_top_vals[3],
+            gpu_top_ids[4],
+            gpu_top_vals[4],
+        },
+    );
+}
+
+fn debugCompareSsmPreGatedNorm(
+    engine: *InferenceEngine,
+    layer: u32,
+    layer_idx: usize,
+    wqkv_t: *const metal_loader.LoadedTensor,
+    z_t: *const metal_loader.LoadedTensor,
+    alpha_t: *const metal_loader.LoadedTensor,
+    beta_t: *const metal_loader.LoadedTensor,
+    hidden_dim: u32,
+    conv_channels: u32,
+    d_inner: u32,
+    d_conv: u32,
+    d_state: u32,
+    n_group: u32,
+    dt_rank: u32,
+    head_v_dim: u32,
+) !void {
+    const allocator = engine.allocator;
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const tensor_data_off = engine.model.gguf_file.tensor_data_offset;
+
+    const norm_in: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+    const gpu_z: [*]const f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+    const gpu_alpha: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+    const gpu_beta: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+    const gpu_conv_out: [*]const f32 = @ptrCast(@alignCast(engine.swiglu_buf.cpu_ptr.?));
+    const gpu_delta_out: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
+
+    const qkv_ref = try allocator.alloc(f32, conv_channels);
+    defer allocator.free(qkv_ref);
+    const z_ref = try allocator.alloc(f32, d_inner);
+    defer allocator.free(z_ref);
+    const alpha_ref = try allocator.alloc(f32, dt_rank);
+    defer allocator.free(alpha_ref);
+    const beta_ref = try allocator.alloc(f32, dt_rank);
+    defer allocator.free(beta_ref);
+    const conv_state_ref = try allocator.alloc(f32, (d_conv - 1) * conv_channels);
+    defer allocator.free(conv_state_ref);
+    const conv_out_ref = try allocator.alloc(f32, conv_channels);
+    defer allocator.free(conv_out_ref);
+    const delta_state_ref = try allocator.alloc(f32, dt_rank * head_v_dim * head_v_dim);
+    defer allocator.free(delta_state_ref);
+    const delta_out_ref = try allocator.alloc(f32, d_inner);
+    defer allocator.free(delta_out_ref);
+
+    @memset(conv_state_ref, 0);
+    @memset(delta_state_ref, 0);
+    @memset(conv_out_ref, 0);
+    @memset(delta_out_ref, 0);
+
+    try cpuDmmvFallback(
+        mmap,
+        wqkv_t,
+        tensor_data_off,
+        norm_in,
+        qkv_ref.ptr,
+        conv_channels,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        z_t,
+        tensor_data_off,
+        norm_in,
+        z_ref.ptr,
+        d_inner,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        alpha_t,
+        tensor_data_off,
+        norm_in,
+        alpha_ref.ptr,
+        dt_rank,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        beta_t,
+        tensor_data_off,
+        norm_in,
+        beta_ref.ptr,
+        dt_rank,
+        hidden_dim,
+        0,
+        allocator,
+    );
+
+    const conv_kernel_ptr: [*]const f32 = @ptrCast(@alignCast(engine.ssm_conv_kernel_bufs.?[layer_idx].cpu_ptr.?));
+    const dt_bias_ptr: [*]const f32 = @ptrCast(@alignCast(engine.ssm_dt_bias_bufs.?[layer_idx].cpu_ptr.?));
+    const ssm_a_ptr: [*]const f32 = @ptrCast(@alignCast(engine.ssm_a_bufs.?[layer_idx].cpu_ptr.?));
+
+    refRunSsmConv1d(
+        qkv_ref,
+        conv_kernel_ptr[0 .. conv_channels * d_conv],
+        conv_state_ref,
+        conv_out_ref,
+        conv_channels,
+        d_conv,
+    );
+    refRunSsmDeltaNet(
+        conv_out_ref,
+        alpha_ref,
+        dt_bias_ptr[0..dt_rank],
+        beta_ref,
+        ssm_a_ptr[0..dt_rank],
+        delta_state_ref,
+        delta_out_ref,
+        dt_rank,
+        head_v_dim,
+        d_state,
+        n_group,
+    );
+
+    logDebugSliceDiff(layer, "z_gate", z_ref[0..d_inner], gpu_z[0..d_inner]);
+    logDebugSliceDiff(layer, "alpha", alpha_ref[0..dt_rank], gpu_alpha[0..dt_rank]);
+    logDebugSliceDiff(layer, "beta", beta_ref[0..dt_rank], gpu_beta[0..dt_rank]);
+    logDebugSliceDiff(layer, "conv_out", conv_out_ref[0..conv_channels], gpu_conv_out[0..conv_channels]);
+    logDebugSliceDiff(layer, "delta_out", delta_out_ref[0..d_inner], gpu_delta_out[0..d_inner]);
+}
+
+fn debugCompareSsmPostProjection(
+    engine: *InferenceEngine,
+    layer: u32,
+    layer_idx: usize,
+    wqkv_t: *const metal_loader.LoadedTensor,
+    z_t: *const metal_loader.LoadedTensor,
+    alpha_t: *const metal_loader.LoadedTensor,
+    beta_t: *const metal_loader.LoadedTensor,
+    ssm_out_t: *const metal_loader.LoadedTensor,
+    hidden_dim: u32,
+    conv_channels: u32,
+    d_inner: u32,
+    d_conv: u32,
+    d_state: u32,
+    n_group: u32,
+    dt_rank: u32,
+    head_v_dim: u32,
+) !void {
+    const allocator = engine.allocator;
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const tensor_data_off = engine.model.gguf_file.tensor_data_offset;
+
+    const norm_in: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+    const gpu_gated: [*]const f32 = @ptrCast(@alignCast(engine.swiglu_buf.cpu_ptr.?));
+    const gpu_proj: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+
+    const qkv_ref = try allocator.alloc(f32, conv_channels);
+    defer allocator.free(qkv_ref);
+    const z_ref = try allocator.alloc(f32, d_inner);
+    defer allocator.free(z_ref);
+    const alpha_ref = try allocator.alloc(f32, dt_rank);
+    defer allocator.free(alpha_ref);
+    const beta_ref = try allocator.alloc(f32, dt_rank);
+    defer allocator.free(beta_ref);
+    const conv_state_ref = try allocator.alloc(f32, (d_conv - 1) * conv_channels);
+    defer allocator.free(conv_state_ref);
+    const conv_out_ref = try allocator.alloc(f32, conv_channels);
+    defer allocator.free(conv_out_ref);
+    const delta_state_ref = try allocator.alloc(f32, dt_rank * head_v_dim * head_v_dim);
+    defer allocator.free(delta_state_ref);
+    const delta_out_ref = try allocator.alloc(f32, d_inner);
+    defer allocator.free(delta_out_ref);
+    const gated_ref = try allocator.alloc(f32, d_inner);
+    defer allocator.free(gated_ref);
+    const proj_ref = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(proj_ref);
+
+    @memset(conv_state_ref, 0);
+    @memset(delta_state_ref, 0);
+    @memset(conv_out_ref, 0);
+    @memset(delta_out_ref, 0);
+    @memset(gated_ref, 0);
+
+    try cpuDmmvFallback(
+        mmap,
+        wqkv_t,
+        tensor_data_off,
+        norm_in,
+        qkv_ref.ptr,
+        conv_channels,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        z_t,
+        tensor_data_off,
+        norm_in,
+        z_ref.ptr,
+        d_inner,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        alpha_t,
+        tensor_data_off,
+        norm_in,
+        alpha_ref.ptr,
+        dt_rank,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        beta_t,
+        tensor_data_off,
+        norm_in,
+        beta_ref.ptr,
+        dt_rank,
+        hidden_dim,
+        0,
+        allocator,
+    );
+
+    const conv_kernel_ptr: [*]const f32 = @ptrCast(@alignCast(engine.ssm_conv_kernel_bufs.?[layer_idx].cpu_ptr.?));
+    const dt_bias_ptr: [*]const f32 = @ptrCast(@alignCast(engine.ssm_dt_bias_bufs.?[layer_idx].cpu_ptr.?));
+    const ssm_a_ptr: [*]const f32 = @ptrCast(@alignCast(engine.ssm_a_bufs.?[layer_idx].cpu_ptr.?));
+    const norm_weight_ptr: [*]const f32 = @ptrCast(@alignCast(engine.ssm_norm_weight_bufs.?[layer_idx].cpu_ptr.?));
+    const norm_len: u32 = if (engine.ssm_norm_per_head.?[layer_idx]) d_inner else d_state;
+
+    refRunSsmConv1d(
+        qkv_ref,
+        conv_kernel_ptr[0 .. conv_channels * d_conv],
+        conv_state_ref,
+        conv_out_ref,
+        conv_channels,
+        d_conv,
+    );
+    refRunSsmDeltaNet(
+        conv_out_ref,
+        alpha_ref,
+        dt_bias_ptr[0..dt_rank],
+        beta_ref,
+        ssm_a_ptr[0..dt_rank],
+        delta_state_ref,
+        delta_out_ref,
+        dt_rank,
+        head_v_dim,
+        d_state,
+        n_group,
+    );
+    refRunSsmGatedNorm(
+        delta_out_ref,
+        z_ref,
+        norm_weight_ptr[0..norm_len],
+        gated_ref,
+        dt_rank,
+        head_v_dim,
+        d_state,
+        engine.ssm_norm_per_head.?[layer_idx],
+    );
+    try cpuDmmvFallback(
+        mmap,
+        ssm_out_t,
+        tensor_data_off,
+        gated_ref.ptr,
+        proj_ref.ptr,
+        hidden_dim,
+        d_inner,
+        0,
+        allocator,
+    );
+
+    logDebugSliceDiff(layer, "gated_norm", gated_ref[0..d_inner], gpu_gated[0..d_inner]);
+    logDebugSliceDiff(layer, "ssm_out_proj", proj_ref[0..hidden_dim], gpu_proj[0..hidden_dim]);
+}
+
+fn debugCompareMoeLayer(
+    engine: *InferenceEngine,
+    layer: u32,
+    lt: LayerTensors,
+    expert_ids: []const u32,
+    expert_weights: []const f32,
+    shexp_gate_weight: f32,
+    hidden_before: []const f32,
+    hidden_dim: u32,
+    inter_dim: u32,
+    shexp_inter_dim: u32,
+) !void {
+    const allocator = engine.allocator;
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const tensor_data_off = engine.model.gguf_file.tensor_data_offset;
+
+    const norm_in: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+    const hidden_after: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+
+    const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
+    const up_exps = lt.ffn_up_exps orelse return error.MissingTensor;
+    const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
+    const expert_gate_bytes = expertSliceBytes(gate_exps.info.type_, inter_dim, hidden_dim);
+    const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
+
+    const gate_buf = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(gate_buf);
+    const up_buf = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(up_buf);
+    const swiglu_buf = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(swiglu_buf);
+    const down_buf = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(down_buf);
+    const expected_delta = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(expected_delta);
+    @memset(expected_delta, 0);
+
+    for (expert_ids, expert_weights) |eid, weight| {
+        const gate_offset = eid * expert_gate_bytes;
+        const up_offset = eid * expert_gate_bytes;
+        const down_offset = eid * expert_down_bytes;
+
+        try cpuDmmvFallback(
+            mmap,
+            gate_exps,
+            tensor_data_off,
+            norm_in,
+            gate_buf.ptr,
+            inter_dim,
+            hidden_dim,
+            gate_offset,
+            allocator,
+        );
+        try cpuDmmvFallback(
+            mmap,
+            up_exps,
+            tensor_data_off,
+            norm_in,
+            up_buf.ptr,
+            inter_dim,
+            hidden_dim,
+            up_offset,
+            allocator,
+        );
+        for (0..inter_dim) |i| {
+            const g = gate_buf[i];
+            swiglu_buf[i] = (g / (1.0 + @exp(-g))) * up_buf[i];
+        }
+        try cpuDmmvFallback(
+            mmap,
+            down_exps,
+            tensor_data_off,
+            swiglu_buf.ptr,
+            down_buf.ptr,
+            hidden_dim,
+            inter_dim,
+            down_offset,
+            allocator,
+        );
+        for (0..hidden_dim) |i| {
+            expected_delta[i] += weight * down_buf[i];
+        }
+    }
+
+    if (lt.ffn_gate_shexp != null and lt.ffn_up_shexp != null and lt.ffn_down_shexp != null) {
+        const gate_sh = try allocator.alloc(f32, shexp_inter_dim);
+        defer allocator.free(gate_sh);
+        const up_sh = try allocator.alloc(f32, shexp_inter_dim);
+        defer allocator.free(up_sh);
+        const sw_sh = try allocator.alloc(f32, shexp_inter_dim);
+        defer allocator.free(sw_sh);
+        const down_sh = try allocator.alloc(f32, hidden_dim);
+        defer allocator.free(down_sh);
+
+        try cpuDmmvFallback(
+            mmap,
+            lt.ffn_gate_shexp.?,
+            tensor_data_off,
+            norm_in,
+            gate_sh.ptr,
+            shexp_inter_dim,
+            hidden_dim,
+            0,
+            allocator,
+        );
+        try cpuDmmvFallback(
+            mmap,
+            lt.ffn_up_shexp.?,
+            tensor_data_off,
+            norm_in,
+            up_sh.ptr,
+            shexp_inter_dim,
+            hidden_dim,
+            0,
+            allocator,
+        );
+        for (0..shexp_inter_dim) |i| {
+            const g = gate_sh[i];
+            sw_sh[i] = (g / (1.0 + @exp(-g))) * up_sh[i];
+        }
+        try cpuDmmvFallback(
+            mmap,
+            lt.ffn_down_shexp.?,
+            tensor_data_off,
+            sw_sh.ptr,
+            down_sh.ptr,
+            hidden_dim,
+            shexp_inter_dim,
+            0,
+            allocator,
+        );
+        for (0..hidden_dim) |i| {
+            expected_delta[i] += shexp_gate_weight * down_sh[i];
+        }
+    }
+
+    const actual_delta = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(actual_delta);
+    for (0..hidden_dim) |i| {
+        actual_delta[i] = hidden_after[i] - hidden_before[i];
+    }
+
+    logDebugSliceDiff(layer, "moe_delta", expected_delta[0..hidden_dim], actual_delta[0..hidden_dim]);
+}
+
+fn refDeinterleaveQGate(input: []const f32, q: []f32, gate: []f32, head_dim: usize, n_heads: usize) void {
+    for (0..n_heads) |h| {
+        const src = input[h * head_dim * 2 ..][0 .. head_dim * 2];
+        @memcpy(q[h * head_dim ..][0..head_dim], src[0..head_dim]);
+        @memcpy(gate[h * head_dim ..][0..head_dim], src[head_dim .. head_dim * 2]);
+    }
+}
+
+fn refFlashAttnContiguous(
+    q: []const f32,
+    k_cache: []const f32,
+    v_cache: []const f32,
+    out: []f32,
+    head_dim: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    seq_len: usize,
+) void {
+    const q_per_kv = @max(n_heads / @max(n_kv_heads, 1), 1);
+    const token_stride = n_kv_heads * head_dim;
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+
+    for (0..n_heads) |head| {
+        const kv_head = head / q_per_kv;
+        const q_head = q[head * head_dim ..][0..head_dim];
+        const out_head = out[head * head_dim ..][0..head_dim];
+        @memset(out_head, 0);
+
+        var max_score: f32 = -std.math.inf(f32);
+        for (0..seq_len) |tok| {
+            const kv_base = tok * token_stride + kv_head * head_dim;
+            const k_head = k_cache[kv_base..][0..head_dim];
+            var score: f32 = 0;
+            for (0..head_dim) |i| score += q_head[i] * k_head[i];
+            score *= scale;
+            if (score > max_score) max_score = score;
+        }
+
+        var denom: f32 = 0;
+        for (0..seq_len) |tok| {
+            const kv_base = tok * token_stride + kv_head * head_dim;
+            const k_head = k_cache[kv_base..][0..head_dim];
+            const v_head = v_cache[kv_base..][0..head_dim];
+            var score: f32 = 0;
+            for (0..head_dim) |i| score += q_head[i] * k_head[i];
+            const weight = @exp(score * scale - max_score);
+            denom += weight;
+            for (0..head_dim) |i| out_head[i] += weight * v_head[i];
+        }
+
+        if (denom > 0) {
+            const inv = 1.0 / denom;
+            for (0..head_dim) |i| out_head[i] *= inv;
+        }
+    }
+}
+
+fn debugCompareAttentionLayer(
+    engine: *InferenceEngine,
+    layer: u32,
+    layer_idx: usize,
+    lt: LayerTensors,
+    hidden_dim: u32,
+    q_dim: u32,
+    kv_dim: u32,
+) !void {
+    const allocator = engine.allocator;
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const tensor_data_off = engine.model.gguf_file.tensor_data_offset;
+    const cfg = engine.config;
+    const head_dim: usize = @intCast(cfg.head_dim);
+    const n_heads: usize = @intCast(cfg.n_heads);
+    const n_kv_heads: usize = @intCast(cfg.n_kv_heads);
+    const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+    const seq_len: usize = @intCast(engine.position + 1);
+
+    const q_tensor = lt.attn_q orelse return error.MissingTensor;
+    const k_tensor = lt.attn_k orelse return error.MissingTensor;
+    const v_tensor = lt.attn_v orelse return error.MissingTensor;
+    const o_tensor = lt.attn_output orelse return error.MissingTensor;
+
+    const norm_in: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+    const q_actual: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+    const k_actual: [*]const f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
+    const v_actual: [*]const f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
+    const gate_actual: [*]const f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+    const attn_actual: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
+    const oproj_actual: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+    const k_cache_actual: [*]const f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
+    const v_cache_actual: [*]const f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
+
+    const q_full_dim: u32 = q_dim * 2;
+    const q_full_ref = try allocator.alloc(f32, q_full_dim);
+    defer allocator.free(q_full_ref);
+    const q_ref = try allocator.alloc(f32, q_dim);
+    defer allocator.free(q_ref);
+    const k_ref = try allocator.alloc(f32, kv_dim);
+    defer allocator.free(k_ref);
+    const v_ref = try allocator.alloc(f32, kv_dim);
+    defer allocator.free(v_ref);
+    const gate_ref = try allocator.alloc(f32, q_dim);
+    defer allocator.free(gate_ref);
+    const flash_ref = try allocator.alloc(f32, q_dim);
+    defer allocator.free(flash_ref);
+    const gated_ref = try allocator.alloc(f32, q_dim);
+    defer allocator.free(gated_ref);
+    const oproj_ref = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(oproj_ref);
+
+    try cpuDmmvFallback(
+        mmap,
+        q_tensor,
+        tensor_data_off,
+        norm_in,
+        q_full_ref.ptr,
+        q_full_dim,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        k_tensor,
+        tensor_data_off,
+        norm_in,
+        k_ref.ptr,
+        kv_dim,
+        hidden_dim,
+        0,
+        allocator,
+    );
+    try cpuDmmvFallback(
+        mmap,
+        v_tensor,
+        tensor_data_off,
+        norm_in,
+        v_ref.ptr,
+        kv_dim,
+        hidden_dim,
+        0,
+        allocator,
+    );
+
+    refDeinterleaveQGate(q_full_ref, q_ref, gate_ref, head_dim, n_heads);
+    if (engine.attn_q_norm_present[layer_idx]) {
+        const qn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[layer_idx].cpu_ptr.?));
+        cpuRmsNormMul(q_ref.ptr, qn_w[0..head_dim], q_ref.ptr, cfg.head_dim, cfg.n_heads, 1e-6);
+    }
+    if (engine.attn_k_norm_present[layer_idx]) {
+        const kn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[layer_idx].cpu_ptr.?));
+        cpuRmsNormMul(k_ref.ptr, kn_w[0..head_dim], k_ref.ptr, cfg.head_dim, cfg.n_kv_heads, 1e-6);
+    }
+    cpuRope(q_ref.ptr, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
+    cpuRope(k_ref.ptr, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
+
+    const kv_offset: usize = @intCast(engine.position * kv_dim);
+    logDebugSliceDiff(layer, "attn_q", q_ref[0..q_dim], q_actual[0..q_dim]);
+    logDebugSliceDiff(layer, "attn_k", k_ref[0..kv_dim], k_actual[0..kv_dim]);
+    logDebugSliceDiff(layer, "attn_v", v_ref[0..kv_dim], v_actual[0..kv_dim]);
+    logDebugSliceDiff(layer, "attn_gate", gate_ref[0..q_dim], gate_actual[0..q_dim]);
+    logDebugSliceDiff(layer, "kv_write_k", k_ref[0..kv_dim], k_cache_actual[kv_offset .. kv_offset + kv_dim]);
+    logDebugSliceDiff(layer, "kv_write_v", v_ref[0..kv_dim], v_cache_actual[kv_offset .. kv_offset + kv_dim]);
+
+    refFlashAttnContiguous(
+        q_actual[0..q_dim],
+        k_cache_actual[0 .. seq_len * @as(usize, kv_dim)],
+        v_cache_actual[0 .. seq_len * @as(usize, kv_dim)],
+        flash_ref,
+        head_dim,
+        n_heads,
+        n_kv_heads,
+        seq_len,
+    );
+    for (0..@as(usize, q_dim)) |i| {
+        const g = gate_actual[i];
+        gated_ref[i] = flash_ref[i] * (1.0 / (1.0 + @exp(-g)));
+    }
+    try cpuDmmvFallback(
+        mmap,
+        o_tensor,
+        tensor_data_off,
+        gated_ref.ptr,
+        oproj_ref.ptr,
+        hidden_dim,
+        q_dim,
+        0,
+        allocator,
+    );
+
+    logDebugSliceDiff(layer, "flash_gated", gated_ref[0..q_dim], attn_actual[0..q_dim]);
+    logDebugSliceDiff(layer, "attn_o_proj", oproj_ref[0..hidden_dim], oproj_actual[0..hidden_dim]);
+}
+
+fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, is_full_attn: bool, stage: []const u8) void {
+    const hidden_dim = engine.config.hidden_dim;
+    if (hidden_dim == 0) return;
+
+    const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+    const hidden = hidden_ptr[0..hidden_dim];
+
+    var sum_sq: f64 = 0;
+    var max_abs: f32 = 0;
+    for (hidden) |v| {
+        sum_sq += @as(f64, v) * @as(f64, v);
+        const av = @abs(v);
+        if (av > max_abs) max_abs = av;
+    }
+    const rms: f32 = @floatCast(@sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim))));
+
+    var logit5: f32 = 0;
+    if (hidden_dim <= 8192 and engine.model.mmap_data != null) {
+        const norm_w: [*]const f32 = @ptrCast(@alignCast(engine.final_norm_gpu.cpu_ptr.?));
+        const rms_inv: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + 1e-6));
+        const mmap = engine.model.mmap_data.?;
+        const lm_off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + engine.lm_head.info.offset);
+        var lm_row: [8192]f32 = undefined;
+        dequantRow(mmap[lm_off..], 5, hidden_dim, engine.lm_head.info.type_, lm_row[0..hidden_dim]);
+        var dot: f64 = 0;
+        for (0..hidden_dim) |i| {
+            const normed = @as(f64, norm_w[i]) * @as(f64, hidden[i]) * @as(f64, rms_inv);
+            dot += normed * @as(f64, lm_row[i]);
+        }
+        logit5 = @floatCast(dot);
+    }
+
+    if (layer == 0) {
+        log.info("L0 quant: qkv={s} attn_gate={s} ssm_out={s} gate_exps={s} down_exps={s}", .{
+            if (lt.attn_qkv) |t| @tagName(t.info.type_) else "-",
+            if (lt.attn_gate) |t| @tagName(t.info.type_) else "-",
+            if (lt.ssm_out) |t| @tagName(t.info.type_) else "-",
+            if (lt.ffn_gate_exps) |t| @tagName(t.info.type_) else "-",
+            if (lt.ffn_down_exps) |t| @tagName(t.info.type_) else "-",
+        });
+    }
+
+    if (std.mem.eql(u8, stage, "pre_ffn")) {
+        const core_dim: usize = if (is_full_attn) @intCast(engine.config.n_heads * engine.config.head_dim) else @intCast(engine.config.ssm_d_inner);
+        const core_ptr: [*]const f32 = @ptrCast(@alignCast(if (is_full_attn) engine.attn_out_buf.cpu_ptr.? else engine.swiglu_buf.cpu_ptr.?));
+        const proj_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+        const core = core_ptr[0..core_dim];
+        const proj = proj_ptr[0..hidden_dim];
+
+        var core_sq: f64 = 0;
+        var core_max: f32 = 0;
+        for (core) |v| {
+            core_sq += @as(f64, v) * @as(f64, v);
+            const av = @abs(v);
+            if (av > core_max) core_max = av;
+        }
+        var proj_sq: f64 = 0;
+        var proj_max: f32 = 0;
+        for (proj) |v| {
+            proj_sq += @as(f64, v) * @as(f64, v);
+            const av = @abs(v);
+            if (av > proj_max) proj_max = av;
+        }
+
+        log.info("L{d} {s} {s}: rms={d:.4} max={d:.4} h0={d:.6} logit5={d:.4} core={d:.4}/{d:.4} proj={d:.4}/{d:.4}", .{
+            layer,
+            if (is_full_attn) "A" else "S",
+            stage,
+            rms,
+            max_abs,
+            hidden[0],
+            logit5,
+            @as(f32, @floatCast(@sqrt(core_sq / @as(f64, @floatFromInt(core_dim))))),
+            core_max,
+            @as(f32, @floatCast(@sqrt(proj_sq / @as(f64, @floatFromInt(hidden_dim))))),
+            proj_max,
+        });
+        return;
+    }
+
+    log.info("L{d} {s} {s}: rms={d:.4} max={d:.4} h0={d:.6} logit5={d:.4}", .{
+        layer,
+        if (is_full_attn) "A" else "S",
+        stage,
+        rms,
+        max_abs,
+        hidden[0],
+        logit5,
+    });
 }
 
 // ---------------------------------------------------------------------------
 // Generate
 // ---------------------------------------------------------------------------
 
-pub fn generate(
+pub fn generateWithMetrics(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
     max_tokens: u32,
     eos_id: u32,
     allocator: std.mem.Allocator,
-) ![]u32 {
+) !GenerateResult {
     var output: std.ArrayList(u32) = .{};
     errdefer output.deinit(allocator);
 
@@ -2082,27 +3093,38 @@ pub fn generate(
     }
     const prefill_end = std.time.nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
-    if (prompt_tokens.len > 0) {
-        const prefill_tps = @as(f64, @floatFromInt(prompt_tokens.len)) * 1_000_000_000.0 / @as(f64, @floatFromInt(prefill_ns));
-        log.info("Prefill: {d} tokens in {d:.1} ms ({d:.1} tok/s)", .{
-            prompt_tokens.len, @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0, prefill_tps,
-        });
-    }
+    const prefill_tps = if (prompt_tokens.len > 0 and prefill_ns > 0)
+        @as(f64, @floatFromInt(prompt_tokens.len)) * 1_000_000_000.0 / @as(f64, @floatFromInt(prefill_ns))
+    else
+        0.0;
 
     // Sample first output token from prefill logits
+    var eos_at_first_position = false;
     if (prompt_tokens.len > 0 and max_tokens > 0) {
         const first_token = engine.sampleGreedy();
         if (first_token == eos_id) {
-            log.info("Generated 0 tokens (EOS at first position)", .{});
-            return try output.toOwnedSlice(allocator);
+            eos_at_first_position = true;
+            return .{
+                .output_tokens = try output.toOwnedSlice(allocator),
+                .metrics = .{
+                    .prefill_tokens = prompt_tokens.len,
+                    .prefill_ns = prefill_ns,
+                    .prefill_tps = prefill_tps,
+                    .generated_tokens = 0,
+                    .decode_ns = 0,
+                    .decode_tps = 0.0,
+                    .ms_per_token = 0.0,
+                    .eos_at_first_position = true,
+                },
+            };
         }
         try output.append(allocator, first_token);
     }
 
     // Decode loop
     const decode_start = std.time.nanoTimestamp();
-    var tokens_generated: u32 = 1;
-    while (tokens_generated < max_tokens) {
+    var tokens_generated: u32 = @intCast(output.items.len);
+    while (tokens_generated < max_tokens and output.items.len > 0) {
         const input_token = output.items[output.items.len - 1];
         try engine.loadTokenEmbedding(input_token);
         try runDecodeStep(engine);
@@ -2115,14 +3137,166 @@ pub fn generate(
     }
     const decode_end = std.time.nanoTimestamp();
     const decode_ns: u64 = @intCast(decode_end - decode_start);
-    if (tokens_generated > 0) {
-        const decode_tps = @as(f64, @floatFromInt(tokens_generated)) * 1_000_000_000.0 / @as(f64, @floatFromInt(decode_ns));
-        const ms_per_tok = @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0 / @as(f64, @floatFromInt(tokens_generated));
-        log.info("Generated {d} tokens in {d:.1} ms — {d:.2} tok/s ({d:.1} ms/tok)", .{
-            tokens_generated, @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0, decode_tps, ms_per_tok,
+    const decode_tps = if (tokens_generated > 0 and decode_ns > 0)
+        @as(f64, @floatFromInt(tokens_generated)) * 1_000_000_000.0 / @as(f64, @floatFromInt(decode_ns))
+    else
+        0.0;
+    const ms_per_tok = if (tokens_generated > 0)
+        @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0 / @as(f64, @floatFromInt(tokens_generated))
+    else
+        0.0;
+
+    return .{
+        .output_tokens = try output.toOwnedSlice(allocator),
+        .metrics = .{
+            .prefill_tokens = prompt_tokens.len,
+            .prefill_ns = prefill_ns,
+            .prefill_tps = prefill_tps,
+            .generated_tokens = tokens_generated,
+            .decode_ns = decode_ns,
+            .decode_tps = decode_tps,
+            .ms_per_token = ms_per_tok,
+            .eos_at_first_position = eos_at_first_position,
+        },
+    };
+}
+
+pub fn generate(
+    engine: *InferenceEngine,
+    prompt_tokens: []const u32,
+    max_tokens: u32,
+    eos_id: u32,
+    allocator: std.mem.Allocator,
+) ![]u32 {
+    const result = try generateWithMetrics(engine, prompt_tokens, max_tokens, eos_id, allocator);
+    if (result.metrics.prefill_tokens > 0) {
+        log.info("Prefill: {d} tokens in {d:.1} ms ({d:.1} tok/s)", .{
+            result.metrics.prefill_tokens,
+            @as(f64, @floatFromInt(result.metrics.prefill_ns)) / 1_000_000.0,
+            result.metrics.prefill_tps,
         });
     }
-    return try output.toOwnedSlice(allocator);
+    if (result.metrics.eos_at_first_position) {
+        log.info("Generated 0 tokens (EOS at first position)", .{});
+    } else if (result.metrics.generated_tokens > 0) {
+        log.info("Generated {d} tokens in {d:.1} ms — {d:.2} tok/s ({d:.1} ms/tok)", .{
+            result.metrics.generated_tokens,
+            @as(f64, @floatFromInt(result.metrics.decode_ns)) / 1_000_000.0,
+            result.metrics.decode_tps,
+            result.metrics.ms_per_token,
+        });
+    }
+    return result.output_tokens;
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+fn refL2Normalize(v: []f32) void {
+    var sum_sq: f32 = 0;
+    for (v) |x| sum_sq += x * x;
+    const denom = @sqrt(sum_sq) + 1e-12;
+    for (v) |*x| x.* /= denom;
+}
+
+fn refRunSsmDeltaNet(
+    conv_out: []const f32,
+    alpha: []const f32,
+    dt_bias: []const f32,
+    beta: []const f32,
+    ssm_a: []const f32,
+    state: []f32,
+    output: []f32,
+    dt_rank: usize,
+    head_v_dim: usize,
+    d_state: usize,
+    n_group: usize,
+) void {
+    const qk_dim = d_state * n_group;
+    const k_len = @min(head_v_dim, d_state);
+
+    var q_buf: [128]f32 = [_]f32{0} ** 128;
+    var k_buf: [128]f32 = [_]f32{0} ** 128;
+
+    for (0..dt_rank) |h| {
+        @memset(q_buf[0..head_v_dim], 0);
+        @memset(k_buf[0..head_v_dim], 0);
+
+        const k_hi = if (n_group == dt_rank) h else h % n_group;
+        const q_offset = k_hi * d_state;
+        const k_offset = qk_dim + k_hi * d_state;
+        const v_offset = 2 * qk_dim + h * head_v_dim;
+
+        @memcpy(q_buf[0..k_len], conv_out[q_offset .. q_offset + k_len]);
+        @memcpy(k_buf[0..k_len], conv_out[k_offset .. k_offset + k_len]);
+        refL2Normalize(q_buf[0..k_len]);
+        refL2Normalize(k_buf[0..k_len]);
+        const q_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_state)));
+        for (0..k_len) |i| q_buf[i] *= q_scale;
+        const gate = @exp(@log(1.0 + @exp(alpha[h] + dt_bias[h])) * ssm_a[h]);
+        const beta_val = 1.0 / (1.0 + @exp(-beta[h]));
+        const s_base = h * head_v_dim * head_v_dim;
+        const v_head = conv_out[v_offset .. v_offset + head_v_dim];
+
+        for (0..head_v_dim * head_v_dim) |i| state[s_base + i] *= gate;
+
+        for (0..head_v_dim) |row| {
+            const row_base = s_base + row * head_v_dim;
+            var sk: f32 = 0;
+            for (0..k_len) |col| sk += state[row_base + col] * k_buf[col];
+            const d_val = beta_val * (v_head[row] - sk);
+            for (0..k_len) |col| state[row_base + col] += k_buf[col] * d_val;
+
+            var o_val: f32 = 0;
+            for (0..k_len) |col| o_val += state[row_base + col] * q_buf[col];
+            output[h * head_v_dim + row] = o_val;
+        }
+    }
+}
+
+fn refRunSsmConv1d(current_input: []const f32, kernel: []const f32, state: []f32, output: []f32, conv_channels: usize, d_conv: usize) void {
+    const d_conv_1 = d_conv - 1;
+    for (0..conv_channels) |ch| {
+        var sum: f32 = 0;
+        for (0..d_conv) |ki| {
+            const kw = kernel[ch * d_conv + ki];
+            const sv = if (ki < d_conv_1) state[ki * conv_channels + ch] else current_input[ch];
+            sum += kw * sv;
+        }
+        output[ch] = sum / (1.0 + @exp(-sum));
+    }
+    if (d_conv_1 > 1) {
+        const shift = (d_conv_1 - 1) * conv_channels;
+        std.mem.copyForwards(f32, state[0..shift], state[conv_channels .. shift + conv_channels]);
+    }
+    @memcpy(state[(d_conv_1 - 1) * conv_channels ..][0..conv_channels], current_input);
+}
+
+fn refRunSsmGatedNorm(
+    delta_net_output: []const f32,
+    z_gate: []const f32,
+    norm_weight: []const f32,
+    output: []f32,
+    dt_rank: usize,
+    head_v_dim: usize,
+    d_state: usize,
+    norm_per_head: bool,
+) void {
+    for (0..dt_rank) |h| {
+        const base = h * head_v_dim;
+        const delta_head = delta_net_output[base .. base + head_v_dim];
+        const gate_head = z_gate[base .. base + head_v_dim];
+        var sum_sq: f32 = 0;
+        for (delta_head) |v| sum_sq += v * v;
+        const rms_inv = 1.0 / @sqrt(sum_sq / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
+        for (0..head_v_dim) |i| {
+            const norm_idx = if (norm_per_head) base + i else i % d_state;
+            const nv = delta_head[i] * rms_inv * norm_weight[norm_idx];
+            const z = gate_head[i];
+            output[base + i] = nv * (z / (1.0 + @exp(-z)));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2139,6 +3313,553 @@ test "topKSoftmax selects correct top-k with renormalization" {
     try std.testing.expectEqual(@as(u32, 7), ids[2]);
     const wsum = weights[0] + weights[1] + weights[2];
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), wsum, 0.01);
+}
+
+test "ssm_delta_net shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_delta_net");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const dt_rank: u32 = 2;
+    const head_v_dim: u32 = 4;
+    const d_state: u32 = 2;
+    const n_group: u32 = 1;
+    const d_inner: u32 = dt_rank * head_v_dim;
+    const qk_dim: u32 = d_state * n_group;
+    const conv_len: u32 = 2 * qk_dim + d_inner;
+    const state_len: u32 = dt_rank * head_v_dim * head_v_dim;
+
+    var conv_buf = try metal_buffer.createBuffer(ctx, conv_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&conv_buf);
+    var alpha_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&alpha_buf);
+    var dt_bias_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dt_bias_buf);
+    var ssm_a_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&ssm_a_buf);
+    var beta_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&beta_buf);
+    var state_buf = try metal_buffer.createBuffer(ctx, state_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&state_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const conv_ptr: [*]f32 = @ptrCast(@alignCast(conv_buf.cpu_ptr.?));
+    const alpha_ptr: [*]f32 = @ptrCast(@alignCast(alpha_buf.cpu_ptr.?));
+    const dt_bias_ptr: [*]f32 = @ptrCast(@alignCast(dt_bias_buf.cpu_ptr.?));
+    const ssm_a_ptr: [*]f32 = @ptrCast(@alignCast(ssm_a_buf.cpu_ptr.?));
+    const beta_ptr: [*]f32 = @ptrCast(@alignCast(beta_buf.cpu_ptr.?));
+    const state_ptr: [*]f32 = @ptrCast(@alignCast(state_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    const conv_init = [_]f32{ 3.0, 4.0, 4.0, 0.0, 1.0, 2.0, 3.0, 4.0, 0.5, -1.0, 2.0, -2.0 };
+    @memcpy(conv_ptr[0..conv_len], conv_init[0..conv_len]);
+    alpha_ptr[0] = 0.1;
+    alpha_ptr[1] = -0.2;
+    dt_bias_ptr[0] = 0.3;
+    dt_bias_ptr[1] = -0.1;
+    ssm_a_ptr[0] = 0.5;
+    ssm_a_ptr[1] = -0.75;
+    beta_ptr[0] = 0.25;
+    beta_ptr[1] = -0.5;
+    for (0..state_len) |i| {
+        state_ptr[i] = @as(f32, @floatFromInt(@as(i32, @intCast(i % 7)) - 3)) * 0.1;
+    }
+    @memset(output_ptr[0..d_inner], 0);
+
+    var ref_state: [32]f32 = undefined;
+    var ref_output: [8]f32 = [_]f32{0} ** 8;
+    @memcpy(ref_state[0..state_len], state_ptr[0..state_len]);
+    refRunSsmDeltaNet(
+        conv_ptr[0..conv_len],
+        alpha_ptr[0..dt_rank],
+        dt_bias_ptr[0..dt_rank],
+        beta_ptr[0..dt_rank],
+        ssm_a_ptr[0..dt_rank],
+        ref_state[0..state_len],
+        ref_output[0..d_inner],
+        dt_rank,
+        head_v_dim,
+        d_state,
+        n_group,
+    );
+
+    const push = SsmDeltaNetPush{
+        .d_inner = d_inner,
+        .dt_rank = dt_rank,
+        .head_v_dim = head_v_dim,
+        .d_state = d_state,
+        .n_group = n_group,
+        .ssm_a_is_f16 = 0,
+        .dt_bias_is_f16 = 0,
+        .has_dt_bias = 1,
+        .has_ssm_a = 1,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &conv_buf,
+        &alpha_buf,
+        &dt_bias_buf,
+        &ssm_a_buf,
+        &beta_buf,
+        &state_buf,
+        &output_buf,
+    };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
+    cmd.commitAndWait();
+
+    for (0..d_inner) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.0005);
+    }
+    for (0..state_len) |i| {
+        try std.testing.expectApproxEqAbs(ref_state[i], state_ptr[i], 0.0005);
+    }
+}
+
+test "ssm_conv1d shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_conv1d");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const conv_channels: usize = 5;
+    const d_conv: usize = 4;
+    const state_len: usize = (d_conv - 1) * conv_channels;
+    const kernel_len: usize = conv_channels * d_conv;
+
+    var kernel_buf = try metal_buffer.createBuffer(ctx, kernel_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&kernel_buf);
+    var state_buf = try metal_buffer.createBuffer(ctx, state_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&state_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, conv_channels * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, conv_channels * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const kernel_ptr: [*]f32 = @ptrCast(@alignCast(kernel_buf.cpu_ptr.?));
+    const state_ptr: [*]f32 = @ptrCast(@alignCast(state_buf.cpu_ptr.?));
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    const kernel_init = [_]f32{
+        0.25,  -0.50, 0.75,  1.00,
+        -1.25, 0.50,  -0.25, 0.80,
+        0.10,  0.20,  0.30,  0.40,
+        -0.60, 0.90,  -1.10, 0.70,
+        1.20,  -0.70, 0.50,  -0.30,
+    };
+    const state_init = [_]f32{
+        -0.40, 0.25,  1.10, -0.75, 0.60,
+        0.50,  -0.20, 0.35, 0.90,  -1.25,
+        1.40,  -0.80, 0.15, -0.45, 0.95,
+    };
+    const input_init = [_]f32{ 0.80, -1.50, 0.45, 1.25, -0.65 };
+
+    @memcpy(kernel_ptr[0..kernel_len], kernel_init[0..kernel_len]);
+    @memcpy(state_ptr[0..state_len], state_init[0..state_len]);
+    @memcpy(input_ptr[0..conv_channels], input_init[0..conv_channels]);
+    @memset(output_ptr[0..conv_channels], 0);
+
+    var ref_state: [state_len]f32 = undefined;
+    var ref_output: [conv_channels]f32 = [_]f32{0} ** conv_channels;
+    @memcpy(ref_state[0..state_len], state_ptr[0..state_len]);
+    refRunSsmConv1d(
+        input_ptr[0..conv_channels],
+        kernel_ptr[0..kernel_len],
+        ref_state[0..state_len],
+        ref_output[0..conv_channels],
+        conv_channels,
+        d_conv,
+    );
+
+    var cmd = try metal_command.beginCommand(ctx);
+    dispatchSsmConv1dWithPipe(
+        &cmd,
+        &pipe,
+        &kernel_buf,
+        &state_buf,
+        &input_buf,
+        &output_buf,
+        @intCast(conv_channels),
+        @intCast(d_conv),
+        false,
+    );
+    cmd.commitAndWait();
+
+    for (0..conv_channels) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.0005);
+    }
+    for (0..state_len) |i| {
+        try std.testing.expectApproxEqAbs(ref_state[i], state_ptr[i], 0.0005);
+    }
+}
+
+test "ssm_gated_norm shader matches CPU reference with shared norm weights" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_gated_norm");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const dt_rank: usize = 2;
+    const head_v_dim: usize = 4;
+    const d_state: usize = 2;
+    const d_inner: usize = dt_rank * head_v_dim;
+
+    var delta_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&delta_buf);
+    var gate_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&gate_buf);
+    var norm_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&norm_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const delta_ptr: [*]f32 = @ptrCast(@alignCast(delta_buf.cpu_ptr.?));
+    const gate_ptr: [*]f32 = @ptrCast(@alignCast(gate_buf.cpu_ptr.?));
+    const norm_ptr: [*]f32 = @ptrCast(@alignCast(norm_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    const delta_init = [_]f32{ 1.0, -2.0, 3.0, -4.0, -0.5, 0.75, -1.25, 1.50 };
+    const gate_init = [_]f32{ 0.20, -0.70, 1.10, -1.40, 0.50, -0.30, 0.90, -1.20 };
+    const norm_init = [_]f32{ 1.25, 0.80, 1.25, 0.80, 1.25, 0.80, 1.25, 0.80 };
+
+    @memcpy(delta_ptr[0..d_inner], delta_init[0..d_inner]);
+    @memcpy(gate_ptr[0..d_inner], gate_init[0..d_inner]);
+    @memcpy(norm_ptr[0..d_inner], norm_init[0..d_inner]);
+    @memset(output_ptr[0..d_inner], 0);
+
+    var ref_output: [d_inner]f32 = [_]f32{0} ** d_inner;
+    refRunSsmGatedNorm(
+        delta_ptr[0..d_inner],
+        gate_ptr[0..d_inner],
+        norm_ptr[0..d_inner],
+        ref_output[0..d_inner],
+        dt_rank,
+        head_v_dim,
+        d_state,
+        false,
+    );
+
+    var cmd = try metal_command.beginCommand(ctx);
+    dispatchSsmGatedNormWithPipe(
+        &cmd,
+        &pipe,
+        &delta_buf,
+        &norm_buf,
+        &gate_buf,
+        &output_buf,
+        @intCast(d_inner),
+        @intCast(dt_rank),
+        @intCast(head_v_dim),
+        @intCast(d_state),
+        false,
+    );
+    cmd.commitAndWait();
+
+    for (0..d_inner) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.0005);
+    }
+}
+
+test "ssm_gated_norm shader matches CPU reference with per-head norm weights" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_gated_norm");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const dt_rank: usize = 2;
+    const head_v_dim: usize = 4;
+    const d_state: usize = 2;
+    const d_inner: usize = dt_rank * head_v_dim;
+
+    var delta_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&delta_buf);
+    var gate_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&gate_buf);
+    var norm_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&norm_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const delta_ptr: [*]f32 = @ptrCast(@alignCast(delta_buf.cpu_ptr.?));
+    const gate_ptr: [*]f32 = @ptrCast(@alignCast(gate_buf.cpu_ptr.?));
+    const norm_ptr: [*]f32 = @ptrCast(@alignCast(norm_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    const delta_init = [_]f32{ 2.0, -1.0, 0.5, -0.25, -3.0, 1.5, -0.75, 0.125 };
+    const gate_init = [_]f32{ 1.00, -0.25, 0.40, -0.80, 0.60, -1.10, 0.30, -0.45 };
+    const norm_init = [_]f32{ 0.90, 1.10, 1.30, 0.70, 1.20, 0.85, 1.05, 0.95 };
+
+    @memcpy(delta_ptr[0..d_inner], delta_init[0..d_inner]);
+    @memcpy(gate_ptr[0..d_inner], gate_init[0..d_inner]);
+    @memcpy(norm_ptr[0..d_inner], norm_init[0..d_inner]);
+    @memset(output_ptr[0..d_inner], 0);
+
+    var ref_output: [d_inner]f32 = [_]f32{0} ** d_inner;
+    refRunSsmGatedNorm(
+        delta_ptr[0..d_inner],
+        gate_ptr[0..d_inner],
+        norm_ptr[0..d_inner],
+        ref_output[0..d_inner],
+        dt_rank,
+        head_v_dim,
+        d_state,
+        true,
+    );
+
+    var cmd = try metal_command.beginCommand(ctx);
+    dispatchSsmGatedNormWithPipe(
+        &cmd,
+        &pipe,
+        &delta_buf,
+        &norm_buf,
+        &gate_buf,
+        &output_buf,
+        @intCast(d_inner),
+        @intCast(dt_rank),
+        @intCast(head_v_dim),
+        @intCast(d_state),
+        true,
+    );
+    cmd.commitAndWait();
+
+    for (0..d_inner) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.0005);
+    }
+}
+
+test "ssm_delta_net shader matches CPU reference at realistic head width" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_delta_net");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const dt_rank: usize = 4;
+    const head_v_dim: usize = 128;
+    const d_state: usize = 16;
+    const n_group: usize = 2;
+    const d_inner: usize = dt_rank * head_v_dim;
+    const qk_dim: usize = d_state * n_group;
+    const conv_len: usize = 2 * qk_dim + d_inner;
+    const state_len: usize = dt_rank * head_v_dim * head_v_dim;
+
+    var conv_buf = try metal_buffer.createBuffer(ctx, conv_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&conv_buf);
+    var alpha_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&alpha_buf);
+    var dt_bias_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dt_bias_buf);
+    var ssm_a_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&ssm_a_buf);
+    var beta_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&beta_buf);
+    var state_buf = try metal_buffer.createBuffer(ctx, state_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&state_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const conv_ptr: [*]f32 = @ptrCast(@alignCast(conv_buf.cpu_ptr.?));
+    const alpha_ptr: [*]f32 = @ptrCast(@alignCast(alpha_buf.cpu_ptr.?));
+    const dt_bias_ptr: [*]f32 = @ptrCast(@alignCast(dt_bias_buf.cpu_ptr.?));
+    const ssm_a_ptr: [*]f32 = @ptrCast(@alignCast(ssm_a_buf.cpu_ptr.?));
+    const beta_ptr: [*]f32 = @ptrCast(@alignCast(beta_buf.cpu_ptr.?));
+    const state_ptr: [*]f32 = @ptrCast(@alignCast(state_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    for (0..conv_len) |i| {
+        const imod: i32 = @intCast(i % 17);
+        const isub: i32 = imod - 8;
+        conv_ptr[i] = @as(f32, @floatFromInt(isub)) * 0.07;
+    }
+    for (0..dt_rank) |i| {
+        alpha_ptr[i] = 0.15 * @as(f32, @floatFromInt(@as(i32, @intCast(i)) - 1));
+        dt_bias_ptr[i] = -0.1 + 0.08 * @as(f32, @floatFromInt(i));
+        ssm_a_ptr[i] = -0.35 + 0.22 * @as(f32, @floatFromInt(i));
+        beta_ptr[i] = 0.25 - 0.12 * @as(f32, @floatFromInt(i));
+    }
+    for (0..state_len) |i| {
+        const imod: i32 = @intCast(i % 23);
+        const isub: i32 = imod - 11;
+        state_ptr[i] = @as(f32, @floatFromInt(isub)) * 0.03;
+    }
+    @memset(output_ptr[0..d_inner], 0);
+
+    const allocator = std.testing.allocator;
+    const ref_state = try allocator.alloc(f32, state_len);
+    defer allocator.free(ref_state);
+    const ref_output = try allocator.alloc(f32, d_inner);
+    defer allocator.free(ref_output);
+
+    @memcpy(ref_state[0..state_len], state_ptr[0..state_len]);
+    @memset(ref_output[0..d_inner], 0);
+    refRunSsmDeltaNet(
+        conv_ptr[0..conv_len],
+        alpha_ptr[0..dt_rank],
+        dt_bias_ptr[0..dt_rank],
+        beta_ptr[0..dt_rank],
+        ssm_a_ptr[0..dt_rank],
+        ref_state[0..state_len],
+        ref_output[0..d_inner],
+        dt_rank,
+        head_v_dim,
+        d_state,
+        n_group,
+    );
+
+    const push = SsmDeltaNetPush{
+        .d_inner = @intCast(d_inner),
+        .dt_rank = @intCast(dt_rank),
+        .head_v_dim = @intCast(head_v_dim),
+        .d_state = @intCast(d_state),
+        .n_group = @intCast(n_group),
+        .ssm_a_is_f16 = 0,
+        .dt_bias_is_f16 = 0,
+        .has_dt_bias = 1,
+        .has_ssm_a = 1,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &conv_buf,
+        &alpha_buf,
+        &dt_bias_buf,
+        &ssm_a_buf,
+        &beta_buf,
+        &state_buf,
+        &output_buf,
+    };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast(dt_rank), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
+    cmd.commitAndWait();
+
+    for (0..d_inner) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.001);
+    }
+    for (0..state_len) |i| {
+        try std.testing.expectApproxEqAbs(ref_state[i], state_ptr[i], 0.001);
+    }
+}
+
+test "ssm_delta_net shader matches CPU reference at model-like dimensions" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_delta_net");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const dt_rank: usize = 32;
+    const head_v_dim: usize = 128;
+    const d_state: usize = 128;
+    const n_group: usize = 16;
+    const d_inner: usize = dt_rank * head_v_dim;
+    const qk_dim: usize = d_state * n_group;
+    const conv_len: usize = 2 * qk_dim + d_inner;
+    const state_len: usize = dt_rank * head_v_dim * head_v_dim;
+
+    var conv_buf = try metal_buffer.createBuffer(ctx, conv_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&conv_buf);
+    var alpha_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&alpha_buf);
+    var dt_bias_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dt_bias_buf);
+    var ssm_a_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&ssm_a_buf);
+    var beta_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&beta_buf);
+    var state_buf = try metal_buffer.createBuffer(ctx, state_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&state_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const conv_ptr: [*]f32 = @ptrCast(@alignCast(conv_buf.cpu_ptr.?));
+    const alpha_ptr: [*]f32 = @ptrCast(@alignCast(alpha_buf.cpu_ptr.?));
+    const dt_bias_ptr: [*]f32 = @ptrCast(@alignCast(dt_bias_buf.cpu_ptr.?));
+    const ssm_a_ptr: [*]f32 = @ptrCast(@alignCast(ssm_a_buf.cpu_ptr.?));
+    const beta_ptr: [*]f32 = @ptrCast(@alignCast(beta_buf.cpu_ptr.?));
+    const state_ptr: [*]f32 = @ptrCast(@alignCast(state_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    for (0..conv_len) |i| {
+        const raw: i32 = @intCast((i * 17 + 3) % 41);
+        conv_ptr[i] = @as(f32, @floatFromInt(raw - 20)) * 0.03125;
+    }
+    for (0..dt_rank) |i| {
+        alpha_ptr[i] = -0.40 + 0.03 * @as(f32, @floatFromInt(i));
+        dt_bias_ptr[i] = 0.20 - 0.015 * @as(f32, @floatFromInt(i));
+        ssm_a_ptr[i] = -0.55 + 0.025 * @as(f32, @floatFromInt(i));
+        beta_ptr[i] = 0.35 - 0.02 * @as(f32, @floatFromInt(i % 11));
+    }
+    for (0..state_len) |i| {
+        const raw: i32 = @intCast((i * 5 + 11) % 37);
+        state_ptr[i] = @as(f32, @floatFromInt(raw - 18)) * 0.015625;
+    }
+    @memset(output_ptr[0..d_inner], 0);
+
+    const allocator = std.testing.allocator;
+    const ref_state = try allocator.alloc(f32, state_len);
+    defer allocator.free(ref_state);
+    const ref_output = try allocator.alloc(f32, d_inner);
+    defer allocator.free(ref_output);
+
+    @memcpy(ref_state[0..state_len], state_ptr[0..state_len]);
+    @memset(ref_output[0..d_inner], 0);
+    refRunSsmDeltaNet(
+        conv_ptr[0..conv_len],
+        alpha_ptr[0..dt_rank],
+        dt_bias_ptr[0..dt_rank],
+        beta_ptr[0..dt_rank],
+        ssm_a_ptr[0..dt_rank],
+        ref_state[0..state_len],
+        ref_output[0..d_inner],
+        dt_rank,
+        head_v_dim,
+        d_state,
+        n_group,
+    );
+
+    const push = SsmDeltaNetPush{
+        .d_inner = @intCast(d_inner),
+        .dt_rank = @intCast(dt_rank),
+        .head_v_dim = @intCast(head_v_dim),
+        .d_state = @intCast(d_state),
+        .n_group = @intCast(n_group),
+        .ssm_a_is_f16 = 0,
+        .dt_bias_is_f16 = 0,
+        .has_dt_bias = 1,
+        .has_ssm_a = 1,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &conv_buf,
+        &alpha_buf,
+        &dt_bias_buf,
+        &ssm_a_buf,
+        &beta_buf,
+        &state_buf,
+        &output_buf,
+    };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast(dt_rank), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
+    cmd.commitAndWait();
+
+    for (0..d_inner) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.002);
+    }
+    for (0..state_len) |i| {
+        try std.testing.expectApproxEqAbs(ref_state[i], state_ptr[i], 0.002);
+    }
 }
 
 test "topKSoftmax with uniform logits returns equal weights" {
@@ -2163,6 +3884,511 @@ test "dequantRow F32 direct copy" {
     dequantRow(&raw, 0, 4, .f32, &out);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[0], 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), out[3], 0.001);
+}
+
+test "dmmv_q5k shader matches GGML contiguous-half CPU reference ordering" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 1;
+    const K: u32 = 256;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, 176);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const d_bits = @as(u16, @bitCast(@as(f16, 1.0)));
+    weight_buf.cpu_ptr.?[0] = @truncate(d_bits);
+    weight_buf.cpu_ptr.?[1] = @truncate(d_bits >> 8);
+    weight_buf.cpu_ptr.?[4] = 1;
+    weight_buf.cpu_ptr.?[5] = 1;
+    weight_buf.cpu_ptr.?[48] = 0x3A;
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    input_ptr[0] = 1.0;
+    input_ptr[1] = 100.0;
+    input_ptr[32] = 1000.0;
+
+    var ref_row: [256]f32 = undefined;
+    dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], 0, K, .q5_k, &ref_row);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), ref_row[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), ref_row[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), ref_row[32], 0.001);
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    var expected: f32 = 0;
+    for (0..K) |i| {
+        expected += ref_row[i] * input_ptr[i];
+    }
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    try std.testing.expectApproxEqAbs(@as(f32, 3010.0), expected, 0.001);
+    try std.testing.expectApproxEqAbs(expected, output_ptr[0], 0.001);
+}
+
+test "dmmv_q5k shader matches CPU reference across rows and blocks" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 2;
+    const K: u32 = 512;
+    const blocks_per_row: usize = K / 256;
+    const row_bytes: usize = blocks_per_row * 176;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..@as(usize, M)) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 176;
+            const d_bits = @as(u16, @bitCast(@as(f16, @floatCast(0.25 * @as(f32, @floatFromInt(1 + row + blk))))));
+            weight_buf.cpu_ptr.?[base] = @truncate(d_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(d_bits >> 8);
+            weight_buf.cpu_ptr.?[base + 2] = 0;
+            weight_buf.cpu_ptr.?[base + 3] = 0;
+            for (0..12) |i| {
+                weight_buf.cpu_ptr.?[base + 4 + i] = @intCast(1 + ((i + row + blk) % 3));
+            }
+            for (0..32) |i| {
+                weight_buf.cpu_ptr.?[base + 16 + i] = @intCast((i + row + blk) & 0xFF);
+            }
+            for (0..128) |i| {
+                const lo: u8 = @intCast((i + blk + row) & 0xF);
+                const hi: u8 = @intCast((15 - ((i + blk * 3 + row) & 0xF)) & 0xF);
+                weight_buf.cpu_ptr.?[base + 48 + i] = lo | (hi << 4);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast(i % 11);
+        input_ptr[i] = @as(f32, @floatFromInt(raw - 5));
+    }
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    var ref_row: [512]f32 = undefined;
+    var expected: [2]f32 = .{ 0, 0 };
+    for (0..@as(usize, M)) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), K, .q5_k, &ref_row);
+        for (0..K) |i| expected[row] += ref_row[i] * input_ptr[i];
+    }
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    try std.testing.expectApproxEqAbs(expected[0], output_ptr[0], 0.01);
+    try std.testing.expectApproxEqAbs(expected[1], output_ptr[1], 0.01);
+}
+
+test "dmmv_q5k shader matches CPU reference with nonzero a_offset across many rows" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 257;
+    const K: usize = 512;
+    const blocks_per_row: usize = K / 256;
+    const row_bytes: usize = blocks_per_row * 176;
+    const matrix_bytes: usize = M * row_bytes;
+    const a_offset: usize = matrix_bytes;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, a_offset + matrix_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0xCD);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = a_offset + row * row_bytes + blk * 176;
+            const d = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + (row % 5) + blk))));
+            const dmin = @as(f16, @floatCast(0.015625 * @as(f32, @floatFromInt(1 + ((row + blk) % 7)))));
+            const d_bits = @as(u16, @bitCast(d));
+            const dmin_bits = @as(u16, @bitCast(dmin));
+            weight_buf.cpu_ptr.?[base] = @truncate(d_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(d_bits >> 8);
+            weight_buf.cpu_ptr.?[base + 2] = @truncate(dmin_bits);
+            weight_buf.cpu_ptr.?[base + 3] = @truncate(dmin_bits >> 8);
+            for (0..12) |i| {
+                weight_buf.cpu_ptr.?[base + 4 + i] = @intCast((row * 9 + blk * 5 + i * 3) & 0xFF);
+            }
+            for (0..32) |i| {
+                weight_buf.cpu_ptr.?[base + 16 + i] = @intCast((row * 7 + blk * 11 + i * 5) & 0xFF);
+            }
+            for (0..128) |i| {
+                weight_buf.cpu_ptr.?[base + 48 + i] = @intCast((row * 13 + blk * 17 + i * 7) & 0xFF);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 19 + 5) % 21);
+        input_ptr[i] = 0.125 * @as(f32, @floatFromInt(raw - 10));
+    }
+
+    const push = DmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = @intCast(a_offset),
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 63) / 64), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+    const expected = try allocator.alloc(f32, M);
+    defer allocator.free(expected);
+    @memset(expected[0..M], 0);
+
+    const matrix_raw = weight_buf.cpu_ptr.?[a_offset .. a_offset + matrix_bytes];
+    for (0..M) |row| {
+        dequantRow(matrix_raw, @intCast(row), @intCast(K), .q5_k, ref_row);
+        for (0..K) |i| {
+            expected[row] += ref_row[i] * input_ptr[i];
+        }
+    }
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.05);
+    }
+}
+
+test "dmmv_q8_0 shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 1;
+    const K: u32 = 32;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, 34);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const scale_bits = @as(u16, @bitCast(@as(f16, 0.5)));
+    weight_buf.cpu_ptr.?[0] = @truncate(scale_bits);
+    weight_buf.cpu_ptr.?[1] = @truncate(scale_bits >> 8);
+
+    const qs: [32]i8 = .{
+        -4,  3,  -2,  1,  -8,  7,  -6,  5,
+        -12, 11, -10, 9,  -16, 15, -14, 13,
+        -1,  2,  -3,  4,  -5,  6,  -7,  8,
+        -9,  10, -11, 12, -13, 14, -15, 16,
+    };
+    for (qs, 0..) |q, i| {
+        weight_buf.cpu_ptr.?[2 + i] = @bitCast(q);
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        input_ptr[i] = @as(f32, @floatFromInt((i % 5) + 1));
+    }
+
+    var ref_row: [32]f32 = undefined;
+    dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], 0, K, .q8_0, &ref_row);
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    var expected: f32 = 0;
+    for (0..K) |i| expected += ref_row[i] * input_ptr[i];
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    try std.testing.expectApproxEqAbs(expected, output_ptr[0], 0.001);
+}
+
+test "dmmv_q8_0 shader matches CPU reference across rows and blocks" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 2;
+    const K: u32 = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..@as(usize, M)) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.125 * @as(f32, @floatFromInt(1 + (blk % 3) + row))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((e + blk * 5 + row * 7) % 31);
+                const q: i8 = @intCast(raw_q - 15);
+                weight_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast(i % 9);
+        input_ptr[i] = @as(f32, @floatFromInt(raw - 4));
+    }
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    var ref_row: [2048]f32 = undefined;
+    var expected: [2]f32 = .{ 0, 0 };
+    for (0..@as(usize, M)) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), K, .q8_0, &ref_row);
+        for (0..K) |i| expected[row] += ref_row[i] * input_ptr[i];
+    }
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    try std.testing.expectApproxEqAbs(expected[0], output_ptr[0], 0.01);
+    try std.testing.expectApproxEqAbs(expected[1], output_ptr[1], 0.01);
+}
+
+test "dmmv_q8_0 shader matches CPU reference across many workgroups" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 258;
+    const K: usize = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale_mag = 0.03125 * @as(f32, @floatFromInt(1 + (row % 5) + (blk % 7)));
+            const scale = @as(f16, @floatCast(scale_mag));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 11 + blk * 7 + e * 5) % 63);
+                const q: i8 = @intCast(raw_q - 31);
+                weight_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 13 + 7) % 29);
+        input_ptr[i] = 0.125 * @as(f32, @floatFromInt(raw - 14));
+    }
+
+    const push = DmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 1) / 2), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+    const expected = try allocator.alloc(f32, M);
+    defer allocator.free(expected);
+    @memset(expected[0..M], 0);
+
+    for (0..M) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), @intCast(K), .q8_0, ref_row);
+        for (0..K) |i| {
+            expected[row] += ref_row[i] * input_ptr[i];
+        }
+    }
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.05);
+    }
+}
+
+test "dmmv_q4k_k2048 shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 1;
+    const K: u32 = 256;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, 144);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const d_bits = @as(u16, @bitCast(@as(f16, 1.0)));
+    weight_buf.cpu_ptr.?[0] = @truncate(d_bits);
+    weight_buf.cpu_ptr.?[1] = @truncate(d_bits >> 8);
+    weight_buf.cpu_ptr.?[4] = 1;
+    weight_buf.cpu_ptr.?[5] = 2;
+    weight_buf.cpu_ptr.?[16] = 0x53;
+    weight_buf.cpu_ptr.?[17] = 0x97;
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    input_ptr[0] = 1.0;
+    input_ptr[1] = 100.0;
+    input_ptr[32] = 1000.0;
+    input_ptr[33] = 10000.0;
+
+    var ref_row: [256]f32 = undefined;
+    dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], 0, K, .q4_k, &ref_row);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), ref_row[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), ref_row[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), ref_row[32], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 18.0), ref_row[33], 0.001);
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 1);
+    cmd.commitAndWait();
+
+    var expected: f32 = 0;
+    for (0..K) |i| expected += ref_row[i] * input_ptr[i];
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    try std.testing.expectApproxEqAbs(expected, output_ptr[0], 0.001);
 }
 
 test "batched MoE Metal shaders compile" {
