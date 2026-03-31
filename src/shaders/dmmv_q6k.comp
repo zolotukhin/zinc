@@ -2,6 +2,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 layout(local_size_x = 64) in;
 
+layout(constant_id = 1) const uint SPEC_K = 4096;
+
 layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
 layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
@@ -22,13 +24,21 @@ float fp16_to_fp32(uint h) {
     return unpackHalf2x16(h).x;
 }
 
+shared float s_x[SPEC_K];
+
 void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint x_base = x_offset / 4u;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x[x_base + i];
+    }
+    barrier();
+
     uint row = gl_GlobalInvocationID.x;
     if (row >= M) return;
 
     uint blocks_per_row = K / 256;
     uint row_offset = a_offset + row * blocks_per_row * 210;
-    uint x_base = x_offset / 4;
     uint y_base = y_offset / 4;
 
     float sum = 0.0;
@@ -65,10 +75,10 @@ void main() {
                 float s4 = float(int(w[sc_off + is + 4])) - (w[sc_off + is + 4] >= 128u ? 256.0 : 0.0);
                 float s6 = float(int(w[sc_off + is + 6])) - (w[sc_off + is + 6] >= 128u ? 256.0 : 0.0);
 
-                sum += d * s0 * (float(q1) - 32.0) * x[x_base + xi + l];
-                sum += d * s2 * (float(q2) - 32.0) * x[x_base + xi + l + 32];
-                sum += d * s4 * (float(q3) - 32.0) * x[x_base + xi + l + 64];
-                sum += d * s6 * (float(q4) - 32.0) * x[x_base + xi + l + 96];
+                sum += d * s0 * (float(q1) - 32.0) * s_x[xi + l];
+                sum += d * s2 * (float(q2) - 32.0) * s_x[xi + l + 32u];
+                sum += d * s4 * (float(q3) - 32.0) * s_x[xi + l + 64u];
+                sum += d * s6 * (float(q4) - 32.0) * s_x[xi + l + 96u];
             }
             xi += 128;
         }

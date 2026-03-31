@@ -151,9 +151,9 @@ On the shared RDNA4 host on March 29, 2026, `./zig-out/bin/zinc model list` retu
 ```bash
 Detected GPU profile: amd-rdna4-32gb
 
-ID                             Status      Fit    Installed   Active   Notes
-qwen35-2b-q4k-m                supported   yes    no          no       tested + catalog fit
-qwen35-35b-a3b-q4k-xl          supported   yes    no          no       tested + catalog fit
+ID                             Released     Status      Fit    Installed   Active   Notes
+qwen35-2b-q4k-m                2026-02-16   supported   yes    no          no       tested + catalog fit
+qwen35-35b-a3b-q4k-xl          2026-02-16   supported   yes    no          no       tested + catalog fit
 ```
 
 If you want ZINC to manage downloads and the default startup model for you:
@@ -167,7 +167,15 @@ If you want ZINC to manage downloads and the default startup model for you:
 
 # Inspect the current managed default
 ./zig-out/bin/zinc model active
+
+# Remove a cached managed model
+./zig-out/bin/zinc model rm qwen35-2b-q4k-m
+
+# Force-unload it from the local server first if it is still active there
+./zig-out/bin/zinc model rm --force qwen35-2b-q4k-m
 ```
+
+`model rm` is conservative by default: if the local ZINC server still has that model loaded in GPU memory, the command refuses and leaves the cache untouched. Use `--force` to have the local server unload it first. If your server uses a non-default port, add `--port <port>` before `model rm`.
 
 ## Run a single prompt from the terminal
 
@@ -311,6 +319,27 @@ curl http://localhost:8080/v1/models/activate \
   }'
 ```
 
+### Remove a managed model from a running server
+
+```bash
+# Remove an installed model if it is not currently loaded
+curl http://localhost:8080/v1/models/remove \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen35-2b-q4k-m"
+  }'
+
+# Force the server to unload it first if it is still active
+curl http://localhost:8080/v1/models/remove \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen35-2b-q4k-m",
+    "force": true
+  }'
+```
+
+Without `force`, a loaded target returns `409` and ZINC leaves the cached files untouched.
+
 ### Use with OpenAI SDKs
 
 Node.js:
@@ -336,6 +365,7 @@ for await (const chunk of stream) {
 | GET | `/health` | Server status, loaded model, active/queued requests, uptime |
 | GET | `/v1/models` | List managed models, fit status, install state, and the active entry |
 | POST | `/v1/models/activate` | Activate an installed managed model |
+| POST | `/v1/models/remove` | Remove a cached managed model, optionally unloading it first |
 | POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
 | POST | `/v1/completions` | Text completion |
 

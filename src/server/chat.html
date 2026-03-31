@@ -374,9 +374,34 @@ function setCurrentModel(model){
   MN.href=model.homepage_url||modelHrefForName(model.display_name||model.id);
 }
 
-function setGpuMemory(used,budget){
-  if(!used||!budget){GM.textContent='';return}
-  GM.textContent='VRAM '+fmtGiB(used)+' / '+fmtGiB(budget)+' GiB';
+function setGpuMemory(info,budgetArg){
+  let used=0,budget=0,ctxReserved=0,ctxActive=0,ctxTokens=0,ctxCapacity=0;
+  if(typeof info==='object'&&info){
+    used=info.gpu_memory_used_bytes||info.active_memory_used_bytes||0;
+    budget=info.gpu_memory_budget_bytes||info.active_memory_budget_bytes||0;
+    ctxReserved=info.gpu_context_reserved_bytes||info.active_context_reserved_bytes||0;
+    ctxActive=info.gpu_context_active_bytes||info.active_context_active_bytes||0;
+    ctxTokens=info.gpu_context_tokens||info.active_context_tokens||0;
+    ctxCapacity=info.gpu_context_capacity_tokens||info.active_context_capacity_tokens||0;
+  }else{
+    used=info||0;
+    budget=budgetArg||0;
+  }
+  if(!used||!budget){GM.textContent='';GM.title='';return}
+  let text='VRAM '+fmtGiB(used)+' / '+fmtGiB(budget)+' GiB';
+  if(ctxReserved>0&&ctxCapacity>0){
+    if(ctxTokens>0||ctxActive>0){
+      text+=' · ctx '+fmtGiB(ctxActive)+' / '+fmtGiB(ctxReserved)+' GiB ('+ctxTokens+'/'+ctxCapacity+' tok)';
+    }else{
+      text+=' · ctx reserved '+fmtGiB(ctxReserved)+' GiB ('+ctxCapacity+' tok cap)';
+    }
+  }
+  GM.textContent=text;
+  if(ctxReserved>0&&ctxCapacity>0){
+    GM.title='The total VRAM number includes the full reserved KV context budget. Active ctx shows how much of that reserved space the current chat is actually using.';
+  }else{
+    GM.title='';
+  }
 }
 
 function updateDownloadUi(){
@@ -494,7 +519,7 @@ async function refreshModels(){
     if(selected&&selected.id===m.id)opt.selected=true;
     MS.appendChild(opt);
   }
-  setGpuMemory(md.active_memory_used_bytes||0,md.active_memory_budget_bytes||0);
+  setGpuMemory(md);
   setCurrentModel(current);
   updateDownloadUi();
   updateModelAction();
@@ -507,7 +532,7 @@ async function refreshHealth(){
     let r=await fetch(base.replace('/v1','/health'));let d=await r.json();
     if(d.status==='ok'){
       ST.textContent='online';ST.className='badge ok';setModelTag(d.model);
-      setGpuMemory(d.gpu_memory_used_bytes||0,d.gpu_memory_budget_bytes||0);
+      setGpuMemory(d);
     }else throw new Error('health unavailable');
   }catch(e){ST.textContent='offline';ST.className='badge'}
   finally{scheduleHealthRefresh(2000)}

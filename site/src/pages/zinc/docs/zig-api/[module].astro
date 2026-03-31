@@ -83,6 +83,39 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
 
             <pre><code>{symbol.signature}</code></pre>
 
+            {symbol.symbolKind === 'struct' && symbol.size !== undefined && (
+              <div class="struct-layout meta-block">
+                <h3>Memory Layout</h3>
+                <p>Size: <strong>{symbol.size}</strong> bytes (alignment: {symbol.alignment})</p>
+                {symbol.fields && symbol.fields.length > 0 && (
+                  <div class="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th class="numeric">Offset</th>
+                          <th class="numeric">Size</th>
+                          <th class="numeric">Align</th>
+                          <th>Field</th>
+                          <th>Type</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {symbol.fields.map(field => (
+                          <tr>
+                            <td class="numeric">{field.offset}</td>
+                            <td class="numeric">{field.size}</td>
+                            <td class="numeric">{field.alignment}</td>
+                            <td><code>{field.name}</code></td>
+                            <td><code>{field.type}</code></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
             {hasDocContent(symbol) ? (
               <div class="doc-copy">
                 {symbol.doc.summary && <p class="doc-summary">{symbol.doc.summary}</p>}
@@ -468,6 +501,41 @@ function hasDocContent(symbol: ZigApiSymbol | ZigApiMember): boolean {
   .detail-list dd {
     margin: 0;
     color: var(--color-text-muted);
+  }
+
+  .table-wrapper {
+    overflow-x: auto;
+    margin-top: var(--space-sm);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg);
+  }
+
+  .table-wrapper table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+
+  .table-wrapper th,
+  .table-wrapper td {
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .table-wrapper th {
+    background: var(--color-bg-alt);
+    font-weight: 600;
+  }
+
+  .table-wrapper tr:last-child td {
+    border-bottom: none;
+  }
+
+  .table-wrapper .numeric {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 
   .toc {

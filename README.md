@@ -31,6 +31,63 @@
   <em>35B parameter model running locally on a single AMD GPU — Zig + Vulkan, no ROCm, no CUDA</em>
 </p>
 
+## Best Supported Setup
+
+- Linux
+- AMD RDNA4 GPU with 16-32 GB VRAM
+- Mesa RADV with `RADV_PERFTEST=coop_matrix`
+- `zig build -Doptimize=ReleaseFast`
+
+macOS can build the project and is fine for development, but it is not the primary target environment for real ZINC GPU inference.
+
+## Start Here
+
+If you want the shortest path to a successful first run:
+
+```bash
+git clone https://github.com/zolotukhin/zinc.git
+cd zinc
+zig build -Doptimize=ReleaseFast
+
+# Recommended on RDNA4 before checks and benchmarks
+export RADV_PERFTEST=coop_matrix
+
+# Verify Vulkan, shaders, and runtime setup
+./zig-out/bin/zinc --check
+
+# See which supported models fit this machine
+./zig-out/bin/zinc model list
+
+# Download one supported model
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+
+# Run a prompt with the managed model
+./zig-out/bin/zinc --model-id qwen35-2b-q4k-m --prompt "Hello"
+```
+
+If you want the browser UI instead, start the server with:
+
+```bash
+./zig-out/bin/zinc --model-id qwen35-2b-q4k-m -p 8080
+```
+
+Then open `http://localhost:8080/`.
+
+## What Works Today
+
+- Single-stream CLI inference on the validated Qwen3.5 models listed below
+- OpenAI-compatible `/v1` API
+- Built-in browser chat UI at `/`
+- Managed model workflow: `list`, `pull`, `use`, `active`, and `rm`
+- RDNA4-tuned Vulkan path with coherent outputs on the supported GGUFs
+
+## Still Rough
+
+- Continuous batching and stronger multi-tenant serving are still roadmap work
+- Chat/reasoning workloads are still slower than the raw decode path
+- The supported-model list is intentionally narrow
+- macOS is useful for building and docs work, but not the target runtime for GPU inference
+
 ## The Problem
 
 AMD's RDNA3/RDNA4 GPUs (RX 9070, Radeon AI PRO R9700, etc.) have excellent memory bandwidth (576+ GB/s) and hardware features (cooperative matrix, integer dot product), but:
@@ -52,21 +109,22 @@ ZINC takes the hardware these cards already have — 576 GB/s memory bandwidth, 
 
 **Drop-in compatible.** The API is OpenAI-compatible — point your existing client at it and it works. No ROCm, no CUDA, no driver stack to fight. One binary, one GPU, production inference on a $550 card.
 
-## Tested Models
+## Supported Models
 
-The table below is intentionally narrow: it lists the exact GGUFs we have revalidated end-to-end, not a broader wishlist of architectures that might work.
+The table below is intentionally narrow: it lists the exact GGUFs ZINC currently supports and that we have revalidated end-to-end, not a broader wishlist of architectures that might work.
 
-| Model | Exact GGUF tested | Measured throughput on AI PRO R9700 |
+| Model | Exact GGUF tested | Typical throughput on AI PRO R9700 |
 |------|--------------------|-------------------------------------|
-| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 22.93 tok/s plain decode (CLI), 21.88 tok/s raw API without chat template/thinking, 17.35–17.50 tok/s reasoning chat |
-| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 33.58 tok/s plain decode (CLI), 33.55 tok/s raw API without chat template/thinking, 24.94–28.56 tok/s reasoning chat |
+| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~22 tok/s plain generation, ~17 tok/s reasoning chat |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~33 tok/s plain generation, ~25–29 tok/s reasoning chat |
 
 Benchmark details for the numbers above:
 
 - Hardware: AMD Radeon AI PRO R9700 (RDNA4, 32 GB)
 - Build: `zig build -Doptimize=ReleaseFast`
-- Prompt: CLI and raw API use `"The capital of France is"` with no chat template and no explicit reasoning/thinking prompt; the reasoning chat result comes from three non-streaming step-by-step prompts
-- Run shape: 256 generated tokens for the CLI and raw API numbers, with `RADV_PERFTEST=coop_matrix`
+- Run shape: single-stream, `RADV_PERFTEST=coop_matrix`
+- Plain generation: 256-token runs without chat template or explicit reasoning
+- Reasoning chat: non-streaming `/v1/chat/completions` with step-by-step prompts
 - Latest validation date: 2026-03-30
 - Validation: coherent output on CLI, raw `/v1/completions`, and `/v1/chat/completions`
 
@@ -130,28 +188,14 @@ export RADV_PERFTEST=coop_matrix
 
 If `--check` reports warnings, treat them as setup work to finish before judging runtime behavior. For the full walkthrough, see [Running ZINC](docs/RUNNING_ZINC.md) and [Hardware requirements](docs/HARDWARE_REQUIREMENTS.md).
 
-### Pick a Model
+### Choosing Models
 
-ZINC now ships with a small built-in managed catalog of models that have been explicitly revalidated on specific GPU profiles.
+The README keeps the supported-model table narrow on purpose and leaves the full managed-model workflow to the docs.
 
-```bash
-# Show only models that are both tested for the detected GPU
-# and estimated to fit the current VRAM budget
-./zig-out/bin/zinc model list
+Use these for model selection, cache management, and API details:
 
-# Download one managed model into the local cache
-./zig-out/bin/zinc model pull qwen35-2b-q4k-m
-
-# Set the default managed model for future runs
-./zig-out/bin/zinc model use qwen35-2b-q4k-m
-
-# See the current default selection
-./zig-out/bin/zinc model active
-```
-
-On the shared RDNA4 host on March 29, 2026, `./zig-out/bin/zinc model list` reported both built-in Qwen3.5 entries as `supported` with `Fit yes`.
-
-If you want the full catalog even when Vulkan is unavailable locally, run `./zig-out/bin/zinc model list --all`.
+- [Running ZINC](https://zolotukhin.ai/zinc/docs/running-zinc)
+- [Serving HTTP API](https://zolotukhin.ai/zinc/docs/api)
 
 ### Run a Prompt
 
@@ -403,7 +447,7 @@ For reference, the current llama.cpp baseline on the same node and model is abou
 
 - The clean ReleaseFast decode path is already above the `30 tok/s` mark on the 35B model.
 - The `33.58 tok/s`, `33.55 tok/s`, `22.93 tok/s`, and `21.88 tok/s` figures are plain decode numbers, not thinking-enabled runs.
-- The raw OpenAI-compatible `/v1/completions` route now tracks CLI closely on both validated models, so the main remaining overhead is not the basic HTTP wrapper.
+- The raw OpenAI-compatible `/v1/completions` route now tracks CLI closely on both supported models, so the main remaining overhead is not the basic HTTP wrapper.
 - The current proxy for "thinking enabled" throughput is the reasoning-chat row, which uses `/v1/chat/completions` with longer step-by-step prompts rather than a separate model-side thinking toggle.
 - The remaining gap is the chat/reasoning route: longer templated chat answers are still slower than raw decode on both models.
 - The 2B model is currently slower than the 35B MoE model on this node, which means today's bottleneck is not just "smaller model = faster"; kernel shape, architecture mix, and decode-path efficiency matter more than parameter count alone.

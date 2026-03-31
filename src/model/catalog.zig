@@ -15,6 +15,8 @@ pub const CatalogStatus = enum {
 pub const CatalogEntry = struct {
     id: []const u8,
     display_name: []const u8,
+    /// Upstream model-family release date in YYYY-MM-DD format.
+    release_date: []const u8,
     family: []const u8,
     format: []const u8,
     quantization: []const u8,
@@ -34,6 +36,7 @@ pub const entries = [_]CatalogEntry{
     .{
         .id = "qwen35-2b-q4k-m",
         .display_name = "Qwen3.5 2B Q4_K_M",
+        .release_date = "2026-02-16",
         .family = "qwen3.5",
         .format = "gguf",
         .quantization = "Q4_K_M",
@@ -53,6 +56,7 @@ pub const entries = [_]CatalogEntry{
     .{
         .id = "qwen35-35b-a3b-q4k-xl",
         .display_name = "Qwen3.5 35B-A3B UD Q4_K_XL",
+        .release_date = "2026-02-16",
         .family = "qwen3.5",
         .format = "gguf",
         .quantization = "UD-Q4_K_XL",
@@ -108,6 +112,7 @@ pub fn supportedOnCurrentGpu(entry: CatalogEntry, profile: []const u8, vram_budg
 test "find returns known entry" {
     const entry = find("qwen35-2b-q4k-m") orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("Qwen3.5 2B Q4_K_M", entry.display_name);
+    try std.testing.expectEqualStrings("2026-02-16", entry.release_date);
 }
 
 test "profileForGpu maps RDNA4 32 GB boards" {

@@ -585,6 +585,146 @@ Live server health:
 curl -fsS "http://$ZINC_HOST:9090/health"
 ```
 
+## Historical Debug Appendix
+
+This is the part that used to live in a separate `QWEN35_DEBUG` note. It stays here now because it is part of the same support story, just from the "before the fixes were complete" side of the timeline.
+
+### March 29 Debug Snapshot
+
+At that point the state was still messy:
+
+- local `zig build test --summary all` was passing
+- the small dense `qwen35` model was still wrong from source builds on the RDNA4 node
+- the larger `qwen35moe` model was also still wrong from the current source tree
+- `/root/zinc` on the node was not a trustworthy baseline because it carried a large dirty patch stack
+
+Observed first-token states on 2026-03-29:
+
+- clean temp build before the packed-attention fix: 35B first token `195229`
+- packed-attention-aligned tree in `/tmp/zinc-qwen35-clean`: 2B first token `228`
+- packed-attention-aligned tree in `/tmp/zinc-qwen35-clean`: 35B first token `264`
+- dirty `/root/zinc` after rebuild: 35B first token `264`
+
+That was the useful takeaway: if 35B had worked on the node earlier, it was under a different remote state than the current tree.
+
+### What Was Already Known To Be Good
+
+Several suspicious areas were already strong enough to stop blaming:
+
+- flash attention math was self-consistent
+  - `ATTN_SELFTEST` at `seq_len=1` matched the current V slice
+  - `ATTN_REFTEST` at `seq_len=5` matched a naive CPU attention reference to about `1e-6`
+- multiple DMMV paths already matched CPU references closely enough
+  - `wqkv`
+  - `ffn_gate`
+  - `ffn_up`
+  - `attn_q`
+  - `attn_output`
+  - `ffn_down`
+- the original 2B SSM blow-up was fixed
+- `ssm_norm.weight` clearly looked like a real shared norm tensor, not corrupted metadata
+
+That mattered because it narrowed the search surface. The remaining mismatch was more likely in hybrid linear-attention sequencing or quantized expert math than in plain attention or generic matvecs.
+
+### Architecture References That Mattered
+
+The two most useful external references were:
+
+- vLLM `Qwen3NextAttention`
+- vLLM `GatedDeltaNetAttention`
+
+Those references helped pin down:
+
+- packed per-head `[Q, gate]` layout instead of element-interleaving
+- `q_norm` and `k_norm` placement before RoPE
+- attention-output gate placement
+- the dense linear-attention flow of `[q, k, v, z]`, `[b, a]`, conv, gated delta-net, RMSNormGated, and output projection
+
+### High-Risk Mapping Assumptions
+
+The most suspicious unresolved mapping on March 29 was still the meaning of `ssm_a`.
+
+The reference wanted:
+
+- `g = -exp(A_log) * softplus(a + dt_bias)`
+
+The current ZINC path at that point was effectively assuming:
+
+- `gate_arr = softplus(alpha + dt_bias) * ssm_a`
+  or `-softplus(...)` when `ssm_a` was absent
+
+If GGUF stored `A_log` rather than `-exp(A_log)`, that was still wrong by an exponential. That was exactly the kind of detail that can leave the model alive but numerically off.
+
+### Useful Diagnostics Captured
+
+The most useful 2B SSM diagnostics from that stage were:
+
+```text
+SSM tensor types: conv1d=f32 dt_bias=f32 ssm_a=f32 n_group=16 dt_rank=16 d_state=128 head_v=128
+SSM gate L0 pos=0: alpha0=2.890070 dt_bias0=3.703125 ssm_a0=-0.772740 gate_log=[-5.095884,-0.000000] decay=[0.006122,1.000000] beta=[0.357056,0.926990]
+ssm_norm.weight: type=f32 n_dims=1 dims=[128,1] elems=128 d_state=128 d_inner=2048 head_v=128 per_head=false
+```
+
+What that told us:
+
+- `ssm_a` was present and `f32`
+- `ssm_norm.weight` was shared over `d_state`, not per-`d_inner`
+- decay was no longer numerically exploding
+
+### Next Checks That Were Still Open Then
+
+The best unresolved checks on March 29 were:
+
+- verify whether GGUF `ssm_a` stored `A_log` or `-exp(A_log)`
+- compare `ssm_alpha` and `ssm_beta` against the reference `b/a` ordering
+- compare one full linear-attention layer end-to-end against a reference implementation, not just internal self-consistency
+- keep using the larger 35B model as a regression guard, but stop treating the dirty remote node checkout as a known-good baseline
+
+### Historical Repro Commands
+
+These are the cleaned versions of the commands we were using during that debug pass:
+
+```bash
+source .env
+
+rsync -az --delete \
+  --exclude '.git' \
+  --exclude '.zig-cache' \
+  --exclude 'zig-out' \
+  --exclude 'node_modules' \
+  --exclude '.DS_Store' \
+  --exclude 'site' \
+  --exclude 'research/turboquant-pytorch-master' \
+  -e "ssh -p $ZINC_PORT" . $ZINC_USER@$ZINC_HOST:/tmp/zinc-qwen35-clean/
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST \
+  'cd /tmp/zinc-qwen35-clean && zig build -Doptimize=ReleaseFast'
+```
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST \
+  'cd /tmp/zinc-qwen35-clean && \
+   timeout 30 env ZINC_DEBUG=1 RADV_PERFTEST=coop_matrix \
+   ./zig-out/bin/zinc --profile \
+   -m /root/models/Qwen3.5-2B-Q4_K_M.gguf \
+   --prompt "The capital of France is" 2>&1 | \
+   rg --line-buffered "decode\\[0\\]|TOP5\\[0\\]|Output text:"'
+```
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST \
+  'cd /tmp/zinc-qwen35-clean && \
+   timeout 30 env ZINC_DEBUG=1 RADV_PERFTEST=coop_matrix \
+   ./zig-out/bin/zinc --profile \
+   -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+   --prompt "The capital of France is" 2>&1 | \
+   rg --line-buffered "decode\\[0\\]|TOP5\\[0\\]|Output text:"'
+```
+
 ## Best Candidate Narrative For The Article
 
 If this turns into a full article, the cleanest structure is probably:

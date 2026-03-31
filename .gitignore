@@ -2,6 +2,7 @@
 zig-cache/
 zig-out/
 .zig-cache/
+.zig-api-cache/
 *.o
 *.spv
 *.so

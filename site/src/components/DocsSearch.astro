@@ -1,0 +1,393 @@
+---
+import { randomUUID } from 'node:crypto';
+
+interface Props {
+  compact?: boolean;
+  placeholder?: string;
+}
+
+const {
+  compact = false,
+  placeholder = 'Search docs, API modules, symbols, and sections',
+} = Astro.props;
+
+const componentId = `docs-search-${randomUUID()}`;
+const endpoint = '/zinc/docs/search';
+const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
+---
+
+<section id={componentId} class:list={['docs-search', { compact }]}>
+  <label class="sr-only" for={`${componentId}-input`}>Search docs</label>
+  <div class="docs-search-shell">
+    <input
+      id={`${componentId}-input`}
+      type="search"
+      inputmode="search"
+      autocomplete="off"
+      spellcheck="false"
+      placeholder={placeholder}
+      data-docs-search-input
+    />
+  </div>
+
+  {!compact && (
+    <div class="docs-search-suggestions" data-docs-search-suggestions>
+      {suggestions.map((suggestion) => (
+        <button type="button" class="docs-search-chip" data-docs-search-chip={suggestion}>
+          {suggestion}
+        </button>
+      ))}
+    </div>
+  )}
+
+  <p class="docs-search-status" data-docs-search-status hidden></p>
+
+  <ul class="docs-search-results" data-docs-search-results hidden></ul>
+</section>
+
+<script define:vars={{ componentId, endpoint }}>
+  const root = document.getElementById(componentId);
+
+  if (root) {
+    const input = root.querySelector('[data-docs-search-input]');
+    const chips = root.querySelectorAll('[data-docs-search-chip]');
+    const status = root.querySelector('[data-docs-search-status]');
+    const results = root.querySelector('[data-docs-search-results]');
+
+    const MAX_RESULTS = 10;
+    const SEARCH_CACHE_KEY = '__zincDocsSearchIndexPromise';
+    const SEARCH_ENDPOINTS = [endpoint, `${endpoint}.json`];
+
+    const normalize = (value) =>
+      value
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const termsFor = (query) => normalize(query).split(' ').filter(Boolean);
+
+    const scoreEntry = (entry, query, terms) => {
+      const normalizedTitle = normalize(entry.title);
+      const normalizedGroup = normalize(entry.group);
+      const haystack = normalize(`${entry.title} ${entry.group} ${entry.preview} ${entry.searchText}`);
+
+      let score = 0;
+      if (normalizedTitle === query) score += 260;
+      if (normalizedTitle.startsWith(query)) score += 140;
+      if (normalizedTitle.includes(query)) score += 110;
+      if (normalizedGroup.includes(query)) score += 35;
+      if (haystack.includes(query)) score += 30;
+
+      for (const term of terms) {
+        if (normalizedTitle.includes(term)) score += 28;
+        if (normalizedGroup.includes(term)) score += 10;
+        if (haystack.includes(term)) score += 6;
+      }
+
+      if (entry.kind === 'Guide') score += 20;
+      if (entry.kind === 'Section') score += 16;
+      if (entry.kind === 'API Module') score += 12;
+      if (entry.kind === 'API Symbol') score += 8;
+      if (entry.kind === 'API Method') score += 4;
+
+      return score;
+    };
+
+    const escapeHtml = (value) =>
+      value
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+
+    const highlight = (value, terms) => {
+      let output = escapeHtml(value);
+      for (const term of [...terms].sort((a, b) => b.length - a.length)) {
+        if (!term) continue;
+        const pattern = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig');
+        output = output.replace(pattern, (match) => `<mark>${match}</mark>`);
+      }
+      return output;
+    };
+
+    const renderResults = (entries, terms) => {
+      results.innerHTML = '';
+
+      if (entries.length === 0) {
+        results.hidden = true;
+        status.hidden = false;
+        status.textContent = 'No matches yet. Try a model name, API route, module, or symbol.';
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      for (const entry of entries) {
+        const item = document.createElement('li');
+        const link = document.createElement('a');
+        const meta = document.createElement('div');
+        const title = document.createElement('strong');
+        const preview = document.createElement('p');
+
+        item.className = 'docs-search-result';
+        link.className = 'docs-search-result-link';
+        link.href = entry.url;
+
+        meta.className = 'docs-search-result-meta';
+        meta.textContent = `${entry.kind} · ${entry.group}`;
+
+        title.className = 'docs-search-result-title';
+        title.innerHTML = highlight(entry.title, terms);
+
+        preview.className = 'docs-search-result-preview';
+        preview.innerHTML = highlight(entry.preview, terms);
+
+        link.append(meta, title, preview);
+        item.append(link);
+        fragment.append(item);
+      }
+
+      results.append(fragment);
+      results.hidden = false;
+      status.hidden = false;
+      status.textContent = `${entries.length} result${entries.length === 1 ? '' : 's'}`;
+    };
+
+    const loadIndex = async () => {
+      if (!window[SEARCH_CACHE_KEY]) {
+        window[SEARCH_CACHE_KEY] = (async () => {
+          let lastError = null;
+          for (const candidate of SEARCH_ENDPOINTS) {
+            try {
+              const response = await fetch(candidate, { credentials: 'same-origin' });
+              if (!response.ok) throw new Error(`Search index request failed: ${response.status}`);
+              const payload = await response.json();
+              return Array.isArray(payload.entries) ? payload.entries : [];
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          throw lastError ?? new Error('Search index request failed');
+        })();
+      }
+      return window[SEARCH_CACHE_KEY];
+    };
+
+    const runSearch = async () => {
+      const rawQuery = input.value.trim();
+
+      if (rawQuery.length < 2) {
+        results.hidden = true;
+        results.innerHTML = '';
+        status.hidden = true;
+        return;
+      }
+
+      status.hidden = false;
+      status.textContent = 'Searching…';
+      const normalizedQuery = normalize(rawQuery);
+      const terms = termsFor(rawQuery);
+      const entries = await loadIndex();
+
+      const ranked = entries
+        .map((entry) => ({ entry, score: scoreEntry(entry, normalizedQuery, terms) }))
+        .filter((result) => result.score > 0)
+        .sort((a, b) => b.score - a.score || a.entry.title.localeCompare(b.entry.title))
+        .slice(0, MAX_RESULTS)
+        .map((result) => result.entry);
+
+      renderResults(ranked, terms);
+    };
+
+    input.addEventListener('input', () => {
+      runSearch().catch((error) => {
+        console.error(error);
+        results.hidden = true;
+        status.hidden = false;
+        status.textContent = 'Search is unavailable right now.';
+      });
+    });
+
+    chips.forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const query = chip.getAttribute('data-docs-search-chip') ?? '';
+        input.value = query;
+        input.focus();
+        runSearch().catch((error) => {
+          console.error(error);
+          results.hidden = true;
+          status.hidden = false;
+          status.textContent = 'Search is unavailable right now.';
+        });
+      });
+    });
+  }
+</script>
+
+<style>
+  .docs-search {
+    position: relative;
+  }
+
+  .docs-search-shell {
+    display: flex;
+    gap: var(--space-xs);
+    align-items: center;
+  }
+
+  .docs-search-shell input {
+    width: 100%;
+    min-width: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    padding: 0.7rem 0.95rem;
+    background: var(--color-bg-alt);
+    color: var(--color-text);
+    font: inherit;
+  }
+
+  .docs-search-shell input:focus {
+    outline: 2px solid color-mix(in srgb, var(--color-accent) 25%, transparent);
+    border-color: var(--color-accent);
+  }
+
+  .docs-search-status {
+    margin: var(--space-sm) 0 0;
+    color: var(--color-text-muted);
+    font-size: 0.82rem;
+  }
+
+  .docs-search-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-top: 0.55rem;
+  }
+
+  .docs-search-chip {
+    border: 1px solid color-mix(in srgb, var(--color-accent) 30%, var(--color-border));
+    border-radius: 999px;
+    padding: 0.14rem 0.48rem;
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    color: var(--color-accent);
+    font: inherit;
+    font-size: 0.72rem;
+    line-height: 1.2;
+    cursor: pointer;
+  }
+
+  .docs-search-chip:hover {
+    border-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+    color: var(--color-accent);
+  }
+
+  .docs-search-results {
+    list-style: none;
+    margin: var(--space-sm) 0 0;
+    padding: 0;
+    display: grid;
+    gap: var(--space-xs);
+    max-height: 28rem;
+    overflow-y: auto;
+  }
+
+  .docs-search-result {
+    margin: 0;
+  }
+
+  .docs-search-result-link {
+    display: block;
+    padding: 0.75rem 0.85rem;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    text-decoration: none;
+  }
+
+  .docs-search-result-link:hover {
+    border-color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  .docs-search-result-meta {
+    font-size: 0.72rem;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.2rem;
+  }
+
+  .docs-search-result-title {
+    display: block;
+    font-size: 0.94rem;
+    margin-bottom: 0.2rem;
+  }
+
+  .docs-search-result-preview {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--color-text-muted);
+    line-height: 1.45;
+  }
+
+  .docs-search mark {
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    color: inherit;
+    padding: 0 0.1em;
+    border-radius: 0.15em;
+  }
+
+  .docs-search.compact .docs-search-shell {
+    gap: 0;
+  }
+
+  .docs-search.compact .docs-search-shell input {
+    padding: 0.48rem 0.72rem;
+    font-size: 0.82rem;
+    border-radius: 10px;
+    background: transparent;
+  }
+
+  .docs-search.compact .docs-search-suggestions {
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+  }
+
+  .docs-search.compact .docs-search-chip {
+    padding: 0.12rem 0.38rem;
+    font-size: 0.64rem;
+  }
+
+  .docs-search.compact .docs-search-status {
+    margin-top: 0.35rem;
+    font-size: 0.72rem;
+  }
+
+  .docs-search.compact .docs-search-results {
+    margin-top: 0.4rem;
+    gap: 0.35rem;
+  }
+
+  .docs-search.compact .docs-search-result-link {
+    padding: 0.55rem 0.65rem;
+    border-radius: 8px;
+  }
+
+  .docs-search.compact .docs-search-result-meta {
+    font-size: 0.66rem;
+    margin-bottom: 0.15rem;
+  }
+
+  .docs-search.compact .docs-search-result-title {
+    font-size: 0.84rem;
+  }
+
+  .docs-search.compact .docs-search-result-preview {
+    font-size: 0.75rem;
+    line-height: 1.35;
+  }
+</style>

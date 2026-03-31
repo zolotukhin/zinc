@@ -1,6 +1,14 @@
 # Better ZINC CLI
 
-Status: draft
+Status: partially implemented
+
+Implemented as of March 30, 2026:
+
+- `zinc model rm <model-id>`
+- `zinc model rm --force <model-id>`
+- `POST /v1/models/remove`
+
+The broader document below still describes the larger managed-model direction beyond the currently shipped removal flow.
 
 This document outlines a managed-model workflow for ZINC that behaves more like a Docker image runtime than a one-off binary that needs a raw `.gguf` path every time.
 
@@ -9,6 +17,7 @@ The goal is to let a user:
 - detect the current GPU automatically
 - see only models that ZINC actually supports and has tested on that GPU class
 - download those models into a local cache directory
+- remove cached models cleanly when they are no longer needed
 - verify file integrity with a published SHA-256 before activation
 - run a chosen cached model from CLI or server mode
 - switch the active model from the CLI or the built-in chat UI
@@ -38,6 +47,7 @@ ZINC should behave like this:
 6. activate one cached model at a time
 7. let CLI and chat use that active model by default
 8. allow switching to another installed compatible model without manually editing paths
+9. remove cached models safely, with an explicit force path when the model is currently loaded in GPU memory
 
 For now, ZINC still loads one active model into memory at a time. This is the right MVP because the runtime is still effectively single-engine.
 
@@ -73,10 +83,9 @@ Example output:
 ```text
 Detected GPU profile: amd-rdna4-32gb
 
-ID                             Status      Fit    Installed   Active   Notes
-qwen35-35b-a3b-q4k-xl          supported   yes    yes         yes      tested on RDNA4 32 GB
-qwen35-14b-q4k                 supported   yes    no          no       tested on RDNA4 16 GB+
-llama33-8b-q4k                 supported   yes    yes         no       tested on RDNA4 12 GB+
+ID                             Released     Status      Fit    Installed   Active   Notes
+qwen35-2b-q4k-m                2026-02-16   supported   yes    yes         no       tested + catalog fit
+qwen35-35b-a3b-q4k-xl          2026-02-16   supported   yes    yes         yes      tested + catalog fit
 ```
 
 ### Flow 2: Pull a supported model into local cache
@@ -147,6 +156,72 @@ Expected behavior:
 - switching models calls a local ZINC admin endpoint
 - the switch drains or blocks generation during the model transition
 - after switch, the UI starts a fresh conversation because tokenizer and system behavior may differ
+
+### Flow 6: Remove a cached model
+
+Example:
+
+```bash
+zinc model rm qwen35-14b-q4k
+```
+
+Expected behavior:
+
+- ZINC resolves the managed model id and the installed cache path
+- ZINC checks whether that model is currently loaded into GPU memory by the local ZINC runtime
+- if the model is not loaded, ZINC deletes:
+  - the cached `model.gguf`
+  - the installed `manifest.json`
+  - the now-empty model cache directory if possible
+- if the removed model was the active selection, ZINC clears the active-model pointer
+
+Example output:
+
+```text
+Removing model: qwen35-14b-q4k
+Deleted: <cache-root>/models/qwen35-14b-q4k/model.gguf
+Deleted: <cache-root>/models/qwen35-14b-q4k/manifest.json
+Cleared active model selection
+Removed: qwen35-14b-q4k
+```
+
+### Flow 7: Refuse removal when the model is still loaded in VRAM
+
+Example:
+
+```bash
+zinc model rm qwen35-35b-a3b-q4k-xl
+```
+
+Expected behavior:
+
+- if the target model is the one currently loaded by the running ZINC server, the command fails closed
+- ZINC prints a clear message instead of silently deleting files that still back the active runtime
+
+Example output:
+
+```text
+Cannot remove qwen35-35b-a3b-q4k-xl: model is currently loaded in GPU memory.
+Use `zinc model rm -f qwen35-35b-a3b-q4k-xl` to unload it and delete the cached files.
+```
+
+### Flow 8: Force removal
+
+Example:
+
+```bash
+zinc model rm --force qwen35-35b-a3b-q4k-xl
+```
+
+Expected behavior:
+
+- ZINC acquires the same serialized model-switch / generation lock used for activation
+- ZINC unloads the target model from GPU memory first
+- ZINC clears the active-model pointer if it pointed at the removed model
+- ZINC then deletes the cached model files from disk
+- if the target model is currently serving requests, force removal should still wait for the active request to finish or fail with a clear busy error rather than corrupting live inference state
+
+The important rule is that `--force` is not "ignore errors and keep going." It is an explicit request to offload the model from VRAM first, then remove it from the filesystem.
 
 ## Core Concepts
 
@@ -266,7 +341,8 @@ zinc model list --all
 zinc model pull <model-id>
 zinc model use <model-id>
 zinc model installed
-zinc model remove <model-id>
+zinc model rm <model-id>
+zinc model rm --force <model-id>
 zinc model active
 ```
 
@@ -315,6 +391,7 @@ Suggested endpoints:
 
 - `POST /v1/models/pull`
 - `POST /v1/models/activate`
+- `POST /v1/models/remove`
 - `GET /v1/models/active`
 
 These are ZINC-specific operational endpoints, not strict OpenAI API compatibility endpoints.
@@ -347,6 +424,13 @@ V1 behavior should be:
 - release the lock
 
 Operationally, this is more important than making switching instant.
+
+The same lock should protect forced removal:
+
+- plain `model rm` must refuse if the target model is the current loaded model
+- `model rm --force` must acquire the generation lock
+- the runtime must offload the current model resources from GPU memory before filesystem deletion starts
+- deletion should only happen after the unload succeeds
 
 ### Chat-side consequence
 
@@ -388,6 +472,24 @@ Before activation and before server startup, ZINC should reuse the current fit-e
 - headroom threshold
 
 A pulled model may be cached but still not activatable on the current machine.
+
+### Removal safety
+
+Removal should be conservative by default.
+
+Plain `model rm` should:
+
+- fail if the model is not installed
+- fail if the model is currently loaded in VRAM
+- fail if the cache path resolves outside the managed cache root
+
+Forced `model rm --force` should:
+
+- require an exact managed model id, not an arbitrary path
+- unload the model from GPU memory first
+- clear the active selection if necessary
+- delete `model.gguf`, `manifest.json`, and the empty model directory
+- leave unrelated cache entries untouched
 
 ## Catalog Source Of Truth
 
@@ -451,18 +553,22 @@ This is the key rule: ZINC only advertises models that the project has actually 
 - add `zinc model list`
 - add `zinc model active`
 
-### Phase 2: Pull and activate
+### Phase 2: Pull, activate, and remove
 
 - add `zinc model pull <id>`
 - add `zinc model use <id>`
+- add `zinc model rm <id>`
+- add `zinc model rm --force <id>`
 - add fit validation before activation
 - add active-model config persistence
+- add cache-entry deletion helpers
 - add `--model-id` runtime selection
 
 ### Phase 3: Server and chat integration
 
 - replace single-entry `/v1/models` response with catalog-aware response
 - add `POST /v1/models/activate`
+- add `POST /v1/models/remove`
 - wire chat model selector
 - clear local conversation after switch
 - ensure switching is serialized under the existing generation lock
@@ -486,6 +592,9 @@ This is the key rule: ZINC only advertises models that the project has actually 
 - active model config read and write
 - GPU profile filtering
 - fit rejection before activation
+- installed model deletion
+- force-removal path clears active-model config when needed
+- removal refuses to delete paths outside the managed cache root
 
 ### Integration tests
 
@@ -493,6 +602,10 @@ This is the key rule: ZINC only advertises models that the project has actually 
 - pull succeeds on matching SHA-256
 - pull fails and cleans up on mismatch
 - activating an uninstalled model fails cleanly
+- removing an uninstalled model fails cleanly
+- removing an installed but unloaded model deletes the cache entry
+- removing the active loaded model fails without `--force`
+- removing the active loaded model with `--force` unloads it first, then deletes the cache entry
 - server startup uses active model when no explicit override is passed
 - chat switch endpoint changes active model and resets conversation state
 
@@ -500,6 +613,8 @@ This is the key rule: ZINC only advertises models that the project has actually 
 
 - fresh machine: list, pull, activate, prompt
 - installed machine: switch from model A to model B
+- installed machine: remove model B after switching away from it
+- installed machine: force-remove the currently active model and confirm the cache entry is gone
 - incompatible machine: cached model exists but activation is rejected
 
 ## Open Questions
@@ -517,6 +632,7 @@ If we keep the first release tight, the MVP should be:
 - local cache directory
 - SHA-256 verified `zinc model pull`
 - active model persistence
+- safe `zinc model rm`, with `--force` for VRAM-offload + delete
 - `--model-id` support
 - `/v1/models` returns installed and active state
 - chat dropdown for installed compatible models

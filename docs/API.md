@@ -18,6 +18,7 @@ export OPENAI_BASE_URL=http://localhost:8080/v1
 | POST | `/v1/completions` | Text completion |
 | GET | `/v1/models` | List managed models, fit status, install state, and the active entry |
 | POST | `/v1/models/activate` | Activate an installed managed model |
+| POST | `/v1/models/remove` | Remove a cached managed model, optionally unloading it first |
 | GET | `/health` | Server health, active requests, queued requests, and uptime |
 
 ---
@@ -219,6 +220,8 @@ Generate a text completion from a raw prompt string. Same parameters as chat com
 
 List managed models, fit status, install state, and the active entry. ZINC still loads one model into memory at a time, but this endpoint exposes the built-in managed catalog for the current server GPU profile.
 
+Each managed model object now includes `release_date` as a `YYYY-MM-DD` string sourced from the catalog metadata. Raw manually loaded models expose an empty string for that field.
+
 ### Response
 
 ```json
@@ -232,6 +235,7 @@ List managed models, fit status, install state, and the active entry. ZINC still
       "created": 1711500000,
       "owned_by": "zinc",
       "display_name": "Qwen3.5 35B-A3B UD Q4_K_XL",
+      "release_date": "2026-02-16",
       "homepage_url": "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF",
       "installed": false,
       "active": false,
@@ -240,7 +244,8 @@ List managed models, fit status, install state, and the active entry. ZINC still
       "fits_current_gpu": true,
       "required_vram_bytes": 22987514102,
       "fit_source": "catalog",
-      "status": "supported"
+      "status": "supported",
+      "supports_thinking_toggle": false
     }
   ]
 }
@@ -283,6 +288,57 @@ curl http://localhost:8080/v1/models/activate \
 
 ---
 
+## POST /v1/models/remove
+
+Remove an installed managed model from the local cache. If the target model is currently loaded by the running server, the request fails by default. Set `force: true` to unload it first and then delete the cached files.
+
+### Request
+
+```json
+{
+  "model": "qwen35-2b-q4k-m",
+  "force": false
+}
+```
+
+### Response
+
+```json
+{
+  "object": "model.remove",
+  "id": "qwen35-2b-q4k-m",
+  "removed": true,
+  "unloaded_from_gpu": false,
+  "cleared_active_selection": true,
+  "deleted_model": true,
+  "deleted_manifest": true,
+  "removed_dir": true
+}
+```
+
+### Example: curl
+
+```bash
+# Remove a cached model if it is not currently loaded
+curl http://localhost:8080/v1/models/remove \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen35-2b-q4k-m"
+  }'
+
+# Force-unload it from the running server first
+curl http://localhost:8080/v1/models/remove \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen35-2b-q4k-m",
+    "force": true
+  }'
+```
+
+Without `force`, a loaded target returns `409 Conflict` and the cached files remain untouched. After a forced remove, the server may be left with no model loaded; in that state, generation endpoints return `503` until another model is activated or the server is restarted with a model.
+
+---
+
 ## GET /health
 
 Server health check for monitoring and load balancers.
@@ -298,6 +354,8 @@ Server health check for monitoring and load balancers.
   "uptime_seconds": 3600
 }
 ```
+
+`model` is `"none"` when the server is running but no model is currently loaded.
 
 ---
 
@@ -319,6 +377,8 @@ All errors follow the OpenAI error schema:
 |--------|------|------|
 | 400 | `invalid_request_error` | Malformed JSON, missing required fields, invalid parameters |
 | 400 | `invalid_request_error` | Unknown managed model id, model not installed, or model does not fit when activating |
+| 409 | `invalid_request_error` | `POST /v1/models/remove` was asked to remove the model currently loaded by the server without `force: true` |
+| 503 | `service_unavailable` | Generation was requested while the server has no model loaded |
 | 500 | `internal_error` | GPU error, inference failure |
 
 ---

@@ -98,7 +98,7 @@ test "chat UI derives the model link from the reported model name" {
     try expectContains(src, "function scheduleHealthRefresh(delay)");
     try expectContains(src, "function refreshHealth()");
     try expectContains(src, "setModelTag(d.model)");
-    try expectContains(src, "setGpuMemory(d.gpu_memory_used_bytes||0,d.gpu_memory_budget_bytes||0);");
+    try expectContains(src, "setGpuMemory(d);");
     try expectContains(src, "restoreChatState();");
     try expectContains(src, "CB.addEventListener('click',clearConversation);");
     try expectContains(src, "setCurrentModel(current);");

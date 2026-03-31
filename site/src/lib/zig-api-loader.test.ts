@@ -75,6 +75,19 @@ describe('loadZigApi', () => {
     expect(api.modules.some(module => module.href === '/zinc/docs/zig-api/loader')).toBe(true);
   });
 
+  it('extracts struct layout metadata for rendered API docs', async () => {
+    const api = await loadZigApi();
+    const gguf = api.modules.find(module => module.slug === 'gguf');
+    const tensorInfo = gguf?.symbols.find(symbol => symbol.qualifiedName === 'TensorInfo');
+
+    expect(gguf).toBeDefined();
+    expect(tensorInfo?.symbolKind).toBe('struct');
+    expect(tensorInfo?.size).toBeGreaterThan(0);
+    expect(tensorInfo?.alignment).toBeGreaterThan(0);
+    expect(tensorInfo?.fields?.length).toBeGreaterThan(0);
+    expect(tensorInfo?.fields?.some(field => field.name === 'dims')).toBe(true);
+  });
+
   it('serializes agent-friendly JSON and text exports', async () => {
     const api = await loadZigApi();
     const payload = createZigApiAgentPayload(api, 'https://zolotukhin.ai/');

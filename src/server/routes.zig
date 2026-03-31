@@ -17,6 +17,7 @@ pub const ServerState = struct {
     started_at: i64,
     active_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     queued_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    active_context_tokens: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     generation_mutex: std.Thread.Mutex = .{},
     downloads: DownloadTracker = .{},
 
@@ -32,14 +33,24 @@ pub const ServerState = struct {
         return .{
             .active_requests = self.active_requests.load(.monotonic),
             .queued_requests = self.queued_requests.load(.monotonic),
+            .active_context_tokens = self.active_context_tokens.load(.monotonic),
             .uptime_seconds = self.uptimeSeconds(now),
         };
+    }
+
+    pub fn setActiveContextTokens(self: *ServerState, tokens: u32) void {
+        self.active_context_tokens.store(tokens, .monotonic);
+    }
+
+    pub fn clearActiveContext(self: *ServerState) void {
+        self.active_context_tokens.store(0, .monotonic);
     }
 };
 
 const HealthSnapshot = struct {
     active_requests: u32,
     queued_requests: u32,
+    active_context_tokens: u32,
     uptime_seconds: u64,
 };
 
@@ -199,6 +210,8 @@ pub fn handleConnection(
         try handleActivateModel(conn, manager, server_state, request.body);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/pull")) {
         try handlePullModel(conn, manager, server_state, request.body, allocator);
+    } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/remove")) {
+        try handleRemoveModel(conn, manager, server_state, request.body);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/completions")) {
         try handleChatCompletions(conn, manager, server_state, request.body, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/completions")) {
@@ -223,8 +236,10 @@ fn buildHealthJson(
 ) ![]const u8 {
     const now = std.time.timestamp();
     const snapshot = server_state.snapshot(now);
+    const active_context_tokens = memory_usage.activeContextTokens(snapshot.active_context_tokens);
+    const active_context_bytes = memory_usage.activeContextBytes(active_context_tokens);
     return std.fmt.bufPrint(buf,
-        \\{{"status":"ok","model":"{s}","active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d}}}
+        \\{{"status":"ok","model":"{s}","active_requests":{d},"queued_requests":{d},"uptime_seconds":{d},"gpu_memory_used_bytes":{d},"gpu_memory_budget_bytes":{d},"gpu_memory_weights_bytes":{d},"gpu_memory_runtime_bytes":{d},"gpu_context_reserved_bytes":{d},"gpu_context_active_bytes":{d},"gpu_context_tokens":{d},"gpu_context_capacity_tokens":{d}}}
     , .{
         model_name,
         snapshot.active_requests,
@@ -232,6 +247,12 @@ fn buildHealthJson(
         snapshot.uptime_seconds,
         memory_usage.device_local_bytes,
         memory_usage.device_local_budget_bytes,
+        memory_usage.weights_bytes,
+        memory_usage.runtime_device_local_bytes,
+        memory_usage.context_reserved_bytes,
+        active_context_bytes,
+        active_context_tokens,
+        memory_usage.context_capacity_tokens,
     });
 }
 
@@ -258,8 +279,18 @@ fn handleModels(
     defer body.deinit(allocator);
 
     try body.writer(allocator).print(
-        "{{\"object\":\"list\",\"profile\":\"{s}\",\"active_memory_used_bytes\":{d},\"active_memory_budget_bytes\":{d},\"data\":[",
-        .{ view.profile, memory_usage.device_local_bytes, memory_usage.device_local_budget_bytes },
+        "{{\"object\":\"list\",\"profile\":\"{s}\",\"active_memory_used_bytes\":{d},\"active_memory_budget_bytes\":{d},\"active_memory_weights_bytes\":{d},\"active_memory_runtime_bytes\":{d},\"active_context_reserved_bytes\":{d},\"active_context_active_bytes\":{d},\"active_context_tokens\":{d},\"active_context_capacity_tokens\":{d},\"data\":[",
+        .{
+            view.profile,
+            memory_usage.device_local_bytes,
+            memory_usage.device_local_budget_bytes,
+            memory_usage.weights_bytes,
+            memory_usage.runtime_device_local_bytes,
+            memory_usage.context_reserved_bytes,
+            memory_usage.activeContextBytes(server_state.active_context_tokens.load(.monotonic)),
+            memory_usage.activeContextTokens(server_state.active_context_tokens.load(.monotonic)),
+            memory_usage.context_capacity_tokens,
+        },
     );
     const ts = @divTrunc(std.time.timestamp(), 1);
     for (view.data, 0..) |entry, i| {
@@ -270,11 +301,12 @@ fn handleModels(
         const download_phase = if (is_download_target) @tagName(download.phase) else "idle";
         const download_error = if (is_download_target) download.errorMessage() else "";
         try body.writer(allocator).print(
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","display_name":"{s}","homepage_url":"{s}","installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}} 
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","display_name":"{s}","release_date":"{s}","homepage_url":"{s}","installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}} 
         , .{
             entry.id,
             ts,
             entry.display_name,
+            entry.release_date,
             entry.homepage_url,
             if (entry.installed) "true" else "false",
             if (entry.active) "true" else "false",
@@ -331,6 +363,56 @@ fn handleActivateModel(
     const response = std.fmt.bufPrint(&buf,
         \\{{"object":"model.activation","id":"{s}","active":true}}
     , .{parsed.model_id}) catch return error.BufferTooSmall;
+    try conn.sendJson(200, response);
+}
+
+fn handleRemoveModel(
+    conn: *http.Connection,
+    manager: *model_manager_mod.ModelManager,
+    server_state: *ServerState,
+    body: []const u8,
+) !void {
+    const parsed = parseJsonFields(body) catch {
+        try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
+        return;
+    };
+    if (parsed.model_id.len == 0) {
+        try conn.sendError(400, "invalid_request_error", "Field 'model' is required");
+        return;
+    }
+    if (catalog_mod.find(parsed.model_id) == null) {
+        try conn.sendError(400, "invalid_request_error", "Unknown managed model id");
+        return;
+    }
+
+    server_state.generation_mutex.lock();
+    defer server_state.generation_mutex.unlock();
+
+    const result = manager.removeManagedModel(parsed.model_id, parsed.force) catch |err| {
+        const msg = switch (err) {
+            error.ModelNotInstalled => "Model is not installed in the local cache",
+            error.ModelLoadedInGpu => "Model is currently loaded in GPU memory. Retry with force=true to unload it first.",
+            else => "Model removal failed",
+        };
+        const status: u16 = switch (err) {
+            error.ModelLoadedInGpu => 409,
+            else => 400,
+        };
+        try conn.sendError(status, "invalid_request_error", msg);
+        return;
+    };
+
+    var buf: [768]u8 = undefined;
+    const response = std.fmt.bufPrint(&buf,
+        \\{{"object":"model.remove","id":"{s}","removed":true,"unloaded_from_gpu":{s},"cleared_active_selection":{s},"deleted_model":{s},"deleted_manifest":{s},"removed_dir":{s}}}
+    , .{
+        parsed.model_id,
+        if (result.unloaded_from_gpu) "true" else "false",
+        if (result.cleared_active_selection) "true" else "false",
+        if (result.removed.deleted_model) "true" else "false",
+        if (result.removed.deleted_manifest) "true" else "false",
+        if (result.removed.removed_dir) "true" else "false",
+    }) catch return error.BufferTooSmall;
     try conn.sendJson(200, response);
 }
 
@@ -512,6 +594,15 @@ const ParsedChatRequest = struct {
         self.* = undefined;
     }
 };
+
+fn countValidChatMessages(messages: []const ChatMessage) usize {
+    var count: usize = 0;
+    for (messages) |message| {
+        if (message.role.len == 0 or message.content.len == 0) continue;
+        count += 1;
+    }
+    return count;
+}
 
 fn estimateChatPromptBytes(roles: []const []const u8, contents: []const []const u8, thinking_enabled: bool) usize {
     var total: usize = 128;
@@ -695,14 +786,17 @@ fn handleChatCompletions(
     };
     defer parsed.deinit();
 
-    if (parsed.roles.len == 0 or parsed.contents.len == 0) {
+    if (countValidChatMessages(parsed.parsed.value.messages) == 0 or parsed.roles.len == 0 or parsed.contents.len == 0) {
         try conn.sendError(400, "invalid_request_error", "Field 'messages' is required");
         return;
     }
 
     var generation_guard = GenerationGuard.acquire(server_state);
     defer generation_guard.release();
-    const resources = manager.currentResources();
+    const resources = manager.currentResources() orelse {
+        try conn.sendError(503, "service_unavailable", "No model is currently loaded");
+        return;
+    };
     const engine = &resources.engine;
     const tokenizer = &resources.tokenizer;
     const model_name = resources.display_name;
@@ -744,10 +838,12 @@ fn handleChatCompletions(
     };
     errdefer allocator.free(prompt_tokens);
     defer allocator.free(prompt_tokens);
+    defer server_state.clearActiveContext();
     if (prompt_tokens.len == 0) {
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
     }
+    server_state.setActiveContextTokens(@intCast(@min(prompt_tokens.len, std.math.maxInt(u32))));
 
     const ts = @divTrunc(std.time.timestamp(), 1);
     const max_tokens = parsed.max_tokens;
@@ -782,6 +878,7 @@ fn handleChatCompletions(
             conn.writeSseDone() catch {};
             return;
         };
+        server_state.setActiveContextTokens(state.position);
         if (conn.isPeerClosed()) return;
 
         // Decode loop with buffered stop detection.
@@ -810,6 +907,7 @@ fn handleChatCompletions(
                     if (generated < max_tokens) {
                         if (conn.isPeerClosed()) return;
                         engine.decodeStep(&state, prev_token, true) catch break;
+                        server_state.setActiveContextTokens(state.position);
                         if (conn.isPeerClosed()) return;
                         prev_token = engine.sample(&state, sampling, random);
                         generated += 1;
@@ -867,6 +965,7 @@ fn handleChatCompletions(
                 if (generated < max_tokens) {
                     if (conn.isPeerClosed()) return;
                     engine.decodeStep(&state, prev_token, true) catch break;
+                    server_state.setActiveContextTokens(state.position);
                     if (conn.isPeerClosed()) return;
                     prev_token = engine.sample(&state, sampling, random);
                 } else break;
@@ -904,6 +1003,7 @@ fn handleChatCompletions(
             try conn.sendError(500, "internal_error", "Prefill failed");
             return;
         };
+        server_state.setActiveContextTokens(state2.position);
         var text_buf: std.ArrayList(u8) = .{};
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
@@ -917,6 +1017,7 @@ fn handleChatCompletions(
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
                     engine.decodeStep(&state2, prev, true) catch break;
+                    server_state.setActiveContextTokens(state2.position);
                     prev = engine.sample(&state2, sampling, random);
                     continue;
                 }
@@ -929,6 +1030,7 @@ fn handleChatCompletions(
                 if (hit) break;
                 if (ns_gen >= max_tokens) break;
                 engine.decodeStep(&state2, prev, true) catch break;
+                server_state.setActiveContextTokens(state2.position);
                 prev = engine.sample(&state2, sampling, random);
             }
             if (prev != ns_eos and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
@@ -979,7 +1081,10 @@ fn handleCompletions(
 
     var generation_guard = GenerationGuard.acquire(server_state);
     defer generation_guard.release();
-    const resources = manager.currentResources();
+    const resources = manager.currentResources() orelse {
+        try conn.sendError(503, "service_unavailable", "No model is currently loaded");
+        return;
+    };
     const tokenizer = &resources.tokenizer;
     const engine = &resources.engine;
     const model_name = resources.display_name;
@@ -990,10 +1095,12 @@ fn handleCompletions(
         return;
     };
     defer allocator.free(prompt_tokens);
+    defer server_state.clearActiveContext();
     if (prompt_tokens.len == 0) {
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
     }
+    server_state.setActiveContextTokens(@intCast(@min(prompt_tokens.len, std.math.maxInt(u32))));
 
     const ts = @divTrunc(std.time.timestamp(), 1);
     const req_id = "cmpl-zinc0001";
@@ -1037,6 +1144,7 @@ const ParsedRequest = struct {
     prompt_text: []const u8, // raw prompt for /v1/completions
     max_tokens: u32,
     stream: bool,
+    force: bool,
     temperature: f32,
     enable_thinking: ?bool,
 };
@@ -1048,6 +1156,7 @@ fn parseJsonFields(body: []const u8) !ParsedRequest {
         .prompt_text = "",
         .max_tokens = 256,
         .stream = false,
+        .force = false,
         .temperature = 1.0,
         .enable_thinking = null,
     };
@@ -1057,6 +1166,12 @@ fn parseJsonFields(body: []const u8) !ParsedRequest {
         std.mem.indexOf(u8, body, "\"stream\": true") != null)
     {
         result.stream = true;
+    }
+
+    if (std.mem.indexOf(u8, body, "\"force\":true") != null or
+        std.mem.indexOf(u8, body, "\"force\": true") != null)
+    {
+        result.force = true;
     }
 
     if (std.mem.indexOf(u8, body, "\"enable_thinking\":true") != null or
@@ -1259,6 +1374,11 @@ test "parseJsonFields extracts stream flag" {
     try std.testing.expect(parsed.stream);
     try std.testing.expectEqualStrings("hello", parsed.messages_content);
     try std.testing.expect(parsed.enable_thinking == null);
+}
+
+test "parseJsonFields extracts force flag" {
+    const parsed = try parseJsonFields("{\"model\":\"qwen\",\"force\": true}");
+    try std.testing.expect(parsed.force);
 }
 
 test "parseJsonFields extracts max_tokens" {
@@ -1521,6 +1641,25 @@ test "parseChatRequest defaults to greedy temperature when omitted" {
     try std.testing.expectEqual(@as(f32, 0.0), parsed.temperature);
 }
 
+test "countValidChatMessages ignores empty entries" {
+    const messages = [_]ChatMessage{
+        .{ .role = "", .content = "ignored" },
+        .{ .role = "user", .content = "" },
+        .{ .role = "user", .content = "hello" },
+    };
+    try std.testing.expectEqual(@as(usize, 1), countValidChatMessages(&messages));
+}
+
+test "parseChatRequest leaves empty message array empty before validation" {
+    const body = "{}";
+    var parsed = try parseChatRequest(std.testing.allocator, body);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), countValidChatMessages(parsed.parsed.value.messages));
+    try std.testing.expectEqual(@as(usize, 1), parsed.roles.len);
+    try std.testing.expectEqualStrings("system", parsed.roles[0]);
+}
+
 test "prefixThinkingEnvelope adds think prefix when enabled" {
     var buf: [128]u8 = undefined;
     const prefixed = try prefixThinkingEnvelope("17 * 24 = 408\n</think>\n408", true, &buf);
@@ -1558,10 +1697,12 @@ test "ServerState snapshot tracks active queued and uptime" {
     var state = ServerState.init(100);
     _ = state.active_requests.fetchAdd(1, .monotonic);
     _ = state.queued_requests.fetchAdd(2, .monotonic);
+    state.setActiveContextTokens(1536);
 
     const snapshot = state.snapshot(112);
     try std.testing.expectEqual(@as(u32, 1), snapshot.active_requests);
     try std.testing.expectEqual(@as(u32, 2), snapshot.queued_requests);
+    try std.testing.expectEqual(@as(u32, 1536), snapshot.active_context_tokens);
     try std.testing.expectEqual(@as(u64, 12), snapshot.uptime_seconds);
 }
 
@@ -1569,9 +1710,15 @@ test "buildHealthJson includes request counts and uptime" {
     var state = ServerState.init(std.time.timestamp() - 5);
     _ = state.active_requests.fetchAdd(1, .monotonic);
     _ = state.queued_requests.fetchAdd(1, .monotonic);
+    state.setActiveContextTokens(1024);
 
-    var buf: [256]u8 = undefined;
+    var buf: [1024]u8 = undefined;
     const body = try buildHealthJson(&state, "qwen3.5-35b", .{
+        .weights_bytes = 20 * 1024 * 1024 * 1024,
+        .runtime_device_local_bytes = 1024 * 1024 * 1024,
+        .context_reserved_bytes = 768 * 1024 * 1024,
+        .context_capacity_tokens = 4096,
+        .context_bytes_per_token = 192 * 1024,
         .device_local_bytes = 21 * 1024 * 1024 * 1024,
         .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
     }, &buf);
@@ -1582,6 +1729,10 @@ test "buildHealthJson includes request counts and uptime" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"uptime_seconds\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_memory_used_bytes\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_memory_budget_bytes\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_reserved_bytes\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_active_bytes\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_tokens\":1024") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_capacity_tokens\":4096") != null);
 }
 
 test "findFirstStop picks earliest chat control marker" {

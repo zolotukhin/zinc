@@ -10,6 +10,64 @@ import rehypeKatex from 'rehype-katex';
 import rehypeShiki from '@shikijs/rehype';
 import rehypeStringify from 'rehype-stringify';
 
+function extractHeadingText(node: any): string {
+  if (!node || typeof node !== 'object') return '';
+  if (node.type === 'text' || node.type === 'inlineCode') return String(node.value ?? '');
+  if (!Array.isArray(node.children)) return '';
+  return node.children.map(extractHeadingText).join('');
+}
+
+function slugifyHeading(text: string): string {
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'section';
+}
+
+function rehypeDocHeadingAnchors() {
+  return (tree: any) => {
+    const seen = new Map<string, number>();
+
+    const walk = (node: any) => {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'element' && typeof node.tagName === 'string' && /^h[1-6]$/.test(node.tagName)) {
+        const headingText = extractHeadingText(node).trim();
+        if (headingText.length > 0) {
+          const existingId = typeof node.properties?.id === 'string' ? node.properties.id : null;
+          let slug = existingId ?? slugifyHeading(headingText);
+          if (!existingId) {
+            const count = seen.get(slug) ?? 0;
+            seen.set(slug, count + 1);
+            if (count > 0) slug = `${slug}-${count + 1}`;
+          }
+          node.properties = { ...(node.properties ?? {}), id: slug };
+          node.children = [
+            ...(node.children ?? []),
+            {
+              type: 'element',
+              tagName: 'a',
+              properties: {
+                href: `#${slug}`,
+                className: ['heading-anchor'],
+                'aria-label': `Link to section ${headingText}`,
+              },
+              children: [{ type: 'text', value: '#' }],
+            },
+          ];
+        }
+      }
+      if (Array.isArray(node.children)) {
+        for (const child of node.children) walk(child);
+      }
+    };
+
+    walk(tree);
+  };
+}
+
 export async function getStaticPaths() {
   const docMeta: Record<string, { title: string; description: string; keywords: string }> = {
     'getting-started': {
@@ -88,6 +146,7 @@ const contentHtml = String(
       },
       langs: ['zig', 'glsl', 'json', 'bash', 'typescript', 'javascript', 'text', 'c'],
     })
+    .use(rehypeDocHeadingAnchors)
     .use(rehypeStringify)
     .process(content)
 );
