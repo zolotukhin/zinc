@@ -2,7 +2,11 @@
 zig-cache/
 zig-out/
 .zig-cache/
+.zig-cache-local/
+.zig-global-cache-local/
 .zig-api-cache/
+.zig-struct-analyzer.generated.zig
+.tmp_gguf_inspect.zig
 *.o
 *.spv
 *.so
@@ -35,6 +39,8 @@ bun.lockb
 # OS
 .DS_Store
 Thumbs.db
+.clang-module-cache/
 
 research/turboquant-pytorch-master/
+research/__pycache__/
 .metal_optimize/
