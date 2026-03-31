@@ -272,6 +272,7 @@ curl -N http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "qwen3.5-35b",
     "messages": [{"role": "user", "content": "Hello!"}],
+    "enable_thinking": true,
     "stream": true,
     "max_tokens": 256
   }'
@@ -285,9 +286,12 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "qwen3.5-35b",
     "messages": [{"role": "user", "content": "What is 2+2?"}],
+    "enable_thinking": true,
     "max_tokens": 32
   }'
 ```
+
+`enable_thinking` only has an effect when the active model's chat template exposes a thinking toggle. In the built-in chat UI, the Thinking checkbox is shown only for models that report this capability.
 
 ### List models
 

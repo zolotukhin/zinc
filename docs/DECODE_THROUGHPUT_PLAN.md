@@ -27,8 +27,10 @@ After clearing the RDNA4 node of competing `zinc` and `llama` processes and re-r
 - clean `ReleaseFast` CLI run: `33.58 tok/s`
 - raw `/v1/completions` on the same server path: `33.55 tok/s`
 - raw `/v1/completions` at `concurrency=4`: `33.98 tok/s` aggregate
-- one longer reasoning chat sample: `28.40 tok/s`
+- 3-prompt reasoning chat matrix: `24.94–28.56 tok/s` (about `26.92 tok/s` average)
 - modeled decode bandwidth at `33.58 tok/s`: `112.5 GB/s`, about `19.5%` of `576 GB/s`
+
+The `33.58/33.55/33.98 tok/s` figures above are plain decode numbers, not thinking-enabled runs. The closest current proxy for a thinking-style workload is the reasoning-chat matrix.
 
 This means the current tree already exceeds the old `15 tok/s` target and also clears the new `30 tok/s` target on the raw decode path.
 The remaining gap is no longer "how do we get above 15"; it is "how do we keep reasoning chat above 30 and drive utilization higher without regressing quality."
@@ -68,7 +70,7 @@ It does not represent full-token decode traffic. Treating it as whole-model memo
 
 The decode graph artifact at `/tmp/zinc-decode-graph.json` models roughly `3.35 GB/token` for this graph. Using that model:
 
-- `28.40 tok/s` implies about `95 GB/s`
+- `24.94–28.56 tok/s` implies about `84–96 GB/s`
 - `33.58 tok/s` implies about `112.5 GB/s`
 - `112.5 GB/s` is only about `19.5%` of `576 GB/s`
 
@@ -134,26 +136,26 @@ Concrete work:
 
 Expected result:
 
-- clean benchmark stays around `10.5-11 tok/s`
-- profiling overhead drops materially from the current `5.52 tok/s` path
-- future optimization work gets trustworthy before/after measurements
+- clean ReleaseFast benchmark stays near the current `33+ tok/s` raw-decode path
+- profiling overhead drops enough to make profile-vs-clean comparisons trustworthy again
+- future optimization work gets honest before/after measurements instead of stale debug-path numbers
 
-### Phase 2. Remove obvious per-token tail overhead
+### Phase 2. Close the reasoning-chat gap
 
 Objective:
 
-- reduce CPU-visible tail work after GPU decode
+- make `/v1/chat/completions` materially closer to raw `/v1/completions`
 
 Concrete work:
 
-1. Move greedy argmax fully onto the GPU using the existing `argmax` shader path
-2. Stop copying full logits back for greedy sampling
-3. Keep full logits readback only for explicit diagnostics modes
+1. benchmark longer reasoning prompts across raw and chat paths
+2. measure template, stop-sequence, and server-side framing overhead separately
+3. keep raw decode wins while lifting non-streaming reasoning chat above `30 tok/s` on the 35B model
 
 Expected result:
 
-- small but real single-stream gain
-- lower per-token CPU synchronization pressure
+- chat throughput no longer lags raw decode by `15–25%`
+- better explanation of where chat latency is going today
 
 ### Phase 3. Reduce Vulkan setup overhead
 
@@ -186,7 +188,7 @@ Expected result:
 
 - better effective memory locality
 - fewer dispatches and barriers
-- best path from `10-11` toward `12-15 tok/s`
+- best path from the current `33+ tok/s` raw decode toward higher single-stream throughput on the 35B path
 
 ### Phase 5. Retune kernels by actual decode shapes
 
@@ -210,22 +212,25 @@ Expected result:
 
 ### Short term
 
-- clean no-debug CLI benchmark reproducibly above `15 tok/s`
+- clean no-debug 35B CLI benchmark reproducibly above `30 tok/s`
 - profile mode stays near clean-mode throughput
 - loop benchmarks clean decode instead of debug decode
+- non-streaming 35B reasoning chat consistently lands above the current `24.94–28.56 tok/s` band
 
 ### Medium term
 
-- stable `20+ tok/s` on the RDNA4 node for this model
+- stable `30+ tok/s` on the RDNA4 node for the 35B raw-decode path
 - profile output identifies full-token GPU time with low perturbation
+- reasoning chat crosses `30 tok/s` on the 35B model
 
 ### Long term
 
-- `25+ tok/s` single stream
+- materially higher aggregate throughput and bandwidth utilization through batching/concurrency
 - separate server-mode work for aggregate throughput and higher bandwidth utilization via concurrency
 
 ## Notes
 
 - The loop appearing "stuck at 7 tok/s" was partly a tooling problem, not only a kernel problem.
-- The current clean build now exceeds `22 tok/s` on the idle RDNA4 node; the next step is to make that the default measured baseline and then improve from there.
+- The current clean build now measures `33.58 tok/s` on Qwen3.5-35B-A3B-UD and `22.93 tok/s` on Qwen3.5-2B-Q4_K_M on the idle RDNA4 node, but those are plain decode numbers rather than reasoning-chat numbers.
+- The fact that the smaller 2B model is slower than the 35B MoE model is a useful signal: today's performance is governed by actual decode kernel regimes and model structure, not only weight bytes.
 - Full memory-bandwidth saturation should not be used as the single-stream success metric for this workload.

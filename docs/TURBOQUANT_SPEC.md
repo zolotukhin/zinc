@@ -1,5 +1,7 @@
 # TurboQuant KV Cache Compression — ZINC Implementation Spec
 
+> This is a forward-looking implementation spec. Capacity and concurrency examples in this document describe the intended effect of TurboQuant, not the current public ZINC throughput baseline.
+
 ## Overview
 
 TurboQuant (ICLR 2026) is a two-stage vector quantization algorithm that compresses LLM key-value caches to 2-4 bits per coordinate with minimal impact on attention accuracy. At 3-bit, a 289 MB KV cache (8K context, 36-layer model) shrinks to 58 MB — a 5x reduction that directly translates to longer contexts or more concurrent requests on the same GPU.

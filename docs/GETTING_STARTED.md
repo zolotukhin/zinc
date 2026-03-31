@@ -28,7 +28,14 @@ ZINC is currently aimed at:
 | LLaMA / Mistral | [LLaMA 3.1 8B](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF), [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.3) |
 | Mamba / Jamba (SSM) | [Jamba-v0.1](https://huggingface.co/ai21labs/Jamba-v0.1) |
 
-The primary test model is **Qwen3.5-35B-A3B** — download [Q4_K_XL from unsloth](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) (21 GB, fits in 32 GB VRAM).
+### Validated models
+
+This list is intentionally narrow. It shows the exact GGUFs that have been revalidated in ZINC, not a broader architecture wishlist.
+
+| Model | Exact GGUF |
+|------|------------|
+| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
 
 macOS can build the project, but it is not the target environment for actual ZINC GPU inference. If you want the shortest path to success, use Linux on AMD hardware.
 

@@ -1,5 +1,7 @@
 # RDNA4 Tuning Guide
 
+> This guide mixes general RDNA4 platform findings, driver/toolchain notes, and external baseline measurements. Treat it as tuning context, not as the current ZINC benchmark leaderboard.
+
 Findings from extensive profiling of LLM inference on AMD Radeon AI PRO R9700 (RDNA4, gfx1201).
 
 ## Hardware Specifications

@@ -37,6 +37,7 @@ Generate a chat completion from a conversation. Supports both streaming (SSE) an
   ],
   "max_tokens": 256,
   "temperature": 0.7,
+  "enable_thinking": true,
   "top_p": 0.9,
   "stream": true,
   "stop": ["\n\n"]
@@ -49,9 +50,12 @@ Generate a chat completion from a conversation. Supports both streaming (SSE) an
 | `messages` | array | required | Conversation messages with `role` and `content` |
 | `max_tokens` | integer | 256 | Maximum tokens to generate |
 | `temperature` | float | 1.0 | Sampling temperature. `0` = greedy (deterministic) |
+| `enable_thinking` | boolean | false | When the active model's chat template supports it, request an open `<think>` block instead of the no-thinking generation suffix |
 | `top_p` | float | 1.0 | Nucleus sampling threshold |
 | `stream` | boolean | false | Enable Server-Sent Events streaming |
 | `stop` | string or array | null | Stop sequence(s) to halt generation |
+
+`enable_thinking` is currently model-dependent. Qwen-style templates that expose `enable_thinking` and `<think>` honor it; models without that template support ignore the flag.
 
 #### Message roles
 
@@ -110,7 +114,8 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "qwen",
     "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 128
+    "max_tokens": 128,
+    "enable_thinking": true
   }'
 
 # Streaming
@@ -120,6 +125,7 @@ curl -N http://localhost:8080/v1/chat/completions \
     "model": "qwen",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 128,
+    "enable_thinking": true,
     "stream": true
   }'
 ```
@@ -139,6 +145,7 @@ const response = await client.chat.completions.create({
   model: "qwen",
   messages: [{ role: "user", content: "What is 2+2?" }],
   max_tokens: 128,
+  enable_thinking: true,
 });
 console.log(response.choices[0].message.content);
 
@@ -147,6 +154,7 @@ const stream = await client.chat.completions.create({
   model: "qwen",
   messages: [{ role: "user", content: "Explain gravity" }],
   max_tokens: 256,
+  enable_thinking: true,
   stream: true,
 });
 for await (const chunk of stream) {

@@ -31,7 +31,7 @@ The same coding agent gave us two completely different outcomes. In one ZINC loo
 
 That is why [Karpathy's `autoresearch`](https://github.com/karpathy/autoresearch) is spreading so fast. On March 28, 2026, its GitHub page showed **59.4k stars and 8.2k forks**. The repo makes the whole idea legible: give an agent a small but real training harness, make it edit one file, evaluate on a fixed budget, keep the good mutations, and discard the bad ones. The README and [`program.md`](https://github.com/karpathy/autoresearch/blob/master/program.md) reduce "AI self-improve" from a slogan into an operating loop.
 
-We have been building a much harsher version of that idea in ZINC. Our loop lives in [`loops/optimize_zinc.ts`](https://github.com/zolotukhin/zinc/blob/main/loops/optimize_zinc.ts), and the ugly details are in [`writing/LOOP_CHALLENGES.md`](https://github.com/zolotukhin/zinc/blob/main/writing/LOOP_CHALLENGES.md). It does not mutate a single Python file and read back one loss number. It edits Zig and GLSL, syncs them to a remote AMD GPU node, builds on the target machine, runs real inference, checks whether the output got more coherent or more broken, and only advances when the hardware says yes.
+We have been building a much harsher version of that idea in ZINC. Our loop lives in [`loops/optimize_zinc.ts`](https://github.com/zolotukhin/zinc/blob/main/loops/optimize_zinc.ts). It does not mutate a single Python file and read back one loss number. It edits Zig and GLSL, syncs them to a remote AMD GPU node, builds on the target machine, runs real inference, checks whether the output got more coherent or more broken, and only advances when the hardware says yes.
 
 That distinction matters. A self-improving AI loop is not mystical recursion. It is a controlled search process with four hard properties: a bounded mutation surface, an evaluator you trust, memory across attempts, and a cheap way to revert bad ideas. When those four properties are present, the development cycle gets much shorter without pretending the underlying engineering got easy.
 
@@ -123,7 +123,7 @@ That is not glamorous code, but it is one of the main reasons Run 3 behaved so d
 
 ## How much the cycle actually shrank
 
-The cleanest proof came from the three major runs in [`LOOP_CHALLENGES.md`](https://github.com/zolotukhin/zinc/blob/main/writing/LOOP_CHALLENGES.md). The first run focused on DMMV performance and kept 9 of 29 cycles. The second run used a weak prompt with poor architectural context and kept 0 of 43. The third run carried full architecture notes, failed approaches, previously fixed bugs, and the agent's own self-analysis, and kept 40 of 44.
+The cleanest proof came from three major runs of the loop itself. The first run focused on DMMV performance and kept 9 of 29 cycles. The second run used a weak prompt with poor architectural context and kept 0 of 43. The third run carried full architecture notes, failed approaches, previously fixed bugs, and the agent's own self-analysis, and kept 40 of 44.
 
 That difference is why I take the loop seriously. The step change did not come from swapping models or adding more hype. It came from making the controller more honest about the problem.
 

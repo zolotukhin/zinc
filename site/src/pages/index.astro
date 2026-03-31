@@ -28,7 +28,7 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
   <section class="project-highlight">
     <a href="/zinc" class="project-card">
       <h2>ZINC</h2>
-      <p>AMD consumer GPUs are fast enough for local LLM inference, but the software stack ignores them. ZINC fixes that with hand-tuned Vulkan shaders, continuous batching, and TurboQuant KV compression. 110+ tok/s on the AI PRO R9700.</p>
+      <p>AMD consumer GPUs are fast enough for local LLM inference, but the software stack ignores them. ZINC is the Zig + Vulkan engine I am building for that gap. Current validated plain-decode numbers on the AI PRO R9700 are 33.58 tok/s on Qwen3.5-35B-A3B-UD and 22.93 tok/s on Qwen3.5-2B-Q4_K_M.</p>
       <span class="project-link">Learn more &rarr;</span>
     </a>
   </section>
