@@ -32,6 +32,7 @@ pub const ModelSummary = struct {
     required_vram_bytes: u64,
     exact_fit: bool,
     status_label: []const u8,
+    supports_thinking_toggle: bool,
 };
 
 pub const ModelCatalogView = struct {
@@ -132,6 +133,7 @@ pub const ModelManager = struct {
         const profile = catalog_mod.profileForGpu(self.gpu_config);
         const active_managed_id = self.current.managed_id;
         const active_display_name = self.current.display_name;
+        const active_supports_thinking_toggle = self.current.tokenizer.supportsThinkingToggle();
 
         var list: std.ArrayList(ModelSummary) = .{};
         defer list.deinit(allocator);
@@ -167,6 +169,7 @@ pub const ModelManager = struct {
                 .required_vram_bytes = fit.required_vram_bytes,
                 .exact_fit = fit.exact,
                 .status_label = status_label,
+                .supports_thinking_toggle = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id) and active_supports_thinking_toggle,
             });
         }
 
@@ -183,6 +186,7 @@ pub const ModelManager = struct {
                 .required_vram_bytes = 0,
                 .exact_fit = true,
                 .status_label = "raw",
+                .supports_thinking_toggle = active_supports_thinking_toggle,
             });
         }
 
@@ -316,7 +320,26 @@ test "collectCatalogView marks active managed model" {
     };
     var current = LoadedResources{
         .model = undefined,
-        .tokenizer = undefined,
+        .tokenizer = .{
+            .vocab = &.{},
+            .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+            .merges = &.{},
+            .scores = null,
+            .bos_id = 1,
+            .eos_id = 2,
+            .prepend_bos = true,
+            .chat_template =
+            \\{%- if add_generation_prompt %}
+            \\  {{- '<|im_start|>assistant\n' }}
+            \\  {%- if enable_thinking is defined and enable_thinking is true %}
+            \\    {{- '<think>\n' }}
+            \\  {%- else %}
+            \\    {{- '<think>\n\n</think>\n\n' }}
+            \\  {%- endif %}
+            \\{%- endif %}
+            ,
+            .allocator = std.testing.allocator,
+        },
         .engine = undefined,
         .model_path = try std.testing.allocator.dupe(u8, "/tmp/test.gguf"),
         .managed_id = try std.testing.allocator.dupe(u8, "qwen35-35b-a3b-q4k-xl"),
@@ -326,6 +349,7 @@ test "collectCatalogView marks active managed model" {
     };
     fake.current = &current;
     defer {
+        fake.current.tokenizer.token_to_id.deinit();
         std.testing.allocator.free(fake.current.model_path);
         if (fake.current.managed_id) |id| std.testing.allocator.free(id);
         std.testing.allocator.free(fake.current.display_name);
@@ -340,6 +364,7 @@ test "collectCatalogView marks active managed model" {
         if (std.mem.eql(u8, entry.id, "qwen35-35b-a3b-q4k-xl")) {
             saw_active = true;
             try std.testing.expect(entry.active);
+            try std.testing.expect(entry.supports_thinking_toggle);
         }
     }
     try std.testing.expect(saw_active);

@@ -52,6 +52,17 @@ pub const DecodeState = struct {
     }
 };
 
+pub const SamplingParams = struct {
+    temperature: f32 = 0.0,
+    top_p: f32 = 1.0,
+    repetition_penalty: f32 = 1.0,
+    top_k: u32 = 64,
+
+    pub fn requiresLogitsReadback(self: @This()) bool {
+        return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Quantization helpers for CPU-side embedding lookup
 // ---------------------------------------------------------------------------
@@ -2842,6 +2853,109 @@ pub const InferenceEngine = struct {
     // Sampling
     // -----------------------------------------------------------------------
 
+    fn tokenSeen(history: []const u32, token: u32) bool {
+        for (history) |seen| {
+            if (seen == token) return true;
+        }
+        return false;
+    }
+
+    fn adjustedLogit(logit: f32, token: u32, history: []const u32, repetition_penalty: f32) f32 {
+        if (repetition_penalty <= 1.0001 or !tokenSeen(history, token)) return logit;
+        if (logit >= 0) return logit / repetition_penalty;
+        return logit * repetition_penalty;
+    }
+
+    fn argmaxFromLogits(logits: []const f32, history: []const u32, repetition_penalty: f32) u32 {
+        if (logits.len == 0) return 0;
+        var best_idx: u32 = 0;
+        var best_val = adjustedLogit(logits[0], 0, history, repetition_penalty);
+        for (logits[1..], 1..) |raw_val, i| {
+            const val = adjustedLogit(raw_val, @intCast(i), history, repetition_penalty);
+            if (val > best_val) {
+                best_val = val;
+                best_idx = @intCast(i);
+            }
+        }
+        return best_idx;
+    }
+
+    fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random) u32 {
+        if (logits.len == 0) return 0;
+        if (!params.requiresLogitsReadback()) return argmaxFromLogits(logits, history, 1.0);
+        if (params.temperature <= 0.0001) {
+            return argmaxFromLogits(logits, history, params.repetition_penalty);
+        }
+
+        const max_candidates = 128;
+        const top_k: usize = @min(@max(params.top_k, 1), max_candidates);
+        const safe_top_p = std.math.clamp(params.top_p, 0.0, 1.0);
+        const temperature = @max(params.temperature, 0.0001);
+
+        var candidate_ids: [max_candidates]u32 = undefined;
+        var candidate_logits: [max_candidates]f32 = undefined;
+        var candidate_count: usize = 0;
+
+        for (logits, 0..) |raw_val, i| {
+            if (!std.math.isFinite(raw_val)) continue;
+            const token_id: u32 = @intCast(i);
+            const val = adjustedLogit(raw_val, token_id, history, params.repetition_penalty);
+
+            var insert_at = candidate_count;
+            while (insert_at > 0 and val > candidate_logits[insert_at - 1]) : (insert_at -= 1) {}
+            if (insert_at >= top_k) continue;
+
+            if (candidate_count < top_k) {
+                candidate_count += 1;
+            }
+
+            var j = candidate_count - 1;
+            while (j > insert_at) : (j -= 1) {
+                candidate_ids[j] = candidate_ids[j - 1];
+                candidate_logits[j] = candidate_logits[j - 1];
+            }
+            candidate_ids[insert_at] = token_id;
+            candidate_logits[insert_at] = val;
+        }
+
+        if (candidate_count == 0) return 0;
+        if (candidate_count == 1) return candidate_ids[0];
+
+        var weights: [max_candidates]f64 = undefined;
+        const max_logit = @as(f64, candidate_logits[0]) / @as(f64, temperature);
+        var total_weight: f64 = 0.0;
+        for (0..candidate_count) |i| {
+            const scaled = @as(f64, candidate_logits[i]) / @as(f64, temperature);
+            const weight = @exp(scaled - max_logit);
+            weights[i] = weight;
+            total_weight += weight;
+        }
+        if (!(total_weight > 0.0) or !std.math.isFinite(total_weight)) return candidate_ids[0];
+
+        var keep_count = candidate_count;
+        if (safe_top_p < 0.9999) {
+            var cumulative: f64 = 0.0;
+            for (0..candidate_count) |i| {
+                cumulative += weights[i] / total_weight;
+                keep_count = i + 1;
+                if (cumulative >= @as(f64, safe_top_p) and i > 0) break;
+            }
+        }
+
+        var kept_weight: f64 = 0.0;
+        for (0..keep_count) |i| kept_weight += weights[i];
+        if (!(kept_weight > 0.0) or !std.math.isFinite(kept_weight)) return candidate_ids[0];
+
+        const target = random.float(f64) * kept_weight;
+        var cumulative: f64 = 0.0;
+        for (0..keep_count) |i| {
+            cumulative += weights[i];
+            if (target <= cumulative) return candidate_ids[i];
+        }
+
+        return candidate_ids[keep_count - 1];
+    }
+
     /// Sample a token greedily. Uses GPU argmax when available, otherwise falls back to CPU scan.
     pub fn sampleGreedy(self: *const InferenceEngine) u32 {
         if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
@@ -2862,6 +2976,16 @@ pub const InferenceEngine = struct {
             }
         }
         return max_idx;
+    }
+
+    /// Sample a token using either the GPU argmax fast path or host logits sampling.
+    pub fn sample(self: *const InferenceEngine, state: *const DecodeState, params: SamplingParams, random: std.Random) u32 {
+        if (!params.requiresLogitsReadback()) return self.sampleGreedy();
+
+        const vocab_size = self.model.config.vocab_size;
+        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+        const logits = logits_ptr[0..vocab_size];
+        return sampleFromLogits(logits, state.generated_tokens.items, params, random);
     }
 
     // -----------------------------------------------------------------------
@@ -3603,6 +3727,42 @@ test "expertSliceBytes computes correct byte offsets for Q5_K" {
     // bytes = 2048 * 2 * 176 = 720,896
     const result = expertSliceBytes(.q5_k, 2048, 512);
     try std.testing.expectEqual(@as(u32, 720_896), result);
+}
+
+test "SamplingParams requires logits readback for non-greedy decoding" {
+    try std.testing.expect(!(SamplingParams{}).requiresLogitsReadback());
+    try std.testing.expect((SamplingParams{ .temperature = 0.7 }).requiresLogitsReadback());
+    try std.testing.expect((SamplingParams{ .top_p = 0.9 }).requiresLogitsReadback());
+    try std.testing.expect((SamplingParams{ .repetition_penalty = 1.1 }).requiresLogitsReadback());
+}
+
+test "sampleFromLogits greedy path returns argmax" {
+    const logits = [_]f32{ 0.5, 2.0, 1.25 };
+    var prng = std.Random.DefaultPrng.init(1234);
+    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{}, prng.random());
+    try std.testing.expectEqual(@as(u32, 1), token);
+}
+
+test "sampleFromLogits repetition penalty can break a simple loop" {
+    const logits = [_]f32{ 10.0, 9.0, 1.0 };
+    const history = [_]u32{0, 0, 0};
+    var prng = std.Random.DefaultPrng.init(42);
+    const token = InferenceEngine.sampleFromLogits(&logits, &history, .{
+        .temperature = 0.0,
+        .repetition_penalty = 2.0,
+    }, prng.random());
+    try std.testing.expectEqual(@as(u32, 1), token);
+}
+
+test "sampleFromLogits top_p keeps only the highest-probability token when threshold is low" {
+    const logits = [_]f32{ 8.0, 5.0, 1.0 };
+    var prng = std.Random.DefaultPrng.init(7);
+    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{
+        .temperature = 0.8,
+        .top_p = 0.5,
+        .top_k = 8,
+    }, prng.random());
+    try std.testing.expectEqual(@as(u32, 0), token);
 }
 
 // ---------------------------------------------------------------------------

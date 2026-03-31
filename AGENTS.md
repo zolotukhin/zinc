@@ -293,10 +293,13 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
 
 Reference result from a clean RDNA4 node on 2026-03-30 with `zig build -Doptimize=ReleaseFast`:
 
-- CLI decode on `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`: `33.58 tok/s`, `29.8 ms/tok`
-- `POST /v1/completions` with `max_tokens=256` sustained about `33.55 tok/s` at `concurrency=1`
+- CLI plain decode on `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`: `33.58 tok/s`, `29.8 ms/tok`
+- `POST /v1/completions` with `max_tokens=256` sustained about `33.55 tok/s` at `concurrency=1` with no chat template or explicit thinking prompt
 - `POST /v1/completions` with `max_tokens=256` and `concurrency=4` held aggregate throughput at about `33.98 tok/s`, while average per-request latency rose to about `18.84s`
-- One longer reasoning-style `POST /v1/chat/completions` sample produced `257` completion tokens at about `28.40 tok/s`
+- A 3-prompt non-streaming reasoning-chat matrix landed at `24.94–28.56 tok/s` (`/tmp/zinc_reasoning_chat_matrix.json` on the RDNA4 node)
+- CLI plain decode on `Qwen3.5-2B-Q4_K_M.gguf`: `22.93 tok/s`, `43.6 ms/tok`
+- `Qwen3.5-2B-Q4_K_M.gguf` also measured about `21.88 tok/s` on raw `/v1/completions` without chat template/thinking and `17.35–17.50 tok/s` on the same 3-prompt reasoning-chat matrix
+- Treat the reasoning-chat matrix as the current "thinking-style" benchmark. We are not flipping a separate model-side thinking mode in the raw `/v1/completions` runs.
 
 ### Troubleshooting performance
 

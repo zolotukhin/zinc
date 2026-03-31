@@ -59,6 +59,30 @@ async function parseJson(response: Response): Promise<any> {
   }
 }
 
+function spawnStreamingCurl(base: string, modelId: string, message: string): Bun.Subprocess {
+  return Bun.spawn({
+    cmd: [
+      "curl",
+      "-N",
+      "-sS",
+      `${base}/chat/completions`,
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: message }],
+        stream: true,
+        max_tokens: 256,
+        temperature: 0,
+      }),
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: process.env,
+  });
+}
+
 async function testHealth(base: string): Promise<void> {
   const response = await fetch(`${healthBase(base)}/health`, {
     signal: AbortSignal.timeout(5_000),
@@ -238,25 +262,7 @@ async function testChatCompletionStreamingOverlapped(base: string, modelId: stri
 }
 
 async function testHealthReflectsQueuedLoad(base: string, modelId: string): Promise<void> {
-  const firstController = new AbortController();
-  const secondController = new AbortController();
-
-  const requestBody = (message: string) =>
-    JSON.stringify({
-      model: modelId,
-      messages: [{ role: "user", content: message }],
-      stream: true,
-      max_tokens: 256,
-      temperature: 0,
-    });
-
-  const firstResponse = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: requestBody("The capital of France is"),
-    signal: firstController.signal,
-  });
-  assert(firstResponse.status === 200, `Primary load stream failed: ${firstResponse.status}`);
+  const firstProc = spawnStreamingCurl(base, modelId, "The capital of France is");
 
   const activeHealth = await waitForHealth(
     base,
@@ -265,12 +271,7 @@ async function testHealthReflectsQueuedLoad(base: string, modelId: string): Prom
     15_000,
   );
 
-  const secondPromise = fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: requestBody("The capital of France is"),
-    signal: secondController.signal,
-  });
+  const secondProc = spawnStreamingCurl(base, modelId, "The capital of France is");
 
   const queuedHealth = await waitForHealth(
     base,
@@ -279,10 +280,9 @@ async function testHealthReflectsQueuedLoad(base: string, modelId: string): Prom
     15_000,
   );
 
-  await firstResponse.body?.cancel().catch(() => undefined);
-  firstController.abort();
-  secondController.abort();
-  await Promise.allSettled([secondPromise]);
+  firstProc.kill();
+  secondProc.kill();
+  await Promise.allSettled([firstProc.exited, secondProc.exited]);
 
   const idleHealth = await waitForHealth(
     base,

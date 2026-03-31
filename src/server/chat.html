@@ -25,6 +25,10 @@ header h1 span{color:var(--accent)}
 .model-action.download{border-color:var(--accent);color:var(--accent)}
 .model-action.active{opacity:.7;cursor:default}
 .model-action:disabled{opacity:.4;cursor:not-allowed}
+.thinking-toggle{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:6px 10px;user-select:none}
+.thinking-toggle input{accent-color:var(--accent)}
+.thinking-toggle.disabled{opacity:.5}
+.thinking-toggle.disabled input{cursor:not-allowed}
 .model-tag{font-size:12px;color:var(--muted);background:var(--bg3);padding:3px 10px;border-radius:6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .stats{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .top-status{padding:8px 20px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -49,7 +53,8 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl h1{font-size:20px}
 .msg.a .bbl h2{font-size:18px}
 .msg.a .bbl h3,.msg.a .bbl h4{font-size:16px}
-.msg.a .bbl ol,.msg.a .bbl ul{margin:0 0 10px 22px;padding:0}
+.msg.a .bbl ol{margin:0 0 10px 22px;padding:0;list-style:decimal outside}
+.msg.a .bbl ul{margin:0 0 10px 22px;padding:0;list-style:disc outside}
 .msg.a .bbl li{margin:0 0 4px}
 .msg.a .bbl li:last-child{margin-bottom:0}
 .msg.a .bbl strong{color:#fff}
@@ -63,9 +68,19 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl pre{background:var(--bg);padding:10px 12px;margin:0;overflow-x:auto;border-radius:0}
 .msg.a .bbl pre code{background:none;padding:0;font-size:13px}
 .msg.a .bbl pre code.hljs{background:none;padding:0}
-.msg.a .bbl .reasoning-block{margin-bottom:8px}
-.msg.a .bbl .reasoning-block summary{cursor:pointer;color:var(--muted);font-size:12px;user-select:none}
-.msg.a .bbl .reasoning-body{font-size:13px;color:var(--muted);padding:6px 0;line-height:1.5}
+.msg.a .bbl .reasoning-block{margin-bottom:12px;border:1px solid rgba(232,114,42,.28);border-radius:12px;background:linear-gradient(180deg,rgba(232,114,42,.09),rgba(24,24,27,.96));overflow:hidden}
+.msg.a .bbl .reasoning-block[open]{border-color:rgba(232,114,42,.45);box-shadow:0 0 0 1px rgba(232,114,42,.08) inset}
+.msg.a .bbl .reasoning-block summary{cursor:pointer;list-style:none;user-select:none;padding:10px 12px;background:rgba(255,255,255,.02)}
+.msg.a .bbl .reasoning-block summary::-webkit-details-marker{display:none}
+.msg.a .bbl .reasoning-summary{display:flex;align-items:center;gap:10px;min-width:0}
+.msg.a .bbl .reasoning-summary::before{content:'▸';font-size:12px;color:var(--accent);transition:transform .15s ease}
+.msg.a .bbl .reasoning-block[open] .reasoning-summary::before{transform:rotate(90deg)}
+.msg.a .bbl .reasoning-state{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;border:1px solid rgba(232,114,42,.3);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#ffd1b0;background:rgba(232,114,42,.12)}
+.msg.a .bbl .reasoning-state.live{color:#fff0e2;border-color:rgba(232,114,42,.45);background:rgba(232,114,42,.22)}
+.msg.a .bbl .reasoning-preview{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#d7b28d}
+.msg.a .bbl .reasoning-body{font-size:13px;color:#bba48e;padding:12px 14px 14px;line-height:1.6;border-top:1px solid rgba(232,114,42,.18);background:rgba(10,10,12,.18)}
+.msg.a .bbl .reasoning-body strong{color:#f3d7bd}
+.msg.a .bbl .reasoning-body code{background:rgba(255,255,255,.05)}
 .msg .meta{font-size:11px;color:var(--muted);margin-top:4px}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
@@ -118,6 +133,7 @@ header{padding:10px 12px;gap:8px}
 <div class="model-controls">
 <select id="ms" class="model-select" title="Model"></select>
 <button id="mbtn" class="model-action active" type="button">Active</button>
+<label id="tw" class="thinking-toggle" title="Enable model reasoning when supported"><input id="th" type="checkbox"><span id="tl">Thinking</span></label>
 </div>
 <a id="mn" class="model-tag" href="https://huggingface.co/" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:var(--muted)">-</a>
 </header>
@@ -143,8 +159,10 @@ header{padding:10px 12px;gap:8px}
 const M=document.getElementById('messages'),I=document.getElementById('i'),B=document.getElementById('b'),CB=document.getElementById('cb');
 const ST=document.getElementById('st'),MN=document.getElementById('mn'),SS=document.getElementById('stats'),MS=document.getElementById('ms');
 const MB=document.getElementById('mbtn'),GM=document.getElementById('gpu'),DL=document.getElementById('dl'),MP=document.getElementById('mp'),MPF=document.getElementById('mpf');
+const TW=document.getElementById('tw'),TH=document.getElementById('th'),TL=document.getElementById('tl');
 const emptyStateHtml='<div class="empty" id="w"><strong>ZINC Inference Engine</strong>AMD RDNA4 GPU &middot; Vulkan Compute<br>Type a message to start</div>';
-const chatStateKey='zinc.chat.state.v1';
+const chatStateKey='zinc.chat.state.v2';
+const chatPrefsKey='zinc.chat.prefs.v1';
 let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false,models=[],modelPollTimer=null,healthPollTimer=null;
 
 function readStorage(key){
@@ -180,10 +198,25 @@ function readChatState(){
   if(!raw)return{messages:[],input:''};
   try{
     let parsed=JSON.parse(raw);
-    let messages=Array.isArray(parsed.messages)?parsed.messages.map(sanitizeMessage).filter(Boolean).slice(-128):[];
+    let messages=Array.isArray(parsed.messages)?parsed.messages.map(sanitizeMessage).filter(Boolean).filter(m=>!(m.role==='assistant'&&m.partial)).slice(-128):[];
     let input=typeof parsed.input==='string'?parsed.input.slice(0,8000):'';
     return{messages,input};
   }catch(e){return{messages:[],input:''}}
+}
+
+function readChatPrefs(){
+  let raw=readStorage(chatPrefsKey);
+  if(!raw)return{thinkingEnabled:true};
+  try{
+    let parsed=JSON.parse(raw);
+    return{thinkingEnabled:parsed.thinkingEnabled!==false};
+  }catch(e){return{thinkingEnabled:true}}
+}
+
+let chatPrefs=readChatPrefs();
+
+function saveChatPrefs(){
+  writeStorage(chatPrefsKey,JSON.stringify({thinkingEnabled:chatPrefs.thinkingEnabled!==false}));
 }
 
 function saveChatState(){
@@ -208,6 +241,11 @@ function selectedModel(){
 
 function activeModel(){
   return models.find(m=>m.active)||models[0]||null;
+}
+
+function activeModelSupportsThinking(){
+  let m=activeModel();
+  return !!(m&&m.supports_thinking_toggle);
 }
 
 function hasActiveDownload(){
@@ -256,6 +294,10 @@ function resetConversation(note){
   if(note)addMsg('assistant',note);
 }
 
+function requestMessagesFromHistory(){
+  return H.filter(m=>!(m.role==='assistant'&&m.partial)).map(m=>({role:m.role,content:m.content}));
+}
+
 function assistantHtmlFromRaw(raw,isThinking){
   let view=splitDisplayContent(raw,isThinking);
   let html='';
@@ -263,6 +305,32 @@ function assistantHtmlFromRaw(raw,isThinking){
   if(view.answer)html+=md(view.answer);
   if(!html&&raw)html=md(stripTrailingArtifacts(raw));
   return{html,view};
+}
+
+async function fetchRecoveredAnswer(model,messages){
+  let r=await fetch(base+'/chat/completions',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      model,
+      messages,
+      stream:false,
+      max_tokens:512,
+      temperature:0.0,
+      enable_thinking:false
+    })
+  });
+  if(!r.ok){
+    let e=await r.json().catch(()=>({}));
+    throw new Error(e.error?.message||r.statusText);
+  }
+  let body=await r.json();
+  let choice=body?.choices?.[0];
+  let content=choice?.message?.content||'';
+  return{
+    content:stripTrailingArtifacts(stripInlineTransportArtifacts(content)),
+    finishReason:choice?.finish_reason||'stop'
+  };
 }
 
 function renderStoredAssistant(message){
@@ -393,6 +461,15 @@ function updateModelAction(){
   MB.classList.add('download');
 }
 
+function updateThinkingUi(){
+  let supported=activeModelSupportsThinking();
+  TH.checked=supported?chatPrefs.thinkingEnabled!==false:false;
+  TH.disabled=!supported||isGenerating;
+  TW.classList.toggle('disabled',!supported||isGenerating);
+  TL.textContent=supported?'Thinking':'Thinking n/a';
+  TW.title=supported?'Enable model reasoning in chat responses':'The active model does not expose a thinking toggle';
+}
+
 async function refreshModels(){
   let mr=await fetch(base+'/models');let md=await mr.json();
   models=Array.isArray(md.data)?md.data:[];
@@ -421,6 +498,7 @@ async function refreshModels(){
   setCurrentModel(current);
   updateDownloadUi();
   updateModelAction();
+  updateThinkingUi();
   MS.disabled=isGenerating||models.length<=1;
 }
 
@@ -437,6 +515,7 @@ async function refreshHealth(){
 
 async function init(){
   restoreChatState();
+  updateThinkingUi();
   await Promise.allSettled([refreshHealth(),refreshModels()]);
 }
 
@@ -452,6 +531,7 @@ function setGenerating(v){
   MS.disabled=v||models.length<=1;
   CB.disabled=v;
   updateModelAction();
+  updateThinkingUi();
 }
 
 function stopGeneration(){
@@ -462,6 +542,7 @@ function stopGeneration(){
 }
 
 function fmtInline(s){
+  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
   s=s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   s=s.replace(/(?<!\*)\*([^\*]+?)\*(?!\*)/g,'<em>$1</em>');
@@ -557,6 +638,116 @@ function renderBlock(block){
   return renderParagraph(lines);
 }
 
+function normalizeListSpacing(text){
+  let lines=(text||'').split('\n');
+  let out=[];
+  for(let i=0;i<lines.length;i++){
+    let line=lines[i];
+    if(line.trim()){
+      out.push(line);
+      continue;
+    }
+    let prev='';
+    for(let j=out.length-1;j>=0;j--){
+      if(out[j].trim()){
+        prev=out[j];
+        break;
+      }
+    }
+    let next='';
+    for(let j=i+1;j<lines.length;j++){
+      if(lines[j].trim()){
+        next=lines[j];
+        break;
+      }
+    }
+    let prevOrdered=/^\s*\d+\.\s+/.test(prev);
+    let nextOrdered=/^\s*\d+\.\s+/.test(next);
+    let prevUnordered=/^\s*[-*]\s+/.test(prev);
+    let nextUnordered=/^\s*[-*]\s+/.test(next);
+    if((prevOrdered&&nextOrdered)||(prevUnordered&&nextUnordered)) continue;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+function normalizeHeadingSpacing(text){
+  let lines=(text||'').split('\n');
+  let out=[];
+  for(let i=0;i<lines.length;i++){
+    let line=lines[i];
+    let trimmed=line.trim();
+    if(!/^#{1,4}\s+\S/.test(trimmed)){
+      out.push(line);
+      continue;
+    }
+    let prev=out.length?out[out.length-1]:'';
+    if(prev.trim()) out.push('');
+    out.push(line);
+    let next='';
+    for(let j=i+1;j<lines.length;j++){
+      if(lines[j].trim()||j===lines.length-1){
+        next=lines[j];
+        break;
+      }
+    }
+    if(next.trim()) out.push('');
+  }
+  return out.join('\n');
+}
+
+function splitMarkdownBlocks(text){
+  let lines=(text||'').split('\n');
+  let blocks=[];
+  let i=0;
+
+  function kindOf(line){
+    if(!line.trim()) return 'blank';
+    if(/^\s*\d+\.\s+/.test(line)) return 'ordered';
+    if(/^\s*[-*]\s+/.test(line)) return 'unordered';
+    if(/^\s{2,}\S/.test(line)) return 'indented';
+    if(/^#{1,4}\s+\S/.test(line.trim())) return 'heading';
+    return 'text';
+  }
+
+  while(i<lines.length){
+    while(i<lines.length&&!lines[i].trim()) i++;
+    if(i>=lines.length) break;
+    let start=i;
+    let mode=kindOf(lines[i]);
+    if(mode!=='ordered'&&mode!=='unordered'){
+      i++;
+      while(i<lines.length&&lines[i].trim()) i++;
+      blocks.push(lines.slice(start,i).join('\n'));
+      continue;
+    }
+
+    i++;
+    let prevBlank=false;
+    while(i<lines.length){
+      let kind=kindOf(lines[i]);
+      if(kind==='blank'){
+        prevBlank=true;
+        i++;
+        continue;
+      }
+      if(kind===mode||kind==='indented'||(mode==='ordered'&&kind==='unordered')){
+        prevBlank=false;
+        i++;
+        continue;
+      }
+      if(kind==='text'&&!prevBlank){
+        i++;
+        continue;
+      }
+      break;
+    }
+    blocks.push(lines.slice(start,i).join('\n'));
+  }
+
+  return blocks;
+}
+
 function md(s){
   // Extract code blocks BEFORE escaping HTML (complete and incomplete)
   let blocks=[];
@@ -577,33 +768,85 @@ function md(s){
   });
   // Now escape remaining HTML
   s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  s=s.split(/\n{2,}/).map(renderBlock).filter(Boolean).join('');
+  s=normalizeListSpacing(s);
+  s=normalizeHeadingSpacing(s);
+  s=splitMarkdownBlocks(s).map(renderBlock).filter(Boolean).join('');
   if(!s)return '';
   // Restore code blocks
   for(let i=0;i<blocks.length;i++) s=s.replace('\x00BLOCK'+i+'\x00',blocks[i]);
   return s;
 }
 
+function hasStructuredReasoning(text){
+  return /(?:^|\n)\s*(?:\d+\.\s+|[-*]\s+|#{1,4}\s+)/.test(text||'');
+}
+
+function reasoningPreview(text){
+  let compact=(text||'')
+    .split('\n')
+    .map(line=>line.replace(/^\s*(?:\d+\.\s+|[-*]\s+)/,'').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g,' ')
+    .trim();
+  if(!compact)return '';
+  return compact.length>96?compact.slice(0,95)+'…':compact;
+}
+
 function renderReasoning(thinkText,isThinking){
-  let open=isThinking?' open':'';
+  let structured=hasStructuredReasoning(thinkText);
+  let open=(isThinking||structured)?' open':'';
   let body=md((thinkText||'').trim());
-  return '<details'+open+' class="reasoning-block"><summary>'+(isThinking?'Thinking...':'Reasoning')+'</summary><div class="reasoning-body">'+body+'</div></details>';
+  let preview=isThinking?'Live reasoning stream':(structured?'':reasoningPreview(thinkText));
+  let stateClass=isThinking?'reasoning-state live':'reasoning-state';
+  let stateText=isThinking?'Thinking':'Reasoning';
+  let previewHtml=preview?'<span class="reasoning-preview">'+esc(preview)+'</span>':'';
+  return '<details'+open+' class="reasoning-block"><summary><span class="reasoning-summary"><span class="'+stateClass+'">'+stateText+'</span>'+previewHtml+'</span></summary><div class="reasoning-body">'+body+'</div></details>';
 }
 
 function stripTrailingStandaloneQuote(text){
   let s=(text||'').replace(/\s+$/,'');
   if(/(^|\n)"$/.test(s)) s=s.replace(/(^|\n)"$/,'').replace(/\s+$/,'');
-  let quoteCount=(s.match(/"/g)||[]).length;
-  if(quoteCount===1&&/[.!?,:;]"$/.test(s)) s=s.slice(0,-1).replace(/\s+$/,'');
+  if(s.endsWith('"')){
+    let body=s.slice(0,-1).replace(/\uFFFD+$/gu,'').replace(/\s+$/,'');
+    let quoteCount=(body.match(/"/g)||[]).length;
+    if(body&&quoteCount%2===0) s=body;
+  }
+  return s;
+}
+
+function stripLeadingStandaloneQuote(text){
+  let s=text||'';
+  if(/^\s*"\s*(?:\n\s*)+/u.test(s)) s=s.replace(/^\s*"\s*(?:\n\s*)+/u,'');
+  return s;
+}
+
+function stripTrailingDanglingHeading(text){
+  let s=(text||'').replace(/\s+$/,'');
+  if(/(?:^|\n)#{1,4}\s*$/u.test(s)) s=s.replace(/(?:^|\n)#{1,4}\s*$/u,'').replace(/\s+$/,'');
   return s;
 }
 
 function stripTrailingArtifacts(text){
   let s=text||'';
-  s=s.replace(/(?:<\|im_end\|>|<\|im_start\|>assistant)\s*$/u,'');
-  s=s.replace(/<\|endoftext\|>\s*$/u,'');
-  s=s.replace(/(?:[\s\uFFFD])+$/gu,'');
-  return stripTrailingStandaloneQuote(s);
+  while(true){
+    let next=s;
+    next=stripLeadingStandaloneQuote(next);
+    next=next.replace(/(?:<\|im_end\|>|<\|im_start\|>assistant)\s*$/u,'');
+    next=next.replace(/<\|endoftext\|>\s*$/u,'');
+    next=next.replace(/(?:[\s\uFFFD])+$/gu,'');
+    next=stripTrailingStandaloneQuote(next);
+    next=stripTrailingDanglingHeading(next);
+    if(next===s) return next;
+    s=next;
+  }
+}
+
+function stripInlineTransportArtifacts(text){
+  return (text||'')
+    .replace(/<\|im_end\|>/gu,'')
+    .replace(/<\|im_start\|>assistant/gu,'')
+    .replace(/<\|im_start\|>/gu,'');
 }
 
 function looksLikePlainReasoning(text){
@@ -617,6 +860,7 @@ function splitDisplayContent(raw,isThinking){
   let text=raw||'';
   let thinkMatch=text.match(/<think>([\s\S]*?)<\/think>/);
   let thinkPartial=!thinkMatch&&text.match(/<think>([\s\S]*)$/);
+  let implicitThinkClose=!thinkMatch&&!thinkPartial&&text.includes('</think>')&&!text.includes('<think>');
   let answer=stripTrailingArtifacts(
     text.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim()
   );
@@ -628,8 +872,25 @@ function splitDisplayContent(raw,isThinking){
       isThinking,
     };
   }
+  if(implicitThinkClose){
+    let parts=text.split('</think>');
+    return {
+      reasoning:stripTrailingArtifacts((parts[0]||'').trim()),
+      answer:stripTrailingArtifacts(parts.slice(1).join('</think>').trim()),
+      showReasoning:true,
+      isThinking:false,
+    };
+  }
   let trimmed=stripTrailingArtifacts(text.trim());
   if(looksLikePlainReasoning(trimmed)){
+    if(!isThinking){
+      return {
+        reasoning:'',
+        answer:trimmed,
+        showReasoning:false,
+        isThinking:false,
+      };
+    }
     return {
       reasoning:trimmed,
       answer:'',
@@ -674,15 +935,21 @@ async function send(){
   addMsg('user',t);H.push({role:'user',content:t});saveChatState();
   let bbl=addMsg('assistant','');
   let cur=document.createElement('span');cur.className='cursor';bbl.appendChild(cur);
-  let raw='',tokens=0,t0=performance.now(),thinking=false,stopped=false,draftEntry=null;
+  let raw='',tokens=0,t0=performance.now(),thinking=false,stopped=false,draftEntry=null,finishReason='stop';
+  let selectedModelId='zinc';
+  let enableThinking=false;
+  let requestMessages=[];
   activeController=new AbortController();stopRequested=false;setGenerating(true);
   try{
     let currentModel=selectedModel();
-    let selectedModelId=currentModel?.id||MN.textContent||'zinc';
-    let requestMessages=H.map(m=>({role:m.role,content:m.content}));
+    selectedModelId=currentModel?.id||MN.textContent||'zinc';
+    enableThinking=activeModelSupportsThinking()&&TH.checked;
+    let maxTokens=enableThinking?2048:512;
+    thinking=enableThinking;
+    requestMessages=requestMessagesFromHistory();
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:selectedModelId,messages:requestMessages,stream:true,max_tokens:512,temperature:0.7}),
+      body:JSON.stringify({model:selectedModelId,messages:requestMessages,stream:true,max_tokens:maxTokens,temperature:0.0,enable_thinking:enableThinking}),
       signal:activeController.signal});
     if(!r.ok){let e=await r.json().catch(()=>({}));throw new Error(e.error?.message||r.statusText)}
     if(!r.body)throw new Error('Streaming response missing body');
@@ -692,13 +959,17 @@ async function send(){
       buf+=dc.decode(value,{stream:true});let ls=buf.split('\n');buf=ls.pop()||'';
       for(let l of ls){
         if(!l.startsWith('data: '))continue;let p=l.slice(6);if(p==='[DONE]')break stream;
-        try{let c=JSON.parse(p).choices?.[0]?.delta?.content;
-          if(c){tokens++;raw+=c;
+        try{
+          let choice=JSON.parse(p).choices?.[0];
+          if(choice?.finish_reason)finishReason=choice.finish_reason;
+          let c=choice?.delta?.content;
+          if(c){tokens++;
+            let cleanChunk=stripInlineTransportArtifacts(c);
+            if(!cleanChunk)continue;
+            raw+=cleanChunk;
             // Track <think>...</think> reasoning blocks
             if(!thinking&&raw.includes('<think>')){thinking=true}
             if(thinking&&raw.includes('</think>')){thinking=false}
-            // Filter stop tokens from display
-            if(c.includes('<|im_end')||c.includes('<|im_start'))continue;
             if(!draftEntry){
               draftEntry={role:'assistant',content:'',raw:'',partial:true};
               H.push(draftEntry);
@@ -724,11 +995,27 @@ async function send(){
   activeController=null;stopRequested=false;setGenerating(false);I.focus();
   let finalView=splitDisplayContent(raw,false);
   let cleanAnswer=finalView.answer;
+  let finalRendered=assistantHtmlFromRaw(raw,false);
+  if(!stopped&&enableThinking&&finishReason==='length'&&!cleanAnswer&&finalView.showReasoning){
+    try{
+      SS.textContent='recovering final answer...';
+      let recovered=await fetchRecoveredAnswer(selectedModelId,requestMessages);
+      if(recovered.content){
+        raw=raw+(raw.endsWith('\n')?'':'\n')+'</think>\n'+recovered.content;
+        finalView=splitDisplayContent(raw,false);
+        cleanAnswer=finalView.answer;
+        finalRendered=assistantHtmlFromRaw(raw,false);
+        finishReason=recovered.finishReason||'stop';
+      }
+    }catch(_e){}
+  }
   if(draftEntry){
     if(cleanAnswer){
       draftEntry.content=cleanAnswer;
-      if(stopped){draftEntry.raw=raw;draftEntry.partial=true}
-      else{delete draftEntry.raw;delete draftEntry.partial}
+      draftEntry.raw=raw;
+      if(stopped){draftEntry.partial=true}
+      else if(!finalView.showReasoning){delete draftEntry.raw;delete draftEntry.partial}
+      else{delete draftEntry.partial}
     }else if(raw.trim()){
       draftEntry.content=finalView.reasoning||stripTrailingArtifacts(raw);
       draftEntry.raw=raw;
@@ -753,10 +1040,17 @@ async function send(){
     return;
   }
   if(!cleanAnswer&&finalView.showReasoning){
-    bbl.innerHTML=renderReasoning(finalView.reasoning,false)+'<p><em>No final answer returned.</em></p>';
+    let msg=finishReason==='length'
+      ? 'Response hit the token limit before a final answer.'
+      : 'No final answer returned.';
+    bbl.innerHTML=renderReasoning(finalView.reasoning,false)+'<p><em>'+msg+'</em></p>';
     highlightAll();
   }
   if(cleanAnswer){
+    if(finalRendered.html){
+      bbl.innerHTML=finalRendered.html;
+      highlightAll();
+    }
     let el=(performance.now()-t0)/1000,tps=tokens/el;
     SS.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s';
     let meta=document.createElement('div');meta.className='meta';
@@ -776,6 +1070,11 @@ function copyCode(btn){
 function highlightAll(){document.querySelectorAll('pre code[class^="language-"]').forEach(el=>{
   if(!el.dataset.highlighted){try{hljs.highlightElement(el)}catch(e){}}
 })}
+TH.addEventListener('change',()=>{
+  chatPrefs.thinkingEnabled=TH.checked;
+  saveChatPrefs();
+  updateThinkingUi();
+});
 MS.addEventListener('change',()=>{
   updateDownloadUi();
   updateModelAction();

@@ -270,7 +270,7 @@ fn handleModels(
         const download_phase = if (is_download_target) @tagName(download.phase) else "idle";
         const download_error = if (is_download_target) download.errorMessage() else "";
         try body.writer(allocator).print(
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","display_name":"{s}","homepage_url":"{s}","installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"fit_source":"{s}","status":"{s}","downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}} 
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","display_name":"{s}","homepage_url":"{s}","installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}} 
         , .{
             entry.id,
             ts,
@@ -284,6 +284,7 @@ fn handleModels(
             entry.required_vram_bytes,
             fit_source,
             entry.status_label,
+            if (entry.supports_thinking_toggle) "true" else "false",
             if (downloading) "true" else "false",
             download_phase,
             if (is_download_target) download.downloaded_bytes else 0,
@@ -472,11 +473,103 @@ const chat_stop_strs = [_][]const u8{
 };
 
 const utf8_replacement = "\xEF\xBF\xBD";
+const thinking_prefix = "<think>\n";
+const default_chat_system_prompt =
+    "Answer directly. If a user term is ambiguous or looks misspelled, say that briefly and continue with the most likely interpretation. Never output self-referential planning or phrases like 'I need to complete the response'.";
 
-fn buildChatPrompt(tokenizer: *const tokenizer_mod.Tokenizer, user_content: []const u8, buf: []u8) ![]const u8 {
-    const roles = [_][]const u8{"user"};
-    const contents = [_][]const u8{user_content};
-    return tokenizer.applyChatTemplate(&roles, &contents, buf);
+const FinishReason = enum {
+    stop,
+    length,
+};
+
+const ChatMessage = struct {
+    role: []const u8 = "",
+    content: []const u8 = "",
+};
+
+const ChatRequestBody = struct {
+    model: []const u8 = "",
+    messages: []const ChatMessage = &.{},
+    max_tokens: u32 = 256,
+    stream: bool = false,
+    temperature: f32 = 0.0,
+    top_p: f32 = 1.0,
+    enable_thinking: ?bool = null,
+};
+
+const ParsedChatRequest = struct {
+    parsed: std.json.Parsed(ChatRequestBody),
+    roles: []const []const u8,
+    contents: []const []const u8,
+    max_tokens: u32,
+    stream: bool,
+    temperature: f32,
+    top_p: f32,
+    enable_thinking: ?bool,
+
+    fn deinit(self: *ParsedChatRequest) void {
+        self.parsed.deinit();
+        self.* = undefined;
+    }
+};
+
+fn estimateChatPromptBytes(roles: []const []const u8, contents: []const []const u8, thinking_enabled: bool) usize {
+    var total: usize = 128;
+    const n = @min(roles.len, contents.len);
+    for (0..n) |i| {
+        total += roles[i].len + contents[i].len + 32;
+    }
+    if (thinking_enabled) total += thinking_prefix.len + 32 else total += 32;
+    return total;
+}
+
+fn buildChatPrompt(tokenizer: *const tokenizer_mod.Tokenizer, roles: []const []const u8, contents: []const []const u8, enable_thinking: ?bool, buf: []u8) ![]const u8 {
+    return tokenizer.applyChatTemplateWithOptions(roles, contents, .{ .enable_thinking = enable_thinking }, buf);
+}
+
+fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedChatRequest {
+    var parsed = try std.json.parseFromSlice(ChatRequestBody, allocator, body, .{
+        .ignore_unknown_fields = true,
+    });
+    errdefer parsed.deinit();
+
+    const arena_allocator = parsed.arena.allocator();
+    const messages = parsed.value.messages;
+    const roles = try arena_allocator.alloc([]const u8, messages.len + 1);
+    const contents = try arena_allocator.alloc([]const u8, messages.len + 1);
+
+    var count: usize = 0;
+    var has_guiding_message = false;
+    for (messages) |message| {
+        if (message.role.len == 0 or message.content.len == 0) continue;
+        if (std.mem.eql(u8, message.role, "system") or std.mem.eql(u8, message.role, "developer")) {
+            has_guiding_message = true;
+        }
+    }
+
+    if (!has_guiding_message) {
+        roles[count] = "system";
+        contents[count] = default_chat_system_prompt;
+        count += 1;
+    }
+
+    for (messages) |message| {
+        if (message.role.len == 0 or message.content.len == 0) continue;
+        roles[count] = message.role;
+        contents[count] = message.content;
+        count += 1;
+    }
+
+    return .{
+        .parsed = parsed,
+        .roles = roles[0..count],
+        .contents = contents[0..count],
+        .max_tokens = parsed.value.max_tokens,
+        .stream = parsed.value.stream,
+        .temperature = parsed.value.temperature,
+        .top_p = parsed.value.top_p,
+        .enable_thinking = parsed.value.enable_thinking,
+    };
 }
 
 fn findFirstStop(text: []const u8, stop_strs: []const []const u8) ?usize {
@@ -494,7 +587,8 @@ fn findFirstStop(text: []const u8, stop_strs: []const []const u8) ?usize {
 fn trimTrailingChatArtifacts(text: []const u8) []const u8 {
     var out = text;
     while (true) {
-        const trimmed = std.mem.trimRight(u8, out, " \t\r\n");
+        const trimmed_left = trimLeadingStandaloneQuote(out);
+        const trimmed = std.mem.trimRight(u8, trimmed_left, " \t\r\n");
         if (std.mem.endsWith(u8, trimmed, "<|endoftext|>")) {
             out = trimmed[0 .. trimmed.len - "<|endoftext|>".len];
             continue;
@@ -503,33 +597,62 @@ fn trimTrailingChatArtifacts(text: []const u8) []const u8 {
             out = trimmed[0 .. trimmed.len - utf8_replacement.len];
             continue;
         }
-        out = trimmed;
+        if (hasDanglingTrailingQuote(trimmed)) {
+            out = trimmed[0 .. trimmed.len - 1];
+            continue;
+        }
+        if (trimDanglingHeading(trimmed)) |next| {
+            out = next;
+            continue;
+        }
+        return trimmed;
+    }
+}
+
+fn trimLeadingStandaloneQuote(text: []const u8) []const u8 {
+    var s = std.mem.trimLeft(u8, text, " \t\r\n");
+    if (s.len == 0 or s[0] != '"') return text;
+    var i: usize = 1;
+    var saw_newline = false;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (c == '\n' or c == '\r') {
+            saw_newline = true;
+            continue;
+        }
+        if (c == ' ' or c == '\t') continue;
         break;
     }
-    const trimmed = out;
-    if (trimmed.len > 0 and trimmed[trimmed.len - 1] == '"') {
-        var quote_count: usize = 0;
-        for (trimmed) |c| {
-            if (c == '"') quote_count += 1;
-        }
-        const prev = if (trimmed.len >= 2) trimmed[trimmed.len - 2] else 0;
-        if (quote_count == 1 and (prev == '.' or prev == '!' or prev == '?' or prev == ',' or prev == ':' or prev == ';')) {
-            return std.mem.trimRight(u8, trimmed[0 .. trimmed.len - 1], " \t\r\n");
-        }
-    }
-    return trimmed;
+    if (!saw_newline) return text;
+    return std.mem.trimLeft(u8, s[i..], " \t\r\n");
+}
+
+fn supportsEnabledThinking(tokenizer: *const tokenizer_mod.Tokenizer, enable_thinking: ?bool) bool {
+    return tokenizer.supportsThinkingToggle() and (enable_thinking orelse false);
+}
+
+fn prefixThinkingEnvelope(text: []const u8, enabled: bool, buf: []u8) ![]const u8 {
+    if (!enabled or std.mem.startsWith(u8, text, "<think>")) return text;
+    if (thinking_prefix.len + text.len > buf.len) return error.BufferTooSmall;
+    @memcpy(buf[0..thinking_prefix.len], thinking_prefix);
+    @memcpy(buf[thinking_prefix.len .. thinking_prefix.len + text.len], text);
+    return buf[0 .. thinking_prefix.len + text.len];
 }
 
 fn hasDanglingTrailingQuote(text: []const u8) bool {
     const trimmed = std.mem.trimRight(u8, text, " \t\r\n");
     if (trimmed.len == 0 or trimmed[trimmed.len - 1] != '"') return false;
+    var body = trimmed[0 .. trimmed.len - 1];
+    while (std.mem.endsWith(u8, body, utf8_replacement)) {
+        body = body[0 .. body.len - utf8_replacement.len];
+    }
+    body = std.mem.trimRight(u8, body, " \t\r\n");
+    if (body.len == 0) return false;
     var quote_count: usize = 0;
-    for (trimmed) |c| {
+    for (body) |c| {
         if (c == '"') quote_count += 1;
     }
-    if (quote_count != 1) return false;
-    const prev = if (trimmed.len >= 2) trimmed[trimmed.len - 2] else 0;
-    return prev == '.' or prev == '!' or prev == '?' or prev == ',' or prev == ':' or prev == ';';
+    return quote_count % 2 == 0;
 }
 
 fn isReplacementArtifact(text: []const u8) bool {
@@ -542,6 +665,23 @@ fn isReplacementArtifact(text: []const u8) bool {
     return true;
 }
 
+fn trimDanglingHeading(text: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trimRight(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const line_start = (std.mem.lastIndexOfScalar(u8, trimmed, '\n') orelse return checkHeading(trimmed, 0));
+    return checkHeading(trimmed, line_start + 1);
+}
+
+fn checkHeading(trimmed: []const u8, start: usize) ?[]const u8 {
+    const line = std.mem.trim(u8, trimmed[start..], " \t\r\n");
+    if (line.len == 0 or line.len > 4) return null;
+    for (line) |c| {
+        if (c != '#') return null;
+    }
+    if (start == 0) return "";
+    return std.mem.trimRight(u8, trimmed[0 .. start - 1], " \t\r\n");
+}
+
 fn handleChatCompletions(
     conn: *http.Connection,
     manager: *model_manager_mod.ModelManager,
@@ -549,13 +689,13 @@ fn handleChatCompletions(
     body: []const u8,
     allocator: std.mem.Allocator,
 ) !void {
-    // Parse essential fields from JSON body
-    const parsed = parseJsonFields(body) catch {
+    var parsed = parseChatRequest(allocator, body) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
         return;
     };
+    defer parsed.deinit();
 
-    if (parsed.messages_content.len == 0) {
+    if (parsed.roles.len == 0 or parsed.contents.len == 0) {
         try conn.sendError(400, "invalid_request_error", "Field 'messages' is required");
         return;
     }
@@ -566,9 +706,26 @@ fn handleChatCompletions(
     const engine = &resources.engine;
     const tokenizer = &resources.tokenizer;
     const model_name = resources.display_name;
+    const sampling = forward_mod.SamplingParams{
+        .temperature = if (parsed.temperature <= 0.0001) 0.0 else std.math.clamp(parsed.temperature, 0.0, 2.0),
+        .top_p = std.math.clamp(parsed.top_p, 0.0, 1.0),
+        .repetition_penalty = if (parsed.temperature > 0.0001 or parsed.top_p < 0.9999) 1.08 else 1.0,
+        .top_k = 64,
+    };
+    const previous_logits_readback = engine.logits_readback_enabled;
+    if (sampling.requiresLogitsReadback() and !previous_logits_readback) {
+        engine.enableLogitsReadback();
+    }
+    defer engine.logits_readback_enabled = previous_logits_readback;
 
-    var prompt_buf: [8192]u8 = undefined;
-    const prompt = buildChatPrompt(tokenizer, parsed.messages_content, &prompt_buf) catch |err| {
+    const prompt_capacity = estimateChatPromptBytes(parsed.roles, parsed.contents, supportsEnabledThinking(tokenizer, parsed.enable_thinking));
+    const prompt_buf = allocator.alloc(u8, prompt_capacity) catch {
+        try conn.sendError(500, "internal_error", "Prompt allocation failed");
+        return;
+    };
+    defer allocator.free(prompt_buf);
+
+    const prompt = buildChatPrompt(tokenizer, parsed.roles, parsed.contents, parsed.enable_thinking, prompt_buf) catch |err| {
         if (err == error.BufferTooSmall) {
             try conn.sendError(400, "invalid_request_error", "Prompt too long");
             return;
@@ -595,6 +752,11 @@ fn handleChatCompletions(
     const ts = @divTrunc(std.time.timestamp(), 1);
     const max_tokens = parsed.max_tokens;
     const req_id = "chatcmpl-zinc0001"; // TODO: T013 unique IDs
+    const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
+    const seed_ns: i128 = std.time.nanoTimestamp();
+    const seed_bits: u128 = @bitCast(seed_ns);
+    var prng = std.Random.DefaultPrng.init(@truncate(seed_bits));
+    const random = prng.random();
 
     if (parsed.stream) {
         // Streaming path — per-token SSE delivery
@@ -607,6 +769,9 @@ fn handleChatCompletions(
                 \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{"role":"assistant"}},"finish_reason":null}}]}}
             , .{ req_id, ts, model_name }) catch return;
             conn.writeSseEvent(chunk) catch return;
+        }
+        if (thinking_enabled) {
+            streamText(conn, thinking_prefix, req_id, ts, model_name) catch return;
         }
         if (conn.isPeerClosed()) return;
 
@@ -629,13 +794,13 @@ fn handleChatCompletions(
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
         var stopped = false;
+        var finish_reason: FinishReason = .stop;
 
-        var generated: u32 = 0;
         if (max_tokens > 0) {
-            var prev_token = engine.sampleGreedy();
-            generated = 1;
+            var prev_token = engine.sample(&state, sampling, random);
+            var generated: u32 = 0;
 
-            while (generated <= max_tokens and prev_token != eos and !stopped) {
+            while (generated < max_tokens and prev_token != eos and !stopped) {
                 if (conn.isPeerClosed()) return;
 
                 // Accumulate this token's decoded text
@@ -646,7 +811,7 @@ fn handleChatCompletions(
                         if (conn.isPeerClosed()) return;
                         engine.decodeStep(&state, prev_token, true) catch break;
                         if (conn.isPeerClosed()) return;
-                        prev_token = engine.sampleGreedy();
+                        prev_token = engine.sample(&state, sampling, random);
                         generated += 1;
                         continue;
                     }
@@ -696,14 +861,19 @@ fn handleChatCompletions(
                     sent_text_len = gen_text_len;
                 }
 
+                generated += 1;
+
                 // Generate next token
                 if (generated < max_tokens) {
                     if (conn.isPeerClosed()) return;
                     engine.decodeStep(&state, prev_token, true) catch break;
                     if (conn.isPeerClosed()) return;
-                    prev_token = engine.sampleGreedy();
-                    generated += 1;
+                    prev_token = engine.sample(&state, sampling, random);
                 } else break;
+            }
+
+            if (!stopped and prev_token != eos and generated >= max_tokens) {
+                finish_reason = .length;
             }
 
             // Flush any remaining pending tokens (only if we didn't hit stop)
@@ -720,8 +890,8 @@ fn handleChatCompletions(
         {
             var chunk_buf: [1024]u8 = undefined;
             const chunk = std.fmt.bufPrint(&chunk_buf,
-                \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}
-            , .{ req_id, ts, model_name }) catch "";
+                \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{}},"finish_reason":"{s}"}}]}}
+            , .{ req_id, ts, model_name, @tagName(finish_reason) }) catch "";
             conn.writeSseEvent(chunk) catch return;
         }
 
@@ -739,40 +909,46 @@ fn handleChatCompletions(
         var ns_gen: u32 = 0;
         const ns_eos = tokenizer.eosId();
         const ns_stops = chat_stop_strs[0..];
+        var finish_reason: FinishReason = .stop;
         if (max_tokens > 0) {
-            var prev = engine.sampleGreedy();
-            ns_gen = 1;
-            while (ns_gen <= max_tokens and prev != ns_eos) {
+            var prev = engine.sample(&state2, sampling, random);
+            while (ns_gen < max_tokens and prev != ns_eos) {
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
                     engine.decodeStep(&state2, prev, true) catch break;
-                    prev = engine.sampleGreedy();
-                    ns_gen += 1;
+                    prev = engine.sample(&state2, sampling, random);
                     continue;
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
+                ns_gen += 1;
                 const hit = if (findFirstStop(text_buf.items, ns_stops)) |pos| blk: {
                     text_buf.shrinkRetainingCapacity(pos);
                     break :blk true;
                 } else false;
                 if (hit) break;
+                if (ns_gen >= max_tokens) break;
                 engine.decodeStep(&state2, prev, true) catch break;
-                prev = engine.sampleGreedy();
-                ns_gen += 1;
+                prev = engine.sample(&state2, sampling, random);
+            }
+            if (prev != ns_eos and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
+                finish_reason = .length;
             }
         }
 
         // Escape the full text for JSON
+        const trimmed_text = trimTrailingChatArtifacts(text_buf.items);
+        var thinking_buf: [16384]u8 = undefined;
+        const response_text = prefixThinkingEnvelope(trimmed_text, thinking_enabled, &thinking_buf) catch trimmed_text;
         var escaped_buf: [16384]u8 = undefined;
-        const escaped_text = jsonEscape(trimTrailingChatArtifacts(text_buf.items), &escaped_buf);
+        const escaped_text = jsonEscape(response_text, &escaped_buf);
 
         var resp_buf: [32768]u8 = undefined;
         const resp = std.fmt.bufPrint(&resp_buf,
-            \\{{"id":"{s}","object":"chat.completion","created":{d},"model":"{s}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{s}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
+            \\{{"id":"{s}","object":"chat.completion","created":{d},"model":"{s}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{s}"}},"finish_reason":"{s}"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
         , .{
             req_id,                     ts,                model_name,
-            escaped_text,               prompt_tokens.len, ns_gen,
+            escaped_text,               @tagName(finish_reason), prompt_tokens.len, ns_gen,
             prompt_tokens.len + ns_gen,
         }) catch {
             try conn.sendError(500, "internal_error", "Response too large");
@@ -862,6 +1038,7 @@ const ParsedRequest = struct {
     max_tokens: u32,
     stream: bool,
     temperature: f32,
+    enable_thinking: ?bool,
 };
 
 fn parseJsonFields(body: []const u8) !ParsedRequest {
@@ -872,6 +1049,7 @@ fn parseJsonFields(body: []const u8) !ParsedRequest {
         .max_tokens = 256,
         .stream = false,
         .temperature = 1.0,
+        .enable_thinking = null,
     };
 
     // Extract "stream":true/false
@@ -879,6 +1057,16 @@ fn parseJsonFields(body: []const u8) !ParsedRequest {
         std.mem.indexOf(u8, body, "\"stream\": true") != null)
     {
         result.stream = true;
+    }
+
+    if (std.mem.indexOf(u8, body, "\"enable_thinking\":true") != null or
+        std.mem.indexOf(u8, body, "\"enable_thinking\": true") != null)
+    {
+        result.enable_thinking = true;
+    } else if (std.mem.indexOf(u8, body, "\"enable_thinking\":false") != null or
+        std.mem.indexOf(u8, body, "\"enable_thinking\": false") != null)
+    {
+        result.enable_thinking = false;
     }
 
     // Extract "max_tokens":N
@@ -1070,6 +1258,7 @@ test "parseJsonFields extracts stream flag" {
     const parsed = try parseJsonFields(body);
     try std.testing.expect(parsed.stream);
     try std.testing.expectEqualStrings("hello", parsed.messages_content);
+    try std.testing.expect(parsed.enable_thinking == null);
 }
 
 test "parseJsonFields extracts max_tokens" {
@@ -1104,12 +1293,21 @@ test "parseJsonFields defaults when fields missing" {
     try std.testing.expectEqual(@as(u32, 256), parsed.max_tokens);
     try std.testing.expectEqualStrings("", parsed.messages_content);
     try std.testing.expectEqualStrings("", parsed.prompt_text);
+    try std.testing.expect(parsed.enable_thinking == null);
 }
 
 test "parseJsonFields stream false explicit" {
     const body = "{\"model\":\"qwen\",\"stream\":false}";
     const parsed = try parseJsonFields(body);
     try std.testing.expect(!parsed.stream);
+}
+
+test "parseJsonFields extracts enable_thinking flag" {
+    const enabled = try parseJsonFields("{\"enable_thinking\":true}");
+    try std.testing.expectEqual(@as(?bool, true), enabled.enable_thinking);
+
+    const disabled = try parseJsonFields("{\"enable_thinking\": false}");
+    try std.testing.expectEqual(@as(?bool, false), disabled.enable_thinking);
 }
 
 test "parseJsonFields extracts content with spaces" {
@@ -1190,8 +1388,10 @@ test "buildChatPrompt uses tokenizer chat template helper" {
     var tok = makeTestTokenizer(null);
     defer tok.token_to_id.deinit();
 
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"hello"};
     var buf: [512]u8 = undefined;
-    const prompt = try buildChatPrompt(&tok, "hello", &buf);
+    const prompt = try buildChatPrompt(&tok, &roles, &contents, null, &buf);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>system\n") == null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "Do not output labels like 'Thinking Process:'") == null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>user\nhello<|im_end|>\n") != null);
@@ -1205,7 +1405,18 @@ test "trimTrailingChatArtifacts strips endoftext and replacement junk" {
 
 test "trimTrailingChatArtifacts strips unmatched trailing quote after punctuation" {
     try std.testing.expectEqualStrings("Hello! How can I help you today?", trimTrailingChatArtifacts("Hello! How can I help you today?\"\n\n"));
+    try std.testing.expectEqualStrings("Hey there! How can I help you today?", trimTrailingChatArtifacts("Hey there! How can I help you today? \xEF\xBF\xBD\xEF\xBF\xBD\"\n"));
+    try std.testing.expectEqualStrings("Hey there! How can I help you today? 😊", trimTrailingChatArtifacts("Hey there! How can I help you today? 😊\"\n"));
     try std.testing.expectEqualStrings("\"Paris.\"", trimTrailingChatArtifacts("\"Paris.\""));
+}
+
+test "trimTrailingChatArtifacts strips dangling heading markers" {
+    try std.testing.expectEqualStrings("Hello", trimTrailingChatArtifacts("Hello\n\n###\n"));
+    try std.testing.expectEqualStrings("", trimTrailingChatArtifacts("###\n"));
+}
+
+test "trimTrailingChatArtifacts strips leading standalone quote before answer text" {
+    try std.testing.expectEqualStrings("Vulcan is likely a typo for Vulkan.", trimTrailingChatArtifacts("\"\n\nVulcan is likely a typo for Vulkan."));
 }
 
 test "isReplacementArtifact detects replacement-only chunks" {
@@ -1217,6 +1428,8 @@ test "isReplacementArtifact detects replacement-only chunks" {
 test "hasDanglingTrailingQuote detects unmatched punctuation quote suffix" {
     try std.testing.expect(hasDanglingTrailingQuote("Hello?\""));
     try std.testing.expect(hasDanglingTrailingQuote("Hello?\"\n\n"));
+    try std.testing.expect(hasDanglingTrailingQuote("Hello? \xEF\xBF\xBD\xEF\xBF\xBD\""));
+    try std.testing.expect(hasDanglingTrailingQuote("Hello 😊\""));
     try std.testing.expect(!hasDanglingTrailingQuote("\"Paris.\""));
     try std.testing.expect(!hasDanglingTrailingQuote("He said \"hi\""));
 }
@@ -1234,10 +1447,111 @@ test "buildChatPrompt uses qwen no-thinking generation suffix when template requ
     );
     defer tok.token_to_id.deinit();
 
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"hello"};
     var buf: [512]u8 = undefined;
-    const prompt = try buildChatPrompt(&tok, "hello", &buf);
+    const prompt = try buildChatPrompt(&tok, &roles, &contents, null, &buf);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>user\nhello<|im_end|>\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, prompt, "<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+}
+
+test "buildChatPrompt enables thinking when requested" {
+    var tok = makeTestTokenizer(
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+    );
+    defer tok.token_to_id.deinit();
+
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"hello"};
+    var buf: [512]u8 = undefined;
+    const prompt = try buildChatPrompt(&tok, &roles, &contents, true, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>user\nhello<|im_end|>\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, prompt, "<|im_start|>assistant\n<think>\n"));
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "</think>") == null);
+}
+
+test "parseChatRequest preserves full message history" {
+    const body =
+        \\{"messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"follow up"}],"max_tokens":128,"stream":true,"temperature":0.7,"top_p":0.9,"enable_thinking":true}
+    ;
+    var parsed = try parseChatRequest(std.testing.allocator, body);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), parsed.roles.len);
+    try std.testing.expectEqualStrings("system", parsed.roles[0]);
+    try std.testing.expectEqualStrings("be concise", parsed.contents[0]);
+    try std.testing.expectEqualStrings("assistant", parsed.roles[2]);
+    try std.testing.expectEqualStrings("hi", parsed.contents[2]);
+    try std.testing.expectEqualStrings("user", parsed.roles[3]);
+    try std.testing.expectEqualStrings("follow up", parsed.contents[3]);
+    try std.testing.expectEqual(@as(u32, 128), parsed.max_tokens);
+    try std.testing.expect(parsed.stream);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7), parsed.temperature, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.9), parsed.top_p, 0.0001);
+    try std.testing.expectEqual(@as(?bool, true), parsed.enable_thinking);
+}
+
+test "parseChatRequest prepends default system guidance when missing" {
+    const body =
+        \\{"messages":[{"role":"user","content":"tell me how I can do inference on Vulcan + zig"}]}
+    ;
+    var parsed = try parseChatRequest(std.testing.allocator, body);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), parsed.roles.len);
+    try std.testing.expectEqualStrings("system", parsed.roles[0]);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.contents[0], "ambiguous") != null);
+    try std.testing.expectEqualStrings("user", parsed.roles[1]);
+}
+
+test "parseChatRequest defaults to greedy temperature when omitted" {
+    const body =
+        \\{"messages":[{"role":"user","content":"hello"}]}
+    ;
+    var parsed = try parseChatRequest(std.testing.allocator, body);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(f32, 0.0), parsed.temperature);
+}
+
+test "prefixThinkingEnvelope adds think prefix when enabled" {
+    var buf: [128]u8 = undefined;
+    const prefixed = try prefixThinkingEnvelope("17 * 24 = 408\n</think>\n408", true, &buf);
+    try std.testing.expectEqualStrings("<think>\n17 * 24 = 408\n</think>\n408", prefixed);
+}
+
+test "prefixThinkingEnvelope leaves text unchanged when disabled" {
+    var buf: [64]u8 = undefined;
+    const plain = try prefixThinkingEnvelope("408", false, &buf);
+    try std.testing.expectEqualStrings("408", plain);
+}
+
+test "supportsEnabledThinking requires tokenizer support and request flag" {
+    var qwen_tok = makeTestTokenizer(
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+    );
+    defer qwen_tok.token_to_id.deinit();
+
+    var plain_tok = makeTestTokenizer(null);
+    defer plain_tok.token_to_id.deinit();
+
+    try std.testing.expect(supportsEnabledThinking(&qwen_tok, true));
+    try std.testing.expect(!supportsEnabledThinking(&qwen_tok, false));
+    try std.testing.expect(!supportsEnabledThinking(&plain_tok, true));
 }
 
 test "ServerState snapshot tracks active queued and uptime" {

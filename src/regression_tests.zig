@@ -87,7 +87,7 @@ test "Q5_K MoE shader keeps GGML contiguous half ordering" {
 
 test "chat UI derives the model link from the reported model name" {
     const src = @embedFile("server/chat.html");
-    try expectContains(src, "const chatStateKey='zinc.chat.state.v1';");
+    try expectContains(src, "const chatStateKey='zinc.chat.state.v2';");
     try expectContains(src, "function restoreChatState()");
     try expectContains(src, "function clearConversation()");
     try expectContains(src, "id=\"cb\" class=\"btn btn-clear\"");
