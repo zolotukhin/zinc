@@ -1,8 +1,10 @@
 # AMD RDNA3/RDNA4 GPU Reference for Inference
 
-Hardware specifications, ISA details, and compute architecture reference for LLM inference on AMD consumer GPUs. Consolidated from AMD's official ISA manuals, GPUOpen documentation, and profiling data.
+Hardware specifications, ISA details, and compute architecture reference for LLM inference on AMD consumer GPUs. Consolidated from AMD product pages, ROCm hardware tables, AMD ISA manuals, GPUOpen documentation, and profiling data.
 
 ## Hardware Specifications
+
+> Note: Board power, clocks, VRAM, bus width, and memory bandwidth below were re-checked against AMD product pages on 2026-03-30. Wave size, LDS, Infinity Cache, and L2 cache rows are cross-checked against AMD's ROCm hardware tables. `Radeon AI PRO R9700` memory speed is derived from AMD's published 640 GB/s bandwidth over a 256-bit bus because the product page lists bandwidth but not Gbps directly. `Radeon RX 9070 GRE` ships as a 12 GB board on AMD's product page even though current ROCm tables still list 16 GiB; this reference follows the product page for shipping board specs. Blank clock cells for `Radeon RX 9060` are intentional because AMD's product page does not currently publish game / boost clocks there.
 
 ### RDNA4 — Navi 48 (gfx1201)
 
@@ -14,17 +16,16 @@ Hardware specifications, ISA details, and compute architecture reference for LLM
 | **Wave Size** | 32 or 64 | 32 or 64 | 32 or 64 | 32 or 64 |
 | **VRAM** | 16 GB GDDR6 | 16 GB GDDR6 | 12 GB GDDR6 | 32 GB GDDR6 |
 | **Memory Bus** | 256-bit | 256-bit | 192-bit | 256-bit |
-| **Memory Speed** | 20 Gbps | 20 Gbps | 18 Gbps | 18 Gbps |
-| **Memory Bandwidth** | 640 GB/s | 640 GB/s | 432 GB/s | 576 GB/s |
+| **Memory Speed** | 20 Gbps | 20 Gbps | 18 Gbps | 20 Gbps* |
+| **Memory Bandwidth** | 640 GB/s | 640 GB/s | 432 GB/s | 640 GB/s |
 | **Infinity Cache** | 64 MB | 64 MB | 48 MB | 64 MB |
-| **L2 Cache** | 8 MB | 8 MB | 4 MB | 8 MB |
-| **Game Clock** | 2400 MHz | 2070 MHz | — | — |
-| **Boost Clock** | 2970 MHz | 2520 MHz | — | 2350 MHz |
-| **TDP** | 304W | 304W | 220W | 150W |
+| **L2 Cache** | 8 MB | 8 MB | 6 MB | 8 MB |
+| **Game Clock** | 2400 MHz | 2070 MHz | 2220 MHz | 2350 MHz |
+| **Boost Clock** | 2970 MHz | 2520 MHz | 2790 MHz | 2920 MHz |
+| **Board Power** | 304 W | 220 W | 220 W | 300 W |
 | **Process** | TSMC N4P | TSMC N4P | TSMC N4P | TSMC N4P |
 | **Transistors** | 53.9B | 53.9B | 53.9B | 53.9B |
 | **Die Size** | 356.5 mm² | 356.5 mm² | 356.5 mm² | 356.5 mm² |
-| **PCIe** | 5.0 x16 | 5.0 x16 | 5.0 x8 | 5.0 x16 |
 
 ### RDNA3 — Navi 31 (gfx1100) and Navi 32 (gfx1101)
 
@@ -37,27 +38,30 @@ Hardware specifications, ISA details, and compute architecture reference for LLM
 | **Memory Bus** | 384-bit | 320-bit | 256-bit | 192-bit |
 | **Memory Bandwidth** | 960 GB/s | 800 GB/s | 624 GB/s | 432 GB/s |
 | **Infinity Cache** | 96 MB | 80 MB | 64 MB | 48 MB |
-| **L2 Cache** | 6 MB | 5 MB | 4 MB | 4 MB |
-| **Boost Clock** | 2499 MHz | 2394 MHz | 2430 MHz | 2544 MHz |
-| **TDP** | 355W | 315W | 263W | 245W |
+| **L2 Cache** | 6 MB | 6 MB | 4 MB | 4 MB |
+| **Game Clock** | 2300 MHz | 2000 MHz | 2124 MHz | 2171 MHz |
+| **Boost Clock** | 2500 MHz | 2400 MHz | 2430 MHz | 2544 MHz |
+| **Board Power** | 355 W | 315 W | 263 W | 245 W |
 | **Process** | TSMC N5 (GCD) + N6 (MCD) | TSMC N5 + N6 | TSMC N5 + N6 | TSMC N5 + N6 |
 
 ### RDNA4 — Navi 44 (gfx1200)
 
-| | RX 9060 XT (Navi 48) | RX 9060 (Navi 44) |
-|---|---|---|
-| **Die** | Navi 48 (cut-down) | Navi 44 |
-| **Compute Units** | 32 | 28 |
-| **Stream Processors** | 2048 | 1792 |
-| **VRAM** | 8 or 16 GB GDDR6 | 8 GB GDDR6 |
-| **Memory Bus** | 128-bit | 128-bit |
-| **Memory Bandwidth** | ~320 GB/s | 288 GB/s |
-| **L2 Cache** | 4 MB | 4 MB |
-| **Infinity Cache** | 32 MB | 32 MB |
-| **Boost Clock** | — | 2990 MHz |
-| **TDP** | — | 132W |
-| **Transistors** | 53.9B (Navi 48 die) | 29.7B |
-| **Die Size** | 356.5 mm² (Navi 48 die) | 199 mm² |
+| | RX 9060 XT (16 GB) | RX 9060 XT (8 GB) | RX 9060 |
+|---|---|---|---|
+| **Die** | Navi 44 | Navi 44 | Navi 44 |
+| **Compute Units** | 32 | 32 | 28 |
+| **Stream Processors** | 2048 | 2048 | 1792 |
+| **VRAM** | 16 GB GDDR6 | 8 GB GDDR6 | 8 GB GDDR6 |
+| **Memory Bus** | 128-bit | 128-bit | 128-bit |
+| **Memory Speed** | 20 Gbps | 20 Gbps | 18 Gbps |
+| **Memory Bandwidth** | 320 GB/s | 320 GB/s | 288 GB/s |
+| **L2 Cache** | 4 MB | 4 MB | 4 MB |
+| **Infinity Cache** | 32 MB | 32 MB | 32 MB |
+| **Game Clock** | 2530 MHz | 2530 MHz | — |
+| **Boost Clock** | 3130 MHz | 3130 MHz | — |
+| **Board Power** | 160 W | 150 W | 132 W |
+| **Transistors** | 29.7B | 29.7B | 29.7B |
+| **Die Size** | 199 mm² | 199 mm² | 199 mm² |
 
 ## Compute Unit Architecture
 
@@ -137,7 +141,7 @@ Shader Engine → L2 Cache (8 MB on Navi 48, ~100 cycles)
   ↓
 GPU → Infinity Cache (64 MB on Navi 48, ~150 cycles)
   ↓
-GPU → GDDR6 VRAM (16–32 GB, ~300+ cycles)
+GPU → GDDR6 VRAM (8–32 GB, ~300+ cycles)
 ```
 
 **Cache line sizes:**
@@ -149,7 +153,7 @@ GPU → GDDR6 VRAM (16–32 GB, ~300+ cycles)
 - LDS: ~64 bytes/clock/CU (dual-issue capable)
 - L0 Vector Cache: ~64 bytes/clock read
 - L2: doubled bandwidth per slice vs RDNA3
-- VRAM: 576–640 GB/s theoretical, 67–93% achievable on large DMMV
+- VRAM: 288–640 GB/s theoretical across current RDNA4 boards; on Navi 48 we typically see 67–93% utilization on large DMMV
 - PCIe 5.0 x16: ~64 GB/s per direction (128 GB/s bidirectional) — relevant for model loading
 
 **Memory coalescing:** Contiguous 4-byte accesses across all threads in a wave coalesce into full cache line requests. A wave32 reading 32 consecutive 4-byte values (128 bytes) generates 2 cache line requests (64 bytes each). Non-coalesced (scattered) access patterns cause replay penalties — each unique cache line touched generates a separate request. For DMMV, weight data is accessed sequentially so coalescing is natural. For KV cache with paged attention, page alignment to cache lines matters.
@@ -365,7 +369,7 @@ Q4_K stores weights as 4-bit indices with per-block scales. The DMMV inner loop:
 | **L0 Scalar Cache hit** | ~30 cycles | — | — | Constants, descriptors |
 | **L2 Cache hit** | ~100 cycles | 2× vs RDNA3 per slice | 128 B | Shared per Shader Engine |
 | **Infinity Cache hit** | ~150 cycles | — | 64 B | Victim cache, amplifies BW |
-| **VRAM (GDDR6)** | ~300+ cycles | 576–640 GB/s | 64 B | Full miss path |
+| **VRAM (GDDR6)** | ~300+ cycles | 288–640 GB/s | 64 B | Full miss path, depends on SKU |
 | **PCIe 5.0 x16** | ~1000+ cycles | 64 GB/s per direction | — | CPU↔GPU DMA (model loading) |
 
 ### Synchronization Costs
@@ -401,7 +405,7 @@ For K=4096: 4096/32 = 128 super-blocks
   Total memory: 128 × 18B = 2304 bytes per row
   Total ALU: 128 × 50 clk = 6400 clk ≈ 2.6 µs at 2.5 GHz
 
-At 576 GB/s bandwidth: 2304 bytes / 576 GB/s = 0.004 µs (memory)
+At 640 GB/s bandwidth (R9700 / RX 9070-class Navi 48): 2304 bytes / 640 GB/s = 0.0036 µs (memory)
 The operation is ALU-bound for a single row — but with wave-level parallelism
 across many rows, the GPU hides ALU latency behind memory latency of other waves.
 
@@ -565,7 +569,7 @@ Newer glslc adds `NonWritable`/`NonReadable` SPIR-V decorations and different co
 
 ### SMU Firmware
 
-Kernel 6.17 has SMU driver interface v0x2e, but RDNA4 firmware expects v0x32. This limits max GPU clock to 2200 MHz instead of 2350 MHz on AI PRO R9700. Kernel 6.14 or earlier may work correctly.
+Kernel 6.17 has SMU driver interface v0x2e, but RDNA4 firmware expects v0x32. On Radeon AI PRO R9700 this can pin sustained clocks around ~2200 MHz under compute load, below the card's advertised 2350 MHz game clock and 2920 MHz boost clock. Kernel 6.14 or earlier may work correctly.
 
 ## Official Documentation Links
 

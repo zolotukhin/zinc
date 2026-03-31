@@ -59,6 +59,12 @@ pub const InstalledManifest = struct {
     }
 };
 
+pub const RemoveInstalledModelResult = struct {
+    deleted_model: bool,
+    deleted_manifest: bool,
+    removed_dir: bool,
+};
+
 pub const DownloadObserver = struct {
     context: ?*anyopaque = null,
     on_start: ?*const fn (context: ?*anyopaque, total_bytes: ?u64) void = null,
@@ -150,6 +156,23 @@ pub fn writeActiveSelection(model_id: []const u8, allocator: std.mem.Allocator) 
         \\{{"active_model_id":"{s}","selected_at_unix":{d}}}
     , .{ model_id, std.time.timestamp() });
     try writer.interface.flush();
+}
+
+pub fn clearActiveSelection(allocator: std.mem.Allocator) !bool {
+    const path = try resolveActiveConfigPath(allocator);
+    defer allocator.free(path);
+    return deleteFileIfExistsAbsolute(path);
+}
+
+pub fn clearActiveSelectionIfMatches(model_id: []const u8, allocator: std.mem.Allocator) !bool {
+    var active = try readActiveSelection(allocator);
+    defer if (active) |*selection| selection.deinit(allocator);
+    if (active) |selection| {
+        if (std.mem.eql(u8, selection.model_id, model_id)) {
+            return try clearActiveSelection(allocator);
+        }
+    }
+    return false;
 }
 
 pub fn readCachedGpuProfile(device_index: u32, allocator: std.mem.Allocator) !?CachedGpuProfile {
@@ -254,6 +277,17 @@ pub fn verifyActiveSelectionFits(model_id: []const u8, vram_budget_bytes: u64, a
     const entry = catalog.find(model_id) orelse return error.UnknownManagedModel;
     if (!isInstalled(model_id, allocator)) return error.ModelNotInstalled;
     return describeFit(entry.*, vram_budget_bytes, allocator);
+}
+
+pub fn removeInstalledModel(model_id: []const u8, allocator: std.mem.Allocator) !RemoveInstalledModelResult {
+    const model_dir = try resolveInstalledModelDir(model_id, allocator);
+    defer allocator.free(model_dir);
+    const model_path = try resolveInstalledModelPath(model_id, allocator);
+    defer allocator.free(model_path);
+    const manifest_path = try resolveManifestPath(model_id, allocator);
+    defer allocator.free(manifest_path);
+
+    return removeInstalledModelAtPaths(model_dir, model_path, manifest_path);
 }
 
 pub fn pullModel(entry: catalog.CatalogEntry, allocator: std.mem.Allocator, writer: anytype) !void {
@@ -536,6 +570,28 @@ fn computeFileSha256Hex(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, &hex);
 }
 
+fn resolveInstalledModelDir(model_id: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var paths = try runtimePaths(allocator);
+    defer paths.deinit(allocator);
+    return try std.fs.path.join(allocator, &.{ paths.cache_root, "models", model_id });
+}
+
+fn removeInstalledModelAtPaths(model_dir: []const u8, model_path: []const u8, manifest_path: []const u8) !RemoveInstalledModelResult {
+    const had_model = pathExistsAbsolute(model_path);
+    const had_manifest = pathExistsAbsolute(manifest_path);
+    if (!had_model and !had_manifest) return error.ModelNotInstalled;
+
+    return .{
+        .deleted_model = try deleteFileIfExistsAbsolute(model_path),
+        .deleted_manifest = try deleteFileIfExistsAbsolute(manifest_path),
+        .removed_dir = deleteDirIfEmptyAbsolute(model_dir) catch |err| switch (err) {
+            error.FileNotFound => false,
+            error.DirNotEmpty => false,
+            else => return err,
+        },
+    };
+}
+
 fn resolveCacheRoot(allocator: std.mem.Allocator) ![]u8 {
     const xdg_cache = std.posix.getenv("XDG_CACHE_HOME");
     const home = std.posix.getenv("HOME");
@@ -583,6 +639,36 @@ fn resolveConfigRootForEnv(
 fn ensureParentDir(path: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return;
     try std.fs.cwd().makePath(parent);
+}
+
+fn pathExistsAbsolute(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
+fn dirExistsAbsolute(path: []const u8) bool {
+    const dir = std.fs.openDirAbsolute(path, .{}) catch return false;
+    defer {
+        var close_dir = dir;
+        close_dir.close();
+    }
+    return true;
+}
+
+fn deleteFileIfExistsAbsolute(path: []const u8) !bool {
+    std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
+fn deleteDirIfEmptyAbsolute(path: []const u8) !bool {
+    std.fs.deleteDirAbsolute(path) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
 }
 
 fn extractJsonStringField(body: []const u8, key: []const u8) ?[]const u8 {
@@ -693,4 +779,76 @@ test "buildProgressBar reflects partial and complete downloads" {
     const full_bar = buildProgressBar(&full, 100, 100);
     try std.testing.expectEqual(@as(usize, progress_bar_width), full_bar.len);
     try std.testing.expect(std.mem.indexOfScalar(u8, full_bar, ' ') == null);
+}
+
+test "removeInstalledModelAtPaths deletes known artifacts and empty dir" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen35-2b-q4k-m" });
+    defer std.testing.allocator.free(model_dir);
+    try std.fs.cwd().makePath(model_dir);
+
+    const model_path = try std.fs.path.join(std.testing.allocator, &.{ model_dir, "model.gguf" });
+    defer std.testing.allocator.free(model_path);
+    const manifest_path = try std.fs.path.join(std.testing.allocator, &.{ model_dir, "manifest.json" });
+    defer std.testing.allocator.free(manifest_path);
+
+    {
+        const file = try std.fs.createFileAbsolute(model_path, .{});
+        defer {
+            var close_file = file;
+            close_file.close();
+        }
+    }
+    {
+        const file = try std.fs.createFileAbsolute(manifest_path, .{});
+        defer {
+            var close_file = file;
+            close_file.close();
+        }
+    }
+
+    const result = try removeInstalledModelAtPaths(model_dir, model_path, manifest_path);
+    try std.testing.expect(result.deleted_model);
+    try std.testing.expect(result.deleted_manifest);
+    try std.testing.expect(result.removed_dir);
+    try std.testing.expect(!pathExistsAbsolute(model_path));
+    try std.testing.expect(!pathExistsAbsolute(manifest_path));
+    try std.testing.expect(!dirExistsAbsolute(model_dir));
+}
+
+test "removeInstalledModelAtPaths keeps non-empty directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen35-2b-q4k-m" });
+    defer std.testing.allocator.free(model_dir);
+    try std.fs.cwd().makePath(model_dir);
+
+    const model_path = try std.fs.path.join(std.testing.allocator, &.{ model_dir, "model.gguf" });
+    defer std.testing.allocator.free(model_path);
+    const manifest_path = try std.fs.path.join(std.testing.allocator, &.{ model_dir, "manifest.json" });
+    defer std.testing.allocator.free(manifest_path);
+    const extra_path = try std.fs.path.join(std.testing.allocator, &.{ model_dir, "notes.txt" });
+    defer std.testing.allocator.free(extra_path);
+
+    for ([_][]const u8{ model_path, manifest_path, extra_path }) |path| {
+        const file = try std.fs.createFileAbsolute(path, .{});
+        defer {
+            var close_file = file;
+            close_file.close();
+        }
+    }
+
+    const result = try removeInstalledModelAtPaths(model_dir, model_path, manifest_path);
+    try std.testing.expect(result.deleted_model);
+    try std.testing.expect(result.deleted_manifest);
+    try std.testing.expect(!result.removed_dir);
+    try std.testing.expect(pathExistsAbsolute(extra_path));
+    try std.testing.expect(dirExistsAbsolute(model_dir));
 }

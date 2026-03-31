@@ -52,6 +52,8 @@ pub const DmmvDispatch = struct {
     pipeline_q4k_moe: ?Pipeline,
     /// MoE Q5K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q5k_moe: ?Pipeline,
+    /// MoE Q6K pipeline (4 bindings: A, x, y, routing), or null.
+    pipeline_q6k_moe: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -116,13 +118,13 @@ pub const DmmvDispatch = struct {
         };
 
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
             log.warn("Q6_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -149,12 +151,18 @@ pub const DmmvDispatch = struct {
         };
 
         const q5k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k_moe = pipeline_mod.createFromSpirv(instance, q5k_moe_path, 4, moe_push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q5k_moe = pipeline_mod.createFromSpirv(instance, q5k_moe_path, 4, moe_push_size, &spec_k, allocator) catch |err| blk: {
             log.warn("Q5_K MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
-        if (pipeline_q4k_moe != null and pipeline_q5k_moe != null) {
+        const q6k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_moe.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_moe = pipeline_mod.createFromSpirv(instance, q6k_moe_path, 4, moe_push_size, &spec_k, allocator) catch |err| blk: {
+            log.warn("Q6_K MoE shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        if (pipeline_q4k_moe != null and pipeline_q5k_moe != null and pipeline_q6k_moe != null) {
             log.info("MoE DMMV pipelines loaded — GPU expert dispatch enabled (no readback)", .{});
         }
 
@@ -167,6 +175,7 @@ pub const DmmvDispatch = struct {
             .pipeline_f32 = pipeline_f32,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
+            .pipeline_q6k_moe = pipeline_q6k_moe,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -194,6 +203,7 @@ pub const DmmvDispatch = struct {
         return switch (quant_type) {
             .q4_k => if (self.pipeline_q4k_moe) |*p| p else null,
             .q5_k => if (self.pipeline_q5k_moe) |*p| p else null,
+            .q6_k => if (self.pipeline_q6k_moe) |*p| p else null,
             else => null,
         };
     }
@@ -300,6 +310,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_f32) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
+        if (self.pipeline_q6k_moe) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

@@ -846,7 +846,7 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   diagnosis.push("");
   diagnosis.push("## CURRENT STATE (2026-03-30, updated)");
   diagnosis.push("Output: CORRECT at 33.6 tok/s clean CLI and ~33.5 tok/s raw API on a clean ReleaseFast build.");
-  diagnosis.push("Reasoning chat is still slower: one longer chat sample produced 257 completion tokens at ~28.4 tok/s.");
+  diagnosis.push("Reasoning chat is still slower: the current 3-prompt matrix lands at 24.9-28.6 tok/s (about 26.9 tok/s average).");
   diagnosis.push("Modeled decode bandwidth at 33.58 tok/s is ~112.5 GB/s (~19.5% of 576 GB/s). Single-stream decode will not saturate DRAM.");
   diagnosis.push("Remaining bottlenecks are medium/small decode kernels, chat template/stop-path overhead, and still-intrusive profiling.");
   diagnosis.push("All changes MUST pass `zig build test`.");

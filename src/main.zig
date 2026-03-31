@@ -155,6 +155,8 @@ pub const Config = struct {
     command: Command = .run,
     /// Positional model id for `zinc model ...`.
     command_model_id: ?[]const u8 = null,
+    /// Force a managed-model command that would otherwise refuse.
+    command_force: bool = false,
     /// Show unsupported catalog entries in `zinc model list`.
     show_all_models: bool = false,
 };
@@ -165,6 +167,7 @@ pub const Command = enum {
     model_pull,
     model_use,
     model_active,
+    model_rm,
 };
 
 const ConnectionWorker = if (gpu.is_vulkan) struct {
@@ -228,7 +231,7 @@ const banner =
     \\  zinc -m <model.gguf> [-p 8080]
     \\  zinc --model-id <id> [--prompt "Hello"]
     \\  zinc --check [-m <model.gguf> | --model-id <id>]
-    \\  zinc model <list|pull|use|active> [args]
+    \\  zinc model <list|pull|use|active|rm> [args]
     \\
     \\Common options:
     \\  -m, --model <path>       GGUF model file to load
@@ -249,6 +252,7 @@ const banner =
     \\  model pull <id>          Download a supported managed model into the local cache
     \\  model use <id>           Set the active managed model for future runs
     \\  model active             Print the active managed model
+    \\  model rm [-f] <id>       Remove a cached managed model; -f unloads it first if active
     \\
     \\Diagnostics:
     \\  --check                  Run system diagnostics and verify dependencies
@@ -267,7 +271,7 @@ const banner_full =
     \\  zinc -m <model.gguf> [-p 8080]
     \\  zinc --model-id <id> [--prompt "Hello"]
     \\  zinc --check [-m <model.gguf> | --model-id <id>]
-    \\  zinc model <list|pull|use|active> [args]
+    \\  zinc model <list|pull|use|active|rm> [args]
     \\
     \\Common options:
     \\  -m, --model <path>       GGUF model file to load
@@ -288,6 +292,7 @@ const banner_full =
     \\  model pull <id>          Download a supported managed model into the local cache
     \\  model use <id>           Set the active managed model for future runs
     \\  model active             Print the active managed model
+    \\  model rm [-f] <id>       Remove a cached managed model; -f unloads it first if active
     \\
     \\Diagnostics:
     \\  --check                  Run system diagnostics and verify dependencies
@@ -343,6 +348,14 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
                 config.command_model_id = args[i];
             } else if (std.mem.eql(u8, sub, "active")) {
                 config.command = .model_active;
+            } else if (std.mem.eql(u8, sub, "rm") or std.mem.eql(u8, sub, "remove")) {
+                config.command = .model_rm;
+                while (i + 1 < args.len and (std.mem.eql(u8, args[i + 1], "-f") or std.mem.eql(u8, args[i + 1], "--force"))) : (i += 1) {
+                    config.command_force = true;
+                }
+                i += 1;
+                if (i >= args.len) return error.MissingArgValue;
+                config.command_model_id = args[i];
             } else {
                 return error.UnknownArgument;
             }
@@ -408,6 +421,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             config.check = true;
         } else if (std.mem.eql(u8, arg, "--all")) {
             config.show_all_models = true;
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            config.command_force = true;
         } else {
             return error.UnknownArgument;
         }
@@ -564,14 +579,15 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
         }
 
         try stdout.interface.print("Vulkan GPU detection unavailable ({s}). Showing the full catalog without live fit checks.\n\n", .{@errorName(err)});
-        try stdout.interface.writeAll("ID                             Status      Fit    Installed   Active   Notes\n");
+        try stdout.interface.writeAll("ID                             Released     Status      Fit    Installed   Active   Notes\n");
         for (catalog_mod.entries) |entry| {
             const installed = managed_mod.isInstalled(entry.id, allocator);
             const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
             try stdout.interface.print(
-                "{s: <30} {s: <11} {s: <6} {s: <11} {s: <8} {s}\n",
+                "{s: <30} {s: <12} {s: <11} {s: <6} {s: <11} {s: <8} {s}\n",
                 .{
                     entry.id,
+                    entry.release_date,
                     "catalog",
                     "n/a",
                     if (installed) "yes" else "no",
@@ -595,7 +611,7 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
             if (support.from_cache) " (cached)" else "",
         },
     );
-    try stdout.interface.writeAll("ID                             Status      Fit    Installed   Active   Notes\n");
+    try stdout.interface.writeAll("ID                             Released     Status      Fit    Installed   Active   Notes\n");
 
     var rendered_any = false;
     for (catalog_mod.entries) |entry| {
@@ -618,9 +634,10 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
         else
             "hidden";
         try stdout.interface.print(
-            "{s: <30} {s: <11} {s: <6} {s: <11} {s: <8} {s}\n",
+            "{s: <30} {s: <12} {s: <11} {s: <6} {s: <11} {s: <8} {s}\n",
             .{
                 entry.id,
+                entry.release_date,
                 status_label,
                 if (fit.fits_current_gpu) "yes" else "no",
                 if (installed) "yes" else "no",
@@ -635,6 +652,148 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     }
 
     try stdout.interface.flush();
+}
+
+const LocalAdminRemoveResponse = struct {
+    status: u16,
+    payload: []u8,
+    body: []const u8,
+
+    fn deinit(self: *LocalAdminRemoveResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
+const ManagedRemoveOutcome = struct {
+    unloaded_from_gpu: bool,
+    cleared_active_selection: bool,
+    deleted_model: bool,
+    deleted_manifest: bool,
+    removed_dir: bool,
+};
+
+fn tryRemoveManagedModelViaLocalServer(
+    port: u16,
+    model_id: []const u8,
+    force: bool,
+    allocator: std.mem.Allocator,
+) !?LocalAdminRemoveResponse {
+    const address = try std.net.Address.parseIp4("127.0.0.1", port);
+    var stream = std.net.tcpConnectToAddress(address) catch return null;
+    defer stream.close();
+
+    const request_body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"model\":\"{s}\",\"force\":{s}}}",
+        .{ model_id, if (force) "true" else "false" },
+    );
+    defer allocator.free(request_body);
+
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "POST /v1/models/remove HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+        .{ port, request_body.len, request_body },
+    );
+    defer allocator.free(request);
+    try stream.writeAll(request);
+
+    var response: std.ArrayList(u8) = .{};
+    defer response.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = try stream.read(&buf);
+        if (n == 0) break;
+        try response.appendSlice(allocator, buf[0..n]);
+        if (response.items.len > 64 * 1024) return error.ResponseTooLarge;
+    }
+
+    const header_end = std.mem.indexOf(u8, response.items, "\r\n\r\n") orelse return null;
+    const status = parseHttpStatus(response.items[0..header_end]) orelse return null;
+    const payload = try allocator.dupe(u8, response.items);
+    return .{
+        .status = status,
+        .payload = payload,
+        .body = payload[header_end + 4 ..],
+    };
+}
+
+fn parseHttpStatus(header: []const u8) ?u16 {
+    const line_end = std.mem.indexOf(u8, header, "\r\n") orelse header.len;
+    const line = header[0..line_end];
+    const first_space = std.mem.indexOfScalar(u8, line, ' ') orelse return null;
+    const rest = line[first_space + 1 ..];
+    if (rest.len < 3) return null;
+    return std.fmt.parseInt(u16, rest[0..3], 10) catch null;
+}
+
+fn jsonFieldIsTrue(body: []const u8, key: []const u8) bool {
+    var needle_buf: [96]u8 = undefined;
+    const compact = std.fmt.bufPrint(&needle_buf, "\"{s}\":true", .{key}) catch return false;
+    if (std.mem.indexOf(u8, body, compact) != null) return true;
+    const spaced = std.fmt.bufPrint(&needle_buf, "\"{s}\": true", .{key}) catch return false;
+    return std.mem.indexOf(u8, body, spaced) != null;
+}
+
+fn extractJsonMessage(body: []const u8) ?[]const u8 {
+    return extractJsonStringField(body, "message");
+}
+
+fn extractJsonStringField(body: []const u8, key: []const u8) ?[]const u8 {
+    var needle_buf: [128]u8 = undefined;
+    const compact = std.fmt.bufPrint(&needle_buf, "\"{s}\":\"", .{key}) catch return null;
+    if (std.mem.indexOf(u8, body, compact)) |pos| {
+        const start = pos + compact.len;
+        return body[start .. start + (findJsonStringEnd(body[start..]) orelse return null)];
+    }
+    const spaced = std.fmt.bufPrint(&needle_buf, "\"{s}\": \"", .{key}) catch return null;
+    if (std.mem.indexOf(u8, body, spaced)) |pos| {
+        const start = pos + spaced.len;
+        return body[start .. start + (findJsonStringEnd(body[start..]) orelse return null)];
+    }
+    return null;
+}
+
+fn findJsonStringEnd(s: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (s[i] == '"') return i;
+    }
+    return null;
+}
+
+fn printManagedRemoveSummary(model_id: []const u8, outcome: ManagedRemoveOutcome) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    if (outcome.unloaded_from_gpu) {
+        try stdout.interface.print("Unloaded {s} from GPU memory\n", .{model_id});
+    }
+    if (outcome.deleted_model) {
+        try stdout.interface.writeAll("Deleted: model.gguf\n");
+    }
+    if (outcome.deleted_manifest) {
+        try stdout.interface.writeAll("Deleted: manifest.json\n");
+    }
+    if (outcome.removed_dir) {
+        try stdout.interface.writeAll("Removed empty cache directory\n");
+    }
+    if (outcome.cleared_active_selection) {
+        try stdout.interface.writeAll("Cleared active model selection\n");
+    }
+    try stdout.interface.print("Removed: {s}\n", .{model_id});
+    try stdout.interface.flush();
+}
+
+fn printCommandError(message: []const u8) !void {
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
+    try stderr.interface.print("{s}\n", .{message});
+    try stderr.interface.flush();
 }
 
 fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
@@ -679,6 +838,41 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
             var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
             try stdout.interface.print("Active model set to {s}\n", .{model_id});
             try stdout.interface.flush();
+        },
+        .model_rm => {
+            const model_id = config.command_model_id orelse return error.MissingArgValue;
+            _ = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
+
+            if (try tryRemoveManagedModelViaLocalServer(config.port, model_id, config.command_force, allocator)) |server_response| {
+                defer {
+                    var owned = server_response;
+                    owned.deinit(allocator);
+                }
+
+                if (server_response.status >= 200 and server_response.status < 300) {
+                    try printManagedRemoveSummary(model_id, .{
+                        .unloaded_from_gpu = jsonFieldIsTrue(server_response.body, "unloaded_from_gpu"),
+                        .cleared_active_selection = jsonFieldIsTrue(server_response.body, "cleared_active_selection"),
+                        .deleted_model = jsonFieldIsTrue(server_response.body, "deleted_model"),
+                        .deleted_manifest = jsonFieldIsTrue(server_response.body, "deleted_manifest"),
+                        .removed_dir = jsonFieldIsTrue(server_response.body, "removed_dir"),
+                    });
+                    return;
+                }
+
+                try printCommandError(extractJsonMessage(server_response.body) orelse "Managed model removal failed through the local server.");
+                return error.CommandAlreadyReported;
+            }
+
+            const removed = try managed_mod.removeInstalledModel(model_id, allocator);
+            const cleared_active_selection = try managed_mod.clearActiveSelectionIfMatches(model_id, allocator);
+            try printManagedRemoveSummary(model_id, .{
+                .unloaded_from_gpu = false,
+                .cleared_active_selection = cleared_active_selection,
+                .deleted_model = removed.deleted_model,
+                .deleted_manifest = removed.deleted_manifest,
+                .removed_dir = removed.removed_dir,
+            });
         },
         .run => {},
     }
@@ -846,6 +1040,9 @@ pub fn main() !void {
 
     if (config.command != .run) {
         runModelCommand(config, allocator) catch |err| {
+            if (err == error.CommandAlreadyReported) {
+                std.process.exit(1);
+            }
             if (err == error.GpuDetectionUnavailable) {
                 std.process.exit(1);
             }
@@ -1184,12 +1381,16 @@ pub fn main() !void {
         defer manager.deinit();
 
         if (config.profile) {
-            manager.currentResources().engine.enableProfiling() catch |err| {
-                log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
-            };
+            if (manager.currentResources()) |resources| {
+                resources.engine.enableProfiling() catch |err| {
+                    log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
+                };
+            }
         }
         if (config.debug) {
-            manager.currentResources().engine.enableLogitsReadback();
+            if (manager.currentResources()) |resources| {
+                resources.engine.enableLogitsReadback();
+            }
         }
 
         var server = http_mod.Server.init(allocator, config.port) catch |err| {
@@ -1374,6 +1575,12 @@ test "parseArgs: managed model subcommands" {
     const active_args = [_][:0]const u8{ "zinc", "model", "active" };
     const active_config = try parseArgs(&active_args);
     try std.testing.expectEqual(Command.model_active, active_config.command);
+
+    const rm_args = [_][:0]const u8{ "zinc", "model", "rm", "-f", "qwen35-2b-q4k-m" };
+    const rm_config = try parseArgs(&rm_args);
+    try std.testing.expectEqual(Command.model_rm, rm_config.command);
+    try std.testing.expect(rm_config.command_force);
+    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", rm_config.command_model_id.?);
 }
 
 test "resolveCheckTarget returns general diagnostics target when no model is specified" {

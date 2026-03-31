@@ -23,6 +23,7 @@ pub const LoadSpec = struct {
 pub const ModelSummary = struct {
     id: []const u8,
     display_name: []const u8,
+    release_date: []const u8,
     homepage_url: []const u8,
     installed: bool,
     active: bool,
@@ -32,6 +33,7 @@ pub const ModelSummary = struct {
     required_vram_bytes: u64,
     exact_fit: bool,
     status_label: []const u8,
+    supports_thinking_toggle: bool,
 };
 
 pub const ModelCatalogView = struct {
@@ -51,6 +53,11 @@ pub const LoadedResources = struct {
     model_path: []u8,
     managed_id: ?[]u8,
     display_name: []u8,
+    weights_bytes: u64,
+    runtime_device_local_bytes: u64,
+    context_reserved_bytes: u64,
+    context_capacity_tokens: u32,
+    context_bytes_per_token: u64,
     device_local_bytes: u64,
     device_local_budget_bytes: u64,
 
@@ -72,7 +79,13 @@ pub const ModelManager = struct {
     vram_budget_bytes: u64,
     shader_dir: []const u8,
     state_mutex: std.Thread.Mutex = .{},
-    current: *LoadedResources,
+    current: ?*LoadedResources,
+
+    pub const RemoveResult = struct {
+        unloaded_from_gpu: bool,
+        cleared_active_selection: bool,
+        removed: managed_mod.RemoveInstalledModelResult,
+    };
 
     pub fn init(
         spec: LoadSpec,
@@ -97,31 +110,62 @@ pub const ModelManager = struct {
     pub fn deinit(self: *ModelManager) void {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
-        self.current.deinit(self.instance, self.allocator);
-        self.allocator.destroy(self.current);
+        if (self.current) |current| {
+            current.deinit(self.instance, self.allocator);
+            self.allocator.destroy(current);
+        }
     }
 
-    pub fn currentResources(self: *ModelManager) *LoadedResources {
+    pub fn currentResources(self: *ModelManager) ?*LoadedResources {
         return self.current;
     }
 
     pub fn activeDisplayName(self: *ModelManager) []const u8 {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
-        return self.current.display_name;
+        return if (self.current) |current| current.display_name else "none";
     }
 
     pub const MemoryUsage = struct {
+        weights_bytes: u64,
+        runtime_device_local_bytes: u64,
+        context_reserved_bytes: u64,
+        context_capacity_tokens: u32,
+        context_bytes_per_token: u64,
         device_local_bytes: u64,
         device_local_budget_bytes: u64,
+
+        pub fn activeContextTokens(self: @This(), requested_tokens: u32) u32 {
+            return @min(requested_tokens, self.context_capacity_tokens);
+        }
+
+        pub fn activeContextBytes(self: @This(), requested_tokens: u32) u64 {
+            return @as(u64, self.activeContextTokens(requested_tokens)) * self.context_bytes_per_token;
+        }
     };
 
     pub fn currentMemoryUsage(self: *ModelManager) MemoryUsage {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
+        if (self.current) |current| {
+            return .{
+                .weights_bytes = current.weights_bytes,
+                .runtime_device_local_bytes = current.runtime_device_local_bytes,
+                .context_reserved_bytes = current.context_reserved_bytes,
+                .context_capacity_tokens = current.context_capacity_tokens,
+                .context_bytes_per_token = current.context_bytes_per_token,
+                .device_local_bytes = current.device_local_bytes,
+                .device_local_budget_bytes = current.device_local_budget_bytes,
+            };
+        }
         return .{
-            .device_local_bytes = self.current.device_local_bytes,
-            .device_local_budget_bytes = self.current.device_local_budget_bytes,
+            .weights_bytes = 0,
+            .runtime_device_local_bytes = 0,
+            .context_reserved_bytes = 0,
+            .context_capacity_tokens = 0,
+            .context_bytes_per_token = 0,
+            .device_local_bytes = 0,
+            .device_local_budget_bytes = self.vram_budget_bytes,
         };
     }
 
@@ -130,8 +174,9 @@ pub const ModelManager = struct {
         defer self.state_mutex.unlock();
 
         const profile = catalog_mod.profileForGpu(self.gpu_config);
-        const active_managed_id = self.current.managed_id;
-        const active_display_name = self.current.display_name;
+        const active_managed_id = if (self.current) |current| current.managed_id else null;
+        const active_display_name = if (self.current) |current| current.display_name else "none";
+        const active_supports_thinking_toggle = if (self.current) |current| current.tokenizer.supportsThinkingToggle() else false;
 
         var list: std.ArrayList(ModelSummary) = .{};
         defer list.deinit(allocator);
@@ -158,6 +203,7 @@ pub const ModelManager = struct {
             try list.append(allocator, .{
                 .id = entry.id,
                 .display_name = entry.display_name,
+                .release_date = entry.release_date,
                 .homepage_url = entry.homepage_url,
                 .installed = installed,
                 .active = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id),
@@ -167,13 +213,15 @@ pub const ModelManager = struct {
                 .required_vram_bytes = fit.required_vram_bytes,
                 .exact_fit = fit.exact,
                 .status_label = status_label,
+                .supports_thinking_toggle = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id) and active_supports_thinking_toggle,
             });
         }
 
-        if (active_managed_id == null) {
+        if (self.current != null and active_managed_id == null) {
             try list.append(allocator, .{
                 .id = active_display_name,
                 .display_name = active_display_name,
+                .release_date = "",
                 .homepage_url = "",
                 .installed = true,
                 .active = true,
@@ -183,6 +231,7 @@ pub const ModelManager = struct {
                 .required_vram_bytes = 0,
                 .exact_fit = true,
                 .status_label = "raw",
+                .supports_thinking_toggle = active_supports_thinking_toggle,
             });
         }
 
@@ -205,10 +254,12 @@ pub const ModelManager = struct {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
 
-        if (self.current.managed_id) |active_id| {
-            if (std.mem.eql(u8, active_id, model_id)) {
-                if (persist_active) try managed_mod.writeActiveSelection(model_id, self.allocator);
-                return;
+        if (self.current) |current| {
+            if (current.managed_id) |active_id| {
+                if (std.mem.eql(u8, active_id, model_id)) {
+                    if (persist_active) try managed_mod.writeActiveSelection(model_id, self.allocator);
+                    return;
+                }
             }
         }
 
@@ -222,10 +273,48 @@ pub const ModelManager = struct {
 
         const previous = self.current;
         self.current = switched;
-        previous.deinit(self.instance, self.allocator);
-        self.allocator.destroy(previous);
+        if (previous) |old| {
+            old.deinit(self.instance, self.allocator);
+            self.allocator.destroy(old);
+        }
 
         if (persist_active) try managed_mod.writeActiveSelection(model_id, self.allocator);
+    }
+
+    /// Caller must already hold the shared generation lock.
+    pub fn removeManagedModel(self: *ModelManager, model_id: []const u8, force: bool) !RemoveResult {
+        var unloaded_from_gpu = false;
+        var previous: ?*LoadedResources = null;
+
+        self.state_mutex.lock();
+        if (self.current) |current| {
+            if (current.managed_id) |active_id| {
+                if (std.mem.eql(u8, active_id, model_id)) {
+                    if (!force) {
+                        self.state_mutex.unlock();
+                        return error.ModelLoadedInGpu;
+                    }
+                    previous = current;
+                    self.current = null;
+                    unloaded_from_gpu = true;
+                }
+            }
+        }
+        self.state_mutex.unlock();
+
+        if (previous) |resources| {
+            resources.deinit(self.instance, self.allocator);
+            self.allocator.destroy(resources);
+        }
+
+        const removed = try managed_mod.removeInstalledModel(model_id, self.allocator);
+        const cleared_active_selection = try managed_mod.clearActiveSelectionIfMatches(model_id, self.allocator);
+
+        return .{
+            .unloaded_from_gpu = unloaded_from_gpu,
+            .cleared_active_selection = cleared_active_selection,
+            .removed = removed,
+        };
     }
 };
 
@@ -263,6 +352,11 @@ fn loadResourcesInto(
 
     resources.display_name = try allocator.dupe(u8, modelDisplayName(&resources.model));
     errdefer allocator.free(resources.display_name);
+    resources.weights_bytes = inspection.tensor_bytes;
+    resources.runtime_device_local_bytes = fit.runtime_device_local_bytes;
+    resources.context_reserved_bytes = fit.kv_cache_bytes;
+    resources.context_capacity_tokens = fit.max_ctx;
+    resources.context_bytes_per_token = if (fit.max_ctx == 0) 0 else @divTrunc(fit.kv_cache_bytes, fit.max_ctx);
     resources.device_local_bytes = fit.total_device_local_bytes;
     resources.device_local_budget_bytes = fit.vram_budget_bytes;
 
@@ -316,19 +410,46 @@ test "collectCatalogView marks active managed model" {
     };
     var current = LoadedResources{
         .model = undefined,
-        .tokenizer = undefined,
+        .tokenizer = .{
+            .vocab = &.{},
+            .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+            .merges = &.{},
+            .scores = null,
+            .bos_id = 1,
+            .eos_id = 2,
+            .prepend_bos = true,
+            .chat_template =
+            \\{%- if add_generation_prompt %}
+            \\  {{- '<|im_start|>assistant\n' }}
+            \\  {%- if enable_thinking is defined and enable_thinking is true %}
+            \\    {{- '<think>\n' }}
+            \\  {%- else %}
+            \\    {{- '<think>\n\n</think>\n\n' }}
+            \\  {%- endif %}
+            \\{%- endif %}
+            ,
+            .allocator = std.testing.allocator,
+        },
         .engine = undefined,
         .model_path = try std.testing.allocator.dupe(u8, "/tmp/test.gguf"),
         .managed_id = try std.testing.allocator.dupe(u8, "qwen35-35b-a3b-q4k-xl"),
         .display_name = try std.testing.allocator.dupe(u8, "Qwen3.5 35B-A3B UD Q4_K_XL"),
+        .weights_bytes = 20 * 1024 * 1024 * 1024,
+        .runtime_device_local_bytes = 1024 * 1024 * 1024,
+        .context_reserved_bytes = 768 * 1024 * 1024,
+        .context_capacity_tokens = 4096,
+        .context_bytes_per_token = 192 * 1024,
         .device_local_bytes = 21 * 1024 * 1024 * 1024,
         .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
     };
     fake.current = &current;
     defer {
-        std.testing.allocator.free(fake.current.model_path);
-        if (fake.current.managed_id) |id| std.testing.allocator.free(id);
-        std.testing.allocator.free(fake.current.display_name);
+        if (fake.current) |loaded| {
+            loaded.tokenizer.token_to_id.deinit();
+            std.testing.allocator.free(loaded.model_path);
+            if (loaded.managed_id) |id| std.testing.allocator.free(id);
+            std.testing.allocator.free(loaded.display_name);
+        }
     }
 
     var view = try fake.collectCatalogView(std.testing.allocator, false);
@@ -340,7 +461,110 @@ test "collectCatalogView marks active managed model" {
         if (std.mem.eql(u8, entry.id, "qwen35-35b-a3b-q4k-xl")) {
             saw_active = true;
             try std.testing.expect(entry.active);
+            try std.testing.expect(entry.supports_thinking_toggle);
+            try std.testing.expectEqualStrings("2026-02-16", entry.release_date);
         }
     }
     try std.testing.expect(saw_active);
+}
+
+test "currentMemoryUsage reports empty state when no model is loaded" {
+    var fake = ModelManager{
+        .allocator = std.testing.allocator,
+        .instance = undefined,
+        .gpu_config = .{
+            .vendor = .amd_rdna4,
+            .device_name = undefined,
+            .device_name_len = 0,
+            .vram_mb = 32624,
+            .bandwidth_gbps = 576,
+            .compute_units = 64,
+            .wave_size = 64,
+            .coopmat_support = true,
+            .l1_cache_kb = 32,
+            .l2_cache_mb = 6,
+            .max_workgroup_size = 1024,
+            .dmmv_workgroup_size = 64,
+            .dmmv_rows_per_workgroup = 2,
+            .matmul_tile_m = 16,
+            .matmul_tile_n = 16,
+            .flash_attn_block_size = 256,
+        },
+        .vram_budget_bytes = 32 * 1024 * 1024 * 1024,
+        .shader_dir = "zig-out/share/zinc/shaders",
+        .current = null,
+    };
+
+    const usage = fake.currentMemoryUsage();
+    try std.testing.expectEqual(@as(u64, 0), usage.weights_bytes);
+    try std.testing.expectEqual(@as(u64, 0), usage.runtime_device_local_bytes);
+    try std.testing.expectEqual(@as(u64, 0), usage.context_reserved_bytes);
+    try std.testing.expectEqual(@as(u32, 0), usage.context_capacity_tokens);
+    try std.testing.expectEqual(@as(u64, 0), usage.context_bytes_per_token);
+    try std.testing.expectEqual(@as(u64, 0), usage.device_local_bytes);
+    try std.testing.expectEqual(@as(u64, 32 * 1024 * 1024 * 1024), usage.device_local_budget_bytes);
+    try std.testing.expectEqualStrings("none", fake.activeDisplayName());
+}
+
+test "removeManagedModel refuses loaded active model without force" {
+    var fake = ModelManager{
+        .allocator = std.testing.allocator,
+        .instance = undefined,
+        .gpu_config = .{
+            .vendor = .amd_rdna4,
+            .device_name = undefined,
+            .device_name_len = 0,
+            .vram_mb = 32624,
+            .bandwidth_gbps = 576,
+            .compute_units = 64,
+            .wave_size = 64,
+            .coopmat_support = true,
+            .l1_cache_kb = 32,
+            .l2_cache_mb = 6,
+            .max_workgroup_size = 1024,
+            .dmmv_workgroup_size = 64,
+            .dmmv_rows_per_workgroup = 2,
+            .matmul_tile_m = 16,
+            .matmul_tile_n = 16,
+            .flash_attn_block_size = 256,
+        },
+        .vram_budget_bytes = 32 * 1024 * 1024 * 1024,
+        .shader_dir = "zig-out/share/zinc/shaders",
+        .current = undefined,
+    };
+    var current = LoadedResources{
+        .model = undefined,
+        .tokenizer = .{
+            .vocab = &.{},
+            .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+            .merges = &.{},
+            .scores = null,
+            .bos_id = 1,
+            .eos_id = 2,
+            .prepend_bos = true,
+            .chat_template = null,
+            .allocator = std.testing.allocator,
+        },
+        .engine = undefined,
+        .model_path = try std.testing.allocator.dupe(u8, "/tmp/test.gguf"),
+        .managed_id = try std.testing.allocator.dupe(u8, "qwen35-35b-a3b-q4k-xl"),
+        .display_name = try std.testing.allocator.dupe(u8, "Qwen3.5 35B-A3B UD Q4_K_XL"),
+        .weights_bytes = 20 * 1024 * 1024 * 1024,
+        .runtime_device_local_bytes = 1024 * 1024 * 1024,
+        .context_reserved_bytes = 768 * 1024 * 1024,
+        .context_capacity_tokens = 4096,
+        .context_bytes_per_token = 192 * 1024,
+        .device_local_bytes = 21 * 1024 * 1024 * 1024,
+        .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
+    };
+    fake.current = &current;
+    defer {
+        fake.current.?.tokenizer.token_to_id.deinit();
+        std.testing.allocator.free(fake.current.?.model_path);
+        if (fake.current.?.managed_id) |id| std.testing.allocator.free(id);
+        std.testing.allocator.free(fake.current.?.display_name);
+    }
+
+    try std.testing.expectError(error.ModelLoadedInGpu, fake.removeManagedModel("qwen35-35b-a3b-q4k-xl", false));
+    try std.testing.expect(fake.current == &current);
 }

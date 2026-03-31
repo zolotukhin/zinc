@@ -491,28 +491,43 @@ pub const Tokenizer = struct {
         return buf[0..out];
     }
 
+    pub const ChatTemplateOptions = struct {
+        enable_thinking: ?bool = null,
+    };
+
+    pub fn supportsThinkingToggle(self: *const Tokenizer) bool {
+        return if (self.chat_template) |tmpl|
+            std.mem.indexOf(u8, tmpl, "enable_thinking") != null and
+                std.mem.indexOf(u8, tmpl, "<think>") != null
+        else
+            false;
+    }
+
     /// Apply chat template to role/content pairs. Returns formatted prompt in buf.
     pub fn applyChatTemplate(self: *const Tokenizer, roles: []const []const u8, contents: []const []const u8, buf: []u8) ![]const u8 {
+        return self.applyChatTemplateWithOptions(roles, contents, .{}, buf);
+    }
+
+    /// Apply chat template to role/content pairs with explicit thinking control.
+    pub fn applyChatTemplateWithOptions(self: *const Tokenizer, roles: []const []const u8, contents: []const []const u8, options: ChatTemplateOptions, buf: []u8) ![]const u8 {
         var pos: usize = 0;
         const use_chatml = if (self.chat_template) |tmpl|
             std.mem.indexOf(u8, tmpl, "im_start") != null
         else
             true;
-        const qwen_no_thinking = if (self.chat_template) |tmpl|
-            std.mem.indexOf(u8, tmpl, "enable_thinking") != null and
-                std.mem.indexOf(u8, tmpl, "<think>") != null
-        else
-            false;
+        const supports_thinking = self.supportsThinkingToggle();
         const n = @min(roles.len, contents.len);
         if (use_chatml) {
             for (0..n) |i| {
                 const written = std.fmt.bufPrint(buf[pos..], "<|im_start|>{s}\n{s}<|im_end|>\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
                 pos += written.len;
             }
-            const suffix = (if (qwen_no_thinking)
-                std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n\n</think>\n\n", .{})
-            else
-                std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{})) catch return error.BufferTooSmall;
+            const suffix = if (supports_thinking) blk: {
+                if (options.enable_thinking orelse false) {
+                    break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n", .{}) catch return error.BufferTooSmall;
+                }
+                break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n\n</think>\n\n", .{}) catch return error.BufferTooSmall;
+            } else std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{}) catch return error.BufferTooSmall;
             pos += suffix.len;
         } else {
             for (0..n) |i| {
@@ -773,6 +788,63 @@ test "applyChatTemplate qwen thinking template emits empty think block for gener
     const result = try tok.applyChatTemplate(&roles, &contents, &buf);
     try std.testing.expect(std.mem.indexOf(u8, result, "<|im_start|>user\nHello<|im_end|>\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, result, "<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+}
+
+test "applyChatTemplateWithOptions emits open think block when enabled" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .chat_template =
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+        ,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"Hello"};
+    const result = try tok.applyChatTemplateWithOptions(&roles, &contents, .{ .enable_thinking = true }, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|im_start|>user\nHello<|im_end|>\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, result, "<|im_start|>assistant\n<think>\n"));
+    try std.testing.expect(std.mem.indexOf(u8, result, "</think>") == null);
+}
+
+test "supportsThinkingToggle detects qwen enable_thinking templates" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .chat_template =
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+        ,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+    try std.testing.expect(tok.supportsThinkingToggle());
 }
 
 test "applyChatTemplate non-ChatML fallback" {

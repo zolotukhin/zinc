@@ -8,6 +8,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 layout(local_size_x = 64) in;
 
+layout(constant_id = 1) const uint SPEC_K = 4096;
+
 layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
 layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
@@ -26,11 +28,19 @@ float fp16_to_fp32(uint h) {
     return unpackHalf2x16(h).x;
 }
 
+shared float s_x[SPEC_K];
+
 void main() {
+    uint expert_slot = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    uint x_base = x_offset / 4u + expert_slot * x_expert_stride;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x[x_base + i];
+    }
+    barrier();
+
     uint row = gl_GlobalInvocationID.x;
     if (row >= M) return;
-
-    uint expert_slot = gl_WorkGroupID.y;
 
     // Read expert_id from GPU routing buffer — no CPU readback needed
     uint expert_id = routing_data[expert_slot];
@@ -38,8 +48,6 @@ void main() {
 
     uint blocks_per_row = K / 256;
     uint row_offset = a_offset + row * blocks_per_row * 176;
-    // Per-expert input offset: x_expert_stride=0 for shared input, K for per-expert
-    uint x_base = x_offset / 4 + expert_slot * x_expert_stride;
     // Per-expert output offset: each expert writes to its own M-element region
     uint y_base = y_offset / 4 + expert_slot * M;
 
@@ -82,7 +90,7 @@ void main() {
             uint qs_base = bb + 48 + g * 32;
             uint qh_bit_lo = sb_lo;
             uint qh_bit_hi = sb_hi;
-            uint x_grp = x_base + xi;
+            uint x_grp = xi;
 
             for (uint e = 0; e < 32; e++) {
                 uint byte_val = uint(w[qs_base + e]);
@@ -96,8 +104,8 @@ void main() {
                 float v_lo = float(q_lo | (hb_lo << 4));
                 float v_hi = float(q_hi | (hb_hi << 4));
 
-                sum += (factor_lo * v_lo - bias_lo) * x[x_grp + e];
-                sum += (factor_hi * v_hi - bias_hi) * x[x_grp + 32u + e];
+                sum += (factor_lo * v_lo - bias_lo) * s_x[x_grp + e];
+                sum += (factor_hi * v_hi - bias_hi) * s_x[x_grp + 32u + e];
             }
             xi += 64;
         }

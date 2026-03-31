@@ -21,15 +21,6 @@ ZINC is currently aimed at:
 
 ### Supported models
 
-| Architecture | Example models |
-|-------------|---------------|
-| Qwen3.5 MoE (hybrid SSM+attention) | [Qwen3.5-35B-A3B](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
-| Qwen3 / Qwen2 MoE | [Qwen3-30B-A3B](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF), [Qwen2.5-32B](https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF) |
-| LLaMA / Mistral | [LLaMA 3.1 8B](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF), [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.3) |
-| Mamba / Jamba (SSM) | [Jamba-v0.1](https://huggingface.co/ai21labs/Jamba-v0.1) |
-
-### Validated models
-
 This list is intentionally narrow. It shows the exact GGUFs that have been revalidated in ZINC, not a broader architecture wishlist.
 
 | Model | Exact GGUF |
@@ -108,6 +99,8 @@ If you want to see what ZINC currently marks as supported on the local machine:
 ./zig-out/bin/zinc model list --all
 ```
 
+`model list` now includes a `Released` column sourced from the managed-model catalog, so you can see the upstream model-family release date alongside fit and install status.
+
 If you want ZINC to manage downloads and default model selection for you:
 
 ```bash
@@ -119,7 +112,15 @@ If you want ZINC to manage downloads and default model selection for you:
 
 # Inspect the current managed default
 ./zig-out/bin/zinc model active
+
+# Remove a cached managed model
+./zig-out/bin/zinc model rm qwen35-2b-q4k-m
+
+# Force the local server to unload it first if needed
+./zig-out/bin/zinc model rm --force qwen35-2b-q4k-m
 ```
+
+If your local ZINC server is not using port `8080`, add `--port <port>` before `model rm` so the CLI talks to the right server when checking whether the model is still loaded.
 
 ## Run your first prompt
 

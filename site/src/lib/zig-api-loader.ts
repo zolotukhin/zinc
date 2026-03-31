@@ -30,6 +30,14 @@ export interface ZigApiMember {
   qualifiedName: string;
 }
 
+export interface ZigApiStructField {
+  name: string;
+  type: string;
+  size: number;
+  alignment: number;
+  offset: number;
+}
+
 export interface ZigApiSymbol {
   name: string;
   declarationKind: 'const' | 'fn' | 'var';
@@ -42,6 +50,9 @@ export interface ZigApiSymbol {
   href: string;
   qualifiedName: string;
   members: ZigApiMember[];
+  size?: number;
+  alignment?: number;
+  fields?: ZigApiStructField[];
 }
 
 export interface ZigApiModule {
@@ -81,7 +92,7 @@ export interface ZigApiIndex {
   modules: ZigApiModule[];
 }
 
-interface ParsedComment extends ZigApiDocBlock {}
+interface ParsedComment extends ZigApiDocBlock { }
 
 const EXCLUDED_MODULES = new Set(['vulkan/vk.zig']);
 
@@ -186,6 +197,7 @@ function resolveSiteRoot(): string {
 const SITE_ROOT = resolveSiteRoot();
 const REPO_ROOT = join(SITE_ROOT, '..');
 const SRC_ROOT = join(REPO_ROOT, 'src');
+let zigApiPromise: Promise<ZigApiIndex> | null = null;
 
 function toSlugPart(value: string): string {
   return value
@@ -783,6 +795,11 @@ export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
           source_line: symbol.line,
           source_url: sourceHref(symbol.sourcePath, symbol.line),
           doc: normalizeDocBlock(symbol.doc),
+          ...(symbol.symbolKind === 'struct' && symbol.size !== undefined ? {
+            size: symbol.size,
+            alignment: symbol.alignment,
+            fields: symbol.fields,
+          } : {}),
           members: symbol.members.map(member => ({
             name: member.name,
             qualified_name: member.qualifiedName,
@@ -855,6 +872,16 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
           lines.push(`  Note: ${note}`);
         }
 
+        if (symbol.kind === 'struct' && symbol.size !== undefined) {
+          lines.push(`  Size: ${symbol.size} bytes (alignment: ${symbol.alignment})`);
+          if (symbol.fields && symbol.fields.length > 0) {
+            lines.push(`  Fields:`);
+            for (const field of symbol.fields) {
+              lines.push(`    - ${field.name}: ${field.type} (offset: ${field.offset}, size: ${field.size}, align: ${field.alignment})`);
+            }
+          }
+        }
+
         for (const member of symbol.members) {
           lines.push(
             `  - ${member.qualified_name} [method]`,
@@ -881,7 +908,7 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
   return `${lines.join('\n').trim()}\n`;
 }
 
-export async function loadZigApi(): Promise<ZigApiIndex> {
+async function loadZigApiImpl(): Promise<ZigApiIndex> {
   const files = await collectZigFiles(SRC_ROOT);
   const modules: ZigApiModule[] = [];
   let latestMtime = 0;
@@ -896,6 +923,118 @@ export async function loadZigApi(): Promise<ZigApiIndex> {
 
     const parsed = parseZigModuleContent(content, relativePath);
     if (parsed) modules.push(parsed);
+  }
+
+  const structSymbols: { modulePath: string; qualifiedName: string; symbol: ZigApiSymbol }[] = [];
+  for (const mod of modules) {
+    for (const sym of mod.symbols) {
+      if (sym.symbolKind === 'struct') {
+        structSymbols.push({ modulePath: sym.sourcePath, qualifiedName: sym.qualifiedName, symbol: sym });
+      }
+    }
+  }
+
+  if (structSymbols.length > 0) {
+    const zigScriptContent = `const std = @import("std");
+
+fn dumpStruct(comptime T: type, name: []const u8, first: *bool, w: anytype) !void {
+    const type_info = @typeInfo(T);
+    if (type_info != .@"struct") return;
+    if (!first.*) try w.print(",", .{});
+    first.* = false;
+    
+    try w.print("\\"{s}\\":{{", .{name});
+    try w.print("\\"size\\":{d},\\"alignment\\":{d},\\"fields\\":[", .{ @sizeOf(T), @alignOf(T) });
+    
+    var firstField = true;
+    inline for (type_info.@"struct".fields) |f| {
+        if (@sizeOf(f.type) > 0 and !f.is_comptime) {
+            if (!firstField) try w.print(",", .{});
+            try w.print("{{\\"name\\":\\"{s}\\",\\"type\\":\\"{s}\\",\\"size\\":{d},\\"alignment\\":{d},\\"offset\\":{d}}}", .{
+                f.name, @typeName(f.type), @sizeOf(f.type), f.alignment, @offsetOf(T, f.name)
+            });
+            firstField = false;
+        }
+    }
+    try w.print("]}}", .{});
+}
+
+pub fn main() !void {
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    const out = &stdout.interface;
+    try out.print("{{", .{});
+    var first = true;
+${structSymbols.map((s) => {
+      const modIdx = [...new Set(structSymbols.map(x => x.modulePath))].indexOf(s.modulePath);
+      return `    if (@TypeOf(mod${modIdx}.${s.qualifiedName}) == type) {\n        dumpStruct(mod${modIdx}.${s.qualifiedName}, "${s.qualifiedName}", &first, out) catch {};\n    }`;
+    }).join('\n')}
+    try out.print("}}", .{});
+    try out.flush();
+}
+
+${[...new Set(structSymbols.map(s => s.modulePath))].map((path, idx) => `const mod${idx} = @import("${path}");`).join('\n')}
+`;
+
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+
+    const scriptPath = join(REPO_ROOT, '.zig-struct-analyzer.generated.zig');
+    const cacheRoot = join(REPO_ROOT, '.zig-api-cache');
+    const globalCache = join(cacheRoot, 'global');
+    const localCache = join(cacheRoot, 'local');
+    await mkdir(globalCache, { recursive: true });
+    await mkdir(localCache, { recursive: true });
+    if (!existsSync(scriptPath) || (await readFile(scriptPath, 'utf-8')) !== zigScriptContent) {
+      await writeFile(scriptPath, zigScriptContent, 'utf-8');
+    }
+
+    try {
+      const zigArgs = ['run', '-lc'];
+      zigArgs.push('-I', join(REPO_ROOT, 'src', 'metal'));
+
+      if (process.platform === 'darwin') {
+        zigArgs.push('-I', '/opt/homebrew/include', '-L', '/opt/homebrew/lib', '-lvulkan');
+      } else if (process.platform === 'win32') {
+        const vulkanSdk = process.env.VULKAN_SDK ?? process.env.VK_SDK_PATH;
+        if (vulkanSdk) {
+          zigArgs.push(
+            '-I',
+            join(vulkanSdk, 'Include'),
+            '-L',
+            join(vulkanSdk, process.arch === 'ia32' ? 'Lib32' : 'Lib'),
+            '-lvulkan-1'
+          );
+        }
+      } else {
+        zigArgs.push('-lvulkan');
+      }
+
+      zigArgs.push(scriptPath);
+
+      const { stdout } = await execFileAsync('zig', zigArgs, {
+        cwd: REPO_ROOT,
+        maxBuffer: 10 * 1024 * 1024,
+        env: {
+          ...process.env,
+          ZIG_GLOBAL_CACHE_DIR: globalCache,
+          ZIG_LOCAL_CACHE_DIR: localCache,
+        },
+      });
+      const structData = JSON.parse(stdout);
+
+      for (const { qualifiedName, symbol } of structSymbols) {
+        if (structData[qualifiedName]) {
+          symbol.size = structData[qualifiedName].size;
+          symbol.alignment = structData[qualifiedName].alignment;
+          symbol.fields = structData[qualifiedName].fields;
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to extract struct layouts:', err);
+    }
   }
 
   modules.sort((a, b) => {
@@ -937,4 +1076,9 @@ export async function loadZigApi(): Promise<ZigApiIndex> {
     sections: [...sections.values()].sort((a, b) => a.order - b.order),
     modules,
   };
+}
+
+export async function loadZigApi(): Promise<ZigApiIndex> {
+  zigApiPromise ??= loadZigApiImpl();
+  return zigApiPromise;
 }

@@ -1,6 +1,7 @@
 ---
 import BaseLayout from './BaseLayout.astro';
 import Breadcrumbs from '../components/Breadcrumbs.astro';
+import DocsSearch from '../components/DocsSearch.astro';
 import { buildBreadcrumbList } from '../lib/structured-data';
 
 interface Props {
@@ -74,6 +75,7 @@ function isActive(slug: string): boolean {
   <div class="doc-layout wide">
     <aside class="doc-nav">
       <h3><a href="/zinc/docs">Docs</a></h3>
+      <DocsSearch compact={true} heading="Search" intro="Search guides and the Zig API." placeholder="Search docs and API" />
       {docNavSections.map(section => (
         <div class="doc-nav-section">
           <p class="doc-nav-label">{section.label}</p>
@@ -169,6 +171,25 @@ function isActive(slug: string): boolean {
 
   .doc-content {
     min-width: 0;
+  }
+
+  .doc-content :is(h1, h2, h3, h4, h5, h6) {
+    scroll-margin-top: 1.25rem;
+  }
+
+  .doc-content .heading-anchor {
+    margin-left: 0.45rem;
+    color: var(--color-text-muted);
+    opacity: 0;
+    font-size: 0.8em;
+    text-decoration: none;
+    transition: opacity 0.12s ease;
+  }
+
+  .doc-content :is(h1, h2, h3, h4, h5, h6):hover .heading-anchor,
+  .doc-content :is(h1, h2, h3, h4, h5, h6):focus-within .heading-anchor,
+  .doc-content .heading-anchor:focus {
+    opacity: 1;
   }
 
   @media (max-width: 1024px) {

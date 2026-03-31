@@ -52,6 +52,112 @@ pub const DecodeState = struct {
     }
 };
 
+pub const SamplingParams = struct {
+    temperature: f32 = 0.0,
+    top_p: f32 = 1.0,
+    repetition_penalty: f32 = 1.0,
+    top_k: u32 = 64,
+
+    pub fn requiresLogitsReadback(self: @This()) bool {
+        return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
+    }
+};
+
+const ProfilePhase = enum(u8) {
+    embed_upload,
+    attention,
+    ssm,
+    ssm_proj,
+    ssm_conv,
+    ssm_delta,
+    ssm_gated_norm,
+    ssm_out,
+    moe_routed,
+    moe_router,
+    moe_topk,
+    moe_gate_up,
+    moe_swiglu,
+    moe_down,
+    moe_weighted_acc,
+    shared_expert,
+    shared_proj,
+    shared_swiglu,
+    shared_down,
+    shared_gate_acc,
+    final_tail,
+
+    fn label(self: @This()) []const u8 {
+        return switch (self) {
+            .embed_upload => "embed",
+            .attention => "attention",
+            .ssm => "ssm",
+            .ssm_proj => "ssm_proj",
+            .ssm_conv => "ssm_conv",
+            .ssm_delta => "ssm_delta",
+            .ssm_gated_norm => "ssm_gnorm",
+            .ssm_out => "ssm_out",
+            .moe_routed => "moe",
+            .moe_router => "moe_router",
+            .moe_topk => "moe_topk",
+            .moe_gate_up => "moe_gate_up",
+            .moe_swiglu => "moe_swiglu",
+            .moe_down => "moe_down",
+            .moe_weighted_acc => "moe_acc",
+            .shared_expert => "shared",
+            .shared_proj => "shared_proj",
+            .shared_swiglu => "shared_swiglu",
+            .shared_down => "shared_down",
+            .shared_gate_acc => "shared_gate",
+            .final_tail => "tail",
+        };
+    }
+};
+
+const profile_phase_count = @typeInfo(ProfilePhase).@"enum".fields.len;
+const max_profile_phase_ranges: usize = 1024;
+
+const ProfilePhaseRange = struct {
+    phase: ProfilePhase,
+    start_query: u16,
+    end_query: u16,
+};
+
+const ProfileCounters = struct {
+    cpu_embed_ns: u64 = 0,
+    cpu_record_ns: u64 = 0,
+    submit_wait_ns: u64 = 0,
+    query_read_ns: u64 = 0,
+    descriptor_allocs: u64 = 0,
+    descriptor_write_calls: u64 = 0,
+    descriptor_bindings: u64 = 0,
+    cpu_ssm_fallbacks: u64 = 0,
+    cpu_moe_fallbacks: u64 = 0,
+    cpu_shared_gate_fallbacks: u64 = 0,
+    cpu_argmax_fallbacks: u64 = 0,
+    gpu_phase_ns: [profile_phase_count]u64 = [_]u64{0} ** profile_phase_count,
+
+    fn reset(self: *ProfileCounters) void {
+        self.* = .{};
+    }
+
+    fn add(self: *ProfileCounters, other: ProfileCounters) void {
+        self.cpu_embed_ns += other.cpu_embed_ns;
+        self.cpu_record_ns += other.cpu_record_ns;
+        self.submit_wait_ns += other.submit_wait_ns;
+        self.query_read_ns += other.query_read_ns;
+        self.descriptor_allocs += other.descriptor_allocs;
+        self.descriptor_write_calls += other.descriptor_write_calls;
+        self.descriptor_bindings += other.descriptor_bindings;
+        self.cpu_ssm_fallbacks += other.cpu_ssm_fallbacks;
+        self.cpu_moe_fallbacks += other.cpu_moe_fallbacks;
+        self.cpu_shared_gate_fallbacks += other.cpu_shared_gate_fallbacks;
+        self.cpu_argmax_fallbacks += other.cpu_argmax_fallbacks;
+        for (0..profile_phase_count) |i| {
+            self.gpu_phase_ns[i] += other.gpu_phase_ns[i];
+        }
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Quantization helpers for CPU-side embedding lookup
 // ---------------------------------------------------------------------------
@@ -417,6 +523,17 @@ pub const InferenceEngine = struct {
     profile_total_gpu_ms: f64 = 0.0,
     profile_max_gpu_ms: f64 = 0.0,
     profile_sample_count: u32 = 0,
+    profile_total_cpu_embed_ns: u64 = 0,
+    profile_total_cpu_record_ns: u64 = 0,
+    profile_total_submit_wait_ns: u64 = 0,
+    profile_total_query_read_ns: u64 = 0,
+    profile_max_cpu_record_ns: u64 = 0,
+    profile_max_submit_wait_ns: u64 = 0,
+    profile_token_counters: ProfileCounters = .{},
+    profile_total_counters: ProfileCounters = .{},
+    profile_phase_ranges: [max_profile_phase_ranges]ProfilePhaseRange = undefined,
+    profile_phase_range_count: u32 = 0,
+    profile_logged_cpu_moe_fallback: bool = false,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -892,13 +1009,49 @@ pub const InferenceEngine = struct {
     fn resetTimestamps(self: *InferenceEngine) void {
         if (!self.profile_enabled) return;
         self.timestamp_count = 0;
+        self.profile_phase_range_count = 0;
+        self.profile_token_counters.reset();
         vk.c.vkCmdResetQueryPool(self.decode_cmd.handle, self.timestamp_query_pool, 0, 2048);
+    }
+
+    fn beginProfilePhase(self: *InferenceEngine) ?u32 {
+        return self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+    }
+
+    fn endProfilePhase(self: *InferenceEngine, phase: ProfilePhase, start_query: ?u32) void {
+        if (!self.profile_enabled) return;
+        const start_idx = start_query orelse return;
+        const end_idx = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) orelse return;
+        if (self.profile_phase_range_count >= max_profile_phase_ranges) return;
+        self.profile_phase_ranges[self.profile_phase_range_count] = .{
+            .phase = phase,
+            .start_query = @intCast(start_idx),
+            .end_query = @intCast(end_idx),
+        };
+        self.profile_phase_range_count += 1;
     }
 
     fn resetProfilingSamples(self: *InferenceEngine) void {
         self.profile_total_gpu_ms = 0.0;
         self.profile_max_gpu_ms = 0.0;
         self.profile_sample_count = 0;
+        self.profile_total_cpu_embed_ns = 0;
+        self.profile_total_cpu_record_ns = 0;
+        self.profile_total_submit_wait_ns = 0;
+        self.profile_total_query_read_ns = 0;
+        self.profile_max_cpu_record_ns = 0;
+        self.profile_max_submit_wait_ns = 0;
+        self.profile_token_counters.reset();
+        self.profile_total_counters.reset();
+        self.profile_phase_range_count = 0;
+        self.profile_logged_cpu_moe_fallback = false;
+    }
+
+    fn avgProfilePhaseMs(self: *const InferenceEngine, phase: ProfilePhase) f64 {
+        if (self.profile_sample_count == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.profile_total_counters.gpu_phase_ns[@intFromEnum(phase)])) /
+            @as(f64, @floatFromInt(self.profile_sample_count)) /
+            1_000_000.0;
     }
 
     fn resetRequestState(self: *InferenceEngine) !void {
@@ -939,6 +1092,7 @@ pub const InferenceEngine = struct {
         if (!self.profile_enabled or self.timestamp_count == 0) return;
         const count = self.timestamp_count;
         var timestamps: [2048]u64 = undefined;
+        const query_read_start = std.time.nanoTimestamp();
         const qr = vk.c.vkGetQueryPoolResults(
             self.instance.device,
             self.timestamp_query_pool,
@@ -953,6 +1107,8 @@ pub const InferenceEngine = struct {
             log.warn("Failed to read timestamp queries: {d}", .{qr});
             return;
         }
+        const query_read_end = std.time.nanoTimestamp();
+        self.profile_token_counters.query_read_ns += @intCast(query_read_end - query_read_start);
         if (count >= 2) {
             const first = timestamps[0];
             const last = timestamps[count - 1];
@@ -961,7 +1117,35 @@ pub const InferenceEngine = struct {
             self.profile_total_gpu_ms += elapsed_ms;
             if (elapsed_ms > self.profile_max_gpu_ms) self.profile_max_gpu_ms = elapsed_ms;
             self.profile_sample_count += 1;
-            log.debug("PROFILE: {d} timestamps, GPU decode token={d:.2}ms", .{ count, elapsed_ms });
+            for (0..self.profile_phase_range_count) |i| {
+                const range = self.profile_phase_ranges[i];
+                if (range.end_query >= count or range.start_query >= count) continue;
+                const phase_ns_f64 = @as(f64, @floatFromInt(timestamps[range.end_query] -| timestamps[range.start_query])) * self.timestamp_period_ns;
+                self.profile_token_counters.gpu_phase_ns[@intFromEnum(range.phase)] += @intFromFloat(@max(phase_ns_f64, 0.0));
+            }
+            self.profile_total_cpu_embed_ns += self.profile_token_counters.cpu_embed_ns;
+            self.profile_total_cpu_record_ns += self.profile_token_counters.cpu_record_ns;
+            self.profile_total_submit_wait_ns += self.profile_token_counters.submit_wait_ns;
+            self.profile_total_query_read_ns += self.profile_token_counters.query_read_ns;
+            if (self.profile_token_counters.cpu_record_ns > self.profile_max_cpu_record_ns) {
+                self.profile_max_cpu_record_ns = self.profile_token_counters.cpu_record_ns;
+            }
+            if (self.profile_token_counters.submit_wait_ns > self.profile_max_submit_wait_ns) {
+                self.profile_max_submit_wait_ns = self.profile_token_counters.submit_wait_ns;
+            }
+            self.profile_total_counters.add(self.profile_token_counters);
+            log.debug(
+                "PROFILE_TOKEN: gpu={d:.2}ms cpu_embed={d:.2}ms cpu_record={d:.2}ms submit_wait={d:.2}ms query_read={d:.3}ms desc_allocs={d} desc_writes={d}",
+                .{
+                    elapsed_ms,
+                    @as(f64, @floatFromInt(self.profile_token_counters.cpu_embed_ns)) / 1e6,
+                    @as(f64, @floatFromInt(self.profile_token_counters.cpu_record_ns)) / 1e6,
+                    @as(f64, @floatFromInt(self.profile_token_counters.submit_wait_ns)) / 1e6,
+                    @as(f64, @floatFromInt(self.profile_token_counters.query_read_ns)) / 1e6,
+                    self.profile_token_counters.descriptor_allocs,
+                    self.profile_token_counters.descriptor_write_calls,
+                },
+            );
         }
     }
 
@@ -971,7 +1155,7 @@ pub const InferenceEngine = struct {
 
     /// Allocate a descriptor set from the shared pool with the given layout.
     /// If pool is exhausted (VK_ERROR_OUT_OF_POOL_MEMORY), logs a warning.
-    fn allocDescSet(self: *const InferenceEngine, layout: vk.c.VkDescriptorSetLayout) !vk.c.VkDescriptorSet {
+    fn allocDescSet(self: *InferenceEngine, layout: vk.c.VkDescriptorSetLayout) !vk.c.VkDescriptorSet {
         const alloc_info = vk.c.VkDescriptorSetAllocateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .pNext = null,
@@ -986,12 +1170,13 @@ pub const InferenceEngine = struct {
             return error.DescriptorSetAllocFailed;
         }
         if (result != vk.c.VK_SUCCESS) return error.DescriptorSetAllocFailed;
+        if (self.profile_enabled) self.profile_token_counters.descriptor_allocs += 1;
         return ds;
     }
 
     /// Write storage buffer bindings to a descriptor set (up to 8).
     fn writeDescSet3(
-        self: *const InferenceEngine,
+        self: *InferenceEngine,
         ds: vk.c.VkDescriptorSet,
         buf0: vk.c.VkBuffer,
         size0: vk.c.VkDeviceSize,
@@ -1021,6 +1206,10 @@ pub const InferenceEngine = struct {
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 3, &writes, 0, null);
+        if (self.profile_enabled) {
+            self.profile_token_counters.descriptor_write_calls += 1;
+            self.profile_token_counters.descriptor_bindings += 3;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1038,7 +1227,7 @@ pub const InferenceEngine = struct {
     // -----------------------------------------------------------------------
 
     fn writeDescSet2(
-        self: *const InferenceEngine,
+        self: *InferenceEngine,
         ds: vk.c.VkDescriptorSet,
         buf0: vk.c.VkBuffer,
         size0: vk.c.VkDeviceSize,
@@ -1065,10 +1254,14 @@ pub const InferenceEngine = struct {
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 2, &writes, 0, null);
+        if (self.profile_enabled) {
+            self.profile_token_counters.descriptor_write_calls += 1;
+            self.profile_token_counters.descriptor_bindings += 2;
+        }
     }
 
     fn writeDescSet5(
-        self: *const InferenceEngine,
+        self: *InferenceEngine,
         ds: vk.c.VkDescriptorSet,
         buf0: vk.c.VkBuffer,
         size0: vk.c.VkDeviceSize,
@@ -1104,10 +1297,14 @@ pub const InferenceEngine = struct {
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 5, &writes, 0, null);
+        if (self.profile_enabled) {
+            self.profile_token_counters.descriptor_write_calls += 1;
+            self.profile_token_counters.descriptor_bindings += 5;
+        }
     }
 
     fn writeDescSet4(
-        self: *const InferenceEngine,
+        self: *InferenceEngine,
         ds: vk.c.VkDescriptorSet,
         buf0: vk.c.VkBuffer,
         size0: vk.c.VkDeviceSize,
@@ -1140,10 +1337,14 @@ pub const InferenceEngine = struct {
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 4, &writes, 0, null);
+        if (self.profile_enabled) {
+            self.profile_token_counters.descriptor_write_calls += 1;
+            self.profile_token_counters.descriptor_bindings += 4;
+        }
     }
 
     fn writeDescSet7(
-        self: *const InferenceEngine,
+        self: *InferenceEngine,
         ds: vk.c.VkDescriptorSet,
         buf0: vk.c.VkBuffer,
         size0: vk.c.VkDeviceSize,
@@ -1185,6 +1386,10 @@ pub const InferenceEngine = struct {
             };
         }
         vk.c.vkUpdateDescriptorSets(self.instance.device, 7, &writes, 0, null);
+        if (self.profile_enabled) {
+            self.profile_token_counters.descriptor_write_calls += 1;
+            self.profile_token_counters.descriptor_bindings += 7;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1237,11 +1442,18 @@ pub const InferenceEngine = struct {
         }
 
         // 1. CPU: dequantize embedding
+        const cpu_embed_start = if (self.profile_enabled) std.time.nanoTimestamp() else 0;
         try self.embedToken(token_id);
+        if (self.profile_enabled) {
+            const cpu_embed_end = std.time.nanoTimestamp();
+            self.profile_token_counters.cpu_embed_ns += @intCast(cpu_embed_end - cpu_embed_start);
+        }
 
         // Per-layer logit5 tracking for BOS diagnostic summary
         var diag_logit5 = [_]f32{0} ** 64;
         var diag_rms_arr = [_]f32{0} ** 64;
+
+        const cpu_record_start = if (self.profile_enabled) std.time.nanoTimestamp() else 0;
 
         // Begin single command buffer for all layers (Phase 3c batching)
         _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
@@ -1257,9 +1469,11 @@ pub const InferenceEngine = struct {
 
             // --- Upload embedding (only first layer) ---
             if (layer == 0) {
+                const embed_phase = self.beginProfilePhase();
                 const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.embed_staging.handle, self.hidden_buf.handle, 1, &region);
                 self.decode_cmd.transferToComputeBarrier();
+                self.endProfilePhase(.embed_upload, embed_phase);
             }
 
             // --- Input RMS norm: hidden_buf → norm_buf ---
@@ -1278,6 +1492,7 @@ pub const InferenceEngine = struct {
             const is_full_attn = ((layer + 1) % full_attn_interval == 0);
 
             if (is_full_attn) {
+                const attention_phase = self.beginProfilePhase();
                 // === FULL ATTENTION LAYER ===
                 // Q/gate projection → Q/K norm → K/V proj → RoPE → KV cache → flash attention
                 // → sigmoid gate → output projection → residual
@@ -1708,14 +1923,25 @@ pub const InferenceEngine = struct {
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
                 }
+                self.endProfilePhase(.attention, attention_phase);
             } else {
                 // === SSM / LINEAR ATTENTION LAYER ===
                 const use_gpu_ssm = self.elementwise.pipeline_ssm_conv1d != null and config.architecture != .qwen35;
+                if (state.position == 0 and layer == 0) {
+                    log.info("FASTPATH: gpu_ssm={} arch={s} ssm_shader={}", .{
+                        use_gpu_ssm,
+                        @tagName(config.architecture),
+                        self.elementwise.pipeline_ssm_conv1d != null,
+                    });
+                }
+                const ssm_phase = self.beginProfilePhase();
                 if (use_gpu_ssm) {
                     try self.runSsmLayerGpu(state, layer, layer_idx);
                 } else {
+                    if (self.profile_enabled) self.profile_token_counters.cpu_ssm_fallbacks += 1;
                     try self.runSsmLayerCpu(state, layer, layer_idx);
                 }
+                self.endProfilePhase(.ssm, ssm_phase);
             }
 
             // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
@@ -1730,10 +1956,13 @@ pub const InferenceEngine = struct {
             self.decode_cmd.computeBarrier();
 
             if (is_moe) {
+                const moe_phase = self.beginProfilePhase();
                 // --- MoE: router DMMV → top-k → expert dispatch ---
                 const router_tensor = self.findLayerTensor(layer, "ffn_gate_inp.weight") orelse return error.TensorNotFound;
+                const moe_router_phase = self.beginProfilePhase();
                 try self.dispatchDmmv(router_tensor, self.ffn_norm_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
                 self.decode_cmd.computeBarrier();
+                self.endProfilePhase(.moe_router, moe_router_phase);
 
                 const n_used = config.n_experts_used;
 
@@ -1754,6 +1983,18 @@ pub const InferenceEngine = struct {
                     self.dmmv.moePipelineForType(down_quant) != null and
                     self.elementwise.pipeline_softmax_topk != null and
                     self.elementwise.pipeline_moe_weighted_acc != null;
+                if (state.position == 0 and layer == 0) {
+                    log.info("FASTPATH: gpu_moe={} gate={s} up={s} down={s} q4k_moe={} q5k_moe={} softmax_topk={} weighted_acc={}", .{
+                        use_gpu_moe,
+                        @tagName(gate_quant),
+                        @tagName(up_exps.info.type_),
+                        @tagName(down_quant),
+                        self.dmmv.moePipelineForType(gate_quant) != null,
+                        self.dmmv.moePipelineForType(down_quant) != null,
+                        self.elementwise.pipeline_softmax_topk != null,
+                        self.elementwise.pipeline_moe_weighted_acc != null,
+                    });
+                }
 
                 if (use_gpu_moe) {
                     // === GPU MoE path: BATCHED expert dispatch — all experts in parallel ===
@@ -1762,6 +2003,7 @@ pub const InferenceEngine = struct {
                     // Reduces dispatches from 32 to 5, barriers from 32 to 4 per MoE layer.
 
                     // softmax_topk writes expert_ids + weights to router_output_buf
+                    const moe_topk_phase = self.beginProfilePhase();
                     {
                         const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
                         const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -1775,10 +2017,12 @@ pub const InferenceEngine = struct {
                         try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.moe_topk, moe_topk_phase);
 
                     // gate DMMV: ALL experts at once (Y=n_used workgroups)
                     // gate_exps[expert] × ffn_norm_buf → gate_buf[expert*inter_dim..]
                     // x_expert_stride=0: all experts read same input (ffn_norm_buf)
+                    const moe_gate_up_phase = self.beginProfilePhase();
                     {
                         const qt = gate_exps.info.type_;
                         const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
@@ -1795,8 +2039,10 @@ pub const InferenceEngine = struct {
                         try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.moe_gate_up, moe_gate_up_phase);
 
                     // SwiGLU: ALL experts at once (N = n_used * inter_dim)
+                    const moe_swiglu_phase = self.beginProfilePhase();
                     {
                         const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                         const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -1804,9 +2050,11 @@ pub const InferenceEngine = struct {
                         try self.elementwise.recordSwiglu(&self.decode_cmd, ds, n_used * inter_dim);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.moe_swiglu, moe_swiglu_phase);
 
                     // down DMMV: ALL experts at once
                     // x_expert_stride=inter_dim: each expert reads from its own swiglu section
+                    const moe_down_phase = self.beginProfilePhase();
                     {
                         const qt = down_exps.info.type_;
                         const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
@@ -1815,9 +2063,11 @@ pub const InferenceEngine = struct {
                         try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, hidden_dim, inter_dim, expert_down_row_bytes, n_used, inter_dim, 0, 0);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.moe_down, moe_down_phase);
 
                     // Weighted accumulation: sum ALL experts at once (writes result, no zero needed)
                     // moe_out_buf[i] = sum_j(weight_j * down_buf[j * hidden_dim + i])
+                    const moe_acc_phase = self.beginProfilePhase();
                     {
                         const pip = &(self.elementwise.pipeline_moe_weighted_acc orelse unreachable);
                         const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -1825,7 +2075,23 @@ pub const InferenceEngine = struct {
                         try self.elementwise.recordMoeWeightedAcc(&self.decode_cmd, ds, hidden_dim, n_used, hidden_dim);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.moe_weighted_acc, moe_acc_phase);
                 } else {
+                    if (self.profile_enabled) self.profile_token_counters.cpu_moe_fallbacks += 1;
+                    if (self.profile_enabled and !self.profile_logged_cpu_moe_fallback) {
+                        self.profile_logged_cpu_moe_fallback = true;
+                        log.info("PROFILE_FALLBACK: cpu_moe pos={d} layer={d} gate={s} up={s} down={s} q4k_moe={} q5k_moe={} softmax_topk={} weighted_acc={}", .{
+                            state.position,
+                            layer,
+                            @tagName(gate_quant),
+                            @tagName(up_exps.info.type_),
+                            @tagName(down_quant),
+                            self.dmmv.moePipelineForType(gate_quant) != null,
+                            self.dmmv.moePipelineForType(down_quant) != null,
+                            self.elementwise.pipeline_softmax_topk != null,
+                            self.elementwise.pipeline_moe_weighted_acc != null,
+                        });
+                    }
                     // === CPU fallback: readback router logits, CPU softmax+topk ===
                     var expert_ids: [16]u32 = undefined;
                     var expert_weights: [16]f32 = undefined;
@@ -1887,18 +2153,29 @@ pub const InferenceEngine = struct {
                         self.decode_cmd.computeBarrier();
                     }
                 }
+                self.endProfilePhase(.moe_routed, moe_phase);
 
                 // Bug fix #3: Shared expert — runs every token alongside the routed experts
                 const gate_shexp = self.findLayerTensor(layer, "ffn_gate_shexp.weight");
                 const up_shexp = self.findLayerTensor(layer, "ffn_up_shexp.weight");
                 const down_shexp = self.findLayerTensor(layer, "ffn_down_shexp.weight");
                 const shexp_gate = self.findLayerTensor(layer, "ffn_gate_inp_shexp.weight");
+                const shared_phase = self.beginProfilePhase();
+                if (state.position == 0 and layer == 0) {
+                    log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s}", .{
+                        if (gate_shexp) |t| @tagName(t.info.type_) else "none",
+                        if (up_shexp) |t| @tagName(t.info.type_) else "none",
+                        if (down_shexp) |t| @tagName(t.info.type_) else "none",
+                        if (shexp_gate) |t| @tagName(t.info.type_) else "none",
+                    });
+                }
 
                 if (gate_shexp != null and up_shexp != null and down_shexp != null) {
                     // Shared expert has its own intermediate dim (feed_forward_length), different from per-expert dim
                     const shexp_size = @as(vk.c.VkDeviceSize, shexp_inter_dim) * @sizeOf(f32);
 
                     // Shared expert FFN: gate + up → SwiGLU → down
+                    const shared_proj_phase = self.beginProfilePhase();
                     try self.dispatchDmmv(gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
                     try self.dispatchDmmv(up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, shexp_inter_dim, hidden_dim);
                     // Dispatch shared expert gate projection in parallel (1 scalar output)
@@ -1906,7 +2183,9 @@ pub const InferenceEngine = struct {
                         try self.dispatchDmmv(sg, self.ffn_norm_buf, hidden_size, self.router_logits_buf, 1, hidden_dim);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.shared_proj, shared_proj_phase);
 
+                    const shared_swiglu_phase = self.beginProfilePhase();
                     {
                         const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                         const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
@@ -1914,11 +2193,15 @@ pub const InferenceEngine = struct {
                         try self.elementwise.recordSwiglu(&self.decode_cmd, ds2, shexp_inter_dim);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.shared_swiglu, shared_swiglu_phase);
 
+                    const shared_down_phase = self.beginProfilePhase();
                     try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.shared_down, shared_down_phase);
 
                     // Apply shared expert gate: moe_out_buf += sigmoid(gate) * down_buf
+                    const shared_gate_phase = self.beginProfilePhase();
                     if (shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
                         // GPU path: sigmoid_scale_acc reads gate from router_logits_buf[0]
                         const pip = &(self.elementwise.pipeline_sigmoid_scale_acc orelse unreachable);
@@ -1934,6 +2217,7 @@ pub const InferenceEngine = struct {
                         );
                         try self.elementwise.recordSigmoidScaleAcc(&self.decode_cmd, ds2, hidden_dim);
                     } else if (shexp_gate != null) {
+                        if (self.profile_enabled) self.profile_token_counters.cpu_shared_gate_fallbacks += 1;
                         // CPU fallback: readback gate scalar, compute sigmoid on CPU
                         {
                             const bar = vk.c.VkMemoryBarrier{
@@ -1965,7 +2249,9 @@ pub const InferenceEngine = struct {
                         try self.elementwise.recordScaleAcc(&self.decode_cmd, ds2, hidden_dim, 1.0);
                     }
                     self.decode_cmd.computeBarrier();
+                    self.endProfilePhase(.shared_gate_acc, shared_gate_phase);
                 }
+                self.endProfilePhase(.shared_expert, shared_phase);
 
                 // FFN residual: hidden_buf += moe_out_buf
                 {
@@ -2175,6 +2461,8 @@ pub const InferenceEngine = struct {
         // === Final norm + LM head (after all layers) ===
         // Stay in the same command buffer so decode uses a single queue submit.
 
+        const final_tail_phase = self.beginProfilePhase();
+
         // Final RMS norm: hidden_buf → norm_buf
         const final_norm_tensor = findLoadedTensor(self.model, "output_norm.weight") orelse return error.TensorNotFound;
         {
@@ -2204,6 +2492,9 @@ pub const InferenceEngine = struct {
         // Read back the 4-byte token id result every token, and full logits only when debugging
         // or when GPU argmax is unavailable and we must fall back to CPU greedy sampling.
         const need_logits_readback = collect_output and (self.logits_readback_enabled or self.validation_diagnostics_enabled or !use_gpu_argmax);
+        if (self.profile_enabled and collect_output and !use_gpu_argmax) {
+            self.profile_token_counters.cpu_argmax_fallbacks += 1;
+        }
         if (collect_output) {
             const barrier = vk.c.VkMemoryBarrier{
                 .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -2222,10 +2513,20 @@ pub const InferenceEngine = struct {
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &region);
             }
         }
+        self.endProfilePhase(.final_tail, final_tail_phase);
         _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         try self.decode_cmd.end();
+        if (self.profile_enabled) {
+            const cpu_record_end = std.time.nanoTimestamp();
+            self.profile_token_counters.cpu_record_ns += @intCast(cpu_record_end - cpu_record_start);
+        }
+        const submit_wait_start = if (self.profile_enabled) std.time.nanoTimestamp() else 0;
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        if (self.profile_enabled) {
+            const submit_wait_end = std.time.nanoTimestamp();
+            self.profile_token_counters.submit_wait_ns += @intCast(submit_wait_end - submit_wait_start);
+        }
         self.recordProfilingSample();
 
         state.position += 1;
@@ -2315,6 +2616,18 @@ pub const InferenceEngine = struct {
 
         const beta_tensor = self.findLayerTensor(layer, "ssm_beta.weight") orelse return;
         try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
+        if (layer == 0) {
+            const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
+            const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+            log.info("FASTPATH: ssm qkv={s} gate={s} alpha={s} beta={s} conv={s} out={s}", .{
+                @tagName(wqkv_tensor.info.type_),
+                @tagName(z_tensor.info.type_),
+                @tagName(alpha_tensor.info.type_),
+                @tagName(beta_tensor.info.type_),
+                @tagName(conv_tensor.info.type_),
+                @tagName(ssm_out_tensor.info.type_),
+            });
+        }
         self.decode_cmd.computeBarrier();
 
         // --- Readback projection results to CPU via logits_staging ---
@@ -2630,7 +2943,7 @@ pub const InferenceEngine = struct {
     /// Run one SSM layer entirely on GPU via compute shaders (Phase 3c).
     /// Replaces runSsmLayerCpu — no readback, no CPU computation, no submitAndWait.
     /// Command buffer remains open after this function returns.
-    fn runSsmLayerGpu(self: *InferenceEngine, _: *DecodeState, layer: u32, layer_idx: usize) !void {
+    fn runSsmLayerGpu(self: *InferenceEngine, state: *DecodeState, layer: u32, layer_idx: usize) !void {
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
@@ -2650,23 +2963,35 @@ pub const InferenceEngine = struct {
 
         // --- GPU: 4 DMMV projections (same as CPU path) ---
         const wqkv_tensor = self.findLayerTensor(layer, "attn_qkv.weight") orelse return;
-        try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
-
         const z_tensor = self.findLayerTensor(layer, "attn_gate.weight") orelse return;
-        try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
-
         const alpha_tensor = self.findLayerTensor(layer, "ssm_alpha.weight") orelse return;
-        try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
-
         const beta_tensor = self.findLayerTensor(layer, "ssm_beta.weight") orelse return;
+        if (state.position == 0 and layer == 0) {
+            const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
+            const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+            log.info("FASTPATH: ssm qkv={s} gate={s} alpha={s} beta={s} conv={s} out={s}", .{
+                @tagName(wqkv_tensor.info.type_),
+                @tagName(z_tensor.info.type_),
+                @tagName(alpha_tensor.info.type_),
+                @tagName(beta_tensor.info.type_),
+                @tagName(conv_tensor.info.type_),
+                @tagName(ssm_out_tensor.info.type_),
+            });
+        }
+        const ssm_proj_phase = self.beginProfilePhase();
+        try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+        try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+        try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
         try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
         self.decode_cmd.computeBarrier();
+        self.endProfilePhase(.ssm_proj, ssm_proj_phase);
 
         // --- GPU: conv1d + SiLU ---
         // Input: attn_out_buf (QKV projection), conv kernel from GPU tensor, persistent conv state
         // Output: swiglu_buf (reused as conv1d output)
         const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
         const conv_kernel_is_f16 = conv_tensor.info.type_ == .f16;
+        const ssm_conv_phase = self.beginProfilePhase();
         {
             const pip = &(self.elementwise.pipeline_ssm_conv1d orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -2684,6 +3009,7 @@ pub const InferenceEngine = struct {
             try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16);
         }
         self.decode_cmd.computeBarrier();
+        self.endProfilePhase(.ssm_conv, ssm_conv_phase);
 
         // --- GPU SSM diagnostic: readback conv1d output at layer 0 for comparison with CPU SSM_DBG ---
         if (layer == 0 and self.validation_diagnostics_enabled) {
@@ -2724,6 +3050,7 @@ pub const InferenceEngine = struct {
         const dt_bias_size = if (dt_bias_tensor) |t| t.gpu_buffer.size else ab_bytes;
         const ssm_a_buf = if (ssm_a_tensor) |t| t.gpu_buffer.handle else self.down_buf.handle;
         const ssm_a_size = if (ssm_a_tensor) |t| t.gpu_buffer.size else ab_bytes;
+        const ssm_delta_phase = self.beginProfilePhase();
         {
             const pip = &(self.elementwise.pipeline_ssm_delta_net orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -2759,6 +3086,7 @@ pub const InferenceEngine = struct {
             try self.elementwise.recordSsmDeltaNet(&self.decode_cmd, ds, push);
         }
         self.decode_cmd.computeBarrier();
+        self.endProfilePhase(.ssm_delta, ssm_delta_phase);
 
         // --- GPU: gated norm ---
         // Input: delta_net output (attn_out_buf), z gate (gate_buf), norm weights from tensor
@@ -2768,6 +3096,7 @@ pub const InferenceEngine = struct {
         const norm_per_head = norm_elems >= d_inner;
         const norm_buf_handle = if (norm_tensor) |t| t.gpu_buffer.handle else self.down_buf.handle;
         const norm_buf_size = if (norm_tensor) |t| t.gpu_buffer.size else ab_bytes;
+        const ssm_gated_norm_phase = self.beginProfilePhase();
         {
             const pip = &(self.elementwise.pipeline_ssm_gated_norm orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -2793,9 +3122,11 @@ pub const InferenceEngine = struct {
             try self.elementwise.recordSsmGatedNorm(&self.decode_cmd, ds, push);
         }
         self.decode_cmd.computeBarrier();
+        self.endProfilePhase(.ssm_gated_norm, ssm_gated_norm_phase);
 
         // --- GPU: ssm_out DMMV + residual (same as CPU path's GPU phase 2) ---
         const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+        const ssm_out_phase = self.beginProfilePhase();
         try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
         self.decode_cmd.computeBarrier();
 
@@ -2807,6 +3138,7 @@ pub const InferenceEngine = struct {
             try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
         }
         self.decode_cmd.computeBarrier();
+        self.endProfilePhase(.ssm_out, ssm_out_phase);
     }
 
     /// L2 normalize a vector in-place.
@@ -2842,6 +3174,109 @@ pub const InferenceEngine = struct {
     // Sampling
     // -----------------------------------------------------------------------
 
+    fn tokenSeen(history: []const u32, token: u32) bool {
+        for (history) |seen| {
+            if (seen == token) return true;
+        }
+        return false;
+    }
+
+    fn adjustedLogit(logit: f32, token: u32, history: []const u32, repetition_penalty: f32) f32 {
+        if (repetition_penalty <= 1.0001 or !tokenSeen(history, token)) return logit;
+        if (logit >= 0) return logit / repetition_penalty;
+        return logit * repetition_penalty;
+    }
+
+    fn argmaxFromLogits(logits: []const f32, history: []const u32, repetition_penalty: f32) u32 {
+        if (logits.len == 0) return 0;
+        var best_idx: u32 = 0;
+        var best_val = adjustedLogit(logits[0], 0, history, repetition_penalty);
+        for (logits[1..], 1..) |raw_val, i| {
+            const val = adjustedLogit(raw_val, @intCast(i), history, repetition_penalty);
+            if (val > best_val) {
+                best_val = val;
+                best_idx = @intCast(i);
+            }
+        }
+        return best_idx;
+    }
+
+    fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random) u32 {
+        if (logits.len == 0) return 0;
+        if (!params.requiresLogitsReadback()) return argmaxFromLogits(logits, history, 1.0);
+        if (params.temperature <= 0.0001) {
+            return argmaxFromLogits(logits, history, params.repetition_penalty);
+        }
+
+        const max_candidates = 128;
+        const top_k: usize = @min(@max(params.top_k, 1), max_candidates);
+        const safe_top_p = std.math.clamp(params.top_p, 0.0, 1.0);
+        const temperature = @max(params.temperature, 0.0001);
+
+        var candidate_ids: [max_candidates]u32 = undefined;
+        var candidate_logits: [max_candidates]f32 = undefined;
+        var candidate_count: usize = 0;
+
+        for (logits, 0..) |raw_val, i| {
+            if (!std.math.isFinite(raw_val)) continue;
+            const token_id: u32 = @intCast(i);
+            const val = adjustedLogit(raw_val, token_id, history, params.repetition_penalty);
+
+            var insert_at = candidate_count;
+            while (insert_at > 0 and val > candidate_logits[insert_at - 1]) : (insert_at -= 1) {}
+            if (insert_at >= top_k) continue;
+
+            if (candidate_count < top_k) {
+                candidate_count += 1;
+            }
+
+            var j = candidate_count - 1;
+            while (j > insert_at) : (j -= 1) {
+                candidate_ids[j] = candidate_ids[j - 1];
+                candidate_logits[j] = candidate_logits[j - 1];
+            }
+            candidate_ids[insert_at] = token_id;
+            candidate_logits[insert_at] = val;
+        }
+
+        if (candidate_count == 0) return 0;
+        if (candidate_count == 1) return candidate_ids[0];
+
+        var weights: [max_candidates]f64 = undefined;
+        const max_logit = @as(f64, candidate_logits[0]) / @as(f64, temperature);
+        var total_weight: f64 = 0.0;
+        for (0..candidate_count) |i| {
+            const scaled = @as(f64, candidate_logits[i]) / @as(f64, temperature);
+            const weight = @exp(scaled - max_logit);
+            weights[i] = weight;
+            total_weight += weight;
+        }
+        if (!(total_weight > 0.0) or !std.math.isFinite(total_weight)) return candidate_ids[0];
+
+        var keep_count = candidate_count;
+        if (safe_top_p < 0.9999) {
+            var cumulative: f64 = 0.0;
+            for (0..candidate_count) |i| {
+                cumulative += weights[i] / total_weight;
+                keep_count = i + 1;
+                if (cumulative >= @as(f64, safe_top_p) and i > 0) break;
+            }
+        }
+
+        var kept_weight: f64 = 0.0;
+        for (0..keep_count) |i| kept_weight += weights[i];
+        if (!(kept_weight > 0.0) or !std.math.isFinite(kept_weight)) return candidate_ids[0];
+
+        const target = random.float(f64) * kept_weight;
+        var cumulative: f64 = 0.0;
+        for (0..keep_count) |i| {
+            cumulative += weights[i];
+            if (target <= cumulative) return candidate_ids[i];
+        }
+
+        return candidate_ids[keep_count - 1];
+    }
+
     /// Sample a token greedily. Uses GPU argmax when available, otherwise falls back to CPU scan.
     pub fn sampleGreedy(self: *const InferenceEngine) u32 {
         if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
@@ -2862,6 +3297,16 @@ pub const InferenceEngine = struct {
             }
         }
         return max_idx;
+    }
+
+    /// Sample a token using either the GPU argmax fast path or host logits sampling.
+    pub fn sample(self: *const InferenceEngine, state: *const DecodeState, params: SamplingParams, random: std.Random) u32 {
+        if (!params.requiresLogitsReadback()) return self.sampleGreedy();
+
+        const vocab_size = self.model.config.vocab_size;
+        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+        const logits = logits_ptr[0..vocab_size];
+        return sampleFromLogits(logits, state.generated_tokens.items, params, random);
     }
 
     // -----------------------------------------------------------------------
@@ -3543,10 +3988,73 @@ pub fn generate(
         }
         if (engine.profile_enabled and engine.profile_sample_count > 0) {
             const avg_gpu_ms = engine.profile_total_gpu_ms / @as(f64, @floatFromInt(engine.profile_sample_count));
+            const avg_cpu_embed_ms = @as(f64, @floatFromInt(engine.profile_total_cpu_embed_ns)) / @as(f64, @floatFromInt(engine.profile_sample_count)) / 1_000_000.0;
+            const avg_cpu_record_ms = @as(f64, @floatFromInt(engine.profile_total_cpu_record_ns)) / @as(f64, @floatFromInt(engine.profile_sample_count)) / 1_000_000.0;
+            const avg_submit_wait_ms = @as(f64, @floatFromInt(engine.profile_total_submit_wait_ns)) / @as(f64, @floatFromInt(engine.profile_sample_count)) / 1_000_000.0;
+            const avg_query_read_ms = @as(f64, @floatFromInt(engine.profile_total_query_read_ns)) / @as(f64, @floatFromInt(engine.profile_sample_count)) / 1_000_000.0;
+            const avg_embed_phase_ms = engine.avgProfilePhaseMs(.embed_upload);
+            const avg_attention_phase_ms = engine.avgProfilePhaseMs(.attention);
+            const avg_ssm_phase_ms = engine.avgProfilePhaseMs(.ssm);
+            const avg_moe_phase_ms = engine.avgProfilePhaseMs(.moe_routed);
+            const avg_shared_phase_ms = engine.avgProfilePhaseMs(.shared_expert);
+            const avg_tail_phase_ms = engine.avgProfilePhaseMs(.final_tail);
+            const avg_desc_allocs = @as(f64, @floatFromInt(engine.profile_total_counters.descriptor_allocs)) / @as(f64, @floatFromInt(engine.profile_sample_count));
+            const avg_desc_writes = @as(f64, @floatFromInt(engine.profile_total_counters.descriptor_write_calls)) / @as(f64, @floatFromInt(engine.profile_sample_count));
+            const avg_desc_bindings = @as(f64, @floatFromInt(engine.profile_total_counters.descriptor_bindings)) / @as(f64, @floatFromInt(engine.profile_sample_count));
+            const avg_wait_overhang_ms = @max(0.0, avg_submit_wait_ms - avg_gpu_ms);
             log.info("PROFILE: avg GPU decode token={d:.2} ms over {d} sampled decode steps (max={d:.2} ms)", .{
                 avg_gpu_ms,
                 engine.profile_sample_count,
                 engine.profile_max_gpu_ms,
+            });
+            log.info("PROFILE: avg CPU embed={d:.2} ms | avg CPU record={d:.2} ms (max={d:.2} ms) | avg submit+wait={d:.2} ms (max={d:.2} ms) | avg query_read={d:.3} ms | submit overhang={d:.2} ms", .{
+                avg_cpu_embed_ms,
+                avg_cpu_record_ms,
+                @as(f64, @floatFromInt(engine.profile_max_cpu_record_ns)) / 1_000_000.0,
+                avg_submit_wait_ms,
+                @as(f64, @floatFromInt(engine.profile_max_submit_wait_ns)) / 1_000_000.0,
+                avg_query_read_ms,
+                avg_wait_overhang_ms,
+            });
+            log.info("PROFILE: avg descriptor allocs={d:.1} writes={d:.1} bindings={d:.1}", .{
+                avg_desc_allocs,
+                avg_desc_writes,
+                avg_desc_bindings,
+            });
+            log.info("PROFILE: avg GPU phases embed={d:.2} ms attention={d:.2} ms ssm={d:.2} ms moe={d:.2} ms shared={d:.2} ms tail={d:.2} ms", .{
+                avg_embed_phase_ms,
+                avg_attention_phase_ms,
+                avg_ssm_phase_ms,
+                avg_moe_phase_ms,
+                avg_shared_phase_ms,
+                avg_tail_phase_ms,
+            });
+            log.info("PROFILE: avg SSM subphases proj={d:.2} ms conv={d:.2} ms delta={d:.2} ms gnorm={d:.2} ms out={d:.2} ms", .{
+                engine.avgProfilePhaseMs(.ssm_proj),
+                engine.avgProfilePhaseMs(.ssm_conv),
+                engine.avgProfilePhaseMs(.ssm_delta),
+                engine.avgProfilePhaseMs(.ssm_gated_norm),
+                engine.avgProfilePhaseMs(.ssm_out),
+            });
+            log.info("PROFILE: avg MoE subphases router={d:.2} ms topk={d:.2} ms gate_up={d:.2} ms swiglu={d:.2} ms down={d:.2} ms acc={d:.2} ms", .{
+                engine.avgProfilePhaseMs(.moe_router),
+                engine.avgProfilePhaseMs(.moe_topk),
+                engine.avgProfilePhaseMs(.moe_gate_up),
+                engine.avgProfilePhaseMs(.moe_swiglu),
+                engine.avgProfilePhaseMs(.moe_down),
+                engine.avgProfilePhaseMs(.moe_weighted_acc),
+            });
+            log.info("PROFILE: avg shared subphases proj={d:.2} ms swiglu={d:.2} ms down={d:.2} ms gate={d:.2} ms", .{
+                engine.avgProfilePhaseMs(.shared_proj),
+                engine.avgProfilePhaseMs(.shared_swiglu),
+                engine.avgProfilePhaseMs(.shared_down),
+                engine.avgProfilePhaseMs(.shared_gate_acc),
+            });
+            log.info("PROFILE: fallback counts cpu_ssm={d} cpu_moe={d} cpu_shared_gate={d} cpu_argmax={d}", .{
+                engine.profile_total_counters.cpu_ssm_fallbacks,
+                engine.profile_total_counters.cpu_moe_fallbacks,
+                engine.profile_total_counters.cpu_shared_gate_fallbacks,
+                engine.profile_total_counters.cpu_argmax_fallbacks,
             });
         }
     } else {
@@ -3603,6 +4111,42 @@ test "expertSliceBytes computes correct byte offsets for Q5_K" {
     // bytes = 2048 * 2 * 176 = 720,896
     const result = expertSliceBytes(.q5_k, 2048, 512);
     try std.testing.expectEqual(@as(u32, 720_896), result);
+}
+
+test "SamplingParams requires logits readback for non-greedy decoding" {
+    try std.testing.expect(!(SamplingParams{}).requiresLogitsReadback());
+    try std.testing.expect((SamplingParams{ .temperature = 0.7 }).requiresLogitsReadback());
+    try std.testing.expect((SamplingParams{ .top_p = 0.9 }).requiresLogitsReadback());
+    try std.testing.expect((SamplingParams{ .repetition_penalty = 1.1 }).requiresLogitsReadback());
+}
+
+test "sampleFromLogits greedy path returns argmax" {
+    const logits = [_]f32{ 0.5, 2.0, 1.25 };
+    var prng = std.Random.DefaultPrng.init(1234);
+    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{}, prng.random());
+    try std.testing.expectEqual(@as(u32, 1), token);
+}
+
+test "sampleFromLogits repetition penalty can break a simple loop" {
+    const logits = [_]f32{ 10.0, 9.0, 1.0 };
+    const history = [_]u32{0, 0, 0};
+    var prng = std.Random.DefaultPrng.init(42);
+    const token = InferenceEngine.sampleFromLogits(&logits, &history, .{
+        .temperature = 0.0,
+        .repetition_penalty = 2.0,
+    }, prng.random());
+    try std.testing.expectEqual(@as(u32, 1), token);
+}
+
+test "sampleFromLogits top_p keeps only the highest-probability token when threshold is low" {
+    const logits = [_]f32{ 8.0, 5.0, 1.0 };
+    var prng = std.Random.DefaultPrng.init(7);
+    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{
+        .temperature = 0.8,
+        .top_p = 0.5,
+        .top_k = 8,
+    }, prng.random());
+    try std.testing.expectEqual(@as(u32, 0), token);
 }
 
 // ---------------------------------------------------------------------------

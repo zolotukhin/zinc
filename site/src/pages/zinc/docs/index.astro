@@ -1,6 +1,7 @@
 ---
 import BaseLayout from '../../../layouts/BaseLayout.astro';
 import Breadcrumbs from '../../../components/Breadcrumbs.astro';
+import DocsSearch from '../../../components/DocsSearch.astro';
 import TerminalWindow from '../../../components/TerminalWindow.astro';
 import { buildBreadcrumbList } from '../../../lib/structured-data';
 import { loadDocs } from '../../../lib/docs-loader';
@@ -73,6 +74,10 @@ const jsonLd = {
       <p>Start with how to actually use ZINC: confirm the hardware, build the binary, run one model, then go deeper into tuning and internals.</p>
     </header>
 
+    <section class="search-panel">
+      <DocsSearch />
+    </section>
+
     <section class="status-banner">
       <div>
         <p class="kicker">Current Status</p>
@@ -85,12 +90,32 @@ const jsonLd = {
     <section class="quickstart-panel">
       <TerminalWindow
         title="bash"
-        code={`# Fastest path: build ZINC, confirm Vulkan sees the GPU,
-# and run one GGUF model end to end.
+        code={`# Fastest path: build ZINC, see which supported models fit,
+# pull one, and run it end to end.
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
-zig build
+zig build -Doptimize=ReleaseFast
 export RADV_PERFTEST=coop_matrix
+
+# Verify Vulkan, shaders, and the runtime path first
+./zig-out/bin/zinc --check
+
+# Show supported models for this machine
+./zig-out/bin/zinc model list
+
+# Pull one managed model from the built-in catalog
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+
+# Check the managed model before the first run
+./zig-out/bin/zinc --check --model-id qwen35-2b-q4k-m
+
+# Run a prompt with that managed model
+./zig-out/bin/zinc \\
+  --model-id qwen35-2b-q4k-m \\
+  --prompt "The capital of France is"
+
+# If you already have a local GGUF file, use it directly instead
+./zig-out/bin/zinc --check -m /path/to/model.gguf
 ./zig-out/bin/zinc \\
   -m /path/to/model.gguf \\
   --prompt "The capital of France is"`}
@@ -172,6 +197,7 @@ export RADV_PERFTEST=coop_matrix
   .status-link, .card, .section-link { color: var(--color-text); }
   .status-link { display: inline-flex; align-items: center; justify-content: center; align-self: center; padding: 0.55rem 0.9rem; border: 1px solid var(--color-border); border-radius: 999px; white-space: nowrap; }
   .status-link:hover, .card:hover, .section-link:hover { text-decoration: none; border-color: var(--color-accent); }
+  .search-panel { margin: 0 0 var(--space-lg); }
   .quickstart-panel { margin-bottom: var(--space-xl); }
   .group + .group { margin-top: var(--space-xl); }
   .group-head { margin-bottom: var(--space-md); }
