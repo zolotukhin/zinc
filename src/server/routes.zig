@@ -4,12 +4,13 @@
 //! and a built-in chat UI. Supports both streaming (SSE) and non-streaming responses.
 const std = @import("std");
 const http = @import("http.zig");
-const forward_mod = @import("../compute/forward.zig");
-const catalog_mod = @import("../model/catalog.zig");
-const managed_mod = @import("../model/managed.zig");
-const model_manager_mod = @import("model_manager.zig");
-const tokenizer_mod = @import("../model/tokenizer.zig");
-const Model = @import("../model/loader.zig").Model;
+const runtime = @import("runtime.zig");
+const forward_mod = runtime.forward_mod;
+const catalog_mod = if (runtime.supports_model_management) @import("../model/catalog.zig") else struct {};
+const managed_mod = if (runtime.supports_model_management) @import("../model/managed.zig") else struct {};
+const model_manager_mod = runtime.model_manager_mod;
+const tokenizer_mod = runtime.tokenizer_mod;
+const Model = runtime.Model;
 
 const log = std.log.scoped(.routes);
 
@@ -207,11 +208,23 @@ pub fn handleConnection(
     } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/models")) {
         try handleModels(conn, manager, server_state, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/activate")) {
-        try handleActivateModel(conn, manager, server_state, request.body, allocator);
+        if (comptime runtime.supports_model_management) {
+            try handleActivateModel(conn, manager, server_state, request.body, allocator);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/pull")) {
-        try handlePullModel(conn, manager, server_state, request.body, allocator);
+        if (comptime runtime.supports_model_management) {
+            try handlePullModel(conn, manager, server_state, request.body, allocator);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/remove")) {
-        try handleRemoveModel(conn, manager, server_state, request.body);
+        if (comptime runtime.supports_model_management) {
+            try handleRemoveModel(conn, manager, server_state, request.body);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/completions")) {
         try handleChatCompletions(conn, manager, server_state, request.body, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/completions")) {
@@ -224,6 +237,10 @@ pub fn handleConnection(
     } else {
         try conn.sendError(404, "not_found", "Unknown endpoint");
     }
+}
+
+fn sendUnsupportedModelManagement(conn: *http.Connection) !void {
+    try conn.sendError(501, "unsupported_operation", "Model management endpoints are not available on this backend");
 }
 
 // ── /health ──────────────────────────────────────────────────
@@ -331,12 +348,16 @@ fn handleModels(
 
 fn handleActivateModel(
     conn: *http.Connection,
-    manager: *model_manager_mod.ModelManager,
-    server_state: *ServerState,
-    body: []const u8,
-    allocator: std.mem.Allocator,
+    _manager: *model_manager_mod.ModelManager,
+    _server_state: *ServerState,
+    _body: []const u8,
+    _allocator: std.mem.Allocator,
 ) !void {
-    var parsed = parseRequestBody(body, allocator) catch {
+    if (comptime !runtime.supports_model_management) {
+        try sendUnsupportedModelManagement(conn);
+        return;
+    }
+    var parsed = parseRequestBody(_body, _allocator) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
         return;
     };
@@ -346,10 +367,10 @@ fn handleActivateModel(
         return;
     }
 
-    server_state.generation_mutex.lock();
-    defer server_state.generation_mutex.unlock();
+    _server_state.generation_mutex.lock();
+    defer _server_state.generation_mutex.unlock();
 
-    manager.activateManagedModel(parsed.model_id, true) catch |err| {
+    _manager.activateManagedModel(parsed.model_id, true) catch |err| {
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown managed model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
@@ -370,11 +391,15 @@ fn handleActivateModel(
 
 fn handleRemoveModel(
     conn: *http.Connection,
-    manager: *model_manager_mod.ModelManager,
-    server_state: *ServerState,
-    body: []const u8,
+    _manager: *model_manager_mod.ModelManager,
+    _server_state: *ServerState,
+    _body: []const u8,
 ) !void {
-    const parsed = parseJsonFields(body) catch {
+    if (comptime !runtime.supports_model_management) {
+        try sendUnsupportedModelManagement(conn);
+        return;
+    }
+    const parsed = parseJsonFields(_body) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
         return;
     };
@@ -387,10 +412,10 @@ fn handleRemoveModel(
         return;
     }
 
-    server_state.generation_mutex.lock();
-    defer server_state.generation_mutex.unlock();
+    _server_state.generation_mutex.lock();
+    defer _server_state.generation_mutex.unlock();
 
-    const result = manager.removeManagedModel(parsed.model_id, parsed.force) catch |err| {
+    const result = _manager.removeManagedModel(parsed.model_id, parsed.force) catch |err| {
         const msg = switch (err) {
             error.ModelNotInstalled => "Model is not installed in the local cache",
             error.ModelLoadedInGpu => "Model is currently loaded in GPU memory. Retry with force=true to unload it first.",
@@ -480,12 +505,16 @@ fn downloadObserverComplete(context: ?*anyopaque, downloaded_bytes: u64) void {
 
 fn handlePullModel(
     conn: *http.Connection,
-    manager: *model_manager_mod.ModelManager,
-    server_state: *ServerState,
-    body: []const u8,
-    allocator: std.mem.Allocator,
+    _manager: *model_manager_mod.ModelManager,
+    _server_state: *ServerState,
+    _body: []const u8,
+    _allocator: std.mem.Allocator,
 ) !void {
-    var parsed = parseRequestBody(body, allocator) catch {
+    if (comptime !runtime.supports_model_management) {
+        try sendUnsupportedModelManagement(conn);
+        return;
+    }
+    var parsed = parseRequestBody(_body, _allocator) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
         return;
     };
@@ -500,13 +529,12 @@ fn handlePullModel(
         return;
     };
 
-    const profile = catalog_mod.profileForGpu(manager.gpu_config);
-    if (!catalog_mod.supportedOnCurrentGpu(entry.*, profile, manager.vram_budget_bytes)) {
+    if (!_manager.supportsManagedEntry(entry.*, _allocator)) {
         try conn.sendError(400, "invalid_request_error", "Model is not marked supported for the current GPU profile or VRAM budget");
         return;
     }
 
-    if (managed_mod.isInstalled(parsed.model_id, allocator)) {
+    if (managed_mod.isInstalled(parsed.model_id, _allocator)) {
         var installed_buf: [512]u8 = undefined;
         const installed_response = std.fmt.bufPrint(&installed_buf,
             \\{{"object":"model.pull","id":"{s}","state":"installed"}}
@@ -515,8 +543,8 @@ fn handlePullModel(
         return;
     }
 
-    server_state.downloads.begin(parsed.model_id) catch {
-        const snapshot = server_state.downloads.snapshot();
+    _server_state.downloads.begin(parsed.model_id) catch {
+        const snapshot = _server_state.downloads.snapshot();
         if (snapshot.model_id_len != 0 and std.mem.eql(u8, snapshot.modelId(), parsed.model_id)) {
             var busy_buf: [768]u8 = undefined;
             const busy_response = std.fmt.bufPrint(&busy_buf,
@@ -532,11 +560,11 @@ fn handlePullModel(
     const worker = try std.heap.page_allocator.create(DownloadWorker);
     worker.* = .{
         .entry = entry.*,
-        .tracker = &server_state.downloads,
+        .tracker = &_server_state.downloads,
     };
 
     const thread = std.Thread.spawn(.{}, DownloadWorker.run, .{worker}) catch |err| {
-        server_state.downloads.markFailed(@errorName(err));
+        _server_state.downloads.markFailed(@errorName(err));
         std.heap.page_allocator.destroy(worker);
         return err;
     };
@@ -802,17 +830,23 @@ fn handleChatCompletions(
     const engine = &resources.engine;
     const tokenizer = &resources.tokenizer;
     const model_name = resources.display_name;
-    const sampling = forward_mod.SamplingParams{
+    if (comptime !runtime.supports_sampling_controls) {
+        if (parsed.temperature > 0.0001 or parsed.top_p < 0.9999) {
+            try conn.sendError(400, "invalid_request_error", "Metal server currently supports greedy decoding only (temperature=0, top_p=1)");
+            return;
+        }
+    }
+    const sampling = runtime.SamplingParams{
         .temperature = if (parsed.temperature <= 0.0001) 0.0 else std.math.clamp(parsed.temperature, 0.0, 2.0),
         .top_p = std.math.clamp(parsed.top_p, 0.0, 1.0),
         .repetition_penalty = if (parsed.temperature > 0.0001 or parsed.top_p < 0.9999) 1.08 else 1.0,
         .top_k = 64,
     };
-    const previous_logits_readback = engine.logits_readback_enabled;
+    const previous_logits_readback = runtime.logitsReadbackEnabled(engine);
     if (sampling.requiresLogitsReadback() and !previous_logits_readback) {
-        engine.enableLogitsReadback();
+        runtime.enableLogitsReadback(engine);
     }
-    defer engine.logits_readback_enabled = previous_logits_readback;
+    defer runtime.setLogitsReadbackEnabled(engine, previous_logits_readback);
 
     const prompt_capacity = estimateChatPromptBytes(parsed.roles, parsed.contents, supportsEnabledThinking(tokenizer, parsed.enable_thinking));
     const prompt_buf = allocator.alloc(u8, prompt_capacity) catch {
@@ -895,7 +929,7 @@ fn handleChatCompletions(
         var finish_reason: FinishReason = .stop;
 
         if (max_tokens > 0) {
-            var prev_token = engine.sample(&state, sampling, random);
+            var prev_token = runtime.sample(engine, &state, sampling, random);
             var generated: u32 = 0;
 
             while (generated < max_tokens and prev_token != eos and !stopped) {
@@ -907,10 +941,10 @@ fn handleChatCompletions(
                 if (isReplacementArtifact(tok_text)) {
                     if (generated < max_tokens) {
                         if (conn.isPeerClosed()) return;
-                        engine.decodeStep(&state, prev_token, true) catch break;
+                        runtime.decodeStep(engine, &state, prev_token, true) catch break;
                         server_state.setActiveContextTokens(state.position);
                         if (conn.isPeerClosed()) return;
-                        prev_token = engine.sample(&state, sampling, random);
+                        prev_token = runtime.sample(engine, &state, sampling, random);
                         generated += 1;
                         continue;
                     }
@@ -965,10 +999,10 @@ fn handleChatCompletions(
                 // Generate next token
                 if (generated < max_tokens) {
                     if (conn.isPeerClosed()) return;
-                    engine.decodeStep(&state, prev_token, true) catch break;
+                    runtime.decodeStep(engine, &state, prev_token, true) catch break;
                     server_state.setActiveContextTokens(state.position);
                     if (conn.isPeerClosed()) return;
-                    prev_token = engine.sample(&state, sampling, random);
+                    prev_token = runtime.sample(engine, &state, sampling, random);
                 } else break;
             }
 
@@ -1012,14 +1046,14 @@ fn handleChatCompletions(
         const ns_stops = chat_stop_strs[0..];
         var finish_reason: FinishReason = .stop;
         if (max_tokens > 0) {
-            var prev = engine.sample(&state2, sampling, random);
+            var prev = runtime.sample(engine, &state2, sampling, random);
             while (ns_gen < max_tokens and prev != ns_eos) {
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
-                    engine.decodeStep(&state2, prev, true) catch break;
+                    runtime.decodeStep(engine, &state2, prev, true) catch break;
                     server_state.setActiveContextTokens(state2.position);
-                    prev = engine.sample(&state2, sampling, random);
+                    prev = runtime.sample(engine, &state2, sampling, random);
                     continue;
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
@@ -1030,9 +1064,9 @@ fn handleChatCompletions(
                 } else false;
                 if (hit) break;
                 if (ns_gen >= max_tokens) break;
-                engine.decodeStep(&state2, prev, true) catch break;
+                runtime.decodeStep(engine, &state2, prev, true) catch break;
                 server_state.setActiveContextTokens(state2.position);
-                prev = engine.sample(&state2, sampling, random);
+                prev = runtime.sample(engine, &state2, sampling, random);
             }
             if (prev != ns_eos and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
                 finish_reason = .length;

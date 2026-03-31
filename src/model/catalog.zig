@@ -32,6 +32,8 @@ pub const CatalogEntry = struct {
     tested_profiles: []const []const u8,
 };
 
+pub const apple_silicon_profile = "apple-silicon";
+
 pub const entries = [_]CatalogEntry{
     .{
         .id = "qwen35-2b-q4k-m",
@@ -44,13 +46,14 @@ pub const entries = [_]CatalogEntry{
         .homepage_url = "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF",
         .download_url = "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf?download=true",
         .sha256 = "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
-        .size_bytes = 1_374_389_535,
+        .size_bytes = 1_280_835_840,
         .required_vram_bytes = 3 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
         .recommended_for_chat = true,
         .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
+            apple_silicon_profile,
         },
     },
     .{
@@ -63,14 +66,15 @@ pub const entries = [_]CatalogEntry{
         .file_name = "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
         .homepage_url = "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF",
         .download_url = "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf?download=true",
-        .sha256 = "70f7b15b38aa5d778e3ecd7158fc35ecc7b9c36d11696d4ec59a116b75a78158",
-        .size_bytes = 21_152_743_629,
+        .sha256 = "1b0ac637dfa092bbba2793977db9485a40c4f8b42df5fe342f0076d61b66ae83",
+        .size_bytes = 22_241_950_336,
         .required_vram_bytes = 22_987_514_102,
         .default_context_length = 4096,
         .recommended_for_chat = true,
         .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
+            apple_silicon_profile,
         },
     },
 };
@@ -92,6 +96,10 @@ pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
         .intel_arc => "intel-arc",
         .unknown => "unknown",
     };
+}
+
+pub fn profileForMetal() []const u8 {
+    return apple_silicon_profile;
 }
 
 pub fn supportsProfile(entry: CatalogEntry, profile: []const u8) bool {
@@ -135,6 +143,10 @@ test "profileForGpu maps RDNA4 32 GB boards" {
         .flash_attn_block_size = 256,
     };
     try std.testing.expectEqualStrings("amd-rdna4-32gb", profileForGpu(config));
+}
+
+test "profileForMetal returns apple silicon profile" {
+    try std.testing.expectEqualStrings(apple_silicon_profile, profileForMetal());
 }
 
 test "fitsGpu compares against required vram" {

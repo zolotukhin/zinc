@@ -81,7 +81,6 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl .reasoning-body{font-size:13px;color:#bba48e;padding:12px 14px 14px;line-height:1.6;border-top:1px solid rgba(232,114,42,.18);background:rgba(10,10,12,.18)}
 .msg.a .bbl .reasoning-body strong{color:#f3d7bd}
 .msg.a .bbl .reasoning-body code{background:rgba(255,255,255,.05)}
-.msg.a .bbl .reasoning-body .placeholder{opacity:.8;font-style:italic}
 .msg .meta{font-size:11px;color:var(--muted);margin-top:4px}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
@@ -803,52 +802,6 @@ function md(s){
   return s;
 }
 
-function stripLeadingThinkNoise(text){
-  const firstThink=text.indexOf('<think>');
-  if(firstThink<=0||firstThink>24)return text;
-  const prefix=text.slice(0,firstThink).trim();
-  if(!prefix)return text.slice(firstThink);
-  if(prefix.length<=8&&!/\s/.test(prefix))return text.slice(firstThink);
-  return text;
-}
-
-function formatDuration(ms){
-  const secs=Math.max(ms,0)/1000;
-  return (secs>=10?secs.toFixed(0):secs.toFixed(1))+'s';
-}
-
-function formatRate(tokens,ms){
-  if(tokens<=0||ms<=0)return null;
-  return (tokens/(ms/1000)).toFixed(1);
-}
-
-function buildLiveStats(startedAt,firstTokenAt,streamedTokens){
-  const now=performance.now();
-  if(!firstTokenAt)return 'Prefill '+formatDuration(now-startedAt);
-  const parts=['TTFT '+formatDuration(firstTokenAt-startedAt)];
-  const rate=formatRate(Math.max(streamedTokens-1,0),now-firstTokenAt);
-  parts.push(rate?rate+' tok/s':'Generating...');
-  return parts.join(' \u00b7 ');
-}
-
-function buildFinalStats(startedAt,firstTokenAt,streamedTokens){
-  const endedAt=performance.now();
-  const totalMs=endedAt-startedAt;
-  if(!firstTokenAt){
-    return {
-      header:'No output \u00b7 '+formatDuration(totalMs),
-      meta:'0 streamed \u00b7 '+formatDuration(totalMs)+' total',
-    };
-  }
-  const ttftMs=firstTokenAt-startedAt;
-  const genMs=endedAt-firstTokenAt;
-  const rate=formatRate(Math.max(streamedTokens-1,0),genMs);
-  return {
-    header:'TTFT '+formatDuration(ttftMs)+(rate?' \u00b7 '+rate+' tok/s':''),
-    meta:streamedTokens+' streamed \u00b7 TTFT '+formatDuration(ttftMs)+(rate?' \u00b7 '+rate+' gen tok/s':'')+' \u00b7 '+formatDuration(totalMs)+' total',
-  };
-}
-
 function hasStructuredReasoning(text){
   return /(?:^|\n)\s*(?:\d+\.\s+|[-*]\s+|#{1,4}\s+)/.test(text||'');
 }
@@ -869,7 +822,6 @@ function renderReasoning(thinkText,isThinking){
   let structured=hasStructuredReasoning(thinkText);
   let open=(isThinking||structured)?' open':'';
   let body=md((thinkText||'').trim());
-  if(!body) body='<p class="placeholder">'+(isThinking?'Waiting for reasoning...':'No reasoning returned.')+'</p>';
   let preview=isThinking?'Live reasoning stream':(structured?'':reasoningPreview(thinkText));
   let stateClass=isThinking?'reasoning-state live':'reasoning-state';
   let stateText=isThinking?'Thinking':'Reasoning';
@@ -930,9 +882,7 @@ function looksLikePlainReasoning(text){
 }
 
 function splitDisplayContent(raw,isThinking){
-  let text=stripLeadingThinkNoise(raw||'')
-    .replace(/<\|im_start\|>\w*\n?/g,'')
-    .replace(/<\|im_end\|>/g,'');
+  let text=raw||'';
   let thinkMatch=text.match(/<think>([\s\S]*?)<\/think>/);
   let thinkPartial=!thinkMatch&&text.match(/<think>([\s\S]*)$/);
   let implicitThinkClose=!thinkMatch&&!thinkPartial&&text.includes('</think>')&&!text.includes('<think>');
@@ -1010,12 +960,11 @@ async function send(){
   addMsg('user',t);H.push({role:'user',content:t});saveChatState();
   let bbl=addMsg('assistant','');
   let cur=document.createElement('span');cur.className='cursor';bbl.appendChild(cur);
-  let raw='',tokens=0,requestStartedAt=performance.now(),firstTokenAt=0,thinking=false,stopped=false,draftEntry=null,finishReason='stop';
+  let raw='',tokens=0,t0=performance.now(),thinking=false,stopped=false,draftEntry=null,finishReason='stop';
   let selectedModelId='zinc';
   let enableThinking=false;
   let requestMessages=[];
   activeController=new AbortController();stopRequested=false;setGenerating(true);
-  SS.textContent='Prefill 0.0s';
   try{
     let currentModel=selectedModel();
     selectedModelId=currentModel?.id||MN.textContent||'zinc';
@@ -1039,29 +988,28 @@ async function send(){
           let choice=JSON.parse(p).choices?.[0];
           if(choice?.finish_reason)finishReason=choice.finish_reason;
           let c=choice?.delta?.content;
-          if(c){
+          if(c){tokens++;
             let cleanChunk=stripInlineTransportArtifacts(c);
             if(!cleanChunk)continue;
+            raw+=cleanChunk;
+            // Track <think>...</think> reasoning blocks
+            if(!thinking&&raw.includes('<think>')){thinking=true}
+            if(thinking&&raw.includes('</think>')){thinking=false}
             if(!draftEntry){
               draftEntry={role:'assistant',content:'',raw:'',partial:true};
               H.push(draftEntry);
             }
-            raw+=cleanChunk;
-            tokens++;
-            if(!firstTokenAt)firstTokenAt=performance.now();
-            if(!thinking&&raw.includes('<think>')){thinking=true}
-            if(thinking&&raw.includes('</think>')){thinking=false}
             let rendered=assistantHtmlFromRaw(raw,thinking);
             draftEntry.raw=raw;
-            draftEntry.content=rendered.view.answer||rendered.view.reasoning||stripTrailingArtifacts(raw);
+            draftEntry.content=rendered.view.answer||stripTrailingArtifacts(raw);
             saveChatState();
             let html=rendered.html;
             if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();M.scrollTop=M.scrollHeight}
-            SS.textContent=buildLiveStats(requestStartedAt,firstTokenAt,tokens);
+            let el=(performance.now()-t0)/1000;
+            if(el>0.3)SS.textContent=((tokens/el).toFixed(1))+' tok/s';
           }
         }catch(e){}
       }
-      if(!firstTokenAt)SS.textContent=buildLiveStats(requestStartedAt,firstTokenAt,tokens);
     }
   }catch(e){
     if(stopRequested||e.name==='AbortError'){stopped=true}
@@ -1102,21 +1050,16 @@ async function send(){
     }
     saveChatState();
   }
-  if(!raw.trim()&&/^Error:/.test(bbl.textContent||'')){
-    SS.textContent='request failed';
-    saveChatState();
-    return;
-  }
-  const stats=buildFinalStats(requestStartedAt,firstTokenAt,tokens);
   if(stopped){
     let meta=document.createElement('div');meta.className='meta';
+    let el=(performance.now()-t0)/1000;
     if(cleanAnswer){
-      SS.textContent=stats.header+' \u00b7 stopped';
-      meta.textContent=stats.meta+' \u00b7 stopped';
+      SS.textContent=tokens+' tokens \u00b7 stopped';
+      meta.textContent=tokens+' tokens \u00b7 stopped \u00b7 '+el.toFixed(1)+'s';
     }else{
       bbl.innerHTML='<p><em>Stopped.</em></p>';
       SS.textContent='stopped';
-      meta.textContent='stopped \u00b7 '+stats.meta;
+      meta.textContent='stopped \u00b7 '+el.toFixed(1)+'s';
     }
     bbl.parentElement.appendChild(meta);
     return;
@@ -1127,14 +1070,18 @@ async function send(){
       : 'No final answer returned.';
     bbl.innerHTML=renderReasoning(finalView.reasoning,false)+'<p><em>'+msg+'</em></p>';
     highlightAll();
-  }else if(finalRendered.html){
-    bbl.innerHTML=finalRendered.html;
-    highlightAll();
   }
-  SS.textContent=stats.header;
-  let meta=document.createElement('div');meta.className='meta';
-  meta.textContent=stats.meta;
-  bbl.parentElement.appendChild(meta);
+  if(cleanAnswer){
+    if(finalRendered.html){
+      bbl.innerHTML=finalRendered.html;
+      highlightAll();
+    }
+    let el=(performance.now()-t0)/1000,tps=tokens/el;
+    SS.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s';
+    let meta=document.createElement('div');meta.className='meta';
+    meta.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s \u00b7 '+el.toFixed(1)+'s';
+    bbl.parentElement.appendChild(meta);
+  }
   saveChatState();
 }
 

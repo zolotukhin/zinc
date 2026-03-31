@@ -10,6 +10,14 @@ const MetalBuffer = metal_buffer.MetalBuffer;
 
 const log = std.log.scoped(.loader);
 
+pub const ModelInspection = struct {
+    config: ModelConfig,
+    file_size: u64,
+    tensor_bytes: u64,
+    tensor_count: u64,
+    metadata_count: usize,
+};
+
 /// A tensor descriptor paired with a Metal buffer wrapping its mmap'd data.
 pub const LoadedTensor = struct {
     info: gguf.TensorInfo,
@@ -45,7 +53,7 @@ pub const Model = struct {
 };
 
 /// Extract model configuration from GGUF metadata (platform-independent).
-fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
+fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelConfig {
     const arch_str = gf.getString("general.architecture") orelse "unknown";
     const arch = config_mod.parseArchitecture(arch_str);
     const prefix = arch_str;
@@ -148,18 +156,20 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
         break :blk @as(f32, 10000.0);
     };
 
-    log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
-        arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
-    });
-    if (n_experts > 0) {
-        log.info("MoE: {d} experts, {d} active | intermediate {d} | shared expert {d}", .{
-            n_experts, n_experts_used, intermediate_dim, shared_expert_intermediate_dim,
+    if (log_metadata) {
+        log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
+            arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
         });
-    }
-    if (ssm_d_inner > 0) {
-        log.info("SSM: d_conv={d} d_inner={d} d_state={d} dt_rank={d} n_group={d}", .{
-            ssm_d_conv, ssm_d_inner, ssm_d_state, ssm_dt_rank, ssm_n_group,
-        });
+        if (n_experts > 0) {
+            log.info("MoE: {d} experts, {d} active | intermediate {d} | shared expert {d}", .{
+                n_experts, n_experts_used, intermediate_dim, shared_expert_intermediate_dim,
+            });
+        }
+        if (ssm_d_inner > 0) {
+            log.info("SSM: d_conv={d} d_inner={d} d_state={d} dt_rank={d} n_group={d}", .{
+                ssm_d_conv, ssm_d_inner, ssm_d_state, ssm_dt_rank, ssm_n_group,
+            });
+        }
     }
 
     return ModelConfig{
@@ -187,6 +197,10 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
     };
 }
 
+fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
+    return extractConfigWithLogging(gf, true);
+}
+
 /// Inspect a GGUF file and extract only the model configuration (no GPU operations).
 pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfig {
     const file = try std.fs.cwd().openFile(path, .{});
@@ -206,10 +220,45 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     );
     defer std.posix.munmap(mmap_data);
 
-    var gf = try gguf.parse(mmap_data, allocator);
+    var gf = try gguf.parseWithOptions(mmap_data, allocator, .{ .log_summary = false });
     defer gf.deinit();
 
-    return extractConfig(&gf);
+    return extractConfigWithLogging(&gf, false);
+}
+
+pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspection {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer {
+        var close_file = file;
+        close_file.close();
+    }
+
+    const stat = try file.stat();
+    const mmap_data = try std.posix.mmap(
+        null,
+        stat.size,
+        std.posix.PROT.READ,
+        .{ .TYPE = .PRIVATE },
+        file.handle,
+        0,
+    );
+    defer std.posix.munmap(mmap_data);
+
+    var gf = try gguf.parseWithOptions(mmap_data, allocator, .{ .log_summary = false });
+    defer gf.deinit();
+
+    var tensor_bytes: u64 = 0;
+    for (gf.tensors.items) |tensor_info| {
+        tensor_bytes += tensor_info.sizeBytes();
+    }
+
+    return .{
+        .config = extractConfigWithLogging(&gf, false),
+        .file_size = stat.size,
+        .tensor_bytes = tensor_bytes,
+        .tensor_count = gf.tensor_count,
+        .metadata_count = gf.metadata.count(),
+    };
 }
 
 /// Load a GGUF model with zero-copy Metal buffers wrapping mmap'd tensor data.

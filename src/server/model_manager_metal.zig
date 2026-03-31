@@ -1,19 +1,15 @@
-//! Managed active-model runtime state for the HTTP server and CLI startup.
-//! @section Managed Models
-//! ZINC still loads one model into memory at a time. This manager keeps the
-//! current engine/tokenizer/model bundle together and handles serialized swaps.
+//! Metal-backed active-model runtime state for the HTTP server.
 const std = @import("std");
-const loader_mod = @import("../model/loader.zig");
-const tokenizer_mod = @import("../model/tokenizer.zig");
 const catalog_mod = @import("../model/catalog.zig");
+const config_mod = @import("../model/config.zig");
 const managed_mod = @import("../model/managed.zig");
-const diagnostics_mod = @import("../diagnostics.zig");
-const forward_mod = @import("../compute/forward.zig");
-const gpu_detect = @import("../vulkan/gpu_detect.zig");
-const instance_mod = @import("../vulkan/instance.zig");
-const CommandPool = @import("../vulkan/command.zig").CommandPool;
+const loader_mod = @import("../model/loader_metal.zig");
+const tokenizer_mod = @import("../model/tokenizer.zig");
+const forward_mod = @import("../compute/forward_metal.zig");
+const metal_device = @import("../metal/device.zig");
 
-const Instance = instance_mod.Instance;
+const ModelConfig = config_mod.ModelConfig;
+const MetalDevice = metal_device.MetalDevice;
 
 pub const LoadSpec = struct {
     model_path: []const u8,
@@ -61,10 +57,10 @@ pub const LoadedResources = struct {
     device_local_bytes: u64,
     device_local_budget_bytes: u64,
 
-    fn deinit(self: *LoadedResources, instance: *const Instance, allocator: std.mem.Allocator) void {
+    fn deinit(self: *LoadedResources, allocator: std.mem.Allocator) void {
         self.engine.deinit();
         self.tokenizer.deinit();
-        self.model.deinit(instance);
+        self.model.deinit();
         allocator.free(self.model_path);
         if (self.managed_id) |id| allocator.free(id);
         allocator.free(self.display_name);
@@ -74,10 +70,9 @@ pub const LoadedResources = struct {
 
 pub const ModelManager = struct {
     allocator: std.mem.Allocator,
-    instance: *const Instance,
-    gpu_config: gpu_detect.GpuConfig,
+    device: *const MetalDevice,
+    profile: []const u8,
     vram_budget_bytes: u64,
-    shader_dir: []const u8,
     state_mutex: std.Thread.Mutex = .{},
     current: ?*LoadedResources,
 
@@ -86,49 +81,6 @@ pub const ModelManager = struct {
         cleared_active_selection: bool,
         removed: managed_mod.RemoveInstalledModelResult,
     };
-
-    pub fn init(
-        spec: LoadSpec,
-        instance: *const Instance,
-        gpu_config_value: gpu_detect.GpuConfig,
-        shader_dir: []const u8,
-        allocator: std.mem.Allocator,
-    ) !ModelManager {
-        const current = try allocator.create(LoadedResources);
-        errdefer allocator.destroy(current);
-        try loadResourcesInto(current, spec, instance, gpu_config_value, shader_dir, allocator);
-        return .{
-            .allocator = allocator,
-            .instance = instance,
-            .gpu_config = gpu_config_value,
-            .vram_budget_bytes = instance.vramBytes(),
-            .shader_dir = shader_dir,
-            .current = current,
-        };
-    }
-
-    pub fn deinit(self: *ModelManager) void {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
-        if (self.current) |current| {
-            current.deinit(self.instance, self.allocator);
-            self.allocator.destroy(current);
-        }
-    }
-
-    pub fn currentResources(self: *ModelManager) ?*LoadedResources {
-        return self.current;
-    }
-
-    pub fn activeDisplayName(self: *ModelManager) []const u8 {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
-        return if (self.current) |current| current.display_name else "none";
-    }
-
-    pub fn catalogProfile(self: *const ModelManager) []const u8 {
-        return catalog_mod.profileForGpu(self.gpu_config);
-    }
 
     pub const MemoryUsage = struct {
         weights_bytes: u64,
@@ -147,6 +99,46 @@ pub const ModelManager = struct {
             return @as(u64, self.activeContextTokens(requested_tokens)) * self.context_bytes_per_token;
         }
     };
+
+    pub fn init(
+        spec: LoadSpec,
+        device: *const MetalDevice,
+        allocator: std.mem.Allocator,
+    ) !ModelManager {
+        const current = try allocator.create(LoadedResources);
+        errdefer allocator.destroy(current);
+        try loadResourcesInto(current, spec, device, allocator);
+        return .{
+            .allocator = allocator,
+            .device = device,
+            .profile = catalog_mod.profileForMetal(),
+            .vram_budget_bytes = memoryBudget(device),
+            .current = current,
+        };
+    }
+
+    pub fn deinit(self: *ModelManager) void {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        if (self.current) |current| {
+            current.deinit(self.allocator);
+            self.allocator.destroy(current);
+        }
+    }
+
+    pub fn currentResources(self: *ModelManager) ?*LoadedResources {
+        return self.current;
+    }
+
+    pub fn activeDisplayName(self: *ModelManager) []const u8 {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        return if (self.current) |current| current.display_name else "none";
+    }
+
+    pub fn catalogProfile(self: *const ModelManager) []const u8 {
+        return self.profile;
+    }
 
     pub fn currentMemoryUsage(self: *ModelManager) MemoryUsage {
         self.state_mutex.lock();
@@ -177,7 +169,6 @@ pub const ModelManager = struct {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
 
-        const profile = self.catalogProfile();
         const active_managed_id = if (self.current) |current| current.managed_id else null;
         const active_display_name = if (self.current) |current| current.display_name else "none";
         const active_supports_thinking_toggle = if (self.current) |current| current.tokenizer.supportsThinkingToggle() else false;
@@ -186,8 +177,7 @@ pub const ModelManager = struct {
         defer list.deinit(allocator);
 
         for (catalog_mod.entries) |entry| {
-            const tested_profile_match = catalog_mod.supportsProfile(entry, profile);
-
+            const tested_profile_match = catalog_mod.supportsProfile(entry, self.profile);
             const installed = managed_mod.isInstalled(entry.id, allocator);
             const fit = managed_mod.describeFit(entry, self.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
                 .required_vram_bytes = entry.required_vram_bytes,
@@ -240,7 +230,7 @@ pub const ModelManager = struct {
         }
 
         return .{
-            .profile = profile,
+            .profile = self.profile,
             .data = try list.toOwnedSlice(allocator),
         };
     }
@@ -251,13 +241,13 @@ pub const ModelManager = struct {
             .fits_current_gpu = catalog_mod.fitsGpu(entry, self.vram_budget_bytes),
             .exact = false,
         };
-        return catalog_mod.supportsProfile(entry, self.catalogProfile()) and fit.fits_current_gpu;
+        return catalog_mod.supportsProfile(entry, self.profile) and fit.fits_current_gpu;
     }
 
     /// Caller must already hold the shared generation lock.
     pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool) !void {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
-        if (!catalog_mod.supportsProfile(entry.*, self.catalogProfile())) return error.ModelUnsupportedOnThisGpu;
+        if (!catalog_mod.supportsProfile(entry.*, self.profile)) return error.ModelUnsupportedOnThisGpu;
         if (!managed_mod.isInstalled(model_id, self.allocator)) return error.ModelNotInstalled;
 
         const fit = try managed_mod.verifyActiveSelectionFits(model_id, self.vram_budget_bytes, self.allocator);
@@ -279,14 +269,12 @@ pub const ModelManager = struct {
         defer self.allocator.free(new_path);
         const switched = try self.allocator.create(LoadedResources);
         errdefer self.allocator.destroy(switched);
-        loadResourcesInto(switched, .{ .model_path = new_path, .managed_id = model_id }, self.instance, self.gpu_config, self.shader_dir, self.allocator) catch |switch_err| {
-            return switch_err;
-        };
+        try loadResourcesInto(switched, .{ .model_path = new_path, .managed_id = model_id }, self.device, self.allocator);
 
         const previous = self.current;
         self.current = switched;
         if (previous) |old| {
-            old.deinit(self.instance, self.allocator);
+            old.deinit(self.allocator);
             self.allocator.destroy(old);
         }
 
@@ -315,7 +303,7 @@ pub const ModelManager = struct {
         self.state_mutex.unlock();
 
         if (previous) |resources| {
-            resources.deinit(self.instance, self.allocator);
+            resources.deinit(self.allocator);
             self.allocator.destroy(resources);
         }
 
@@ -333,27 +321,18 @@ pub const ModelManager = struct {
 fn loadResourcesInto(
     resources: *LoadedResources,
     spec: LoadSpec,
-    instance: *const Instance,
-    gpu_config_value: gpu_detect.GpuConfig,
-    shader_dir: []const u8,
+    device: *const MetalDevice,
     allocator: std.mem.Allocator,
 ) !void {
-    var cmd_pool = try CommandPool.init(instance);
-    defer cmd_pool.deinit();
-
     resources.* = undefined;
-    const inspection = try loader_mod.inspectModel(spec.model_path, allocator);
-    const fit = diagnostics_mod.estimateFit(inspection, instance.vramBytes());
 
-    resources.model = try loader_mod.load(spec.model_path, instance, &cmd_pool, allocator);
-    errdefer resources.model.deinit(instance);
+    resources.model = try loader_mod.load(spec.model_path, device.ctx, allocator);
+    errdefer resources.model.deinit();
 
     resources.tokenizer = try tokenizer_mod.Tokenizer.initFromGGUF(&resources.model.gguf_file, allocator);
     errdefer resources.tokenizer.deinit();
 
-    // Important: the engine stores a Model pointer. Initialize it against the
-    // stable model field inside the final LoadedResources storage.
-    resources.engine = try forward_mod.InferenceEngine.init(&resources.model, instance, gpu_config_value, shader_dir, allocator);
+    resources.engine = try forward_mod.InferenceEngine.init(&resources.model, device, allocator, false);
     errdefer resources.engine.deinit();
 
     resources.model_path = try allocator.dupe(u8, spec.model_path);
@@ -364,15 +343,88 @@ fn loadResourcesInto(
 
     resources.display_name = try allocator.dupe(u8, modelDisplayName(&resources.model));
     errdefer allocator.free(resources.display_name);
-    resources.weights_bytes = inspection.tensor_bytes;
-    resources.runtime_device_local_bytes = fit.runtime_device_local_bytes;
-    resources.context_reserved_bytes = fit.kv_cache_bytes;
-    resources.context_capacity_tokens = fit.max_ctx;
-    resources.context_bytes_per_token = if (fit.max_ctx == 0) 0 else @divTrunc(fit.kv_cache_bytes, fit.max_ctx);
-    resources.device_local_bytes = fit.total_device_local_bytes;
-    resources.device_local_budget_bytes = fit.vram_budget_bytes;
 
-    std.debug.assert(resources.engine.model == &resources.model);
+    const weights_bytes = tensorBytes(&resources.model);
+    const usage = estimateMemoryUsage(resources.model.config, weights_bytes, memoryBudget(device));
+    resources.weights_bytes = usage.weights_bytes;
+    resources.runtime_device_local_bytes = usage.runtime_device_local_bytes;
+    resources.context_reserved_bytes = usage.context_reserved_bytes;
+    resources.context_capacity_tokens = usage.context_capacity_tokens;
+    resources.context_bytes_per_token = usage.context_bytes_per_token;
+    resources.device_local_bytes = usage.device_local_bytes;
+    resources.device_local_budget_bytes = usage.device_local_budget_bytes;
+}
+
+fn tensorBytes(model: *const loader_mod.Model) u64 {
+    var total: u64 = 0;
+    for (model.gguf_file.tensors.items) |tensor_info| {
+        total += tensor_info.sizeBytes();
+    }
+    return total;
+}
+
+fn memoryBudget(device: *const MetalDevice) u64 {
+    const working_set = device.recommendedMaxWorkingSetSize();
+    if (working_set > 0) return working_set;
+    return device.totalMemory();
+}
+
+fn estimateMemoryUsage(config: ModelConfig, weights_bytes: u64, budget_bytes: u64) ModelManager.MemoryUsage {
+    const hidden_size = @as(u64, config.hidden_dim) * @sizeOf(f32);
+    const logits_size = @as(u64, config.vocab_size) * @sizeOf(f32);
+    const q_dim = @as(u64, config.n_heads) * config.head_dim;
+    const kv_dim = @as(u64, config.n_kv_heads) * config.head_dim;
+    const q_size = q_dim * @sizeOf(f32);
+    const kv_size = kv_dim * @sizeOf(f32);
+    const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
+    const shexp_inter = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_dim;
+    const ssm_conv_channels: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
+    const max_inter = @max(
+        @max(inter_dim, shexp_inter),
+        @max(if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim, ssm_conv_channels),
+    );
+    const inter_size = @as(u64, max_inter) * @sizeOf(f32);
+    const n_experts_total: u32 = if (config.n_experts > 0) config.n_experts else 1;
+    const n_experts_used: u32 = if (config.n_experts_used > 0) config.n_experts_used else 8;
+    const batched_inter_size = @as(u64, n_experts_used) * inter_dim * @sizeOf(f32);
+    const batched_down_size = @as(u64, n_experts_used) * hidden_size;
+    const gate_buf_size = @max(inter_size, batched_inter_size);
+    const down_buf_size = @max(hidden_size, batched_down_size);
+    const q_full_size = @as(u64, q_dim * 2) * @sizeOf(f32);
+    const conv_ch: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
+    const attn_out_size = @max(q_full_size, @as(u64, conv_ch) * @sizeOf(f32));
+    const router_size = @as(u64, n_experts_total) * @sizeOf(f32);
+    const max_ctx: u32 = @min(config.context_length, 4096);
+    const kv_cache_per_layer = @as(u64, max_ctx) * kv_dim * @sizeOf(f32);
+    const kv_cache_bytes = @as(u64, config.n_layers) * kv_cache_per_layer * 2;
+
+    const gpu_ssm_bytes = blk: {
+        if (config.ssm_d_inner == 0) break :blk @as(u64, 0);
+        const d_inner = config.ssm_d_inner;
+        const dt_rank = config.ssm_dt_rank;
+        if (dt_rank == 0) break :blk @as(u64, 0);
+        const head_v_dim = d_inner / dt_rank;
+        const gpu_conv_ch = d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
+        const gpu_conv_size = @as(u64, (config.ssm_d_conv - 1) * gpu_conv_ch) * @sizeOf(f32);
+        const gpu_state_size = @as(u64, dt_rank) * head_v_dim * head_v_dim * @sizeOf(f32);
+        break :blk @as(u64, config.n_layers) * (gpu_conv_size + gpu_state_size);
+    };
+
+    const runtime_device_local_bytes =
+        hidden_size + hidden_size + hidden_size + logits_size +
+        q_size + kv_size + kv_size + attn_out_size + hidden_size + hidden_size +
+        gate_buf_size + gate_buf_size + gate_buf_size + down_buf_size + hidden_size +
+        router_size + kv_cache_bytes + gpu_ssm_bytes;
+
+    return .{
+        .weights_bytes = weights_bytes,
+        .runtime_device_local_bytes = runtime_device_local_bytes,
+        .context_reserved_bytes = kv_cache_bytes,
+        .context_capacity_tokens = max_ctx,
+        .context_bytes_per_token = if (max_ctx == 0) 0 else @divTrunc(kv_cache_bytes, max_ctx),
+        .device_local_bytes = weights_bytes + runtime_device_local_bytes,
+        .device_local_budget_bytes = budget_bytes,
+    };
 }
 
 fn fallbackModelName(model: *const loader_mod.Model) []const u8 {
@@ -394,189 +446,16 @@ fn modelDisplayName(model: *const loader_mod.Model) []const u8 {
         fallbackModelName(model);
 }
 
-test "collectCatalogView marks active managed model" {
-    var fake = ModelManager{
-        .allocator = std.testing.allocator,
-        .instance = undefined,
-        .gpu_config = .{
-            .vendor = .amd_rdna4,
-            .device_name = undefined,
-            .device_name_len = 0,
-            .vram_mb = 32624,
-            .bandwidth_gbps = 576,
-            .compute_units = 64,
-            .wave_size = 64,
-            .coopmat_support = true,
-            .l1_cache_kb = 32,
-            .l2_cache_mb = 6,
-            .max_workgroup_size = 1024,
-            .dmmv_workgroup_size = 64,
-            .dmmv_rows_per_workgroup = 2,
-            .matmul_tile_m = 16,
-            .matmul_tile_n = 16,
-            .flash_attn_block_size = 256,
-        },
-        .vram_budget_bytes = 32 * 1024 * 1024 * 1024,
-        .shader_dir = "zig-out/share/zinc/shaders",
-        .current = undefined,
+test "MemoryUsage active context bytes clamp to capacity" {
+    const usage = ModelManager.MemoryUsage{
+        .weights_bytes = 0,
+        .runtime_device_local_bytes = 0,
+        .context_reserved_bytes = 1024,
+        .context_capacity_tokens = 4,
+        .context_bytes_per_token = 256,
+        .device_local_bytes = 0,
+        .device_local_budget_bytes = 0,
     };
-    var current = LoadedResources{
-        .model = undefined,
-        .tokenizer = .{
-            .vocab = &.{},
-            .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
-            .merges = &.{},
-            .scores = null,
-            .bos_id = 1,
-            .eos_id = 2,
-            .prepend_bos = true,
-            .chat_template =
-            \\{%- if add_generation_prompt %}
-            \\  {{- '<|im_start|>assistant\n' }}
-            \\  {%- if enable_thinking is defined and enable_thinking is true %}
-            \\    {{- '<think>\n' }}
-            \\  {%- else %}
-            \\    {{- '<think>\n\n</think>\n\n' }}
-            \\  {%- endif %}
-            \\{%- endif %}
-            ,
-            .allocator = std.testing.allocator,
-        },
-        .engine = undefined,
-        .model_path = try std.testing.allocator.dupe(u8, "/tmp/test.gguf"),
-        .managed_id = try std.testing.allocator.dupe(u8, "qwen35-35b-a3b-q4k-xl"),
-        .display_name = try std.testing.allocator.dupe(u8, "Qwen3.5 35B-A3B UD Q4_K_XL"),
-        .weights_bytes = 20 * 1024 * 1024 * 1024,
-        .runtime_device_local_bytes = 1024 * 1024 * 1024,
-        .context_reserved_bytes = 768 * 1024 * 1024,
-        .context_capacity_tokens = 4096,
-        .context_bytes_per_token = 192 * 1024,
-        .device_local_bytes = 21 * 1024 * 1024 * 1024,
-        .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
-    };
-    fake.current = &current;
-    defer {
-        if (fake.current) |loaded| {
-            loaded.tokenizer.token_to_id.deinit();
-            std.testing.allocator.free(loaded.model_path);
-            if (loaded.managed_id) |id| std.testing.allocator.free(id);
-            std.testing.allocator.free(loaded.display_name);
-        }
-    }
-
-    var view = try fake.collectCatalogView(std.testing.allocator, false);
-    defer view.deinit(std.testing.allocator);
-
-    try std.testing.expect(view.data.len >= 1);
-    var saw_active = false;
-    for (view.data) |entry| {
-        if (std.mem.eql(u8, entry.id, "qwen35-35b-a3b-q4k-xl")) {
-            saw_active = true;
-            try std.testing.expect(entry.active);
-            try std.testing.expect(entry.supports_thinking_toggle);
-            try std.testing.expectEqualStrings("2026-02-16", entry.release_date);
-        }
-    }
-    try std.testing.expect(saw_active);
-}
-
-test "currentMemoryUsage reports empty state when no model is loaded" {
-    var fake = ModelManager{
-        .allocator = std.testing.allocator,
-        .instance = undefined,
-        .gpu_config = .{
-            .vendor = .amd_rdna4,
-            .device_name = undefined,
-            .device_name_len = 0,
-            .vram_mb = 32624,
-            .bandwidth_gbps = 576,
-            .compute_units = 64,
-            .wave_size = 64,
-            .coopmat_support = true,
-            .l1_cache_kb = 32,
-            .l2_cache_mb = 6,
-            .max_workgroup_size = 1024,
-            .dmmv_workgroup_size = 64,
-            .dmmv_rows_per_workgroup = 2,
-            .matmul_tile_m = 16,
-            .matmul_tile_n = 16,
-            .flash_attn_block_size = 256,
-        },
-        .vram_budget_bytes = 32 * 1024 * 1024 * 1024,
-        .shader_dir = "zig-out/share/zinc/shaders",
-        .current = null,
-    };
-
-    const usage = fake.currentMemoryUsage();
-    try std.testing.expectEqual(@as(u64, 0), usage.weights_bytes);
-    try std.testing.expectEqual(@as(u64, 0), usage.runtime_device_local_bytes);
-    try std.testing.expectEqual(@as(u64, 0), usage.context_reserved_bytes);
-    try std.testing.expectEqual(@as(u32, 0), usage.context_capacity_tokens);
-    try std.testing.expectEqual(@as(u64, 0), usage.context_bytes_per_token);
-    try std.testing.expectEqual(@as(u64, 0), usage.device_local_bytes);
-    try std.testing.expectEqual(@as(u64, 32 * 1024 * 1024 * 1024), usage.device_local_budget_bytes);
-    try std.testing.expectEqualStrings("none", fake.activeDisplayName());
-}
-
-test "removeManagedModel refuses loaded active model without force" {
-    var fake = ModelManager{
-        .allocator = std.testing.allocator,
-        .instance = undefined,
-        .gpu_config = .{
-            .vendor = .amd_rdna4,
-            .device_name = undefined,
-            .device_name_len = 0,
-            .vram_mb = 32624,
-            .bandwidth_gbps = 576,
-            .compute_units = 64,
-            .wave_size = 64,
-            .coopmat_support = true,
-            .l1_cache_kb = 32,
-            .l2_cache_mb = 6,
-            .max_workgroup_size = 1024,
-            .dmmv_workgroup_size = 64,
-            .dmmv_rows_per_workgroup = 2,
-            .matmul_tile_m = 16,
-            .matmul_tile_n = 16,
-            .flash_attn_block_size = 256,
-        },
-        .vram_budget_bytes = 32 * 1024 * 1024 * 1024,
-        .shader_dir = "zig-out/share/zinc/shaders",
-        .current = undefined,
-    };
-    var current = LoadedResources{
-        .model = undefined,
-        .tokenizer = .{
-            .vocab = &.{},
-            .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
-            .merges = &.{},
-            .scores = null,
-            .bos_id = 1,
-            .eos_id = 2,
-            .prepend_bos = true,
-            .chat_template = null,
-            .allocator = std.testing.allocator,
-        },
-        .engine = undefined,
-        .model_path = try std.testing.allocator.dupe(u8, "/tmp/test.gguf"),
-        .managed_id = try std.testing.allocator.dupe(u8, "qwen35-35b-a3b-q4k-xl"),
-        .display_name = try std.testing.allocator.dupe(u8, "Qwen3.5 35B-A3B UD Q4_K_XL"),
-        .weights_bytes = 20 * 1024 * 1024 * 1024,
-        .runtime_device_local_bytes = 1024 * 1024 * 1024,
-        .context_reserved_bytes = 768 * 1024 * 1024,
-        .context_capacity_tokens = 4096,
-        .context_bytes_per_token = 192 * 1024,
-        .device_local_bytes = 21 * 1024 * 1024 * 1024,
-        .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
-    };
-    fake.current = &current;
-    defer {
-        fake.current.?.tokenizer.token_to_id.deinit();
-        std.testing.allocator.free(fake.current.?.model_path);
-        if (fake.current.?.managed_id) |id| std.testing.allocator.free(id);
-        std.testing.allocator.free(fake.current.?.display_name);
-    }
-
-    try std.testing.expectError(error.ModelLoadedInGpu, fake.removeManagedModel("qwen35-35b-a3b-q4k-xl", false));
-    try std.testing.expect(fake.current == &current);
+    try std.testing.expectEqual(@as(u32, 4), usage.activeContextTokens(99));
+    try std.testing.expectEqual(@as(u64, 1024), usage.activeContextBytes(99));
 }
