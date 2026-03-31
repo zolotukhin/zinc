@@ -307,25 +307,6 @@ Project expectations and planning live here:
 - [Code of Conduct](./CODE_OF_CONDUCT.md)
 - [Roadmap](./docs/ROADMAP.md)
 
-## CLI Reference
-
-```
-Usage: zinc [options]
-  -m, --model <path>       Path to GGUF model file (required)
-  -p, --port <port>        Server port (default: 8080)
-  -d, --device <id>        Vulkan device index (default: 0)
-  -c, --context <size>     Context length (default: 4096)
-  --parallel <n>           Max concurrent requests (default: 4)
-  --prompt <text>          Single prompt (CLI mode, no server)
-  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0=off)
-  --graph-report <path>    Write decode-graph JSON report from GGUF metadata
-  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
-  --debug                  Enable verbose debug logging (or set ZINC_DEBUG=1)
-  -h, --help               Show this help
-```
-
-The JSON report includes node/edge lists, op-type counts, per-node depth, root/leaf flags, and the structural critical path. The DOT export is intended for Graphviz or downstream visualization tools.
-
 ## Self-Improving Optimization Loop
 
 ZINC includes an AI-powered self-improving loop that iteratively builds, deploys, and fixes/optimizes the engine on real RDNA4 hardware.
