@@ -15,18 +15,12 @@ inline float fp16_to_fp32(uint h) {
     return float(as_type<half>(ushort(h)));
 }
 
-inline float2 get_scale_min_k5(uint j, device const uchar* scales) {
-    if (j < 4u) {
-        return float2(float(scales[j] & 63u), float(scales[4u + j] & 63u));
-    }
-    return float2(
-        float((scales[4u + j] & 0x0Fu) | ((scales[j - 4u] >> 6u) << 4u)),
-        float((scales[4u + j] >> 4u) | ((scales[j] >> 6u) << 4u))
-    );
+inline float s8_to_f32(uint x) {
+    return float((x < 128u) ? int(x) : (int(x) - 256));
 }
 
-// Reuse the staged expert input vector across 8 rows so the mixed-quant MoE
-// path does not fall back to the one-thread-per-row SPIRV-Cross shape.
+// Reuse the staged expert input vector across 8 rows so mixed q6_k experts
+// can stay on the shared-command decode path without thrashing device memory.
 #define TG_SIZE 256
 #define ROWS_PER_TG (TG_SIZE / 32)
 #define TILE_K 2048
@@ -53,7 +47,7 @@ kernel void main0(
     const bool row_active = row < p.M;
 
     const uint blocks_per_row = p.K / 256u;
-    const uint row_offset = p.a_offset + expert_id * p.expert_stride + row * blocks_per_row * 176u;
+    const uint row_offset = p.a_offset + expert_id * p.expert_stride + row * blocks_per_row * 210u;
     const uint y_base = (p.y_offset / 4u) + expert_slot * p.M;
 
     float sum = 0.0f;
@@ -71,33 +65,34 @@ kernel void main0(
 
         if (row_active) {
             for (uint bi = 0u; bi < tile_blocks; bi++) {
-                const uint bb = row_offset + (tile_block + bi) * 176u;
-                const float d = fp16_to_fp32(uint(W[bb]) | (uint(W[bb + 1u]) << 8u));
-                const float dmin = fp16_to_fp32(uint(W[bb + 2u]) | (uint(W[bb + 3u]) << 8u));
-                device const uchar* scales = W + bb + 4u;
-                device const uchar* high_bits = W + bb + 16u;
-                device const uchar* quants = W + bb + 48u;
+                const uint bb = row_offset + (tile_block + bi) * 210u;
+                const float d = fp16_to_fp32(uint(W[bb + 208u]) | (uint(W[bb + 209u]) << 8u));
                 const uint tile_base = bi * 256u;
 
-                for (uint g = 0u; g < 4u; g++) {
-                    const uint sb_lo = g * 2u;
-                    const uint sb_hi = sb_lo + 1u;
-                    const float2 sm_lo = get_scale_min_k5(sb_lo, scales);
-                    const float2 sm_hi = get_scale_min_k5(sb_hi, scales);
-                    const float factor_lo = d * sm_lo.x;
-                    const float bias_lo = dmin * sm_lo.y;
-                    const float factor_hi = d * sm_hi.x;
-                    const float bias_hi = dmin * sm_hi.y;
+                for (uint g = 0u; g < 2u; g++) {
+                    const uint qs_lo_base = bb + g * 64u;
+                    const uint qs_hi_base = bb + 128u + g * 32u;
+                    const uint scale_base = bb + 192u + g * 8u;
+                    const uint scale_group = lane / 16u;
 
-                    const uint q_byte = uint(quants[g * 32u + lane]);
-                    const uint qh_val = uint(high_bits[lane]);
-                    const float v_lo = factor_lo * float((q_byte & 0x0Fu) | (((qh_val >> sb_lo) & 1u) << 4u)) - bias_lo;
-                    const float v_hi = factor_hi * float((q_byte >> 4u) | (((qh_val >> sb_hi) & 1u) << 4u)) - bias_hi;
-                    const uint col_lo = tile_base + g * 64u + lane;
-                    const uint col_hi = col_lo + 32u;
+                    const uint ql0 = uint(W[qs_lo_base + lane]);
+                    const uint ql1 = uint(W[qs_lo_base + 32u + lane]);
+                    const uint qh = uint(W[qs_hi_base + lane]);
+                    const float d_sc0 = d * s8_to_f32(uint(W[scale_base + scale_group]));
+                    const float d_sc1 = d * s8_to_f32(uint(W[scale_base + 2u + scale_group]));
+                    const float d_sc2 = d * s8_to_f32(uint(W[scale_base + 4u + scale_group]));
+                    const float d_sc3 = d * s8_to_f32(uint(W[scale_base + 6u + scale_group]));
 
-                    sum += v_lo * x_cache[col_lo];
-                    sum += v_hi * x_cache[col_hi];
+                    const float q0 = float((ql0 & 0x0Fu) | ((qh & 0x03u) << 4u)) - 32.0f;
+                    const float q1 = float((ql1 & 0x0Fu) | (((qh >> 2u) & 0x03u) << 4u)) - 32.0f;
+                    const float q2 = float((ql0 >> 4u) | (((qh >> 4u) & 0x03u) << 4u)) - 32.0f;
+                    const float q3 = float((ql1 >> 4u) | (((qh >> 6u) & 0x03u) << 4u)) - 32.0f;
+
+                    const uint base_col = tile_base + g * 128u + lane;
+                    sum += (d_sc0 * q0) * x_cache[base_col];
+                    sum += (d_sc1 * q1) * x_cache[base_col + 32u];
+                    sum += (d_sc2 * q2) * x_cache[base_col + 64u];
+                    sum += (d_sc3 * q3) * x_cache[base_col + 96u];
                 }
             }
         }

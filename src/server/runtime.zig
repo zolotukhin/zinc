@@ -7,7 +7,7 @@ pub const is_metal = gpu.is_metal;
 pub const is_vulkan = gpu.is_vulkan;
 pub const supports_model_management = gpu.is_vulkan or gpu.is_metal;
 pub const supports_sampling_controls = gpu.is_vulkan;
-pub const supports_runtime_profiling = gpu.is_vulkan;
+pub const supports_runtime_profiling = gpu.is_vulkan or gpu.is_metal;
 
 pub const tokenizer_mod = @import("../model/tokenizer.zig");
 pub const forward_mod = if (gpu.is_metal) @import("../compute/forward_metal.zig") else @import("../compute/forward.zig");
@@ -52,6 +52,8 @@ pub fn setLogitsReadbackEnabled(_engine: *InferenceEngine, _enabled: bool) void 
 
 pub fn enableProfiling(_engine: *InferenceEngine) !void {
     if (comptime gpu.is_vulkan) {
+        try _engine.enableProfiling();
+    } else if (comptime gpu.is_metal) {
         try _engine.enableProfiling();
     }
 }

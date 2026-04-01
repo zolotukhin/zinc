@@ -225,7 +225,7 @@ pub fn main() !void {
     const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
     defer allocator.free(prompt_tokens);
 
-    var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, false);
+    var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, .{});
     defer engine.deinit();
 
     try stdout.interface.print("Metal inference benchmark\n", .{});

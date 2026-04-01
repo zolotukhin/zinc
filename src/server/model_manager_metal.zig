@@ -332,7 +332,7 @@ fn loadResourcesInto(
     resources.tokenizer = try tokenizer_mod.Tokenizer.initFromGGUF(&resources.model.gguf_file, allocator);
     errdefer resources.tokenizer.deinit();
 
-    resources.engine = try forward_mod.InferenceEngine.init(&resources.model, device, allocator, false);
+    resources.engine = try forward_mod.InferenceEngine.init(&resources.model, device, allocator, .{});
     errdefer resources.engine.deinit();
 
     resources.model_path = try allocator.dupe(u8, spec.model_path);

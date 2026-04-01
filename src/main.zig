@@ -386,7 +386,7 @@ const banner_full =
     \\Analysis and developer options:
     \\  --graph-report <path>    Write decode-graph analysis JSON report
     \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
-    \\  --profile                Enable per-dispatch GPU timing profiling
+    \\  --profile                Enable runtime profiling (per-dispatch on Vulkan, phase summary on Metal)
     \\  --debug                  Enable verbose debug logging
     \\
     \\Help:
@@ -1249,7 +1249,10 @@ pub fn main() !void {
             log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
 
             // Initialize inference engine
-            var engine = forward_metal.InferenceEngine.init(&model, &device, allocator, config.profile) catch |err| {
+            var engine = forward_metal.InferenceEngine.init(&model, &device, allocator, .{
+                .profile_enabled = config.profile,
+                .debug_validation_enabled = config.profile and config.debug,
+            }) catch |err| {
                 log.err("Failed to init Metal inference engine: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };

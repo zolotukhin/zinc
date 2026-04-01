@@ -58,6 +58,65 @@ pub const GenerateResult = struct {
     }
 };
 
+pub const InitOptions = struct {
+    profile_enabled: bool = false,
+    debug_validation_enabled: bool = false,
+};
+
+pub const RuntimeProfile = struct {
+    decode_steps: u32 = 0,
+    shared_cmd_steps: u32 = 0,
+    command_buffers: u32 = 0,
+    commit_waits: u32 = 0,
+    sample_calls: u32 = 0,
+    full_attn_layers: u32 = 0,
+    ssm_layers: u32 = 0,
+    gpu_routed_moe_layers: u32 = 0,
+    fallback_moe_layers: u32 = 0,
+    dense_ffn_layers: u32 = 0,
+    embedding_ns: u64 = 0,
+    layer_record_ns: u64 = 0,
+    router_cpu_ns: u64 = 0,
+    gpu_routed_moe_record_ns: u64 = 0,
+    fallback_moe_record_ns: u64 = 0,
+    dense_ffn_record_ns: u64 = 0,
+    final_record_ns: u64 = 0,
+    submit_wait_ns: u64 = 0,
+    sample_ns: u64 = 0,
+    total_step_ns: u64 = 0,
+    debug_validation_ns: u64 = 0,
+
+    fn reset(self: *RuntimeProfile) void {
+        self.* = .{};
+    }
+};
+
+fn profileStart(enabled: bool) i128 {
+    return if (enabled) std.time.nanoTimestamp() else -1;
+}
+
+fn profileElapsedNs(start_ns: i128) u64 {
+    if (start_ns < 0) return 0;
+    const end_ns = std.time.nanoTimestamp();
+    if (end_ns <= start_ns) return 0;
+    return @intCast(end_ns - start_ns);
+}
+
+fn nsToMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+}
+
+fn avgMs(ns: u64, count: anytype) f64 {
+    const denom = @as(u64, count);
+    if (denom == 0) return 0.0;
+    return nsToMs(ns) / @as(f64, @floatFromInt(denom));
+}
+
+fn pctOf(total_ns: u64, part_ns: u64) f64 {
+    if (total_ns == 0) return 0.0;
+    return @as(f64, @floatFromInt(part_ns)) * 100.0 / @as(f64, @floatFromInt(total_ns));
+}
+
 /// Push constants for DMMV dispatch (matches GLSL layout).
 const DmmvPush = extern struct {
     M: u32, // rows
@@ -296,6 +355,8 @@ pub const InferenceEngine = struct {
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
+    dmmv_q5k_moe_pipe: MetalPipeline,
+    dmmv_q6k_moe_pipe: MetalPipeline,
     dmmv_q4k_moe_k2048_pipe: MetalPipeline,
     dmmv_q4k_moe_k2048_1024_pipe: MetalPipeline,
 
@@ -351,12 +412,14 @@ pub const InferenceEngine = struct {
     // Decode state
     position: u32,
     profile_enabled: bool,
+    debug_validation_enabled: bool,
+    request_profile: RuntimeProfile,
 
     pub fn init(
         model: *const metal_loader.Model,
         device: *const metal_device.MetalDevice,
         allocator: std.mem.Allocator,
-        profile_enabled: bool,
+        options: InitOptions,
     ) !InferenceEngine {
         const cfg = model.config;
         const ctx = device.ctx;
@@ -394,7 +457,9 @@ pub const InferenceEngine = struct {
         self.config = cfg;
         self.allocator = allocator;
         self.position = 0;
-        self.profile_enabled = profile_enabled;
+        self.profile_enabled = options.profile_enabled;
+        self.debug_validation_enabled = options.debug_validation_enabled;
+        self.request_profile = .{};
 
         self.hidden_buf = try metal_buffer.createBuffer(ctx, hidden_size);
         self.residual_buf = try metal_buffer.createBuffer(ctx, hidden_size);
@@ -463,6 +528,8 @@ pub const InferenceEngine = struct {
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
+        self.dmmv_q5k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
+        self.dmmv_q6k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_moe");
         self.dmmv_q4k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048");
         self.dmmv_q4k_moe_k2048_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048_1024");
 
@@ -673,11 +740,17 @@ pub const InferenceEngine = struct {
             },
         );
         log.info(
-            "Metal pipeline caps: dmmv_q4k_moe tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048 tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048_1024 tw={d} max={d} stgmem={d}",
+            "Metal pipeline caps: dmmv_q4k_moe tw={d} max={d} stgmem={d} | dmmv_q5k_moe tw={d} max={d} stgmem={d} | dmmv_q6k_moe tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048 tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048_1024 tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_moe_pipe.thread_execution_width,
                 self.dmmv_q4k_moe_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_moe_pipe.static_threadgroup_memory_length,
+                self.dmmv_q5k_moe_pipe.thread_execution_width,
+                self.dmmv_q5k_moe_pipe.max_threads_per_threadgroup,
+                self.dmmv_q5k_moe_pipe.static_threadgroup_memory_length,
+                self.dmmv_q6k_moe_pipe.thread_execution_width,
+                self.dmmv_q6k_moe_pipe.max_threads_per_threadgroup,
+                self.dmmv_q6k_moe_pipe.static_threadgroup_memory_length,
                 self.dmmv_q4k_moe_k2048_pipe.thread_execution_width,
                 self.dmmv_q4k_moe_k2048_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_moe_k2048_pipe.static_threadgroup_memory_length,
@@ -755,6 +828,8 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q5k_moe_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q6k_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_1024_pipe);
         metal_pipeline.freePipeline(&self.deinterleave_pipe);
@@ -824,6 +899,13 @@ pub const InferenceEngine = struct {
 
     /// Sample the next token greedily (argmax over logits).
     pub fn sampleGreedy(self: *const InferenceEngine) u32 {
+        const sample_start = profileStart(self.profile_enabled);
+        defer if (self.profile_enabled) {
+            const mutable = @constCast(self);
+            mutable.request_profile.sample_calls += 1;
+            mutable.request_profile.sample_ns += profileElapsedNs(sample_start);
+        };
+
         const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
         const logits = logits_ptr[0..self.config.vocab_size];
         var max_val: f32 = -std.math.inf(f32);
@@ -839,6 +921,7 @@ pub const InferenceEngine = struct {
 
     pub fn resetRequestState(self: *InferenceEngine) void {
         self.position = 0;
+        self.request_profile.reset();
 
         if (self.ssm_conv_state_bufs) |bufs| {
             for (bufs) |buf| {
@@ -870,7 +953,81 @@ pub const InferenceEngine = struct {
         state.position = self.position;
     }
 
+    pub fn enableProfiling(self: *InferenceEngine) !void {
+        self.profile_enabled = true;
+        self.request_profile.reset();
+    }
+
+    pub fn logRequestProfileSummary(self: *const InferenceEngine, label: []const u8, prompt_tokens: usize, completion_tokens: u32) void {
+        if (!self.profile_enabled) return;
+
+        const profile = self.request_profile;
+        if (profile.decode_steps == 0 and profile.sample_calls == 0) return;
+
+        const record_ns = profile.layer_record_ns +
+            profile.gpu_routed_moe_record_ns +
+            profile.fallback_moe_record_ns +
+            profile.dense_ffn_record_ns +
+            profile.final_record_ns;
+        const traced_request_ns = profile.total_step_ns + profile.sample_ns;
+
+        log.info("Metal profile ({s}): steps={d} prompt={d} completion={d} shared_steps={d} cmds={d} commits={d}", .{
+            label,
+            profile.decode_steps,
+            prompt_tokens,
+            completion_tokens,
+            profile.shared_cmd_steps,
+            profile.command_buffers,
+            profile.commit_waits,
+        });
+        log.info("  cpu: embed {d:.2} ms ({d:.3} ms/step) | record {d:.2} ms ({d:.3} ms/step) | router {d:.2} ms | sample {d:.2} ms ({d:.3} ms/sample)", .{
+            nsToMs(profile.embedding_ns),
+            avgMs(profile.embedding_ns, profile.decode_steps),
+            nsToMs(record_ns),
+            avgMs(record_ns, profile.decode_steps),
+            nsToMs(profile.router_cpu_ns),
+            nsToMs(profile.sample_ns),
+            avgMs(profile.sample_ns, profile.sample_calls),
+        });
+        log.info("  wait: submit {d:.2} ms ({d:.3} ms/step, {d:.1}% of traced time) | record breakdown layer {d:.2} ms gpu-moe {d:.2} ms fallback-moe {d:.2} ms dense {d:.2} ms final {d:.2} ms", .{
+            nsToMs(profile.submit_wait_ns),
+            avgMs(profile.submit_wait_ns, profile.decode_steps),
+            pctOf(traced_request_ns, profile.submit_wait_ns),
+            nsToMs(profile.layer_record_ns),
+            nsToMs(profile.gpu_routed_moe_record_ns),
+            nsToMs(profile.fallback_moe_record_ns),
+            nsToMs(profile.dense_ffn_record_ns),
+            nsToMs(profile.final_record_ns),
+        });
+        if (profile.decode_steps > 0) {
+            const steps_f = @as(f64, @floatFromInt(profile.decode_steps));
+            log.info("  mix/step: attn {d:.1} ssm {d:.1} gpu-moe {d:.1} fallback-moe {d:.1} dense {d:.1}", .{
+                @as(f64, @floatFromInt(profile.full_attn_layers)) / steps_f,
+                @as(f64, @floatFromInt(profile.ssm_layers)) / steps_f,
+                @as(f64, @floatFromInt(profile.gpu_routed_moe_layers)) / steps_f,
+                @as(f64, @floatFromInt(profile.fallback_moe_layers)) / steps_f,
+                @as(f64, @floatFromInt(profile.dense_ffn_layers)) / steps_f,
+            });
+        }
+        if (profile.gpu_routed_moe_layers == 0 and profile.fallback_moe_layers > 0 and self.layer_tensors.len > 0) {
+            const layer0 = self.layer_tensors[0];
+            log.info("  fallback-moe path: gate_exps={s} up_exps={s} down_exps={s} (GPU-routed path currently supports q4_k/q4_k/{{q4_k,q5_k}})", .{
+                if (layer0.ffn_gate_exps) |t| @tagName(t.info.type_) else "-",
+                if (layer0.ffn_up_exps) |t| @tagName(t.info.type_) else "-",
+                if (layer0.ffn_down_exps) |t| @tagName(t.info.type_) else "-",
+            });
+        }
+        if (profile.debug_validation_ns > 0) {
+            log.info("  debug-validation {d:.2} ms", .{nsToMs(profile.debug_validation_ns)});
+        }
+    }
+
     fn loadTokenEmbedding(self: *InferenceEngine, token_id: u32) !void {
+        const embed_start = profileStart(self.profile_enabled);
+        defer if (self.profile_enabled) {
+            self.request_profile.embedding_ns += profileElapsedNs(embed_start);
+        };
+
         const mmap = self.model.mmap_data orelse return error.NoMmapData;
         const embed_data_offset = self.model.gguf_file.tensor_data_offset + self.token_embed.info.offset;
         const embed_raw = mmap[embed_data_offset..];
@@ -1065,6 +1222,103 @@ fn dispatchDmmvMoeQ4kOnCmd(
     else
         &engine.dmmv_q4k_moe_pipe;
     cmd.dispatchV2(pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+}
+
+fn dispatchDmmvMoeQ5kOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    routing_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    x_expert_stride: u32,
+    extra_byte_offset: u32,
+) void {
+    if (tensor.info.type_ != .q5_k) {
+        log.err("Batched MoE DMMV only supports Q5_K (tensor {s})", .{tensor.info.name});
+        return;
+    }
+    if (engine.dmmv_q5k_moe_pipe.max_threads_per_threadgroup < 256) {
+        log.err("Batched Q5_K MoE DMMV requires 256-thread threadgroups", .{});
+        return;
+    }
+
+    const push = MoeDmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+        .expert_stride = expert_stride,
+        .x_expert_stride = x_expert_stride,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
+    const rows_per_wg: u32 = 8;
+    const block_size: u32 = 256;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    cmd.dispatchV2(&engine.dmmv_q5k_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+}
+
+fn dispatchDmmvMoeQ6kOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    routing_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    x_expert_stride: u32,
+    extra_byte_offset: u32,
+) void {
+    if (tensor.info.type_ != .q6_k) {
+        log.err("Batched MoE DMMV only supports Q6_K (tensor {s})", .{tensor.info.name});
+        return;
+    }
+    if (engine.dmmv_q6k_moe_pipe.max_threads_per_threadgroup < 256) {
+        log.err("Batched Q6_K MoE DMMV requires 256-thread threadgroups", .{});
+        return;
+    }
+
+    const push = MoeDmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+        .expert_stride = expert_stride,
+        .x_expert_stride = x_expert_stride,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
+    const rows_per_wg: u32 = 8;
+    const block_size: u32 = 256;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    cmd.dispatchV2(&engine.dmmv_q6k_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+}
+
+fn dispatchDmmvMoeOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    routing_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    x_expert_stride: u32,
+    extra_byte_offset: u32,
+) !void {
+    switch (tensor.info.type_) {
+        .q4_k => dispatchDmmvMoeQ4kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
+        .q5_k => dispatchDmmvMoeQ5kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
+        .q6_k => dispatchDmmvMoeQ6kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
+        else => return error.UnsupportedQuantType,
+    }
 }
 
 /// Preload norm weights from mmap into an f32 Metal buffer (done once at init).
@@ -1534,6 +1788,53 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
                 }
             }
         },
+        .q6_k => {
+            const bpb: usize = 210;
+            const bpr = @as(usize, cols) / 256;
+            const row_off = @as(usize, row) * bpr * bpb;
+            var out_i: usize = 0;
+            for (0..bpr) |bi| {
+                const bb = row_off + bi * bpb;
+                const d_bits = std.mem.readInt(u16, raw_data[bb + 208 ..][0..2], .little);
+                const d: f32 = @floatCast(@as(f16, @bitCast(d_bits)));
+
+                var ql_off: usize = bb;
+                var qh_off: usize = bb + 128;
+                var sc_off: usize = bb + 192;
+                for (0..2) |_| {
+                    for (0..32) |l| {
+                        const scale_idx = l / 16;
+                        const ql_lo = raw_data[ql_off + l];
+                        const ql_hi = raw_data[ql_off + l + 32];
+                        const qh = raw_data[qh_off + l];
+
+                        const rq0: u8 = (ql_lo & 0xF) | (((qh >> 0) & 3) << 4);
+                        const rq1: u8 = (ql_hi & 0xF) | (((qh >> 2) & 3) << 4);
+                        const rq2: u8 = (ql_lo >> 4) | (((qh >> 4) & 3) << 4);
+                        const rq3: u8 = (ql_hi >> 4) | (((qh >> 6) & 3) << 4);
+
+                        const q0: f32 = @floatFromInt(@as(i16, @intCast(rq0)) - 32);
+                        const q1: f32 = @floatFromInt(@as(i16, @intCast(rq1)) - 32);
+                        const q2: f32 = @floatFromInt(@as(i16, @intCast(rq2)) - 32);
+                        const q3: f32 = @floatFromInt(@as(i16, @intCast(rq3)) - 32);
+
+                        const s0: f32 = @floatFromInt(@as(i8, @bitCast(raw_data[sc_off + scale_idx])));
+                        const s1: f32 = @floatFromInt(@as(i8, @bitCast(raw_data[sc_off + scale_idx + 2])));
+                        const s2: f32 = @floatFromInt(@as(i8, @bitCast(raw_data[sc_off + scale_idx + 4])));
+                        const s3: f32 = @floatFromInt(@as(i8, @bitCast(raw_data[sc_off + scale_idx + 6])));
+
+                        output[out_i + l] = d * s0 * q0;
+                        output[out_i + 32 + l] = d * s1 * q1;
+                        output[out_i + 64 + l] = d * s2 * q2;
+                        output[out_i + 96 + l] = d * s3 * q3;
+                    }
+                    ql_off += 64;
+                    qh_off += 32;
+                    sc_off += 8;
+                    out_i += 128;
+                }
+            }
+        },
         .q5_k => {
             const bpb: usize = 176;
             const bpr = @as(usize, cols) / 256;
@@ -1680,13 +1981,24 @@ fn canUseBatchedQ4kMoe(engine: *const InferenceEngine, gate_quant: GGMLType, dow
     return engine.config.n_experts_used == 8 and gate_quant == .q4_k and down_quant == .q4_k;
 }
 
+fn canUseGpuRoutedMoeDown(engine: *const InferenceEngine, down_quant: GGMLType) bool {
+    return switch (down_quant) {
+        .q4_k => true,
+        .q5_k => engine.dmmv_q5k_moe_pipe.handle != null,
+        .q6_k => engine.dmmv_q6k_moe_pipe.handle != null,
+        else => false,
+    };
+}
+
 fn canUseGpuRoutedBatchedMoe(engine: *const InferenceEngine, lt: LayerTensors) bool {
     const gate_exps = lt.ffn_gate_exps orelse return false;
     const up_exps = lt.ffn_up_exps orelse return false;
     const down_exps = lt.ffn_down_exps orelse return false;
 
-    if (!canUseBatchedQ4kMoe(engine, gate_exps.info.type_, down_exps.info.type_)) return false;
-    if (up_exps.info.type_ != .q4_k) return false;
+    if (engine.config.n_experts_used != 8) return false;
+    if (!canUseGpuRoutedMoeDown(engine, gate_exps.info.type_)) return false;
+    if (!canUseGpuRoutedMoeDown(engine, up_exps.info.type_)) return false;
+    if (!canUseGpuRoutedMoeDown(engine, down_exps.info.type_)) return false;
 
     const has_shexp = lt.ffn_gate_shexp != null and lt.ffn_up_shexp != null and lt.ffn_down_shexp != null;
     if (has_shexp and lt.ffn_gate_inp_shexp != null and engine.sigmoid_scale_acc_pipe.handle == null) return false;
@@ -1716,8 +2028,8 @@ fn recordGpuRoutedBatchedMoeOnCmd(
 
     dispatchSoftmaxTopkOnCmd(engine, cmd, &engine.router_logits_buf, &engine.router_output_buf, cfg.n_experts, cfg.n_experts_used);
 
-    dispatchDmmvMoeQ4kOnCmd(engine, cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
-    dispatchDmmvMoeQ4kOnCmd(engine, cmd, up_exps, &engine.norm_buf, &engine.expert_up_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
+    try dispatchDmmvMoeOnCmd(engine, cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
+    try dispatchDmmvMoeOnCmd(engine, cmd, up_exps, &engine.norm_buf, &engine.expert_up_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
         dispatchDmmvOnCmd(engine, cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
@@ -1735,7 +2047,7 @@ fn recordGpuRoutedBatchedMoeOnCmd(
         const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
         cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
     }
-    dispatchDmmvMoeQ4kOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
+    try dispatchDmmvMoeOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
     }
@@ -1759,15 +2071,31 @@ fn acquireLayerCommand(
     shared_cmd: ?*MetalCommand,
     local_cmd_storage: *MetalCommand,
     using_local_cmd: *bool,
+    profile: ?*RuntimeProfile,
 ) !*MetalCommand {
     if (shared_cmd) |cmd| {
         using_local_cmd.* = false;
         return cmd;
     }
 
-    local_cmd_storage.* = try metal_command.beginCommand(engine.device.ctx);
+    local_cmd_storage.* = try beginProfiledCommand(engine, profile);
     using_local_cmd.* = true;
     return local_cmd_storage;
+}
+
+fn beginProfiledCommand(engine: *InferenceEngine, profile: ?*RuntimeProfile) !MetalCommand {
+    const cmd = try metal_command.beginCommand(engine.device.ctx);
+    if (profile) |p| p.command_buffers += 1;
+    return cmd;
+}
+
+fn commitAndWaitProfiled(cmd: *MetalCommand, profile: ?*RuntimeProfile) void {
+    const commit_start = profileStart(profile != null);
+    cmd.commitAndWait();
+    if (profile) |p| {
+        p.commit_waits += 1;
+        p.submit_wait_ns += profileElapsedNs(commit_start);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,6 +2103,11 @@ fn acquireLayerCommand(
 // ---------------------------------------------------------------------------
 
 fn runDecodeStep(engine: *InferenceEngine) !void {
+    const step_start = profileStart(engine.profile_enabled);
+    defer if (engine.profile_enabled) {
+        engine.request_profile.total_step_ns += profileElapsedNs(step_start);
+    };
+
     const cfg = engine.config;
     const hidden_dim = cfg.hidden_dim;
     const q_dim: u32 = cfg.n_heads * cfg.head_dim;
@@ -1799,9 +2132,26 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         }
         break :blk true;
     };
+    if (engine.profile_enabled and engine.position == 0 and is_moe and !use_single_gpu_cmd) {
+        for (engine.layer_tensors, 0..) |lt, layer_idx| {
+            if (canUseGpuRoutedBatchedMoe(engine, lt)) continue;
+            log.info("Metal profile: shared token command disabled by layer {d} (gate_exps={s} up_exps={s} down_exps={s})", .{
+                layer_idx,
+                if (lt.ffn_gate_exps) |t| @tagName(t.info.type_) else "-",
+                if (lt.ffn_up_exps) |t| @tagName(t.info.type_) else "-",
+                if (lt.ffn_down_exps) |t| @tagName(t.info.type_) else "-",
+            });
+            break;
+        }
+    }
+    const profile: ?*RuntimeProfile = if (engine.profile_enabled) &engine.request_profile else null;
+    if (profile) |p| {
+        p.decode_steps += 1;
+        if (use_single_gpu_cmd) p.shared_cmd_steps += 1;
+    }
     var shared_cmd_storage: MetalCommand = undefined;
     const shared_cmd: ?*MetalCommand = if (use_single_gpu_cmd) blk: {
-        shared_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+        shared_cmd_storage = try beginProfiledCommand(engine, profile);
         break :blk &shared_cmd_storage;
     } else null;
 
@@ -1812,9 +2162,11 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
 
         if (is_full_attn) {
+            if (profile) |p| p.full_attn_layers += 1;
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
-            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
+            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
+            const layer_record_start = profileStart(profile != null);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
             try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
             dispatchFlashAttnOnCmd(engine, cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
@@ -1822,11 +2174,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
-            const should_debug_attn_compare = engine.profile_enabled and using_local_cmd and (engine.position == 4 or engine.position == 5) and (layer_idx == 7 or layer_idx == 31);
+            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and (engine.position == 4 or engine.position == 5) and (layer_idx == 7 or layer_idx == 31);
             if (should_debug_attn_compare) {
-                cmd.commitAndWait();
+                commitAndWaitProfiled(cmd, profile);
+                const debug_start = profileStart(profile != null);
                 try debugCompareAttentionLayer(engine, layer, layer_idx, lt, hidden_dim, q_dim, kv_dim);
-                local_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+                if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
+                local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
             {
@@ -1839,15 +2193,25 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
                 if (use_gpu_routed_moe) {
+                    if (profile) |p| p.layer_record_ns += profileElapsedNs(layer_record_start);
+                    if (profile) |p| p.gpu_routed_moe_layers += 1;
+                    const moe_record_start = profileStart(profile != null);
                     try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    if (profile) |p| p.gpu_routed_moe_record_ns += profileElapsedNs(moe_record_start);
+                } else if (profile) |p| {
+                    p.layer_record_ns += profileElapsedNs(layer_record_start);
                 }
+            } else if (profile) |p| {
+                p.layer_record_ns += profileElapsedNs(layer_record_start);
             }
-            if (using_local_cmd) cmd.commitAndWait();
+            if (using_local_cmd) commitAndWaitProfiled(cmd, profile);
         } else {
+            if (profile) |p| p.ssm_layers += 1;
             // ===== SSM: fused batch 1 + recurrent body + batch 2 =====
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
-            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd);
+            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
+            const layer_record_start = profileStart(profile != null);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
             cmd.barrier();
 
@@ -1899,9 +2263,10 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
             }
             cmd.barrier();
-            const should_debug_ssm_compare = engine.profile_enabled and engine.position == 0 and layer_idx == 6 and using_local_cmd;
+            const should_debug_ssm_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6 and using_local_cmd;
             if (should_debug_ssm_compare) {
-                cmd.commitAndWait();
+                commitAndWaitProfiled(cmd, profile);
+                const debug_start = profileStart(profile != null);
                 try debugCompareSsmPreGatedNorm(
                     engine,
                     layer,
@@ -1919,7 +2284,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     dt_rank,
                     head_v_dim,
                 );
-                local_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+                if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
+                local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
 
@@ -1946,7 +2312,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             dispatchDmmvOnCmd(engine, cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
             cmd.barrier();
             if (should_debug_ssm_compare) {
-                cmd.commitAndWait();
+                commitAndWaitProfiled(cmd, profile);
+                const debug_start = profileStart(profile != null);
                 try debugCompareSsmPostProjection(
                     engine,
                     layer,
@@ -1965,7 +2332,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     dt_rank,
                     head_v_dim,
                 );
-                local_cmd_storage = try metal_command.beginCommand(engine.device.ctx);
+                if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
+                local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
 
@@ -1982,24 +2350,34 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
                 if (use_gpu_routed_moe) {
+                    if (profile) |p| p.layer_record_ns += profileElapsedNs(layer_record_start);
+                    if (profile) |p| p.gpu_routed_moe_layers += 1;
+                    const moe_record_start = profileStart(profile != null);
                     try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    if (profile) |p| p.gpu_routed_moe_record_ns += profileElapsedNs(moe_record_start);
+                } else if (profile) |p| {
+                    p.layer_record_ns += profileElapsedNs(layer_record_start);
                 }
+            } else if (profile) |p| {
+                p.layer_record_ns += profileElapsedNs(layer_record_start);
             }
-            if (using_local_cmd) cmd.commitAndWait();
+            if (using_local_cmd) commitAndWaitProfiled(cmd, profile);
         }
 
-        if (engine.profile_enabled and engine.position == 0) {
+        if (engine.debug_validation_enabled and engine.position == 0) {
             logLayerDiagnostics(engine, lt, layer, is_full_attn, "pre_ffn");
         }
 
         // ===== MoE / Dense FFN =====
         if (is_moe and !use_gpu_routed_moe) {
+            if (profile) |p| p.fallback_moe_layers += 1;
             // CPU topK softmax
+            const router_start = profileStart(profile != null);
             const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
             var expert_ids: [16]u32 = undefined;
             var expert_weights: [16]f32 = undefined;
             topKSoftmax(router_ptr[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
-            const should_debug_moe_compare = engine.profile_enabled and engine.position == 0 and layer_idx == 6;
+            const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6;
             const hidden_before_snapshot: ?[]f32 = if (should_debug_moe_compare) blk: {
                 const snap = try engine.allocator.alloc(f32, hidden_dim);
                 const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
@@ -2022,6 +2400,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     }
                 }
             }
+            if (profile) |p| p.router_cpu_ns += profileElapsedNs(router_start);
 
             // Expert dispatch — GPU: gate+up → SwiGLU → down → accumulate → [next batch1]
             const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
@@ -2039,7 +2418,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             }
 
             {
-                var cmd = try metal_command.beginCommand(engine.device.ctx);
+                const moe_record_start = profileStart(profile != null);
+                var cmd = try beginProfiledCommand(engine, profile);
                 const gate_shexp = lt.ffn_gate_shexp;
                 const up_shexp = lt.ffn_up_shexp;
                 const down_shexp = lt.ffn_down_shexp;
@@ -2182,8 +2562,10 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     }
                 }
 
-                cmd.commitAndWait();
+                if (profile) |p| p.fallback_moe_record_ns += profileElapsedNs(moe_record_start);
+                commitAndWaitProfiled(&cmd, profile);
                 if (hidden_before_snapshot) |snap| {
+                    const debug_start = profileStart(profile != null);
                     try debugCompareMoeLayer(
                         engine,
                         layer,
@@ -2196,16 +2578,19 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                         inter_dim,
                         shexp_inter_dim,
                     );
+                    if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
                 }
             }
         } else if (!is_moe) {
+            if (profile) |p| p.dense_ffn_layers += 1;
             // Dense FFN (non-MoE) — norm_buf already set by GPU batch 2
             const gate_t = lt.ffn_gate orelse return error.MissingTensor;
             const up_t = lt.ffn_up orelse return error.MissingTensor;
             const down_t = lt.ffn_down orelse return error.MissingTensor;
 
             {
-                var cmd = try metal_command.beginCommand(engine.device.ctx);
+                const dense_record_start = profileStart(profile != null);
+                var cmd = try beginProfiledCommand(engine, profile);
                 dispatchDmmvOnCmd(engine, &cmd, gate_t, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, 0);
                 dispatchDmmvOnCmd(engine, &cmd, up_t, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, 0);
                 cmd.barrier();
@@ -2216,7 +2601,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 cmd.barrier();
 
                 dispatchDmmvOnCmd(engine, &cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
-                cmd.commitAndWait();
+                if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
+                commitAndWaitProfiled(&cmd, profile);
             }
 
             const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
@@ -2224,26 +2610,31 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
         }
 
-        if (engine.profile_enabled and engine.position == 0) {
+        if (engine.debug_validation_enabled and engine.position == 0) {
             logLayerDiagnostics(engine, lt, layer, is_full_attn, "post_ffn");
         }
     }
 
     // ===== Final: GPU norm → LM head (batched) =====
+    const final_record_start = profileStart(profile != null);
     if (shared_cmd) |cmd| {
         dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
         cmd.barrier();
         dispatchDmmvOnCmd(engine, cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
-        cmd.commitAndWait();
+        if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
+        commitAndWaitProfiled(cmd, profile);
     } else {
-        var cmd = try metal_command.beginCommand(engine.device.ctx);
+        var cmd = try beginProfiledCommand(engine, profile);
         dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
         cmd.barrier();
         dispatchDmmvOnCmd(engine, &cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
-        cmd.commitAndWait();
+        if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
+        commitAndWaitProfiled(&cmd, profile);
     }
-    if (engine.profile_enabled and engine.position == 5) {
+    if (engine.debug_validation_enabled and engine.position == 5) {
+        const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
+        if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
     }
 
     engine.position += 1;
@@ -3186,6 +3577,7 @@ pub fn generate(
             result.metrics.ms_per_token,
         });
     }
+    engine.logRequestProfileSummary("request", prompt_tokens.len, result.metrics.generated_tokens);
     return result.output_tokens;
 }
 
@@ -4115,6 +4507,386 @@ test "dmmv_q5k shader matches CPU reference with nonzero a_offset across many ro
     }
 }
 
+test "dmmv_q6k shader matches CPU reference with nonzero a_offset across many rows" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 257;
+    const K: usize = 512;
+    const blocks_per_row: usize = K / 256;
+    const row_bytes: usize = blocks_per_row * 210;
+    const matrix_bytes: usize = M * row_bytes;
+    const a_offset: usize = matrix_bytes;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, a_offset + matrix_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0xCD);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = a_offset + row * row_bytes + blk * 210;
+            const d = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + (row % 5) + blk))));
+            const d_bits = @as(u16, @bitCast(d));
+            weight_buf.cpu_ptr.?[base + 208] = @truncate(d_bits);
+            weight_buf.cpu_ptr.?[base + 209] = @truncate(d_bits >> 8);
+            for (0..192) |i| {
+                weight_buf.cpu_ptr.?[base + i] = @intCast((row * 23 + blk * 17 + i * 7) & 0xFF);
+            }
+            for (0..16) |i| {
+                weight_buf.cpu_ptr.?[base + 192 + i] = @intCast((row * 29 + blk * 19 + i * 5) & 0xFF);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 17 + 9) % 25);
+        input_ptr[i] = 0.125 * @as(f32, @floatFromInt(raw - 12));
+    }
+
+    const push = DmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = @intCast(a_offset),
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 63) / 64), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+    const expected = try allocator.alloc(f32, M);
+    defer allocator.free(expected);
+    @memset(expected[0..M], 0);
+
+    const matrix_raw = weight_buf.cpu_ptr.?[a_offset .. a_offset + matrix_bytes];
+    for (0..M) |row| {
+        dequantRow(matrix_raw, @intCast(row), @intCast(K), .q6_k, ref_row);
+        for (0..K) |i| {
+            expected[row] += ref_row[i] * input_ptr[i];
+        }
+    }
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.05);
+    }
+}
+
+test "dmmv_q4k_moe_k2048 shader matches CPU reference across selected experts" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 65;
+    const K: usize = 512;
+    const n_used: usize = 2;
+    const n_experts: usize = 3;
+    const blocks_per_row: usize = K / 256;
+    const row_bytes: usize = blocks_per_row * 144;
+    const expert_stride: usize = M * row_bytes;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, n_experts * expert_stride);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, n_used * K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, n_used * M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    var routing_buf = try metal_buffer.createBuffer(ctx, n_used * 2 * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&routing_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+    @memset(routing_buf.cpu_ptr.?[0..routing_buf.size], 0);
+
+    for (0..n_experts) |expert| {
+        for (0..M) |row| {
+            for (0..blocks_per_row) |blk| {
+                const base = expert * expert_stride + row * row_bytes + blk * 144;
+                const d = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + expert + (row % 5) + blk))));
+                const dmin = @as(f16, @floatCast(0.015625 * @as(f32, @floatFromInt(1 + ((expert + row + blk) % 7)))));
+                const d_bits = @as(u16, @bitCast(d));
+                const dmin_bits = @as(u16, @bitCast(dmin));
+                weight_buf.cpu_ptr.?[base] = @truncate(d_bits);
+                weight_buf.cpu_ptr.?[base + 1] = @truncate(d_bits >> 8);
+                weight_buf.cpu_ptr.?[base + 2] = @truncate(dmin_bits);
+                weight_buf.cpu_ptr.?[base + 3] = @truncate(dmin_bits >> 8);
+                for (0..12) |i| {
+                    weight_buf.cpu_ptr.?[base + 4 + i] = @intCast((expert * 31 + row * 9 + blk * 5 + i * 3) & 0xFF);
+                }
+                for (0..128) |i| {
+                    const lo: u8 = @intCast((expert * 19 + row * 13 + blk * 17 + i * 7) & 0x0F);
+                    const hi: u8 = @intCast((expert * 11 + row * 5 + blk * 3 + i * 9) & 0x0F);
+                    weight_buf.cpu_ptr.?[base + 16 + i] = lo | (hi << 4);
+                }
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        for (0..K) |i| {
+            const raw: i32 = @intCast((slot * 23 + i * 19 + 5) % 21);
+            input_ptr[slot * K + i] = 0.125 * @as(f32, @floatFromInt(raw - 10));
+        }
+    }
+
+    const routing_ptr: [*]u32 = @ptrCast(@alignCast(routing_buf.cpu_ptr.?));
+    routing_ptr[0] = 2;
+    routing_ptr[1] = 0;
+
+    const push = MoeDmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = 0,
+        .expert_stride = @intCast(expert_stride),
+        .x_expert_stride = @intCast(K),
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf, &routing_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 15) / 16), @intCast(n_used), 1 }, .{ 512, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        const expert_id = routing_ptr[slot];
+        const matrix_raw = weight_buf.cpu_ptr.?[@as(usize, expert_id) * expert_stride ..][0..expert_stride];
+        const input_slice = input_ptr[slot * K .. (slot + 1) * K];
+        for (0..M) |row| {
+            dequantRow(matrix_raw, @intCast(row), @intCast(K), .q4_k, ref_row);
+            var expected: f32 = 0.0;
+            for (0..K) |i| {
+                expected += ref_row[i] * input_slice[i];
+            }
+            try std.testing.expectApproxEqAbs(expected, output_ptr[slot * M + row], 0.05);
+        }
+    }
+}
+
+test "dmmv_q5k_moe shader matches CPU reference across selected experts" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 65;
+    const K: usize = 512;
+    const n_used: usize = 2;
+    const n_experts: usize = 3;
+    const blocks_per_row: usize = K / 256;
+    const row_bytes: usize = blocks_per_row * 176;
+    const expert_stride: usize = M * row_bytes;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, n_experts * expert_stride);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, n_used * K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, n_used * M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    var routing_buf = try metal_buffer.createBuffer(ctx, n_used * 2 * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&routing_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+    @memset(routing_buf.cpu_ptr.?[0..routing_buf.size], 0);
+
+    for (0..n_experts) |expert| {
+        for (0..M) |row| {
+            for (0..blocks_per_row) |blk| {
+                const base = expert * expert_stride + row * row_bytes + blk * 176;
+                const d = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + expert + (row % 5) + blk))));
+                const dmin = @as(f16, @floatCast(0.015625 * @as(f32, @floatFromInt(1 + ((expert + row + blk) % 7)))));
+                const d_bits = @as(u16, @bitCast(d));
+                const dmin_bits = @as(u16, @bitCast(dmin));
+                weight_buf.cpu_ptr.?[base] = @truncate(d_bits);
+                weight_buf.cpu_ptr.?[base + 1] = @truncate(d_bits >> 8);
+                weight_buf.cpu_ptr.?[base + 2] = @truncate(dmin_bits);
+                weight_buf.cpu_ptr.?[base + 3] = @truncate(dmin_bits >> 8);
+                for (0..12) |i| {
+                    weight_buf.cpu_ptr.?[base + 4 + i] = @intCast((expert * 31 + row * 9 + blk * 5 + i * 3) & 0xFF);
+                }
+                for (0..32) |i| {
+                    weight_buf.cpu_ptr.?[base + 16 + i] = @intCast((expert * 17 + row * 7 + blk * 11 + i * 5) & 0xFF);
+                }
+                for (0..128) |i| {
+                    weight_buf.cpu_ptr.?[base + 48 + i] = @intCast((expert * 19 + row * 13 + blk * 17 + i * 7) & 0xFF);
+                }
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        for (0..K) |i| {
+            const raw: i32 = @intCast((slot * 23 + i * 19 + 5) % 21);
+            input_ptr[slot * K + i] = 0.125 * @as(f32, @floatFromInt(raw - 10));
+        }
+    }
+
+    const routing_ptr: [*]u32 = @ptrCast(@alignCast(routing_buf.cpu_ptr.?));
+    routing_ptr[0] = 2;
+    routing_ptr[1] = 0;
+
+    const push = MoeDmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = 0,
+        .expert_stride = @intCast(expert_stride),
+        .x_expert_stride = @intCast(K),
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf, &routing_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 7) / 8), @intCast(n_used), 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        const expert_id = routing_ptr[slot];
+        const matrix_raw = weight_buf.cpu_ptr.?[@as(usize, expert_id) * expert_stride ..][0..expert_stride];
+        const input_slice = input_ptr[slot * K .. (slot + 1) * K];
+        for (0..M) |row| {
+            dequantRow(matrix_raw, @intCast(row), @intCast(K), .q5_k, ref_row);
+            var expected: f32 = 0.0;
+            for (0..K) |i| {
+                expected += ref_row[i] * input_slice[i];
+            }
+            try std.testing.expectApproxEqAbs(expected, output_ptr[slot * M + row], 0.05);
+        }
+    }
+}
+
+test "dmmv_q6k_moe shader matches CPU reference across selected experts" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q6k_moe");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 65;
+    const K: usize = 512;
+    const n_used: usize = 2;
+    const n_experts: usize = 3;
+    const blocks_per_row: usize = K / 256;
+    const row_bytes: usize = blocks_per_row * 210;
+    const expert_stride: usize = M * row_bytes;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, n_experts * expert_stride);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, n_used * K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, n_used * M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    var routing_buf = try metal_buffer.createBuffer(ctx, n_used * 2 * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&routing_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+    @memset(routing_buf.cpu_ptr.?[0..routing_buf.size], 0);
+
+    for (0..n_experts) |expert| {
+        for (0..M) |row| {
+            for (0..blocks_per_row) |blk| {
+                const base = expert * expert_stride + row * row_bytes + blk * 210;
+                const d = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + expert + (row % 5) + blk))));
+                const d_bits = @as(u16, @bitCast(d));
+                weight_buf.cpu_ptr.?[base + 208] = @truncate(d_bits);
+                weight_buf.cpu_ptr.?[base + 209] = @truncate(d_bits >> 8);
+                for (0..192) |i| {
+                    weight_buf.cpu_ptr.?[base + i] = @intCast((expert * 23 + row * 11 + blk * 17 + i * 7) & 0xFF);
+                }
+                for (0..16) |i| {
+                    weight_buf.cpu_ptr.?[base + 192 + i] = @intCast((expert * 29 + row * 13 + blk * 19 + i * 5) & 0xFF);
+                }
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        for (0..K) |i| {
+            const raw: i32 = @intCast((slot * 31 + i * 17 + 9) % 25);
+            input_ptr[slot * K + i] = 0.125 * @as(f32, @floatFromInt(raw - 12));
+        }
+    }
+
+    const routing_ptr: [*]u32 = @ptrCast(@alignCast(routing_buf.cpu_ptr.?));
+    routing_ptr[0] = 1;
+    routing_ptr[1] = 2;
+
+    const push = MoeDmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = 0,
+        .expert_stride = @intCast(expert_stride),
+        .x_expert_stride = @intCast(K),
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf, &routing_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 7) / 8), @intCast(n_used), 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        const expert_id = routing_ptr[slot];
+        const matrix_raw = weight_buf.cpu_ptr.?[@as(usize, expert_id) * expert_stride ..][0..expert_stride];
+        const input_slice = input_ptr[slot * K .. (slot + 1) * K];
+        for (0..M) |row| {
+            dequantRow(matrix_raw, @intCast(row), @intCast(K), .q6_k, ref_row);
+            var expected: f32 = 0.0;
+            for (0..K) |i| {
+                expected += ref_row[i] * input_slice[i];
+            }
+            try std.testing.expectApproxEqAbs(expected, output_ptr[slot * M + row], 0.05);
+        }
+    }
+}
+
 test "dmmv_q8_0 shader matches CPU reference" {
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -4413,6 +5185,10 @@ test "batched MoE Metal shaders compile" {
 
     var dmmv_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
     defer metal_pipeline.freePipeline(&dmmv_pipe);
+    var dmmv_q5k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
+    defer metal_pipeline.freePipeline(&dmmv_q5k_moe_pipe);
+    var dmmv_q6k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_moe");
+    defer metal_pipeline.freePipeline(&dmmv_q6k_moe_pipe);
 
     var dmmv_pipe_k2048 = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
     defer metal_pipeline.freePipeline(&dmmv_pipe_k2048);
@@ -4445,6 +5221,8 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(rope_pipe.handle != null);
     try std.testing.expect(sigmoid_mul_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
+    try std.testing.expect(dmmv_q5k_moe_pipe.handle != null);
+    try std.testing.expect(dmmv_q6k_moe_pipe.handle != null);
     try std.testing.expect(dmmv_pipe_k2048.handle != null);
     try std.testing.expect(dmmv_moe_pipe_k2048.handle != null);
     try std.testing.expect(dmmv_moe_pipe_k2048_1024.handle != null);
