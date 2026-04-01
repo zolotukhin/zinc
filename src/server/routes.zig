@@ -587,6 +587,8 @@ const chat_stop_strs = [_][]const u8{
 
 const utf8_replacement = "\xEF\xBF\xBD";
 const thinking_prefix = "<think>\n";
+const thinking_open_tag = "<think>";
+const thinking_close_tag = "</think>";
 const default_chat_system_prompt =
     "Answer directly. If a user term is ambiguous or looks misspelled, say that briefly and continue with the most likely interpretation. Never output self-referential planning or phrases like 'I need to complete the response'.";
 
@@ -760,6 +762,55 @@ fn prefixThinkingEnvelope(text: []const u8, enabled: bool, buf: []u8) ![]const u
     return buf[0 .. thinking_prefix.len + text.len];
 }
 
+fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8 {
+    var cursor: usize = 0;
+    var out_len: usize = 0;
+
+    while (cursor < text.len) {
+        const next_open = std.mem.indexOfPos(u8, text, cursor, thinking_open_tag);
+        const next_close = std.mem.indexOfPos(u8, text, cursor, thinking_close_tag);
+        const cut_at = switch (next_open != null or next_close != null) {
+            false => null,
+            true => blk: {
+                if (next_open == null) break :blk next_close;
+                if (next_close == null) break :blk next_open;
+                break :blk @min(next_open.?, next_close.?);
+            },
+        };
+
+        if (cut_at == null) {
+            const tail = text[cursor..];
+            if (out_len + tail.len > buf.len) return error.BufferTooSmall;
+            @memcpy(buf[out_len .. out_len + tail.len], tail);
+            out_len += tail.len;
+            break;
+        }
+
+        const cut = cut_at.?;
+        if (cut > cursor) {
+            const chunk = text[cursor..cut];
+            if (out_len + chunk.len > buf.len) return error.BufferTooSmall;
+            @memcpy(buf[out_len .. out_len + chunk.len], chunk);
+            out_len += chunk.len;
+        }
+
+        if (next_open != null and next_open.? == cut) {
+            const after_open = cut + thinking_open_tag.len;
+            if (std.mem.indexOfPos(u8, text, after_open, thinking_close_tag)) |close| {
+                cursor = close + thinking_close_tag.len;
+                while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
+                continue;
+            }
+            break;
+        }
+
+        cursor = cut + thinking_close_tag.len;
+        while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
+    }
+
+    return std.mem.trim(u8, buf[0..out_len], " \t\r\n");
+}
+
 fn hasDanglingTrailingQuote(text: []const u8) bool {
     const trimmed = std.mem.trimRight(u8, text, " \t\r\n");
     if (trimmed.len == 0 or trimmed[trimmed.len - 1] != '"') return false;
@@ -768,7 +819,7 @@ fn hasDanglingTrailingQuote(text: []const u8) bool {
         body = body[0 .. body.len - utf8_replacement.len];
     }
     body = std.mem.trimRight(u8, body, " \t\r\n");
-    if (body.len == 0) return false;
+    if (body.len == 0) return true;
     var quote_count: usize = 0;
     for (body) |c| {
         if (c == '"') quote_count += 1;
@@ -925,6 +976,8 @@ fn handleChatCompletions(
         var gen_text_buf: [4096]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
+        var sent_visible_len: usize = 0; // cleaned visible bytes already streamed when thinking is disabled
+        var visible_buf: [4096]u8 = undefined;
         var stopped = false;
         var finish_reason: FinishReason = .stop;
 
@@ -956,7 +1009,7 @@ fn handleChatCompletions(
                 }
 
                 // Add to pending queue
-                if (pending_count < pending_tokens.len) {
+                if (thinking_enabled and pending_count < pending_tokens.len) {
                     pending_tokens[pending_count] = prev_token;
                     pending_count += 1;
                 }
@@ -986,11 +1039,19 @@ fn handleChatCompletions(
                 }
 
                 if (!is_partial) {
-                    // Safe to send all pending tokens
-                    for (pending_tokens[0..pending_count]) |tid| {
-                        streamToken(conn, tid, tokenizer, req_id, ts, model_name) catch return;
+                    if (thinking_enabled) {
+                        // Safe to send all pending tokens
+                        for (pending_tokens[0..pending_count]) |tid| {
+                            streamToken(conn, tid, tokenizer, req_id, ts, model_name) catch return;
+                        }
+                        pending_count = 0;
+                    } else {
+                        const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
+                        if (visible.len > sent_visible_len) {
+                            streamText(conn, visible[sent_visible_len..], req_id, ts, model_name) catch return;
+                            sent_visible_len = visible.len;
+                        }
                     }
-                    pending_count = 0;
                     sent_text_len = gen_text_len;
                 }
 
@@ -1012,10 +1073,18 @@ fn handleChatCompletions(
 
             // Flush any remaining pending tokens (only if we didn't hit stop)
             if (!stopped) {
-                const pending_text = gen_text_buf[sent_text_len..gen_text_len];
-                const cleaned_pending = trimTrailingChatArtifacts(pending_text);
-                if (cleaned_pending.len > 0) {
-                    streamText(conn, cleaned_pending, req_id, ts, model_name) catch return;
+                if (thinking_enabled) {
+                    const pending_text = gen_text_buf[sent_text_len..gen_text_len];
+                    const cleaned_pending = trimTrailingChatArtifacts(pending_text);
+                    if (cleaned_pending.len > 0) {
+                        streamText(conn, cleaned_pending, req_id, ts, model_name) catch return;
+                    }
+                } else {
+                    const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
+                    const cleaned_visible = trimTrailingChatArtifacts(visible);
+                    if (cleaned_visible.len > sent_visible_len) {
+                        streamText(conn, cleaned_visible[sent_visible_len..], req_id, ts, model_name) catch return;
+                    }
                 }
             }
         }
@@ -1074,7 +1143,12 @@ fn handleChatCompletions(
         }
 
         // Escape the full text for JSON
-        const trimmed_text = trimTrailingChatArtifacts(text_buf.items);
+        var strip_buf: [16384]u8 = undefined;
+        const base_text = if (thinking_enabled)
+            text_buf.items
+        else
+            stripThinkingForDisabledResponse(text_buf.items, &strip_buf) catch text_buf.items;
+        const trimmed_text = trimTrailingChatArtifacts(base_text);
         var thinking_buf: [16384]u8 = undefined;
         const response_text = prefixThinkingEnvelope(trimmed_text, thinking_enabled, &thinking_buf) catch trimmed_text;
         var escaped_buf: [16384]u8 = undefined;
@@ -1891,6 +1965,30 @@ test "prefixThinkingEnvelope leaves text unchanged when disabled" {
     var buf: [64]u8 = undefined;
     const plain = try prefixThinkingEnvelope("408", false, &buf);
     try std.testing.expectEqualStrings("408", plain);
+}
+
+test "stripThinkingForDisabledResponse removes complete think block and keeps answer" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("<think>\n17 * 24 = 408\n</think>\n\n408", &buf);
+    try std.testing.expectEqualStrings("408", stripped);
+}
+
+test "stripThinkingForDisabledResponse truncates partial think block after visible answer" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("Hello! How can I help you today?\"\n\n<think>\nThinking Process:\n", &buf);
+    const cleaned = trimTrailingChatArtifacts(stripped);
+    try std.testing.expectEqualStrings("Hello! How can I help you today?", cleaned);
+}
+
+test "stripThinkingForDisabledResponse preserves text outside think tags" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("Visible text\n<think>\nhidden\n</think>\n\nMore text", &buf);
+    try std.testing.expectEqualStrings("Visible text\nMore text", stripped);
+}
+
+test "hasDanglingTrailingQuote treats standalone trailing quote as dangling" {
+    try std.testing.expect(hasDanglingTrailingQuote("\""));
+    try std.testing.expect(hasDanglingTrailingQuote("answer\""));
 }
 
 test "supportsEnabledThinking requires tokenizer support and request flag" {
