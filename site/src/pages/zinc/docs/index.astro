@@ -32,8 +32,8 @@ const docMeta: Record<string, { label: string; description: string; order: numbe
 };
 
 const orderedDocs = [...docs].sort((a, b) => (docMeta[a.slug]?.order ?? 99) - (docMeta[b.slug]?.order ?? 99));
-const startHere = orderedDocs.filter(doc => ['getting-started', 'hardware-requirements', 'running-zinc', 'api'].includes(doc.slug));
-const deepDocs = orderedDocs.filter(doc => !['getting-started', 'hardware-requirements', 'running-zinc', 'api'].includes(doc.slug));
+const startHere = orderedDocs.filter(doc => ['getting-started', 'hardware-requirements', 'running-zinc', 'api', 'development'].includes(doc.slug));
+const deepDocs = orderedDocs.filter(doc => !['getting-started', 'hardware-requirements', 'running-zinc', 'api', 'development'].includes(doc.slug));
 
 const combinedDocs = [
   ...startHere.map(doc => ({ label: docMeta[doc.slug]?.label ?? doc.title, href: `/zinc/docs/${doc.slug}` })),

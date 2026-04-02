@@ -29,66 +29,84 @@ glslc --target-env=vulkan1.3 -O -o out.spv src/shaders/name.comp
 
 ```
 src/
-├── main.zig                    # CLI entry point, arg parsing, main loop
-├── vulkan/                     # GPU abstraction layer
-│   ├── vk.zig                  #   @cImport of vulkan/vulkan.h
-│   ├── instance.zig            #   VkInstance, VkDevice, queue init
-│   ├── buffer.zig              #   GPU buffer alloc, staging, DMA
-│   ├── pipeline.zig            #   Compute pipeline from SPIR-V
-│   ├── command.zig             #   Command pool/buffer, dispatch recording
-│   └── gpu_detect.zig          #   GPU vendor detect + auto-tuning (RDNA3/4, NVIDIA, Intel)
-├── model/                      # Model loading
-│   ├── gguf.zig                #   GGUF format parser (header, metadata, tensors)
-│   ├── loader.zig              #   Load GGUF → GPU buffers (mmap + DMA)
-│   ├── architecture.zig        #   Compute graph builders per arch (Llama, Qwen, Mamba)
-│   └── tokenizer.zig           #   Native Zig text ↔ token conversion and chat templating
-├── compute/                    # Inference dispatch
-│   ├── graph.zig               #   Static compute graph IR (nodes, deps, topo sort)
-│   ├── dmmv.zig                #   Decode matmul-vec dispatch (Q4_K, Q8_0, F16)
-│   ├── elementwise.zig         #   RMS norm, SwiGLU, RoPE dispatch
-│   ├── attention.zig           #   Flash attention dispatch (paged, GQA)
-│   └── forward.zig             #   Inference engine: decode loop, token generation
-└── shaders/                    # GLSL compute kernels → compiled to .spv
-    ├── dmmv_q4k.comp           #   Q4_K dequant + matvec
-    ├── dmmv_q8_0.comp          #   Q8_0 dequant + matvec
-    ├── dmmv_f16.comp           #   FP16 matvec (no dequant)
-    ├── coop_matmul.comp        #   Cooperative matrix 16x16x16 for prefill
-    ├── flash_attn.comp         #   Paged flash attention with GQA
-    ├── rms_norm_mul.comp       #   RMS norm + scale multiply (fused)
-    ├── swiglu.comp             #   SiLU-gated linear unit (fused)
-    ├── rope_fused.comp         #   Rotary position embedding (fused)
-    ├── sigmoid_mul.comp        #   Sigmoid * element-wise (SSM gating)
-    ├── scale_acc_sigmoid.comp  #   a += sigmoid(gate) * b (shared expert gating)
-    ├── sigmoid_scale_acc.comp  #   Variant sigmoid-gated scale-accumulate
-    ├── softmax_topk.comp       #   Softmax + top-k (MoE routing on GPU)
-    ├── ssm_conv1d.comp         #   1D causal conv for SSM layers
-    ├── ssm_delta_net.comp      #   Delta-net recurrent state update
-    ├── ssm_gated_norm.comp     #   Gated RMS norm for SSM output
-    ├── argmax.comp             #   GPU-side argmax
-    ├── embed_dequant_q4k.comp  #   Token embedding dequant on GPU
-    ├── tq_quantize_keys.comp   #   TurboQuant: quantize K cache
-    ├── tq_quantize_values.comp #   TurboQuant: quantize V cache
-    ├── tq_attention_scores.comp#   TurboQuant: attention on quantized KV
-    └── tq_decompress_values.comp#  TurboQuant: decompress V values
+├── main.zig                     # CLI entry, arg parsing, server startup, chat subcommand
+├── compute/
+│   ├── forward.zig              # Vulkan inference engine — prefill + decode loop
+│   ├── forward_metal.zig        # Metal inference engine — prefill + decode loop
+│   ├── dmmv.zig                 # DMMV dispatch (quantized matmul-vec)
+│   ├── elementwise.zig          # Fused elementwise ops (RMS norm, SwiGLU, etc.)
+│   ├── attention.zig            # Flash attention dispatch
+│   ├── argmax.zig               # Argmax / sampling dispatch
+│   └── graph.zig                # Decode graph builder and exporter
+├── model/
+│   ├── tokenizer.zig            # BPE tokenizer, chat templates, thinking toggle
+│   ├── catalog.zig              # Managed model catalog with thinking_stable flag
+│   ├── gguf.zig                 # GGUF file parser and tensor metadata
+│   ├── loader.zig               # Model loader (Vulkan — mmap + DMA to VRAM)
+│   ├── loader_metal.zig         # Model loader (Metal — zero-copy mmap)
+│   ├── architecture.zig         # Architecture detection (Qwen, MoE, SSM, etc.)
+│   ├── config.zig               # Model configuration from GGUF metadata
+│   └── managed.zig              # Managed model download, install, activation
+├── server/
+│   ├── routes.zig               # OpenAI-compatible API, streaming, stop detection
+│   ├── chat.html                # Built-in chat UI (embedded at compile time)
+│   ├── http.zig                 # HTTP server and connection handling
+│   ├── model_manager.zig        # Hot model switching and catalog view
+│   ├── runtime.zig              # Backend runtime dispatch (Vulkan vs Metal)
+│   └── session.zig              # Chat session state
+├── vulkan/
+│   ├── instance.zig             # Vulkan instance and device init
+│   ├── pipeline.zig             # Compute pipeline and shader loading
+│   ├── buffer.zig               # GPU buffer allocation and transfers
+│   ├── command.zig              # Command buffer recording and submission
+│   ├── gpu_detect.zig           # GPU vendor/capability detection
+│   └── vk.zig                   # Vulkan C API bindings
+├── metal/
+│   ├── device.zig               # Metal device init and capability query
+│   ├── pipeline.zig             # MSL compute pipeline compilation
+│   ├── buffer.zig               # Metal buffer management
+│   ├── command.zig              # Command buffer and encoder
+│   └── shim.m                   # Objective-C shim (Metal.framework bridge)
+├── gpu/
+│   └── interface.zig            # Backend abstraction (Vulkan vs Metal)
+├── scheduler/
+│   ├── scheduler.zig            # Request scheduling
+│   └── kv_cache.zig             # KV cache management
+├── diagnostics.zig              # --check system diagnostics (Vulkan)
+├── diagnostics_metal.zig        # --check system diagnostics (Metal)
+├── shaders/
+│   ├── *.comp                   # GLSL compute shaders (Vulkan/SPIR-V) — 24 shaders
+│   └── metal/*.metal            # MSL compute shaders (Apple Silicon) — 31 shaders
 
 benchmarks/
-├── bandwidth.zig               # DMMV bandwidth utilization benchmark
-└── dispatch.zig                # Vulkan dispatch overhead benchmark
+├── bandwidth.zig                # DMMV bandwidth utilization benchmark
+├── dispatch.zig                 # Vulkan dispatch overhead benchmark
+└── metal_inference.zig          # Metal inference benchmark
 
-loops/                          # Self-improving optimization loops
-├── optimize_zinc.ts            #   ZINC loop: rsync → build → run → agent → keep/revert
-├── optimize_zinc.test.ts       #   Tests for ZINC loop (bun test)
-├── optimize_llm_tps.ts         #   llama.cpp TPS optimization loop
-└── optimize_llm_tps.test.ts    #   Tests for llama.cpp loop (bun test)
+loops/                           # Self-improving optimization loops
+├── optimize_zinc.ts             #   ZINC loop: rsync → build → run → agent → keep/revert
+├── optimize_zinc.test.ts        #   Tests for ZINC loop
+├── implement_metal.ts           #   Metal implementation loop
+└── implement_metal.test.ts      #   Tests for Metal loop
 
-docs/                           # Technical specifications
-├── SPEC.md                     #   Architecture overview
-├── API.md                      #   OpenAI-compatible API spec
-├── RDNA4_TUNING.md             #   RDNA4-specific optimizations
-└── TURBOQUANT_SPEC.md          #   TurboQuant KV cache compression spec
+docs/                            # Technical documentation (published to site)
+├── DEVELOPMENT.md               #   Development guide (canonical dev reference)
+├── GETTING_STARTED.md           #   First run guide
+├── RUNNING_ZINC.md              #   CLI usage and server mode
+├── API.md                       #   OpenAI-compatible API spec
+├── SPEC.md                      #   Architecture overview
+├── RDNA4_TUNING.md              #   RDNA4-specific optimizations
+├── GPU_REFERENCE.md             #   RDNA3/RDNA4 hardware reference
+├── TURBOQUANT_SPEC.md           #   TurboQuant KV cache compression spec
+├── APPLE_SILICON_REFERENCE.md   #   Apple Silicon M1–M5 reference
+├── APPLE_METAL_REFERENCE.md     #   Metal/MSL kernel reference
+└── APPLE_SILICON_METAL_ENABLEMENT.md # Metal port implementation notes
 
-site/                           # Astro website (zolotukhin.ai)
-specs/                          # Feature specs and planning artifacts
+site/                            # Astro website (zolotukhin.ai)
+tools/                           # API benchmark, standalone utilities
+specs/                           # Feature specs and planning artifacts
+scripts/                         # Deployment scripts
+tests/                           # TypeScript test files
 ```
 
 ## Module Dependency Graph

@@ -85,35 +85,68 @@ ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" -n 64
 
 ```
 src/
-├── main.zig                 # CLI entry point, arg parsing, server startup
+├── main.zig                     # CLI entry, arg parsing, server startup, chat subcommand
 ├── compute/
-│   ├── forward.zig          # Vulkan decode loop (~2000 lines)
-│   ├── forward_metal.zig    # Metal decode loop (~3500 lines)
-│   ├── dmmv.zig             # DMMV dispatch (quantized matmul-vec)
-│   └── elementwise.zig      # Fused elementwise ops (RMS norm, SwiGLU, etc.)
+│   ├── forward.zig              # Vulkan inference engine — prefill + decode loop
+│   ├── forward_metal.zig        # Metal inference engine — prefill + decode loop
+│   ├── dmmv.zig                 # DMMV dispatch (quantized matmul-vec)
+│   ├── elementwise.zig          # Fused elementwise ops (RMS norm, SwiGLU, etc.)
+│   ├── attention.zig            # Flash attention dispatch
+│   ├── argmax.zig               # Argmax / sampling dispatch
+│   └── graph.zig                # Decode graph builder and exporter
 ├── model/
-│   ├── tokenizer.zig        # BPE tokenizer, chat templates
-│   ├── catalog.zig          # Managed model catalog
-│   └── gguf.zig             # GGUF file parser
+│   ├── tokenizer.zig            # BPE tokenizer, chat templates, thinking toggle
+│   ├── catalog.zig              # Managed model catalog with thinking_stable flag
+│   ├── gguf.zig                 # GGUF file parser and tensor metadata
+│   ├── loader.zig               # Model loader (Vulkan — mmap + DMA to VRAM)
+│   ├── loader_metal.zig         # Model loader (Metal — zero-copy mmap)
+│   ├── architecture.zig         # Architecture detection (Qwen, MoE, SSM, etc.)
+│   ├── config.zig               # Model configuration from GGUF metadata
+│   └── managed.zig              # Managed model download, install, activation
 ├── server/
-│   ├── routes.zig           # OpenAI-compatible API + chat completions
-│   ├── chat.html            # Built-in chat UI (embedded at compile time)
-│   └── model_manager.zig    # Hot model switching
-├── vulkan/                  # Vulkan backend (device, pipeline, memory)
-├── metal/                   # Metal backend (device, pipeline, shim.m)
-├── shaders/
-│   ├── *.comp               # GLSL compute shaders (Vulkan/SPIR-V)
-│   └── metal/*.metal        # MSL compute shaders (Apple Silicon)
+│   ├── routes.zig               # OpenAI-compatible API, streaming, stop detection
+│   ├── chat.html                # Built-in chat UI (embedded at compile time)
+│   ├── http.zig                 # HTTP server and connection handling
+│   ├── model_manager.zig        # Hot model switching and catalog view
+│   ├── model_manager_metal.zig  # Metal-specific model manager extensions
+│   ├── model_manager_runtime.zig # Runtime abstraction for model manager
+│   ├── runtime.zig              # Backend runtime dispatch (Vulkan vs Metal)
+│   └── session.zig              # Chat session state
+├── vulkan/
+│   ├── instance.zig             # Vulkan instance and device init
+│   ├── pipeline.zig             # Compute pipeline and shader loading
+│   ├── buffer.zig               # GPU buffer allocation and transfers
+│   ├── command.zig              # Command buffer recording and submission
+│   ├── gpu_detect.zig           # GPU vendor/capability detection
+│   └── vk.zig                   # Vulkan C API bindings
+├── metal/
+│   ├── device.zig               # Metal device init and capability query
+│   ├── pipeline.zig             # MSL compute pipeline compilation
+│   ├── buffer.zig               # Metal buffer management
+│   ├── command.zig              # Command buffer and encoder
+│   ├── c.zig                    # Metal C API bindings
+│   ├── shim.h                   # Objective-C shim header
+│   └── shim.m                   # Objective-C shim implementation
 ├── gpu/
-│   └── interface.zig        # Backend abstraction (Vulkan vs Metal)
-site/                        # zolotukhin.ai Astro site
-docs/                        # Technical documentation (published to site)
-tools/                       # API benchmark, standalone utilities
-specs/                       # Feature specifications and plans
-benchmarks/                  # GPU microbenchmarks
-scripts/                     # Deployment scripts
-tests/                       # TypeScript test files
-loops/                       # Self-improving optimization loop
+│   └── interface.zig            # Backend abstraction (Vulkan vs Metal)
+├── scheduler/
+│   ├── scheduler.zig            # Request scheduling
+│   ├── kv_cache.zig             # KV cache management
+│   └── request.zig              # Request state
+├── diagnostics.zig              # --check system diagnostics (Vulkan)
+├── diagnostics_metal.zig        # --check system diagnostics (Metal)
+├── regression_tests.zig         # Regression test fixtures
+├── shaders/
+│   ├── *.comp                   # GLSL compute shaders (Vulkan/SPIR-V) — 24 shaders
+│   └── metal/*.metal            # MSL compute shaders (Apple Silicon) — 31 shaders
+site/                            # zolotukhin.ai Astro site
+docs/                            # Technical documentation (published to site)
+tools/                           # API benchmark, standalone utilities
+specs/                           # Feature specifications and plans
+benchmarks/                      # GPU microbenchmarks (bandwidth, dispatch, Metal)
+scripts/                         # Deployment scripts
+tests/                           # TypeScript test files
+loops/                           # Self-improving optimization loop
 ```
 
 ## Graph Export
