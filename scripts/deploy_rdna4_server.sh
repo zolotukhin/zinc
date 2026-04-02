@@ -95,14 +95,14 @@ fi
 
 if (( do_healthcheck )); then
   echo "==> Waiting for health check"
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do
     if "${ssh_cmd[@]}" "curl -fsS --max-time 2 http://127.0.0.1:${PORT}/health" 2>/dev/null; then
       echo ""
       echo "==> Server healthy after ${i}s"
       break
     fi
-    if (( i == 30 )); then
-      echo "==> Health check failed after 30s" >&2
+    if (( i == 60 )); then
+      echo "==> Health check failed after 60s" >&2
       exit 1
     fi
     sleep 1
