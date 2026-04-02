@@ -719,10 +719,10 @@ pub const InferenceEngine = struct {
             findTensorByName(model, "token_embd.weight") orelse return error.MissingTensor;
         self.token_embed = findTensorByName(model, "token_embd.weight") orelse return error.MissingTensor;
 
-        log.info("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
+        log.debug("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
         });
-        log.info(
+        log.debug(
             "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_pipe.thread_execution_width,
@@ -739,7 +739,7 @@ pub const InferenceEngine = struct {
                 self.dmmv_q4k_lmhead_1024_pipe.static_threadgroup_memory_length,
             },
         );
-        log.info(
+        log.debug(
             "Metal pipeline caps: dmmv_q4k_moe tw={d} max={d} stgmem={d} | dmmv_q5k_moe tw={d} max={d} stgmem={d} | dmmv_q6k_moe tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048 tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048_1024 tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_moe_pipe.thread_execution_width,
@@ -759,7 +759,7 @@ pub const InferenceEngine = struct {
                 self.dmmv_q4k_moe_k2048_1024_pipe.static_threadgroup_memory_length,
             },
         );
-        log.info(
+        log.debug(
             "Metal pipeline caps: rms_norm tw={d} max={d} | swiglu tw={d} max={d} | swiglu_batched tw={d} max={d} | moe_acc_batched tw={d} max={d}",
             .{
                 self.rms_norm_pipe.thread_execution_width,
