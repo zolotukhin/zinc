@@ -19,11 +19,6 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
 <section id={componentId} class:list={['docs-search', { compact }]}>
   <label class="sr-only" for={`${componentId}-input`}>Search docs</label>
   <div class="docs-search-shell">
-    {!compact && (
-      <div class="docs-search-orbit" aria-hidden="true">
-        <span class="docs-search-orbit-dot"></span>
-      </div>
-    )}
     <input
       id={`${componentId}-input`}
       type="search"
@@ -257,33 +252,6 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
     align-items: center;
   }
 
-  .docs-search-orbit {
-    position: absolute;
-    inset: -0.45rem;
-    pointer-events: none;
-    border-radius: 999px;
-  }
-
-  .docs-search-orbit-dot {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 0.48rem;
-    height: 0.48rem;
-    margin-left: -0.24rem;
-    margin-top: -0.24rem;
-    border-radius: 999px;
-    background:
-      radial-gradient(circle, rgba(255, 244, 227, 1) 0%, rgba(255, 196, 122, 0.95) 38%, rgba(211, 84, 0, 0.92) 72%, rgba(211, 84, 0, 0.25) 100%);
-    box-shadow:
-      0 0 0.35rem rgba(255, 166, 77, 0.7),
-      0 0 0.85rem rgba(211, 84, 0, 0.4);
-    animation: docs-search-orbit 8.5s linear infinite;
-    will-change: transform;
-    /* offset-path traces an ellipse matching the orbit container's perimeter */
-    offset-path: ellipse(50% 50% at 50% 50%);
-    offset-rotate: 0deg;
-  }
 
   .docs-search-shell input {
     width: 100%;
@@ -304,6 +272,10 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
   .docs-search-shell input::-webkit-search-cancel-button {
     display: none;
     -webkit-appearance: none;
+  }
+
+  .docs-search-shell input::-moz-search-clear-button {
+    display: none;
   }
 
   .docs-search-clear {
@@ -476,13 +448,4 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
     line-height: 1.35;
   }
 
-  @keyframes docs-search-orbit {
-    from {
-      offset-distance: 0%;
-    }
-
-    to {
-      offset-distance: 100%;
-    }
-  }
 </style>
