@@ -171,6 +171,7 @@ pub const Config = struct {
 
 pub const Command = enum {
     run,
+    chat,
     model_list,
     model_pull,
     model_use,
@@ -198,6 +199,17 @@ const ConnectionWorker = struct {
     }
 };
 
+fn openBrowser(port: u16) void {
+    var url_buf: [64]u8 = undefined;
+    const url = std.fmt.bufPrint(&url_buf, "http://localhost:{d}", .{port}) catch return;
+    const opener = if (comptime @import("builtin").os.tag == .macos) "open" else "xdg-open";
+    var child = std.process.Child.init(&.{ opener, url }, std.heap.page_allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawnAndWait() catch {};
+}
+
 fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, allocator: std.mem.Allocator) void {
     if (config.profile) {
         if (manager.currentResources()) |resources| {
@@ -223,6 +235,10 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
     defer server.deinit();
     log.info("Server listening on 0.0.0.0:{d}", .{config.port});
     log.info("Press Ctrl+C to stop", .{});
+
+    if (config.command == .chat) {
+        openBrowser(config.port);
+    }
 
     const posix = std.posix;
     const Handler = struct {
@@ -315,6 +331,7 @@ const banner =
     \\Usage:
     \\  zinc -m <model.gguf> --prompt "Hello"
     \\  zinc -m <model.gguf> [-p 8080]
+    \\  zinc chat                          Start server and open chat UI in browser
     \\  zinc --model-id <id> [--prompt "Hello"]
     \\  zinc --check [-m <model.gguf> | --model-id <id>]
     \\  zinc model <list|pull|use|active|rm> [args]
@@ -355,6 +372,7 @@ const banner_full =
     \\Usage:
     \\  zinc -m <model.gguf> --prompt "Hello"
     \\  zinc -m <model.gguf> [-p 8080]
+    \\  zinc chat                          Start server and open chat UI in browser
     \\  zinc --model-id <id> [--prompt "Hello"]
     \\  zinc --check [-m <model.gguf> | --model-id <id>]
     \\  zinc model <list|pull|use|active|rm> [args]
@@ -416,6 +434,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             config.show_help = true;
             config.show_help_all = true;
             return config;
+        } else if (std.mem.eql(u8, arg, "chat")) {
+            config.command = .chat;
         } else if (std.mem.eql(u8, arg, "model")) {
             i += 1;
             if (i >= args.len) return error.MissingModelSubcommand;
@@ -983,7 +1003,7 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
                 .removed_dir = removed.removed_dir,
             });
         },
-        .run => {},
+        .run, .chat => {},
     }
 }
 
@@ -1147,7 +1167,7 @@ pub fn main() !void {
         return;
     }
 
-    if (config.command != .run) {
+    if (config.command != .run and config.command != .chat) {
         runModelCommand(config, allocator) catch |err| {
             if (err == error.CommandAlreadyReported) {
                 std.process.exit(1);
