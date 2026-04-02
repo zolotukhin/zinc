@@ -2,7 +2,7 @@
   <img src="assets/zinc_trademark.png" alt="ZINC Logo" width="400">
 </p>
 
-# ZINC — Zig INferenCe Engine for AMD GPUs
+# ZINC — Zig INferenCe Engine
 
 <p align="center">
   <a href="https://github.com/zolotukhin/zinc/actions/workflows/test.yml">
@@ -14,7 +14,7 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License">
   </a>
-  <img src="https://img.shields.io/badge/platform-linux-lightgrey" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey" alt="Platform">
   <a href="https://zolotukhin.ai/zinc">
     <img src="https://img.shields.io/badge/web-zolotukhin.ai%2Fzinc-8B5CF6" alt="Website">
   </a>
@@ -23,112 +23,101 @@
   </a>
 </p>
 
-> Making AMD consumer GPUs actually usable for LLM inference.
+> Local LLM inference on AMD GPUs and Apple Silicon — no ROCm, no CUDA, one binary.
 
 <p align="center">
   <img src="assets/zinc-chat-demo.gif" alt="ZINC Chat Demo — streaming inference on AMD RDNA4" width="720">
   <br>
-  <em>35B parameter model running locally on a single AMD GPU — Zig + Vulkan, no ROCm, no CUDA</em>
+  <em>35B parameter model running locally — Zig + Vulkan/Metal, no ROCm, no CUDA</em>
 </p>
 
-## Best Supported Setup
+## Supported Platforms
 
-- Linux
-- AMD RDNA4 GPU with 16-32 GB VRAM
-- Mesa RADV with `RADV_PERFTEST=coop_matrix`
-- `zig build -Doptimize=ReleaseFast`
-
-macOS can build the project and is fine for development, but it is not the primary target environment for real ZINC GPU inference.
+| Platform | GPU | Backend | Status |
+|----------|-----|---------|--------|
+| **Linux** | AMD RDNA4 (RX 9070, AI PRO R9700) | Vulkan | Primary — hand-tuned shaders |
+| **Linux** | AMD RDNA3 (RX 7900 XTX, etc.) | Vulkan | Supported |
+| **macOS** | Apple Silicon (M1, M2, M3, M4, M5) | Metal | Supported — native MSL shaders |
 
 ## Start Here
 
-If you want the shortest path to a successful first run:
+Works the same on Linux (AMD GPU) and macOS (Apple Silicon):
 
 ```bash
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 zig build -Doptimize=ReleaseFast
 
-# Recommended on RDNA4 before checks and benchmarks
-export RADV_PERFTEST=coop_matrix
+# On RDNA4 Linux, enable cooperative matrix
+export RADV_PERFTEST=coop_matrix  # skip on macOS
 
-# Verify Vulkan, shaders, and runtime setup
+# Verify GPU, shaders, and runtime
 ./zig-out/bin/zinc --check
 
-# See which supported models fit this machine
+# See which models fit this machine
 ./zig-out/bin/zinc model list
 
-# Download one supported model
+# Download a model
 ./zig-out/bin/zinc model pull qwen35-2b-q4k-m
 
-# Run a prompt with the managed model
+# Run a prompt
 ./zig-out/bin/zinc --model-id qwen35-2b-q4k-m --prompt "Hello"
+
+# Or open the chat UI in your browser
+./zig-out/bin/zinc chat
 ```
 
-If you want the browser UI instead, start the server with:
-
-```bash
-./zig-out/bin/zinc --model-id qwen35-2b-q4k-m -p 8080
-```
-
-Then open `http://localhost:8080/` for the built-in chat UI. The server also exposes an OpenAI-compatible API at `http://localhost:8080/v1` — use it with any client that supports the OpenAI chat completions format.
+The server exposes the built-in chat UI at `/` and an OpenAI-compatible API at `/v1`.
 
 ## What Works Today
 
 - Single-stream CLI inference on the validated Qwen3.5 models listed below
-- OpenAI-compatible `/v1` API
-- Built-in browser chat UI at `/`
-- Managed model workflow: `list`, `pull`, `use`, `active`, and `rm`
-- RDNA4-tuned Vulkan path with coherent outputs on the supported GGUFs
+- OpenAI-compatible `/v1` API with streaming
+- Built-in browser chat UI with thinking mode support
+- Managed model workflow: `list`, `pull`, `use`, `active`, `rm`
+- `zinc chat` — start server and open browser in one command
+- **AMD path**: RDNA4-tuned Vulkan shaders (wave64, cooperative matrix, fused ops)
+- **Apple Silicon path**: native Metal shaders (MSL, zero-copy mmap, simdgroup ops)
+- Auto-detection: ZINC picks the right backend (Vulkan or Metal) at build time
 
 ## Still Rough
 
-- Continuous batching and stronger multi-tenant serving are still roadmap work
-- Chat/reasoning workloads are still slower than the raw decode path
+- Continuous batching and multi-tenant serving are still roadmap work
 - The supported-model list is intentionally narrow
-- macOS is useful for building and docs work, but not the target runtime for GPU inference
+- Apple Silicon performance tuning is ongoing (RDNA4 path is more mature)
 
 ## The Problem
 
-AMD's RDNA3/RDNA4 GPUs (RX 9070, Radeon AI PRO R9700, etc.) have excellent memory bandwidth (576+ GB/s) and hardware features (cooperative matrix, integer dot product), but:
+Consumer GPUs have the hardware for fast LLM inference — bandwidth, compute, VRAM — but the software doesn't use it:
 
-1. **ROCm doesn't support them** — only MI-series datacenter GPUs
-2. **vLLM requires ROCm** — so it can't use these GPUs at all
-3. **llama.cpp Vulkan works** but treats RDNA4 as an afterthought — no RDNA4-specific tuning, SPIR-V toolchain incompatibilities, no tensor parallelism
-4. **No solution handles parallel requests well** on these GPUs for production use
-
-These cards cost $500–1500 (vs $15,000+ for MI300X) and sit in millions of desktops doing nothing during inference.
+- **AMD RDNA3/RDNA4**: ROCm doesn't support them. vLLM requires ROCm. llama.cpp's Vulkan path has no RDNA-specific tuning. These $500–1500 cards sit idle.
+- **Apple Silicon**: MLX and llama.cpp Metal work, but leave performance on the table. No engine is built from scratch around Metal's strengths (unified memory, simdgroup ops, zero-copy mmap).
 
 ## The Solution
 
-ZINC takes the hardware these cards already have — 576 GB/s memory bandwidth, cooperative matrix units, 16–32 GB VRAM — and builds an inference engine that actually uses it.
+ZINC builds an inference engine tuned for the hardware you actually have.
 
-**Hand-tuned for the hardware.** The GPU shaders are written specifically for RDNA4's memory hierarchy: wave64 dispatch, architecture-aware tiling, fused operations that cut redundant VRAM round-trips. Not a generic Vulkan backend that happens to run on AMD — built to hit 90%+ of theoretical memory bandwidth on the matmuls that dominate LLM decode.
+**Hand-tuned shaders for each platform.** On AMD: wave64, cooperative matrix, architecture-aware tiling via Vulkan compute. On Apple Silicon: native MSL kernels with simdgroup reductions, zero-copy model loading, and Metal pipeline tuning. Not a generic backend that happens to run — built to extract real performance from each GPU.
 
-**Built for real inference work, not just demos.** The current engine already has a fast CLI path, an OpenAI-compatible API, graph-report tooling, and hardware-aware benchmarking on RDNA4. Continuous batching and deeper TurboQuant validation are still roadmap work, so today's server path should be read as a strong single-stream engine rather than a finished multi-tenant serving stack.
+**One binary, no driver stack.** No ROCm, no CUDA, no Python. Build with Zig, point at a GGUF, run inference. The right backend (Vulkan or Metal) is selected automatically at build time.
 
-**Drop-in compatible.** The API is OpenAI-compatible — point your existing client at it and it works. No ROCm, no CUDA, no driver stack to fight. One binary, one GPU, production inference on a $550 card.
+**Drop-in compatible.** OpenAI-compatible API, built-in chat UI, managed model catalog. Point your existing client at it and it works.
 
 ## Supported Models
 
-The table below is intentionally narrow: it lists the exact GGUFs ZINC currently supports and that we have revalidated end-to-end, not a broader wishlist of architectures that might work.
+The table below lists the exact GGUFs ZINC currently supports end-to-end, not a broader wishlist.
 
-| Model | Exact GGUF tested | Typical throughput on AI PRO R9700 |
-|------|--------------------|-------------------------------------|
-| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s plain generation |
-| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s plain generation |
+| Model | GGUF | AMD RDNA4 | Apple Silicon |
+|-------|------|-----------|---------------|
+| **Qwen3.5 2B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s | ~17 tok/s |
+| **Qwen3.5 35B-A3B UD** | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s | needs 24+ GB unified |
 
-Benchmark details for the numbers above:
+- **AMD**: Radeon AI PRO R9700 (RDNA4, 32 GB), `RADV_PERFTEST=coop_matrix`
+- **Apple Silicon**: tested on M1 Pro 32 GB (Apple Silicon benchmarks on M4 coming soon)
+- All numbers: single-stream CLI decode, `zig build -Doptimize=ReleaseFast`
+- Latest validation: 2026-03-31
 
-- Hardware: AMD Radeon AI PRO R9700 (RDNA4, 32 GB)
-- Build: `zig build -Doptimize=ReleaseFast`
-- Run shape: single-stream, `RADV_PERFTEST=coop_matrix`
-- Plain generation: 256-token runs without chat template or explicit reasoning
-- Reasoning chat: non-streaming `/v1/chat/completions` with step-by-step prompts
-- Latest validation date: 2026-03-31
-- Validation: coherent output on CLI, raw `/v1/completions`, and `/v1/chat/completions`
-
-**Quantization formats implemented in the current kernels**: Q4_K, Q5_K, Q6_K, Q8_0, F16
+**Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, F16
 
 ## Quick Start
 
