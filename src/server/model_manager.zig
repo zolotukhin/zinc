@@ -126,6 +126,10 @@ pub const ModelManager = struct {
         return if (self.current) |current| current.display_name else "none";
     }
 
+    pub fn catalogProfile(self: *const ModelManager) []const u8 {
+        return catalog_mod.profileForGpu(self.gpu_config);
+    }
+
     pub const MemoryUsage = struct {
         weights_bytes: u64,
         runtime_device_local_bytes: u64,
@@ -173,7 +177,7 @@ pub const ModelManager = struct {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
 
-        const profile = catalog_mod.profileForGpu(self.gpu_config);
+        const profile = self.catalogProfile();
         const active_managed_id = if (self.current) |current| current.managed_id else null;
         const active_display_name = if (self.current) |current| current.display_name else "none";
         const active_supports_thinking_toggle = if (self.current) |current| current.tokenizer.supportsThinkingToggle() else false;
@@ -241,11 +245,19 @@ pub const ModelManager = struct {
         };
     }
 
+    pub fn supportsManagedEntry(self: *ModelManager, entry: catalog_mod.CatalogEntry, allocator: std.mem.Allocator) bool {
+        const fit = managed_mod.describeFit(entry, self.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
+            .required_vram_bytes = entry.required_vram_bytes,
+            .fits_current_gpu = catalog_mod.fitsGpu(entry, self.vram_budget_bytes),
+            .exact = false,
+        };
+        return catalog_mod.supportsProfile(entry, self.catalogProfile()) and fit.fits_current_gpu;
+    }
+
     /// Caller must already hold the shared generation lock.
     pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool) !void {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
-        const profile = catalog_mod.profileForGpu(self.gpu_config);
-        if (!catalog_mod.supportsProfile(entry.*, profile)) return error.ModelUnsupportedOnThisGpu;
+        if (!catalog_mod.supportsProfile(entry.*, self.catalogProfile())) return error.ModelUnsupportedOnThisGpu;
         if (!managed_mod.isInstalled(model_id, self.allocator)) return error.ModelNotInstalled;
 
         const fit = try managed_mod.verifyActiveSelectionFits(model_id, self.vram_budget_bytes, self.allocator);

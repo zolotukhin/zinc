@@ -20,6 +20,8 @@ pub const Tokenizer = struct {
     eos_id: u32,
     /// Whether prompts should be prefixed with BOS automatically.
     prepend_bos: bool,
+    /// Whether prompt construction should append EOS.
+    add_eos_token: bool = false,
     /// Token scores (used for SentencePiece-style merge priority)
     scores: ?[]const f32,
     /// Chat template string from GGUF metadata, or null
@@ -122,21 +124,27 @@ pub const Tokenizer = struct {
         const bos_id = gf.getU32("tokenizer.ggml.bos_token_id") orelse
             if (is_qwen35_family) @as(u32, 1) else null;
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
-        const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse is_qwen35_family or (bos_id != null);
-
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
+        const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse blk: {
+            if (is_qwen35_family) break :blk true;
+            if (std.mem.eql(u8, model_type, "gpt2")) break :blk false;
+            break :blk bos_id != null;
+        };
+        const add_eos_token = gf.getBool("tokenizer.ggml.add_eos_token") orelse false;
         if (bos_id) |id| {
-            log.debug("Tokenizer type: {s} | BOS: {d} | prepend_bos={} | EOS: {d}", .{
+            log.debug("Tokenizer type: {s} | BOS: {d} | prepend_bos={} | EOS: {d} | add_eos={}", .{
                 model_type,
                 id,
                 prepend_bos,
                 eos_id,
+                add_eos_token,
             });
         } else {
-            log.debug("Tokenizer type: {s} | BOS: none | prepend_bos={} | EOS: {d}", .{
+            log.debug("Tokenizer type: {s} | BOS: none | prepend_bos={} | EOS: {d} | add_eos={}", .{
                 model_type,
                 prepend_bos,
                 eos_id,
+                add_eos_token,
             });
         }
 
@@ -151,6 +159,7 @@ pub const Tokenizer = struct {
             .bos_id = bos_id,
             .eos_id = eos_id,
             .prepend_bos = prepend_bos,
+            .add_eos_token = add_eos_token,
             .chat_template = chat_template,
             .allocator = allocator,
         };
@@ -322,9 +331,11 @@ pub const Tokenizer = struct {
             if (best_rank == std.math.maxInt(u32)) break; // No more merges possible
 
             // Merge the pair: concatenate symbols[best_pos] and symbols[best_pos+1]
+            const old_left = symbols.items[best_pos];
+            const old_right = symbols.items[best_pos + 1];
             const merged = try std.mem.concat(self.allocator, u8, &.{
-                symbols.items[best_pos],
-                symbols.items[best_pos + 1],
+                old_left,
+                old_right,
             });
             try owned_symbols.append(self.allocator, merged);
 
@@ -362,9 +373,11 @@ pub const Tokenizer = struct {
 
             if (!found) break;
 
+            const old_left = symbols.items[best_pos];
+            const old_right = symbols.items[best_pos + 1];
             const merged = try std.mem.concat(self.allocator, u8, &.{
-                symbols.items[best_pos],
-                symbols.items[best_pos + 1],
+                old_left,
+                old_right,
             });
             try owned_symbols.append(self.allocator, merged);
 
@@ -405,6 +418,26 @@ pub const Tokenizer = struct {
     /// Whether prompt construction should prepend BOS automatically.
     pub fn shouldPrependBos(self: *const Tokenizer) bool {
         return self.prepend_bos and self.bos_id != null;
+    }
+
+    /// Build prompt tokens following GGUF BOS/EOS policy.
+    pub fn preparePromptTokens(self: *const Tokenizer, raw_tokens: []const u32) ![]u32 {
+        const prefix_len: usize = if (self.shouldPrependBos()) 1 else 0;
+        const suffix_len: usize = if (self.add_eos_token) 1 else 0;
+        const prompt_tokens = try self.allocator.alloc(u32, raw_tokens.len + prefix_len + suffix_len);
+
+        var pos: usize = 0;
+        if (self.shouldPrependBos()) {
+            prompt_tokens[pos] = self.bosId();
+            pos += 1;
+        }
+        @memcpy(prompt_tokens[pos .. pos + raw_tokens.len], raw_tokens);
+        pos += raw_tokens.len;
+        if (self.add_eos_token) {
+            prompt_tokens[pos] = self.eos_id;
+        }
+
+        return prompt_tokens;
     }
 
     /// Release tokenizer-owned vocabulary tables, merges, and optional score arrays.
@@ -580,6 +613,48 @@ test "initFromGGUF restores BOS fallback for qwen35 family" {
 
     try std.testing.expectEqual(@as(u32, 1), tok.bosId());
     try std.testing.expect(tok.shouldPrependBos());
+}
+
+test "preparePromptTokens skips BOS when prepend_bos is false" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .bos_id = @as(u32, 11),
+        .eos_id = 42,
+        .prepend_bos = false,
+        .scores = null,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    const raw = [_]u32{ 760, 6511, 314, 9338, 369 };
+    const prompt = try tok.preparePromptTokens(&raw);
+    defer std.testing.allocator.free(prompt);
+
+    try std.testing.expectEqualSlices(u32, &raw, prompt);
+}
+
+test "preparePromptTokens prepends BOS when prepend_bos is true" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .scores = null,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    const raw = [_]u32{ 10, 20, 30 };
+    const prompt = try tok.preparePromptTokens(&raw);
+    defer std.testing.allocator.free(prompt);
+
+    try std.testing.expectEqual(@as(usize, 4), prompt.len);
+    try std.testing.expectEqual(@as(u32, 1), prompt[0]);
+    try std.testing.expectEqualSlices(u32, &raw, prompt[1..]);
 }
 
 test "decodeToken converts GPT-2 leading-space marker back to ASCII space" {

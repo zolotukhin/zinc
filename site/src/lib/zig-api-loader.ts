@@ -993,6 +993,7 @@ ${[...new Set(structSymbols.map(s => s.modulePath))].map((path, idx) => `const m
 
     try {
       const zigArgs = ['run', '-lc'];
+      zigArgs.push('-I', join(REPO_ROOT, 'src', 'metal'));
 
       if (process.platform === 'darwin') {
         zigArgs.push('-I', '/opt/homebrew/include', '-L', '/opt/homebrew/lib', '-lvulkan');

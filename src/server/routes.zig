@@ -4,12 +4,13 @@
 //! and a built-in chat UI. Supports both streaming (SSE) and non-streaming responses.
 const std = @import("std");
 const http = @import("http.zig");
-const forward_mod = @import("../compute/forward.zig");
-const catalog_mod = @import("../model/catalog.zig");
-const managed_mod = @import("../model/managed.zig");
-const model_manager_mod = @import("model_manager.zig");
-const tokenizer_mod = @import("../model/tokenizer.zig");
-const Model = @import("../model/loader.zig").Model;
+const runtime = @import("runtime.zig");
+const forward_mod = runtime.forward_mod;
+const catalog_mod = if (runtime.supports_model_management) @import("../model/catalog.zig") else struct {};
+const managed_mod = if (runtime.supports_model_management) @import("../model/managed.zig") else struct {};
+const model_manager_mod = runtime.model_manager_mod;
+const tokenizer_mod = runtime.tokenizer_mod;
+const Model = runtime.Model;
 
 const log = std.log.scoped(.routes);
 
@@ -336,11 +337,23 @@ pub fn handleConnection(
     } else if (request.method == .GET and std.mem.eql(u8, request.path, "/v1/models")) {
         try handleModels(conn, manager, server_state, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/activate")) {
-        try handleActivateModel(conn, manager, server_state, request.body);
+        if (comptime runtime.supports_model_management) {
+            try handleActivateModel(conn, manager, server_state, request.body, allocator);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/pull")) {
-        try handlePullModel(conn, manager, server_state, request.body, allocator);
+        if (comptime runtime.supports_model_management) {
+            try handlePullModel(conn, manager, server_state, request.body, allocator);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/models/remove")) {
-        try handleRemoveModel(conn, manager, server_state, request.body);
+        if (comptime runtime.supports_model_management) {
+            try handleRemoveModel(conn, manager, server_state, request.body);
+        } else {
+            try sendUnsupportedModelManagement(conn);
+        }
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/chat/completions")) {
         try handleChatCompletions(conn, manager, server_state, request.body, allocator);
     } else if (request.method == .POST and std.mem.eql(u8, request.path, "/v1/completions")) {
@@ -353,6 +366,10 @@ pub fn handleConnection(
     } else {
         try conn.sendError(404, "not_found", "Unknown endpoint");
     }
+}
+
+fn sendUnsupportedModelManagement(conn: *http.Connection) !void {
+    try conn.sendError(501, "unsupported_operation", "Model management endpoints are not available on this backend");
 }
 
 // ── /health ──────────────────────────────────────────────────
@@ -460,14 +477,20 @@ fn handleModels(
 
 fn handleActivateModel(
     conn: *http.Connection,
-    manager: *model_manager_mod.ModelManager,
+    _manager: *model_manager_mod.ModelManager,
     server_state: *ServerState,
-    body: []const u8,
+    _body: []const u8,
+    _allocator: std.mem.Allocator,
 ) !void {
-    const parsed = parseJsonFields(body) catch {
+    if (comptime !runtime.supports_model_management) {
+        try sendUnsupportedModelManagement(conn);
+        return;
+    }
+    var parsed = parseRequestBody(_body, _allocator) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
         return;
     };
+    defer parsed.deinit();
     if (parsed.model_id.len == 0) {
         try conn.sendError(400, "invalid_request_error", "Field 'model' is required");
         return;
@@ -476,7 +499,7 @@ fn handleActivateModel(
     server_state.generation_mutex.lock();
     defer server_state.generation_mutex.unlock();
 
-    manager.activateManagedModel(parsed.model_id, true) catch |err| {
+    _manager.activateManagedModel(parsed.model_id, true) catch |err| {
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown managed model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
@@ -498,11 +521,15 @@ fn handleActivateModel(
 
 fn handleRemoveModel(
     conn: *http.Connection,
-    manager: *model_manager_mod.ModelManager,
+    _manager: *model_manager_mod.ModelManager,
     server_state: *ServerState,
-    body: []const u8,
+    _body: []const u8,
 ) !void {
-    const parsed = parseJsonFields(body) catch {
+    if (comptime !runtime.supports_model_management) {
+        try sendUnsupportedModelManagement(conn);
+        return;
+    }
+    const parsed = parseJsonFields(_body) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
         return;
     };
@@ -518,7 +545,7 @@ fn handleRemoveModel(
     server_state.generation_mutex.lock();
     defer server_state.generation_mutex.unlock();
 
-    const result = manager.removeManagedModel(parsed.model_id, parsed.force) catch |err| {
+    const result = _manager.removeManagedModel(parsed.model_id, parsed.force) catch |err| {
         const msg = switch (err) {
             error.ModelNotInstalled => "Model is not installed in the local cache",
             error.ModelLoadedInGpu => "Model is currently loaded in GPU memory. Retry with force=true to unload it first.",
@@ -609,15 +636,20 @@ fn downloadObserverComplete(context: ?*anyopaque, downloaded_bytes: u64) void {
 
 fn handlePullModel(
     conn: *http.Connection,
-    manager: *model_manager_mod.ModelManager,
+    _manager: *model_manager_mod.ModelManager,
     server_state: *ServerState,
-    body: []const u8,
-    allocator: std.mem.Allocator,
+    _body: []const u8,
+    _allocator: std.mem.Allocator,
 ) !void {
-    const parsed = parseJsonFields(body) catch {
+    if (comptime !runtime.supports_model_management) {
+        try sendUnsupportedModelManagement(conn);
+        return;
+    }
+    var parsed = parseRequestBody(_body, _allocator) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON in request body");
         return;
     };
+    defer parsed.deinit();
     if (parsed.model_id.len == 0) {
         try conn.sendError(400, "invalid_request_error", "Field 'model' is required");
         return;
@@ -628,13 +660,12 @@ fn handlePullModel(
         return;
     };
 
-    const profile = catalog_mod.profileForGpu(manager.gpu_config);
-    if (!catalog_mod.supportedOnCurrentGpu(entry.*, profile, manager.vram_budget_bytes)) {
+    if (!_manager.supportsManagedEntry(entry.*, _allocator)) {
         try conn.sendError(400, "invalid_request_error", "Model is not marked supported for the current GPU profile or VRAM budget");
         return;
     }
 
-    if (managed_mod.isInstalled(parsed.model_id, allocator)) {
+    if (managed_mod.isInstalled(parsed.model_id, _allocator)) {
         var installed_buf: [512]u8 = undefined;
         const installed_response = std.fmt.bufPrint(&installed_buf,
             \\{{"object":"model.pull","id":"{s}","state":"installed"}}
@@ -702,6 +733,8 @@ const leaked_reasoning_markers = [_][]const u8{
 const utf8_replacement = "\xEF\xBF\xBD";
 const thinking_prefix = "<think>\n";
 const empty_thinking_prefix = "<think>\n\n</think>\n\n";
+const thinking_open_tag = "<think>";
+const thinking_close_tag = "</think>";
 const chat_history_answer_limit_bytes: usize = 640;
 const default_chat_system_prompt =
     "Answer directly. If a user term is ambiguous or looks misspelled, say that briefly and continue with the most likely interpretation. Never output self-referential planning or phrases like 'I need to complete the response'.";
@@ -924,7 +957,6 @@ fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedChatR
         .enable_thinking = parsed.value.enable_thinking,
     };
 }
-
 fn findFirstStop(text: []const u8, stop_strs: []const []const u8) ?usize {
     var first: ?usize = null;
     for (stop_strs) |stop| {
@@ -1263,6 +1295,55 @@ fn compactHistoryAnswer(answer: []const u8) []const u8 {
     return std.mem.trimRight(u8, trimmed[0..cut], " \t\r\n");
 }
 
+fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8 {
+    var cursor: usize = 0;
+    var out_len: usize = 0;
+
+    while (cursor < text.len) {
+        const next_open = std.mem.indexOfPos(u8, text, cursor, thinking_open_tag);
+        const next_close = std.mem.indexOfPos(u8, text, cursor, thinking_close_tag);
+        const cut_at = switch (next_open != null or next_close != null) {
+            false => null,
+            true => blk: {
+                if (next_open == null) break :blk next_close;
+                if (next_close == null) break :blk next_open;
+                break :blk @min(next_open.?, next_close.?);
+            },
+        };
+
+        if (cut_at == null) {
+            const tail = text[cursor..];
+            if (out_len + tail.len > buf.len) return error.BufferTooSmall;
+            @memcpy(buf[out_len .. out_len + tail.len], tail);
+            out_len += tail.len;
+            break;
+        }
+
+        const cut = cut_at.?;
+        if (cut > cursor) {
+            const chunk = text[cursor..cut];
+            if (out_len + chunk.len > buf.len) return error.BufferTooSmall;
+            @memcpy(buf[out_len .. out_len + chunk.len], chunk);
+            out_len += chunk.len;
+        }
+
+        if (next_open != null and next_open.? == cut) {
+            const after_open = cut + thinking_open_tag.len;
+            if (std.mem.indexOfPos(u8, text, after_open, thinking_close_tag)) |close| {
+                cursor = close + thinking_close_tag.len;
+                while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
+                continue;
+            }
+            break;
+        }
+
+        cursor = cut + thinking_close_tag.len;
+        while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
+    }
+
+    return std.mem.trim(u8, buf[0..out_len], " \t\r\n");
+}
+
 fn hasDanglingTrailingQuote(text: []const u8) bool {
     const trimmed = std.mem.trimRight(u8, text, " \t\r\n");
     if (trimmed.len == 0 or trimmed[trimmed.len - 1] != '"') return false;
@@ -1271,7 +1352,7 @@ fn hasDanglingTrailingQuote(text: []const u8) bool {
         body = body[0 .. body.len - utf8_replacement.len];
     }
     body = std.mem.trimRight(u8, body, " \t\r\n");
-    if (body.len == 0) return false;
+    if (body.len == 0) return true;
     var quote_count: usize = 0;
     for (body) |c| {
         if (c == '"') quote_count += 1;
@@ -1343,17 +1424,23 @@ fn handleChatCompletions(
     if (skip_thinking_template) {
         parsed.enable_thinking = null;
     }
-    const sampling = forward_mod.SamplingParams{
+    if (comptime !runtime.supports_sampling_controls) {
+        if (parsed.temperature > 0.0001 or parsed.top_p < 0.9999) {
+            try conn.sendError(400, "invalid_request_error", "Metal server currently supports greedy decoding only (temperature=0, top_p=1)");
+            return;
+        }
+    }
+    const sampling = runtime.SamplingParams{
         .temperature = if (parsed.temperature <= 0.0001) 0.0 else std.math.clamp(parsed.temperature, 0.0, 2.0),
         .top_p = std.math.clamp(parsed.top_p, 0.0, 1.0),
         .repetition_penalty = if (parsed.temperature > 0.0001 or parsed.top_p < 0.9999) 1.08 else 1.0,
         .top_k = 64,
     };
-    const previous_logits_readback = engine.logits_readback_enabled;
+    const previous_logits_readback = runtime.logitsReadbackEnabled(engine);
     if (sampling.requiresLogitsReadback() and !previous_logits_readback) {
-        engine.enableLogitsReadback();
+        runtime.enableLogitsReadback(engine);
     }
-    defer engine.logits_readback_enabled = previous_logits_readback;
+    defer runtime.setLogitsReadbackEnabled(engine, previous_logits_readback);
 
     const prompt_capacity = estimateChatPromptBytes(parsed.roles, parsed.contents, supportsEnabledThinking(tokenizer, parsed.enable_thinking));
     const prompt_buf = allocator.alloc(u8, prompt_capacity) catch {
@@ -1386,6 +1473,7 @@ fn handleChatCompletions(
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
     }
+    server_state.setActiveContextTokens(@intCast(@min(prompt_tokens.len, std.math.maxInt(u32))));
 
     const ts = @divTrunc(std.time.timestamp(), 1);
     const max_tokens = parsed.max_tokens;
@@ -1493,11 +1581,13 @@ fn handleChatCompletions(
         var gen_text_buf: [32768]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
+        var sent_visible_len: usize = 0; // cleaned visible bytes already streamed when thinking is disabled
+        var visible_buf: [4096]u8 = undefined;
         var stopped = false;
         var finish_reason: FinishReason = .stop;
 
         if (max_tokens > 0) {
-            var prev_token = engine.sample(&state, sampling, random);
+            var prev_token = runtime.sample(engine, &state, sampling, random);
             var generated: u32 = 0;
 
             while (generated < max_tokens and prev_token != eos and !stopped) {
@@ -1509,11 +1599,11 @@ fn handleChatCompletions(
                 if (isReplacementArtifact(tok_text)) {
                     if (generated < max_tokens) {
                         if (conn.isPeerClosed()) return;
-                        engine.decodeStep(&state, prev_token, true) catch break;
+                        runtime.decodeStep(engine, &state, prev_token, true) catch break;
                         processed_generated_tokens.append(allocator, prev_token) catch {};
                         server_state.setActiveContextTokens(state.position);
                         if (conn.isPeerClosed()) return;
-                        prev_token = engine.sample(&state, sampling, random);
+                        prev_token = runtime.sample(engine, &state, sampling, random);
                         generated += 1;
                         continue;
                     }
@@ -1525,7 +1615,7 @@ fn handleChatCompletions(
                 }
 
                 // Add to pending queue
-                if (pending_count < pending_tokens.len) {
+                if (thinking_enabled and pending_count < pending_tokens.len) {
                     pending_tokens[pending_count] = prev_token;
                     pending_count += 1;
                 }
@@ -1564,11 +1654,19 @@ fn handleChatCompletions(
                 }
 
                 if (!is_partial) {
-                    // Safe to send all pending tokens
-                    for (pending_tokens[0..pending_count]) |tid| {
-                        streamToken(conn, tid, tokenizer, req_id, ts, model_name) catch return;
+                    if (thinking_enabled) {
+                        // Safe to send all pending tokens
+                        for (pending_tokens[0..pending_count]) |tid| {
+                            streamToken(conn, tid, tokenizer, req_id, ts, model_name) catch return;
+                        }
+                        pending_count = 0;
+                    } else {
+                        const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
+                        if (visible.len > sent_visible_len) {
+                            streamText(conn, visible[sent_visible_len..], req_id, ts, model_name) catch return;
+                            sent_visible_len = visible.len;
+                        }
                     }
-                    pending_count = 0;
                     sent_text_len = gen_text_len;
                 }
 
@@ -1577,11 +1675,11 @@ fn handleChatCompletions(
                 // Generate next token
                 if (generated < max_tokens) {
                     if (conn.isPeerClosed()) return;
-                    engine.decodeStep(&state, prev_token, true) catch break;
+                    runtime.decodeStep(engine, &state, prev_token, true) catch break;
                     processed_generated_tokens.append(allocator, prev_token) catch {};
                     server_state.setActiveContextTokens(state.position);
                     if (conn.isPeerClosed()) return;
-                    prev_token = engine.sample(&state, sampling, random);
+                    prev_token = runtime.sample(engine, &state, sampling, random);
                 } else break;
             }
 
@@ -1591,10 +1689,18 @@ fn handleChatCompletions(
 
             // Flush any remaining pending tokens (only if we didn't hit stop)
             if (!stopped) {
-                const pending_text = gen_text_buf[sent_text_len..gen_text_len];
-                const cleaned_pending = trimTrailingChatArtifacts(pending_text);
-                if (cleaned_pending.len > 0) {
-                    streamText(conn, cleaned_pending, req_id, ts, model_name) catch return;
+                if (thinking_enabled) {
+                    const pending_text = gen_text_buf[sent_text_len..gen_text_len];
+                    const cleaned_pending = trimTrailingChatArtifacts(pending_text);
+                    if (cleaned_pending.len > 0) {
+                        streamText(conn, cleaned_pending, req_id, ts, model_name) catch return;
+                    }
+                } else {
+                    const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
+                    const cleaned_visible = trimTrailingChatArtifacts(visible);
+                    if (cleaned_visible.len > sent_visible_len) {
+                        streamText(conn, cleaned_visible[sent_visible_len..], req_id, ts, model_name) catch return;
+                    }
                 }
             }
         }
@@ -1624,15 +1730,15 @@ fn handleChatCompletions(
         const ns_stops = chat_stop_strs[0..];
         var finish_reason: FinishReason = .stop;
         if (max_tokens > 0) {
-            var prev = engine.sample(&state, sampling, random);
+            var prev = runtime.sample(engine, &state, sampling, random);
             while (ns_gen < max_tokens and prev != ns_eos) {
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
-                    engine.decodeStep(&state, prev, true) catch break;
+                    runtime.decodeStep(engine, &state, prev, true) catch break;
                     processed_generated_tokens.append(allocator, prev) catch {};
                     server_state.setActiveContextTokens(state.position);
-                    prev = engine.sample(&state, sampling, random);
+                    prev = runtime.sample(engine, &state, sampling, random);
                     continue;
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
@@ -1643,10 +1749,10 @@ fn handleChatCompletions(
                 } else false;
                 if (hit) break;
                 if (ns_gen >= max_tokens) break;
-                engine.decodeStep(&state, prev, true) catch break;
+                runtime.decodeStep(engine, &state, prev, true) catch break;
                 processed_generated_tokens.append(allocator, prev) catch {};
                 server_state.setActiveContextTokens(state.position);
-                prev = engine.sample(&state, sampling, random);
+                prev = runtime.sample(engine, &state, sampling, random);
             }
             if (prev != ns_eos and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
                 finish_reason = .length;
@@ -1654,10 +1760,12 @@ fn handleChatCompletions(
         }
 
         // Escape the full text for JSON
-        const trimmed_text = if (thinking_enabled)
-            trimTrailingChatArtifacts(text_buf.items)
+        var strip_buf: [16384]u8 = undefined;
+        const base_text = if (thinking_enabled)
+            text_buf.items
         else
-            sanitizeAssistantHistoryContent(text_buf.items);
+            stripThinkingForDisabledResponse(text_buf.items, &strip_buf) catch text_buf.items;
+        const trimmed_text = trimTrailingChatArtifacts(base_text);
         var thinking_buf: [16384]u8 = undefined;
         const prefixed_text = prefixThinkingEnvelope(trimmed_text, thinking_enabled, &thinking_buf) catch trimmed_text;
         var sanitized_thinking_buf: [16384]u8 = undefined;
@@ -1672,9 +1780,9 @@ fn handleChatCompletions(
         const resp = std.fmt.bufPrint(&resp_buf,
             \\{{"id":"{s}","object":"chat.completion","created":{d},"model":"{s}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{s}"}},"finish_reason":"{s}"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
         , .{
-            req_id,                     ts,                model_name,
-            escaped_text,               @tagName(finish_reason), prompt_tokens.len, ns_gen,
-            prompt_tokens.len + ns_gen,
+            req_id,       ts,                         model_name,
+            escaped_text, @tagName(finish_reason),    prompt_tokens.len,
+            ns_gen,       prompt_tokens.len + ns_gen,
         }) catch {
             try conn.sendError(500, "internal_error", "Response too large");
             return;
@@ -1697,12 +1805,13 @@ fn handleCompletions(
     body: []const u8,
     allocator: std.mem.Allocator,
 ) !void {
-    const parsed = parseJsonFields(body) catch {
+    var parsed = parseRequestBody(body, allocator) catch {
         try conn.sendError(400, "invalid_request_error", "Invalid JSON");
         return;
     };
+    defer parsed.deinit();
 
-    if (parsed.prompt_text.len == 0) {
+    if (parsed.prompt.len == 0) {
         try conn.sendError(400, "invalid_request_error", "Field 'prompt' is required");
         return;
     }
@@ -1718,7 +1827,7 @@ fn handleCompletions(
     const model_name = resources.display_name;
 
     // Tokenize raw prompt (no chat template)
-    const prompt_tokens = tokenizer.encodePrompt(parsed.prompt_text, allocator) catch {
+    const prompt_tokens = tokenizer.encodePrompt(parsed.prompt, allocator) catch {
         try conn.sendError(500, "internal_error", "Tokenization failed");
         return;
     };
@@ -1765,8 +1874,13 @@ fn handleCompletions(
 
 // ── Helpers ──────────────────────────────────────────────────
 
+const RawMessage = struct {
+    role: []const u8 = "",
+    content: []const u8 = "",
+};
+
 /// Minimal JSON field extraction (no full parser — just find key fields).
-const ParsedRequest = struct {
+const ParsedJsonFields = struct {
     model_id: []const u8,
     messages_content: []const u8, // last user message content
     prompt_text: []const u8, // raw prompt for /v1/completions
@@ -1777,8 +1891,8 @@ const ParsedRequest = struct {
     enable_thinking: ?bool,
 };
 
-fn parseJsonFields(body: []const u8) !ParsedRequest {
-    var result = ParsedRequest{
+fn parseJsonFields(body: []const u8) !ParsedJsonFields {
+    var result = ParsedJsonFields{
         .model_id = "",
         .messages_content = "",
         .prompt_text = "",
@@ -1877,10 +1991,190 @@ fn findStringEnd(s: []const u8) ?usize {
         if (s[i] == '\\') {
             i += 1;
             continue;
-        } // skip escaped chars
+        }
         if (s[i] == '"') return i;
     }
     return null;
+}
+
+const RawRequestBody = struct {
+    model: []const u8 = "",
+    messages: ?[]RawMessage = null,
+    prompt: []const u8 = "",
+    max_tokens: u32 = 256,
+    stream: bool = false,
+    temperature: f32 = 1.0,
+};
+
+const JsonMessage = struct {
+    role: []u8 = &[_]u8{},
+    content: []u8 = &[_]u8{},
+};
+
+const ParsedRequest = struct {
+    model_id: []u8 = &[_]u8{},
+    messages: []JsonMessage = &[_]JsonMessage{},
+    prompt: []u8 = &[_]u8{},
+    max_tokens: u32 = 256,
+    stream: bool = false,
+    temperature: f32 = 1.0,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *ParsedRequest) void {
+        if (self.model_id.len > 0) self.allocator.free(self.model_id);
+        for (self.messages) |msg| {
+            if (msg.role.len > 0) self.allocator.free(msg.role);
+            if (msg.content.len > 0) self.allocator.free(msg.content);
+        }
+        if (self.messages.len > 0) self.allocator.free(self.messages);
+        if (self.prompt.len > 0) self.allocator.free(self.prompt);
+        self.* = undefined;
+    }
+};
+
+fn parseRequestBody(body: []const u8, allocator: std.mem.Allocator) !ParsedRequest {
+    const parsed = try std.json.parseFromSlice(RawRequestBody, allocator, body, .{
+        .ignore_unknown_fields = true,
+        .duplicate_field_behavior = .use_last,
+        .allocate = .alloc_always,
+    });
+    defer parsed.deinit();
+
+    var result = ParsedRequest{
+        .allocator = allocator,
+    };
+    errdefer result.deinit();
+
+    result.model_id = try decodeJsonText(allocator, parsed.value.model);
+    result.max_tokens = parsed.value.max_tokens;
+    result.stream = parsed.value.stream;
+    result.temperature = parsed.value.temperature;
+    result.prompt = try decodeJsonText(allocator, parsed.value.prompt);
+
+    if (parsed.value.messages) |messages| {
+        result.messages = try allocator.alloc(JsonMessage, messages.len);
+        for (messages, 0..) |msg, i| {
+            result.messages[i] = .{
+                .role = try decodeJsonText(allocator, msg.role),
+                .content = try decodeJsonText(allocator, msg.content),
+            };
+        }
+    }
+
+    return result;
+}
+
+fn decodeJsonText(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    if (input.len == 0) return &[_]u8{};
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        if (input[i] != '\\' or i + 1 >= input.len) {
+            try out.append(allocator, input[i]);
+            continue;
+        }
+
+        i += 1;
+        switch (input[i]) {
+            '"' => try out.append(allocator, '"'),
+            '\\' => try out.append(allocator, '\\'),
+            '/' => try out.append(allocator, '/'),
+            'b' => try out.append(allocator, 0x08),
+            'f' => try out.append(allocator, 0x0c),
+            'n' => try out.append(allocator, '\n'),
+            'r' => try out.append(allocator, '\r'),
+            't' => try out.append(allocator, '\t'),
+            else => try out.append(allocator, input[i]),
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn normalizeRole(role: []const u8) []const u8 {
+    if (std.mem.eql(u8, role, "system") or
+        std.mem.eql(u8, role, "user") or
+        std.mem.eql(u8, role, "assistant"))
+    {
+        return role;
+    }
+    return "user";
+}
+
+test "decodeJsonText handles common escape sequences" {
+    const decoded = try decodeJsonText(std.testing.allocator, "hello\\n\\\"world\\\"\\\\");
+    defer if (decoded.len > 0) std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings("hello\n\"world\"\\", decoded);
+}
+
+test "decodeJsonText empty string" {
+    const decoded = try decodeJsonText(std.testing.allocator, "");
+    defer if (decoded.len > 0) std.testing.allocator.free(decoded);
+    try std.testing.expectEqual(@as(usize, 0), decoded.len);
+}
+
+test "parseRequestBody extracts stream flag and user message" {
+    const body = "{\"model\":\"qwen\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}";
+    var parsed = try parseRequestBody(body, std.testing.allocator);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.stream);
+    try std.testing.expectEqualStrings("qwen", parsed.model_id);
+    try std.testing.expectEqual(@as(usize, 1), parsed.messages.len);
+    try std.testing.expectEqualStrings("user", parsed.messages[0].role);
+    try std.testing.expectEqualStrings("hello", parsed.messages[0].content);
+}
+
+test "parseRequestBody extracts max_tokens and prompt" {
+    const body = "{\"model\":\"qwen\",\"prompt\":\"test\",\"max_tokens\":128}";
+    var parsed = try parseRequestBody(body, std.testing.allocator);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("qwen", parsed.model_id);
+    try std.testing.expectEqual(@as(u32, 128), parsed.max_tokens);
+    try std.testing.expectEqualStrings("test", parsed.prompt);
+}
+
+test "parseRequestBody defaults when fields missing" {
+    const body = "{\"model\":\"qwen\"}";
+    var parsed = try parseRequestBody(body, std.testing.allocator);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("qwen", parsed.model_id);
+    try std.testing.expect(!parsed.stream);
+    try std.testing.expectEqual(@as(u32, 256), parsed.max_tokens);
+    try std.testing.expectEqual(@as(usize, 0), parsed.messages.len);
+    try std.testing.expectEqualStrings("", parsed.prompt);
+}
+
+test "parseRequestBody handles escaped content and multiple messages" {
+    const body =
+        \\{"messages":[{"role":"assistant","content":"literal \"content\":\"noise\""},{"role":"user","content":"line1\\nline2"}],"stream":true}
+    ;
+    var parsed = try parseRequestBody(body, std.testing.allocator);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.messages.len);
+    try std.testing.expectEqualStrings("assistant", parsed.messages[0].role);
+    try std.testing.expectEqualStrings("literal \"content\":\"noise\"", parsed.messages[0].content);
+    try std.testing.expectEqualStrings("line1\nline2", parsed.messages[1].content);
+}
+
+test "normalizeRole falls back to user" {
+    try std.testing.expectEqualStrings("user", normalizeRole("tool"));
+    try std.testing.expectEqualStrings("assistant", normalizeRole("assistant"));
+}
+
+test "ParsedRequest defaults" {
+    var result = ParsedRequest{
+        .allocator = std.testing.allocator,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 0), result.model_id.len);
+    try std.testing.expectEqual(@as(usize, 0), result.messages.len);
+    try std.testing.expectEqual(@as(usize, 0), result.prompt.len);
+    try std.testing.expectEqual(@as(u32, 256), result.max_tokens);
+    try std.testing.expect(!result.stream);
+    try std.testing.expectEqual(@as(f32, 1.0), result.temperature);
 }
 
 fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
@@ -2474,6 +2768,30 @@ test "historyAssistantContent strips streamed reasoning before caching" {
     try std.testing.expectEqualStrings("<think>\n\n</think>\n\nAnswer text.", cached);
 }
 
+test "stripThinkingForDisabledResponse removes complete think block and keeps answer" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("<think>\n17 * 24 = 408\n</think>\n\n408", &buf);
+    try std.testing.expectEqualStrings("408", stripped);
+}
+
+test "stripThinkingForDisabledResponse truncates partial think block after visible answer" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("Hello! How can I help you today?\"\n\n<think>\nThinking Process:\n", &buf);
+    const cleaned = trimTrailingChatArtifacts(stripped);
+    try std.testing.expectEqualStrings("Hello! How can I help you today?", cleaned);
+}
+
+test "stripThinkingForDisabledResponse preserves text outside think tags" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("Visible text\n<think>\nhidden\n</think>\n\nMore text", &buf);
+    try std.testing.expectEqualStrings("Visible text\nMore text", stripped);
+}
+
+test "hasDanglingTrailingQuote treats standalone trailing quote as dangling" {
+    try std.testing.expect(hasDanglingTrailingQuote("\""));
+    try std.testing.expect(hasDanglingTrailingQuote("answer\""));
+}
+
 test "supportsEnabledThinking requires tokenizer support and request flag" {
     var qwen_tok = makeTestTokenizer(
         \\{%- if add_generation_prompt %}
@@ -2586,7 +2904,6 @@ test "buildHealthJson includes request counts and uptime" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_tokens\":1024") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"gpu_context_capacity_tokens\":4096") != null);
 }
-
 test "findFirstStop picks earliest chat control marker" {
     const text = "Hello<|im_start|>assistant<|im_end|>";
     try std.testing.expectEqual(@as(?usize, 5), findFirstStop(text, chat_stop_strs[0..]));

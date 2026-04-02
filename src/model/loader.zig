@@ -4,6 +4,7 @@
 //! configuration and uploaded tensors consumed by the inference runtime.
 const std = @import("std");
 const gguf = @import("gguf.zig");
+const config_mod = @import("config.zig");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
 const Buffer = @import("../vulkan/buffer.zig").Buffer;
@@ -12,58 +13,10 @@ const CommandPool = @import("../vulkan/command.zig").CommandPool;
 
 const log = std.log.scoped(.loader);
 
-/// Supported model families inferred from GGUF architecture metadata.
-pub const Architecture = enum {
-    llama,
-    mistral,
-    qwen2,
-    qwen2_moe,
-    qwen35,
-    mamba,
-    jamba,
-    unknown,
-};
+// Re-export from config.zig for backward compatibility
+pub const Architecture = config_mod.Architecture;
 
-/// Normalized model dimensions and routing metadata extracted from GGUF fields.
-pub const ModelConfig = struct {
-    /// Model architecture family.
-    architecture: Architecture,
-    /// Number of layers.
-    n_layers: u32,
-    /// Number of query heads.
-    n_heads: u32,
-    /// Number of KV heads (GQA).
-    n_kv_heads: u32,
-    /// Per-head dimension.
-    head_dim: u32,
-    /// Hidden state width.
-    hidden_dim: u32,
-    /// FFN intermediate width.
-    intermediate_dim: u32,
-    /// Vocabulary size.
-    vocab_size: u32,
-    /// Max sequence length.
-    context_length: u32,
-    /// RoPE base frequency.
-    rope_freq_base: f32,
-    /// RMSNorm epsilon from GGUF metadata.
-    rms_norm_eps: f32 = 1e-6,
-    // MoE fields
-    /// Total MoE experts (0 for dense).
-    n_experts: u32,
-    /// Active experts per token.
-    n_experts_used: u32,
-    // RoPE
-    rope_dim: u32, // number of dimensions to rotate (0 = all)
-    // SSM / delta-net fields (hybrid models)
-    ssm_d_conv: u32, // conv kernel size (typically 4)
-    ssm_d_inner: u32, // inner dimension (typically 4096)
-    ssm_d_state: u32, // state size per head (typically 128)
-    ssm_dt_rank: u32, // number of V heads (typically 32)
-    ssm_n_group: u32, // number of K heads / groups (typically 16)
-    full_attn_interval: u32, // every Nth layer is full attention (typically 4)
-    shared_expert_intermediate_dim: u32, // shared expert FFN dim (may differ from per-expert)
-};
+pub const ModelConfig = config_mod.ModelConfig;
 
 pub const ModelInspection = struct {
     config: ModelConfig,
@@ -120,19 +73,7 @@ pub const Model = struct {
     }
 };
 
-/// Parse architecture string from GGUF metadata.
-fn parseArchitecture(arch_str: []const u8) Architecture {
-    if (std.mem.eql(u8, arch_str, "llama")) return .llama;
-    if (std.mem.eql(u8, arch_str, "mistral")) return .mistral;
-    if (std.mem.eql(u8, arch_str, "qwen2")) return .qwen2;
-    if (std.mem.eql(u8, arch_str, "qwen2moe")) return .qwen2_moe;
-    if (std.mem.eql(u8, arch_str, "qwen3moe")) return .qwen2_moe;
-    if (std.mem.eql(u8, arch_str, "qwen35moe")) return .qwen2_moe;
-    if (std.mem.eql(u8, arch_str, "qwen35")) return .qwen35;
-    if (std.mem.eql(u8, arch_str, "mamba")) return .mamba;
-    if (std.mem.eql(u8, arch_str, "jamba")) return .jamba;
-    return .unknown;
-}
+const parseArchitecture = config_mod.parseArchitecture;
 
 /// Extract model configuration from GGUF metadata.
 fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelConfig {
@@ -179,10 +120,31 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         break :blk gf.getU32(key) orelse 0;
     };
 
-    // Shared expert intermediate dim: feed_forward_length (different from per-expert dim in MoE models)
+    // Shared expert intermediate dim: prefer metadata, but Qwen3.5 GGUFs may omit it.
+    // Fall back to the actual shared-expert tensor shape when the metadata is zero.
     const shared_expert_intermediate_dim = blk: {
+        const shared_key = std.fmt.bufPrint(&key_buf, "{s}.expert_shared_feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
+        if (gf.getU32(shared_key)) |v| {
+            if (v > 0) break :blk v;
+        }
         const key = std.fmt.bufPrint(&key_buf, "{s}.feed_forward_length", .{prefix}) catch break :blk @as(u32, 0);
-        break :blk gf.getU32(key) orelse 0;
+        if (gf.getU32(key)) |v| {
+            if (v > 0) break :blk v;
+        }
+
+        var name_buf: [96]u8 = undefined;
+        for (0..n_layers) |layer| {
+            const gate_name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_gate_shexp.weight", .{layer}) catch break;
+            if (gf.findTensor(gate_name)) |t| break :blk @as(u32, @intCast(t.dims[1]));
+
+            const up_name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_up_shexp.weight", .{layer}) catch break;
+            if (gf.findTensor(up_name)) |t| break :blk @as(u32, @intCast(t.dims[1]));
+
+            const down_name = std.fmt.bufPrint(&name_buf, "blk.{d}.ffn_down_shexp.weight", .{layer}) catch break;
+            if (gf.findTensor(down_name)) |t| break :blk @as(u32, @intCast(t.dims[0]));
+        }
+
+        break :blk @as(u32, 0);
     };
 
     const vocab_size = blk: {

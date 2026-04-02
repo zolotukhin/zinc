@@ -4,9 +4,10 @@
 //! switching flow.
 const std = @import("std");
 const builtin = @import("builtin");
+const gpu = @import("../gpu/interface.zig");
 const catalog = @import("catalog.zig");
-const diagnostics = @import("../diagnostics.zig");
-const loader_mod = @import("loader.zig");
+const diagnostics = if (gpu.is_metal) @import("../diagnostics_metal.zig") else @import("../diagnostics.zig");
+const loader_mod = if (gpu.is_metal) @import("loader_metal.zig") else @import("loader.zig");
 
 pub const RuntimePaths = struct {
     cache_root: []u8,
@@ -75,6 +76,90 @@ pub const DownloadObserver = struct {
 
 const progress_bar_width = 28;
 const progress_update_interval_ns = 150 * std.time.ns_per_ms;
+const redirect_buffer_len = 4096;
+
+const UpstreamArtifactMetadata = struct {
+    size_bytes: ?u64 = null,
+    sha256_hex: ?[64]u8 = null,
+};
+
+fn estimateRequiredBytes(inspection: loader_mod.ModelInspection) u64 {
+    if (comptime gpu.is_metal) {
+        return diagnostics.estimateUnifiedFit(inspection, std.math.maxInt(u64), std.math.maxInt(u64)).total_unified_bytes;
+    }
+    return diagnostics.estimateFit(inspection, std.math.maxInt(u64)).total_device_local_bytes;
+}
+
+fn findHeaderValue(head: std.http.Client.Response.Head, name: []const u8) ?[]const u8 {
+    var it = head.iterateHeaders();
+    while (it.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
+}
+
+fn canonicalizeSha256Header(value: []const u8) ?[64]u8 {
+    const trimmed = std.mem.trim(u8, value, "\" ");
+    if (trimmed.len != 64) return null;
+
+    var out: [64]u8 = undefined;
+    for (trimmed, 0..) |c, i| {
+        if (!std.ascii.isHex(c)) return null;
+        out[i] = std.ascii.toLower(c);
+    }
+    return out;
+}
+
+fn fetchUpstreamArtifactMetadata(client: *std.http.Client, uri: std.Uri) !UpstreamArtifactMetadata {
+    var req = try client.request(.HEAD, uri, .{ .redirect_behavior = .unhandled });
+    defer req.deinit();
+    try req.sendBodiless();
+
+    const response = try req.receiveHead(&.{});
+    return try extractUpstreamArtifactMetadata(response.head);
+}
+
+fn extractUpstreamArtifactMetadata(head: std.http.Client.Response.Head) !UpstreamArtifactMetadata {
+    const status_class = head.status.class();
+    if (status_class != .success and status_class != .redirect) return error.DownloadFailed;
+
+    var metadata = UpstreamArtifactMetadata{};
+    if (findHeaderValue(head, "x-linked-size")) |value| {
+        metadata.size_bytes = std.fmt.parseInt(u64, std.mem.trim(u8, value, " "), 10) catch return error.InvalidUpstreamMetadata;
+    } else if (status_class == .success) {
+        metadata.size_bytes = head.content_length;
+    }
+    if (findHeaderValue(head, "x-linked-etag")) |value| {
+        metadata.sha256_hex = canonicalizeSha256Header(value);
+    }
+    return metadata;
+}
+
+fn preflightCatalogDrift(
+    entry: catalog.CatalogEntry,
+    metadata: UpstreamArtifactMetadata,
+    writer: anytype,
+) !void {
+    if (metadata.size_bytes) |size_bytes| {
+        if (size_bytes != entry.size_bytes) {
+            try writer.print(
+                "Catalog note: upstream size is {d:.2} GiB but pinned catalog size is {d:.2} GiB; continuing because sha256 pin is authoritative.\n",
+                .{ bytesToGiB(size_bytes), bytesToGiB(entry.size_bytes) },
+            );
+        }
+    }
+
+    if (metadata.sha256_hex) |sha256_hex| {
+        if (!std.ascii.eqlIgnoreCase(sha256_hex[0..], entry.sha256)) {
+            try writer.print(
+                "Catalog stale: upstream sha256 is {s} but pinned catalog sha256 is {s}\n",
+                .{ sha256_hex[0..], entry.sha256 },
+            );
+            try writer.writeAll("Refresh src/model/catalog.zig before pulling this managed model.\n");
+            return error.CatalogMetadataMismatch;
+        }
+    }
+}
 
 pub fn runtimePaths(allocator: std.mem.Allocator) !RuntimePaths {
     return .{
@@ -257,11 +342,11 @@ pub fn describeFit(entry: catalog.CatalogEntry, vram_budget_bytes: u64, allocato
         }
 
         const inspection = try loader_mod.inspectModel(installed_path, allocator);
-        const fit = diagnostics.estimateFit(inspection, vram_budget_bytes);
-        try writeManifest(manifest_path, entry, inspection.file_size, fit.total_device_local_bytes, allocator);
+        const required_bytes = estimateRequiredBytes(inspection);
+        try writeManifest(manifest_path, entry, inspection.file_size, required_bytes, allocator);
         return .{
-            .required_vram_bytes = fit.total_device_local_bytes,
-            .fits_current_gpu = fit.total_device_local_bytes <= vram_budget_bytes,
+            .required_vram_bytes = required_bytes,
+            .fits_current_gpu = required_bytes <= vram_budget_bytes,
             .exact = true,
         };
     }
@@ -335,6 +420,13 @@ pub fn pullModelWithObserver(
     try writer.print("Resolving model: {s}\n", .{entry.id});
     try writer.print("Downloading: {s}\n", .{entry.download_url});
 
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    const uri = try std.Uri.parse(entry.download_url);
+    const upstream_metadata = try fetchUpstreamArtifactMetadata(&client, uri);
+    try preflightCatalogDrift(entry, upstream_metadata, writer);
+
     const partial_file = try std.fs.createFileAbsolute(partial_path, .{ .truncate = true });
     defer {
         var close_file = partial_file;
@@ -345,15 +437,12 @@ pub fn pullModelWithObserver(
     var file_buffer: [16 * 1024]u8 = undefined;
     var file_writer = partial_file.writerStreaming(&file_buffer);
 
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    const uri = try std.Uri.parse(entry.download_url);
     var req = try client.request(.GET, uri, .{});
     defer req.deinit();
     try req.sendBodiless();
 
-    var response = try req.receiveHead(&.{});
+    var redirect_buffer: [redirect_buffer_len]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
     if (response.head.status.class() != .success) return error.DownloadFailed;
 
     const total_bytes = response.head.content_length;
@@ -414,8 +503,7 @@ pub fn pullModelWithObserver(
     std.fs.deleteFileAbsolute(final_path) catch {};
     try std.fs.renameAbsolute(partial_path, final_path);
     const inspection = try loader_mod.inspectModel(final_path, allocator);
-    const fit = diagnostics.estimateFit(inspection, std.math.maxInt(u64));
-    try writeManifest(manifest_path, entry, stat.size, fit.total_device_local_bytes, allocator);
+    try writeManifest(manifest_path, entry, stat.size, estimateRequiredBytes(inspection), allocator);
     if (observer) |obs| {
         if (obs.on_complete) |cb| cb(obs.context, stat.size);
     }
@@ -779,6 +867,56 @@ test "buildProgressBar reflects partial and complete downloads" {
     const full_bar = buildProgressBar(&full, 100, 100);
     try std.testing.expectEqual(@as(usize, progress_bar_width), full_bar.len);
     try std.testing.expect(std.mem.indexOfScalar(u8, full_bar, ' ') == null);
+}
+
+test "extractUpstreamArtifactMetadata reads x-linked headers from redirect response" {
+    const response_bytes =
+        "HTTP/1.1 302 Found\r\n" ++
+        "x-linked-size: 22241950336\r\n" ++
+        "x-linked-etag: \"1b0ac637dfa092bbba2793977db9485a40c4f8b42df5fe342f0076d61b66ae83\"\r\n" ++
+        "location: https://example.invalid/file.gguf\r\n\r\n";
+
+    const head = try std.http.Client.Response.Head.parse(response_bytes);
+    const metadata = try extractUpstreamArtifactMetadata(head);
+
+    try std.testing.expectEqual(@as(?u64, 22_241_950_336), metadata.size_bytes);
+    try std.testing.expect(metadata.sha256_hex != null);
+    try std.testing.expectEqualStrings(
+        "1b0ac637dfa092bbba2793977db9485a40c4f8b42df5fe342f0076d61b66ae83",
+        metadata.sha256_hex.?[0..],
+    );
+}
+
+test "preflightCatalogDrift fails fast on upstream drift" {
+    const entry = catalog.find("qwen35-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
+    const drifted = UpstreamArtifactMetadata{
+        .size_bytes = entry.size_bytes + 1,
+        .sha256_hex = canonicalizeSha256Header("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").?,
+    };
+
+    const Sink = struct {
+        fn print(_: *@This(), comptime _: []const u8, _: anytype) !void {}
+        fn writeAll(_: *@This(), _: []const u8) !void {}
+    };
+    var sink = Sink{};
+
+    try std.testing.expectError(error.CatalogMetadataMismatch, preflightCatalogDrift(entry.*, drifted, &sink));
+}
+
+test "preflightCatalogDrift allows size-only drift" {
+    const entry = catalog.find("qwen35-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
+    const drifted = UpstreamArtifactMetadata{
+        .size_bytes = entry.size_bytes + 1,
+        .sha256_hex = canonicalizeSha256Header(entry.sha256).?,
+    };
+
+    const Sink = struct {
+        fn print(_: *@This(), comptime _: []const u8, _: anytype) !void {}
+        fn writeAll(_: *@This(), _: []const u8) !void {}
+    };
+    var sink = Sink{};
+
+    try preflightCatalogDrift(entry.*, drifted, &sink);
 }
 
 test "removeInstalledModelAtPaths deletes known artifacts and empty dir" {

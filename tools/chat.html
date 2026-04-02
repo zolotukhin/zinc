@@ -23,6 +23,13 @@ header .status.ok { color: #4ecca3; }
 .msg.assistant .bubble { background: #16213e; border: 1px solid #0f3460; }
 .msg .role { font-size: 11px; color: #666; margin-bottom: 4px; }
 .msg.user .role { text-align: right; }
+.msg .meta { font-size: 11px; color: #7f8aa6; margin-top: 4px; }
+.reasoning { margin: 0 0 10px; border: 1px solid #0f3460; border-radius: 10px; background: #12203a; overflow: hidden; }
+.reasoning summary { cursor: pointer; color: #9aa6c1; font-size: 12px; list-style: none; padding: 8px 12px; user-select: none; }
+.reasoning summary::-webkit-details-marker { display: none; }
+.reasoning[open] summary { color: #e0e0e0; }
+.reasoning .body { padding: 0 12px 12px; color: #9aa6c1; font-size: 13px; line-height: 1.6; white-space: pre-wrap; border-top: 1px solid #0f3460; }
+.reasoning .placeholder { opacity: 0.85; font-style: italic; }
 #input-area { padding: 12px 20px; background: #16213e; border-top: 1px solid #0f3460; display: flex; gap: 8px; }
 #input-area textarea { flex: 1; background: #1a1a2e; border: 1px solid #0f3460; color: #e0e0e0; padding: 10px; border-radius: 8px; font-size: 14px; font-family: inherit; resize: none; min-height: 44px; max-height: 120px; }
 #input-area textarea:focus { outline: none; border-color: #e94560; }
@@ -37,6 +44,7 @@ header .status.ok { color: #4ecca3; }
   <h1>ZINC Chat</h1>
   <span id="status" class="status">Connecting...</span>
   <span id="model-name" class="status"></span>
+  <span id="stats" class="status"></span>
 </header>
 <div class="config">
   <label>API:</label>
@@ -56,6 +64,7 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 const statusEl = document.getElementById('status');
 const modelEl = document.getElementById('model-name');
+const statsEl = document.getElementById('stats');
 const apiUrlInput = document.getElementById('api-url');
 let conversationHistory = [];
 
@@ -98,6 +107,97 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function renderReasoningBlock(text, isPartial) {
+  const trimmed = text.trim();
+  if (!trimmed && !isPartial) return '';
+  const label = isPartial ? 'Thinking...' : 'Reasoning';
+  const body = trimmed ? escapeHtml(trimmed) : '<span class="placeholder">Waiting for reasoning...</span>';
+  return `<details class="reasoning"${isPartial ? ' open' : ''}><summary>${label}</summary><div class="body">${body}</div></details>`;
+}
+
+function stripLeadingThinkNoise(text) {
+  const firstThink = text.indexOf('<think>');
+  if (firstThink <= 0 || firstThink > 24) return text;
+  const prefix = text.slice(0, firstThink).trim();
+  if (!prefix) return text.slice(firstThink);
+  if (prefix.length <= 8 && !/\s/.test(prefix)) return text.slice(firstThink);
+  return text;
+}
+
+function renderAssistant(raw) {
+  const normalized = stripLeadingThinkNoise(raw
+    .replace(/<\|im_start\|>\w*\n?/g, '')
+    .replace(/<\|im_end\|>/g, ''));
+  let html = '';
+  let cursor = 0;
+  while (cursor < normalized.length) {
+    const thinkStart = normalized.indexOf('<think>', cursor);
+    if (thinkStart === -1) {
+      const tail = normalized.slice(cursor).trim();
+      if (tail) html += escapeHtml(tail).replace(/\n/g, '<br>');
+      break;
+    }
+
+    const before = normalized.slice(cursor, thinkStart).trim();
+    if (before) html += escapeHtml(before).replace(/\n/g, '<br>');
+
+    const bodyStart = thinkStart + '<think>'.length;
+    const thinkEnd = normalized.indexOf('</think>', bodyStart);
+    if (thinkEnd === -1) {
+      html += renderReasoningBlock(normalized.slice(bodyStart), true);
+      break;
+    }
+
+    html += renderReasoningBlock(normalized.slice(bodyStart, thinkEnd), false);
+    cursor = thinkEnd + '</think>'.length;
+  }
+
+  const cleanAnswer = normalized
+    .replace(/<think>[\s\S]*?<\/think>\s*/g, ' ')
+    .replace(/<think>[\s\S]*$/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!html && cleanAnswer) html = escapeHtml(cleanAnswer).replace(/\n/g, '<br>');
+  return { html, cleanAnswer };
+}
+
+function formatDuration(ms) {
+  const secs = Math.max(ms, 0) / 1000;
+  return (secs >= 10 ? secs.toFixed(0) : secs.toFixed(1)) + 's';
+}
+
+function formatRate(tokens, ms) {
+  if (tokens <= 0 || ms <= 0) return null;
+  return (tokens / (ms / 1000)).toFixed(1);
+}
+
+function buildLiveStats(startedAt, firstTokenAt, streamedTokens) {
+  const now = performance.now();
+  if (!firstTokenAt) return 'Prefill ' + formatDuration(now - startedAt);
+  const parts = ['TTFT ' + formatDuration(firstTokenAt - startedAt)];
+  const rate = formatRate(Math.max(streamedTokens - 1, 0), now - firstTokenAt);
+  parts.push(rate ? rate + ' tok/s' : 'Generating...');
+  return parts.join(' · ');
+}
+
+function buildFinalStats(startedAt, firstTokenAt, streamedTokens) {
+  const endedAt = performance.now();
+  const totalMs = endedAt - startedAt;
+  if (!firstTokenAt) {
+    return {
+      header: 'No output · ' + formatDuration(totalMs),
+      meta: '0 streamed · ' + formatDuration(totalMs) + ' total',
+    };
+  }
+  const ttftMs = firstTokenAt - startedAt;
+  const genMs = endedAt - firstTokenAt;
+  const rate = formatRate(Math.max(streamedTokens - 1, 0), genMs);
+  return {
+    header: 'TTFT ' + formatDuration(ttftMs) + (rate ? ' · ' + rate + ' tok/s' : ''),
+    meta: streamedTokens + ' streamed · TTFT ' + formatDuration(ttftMs) + (rate ? ' · ' + rate + ' gen tok/s' : '') + ' · ' + formatDuration(totalMs) + ' total',
+  };
+}
+
 async function send() {
   const text = input.value.trim();
   if (!text) return;
@@ -109,6 +209,10 @@ async function send() {
 
   const bubble = addMessage('assistant', '');
   let fullText = '';
+  let streamedTokens = 0;
+  let requestStartedAt = performance.now();
+  let firstTokenAt = 0;
+  statsEl.textContent = 'Prefill 0.0s';
 
   try {
     const maxTokens = parseInt(document.getElementById('max-tokens').value) || 256;
@@ -142,14 +246,28 @@ async function send() {
           const chunk = JSON.parse(data);
           const content = chunk.choices?.[0]?.delta?.content;
           if (content) {
+            if (content.includes('<|im_end') || content.includes('<|im_start')) continue;
+            if (!firstTokenAt) firstTokenAt = performance.now();
+            streamedTokens++;
             fullText += content;
-            bubble.textContent = fullText;
+            const rendered = renderAssistant(fullText);
+            bubble.innerHTML = rendered.html;
+            statsEl.textContent = buildLiveStats(requestStartedAt, firstTokenAt, streamedTokens);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
           }
         } catch(e) {}
       }
+      if (!firstTokenAt) statsEl.textContent = buildLiveStats(requestStartedAt, firstTokenAt, streamedTokens);
     }
-    conversationHistory.push({ role: 'assistant', content: fullText });
+    const rendered = renderAssistant(fullText);
+    bubble.innerHTML = rendered.html;
+    const stats = buildFinalStats(requestStartedAt, firstTokenAt, streamedTokens);
+    statsEl.textContent = stats.header;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = stats.meta;
+    bubble.parentElement.appendChild(meta);
+    conversationHistory.push({ role: 'assistant', content: rendered.cleanAnswer });
   } catch(e) {
     bubble.textContent = 'Error: ' + e.message;
   }

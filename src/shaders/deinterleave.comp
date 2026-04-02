@@ -1,6 +1,6 @@
 #version 460
-// Deinterleave Q+gate from element-interleaved layout to separate buffers
-// Input layout per head: [Q_0, gate_0, Q_1, gate_1, ..., Q_{hd-1}, gate_{hd-1}]
+// Deinterleave Q+gate from per-head block layout to separate buffers.
+// Input layout per head: [Q_0, Q_1, ..., Q_{hd-1}, gate_0, gate_1, ..., gate_{hd-1}]
 // Output Q: [Q_0, Q_1, ..., Q_{hd-1}] per head
 // Output gate: [gate_0, gate_1, ..., gate_{hd-1}] per head
 
@@ -23,9 +23,10 @@ void main() {
     uint head = i / head_dim;
     uint dim = i % head_dim;
 
-    // Input has 2 * head_dim elements per head (interleaved Q and gate)
-    uint in_idx = head * head_dim * 2 + dim * 2;      // Q at even indices
-    uint in_idx_g = head * head_dim * 2 + dim * 2 + 1; // gate at odd indices
+    // Input has 2 * head_dim elements per head laid out as [Q block][gate block].
+    uint head_base = head * head_dim * 2;
+    uint in_idx = head_base + dim;
+    uint in_idx_g = head_base + head_dim + dim;
 
     q[i] = x[in_idx];
     g[i] = x[in_idx_g];

@@ -1,0 +1,20 @@
+# Reference Output: llama.cpp Metal on Mac Studio M4 Max 64 GB
+# Model: Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+# Command: llama-cli -ngl 99 -c 4096 -p "The capital of France is" -n 32 --temp 0
+# Date: 2026-03-29
+# Build: afe65aa
+
+## Performance
+Prefill: 213.8 tok/s
+Generation: 76.2 tok/s
+
+## Notes
+- Model generates reasoning tokens (<think>...</think>) before answering
+- With --temp 0, first reasoning token starts "Thinking Process:"
+- The model's answer after reasoning is "Paris" (confirmed via benchmark)
+- ZINC reference check: output text should eventually contain "Paris"
+  (may first produce reasoning tokens which is acceptable)
+
+## llama-bench results (same session)
+pp512: 1421.01 tok/s
+tg128: 72.93 tok/s

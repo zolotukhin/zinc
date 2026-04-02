@@ -5,8 +5,9 @@
 //! prefill through token generation to completion.
 const std = @import("std");
 const http = @import("http.zig");
-const forward_mod = @import("../compute/forward.zig");
-const tokenizer_mod = @import("../model/tokenizer.zig");
+const runtime = @import("runtime.zig");
+const forward_mod = runtime.forward_mod;
+const tokenizer_mod = runtime.tokenizer_mod;
 
 const log = std.log.scoped(.session);
 
@@ -148,12 +149,35 @@ pub const Session = struct {
         for (input) |c| {
             if (out + 2 >= buf.len) break;
             switch (c) {
-                '"' => { buf[out] = '\\'; buf[out + 1] = '"'; out += 2; },
-                '\\' => { buf[out] = '\\'; buf[out + 1] = '\\'; out += 2; },
-                '\n' => { buf[out] = '\\'; buf[out + 1] = 'n'; out += 2; },
-                '\r' => { buf[out] = '\\'; buf[out + 1] = 'r'; out += 2; },
-                '\t' => { buf[out] = '\\'; buf[out + 1] = 't'; out += 2; },
-                else => { buf[out] = c; out += 1; },
+                '"' => {
+                    buf[out] = '\\';
+                    buf[out + 1] = '"';
+                    out += 2;
+                },
+                '\\' => {
+                    buf[out] = '\\';
+                    buf[out + 1] = '\\';
+                    out += 2;
+                },
+                '\n' => {
+                    buf[out] = '\\';
+                    buf[out + 1] = 'n';
+                    out += 2;
+                },
+                '\r' => {
+                    buf[out] = '\\';
+                    buf[out + 1] = 'r';
+                    out += 2;
+                },
+                '\t' => {
+                    buf[out] = '\\';
+                    buf[out + 1] = 't';
+                    out += 2;
+                },
+                else => {
+                    buf[out] = c;
+                    out += 1;
+                },
             }
         }
         return buf[0..out];

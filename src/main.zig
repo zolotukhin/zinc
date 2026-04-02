@@ -1,23 +1,52 @@
 //! CLI entrypoints for configuring ZINC and starting local inference.
 //! @section CLI & Entrypoints
-//! This module wires together Vulkan initialization, model loading, tokenization,
+//! This module wires together GPU initialization, model loading, tokenization,
 //! and the single-process decode loop used for prompt-mode execution.
 const std = @import("std");
-const instance_mod = @import("vulkan/instance.zig");
-const gpu_detect = @import("vulkan/gpu_detect.zig");
+const gpu = @import("gpu/interface.zig");
 const catalog_mod = @import("model/catalog.zig");
-const loader_mod = @import("model/loader.zig");
+const diagnostics_mod = if (gpu.is_vulkan)
+    @import("diagnostics.zig")
+else if (gpu.is_metal)
+    @import("diagnostics_metal.zig")
+else
+    struct {
+        pub const ManagedModelInfo = struct {
+            id: []const u8,
+            display_name: []const u8,
+            file_name: []const u8,
+            size_bytes: u64,
+            required_vram_bytes: u64,
+            status_label: []const u8,
+        };
+
+        pub fn run(_: anytype, _: std.mem.Allocator) !void {
+            return error.DiagnosticsUnsupportedOnThisBackend;
+        }
+    };
 const gguf_mod = @import("model/gguf.zig");
 const managed_mod = @import("model/managed.zig");
-const architecture_mod = @import("model/architecture.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
-const forward_mod = @import("compute/forward.zig");
 const graph_mod = @import("compute/graph.zig");
-const diagnostics_mod = @import("diagnostics.zig");
+const server_runtime = @import("server/runtime.zig");
+// These modules import vulkan/ transitively — only available on Linux until T010-T014 refactor.
+// On macOS they are stubbed out; the GPU abstraction refactor will make them platform-independent.
+const loader_mod = if (gpu.is_vulkan) @import("model/loader.zig") else struct {};
+const architecture_mod = if (gpu.is_vulkan) @import("model/architecture.zig") else struct {};
+const forward_mod = if (gpu.is_vulkan) @import("compute/forward.zig") else struct {};
+
+// Backend-specific imports (only one branch compiles per platform)
+const instance_mod = if (gpu.is_vulkan) @import("vulkan/instance.zig") else gpu.backend;
+const gpu_detect = if (gpu.is_vulkan) @import("vulkan/gpu_detect.zig") else struct {};
 const http_mod = @import("server/http.zig");
-const model_manager_mod = @import("server/model_manager.zig");
+const model_manager_mod = @import("server/model_manager_runtime.zig");
 const routes_mod = @import("server/routes.zig");
-const CommandPool = @import("vulkan/command.zig").CommandPool;
+const CommandPool = if (gpu.is_vulkan) @import("vulkan/command.zig").CommandPool else struct {
+    pub fn init(_: anytype) !@This() {
+        return .{};
+    }
+    pub fn deinit(_: *@This()) void {}
+};
 const Graph = graph_mod.Graph;
 
 const log = std.log.scoped(.zinc);
@@ -41,32 +70,58 @@ pub fn myLogFn(
     std.debug.print(prefix ++ format ++ "\n", args);
 }
 
-// Force compilation and testing of all modules
+// Force compilation and testing of all modules (platform-conditional).
+// Modules that directly import vulkan/ are only compiled on Linux.
+// On macOS, Metal-specific modules are compiled instead.
+// T010-T014 will refactor compute/ and model/ to use gpu/interface.zig,
+// after which all modules compile on both platforms.
 comptime {
-    _ = @import("vulkan/vk.zig");
-    _ = @import("vulkan/buffer.zig");
-    _ = @import("vulkan/pipeline.zig");
-    _ = @import("vulkan/command.zig");
-    _ = @import("model/catalog.zig");
+    if (gpu.is_vulkan) {
+        _ = @import("vulkan/vk.zig");
+        _ = @import("vulkan/buffer.zig");
+        _ = @import("vulkan/pipeline.zig");
+        _ = @import("vulkan/command.zig");
+        _ = @import("model/catalog.zig");
+        _ = @import("model/managed.zig");
+        // These modules import vulkan/ directly — Vulkan-only until T010-T014 refactor
+        _ = @import("compute/dmmv.zig");
+        _ = @import("compute/elementwise.zig");
+        _ = @import("compute/attention.zig");
+        _ = @import("compute/forward.zig");
+        _ = @import("model/loader.zig");
+        _ = @import("model/architecture.zig");
+        _ = @import("server/model_manager.zig");
+        _ = @import("server/routes.zig");
+    }
+    if (gpu.is_metal) {
+        _ = @import("metal/device.zig");
+        _ = @import("metal/buffer.zig");
+        _ = @import("metal/pipeline.zig");
+        _ = @import("metal/command.zig");
+        _ = @import("model/loader_metal.zig");
+        _ = @import("compute/forward_metal.zig");
+        _ = @import("server/model_manager_metal.zig");
+        _ = @import("server/model_manager_runtime.zig");
+        _ = @import("server/routes.zig");
+    }
+    // Platform-independent modules
+    _ = @import("model/config.zig");
     _ = @import("model/gguf.zig");
-    _ = @import("model/loader.zig");
-    _ = @import("model/managed.zig");
     _ = @import("model/tokenizer.zig");
-    _ = @import("model/architecture.zig");
     _ = @import("compute/graph.zig");
-    _ = @import("compute/dmmv.zig");
-    _ = @import("compute/elementwise.zig");
-    _ = @import("compute/attention.zig");
-    _ = @import("compute/forward.zig");
     _ = @import("regression_tests.zig");
     _ = @import("server/http.zig");
-    _ = @import("server/model_manager.zig");
-    _ = @import("server/routes.zig");
+    _ = @import("server/runtime.zig");
     _ = @import("server/session.zig");
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
     _ = @import("scheduler/kv_cache.zig");
-    _ = @import("diagnostics.zig");
+    if (gpu.is_vulkan) {
+        _ = @import("diagnostics.zig");
+    }
+    if (gpu.is_metal) {
+        _ = @import("diagnostics_metal.zig");
+    }
 }
 
 /// Runtime configuration built from CLI flags and default values.
@@ -128,7 +183,7 @@ const ConnectionWorker = struct {
     manager: *model_manager_mod.ModelManager,
     server_state: *routes_mod.ServerState,
 
-    fn run(self: *ConnectionWorker) void {
+    fn run(self: *@This()) void {
         defer std.heap.page_allocator.destroy(self);
         defer self.conn.close();
 
@@ -142,6 +197,84 @@ const ConnectionWorker = struct {
         };
     }
 };
+
+fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, allocator: std.mem.Allocator) void {
+    if (config.profile) {
+        if (manager.currentResources()) |resources| {
+            if (comptime server_runtime.supports_runtime_profiling) {
+                server_runtime.enableProfiling(&resources.engine) catch |err| {
+                    log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
+                };
+            } else {
+                log.warn("Per-dispatch profiling is not available on the Metal HTTP server yet.", .{});
+            }
+        }
+    }
+    if (config.debug) {
+        if (manager.currentResources()) |resources| {
+            server_runtime.enableLogitsReadback(&resources.engine);
+        }
+    }
+
+    var server = http_mod.Server.init(allocator, config.port) catch |err| {
+        log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer server.deinit();
+    log.info("Server listening on 0.0.0.0:{d}", .{config.port});
+    log.info("Press Ctrl+C to stop", .{});
+
+    const posix = std.posix;
+    const Handler = struct {
+        var shutdown_requested: bool = false;
+        fn handler(_: c_int) callconv(.c) void {
+            shutdown_requested = true;
+        }
+    };
+    const sa = posix.Sigaction{
+        .handler = .{ .handler = Handler.handler },
+        .mask = std.mem.zeroes(posix.sigset_t),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.INT, &sa, null);
+    posix.sigaction(posix.SIG.TERM, &sa, null);
+
+    var server_state = routes_mod.ServerState.init(std.time.timestamp());
+
+    while (!Handler.shutdown_requested) {
+        var conn = server.accept() catch |err| {
+            if (Handler.shutdown_requested) break;
+            log.warn("Accept failed: {s}", .{@errorName(err)});
+            continue;
+        };
+
+        const worker = std.heap.page_allocator.create(ConnectionWorker) catch |err| {
+            log.warn("Failed to allocate connection worker: {s}", .{@errorName(err)});
+            conn.close();
+            continue;
+        };
+        worker.* = .{
+            .conn = conn,
+            .manager = manager,
+            .server_state = &server_state,
+        };
+
+        const thread = std.Thread.spawn(.{}, ConnectionWorker.run, .{worker}) catch |err| {
+            log.warn("Failed to spawn connection worker: {s}", .{@errorName(err)});
+            std.heap.page_allocator.destroy(worker);
+            conn.close();
+            continue;
+        };
+        thread.detach();
+    }
+
+    while (server_state.active_requests.load(.monotonic) != 0 or
+        server_state.queued_requests.load(.monotonic) != 0)
+    {
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+    log.info("Shutting down...", .{});
+}
 
 const PreparedPrompt = struct {
     text: []const u8,
@@ -253,7 +386,7 @@ const banner_full =
     \\Analysis and developer options:
     \\  --graph-report <path>    Write decode-graph analysis JSON report
     \\  --graph-dot <path>       Write decode-graph Graphviz DOT from GGUF metadata
-    \\  --profile                Enable per-dispatch GPU timing profiling
+    \\  --profile                Enable runtime profiling (per-dispatch on Vulkan, phase summary on Metal)
     \\  --debug                  Enable verbose debug logging
     \\
     \\Help:
@@ -332,6 +465,7 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.context_length = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidContext;
+            if (config.context_length > 32768) return error.InvalidContext;
         } else if (std.mem.eql(u8, arg, "--parallel")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -361,6 +495,10 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.graph_dot_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--max-tokens") or std.mem.eql(u8, arg, "-n")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            config.max_tokens = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidMaxTokens;
         } else if (std.mem.eql(u8, arg, "--profile")) {
             config.profile = true;
         } else if (std.mem.eql(u8, arg, "--debug")) {
@@ -488,20 +626,46 @@ fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !Ma
         };
     }
 
-    var vk_instance = try instance_mod.Instance.init(allocator, device_index);
-    defer vk_instance.deinit();
+    if (gpu.is_vulkan) {
+        var vk_instance = try instance_mod.Instance.init(allocator, device_index);
+        defer vk_instance.deinit();
 
-    const gpu_config = gpu_detect.detect(&vk_instance);
-    const profile = catalog_mod.profileForGpu(gpu_config);
-    const vram_budget_bytes = vk_instance.vramBytes();
+        const gpu_config = gpu_detect.detect(&vk_instance);
+        const profile = catalog_mod.profileForGpu(gpu_config);
+        const vram_budget_bytes = vk_instance.vramBytes();
 
-    try managed_mod.writeCachedGpuProfile(device_index, profile, gpu_config.nameSlice(), vram_budget_bytes, allocator);
+        try managed_mod.writeCachedGpuProfile(device_index, profile, gpu_config.nameSlice(), vram_budget_bytes, allocator);
 
-    return .{
-        .profile = try allocator.dupe(u8, profile),
-        .vram_budget_bytes = vram_budget_bytes,
-        .from_cache = false,
-    };
+        return .{
+            .profile = try allocator.dupe(u8, profile),
+            .vram_budget_bytes = vram_budget_bytes,
+            .from_cache = false,
+        };
+    }
+
+    if (gpu.is_metal) {
+        const metal_device_mod = @import("metal/device.zig");
+
+        var device = try metal_device_mod.MetalDevice.init(allocator, device_index);
+        defer device.deinit();
+
+        const profile = catalog_mod.profileForMetal();
+        const vram_budget_bytes = blk: {
+            const working_set = device.recommendedMaxWorkingSetSize();
+            break :blk if (working_set > 0) working_set else device.totalMemory();
+        };
+        const device_name = @tagName(device.chip);
+
+        try managed_mod.writeCachedGpuProfile(device_index, profile, device_name, vram_budget_bytes, allocator);
+
+        return .{
+            .profile = try allocator.dupe(u8, profile),
+            .vram_budget_bytes = vram_budget_bytes,
+            .from_cache = false,
+        };
+    }
+
+    return error.GpuDetectionUnavailable;
 }
 
 fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
@@ -511,18 +675,19 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
     const active_model_id = if (active) |selection| selection.model_id else null;
+    const backend_name = if (gpu.is_metal) "Metal" else if (gpu.is_vulkan) "Vulkan" else "GPU";
 
     const support = resolveManagedGpuSupport(config.device_index, allocator) catch |err| {
         if (!config.show_all_models) {
             var stderr_buffer: [1024]u8 = undefined;
             var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
-            try stderr.interface.print("Unable to initialize Vulkan for GPU detection: {s}\n", .{@errorName(err)});
+            try stderr.interface.print("Unable to initialize {s} for GPU detection: {s}\n", .{ backend_name, @errorName(err) });
             try stderr.interface.writeAll("Use `zinc model list --all` to inspect the catalog without live fit checks.\n");
             try stderr.interface.flush();
             return error.GpuDetectionUnavailable;
         }
 
-        try stdout.interface.print("Vulkan GPU detection unavailable ({s}). Showing the full catalog without live fit checks.\n\n", .{@errorName(err)});
+        try stdout.interface.print("{s} GPU detection unavailable ({s}). Showing the full catalog without live fit checks.\n\n", .{ backend_name, @errorName(err) });
         try stdout.interface.writeAll("ID                             Released     Status      Fit    Installed   Active   Notes\n");
         for (catalog_mod.entries) |entry| {
             const installed = managed_mod.isInstalled(entry.id, allocator);
@@ -536,7 +701,7 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
                     "n/a",
                     if (installed) "yes" else "no",
                     if (is_active) "yes" else "no",
-                    "fit unavailable without Vulkan",
+                    "fit unavailable without live GPU probe",
                 },
             );
         }
@@ -823,11 +988,24 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
 }
 
 /// Build the static decode graph from GGUF metadata and write debugging artifacts.
-/// @param model_path Path to the GGUF file to inspect.
-/// @param report_path Optional JSON destination for the structural graph report.
-/// @param dot_path Optional DOT destination for Graphviz rendering.
-/// @param allocator Allocator used for GGUF parsing and graph analysis.
-fn exportDecodeGraphArtifacts(
+/// Only available on Vulkan backend (loader.zig depends on Vulkan until T010-T014 refactor).
+const exportDecodeGraphArtifacts = if (gpu.is_vulkan) exportDecodeGraphArtifactsImpl else (struct {
+    fn f(_: []const u8, _: ?[]const u8, _: ?[]const u8, _: std.mem.Allocator) !void {
+        log.warn("Graph export not yet available on Metal backend", .{});
+    }
+}).f;
+
+fn runServer(
+    _: anytype,
+    _: *tokenizer_mod.Tokenizer,
+    _: anytype,
+    _: Config,
+    _: std.mem.Allocator,
+) !void {
+    return error.ServerModeUnavailableOnThisBackend;
+}
+
+fn exportDecodeGraphArtifactsImpl(
     model_path: []const u8,
     report_path: ?[]const u8,
     dot_path: ?[]const u8,
@@ -961,7 +1139,7 @@ pub fn main() !void {
             .device_index = config.device_index,
             .model_path = check_target.model_path,
             .managed_model = check_target.managed_model,
-            .shader_dir = "zig-out/share/zinc/shaders",
+            .shader_dir = if (gpu.is_metal) "src/shaders/metal" else "zig-out/share/zinc/shaders",
         }, allocator) catch |err| {
             log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
             std.process.exit(1);
@@ -1007,7 +1185,146 @@ pub fn main() !void {
         return;
     }
 
-    // Initialize Vulkan
+    // Initialize GPU backend
+    if (comptime gpu.is_metal) {
+        const metal_device = @import("metal/device.zig");
+        const metal_loader = @import("model/loader_metal.zig");
+        const forward_metal = @import("compute/forward_metal.zig");
+
+        var device = metal_device.MetalDevice.init(allocator, config.device_index) catch |err| {
+            log.err("Metal init failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer device.deinit();
+
+        log.info("ZINC Metal backend — Apple Silicon (public GPU family {s})", .{@tagName(device.chip)});
+        log.info("Memory: {d} GB | Max buffer: {d} GB", .{
+            device.totalMemory() / (1024 * 1024 * 1024),
+            device.maxBufferSize() / (1024 * 1024 * 1024),
+        });
+        log.info(
+            "Metal caps: apple7={any} apple8={any} apple9={any} apple10={any} mac2={any} unified={any} raytracing={any} tgmem={d} KiB working-set={d} GiB",
+            .{
+                device.caps.supports_apple7,
+                device.caps.supports_apple8,
+                device.caps.supports_apple9,
+                device.caps.supports_apple10,
+                device.caps.supports_mac2,
+                device.caps.has_unified_memory,
+                device.caps.supports_raytracing,
+                device.maxThreadgroupMemoryLength() / 1024,
+                device.recommendedMaxWorkingSetSize() / (1024 * 1024 * 1024),
+            },
+        );
+        log.info(
+            "Inference hints: simdgroup-width comes from pipeline threadExecutionWidth; apple10 => investigate TensorOps/M5 neural accelerators for large GEMMs; unified memory => avoid staging copies; raytracing is irrelevant for inference",
+            .{},
+        );
+
+        // Load model (zero-copy mmap)
+        var model = metal_loader.load(model_path, device.ctx, allocator) catch |err| {
+            log.err("Failed to load model: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer model.deinit();
+
+        if (config.prompt) |prompt| {
+            log.info("Prompt: {s}", .{prompt});
+
+            var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
+                log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer tokenizer.deinit();
+
+            var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, config.chat, allocator);
+            defer prepared_prompt.deinit(allocator);
+            if (config.chat) {
+                log.info("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
+            }
+
+            const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
+            defer allocator.free(prompt_tokens);
+
+            log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
+
+            // Initialize inference engine
+            var engine = forward_metal.InferenceEngine.init(&model, &device, allocator, .{
+                .profile_enabled = config.profile,
+                .debug_validation_enabled = config.profile and config.debug,
+            }) catch |err| {
+                log.err("Failed to init Metal inference engine: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer engine.deinit();
+
+            // Generate
+            const output_tokens = forward_metal.generate(&engine, prompt_tokens, config.max_tokens, tokenizer.eosId(), allocator) catch |err| {
+                log.err("Failed to generate: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer allocator.free(output_tokens);
+
+            if (output_tokens.len == 0) {
+                log.warn("Metal decode loop not yet implemented. Engine initialized successfully with {d} pipelines.", .{9});
+            } else {
+                if (config.profile) {
+                    const vocab_size = model.config.vocab_size;
+                    const logits_ptr: [*]const f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
+                    const logits = logits_ptr[0..vocab_size];
+                    var top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };
+                    var top_vals: [5]f32 = .{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+                    for (logits, 0..) |v, i| {
+                        if (v <= top_vals[4]) continue;
+                        top_vals[4] = v;
+                        top_ids[4] = @intCast(i);
+                        var j: usize = 4;
+                        while (j > 0 and top_vals[j] > top_vals[j - 1]) : (j -= 1) {
+                            const tv = top_vals[j];
+                            top_vals[j] = top_vals[j - 1];
+                            top_vals[j - 1] = tv;
+                            const ti = top_ids[j];
+                            top_ids[j] = top_ids[j - 1];
+                            top_ids[j - 1] = ti;
+                        }
+                    }
+                    for (0..5) |k| {
+                        var dec_buf: [256]u8 = undefined;
+                        const tok_str = tokenizer.decodeToken(top_ids[k], &dec_buf);
+                        log.info("  metal prefill logit #{d}: id={d} val={d:.4} \"{s}\"", .{ k, top_ids[k], top_vals[k], tok_str });
+                    }
+                }
+
+                // Decode tokens to text
+                var text_buf: std.ArrayList(u8) = .{};
+                defer text_buf.deinit(allocator);
+                for (output_tokens) |tid| {
+                    var dec_buf: [256]u8 = undefined;
+                    const decoded = tokenizer.decodeToken(tid, &dec_buf);
+                    if (decoded.len > 0) {
+                        try text_buf.appendSlice(allocator, decoded);
+                    } else {
+                        try text_buf.appendSlice(allocator, "<?>");
+                    }
+                }
+                const output_text = trimCliOutputText(text_buf.items, config.chat);
+                log.info("Output ({d} tokens): {s}", .{ output_tokens.len, output_text });
+            }
+        } else {
+            log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
+
+            var manager = model_manager_mod.ModelManager.init(resolved_model.spec, &device, allocator) catch |err| {
+                log.err("Failed to init Metal model manager: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer manager.deinit();
+
+            runHttpServer(config, &manager, allocator);
+        }
+        return;
+    }
+
+    // Vulkan backend (Linux)
     var vk_instance = instance_mod.Instance.init(allocator, config.device_index) catch |err| {
         log.err("Vulkan init failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -1181,83 +1498,7 @@ pub fn main() !void {
             std.process.exit(1);
         };
         defer manager.deinit();
-
-        if (config.profile) {
-            if (manager.currentResources()) |resources| {
-                resources.engine.enableProfiling() catch |err| {
-                    log.warn("Failed to enable profiling: {s}", .{@errorName(err)});
-                };
-            }
-        }
-        if (config.debug) {
-            if (manager.currentResources()) |resources| {
-                resources.engine.enableLogitsReadback();
-            }
-        }
-
-        var server = http_mod.Server.init(allocator, config.port) catch |err| {
-            log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        defer server.deinit();
-        log.info("Server listening on 0.0.0.0:{d}", .{config.port});
-        log.info("Press Ctrl+C to stop", .{});
-
-        // Graceful shutdown: set flag on SIGINT/SIGTERM
-        const posix = std.posix;
-        const Handler = struct {
-            var shutdown_requested: bool = false;
-            fn handler(_: c_int) callconv(.c) void {
-                shutdown_requested = true;
-            }
-        };
-        const sa = posix.Sigaction{
-            .handler = .{ .handler = Handler.handler },
-            .mask = std.mem.zeroes(posix.sigset_t),
-            .flags = 0,
-        };
-        posix.sigaction(posix.SIG.INT, &sa, null);
-        posix.sigaction(posix.SIG.TERM, &sa, null);
-
-        var server_state = routes_mod.ServerState.init(std.time.timestamp());
-        defer server_state.deinit();
-
-        // Server loop — accepts connections concurrently so operational endpoints
-        // like /health remain responsive, while generation itself is serialized
-        // behind a shared lock inside the route handlers.
-        while (!Handler.shutdown_requested) {
-            var conn = server.accept() catch |err| {
-                if (Handler.shutdown_requested) break;
-                log.warn("Accept failed: {s}", .{@errorName(err)});
-                continue;
-            };
-
-            const worker = std.heap.page_allocator.create(ConnectionWorker) catch |err| {
-                log.warn("Failed to allocate connection worker: {s}", .{@errorName(err)});
-                conn.close();
-                continue;
-            };
-            worker.* = .{
-                .conn = conn,
-                .manager = &manager,
-                .server_state = &server_state,
-            };
-
-            const thread = std.Thread.spawn(.{}, ConnectionWorker.run, .{worker}) catch |err| {
-                log.warn("Failed to spawn connection worker: {s}", .{@errorName(err)});
-                std.heap.page_allocator.destroy(worker);
-                conn.close();
-                continue;
-            };
-            thread.detach();
-        }
-
-        while (server_state.active_requests.load(.monotonic) != 0 or
-            server_state.queued_requests.load(.monotonic) != 0)
-        {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-        }
-        log.info("Shutting down...", .{});
+        runHttpServer(config, &manager, allocator);
     }
 }
 

@@ -29,11 +29,15 @@ fn configureVulkanModule(
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    var optimize = b.standardOptimizeOption(.{});
+    if (b.option(bool, "release", "Deprecated compatibility flag; prefer -Doptimize")) |release| {
+        optimize = if (release) .ReleaseFast else .Debug;
+    }
     const full_tests = b.option(bool, "full-tests", "Require integration smoke tests and fail when their environment is missing") orelse false;
     const install_hot_bench = b.option(bool, "install-hot-bench", "Install the zinc-hot-bench binary as part of the default install step") orelse false;
 
     const is_linux = target.result.os.tag == .linux;
+    const is_macos = target.result.os.tag == .macos;
 
     // --- Shader compilation: GLSL .comp → SPIR-V .spv ---
     // Only compiled when glslc is available (Linux build node).
@@ -101,7 +105,17 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    configureVulkanModule(b, target, exe_mod);
+    if (is_macos) {
+        exe_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        exe_mod.addIncludePath(b.path("src/metal"));
+        exe_mod.linkFramework("Metal", .{});
+        exe_mod.linkFramework("Foundation", .{});
+    } else {
+        configureVulkanModule(b, target, exe_mod);
+    }
 
     const exe = b.addExecutable(.{
         .name = "zinc",
@@ -153,6 +167,47 @@ pub fn build(b: *std.Build) void {
     const hot_bench_step = b.step("hot-bench", "Run hot decode microbenchmarks");
     hot_bench_step.dependOn(&run_hot_bench.step);
 
+    if (is_macos) {
+        const bench_mod = b.createModule(.{
+            .root_source_file = b.path("benchmarks/metal_inference.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        });
+        const bench_support_mod = b.createModule(.{
+            .root_source_file = b.path("src/bench_support.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        });
+        bench_support_mod.addIncludePath(b.path("src/metal"));
+        bench_mod.addImport("zinc_bench_support", bench_support_mod);
+        bench_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        bench_mod.addIncludePath(b.path("src/metal"));
+        bench_mod.linkFramework("Metal", .{});
+        bench_mod.linkFramework("Foundation", .{});
+
+        const bench_exe = b.addExecutable(.{
+            .name = "zinc-bench-metal",
+            .root_module = bench_mod,
+        });
+        b.installArtifact(bench_exe);
+
+        const bench_run = b.addRunArtifact(bench_exe);
+        if (b.args) |args| {
+            bench_run.addArgs(args);
+        }
+
+        const bench_metal_step = b.step("bench-metal", "Run the Metal inference benchmark (ReleaseFast)");
+        bench_metal_step.dependOn(&bench_run.step);
+
+        const bench_step = b.step("bench", "Run benchmarks");
+        bench_step.dependOn(&bench_run.step);
+    }
+
     // --- Unit tests ---
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -160,7 +215,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    configureVulkanModule(b, target, test_mod);
+    if (is_macos) {
+        test_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        test_mod.addIncludePath(b.path("src/metal"));
+        test_mod.linkFramework("Metal", .{});
+        test_mod.linkFramework("Foundation", .{});
+    } else {
+        configureVulkanModule(b, target, test_mod);
+    }
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
