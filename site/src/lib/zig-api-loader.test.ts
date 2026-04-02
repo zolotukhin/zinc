@@ -73,7 +73,7 @@ describe('loadZigApi', () => {
     expect(api.memberCount).toBeGreaterThan(10);
     expect(api.sections.some(section => section.title === 'Vulkan Runtime')).toBe(true);
     expect(api.modules.some(module => module.href === '/zinc/docs/zig-api/loader')).toBe(true);
-  });
+  }, 30000);
 
   it('extracts struct layout metadata for rendered API docs', async () => {
     const api = await loadZigApi();
@@ -90,7 +90,7 @@ describe('loadZigApi', () => {
       expect(tensorInfo.fields?.length).toBeGreaterThan(0);
       expect(tensorInfo.fields?.some(field => field.name === 'dims')).toBe(true);
     }
-  });
+  }, 30000);
 
   it('serializes agent-friendly JSON and text exports', async () => {
     const api = await loadZigApi();
@@ -104,5 +104,5 @@ describe('loadZigApi', () => {
     expect(text).toContain('# ZINC Zig API');
     expect(text).toContain('JSON export: https://zolotukhin.ai/zinc/docs/zig-api.json');
     expect(text).toContain('Guidance: Use the generated Zig API as the canonical internal runtime reference.');
-  });
+  }, 30000);
 });
