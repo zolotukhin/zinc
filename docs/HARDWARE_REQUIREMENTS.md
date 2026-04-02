@@ -1,187 +1,172 @@
 # ZINC hardware requirements
 
-> **Experimental and Linux-first**: ZINC is under active development. The most reliable environment today is Linux on AMD RDNA3 or RDNA4 with Vulkan 1.3.
+ZINC runs on AMD GPUs (Linux, Vulkan) and Apple Silicon (macOS, Metal). This page covers what hardware and OS setup you need for each platform.
 
-This page answers the practical question first: what hardware and OS setup do you need to actually run ZINC without fighting the stack?
+## Supported platforms
 
-## Recommended target environment
+| Platform | GPU | Backend | Status |
+|----------|-----|---------|--------|
+| **Linux** | AMD RDNA4 | Vulkan 1.3 | Primary tuning target |
+| **Linux** | AMD RDNA3 | Vulkan 1.3 | Supported, less tuned |
+| **macOS** | Apple Silicon M1 through M5 | Metal | Supported, native MSL shaders |
 
-The current sweet spot is:
+## AMD GPUs (Linux)
+
+ZINC targets AMD consumer and workstation GPUs that the ROCm stack does not support.
+
+| Family | Examples | Notes |
+| --- | --- | --- |
+| RDNA4 | RX 9070, RX 9070 XT, Radeon AI PRO R9700 | Primary tuning target, hand-tuned shaders |
+| RDNA3 | RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600 | Supported, less tuned than RDNA4 |
+
+Any AMD GPU with Vulkan 1.3 and a working RADV or AMDVLK driver should work.
+
+### AMD requirements
 
 - **OS**: Linux
-- **GPU**: AMD RDNA3 or RDNA4
 - **API**: Vulkan 1.3
-- **Drivers**: RADV or AMDVLK
-- **Model format**: GGUF
+- **Driver**: RADV (Mesa) or AMDVLK
+- **Shader compiler**: glslc (shaderc 2023.8, included in build)
+- **Recommended**: `export RADV_PERFTEST=coop_matrix` on RDNA4
 
-If you match that stack, you are inside the environment ZINC is tuned and tested around.
+Verify your Vulkan stack:
 
-## GPU support
+```bash
+vulkaninfo --summary
+```
 
-ZINC is being built specifically for AMD consumer and workstation GPUs that the mainstream ROCm-first stack underserves.
+If that command does not show your AMD GPU, ZINC will not work.
 
-### Primary target GPUs
+### AMD VRAM guide
 
-| Family | Examples | Status |
-| --- | --- | --- |
-| RDNA4 | RX 9070, RX 9070 XT, Radeon AI PRO R9700 | Primary tuning target |
-| RDNA3 | RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600 | Supported direction, less tuned than RDNA4 |
+| VRAM | What fits |
+| --- | --- |
+| 16 GB | 2B to 8B class models comfortably |
+| 32 GB | 35B MoE models like Qwen3.5-35B-A3B Q4_K_XL |
 
-### Experimental or secondary paths
+Exact fit depends on architecture, quantization, and context length. `--check -m <model>` prints a practical fit estimate.
+
+### Future AMD directions
 
 | Family | Status |
 | --- | --- |
 | Intel Arc | Possible through Vulkan, not a primary target |
-| NVIDIA via Vulkan | Not a primary target |
-| macOS GPUs | Build environment only, not the practical runtime target |
+| NVIDIA via Vulkan | Vulkan works, not primary target |
 
-## Vulkan requirements
+## Apple Silicon (macOS)
 
-You need a working Vulkan stack that can see the GPU:
+ZINC has a native Metal backend with 31 MSL compute shaders, zero-copy model loading via `newBufferWithBytesNoCopy`, and the same OpenAI-compatible API as the AMD path.
+
+| Chip family | Metal GPU family | Status |
+| --- | --- | --- |
+| M1, M1 Pro, M1 Max, M1 Ultra | Apple7 | Supported |
+| M2, M2 Pro, M2 Max, M2 Ultra | Apple8 | Supported |
+| M3, M3 Pro, M3 Max, M3 Ultra | Apple9 | Supported |
+| M4, M4 Pro, M4 Max | Apple9 | Supported |
+| M5, M5 Pro, M5 Max | Apple10 | Supported (TensorOps investigation planned) |
+
+### Apple Silicon requirements
+
+- **OS**: macOS
+- **Tools**: Xcode Command Line Tools (`xcode-select --install`)
+- No Vulkan, no ROCm, no MLX, no Python needed
+
+### Apple Silicon memory guide
+
+Apple Silicon uses unified memory shared between CPU and GPU. There is no separate "VRAM" budget.
+
+| Unified memory | What fits |
+| --- | --- |
+| 8 GB | Too tight for most models |
+| 16 GB | 2B models comfortably |
+| 24 GB | 2B with headroom, 35B might be tight |
+| 32+ GB | 35B MoE models like Qwen3.5-35B-A3B Q4_K_XL |
+| 64+ GB (Pro/Max/Ultra) | Large models with generous context |
+
+ZINC uses zero-copy model loading on Metal, so a 1.2 GB model file does not require an additional 1.2 GB of GPU memory. The model weights stay in place and the GPU reads from the mmap'd pages directly.
+
+## Preflight check
+
+Once the binary is built, verify everything works:
 
 ```bash
-vulkaninfo --summary
-```
-
-If that command does not show your AMD GPU, ZINC will not work yet no matter what model or command line you use.
-
-## Fastest preflight command
-
-Once the binary is built, the quickest end-to-end sanity check is:
-
-```bash
-# General machine + Vulkan + shader preflight
 ./zig-out/bin/zinc --check
-
-# Check one exact GGUF file
-./zig-out/bin/zinc --check -m /path/to/model.gguf
-
-# Or check one managed model from the built-in catalog
-./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
 ```
 
-That command combines the practical questions you usually care about:
-
-- does the Vulkan stack initialize?
-- did ZINC find the intended GPU?
-- are the runtime shader assets present?
-- is the GGUF file valid when you pass `-m`?
-- does the managed catalog entry look runnable here when you pass `--model-id`?
-- does the current single-GPU runtime appear to fit into device-local VRAM?
-
-For RDNA4 shells, use:
+On AMD Linux, add the cooperative matrix flag:
 
 ```bash
-# Recommended on RDNA4 shells
 export RADV_PERFTEST=coop_matrix
-
-# Check one exact GGUF file
-./zig-out/bin/zinc --check -m /path/to/model.gguf
+./zig-out/bin/zinc --check
 ```
 
-If you want to see which managed models ZINC currently marks as supported on the machine, use:
+The check command verifies:
+
+- GPU detection (Vulkan device or Metal device)
+- Shader assets (SPIR-V on Linux, MSL sources on macOS)
+- Runtime initialization
+- Model fit (when `-m <model>` or `--model-id <id>` is passed)
+
+## Model catalog
+
+See which models ZINC supports on your machine:
 
 ```bash
-# Tested for this GPU profile and estimated to fit current VRAM
+# Models that fit this machine
 ./zig-out/bin/zinc model list
 
-# Full catalog, even if local GPU probing is unavailable
+# Full catalog including models that do not fit
 ./zig-out/bin/zinc model list --all
 ```
 
-## Driver and runtime notes
+The catalog automatically selects the right GPU profile (`amd-rdna4-32gb`, `apple-silicon`, etc.) and shows which models are installed, active, and fit the available memory.
 
-For the best current path on AMD Linux:
+## System requirements (both platforms)
 
-- use a working **Vulkan 1.3** stack
-- use **RADV** or **AMDVLK**
-- on RDNA4, set `RADV_PERFTEST=coop_matrix`
+| Resource | Minimum | Recommended |
+| --- | --- | --- |
+| **CPU** | Any modern 64-bit (x86_64 or arm64) | Multi-core for serving |
+| **System RAM** | 16 GB | 32 GB+ for larger models |
+| **Storage** | SSD | NVMe SSD for fast model loading |
 
-Typical RDNA4 runtime setup:
+## Quick sanity check
+
+### Linux (AMD)
+
+```bash
+lspci | grep -i "vga\|display\|amd\|radeon"
+vulkaninfo --summary
+./zig-out/bin/zinc --check
+```
+
+### macOS (Apple Silicon)
+
+```bash
+system_profiler SPDisplaysDataType | head -20
+./zig-out/bin/zinc --check
+```
+
+## Shortest path to success
+
+### On Linux with an AMD GPU
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-# Optional: append --debug or use ZINC_DEBUG=1 for diagnostic logs
-./zig-out/bin/zinc -m /path/to/model.gguf --prompt "hello"
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zinc --check
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+./zig-out/bin/zinc chat
 ```
 
-The benchmark node behind ZINC uses Linux with Mesa/RADV and an RDNA4 GPU. That is the environment the project’s tuning notes are grounded in.
+Then see [RDNA4 Tuning](/zinc/docs/rdna4-tuning) for performance work.
 
-## VRAM expectations
-
-The right question is not just “does the GPU work?” but “does the GPU have enough VRAM for the model and context you want?”
-
-### Practical guide
-
-| VRAM | What it is good for |
-| --- | --- |
-| 16 GB | Practical for smaller GGUF models and experiments, especially 7B to 8B class models |
-| 32 GB | The current ZINC development target for larger models such as Qwen3.5-35B-A3B Q4_K_XL |
-
-Exact fit depends on:
-
-- model architecture
-- quantization
-- context length
-- whether KV compression is enabled
-- whether you are serving multiple sessions
-
-`--check -m ...` now prints a practical fit estimate for the current engine. The most important lines are:
-
-- `Tensor upload`: exact device-local weight bytes derived from GGUF tensors
-- `VRAM fit`: estimated device-local total versus the selected GPU's VRAM budget
-- `KV cache`: the current runtime estimate, with today's engine capped to a `4096` token KV budget
-
-Treat that estimate as operational guidance, not a formal allocator proof. It intentionally does not include every source of overhead, such as Vulkan allocation alignment, descriptor pools, query pools, or driver-side bookkeeping.
-
-If you are just getting started, treat **16 GB** as the lower comfortable floor and **32 GB** as the better target for the larger-model work shown in the repo.
-
-## System RAM and CPU
-
-ZINC is GPU-centric, but the machine still needs enough system resources to stage model load and run the process cleanly.
-
-### Recommended baseline
-
-- **CPU**: modern x86_64 CPU
-- **System RAM**: 32 GB minimum, 64 GB preferred for larger models and smoother experimentation
-- **Storage**: NVMe SSD strongly recommended
-
-You do not need a server CPU. You do need a machine stable enough to load multi-gigabyte GGUF files and keep the Vulkan stack happy.
-
-## OS support
-
-### Linux
-
-This is the real target today. If you want to use ZINC, start here.
-
-### macOS
-
-Useful for editing, building, and some development workflows. Not the environment to judge actual ZINC GPU inference.
-
-## How to sanity-check your machine
+### On macOS with Apple Silicon
 
 ```bash
-lspci | rg -i "vga|display|amd|radeon"
-vulkaninfo --summary
-free -h
-./zig-out/bin/zinc --check -m /path/to/model.gguf
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zinc --check
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+./zig-out/bin/zinc chat
 ```
 
-Those four commands answer most early compatibility questions:
-
-- did Linux see the GPU?
-- did Vulkan see the GPU?
-- does the machine have enough memory to stage the workload?
-- does ZINC think the current runtime and model fit together?
-
-## If you want the shortest path to success
-
-Use:
-
-- Linux
-- AMD RDNA4
-- Vulkan 1.3
-- GGUF models
-- CLI mode first
-
-Then move on to [Running ZINC](/zinc/docs/running-zinc) and [RDNA4 tuning](/zinc/docs/rdna4-tuning).
+Then see [Apple Silicon Reference](/zinc/docs/apple-silicon-reference) and [Apple Metal Reference](/zinc/docs/apple-metal-reference) for platform details.

@@ -1,56 +1,55 @@
 # Getting started with ZINC
 
-> **Experimental software**: ZINC is still under active development. The CLI path is the best-supported way to use it today. Server mode, model coverage, and performance tuning are still moving quickly.
+> **Experimental software**: ZINC is under active development. The CLI path is the best-supported way to start. Server mode, model coverage, and performance tuning are still moving quickly.
 
-ZINC is a local LLM inference engine for AMD GPUs built in Zig and Vulkan. The fastest way to understand whether it fits your machine is:
+ZINC is a local LLM inference engine for AMD GPUs and Apple Silicon. The fastest way to check if it works on your machine:
 
-1. Make sure you are on **Linux** with a supported AMD Vulkan stack.
+1. Install Zig.
 2. Build the binary.
-3. Run one GGUF model with one prompt from the terminal.
+3. Run one prompt from the terminal.
 
-If that works, then move on to the [hardware requirements](/zinc/docs/hardware-requirements), [running ZINC](/zinc/docs/running-zinc), and the lower-level tuning docs.
+If that works, move on to the [hardware requirements](/zinc/docs/hardware-requirements), [running ZINC](/zinc/docs/running-zinc), and the lower-level tuning docs.
 
 ## Before you start
 
-ZINC is currently aimed at:
+ZINC currently targets:
 
-- **Linux** for real GPU inference
-- **AMD RDNA3 / RDNA4 GPUs** through Vulkan 1.3
+- **Linux** with AMD RDNA3/RDNA4 GPUs through Vulkan 1.3
+- **macOS** with Apple Silicon (M1 through M5) through Metal
 - **GGUF models** (Q4_K, Q5_K, Q6_K, Q8_0, F16 quantizations)
-- developers who want to run CLI inference first, then experiment with serving
 
 ### Supported models
 
-This list is intentionally narrow. It shows the exact GGUFs that have been revalidated in ZINC, not a broader architecture wishlist.
+This list is intentionally narrow. It shows the exact GGUFs that have been validated end-to-end.
 
-| Model | Exact GGUF |
-|------|------------|
-| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) |
-| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
+| Model | Exact GGUF | Fits on |
+|------|------------|---------|
+| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 16+ GB VRAM or unified |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 24+ GB VRAM or unified |
 
-macOS can build the project, but it is not the target environment for actual ZINC GPU inference. If you want the shortest path to success, use Linux on AMD hardware.
+## Install dependencies
 
-## Install the basic dependencies
+### macOS (Apple Silicon)
 
-You need:
+```bash
+brew install zig
+xcode-select --install
+```
 
-- **Zig 0.15.2+**
-- **Vulkan loader and headers**
-- **`glslc`** for shader compilation on Linux
-- **Git**
+That is all you need. No Vulkan, no glslc, no Python, no MLX.
 
-On Ubuntu or Debian, the system packages are a good starting point for the Vulkan toolchain:
+### Linux (AMD GPU)
 
 ```bash
 sudo apt update
 sudo apt install -y git libvulkan-dev vulkan-tools glslc
 ```
 
-Then install **Zig 0.15.2 or newer** from the official Zig downloads page:
-
-- [ziglang.org/download](https://ziglang.org/download/)
+Then install **Zig 0.15.2 or newer** from [ziglang.org/download](https://ziglang.org/download/).
 
 ## Clone and build
+
+Same on both platforms:
 
 ```bash
 git clone https://github.com/zolotukhin/zinc.git
@@ -58,128 +57,101 @@ cd zinc
 zig build -Doptimize=ReleaseFast
 ```
 
-The compiled binary ends up at:
+The compiled binary ends up at `./zig-out/bin/zinc`. On Linux, the build also compiles GLSL shaders to SPIR-V. On macOS, Metal shaders are compiled at runtime from MSL source.
+
+## Run the preflight check
+
+Before running a prompt, verify the machine and GPU:
 
 ```bash
-./zig-out/bin/zinc
-```
-
-On Linux, `zig build -Doptimize=ReleaseFast` also compiles the GLSL shaders into SPIR-V. On macOS, shader compilation is skipped, which is one of the reasons Linux is the real runtime target.
-
-## Run the preflight before your first prompt
-
-Before running a full prompt, ask ZINC to validate the machine, model, and GPU budget:
-
-```bash
-# General machine + Vulkan + shader preflight
 ./zig-out/bin/zinc --check
+```
 
-# Recommended on RDNA4 shells
+On RDNA4 Linux, enable cooperative matrix first:
+
+```bash
 export RADV_PERFTEST=coop_matrix
-
-# Check one exact GGUF file
-./zig-out/bin/zinc --check -m /path/to/model.gguf
-
-# Or check one managed model from the built-in catalog
-./zig-out/bin/zinc --check --model-id qwen35-35b-a3b-q4k-xl
+./zig-out/bin/zinc --check
 ```
 
-That command verifies the Vulkan path, required shader assets, and the current single-GPU VRAM fit estimate. When you pass `-m`, it checks the exact GGUF file. When you pass `--model-id`, it checks the managed catalog entry by name. If it reports `NOT READY [FAIL]`, fix that first before trying prompt generation.
+The check verifies GPU detection, shader assets, and runtime initialization. If it reports `READY [OK]`, you are good to go.
 
-## Inspect the managed model catalog
+## Browse the model catalog
 
-If you want to see what ZINC currently marks as supported on the local machine:
+See what ZINC supports on your machine:
 
 ```bash
-# Show models that are both tested for the detected GPU profile
-# and estimated to fit the current VRAM budget
 ./zig-out/bin/zinc model list
-
-# Show the full built-in catalog even if Vulkan is unavailable locally
-./zig-out/bin/zinc model list --all
 ```
 
-`model list` now includes a `Released` column sourced from the managed-model catalog, so you can see the upstream model-family release date alongside fit and install status.
+The catalog auto-detects your GPU profile (`amd-rdna4-32gb`, `apple-silicon`, etc.) and shows which models fit.
 
-If you want ZINC to manage downloads and default model selection for you:
+## Download a model
 
 ```bash
-# Download one managed model into the local cache
 ./zig-out/bin/zinc model pull qwen35-2b-q4k-m
-
-# Mark it as the active default for future runs
-./zig-out/bin/zinc model use qwen35-2b-q4k-m
-
-# Inspect the current managed default
-./zig-out/bin/zinc model active
-
-# Remove a cached managed model
-./zig-out/bin/zinc model rm qwen35-2b-q4k-m
-
-# Force the local server to unload it first if needed
-./zig-out/bin/zinc model rm --force qwen35-2b-q4k-m
 ```
 
-If your local ZINC server is not using port `8080`, add `--port <port>` before `model rm` so the CLI talks to the right server when checking whether the model is still loaded.
+This downloads the model into a local cache and verifies the SHA-256 hash.
 
 ## Run your first prompt
 
-On RDNA4, enable cooperative matrix support before running:
+```bash
+./zig-out/bin/zinc --model-id qwen35-2b-q4k-m --prompt "The capital of France is"
+```
+
+On RDNA4 Linux, remember to set the environment variable:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc \
-  -m /path/to/model.gguf \
-  --prompt "The capital of France is"
+./zig-out/bin/zinc --model-id qwen35-2b-q4k-m --prompt "The capital of France is"
 ```
 
-Good first-run signals in the logs look like this:
+Good first-run signals in the logs:
 
-```bash
-info(vulkan): Selected GPU 0: AMD Radeon Graphics
-info(loader): Loading model: /path/to/model.gguf
+```
+info(loader): Loading model: ...
 info(forward): Prefill complete: ...
-info(forward): Generated ... tok/s
+info(forward): Generated 256 tokens in ... ms — XX.XX tok/s
+info(zinc): Output text: Paris...
 ```
 
-If you get through model load, prefill, and at least one decode step, the core path is working.
+If you see a tok/s number and coherent output, the core path is working.
 
-## Verify the environment quickly
-
-These commands are useful before blaming ZINC:
+## Start the chat UI
 
 ```bash
-# Check the local toolchain and Vulkan stack
-zig version
-glslc --version
-vulkaninfo --summary
-
-# Ask ZINC for a general readiness check
-./zig-out/bin/zinc --check
-
-# Ask ZINC about one exact GGUF file
-./zig-out/bin/zinc --check -m /path/to/model.gguf
+./zig-out/bin/zinc chat
 ```
 
-If `vulkaninfo` does not see your AMD GPU, fix that first. ZINC sits on top of the Vulkan stack you already have.
+This starts the server (default port 9090) and opens the built-in chat UI in your browser. The server also exposes an OpenAI-compatible API at `http://localhost:9090/v1`.
 
-## Start the chat interface
-
-Once CLI mode works, start the server to get a ChatGPT-like web UI:
+You can also start the server manually:
 
 ```bash
-export RADV_PERFTEST=coop_matrix
-# Optional: append --debug or use ZINC_DEBUG=1 for diagnostic logs
-./zig-out/bin/zinc -m /path/to/model.gguf -p 8080
+./zig-out/bin/zinc --model-id qwen35-2b-q4k-m -p 8080
 ```
 
-Then open **http://localhost:8080/** in your browser. The chat interface is built into the ZINC binary — no separate install needed.
+Then open `http://localhost:8080/` in your browser.
 
-The server also exposes an OpenAI-compatible API at `http://localhost:8080/v1` that works with any OpenAI SDK client.
+## Manage models
+
+```bash
+# Set a default model for future runs
+./zig-out/bin/zinc model use qwen35-2b-q4k-m
+
+# Check the active default
+./zig-out/bin/zinc model active
+
+# Remove a cached model
+./zig-out/bin/zinc model rm qwen35-2b-q4k-m
+```
 
 ## What to read next
 
-- [Running ZINC](/zinc/docs/running-zinc) for CLI flags, server mode, API endpoints, and SDK examples
-- [Hardware requirements](/zinc/docs/hardware-requirements) for GPU, VRAM, and OS expectations
+- [Hardware requirements](/zinc/docs/hardware-requirements) for GPU, memory, and OS details
+- [Running ZINC](/zinc/docs/running-zinc) for CLI flags, server mode, and API endpoints
 - [Serving HTTP API](/zinc/docs/api) for the full endpoint reference
-- [RDNA4 tuning](/zinc/docs/rdna4-tuning) if you are chasing performance on Linux
+- [Development Guide](/zinc/docs/development) for building, testing, and contributing
+- [RDNA4 tuning](/zinc/docs/rdna4-tuning) for AMD performance work
+- [Apple Silicon Reference](/zinc/docs/apple-silicon-reference) for M1 through M5 platform details

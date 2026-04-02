@@ -162,15 +162,23 @@ const jsonLd = {
 
     <h2>Supported hardware</h2>
 
-    <p>ZINC targets AMD GPUs via Vulkan compute and Apple Silicon via Metal — no ROCm, no MLX, no heavyweight framework.</p>
+    <p>ZINC targets AMD GPUs via Vulkan compute and Apple Silicon via Metal. No ROCm, no MLX, no heavyweight framework.</p>
 
+    <h3>AMD GPUs (Linux)</h3>
     <ul>
-      <li><strong>RDNA4</strong>: RX 9070, RX 9070 XT, Radeon AI PRO R9700</li>
+      <li><strong>RDNA4</strong>: RX 9070, RX 9070 XT, Radeon AI PRO R9700 (primary tuning target)</li>
       <li><strong>RDNA3</strong>: RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600</li>
-      <li><strong>Future</strong>: Intel Arc (same Vulkan path, different tuning), NVIDIA (Vulkan works, not primary target)</li>
+    </ul>
+    <p>Any AMD GPU with Vulkan 1.3 and RADV or AMDVLK drivers should work.</p>
+
+    <h3>Apple Silicon (macOS)</h3>
+    <ul>
+      <li><strong>M1 through M5</strong>: all variants (base, Pro, Max, Ultra)</li>
+      <li>Native Metal shaders, zero-copy model loading, unified memory</li>
+      <li>16 GB for 2B models, 24+ GB for 35B models</li>
     </ul>
 
-    <p>Any GPU with Vulkan 1.3 and a working RADV or AMDVLK driver should work. RDNA4 is the primary tuning target.</p>
+    <p>See the full <a href="/zinc/docs/hardware-requirements">hardware requirements</a> page for details.</p>
 
     <hr />
     <p><a href="/zinc/docs">Documentation</a> · <a href="/zinc/docs/turboquant-spec">TurboQuant spec</a> · <a href="https://github.com/zolotukhin/zinc">GitHub</a></p>
