@@ -17,18 +17,18 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
     '@type': 'WebSite',
     name: 'Stepan Zolotukhin',
     url: 'https://zolotukhin.ai',
-    description: 'Building ZINC — a Zig + Vulkan LLM inference engine for AMD consumer GPUs.',
+    description: 'Building ZINC — a local LLM inference engine for AMD GPUs and Apple Silicon.',
   }}
 >
   <section class="hero">
     <h1>Stepan Zolotukhin</h1>
-    <p>I'm building <a href="/zinc">ZINC</a>, an inference engine for AMD consumer GPUs that the mainstream AI stack ignores. This site is where I write about the work — GPU kernels, Vulkan compute, quantization, and the systems engineering underneath.</p>
+    <p>I'm building <a href="/zinc">ZINC</a>, a local LLM inference engine for AMD GPUs and Apple Silicon. This site is where I write about the work — GPU kernels, Vulkan and Metal compute, quantization, and the systems engineering underneath.</p>
   </section>
 
   <section class="project-highlight">
     <a href="/zinc" class="project-card">
       <h2>ZINC</h2>
-      <p>AMD consumer GPUs are fast enough for local LLM inference, but the software stack ignores them. ZINC is the Zig + Vulkan engine I am building for that gap. Current validated plain-decode numbers on the AI PRO R9700 are 33.58 tok/s on Qwen3.5-35B-A3B-UD and 22.93 tok/s on Qwen3.5-2B-Q4_K_M.</p>
+      <p>Local LLM inference on AMD GPUs and Apple Silicon — hand-tuned Vulkan and Metal shaders, no ROCm, no CUDA, one binary. 37.95 tok/s on RDNA4 with a 35B model, native Apple Silicon support via Metal.</p>
       <span class="project-link">Learn more &rarr;</span>
     </a>
   </section>

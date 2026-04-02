@@ -14,13 +14,13 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       height="320"
     />
 
-    <p>I&apos;m Stepan Zolotukhin. I&apos;m building an inference engine for AMD consumer GPUs because the mainstream local AI stack mostly ignores them.</p>
+    <p>I&apos;m Stepan Zolotukhin. I&apos;m building a local LLM inference engine for AMD GPUs and Apple Silicon.</p>
 
-    <p>Right now I spend most of my time on GPU compute, Zig, Vulkan, and local AI inference.</p>
+    <p>Right now I spend most of my time on GPU compute, Zig, Vulkan, Metal, and local AI inference.</p>
 
     <p>I spent seven years building infrastructure for storage systems. For the past six years, I&apos;ve worked at AWS on low-level systems problems across Linux kernels, userland, cross-compilation, glibc, and adjacent platform work.</p>
 
-    <p>I&apos;m building <a href="/zinc">ZINC</a>, an inference engine for AMD consumer GPUs that the mainstream AI stack does not support. It uses Zig and Vulkan compute shaders instead of ROCm or CUDA. The goal is to make a $500 GPU as useful for local LLM inference as hardware that costs 30x more.</p>
+    <p>I&apos;m building <a href="/zinc">ZINC</a>, an inference engine for AMD GPUs and Apple Silicon. It uses Zig with Vulkan compute shaders on AMD and native Metal shaders on Apple Silicon — no ROCm, no CUDA. The goal is to make the hardware people already own useful for local LLM inference.</p>
 
     <p>I write about the work here: how the GPU kernels are tuned, what the quantization tradeoffs look like, and the systems engineering decisions behind ZINC.</p>
 

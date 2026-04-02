@@ -73,7 +73,7 @@ const jsonLd = {
 
 <BaseLayout
   title="ZINC — LLM Inference Engine"
-  description="ZINC is an inference engine for AMD consumer GPUs that ROCm ignores. Built with Zig and Vulkan, with hand-tuned RDNA4 shaders and an OpenAI-compatible API. Current validated AI PRO R9700 plain-decode performance: 33.58 tok/s on Qwen3.5-35B-A3B-UD."
+  description="ZINC is a local LLM inference engine for AMD GPUs and Apple Silicon. Built with Zig, Vulkan, and Metal — hand-tuned shaders, OpenAI-compatible API, no ROCm, no CUDA."
   keywords="ZINC, LLM inference engine, AMD GPU, RDNA4, RDNA3, RX 9070 XT, RX 7900 XTX, Radeon AI PRO R9700, Vulkan compute, Zig, TurboQuant, KV cache compression, vLLM alternative, llama.cpp alternative, ROCm alternative, OpenAI compatible API, local AI, continuous batching, paged KV cache, GGUF, LLaMA, Qwen, Mistral, Mamba"
   jsonLd={jsonLd}
 >
@@ -106,7 +106,7 @@ const jsonLd = {
   </section>
 
   <section>
-    <p>If you have an AMD consumer GPU — an <strong>RX 7900 XTX</strong>, <strong>RX 9070 XT</strong>, or <strong>Radeon AI PRO R9700</strong> — the mainstream AI stack mostly ignores you. <strong>vLLM</strong> requires <a href="https://rocm.docs.amd.com/en/latest/release/gpu_os_support.html">ROCm</a>, which does not support these cards. <strong>llama.cpp</strong> runs via Vulkan but treats RDNA4 as generic hardware with no architecture-specific tuning.</p>
+    <p>Consumer GPUs have the hardware for fast LLM inference, but the software stack doesn't use it well. AMD's RDNA cards are ignored by ROCm and get generic Vulkan in llama.cpp. Apple Silicon runs MLX and llama.cpp Metal, but no engine is built from scratch around Metal's strengths. ZINC targets both platforms with hand-tuned shaders.</p>
 
     <p><strong>ZINC is not finished productized infrastructure yet.</strong> It is an experimental engine under active development, and the best current experience is still Linux-first, AMD-first, and CLI-first. The point of the docs is to make that path explicit instead of making you reverse-engineer it from technical specs.</p>
 
@@ -162,7 +162,7 @@ const jsonLd = {
 
     <h2>Supported hardware</h2>
 
-    <p>ZINC targets AMD consumer GPUs via Vulkan compute — no ROCm, no CUDA, no proprietary stack required.</p>
+    <p>ZINC targets AMD GPUs via Vulkan compute and Apple Silicon via Metal — no ROCm, no CUDA, no proprietary stack required.</p>
 
     <ul>
       <li><strong>RDNA4</strong>: RX 9070, RX 9070 XT, Radeon AI PRO R9700</li>
