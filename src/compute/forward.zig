@@ -5,6 +5,7 @@
 const std = @import("std");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
+const buffer_mod = @import("../vulkan/buffer.zig");
 const Buffer = @import("../vulkan/buffer.zig").Buffer;
 const CommandPool = @import("../vulkan/command.zig").CommandPool;
 const CommandBuffer = @import("../vulkan/command.zig").CommandBuffer;
@@ -769,20 +770,19 @@ pub const InferenceEngine = struct {
 
         // Identity page table for flash attention: page_ids[i] = i (flat KV layout)
         const page_table_size = @as(vk.c.VkDeviceSize, max_ctx) * @sizeOf(u32);
-        var page_table_buf = try Buffer.init(
+        var page_table_buf = try Buffer.initDeviceLocal(
             instance,
             page_table_size,
-            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         );
         errdefer page_table_buf.deinit();
         {
-            var map_ptr: ?*anyopaque = null;
-            const mr_pt = vk.c.vkMapMemory(instance.device, page_table_buf.memory, 0, page_table_size, 0, &map_ptr);
-            if (mr_pt != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
-            const pt_u32: [*]u32 = @ptrCast(@alignCast(map_ptr));
+            var page_table_staging = try Buffer.initStaging(instance, page_table_size);
+            defer page_table_staging.deinit();
+
+            const pt_u32: [*]u32 = @ptrCast(@alignCast(page_table_staging.mapped.?));
             for (0..max_ctx) |i| pt_u32[i] = @intCast(i);
-            vk.c.vkUnmapMemory(instance.device, page_table_buf.memory);
+            try buffer_mod.copyBuffer(instance, cmd_pool.handle, &page_table_staging, &page_table_buf, page_table_size);
         }
 
         // SSM state (CPU-side, for hybrid models)
