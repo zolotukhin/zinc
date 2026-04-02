@@ -506,7 +506,7 @@ pub const InferenceEngine = struct {
     gpu_ssm_conv_states: []Buffer, // [n_layers] device-local conv state: (d_conv-1) * conv_channels * f32
     gpu_ssm_states: []Buffer, // [n_layers] device-local recurrent state: num_heads * head_v_dim^2 * f32
     // GPU-side MoE router output (for Phase 3c GPU router)
-    router_output_buf: Buffer, // host-visible: expert_ids[k] u32 + expert_weights[k] f32
+    router_output_buf: Buffer, // GPU-side expert_ids[k] u32 + expert_weights[k] f32 for fast MoE routing
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
     /// Vulkan instance.
@@ -870,22 +870,16 @@ pub const InferenceEngine = struct {
             }
         }
 
-        // GPU router output buffer: expert_ids[k] (u32) + expert_weights[k] (f32), host-visible for CPU readback
+        // GPU router output buffer stays device-local on the fast path because the
+        // following MoE kernels consume it directly on-GPU every decode step.
         const n_used_experts = if (config.n_experts_used > 0) config.n_experts_used else 8;
         const router_out_size = @as(vk.c.VkDeviceSize, n_used_experts) * (@sizeOf(u32) + @sizeOf(f32));
-        var router_output_buf = try Buffer.init(
+        var router_output_buf = try Buffer.initDeviceLocal(
             instance,
             router_out_size,
-            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         );
         errdefer router_output_buf.deinit();
-        {
-            var map_ptr: ?*anyopaque = null;
-            const mr3 = vk.c.vkMapMemory(instance.device, router_output_buf.memory, 0, router_out_size, 0, &map_ptr);
-            if (mr3 != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
-            router_output_buf.mapped = @ptrCast(map_ptr);
-        }
 
         // Descriptor pool: need many sets for all layers + MoE experts
         // Per layer: ~15 descriptor sets; MoE adds ~32 per layer (8 experts × 4 ops)
