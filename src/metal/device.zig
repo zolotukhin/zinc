@@ -3,6 +3,7 @@
 const std = @import("std");
 const shim = @import("c.zig").shim;
 
+/// Apple GPU family classification used for feature-gating.
 pub const GpuFamily = enum(u32) {
     apple7 = 7,
     apple8 = 8,
@@ -10,6 +11,7 @@ pub const GpuFamily = enum(u32) {
     apple10 = 10,
     unknown = 0,
 
+    /// Returns true for Apple9 (M3/M4) and newer GPU families.
     pub fn isApple9OrNewer(self: @This()) bool {
         return switch (self) {
             .apple9, .apple10 => true,
@@ -17,29 +19,46 @@ pub const GpuFamily = enum(u32) {
         };
     }
 
+    /// Returns true only for Apple10 (M5-class) GPUs.
     pub fn isM5Class(self: @This()) bool {
         return self == .apple10;
     }
 };
 
+/// Queried hardware capability flags for the Metal device.
 pub const MetalCapabilities = struct {
+    /// True if the GPU supports Apple7 family (M1 and later).
     supports_apple7: bool,
+    /// True if the GPU supports Apple8 family (M2 and later).
     supports_apple8: bool,
+    /// True if the GPU supports Apple9 family (M3/M4 and later).
     supports_apple9: bool,
+    /// True if the GPU supports Apple10 family (M5 and later).
     supports_apple10: bool,
+    /// True if the GPU supports Mac2 family features.
     supports_mac2: bool,
+    /// True on Apple Silicon where CPU and GPU share the same memory.
     has_unified_memory: bool,
+    /// True if the device supports hardware ray tracing.
     supports_raytracing: bool,
+    /// Apple-recommended upper bound on GPU working set size in bytes.
     recommended_max_working_set_size: u64,
+    /// Maximum bytes of threadgroup memory available per threadgroup.
     max_threadgroup_memory_length: u64,
 };
 
+/// Primary Metal GPU device handle wrapping the Objective-C MTLDevice.
 pub const MetalDevice = struct {
+    /// Opaque pointer to the C shim Metal context.
     ctx: ?*shim.MetalCtx,
+    /// Detected GPU family of this device.
     chip: GpuFamily,
+    /// Hardware capability flags queried at init time.
     caps: MetalCapabilities,
+    /// Allocator used for host-side resource bookkeeping.
     allocator: std.mem.Allocator,
 
+    /// Initialize the Metal device, query capabilities, and detect GPU family.
     pub fn init(allocator: std.mem.Allocator, _: u32) !MetalDevice {
         const ctx = shim.mtl_init();
         if (ctx == null) {
@@ -68,6 +87,7 @@ pub const MetalDevice = struct {
         };
     }
 
+    /// Release the Metal context. Safe to call multiple times.
     pub fn deinit(self: *MetalDevice) void {
         if (self.ctx) |ctx| {
             shim.mtl_destroy(ctx);
@@ -75,28 +95,34 @@ pub const MetalDevice = struct {
         }
     }
 
+    /// Returns the maximum single-buffer allocation size in bytes.
     pub fn maxBufferSize(self: *const MetalDevice) u64 {
         if (self.ctx) |ctx| return shim.mtl_max_buffer_size(ctx);
         return 0;
     }
 
+    /// Returns total device memory in bytes (unified on Apple Silicon).
     pub fn totalMemory(self: *const MetalDevice) u64 {
         if (self.ctx) |ctx| return shim.mtl_total_memory(ctx);
         return 0;
     }
 
+    /// Returns Apple's recommended upper bound on GPU working set size in bytes.
     pub fn recommendedMaxWorkingSetSize(self: *const MetalDevice) u64 {
         return self.caps.recommended_max_working_set_size;
     }
 
+    /// Returns the maximum threadgroup memory available per threadgroup in bytes.
     pub fn maxThreadgroupMemoryLength(self: *const MetalDevice) u64 {
         return self.caps.max_threadgroup_memory_length;
     }
 
+    /// Returns true if CPU and GPU share a unified memory architecture.
     pub fn hasUnifiedMemory(self: *const MetalDevice) bool {
         return self.caps.has_unified_memory;
     }
 
+    /// Returns true if the device supports hardware ray tracing.
     pub fn supportsRaytracing(self: *const MetalDevice) bool {
         return self.caps.supports_raytracing;
     }

@@ -16,11 +16,13 @@ const ArgmaxPush = extern struct {
     phase: u32,
 };
 
+/// GPU-accelerated two-phase argmax reduction for greedy token sampling.
 pub const ArgmaxDispatch = struct {
     pipeline: ?Pipeline,
     descriptor_pool: vk.c.VkDescriptorPool,
     device: vk.c.VkDevice,
 
+    /// Create the argmax compute pipeline and descriptor pool on the given Vulkan instance.
     pub fn init(
         instance: *const Instance,
         shader_dir: []const u8,
@@ -56,6 +58,7 @@ pub const ArgmaxDispatch = struct {
         };
     }
 
+    /// Record the two-phase argmax reduction into a command buffer.
     pub fn record(
         self: *const ArgmaxDispatch,
         cmd: *const CommandBuffer,
@@ -79,6 +82,7 @@ pub const ArgmaxDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&phase1), 1, 1, 1);
     }
 
+    /// Allocate a descriptor set from the argmax descriptor pool.
     pub fn allocDescriptorSet(self: *const ArgmaxDispatch) !vk.c.VkDescriptorSet {
         const pip = if (self.pipeline) |*p| p else return error.ShaderNotLoaded;
         const alloc_info = vk.c.VkDescriptorSetAllocateInfo{
@@ -94,6 +98,7 @@ pub const ArgmaxDispatch = struct {
         return ds;
     }
 
+    /// Bind the logits, partials, and result buffers to a descriptor set.
     pub fn writeDescriptorSet(
         self: *const ArgmaxDispatch,
         descriptor_set: vk.c.VkDescriptorSet,
@@ -127,6 +132,7 @@ pub const ArgmaxDispatch = struct {
         vk.c.vkUpdateDescriptorSets(self.device, writes.len, &writes, 0, null);
     }
 
+    /// Destroy the pipeline and descriptor pool.
     pub fn deinit(self: *ArgmaxDispatch) void {
         if (self.pipeline) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);

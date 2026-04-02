@@ -46,6 +46,7 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "llama")) return .llama;
     if (std.mem.eql(u8, arch_str, "mistral")) return .mistral;
     if (std.mem.eql(u8, arch_str, "qwen2")) return .qwen2;
+    if (std.mem.eql(u8, arch_str, "qwen3")) return .qwen2;
     if (std.mem.eql(u8, arch_str, "qwen2moe")) return .qwen2_moe;
     if (std.mem.eql(u8, arch_str, "qwen3moe")) return .qwen2_moe;
     if (std.mem.eql(u8, arch_str, "qwen35moe")) return .qwen2_moe;
@@ -58,6 +59,7 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
 test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.llama, parseArchitecture("llama"));
     try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen2"));
+    try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen3"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen3moe"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen35moe"));

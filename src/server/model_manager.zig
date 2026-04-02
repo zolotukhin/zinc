@@ -15,11 +15,13 @@ const CommandPool = @import("../vulkan/command.zig").CommandPool;
 
 const Instance = instance_mod.Instance;
 
+/// Describes which model to load: a filesystem path and an optional managed-catalog ID.
 pub const LoadSpec = struct {
     model_path: []const u8,
     managed_id: ?[]const u8 = null,
 };
 
+/// Flat representation of a catalog model for JSON serialization to API clients.
 pub const ModelSummary = struct {
     id: []const u8,
     display_name: []const u8,
@@ -36,16 +38,19 @@ pub const ModelSummary = struct {
     supports_thinking_toggle: bool,
 };
 
+/// Snapshot of the full model catalog annotated with the current GPU profile.
 pub const ModelCatalogView = struct {
     profile: []const u8,
     data: []ModelSummary,
 
+    /// Frees the owned summary slice.
     pub fn deinit(self: *ModelCatalogView, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
         self.* = undefined;
     }
 };
 
+/// Bundle of model, tokenizer, and inference engine that represents a fully loaded model.
 pub const LoadedResources = struct {
     model: loader_mod.Model,
     tokenizer: tokenizer_mod.Tokenizer,
@@ -72,6 +77,7 @@ pub const LoadedResources = struct {
     }
 };
 
+/// Thread-safe owner of the currently active model, providing load, swap, and catalog queries.
 pub const ModelManager = struct {
     allocator: std.mem.Allocator,
     instance: *const Instance,
@@ -81,12 +87,14 @@ pub const ModelManager = struct {
     state_mutex: std.Thread.Mutex = .{},
     current: ?*LoadedResources,
 
+    /// Outcome of a managed model removal, including whether it was unloaded from the GPU.
     pub const RemoveResult = struct {
         unloaded_from_gpu: bool,
         cleared_active_selection: bool,
         removed: managed_mod.RemoveInstalledModelResult,
     };
 
+    /// Creates a manager and immediately loads the model described by `spec`.
     pub fn init(
         spec: LoadSpec,
         instance: *const Instance,
@@ -107,6 +115,7 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Creates a manager with no model loaded (server starts idle).
     pub fn initEmpty(
         instance: *const Instance,
         gpu_config_value: gpu_detect.GpuConfig,
@@ -123,6 +132,7 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Tears down the loaded model (if any) and releases all owned resources.
     pub fn deinit(self: *ModelManager) void {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
@@ -132,20 +142,24 @@ pub const ModelManager = struct {
         }
     }
 
+    /// Returns a pointer to the active model resources, or null if none is loaded.
     pub fn currentResources(self: *ModelManager) ?*LoadedResources {
         return self.current;
     }
 
+    /// Returns the human-readable name of the active model, or `"none"`.
     pub fn activeDisplayName(self: *ModelManager) []const u8 {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
         return if (self.current) |current| current.display_name else "none";
     }
 
+    /// Returns the catalog profile string for the detected GPU (e.g. `"amd_rdna4"`).
     pub fn catalogProfile(self: *const ModelManager) []const u8 {
         return catalog_mod.profileForGpu(self.gpu_config);
     }
 
+    /// VRAM accounting breakdown for the currently loaded model.
     pub const MemoryUsage = struct {
         weights_bytes: u64,
         runtime_device_local_bytes: u64,
@@ -155,15 +169,18 @@ pub const ModelManager = struct {
         device_local_bytes: u64,
         device_local_budget_bytes: u64,
 
+        /// Returns the effective context length, clamped to the available capacity.
         pub fn activeContextTokens(self: @This(), requested_tokens: u32) u32 {
             return @min(requested_tokens, self.context_capacity_tokens);
         }
 
+        /// Returns the VRAM bytes required for the effective context length.
         pub fn activeContextBytes(self: @This(), requested_tokens: u32) u64 {
             return @as(u64, self.activeContextTokens(requested_tokens)) * self.context_bytes_per_token;
         }
     };
 
+    /// Snapshots the VRAM usage of the active model, or returns zeroes if idle.
     pub fn currentMemoryUsage(self: *ModelManager) MemoryUsage {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
@@ -189,6 +206,8 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Builds a catalog snapshot with install/active/fit status for every entry.
+    /// When `include_all` is false, entries unsupported on the current GPU are excluded.
     pub fn collectCatalogView(self: *ModelManager, allocator: std.mem.Allocator, include_all: bool) !ModelCatalogView {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
@@ -261,6 +280,7 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Returns true if the given catalog entry is compatible with and fits the current GPU.
     pub fn supportsManagedEntry(self: *ModelManager, entry: catalog_mod.CatalogEntry, allocator: std.mem.Allocator) bool {
         const fit = managed_mod.describeFit(entry, self.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
             .required_vram_bytes = entry.required_vram_bytes,

@@ -320,6 +320,7 @@ fn freeMetadataValue(allocator: std.mem.Allocator, val: MetadataValue) void {
     }
 }
 
+/// Optional flags that control GGUF parsing behavior (e.g. summary logging).
 pub const ParseOptions = struct {
     log_summary: bool = true,
 };

@@ -171,6 +171,7 @@ pub fn buildDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocator
     return buildDecodeGraphDetailed(config, allocator, null);
 }
 
+/// Build a compute graph with per-op weight-size annotations derived from a GGUF file.
 pub fn buildDecodeGraphDetailed(config: *const ModelConfig, allocator: std.mem.Allocator, gf: ?*const gguf.GGUFFile) !Graph {
     return switch (config.architecture) {
         .llama, .mistral, .qwen2 => try buildLlamaDecodeGraph(config, allocator, gf),

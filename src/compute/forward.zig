@@ -52,12 +52,14 @@ pub const DecodeState = struct {
     }
 };
 
+/// Token sampling parameters for temperature, top-p, top-k, and repetition penalty.
 pub const SamplingParams = struct {
     temperature: f32 = 0.0,
     top_p: f32 = 1.0,
     repetition_penalty: f32 = 1.0,
     top_k: u32 = 64,
 
+    /// Return true when the sampling configuration requires reading logits back from the GPU.
     pub fn requiresLogitsReadback(self: @This()) bool {
         return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
     }

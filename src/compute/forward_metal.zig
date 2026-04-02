@@ -23,6 +23,7 @@ pub const DecodeState = struct {
     generated_tokens: std.ArrayList(u32),
     allocator: std.mem.Allocator,
 
+    /// Create a fresh decode state positioned at token index zero.
     pub fn init(allocator: std.mem.Allocator) DecodeState {
         return .{
             .position = 0,
@@ -31,12 +32,14 @@ pub const DecodeState = struct {
         };
     }
 
+    /// Release the generated token buffer.
     pub fn deinit(self: *DecodeState) void {
         self.generated_tokens.deinit(self.allocator);
         self.* = undefined;
     }
 };
 
+/// Timing and throughput metrics collected during a single generate call.
 pub const GenerateMetrics = struct {
     prefill_tokens: usize,
     prefill_ns: u64,
@@ -48,21 +51,25 @@ pub const GenerateMetrics = struct {
     eos_at_first_position: bool,
 };
 
+/// Output tokens and associated metrics returned by `generateWithMetrics`.
 pub const GenerateResult = struct {
     output_tokens: []u32,
     metrics: GenerateMetrics,
 
+    /// Free the output token slice.
     pub fn deinit(self: *GenerateResult, allocator: std.mem.Allocator) void {
         allocator.free(self.output_tokens);
         self.* = undefined;
     }
 };
 
+/// Options passed to `InferenceEngine.init` to enable profiling or debug validation.
 pub const InitOptions = struct {
     profile_enabled: bool = false,
     debug_validation_enabled: bool = false,
 };
 
+/// Cumulative per-request profiling counters for the Metal decode loop.
 pub const RuntimeProfile = struct {
     decode_steps: u32 = 0,
     shared_cmd_steps: u32 = 0,
@@ -216,7 +223,6 @@ const RopePush = extern struct {
     rope_dim: u32,
     n_heads: u32,
     position: u32,
-    freq_base_bits: u32,
 };
 
 /// Push constants for flash attention dispatch (matches flash_attn.metal: buffer(0)).
@@ -385,6 +391,11 @@ pub const InferenceEngine = struct {
     ffn_norm_bufs: []MetalBuffer,
     final_norm_gpu: MetalBuffer,
 
+    // Precomputed inverse RoPE frequencies (f32, GPU-accessible via UMA)
+    // inv_freq[i] = (1/base^(2i/dim)) / freq_factor[i], where freq_factor comes from
+    // rope_freqs.weight if present, or 1.0 otherwise.
+    rope_freq_buf: MetalBuffer,
+
     // SSM GPU pipelines (cross-compiled from GLSL via SPIRV-Cross)
     ssm_conv1d_pipe: MetalPipeline,
     ssm_delta_net_pipe: MetalPipeline,
@@ -415,6 +426,7 @@ pub const InferenceEngine = struct {
     debug_validation_enabled: bool,
     request_profile: RuntimeProfile,
 
+    /// Allocate GPU buffers, compile Metal pipelines, and prepare the KV cache.
     pub fn init(
         model: *const metal_loader.Model,
         device: *const metal_device.MetalDevice,
@@ -582,6 +594,38 @@ pub const InferenceEngine = struct {
         }
         const final_t = findTensorByName(model, "output_norm.weight") orelse return error.MissingTensor;
         self.final_norm_gpu = try preloadNormWeights(ctx, model, final_t, cfg.hidden_dim);
+
+        // Precompute inverse RoPE frequencies into a Metal buffer.
+        // If the model provides rope_freqs.weight (e.g. Llama 3.1), divide by those factors.
+        {
+            const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+            const half_rot: u32 = rope_dim / 2;
+            const freq_buf_size: usize = @as(usize, half_rot) * @sizeOf(f32);
+            self.rope_freq_buf = try metal_buffer.createBuffer(ctx, @max(freq_buf_size, 4));
+            const freq_ptr: [*]f32 = @ptrCast(@alignCast(self.rope_freq_buf.cpu_ptr.?));
+
+            // Standard inverse frequencies: inv_freq[i] = 1 / base^(2i/dim)
+            for (0..half_rot) |i| {
+                const exponent = @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(rope_dim));
+                freq_ptr[i] = 1.0 / std.math.pow(f32, cfg.rope_freq_base, exponent);
+            }
+
+            // If rope_freqs.weight exists, divide each inv_freq by the corresponding factor
+            if (findTensorByName(model, "rope_freqs.weight")) |rope_freqs_t| {
+                const mmap_data = model.mmap_data orelse return error.NoMmapData;
+                const tensor_data_off = model.gguf_file.tensor_data_offset;
+                const off: usize = @intCast(tensor_data_off + rope_freqs_t.info.offset);
+                const freq_factors = try allocator.alloc(f32, half_rot);
+                defer allocator.free(freq_factors);
+                readMmapFloats(mmap_data, off, rope_freqs_t.info.type_, freq_factors);
+                for (0..half_rot) |i| {
+                    if (freq_factors[i] != 0.0) {
+                        freq_ptr[i] /= freq_factors[i];
+                    }
+                }
+                log.info("RoPE: loaded {d} custom frequency factors from rope_freqs.weight", .{half_rot});
+            }
+        }
 
         // SSM GPU pipelines
         self.ssm_conv1d_pipe = try loadShaderPipeline(ctx, "ssm_conv1d");
@@ -776,6 +820,7 @@ pub const InferenceEngine = struct {
         return self;
     }
 
+    /// Release all GPU buffers, pipelines, and KV cache owned by the engine.
     pub fn deinit(self: *InferenceEngine) void {
         metal_buffer.freeBuffer(&self.hidden_buf);
         metal_buffer.freeBuffer(&self.residual_buf);
@@ -860,6 +905,7 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.attn_k_norm_present);
         self.allocator.free(self.ffn_norm_bufs);
         metal_buffer.freeBuffer(&self.final_norm_gpu);
+        metal_buffer.freeBuffer(&self.rope_freq_buf);
         self.allocator.free(self.layer_tensors);
 
         metal_pipeline.freePipeline(&self.ssm_conv1d_pipe);
@@ -919,6 +965,7 @@ pub const InferenceEngine = struct {
         return max_idx;
     }
 
+    /// Reset position, profile counters, and SSM state for a new request.
     pub fn resetRequestState(self: *InferenceEngine) void {
         self.position = 0;
         self.request_profile.reset();
@@ -935,6 +982,7 @@ pub const InferenceEngine = struct {
         }
     }
 
+    /// Process all prompt tokens through every layer to populate the KV cache.
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         self.resetRequestState();
         state.position = 0;
@@ -947,17 +995,20 @@ pub const InferenceEngine = struct {
         state.position = self.position;
     }
 
+    /// Run a single decode step for one token and advance the position counter.
     pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32) !void {
         try self.loadTokenEmbedding(token_id);
         try runDecodeStep(self);
         state.position = self.position;
     }
 
+    /// Turn on per-request profiling and reset the profile counters.
     pub fn enableProfiling(self: *InferenceEngine) !void {
         self.profile_enabled = true;
         self.request_profile.reset();
     }
 
+    /// Log a human-readable breakdown of profiling counters for the completed request.
     pub fn logRequestProfileSummary(self: *const InferenceEngine, label: []const u8, prompt_tokens: usize, completion_tokens: u32) void {
         if (!self.profile_enabled) return;
 
@@ -1033,6 +1084,7 @@ pub const InferenceEngine = struct {
         const embed_raw = mmap[embed_data_offset..];
         const hidden_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
         dequantRow(embed_raw, token_id, self.config.hidden_dim, self.token_embed.info.type_, hidden_ptr[0..self.config.hidden_dim]);
+
     }
 
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
@@ -1349,7 +1401,7 @@ fn dispatchRmsNormOnCmd(
     n: u32,
     n_groups: u32,
 ) void {
-    const push = RmsNormPush{ .n = n, .eps = 1e-6 };
+    const push = RmsNormPush{ .n = n, .eps = engine.config.rms_norm_eps };
     const bufs = [_]*const MetalBuffer{ input, output, weights };
     const simd_width = if (engine.rms_norm_pipe.thread_execution_width > 0 and
         engine.rms_norm_pipe.thread_execution_width <= engine.rms_norm_pipe.max_threads_per_threadgroup)
@@ -1432,16 +1484,14 @@ fn dispatchRopeOnCmd(
     rope_dim: u32,
     n_heads: u32,
     position: u32,
-    freq_base: f32,
 ) void {
     const push = RopePush{
         .stride = stride,
         .rope_dim = rope_dim,
         .n_heads = n_heads,
         .position = position,
-        .freq_base_bits = @bitCast(freq_base),
     };
-    const bufs = [_]*const MetalBuffer{ input, output };
+    const bufs = [_]*const MetalBuffer{ input, output, &engine.rope_freq_buf };
     cmd.dispatchV2(&engine.rope_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopePush), 0);
 }
 
@@ -1559,16 +1609,26 @@ fn dispatchFullAttnPrepOnCmd(
     const q_tensor = lt.attn_q orelse return error.MissingTensor;
     const k_tensor = lt.attn_k orelse return error.MissingTensor;
     const v_tensor = lt.attn_v orelse return error.MissingTensor;
-    const q_full_dim = q_dim * 2;
     const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+
+    // Detect packed Q+gate layout (Qwen3.5): Q tensor output dim is 2*q_dim.
+    // Standard transformers (Llama, Qwen2/3) have output dim == q_dim.
+    const q_out_dim: u32 = @intCast(q_tensor.info.dims[1]);
+    const has_packed_gate = q_out_dim > q_dim;
 
     // Keep the full-attention prep in a single compute encoder and rely on
     // Metal's in-order dispatch execution for the straight write->read chain.
-    dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
     dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
     dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
 
-    dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, cfg.head_dim, cfg.n_heads);
+    if (has_packed_gate) {
+        dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_out_dim, hidden_dim, 0);
+        cmd.barrier();
+        dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, cfg.head_dim, cfg.n_heads);
+    } else {
+        dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.q_buf, q_dim, hidden_dim, 0);
+    }
+    cmd.barrier();
 
     if (engine.attn_q_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], cfg.head_dim, cfg.n_heads);
@@ -1577,8 +1637,9 @@ fn dispatchFullAttnPrepOnCmd(
         dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], cfg.head_dim, cfg.n_kv_heads);
     }
 
-    dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
-    dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
+    dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position);
+    dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position);
+    cmd.barrier();
 
     dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
 }
@@ -1662,15 +1723,13 @@ fn cpuPerHeadRmsNormMul(data: [*]f32, weight: []const f32, head_dim: u32, n_head
     }
 }
 
-/// RoPE: apply rotary position embedding.
-fn cpuRope(data: [*]f32, stride: u32, rope_dim: u32, n_heads: u32, position: u32, freq_base: f32) void {
+/// RoPE: apply rotary position embedding using precomputed inverse frequencies.
+fn cpuRope(data: [*]f32, stride: u32, rope_dim: u32, n_heads: u32, position: u32, inv_freq: []const f32) void {
     const half_rot = rope_dim / 2;
     for (0..n_heads) |h| {
         const base_idx = @as(u32, @intCast(h)) * stride;
         for (0..half_rot) |i| {
-            const exponent = @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(rope_dim));
-            const freq_i = 1.0 / std.math.pow(f32, freq_base, exponent);
-            const theta = @as(f32, @floatFromInt(position)) * freq_i;
+            const theta = @as(f32, @floatFromInt(position)) * inv_freq[i];
             const cos_t = @cos(theta);
             const sin_t = @sin(theta);
             const idx0 = base_idx + @as(u32, @intCast(i));
@@ -1755,6 +1814,7 @@ fn getScaleMinK4(j: usize, scales: []const u8) struct { sc: u8, m: u8 } {
     }
 }
 
+/// Dequantize a single row from a quantized tensor to f32 on the CPU.
 pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, output: []f32) void {
     switch (quant_type) {
         .f32 => {
@@ -1933,6 +1993,7 @@ fn readMmapFloats(mmap: []const u8, base_off: usize, tensor_type: GGMLType, outp
     }
 }
 
+/// Select the top-k logits, apply softmax, and write indices and weights.
 pub fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
     var max_val: f32 = -std.math.inf(f32);
@@ -2168,9 +2229,18 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
             const layer_record_start = profileStart(profile != null);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
             try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
+            cmd.barrier();
             dispatchFlashAttnOnCmd(engine, cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
-            dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+            cmd.barrier();
+            // Sigmoid attention gate only applies when Q has packed gate (Qwen3.5)
+            const q_tensor_for_gate = lt.attn_q orelse return error.MissingTensor;
+            const q_out_dim_for_gate: u32 = @intCast(q_tensor_for_gate.info.dims[1]);
+            if (q_out_dim_for_gate > q_dim) {
+                dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+                cmd.barrier();
+            }
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
@@ -2188,7 +2258,9 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
                 cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
+            cmd.barrier();
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier();
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
@@ -2201,10 +2273,36 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 } else if (profile) |p| {
                     p.layer_record_ns += profileElapsedNs(layer_record_start);
                 }
-            } else if (profile) |p| {
-                p.layer_record_ns += profileElapsedNs(layer_record_start);
+            } else {
+                // Dense FFN (non-MoE) in full-attention layers
+                if (profile) |p| p.layer_record_ns += profileElapsedNs(layer_record_start);
+                if (profile) |p| p.dense_ffn_layers += 1;
+                // Commit attention portion, then dispatch FFN on a fresh command
+                commitAndWaitProfiled(cmd, profile);
+                const gate_t = lt.ffn_gate orelse return error.MissingTensor;
+                const up_t = lt.ffn_up orelse return error.MissingTensor;
+                const down_t = lt.ffn_down orelse return error.MissingTensor;
+                {
+                    const dense_record_start = profileStart(profile != null);
+                    var ffn_cmd = try beginProfiledCommand(engine, profile);
+                    dispatchDmmvOnCmd(engine, &ffn_cmd, gate_t, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, 0);
+                    dispatchDmmvOnCmd(engine, &ffn_cmd, up_t, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, 0);
+                    ffn_cmd.barrier();
+                    const swiglu_push = SwiGLUPush{ .n = inter_dim };
+                    const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
+                    ffn_cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                    ffn_cmd.barrier();
+                    dispatchDmmvOnCmd(engine, &ffn_cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
+                    if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
+                    commitAndWaitProfiled(&ffn_cmd, profile);
+                }
+                const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+                const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+                // Debug: verify FFN gate/down at layer 0, position 0
+                // (debug removed)
+                for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
             }
-            if (using_local_cmd) commitAndWaitProfiled(cmd, profile);
+            if (using_local_cmd and is_moe) commitAndWaitProfiled(cmd, profile);
         } else {
             if (profile) |p| p.ssm_layers += 1;
             // ===== SSM: fused batch 1 + recurrent body + batch 2 =====
@@ -2581,9 +2679,9 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
                 }
             }
-        } else if (!is_moe) {
+        } else if (!is_moe and !is_full_attn) {
             if (profile) |p| p.dense_ffn_layers += 1;
-            // Dense FFN (non-MoE) — norm_buf already set by GPU batch 2
+            // Dense FFN (non-MoE) for SSM layers — norm_buf already set by GPU batch 2
             const gate_t = lt.ffn_gate orelse return error.MissingTensor;
             const up_t = lt.ffn_up orelse return error.MissingTensor;
             const down_t = lt.ffn_down orelse return error.MissingTensor;
@@ -3267,9 +3365,13 @@ fn debugCompareAttentionLayer(
     const k_cache_actual: [*]const f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
     const v_cache_actual: [*]const f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
 
-    const q_full_dim: u32 = q_dim * 2;
-    const q_full_ref = try allocator.alloc(f32, q_full_dim);
-    defer allocator.free(q_full_ref);
+    // Detect packed Q+gate (Qwen3.5) vs plain Q (Llama, Qwen3)
+    const q_out_dim: u32 = @intCast(q_tensor.info.dims[1]);
+    const has_packed_gate = q_out_dim > q_dim;
+    const q_proj_dim: u32 = if (has_packed_gate) q_dim * 2 else q_dim;
+
+    const q_proj_ref = try allocator.alloc(f32, q_proj_dim);
+    defer allocator.free(q_proj_ref);
     const q_ref = try allocator.alloc(f32, q_dim);
     defer allocator.free(q_ref);
     const k_ref = try allocator.alloc(f32, kv_dim);
@@ -3285,51 +3387,28 @@ fn debugCompareAttentionLayer(
     const oproj_ref = try allocator.alloc(f32, hidden_dim);
     defer allocator.free(oproj_ref);
 
-    try cpuDmmvFallback(
-        mmap,
-        q_tensor,
-        tensor_data_off,
-        norm_in,
-        q_full_ref.ptr,
-        q_full_dim,
-        hidden_dim,
-        0,
-        allocator,
-    );
-    try cpuDmmvFallback(
-        mmap,
-        k_tensor,
-        tensor_data_off,
-        norm_in,
-        k_ref.ptr,
-        kv_dim,
-        hidden_dim,
-        0,
-        allocator,
-    );
-    try cpuDmmvFallback(
-        mmap,
-        v_tensor,
-        tensor_data_off,
-        norm_in,
-        v_ref.ptr,
-        kv_dim,
-        hidden_dim,
-        0,
-        allocator,
-    );
+    try cpuDmmvFallback(mmap, q_tensor, tensor_data_off, norm_in, q_proj_ref.ptr, q_proj_dim, hidden_dim, 0, allocator);
+    try cpuDmmvFallback(mmap, k_tensor, tensor_data_off, norm_in, k_ref.ptr, kv_dim, hidden_dim, 0, allocator);
+    try cpuDmmvFallback(mmap, v_tensor, tensor_data_off, norm_in, v_ref.ptr, kv_dim, hidden_dim, 0, allocator);
 
-    refDeinterleaveQGate(q_full_ref, q_ref, gate_ref, head_dim, n_heads);
+    if (has_packed_gate) {
+        refDeinterleaveQGate(q_proj_ref, q_ref, gate_ref, head_dim, n_heads);
+    } else {
+        @memcpy(q_ref, q_proj_ref);
+        @memset(gate_ref, 0);
+    }
     if (engine.attn_q_norm_present[layer_idx]) {
         const qn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[layer_idx].cpu_ptr.?));
-        cpuRmsNormMul(q_ref.ptr, qn_w[0..head_dim], q_ref.ptr, cfg.head_dim, cfg.n_heads, 1e-6);
+        cpuRmsNormMul(q_ref.ptr, qn_w[0..head_dim], q_ref.ptr, cfg.head_dim, cfg.n_heads, cfg.rms_norm_eps);
     }
     if (engine.attn_k_norm_present[layer_idx]) {
         const kn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[layer_idx].cpu_ptr.?));
-        cpuRmsNormMul(k_ref.ptr, kn_w[0..head_dim], k_ref.ptr, cfg.head_dim, cfg.n_kv_heads, 1e-6);
+        cpuRmsNormMul(k_ref.ptr, kn_w[0..head_dim], k_ref.ptr, cfg.head_dim, cfg.n_kv_heads, cfg.rms_norm_eps);
     }
-    cpuRope(q_ref.ptr, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
-    cpuRope(k_ref.ptr, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
+    const inv_freq_ptr: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+    const inv_freq_slice = inv_freq_ptr[0 .. rope_dim / 2];
+    cpuRope(q_ref.ptr, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, inv_freq_slice);
+    cpuRope(k_ref.ptr, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, inv_freq_slice);
 
     const kv_offset: usize = @intCast(engine.position * kv_dim);
     logDebugSliceDiff(layer, "attn_q", q_ref[0..q_dim], q_actual[0..q_dim]);
@@ -3349,9 +3428,13 @@ fn debugCompareAttentionLayer(
         n_kv_heads,
         seq_len,
     );
-    for (0..@as(usize, q_dim)) |i| {
-        const g = gate_actual[i];
-        gated_ref[i] = flash_ref[i] * (1.0 / (1.0 + @exp(-g)));
+    if (has_packed_gate) {
+        for (0..@as(usize, q_dim)) |i| {
+            const g = gate_actual[i];
+            gated_ref[i] = flash_ref[i] * (1.0 / (1.0 + @exp(-g)));
+        }
+    } else {
+        @memcpy(gated_ref, flash_ref);
     }
     try cpuDmmvFallback(
         mmap,
@@ -3464,6 +3547,7 @@ fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, i
 // Generate
 // ---------------------------------------------------------------------------
 
+/// Run prefill and autoregressive decode, returning output tokens and timing metrics.
 pub fn generateWithMetrics(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
@@ -3552,6 +3636,7 @@ pub fn generateWithMetrics(
     };
 }
 
+/// Convenience wrapper around `generateWithMetrics` that logs timing and returns only tokens.
 pub fn generate(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,

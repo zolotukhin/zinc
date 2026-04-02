@@ -4,9 +4,12 @@ const shim = @import("c.zig").shim;
 const MetalBuffer = @import("buffer.zig").MetalBuffer;
 const MetalPipeline = @import("pipeline.zig").MetalPipeline;
 
+/// A recorded command buffer that encodes compute dispatches for the GPU.
 pub const MetalCommand = struct {
+    /// Opaque handle to the C shim command buffer.
     handle: ?*shim.MetalCmd,
 
+    /// Encode a compute dispatch binding buffers, push constants, grid, and block sizes.
     pub fn dispatch(
         self: *MetalCommand,
         pipe: *const MetalPipeline,
@@ -72,10 +75,12 @@ pub const MetalCommand = struct {
         );
     }
 
+    /// Insert a memory barrier ensuring all prior dispatches complete before subsequent ones.
     pub fn barrier(self: *MetalCommand) void {
         if (self.handle) |h| shim.mtl_barrier(h);
     }
 
+    /// Commit the command buffer to the GPU and block until execution completes.
     pub fn commitAndWait(self: *MetalCommand) void {
         if (self.handle) |h| {
             shim.mtl_commit_and_wait(h);
@@ -83,6 +88,7 @@ pub const MetalCommand = struct {
         }
     }
 
+    /// Commit the command buffer for async GPU execution; call `wait` later to synchronize.
     pub fn commitAsync(self: *MetalCommand) void {
         if (self.handle) |h| {
             shim.mtl_commit_async(h);
@@ -90,6 +96,7 @@ pub const MetalCommand = struct {
         }
     }
 
+    /// Block until an async-committed command buffer finishes execution.
     pub fn wait(self: *MetalCommand) void {
         if (self.handle) |h| {
             shim.mtl_wait(h);
@@ -98,6 +105,7 @@ pub const MetalCommand = struct {
     }
 };
 
+/// Allocate a new command buffer from the given Metal context.
 pub fn beginCommand(ctx: ?*shim.MetalCtx) !MetalCommand {
     const handle = shim.mtl_begin_command(ctx);
     if (handle == null) return error.MetalCommandBufferFailed;

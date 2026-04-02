@@ -2,14 +2,18 @@
 const std = @import("std");
 const shim = @import("c.zig").shim;
 
+/// A GPU buffer in shared memory mode, accessible from both CPU and GPU.
 pub const MetalBuffer = struct {
+    /// Opaque handle to the C shim Metal buffer object.
     handle: ?*shim.MetalBuf,
+    /// Allocation size in bytes.
     size: usize,
     /// Direct CPU pointer — always non-null for SharedMode buffers on Apple Silicon.
     cpu_ptr: ?[*]u8,
     /// True if wrapping an external mmap, false if buffer owns its memory.
     is_mmap_wrapped: bool,
 
+    /// Returns the raw CPU pointer to the buffer contents.
     pub fn contents(self: *const MetalBuffer) ?[*]u8 {
         return self.cpu_ptr;
     }
@@ -20,6 +24,7 @@ pub const MetalBuffer = struct {
     }
 };
 
+/// Allocate a new shared-mode Metal buffer of the given size in bytes.
 pub fn createBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
     var cpu_ptr: ?*anyopaque = null;
     const handle = shim.mtl_create_buffer(ctx, size, &cpu_ptr);
@@ -32,6 +37,7 @@ pub fn createBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
     };
 }
 
+/// Wrap an existing mmap'd region as a Metal buffer (zero-copy, no allocation).
 pub fn wrapMmap(ctx: ?*shim.MetalCtx, ptr: [*]u8, size: usize) !MetalBuffer {
     const handle = shim.mtl_wrap_mmap(ctx, ptr, size);
     if (handle == null) return error.MetalMmapWrapFailed;
@@ -43,6 +49,7 @@ pub fn wrapMmap(ctx: ?*shim.MetalCtx, ptr: [*]u8, size: usize) !MetalBuffer {
     };
 }
 
+/// Release the Metal buffer handle. Safe to call with a null handle.
 pub fn freeBuffer(buf: *MetalBuffer) void {
     if (buf.handle) |h| {
         shim.mtl_free_buffer(h);

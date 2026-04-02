@@ -13,11 +13,13 @@ const CommandPool = @import("../vulkan/command.zig").CommandPool;
 
 const log = std.log.scoped(.loader);
 
-// Re-export from config.zig for backward compatibility
+/// Supported model architectures (re-exported from config.zig).
 pub const Architecture = config_mod.Architecture;
 
+/// Normalized model dimensions and hyperparameters (re-exported from config.zig).
 pub const ModelConfig = config_mod.ModelConfig;
 
+/// Summary returned by `inspectModel`: config plus file and tensor size statistics.
 pub const ModelInspection = struct {
     config: ModelConfig,
     file_size: u64,
@@ -186,7 +188,8 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
-    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse 4;
+    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse
+        if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
 
     if (log_metadata) {
         log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{

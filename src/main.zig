@@ -52,13 +52,16 @@ const Graph = graph_mod.Graph;
 
 const log = std.log.scoped(.zinc);
 
+/// Global flag enabling verbose debug log output when `--debug` is passed.
 pub var is_debug_mode: bool = false;
 
+/// Zig standard library options — sets log level to debug and wires the custom log function.
 pub const std_options = std.Options{
     .log_level = .debug,
     .logFn = myLogFn,
 };
 
+/// Custom log handler that filters debug messages unless `is_debug_mode` is set.
 pub fn myLogFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.enum_literal),
@@ -170,6 +173,7 @@ pub const Config = struct {
     show_all_models: bool = false,
 };
 
+/// Top-level CLI subcommands parsed from argv.
 pub const Command = enum {
     run,
     chat,
@@ -1341,7 +1345,7 @@ pub fn main() !void {
             const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
             defer allocator.free(prompt_tokens);
 
-            log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
+            log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 30)] });
 
             // Initialize inference engine
             var engine = forward_metal.InferenceEngine.init(&model, &device, allocator, .{
@@ -1391,6 +1395,7 @@ pub fn main() !void {
                 }
 
                 // Decode tokens to text
+                log.info("Output token IDs: {any}", .{output_tokens[0..@min(output_tokens.len, 10)]});
                 var text_buf: std.ArrayList(u8) = .{};
                 defer text_buf.deinit(allocator);
                 for (output_tokens) |tid| {

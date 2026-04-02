@@ -10,6 +10,7 @@ const MetalBuffer = metal_buffer.MetalBuffer;
 
 const log = std.log.scoped(.loader);
 
+/// Summary returned by `inspectModel`: config plus file and tensor size statistics.
 pub const ModelInspection = struct {
     config: ModelConfig,
     file_size: u64,
@@ -33,6 +34,7 @@ pub const Model = struct {
     mmap_file: ?std.fs.File,
     allocator: std.mem.Allocator,
 
+    /// Release Metal buffers, GGUF metadata, and the backing file mapping.
     pub fn deinit(self: *Model) void {
         for (self.tensors.items) |*t| {
             metal_buffer.freeBuffer(&t.gpu_buffer);
@@ -141,7 +143,8 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
-    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse 4;
+    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse
+        if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
 
     const rope_freq_base: f32 = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
@@ -226,6 +229,7 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     return extractConfigWithLogging(&gf, false);
 }
 
+/// Inspect a GGUF file and return exact tensor upload bytes plus normalized config.
 pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspection {
     const file = try std.fs.cwd().openFile(path, .{});
     defer {

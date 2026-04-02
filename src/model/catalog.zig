@@ -5,6 +5,7 @@
 const std = @import("std");
 const gpu_detect = @import("../vulkan/gpu_detect.zig");
 
+/// Lifecycle status of a catalog entry, controlling visibility and UI treatment.
 pub const CatalogStatus = enum {
     supported,
     experimental,
@@ -12,6 +13,8 @@ pub const CatalogStatus = enum {
     deprecated,
 };
 
+/// A single managed-model entry describing its identity, download location,
+/// hardware requirements, and tested GPU profiles.
 pub const CatalogEntry = struct {
     id: []const u8,
     display_name: []const u8,
@@ -35,8 +38,10 @@ pub const CatalogEntry = struct {
     tested_profiles: []const []const u8,
 };
 
+/// Shared GPU profile string used for all Apple Silicon (Metal) devices.
 pub const apple_silicon_profile = "apple-silicon";
 
+/// The complete list of ZINC-validated managed models available for download.
 pub const entries = [_]CatalogEntry{
     .{
         .id = "qwen35-2b-q4k-m",
@@ -82,8 +87,53 @@ pub const entries = [_]CatalogEntry{
             apple_silicon_profile,
         },
     },
+    .{
+        .id = "llama31-8b-q4k-m",
+        .display_name = "Llama 3.1 8B Instruct Q4_K_M",
+        .release_date = "2024-07-23",
+        .family = "llama3.1",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        .download_url = "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf?download=true",
+        .sha256 = "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c",
+        .size_bytes = 4_920_739_232,
+        .required_vram_bytes = 6 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = false,
+        .thinking_stable = false,
+        .status = .experimental,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
+    .{
+        .id = "qwen3-8b-q4k-m",
+        .display_name = "Qwen3 8B Q4_K_M",
+        .release_date = "2025-04-29",
+        .family = "qwen3",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "Qwen3-8B-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/unsloth/Qwen3-8B-GGUF",
+        .download_url = "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true",
+        .sha256 = "120307ba529eb2439d6c430d94104dabd578497bc7bfe7e322b5d9933b449bd4",
+        .size_bytes = 5_027_784_512,
+        .required_vram_bytes = 6 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .supported,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
 };
 
+/// Look up a catalog entry by its short identifier, returning null if not found.
 pub fn find(id: []const u8) ?*const CatalogEntry {
     for (&entries) |*entry| {
         if (std.mem.eql(u8, entry.id, id)) return entry;
@@ -91,6 +141,7 @@ pub fn find(id: []const u8) ?*const CatalogEntry {
     return null;
 }
 
+/// Map a detected Vulkan GPU configuration to its catalog profile string.
 pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
     return switch (config.vendor) {
         .amd_rdna4 => if (config.vram_mb >= 28 * 1024) "amd-rdna4-32gb" else if (config.vram_mb >= 14 * 1024) "amd-rdna4-16gb" else "amd-rdna4-small",
@@ -103,10 +154,12 @@ pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
     };
 }
 
+/// Return the catalog profile string for Apple Silicon Metal devices.
 pub fn profileForMetal() []const u8 {
     return apple_silicon_profile;
 }
 
+/// Return whether the entry has been tested on the given GPU profile.
 pub fn supportsProfile(entry: CatalogEntry, profile: []const u8) bool {
     for (entry.tested_profiles) |tested| {
         if (std.mem.eql(u8, tested, profile)) return true;
@@ -114,10 +167,12 @@ pub fn supportsProfile(entry: CatalogEntry, profile: []const u8) bool {
     return false;
 }
 
+/// Return whether the model's VRAM requirement fits within the given budget.
 pub fn fitsGpu(entry: CatalogEntry, vram_budget_bytes: u64) bool {
     return entry.required_vram_bytes <= vram_budget_bytes;
 }
 
+/// Return whether the model is both tested on the given profile and fits in VRAM.
 pub fn supportedOnCurrentGpu(entry: CatalogEntry, profile: []const u8, vram_budget_bytes: u64) bool {
     return supportsProfile(entry, profile) and fitsGpu(entry, vram_budget_bytes);
 }

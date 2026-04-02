@@ -10,19 +10,31 @@ const MetalDevice = metal_device.MetalDevice;
 const ModelConfig = config_mod.ModelConfig;
 const ModelInspection = loader_metal.ModelInspection;
 
+/// Configuration for a Metal diagnostics run.
 pub const Options = struct {
+    /// GPU device index (ignored on Metal; always uses the system default).
     device_index: u32 = 0,
+    /// Path to a GGUF model file for inspection, or null to skip.
     model_path: ?[]const u8 = null,
+    /// Managed model catalog entry, if selected via `--model-id`.
     managed_model: ?ManagedModelInfo = null,
+    /// Directory containing Metal shader source files.
     shader_dir: []const u8 = "src/shaders/metal",
 };
 
+/// Catalog metadata for a managed (downloadable) model.
 pub const ManagedModelInfo = struct {
+    /// Unique model identifier used in the catalog.
     id: []const u8,
+    /// Human-readable model name shown in UI.
     display_name: []const u8,
+    /// GGUF filename within the local cache.
     file_name: []const u8,
+    /// On-disk size in bytes.
     size_bytes: u64,
+    /// Minimum VRAM required for inference.
     required_vram_bytes: u64,
+    /// Short status string (e.g. "installed", "available").
     status_label: []const u8,
 };
 
@@ -94,13 +106,21 @@ const PipelineCompileCheck = struct {
     static_threadgroup_memory_length: u32,
 };
 
+/// Estimated unified-memory breakdown for running a model on Apple Silicon.
 pub const UnifiedFitEstimate = struct {
+    /// Tensor weight payload bytes mapped into unified memory.
     weights_bytes: u64,
+    /// Activation, KV-cache, and scratch buffer bytes in unified memory.
     runtime_unified_bytes: u64,
+    /// Sum of weights + runtime bytes in unified memory.
     total_unified_bytes: u64,
+    /// Recommended working-set budget reported by the Metal driver.
     recommended_working_set_bytes: u64,
+    /// Total physical memory on the device.
     total_memory_bytes: u64,
+    /// KV cache bytes included in the runtime estimate.
     kv_cache_bytes: u64,
+    /// Maximum context length used for KV cache sizing (capped at 4096).
     max_ctx: u32,
 
     fn headroomBytes(self: UnifiedFitEstimate) i128 {
@@ -150,6 +170,7 @@ const required_shader_files = [_][]const u8{
     "ssm_gated_norm.metal",
 };
 
+/// Run Metal system diagnostics and output a readable preflight report to stdout.
 pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     const stdout_file = std.fs.File.stdout();
     var stdout_buffer: [4096]u8 = undefined;
@@ -428,6 +449,7 @@ fn printModelCheck(
     try printStatusLine(writer, styles, summary, .skip, "Model", "No model specified", .{});
 }
 
+/// Estimate unified-memory usage for a model given Apple Silicon memory constraints.
 pub fn estimateUnifiedFit(
     inspection: ModelInspection,
     recommended_working_set_bytes: u64,

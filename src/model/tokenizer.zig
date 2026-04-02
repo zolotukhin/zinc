@@ -126,8 +126,10 @@ pub const Tokenizer = struct {
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
         const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse blk: {
-            if (is_qwen35_family) break :blk true;
-            if (std.mem.eql(u8, model_type, "gpt2")) break :blk false;
+            // Default: prepend BOS when a BOS token ID is defined.
+            // Qwen3.5 GGUFs omit BOS metadata but still expect leading BOS=1.
+            // Llama 3 uses GPT2 tokenizer format but requires BOS (128000).
+            // Qwen3 explicitly sets add_bos_token=false in GGUF metadata.
             break :blk bos_id != null;
         };
         const add_eos_token = gf.getBool("tokenizer.ggml.add_eos_token") orelse false;
@@ -265,11 +267,19 @@ pub const Tokenizer = struct {
     /// Encode a prompt and prepend BOS when the model expects it.
     /// The returned slice is allocated with `allocator`, so server routes can use a
     /// per-request allocator while the tokenizer keeps owning its internal scratch buffers.
+    /// Special tokens (e.g. `<|start_header_id|>`) are resolved via `token_to_id` rather
+    /// than being BPE-encoded character by character.
     pub fn encodePrompt(self: *const Tokenizer, text: []const u8, allocator: std.mem.Allocator) ![]u32 {
-        const raw_tokens = try self.encode(text);
-        defer self.freeEncoded(raw_tokens);
+        const raw_tokens = try self.encodeWithSpecialTokens(text, allocator);
+        defer allocator.free(raw_tokens);
 
-        const prepend_bos = self.shouldPrependBos();
+        // Determine whether BOS should be prepended, but avoid duplicating it when
+        // the chat template already emitted the BOS token as its first special token.
+        var prepend_bos = self.shouldPrependBos();
+        if (prepend_bos and raw_tokens.len > 0 and raw_tokens[0] == self.bosId()) {
+            prepend_bos = false;
+        }
+
         const bos_extra: usize = if (prepend_bos) 1 else 0;
         const prompt_tokens = try allocator.alloc(u32, raw_tokens.len + bos_extra);
 
@@ -281,6 +291,64 @@ pub const Tokenizer = struct {
         }
 
         return prompt_tokens;
+    }
+
+    /// Encode text that may contain special token markers (e.g. `<|...|>`).
+    /// Special tokens that exist in the vocabulary are mapped directly to their
+    /// token IDs; the remaining text segments are BPE-encoded normally.
+    /// The returned slice is allocated with `allocator`.
+    fn encodeWithSpecialTokens(self: *const Tokenizer, text: []const u8, allocator: std.mem.Allocator) ![]u32 {
+        // Fast path: if there are no potential special token markers, just BPE-encode.
+        if (std.mem.indexOf(u8, text, "<|") == null) {
+            const bpe = try self.encode(text);
+            defer self.freeEncoded(bpe);
+            const out = try allocator.alloc(u32, bpe.len);
+            @memcpy(out, bpe);
+            return out;
+        }
+
+        var tokens: std.ArrayList(u32) = .{};
+        errdefer tokens.deinit(allocator);
+
+        var pos: usize = 0;
+        while (pos < text.len) {
+            // Look for the next `<|` marker.
+            if (std.mem.indexOfPos(u8, text, pos, "<|")) |start| {
+                // Look for the closing `|>` after the opening `<|`.
+                if (std.mem.indexOfPos(u8, text, start + 2, "|>")) |pipe_end| {
+                    const end = pipe_end + 2; // include the `|>`
+                    const candidate = text[start..end];
+
+                    if (self.token_to_id.get(candidate)) |special_id| {
+                        // BPE-encode any text before this special token.
+                        if (start > pos) {
+                            const bpe = try self.encode(text[pos..start]);
+                            defer self.freeEncoded(bpe);
+                            try tokens.appendSlice(allocator, bpe);
+                        }
+                        try tokens.append(allocator, special_id);
+                        pos = end;
+                        continue;
+                    }
+                }
+                // The `<|...|>` pattern was not a known special token.
+                // BPE-encode everything up to and including `<|` so the outer
+                // loop can continue scanning after it.
+                const chunk_end = start + 2;
+                const bpe = try self.encode(text[pos..chunk_end]);
+                defer self.freeEncoded(bpe);
+                try tokens.appendSlice(allocator, bpe);
+                pos = chunk_end;
+            } else {
+                // No more `<|` markers — BPE-encode the rest.
+                const bpe = try self.encode(text[pos..]);
+                defer self.freeEncoded(bpe);
+                try tokens.appendSlice(allocator, bpe);
+                pos = text.len;
+            }
+        }
+
+        return try tokens.toOwnedSlice(allocator);
     }
 
     /// Apply BPE merges in priority order (GPT-2/tiktoken style).
@@ -440,12 +508,7 @@ pub const Tokenizer = struct {
         return prompt_tokens;
     }
 
-    /// Release tokenizer-owned vocabulary tables, merges, and optional score arrays.
-    /// @param self Tokenizer to tear down in place.
-    /// @note This does not free any source GGUF storage because the tokenizer owns duplicated tables.
-    /// Decode a token to UTF-8 text, reversing GPT-2 byte encoding.
-    /// The vocab stores tokens in GPT-2 Unicode representation where each original byte
-    /// is mapped to a Unicode character. This reverses that mapping.
+    /// Decode a token ID to UTF-8 text, reversing the GPT-2 byte-to-unicode mapping.
     pub fn decodeToken(self: *const Tokenizer, token_id: u32, buf: []u8) []const u8 {
         if (token_id >= self.vocab.len) return "";
         const gpt2_text = self.vocab[token_id];
@@ -491,6 +554,7 @@ pub const Tokenizer = struct {
         return buf[0..out];
     }
 
+    /// Options controlling chat template rendering behavior.
     pub const ChatTemplateOptions = struct {
         enable_thinking: ?bool = null,
         add_generation_prompt: bool = true,
@@ -498,6 +562,7 @@ pub const Tokenizer = struct {
         skip_thinking_template: bool = false,
     };
 
+    /// Return whether the model's chat template supports an explicit thinking toggle.
     pub fn supportsThinkingToggle(self: *const Tokenizer) bool {
         return if (self.chat_template) |tmpl|
             std.mem.indexOf(u8, tmpl, "enable_thinking") != null and
@@ -514,35 +579,57 @@ pub const Tokenizer = struct {
     /// Apply chat template to role/content pairs with explicit thinking control.
     pub fn applyChatTemplateWithOptions(self: *const Tokenizer, roles: []const []const u8, contents: []const []const u8, options: ChatTemplateOptions, buf: []u8) ![]const u8 {
         var pos: usize = 0;
-        const use_chatml = if (self.chat_template) |tmpl|
-            std.mem.indexOf(u8, tmpl, "im_start") != null
-        else
-            true;
+        const template_kind = self.detectTemplateKind();
         const supports_thinking = self.supportsThinkingToggle();
         const n = @min(roles.len, contents.len);
-        if (use_chatml) {
-            for (0..n) |i| {
-                const written = std.fmt.bufPrint(buf[pos..], "<|im_start|>{s}\n{s}<|im_end|>\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
-                pos += written.len;
-            }
-            if (options.add_generation_prompt) {
-                const suffix = if (supports_thinking and !options.skip_thinking_template) blk: {
-                    if (options.enable_thinking orelse false) {
-                        break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n", .{}) catch return error.BufferTooSmall;
-                    }
-                    break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n\n</think>\n\n", .{}) catch return error.BufferTooSmall;
-                } else std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{}) catch return error.BufferTooSmall;
-                pos += suffix.len;
-            }
-        } else {
-            for (0..n) |i| {
-                const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
-                pos += written.len;
-            }
+        switch (template_kind) {
+            .chatml => {
+                for (0..n) |i| {
+                    const written = std.fmt.bufPrint(buf[pos..], "<|im_start|>{s}\n{s}<|im_end|>\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
+                    pos += written.len;
+                }
+                if (options.add_generation_prompt) {
+                    const suffix = if (supports_thinking and !options.skip_thinking_template) blk: {
+                        if (options.enable_thinking orelse false) {
+                            break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n", .{}) catch return error.BufferTooSmall;
+                        }
+                        break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n\n</think>\n\n", .{}) catch return error.BufferTooSmall;
+                    } else std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{}) catch return error.BufferTooSmall;
+                    pos += suffix.len;
+                }
+            },
+            .llama3 => {
+                const header = std.fmt.bufPrint(buf[pos..], "<|begin_of_text|>", .{}) catch return error.BufferTooSmall;
+                pos += header.len;
+                for (0..n) |i| {
+                    const written = std.fmt.bufPrint(buf[pos..], "<|start_header_id|>{s}<|end_header_id|>\n\n{s}<|eot_id|>", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
+                    pos += written.len;
+                }
+                if (options.add_generation_prompt) {
+                    const suffix = std.fmt.bufPrint(buf[pos..], "<|start_header_id|>assistant<|end_header_id|>\n\n", .{}) catch return error.BufferTooSmall;
+                    pos += suffix.len;
+                }
+            },
+            .generic => {
+                for (0..n) |i| {
+                    const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
+                    pos += written.len;
+                }
+            },
         }
         return buf[0..pos];
     }
 
+    const TemplateKind = enum { chatml, llama3, generic };
+
+    fn detectTemplateKind(self: *const Tokenizer) TemplateKind {
+        const tmpl = self.chat_template orelse return .chatml;
+        if (std.mem.indexOf(u8, tmpl, "im_start") != null) return .chatml;
+        if (std.mem.indexOf(u8, tmpl, "start_header_id") != null) return .llama3;
+        return .generic;
+    }
+
+    /// Release tokenizer-owned vocabulary tables, merges, and optional score arrays.
     pub fn deinit(self: *Tokenizer) void {
         if (self.scores) |s| self.allocator.free(s);
         self.allocator.free(self.merges);
@@ -764,6 +851,30 @@ test "applyChatTemplate with im_start template uses ChatML" {
     try std.testing.expect(std.mem.indexOf(u8, result, "Hi") != null);
 }
 
+test "applyChatTemplate llama3 template uses header tokens" {
+    const tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 1,
+        .eos_id = 2,
+        .prepend_bos = true,
+        .chat_template = "{% for message in messages %}<|start_header_id|>{{ message['role'] }}<|end_header_id|>\n\n{{ message['content'] }}<|eot_id|>{% endfor %}",
+        .allocator = std.testing.allocator,
+    };
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{ "system", "user" };
+    const contents = [_][]const u8{ "You help.", "Hi" };
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|begin_of_text|>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|start_header_id|>system<|end_header_id|>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "You help.<|eot_id|>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|start_header_id|>user<|end_header_id|>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Hi<|eot_id|>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|start_header_id|>assistant<|end_header_id|>") != null);
+}
+
 test "applyChatTemplate qwen thinking template emits empty think block for generation" {
     var tok = Tokenizer{
         .vocab = &.{},
@@ -970,4 +1081,156 @@ test "encode frees temporary buffers for sentencepiece merges" {
 
     try std.testing.expectEqual(@as(usize, 1), tokens.len);
     try std.testing.expectEqual(@as(u32, 2), tokens[0]);
+}
+
+test "encodeWithSpecialTokens maps known special tokens to their IDs" {
+    // Build a small vocabulary: single-char GPT-2 tokens + two special tokens.
+    // GPT-2 BPE stores printable ASCII as-is, so "h"/"i" match the byte encoding.
+    const vocab = [_][]const u8{ "h", "i", "<|special|>" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 2,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("h", 0);
+    try tok.token_to_id.put("i", 1);
+    try tok.token_to_id.put("<|special|>", 2);
+
+    const tokens = try tok.encodeWithSpecialTokens("hi<|special|>hi", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+
+    // Expect: h(0), i(1), <|special|>(2), h(0), i(1)
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 0, 1 }, tokens);
+}
+
+test "encodeWithSpecialTokens falls back for unknown <|...|> patterns" {
+    const vocab = [_][]const u8{ "h", "i" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 1,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("h", 0);
+    try tok.token_to_id.put("i", 1);
+
+    // <|nope|> is not in the vocab, so it should be BPE-encoded character by character.
+    const tokens = try tok.encodeWithSpecialTokens("h<|nope|>i", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+
+    // First and last token must be h(0) and i(1); middle tokens are byte-fallback.
+    try std.testing.expect(tokens.len > 2);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0]);
+    try std.testing.expectEqual(@as(u32, 1), tokens[tokens.len - 1]);
+}
+
+test "encodeWithSpecialTokens fast path when no special markers present" {
+    const vocab = [_][]const u8{ "h", "i" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 1,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("h", 0);
+    try tok.token_to_id.put("i", 1);
+
+    const tokens = try tok.encodeWithSpecialTokens("hi", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, tokens);
+}
+
+test "encodePrompt skips duplicate BOS when chat template already emits it" {
+    // Simulate Llama 3 scenario: BOS is token 100, and the text starts with <|begin_of_text|>.
+    const vocab = [_][]const u8{ "h", "i", "<|begin_of_text|>" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 2, // <|begin_of_text|> is token 2 in our mini vocab
+        .eos_id = 1,
+        .prepend_bos = true,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("h", 0);
+    try tok.token_to_id.put("i", 1);
+    try tok.token_to_id.put("<|begin_of_text|>", 2);
+
+    const tokens = try tok.encodePrompt("<|begin_of_text|>hi", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+
+    // BOS (2) should appear exactly once, not twice.
+    try std.testing.expectEqualSlices(u32, &.{ 2, 0, 1 }, tokens);
+}
+
+test "encodePrompt prepends BOS when text has no leading special BOS" {
+    const vocab = [_][]const u8{ "h", "i", "<|special|>" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 2,
+        .eos_id = 1,
+        .prepend_bos = true,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("h", 0);
+    try tok.token_to_id.put("i", 1);
+    try tok.token_to_id.put("<|special|>", 2);
+
+    const tokens = try tok.encodePrompt("hi", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+
+    // BOS (2) should be prepended since the text doesn't start with a BOS token.
+    try std.testing.expectEqualSlices(u32, &.{ 2, 0, 1 }, tokens);
+}
+
+test "encodeWithSpecialTokens handles consecutive special tokens" {
+    const vocab = [_][]const u8{ "<|a|>", "<|b|>", "<|c|>" };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 0,
+        .prepend_bos = false,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("<|a|>", 0);
+    try tok.token_to_id.put("<|b|>", 1);
+    try tok.token_to_id.put("<|c|>", 2);
+
+    const tokens = try tok.encodeWithSpecialTokens("<|a|><|b|><|c|>", std.testing.allocator);
+    defer std.testing.allocator.free(tokens);
+
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, tokens);
 }

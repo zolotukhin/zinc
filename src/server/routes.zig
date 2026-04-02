@@ -127,6 +127,7 @@ const ChatReuseCache = struct {
     }
 };
 
+/// Shared server state tracking active requests, context usage, and generation serialization.
 pub const ServerState = struct {
     started_at: i64,
     active_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -136,6 +137,7 @@ pub const ServerState = struct {
     downloads: DownloadTracker = .{},
     chat_reuse_cache: ChatReuseCache,
 
+    /// Create a new server state anchored to the given UNIX timestamp.
     pub fn init(started_at: i64) ServerState {
         return .{
             .started_at = started_at,
@@ -143,14 +145,17 @@ pub const ServerState = struct {
         };
     }
 
+    /// Release owned resources (chat reuse cache).
     pub fn deinit(self: *ServerState) void {
         self.chat_reuse_cache.deinit();
     }
 
+    /// Return elapsed seconds since the server started.
     pub fn uptimeSeconds(self: *const ServerState, now: i64) u64 {
         return @intCast(@max(now - self.started_at, 0));
     }
 
+    /// Atomically capture current request and context counters for the health endpoint.
     pub fn snapshot(self: *const ServerState, now: i64) HealthSnapshot {
         return .{
             .active_requests = self.active_requests.load(.monotonic),
@@ -160,18 +165,22 @@ pub const ServerState = struct {
         };
     }
 
+    /// Update the active KV-cache token count reported by the health endpoint.
     pub fn setActiveContextTokens(self: *ServerState, tokens: u32) void {
         self.active_context_tokens.store(tokens, .monotonic);
     }
 
+    /// Reset the active context token count to zero.
     pub fn clearActiveContext(self: *ServerState) void {
         self.active_context_tokens.store(0, .monotonic);
     }
 
+    /// Evict all entries from the chat prompt-reuse cache.
     pub fn clearChatReuseCache(self: *ServerState) void {
         self.chat_reuse_cache.clear();
     }
 
+    /// Remove a single session from the chat prompt-reuse cache.
     pub fn clearChatReuseSession(self: *ServerState, session_id: []const u8) void {
         self.chat_reuse_cache.removeSession(session_id);
     }
