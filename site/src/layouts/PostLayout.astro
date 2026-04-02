@@ -32,7 +32,14 @@ const keywordList = keywords && keywords.length > 0 ? keywords : tags ?? [];
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const canonicalUrl = Astro.url.href;
-const xShareText = `Discussing: ${title}`;
+const xStarters = [
+  `Interesting read:`,
+  `Worth a look:`,
+  `Good writeup on`,
+  `This was a fun read:`,
+  `Check this out:`,
+];
+const xShareText = `${xStarters[Math.floor(Math.random() * xStarters.length)]} ${title}`;
 const xIntentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(xShareText)}&url=${encodeURIComponent(canonicalUrl)}`;
 const breadcrumbItems = [
   { name: 'Home', href: '/' },

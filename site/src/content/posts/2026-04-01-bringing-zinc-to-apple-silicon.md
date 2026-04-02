@@ -26,29 +26,68 @@ keywords:
 excerpt: "ZINC now runs natively on Apple Silicon through a Metal backend built from scratch. Not a Vulkan translation layer. Not MLX. Hand-tuned MSL shaders, zero-copy model loading, and the same OpenAI-compatible API. This is the story of how we got there."
 ---
 
-ZINC started as an AMD story. The whole pitch was simple: consumer GPUs have the bandwidth for real LLM inference, but the software stack ignores them. Build the shaders from scratch, tune them for the hardware, skip the heavyweight frameworks.
+Twenty-one thousand command buffer commits per decode run. That was the number staring back at us from the Metal profiler when we first got a 35B model running on Apple Silicon. The GPU kernels were fast. The engine was spending most of its time asking the GPU to please start working.
 
-That pitch turns out to apply to more than just AMD.
+Fixing that took rewriting how Mixture of Experts dispatch works on Metal, building specialized kernels for three quantization types we did not originally plan to support, and rethinking assumptions about command recording that worked fine on Vulkan but fell apart on Apple Silicon. The result: 261 commits per run, a 50% throughput jump, and a Metal backend that now ships as a first-class platform alongside AMD.
 
-Apple Silicon has unified memory, fast GPU cores, and sits inside tens of millions of machines. Yet the local inference options are either MLX (a Python framework that adds a layer of indirection between you and the GPU) or llama.cpp's Metal backend (which works, but treats Apple Silicon the same way it treats everything else: generically). Nobody has built an inference engine from scratch around what Metal actually offers.
+This is the story of how ZINC went from "AMD only" to "AMD and Apple Silicon" without turning into two separate engines.
 
-So we did.
+<figure class="diagram-card diagram-wide">
 
-As of today, ZINC runs natively on every Apple Silicon Mac from M1 through M5. Same CLI, same chat UI, same OpenAI-compatible API. One `zig build`, one binary, no Python, no MLX, no framework overhead. The engine detects the platform at compile time and builds the right backend: Vulkan on Linux, Metal on macOS.
+| | AMD (Vulkan) | Apple Silicon (Metal) |
+|---|---|---|
+| **Memory model** | Discrete VRAM + staging DMA | Unified, shared pages |
+| **Shader language** | GLSL 4.60 → SPIR-V | MSL (Metal Shading Language) |
+| **Shaders shipped** | 24 compute shaders | 31 compute shaders |
+| **Model loading** | mmap → staging buffer → GPU DMA | mmap → `newBufferWithBytesNoCopy` |
+| **Threading model** | wave64, cooperative matrix | 32-lane simdgroups, threadgroup staging |
+| **Command model** | Pre-recorded command buffers | Lightweight encoders, inline dispatch |
 
-This post is the story of how that happened, what was harder than expected, and what design decisions made the difference.
+  <figcaption>The two backends share tokenizer, GGUF parser, HTTP routes, and model catalog. Everything below the GPU abstraction line is platform-native.</figcaption>
+</figure>
 
 ## The first question: translate or rebuild?
 
-When you already have a working Vulkan backend, the obvious path is to make it work on macOS. MoltenVK exists. You could, in theory, just run the same SPIR-V shaders through a Vulkan-to-Metal translation layer and call it a day.
+When you already have a working Vulkan backend, the obvious path is MoltenVK. Run the same SPIR-V shaders through a translation layer. Call it a day.
 
-We tried that for about five minutes before deciding against it.
+We decided against it in about five minutes.
 
-The problem is not that MoltenVK does not work. The problem is that it forces you to pretend Apple Silicon is a discrete GPU with separate host and device memory, explicit staging buffers, and a Vulkan-shaped command model. Apple Silicon is none of those things. It has unified memory where CPU and GPU share the same physical pages. It has a command model designed around lightweight encoders, not heavyweight command buffers. It has `newBufferWithBytesNoCopy`, which lets you hand the GPU a pointer to memory you already own and skip the copy entirely.
+MoltenVK forces you to pretend Apple Silicon is a discrete GPU. Separate host and device memory. Explicit staging buffers. A Vulkan-shaped command model. Apple Silicon is none of those things. It has unified memory where CPU and GPU share the same physical pages. It has `newBufferWithBytesNoCopy`, which lets you hand the GPU a pointer to memory you already own and skip the copy entirely.
 
-If you translate Vulkan to Metal, you throw all of that away. You add overhead to simulate a memory model the hardware does not have, and you give up the one feature that makes Apple Silicon uniquely good for inference: the model weights can stay exactly where they are.
+Translating Vulkan to Metal throws away the one feature that makes Apple Silicon uniquely good for inference: the model weights can stay exactly where they are.
 
-So instead of translating, we rebuilt. A native Metal backend with its own shaders, its own loader, and its own forward runtime. The shared parts of ZINC (tokenizer, GGUF parser, HTTP routes, model catalog) stay shared. Everything below the GPU abstraction line is new.
+<figure class="diagram-card diagram-wide">
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        ZINC Engine                          │
+├──────────────────────┬──────────────────────────────────────┤
+│   Shared layers      │  Tokenizer, GGUF parser, HTTP API,  │
+│                      │  model catalog, chat UI, sessions    │
+├──────────────────────┼──────────────────────────────────────┤
+│   gpu/interface.zig  │  Compile-time backend switch         │
+├───────────┬──────────┴───────────┬──────────────────────────┤
+│  Vulkan   │                      │  Metal                   │
+│  backend  │                      │  backend                 │
+├───────────┤                      ├──────────────────────────┤
+│ instance  │                      │ device.zig               │
+│ buffer    │                      │ buffer.zig               │
+│ pipeline  │                      │ pipeline.zig             │
+│ command   │                      │ command.zig              │
+│ gpu_detect│                      │ shim.m (400 lines ObjC)  │
+├───────────┤                      ├──────────────────────────┤
+│ 24 GLSL   │                      │ 31 MSL shaders           │
+│ → SPIR-V  │                      │ (runtime compiled)       │
+├───────────┤                      ├──────────────────────────┤
+│ forward   │                      │ forward_metal.zig        │
+│ .zig      │                      │                          │
+└───────────┘                      └──────────────────────────┘
+```
+
+  <figcaption>Backend selection happens at compile time. The inactive backend is not compiled into the binary. macOS builds Metal. Linux builds Vulkan.</figcaption>
+</figure>
+
+So instead of translating, we rebuilt. A native Metal backend with its own shaders, its own loader, and its own forward runtime. The shared parts stay shared. Everything below the abstraction line is new.
 
 ## The Objective-C question
 
@@ -56,113 +95,197 @@ ZINC is written in Zig. Metal is an Objective-C framework. Those two do not natu
 
 The solution was a deliberate constraint: exactly one Objective-C file in the entire repo. `src/metal/shim.m` is a thin C-ABI wrapper around the Metal API. It exports plain C functions for device creation, buffer allocation, pipeline compilation, command recording, and dispatch. Everything else in the Metal backend is pure Zig calling that C interface.
 
-This matters for two reasons. First, it keeps the Zig code clean. There is no `@cImport` pulling in Objective-C headers scattered across the codebase. There is no ARC happening in inference-hot code paths. The Zig side sees a set of opaque handles and straightforward function calls.
-
-Second, it keeps the maintenance surface small. When Apple changes Metal APIs or adds new features, exactly one file needs to change. The rest of the engine does not know or care that Objective-C exists.
-
 The shim is about 400 lines. It wraps `MTLDevice`, `MTLCommandQueue`, `MTLBuffer`, `MTLComputePipelineState`, `MTLCommandBuffer`, and `MTLComputeCommandEncoder`. That is enough to build a complete inference backend.
+
+This keeps the Zig code clean (no ARC in hot paths, no Objective-C headers scattered around) and the maintenance surface small (Apple API changes touch one file).
 
 ## Zero-copy model loading
 
-On Vulkan, loading a model means: mmap the GGUF file, parse the metadata, allocate device-local GPU buffers, stage the weights through a transfer buffer, DMA them to VRAM. It is a well-understood pipeline, but it involves real copies and real upload time. A 20 GB model takes noticeable seconds to load.
+This is the single biggest architectural difference between the two backends.
 
-On Metal, the same model loads like this: mmap the GGUF file, parse the metadata, wrap each tensor's memory region directly as an `MTLBuffer` using `newBufferWithBytesNoCopy`. Done. No copy. The GPU sees the same physical pages the CPU mapped.
+<figure class="diagram-card diagram-wide">
 
-This is the single biggest architectural difference between the two backends. The Vulkan loader and the Metal loader share almost no code below the GGUF parser, because the right design on each platform is fundamentally different.
+```
+Vulkan model loading (discrete GPU):
 
-There is one subtlety that took longer than expected. Metal requires buffer backing memory to be page-aligned. GGUF tensors are not always page-aligned. So the Metal loader wraps the page-aligned region containing each tensor and tracks the byte offset from the page boundary to the actual tensor start. Every shader dispatch then receives a buffer handle plus an offset. It is not complicated once you see it, but getting the alignment arithmetic wrong produces the kind of silent corruption that passes simple tests and fails on real models.
+  ┌──────────┐    ┌──────────────┐    ┌───────────┐    ┌──────────┐
+  │ GGUF     │───▶│ Staging      │───▶│ DMA       │───▶│ Device   │
+  │ file     │    │ buffer (CPU) │    │ transfer  │    │ VRAM     │
+  │ (mmap)   │    │              │    │           │    │ (GPU)    │
+  └──────────┘    └──────────────┘    └───────────┘    └──────────┘
+                  ▲ copy 1                ▲ copy 2
+
+
+Metal model loading (unified memory):
+
+  ┌──────────┐    ┌──────────────────────────────────────────────┐
+  │ GGUF     │───▶│ newBufferWithBytesNoCopy                     │
+  │ file     │    │                                              │
+  │ (mmap)   │    │ Same physical pages. GPU reads mmap directly.│
+  └──────────┘    └──────────────────────────────────────────────┘
+                  ▲ zero copies
+```
+
+  <figcaption>On Vulkan, model weights travel through two copies before the GPU sees them. On Metal, the GPU reads the mmap'd file directly. A 20 GB model loads in the time it takes to parse GGUF metadata.</figcaption>
+</figure>
+
+On Vulkan, loading a model means: mmap the GGUF file, allocate device-local GPU buffers, stage weights through a transfer buffer, DMA them to VRAM. Real copies, real upload time.
+
+On Metal: mmap the GGUF file, wrap each tensor's memory region directly as an `MTLBuffer`. Done. The GPU sees the same physical pages the CPU mapped.
+
+There is one subtlety. Metal requires buffer backing memory to be page-aligned. GGUF tensors are not always page-aligned. So the Metal loader wraps the page-aligned region containing each tensor and tracks the byte offset to the actual tensor start. Every shader dispatch receives a buffer handle plus an offset. Getting the alignment arithmetic wrong produces silent corruption that passes simple tests and fails on real models. That one took a while.
 
 ## Writing 31 shaders from scratch
 
 The Vulkan backend has 24 GLSL compute shaders compiled to SPIR-V. The Metal backend has 31 MSL compute shaders. They are not translations of each other.
 
-MSL and GLSL are different languages with different threading models. GLSL thinks in workgroups and invocations. MSL thinks in threadgroups, threads, simdgroups, and thread-position-in-grid. The GLSL shaders use Vulkan push constants for parameters. The MSL shaders use `setBytes:length:atIndex:` to inject small parameter structs inline.
+MSL and GLSL have different threading models. GLSL thinks in workgroups and invocations. MSL thinks in threadgroups, threads, simdgroups, and thread-position-in-grid. The optimization targets are different too. On RDNA4, the hot path is wave64 with cooperative matrix operations. On Apple Silicon, the hot path is 32-lane simdgroups with threadgroup memory staging.
 
-More importantly, the optimization targets are different. On RDNA4, the hot path is wave64 with cooperative matrix operations. On Apple Silicon, the hot path is 32-lane simdgroups with threadgroup memory staging. The kernels that dominate decode time (DMMV, the quantized matrix-vector multiply) have completely different tuning strategies on each platform.
+<figure class="diagram-card diagram-wide">
 
-The Q4_K DMMV family got the deepest treatment on Metal. It has general-purpose variants, K-dimension specializations for the common 2048 case, LM-head specializations with wider parallelism, and MoE-specific batched variants. Each one stages the input activation vector in threadgroup memory and reuses it across multiple output rows. That pattern maps naturally to Apple Silicon's memory hierarchy.
+| Shader family | Count | Purpose |
+|---|---|---|
+| **DMMV (quantized matmul-vec)** | 12 | Q4_K, Q5_K, Q6_K, Q8_0, F16, F32 + LM-head and K-dim specializations |
+| **MoE DMMV (batched experts)** | 5 | Q4_K, Q5_K, Q6_K batched + K-dim specializations |
+| **Elementwise / fusion** | 8 | RMS norm, SwiGLU, RoPE, sigmoid gating, scale-accumulate |
+| **Attention** | 3 | Flash attention, KV-cache write, deinterleave |
+| **SSM (state-space model)** | 3 | Conv1d, delta-net, gated norm |
 
-Q5_K and Q6_K started as simpler one-thread-per-row kernels. Those were enough for correctness, but they left performance on the table. The real versions now use the same staged-input pattern as Q4_K, which matters because the target model uses mixed quantization across its MoE expert tensors.
+  <figcaption>31 MSL compute shaders written from scratch for Apple Silicon. The Q4_K family has the deepest tuning because it appears on the hottest decode-side paths.</figcaption>
+</figure>
+
+The Q4_K DMMV family got the deepest treatment. It has general-purpose variants, K-dimension specializations for the common 2048 case, LM-head specializations with wider parallelism, and MoE-specific batched variants. Each stages the input activation vector in threadgroup memory and reuses it across multiple output rows.
+
+Q5_K and Q6_K started as simpler one-thread-per-row kernels. Correctness was easy. Performance was not. The real versions use the same staged-input pattern as Q4_K, because the target model uses mixed quantization across MoE expert tensors. More on why that matters below.
 
 ## The MoE problem
 
 Everything up to this point was tractable. Build a Metal backend, write some shaders, make inference work. The part that turned out to be genuinely hard was Mixture of Experts.
 
-The Qwen3.5-35B-A3B model is a hybrid architecture: some layers are pure attention, some are SSM (state-space model), and most of the compute lives in MoE layers with 256 experts where 8 are active per token. The MoE layers dominate decode time.
+The Qwen3.5-35B-A3B model has 256 experts per MoE layer with 8 active per token, across 40 MoE layers. That is where most of the compute lives.
 
-The naive MoE path works like this: compute router logits, read them back to the CPU, do top-k selection, then dispatch each selected expert individually. Gate projection, up projection, SwiGLU activation, down projection, accumulate. For 8 experts per layer across 40 MoE layers, that is a lot of individual GPU dispatches per token.
+The naive path: compute router logits, read them back to CPU, select top-k experts, dispatch each expert individually. Gate projection, up projection, SwiGLU, down projection, accumulate. Repeat for 8 experts across 40 layers per token.
 
-On the early Metal backend, a profiled 256-token decode run showed 21,141 command buffer commits. Roughly 81 submits per decode step. The `submit/wait` overhead was dominating total traced time. The actual GPU kernels were fast enough. The problem was that we were spending more time launching them than running them.
+<figure class="diagram-card diagram-wide">
 
-The fix was a GPU-routed batched MoE path. Instead of reading router logits back to the CPU, a `softmax_topk` shader runs entirely on the GPU, writes the selected expert IDs and weights into a compact routing buffer, and then batched expert projections process all 8 experts in a single dispatch per matrix. The weighted accumulation folds into the residual add without a separate pass.
+```
+Before: per-expert dispatch (naive path)
+──────────────────────────────────────────
+Per token, per MoE layer:
+  [router] → CPU readback → [expert 1] → [expert 2] → ... → [expert 8] → [accumulate]
+                ▲                ▲            ▲                   ▲
+          GPU→CPU sync      8 × (gate + up + swiglu + down) = 32 dispatches per layer
 
-After that change, the same class of run dropped to 261 command buffer commits. One shared command per decode step. That was the architectural unlock that moved local decode from about 20 tok/s to roughly 30 tok/s.
+  40 MoE layers × ~81 submits/step = 21,141 command buffer commits per decode run
+  Result: ~20 tok/s (GPU kernels fast, submit/wait overhead dominates)
+
+
+After: GPU-routed batched MoE
+──────────────────────────────
+Per token, per MoE layer:
+  [softmax_topk on GPU] → [batched gate+up] → [swiglu_batched] → [batched down] → [moe_weighted_acc]
+                                    ▲                                      ▲
+                            All 8 experts in one dispatch            Fused residual add
+
+  Entire decode step in 1 shared command buffer = 261 commits per run
+  Result: ~30 tok/s
+```
+
+  <figcaption>The architectural unlock: moving expert routing to the GPU and batching all 8 expert projections into single dispatches eliminated command-buffer fragmentation. This was worth more than any individual kernel optimization.</figcaption>
+</figure>
+
+On the early Metal backend, a profiled 256-token run showed **21,141 command buffer commits**. Roughly 81 submits per decode step. The GPU was fast. We were spending more time launching kernels than running them.
+
+The fix: a GPU-routed batched MoE path. A `softmax_topk` shader runs entirely on the GPU, writes selected expert IDs and weights into a routing buffer, and batched projections process all 8 experts per dispatch. The weighted accumulation folds into the residual add.
+
+After that change: **261 commits**. One shared command per step. Decode went from about 20 tok/s to roughly 30 tok/s.
 
 ## Mixed quantization: the real blocker
 
-Getting the batched MoE path working for Q4_K experts was the first milestone. But the target model does not use Q4_K everywhere. Some layers have `q4_k / q4_k / q5_k` expert tensors. Others have `q5_k / q5_k / q6_k`. Any unsupported quantization in any expert tensor of any layer forces that layer back to the slow per-expert fallback path. And if even one layer falls back, the shared-command fast path is disabled for the entire decode step.
+Getting batched MoE working for Q4_K experts was the first milestone. But the target model does not use Q4_K everywhere. Some layers use `q4_k / q4_k / q5_k`. Others use `q5_k / q5_k / q6_k`.
 
-This is why Q5_K and Q6_K MoE kernels exist. Not because those quantization types are individually important, but because missing support for them in the batched path blocked the optimization that actually mattered.
+Here is the catch: any unsupported quantization in any expert tensor of any MoE layer forces that layer back to the per-expert fallback. And if even one layer falls back, the shared-command fast path is disabled for the entire decode step.
 
-Once mixed-quant MoE support was complete, the shared-command path became legal across all MoE layers in the model. That is when the Metal backend started posting real numbers.
+This is why Q5_K and Q6_K MoE kernels exist. Not because those types are individually important. Because missing them in the batched path blocked the optimization that actually mattered.
+
+Once mixed-quant support was complete, the shared-command path became legal across all 40 MoE layers. That is when the Metal backend started posting real numbers.
 
 ## Runtime shader compilation
 
 One decision that surprised people: the Metal backend compiles shaders from MSL source at startup, not from precompiled metallib bundles.
 
-On the Vulkan side, GLSL shaders are compiled to SPIR-V during the build. The binary ships with `.spv` files. On Metal, the binary ships with `.metal` source files and compiles them into `MTLComputePipelineState` objects when the engine starts.
+On Vulkan, GLSL shaders compile to SPIR-V during the build. On Metal, the binary ships with `.metal` source files and compiles them into `MTLComputePipelineState` objects at launch.
 
-This adds a few seconds to startup, which is not ideal for production. But it made the initial bring-up dramatically simpler. No metallib packaging pipeline. No Xcode project. No separate compilation step. Edit a `.metal` file, rebuild the Zig binary, and the new shader is live. For a period where we were iterating on 31 shaders simultaneously, that feedback loop mattered more than cold-start latency.
+This adds a few seconds to startup. But it made bring-up dramatically simpler. No metallib packaging pipeline. No Xcode project. Edit a `.metal` file, rebuild the Zig binary, and the new shader is live. When iterating on 31 shaders simultaneously, that feedback loop matters more than cold-start latency.
 
-The plan is to add precompilation later. The runtime compilation path will stay as a fallback and development convenience.
+Precompilation is planned. The runtime path stays as fallback and development convenience.
 
 ## Profiling without GPU timestamps
 
-Apple does not expose the same per-dispatch GPU timestamp mechanism that Vulkan does. On the Vulkan backend, you can instrument individual shader dispatches and measure their GPU execution time. On Metal, the engine uses request-scoped CPU-side profiling that tracks:
+Apple does not expose the same per-dispatch GPU timestamp mechanism that Vulkan does. The Metal engine uses request-scoped CPU-side profiling:
 
-Recording time. Router CPU time. Submit-and-wait time. GPU-routed MoE recording time. Fallback MoE recording time. Sampling time. Total step time.
+<figure class="diagram-card diagram-wide">
 
-This is not as precise as per-dispatch GPU timestamps, but it was enough to identify the real bottleneck. The profiling data is what showed that `submit/wait` dominated traced time and that the MoE command fragmentation was the problem, not tokenizer code or output decoding. Without it, the mixed-quant MoE work would have been guesswork.
+| Metric | What it tells you |
+|---|---|
+| **Command recording time** | How long the CPU spends building GPU work |
+| **Submit/wait time** | Time blocked waiting for GPU completion |
+| **Router CPU time** | Expert selection overhead (GPU-routed path eliminates this) |
+| **GPU-routed MoE time** | Batched expert dispatch recording |
+| **Fallback MoE time** | Per-expert dispatch recording (the slow path) |
+| **Sampling time** | CPU-side argmax |
+| **Total step time** | End-to-end per-token wall time |
+
+  <figcaption>Not as precise as per-dispatch GPU timestamps, but enough to find the bottleneck. The profiling data is what proved submit/wait overhead was the problem and directly informed the batched MoE work.</figcaption>
+</figure>
+
+This is what showed that `submit/wait` dominated traced time and that MoE command fragmentation was the problem. Without it, the mixed-quant work would have been guesswork.
 
 ## The server just works
 
-One of the better early decisions was to keep the HTTP route layer backend-agnostic. `src/server/runtime.zig` acts as a thin adapter that aliases the right loader, forward runtime, model manager, and sampling API based on which backend is active. The actual route handlers in `routes.zig` never fork into "Metal vs Vulkan" branches.
+One of the better early decisions: keep the HTTP route layer backend-agnostic. `src/server/runtime.zig` aliases the right loader, forward runtime, model manager, and sampling API based on the active backend. The route handlers in `routes.zig` never branch on "Metal vs Vulkan."
 
-That means the Metal server serves the same built-in chat UI at `/`, the same `/v1/chat/completions` endpoint with SSE streaming, the same `/health` and `/v1/models` endpoints, and the same managed-model workflow. If you have a client that works with the AMD version of ZINC, it works identically with the Apple Silicon version.
-
-The one current difference: sampling controls. The Metal path uses greedy decoding (temperature=0 argmax on CPU). The Vulkan path supports temperature, top-p, top-k, and repetition penalty via GPU-side sampling. Adding the same controls to Metal is straightforward work but has not been the priority.
+The Metal server serves the same chat UI at `/`, the same `/v1/chat/completions` with SSE streaming, the same `/health` endpoint, and the same managed-model workflow. If your client works with the AMD version, it works identically on Apple Silicon.
 
 ## What the numbers look like
 
 On an M1 Pro with 32 GB unified memory running `Qwen3.5-2B-Q4_K_M`:
 
-- CLI plain decode: **~17 tok/s**
-- Chat template: **~17 tok/s**
+| Metric | Result |
+|---|---|
+| CLI plain decode | ~17 tok/s |
+| Chat template | ~17 tok/s |
+| Memory bandwidth | ~200 GB/s |
 
-These are early numbers. The M1 Pro is not the fastest Apple Silicon part, and the Metal kernels have not yet received the same depth of tuning that the RDNA4 Vulkan path has had. M4 and M5 benchmarks are coming.
+These are early numbers on an older chip. The M1 Pro is not the fastest Apple Silicon part, and the Metal kernels have not yet received the same depth of tuning that the RDNA4 Vulkan path has had. **M4 and M5 benchmarks are coming.**
 
-For context, the same model on the AMD RDNA4 test node (Radeon AI PRO R9700, 32 GB, 576 GB/s) runs at about 27 tok/s. The M1 Pro has roughly 200 GB/s memory bandwidth. The numbers are in the right ballpark for the hardware.
+For context, the same model on RDNA4 (576 GB/s) runs at 27 tok/s. The numbers scale with bandwidth, which is exactly what you want to see from a memory-bound decode loop.
 
 ## What is next
 
-The Metal backend is functional and shipping. It passes the same test suite, serves the same API, and handles the same models. But there is real optimization work ahead:
+The Metal backend ships today. Same tests, same API, same models. The optimization roadmap:
 
-**Prefill.** The current Metal prefill path processes one token at a time through the full decode loop. A proper batched prefill would dramatically improve time-to-first-token on longer prompts.
+**Batched prefill.** Current Metal prefill processes one token at a time. A proper batched path would dramatically improve time-to-first-token.
 
-**Sampling.** Adding temperature, top-p, and repetition penalty to the Metal path so it matches the Vulkan server's capabilities.
+**Sampling controls.** Temperature, top-p, repetition penalty on Metal to match Vulkan.
 
-**M4 and M5 tuning.** The current kernels work across all Apple Silicon generations, but M4 and especially M5 (with its new TensorOps / Neural Accelerator path) deserve generation-specific kernel variants.
+**M4/M5 tuning.** Generation-specific kernel variants, especially for M5 with its TensorOps path.
 
-**Precompiled shaders.** Switching from runtime MSL compilation to precompiled metallib bundles for faster cold starts.
+**Precompiled shaders.** metallib bundles for faster cold starts.
 
-**More models.** The current validation is on Qwen3.5. Expanding to more architectures is a matter of adding the right tensor mappings and testing.
+**More models.** Current validation is Qwen3.5. Expanding to more architectures.
 
 ## The bigger picture
 
-When ZINC started, the thesis was narrow: AMD consumer GPUs are ignored by the mainstream AI stack, and someone should fix that. Adding Apple Silicon support does not change that thesis. It broadens it.
+When ZINC started, the thesis was narrow: AMD consumer GPUs are ignored by the AI stack, and someone should fix that. Adding Apple Silicon does not change the thesis. It broadens it.
 
-The real thesis is: local GPUs are underused for inference, and the reason is software, not hardware. AMD RDNA4 has the bandwidth. Apple Silicon has the unified memory. Both have the compute. What they lack is an engine that takes each platform seriously enough to build shaders from scratch, tune them for the actual hardware, and ship a single binary that just works.
+The real thesis: local GPUs are underused for inference, and the reason is software. AMD RDNA4 has the bandwidth. Apple Silicon has the unified memory. Both have the compute. What they lack is an engine that takes each platform seriously enough to build shaders from scratch, tune them for the actual hardware, and ship a single binary that just works.
 
-That is what ZINC is becoming. Two GPU backends, one engine, no heavyweight frameworks. If you have an AMD GPU or an Apple Silicon Mac, you have an inference machine. The software just needs to respect the hardware.
+Two GPU backends. One engine. No heavyweight frameworks. If you have an AMD GPU or a Mac, you have an inference machine.
 
-`zig build`, `zinc chat`, and you are running a 2B model locally. That is the bar we set, and that is what ships today.
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zinc chat
+```
+
+That is what ships today.
