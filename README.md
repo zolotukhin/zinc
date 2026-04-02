@@ -71,7 +71,7 @@ If you want the browser UI instead, start the server with:
 ./zig-out/bin/zinc --model-id qwen35-2b-q4k-m -p 8080
 ```
 
-Then open `http://localhost:8080/`.
+Then open `http://localhost:8080/` for the built-in chat UI. The server also exposes an OpenAI-compatible API at `http://localhost:8080/v1` — use it with any client that supports the OpenAI chat completions format.
 
 ## What Works Today
 
