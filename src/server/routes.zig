@@ -2277,6 +2277,7 @@ fn fallbackModelName(model: *const Model) []const u8 {
         .mistral => "mistral",
         .mamba => "mamba",
         .jamba => "jamba",
+        .gemma => "gemma",
         .unknown => "zinc-model",
     };
 }

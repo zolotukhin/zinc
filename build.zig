@@ -52,6 +52,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_f32",
         "rms_norm_mul",
         "swiglu",
+        "geglu",
         "sigmoid_mul",
         "rope_fused",
         "softmax_topk",

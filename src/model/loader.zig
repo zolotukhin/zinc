@@ -270,6 +270,10 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         .ssm_n_group = ssm_n_group,
         .full_attn_interval = full_attn_interval,
         .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
+        .final_logit_softcapping = blk: {
+            const key4 = std.fmt.bufPrint(&key_buf, "{s}.final_logit_softcapping", .{prefix}) catch break :blk @as(f32, 0.0);
+            break :blk gf.getF32(key4) orelse 0.0;
+        },
     };
 }
 
