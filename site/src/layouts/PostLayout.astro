@@ -31,6 +31,9 @@ const formattedDate = new Intl.DateTimeFormat('en-US', {
 const keywordList = keywords && keywords.length > 0 ? keywords : tags ?? [];
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const canonicalUrl = Astro.url.href;
+const xShareText = `Discussing: ${title}`;
+const xIntentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(xShareText)}&url=${encodeURIComponent(canonicalUrl)}`;
 const breadcrumbItems = [
   { name: 'Home', href: '/' },
   { name: 'Blog', href: '/blog' },
@@ -87,6 +90,20 @@ const jsonLd = {
     <div class="post-content">
       <slot />
     </div>
+    <div class="post-share">
+      <a
+        href={xIntentUrl}
+        class="post-share-link"
+        target="_blank"
+        rel="noopener noreferrer"
+        data-share-x
+        data-copy-url={canonicalUrl}
+      >
+        Discuss on X
+      </a>
+      <span class="post-share-note">Copies this article link and opens a new X post.</span>
+      <span class="post-share-status" data-share-status aria-live="polite"></span>
+    </div>
   </article>
   {(prevPost || nextPost) && (
     <nav class="post-nav-grid">
@@ -132,6 +149,34 @@ const jsonLd = {
     lb.addEventListener('click', function() {
       lb.classList.remove('active');
     });
+
+    document.querySelectorAll('[data-share-x]').forEach(function(link) {
+      var status = link.parentElement && link.parentElement.querySelector('[data-share-status]');
+      var resetStatus = function() {
+        if (!status) return;
+        window.setTimeout(function() {
+          status.textContent = '';
+        }, 2400);
+      };
+
+      link.addEventListener('click', function() {
+        if (!status) return;
+        status.textContent = 'Opening X...';
+
+        var copyUrl = link.getAttribute('data-copy-url');
+        if (!copyUrl || !navigator.clipboard || !navigator.clipboard.writeText) {
+          resetStatus();
+          return;
+        }
+
+        navigator.clipboard.writeText(copyUrl).then(function() {
+          status.textContent = 'Link copied. Opening X...';
+          resetStatus();
+        }).catch(function() {
+          resetStatus();
+        });
+      });
+    });
   })();
 </script>
 
@@ -166,6 +211,44 @@ const jsonLd = {
 
   .post-content {
     line-height: 1.8;
+  }
+
+  .post-share {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.7rem 0.9rem;
+    margin-top: var(--space-xl);
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .post-share-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.5rem;
+    padding: 0.55rem 0.95rem;
+    border-radius: 999px;
+    background: var(--color-text);
+    color: var(--color-bg);
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  .post-share-link:hover {
+    text-decoration: none;
+    opacity: 0.92;
+  }
+
+  .post-share-note,
+  .post-share-status {
+    font-size: 0.88rem;
+    color: var(--color-text-muted);
+  }
+
+  .post-share-status {
+    min-height: 1.2em;
   }
 
   /* Single images: compact, centered */
@@ -233,6 +316,10 @@ const jsonLd = {
     }
     .post-content .img-pair img {
       aspect-ratio: auto;
+    }
+    .post-share {
+      align-items: flex-start;
+      flex-direction: column;
     }
   }
 
