@@ -107,6 +107,22 @@ pub const ModelManager = struct {
         };
     }
 
+    pub fn initEmpty(
+        instance: *const Instance,
+        gpu_config_value: gpu_detect.GpuConfig,
+        shader_dir: []const u8,
+        allocator: std.mem.Allocator,
+    ) ModelManager {
+        return .{
+            .allocator = allocator,
+            .instance = instance,
+            .gpu_config = gpu_config_value,
+            .vram_budget_bytes = instance.vramBytes(),
+            .shader_dir = shader_dir,
+            .current = null,
+        };
+    }
+
     pub fn deinit(self: *ModelManager) void {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();

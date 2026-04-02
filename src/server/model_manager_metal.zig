@@ -117,6 +117,19 @@ pub const ModelManager = struct {
         };
     }
 
+    pub fn initEmpty(
+        device: *const MetalDevice,
+        allocator: std.mem.Allocator,
+    ) ModelManager {
+        return .{
+            .allocator = allocator,
+            .device = device,
+            .profile = catalog_mod.profileForMetal(),
+            .vram_budget_bytes = memoryBudget(device),
+            .current = null,
+        };
+    }
+
     pub fn deinit(self: *ModelManager) void {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();

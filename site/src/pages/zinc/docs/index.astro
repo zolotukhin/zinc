@@ -25,7 +25,9 @@ const docMeta: Record<string, { label: string; description: string; order: numbe
   'rdna4-tuning': { label: 'RDNA4 Tuning Guide', description: 'Cooperative matrix, bandwidth tuning, and toolchain notes.', order: 11 },
   'gpu-reference': { label: 'GPU Reference', description: 'RDNA3 and RDNA4 hardware specs, ISA, and memory hierarchy.', order: 12 },
   'turboquant-spec': { label: 'TurboQuant Compression', description: 'Two-stage vector quantization and KV cache reduction.', order: 13 },
-  'apple-silicon-mlx-reference': { label: 'Apple Silicon + MLX Reference', description: 'Metal GPU families, MLX architecture, M1–M5 capabilities, and MSL kernel optimization.', order: 14 },
+  'apple-silicon-reference': { label: 'Apple Silicon Reference', description: 'M1–M5 generations, Metal GPU families, and capability progression.', order: 14 },
+  'apple-metal-reference': { label: 'Apple Metal Reference', description: 'MSL kernels, simdgroup ops, threadgroup memory, and pipeline optimization.', order: 15 },
+  'apple-silicon-metal-enablement': { label: 'Metal Enablement Notes', description: 'Implementation notes for the Vulkan-to-Metal port.', order: 16 },
 };
 
 const orderedDocs = [...docs].sort((a, b) => (docMeta[a.slug]?.order ?? 99) - (docMeta[b.slug]?.order ?? 99));

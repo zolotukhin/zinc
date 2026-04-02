@@ -2,6 +2,7 @@
 //! @section CLI & Entrypoints
 //! This module wires together GPU initialization, model loading, tokenization,
 //! and the single-process decode loop used for prompt-mode execution.
+const builtin = @import("builtin");
 const std = @import("std");
 const gpu = @import("gpu/interface.zig");
 const catalog_mod = @import("model/catalog.zig");
@@ -234,6 +235,9 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
     };
     defer server.deinit();
     log.info("Server listening on 0.0.0.0:{d}", .{config.port});
+    if (config.command == .chat) {
+        launchChatUi(config.port);
+    }
     log.info("Press Ctrl+C to stop", .{});
 
     if (config.command == .chat) {
@@ -256,8 +260,20 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
     posix.sigaction(posix.SIG.TERM, &sa, null);
 
     var server_state = routes_mod.ServerState.init(std.time.timestamp());
+    var poll_fds = [1]posix.pollfd{.{
+        .fd = server.listener.stream.handle,
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
 
     while (!Handler.shutdown_requested) {
+        poll_fds[0].revents = 0;
+        const ready = posix.poll(&poll_fds, 100) catch |err| {
+            log.warn("Listener poll failed: {s}", .{@errorName(err)});
+            continue;
+        };
+        if (ready == 0) continue;
+
         var conn = server.accept() catch |err| {
             if (Handler.shutdown_requested) break;
             log.warn("Accept failed: {s}", .{@errorName(err)});
@@ -290,6 +306,40 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
         std.Thread.sleep(50 * std.time.ns_per_ms);
     }
     log.info("Shutting down...", .{});
+}
+
+fn launchChatUi(port: u16) void {
+    var url_buf: [128]u8 = undefined;
+    const url = std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/chat", .{port}) catch |err| {
+        log.warn("Failed to format chat URL: {s}", .{@errorName(err)});
+        return;
+    };
+    log.info("Opening chat UI at {s}", .{url});
+    launchBrowser(url) catch |err| {
+        log.warn("Failed to open browser for {s}: {s}", .{ url, @errorName(err) });
+    };
+}
+
+fn launchBrowser(url: []const u8) !void {
+    const argv: []const []const u8 = switch (builtin.os.tag) {
+        .macos => &[_][]const u8{ "open", url },
+        .linux => &[_][]const u8{ "xdg-open", url },
+        .windows => &[_][]const u8{ "cmd", "/c", "start", "", url },
+        else => return error.BrowserLaunchUnsupported,
+    };
+
+    var child = std.process.Child.init(argv, std.heap.page_allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    const term = try child.spawnAndWait();
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) return error.BrowserLauncherFailed;
+        },
+        else => return error.BrowserLauncherFailed,
+    }
 }
 
 const PreparedPrompt = struct {
@@ -331,7 +381,7 @@ const banner =
     \\Usage:
     \\  zinc -m <model.gguf> --prompt "Hello"
     \\  zinc -m <model.gguf> [-p 8080]
-    \\  zinc chat                          Start server and open chat UI in browser
+    \\  zinc chat [-m <model.gguf> | --model-id <id>] [-p 9090]
     \\  zinc --model-id <id> [--prompt "Hello"]
     \\  zinc --check [-m <model.gguf> | --model-id <id>]
     \\  zinc model <list|pull|use|active|rm> [args]
@@ -349,6 +399,7 @@ const banner =
     \\Server options:
     \\  -p, --port <port>        Server port (default: 8080)
     \\  --parallel <n>           Max concurrent requests (default: 4)
+    \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
     \\
     \\Model management:
     \\  model list [--all]       List managed models for the detected GPU
@@ -372,7 +423,7 @@ const banner_full =
     \\Usage:
     \\  zinc -m <model.gguf> --prompt "Hello"
     \\  zinc -m <model.gguf> [-p 8080]
-    \\  zinc chat                          Start server and open chat UI in browser
+    \\  zinc chat [-m <model.gguf> | --model-id <id>] [-p 9090]
     \\  zinc --model-id <id> [--prompt "Hello"]
     \\  zinc --check [-m <model.gguf> | --model-id <id>]
     \\  zinc model <list|pull|use|active|rm> [args]
@@ -390,6 +441,7 @@ const banner_full =
     \\Server options:
     \\  -p, --port <port>        Server port (default: 8080)
     \\  --parallel <n>           Max concurrent requests (default: 4)
+    \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
     \\
     \\Model management:
     \\  model list [--all]       List managed models for the detected GPU
@@ -422,6 +474,7 @@ fn helpText(show_all: bool) []const u8 {
 /// @returns A populated Config value or a validation error describing the first invalid flag.
 pub fn parseArgs(args: []const [:0]const u8) !Config {
     var config = Config{};
+    var port_explicit = false;
     var i: usize = 1; // skip argv[0]
 
     while (i < args.len) : (i += 1) {
@@ -435,8 +488,11 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             config.show_help_all = true;
             return config;
         } else if (std.mem.eql(u8, arg, "chat")) {
+            if (config.command != .run) return error.UnknownArgument;
             config.command = .chat;
+            if (!port_explicit) config.port = 9090;
         } else if (std.mem.eql(u8, arg, "model")) {
+            if (config.command != .run) return error.UnknownArgument;
             i += 1;
             if (i >= args.len) return error.MissingModelSubcommand;
             const sub = args[i];
@@ -477,6 +533,7 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.port = std.fmt.parseInt(u16, args[i], 10) catch return error.InvalidPort;
+            port_explicit = true;
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--device")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -532,6 +589,10 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
         } else {
             return error.UnknownArgument;
         }
+    }
+
+    if (config.command == .chat and config.prompt != null) {
+        return error.ChatCommandDoesNotTakePrompt;
     }
 
     return config;
@@ -1183,26 +1244,40 @@ pub fn main() !void {
 
     is_debug_mode = config.debug or std.posix.getenv("ZINC_DEBUG") != null;
 
-    var resolved_model = resolveStartupModel(config, allocator) catch |err| {
-        if (err == error.NoModelSpecified) {
-            log.warn("No model specified (-m/--model or --model-id) and no active managed model is configured. Use --help for common usage or --help-all for developer flags.", .{});
-            return;
-        }
-        log.err("Failed to resolve model: {s}", .{@errorName(err)});
-        std.process.exit(1);
+    const resolved_model: ?ResolvedStartupModel = blk: {
+        break :blk resolveStartupModel(config, allocator) catch |err| {
+            if (err == error.NoModelSpecified) {
+                if (config.command == .chat) {
+                    log.info("No startup model specified; starting chat server with no model loaded.", .{});
+                    break :blk null;
+                }
+                log.warn("No model specified (-m/--model or --model-id) and no active managed model is configured. Use --help for common usage or --help-all for developer flags.", .{});
+                return;
+            }
+            log.err("Failed to resolve model: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
     };
-    defer resolved_model.deinit(allocator);
+    defer if (resolved_model) |startup_model| {
+        var owned = startup_model;
+        owned.deinit(allocator);
+    };
 
-    const model_path = resolved_model.spec.model_path;
-    log.info("Model: {s}", .{model_path});
+    const model_path = if (resolved_model) |model| model.spec.model_path else null;
+    if (model_path) |path| {
+        log.info("Model: {s}", .{path});
+    }
 
     const wants_graph_artifacts = config.graph_report_path != null or config.graph_dot_path != null;
     if (wants_graph_artifacts and config.prompt == null) {
-        exportDecodeGraphArtifacts(model_path, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
-            log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        return;
+        if (model_path) |path| {
+            exportDecodeGraphArtifacts(path, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
+                log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        }
+        log.warn("Ignoring graph export flags because no startup model is loaded.", .{});
     }
 
     // Initialize GPU backend
@@ -1241,14 +1316,14 @@ pub fn main() !void {
             .{},
         );
 
-        // Load model (zero-copy mmap)
-        var model = metal_loader.load(model_path, device.ctx, allocator) catch |err| {
-            log.err("Failed to load model: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
-        defer model.deinit();
-
         if (config.prompt) |prompt| {
+            // Load model (zero-copy mmap) for prompt-mode execution.
+            var model = metal_loader.load(model_path.?, device.ctx, allocator) catch |err| {
+                log.err("Failed to load model: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            defer model.deinit();
+
             log.info("Prompt: {s}", .{prompt});
 
             var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
@@ -1333,10 +1408,13 @@ pub fn main() !void {
         } else {
             log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
 
-            var manager = model_manager_mod.ModelManager.init(resolved_model.spec, &device, allocator) catch |err| {
-                log.err("Failed to init Metal model manager: {s}", .{@errorName(err)});
-                std.process.exit(1);
-            };
+            var manager = if (resolved_model) |startup_model|
+                model_manager_mod.ModelManager.init(startup_model.spec, &device, allocator) catch |err| {
+                    log.err("Failed to init Metal model manager: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                }
+            else
+                model_manager_mod.ModelManager.initEmpty(&device, allocator);
             defer manager.deinit();
 
             runHttpServer(config, &manager, allocator);
@@ -1364,7 +1442,7 @@ pub fn main() !void {
         var cmd_pool = try CommandPool.init(&vk_instance);
         defer cmd_pool.deinit();
 
-        var model = loader_mod.load(model_path, &vk_instance, &cmd_pool, allocator) catch |err| {
+        var model = loader_mod.load(model_path.?, &vk_instance, &cmd_pool, allocator) catch |err| {
             log.err("Failed to load model: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -1513,10 +1591,13 @@ pub fn main() !void {
     } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
 
-        var manager = model_manager_mod.ModelManager.init(resolved_model.spec, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
-            log.err("Failed to init model manager: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
+        var manager = if (resolved_model) |startup_model|
+            model_manager_mod.ModelManager.init(startup_model.spec, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
+                log.err("Failed to init model manager: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            }
+        else
+            model_manager_mod.ModelManager.initEmpty(&vk_instance, gpu_config, shader_dir, allocator);
         defer manager.deinit();
         runHttpServer(config, &manager, allocator);
     }
@@ -1645,6 +1726,38 @@ test "parseArgs: managed model subcommands" {
     try std.testing.expectEqual(Command.model_rm, rm_config.command);
     try std.testing.expect(rm_config.command_force);
     try std.testing.expectEqualStrings("qwen35-2b-q4k-m", rm_config.command_model_id.?);
+}
+
+test "parseArgs: chat command" {
+    const args = [_][:0]const u8{ "zinc", "chat", "--model-id", "qwen35-2b-q4k-m" };
+    const config = try parseArgs(&args);
+    try std.testing.expectEqual(Command.chat, config.command);
+    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", config.model_id.?);
+    try std.testing.expectEqual(@as(u16, 9090), config.port);
+}
+
+test "parseArgs: chat command preserves explicit port before subcommand" {
+    const args = [_][:0]const u8{ "zinc", "-p", "8088", "chat" };
+    const config = try parseArgs(&args);
+    try std.testing.expectEqual(Command.chat, config.command);
+    try std.testing.expectEqual(@as(u16, 8088), config.port);
+}
+
+test "parseArgs: chat command preserves explicit port after subcommand" {
+    const args = [_][:0]const u8{ "zinc", "chat", "-p", "8088" };
+    const config = try parseArgs(&args);
+    try std.testing.expectEqual(Command.chat, config.command);
+    try std.testing.expectEqual(@as(u16, 8088), config.port);
+}
+
+test "parseArgs: chat command rejects prompt mode" {
+    const args = [_][:0]const u8{ "zinc", "chat", "--prompt", "hello" };
+    try std.testing.expectError(error.ChatCommandDoesNotTakePrompt, parseArgs(&args));
+}
+
+test "parseArgs: chat command rejects model subcommands" {
+    const args = [_][:0]const u8{ "zinc", "chat", "model", "list" };
+    try std.testing.expectError(error.UnknownArgument, parseArgs(&args));
 }
 
 test "resolveCheckTarget returns general diagnostics target when no model is specified" {

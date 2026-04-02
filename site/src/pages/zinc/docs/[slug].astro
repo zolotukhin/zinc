@@ -105,10 +105,20 @@ export async function getStaticPaths() {
       description: 'Hardware specs, ISA opcodes, WMMA matrix cores, memory hierarchy, wave execution, register allocation, and Vulkan compute details for AMD RX 9070 XT, RX 7900 XTX, and Radeon AI PRO R9700.',
       keywords: 'RDNA4 specs, RDNA3 specs, gfx1201, gfx1100, RX 9070 XT specs, RX 7900 XTX specs, Radeon AI PRO R9700 specs, AMD GPU ISA, WMMA, wave64, wave32, cooperative matrix, VGPR, LDS, compute unit, Vulkan dispatch, DMMV, V_FMA_F32, V_DOT2_F32_F16, memory bandwidth, GPU ECC, RADV, SPIR-V',
     },
-    'apple-silicon-mlx-reference': {
-      title: 'Apple Silicon + MLX Architecture Reference',
-      description: 'Metal GPU families, MLX framework architecture, M1–M5 capability progression, runtime detection, MSL kernel optimization, and Apple AMX/AGX ISA status for LLM inference on Apple Silicon.',
-      keywords: 'Apple Silicon inference, Metal GPU, MLX framework, M1 M2 M3 M4 M5, Apple GPU family, MTLGPUFamily, Metal Shading Language, MSL kernels, TensorOps, Metal 4, Apple Neural Engine, AMX, AGX, simdgroup, threadgroup, unified memory, Apple Silicon LLM, ZINC Metal backend',
+    'apple-silicon-reference': {
+      title: 'Apple Silicon Architecture Reference',
+      description: 'M1–M5 generation map, Metal GPU families, public capability progression, runtime detection, AMX/AGX ISA status, and optimization guidance for LLM inference on Apple Silicon.',
+      keywords: 'Apple Silicon inference, M1 M2 M3 M4 M5, Apple GPU family, MTLGPUFamily, Apple10, AMX, AGX, unified memory, memory bandwidth, Apple Silicon LLM, ZINC Metal backend',
+    },
+    'apple-metal-reference': {
+      title: 'Apple Metal Reference',
+      description: 'Metal Shading Language kernels, simdgroup operations, threadgroup memory, pipeline capabilities, and MSL optimization patterns for LLM inference on Apple Silicon.',
+      keywords: 'Metal GPU, Metal Shading Language, MSL kernels, simdgroup, threadgroup, TensorOps, Metal 4, Metal Performance Primitives, compute pipeline, Apple Silicon inference',
+    },
+    'apple-silicon-metal-enablement': {
+      title: 'Apple Silicon Metal Enablement Notes',
+      description: 'Implementation notes for bringing up ZINC on Apple Silicon via Metal — kernel porting, memory model, profiling, and lessons from the Vulkan-to-Metal transition.',
+      keywords: 'Metal enablement, Vulkan to Metal, Apple Silicon port, ZINC Metal backend, GPU kernel porting, Metal profiling, unified memory, MSL shaders, GGUF Metal inference',
     },
     'api': {
       title: 'ZINC API Reference',
