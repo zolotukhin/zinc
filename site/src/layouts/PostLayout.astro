@@ -86,11 +86,6 @@ const jsonLd = {
           {tags.map(tag => <span class="tag">{tag}</span>)}
         </div>
       )}
-    </header>
-    <div class="post-content">
-      <slot />
-    </div>
-    <div class="post-share">
       <a
         href={xIntentUrl}
         class="post-share-link"
@@ -99,10 +94,13 @@ const jsonLd = {
         data-share-x
         data-copy-url={canonicalUrl}
       >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
         Discuss on X
       </a>
-      <span class="post-share-note">Copies this article link and opens a new X post.</span>
       <span class="post-share-status" data-share-status aria-live="polite"></span>
+    </header>
+    <div class="post-content">
+      <slot />
     </div>
   </article>
   {(prevPost || nextPost) && (
@@ -213,42 +211,34 @@ const jsonLd = {
     line-height: 1.8;
   }
 
-  .post-share {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.7rem 0.9rem;
-    margin-top: var(--space-xl);
-    padding-top: var(--space-md);
-    border-top: 1px solid var(--color-border);
-  }
-
   .post-share-link {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    min-height: 2.5rem;
-    padding: 0.55rem 0.95rem;
-    border-radius: 999px;
-    background: var(--color-text);
-    color: var(--color-bg);
-    font-weight: 600;
+    gap: 0.35rem;
+    margin-top: 0.6rem;
+    padding: 0.3rem 0.65rem;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    font-weight: 500;
     line-height: 1;
+    text-decoration: none;
   }
 
   .post-share-link:hover {
+    color: var(--color-text);
+    border-color: var(--color-text-muted);
     text-decoration: none;
-    opacity: 0.92;
   }
 
-  .post-share-note,
   .post-share-status {
-    font-size: 0.88rem;
+    display: block;
+    font-size: 0.75rem;
     color: var(--color-text-muted);
-  }
-
-  .post-share-status {
-    min-height: 1.2em;
+    min-height: 1em;
+    margin-top: 0.25rem;
   }
 
   /* Single images: compact, centered */
@@ -316,10 +306,6 @@ const jsonLd = {
     }
     .post-content .img-pair img {
       aspect-ratio: auto;
-    }
-    .post-share {
-      align-items: flex-start;
-      flex-direction: column;
     }
   }
 
