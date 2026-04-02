@@ -1,170 +1,80 @@
-#pragma clang diagnostic ignored "-Wmissing-prototypes"
-#pragma clang diagnostic ignored "-Wmissing-braces"
-
 #include <metal_stdlib>
-#include <simd/simd.h>
-
 using namespace metal;
 
-template<typename T, size_t Num>
-struct spvUnsafeArray
-{
-    T elements[Num ? Num : 1];
-    
-    thread T& operator [] (size_t pos) thread
-    {
-        return elements[pos];
-    }
-    constexpr const thread T& operator [] (size_t pos) const thread
-    {
-        return elements[pos];
-    }
-    
-    device T& operator [] (size_t pos) device
-    {
-        return elements[pos];
-    }
-    constexpr const device T& operator [] (size_t pos) const device
-    {
-        return elements[pos];
-    }
-    
-    constexpr const constant T& operator [] (size_t pos) const constant
-    {
-        return elements[pos];
-    }
-    
-    threadgroup T& operator [] (size_t pos) threadgroup
-    {
-        return elements[pos];
-    }
-    constexpr const threadgroup T& operator [] (size_t pos) const threadgroup
-    {
-        return elements[pos];
-    }
+struct DmmvPush {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
 };
 
-struct _29
-{
-    uint _m0;
-    uint _m1;
-    uint _m2;
-    uint _m3;
-    uint _m4;
-};
+// Native Metal Q8_0 DMMV.
+//
+// Q8_0 is the dominant path for router, shared-expert, and SSM projections on
+// the target Qwen3.5-35B-A3B model. The old SPIRV-Cross shader only processed
+// two rows per workgroup and re-read the same X vector from device memory for
+// each row. On Apple Silicon the shared/unified memory path benefits from
+// staging X once per workgroup and letting multiple simdgroups reuse it.
+//
+// One simdgroup (32 lanes) handles one output row. Each lane owns a subset of
+// the 32-element Q8_0 blocks for that row and accumulates 8 packed int8 dot
+// products per block. The workgroup can therefore process 2 rows with a 64-wide
+// launch or 8 rows with the 256-wide launch used on the hot decode path.
+//
+// Q8_0 block layout (34 bytes, 32 elements):
+//   [0..1]   d  (float16) scale
+//   [2..33]  qs (32 x int8)
 
-struct _87
-{
-    uchar _m0[1];
-};
+kernel void main0(
+    constant DmmvPush& p [[buffer(0)]],
+    device const uchar* W [[buffer(1)]],
+    device const float* X [[buffer(2)]],
+    device float* Y [[buffer(3)]],
+    uint tg_id [[threadgroup_position_in_grid]],
+    uint local_id [[thread_position_in_threadgroup]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simdgroups_per_tg [[simdgroups_per_threadgroup]]
+) {
+    // Staging activations as half4 cuts threadgroup memory in half versus
+    // float4 while keeping the final accumulation in float. On Apple GPUs the
+    // q8 decode path is occupancy-sensitive; reducing the staged footprint lets
+    // the wider launch shapes stay resident more consistently.
+    threadgroup half4 x_cache4[1024];
 
-struct _131
-{
-    float _m0[1];
-};
+    const uint tg_size = simdgroups_per_tg * 32u;
+    device const float* input = X + (p.x_offset >> 2);
+    device float* output = Y + (p.y_offset >> 2);
 
-struct _283
-{
-    float _m0[1];
-};
+    const uint k_vec4 = p.K >> 2;
+    for (uint i = local_id; i < k_vec4; i += tg_size) {
+        x_cache4[i] = half4(*(device const float4*)(input + (i << 2)));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-kernel void main0(constant _29& _31 [[buffer(0)]], device _87& _89 [[buffer(1)]], device _131& _133 [[buffer(2)]], device _283& _285 [[buffer(3)]], uint3 gl_WorkGroupID [[threadgroup_position_in_grid]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]], uint gl_NumSubgroups [[simdgroups_per_threadgroup]], uint gl_SubgroupID [[simdgroup_index_in_threadgroup]])
-{
-    threadgroup spvUnsafeArray<float, 2> _242;
-    threadgroup spvUnsafeArray<float, 2> _248;
-    uint _19 = gl_WorkGroupID.x * 2u;
-    uint _23 = _19 + 1u;
-    uint _38 = _31._m1 / 32u;
-    float _306;
-    float _307;
-    _307 = 0.0;
-    _306 = 0.0;
-    float _328;
-    float _330;
-    for (uint _305 = gl_LocalInvocationID.x; _305 < _38; _307 = _330, _306 = _328, _305 += 64u)
-    {
-        uint _63 = (_31._m3 / 4u) + (_305 * 32u);
-        if (_19 < _31._m0)
-        {
-            uint _83 = (_31._m2 + ((_19 * _38) * 34u)) + (_305 * 34u);
-            uint _110 = _83 + 2u;
-            float _316;
-            _316 = 0.0;
-            for (uint _315 = 0u; _315 < 32u; )
-            {
-                _316 += (float(char(_89._m0[_110 + _315])) * _133._m0[_63 + _315]);
-                _315++;
-                continue;
-            }
-            _328 = _306 + (float2(as_type<half2>(uint(_89._m0[_83]) | (uint(_89._m0[_83 + 1u]) << uint(8)))).x * _316);
-        }
-        else
-        {
-            _328 = _306;
-        }
-        if (_23 < _31._m0)
-        {
-            uint _169 = (_31._m2 + ((_23 * _38) * 34u)) + (_305 * 34u);
-            uint _188 = _169 + 2u;
-            float _321;
-            _321 = 0.0;
-            for (uint _320 = 0u; _320 < 32u; )
-            {
-                _321 += (float(char(_89._m0[_188 + _320])) * _133._m0[_63 + _320]);
-                _320++;
-                continue;
-            }
-            _330 = _307 + (float2(as_type<half2>(uint(_89._m0[_169]) | (uint(_89._m0[_169 + 1u]) << uint(8)))).x * _321);
-        }
-        else
-        {
-            _330 = _307;
+    const uint row = tg_id * simdgroups_per_tg + sg_idx;
+    if (row >= p.M) return;
+
+    const uint blocks_per_row = p.K >> 5;
+    device const uchar* row_ptr = W + p.a_offset + ulong(row) * ulong(blocks_per_row) * 34ull;
+
+    float acc = 0.0f;
+    for (uint bi = lane; bi < blocks_per_row; bi += 32u) {
+        device const uchar* block = row_ptr + bi * 34u;
+        const float scale = float(as_type<half>(*(device const ushort*)(block)));
+        device const packed_char4* quants = (device const packed_char4*)(block + 2u);
+        const uint x_base = bi * 8u;
+
+        #pragma unroll
+        for (uint vi = 0u; vi < 8u; ++vi) {
+            const char4 q = char4(quants[vi]);
+            acc = fma(scale, dot(float4(q), float4(x_cache4[x_base + vi])), acc);
         }
     }
-    float _229 = simd_sum(_306);
-    float _231 = simd_sum(_307);
-    float _308;
-    float _312;
-    if (gl_NumSubgroups > 1u)
-    {
-        bool _237 = simd_is_first();
-        if (_237)
-        {
-            _242[gl_SubgroupID] = _229;
-            _248[gl_SubgroupID] = _231;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        float _309;
-        float _313;
-        if (gl_LocalInvocationID.x == 0u)
-        {
-            _313 = _248[0] + _248[1];
-            _309 = _242[0] + _242[1];
-        }
-        else
-        {
-            _313 = _231;
-            _309 = _229;
-        }
-        _312 = _313;
-        _308 = _309;
-    }
-    else
-    {
-        _312 = _231;
-        _308 = _229;
-    }
-    if (gl_LocalInvocationID.x == 0u)
-    {
-        uint _275 = _31._m4 / 4u;
-        if (_19 < _31._m0)
-        {
-            _285._m0[_275 + _19] = _308;
-        }
-        if (_23 < _31._m0)
-        {
-            _285._m0[_275 + _23] = _312;
-        }
+
+    const float sum = simd_sum(acc);
+    if (lane == 0u) {
+        output[row] = sum;
     }
 }
-

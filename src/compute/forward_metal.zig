@@ -85,6 +85,20 @@ pub const RuntimeProfile = struct {
     sample_ns: u64 = 0,
     total_step_ns: u64 = 0,
     debug_validation_ns: u64 = 0,
+    dmmv_total_bytes: u64 = 0,
+    dmmv_q4k_bytes: u64 = 0,
+    dmmv_q5k_bytes: u64 = 0,
+    dmmv_q6k_bytes: u64 = 0,
+    dmmv_q8_0_bytes: u64 = 0,
+    dmmv_f16_bytes: u64 = 0,
+    dmmv_f32_bytes: u64 = 0,
+    lm_head_bytes: u64 = 0,
+    ssm_bytes: u64 = 0,
+    full_attn_bytes: u64 = 0,
+    router_bytes: u64 = 0,
+    shared_expert_bytes: u64 = 0,
+    dense_ffn_bytes: u64 = 0,
+    moe_expert_bytes: u64 = 0,
 
     fn reset(self: *RuntimeProfile) void {
         self.* = .{};
@@ -115,6 +129,10 @@ fn avgMs(ns: u64, count: anytype) f64 {
 fn pctOf(total_ns: u64, part_ns: u64) f64 {
     if (total_ns == 0) return 0.0;
     return @as(f64, @floatFromInt(part_ns)) * 100.0 / @as(f64, @floatFromInt(total_ns));
+}
+
+fn bytesToGiB(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / 1_073_741_824.0;
 }
 
 /// Push constants for DMMV dispatch (matches GLSL layout).
@@ -1009,6 +1027,26 @@ pub const InferenceEngine = struct {
                 @as(f64, @floatFromInt(profile.dense_ffn_layers)) / steps_f,
             });
         }
+        if (profile.dmmv_total_bytes > 0) {
+            log.info("  dmmv bytes: q8_0 {d:.2} GiB ({d:.1}%) q4_k {d:.2} GiB ({d:.1}%) q5_k {d:.2} GiB ({d:.1}%) q6_k {d:.2} GiB ({d:.1}%)", .{
+                bytesToGiB(profile.dmmv_q8_0_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q8_0_bytes),
+                bytesToGiB(profile.dmmv_q4k_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q4k_bytes),
+                bytesToGiB(profile.dmmv_q5k_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q5k_bytes),
+                bytesToGiB(profile.dmmv_q6k_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q6k_bytes),
+            });
+            log.info("  path bytes: ssm {d:.2} GiB attn {d:.2} GiB moe-expert {d:.2} GiB shared {d:.2} GiB lm-head {d:.2} GiB router {d:.2} GiB", .{
+                bytesToGiB(profile.ssm_bytes),
+                bytesToGiB(profile.full_attn_bytes),
+                bytesToGiB(profile.moe_expert_bytes),
+                bytesToGiB(profile.shared_expert_bytes),
+                bytesToGiB(profile.lm_head_bytes),
+                bytesToGiB(profile.router_bytes),
+            });
+        }
         if (profile.gpu_routed_moe_layers == 0 and profile.fallback_moe_layers > 0 and self.layer_tensors.len > 0) {
             const layer0 = self.layer_tensors[0];
             log.info("  fallback-moe path: gate_exps={s} up_exps={s} down_exps={s} (GPU-routed path currently supports q4_k/q4_k/{{q4_k,q5_k}})", .{
@@ -1075,7 +1113,21 @@ pub const InferenceEngine = struct {
             },
             .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
-            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
+            .q8_0 => blk: {
+                if (K <= 2048 and
+                    self.dmmv_q8_0_pipe.thread_execution_width == 32 and
+                    self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 512)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 512 };
+                }
+                if (K <= 4096 and
+                    self.dmmv_q8_0_pipe.thread_execution_width == 32 and
+                    self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 256)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
+                }
+                break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 };
+            },
             .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
             .f32 => .{ .pipe = &self.dmmv_f32_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             else => null,
@@ -1128,6 +1180,93 @@ fn tensorPageOffset(model: *const metal_loader.Model, tensor: *const metal_loade
     return @intCast(data_offset - aligned_offset);
 }
 
+fn dmmvWeightBytes(quant_type: GGMLType, rows: u32, cols: u32) u64 {
+    const bs = quant_type.blockSize();
+    const bpb = quant_type.bytesPerBlock();
+    if (bs == 0 or bpb == 0) return @as(u64, rows) * @as(u64, cols) * 4;
+    const blocks_per_row = cols / bs;
+    return @as(u64, rows) * @as(u64, blocks_per_row) * @as(u64, bpb);
+}
+
+fn recordDispatchQuantBytes(profile: *RuntimeProfile, quant_type: GGMLType, bytes: u64) void {
+    profile.dmmv_total_bytes += bytes;
+    switch (quant_type) {
+        .q4_k => profile.dmmv_q4k_bytes += bytes,
+        .q5_k => profile.dmmv_q5k_bytes += bytes,
+        .q6_k => profile.dmmv_q6k_bytes += bytes,
+        .q8_0 => profile.dmmv_q8_0_bytes += bytes,
+        .f16 => profile.dmmv_f16_bytes += bytes,
+        .f32 => profile.dmmv_f32_bytes += bytes,
+        else => {},
+    }
+}
+
+fn recordDmmvProfile(
+    engine: *InferenceEngine,
+    tensor: *const metal_loader.LoadedTensor,
+    rows: u32,
+    cols: u32,
+) void {
+    if (!engine.profile_enabled) return;
+
+    const bytes = dmmvWeightBytes(tensor.info.type_, rows, cols);
+    var profile = &engine.request_profile;
+    recordDispatchQuantBytes(profile, tensor.info.type_, bytes);
+
+    if (tensor == engine.lm_head) {
+        profile.lm_head_bytes += bytes;
+        return;
+    }
+
+    const name = tensor.info.name;
+    if (std.mem.endsWith(u8, name, "ffn_gate_inp.weight")) {
+        profile.router_bytes += bytes;
+        return;
+    }
+    if (std.mem.indexOf(u8, name, "_shexp.")) |_| {
+        profile.shared_expert_bytes += bytes;
+        return;
+    }
+    if (std.mem.endsWith(u8, name, "attn_qkv.weight") or
+        std.mem.endsWith(u8, name, "attn_gate.weight") or
+        std.mem.endsWith(u8, name, "ssm_alpha.weight") or
+        std.mem.endsWith(u8, name, "ssm_beta.weight") or
+        std.mem.endsWith(u8, name, "ssm_out.weight"))
+    {
+        profile.ssm_bytes += bytes;
+        return;
+    }
+    if (std.mem.endsWith(u8, name, "attn_q.weight") or
+        std.mem.endsWith(u8, name, "attn_k.weight") or
+        std.mem.endsWith(u8, name, "attn_v.weight") or
+        std.mem.endsWith(u8, name, "attn_output.weight"))
+    {
+        profile.full_attn_bytes += bytes;
+        return;
+    }
+    if (std.mem.endsWith(u8, name, "ffn_gate.weight") or
+        std.mem.endsWith(u8, name, "ffn_up.weight") or
+        std.mem.endsWith(u8, name, "ffn_down.weight"))
+    {
+        profile.dense_ffn_bytes += bytes;
+    }
+}
+
+fn recordMoeDmmvProfile(
+    engine: *InferenceEngine,
+    quant_type: GGMLType,
+    rows: u32,
+    cols: u32,
+    expert_count: u32,
+) void {
+    if (!engine.profile_enabled) return;
+
+    const bytes = @as(u64, expert_count) * dmmvWeightBytes(quant_type, rows, cols);
+    var profile = &engine.request_profile;
+    recordDispatchQuantBytes(profile, quant_type, bytes);
+    profile.moe_expert_bytes += bytes;
+}
+
 // ---------------------------------------------------------------------------
 // DMMV dispatch helpers
 // ---------------------------------------------------------------------------
@@ -1143,6 +1282,8 @@ fn dispatchDmmvOnCmd(
     K: u32,
     extra_byte_offset: u32,
 ) void {
+    recordDmmvProfile(engine, tensor, M, K);
+
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
         return;
@@ -1313,6 +1454,8 @@ fn dispatchDmmvMoeOnCmd(
     x_expert_stride: u32,
     extra_byte_offset: u32,
 ) !void {
+    recordMoeDmmvProfile(engine, tensor.info.type_, M, K, engine.config.n_experts_used);
+
     switch (tensor.info.type_) {
         .q4_k => dispatchDmmvMoeQ4kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
         .q5_k => dispatchDmmvMoeQ5kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
