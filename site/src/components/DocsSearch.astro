@@ -278,9 +278,11 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
     box-shadow:
       0 0 0.35rem rgba(255, 166, 77, 0.7),
       0 0 0.85rem rgba(211, 84, 0, 0.4);
-    transform: rotate(0deg) translateY(calc(-50% - 1.6rem));
     animation: docs-search-orbit 8.5s linear infinite;
     will-change: transform;
+    /* offset-path traces an ellipse matching the orbit container's perimeter */
+    offset-path: ellipse(50% 50% at 50% 50%);
+    offset-rotate: 0deg;
   }
 
   .docs-search-shell input {
@@ -476,11 +478,11 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
 
   @keyframes docs-search-orbit {
     from {
-      transform: rotate(0deg) translateY(calc(-50% - 1.6rem));
+      offset-distance: 0%;
     }
 
     to {
-      transform: rotate(-360deg) translateY(calc(-50% - 1.6rem));
+      offset-distance: 100%;
     }
   }
 </style>
