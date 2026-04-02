@@ -10,6 +10,8 @@ const pipeline_mod = @import("../vulkan/pipeline.zig");
 const CommandBuffer = @import("../vulkan/command.zig").CommandBuffer;
 
 const log = std.log.scoped(.elementwise);
+const descriptor_pool_max_sets: u32 = 256;
+const max_storage_buffers_per_set: u32 = 7;
 
 /// Push constants for RMS norm shader.
 const RmsNormPush = extern struct {
@@ -143,13 +145,16 @@ pub const ElementwiseDispatch = struct {
     ) !ElementwiseDispatch {
         const pool_size = vk.c.VkDescriptorPoolSize{
             .type = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 3 * 3,
+            // The largest elementwise descriptor set binds 7 storage buffers.
+            // Keep enough descriptors for runtime reuse plus rotating hot-bench
+            // working sets.
+            .descriptorCount = descriptor_pool_max_sets * max_storage_buffers_per_set,
         };
         const pool_info = vk.c.VkDescriptorPoolCreateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = null,
             .flags = vk.c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-            .maxSets = 16,
+            .maxSets = descriptor_pool_max_sets,
             .poolSizeCount = 1,
             .pPoolSizes = &pool_size,
         };
@@ -449,7 +454,8 @@ pub const ElementwiseDispatch = struct {
         push: SsmDeltaNetPush,
     ) !void {
         const pip = if (self.pipeline_ssm_delta_net) |*p| p else return error.ShaderNotLoaded;
-        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), push.dt_rank, 1, 1);
+        const row_blocks = (push.head_v_dim + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), push.dt_rank, row_blocks, 1);
     }
 
     /// Record SSM gated norm dispatch.

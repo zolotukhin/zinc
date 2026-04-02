@@ -13,6 +13,119 @@ const Model = @import("../model/loader.zig").Model;
 
 const log = std.log.scoped(.routes);
 
+const chat_reuse_max_sessions: usize = 32;
+const chat_reuse_idle_timeout_ns: i128 = 30 * 60 * std.time.ns_per_s;
+
+const ChatReuseEntry = struct {
+    session_id: []u8,
+    model_path: []u8,
+    prompt_tokens: []u32,
+    last_used_ns: i128,
+
+    fn deinit(self: *ChatReuseEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_id);
+        allocator.free(self.model_path);
+        allocator.free(self.prompt_tokens);
+        self.* = undefined;
+    }
+};
+
+const ChatReuseCache = struct {
+    allocator: std.mem.Allocator,
+    entries: std.ArrayListUnmanaged(ChatReuseEntry) = .{},
+
+    fn init(allocator: std.mem.Allocator) ChatReuseCache {
+        return .{ .allocator = allocator };
+    }
+
+    fn clear(self: *ChatReuseCache) void {
+        for (self.entries.items) |*entry| entry.deinit(self.allocator);
+        self.entries.clearAndFree(self.allocator);
+    }
+
+    fn deinit(self: *ChatReuseCache) void {
+        self.clear();
+    }
+
+    fn removeAt(self: *ChatReuseCache, idx: usize) void {
+        var entry = self.entries.swapRemove(idx);
+        entry.deinit(self.allocator);
+    }
+
+    fn findSessionIndex(self: *const ChatReuseCache, session_id: []const u8) ?usize {
+        for (self.entries.items, 0..) |entry, idx| {
+            if (std.mem.eql(u8, entry.session_id, session_id)) return idx;
+        }
+        return null;
+    }
+
+    fn pruneExpired(self: *ChatReuseCache, now_ns: i128) void {
+        var i: usize = 0;
+        while (i < self.entries.items.len) {
+            if (now_ns - self.entries.items[i].last_used_ns >= chat_reuse_idle_timeout_ns) {
+                self.removeAt(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    fn evictLru(self: *ChatReuseCache) void {
+        if (self.entries.items.len == 0) return;
+        var oldest_idx: usize = 0;
+        var oldest_ns = self.entries.items[0].last_used_ns;
+        for (self.entries.items[1..], 1..) |entry, idx| {
+            if (entry.last_used_ns < oldest_ns) {
+                oldest_ns = entry.last_used_ns;
+                oldest_idx = idx;
+            }
+        }
+        self.removeAt(oldest_idx);
+    }
+
+    fn matchingPrefixLen(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8, prompt_tokens: []const u32, now_ns: i128) usize {
+        self.pruneExpired(now_ns);
+        for (self.entries.items) |*entry| {
+            if (!std.mem.eql(u8, entry.session_id, session_id)) continue;
+            if (!std.mem.eql(u8, entry.model_path, model_path)) return 0;
+            if (!std.mem.startsWith(u32, prompt_tokens, entry.prompt_tokens)) return 0;
+            entry.last_used_ns = now_ns;
+            return entry.prompt_tokens.len;
+        }
+        return 0;
+    }
+
+    fn removeSession(self: *ChatReuseCache, session_id: []const u8) void {
+        if (self.findSessionIndex(session_id)) |idx| {
+            self.removeAt(idx);
+        }
+    }
+
+    fn count(self: *const ChatReuseCache) usize {
+        return self.entries.items.len;
+    }
+
+    fn store(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8, prompt_tokens: []const u32, now_ns: i128) !void {
+        self.pruneExpired(now_ns);
+        self.removeSession(session_id);
+        while (self.entries.items.len >= chat_reuse_max_sessions) {
+            self.evictLru();
+        }
+
+        const entry = ChatReuseEntry{
+            .session_id = try self.allocator.dupe(u8, session_id),
+            .model_path = try self.allocator.dupe(u8, model_path),
+            .prompt_tokens = try self.allocator.dupe(u32, prompt_tokens),
+            .last_used_ns = now_ns,
+        };
+        errdefer {
+            var owned = entry;
+            owned.deinit(self.allocator);
+        }
+        try self.entries.append(self.allocator, entry);
+    }
+};
+
 pub const ServerState = struct {
     started_at: i64,
     active_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -20,9 +133,17 @@ pub const ServerState = struct {
     active_context_tokens: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     generation_mutex: std.Thread.Mutex = .{},
     downloads: DownloadTracker = .{},
+    chat_reuse_cache: ChatReuseCache,
 
     pub fn init(started_at: i64) ServerState {
-        return .{ .started_at = started_at };
+        return .{
+            .started_at = started_at,
+            .chat_reuse_cache = ChatReuseCache.init(std.heap.page_allocator),
+        };
+    }
+
+    pub fn deinit(self: *ServerState) void {
+        self.chat_reuse_cache.deinit();
     }
 
     pub fn uptimeSeconds(self: *const ServerState, now: i64) u64 {
@@ -44,6 +165,14 @@ pub const ServerState = struct {
 
     pub fn clearActiveContext(self: *ServerState) void {
         self.active_context_tokens.store(0, .monotonic);
+    }
+
+    pub fn clearChatReuseCache(self: *ServerState) void {
+        self.chat_reuse_cache.clear();
+    }
+
+    pub fn clearChatReuseSession(self: *ServerState, session_id: []const u8) void {
+        self.chat_reuse_cache.removeSession(session_id);
     }
 };
 
@@ -358,6 +487,7 @@ fn handleActivateModel(
         try conn.sendError(400, "invalid_request_error", msg);
         return;
     };
+    server_state.clearChatReuseCache();
 
     var buf: [512]u8 = undefined;
     const response = std.fmt.bufPrint(&buf,
@@ -401,6 +531,7 @@ fn handleRemoveModel(
         try conn.sendError(status, "invalid_request_error", msg);
         return;
     };
+    server_state.clearChatReuseCache();
 
     var buf: [768]u8 = undefined;
     const response = std.fmt.bufPrint(&buf,
@@ -553,9 +684,25 @@ const chat_stop_strs = [_][]const u8{
     "<|im_start|>",
     "<|endoftext|>",
 };
+const leaked_reasoning_markers = [_][]const u8{
+    "\n\nThe user is asking",
+    "\n\nThe user's request",
+    "\n\nHere is the response:",
+    "\n\nI will provide a direct answer",
+    "\n\nI will provide the response",
+    "\n\nI will answer directly",
+    "\nSince I am acting as the assistant",
+    " Since I am acting as the assistant",
+    "\nHowever, looking at the prompt structure",
+    " However, looking at the prompt structure",
+    "\nWait, looking closely at the prompt structure",
+    " Wait, looking closely at the prompt structure",
+};
 
 const utf8_replacement = "\xEF\xBF\xBD";
 const thinking_prefix = "<think>\n";
+const empty_thinking_prefix = "<think>\n\n</think>\n\n";
+const chat_history_answer_limit_bytes: usize = 640;
 const default_chat_system_prompt =
     "Answer directly. If a user term is ambiguous or looks misspelled, say that briefly and continue with the most likely interpretation. Never output self-referential planning or phrases like 'I need to complete the response'.";
 
@@ -571,6 +718,7 @@ const ChatMessage = struct {
 
 const ChatRequestBody = struct {
     model: []const u8 = "",
+    session_id: []const u8 = "",
     messages: []const ChatMessage = &.{},
     max_tokens: u32 = 256,
     stream: bool = false,
@@ -583,6 +731,7 @@ const ParsedChatRequest = struct {
     parsed: std.json.Parsed(ChatRequestBody),
     roles: []const []const u8,
     contents: []const []const u8,
+    session_id: []const u8,
     max_tokens: u32,
     stream: bool,
     temperature: f32,
@@ -614,8 +763,117 @@ fn estimateChatPromptBytes(roles: []const []const u8, contents: []const []const 
     return total;
 }
 
-fn buildChatPrompt(tokenizer: *const tokenizer_mod.Tokenizer, roles: []const []const u8, contents: []const []const u8, enable_thinking: ?bool, buf: []u8) ![]const u8 {
-    return tokenizer.applyChatTemplateWithOptions(roles, contents, .{ .enable_thinking = enable_thinking }, buf);
+fn buildChatPrompt(tokenizer: *const tokenizer_mod.Tokenizer, roles: []const []const u8, contents: []const []const u8, enable_thinking: ?bool, skip_thinking_template: bool, buf: []u8) ![]const u8 {
+    return tokenizer.applyChatTemplateWithOptions(roles, contents, .{ .enable_thinking = enable_thinking, .skip_thinking_template = skip_thinking_template }, buf);
+}
+
+fn buildChatTranscriptPrompt(tokenizer: *const tokenizer_mod.Tokenizer, roles: []const []const u8, contents: []const []const u8, enable_thinking: ?bool, buf: []u8) ![]const u8 {
+    return tokenizer.applyChatTemplateWithOptions(roles, contents, .{
+        .add_generation_prompt = false,
+        .enable_thinking = enable_thinking,
+    }, buf);
+}
+
+fn warmChatReuseCache(
+    server_state: *ServerState,
+    resources: *const model_manager_mod.LoadedResources,
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    engine: *forward_mod.InferenceEngine,
+    thinking_enabled: bool,
+    session_id: []const u8,
+    roles: []const []const u8,
+    contents: []const []const u8,
+    assistant_content: []const u8,
+    state: *forward_mod.DecodeState,
+    prompt_tokens: []const u32,
+    processed_generated_tokens: []const u32,
+    allocator: std.mem.Allocator,
+) !void {
+    if (session_id.len == 0) return;
+    const now_ns = std.time.nanoTimestamp();
+
+    const processed_prefix_len = prompt_tokens.len + processed_generated_tokens.len;
+    const transcript_count = roles.len + 1;
+    const transcript_roles = try allocator.alloc([]const u8, transcript_count);
+    defer allocator.free(transcript_roles);
+    const transcript_contents = try allocator.alloc([]const u8, transcript_count);
+    defer allocator.free(transcript_contents);
+
+    @memcpy(transcript_roles[0..roles.len], roles);
+    @memcpy(transcript_contents[0..contents.len], contents);
+    transcript_roles[roles.len] = "assistant";
+    transcript_contents[contents.len] = assistant_content;
+
+    const transcript_capacity = estimateChatPromptBytes(transcript_roles, transcript_contents, false) + assistant_content.len + 64;
+    const transcript_buf = try allocator.alloc(u8, transcript_capacity);
+    defer allocator.free(transcript_buf);
+    const transcript_prompt = try buildChatTranscriptPrompt(tokenizer, transcript_roles, transcript_contents, thinking_enabled, transcript_buf);
+    const transcript_tokens = try tokenizer.encodePrompt(transcript_prompt, allocator);
+    defer allocator.free(transcript_tokens);
+
+    const prompt_mismatch = if (transcript_tokens.len < prompt_tokens.len)
+        prompt_tokens.len
+    else
+        firstTokenMismatch(transcript_tokens[0..prompt_tokens.len], prompt_tokens);
+    const response_mismatch = if (transcript_tokens.len < processed_prefix_len or prompt_mismatch != null)
+        @as(?usize, 0)
+    else
+        firstTokenMismatch(transcript_tokens[prompt_tokens.len..processed_prefix_len], processed_generated_tokens);
+
+    const can_incremental =
+        state.position == processed_prefix_len and
+        transcript_tokens.len >= processed_prefix_len and
+        prompt_mismatch == null and
+        response_mismatch == null;
+
+    if (can_incremental) {
+        const suffix_tokens = transcript_tokens[processed_prefix_len..];
+        if (suffix_tokens.len > 0) {
+            try engine.prefillBatch(state, suffix_tokens);
+        }
+        log.info("chat cache updated: session={s} prefix={d} suffix={d}", .{
+            session_id,
+            transcript_tokens.len,
+            transcript_tokens.len - processed_prefix_len,
+        });
+    } else {
+        if (state.position != processed_prefix_len) {
+            log.info("chat cache skipped: state position mismatch state={d} processed={d}", .{
+                state.position,
+                processed_prefix_len,
+            });
+        } else if (prompt_mismatch) |mismatch| {
+            const transcript_token = if (mismatch < transcript_tokens.len) transcript_tokens[mismatch] else @as(u32, 0);
+            const prompt_token = if (mismatch < prompt_tokens.len) prompt_tokens[mismatch] else @as(u32, 0);
+            log.info("chat cache skipped after prompt mismatch: idx={d} transcript={d} prompt={d}", .{
+                mismatch,
+                transcript_token,
+                prompt_token,
+            });
+        } else if (response_mismatch) |mismatch| {
+            const transcript_slice = transcript_tokens[prompt_tokens.len..processed_prefix_len];
+            const transcript_token = if (mismatch < transcript_slice.len) transcript_slice[mismatch] else @as(u32, 0);
+            const processed_token = if (mismatch < processed_generated_tokens.len) processed_generated_tokens[mismatch] else @as(u32, 0);
+            log.info("chat cache skipped after response mismatch: idx={d} transcript={d} processed={d} processed_len={d}", .{
+                mismatch,
+                transcript_token,
+                processed_token,
+                processed_generated_tokens.len,
+            });
+        }
+        return error.CachePrefixMismatch;
+    }
+
+    try server_state.chat_reuse_cache.store(session_id, resources.model_path, transcript_tokens, now_ns);
+}
+
+fn firstTokenMismatch(a: []const u32, b: []const u32) ?usize {
+    const n = @min(a.len, b.len);
+    for (0..n) |i| {
+        if (a[i] != b[i]) return i;
+    }
+    if (a.len != b.len) return n;
+    return null;
 }
 
 fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedChatRequest {
@@ -647,7 +905,10 @@ fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedChatR
     for (messages) |message| {
         if (message.role.len == 0 or message.content.len == 0) continue;
         roles[count] = message.role;
-        contents[count] = message.content;
+        contents[count] = if (std.mem.eql(u8, message.role, "assistant"))
+            sanitizeAssistantHistoryContent(message.content)
+        else
+            message.content;
         count += 1;
     }
 
@@ -655,6 +916,7 @@ fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedChatR
         .parsed = parsed,
         .roles = roles[0..count],
         .contents = contents[0..count],
+        .session_id = parsed.value.session_id,
         .max_tokens = parsed.value.max_tokens,
         .stream = parsed.value.stream,
         .temperature = parsed.value.temperature,
@@ -696,8 +958,230 @@ fn trimTrailingChatArtifacts(text: []const u8) []const u8 {
             out = next;
             continue;
         }
+        if (trimDanglingListMarker(trimmed)) |next| {
+            out = next;
+            continue;
+        }
         return trimmed;
     }
+}
+
+fn trimDanglingListMarker(text: []const u8) ?[]const u8 {
+    if (text.len == 0) return null;
+    const line_start = (std.mem.lastIndexOfScalar(u8, text, '\n') orelse return null) + 1;
+    const line = std.mem.trim(u8, text[line_start..], " \t\r\n");
+    if (line.len == 1 and (line[0] == '-' or line[0] == '*')) {
+        return std.mem.trimRight(u8, text[0..line_start], " \t\r\n");
+    }
+    return null;
+}
+
+const leaked_reasoning_start_markers = [_][]const u8{
+    "The user is asking",
+    "The user's request",
+    "The user's question",
+    "I need to provide",
+    "I need to answer",
+    "I need to respond",
+    "I should answer",
+    "I should provide",
+    "I should respond",
+    "I will provide",
+    "I will answer",
+    "I will respond",
+    "Let me answer",
+    "Let me provide",
+    "Let me respond",
+    "Let me think",
+    "Let me analyze",
+};
+
+fn startsWithLeakedReasoning(text: []const u8) bool {
+    const trimmed = std.mem.trimLeft(u8, text, " \t\r\n");
+    for (leaked_reasoning_start_markers) |marker| {
+        if (trimmed.len >= marker.len and std.ascii.eqlIgnoreCase(trimmed[0..marker.len], marker)) return true;
+    }
+    return false;
+}
+
+fn findLeakedReasoningStart(text: []const u8) ?usize {
+    var first: ?usize = null;
+    for (leaked_reasoning_markers) |marker| {
+        if (std.mem.indexOf(u8, text, marker)) |idx| {
+            if (idx >= 48 and (first == null or idx < first.?)) first = idx;
+        }
+    }
+    return first;
+}
+
+fn trimLeakedNoThinkingOutput(text: []const u8) []const u8 {
+    if (findLeakedReasoningStart(text)) |idx| {
+        return std.mem.trimRight(u8, text[0..idx], " \t\r\n");
+    }
+    return text;
+}
+
+fn findUnexpectedThinkingTailStart(text: []const u8) ?usize {
+    // If text starts with <think>, skip past the first </think> so we detect REOPENED blocks
+    var search_start: usize = 0;
+    const trimmed_start = std.mem.trimLeft(u8, text, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed_start, "<think>")) {
+        if (std.mem.indexOf(u8, text, "</think>")) |close_idx| {
+            search_start = close_idx + "</think>".len;
+        } else {
+            return null; // thinking block not closed yet
+        }
+    }
+    if (std.mem.indexOf(u8, text[search_start..], "<think>")) |rel_idx| {
+        const idx = search_start + rel_idx;
+        const prefix = std.mem.trim(u8, text[0..idx], " \t\r\n");
+        if (prefix.len > 0) return idx;
+    }
+    return null;
+}
+
+fn trimUnexpectedThinkingTail(text: []const u8) []const u8 {
+    if (findUnexpectedThinkingTailStart(text)) |idx| {
+        const trimmed = std.mem.trimRight(u8, text[0..idx], " \t\r\n");
+        if (trimmed.len > 0) {
+            return trimmed;
+        }
+    }
+    return text;
+}
+
+/// Detect a repeated phrase appearing 3+ times in text.
+/// Picks candidate phrases from sentence-boundary positions (after ". ")
+/// and checks if they repeat 3+ times. Returns the index of the first repeat region.
+fn findRepeatedPhraseLoop(text: []const u8) ?usize {
+    if (text.len < 80) return null;
+    // Collect candidate start positions: after ". " or start of text
+    var starts: [64]usize = undefined;
+    var n_starts: usize = 0;
+    starts[0] = 0;
+    n_starts = 1;
+    var si: usize = 0;
+    while (si + 1 < text.len and n_starts < starts.len) : (si += 1) {
+        if (text[si] == '.' and text[si + 1] == ' ') {
+            starts[n_starts] = si + 2;
+            n_starts += 1;
+        }
+    }
+    // For each candidate start, try phrase lengths 20..60
+    for (starts[0..n_starts]) |start| {
+        if (start + 20 > text.len) continue;
+        var plen: usize = 20;
+        while (plen <= @min(60, text.len - start)) : (plen += 5) {
+            const phrase = text[start .. start + plen];
+            var count: usize = 1;
+            var search_from = start + plen;
+            var second_pos: usize = 0;
+            while (search_from + plen <= text.len) {
+                if (std.mem.indexOf(u8, text[search_from..], phrase)) |rel| {
+                    count += 1;
+                    if (count == 2) second_pos = search_from + rel;
+                    if (count >= 3) return second_pos;
+                    search_from = search_from + rel + plen;
+                } else break;
+            }
+        }
+    }
+    return null;
+}
+
+fn findStreamingStopStart(text: []const u8) ?usize {
+    var first: ?usize = findFirstStop(text, chat_stop_strs[0..]);
+    if (findUnexpectedThinkingTailStart(text)) |idx| {
+        if (first == null or idx < first.?) first = idx;
+    }
+    if (findLeakedReasoningStart(text)) |idx| {
+        if (first == null or idx < first.?) first = idx;
+    }
+    if (findRepeatedPhraseLoop(text)) |idx| {
+        if (first == null or idx < first.?) first = idx;
+    }
+    return first;
+}
+
+fn sanitizeAnswerTail(text: []const u8) []const u8 {
+    return trimRestartedAnswer(trimLeakedNoThinkingOutput(trimUnexpectedThinkingTail(trimTrailingChatArtifacts(text))));
+}
+
+fn sanitizeStreamingAnswerTail(text: []const u8) []const u8 {
+    return trimRestartedAnswer(trimLeakedNoThinkingOutput(trimUnexpectedThinkingTail(text)));
+}
+
+fn sanitizeThinkingOutput(text: []const u8, buf: []u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, text, "<think>")) return sanitizeAnswerTail(text);
+    const close_idx = std.mem.indexOf(u8, text, "</think>") orelse return text;
+    const reasoning_end = close_idx + "</think>".len;
+    const answer = sanitizeAnswerTail(text[reasoning_end..]);
+    const joiner = if (answer.len > 0 and !std.mem.startsWith(u8, answer, "\n")) "\n" else "";
+    const total_len = reasoning_end + joiner.len + answer.len;
+    if (total_len > buf.len) return error.BufferTooSmall;
+    @memcpy(buf[0..reasoning_end], text[0..reasoning_end]);
+    var pos = reasoning_end;
+    if (joiner.len > 0) {
+        @memcpy(buf[pos .. pos + joiner.len], joiner);
+        pos += joiner.len;
+    }
+    if (answer.len > 0) {
+        @memcpy(buf[pos .. pos + answer.len], answer);
+        pos += answer.len;
+    }
+    return buf[0..pos];
+}
+
+fn sanitizeStreamingThinkingOutput(text: []const u8, buf: []u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, text, "<think>")) return sanitizeStreamingAnswerTail(text);
+    const close_idx = std.mem.indexOf(u8, text, "</think>") orelse return text;
+    const reasoning_end = close_idx + "</think>".len;
+    const answer = sanitizeStreamingAnswerTail(text[reasoning_end..]);
+    const joiner = if (answer.len > 0 and !std.mem.startsWith(u8, answer, "\n")) "\n" else "";
+    const total_len = reasoning_end + joiner.len + answer.len;
+    if (total_len > buf.len) return error.BufferTooSmall;
+    @memcpy(buf[0..reasoning_end], text[0..reasoning_end]);
+    var pos = reasoning_end;
+    if (joiner.len > 0) {
+        @memcpy(buf[pos .. pos + joiner.len], joiner);
+        pos += joiner.len;
+    }
+    if (answer.len > 0) {
+        @memcpy(buf[pos .. pos + answer.len], answer);
+        pos += answer.len;
+    }
+    return buf[0..pos];
+}
+
+fn findRestartedAnswerStart(text: []const u8) ?usize {
+    if (text.len < 160) return null;
+    const prefix_len: usize = @min(text.len, @as(usize, 96));
+    if (prefix_len < 48) return null;
+    const prefix = text[0..prefix_len];
+    var search_from: usize = prefix_len + @as(usize, 64);
+    while (search_from + prefix_len <= text.len) {
+        const idx = std.mem.indexOfPos(u8, text, search_from, prefix) orelse return null;
+        const at_line_start = idx > 0 and text[idx - 1] == '\n';
+        const at_paragraph_start = idx > 1 and text[idx - 2] == '\n' and text[idx - 1] == '\n';
+        if (at_line_start or at_paragraph_start) return idx;
+        search_from = idx + 1;
+    }
+    return null;
+}
+
+fn trimRestartedAnswer(text: []const u8) []const u8 {
+    if (findRestartedAnswerStart(text)) |idx| {
+        return std.mem.trimRight(u8, text[0..idx], " \t\r\n");
+    }
+    return text;
+}
+
+fn sanitizeAssistantHistoryContent(text: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, text, empty_thinking_prefix)) {
+        const body = sanitizeAnswerTail(text[empty_thinking_prefix.len..]);
+        return if (body.len == 0) text else std.mem.trimRight(u8, text[0 .. empty_thinking_prefix.len + body.len], " \t\r\n");
+    }
+    return sanitizeAnswerTail(text);
 }
 
 fn trimLeadingStandaloneQuote(text: []const u8) []const u8 {
@@ -728,6 +1212,55 @@ fn prefixThinkingEnvelope(text: []const u8, enabled: bool, buf: []u8) ![]const u
     @memcpy(buf[0..thinking_prefix.len], thinking_prefix);
     @memcpy(buf[thinking_prefix.len .. thinking_prefix.len + text.len], text);
     return buf[0 .. thinking_prefix.len + text.len];
+}
+
+fn transportAssistantContent(tokenizer: *const tokenizer_mod.Tokenizer, text: []const u8, thinking_enabled: bool, buf: []u8) ![]const u8 {
+    if (thinking_enabled or !tokenizer.supportsThinkingToggle() or std.mem.startsWith(u8, text, "<think>")) return text;
+    if (empty_thinking_prefix.len + text.len > buf.len) return error.BufferTooSmall;
+    @memcpy(buf[0..empty_thinking_prefix.len], empty_thinking_prefix);
+    @memcpy(buf[empty_thinking_prefix.len .. empty_thinking_prefix.len + text.len], text);
+    return buf[0 .. empty_thinking_prefix.len + text.len];
+}
+
+fn assistantAnswerForHistory(text: []const u8) []const u8 {
+    const sanitized = sanitizeAssistantHistoryContent(text);
+    if (std.mem.indexOf(u8, sanitized, "</think>")) |idx| {
+        const answer = std.mem.trim(u8, sanitized[idx + "</think>".len ..], " \t\r\n");
+        if (answer.len > 0) return compactHistoryAnswer(answer);
+    }
+    return compactHistoryAnswer(sanitized);
+}
+
+fn historyAssistantContent(
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    text: []const u8,
+    transport_buf: []u8,
+) ![]const u8 {
+    const answer = assistantAnswerForHistory(text);
+    return transportAssistantContent(tokenizer, answer, false, transport_buf);
+}
+
+fn compactHistoryAnswer(answer: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, answer, " \t\r\n");
+    if (trimmed.len <= chat_history_answer_limit_bytes) return trimmed;
+
+    var end = @min(chat_history_answer_limit_bytes, trimmed.len);
+    if (end < trimmed.len) {
+        while (end > 0 and (trimmed[end] & 0xC0) == 0x80) : (end -= 1) {}
+    }
+    if (end == 0) return trimmed[0..0];
+
+    const floor = chat_history_answer_limit_bytes * 3 / 5;
+    var cut = end;
+    var i = end;
+    while (i > floor) : (i -= 1) {
+        const c = trimmed[i - 1];
+        if (c == '\n' or c == '.' or c == '!' or c == '?' or c == ' ') {
+            cut = i;
+            break;
+        }
+    }
+    return std.mem.trimRight(u8, trimmed[0..cut], " \t\r\n");
 }
 
 fn hasDanglingTrailingQuote(text: []const u8) bool {
@@ -800,6 +1333,16 @@ fn handleChatCompletions(
     const engine = &resources.engine;
     const tokenizer = &resources.tokenizer;
     const model_name = resources.display_name;
+
+    // If the catalog marks this model's thinking as unstable, force-disable thinking
+    // and skip the thinking template entirely (no empty <think></think> block).
+    const skip_thinking_template = if (resources.managed_id) |mid|
+        if (catalog_mod.find(mid)) |cat_entry| !cat_entry.thinking_stable else false
+    else
+        false;
+    if (skip_thinking_template) {
+        parsed.enable_thinking = null;
+    }
     const sampling = forward_mod.SamplingParams{
         .temperature = if (parsed.temperature <= 0.0001) 0.0 else std.math.clamp(parsed.temperature, 0.0, 2.0),
         .top_p = std.math.clamp(parsed.top_p, 0.0, 1.0),
@@ -819,7 +1362,7 @@ fn handleChatCompletions(
     };
     defer allocator.free(prompt_buf);
 
-    const prompt = buildChatPrompt(tokenizer, parsed.roles, parsed.contents, parsed.enable_thinking, prompt_buf) catch |err| {
+    const prompt = buildChatPrompt(tokenizer, parsed.roles, parsed.contents, parsed.enable_thinking, skip_thinking_template, prompt_buf) catch |err| {
         if (err == error.BufferTooSmall) {
             try conn.sendError(400, "invalid_request_error", "Prompt too long");
             return;
@@ -843,7 +1386,6 @@ fn handleChatCompletions(
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
     }
-    server_state.setActiveContextTokens(@intCast(@min(prompt_tokens.len, std.math.maxInt(u32))));
 
     const ts = @divTrunc(std.time.timestamp(), 1);
     const max_tokens = parsed.max_tokens;
@@ -853,12 +1395,46 @@ fn handleChatCompletions(
     const seed_bits: u128 = @bitCast(seed_ns);
     var prng = std.Random.DefaultPrng.init(@truncate(seed_bits));
     const random = prng.random();
+    const cacheable_session = parsed.session_id.len > 0;
+
+    var state = forward_mod.DecodeState.init(allocator);
+    defer state.deinit();
+
+    var processed_generated_tokens: std.ArrayList(u32) = .{};
+    defer processed_generated_tokens.deinit(allocator);
+
+    var cache_assistant_text: ?[]u8 = null;
+    defer if (cache_assistant_text) |text| allocator.free(text);
+    defer {
+        if (cacheable_session) {
+            if (cache_assistant_text) |assistant_text| {
+                warmChatReuseCache(
+                    server_state,
+                    resources,
+                    tokenizer,
+                    engine,
+                    thinking_enabled,
+                    parsed.session_id,
+                    parsed.roles,
+                    parsed.contents,
+                    assistant_text,
+                    &state,
+                    prompt_tokens,
+                    processed_generated_tokens.items,
+                    allocator,
+                ) catch |err| {
+                    log.info("chat cache disabled: {s}", .{@errorName(err)});
+                    server_state.clearChatReuseSession(parsed.session_id);
+                };
+            } else {
+                server_state.clearChatReuseSession(parsed.session_id);
+            }
+        }
+    }
 
     if (parsed.stream) {
-        // Streaming path — per-token SSE delivery
         conn.sendSseStart() catch return;
 
-        // Send first chunk with role
         {
             var chunk_buf: [1024]u8 = undefined;
             const chunk = std.fmt.bufPrint(&chunk_buf,
@@ -870,24 +1446,51 @@ fn handleChatCompletions(
             streamText(conn, thinking_prefix, req_id, ts, model_name) catch return;
         }
         if (conn.isPeerClosed()) return;
+    }
 
-        // Prefill prompt tokens
-        var state = forward_mod.DecodeState.init(allocator);
-        defer state.deinit();
+    const reused_prefix_len = if (cacheable_session)
+        server_state.chat_reuse_cache.matchingPrefixLen(parsed.session_id, resources.model_path, prompt_tokens, std.time.nanoTimestamp())
+    else
+        0;
+    if (reused_prefix_len > 0) {
+        state.position = @intCast(reused_prefix_len);
+        if (reused_prefix_len < prompt_tokens.len) {
+            engine.prefillBatch(&state, prompt_tokens[reused_prefix_len..]) catch {
+                server_state.clearChatReuseSession(parsed.session_id);
+                if (parsed.stream) {
+                    conn.writeSseDone() catch {};
+                } else {
+                    try conn.sendError(500, "internal_error", "Prefill failed");
+                }
+                return;
+            };
+        }
+        log.info("chat cache hit: session={s} reused={d} appended={d}", .{
+            parsed.session_id,
+            reused_prefix_len,
+            prompt_tokens.len - reused_prefix_len,
+        });
+    } else {
+        if (parsed.session_id.len > 0) server_state.clearChatReuseSession(parsed.session_id);
         engine.prefillBatch(&state, prompt_tokens) catch {
-            conn.writeSseDone() catch {};
+            if (parsed.stream) {
+                conn.writeSseDone() catch {};
+            } else {
+                try conn.sendError(500, "internal_error", "Prefill failed");
+            }
             return;
         };
-        server_state.setActiveContextTokens(state.position);
-        if (conn.isPeerClosed()) return;
+    }
+    server_state.setActiveContextTokens(state.position);
 
+    if (parsed.stream) {
         // Decode loop with buffered stop detection.
         // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
         const eos = tokenizer.eosId();
         const stop_strs = chat_stop_strs[0..];
         var pending_tokens: [16]u32 = undefined; // tokens waiting to be sent
         var pending_count: usize = 0;
-        var gen_text_buf: [4096]u8 = undefined; // accumulated decoded text for stop check
+        var gen_text_buf: [32768]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
         var stopped = false;
@@ -907,6 +1510,7 @@ fn handleChatCompletions(
                     if (generated < max_tokens) {
                         if (conn.isPeerClosed()) return;
                         engine.decodeStep(&state, prev_token, true) catch break;
+                        processed_generated_tokens.append(allocator, prev_token) catch {};
                         server_state.setActiveContextTokens(state.position);
                         if (conn.isPeerClosed()) return;
                         prev_token = engine.sample(&state, sampling, random);
@@ -926,8 +1530,17 @@ fn handleChatCompletions(
                     pending_count += 1;
                 }
 
-                // Check for full stop match against all stop strings
-                if (findFirstStop(gen_text_buf[0..gen_text_len], stop_strs)) |_| {
+                // Check for explicit chat stops, reopened think blocks, and leaked prompt-analysis tails.
+                if (findStreamingStopStart(gen_text_buf[0..gen_text_len])) |stop_idx| {
+                    gen_text_len = stop_idx;
+                    const pending_text = gen_text_buf[sent_text_len..gen_text_len];
+                    const cleaned_pending = trimTrailingChatArtifacts(pending_text);
+                    gen_text_len = sent_text_len + cleaned_pending.len;
+                    if (cleaned_pending.len > 0) {
+                        streamText(conn, cleaned_pending, req_id, ts, model_name) catch return;
+                    }
+                    sent_text_len = gen_text_len;
+                    pending_count = 0;
                     stopped = true;
                 }
                 if (stopped) break;
@@ -965,6 +1578,7 @@ fn handleChatCompletions(
                 if (generated < max_tokens) {
                     if (conn.isPeerClosed()) return;
                     engine.decodeStep(&state, prev_token, true) catch break;
+                    processed_generated_tokens.append(allocator, prev_token) catch {};
                     server_state.setActiveContextTokens(state.position);
                     if (conn.isPeerClosed()) return;
                     prev_token = engine.sample(&state, sampling, random);
@@ -995,15 +1609,14 @@ fn handleChatCompletions(
         }
 
         conn.writeSseDone() catch return;
+        if (cacheable_session) {
+            const trimmed_stream_text = sanitizeAssistantHistoryContent(gen_text_buf[0..gen_text_len]);
+            var transport_buf: [32768]u8 = undefined;
+            const transport_text = historyAssistantContent(tokenizer, trimmed_stream_text, &transport_buf) catch trimmed_stream_text;
+            cache_assistant_text = allocator.dupe(u8, transport_text) catch null;
+        }
     } else {
         // Non-streaming: use same prefill+decode loop with stop detection
-        var state2 = forward_mod.DecodeState.init(allocator);
-        defer state2.deinit();
-        engine.prefillBatch(&state2, prompt_tokens) catch {
-            try conn.sendError(500, "internal_error", "Prefill failed");
-            return;
-        };
-        server_state.setActiveContextTokens(state2.position);
         var text_buf: std.ArrayList(u8) = .{};
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
@@ -1011,14 +1624,15 @@ fn handleChatCompletions(
         const ns_stops = chat_stop_strs[0..];
         var finish_reason: FinishReason = .stop;
         if (max_tokens > 0) {
-            var prev = engine.sample(&state2, sampling, random);
+            var prev = engine.sample(&state, sampling, random);
             while (ns_gen < max_tokens and prev != ns_eos) {
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
-                    engine.decodeStep(&state2, prev, true) catch break;
-                    server_state.setActiveContextTokens(state2.position);
-                    prev = engine.sample(&state2, sampling, random);
+                    engine.decodeStep(&state, prev, true) catch break;
+                    processed_generated_tokens.append(allocator, prev) catch {};
+                    server_state.setActiveContextTokens(state.position);
+                    prev = engine.sample(&state, sampling, random);
                     continue;
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
@@ -1029,9 +1643,10 @@ fn handleChatCompletions(
                 } else false;
                 if (hit) break;
                 if (ns_gen >= max_tokens) break;
-                engine.decodeStep(&state2, prev, true) catch break;
-                server_state.setActiveContextTokens(state2.position);
-                prev = engine.sample(&state2, sampling, random);
+                engine.decodeStep(&state, prev, true) catch break;
+                processed_generated_tokens.append(allocator, prev) catch {};
+                server_state.setActiveContextTokens(state.position);
+                prev = engine.sample(&state, sampling, random);
             }
             if (prev != ns_eos and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
                 finish_reason = .length;
@@ -1039,9 +1654,17 @@ fn handleChatCompletions(
         }
 
         // Escape the full text for JSON
-        const trimmed_text = trimTrailingChatArtifacts(text_buf.items);
+        const trimmed_text = if (thinking_enabled)
+            trimTrailingChatArtifacts(text_buf.items)
+        else
+            sanitizeAssistantHistoryContent(text_buf.items);
         var thinking_buf: [16384]u8 = undefined;
-        const response_text = prefixThinkingEnvelope(trimmed_text, thinking_enabled, &thinking_buf) catch trimmed_text;
+        const prefixed_text = prefixThinkingEnvelope(trimmed_text, thinking_enabled, &thinking_buf) catch trimmed_text;
+        var sanitized_thinking_buf: [16384]u8 = undefined;
+        const response_text = if (thinking_enabled)
+            sanitizeThinkingOutput(prefixed_text, &sanitized_thinking_buf) catch prefixed_text
+        else
+            prefixed_text;
         var escaped_buf: [16384]u8 = undefined;
         const escaped_text = jsonEscape(response_text, &escaped_buf);
 
@@ -1057,6 +1680,11 @@ fn handleChatCompletions(
             return;
         };
         try conn.sendJson(200, resp);
+        if (cacheable_session) {
+            var transport_buf: [32768]u8 = undefined;
+            const transport_text = historyAssistantContent(tokenizer, response_text, &transport_buf) catch response_text;
+            cache_assistant_text = allocator.dupe(u8, transport_text) catch null;
+        }
     }
 }
 
@@ -1316,9 +1944,9 @@ fn streamText(
     ts: i64,
     model_name: []const u8,
 ) !void {
-    var escaped_buf: [512]u8 = undefined;
+    var escaped_buf: [8192]u8 = undefined;
     const escaped = jsonEscape(text, &escaped_buf);
-    var chunk_buf: [1024]u8 = undefined;
+    var chunk_buf: [16384]u8 = undefined;
     const chunk = std.fmt.bufPrint(&chunk_buf,
         \\{{"id":"{s}","object":"chat.completion.chunk","created":{d},"model":"{s}","choices":[{{"index":0,"delta":{{"content":"{s}"}},"finish_reason":null}}]}}
     , .{ req_id, ts, model_name, escaped }) catch return error.BufferTooSmall;
@@ -1511,7 +2139,7 @@ test "buildChatPrompt uses tokenizer chat template helper" {
     const roles = [_][]const u8{"user"};
     const contents = [_][]const u8{"hello"};
     var buf: [512]u8 = undefined;
-    const prompt = try buildChatPrompt(&tok, &roles, &contents, null, &buf);
+    const prompt = try buildChatPrompt(&tok, &roles, &contents, null, false, &buf);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>system\n") == null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "Do not output labels like 'Thinking Process:'") == null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>user\nhello<|im_end|>\n") != null);
@@ -1535,8 +2163,112 @@ test "trimTrailingChatArtifacts strips dangling heading markers" {
     try std.testing.expectEqualStrings("", trimTrailingChatArtifacts("###\n"));
 }
 
+test "trimTrailingChatArtifacts strips dangling list marker" {
+    try std.testing.expectEqualStrings(
+        "Cons:\n- Ecosystem is less mature",
+        trimTrailingChatArtifacts("Cons:\n- Ecosystem is less mature\n-"),
+    );
+}
+
 test "trimTrailingChatArtifacts strips leading standalone quote before answer text" {
     try std.testing.expectEqualStrings("Vulcan is likely a typo for Vulkan.", trimTrailingChatArtifacts("\"\n\nVulcan is likely a typo for Vulkan."));
+}
+
+test "trimLeakedNoThinkingOutput strips self-referential planning suffix" {
+    const raw =
+        "Kernel development requires:\n" ++
+        "- No standard library\n" ++
+        "- Direct hardware access\n" ++
+        "\n\nThe user is asking about writing kernel programs in Zig.\n" ++
+        "Here is the response:\n" ++
+        "Kernel development requires:\n" ++
+        "- No standard library";
+    try std.testing.expectEqualStrings(
+        "Kernel development requires:\n- No standard library\n- Direct hardware access",
+        trimLeakedNoThinkingOutput(raw),
+    );
+}
+
+test "sanitizeThinkingOutput strips leaked planning from answer tail" {
+    const raw =
+        "<think>\nReasoning.\n</think>\n" ++
+        "Zig is increasingly being considered for kernel work.\n\n" ++
+        "However, looking at the prompt structure, it seems I am generating the next turn.";
+    var buf: [512]u8 = undefined;
+    const cleaned = try sanitizeThinkingOutput(raw, &buf);
+    try std.testing.expectEqualStrings(
+        "<think>\nReasoning.\n</think>\nZig is increasingly being considered for kernel work.",
+        cleaned,
+    );
+}
+
+test "sanitizeThinkingOutput strips reopened think block from answer tail" {
+    const raw =
+        "<think>\nReasoning.\n</think>\n" ++
+        "Zig is promising for kernel programming.\n\n" ++
+        "<think>\nThinking Process:\n1. Analyze the request.\n";
+    var buf: [512]u8 = undefined;
+    const cleaned = try sanitizeThinkingOutput(raw, &buf);
+    try std.testing.expectEqualStrings(
+        "<think>\nReasoning.\n</think>\nZig is promising for kernel programming.",
+        cleaned,
+    );
+}
+
+test "sanitizeStreamingThinkingOutput strips reopened think block from answer tail" {
+    const raw =
+        "<think>\nReasoning.\n</think>\n" ++
+        "Zig is promising for kernel programming.\n\n" ++
+        "<think>\nThinking Process:\n1. Analyze the request.\n";
+    var buf: [512]u8 = undefined;
+    const cleaned = try sanitizeStreamingThinkingOutput(raw, &buf);
+    try std.testing.expectEqualStrings(
+        "<think>\nReasoning.\n</think>\nZig is promising for kernel programming.",
+        cleaned,
+    );
+}
+
+test "trimUnexpectedThinkingTail strips reopened think block without leading newline" {
+    const raw =
+        "Overall, Zig has potential for kernel programming." ++
+        "<think>\nThinking Process:\n1. Analyze the request.\n";
+    try std.testing.expectEqualStrings(
+        "Overall, Zig has potential for kernel programming.",
+        trimUnexpectedThinkingTail(raw),
+    );
+}
+
+test "findStreamingStopStart detects leaked prompt-analysis tail" {
+    const raw =
+        "Overall, while Zig has potential, it is not yet the best choice for production kernel programming." ++
+        "<think>\nThinking Process:\n1. Analyze the Request:\n" ++
+        "    *   Current State: The assistant has already provided a response in the few-shot example.";
+    try std.testing.expect(findStreamingStopStart(raw) != null);
+}
+
+test "trimRestartedAnswer strips duplicated restart from opening paragraph" {
+    const raw =
+        "To write kernel programs in Zig, you need to understand that Zig is primarily designed for user-space applications.\n" ++
+        "It also supports low-level systems programming.\n\n" ++
+        "To write kernel programs in Zig, you need to understand that Zig is primarily designed for user-space applications.\n" ++
+        "Here is a code example:";
+    try std.testing.expectEqualStrings(
+        "To write kernel programs in Zig, you need to understand that Zig is primarily designed for user-space applications.\nIt also supports low-level systems programming.",
+        trimRestartedAnswer(raw),
+    );
+}
+
+test "sanitizeAssistantHistoryContent strips leaked planning and duplicate restart" {
+    const raw =
+        "To write kernel programs in Zig, you need to understand that Zig is primarily designed for user-space applications.\n" ++
+        "It also supports low-level systems programming.\n\n" ++
+        "The user is asking about kernel programs in Zig.\n" ++
+        "Here is the response:\n" ++
+        "To write kernel programs in Zig, you need to understand that Zig is primarily designed for user-space applications.";
+    try std.testing.expectEqualStrings(
+        "To write kernel programs in Zig, you need to understand that Zig is primarily designed for user-space applications.\nIt also supports low-level systems programming.",
+        sanitizeAssistantHistoryContent(raw),
+    );
 }
 
 test "isReplacementArtifact detects replacement-only chunks" {
@@ -1570,7 +2302,7 @@ test "buildChatPrompt uses qwen no-thinking generation suffix when template requ
     const roles = [_][]const u8{"user"};
     const contents = [_][]const u8{"hello"};
     var buf: [512]u8 = undefined;
-    const prompt = try buildChatPrompt(&tok, &roles, &contents, null, &buf);
+    const prompt = try buildChatPrompt(&tok, &roles, &contents, null, false, &buf);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>user\nhello<|im_end|>\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, prompt, "<|im_start|>assistant\n<think>\n\n</think>\n\n"));
 }
@@ -1591,7 +2323,7 @@ test "buildChatPrompt enables thinking when requested" {
     const roles = [_][]const u8{"user"};
     const contents = [_][]const u8{"hello"};
     var buf: [512]u8 = undefined;
-    const prompt = try buildChatPrompt(&tok, &roles, &contents, true, &buf);
+    const prompt = try buildChatPrompt(&tok, &roles, &contents, true, false, &buf);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<|im_start|>user\nhello<|im_end|>\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, prompt, "<|im_start|>assistant\n<think>\n"));
     try std.testing.expect(std.mem.indexOf(u8, prompt, "</think>") == null);
@@ -1672,6 +2404,76 @@ test "prefixThinkingEnvelope leaves text unchanged when disabled" {
     try std.testing.expectEqualStrings("408", plain);
 }
 
+test "transportAssistantContent adds empty think scaffold for non-thinking qwen history" {
+    var qwen_tok = makeTestTokenizer(
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+    );
+    defer qwen_tok.token_to_id.deinit();
+
+    var buf: [128]u8 = undefined;
+    const transport = try transportAssistantContent(&qwen_tok, "Kernel code needs explicit resource control.", false, &buf);
+    try std.testing.expectEqualStrings("<think>\n\n</think>\n\nKernel code needs explicit resource control.", transport);
+}
+
+test "transportAssistantContent leaves already-prefixed text unchanged" {
+    var qwen_tok = makeTestTokenizer(
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+    );
+    defer qwen_tok.token_to_id.deinit();
+
+    var buf: [128]u8 = undefined;
+    const transport = try transportAssistantContent(&qwen_tok, "<think>\n\n</think>\n\nKernel code needs explicit resource control.", false, &buf);
+    try std.testing.expectEqualStrings("<think>\n\n</think>\n\nKernel code needs explicit resource control.", transport);
+}
+
+test "assistantAnswerForHistory drops completed reasoning blocks" {
+    const answer = assistantAnswerForHistory("<think>\nReason step\n</think>\nAnswer text.");
+    try std.testing.expectEqualStrings("Answer text.", answer);
+}
+
+test "assistantAnswerForHistory compacts long answers" {
+    const long_answer = "Kernel programming in Zig gives you explicit control. " ** 24;
+    const compacted = assistantAnswerForHistory(long_answer);
+    try std.testing.expect(compacted.len < long_answer.len);
+    try std.testing.expect(std.mem.startsWith(u8, compacted, "Kernel programming in Zig"));
+}
+
+test "historyAssistantContent strips streamed reasoning before caching" {
+    var qwen_tok = makeTestTokenizer(
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+    );
+    defer qwen_tok.token_to_id.deinit();
+
+    var transport_buf: [160]u8 = undefined;
+    const cached = try historyAssistantContent(
+        &qwen_tok,
+        "Reason step\n</think>\nAnswer text.",
+        &transport_buf,
+    );
+    try std.testing.expectEqualStrings("<think>\n\n</think>\n\nAnswer text.", cached);
+}
+
 test "supportsEnabledThinking requires tokenizer support and request flag" {
     var qwen_tok = makeTestTokenizer(
         \\{%- if add_generation_prompt %}
@@ -1691,6 +2493,56 @@ test "supportsEnabledThinking requires tokenizer support and request flag" {
     try std.testing.expect(supportsEnabledThinking(&qwen_tok, true));
     try std.testing.expect(!supportsEnabledThinking(&qwen_tok, false));
     try std.testing.expect(!supportsEnabledThinking(&plain_tok, true));
+}
+
+test "ChatReuseCache stores distinct sessions independently" {
+    var cache = ChatReuseCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.store("session-a", "/tmp/model.gguf", &.{ 1, 2, 3 }, 10);
+    try cache.store("session-b", "/tmp/model.gguf", &.{ 4, 5 }, 20);
+
+    try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 30));
+    try std.testing.expectEqual(@as(usize, 2), cache.matchingPrefixLen("session-b", "/tmp/model.gguf", &.{ 4, 5, 6 }, 31));
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("session-c", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 32));
+}
+
+test "ChatReuseCache prunes idle sessions automatically" {
+    var cache = ChatReuseCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.store("stale", "/tmp/model.gguf", &.{ 1, 2, 3 }, 0);
+    try cache.store("fresh", "/tmp/model.gguf", &.{ 4, 5, 6 }, chat_reuse_idle_timeout_ns - 1);
+
+    _ = cache.matchingPrefixLen("fresh", "/tmp/model.gguf", &.{ 4, 5, 6, 7 }, chat_reuse_idle_timeout_ns - 1);
+    cache.pruneExpired(chat_reuse_idle_timeout_ns + 10);
+
+    try std.testing.expectEqual(@as(usize, 1), cache.count());
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("stale", "/tmp/model.gguf", &.{ 1, 2, 3, 4 }, chat_reuse_idle_timeout_ns + 11));
+    try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen("fresh", "/tmp/model.gguf", &.{ 4, 5, 6, 7 }, chat_reuse_idle_timeout_ns + 11));
+}
+
+test "ChatReuseCache evicts least recently used session when full" {
+    var cache = ChatReuseCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    var session_buf: [64]u8 = undefined;
+    var token_pair: [2]u32 = undefined;
+    for (0..chat_reuse_max_sessions) |i| {
+        const session_id = try std.fmt.bufPrint(&session_buf, "session-{d}", .{i});
+        token_pair = .{ @intCast(i), @intCast(i + 100) };
+        try cache.store(session_id, "/tmp/model.gguf", token_pair[0..], @intCast(i + 1));
+    }
+    _ = cache.matchingPrefixLen("session-0", "/tmp/model.gguf", &.{ 0, 100, 999 }, @intCast(chat_reuse_max_sessions + 1));
+
+    const evicted_session = try std.fmt.bufPrint(&session_buf, "session-{d}", .{chat_reuse_max_sessions});
+    token_pair = .{ @intCast(chat_reuse_max_sessions), @intCast(chat_reuse_max_sessions + 100) };
+    try cache.store(evicted_session, "/tmp/model.gguf", token_pair[0..], @intCast(chat_reuse_max_sessions + 2));
+
+    try std.testing.expectEqual(@as(usize, chat_reuse_max_sessions), cache.count());
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("session-1", "/tmp/model.gguf", &.{ 1, 101, 999 }, @intCast(chat_reuse_max_sessions + 3)));
+    try std.testing.expectEqual(@as(usize, 2), cache.matchingPrefixLen("session-0", "/tmp/model.gguf", &.{ 0, 100, 999 }, @intCast(chat_reuse_max_sessions + 4)));
+    try std.testing.expectEqual(@as(usize, 2), cache.matchingPrefixLen(evicted_session, "/tmp/model.gguf", &.{ @intCast(chat_reuse_max_sessions), @intCast(chat_reuse_max_sessions + 100), 999 }, @intCast(chat_reuse_max_sessions + 5)));
 }
 
 test "ServerState snapshot tracks active queued and uptime" {
@@ -1747,4 +2599,22 @@ test "findFirstStop returns null when no chat stop marker exists" {
 test "findFirstStop detects endoftext marker" {
     const text = "Hello<|endoftext|>";
     try std.testing.expectEqual(@as(?usize, 5), findFirstStop(text, chat_stop_strs[0..]));
+}
+
+test "findRepeatedPhraseLoop detects sentence-level repetition" {
+    const looping = "I should cover the main types. I should also mention type safety. I should also mention type safety. I should also mention type safety. I should also mention type safety.";
+    try std.testing.expect(findRepeatedPhraseLoop(looping) != null);
+}
+
+test "findRepeatedPhraseLoop returns null for normal text" {
+    const normal = "Zig is a systems programming language. It features manual memory management. It compiles to native code.";
+    try std.testing.expect(findRepeatedPhraseLoop(normal) == null);
+}
+
+test "startsWithLeakedReasoning detects meta-commentary at start" {
+    try std.testing.expect(startsWithLeakedReasoning("The user is asking about C types."));
+    try std.testing.expect(startsWithLeakedReasoning("I need to provide a clear explanation."));
+    try std.testing.expect(startsWithLeakedReasoning("  Let me think about this carefully."));
+    try std.testing.expect(!startsWithLeakedReasoning("Zig is a modern systems programming language."));
+    try std.testing.expect(!startsWithLeakedReasoning("C types include int, float, and char."));
 }

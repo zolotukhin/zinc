@@ -17,7 +17,7 @@ const jsonLd = {
     {
       '@type': 'SoftwareApplication',
       name: 'ZINC',
-      description: 'LLM inference engine for AMD RDNA3/RDNA4 consumer GPUs built with Zig and Vulkan compute shaders. Current validated plain-decode performance on AI PRO R9700: 33.58 tok/s on Qwen3.5-35B-A3B-UD and 22.93 tok/s on Qwen3.5-2B-Q4_K_M.',
+      description: 'LLM inference engine for AMD RDNA3/RDNA4 consumer GPUs built with Zig and Vulkan compute shaders. Current validated plain-decode performance on AI PRO R9700: 37.95 tok/s on Qwen3.5-35B-A3B-UD and 26.71 tok/s on Qwen3.5-2B-Q4_K_M.',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'Linux',
       url: `${siteUrl}/zinc`,
@@ -53,7 +53,7 @@ const jsonLd = {
           name: 'What performance does ZINC achieve on RDNA4?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode numbers are 33.58 tok/s CLI decode on Qwen3.5-35B-A3B-UD-Q4_K_XL and 22.93 tok/s CLI decode on Qwen3.5-2B-Q4_K_M. Raw /v1/completions tracks close to CLI with no chat template or explicit thinking prompt, while reasoning chat is slower today.',
+            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode numbers are 37.95 tok/s on Qwen3.5-35B-A3B-UD-Q4_K_XL (26.3 ms/tok) and 26.71 tok/s on Qwen3.5-2B-Q4_K_M (37.4 ms/tok).',
           },
         },
         {
@@ -137,16 +137,12 @@ const jsonLd = {
         <tr><th>GPU</th><th>Model</th><th>Path</th><th>Result</th></tr>
       </thead>
       <tbody>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>CLI plain decode</td><td>33.58 tok/s</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>Raw `/v1/completions` plain decode</td><td>33.55 tok/s (`c=1`), 33.98 tok/s aggregate (`c=4`)</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>Reasoning chat</td><td>24.94–28.56 tok/s</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>CLI plain decode</td><td>22.93 tok/s</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>Raw `/v1/completions` plain decode</td><td>21.88 tok/s (`c=1`), 21.36 tok/s aggregate (`c=4`)</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>Reasoning chat</td><td>17.35–17.50 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>CLI plain decode</td><td>37.95 tok/s (26.3 ms/tok)</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>CLI plain decode</td><td>26.71 tok/s (37.4 ms/tok)</td></tr>
       </tbody>
     </table>
 
-    <p>Today the raw `/v1/completions` route tracks the CLI closely. Those numbers are plain decode, not thinking-enabled runs. The current proxy for thinking-style workloads is the reasoning-chat row; it is slower because prompt templating, stop handling, and other server-side work still matter. Aggregate throughput at `concurrency=4` stays roughly flat because decode is still serialized, so continuous batching should be read as roadmap work rather than a finished claim.</p>
+    <p>These numbers are CLI plain decode (128-token runs, single-stream, <code>RADV_PERFTEST=coop_matrix</code>). Measured 2026-03-31 on the RDNA4 test node with <code>zig build -Doptimize=ReleaseFast</code>.</p>
 
     <h2>What ZINC does</h2>
 

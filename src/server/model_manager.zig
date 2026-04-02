@@ -213,7 +213,7 @@ pub const ModelManager = struct {
                 .required_vram_bytes = fit.required_vram_bytes,
                 .exact_fit = fit.exact,
                 .status_label = status_label,
-                .supports_thinking_toggle = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id) and active_supports_thinking_toggle,
+                .supports_thinking_toggle = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id) and active_supports_thinking_toggle and entry.thinking_stable,
             });
         }
 

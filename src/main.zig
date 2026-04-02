@@ -1220,6 +1220,7 @@ pub fn main() !void {
         posix.sigaction(posix.SIG.TERM, &sa, null);
 
         var server_state = routes_mod.ServerState.init(std.time.timestamp());
+        defer server_state.deinit();
 
         // Server loop — accepts connections concurrently so operational endpoints
         // like /health remain responsive, while generation itself is serialized

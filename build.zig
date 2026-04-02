@@ -31,6 +31,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const full_tests = b.option(bool, "full-tests", "Require integration smoke tests and fail when their environment is missing") orelse false;
+    const install_hot_bench = b.option(bool, "install-hot-bench", "Install the zinc-hot-bench binary as part of the default install step") orelse false;
 
     const is_linux = target.result.os.tag == .linux;
 
@@ -109,6 +110,23 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    const hot_bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench_hot_decode.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    configureVulkanModule(b, target, hot_bench_mod);
+
+    const hot_bench = b.addExecutable(.{
+        .name = "zinc-hot-bench",
+        .root_module = hot_bench_mod,
+    });
+
+    if (install_hot_bench) {
+        b.installArtifact(hot_bench);
+    }
+
     // --- Documentation ---
     const docs_step = b.step("docs", "Generate Zig documentation");
     const docs_install = b.addInstallDirectory(.{
@@ -126,6 +144,14 @@ pub fn build(b: *std.Build) void {
     }
     const run_step = b.step("run", "Run ZINC inference engine");
     run_step.dependOn(&run_cmd.step);
+
+    const run_hot_bench = b.addRunArtifact(hot_bench);
+    run_hot_bench.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_hot_bench.addArgs(args);
+    }
+    const hot_bench_step = b.step("hot-bench", "Run hot decode microbenchmarks");
+    hot_bench_step.dependOn(&run_hot_bench.step);
 
     // --- Unit tests ---
     const test_mod = b.createModule(.{

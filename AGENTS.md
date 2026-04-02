@@ -291,15 +291,66 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
     --output /tmp/zinc_api_raw_benchmark.json"
 ```
 
-Reference result from a clean RDNA4 node on 2026-03-30 with `zig build -Doptimize=ReleaseFast`:
+Latest single-stream reference result from a clean RDNA4 node on 2026-03-31 with `zig build -Doptimize=ReleaseFast`:
 
-- CLI plain decode on `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`: `33.58 tok/s`, `29.8 ms/tok`
-- `POST /v1/completions` with `max_tokens=256` sustained about `33.55 tok/s` at `concurrency=1` with no chat template or explicit thinking prompt
-- `POST /v1/completions` with `max_tokens=256` and `concurrency=4` held aggregate throughput at about `33.98 tok/s`, while average per-request latency rose to about `18.84s`
-- A 3-prompt non-streaming reasoning-chat matrix landed at `24.94–28.56 tok/s` (`/tmp/zinc_reasoning_chat_matrix.json` on the RDNA4 node)
-- CLI plain decode on `Qwen3.5-2B-Q4_K_M.gguf`: `22.93 tok/s`, `43.6 ms/tok`
-- `Qwen3.5-2B-Q4_K_M.gguf` also measured about `21.88 tok/s` on raw `/v1/completions` without chat template/thinking and `17.35–17.50 tok/s` on the same 3-prompt reasoning-chat matrix
-- Treat the reasoning-chat matrix as the current "thinking-style" benchmark. We are not flipping a separate model-side thinking mode in the raw `/v1/completions` runs.
+- CLI plain decode on `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`: `37.95 tok/s`, `26.3 ms/tok`
+- CLI plain decode on `Qwen3.5-2B-Q4_K_M.gguf`: `26.71 tok/s`, `37.4 ms/tok`
+- Previous reference (2026-03-30): 35B was `35.24 tok/s`, 2B was `22.93 tok/s`
+
+### Measure hot decode kernels directly
+
+Use the dedicated microbenchmark when whole-model decode says “MoE”, “shared
+expert”, or `ssm_delta_net` is hot and you need exact per-kernel numbers plus
+`RADV_DEBUG=shaderstats` feedback.
+
+Important caveat:
+
+- the current hot-bench path rotates across multiple buffer sets to reduce the
+  worst cache-hot bias
+- still treat its reported GB/s as a kernel-comparison signal, not as the final
+  whole-model DRAM bandwidth number
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  zig build hot-bench -Doptimize=ReleaseFast -- \
+    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --iterations 200 --warmup 25"
+```
+
+Focused single-case runs:
+
+```bash
+source .env
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  zig build hot-bench -Doptimize=ReleaseFast -- \
+    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --case q8_router"
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  zig build hot-bench -Doptimize=ReleaseFast -- \
+    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --case q8_shared_gate_up"
+
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
+  cd /root/zinc && \
+  RADV_DEBUG=shaderstats zig build hot-bench -Doptimize=ReleaseFast -- \
+    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --case ssm_delta"
+```
+
+Available cases right now:
+
+- `q8_router`
+- `q8_shared_gate_up`
+- `q8_shared_down`
+- `q8_ssm_out`
+- `ssm_delta`
 
 ### Troubleshooting performance
 

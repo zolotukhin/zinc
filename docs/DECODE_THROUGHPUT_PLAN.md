@@ -1,6 +1,6 @@
 # Decode Throughput Plan
 
-Date: 2026-03-30
+Date: 2026-03-31
 Model: `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`
 Target GPU: RDNA4 test node (`AMD Radeon AI PRO R9700`, `576 GB/s`, `64 CUs`)
 
@@ -10,24 +10,27 @@ Hit a stable `50 tok/s` plain decode path on the 35B model on a single R9700 wit
 
 That is the right next target for the current tree:
 
-1. `33.58 tok/s` is already a healthy bring-up baseline
+1. `37.95 tok/s` is already a healthy bring-up baseline
 2. `50 tok/s` is a real step up in usability
 3. `50 tok/s` still does not require full llama.cpp parity
 4. `50 tok/s` is achievable without pretending a single stream should saturate `576 GB/s`
 
 `50 tok/s` means `20.0 ms/tok`.
-The current clean baseline is `29.8 ms/tok`.
-So the practical problem is: remove about `9.8 ms` from the token path.
+The current clean baseline is `26.3 ms/tok`.
+So the practical problem is: remove about `6.3 ms` from the token path.
 
 ## Current Baseline
 
-Measured on March 30, 2026 on the RDNA4 test node from the current checkout synced to `/root/zinc`.
+Measured on March 31, 2026 on the RDNA4 test node from the current checkout synced to `/root/zinc`.
 
-- clean `ReleaseFast` CLI run: `33.58 tok/s`
+- clean `ReleaseFast` CLI run: `37.95 tok/s` (`26.3 ms/tok`)
+- modeled decode bandwidth at `37.95 tok/s`: `127.1 GB/s`, about `22.1%` of `576 GB/s`
+- Qwen3.5-2B-Q4_K_M CLI plain decode: `26.71 tok/s` (`37.4 ms/tok`)
+
+Previous reference (March 30):
+
+- clean `ReleaseFast` CLI run: `35.24 tok/s`
 - raw `/v1/completions`: `33.55 tok/s`
-- raw `/v1/completions` at `concurrency=4`: `33.98 tok/s` aggregate
-- 3-prompt reasoning chat matrix: `24.94-28.56 tok/s` (about `26.92 tok/s` average)
-- modeled decode bandwidth at `33.58 tok/s`: `112.5 GB/s`, about `19.5%` of `576 GB/s`
 
 Clean CLI command shape:
 
@@ -40,55 +43,57 @@ RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
 
 Observed on the cleaned node:
 
-- `Generated 256 tokens in 7624.7 ms`
-- `33.58 tok/s`
-- `29.8 ms/tok`
+- `Generated 256 tokens in 7263.8 ms`
+- `35.24 tok/s`
+- `28.4 ms/tok`
 
 ## Latest Profiling Snapshot
 
-Measured on March 30, 2026 on the same clean RDNA4 node after adding the deeper per-phase profiler.
+Measured on March 31, 2026 on the same clean RDNA4 node after the row-tiled
+`ssm_delta_net` rewrite and the deeper per-phase profiler.
 
-Short profiled run:
+Latest profiled run:
 
-- `Generated 16 tokens in 582.0 ms`
-- `27.49 tok/s` in profile mode
-- `37.21 ms` average GPU token time
-- `0.58 ms` average CPU record time
-- `38.17 ms` average submit-and-wait time
+- `Generated 256 tokens in 7263.8 ms`
+- `35.24 tok/s` in profile mode
+- `26.95 ms` average GPU token time
+- `0.55 ms` average CPU record time
+- `27.89 ms` average submit-and-wait time
+- `0.03 ms` average query-read time
 - `1022` descriptor allocations and `1022` descriptor writes per token
 - `0` CPU fallbacks on the benchmark path
 
 Coarse GPU buckets:
 
-- attention: `2.38 ms`
-- SSM total: `10.58 ms`
-- routed MoE total: `14.12 ms`
-- shared expert total: `7.65 ms`
-- final tail: `0.92 ms`
+- attention: `3.58 ms`
+- SSM total: `5.67 ms`
+- routed MoE total: `10.24 ms`
+- shared expert total: `5.35 ms`
+- final tail: `0.90 ms`
 
 SSM breakdown:
 
-- projections: `1.69 ms`
-- conv1d: `0.34 ms`
-- delta-net update: `7.71 ms`
-- gated norm: `0.31 ms`
-- out projection + residual: `0.87 ms`
+- projections: `1.59 ms`
+- conv1d: `0.26 ms`
+- delta-net update: `3.08 ms`
+- gated norm: `0.23 ms`
+- out projection + residual: `0.76 ms`
 
 Routed MoE breakdown:
 
-- router projection: `7.58 ms`
-- softmax top-k: `2.79 ms`
-- gate + up expert projections: `2.13 ms`
-- SwiGLU: `0.36 ms`
-- down projection: `1.53 ms`
-- weighted accumulate: `0.33 ms`
+- router projection: `5.23 ms`
+- softmax top-k: `2.21 ms`
+- gate + up expert projections: `1.55 ms`
+- SwiGLU: `0.27 ms`
+- down projection: `1.16 ms`
+- weighted accumulate: `0.25 ms`
 
 Shared expert breakdown:
 
-- gate + up projections: `6.75 ms`
-- SwiGLU: `0.35 ms`
-- down projection: `0.52 ms`
-- gate accumulate: `0.36 ms`
+- gate + up projections: `4.69 ms`
+- SwiGLU: `0.27 ms`
+- down projection: `0.37 ms`
+- gate accumulate: `0.26 ms`
 
 Important tensor-type facts from that same run:
 
@@ -99,9 +104,45 @@ Important tensor-type facts from that same run:
 
 That changes the optimization order a lot. The node is not blocked on CPU recording anymore. It is blocked on:
 
-1. `q8_0` small and medium DMMVs
-2. `ssm_delta_net`
-3. second-order MoE work like `softmax_topk`
+1. routed MoE router + top-k
+2. shared expert gate/up projection path
+3. attention and remaining SSM balance
+
+## Latest Hot-Bench Snapshot
+
+Measured on March 31, 2026 with the dedicated hot-kernel benchmark using a
+16-slot rotating working set to reduce cache-hot bias.
+
+Updated sweep on the RDNA4 node:
+
+- `q8_router`: `319.7 GB/s`, `55.5%` of peak
+- `q8_shared_gate_up`: `414.2 GB/s`, `71.9%` of peak
+- `q8_shared_down`: `399.7 GB/s`, `69.4%` of peak
+- `q8_ssm_out`: `376.0 GB/s`, `65.3%` of peak
+- `ssm_delta`: `0.118 ms/iter`, about `36.0 GB/s`, `6.2%` of peak
+
+The important change is `ssm_delta`:
+
+- previous one-case baseline: `0.282 ms/iter`
+- new one-case run after the row-tiled rewrite: `0.146 ms/iter`
+- full-sweep run after the rewrite: `0.118 ms/iter`
+
+That lines up with the full-model profile improvement:
+
+- `ssm_delta_net` inside decode fell from `7.71 ms` to `3.08 ms`
+- clean CLI decode improved from `33.58 tok/s` to `35.24 tok/s`
+- raw `/v1/completions` single-stream improved from `33.55 tok/s` to `37.69 tok/s`
+
+Updated `RADV_DEBUG=shaderstats` for the tuned `ssm_delta_net` run reports:
+
+- `VGPRs=48`
+- `LDS size=1536`
+- `Instructions=441`
+- `Inverse Throughput=569`
+
+So `ssm_delta_net` is no longer the first blocker. The next throughput pass
+should focus on the routed MoE router/top-k path and the shared expert
+projection path before spending more time on delta-net.
 
 ## What 50 tok/s Does And Does Not Mean
 
@@ -132,7 +173,7 @@ The fast path is no longer the old "151 waits per token" architecture. The bigge
 - the token stays in one command buffer through final norm, LM head, and GPU argmax
 - greedy sampling only reads back a 4-byte token id on the fast path
 
-That is why the tree is already at `33.58 tok/s`.
+That is why the tree is already at `37.95 tok/s`.
 
 The next gap to `50 tok/s` looks different:
 
@@ -239,9 +280,9 @@ Objective:
 
 Priority order from the latest measurements:
 
-1. `q8_0` router and shared-expert projection path
-2. `ssm_delta_net`
-3. only then smaller MoE pieces like `softmax_topk`
+1. routed MoE router projection + `softmax_topk`
+2. shared expert gate/up projection path
+3. only then the remaining attention / SSM balance
 
 Concrete work:
 
@@ -251,7 +292,8 @@ Concrete work:
    - SSM output projection: `2048 x 4096`, `q8_0`
 2. Capture `RADV_DEBUG=shaderstats` for `dmmv_q8_0.spv` and `ssm_delta_net.spv`
 3. Tune `q8_0` with real shader-stat feedback, not with generic LDS tricks
-4. Tune `ssm_delta_net` around state-update math, not `conv1d`
+4. Treat `ssm_delta_net` as a second-pass target now that the row-tiled rewrite
+   has already removed most of the old delta-net cost
 
 Observed dead ends already worth avoiding:
 
@@ -317,7 +359,7 @@ Target result:
 
 Objective:
 
-- tune the kernels that actually gate the current `33.58 -> 50 tok/s` jump
+- tune the kernels that actually gate the current `37.95 -> 50 tok/s` jump
 
 Use these shape buckets first:
 
@@ -337,9 +379,9 @@ Concrete work:
 3. Capture shader stats on the benchmark node:
    - `RADV_DEBUG=shaderstats`
 4. Focus on the kernels that are well below target, especially:
-   - `q8_0` decode DMMV
-   - `ssm_delta_net`
-   - any medium-shape path with bad VGPR or LDS pressure
+  - routed MoE router / top-k
+  - shared expert projection path
+  - any medium-shape path with bad VGPR or LDS pressure
 
 Why this phase comes after profiling and descriptor work:
 
@@ -416,11 +458,53 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && \
     --prompt 'The capital of France is' --max-tokens 4"
 ```
 
+### 4. Run the dedicated hot-shape microbenchmarks
+
+Use the focused microbenchmark when you need per-kernel numbers for the current
+`q8_0` router/shared-expert shapes and `ssm_delta_net`, without whole-model
+decode noise.
+
+Important caveat:
+
+- the current microbenchmark rotates across multiple buffer sets to reduce the
+  worst cache-hot bias, but it is still a kernel-comparison tool rather than
+  the final whole-model DRAM truth
+- use it to compare kernels and collect `RADV_DEBUG=shaderstats`, not as the
+  final truth for whole-model DRAM utilization
+
+```bash
+source .env
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && \
+  zig build hot-bench -Doptimize=ReleaseFast -- \
+    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --iterations 200 --warmup 25"
+```
+
+To inspect one hot path at a time:
+
+```bash
+source .env
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && \
+  zig build hot-bench -Doptimize=ReleaseFast -- \
+    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --case q8_shared_gate_up --iterations 400 --warmup 50"
+```
+
+For compiler feedback on register pressure / LDS / occupancy:
+
+```bash
+source .env
+ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && \
+  RADV_DEBUG=shaderstats zig build hot-bench -Doptimize=ReleaseFast -- \
+    --model /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --case ssm_delta --iterations 200 --warmup 25"
+```
+
 ## Success Criteria
 
 ### Short term
 
-- clean `ReleaseFast` 35B decode remains reproducibly above `33 tok/s`
+- clean `ReleaseFast` 35B decode remains reproducibly above `35 tok/s`
 - new profiler overhead stays within a defensible diagnostic range
 - every throughput run reports whether a CPU fallback path was used
 - the profiler keeps identifying the same top buckets reproducibly

@@ -13,6 +13,8 @@ const GpuConfig = @import("../vulkan/gpu_detect.zig").GpuConfig;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 
 const log = std.log.scoped(.dmmv);
+const descriptor_pool_max_sets: u32 = 256;
+const descriptors_per_set: u32 = 3;
 
 /// Push constants for DMMV shaders (must match GLSL layout).
 const DmmvPushConstants = extern struct {
@@ -81,13 +83,14 @@ pub const DmmvDispatch = struct {
         // Create descriptor pool
         const pool_size = vk.c.VkDescriptorPoolSize{
             .type = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 3 * 3, // 3 buffers per pipeline * 3 pipelines
+            // Size for runtime reuse plus rotating hot-bench working sets.
+            .descriptorCount = descriptor_pool_max_sets * descriptors_per_set,
         };
         const pool_info = vk.c.VkDescriptorPoolCreateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = null,
             .flags = vk.c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-            .maxSets = 16,
+            .maxSets = descriptor_pool_max_sets,
             .poolSizeCount = 1,
             .pPoolSizes = &pool_size,
         };

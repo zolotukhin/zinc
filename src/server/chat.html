@@ -46,7 +46,7 @@ header h1 span{color:var(--accent)}
 .msg.u .av{background:var(--user);color:var(--accent);order:2}
 .msg .bbl{padding:10px 14px;border-radius:12px;line-height:1.6;font-size:14px;max-width:85%}
 .msg.u .bbl{background:var(--user);border:1px solid var(--accent2);border-bottom-right-radius:4px;white-space:pre-wrap;word-break:break-word}
-.msg.a .bbl{background:var(--bg2);border:1px solid var(--border);border-bottom-left-radius:4px}
+.msg.a .bbl{background:var(--bg2);border:1px solid var(--border);border-bottom-left-radius:4px;width:85%;max-width:85%}
 .msg.a .bbl p{margin:0 0 8px}
 .msg.a .bbl p:last-child{margin:0}
 .msg.a .bbl h1,.msg.a .bbl h2,.msg.a .bbl h3,.msg.a .bbl h4{margin:0 0 10px;color:#fff;line-height:1.25}
@@ -68,19 +68,23 @@ header h1 span{color:var(--accent)}
 .msg.a .bbl pre{background:var(--bg);padding:10px 12px;margin:0;overflow-x:auto;border-radius:0}
 .msg.a .bbl pre code{background:none;padding:0;font-size:13px}
 .msg.a .bbl pre code.hljs{background:none;padding:0}
-.msg.a .bbl .reasoning-block{margin-bottom:12px;border:1px solid rgba(232,114,42,.28);border-radius:12px;background:linear-gradient(180deg,rgba(232,114,42,.09),rgba(24,24,27,.96));overflow:hidden}
-.msg.a .bbl .reasoning-block[open]{border-color:rgba(232,114,42,.45);box-shadow:0 0 0 1px rgba(232,114,42,.08) inset}
-.msg.a .bbl .reasoning-block summary{cursor:pointer;list-style:none;user-select:none;padding:10px 12px;background:rgba(255,255,255,.02)}
+.msg.a .bbl .reasoning-block{margin-bottom:8px;border:1px solid rgba(255,255,255,.08);border-radius:8px;background:rgba(255,255,255,.03);overflow:hidden}
+.msg.a .bbl .reasoning-block[open]{border-color:rgba(255,255,255,.12)}
+.msg.a .bbl .reasoning-block summary{cursor:pointer;list-style:none;user-select:none;padding:5px 8px}
 .msg.a .bbl .reasoning-block summary::-webkit-details-marker{display:none}
-.msg.a .bbl .reasoning-summary{display:flex;align-items:center;gap:10px;min-width:0}
-.msg.a .bbl .reasoning-summary::before{content:'▸';font-size:12px;color:var(--accent);transition:transform .15s ease}
+.msg.a .bbl .reasoning-summary{display:flex;align-items:center;gap:6px;min-width:0}
+.msg.a .bbl .reasoning-summary::before{content:'▸';font-size:10px;color:var(--muted);transition:transform .15s ease}
 .msg.a .bbl .reasoning-block[open] .reasoning-summary::before{transform:rotate(90deg)}
-.msg.a .bbl .reasoning-state{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;border:1px solid rgba(232,114,42,.3);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#ffd1b0;background:rgba(232,114,42,.12)}
-.msg.a .bbl .reasoning-state.live{color:#fff0e2;border-color:rgba(232,114,42,.45);background:rgba(232,114,42,.22)}
-.msg.a .bbl .reasoning-preview{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#d7b28d}
-.msg.a .bbl .reasoning-body{font-size:13px;color:#bba48e;padding:12px 14px 14px;line-height:1.6;border-top:1px solid rgba(232,114,42,.18);background:rgba(10,10,12,.18)}
-.msg.a .bbl .reasoning-body strong{color:#f3d7bd}
-.msg.a .bbl .reasoning-body code{background:rgba(255,255,255,.05)}
+.msg.a .bbl .reasoning-state{font-size:10px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)}
+.msg.a .bbl .reasoning-state.live{color:var(--accent)}
+.msg.a .bbl .reasoning-preview{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--muted);opacity:.7}
+.msg.a .bbl .reasoning-body{font-size:12px;color:var(--muted);padding:6px 8px 8px;line-height:1.5;border-top:1px solid rgba(255,255,255,.06);max-height:160px;overflow-y:auto}
+.msg.a .bbl .reasoning-body strong{color:#ccc}
+.msg.a .bbl .reasoning-body code{background:rgba(255,255,255,.04)}
+.msg.a .bbl .assistant-note{margin-top:12px;padding:10px 12px;border-radius:10px;border:1px solid var(--border);font-size:13px;line-height:1.5}
+.msg.a .bbl .assistant-note strong{display:block;margin-bottom:4px;color:#fff}
+.msg.a .bbl .assistant-note.warn{border-color:rgba(232,114,42,.42);background:rgba(232,114,42,.1);color:#ffd8bc}
+.msg.a .bbl .assistant-note.error{border-color:rgba(244,63,94,.42);background:rgba(244,63,94,.08);color:#ffd2dc}
 .msg .meta{font-size:11px;color:var(--muted);margin-top:4px}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
@@ -161,9 +165,24 @@ const ST=document.getElementById('st'),MN=document.getElementById('mn'),SS=docum
 const MB=document.getElementById('mbtn'),GM=document.getElementById('gpu'),DL=document.getElementById('dl'),MP=document.getElementById('mp'),MPF=document.getElementById('mpf');
 const TW=document.getElementById('tw'),TH=document.getElementById('th'),TL=document.getElementById('tl');
 const emptyStateHtml='<div class="empty" id="w"><strong>ZINC Inference Engine</strong>AMD RDNA4 GPU &middot; Vulkan Compute<br>Type a message to start</div>';
-const chatStateKey='zinc.chat.state.v2';
+const chatStateKey='zinc.chat.state.v3';
 const chatPrefsKey='zinc.chat.prefs.v1';
 let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false,models=[],modelPollTimer=null,healthPollTimer=null;
+let chatSessionId='',userScrolledUp=false;
+M.addEventListener('scroll',function(){
+  if(!isGenerating)return;
+  let nearBottom=M.scrollHeight-M.scrollTop-M.clientHeight<80;
+  userScrolledUp=!nearBottom;
+},{passive:true});
+function autoScroll(){if(!userScrolledUp)M.scrollTop=M.scrollHeight}
+function autoScrollReasoning(bbl){let rb=bbl.querySelector('.reasoning-body');if(rb)rb.scrollTop=rb.scrollHeight}
+
+function newChatSessionId(){
+  try{
+    if(window.crypto&&typeof window.crypto.randomUUID==='function')return window.crypto.randomUUID();
+  }catch(e){}
+  return 'chat-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
+}
 
 function readStorage(key){
   try{
@@ -188,20 +207,33 @@ function sanitizeMessage(msg){
   if(msg.role!=='user'&&msg.role!=='assistant')return null;
   const content=typeof msg.content==='string'?msg.content:'';
   const raw=typeof msg.raw==='string'?msg.raw:'';
+  const transport=typeof msg.transport==='string'?msg.transport:'';
   const partial=msg.partial===true;
+  const incomplete=msg.incomplete===true;
+  const noticeKind=msg.notice_kind==='error'?'error':(msg.notice_kind==='warn'?'warn':'');
+  const noticeTitle=typeof msg.notice_title==='string'?msg.notice_title:'';
+  const noticeMessage=typeof msg.notice_message==='string'?msg.notice_message:'';
   if(!content&&!raw)return null;
-  return partial?{role:msg.role,content,raw,partial:true}:{role:msg.role,content};
+  let cleaned={role:msg.role,content,transport};
+  if(raw)cleaned.raw=raw;
+  if(partial)cleaned.partial=true;
+  if(incomplete)cleaned.incomplete=true;
+  if(noticeKind)cleaned.notice_kind=noticeKind;
+  if(noticeTitle)cleaned.notice_title=noticeTitle;
+  if(noticeMessage)cleaned.notice_message=noticeMessage;
+  return cleaned;
 }
 
 function readChatState(){
   let raw=readStorage(chatStateKey);
-  if(!raw)return{messages:[],input:''};
+  if(!raw)return{messages:[],input:'',sessionId:newChatSessionId()};
   try{
     let parsed=JSON.parse(raw);
     let messages=Array.isArray(parsed.messages)?parsed.messages.map(sanitizeMessage).filter(Boolean).filter(m=>!(m.role==='assistant'&&m.partial)).slice(-128):[];
     let input=typeof parsed.input==='string'?parsed.input.slice(0,8000):'';
-    return{messages,input};
-  }catch(e){return{messages:[],input:''}}
+    let sessionId=typeof parsed.sessionId==='string'&&parsed.sessionId?parsed.sessionId:newChatSessionId();
+    return{messages,input,sessionId};
+  }catch(e){return{messages:[],input:'',sessionId:newChatSessionId()}}
 }
 
 function readChatPrefs(){
@@ -220,7 +252,7 @@ function saveChatPrefs(){
 }
 
 function saveChatState(){
-  writeStorage(chatStateKey,JSON.stringify({messages:H.slice(-128),input:(I.value||'').slice(0,8000)}));
+  writeStorage(chatStateKey,JSON.stringify({messages:H.slice(-128),input:(I.value||'').slice(0,8000),sessionId:chatSessionId||newChatSessionId()}));
 }
 
 function showEmptyState(){
@@ -289,22 +321,130 @@ function setModelTag(name){
 
 function resetConversation(note){
   H=[];
+  chatSessionId=newChatSessionId();
   saveChatState();
   showEmptyState();
   if(note)addMsg('assistant',note);
 }
 
-function requestMessagesFromHistory(){
-  return H.filter(m=>!(m.role==='assistant'&&m.partial)).map(m=>({role:m.role,content:m.content}));
+function requestMessagesFromHistory(supportsThinking){
+  return H.filter(m=>!(m.role==='assistant'&&(m.partial||m.incomplete))).map(m=>{
+    if(m.role!=='assistant')return{role:m.role,content:m.content};
+    let answer=typeof m.content==='string'?m.content:'';
+    let raw=typeof m.raw==='string'?m.raw:'';
+    let transport=historyTransportContent(answer,raw,activeModelSupportsThinking()&&TH.checked,!!supportsThinking);
+    return{role:m.role,content:transport||m.transport||answer};
+  });
+}
+
+const historyAnswerCharLimit=640;
+
+function compactHistoryAnswer(answer){
+  let text=(answer||'').trim();
+  if(text.length<=historyAnswerCharLimit)return text;
+  let end=historyAnswerCharLimit;
+  let floor=Math.floor(historyAnswerCharLimit*0.6);
+  for(let i=historyAnswerCharLimit;i>floor;i--){
+    let ch=text[i-1];
+    if(ch==='\n'||ch==='.'||ch==='!'||ch==='?'||ch===' '){
+      end=i;
+      break;
+    }
+  }
+  return text.slice(0,end).trim();
+}
+
+function historyTransportContent(answer,raw,enableThinking,supportsThinking){
+  let compact=compactHistoryAnswer(answer);
+  if(!compact)return '';
+  if(!supportsThinking)return compact;
+  return '<think>\n\n</think>\n\n'+compact;
+}
+
+function chatMaxTokens(enableThinking){
+  return enableThinking?2048:1024;
 }
 
 function assistantHtmlFromRaw(raw,isThinking){
-  let view=splitDisplayContent(raw,isThinking);
+  let view=normalizeDisplayView(splitDisplayContent(raw,isThinking));
   let html='';
-  if(view.showReasoning)html+=renderReasoning(view.reasoning,view.isThinking);
+  if(view.showReasoning)html+=renderReasoning(view.reasoning,view.isThinking,view.collapsedReasoning);
   if(view.answer)html+=md(view.answer);
-  if(!html&&raw)html=md(stripTrailingArtifacts(raw));
+  if(!html&&raw&&!view.suppressedReasoning&&!view.collapsedReasoning&&!view.promotedReasoning)html=md(stripTrailingArtifacts(raw));
   return{html,view};
+}
+
+function renderAssistantNotice(kind,title,message){
+  let tone=kind==='error'?'error':'warn';
+  let safeTitle=esc(title||(tone==='error'?'Request failed':'Notice'));
+  let safeMessage=esc(message||'');
+  return '<div class="assistant-note '+tone+'"><strong>'+safeTitle+'</strong>'+(safeMessage?'<span>'+safeMessage+'</span>':'')+'</div>';
+}
+
+function completionNotice(state){
+  let hasAnswer=!!state.hasAnswer;
+  if(state.errorMessage){
+    return {
+      kind:'error',
+      title:hasAnswer?'Response interrupted':'Request failed',
+      message:state.errorMessage,
+    };
+  }
+  if(state.finishReason==='length'){
+    return {
+      kind:'warn',
+      title:'Token limit reached',
+      message:hasAnswer
+        ? 'Response stopped at the current token limit. Ask to continue if you want the rest.'
+        : 'Response hit the token limit before a final answer was returned.',
+    };
+  }
+  if(state.missingFinishReason){
+    return {
+      kind:'warn',
+      title:hasAnswer?'Response interrupted':'Connection interrupted',
+      message:hasAnswer
+        ? 'The stream ended before the server reported a clean finish.'
+        : 'The stream ended before any final answer was returned.',
+    };
+  }
+  if(state.suppressedReasoning&&!hasAnswer){
+    return {
+      kind:'warn',
+      title:'No final answer',
+      message:'The model only produced a trivial reasoning stub and no usable final answer.',
+    };
+  }
+  if(state.showReasoning&&!hasAnswer){
+    return {
+      kind:'warn',
+      title:'No final answer',
+      message:'The model returned reasoning but no final answer.',
+    };
+  }
+  if(!state.hadOutput){
+    return {
+      kind:'warn',
+      title:'Empty response',
+      message:'The model returned no visible content.',
+    };
+  }
+  return null;
+}
+
+function persistAssistantNotice(message,notice,incomplete){
+  if(!message)return;
+  if(notice){
+    message.notice_kind=notice.kind;
+    message.notice_title=notice.title;
+    message.notice_message=notice.message;
+  }else{
+    delete message.notice_kind;
+    delete message.notice_title;
+    delete message.notice_message;
+  }
+  if(incomplete)message.incomplete=true;
+  else delete message.incomplete;
 }
 
 async function fetchRecoveredAnswer(model,messages){
@@ -341,9 +481,16 @@ function renderStoredAssistant(message){
   }else{
     bbl.innerHTML=message.content?md(message.content):'';
   }
+  if(message.notice_message){
+    bbl.insertAdjacentHTML('beforeend',renderAssistantNotice(message.notice_kind,message.notice_title,message.notice_message));
+  }
   if(message.partial){
     let meta=document.createElement('div');meta.className='meta';
     meta.textContent='Restored partial response after refresh';
+    bbl.parentElement.appendChild(meta);
+  }else if(message.incomplete){
+    let meta=document.createElement('div');meta.className='meta';
+    meta.textContent='Previous response was incomplete and is excluded from follow-up history';
     bbl.parentElement.appendChild(meta);
   }
 }
@@ -362,6 +509,7 @@ function renderConversation(){
 function restoreChatState(){
   let state=readChatState();
   H=state.messages;
+  chatSessionId=state.sessionId||newChatSessionId();
   renderConversation();
   I.value=state.input;
   I.style.height='auto';
@@ -818,11 +966,12 @@ function reasoningPreview(text){
   return compact.length>96?compact.slice(0,95)+'…':compact;
 }
 
-function renderReasoning(thinkText,isThinking){
+function renderReasoning(thinkText,isThinking,collapsed){
   let structured=hasStructuredReasoning(thinkText);
-  let open=(isThinking||structured)?' open':'';
-  let body=md((thinkText||'').trim());
-  let preview=isThinking?'Live reasoning stream':(structured?'':reasoningPreview(thinkText));
+  let open=collapsed?'':(isThinking||structured)?' open':'';
+  let liveText=(thinkText||'').trim();
+  let body=isThinking?(liveText?md(liveText):'<p><em>Thinking...</em></p>'):md(liveText);
+  let preview=isThinking?(liveText?(structured?'':reasoningPreview(liveText)):'Live reasoning stream'):(structured?'':reasoningPreview(thinkText));
   let stateClass=isThinking?'reasoning-state live':'reasoning-state';
   let stateText=isThinking?'Thinking':'Reasoning';
   let previewHtml=preview?'<span class="reasoning-preview">'+esc(preview)+'</span>':'';
@@ -831,7 +980,7 @@ function renderReasoning(thinkText,isThinking){
 
 function stripTrailingStandaloneQuote(text){
   let s=(text||'').replace(/\s+$/,'');
-  if(/(^|\n)"$/.test(s)) s=s.replace(/(^|\n)"$/,'').replace(/\s+$/,'');
+  if(/(?:^|\r?\n)\s*"\s*$/u.test(s)) s=s.replace(/(?:^|\r?\n)\s*"\s*$/u,'').replace(/\s+$/,'');
   if(s.endsWith('"')){
     let body=s.slice(0,-1).replace(/\uFFFD+$/gu,'').replace(/\s+$/,'');
     let quoteCount=(body.match(/"/g)||[]).length;
@@ -852,6 +1001,12 @@ function stripTrailingDanglingHeading(text){
   return s;
 }
 
+function stripTrailingDanglingListMarker(text){
+  let s=(text||'').replace(/\s+$/,'');
+  if(/(?:^|\n)[-*]\s*$/u.test(s)) s=s.replace(/(?:^|\n)[-*]\s*$/u,'').replace(/\s+$/,'');
+  return s;
+}
+
 function stripTrailingArtifacts(text){
   let s=text||'';
   while(true){
@@ -862,6 +1017,7 @@ function stripTrailingArtifacts(text){
     next=next.replace(/(?:[\s\uFFFD])+$/gu,'');
     next=stripTrailingStandaloneQuote(next);
     next=stripTrailingDanglingHeading(next);
+    next=stripTrailingDanglingListMarker(next);
     if(next===s) return next;
     s=next;
   }
@@ -871,7 +1027,163 @@ function stripInlineTransportArtifacts(text){
   return (text||'')
     .replace(/<\|im_end\|>/gu,'')
     .replace(/<\|im_start\|>assistant/gu,'')
-    .replace(/<\|im_start\|>/gu,'');
+    .replace(/<\|im_start\|>/gu,'')
+    .replace(/<\|endoftext\|>assistant/gu,'')
+    .replace(/<\|endoftext\|>/gu,'');
+}
+
+function findInlineStopArtifactStart(text){
+  let s=text||'';
+  let markers=['<|endoftext|>','<|im_end|>','<|im_start|>assistant','<|im_start|>'];
+  let first=-1;
+  for(let marker of markers){
+    let idx=s.indexOf(marker);
+    if(idx!==-1&&(first===-1||idx<first))first=idx;
+  }
+  return first;
+}
+
+function hasInlineStopArtifact(text){
+  return findInlineStopArtifactStart(text)!==-1;
+}
+
+function looksLikeRepeatedParagraphLoop(text){
+  let lines=(text||'')
+    .split(/\n+/u)
+    .map(line=>line.toLowerCase().replace(/[^a-z0-9 ]+/gu,' ').replace(/\s+/gu,' ').trim())
+    .filter(line=>line.length>=80);
+  if(lines.length<3)return false;
+  let counts=new Map();
+  for(let line of lines){
+    let key=line.slice(0,48);
+    if(key.length<40)continue;
+    let count=(counts.get(key)||0)+1;
+    if(count>=3)return true;
+    counts.set(key,count);
+  }
+  return false;
+}
+
+function hasRepeatedPhraseLoop(text){
+  let s=text||'';
+  if(s.length<80)return false;
+  // Collect sentence-boundary starts
+  let starts=[0];
+  for(let i=0;i+1<s.length&&starts.length<64;i++){
+    if(s[i]==='.'&&s[i+1]===' ')starts.push(i+2);
+  }
+  for(let start of starts){
+    if(start+20>s.length)continue;
+    for(let plen=20;plen<=Math.min(60,s.length-start);plen+=5){
+      let phrase=s.slice(start,start+plen);
+      let count=1,from=start+plen;
+      while(from+plen<=s.length){
+        let idx=s.indexOf(phrase,from);
+        if(idx===-1||idx+plen>s.length)break;
+        count++;
+        if(count>=3)return true;
+        from=idx+plen;
+      }
+    }
+  }
+  return false;
+}
+
+function findRestartedAnswerStart(text){
+  let s=text||'';
+  if(s.length<160)return -1;
+  let prefixLen=Math.min(s.length,96);
+  if(prefixLen<48)return -1;
+  let prefix=s.slice(0,prefixLen);
+  let searchFrom=prefixLen+64;
+  while(searchFrom+prefixLen<=s.length){
+    let idx=s.indexOf(prefix,searchFrom);
+    if(idx===-1)return -1;
+    let atLineStart=idx>0&&s[idx-1]==='\n';
+    let atParagraphStart=idx>1&&s[idx-2]==='\n'&&s[idx-1]==='\n';
+    if(atLineStart||atParagraphStart)return idx;
+    searchFrom=idx+1;
+  }
+  return -1;
+}
+
+function trimRestartedAnswer(text){
+  let s=text||'';
+  let idx=findRestartedAnswerStart(s);
+  return idx===-1?s:s.slice(0,idx).replace(/\s+$/u,'');
+}
+
+function findLeakedReasoningStart(text){
+  let s=text||'';
+  let markers=[
+    '\n\nThe user is asking',
+    "\n\nThe user's request",
+    '\n\nHere is the response:',
+    '\n\nI will provide a direct answer',
+    '\n\nI will provide the response',
+    '\n\nI will answer directly',
+    '\nSince I am acting as the assistant',
+    ' Since I am acting as the assistant',
+    '\nHowever, looking at the prompt structure',
+    ' However, looking at the prompt structure',
+    '\nWait, looking closely at the prompt structure',
+    ' Wait, looking closely at the prompt structure',
+  ];
+  let first=-1;
+  for(let marker of markers){
+    let idx=s.indexOf(marker);
+    if(idx>=48&&(first===-1||idx<first))first=idx;
+  }
+  return first;
+}
+
+function startsWithLeakedReasoning(text){
+  let s=(text||'').trimStart().toLowerCase();
+  return /^(the user is asking|the user's (request|question)|i need to (provide|answer|respond|complete|continue|help)|i should (answer|provide|respond|help)|i will (provide|answer|respond)|let me (answer|provide|respond|think|analyze))/.test(s);
+}
+
+function trimLeakedNoThinkingOutput(text){
+  let s=text||'';
+  if(startsWithLeakedReasoning(s)){
+    // Entire output is leaked reasoning — look for where the actual answer starts
+    let answerStart=s.search(/\n\n(?=[A-Z](?!.*(I need|I should|The user|Let me)))/u);
+    if(answerStart>=0)return s.slice(answerStart+2);
+    return '';
+  }
+  let idx=findLeakedReasoningStart(s);
+  return idx===-1?s:s.slice(0,idx).replace(/\s+$/u,'');
+}
+
+function findUnexpectedThinkingTailStart(text){
+  let s=text||'';
+  let searchFrom=0;
+  // If text starts with <think>, skip past the first </think> so we detect REOPENED blocks
+  if(s.trimStart().startsWith('<think>')){
+    let closeIdx=s.indexOf('</think>');
+    if(closeIdx===-1)return -1;
+    searchFrom=closeIdx+'</think>'.length;
+  }
+  let idx=s.indexOf('<think>',searchFrom);
+  if(idx===-1)return -1;
+  let prefix=s.slice(0,idx).trim();
+  return prefix?idx:-1;
+}
+
+function trimUnexpectedThinkingTail(text){
+  let s=text||'';
+  let idx=findUnexpectedThinkingTailStart(s);
+  if(idx===-1)return s;
+  let trimmed=s.slice(0,idx).replace(/\s+$/u,'');
+  return trimmed?trimmed:s;
+}
+
+function sanitizeAnswerTail(text){
+  return trimRestartedAnswer(stripTrailingArtifacts(trimLeakedNoThinkingOutput(trimUnexpectedThinkingTail(text||'')).trim()));
+}
+
+function looksLikeGenuineReasoning(text){
+  let s=(text||'').trim().toLowerCase();
+  return /^(the user |the question |i need to |i should |i will |let me |this is |okay,? |alright,? |so,? the user)/u.test(s);
 }
 
 function looksLikePlainReasoning(text){
@@ -881,12 +1193,140 @@ function looksLikePlainReasoning(text){
     /^\d+\.\s+Analyze the Request:/.test(s);
 }
 
+function reasoningIsLowSignal(text){
+  let s=(text||'').trim();
+  if(!s)return false;
+  let lower=s.toLowerCase();
+  let metaStart=/^(i need to|i should|let me|the user is asking|i will|first,? i need to|to answer this,? i need to)\b/u.test(lower);
+  if(metaStart&&!s.includes('\n')&&s.length<=320)return true;
+  if(s.length>140||s.includes('\n')||/[0-9]/.test(s)||/[-*`]/.test(s))return false;
+  let exactPatterns=[
+    /^i need to complete the response\.?$/u,
+    /^i need to continue the response\.?$/u,
+    /^i need to finish the response\.?$/u,
+    /^i need to answer the question\.?$/u,
+    /^i need to provide the answer\.?$/u,
+    /^i should answer directly\.?$/u,
+    /^let me think\.?$/u,
+  ];
+  if(exactPatterns.some(re=>re.test(lower)))return true;
+  return /^(i need to|i should|let me|the user is asking|i will)\b/u.test(lower) &&
+    /\b(response|answer|question|reply|respond|continue|complete|finish|provide)\b/u.test(lower);
+}
+
+function reasoningLooksLikeAnswer(text){
+  let s=(text||'').trim();
+  if(s.length<120)return false;
+  if(hasStructuredReasoning(s)||looksLikePlainReasoning(s))return false;
+  if(/\b(i need|i should|let me|check|compare|verify|inspect|plan|think)\b/iu.test(s))return false;
+  let sentences=s.split(/[.!?](?:\s+|$)/u).map(part=>part.trim()).filter(Boolean);
+  if(sentences.length<2)return false;
+  return /^[A-Z]/u.test(s);
+}
+
+function normalizeReasoningText(text){
+  return (text||'').toLowerCase().replace(/\s+/gu,' ').trim();
+}
+
+function sharedPrefixLen(a,b){
+  let limit=Math.min(a.length,b.length);
+  let i=0;
+  while(i<limit&&a.charCodeAt(i)===b.charCodeAt(i))i++;
+  return i;
+}
+
+function reasoningDuplicatesAnswer(reasoning,answer){
+  let r=normalizeReasoningText(reasoning);
+  let a=normalizeReasoningText(answer);
+  if(!r||!a)return false;
+  if(r===a)return true;
+  let shorter=Math.min(r.length,a.length);
+  if(shorter>=80&&(r.includes(a)||a.includes(r)))return true;
+  let prefix=sharedPrefixLen(r,a);
+  // Early streaming detection: if the entire answer so far matches the reasoning start
+  if(a.length>=40&&r.length>a.length&&r.startsWith(a))return true;
+  return prefix>=120&&prefix/shorter>=0.6;
+}
+
+function normalizeDisplayView(view){
+  if(!view)return view;
+  if(view.showReasoning&&!view.isThinking&&!(view.reasoning||'').trim()){
+    return {
+      reasoning:'',
+      answer:view.answer,
+      showReasoning:false,
+      isThinking:false,
+      suppressedReasoning:true,
+    };
+  }
+  // When reasoning IS the answer, promote it — evaporate the thinking wrapper.
+  // (a) No separate answer, reasoning has substantial content, and it's not genuine meta-reasoning.
+  // (b) Answer duplicates reasoning: promote.
+  // (c) Reasoning looks like an answer and is longer than actual answer: promote.
+  if(view.showReasoning&&!view.isThinking&&(view.reasoning||'').trim().length>=80&&!view.answer&&!reasoningIsLowSignal(view.reasoning)&&!looksLikeGenuineReasoning(view.reasoning)){
+    return {
+      reasoning:'',
+      answer:view.reasoning,
+      showReasoning:false,
+      isThinking:false,
+      promotedReasoning:true,
+    };
+  }
+  if(view.showReasoning&&!view.isThinking&&reasoningLooksLikeAnswer(view.reasoning)){
+    let best=(!view.answer||view.reasoning.length>=view.answer.length)?view.reasoning:view.answer;
+    return {
+      reasoning:'',
+      answer:best,
+      showReasoning:false,
+      isThinking:false,
+      promotedReasoning:true,
+    };
+  }
+  if(reasoningDuplicatesAnswer(view.reasoning,view.answer)){
+    return {
+      reasoning:'',
+      answer:view.answer,
+      showReasoning:false,
+      isThinking:false,
+      promotedReasoning:true,
+    };
+  }
+  if(view.showReasoning&&view.isThinking&&!view.answer&&reasoningLooksLikeAnswer(view.reasoning)){
+    return {
+      reasoning:'',
+      answer:'',
+      showReasoning:true,
+      isThinking:true,
+      deferredReasoning:true,
+    };
+  }
+  if(!view.showReasoning||!reasoningIsLowSignal(view.reasoning))return view;
+  if(view.isThinking){
+    return {
+      reasoning:'',
+      answer:view.answer,
+      showReasoning:true,
+      isThinking:true,
+      deferredReasoning:true,
+      suppressedReasoning:true,
+    };
+  }
+  return {
+    reasoning:'',
+    answer:view.answer,
+    showReasoning:false,
+    isThinking:view.isThinking,
+    suppressedReasoning:true,
+  };
+}
+
 function splitDisplayContent(raw,isThinking){
   let text=raw||'';
+  if(!isThinking)text=trimLeakedNoThinkingOutput(text);
   let thinkMatch=text.match(/<think>([\s\S]*?)<\/think>/);
   let thinkPartial=!thinkMatch&&text.match(/<think>([\s\S]*)$/);
   let implicitThinkClose=!thinkMatch&&!thinkPartial&&text.includes('</think>')&&!text.includes('<think>');
-  let answer=stripTrailingArtifacts(
+  let answer=sanitizeAnswerTail(
     text.replace(/<think>[\s\S]*?<\/think>\s*/g,'').replace(/<think>[\s\S]*$/,'').trim()
   );
   if(thinkMatch||thinkPartial){
@@ -901,12 +1341,12 @@ function splitDisplayContent(raw,isThinking){
     let parts=text.split('</think>');
     return {
       reasoning:stripTrailingArtifacts((parts[0]||'').trim()),
-      answer:stripTrailingArtifacts(parts.slice(1).join('</think>').trim()),
+      answer:sanitizeAnswerTail(parts.slice(1).join('</think>').trim()),
       showReasoning:true,
       isThinking:false,
     };
   }
-  let trimmed=stripTrailingArtifacts(text.trim());
+  let trimmed=sanitizeAnswerTail(text.trim());
   if(looksLikePlainReasoning(trimmed)){
     if(!isThinking){
       return {
@@ -956,131 +1396,274 @@ function clearConversation(){
 async function send(){
   if(isGenerating){stopGeneration();return}
   let t=I.value.trim();if(!t)return;
-  I.value='';I.style.height='auto';
+  I.value='';I.style.height='auto';userScrolledUp=false;
   addMsg('user',t);H.push({role:'user',content:t});saveChatState();
   let bbl=addMsg('assistant','');
+  let liveMeta=document.createElement('div');liveMeta.className='meta';liveMeta.textContent='generating...';
+  bbl.parentElement.appendChild(liveMeta);
   let cur=document.createElement('span');cur.className='cursor';bbl.appendChild(cur);
   let raw='',tokens=0,t0=performance.now(),thinking=false,stopped=false,draftEntry=null,finishReason='stop';
   let selectedModelId='zinc';
   let enableThinking=false;
+  let supportsThinkingForHistory=false;
   let requestMessages=[];
+  let errorMessage='';
+  let sawFinishReason=false;
+  let stallTimer=null;
+  function clearStallTimer(){
+    if(stallTimer!==null){
+      clearTimeout(stallTimer);
+      stallTimer=null;
+    }
+  }
+  function armStallTimer(){
+    clearStallTimer();
+    stallTimer=setTimeout(()=>{
+      if(!activeController||stopRequested||errorMessage)return;
+      errorMessage='Response timed out — the server is still processing a long prompt. Try a shorter message or wait and retry.';
+      activeController.abort();
+    },30000);
+  }
   activeController=new AbortController();stopRequested=false;setGenerating(true);
   try{
     let currentModel=selectedModel();
     selectedModelId=currentModel?.id||MN.textContent||'zinc';
     enableThinking=activeModelSupportsThinking()&&TH.checked;
-    let maxTokens=enableThinking?2048:512;
+    supportsThinkingForHistory=!!currentModel?.supports_thinking_toggle;
+    let maxTokens=chatMaxTokens(enableThinking);
     thinking=enableThinking;
-    requestMessages=requestMessagesFromHistory();
+    requestMessages=requestMessagesFromHistory(supportsThinkingForHistory);
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:selectedModelId,messages:requestMessages,stream:true,max_tokens:maxTokens,temperature:0.0,enable_thinking:enableThinking}),
+      body:JSON.stringify({model:selectedModelId,session_id:chatSessionId,messages:requestMessages,stream:true,max_tokens:maxTokens,temperature:0.0,enable_thinking:enableThinking}),
       signal:activeController.signal});
     if(!r.ok){let e=await r.json().catch(()=>({}));throw new Error(e.error?.message||r.statusText)}
     if(!r.body)throw new Error('Streaming response missing body');
+    armStallTimer();
     let rd=r.body.getReader(),dc=new TextDecoder(),buf='';
     stream:while(true){
       let{done,value}=await rd.read();if(done)break;
+      armStallTimer();
       buf+=dc.decode(value,{stream:true});let ls=buf.split('\n');buf=ls.pop()||'';
       for(let l of ls){
         if(!l.startsWith('data: '))continue;let p=l.slice(6);if(p==='[DONE]')break stream;
         try{
           let choice=JSON.parse(p).choices?.[0];
-          if(choice?.finish_reason)finishReason=choice.finish_reason;
+          if(choice?.finish_reason){finishReason=choice.finish_reason;sawFinishReason=true}
           let c=choice?.delta?.content;
           if(c){tokens++;
+            let sawInlineStop=hasInlineStopArtifact(c);
             let cleanChunk=stripInlineTransportArtifacts(c);
-            if(!cleanChunk)continue;
+            if(!cleanChunk){
+              if(sawInlineStop){
+                finishReason='stop';
+                sawFinishReason=true;
+                activeController.abort();
+                break stream;
+              }
+              continue;
+            }
+            armStallTimer();
             raw+=cleanChunk;
+            let reopenedThinkIdx=findUnexpectedThinkingTailStart(raw);
+            if(reopenedThinkIdx!==-1){
+              raw=raw.slice(0,reopenedThinkIdx).replace(/\s+$/u,'');
+              if(raw&&!draftEntry){
+                draftEntry={role:'assistant',content:'',raw:'',transport:'',partial:true};
+                H.push(draftEntry);
+              }
+              let rendered=assistantHtmlFromRaw(raw,false);
+              if(draftEntry){
+                draftEntry.raw=raw;
+                draftEntry.content=rendered.view.answer||stripTrailingArtifacts(raw);
+                draftEntry.transport='';
+                saveChatState();
+              }
+              let html=rendered.html;
+              if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();autoScroll()}
+              finishReason='stop';
+              sawFinishReason=true;
+              try{rd.cancel();}catch(_e){}
+              break stream;
+            }
+            let inlineStopIdx=findInlineStopArtifactStart(raw);
+            if(inlineStopIdx!==-1){
+              raw=raw.slice(0,inlineStopIdx);
+              if(raw&&!draftEntry){
+                draftEntry={role:'assistant',content:'',raw:'',transport:'',partial:true};
+                H.push(draftEntry);
+              }
+              let rendered=assistantHtmlFromRaw(raw,false);
+              if(draftEntry){
+                draftEntry.raw=raw;
+                draftEntry.content=rendered.view.answer||stripTrailingArtifacts(raw);
+                draftEntry.transport='';
+                saveChatState();
+              }
+              let html=rendered.html;
+              if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();autoScroll()}
+              finishReason='stop';
+              sawFinishReason=true;
+              try{rd.cancel();}catch(_e){}
+              break stream;
+            }
             // Track <think>...</think> reasoning blocks
             if(!thinking&&raw.includes('<think>')){thinking=true}
             if(thinking&&raw.includes('</think>')){thinking=false}
             if(!draftEntry){
-              draftEntry={role:'assistant',content:'',raw:'',partial:true};
+              draftEntry={role:'assistant',content:'',raw:'',transport:'',partial:true};
               H.push(draftEntry);
             }
             let rendered=assistantHtmlFromRaw(raw,thinking);
             draftEntry.raw=raw;
             draftEntry.content=rendered.view.answer||stripTrailingArtifacts(raw);
+            draftEntry.transport='';
             saveChatState();
             let html=rendered.html;
-            if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();M.scrollTop=M.scrollHeight}
+            if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();autoScroll();autoScrollReasoning(bbl)}
+            let visibleAnswer=rendered.view.answer||stripTrailingArtifacts(raw);
+            if(findRestartedAnswerStart(visibleAnswer)!==-1){
+              errorMessage='Response started repeating itself and was stopped early.';
+              activeController.abort();
+              break stream;
+            }
+            if(looksLikeRepeatedParagraphLoop(visibleAnswer)||hasRepeatedPhraseLoop(raw)){
+              errorMessage='Response started looping and was stopped early.';
+              activeController.abort();
+              break stream;
+            }
+            if(sawInlineStop){
+              finishReason='stop';
+              sawFinishReason=true;
+              activeController.abort();
+              break stream;
+            }
             let el=(performance.now()-t0)/1000;
-            if(el>0.3)SS.textContent=((tokens/el).toFixed(1))+' tok/s';
+            if(el>0.3){
+              let tps=(tokens/el).toFixed(1);
+              SS.textContent=tps+' tok/s · generating';
+              liveMeta.textContent=tokens+' tokens · '+tps+' tok/s · generating';
+            }
           }
         }catch(e){}
       }
     }
   }catch(e){
-    if(stopRequested||e.name==='AbortError'){stopped=true}
-    else bbl.textContent='Error: '+e.message
+    if(stopRequested){stopped=true}
+    else if(e.name==='AbortError'&&!errorMessage){stopped=true}
+    else errorMessage=errorMessage||(e?.message||'Request failed')
   }
+  clearStallTimer();
   if(cur.parentNode)cur.remove();
   highlightAll();
   activeController=null;stopRequested=false;setGenerating(false);I.focus();
-  let finalView=splitDisplayContent(raw,false);
+  let finalView=normalizeDisplayView(splitDisplayContent(raw,false));
   let cleanAnswer=finalView.answer;
   let finalRendered=assistantHtmlFromRaw(raw,false);
+  let hadOutput=!!stripTrailingArtifacts(raw).trim();
+  let missingFinishReason=!stopped&&!errorMessage&&!sawFinishReason;
   if(!stopped&&enableThinking&&finishReason==='length'&&!cleanAnswer&&finalView.showReasoning){
     try{
       SS.textContent='recovering final answer...';
       let recovered=await fetchRecoveredAnswer(selectedModelId,requestMessages);
       if(recovered.content){
         raw=raw+(raw.endsWith('\n')?'':'\n')+'</think>\n'+recovered.content;
-        finalView=splitDisplayContent(raw,false);
+        finalView=normalizeDisplayView(splitDisplayContent(raw,false));
         cleanAnswer=finalView.answer;
         finalRendered=assistantHtmlFromRaw(raw,false);
         finishReason=recovered.finishReason||'stop';
+        sawFinishReason=true;
+        missingFinishReason=false;
+        hadOutput=!!stripTrailingArtifacts(raw).trim();
       }
     }catch(_e){}
   }
+  let notice=stopped?null:completionNotice({
+    hasAnswer:!!cleanAnswer,
+    finishReason,
+    errorMessage,
+    missingFinishReason,
+    showReasoning:finalView.showReasoning,
+    suppressedReasoning:finalView.suppressedReasoning===true,
+    hadOutput,
+  });
+  let incomplete=stopped||!!notice;
   if(draftEntry){
     if(cleanAnswer){
       draftEntry.content=cleanAnswer;
+      draftEntry.transport=historyTransportContent(cleanAnswer,raw,enableThinking,supportsThinkingForHistory);
       draftEntry.raw=raw;
-      if(stopped){draftEntry.partial=true}
-      else if(!finalView.showReasoning){delete draftEntry.raw;delete draftEntry.partial}
-      else{delete draftEntry.partial}
+      delete draftEntry.partial;
+      persistAssistantNotice(draftEntry,notice,incomplete);
+      if(!incomplete&&!finalView.showReasoning)delete draftEntry.raw;
     }else if(raw.trim()){
+      let incompleteNotice=notice||{
+        kind:'warn',
+        title:'Incomplete response',
+        message:'The reply ended before it was complete.',
+      };
       draftEntry.content=finalView.reasoning||stripTrailingArtifacts(raw);
+      draftEntry.transport='';
       draftEntry.raw=raw;
-      draftEntry.partial=true;
+      delete draftEntry.partial;
+      persistAssistantNotice(draftEntry,incompleteNotice,true);
     }else{
       H=H.filter(m=>m!==draftEntry);
     }
     saveChatState();
   }
   if(stopped){
-    let meta=document.createElement('div');meta.className='meta';
+    if(cleanAnswer){
+      bbl.innerHTML=finalRendered.html||md(cleanAnswer);
+      bbl.insertAdjacentHTML('beforeend',renderAssistantNotice('warn','Generation stopped','Stopped before the reply finished.'));
+      highlightAll();
+    }else{
+      bbl.innerHTML=renderAssistantNotice('warn','Generation stopped','Stopped before any final answer was returned.');
+    }
     let el=(performance.now()-t0)/1000;
     if(cleanAnswer){
       SS.textContent=tokens+' tokens \u00b7 stopped';
-      meta.textContent=tokens+' tokens \u00b7 stopped \u00b7 '+el.toFixed(1)+'s';
+      liveMeta.textContent=tokens+' tokens \u00b7 stopped \u00b7 '+el.toFixed(1)+'s';
     }else{
-      bbl.innerHTML='<p><em>Stopped.</em></p>';
       SS.textContent='stopped';
-      meta.textContent='stopped \u00b7 '+el.toFixed(1)+'s';
+      liveMeta.textContent='stopped \u00b7 '+el.toFixed(1)+'s';
     }
-    bbl.parentElement.appendChild(meta);
     return;
   }
-  if(!cleanAnswer&&finalView.showReasoning){
-    let msg=finishReason==='length'
-      ? 'Response hit the token limit before a final answer.'
-      : 'No final answer returned.';
-    bbl.innerHTML=renderReasoning(finalView.reasoning,false)+'<p><em>'+msg+'</em></p>';
+  if(!cleanAnswer&&notice){
+    let body='';
+    if(finalView.showReasoning)body+=renderReasoning(finalView.reasoning,false);
+    body+=renderAssistantNotice(notice.kind,notice.title,notice.message);
+    bbl.innerHTML=body;
     highlightAll();
-  }
-  if(cleanAnswer){
+    SS.textContent=notice.kind==='error'?'request failed':'incomplete response';
+    let el=(performance.now()-t0)/1000;
+    liveMeta.textContent=(tokens?tokens+' tokens \u00b7 ':'')+el.toFixed(1)+'s \u00b7 '+notice.title.toLowerCase();
+  }else if(cleanAnswer){
     if(finalRendered.html){
       bbl.innerHTML=finalRendered.html;
       highlightAll();
     }
+    if(notice){
+      bbl.insertAdjacentHTML('beforeend',renderAssistantNotice(notice.kind,notice.title,notice.message));
+    }
     let el=(performance.now()-t0)/1000,tps=tokens/el;
-    SS.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s';
-    let meta=document.createElement('div');meta.className='meta';
-    meta.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s \u00b7 '+el.toFixed(1)+'s';
-    bbl.parentElement.appendChild(meta);
+    let statusSuffix='';
+    if(notice)statusSuffix=notice.kind==='error'?' \u00b7 interrupted':' \u00b7 incomplete';
+    SS.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s'+statusSuffix;
+    liveMeta.textContent=tokens+' tokens \u00b7 '+tps.toFixed(1)+' tok/s \u00b7 '+el.toFixed(1)+'s'+(notice?' \u00b7 '+notice.title.toLowerCase():'');
+  }else{
+    let fallbackNotice=notice||completionNotice({
+      hasAnswer:false,
+      finishReason,
+      errorMessage,
+      missingFinishReason,
+      showReasoning:false,
+      hadOutput:false,
+    });
+    bbl.innerHTML=renderAssistantNotice(fallbackNotice.kind,fallbackNotice.title,fallbackNotice.message);
+    SS.textContent=fallbackNotice.kind==='error'?'request failed':'empty response';
+    liveMeta.textContent=fallbackNotice.title.toLowerCase();
   }
   saveChatState();
 }

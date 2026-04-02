@@ -19,6 +19,11 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
 <section id={componentId} class:list={['docs-search', { compact }]}>
   <label class="sr-only" for={`${componentId}-input`}>Search docs</label>
   <div class="docs-search-shell">
+    {!compact && (
+      <div class="docs-search-orbit" aria-hidden="true">
+        <span class="docs-search-orbit-dot"></span>
+      </div>
+    )}
     <input
       id={`${componentId}-input`}
       type="search"
@@ -28,6 +33,9 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
       placeholder={placeholder}
       data-docs-search-input
     />
+    <button type="button" class="docs-search-clear" data-docs-search-clear hidden aria-label="Clear search">
+      <span aria-hidden="true">&times;</span>
+    </button>
   </div>
 
   {!compact && (
@@ -50,6 +58,7 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
 
   if (root) {
     const input = root.querySelector('[data-docs-search-input]');
+    const clearButton = root.querySelector('[data-docs-search-clear]');
     const chips = root.querySelectorAll('[data-docs-search-chip]');
     const status = root.querySelector('[data-docs-search-status]');
     const results = root.querySelector('[data-docs-search-results]');
@@ -177,6 +186,7 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
 
     const runSearch = async () => {
       const rawQuery = input.value.trim();
+      clearButton.hidden = rawQuery.length === 0;
 
       if (rawQuery.length < 2) {
         results.hidden = true;
@@ -210,6 +220,15 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
       });
     });
 
+    clearButton.addEventListener('click', () => {
+      input.value = '';
+      clearButton.hidden = true;
+      results.hidden = true;
+      results.innerHTML = '';
+      status.hidden = true;
+      input.focus();
+    });
+
     chips.forEach((chip) => {
       chip.addEventListener('click', () => {
         const query = chip.getAttribute('data-docs-search-chip') ?? '';
@@ -232,9 +251,36 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
   }
 
   .docs-search-shell {
+    position: relative;
     display: flex;
     gap: var(--space-xs);
     align-items: center;
+  }
+
+  .docs-search-orbit {
+    position: absolute;
+    inset: -0.45rem;
+    pointer-events: none;
+    border-radius: 999px;
+  }
+
+  .docs-search-orbit-dot {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0.48rem;
+    height: 0.48rem;
+    margin-left: -0.24rem;
+    margin-top: -0.24rem;
+    border-radius: 999px;
+    background:
+      radial-gradient(circle, rgba(255, 244, 227, 1) 0%, rgba(255, 196, 122, 0.95) 38%, rgba(211, 84, 0, 0.92) 72%, rgba(211, 84, 0, 0.25) 100%);
+    box-shadow:
+      0 0 0.35rem rgba(255, 166, 77, 0.7),
+      0 0 0.85rem rgba(211, 84, 0, 0.4);
+    transform: rotate(0deg) translateY(calc(-50% - 1.6rem));
+    animation: docs-search-orbit 8.5s linear infinite;
+    will-change: transform;
   }
 
   .docs-search-shell input {
@@ -242,7 +288,7 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
     min-width: 0;
     border: 1px solid var(--color-border);
     border-radius: 999px;
-    padding: 0.7rem 0.95rem;
+    padding: 0.7rem 2.4rem 0.7rem 0.95rem;
     background: var(--color-bg-alt);
     color: var(--color-text);
     font: inherit;
@@ -251,6 +297,36 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
   .docs-search-shell input:focus {
     outline: 2px solid color-mix(in srgb, var(--color-accent) 25%, transparent);
     border-color: var(--color-accent);
+  }
+
+  .docs-search-shell input::-webkit-search-cancel-button {
+    display: none;
+    -webkit-appearance: none;
+  }
+
+  .docs-search-clear {
+    position: absolute;
+    right: 0.65rem;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    border: 0;
+    border-radius: 999px;
+    padding: 0;
+    background: color-mix(in srgb, var(--color-border) 70%, transparent);
+    color: var(--color-text-muted);
+    font: inherit;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .docs-search-clear:hover {
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    color: var(--color-text);
   }
 
   .docs-search-status {
@@ -346,10 +422,17 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
   }
 
   .docs-search.compact .docs-search-shell input {
-    padding: 0.48rem 0.72rem;
+    padding: 0.48rem 1.95rem 0.48rem 0.72rem;
     font-size: 0.82rem;
     border-radius: 10px;
     background: transparent;
+  }
+
+  .docs-search.compact .docs-search-clear {
+    right: 0.45rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    font-size: 0.78rem;
   }
 
   .docs-search.compact .docs-search-suggestions {
@@ -389,5 +472,15 @@ const suggestions = ['Vulkan', '9070 XT', 'Supported Models'];
   .docs-search.compact .docs-search-result-preview {
     font-size: 0.75rem;
     line-height: 1.35;
+  }
+
+  @keyframes docs-search-orbit {
+    from {
+      transform: rotate(0deg) translateY(calc(-50% - 1.6rem));
+    }
+
+    to {
+      transform: rotate(-360deg) translateY(calc(-50% - 1.6rem));
+    }
   }
 </style>

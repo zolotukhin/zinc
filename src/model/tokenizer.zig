@@ -460,6 +460,9 @@ pub const Tokenizer = struct {
 
     pub const ChatTemplateOptions = struct {
         enable_thinking: ?bool = null,
+        add_generation_prompt: bool = true,
+        /// When true, skip the thinking template entirely even if the tokenizer supports it.
+        skip_thinking_template: bool = false,
     };
 
     pub fn supportsThinkingToggle(self: *const Tokenizer) bool {
@@ -489,13 +492,15 @@ pub const Tokenizer = struct {
                 const written = std.fmt.bufPrint(buf[pos..], "<|im_start|>{s}\n{s}<|im_end|>\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
                 pos += written.len;
             }
-            const suffix = if (supports_thinking) blk: {
-                if (options.enable_thinking orelse false) {
-                    break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n", .{}) catch return error.BufferTooSmall;
-                }
-                break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n\n</think>\n\n", .{}) catch return error.BufferTooSmall;
-            } else std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{}) catch return error.BufferTooSmall;
-            pos += suffix.len;
+            if (options.add_generation_prompt) {
+                const suffix = if (supports_thinking and !options.skip_thinking_template) blk: {
+                    if (options.enable_thinking orelse false) {
+                        break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n", .{}) catch return error.BufferTooSmall;
+                    }
+                    break :blk std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n<think>\n\n</think>\n\n", .{}) catch return error.BufferTooSmall;
+                } else std.fmt.bufPrint(buf[pos..], "<|im_start|>assistant\n", .{}) catch return error.BufferTooSmall;
+                pos += suffix.len;
+            }
         } else {
             for (0..n) |i| {
                 const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
@@ -792,6 +797,27 @@ test "applyChatTemplate non-ChatML fallback" {
     try std.testing.expect(std.mem.indexOf(u8, result, "[user]: test") != null);
     // Should NOT have ChatML tags
     try std.testing.expect(std.mem.indexOf(u8, result, "im_start") == null);
+}
+
+test "applyChatTemplateWithOptions can omit generation prompt" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .bos_id = null,
+        .eos_id = 2,
+        .prepend_bos = false,
+        .scores = null,
+        .chat_template = null,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    const roles = [_][]const u8{ "user", "assistant" };
+    const contents = [_][]const u8{ "hello", "world" };
+    var buf: [256]u8 = undefined;
+    const result = try tok.applyChatTemplateWithOptions(&roles, &contents, .{ .add_generation_prompt = false }, &buf);
+    try std.testing.expectEqualStrings("<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nworld<|im_end|>\n", result);
 }
 
 test "applyChatTemplate empty messages" {

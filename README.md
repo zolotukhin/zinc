@@ -115,8 +115,8 @@ The table below is intentionally narrow: it lists the exact GGUFs ZINC currently
 
 | Model | Exact GGUF tested | Typical throughput on AI PRO R9700 |
 |------|--------------------|-------------------------------------|
-| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~22 tok/s plain generation, ~17 tok/s reasoning chat |
-| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~33 tok/s plain generation, ~25–29 tok/s reasoning chat |
+| **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s plain generation |
+| **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s plain generation |
 
 Benchmark details for the numbers above:
 
@@ -125,7 +125,7 @@ Benchmark details for the numbers above:
 - Run shape: single-stream, `RADV_PERFTEST=coop_matrix`
 - Plain generation: 256-token runs without chat template or explicit reasoning
 - Reasoning chat: non-streaming `/v1/chat/completions` with step-by-step prompts
-- Latest validation date: 2026-03-30
+- Latest validation date: 2026-03-31
 - Validation: coherent output on CLI, raw `/v1/completions`, and `/v1/chat/completions`
 
 **Quantization formats implemented in the current kernels**: Q4_K, Q5_K, Q6_K, Q8_0, F16
@@ -428,28 +428,18 @@ GRUB_CMDLINE_LINUX_DEFAULT="... amdgpu.ras_enable=0"
 
 All numbers below were measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) on a clean RDNA4 node using `RADV_PERFTEST=coop_matrix` and `zig build -Doptimize=ReleaseFast`.
 
-### Current Validated Snapshot (2026-03-30)
+### Current Validated Snapshot (2026-03-31)
 
 | Path | Shape | Result |
 |------|-------|--------|
-| Qwen3.5-35B-A3B-UD CLI plain decode | `--prompt "The capital of France is"`; 256 generated tokens; no chat template/thinking | **33.58 tok/s**, `29.8 ms/tok` |
-| Qwen3.5-35B-A3B-UD raw HTTP plain decode | `POST /v1/completions`, `concurrency=1`, `max_tokens=256`; no chat template/thinking | **33.55 tok/s** |
-| Qwen3.5-35B-A3B-UD raw HTTP | `POST /v1/completions`, `concurrency=4`, `max_tokens=256` | **33.98 tok/s aggregate**, `18.84s` avg latency, `29.01s` p95 |
-| Qwen3.5-35B-A3B-UD reasoning chat | `POST /v1/chat/completions`, 3 non-streaming step-by-step prompts, 186–257 completion tokens | **24.94–28.56 tok/s** |
-| Qwen3.5-2B-Q4_K_M CLI plain decode | `--prompt "The capital of France is"`; 256 generated tokens; no chat template/thinking | **22.93 tok/s**, `43.6 ms/tok` |
-| Qwen3.5-2B-Q4_K_M raw HTTP plain decode | `POST /v1/completions`, `concurrency=1`, `max_tokens=256`; no chat template/thinking | **21.88 tok/s** |
-| Qwen3.5-2B-Q4_K_M raw HTTP | `POST /v1/completions`, `concurrency=4`, `max_tokens=256` | **21.36 tok/s aggregate**, `29.59s` avg latency, `46.06s` p95 |
-| Qwen3.5-2B-Q4_K_M reasoning chat | `POST /v1/chat/completions`, 3 non-streaming step-by-step prompts | **17.35–17.50 tok/s** |
+| Qwen3.5-35B-A3B-UD CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **37.95 tok/s**, `26.3 ms/tok` |
+| Qwen3.5-2B-Q4_K_M CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **26.71 tok/s**, `37.4 ms/tok` |
 
-For reference, the current llama.cpp baseline on the same node and model is about **107 tok/s decode**.
+For reference, the current llama.cpp baseline on the same node and 35B model is about **107 tok/s decode**.
 
 ### What These Numbers Mean
 
-- The clean ReleaseFast decode path is already above the `30 tok/s` mark on the 35B model.
-- The `33.58 tok/s`, `33.55 tok/s`, `22.93 tok/s`, and `21.88 tok/s` figures are plain decode numbers, not thinking-enabled runs.
-- The raw OpenAI-compatible `/v1/completions` route now tracks CLI closely on both supported models, so the main remaining overhead is not the basic HTTP wrapper.
-- The current proxy for "thinking enabled" throughput is the reasoning-chat row, which uses `/v1/chat/completions` with longer step-by-step prompts rather than a separate model-side thinking toggle.
-- The remaining gap is the chat/reasoning route: longer templated chat answers are still slower than raw decode on both models.
+- The clean ReleaseFast decode path is approaching `40 tok/s` on the 35B model.
 - The 2B model is currently slower than the 35B MoE model on this node, which means today's bottleneck is not just "smaller model = faster"; kernel shape, architecture mix, and decode-path efficiency matter more than parameter count alone.
 
 ### Why GPU Bandwidth Is Still Not "Full"

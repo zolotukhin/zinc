@@ -4,10 +4,11 @@
 // replacing the CPU-side computation with a fully GPU-resident kernel.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 //
-// Each workgroup handles one head (dispatch dt_rank workgroups).
+// Each workgroup handles one 64-row tile of one head.
+// Dispatch shape: dt_rank × ceil(head_v_dim / 64) × 1.
 // State per head is head_v_dim × head_v_dim (128×128 = 16384 floats).
-// With 64 threads, each thread owns head_v_dim / 64 = 2 rows of state,
-// processing all head_v_dim columns per row.
+// With 64 threads, each thread owns one row in the selected tile and
+// processes all head_v_dim columns for that row.
 //
 // Algorithm per head h:
 //   1. Extract Q, K, V slices from conv_out
@@ -19,7 +20,7 @@
 //      then s[row][col] += k[col] * d
 //   6. Readout: output[h*head_v_dim + row] = dot(s[row], q)
 //
-// Dispatch: dt_rank × 1 × 1 workgroups
+// Dispatch: dt_rank × ceil(head_v_dim / 64) × 1 workgroups
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -81,10 +82,9 @@ layout(push_constant) uniform PushConstants {
     uint has_ssm_a;      // 1 if ssm_a tensor exists, 0 otherwise
 };
 
-// Shared memory for Q, K, V vectors (up to 128 elements each)
+// Shared memory for Q and K vectors (up to 128 elements each)
 shared float s_q[128];
 shared float s_k[128];
-shared float s_v[128];
 // Shared scalar values broadcast from thread 0
 shared float s_gate;
 shared float s_beta_val;
@@ -92,14 +92,17 @@ shared float s_reduce[64];
 shared float s_reduce_scalar;
 
 void main() {
-    uint h = gl_WorkGroupID.x;    // head index
-    uint tid = gl_LocalInvocationID.x;  // 0..63
+    uint h = gl_WorkGroupID.x;           // head index
+    uint row_block = gl_WorkGroupID.y;   // 64-row tile index within the head
+    uint tid = gl_LocalInvocationID.x;   // 0..63
 
     if (h >= dt_rank) return;
 
     uint qk_dim = d_state * n_group;
+    uint k_len = min(head_v_dim, d_state);
+    uint row = row_block * 64u + tid;
 
-    // --- Step 1: Load Q, K, V into shared memory ---
+    // --- Step 1: Load Q and K into shared memory ---
     // conv_out layout: [Q(qk_dim), K(qk_dim), V(d_inner)]
     // Q and K are grouped: group index for this head
     uint k_hi = (n_group == dt_rank) ? h : (h % n_group);
@@ -107,36 +110,20 @@ void main() {
     uint k_offset = qk_dim + k_hi * d_state;
     uint v_offset = 2 * qk_dim + h * head_v_dim;
 
-    // Load Q (d_state elements from this head's group)
-    for (uint i = tid; i < d_state && i < head_v_dim; i += 64) {
+    // Load the active Q/K slice. Elements beyond k_len are never read.
+    for (uint i = tid; i < k_len; i += 64) {
         s_q[i] = conv_out[q_offset + i];
     }
-    // Zero-fill Q beyond d_state if head_v_dim > d_state
-    for (uint i = tid + d_state; i < head_v_dim; i += 64) {
-        s_q[i] = 0.0;
-    }
-
-    // Load K (d_state elements from this head's group)
-    for (uint i = tid; i < d_state && i < head_v_dim; i += 64) {
+    for (uint i = tid; i < k_len; i += 64) {
         s_k[i] = conv_out[k_offset + i];
-    }
-    // Zero-fill K beyond d_state
-    for (uint i = tid + d_state; i < head_v_dim; i += 64) {
-        s_k[i] = 0.0;
-    }
-
-    // Load V (head_v_dim elements)
-    for (uint i = tid; i < head_v_dim; i += 64) {
-        s_v[i] = conv_out[v_offset + i];
     }
     barrier();
 
     // --- Step 2: L2 normalize Q and K, scale Q by 1/sqrt(d_state) ---
     // L2 normalize Q
     {
-        uint len = min(d_state, head_v_dim);
         float partial = 0.0;
-        for (uint i = tid; i < len; i += 64) {
+        for (uint i = tid; i < k_len; i += 64) {
             partial += s_q[i] * s_q[i];
         }
         partial = subgroupAdd(partial);
@@ -157,7 +144,7 @@ void main() {
         }
         float inv_norm = inversesqrt(max(partial, 1e-12));
         float q_scale = inv_norm / sqrt(float(d_state));
-        for (uint i = tid; i < len; i += 64) {
+        for (uint i = tid; i < k_len; i += 64) {
             s_q[i] *= q_scale;
         }
     }
@@ -165,9 +152,8 @@ void main() {
 
     // L2 normalize K
     {
-        uint len = min(d_state, head_v_dim);
         float partial = 0.0;
-        for (uint i = tid; i < len; i += 64) {
+        for (uint i = tid; i < k_len; i += 64) {
             partial += s_k[i] * s_k[i];
         }
         partial = subgroupAdd(partial);
@@ -187,7 +173,7 @@ void main() {
             partial = s_reduce_scalar;
         }
         float inv_norm = inversesqrt(max(partial, 1e-12));
-        for (uint i = tid; i < len; i += 64) {
+        for (uint i = tid; i < k_len; i += 64) {
             s_k[i] *= inv_norm;
         }
     }
@@ -223,42 +209,40 @@ void main() {
     }
     barrier();
 
+    if (row >= head_v_dim) return;
+
     float g_val = s_gate;
     float b_val = s_beta_val;
+    float v_val = conv_out[v_offset + row];
 
     // --- Steps 4-6: State update and readout ---
     // State layout: state[h * head_v_dim * head_v_dim + row * head_v_dim + col]
-    // Each thread processes multiple rows (head_v_dim / 64 = 2 rows per thread when head_v_dim=128)
     uint s_base = h * head_v_dim * head_v_dim;
-    uint k_len = min(head_v_dim, d_state);
+    uint row_base = s_base + row * head_v_dim;
 
-    for (uint row = tid; row < head_v_dim; row += 64) {
-        uint row_base = s_base + row * head_v_dim;
-
-        // Step 4: Decay state for this row
-        for (uint col = 0; col < head_v_dim; col++) {
-            state[row_base + col] *= g_val;
-        }
-
-        // Step 5: Compute sk = dot(state[row], k)
-        float sk = 0.0;
-        for (uint col = 0; col < k_len; col++) {
-            sk += state[row_base + col] * s_k[col];
-        }
-
-        // d = beta * (v[row] - sk)
-        float d_val = b_val * (s_v[row] - sk);
-
-        // Update state: s[row][col] += k[col] * d_val
-        for (uint col = 0; col < k_len; col++) {
-            state[row_base + col] += s_k[col] * d_val;
-        }
-
-        // Step 6: Readout: output[h*head_v_dim + row] = dot(state[row], q)
-        float o_val = 0.0;
-        for (uint col = 0; col < k_len; col++) {
-            o_val += state[row_base + col] * s_q[col];
-        }
-        out_data[h * head_v_dim + row] = o_val;
+    // Step 4: Decay state for this row.
+    for (uint col = 0; col < head_v_dim; col++) {
+        state[row_base + col] *= g_val;
     }
+
+    // Step 5: Compute sk = dot(state[row], k)
+    float sk = 0.0;
+    for (uint col = 0; col < k_len; col++) {
+        sk += state[row_base + col] * s_k[col];
+    }
+
+    // d = beta * (v[row] - sk)
+    float d_val = b_val * (v_val - sk);
+
+    // Update state: s[row][col] += k[col] * d_val
+    for (uint col = 0; col < k_len; col++) {
+        state[row_base + col] += s_k[col] * d_val;
+    }
+
+    // Step 6: Readout: output[h*head_v_dim + row] = dot(state[row], q)
+    float o_val = 0.0;
+    for (uint col = 0; col < k_len; col++) {
+        o_val += state[row_base + col] * s_q[col];
+    }
+    out_data[h * head_v_dim + row] = o_val;
 }

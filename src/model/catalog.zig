@@ -28,6 +28,9 @@ pub const CatalogEntry = struct {
     required_vram_bytes: u64,
     default_context_length: u32,
     recommended_for_chat: bool,
+    /// Whether the model produces stable, useful output when thinking is enabled.
+    /// Small models may loop or fail to separate reasoning from answers.
+    thinking_stable: bool,
     status: CatalogStatus,
     tested_profiles: []const []const u8,
 };
@@ -48,6 +51,7 @@ pub const entries = [_]CatalogEntry{
         .required_vram_bytes = 3 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
         .recommended_for_chat = true,
+        .thinking_stable = false,
         .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
@@ -68,6 +72,7 @@ pub const entries = [_]CatalogEntry{
         .required_vram_bytes = 22_987_514_102,
         .default_context_length = 4096,
         .recommended_for_chat = true,
+        .thinking_stable = true,
         .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
@@ -148,4 +153,11 @@ test "supportedOnCurrentGpu requires both tested profile and fit" {
     try std.testing.expect(supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 24 * 1024 * 1024 * 1024));
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-16gb", 24 * 1024 * 1024 * 1024));
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 20 * 1024 * 1024 * 1024));
+}
+
+test "thinking_stable is false for 2B and true for 35B" {
+    const small = find("qwen35-2b-q4k-m") orelse return error.TestExpectedEqual;
+    try std.testing.expect(!small.thinking_stable);
+    const large = find("qwen35-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
+    try std.testing.expect(large.thinking_stable);
 }
