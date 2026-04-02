@@ -1,0 +1,35 @@
+#version 460
+// Fused GELU-gated linear unit (GEGLU) for Gemma models.
+// y = gelu(gate) * up
+// Uses the tanh approximation: gelu(x) = 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Gate {
+    float gate[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Up {
+    float up[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Y {
+    float y[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint N;  // total number of elements
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= N) return;
+
+    float g = gate[idx];
+    // gelu_tanh(g) = 0.5 * g * (1.0 + tanh(sqrt(2/pi) * (g + 0.044715 * g^3)))
+    float g3 = g * g * g;
+    float inner = 0.7978845608 * (g + 0.044715 * g3);  // sqrt(2/pi) ≈ 0.7978845608
+    float gelu_g = 0.5 * g * (1.0 + tanh(inner));
+    y[idx] = gelu_g * up[idx];
+}

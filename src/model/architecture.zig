@@ -177,6 +177,7 @@ pub fn buildDecodeGraphDetailed(config: *const ModelConfig, allocator: std.mem.A
         .mistral, .qwen2 => try buildLlamaDecodeGraph(config, allocator, gf),
         .qwen2_moe => try buildMoeDecodeGraph(config, allocator, gf),
         .qwen35, .mamba, .jamba => try buildMambaDecodeGraph(config, allocator, gf),
+        .gemma => if (config.n_experts > 0) try buildGemmaMoeDecodeGraph(config, allocator, gf) else try buildGemmaDecodeGraph(config, allocator, gf),
         .unknown => error.UnsupportedArchitecture,
     };
 }
@@ -741,7 +742,346 @@ fn buildMambaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
     return g;
 }
 
-test "buildDecodeGraph: standard transformer 2 layers" {
+/// Gemma dense transformer decode graph.
+/// Differs from LLaMA: GEGLU activation, post-attention/FFN norms, embedding scaling.
+/// Per-layer structure:
+///   input_norm → QKV → Q/K norm → RoPE → flash attention → O proj → post_attn_norm →
+///   residual add → ffn_norm → gate+up ��� GEGLU → down → post_ffn_norm → residual add
+fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocator, gf: ?*const gguf.GGUFFile) !Graph {
+    var g = Graph.init(allocator, "gemma_decode");
+    errdefer g.deinit();
+
+    const q_dim = config.n_heads * config.head_dim;
+    const kv_dim = config.n_kv_heads * config.head_dim;
+    const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
+    const rope_dim = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
+    const seq_len = @min(config.context_length, 4096);
+    g.setAssumedDecodeSeqLen(seq_len);
+
+    // Token embedding lookup (+ sqrt(hidden_dim) scaling handled at runtime)
+    const embed = try addAnnotatedNode(&g, null, .embed, "token_embed", .{
+        .domain = .cpu_host,
+        .read_bytes = globalTensorBytes(gf, "token_embd.weight", approxF16TensorBytes(config.vocab_size, config.hidden_dim)) / @max(@as(u64, 1), @as(u64, config.vocab_size)),
+        .write_bytes = vecBytes(config.hidden_dim),
+        .requires_host_sync = true,
+        .note = "Embedding dequant/upload + sqrt(d) scaling is host-driven.",
+    });
+
+    var prev_residual = embed;
+
+    for (0..config.n_layers) |layer_idx| {
+        const layer: u32 = @intCast(layer_idx);
+
+        // Pre-attention RMS norm
+        const input_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "input_norm", rmsNormMetrics(
+            config.hidden_dim,
+            1,
+            layerTensorBytes(gf, layer, "attn_norm.weight", config.hidden_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(input_norm, prev_residual);
+
+        // QKV projection
+        const q_proj = try addAnnotatedNode(&g, layer, .dmmv, "q_proj", dmmvMetrics(
+            q_dim, config.hidden_dim,
+            layerTensorBytes(gf, layer, "attn_q.weight", approxF16TensorBytes(q_dim, config.hidden_dim)),
+            q_dim, 1,
+        ));
+        g.addDependency(q_proj, input_norm);
+
+        const k_proj = try addAnnotatedNode(&g, layer, .dmmv, "k_proj", dmmvMetrics(
+            kv_dim, config.hidden_dim,
+            layerTensorBytes(gf, layer, "attn_k.weight", approxF16TensorBytes(kv_dim, config.hidden_dim)),
+            kv_dim, 1,
+        ));
+        g.addDependency(k_proj, input_norm);
+
+        const v_proj = try addAnnotatedNode(&g, layer, .dmmv, "v_proj", dmmvMetrics(
+            kv_dim, config.hidden_dim,
+            layerTensorBytes(gf, layer, "attn_v.weight", approxF16TensorBytes(kv_dim, config.hidden_dim)),
+            kv_dim, 1,
+        ));
+        g.addDependency(v_proj, input_norm);
+
+        // Q/K RMS norms (Gemma 3+ applies per-head norm before RoPE)
+        const q_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "q_norm", rmsNormMetrics(
+            config.head_dim, config.n_heads,
+            layerTensorBytes(gf, layer, "attn_q_norm.weight", config.head_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(q_norm, q_proj);
+
+        const k_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "k_norm", rmsNormMetrics(
+            config.head_dim, config.n_kv_heads,
+            layerTensorBytes(gf, layer, "attn_k_norm.weight", config.head_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(k_norm, k_proj);
+
+        // RoPE on Q and K
+        const rope_q = try addAnnotatedNode(&g, layer, .rope, "rope_q", ropeMetrics(config.head_dim, config.n_heads, rope_dim));
+        g.addDependency(rope_q, q_norm);
+
+        const rope_k = try addAnnotatedNode(&g, layer, .rope, "rope_k", ropeMetrics(config.head_dim, config.n_kv_heads, rope_dim));
+        g.addDependency(rope_k, k_norm);
+
+        // KV cache write
+        const kv_write = try addAnnotatedNode(&g, layer, .kv_cache_write, "kv_write", kvWriteMetrics(kv_dim));
+        g.addDependency(kv_write, rope_k);
+        g.addDependency(kv_write, v_proj);
+
+        // Flash attention
+        const attn = try addAnnotatedNode(&g, layer, .flash_attn, "flash_attn", flashAttnMetrics(
+            config.head_dim, config.n_heads, config.n_kv_heads, seq_len,
+        ));
+        g.addDependency(attn, rope_q);
+        g.addDependency(attn, kv_write);
+
+        // Attention output projection
+        const o_proj = try addAnnotatedNode(&g, layer, .dmmv, "o_proj", dmmvMetrics(
+            config.hidden_dim, q_dim,
+            layerTensorBytes(gf, layer, "attn_output.weight", approxF16TensorBytes(config.hidden_dim, q_dim)),
+            config.hidden_dim, 1,
+        ));
+        g.addDependency(o_proj, attn);
+
+        // Post-attention RMS norm (applied before residual add)
+        const post_attn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "post_attn_norm", rmsNormMetrics(
+            config.hidden_dim, 1,
+            layerTensorBytes(gf, layer, "post_attention_norm.weight", config.hidden_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(post_attn_norm, o_proj);
+
+        // Attention residual add
+        const attn_residual = try addAnnotatedNode(&g, layer, .add, "attn_residual", addMetrics(config.hidden_dim));
+        g.addDependency(attn_residual, prev_residual);
+        g.addDependency(attn_residual, post_attn_norm);
+
+        // Pre-FFN RMS norm
+        const ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "ffn_norm", rmsNormMetrics(
+            config.hidden_dim, 1,
+            layerTensorBytes(gf, layer, "ffn_norm.weight", config.hidden_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(ffn_norm, attn_residual);
+
+        // Gate + Up projection (GEGLU FFN)
+        const gate_proj = try addAnnotatedNode(&g, layer, .dmmv, "gate_proj", dmmvMetrics(
+            inter_dim, config.hidden_dim,
+            layerTensorBytes(gf, layer, "ffn_gate.weight", approxF16TensorBytes(inter_dim, config.hidden_dim)),
+            inter_dim, 1,
+        ));
+        g.addDependency(gate_proj, ffn_norm);
+
+        const up_proj = try addAnnotatedNode(&g, layer, .dmmv, "up_proj", dmmvMetrics(
+            inter_dim, config.hidden_dim,
+            layerTensorBytes(gf, layer, "ffn_up.weight", approxF16TensorBytes(inter_dim, config.hidden_dim)),
+            inter_dim, 1,
+        ));
+        g.addDependency(up_proj, ffn_norm);
+
+        // GEGLU activation
+        const geglu = try addAnnotatedNode(&g, layer, .geglu, "geglu", swigluMetrics(inter_dim));
+        g.addDependency(geglu, gate_proj);
+        g.addDependency(geglu, up_proj);
+
+        // Down projection
+        const down_proj = try addAnnotatedNode(&g, layer, .dmmv, "down_proj", dmmvMetrics(
+            config.hidden_dim, inter_dim,
+            layerTensorBytes(gf, layer, "ffn_down.weight", approxF16TensorBytes(config.hidden_dim, inter_dim)),
+            config.hidden_dim, 1,
+        ));
+        g.addDependency(down_proj, geglu);
+
+        // Post-FFN RMS norm (applied before residual add)
+        const post_ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "post_ffn_norm", rmsNormMetrics(
+            config.hidden_dim, 1,
+            layerTensorBytes(gf, layer, "post_ffw_norm.weight", config.hidden_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(post_ffn_norm, down_proj);
+
+        // FFN residual add
+        const ffn_residual = try addAnnotatedNode(&g, layer, .add, "ffn_residual", addMetrics(config.hidden_dim));
+        g.addDependency(ffn_residual, attn_residual);
+        g.addDependency(ffn_residual, post_ffn_norm);
+
+        prev_residual = ffn_residual;
+    }
+
+    // Final normalization
+    const final_norm = try addAnnotatedNode(&g, null, .rms_norm_mul, "final_norm", rmsNormMetrics(
+        config.hidden_dim, 1,
+        globalTensorBytes(gf, "output_norm.weight", config.hidden_dim * @sizeOf(f32)),
+    ));
+    g.addDependency(final_norm, prev_residual);
+
+    // LM head (tied embeddings: falls back to token_embd.weight)
+    const lm_head = try addAnnotatedNode(&g, null, .dmmv, "lm_head", dmmvMetrics(
+        config.vocab_size, config.hidden_dim,
+        blk: {
+            const out_bytes = globalTensorBytes(gf, "output.weight", 0);
+            if (out_bytes > 0) break :blk out_bytes;
+            break :blk globalTensorBytes(gf, "token_embd.weight", approxF16TensorBytes(config.vocab_size, config.hidden_dim));
+        },
+        config.vocab_size, 1,
+    ));
+    g.addDependency(lm_head, final_norm);
+
+    log.info("Built Gemma decode graph: {d} nodes, {d} layers", .{
+        g.nodeCount(), config.n_layers,
+    });
+
+    return g;
+}
+
+/// Gemma MoE decode graph (e.g. Gemma 4 26B-A4B).
+/// Same as Gemma dense but FFN replaced with expert routing + sparse GEGLU experts.
+fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocator, gf: ?*const gguf.GGUFFile) !Graph {
+    var g = Graph.init(allocator, "gemma_moe_decode");
+    errdefer g.deinit();
+
+    const q_dim = config.n_heads * config.head_dim;
+    const kv_dim = config.n_kv_heads * config.head_dim;
+    const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
+    const rope_dim = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
+    const seq_len = @min(config.context_length, 4096);
+    const n_used = if (config.n_experts_used > 0) config.n_experts_used else 8;
+    g.setAssumedDecodeSeqLen(seq_len);
+
+    const embed = try addAnnotatedNode(&g, null, .embed, "token_embed", .{
+        .domain = .cpu_host,
+        .read_bytes = globalTensorBytes(gf, "token_embd.weight", approxF16TensorBytes(config.vocab_size, config.hidden_dim)) / @max(@as(u64, 1), @as(u64, config.vocab_size)),
+        .write_bytes = vecBytes(config.hidden_dim),
+        .requires_host_sync = true,
+        .note = "Embedding dequant/upload + sqrt(d) scaling is host-driven.",
+    });
+    var prev_residual = embed;
+
+    for (0..config.n_layers) |layer_idx| {
+        const layer: u32 = @intCast(layer_idx);
+
+        // Attention block (same as Gemma dense)
+        const input_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "input_norm", rmsNormMetrics(
+            config.hidden_dim, 1,
+            layerTensorBytes(gf, layer, "attn_norm.weight", config.hidden_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(input_norm, prev_residual);
+
+        const q_proj = try addAnnotatedNode(&g, layer, .dmmv, "q_proj", dmmvMetrics(q_dim, config.hidden_dim, layerTensorBytes(gf, layer, "attn_q.weight", approxF16TensorBytes(q_dim, config.hidden_dim)), q_dim, 1));
+        g.addDependency(q_proj, input_norm);
+        const k_proj = try addAnnotatedNode(&g, layer, .dmmv, "k_proj", dmmvMetrics(kv_dim, config.hidden_dim, layerTensorBytes(gf, layer, "attn_k.weight", approxF16TensorBytes(kv_dim, config.hidden_dim)), kv_dim, 1));
+        g.addDependency(k_proj, input_norm);
+        const v_proj = try addAnnotatedNode(&g, layer, .dmmv, "v_proj", dmmvMetrics(kv_dim, config.hidden_dim, layerTensorBytes(gf, layer, "attn_v.weight", approxF16TensorBytes(kv_dim, config.hidden_dim)), kv_dim, 1));
+        g.addDependency(v_proj, input_norm);
+
+        const rope_q = try addAnnotatedNode(&g, layer, .rope, "rope_q", ropeMetrics(config.head_dim, config.n_heads, rope_dim));
+        g.addDependency(rope_q, q_proj);
+        const rope_k = try addAnnotatedNode(&g, layer, .rope, "rope_k", ropeMetrics(config.head_dim, config.n_kv_heads, rope_dim));
+        g.addDependency(rope_k, k_proj);
+
+        const kv_write = try addAnnotatedNode(&g, layer, .kv_cache_write, "kv_write", kvWriteMetrics(kv_dim));
+        g.addDependency(kv_write, rope_k);
+        g.addDependency(kv_write, v_proj);
+
+        const attn = try addAnnotatedNode(&g, layer, .flash_attn, "flash_attn", flashAttnMetrics(config.head_dim, config.n_heads, config.n_kv_heads, seq_len));
+        g.addDependency(attn, rope_q);
+        g.addDependency(attn, kv_write);
+
+        const o_proj = try addAnnotatedNode(&g, layer, .dmmv, "o_proj", dmmvMetrics(config.hidden_dim, q_dim, layerTensorBytes(gf, layer, "attn_output.weight", approxF16TensorBytes(config.hidden_dim, q_dim)), config.hidden_dim, 1));
+        g.addDependency(o_proj, attn);
+
+        // Post-attention norm + residual
+        const post_attn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "post_attn_norm", rmsNormMetrics(config.hidden_dim, 1, layerTensorBytes(gf, layer, "post_attention_norm.weight", config.hidden_dim * @sizeOf(f32))));
+        g.addDependency(post_attn_norm, o_proj);
+
+        const attn_residual = try addAnnotatedNode(&g, layer, .add, "attn_residual", addMetrics(config.hidden_dim));
+        g.addDependency(attn_residual, prev_residual);
+        g.addDependency(attn_residual, post_attn_norm);
+
+        // Pre-FFN norm
+        const ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "ffn_norm", rmsNormMetrics(
+            config.hidden_dim, 1,
+            layerTensorBytes(gf, layer, "ffn_norm.weight", config.hidden_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(ffn_norm, attn_residual);
+
+        // MoE routing
+        const moe_gate = try addAnnotatedNode(&g, layer, .moe_gate, "moe_gate", .{
+            .read_bytes = vecBytes(config.hidden_dim),
+            .write_bytes = vecBytes(config.n_experts),
+            .weight_bytes = layerTensorBytes(gf, layer, "ffn_gate_inp.weight", approxF16TensorBytes(config.n_experts, config.hidden_dim)),
+            .flops = 2 * @as(u64, config.n_experts) * @as(u64, config.hidden_dim) + @as(u64, config.n_experts) * 8,
+            .workgroups = .{ @max(@as(u32, 1), divCeilU32(config.n_experts, 64)), 1, 1 },
+        });
+        g.addDependency(moe_gate, ffn_norm);
+
+        // Sparse expert GEGLU (gate+up → GEGLU → down)
+        const gate_proj = try addAnnotatedNode(&g, layer, .dmmv, "expert_gate", dmmvMetrics(
+            inter_dim * n_used, config.hidden_dim,
+            layerTensorBytes(gf, layer, "ffn_gate_exps.weight", approxF16TensorBytes(inter_dim * config.n_experts, config.hidden_dim)) / @max(@as(u64, 1), @as(u64, config.n_experts)) * n_used,
+            inter_dim, n_used,
+        ));
+        g.addDependency(gate_proj, ffn_norm);
+        g.addDependency(gate_proj, moe_gate);
+
+        const up_proj = try addAnnotatedNode(&g, layer, .dmmv, "expert_up", dmmvMetrics(
+            inter_dim * n_used, config.hidden_dim,
+            layerTensorBytes(gf, layer, "ffn_up_exps.weight", approxF16TensorBytes(inter_dim * config.n_experts, config.hidden_dim)) / @max(@as(u64, 1), @as(u64, config.n_experts)) * n_used,
+            inter_dim, n_used,
+        ));
+        g.addDependency(up_proj, ffn_norm);
+        g.addDependency(up_proj, moe_gate);
+
+        const geglu = try addAnnotatedNode(&g, layer, .geglu, "expert_geglu", swigluMetrics(inter_dim * n_used));
+        g.addDependency(geglu, gate_proj);
+        g.addDependency(geglu, up_proj);
+
+        const down_proj = try addAnnotatedNode(&g, layer, .dmmv, "expert_down", dmmvMetrics(
+            config.hidden_dim * n_used, inter_dim,
+            layerTensorBytes(gf, layer, "ffn_down_exps.weight", approxF16TensorBytes(config.hidden_dim * config.n_experts, inter_dim)) / @max(@as(u64, 1), @as(u64, config.n_experts)) * n_used,
+            config.hidden_dim, n_used,
+        ));
+        g.addDependency(down_proj, geglu);
+
+        const moe_gather = try addAnnotatedNode(&g, layer, .moe_gather, "moe_gather", moeGatherMetrics(config.hidden_dim, n_used));
+        g.addDependency(moe_gather, down_proj);
+        g.addDependency(moe_gather, moe_gate);
+
+        // Post-FFN norm
+        const post_ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "post_ffn_norm", rmsNormMetrics(
+            config.hidden_dim, 1,
+            layerTensorBytes(gf, layer, "post_ffw_norm.weight", config.hidden_dim * @sizeOf(f32)),
+        ));
+        g.addDependency(post_ffn_norm, moe_gather);
+
+        const ffn_residual = try addAnnotatedNode(&g, layer, .add, "ffn_residual", addMetrics(config.hidden_dim));
+        g.addDependency(ffn_residual, attn_residual);
+        g.addDependency(ffn_residual, post_ffn_norm);
+
+        prev_residual = ffn_residual;
+    }
+
+    const final_norm = try addAnnotatedNode(&g, null, .rms_norm_mul, "final_norm", rmsNormMetrics(
+        config.hidden_dim, 1,
+        globalTensorBytes(gf, "output_norm.weight", config.hidden_dim * @sizeOf(f32)),
+    ));
+    g.addDependency(final_norm, prev_residual);
+
+    const lm_head = try addAnnotatedNode(&g, null, .dmmv, "lm_head", dmmvMetrics(
+        config.vocab_size, config.hidden_dim,
+        blk: {
+            const out_bytes = globalTensorBytes(gf, "output.weight", 0);
+            if (out_bytes > 0) break :blk out_bytes;
+            break :blk globalTensorBytes(gf, "token_embd.weight", approxF16TensorBytes(config.vocab_size, config.hidden_dim));
+        },
+        config.vocab_size, 1,
+    ));
+    g.addDependency(lm_head, final_norm);
+
+    log.info("Built Gemma MoE decode graph: {d} nodes, {d} layers, {d} experts (top-{d})", .{
+        g.nodeCount(), config.n_layers, config.n_experts, config.n_experts_used,
+    });
+
+    return g;
+}
+
+test "buildDecodeGraph: llama 2 layers" {
     const allocator = std.testing.allocator;
     const config = ModelConfig{
         .architecture = .qwen2,

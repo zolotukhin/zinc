@@ -12,6 +12,7 @@ pub const Architecture = enum {
     qwen35,
     mamba,
     jamba,
+    gemma,
     unknown,
 };
 
@@ -52,6 +53,10 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "qwen35")) return .qwen35;
     if (std.mem.eql(u8, arch_str, "mamba")) return .mamba;
     if (std.mem.eql(u8, arch_str, "jamba")) return .jamba;
+    if (std.mem.eql(u8, arch_str, "gemma")) return .gemma;
+    if (std.mem.eql(u8, arch_str, "gemma2")) return .gemma;
+    if (std.mem.eql(u8, arch_str, "gemma3")) return .gemma;
+    if (std.mem.eql(u8, arch_str, "gemma4")) return .gemma;
     return .unknown;
 }
 
@@ -64,5 +69,9 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen35moe"));
     try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));
     try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
+    try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma"));
+    try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma2"));
+    try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma3"));
+    try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma4"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }

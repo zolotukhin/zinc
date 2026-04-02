@@ -69,109 +69,6 @@ pub const InitOptions = struct {
     debug_validation_enabled: bool = false,
 };
 
-/// Token sampling parameters for temperature, top-p, top-k, and repetition penalty.
-pub const SamplingParams = struct {
-    temperature: f32 = 0.0,
-    top_p: f32 = 1.0,
-    repetition_penalty: f32 = 1.0,
-    top_k: u32 = 64,
-
-    pub fn requiresLogitsReadback(self: @This()) bool {
-        return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
-    }
-};
-
-fn tokenSeen(history: []const u32, token: u32) bool {
-    for (history) |t| if (t == token) return true;
-    return false;
-}
-
-fn adjustedLogit(logit: f32, token: u32, history: []const u32, repetition_penalty: f32) f32 {
-    if (repetition_penalty <= 1.0001 or !tokenSeen(history, token)) return logit;
-    if (logit >= 0) return logit / repetition_penalty;
-    return logit * repetition_penalty;
-}
-
-fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random) u32 {
-    if (logits.len == 0) return 0;
-
-    if (params.temperature <= 0.0001) {
-        var best_idx: u32 = 0;
-        var best_val = adjustedLogit(logits[0], 0, history, params.repetition_penalty);
-        for (logits[1..], 1..) |raw, i| {
-            const val = adjustedLogit(raw, @intCast(i), history, params.repetition_penalty);
-            if (val > best_val) { best_val = val; best_idx = @intCast(i); }
-        }
-        return best_idx;
-    }
-
-    const max_candidates = 128;
-    const top_k: usize = @min(@max(params.top_k, 1), max_candidates);
-    const safe_top_p = std.math.clamp(params.top_p, 0.0, 1.0);
-    const temperature = @max(params.temperature, 0.0001);
-
-    var candidate_ids: [max_candidates]u32 = undefined;
-    var candidate_logits: [max_candidates]f32 = undefined;
-    var candidate_count: usize = 0;
-
-    for (logits, 0..) |raw_val, i| {
-        if (!std.math.isFinite(raw_val)) continue;
-        const token_id: u32 = @intCast(i);
-        const val = adjustedLogit(raw_val, token_id, history, params.repetition_penalty);
-
-        var insert_at = candidate_count;
-        while (insert_at > 0 and val > candidate_logits[insert_at - 1]) : (insert_at -= 1) {}
-        if (insert_at >= top_k) continue;
-
-        if (candidate_count < top_k) candidate_count += 1;
-
-        var j = candidate_count - 1;
-        while (j > insert_at) : (j -= 1) {
-            candidate_ids[j] = candidate_ids[j - 1];
-            candidate_logits[j] = candidate_logits[j - 1];
-        }
-        candidate_ids[insert_at] = token_id;
-        candidate_logits[insert_at] = val;
-    }
-
-    if (candidate_count == 0) return 0;
-    if (candidate_count == 1) return candidate_ids[0];
-
-    var weights: [max_candidates]f64 = undefined;
-    const max_logit = @as(f64, candidate_logits[0]) / @as(f64, temperature);
-    var total_weight: f64 = 0.0;
-    for (0..candidate_count) |i| {
-        const scaled = @as(f64, candidate_logits[i]) / @as(f64, temperature);
-        const weight = @exp(scaled - max_logit);
-        weights[i] = weight;
-        total_weight += weight;
-    }
-    if (!(total_weight > 0.0) or !std.math.isFinite(total_weight)) return candidate_ids[0];
-
-    var keep_count = candidate_count;
-    if (safe_top_p < 0.9999) {
-        var cumulative: f64 = 0.0;
-        for (0..candidate_count) |i| {
-            cumulative += weights[i] / total_weight;
-            keep_count = i + 1;
-            if (cumulative >= @as(f64, safe_top_p) and i > 0) break;
-        }
-    }
-
-    var kept_weight: f64 = 0.0;
-    for (0..keep_count) |i| kept_weight += weights[i];
-    if (!(kept_weight > 0.0) or !std.math.isFinite(kept_weight)) return candidate_ids[0];
-
-    const target = random.float(f64) * kept_weight;
-    var cumulative: f64 = 0.0;
-    for (0..keep_count) |i| {
-        cumulative += weights[i];
-        if (target <= cumulative) return candidate_ids[i];
-    }
-
-    return candidate_ids[keep_count - 1];
-}
-
 /// Cumulative per-request profiling counters for the Metal decode loop.
 pub const RuntimeProfile = struct {
     decode_steps: u32 = 0,
@@ -234,21 +131,6 @@ const DmmvPush = extern struct {
     a_offset: u32,
     x_offset: u32,
     y_offset: u32,
-};
-
-/// Push constants for Q4_K GEMM dispatch (matches gemm_q4k.metal GemmPush).
-const GemmQ4kPush = extern struct {
-    ne00: i32, // K dimension
-    ne02: i32, // batch dim 0 (always 1 for single-sequence)
-    nb01: u64, // row stride of weight matrix (bytes)
-    nb02: u64, // batch stride 0
-    ne12: i32, // batch dim 1 (always 1)
-    nb10: u64, // element stride of input (4 for f32)
-    nb11: u64, // row stride of input (ne00 * 4)
-    nb12: u64, // batch stride 1
-    ne0: i32,  // M dimension (output rows)
-    ne1: i32,  // N dimension (number of tokens)
-    src0_off: u32, // byte offset to weight data within the Metal buffer
 };
 
 /// Push constants for SwiGLU dispatch (matches SPIRV-Cross layout: buffer(0)).
@@ -492,6 +374,8 @@ pub const InferenceEngine = struct {
     sigmoid_mul_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
     swiglu_batched_pipe: MetalPipeline,
+    geglu_pipe: MetalPipeline,
+    geglu_batched_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
     rms_norm_pipe: MetalPipeline,
     moe_acc_pipe: MetalPipeline,
@@ -499,9 +383,6 @@ pub const InferenceEngine = struct {
     softmax_topk_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
-    gemm_q4k_pipe: MetalPipeline,
-    flash_attn_batched_pipe: MetalPipeline,
-    gemm_q6k_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -510,6 +391,10 @@ pub const InferenceEngine = struct {
     attn_q_norm_present: []bool,
     attn_k_norm_present: []bool,
     ffn_norm_bufs: []MetalBuffer,
+    post_attn_norm_bufs: []MetalBuffer,
+    post_attn_norm_present: []bool,
+    post_ffn_norm_bufs: []MetalBuffer,
+    post_ffn_norm_present: []bool,
     final_norm_gpu: MetalBuffer,
 
     // Precomputed inverse RoPE frequencies (f32, GPU-accessible via UMA)
@@ -545,7 +430,6 @@ pub const InferenceEngine = struct {
     position: u32,
     profile_enabled: bool,
     debug_validation_enabled: bool,
-    gpu_layer_snapshots: ?[]f32,
     request_profile: RuntimeProfile,
 
     /// Allocate GPU buffers, compile Metal pipelines, and prepare the KV cache.
@@ -593,7 +477,6 @@ pub const InferenceEngine = struct {
         self.position = 0;
         self.profile_enabled = options.profile_enabled;
         self.debug_validation_enabled = options.debug_validation_enabled;
-        self.gpu_layer_snapshots = if (options.debug_validation_enabled) try allocator.alloc(f32, @as(usize, cfg.hidden_dim) * cfg.n_layers) else null;
         self.request_profile = .{};
 
         self.hidden_buf = try metal_buffer.createBuffer(ctx, hidden_size);
@@ -676,6 +559,8 @@ pub const InferenceEngine = struct {
         self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
+        self.geglu_pipe = try loadShaderPipeline(ctx, "geglu");
+        self.geglu_batched_pipe = try loadShaderPipeline(ctx, "geglu_batched");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
         self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
         self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
@@ -683,9 +568,6 @@ pub const InferenceEngine = struct {
         self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
-        self.gemm_q4k_pipe = try loadShaderPipeline(ctx, "gemm_q4k");
-        self.flash_attn_batched_pipe = try loadShaderPipeline(ctx, "flash_attn_batched");
-        self.gemm_q6k_pipe = try loadShaderPipeline(ctx, "gemm_q6k");
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -694,6 +576,10 @@ pub const InferenceEngine = struct {
         self.attn_q_norm_present = try allocator.alloc(bool, cfg.n_layers);
         self.attn_k_norm_present = try allocator.alloc(bool, cfg.n_layers);
         self.ffn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.post_attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.post_attn_norm_present = try allocator.alloc(bool, cfg.n_layers);
+        self.post_ffn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.post_ffn_norm_present = try allocator.alloc(bool, cfg.n_layers);
         for (0..cfg.n_layers) |i| {
             const layer: u32 = @intCast(i);
             const an = findLayerTensor(model, layer, "attn_norm.weight") orelse return error.MissingTensor;
@@ -714,9 +600,35 @@ pub const InferenceEngine = struct {
                 @memset(self.attn_k_norm_bufs[i].cpu_ptr.?[0..4], 0);
                 self.attn_k_norm_present[i] = false;
             }
-            const fn_t = findLayerTensor(model, layer, "post_attention_norm.weight") orelse
-                findLayerTensor(model, layer, "ffn_norm.weight") orelse return error.MissingTensor;
+            // Gemma: ffn_norm.weight is separate from post_attention_norm.
+            // Qwen3.5/LLaMA: post_attention_norm or ffn_norm is the FFN pre-norm.
+            const fn_t = findLayerTensor(model, layer, "ffn_norm.weight") orelse
+                findLayerTensor(model, layer, "post_attention_norm.weight") orelse return error.MissingTensor;
             self.ffn_norm_bufs[i] = try preloadNormWeights(ctx, model, fn_t, cfg.hidden_dim);
+
+            // Gemma post-attention norm (applied before residual add)
+            if (findLayerTensor(model, layer, "post_attention_norm.weight")) |pan| {
+                if (findLayerTensor(model, layer, "ffn_norm.weight") != null) {
+                    // Both exist → Gemma-style: post_attention_norm is separate
+                    self.post_attn_norm_bufs[i] = try preloadNormWeights(ctx, model, pan, cfg.hidden_dim);
+                    self.post_attn_norm_present[i] = true;
+                } else {
+                    self.post_attn_norm_bufs[i] = try metal_buffer.createBuffer(ctx, 4);
+                    self.post_attn_norm_present[i] = false;
+                }
+            } else {
+                self.post_attn_norm_bufs[i] = try metal_buffer.createBuffer(ctx, 4);
+                self.post_attn_norm_present[i] = false;
+            }
+
+            // Gemma post-FFN norm (applied before FFN residual add)
+            if (findLayerTensor(model, layer, "post_ffw_norm.weight")) |pfn| {
+                self.post_ffn_norm_bufs[i] = try preloadNormWeights(ctx, model, pfn, cfg.hidden_dim);
+                self.post_ffn_norm_present[i] = true;
+            } else {
+                self.post_ffn_norm_bufs[i] = try metal_buffer.createBuffer(ctx, 4);
+                self.post_ffn_norm_present[i] = false;
+            }
         }
         const final_t = findTensorByName(model, "output_norm.weight") orelse return error.MissingTensor;
         self.final_norm_gpu = try preloadNormWeights(ctx, model, final_t, cfg.hidden_dim);
@@ -749,7 +661,7 @@ pub const InferenceEngine = struct {
                         freq_ptr[i] /= freq_factors[i];
                     }
                 }
-                log.debug("RoPE: loaded {d} custom frequency factors from rope_freqs.weight", .{half_rot});
+                log.info("RoPE: loaded {d} custom frequency factors from rope_freqs.weight", .{half_rot});
             }
         }
 
@@ -1010,6 +922,8 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
+        metal_pipeline.freePipeline(&self.geglu_pipe);
+        metal_pipeline.freePipeline(&self.geglu_batched_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
         metal_pipeline.freePipeline(&self.rms_norm_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_pipe);
@@ -1017,25 +931,27 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.softmax_topk_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
-        metal_pipeline.freePipeline(&self.gemm_q4k_pipe);
-        metal_pipeline.freePipeline(&self.flash_attn_batched_pipe);
-        metal_pipeline.freePipeline(&self.gemm_q6k_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
             metal_buffer.freeBuffer(&self.attn_q_norm_bufs[i]);
             metal_buffer.freeBuffer(&self.attn_k_norm_bufs[i]);
             metal_buffer.freeBuffer(&self.ffn_norm_bufs[i]);
+            metal_buffer.freeBuffer(&self.post_attn_norm_bufs[i]);
+            metal_buffer.freeBuffer(&self.post_ffn_norm_bufs[i]);
         }
         self.allocator.free(self.attn_norm_bufs);
         self.allocator.free(self.attn_q_norm_bufs);
         self.allocator.free(self.attn_k_norm_bufs);
         self.allocator.free(self.attn_q_norm_present);
         self.allocator.free(self.attn_k_norm_present);
+        self.allocator.free(self.post_attn_norm_bufs);
+        self.allocator.free(self.post_attn_norm_present);
+        self.allocator.free(self.post_ffn_norm_bufs);
+        self.allocator.free(self.post_ffn_norm_present);
         self.allocator.free(self.ffn_norm_bufs);
         metal_buffer.freeBuffer(&self.final_norm_gpu);
         metal_buffer.freeBuffer(&self.rope_freq_buf);
-        if (self.gpu_layer_snapshots) |s| self.allocator.free(s);
         self.allocator.free(self.layer_tensors);
 
         metal_pipeline.freePipeline(&self.ssm_conv1d_pipe);
@@ -1093,22 +1009,6 @@ pub const InferenceEngine = struct {
             }
         }
         return max_idx;
-    }
-
-    /// Sample with temperature, top-k, top-p, and repetition penalty.
-    pub fn sample(self: *const InferenceEngine, history: []const u32, params: SamplingParams, random: std.Random) u32 {
-        const sample_start = profileStart(self.profile_enabled);
-        defer if (self.profile_enabled) {
-            const mutable = @constCast(self);
-            mutable.request_profile.sample_calls += 1;
-            mutable.request_profile.sample_ns += profileElapsedNs(sample_start);
-        };
-
-        if (!params.requiresLogitsReadback()) return self.sampleGreedy();
-
-        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
-        const logits = logits_ptr[0..self.config.vocab_size];
-        return sampleFromLogits(logits, history, params, random);
     }
 
     /// Reset position, profile counters, and SSM state for a new request.
@@ -1231,6 +1131,13 @@ pub const InferenceEngine = struct {
         const hidden_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
         dequantRow(embed_raw, token_id, self.config.hidden_dim, self.token_embed.info.type_, hidden_ptr[0..self.config.hidden_dim]);
 
+        // Gemma models scale embeddings by sqrt(hidden_dim) before the first layer.
+        if (self.config.architecture == .gemma) {
+            const scale: f32 = @sqrt(@as(f32, @floatFromInt(self.config.hidden_dim)));
+            for (0..self.config.hidden_dim) |i| {
+                hidden_ptr[i] *= scale;
+            }
+        }
     }
 
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
@@ -1267,9 +1174,9 @@ pub const InferenceEngine = struct {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
                 }
                 if (k2048_or_less) {
-                    break :blk .{ .pipe = &self.dmmv_q4k_k2048_pipe, .push_idx = 1, .rows_per_wg = 4, .block_size = 64 };
+                    break :blk .{ .pipe = &self.dmmv_q4k_k2048_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 };
                 }
-                break :blk .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 4, .block_size = 64 };
+                break :blk .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 };
             },
             .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
@@ -1342,6 +1249,15 @@ fn dispatchDmmvOnCmd(
     K: u32,
     extra_byte_offset: u32,
 ) void {
+    // DEBUG: Force CPU fallback for all DMMV to test if GPU kernel is the issue
+    if (engine.debug_validation_enabled) {
+        const mmap = engine.model.mmap_data orelse return;
+        const data_off = engine.model.gguf_file.tensor_data_offset;
+        const in_ptr: [*]const f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+        const out_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+        cpuDmmvFallback(mmap, tensor, data_off, in_ptr, out_ptr, M, K, extra_byte_offset, engine.allocator) catch return;
+        return;
+    }
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
         return;
@@ -2249,12 +2165,14 @@ fn recordGpuRoutedBatchedMoeOnCmd(
     {
         const swiglu_push = SwiGLUPush{ .n = inter_dim };
         const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
-        cmd.dispatchV2(&engine.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+        const batch_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_batched_pipe else &engine.swiglu_batched_pipe;
+        cmd.dispatchV2(batch_act_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
     }
     if (has_shexp) {
         const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
         const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-        cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
+        const shexp_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
+        cmd.dispatchV2(shexp_act_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
     }
     try dispatchDmmvMoeOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
     if (has_shexp) {
@@ -2392,136 +2310,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
-            // Flash attention verified correct at pos=5, layers 0-4 (max_diff < 0.0000004)
-            if (false and engine.debug_validation_enabled and using_local_cmd and engine.position == 5 and layer_idx < 5) {
-                commitAndWaitProfiled(cmd, profile);
-                // CPU flash attention reference
-                const q_ptr: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-                const kc_ptr: [*]const f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
-                const vc_ptr: [*]const f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
-                const attn_gpu: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
-                const seq_len: usize = @intCast(engine.position + 1);
-                const cpu_attn = try engine.allocator.alloc(f32, q_dim);
-                defer engine.allocator.free(cpu_attn);
-                refFlashAttnContiguous(
-                    q_ptr[0..q_dim],
-                    kc_ptr[0 .. seq_len * kv_dim],
-                    vc_ptr[0 .. seq_len * kv_dim],
-                    cpu_attn,
-                    @intCast(cfg.head_dim),
-                    @intCast(cfg.n_heads),
-                    @intCast(cfg.n_kv_heads),
-                    seq_len,
-                );
-                var attn_max_d: f32 = 0;
-                var attn_max_i: usize = 0;
-                for (0..q_dim) |i| {
-                    const d = @abs(attn_gpu[i] - cpu_attn[i]);
-                    if (d > attn_max_d) { attn_max_d = d; attn_max_i = i; }
-                }
-                log.info("FLASH_CHECK pos={d} L{d}: max_diff={d:.8} idx={d} gpu={d:.6} cpu={d:.6}", .{
-                    engine.position, layer_idx, attn_max_d, attn_max_i, attn_gpu[attn_max_i], cpu_attn[attn_max_i],
-                });
-                local_cmd_storage = try beginProfiledCommand(engine, profile);
-                cmd = &local_cmd_storage;
-            }
-
-            if (false and engine.debug_validation_enabled and using_local_cmd and (engine.position == 0 or engine.position == 10) and layer_idx == 0) {
-                // At position 10: overwrite norm_buf with 1.0 to test with known input
-                if (engine.position == 10) {
-                    commitAndWaitProfiled(cmd, profile);
-                    const test_norm: [*]f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
-                    for (0..hidden_dim) |i| test_norm[i] = 1.0;
-                    // Re-dispatch Q/K/V DMMVs with the synthetic input
-                    local_cmd_storage = try beginProfiledCommand(engine, profile);
-                    cmd = &local_cmd_storage;
-                    try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
-                    cmd.barrier();
-                }
-                commitAndWaitProfiled(cmd, profile);
-                // Compare V (Q6_K) and Q (Q4_K) against CPU
-                const v_tensor_dbg = lt.attn_v orelse unreachable;
-                const q_tensor_dbg = lt.attn_q orelse unreachable;
-                const norm_in: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
-                const v_gpu: [*]const f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
-                const q_gpu: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-                const mmap = engine.model.mmap_data orelse unreachable;
-                const td_off = engine.model.gguf_file.tensor_data_offset;
-                const v_cpu = try engine.allocator.alloc(f32, kv_dim);
-                defer engine.allocator.free(v_cpu);
-                const q_cpu = try engine.allocator.alloc(f32, q_dim);
-                defer engine.allocator.free(q_cpu);
-                try cpuDmmvFallback(mmap, v_tensor_dbg, td_off, norm_in, v_cpu.ptr, kv_dim, hidden_dim, 0, engine.allocator);
-                const k_tensor_dbg = lt.attn_k orelse unreachable;
-                const k_gpu: [*]const f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
-                const k_cpu = try engine.allocator.alloc(f32, kv_dim);
-                defer engine.allocator.free(k_cpu);
-                try cpuDmmvFallback(mmap, k_tensor_dbg, td_off, norm_in, k_cpu.ptr, kv_dim, hidden_dim, 0, engine.allocator);
-                try cpuDmmvFallback(mmap, q_tensor_dbg, td_off, norm_in, q_cpu.ptr, q_dim, hidden_dim, 0, engine.allocator);
-                // Apply RoPE to CPU reference to match GPU output
-                {
-                    const rd: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
-                    const ifp: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
-                    cpuRope(q_cpu.ptr, cfg.head_dim, rd, cfg.n_heads, engine.position, ifp[0 .. rd / 2]);
-                    cpuRope(k_cpu.ptr, cfg.head_dim, rd, cfg.n_kv_heads, engine.position, ifp[0 .. rd / 2]);
-                }
-                var v_max_d: f32 = 0;
-                var v_max_i: usize = 0;
-                var q_max_d: f32 = 0;
-                var q_max_i: usize = 0;
-                for (0..kv_dim) |i| {
-                    const d = @abs(v_gpu[i] - v_cpu[i]);
-                    if (d > v_max_d) { v_max_d = d; v_max_i = i; }
-                }
-                for (0..q_dim) |i| {
-                    const d = @abs(q_gpu[i] - q_cpu[i]);
-                    if (d > q_max_d) { q_max_d = d; q_max_i = i; }
-                }
-                var k_max_d: f32 = 0;
-                for (0..kv_dim) |i| {
-                    const d = @abs(k_gpu[i] - k_cpu[i]);
-                    if (d > k_max_d) k_max_d = d;
-                }
-                log.info("Q6K_CHECK pos={d} L0: V(q6k) max_diff={d:.8} | K(q4k,M=1024) max_diff={d:.8} | Q(q4k,M=4096) max_diff={d:.8} idx={d} gpu={d:.6} cpu={d:.6}", .{
-                    engine.position, v_max_d, k_max_d, q_max_d, q_max_i, q_gpu[q_max_i], q_cpu[q_max_i],
-                });
-                // Count how many Q elements have large errors
-                var big_err_count: u32 = 0;
-                for (0..q_dim) |i| {
-                    if (@abs(q_gpu[i] - q_cpu[i]) > 0.1) big_err_count += 1;
-                }
-                if (big_err_count > 0) {
-                    log.err("Q4K DMMV BUG: {d} elements with error > 0.1 at pos={d} L0", .{ big_err_count, engine.position });
-                    // Check input norm_buf stats
-                    var norm_max: f32 = 0;
-                    var norm_rms: f64 = 0;
-                    for (0..hidden_dim) |i| {
-                        const v = @abs(norm_in[i]);
-                        if (v > norm_max) norm_max = v;
-                        norm_rms += @as(f64, norm_in[i]) * @as(f64, norm_in[i]);
-                    }
-                    log.err("  input norm_buf: max={d:.4} rms={d:.6} [0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
-                        norm_max,
-                        @as(f32, @floatCast(@sqrt(norm_rms / @as(f64, @floatFromInt(hidden_dim))))),
-                        norm_in[0], norm_in[1], norm_in[2], norm_in[3],
-                    });
-                    // Find first few bad indices
-                    var shown: u32 = 0;
-                    for (0..q_dim) |i| {
-                        if (@abs(q_gpu[i] - q_cpu[i]) > 1.0 and shown < 5) {
-                            // Which Q4_K block and position within the row
-                            const block_idx = i / 4; // which threadgroup row?
-                            log.err("  bad[{d}]: gpu={d:.4} cpu={d:.4} diff={d:.4} (row {d}, block~{d})", .{
-                                i, q_gpu[i], q_cpu[i], q_gpu[i] - q_cpu[i], i, block_idx,
-                            });
-                            shown += 1;
-                        }
-                    }
-                }
-                local_cmd_storage = try beginProfiledCommand(engine, profile);
-                cmd = &local_cmd_storage;
-            }
-            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and engine.position == 0 and (layer_idx == 3 or layer_idx == 4);
+            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and (engine.position == 4 or engine.position == 5) and (layer_idx == 7 or layer_idx == 31);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
                 const debug_start = profileStart(profile != null);
@@ -2529,6 +2318,11 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
+            }
+            // Gemma post-attention norm: normalize O-proj output before residual add.
+            if (engine.post_attn_norm_present[layer_idx]) {
+                dispatchRmsNormOnCmd(engine, cmd, &engine.down_buf, &engine.down_buf, &engine.post_attn_norm_bufs[layer_idx], hidden_dim, 1);
+                cmd.barrier();
             }
             {
                 const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
@@ -2567,26 +2361,24 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     ffn_cmd.barrier();
                     const swiglu_push = SwiGLUPush{ .n = inter_dim };
                     const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                    ffn_cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                    const act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
+                    ffn_cmd.dispatchV2(act_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
                     ffn_cmd.barrier();
                     dispatchDmmvOnCmd(engine, &ffn_cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
-                    ffn_cmd.barrier();
-                    // FFN residual add on GPU (avoids CPU/GPU coherence round-trip)
-                    {
-                        const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                        const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                        ffn_cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
-                    }
                     if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
                     commitAndWaitProfiled(&ffn_cmd, profile);
                 }
-
-                // Snapshot GPU hidden state after each layer for validation
-                if (engine.debug_validation_enabled and engine.position == 0 and engine.gpu_layer_snapshots != null) {
-                    const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-                    const snap = engine.gpu_layer_snapshots.?;
-                    @memcpy(snap[layer_idx * hidden_dim ..][0..hidden_dim], hidden_ptr[0..hidden_dim]);
+                // Gemma post-FFN norm: normalize down_buf before residual add (CPU path).
+                if (engine.post_ffn_norm_present[layer_idx]) {
+                    const pfn_w: [*]const f32 = @ptrCast(@alignCast(engine.post_ffn_norm_bufs[layer_idx].cpu_ptr.?));
+                    const d_rw: [*]f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+                    cpuRmsNormMul(d_rw, pfn_w[0..hidden_dim], d_rw, hidden_dim, 1, cfg.rms_norm_eps);
                 }
+                const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+                const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+                for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
+
+                // (debug removed)
             }
             if (using_local_cmd and is_moe) commitAndWaitProfiled(cmd, profile);
         } else {
@@ -2819,16 +2611,18 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     }
                     cmd.barrier();
 
-                    // Phase 2: Batched SwiGLU over all selected experts (+ shared expert)
+                    // Phase 2: Batched activation over all selected experts (+ shared expert)
                     {
                         const swiglu_push = SwiGLUPush{ .n = inter_dim };
                         const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
-                        cmd.dispatchV2(&engine.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                        const b_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_batched_pipe else &engine.swiglu_batched_pipe;
+                        cmd.dispatchV2(b_act_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
                     }
                     if (has_shexp) {
                         const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
                         const sw_bufs2 = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                        cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
+                        const s_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
+                        cmd.dispatchV2(s_act_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
                     }
                     cmd.barrier();
 
@@ -2875,16 +2669,17 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     }
                     cmd.barrier();
 
-                    // Phase 2: All SwiGLU operations in parallel
+                    // Phase 2: All activation operations in parallel
+                    const e_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
                     for (0..cfg.n_experts_used) |ei| {
                         const swiglu_push = SwiGLUPush{ .n = inter_dim };
                         const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
-                        cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                        cmd.dispatchV2(e_act_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
                     }
                     if (has_shexp) {
                         const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
                         const sw_bufs2 = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                        cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
+                        cmd.dispatchV2(e_act_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
                     }
                     cmd.barrier();
 
@@ -2981,7 +2776,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
                 const swiglu_push = SwiGLUPush{ .n = inter_dim };
                 const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                const ffn_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
+                cmd.dispatchV2(ffn_act_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
                 cmd.barrier();
 
                 dispatchDmmvOnCmd(engine, &cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
@@ -2989,6 +2785,12 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 commitAndWaitProfiled(&cmd, profile);
             }
 
+            // Gemma post-FFN norm (SSM path)
+            if (engine.post_ffn_norm_present[layer_idx]) {
+                const pfn_w: [*]const f32 = @ptrCast(@alignCast(engine.post_ffn_norm_bufs[layer_idx].cpu_ptr.?));
+                const d_rw: [*]f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+                cpuRmsNormMul(d_rw, pfn_w[0..hidden_dim], d_rw, hidden_dim, 1, cfg.rms_norm_eps);
+            }
             const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
             const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
             for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
@@ -2999,7 +2801,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         }
     }
 
-    // ===== Per-layer GPU/CPU comparison (first token only) =====
+    // ===== Per-layer GPU snapshot for validation (first token only) =====
     // Save GPU hidden state after each layer to find where CPU/GPU diverge
     if (engine.debug_validation_enabled and engine.position == 0) {
         // Re-run: load embedding and run CPU forward pass, comparing after each layer
@@ -3090,26 +2892,10 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 rms2 += @as(f64, v) * @as(f64, v);
                 if (@abs(v) > max2) max2 = @abs(v);
             }
-            {
-                // Compare with GPU snapshot at every layer
-                if (engine.gpu_layer_snapshots) |snaps| {
-                    {
-                        const gpu_snap = snaps[li * vdhd ..][0..vdhd];
-                        var md: f32 = 0;
-                        var mi: usize = 0;
-                        var sd: f64 = 0;
-                        for (0..vdhd) |i| {
-                            const df = @abs(gpu_snap[i] - cpu2[i]);
-                            if (df > md) { md = df; mi = i; }
-                            sd += @as(f64, df) * @as(f64, df);
-                        }
-                        log.info("L{d} GPU_vs_CPU: max_diff={d:.8} idx={d} gpu={d:.6} cpu={d:.6} rms_diff={d:.10}", .{
-                            li, md, mi, gpu_snap[mi], cpu2[mi],
-                            @as(f32, @floatCast(@sqrt(sd / @as(f64, @floatFromInt(vdhd))))),
-                        });
-                    }
-                }
-            }
+            if (li < 5 or li == vdc.n_layers - 1)
+                log.info("CPU_CHAIN L{d}: rms={d:.4} max={d:.4}", .{
+                    li, @as(f32, @floatCast(@sqrt(rms2 / @as(f64, @floatFromInt(vdhd))))), max2,
+                });
         }
     }
 
@@ -3266,7 +3052,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(&cmd, profile);
     }
-    if (false and engine.debug_validation_enabled and engine.position >= 33) {
+    if (engine.debug_validation_enabled and engine.position == 5) {
         const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
         if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
@@ -3989,6 +3775,178 @@ fn debugCompareAttentionLayer(
     logDebugSliceDiff(layer, "attn_o_proj", oproj_ref[0..hidden_dim], oproj_actual[0..hidden_dim]);
 }
 
+/// Full CPU reference for layer 0: embedding -> attn_norm -> QKV -> RoPE -> attention -> o_proj -> residual -> ffn_norm -> gate/up -> SwiGLU -> down -> residual.
+/// Compares the resulting hidden state against the GPU hidden_buf after layer 0.
+fn debugCompareFullLayer(
+    engine: *InferenceEngine,
+    layer_idx: usize,
+    lt: LayerTensors,
+    hidden_dim: u32,
+    q_dim: u32,
+    kv_dim: u32,
+    inter_dim: u32,
+) !void {
+    const allocator = engine.allocator;
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const tensor_data_off = engine.model.gguf_file.tensor_data_offset;
+    const cfg = engine.config;
+    const n_heads: u32 = cfg.n_heads;
+    const n_kv_heads: u32 = cfg.n_kv_heads;
+    const head_dim: u32 = cfg.head_dim;
+    const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+    const eps = cfg.rms_norm_eps;
+
+    const q_tensor = lt.attn_q orelse return error.MissingTensor;
+    const k_tensor = lt.attn_k orelse return error.MissingTensor;
+    const v_tensor = lt.attn_v orelse return error.MissingTensor;
+    const o_tensor = lt.attn_output orelse return error.MissingTensor;
+    const gate_t = lt.ffn_gate orelse return error.MissingTensor;
+    const up_t = lt.ffn_up orelse return error.MissingTensor;
+    const down_t = lt.ffn_down orelse return error.MissingTensor;
+
+    // Start from the GPU hidden state at the beginning of this layer
+    // (BEFORE any layer operations — the hidden_buf currently holds the result
+    // AFTER this layer since we run the check after the layer completes.
+    // We need the hidden state BEFORE this layer. We can reconstruct it:
+    // hidden_before = gpu_hidden - attn_residual - ffn_residual
+    // But that's error-prone. Instead, for layer 0 we use the embedding;
+    // for other layers, we save hidden_buf BEFORE the layer starts.)
+    //
+    // SIMPLIFIED: just check the hidden state AFTER the layer. We compare
+    // GPU hidden with a CPU computation that starts from the INPUT to this layer.
+    // The input is: hidden_buf BEFORE the layer ran. We save it at the call site.
+    // For now, we save it in a temporary buffer passed as a parameter.
+    // HACK: Since we can't easily pass the pre-layer hidden state, we'll
+    // recompute from embedding for layer 0, and skip the full recompute for
+    // later layers, just validating individual operations instead.
+    _ = layer_idx;
+
+    // For layer 0 only: recompute from embedding
+    const bos_token: u32 = engine.model.gguf_file.getU32("tokenizer.ggml.bos_token_id") orelse 128000;
+    const embed = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(embed);
+    const norm = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(norm);
+    const q_ref = try allocator.alloc(f32, q_dim);
+    defer allocator.free(q_ref);
+    const k_ref = try allocator.alloc(f32, kv_dim);
+    defer allocator.free(k_ref);
+    const v_ref = try allocator.alloc(f32, kv_dim);
+    defer allocator.free(v_ref);
+    const attn_out = try allocator.alloc(f32, q_dim);
+    defer allocator.free(attn_out);
+    const oproj = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(oproj);
+    const hidden_ref = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(hidden_ref);
+    const ffn_norm_out = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(ffn_norm_out);
+    const gate_ref = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(gate_ref);
+    const up_ref = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(up_ref);
+    const swiglu_ref = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(swiglu_ref);
+    const ffn_down_ref = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(ffn_down_ref);
+
+    // (a) Load BOS token embedding
+    const embed_data_offset = tensor_data_off + engine.token_embed.info.offset;
+    const embed_raw = mmap[embed_data_offset..];
+    dequantRow(embed_raw, bos_token, hidden_dim, engine.token_embed.info.type_, embed);
+
+    // (b) RMS norm with attention norm weights for layer 0
+    const attn_norm_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_norm_bufs[0].cpu_ptr.?));
+    cpuRmsNormMul(embed.ptr, attn_norm_w[0..hidden_dim], norm.ptr, hidden_dim, 1, eps);
+
+    // (c) Q, K, V projections
+    try cpuDmmvFallback(mmap, q_tensor, tensor_data_off, norm.ptr, q_ref.ptr, q_dim, hidden_dim, 0, allocator);
+    try cpuDmmvFallback(mmap, k_tensor, tensor_data_off, norm.ptr, k_ref.ptr, kv_dim, hidden_dim, 0, allocator);
+    try cpuDmmvFallback(mmap, v_tensor, tensor_data_off, norm.ptr, v_ref.ptr, kv_dim, hidden_dim, 0, allocator);
+
+    // Optional per-head Q/K norms (Llama 3.1 does not have these, but check anyway)
+    if (engine.attn_q_norm_present[0]) {
+        const qn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[0].cpu_ptr.?));
+        cpuRmsNormMul(q_ref.ptr, qn_w[0..head_dim], q_ref.ptr, head_dim, n_heads, eps);
+    }
+    if (engine.attn_k_norm_present[0]) {
+        const kn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[0].cpu_ptr.?));
+        cpuRmsNormMul(k_ref.ptr, kn_w[0..head_dim], k_ref.ptr, head_dim, n_kv_heads, eps);
+    }
+
+    // (d) Apply RoPE to Q and K
+    const inv_freq_ptr: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+    const inv_freq_slice = inv_freq_ptr[0 .. rope_dim / 2];
+    cpuRope(q_ref.ptr, head_dim, rope_dim, n_heads, engine.position, inv_freq_slice);
+    cpuRope(k_ref.ptr, head_dim, rope_dim, n_kv_heads, engine.position, inv_freq_slice);
+
+    // (e) Flash attention with seq_len=1: output = V expanded for GQA
+    const q_per_kv = n_heads / @max(n_kv_heads, 1);
+    for (0..n_heads) |h| {
+        const kv_head = h / q_per_kv;
+        const v_head = v_ref[kv_head * head_dim ..][0..head_dim];
+        @memcpy(attn_out[h * head_dim ..][0..head_dim], v_head);
+    }
+
+    // (f) Output projection: oproj = cpu_dmmv(attn_output, attn_out)
+    try cpuDmmvFallback(mmap, o_tensor, tensor_data_off, attn_out.ptr, oproj.ptr, hidden_dim, q_dim, 0, allocator);
+
+    // (g) Attention residual: hidden_ref = embedding + oproj
+    for (0..hidden_dim) |i| hidden_ref[i] = embed[i] + oproj[i];
+
+    // (h) FFN norm with ffn_norm weights for layer 0
+    const ffn_norm_w: [*]const f32 = @ptrCast(@alignCast(engine.ffn_norm_bufs[0].cpu_ptr.?));
+    cpuRmsNormMul(hidden_ref.ptr, ffn_norm_w[0..hidden_dim], ffn_norm_out.ptr, hidden_dim, 1, eps);
+
+    // (i) Gate and up projections
+    try cpuDmmvFallback(mmap, gate_t, tensor_data_off, ffn_norm_out.ptr, gate_ref.ptr, inter_dim, hidden_dim, 0, allocator);
+    try cpuDmmvFallback(mmap, up_t, tensor_data_off, ffn_norm_out.ptr, up_ref.ptr, inter_dim, hidden_dim, 0, allocator);
+
+    // (j) SwiGLU: silu(gate) * up
+    cpuSwiGLU(gate_ref.ptr, up_ref.ptr, swiglu_ref.ptr, inter_dim);
+
+    // (k) FFN down projection
+    try cpuDmmvFallback(mmap, down_t, tensor_data_off, swiglu_ref.ptr, ffn_down_ref.ptr, hidden_dim, inter_dim, 0, allocator);
+
+    // (l) FFN residual: hidden_ref = hidden_ref + ffn_down_ref
+    for (0..hidden_dim) |i| hidden_ref[i] += ffn_down_ref[i];
+
+    // Compare CPU reference with GPU hidden_buf
+    const gpu_hidden: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+    var max_diff: f32 = 0;
+    var max_idx: usize = 0;
+    var sum_sq: f64 = 0;
+    for (0..hidden_dim) |i| {
+        const diff = gpu_hidden[i] - hidden_ref[i];
+        const abs_diff = @abs(diff);
+        if (abs_diff > max_diff) {
+            max_diff = abs_diff;
+            max_idx = i;
+        }
+        sum_sq += @as(f64, diff) * @as(f64, diff);
+    }
+    const rms_diff: f64 = @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)));
+
+    log.info("FULL_L0_REF: bos={d} max_diff={d:.6} idx={d} cpu={d:.6} gpu={d:.6} rms_diff={d:.8}", .{
+        bos_token,
+        max_diff,
+        max_idx,
+        hidden_ref[max_idx],
+        gpu_hidden[max_idx],
+        rms_diff,
+    });
+    log.info("FULL_L0_REF: cpu_h[0..4]={d:.6},{d:.6},{d:.6},{d:.6} gpu_h[0..4]={d:.6},{d:.6},{d:.6},{d:.6}", .{
+        hidden_ref[0],
+        hidden_ref[1],
+        hidden_ref[2],
+        hidden_ref[3],
+        gpu_hidden[0],
+        gpu_hidden[1],
+        gpu_hidden[2],
+        gpu_hidden[3],
+    });
+}
+
 fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, is_full_attn: bool, stage: []const u8) void {
     const hidden_dim = engine.config.hidden_dim;
     if (hidden_dim == 0) return;
@@ -4081,373 +4039,6 @@ fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, i
 }
 
 // ---------------------------------------------------------------------------
-// GEMM-based prefill dispatch helper
-// ---------------------------------------------------------------------------
-
-/// Dispatch a Q4_K GEMM: weight[M×K] × input[N×K]^T → output[N×M]
-/// where M = output rows, K = inner dim, N = number of tokens.
-/// The output layout is column-major: output[row + col * ne0].
-fn dispatchGemmQ4k(
-    engine: *InferenceEngine,
-    cmd: *MetalCommand,
-    tensor: *const metal_loader.LoadedTensor,
-    input_buf: *const MetalBuffer,
-    output_buf: *const MetalBuffer,
-    M: u32, // output rows (e.g. q_dim, kv_dim, inter_dim)
-    K: u32, // inner dim (hidden_dim)
-    N: u32, // number of tokens
-) void {
-    const nb01 = @as(u64, K / QK_K) * 144; // bytes per weight row (Q4_K block size)
-    const push = GemmQ4kPush{
-        .ne00 = @intCast(K),
-        .ne02 = 1,
-        .nb01 = nb01,
-        .nb02 = nb01 * @as(u64, M),
-        .ne12 = 1,
-        .nb10 = 4, // sizeof(f32)
-        .nb11 = @as(u64, K) * 4,
-        .nb12 = @as(u64, K) * 4 * N,
-        .ne0 = @intCast(M),
-        .ne1 = @intCast(N),
-        .src0_off = tensorPageOffset(engine.model, tensor),
-    };
-    // src0 = weight buffer (with page offset baked into the buffer start)
-    // src1 = input buffer (N×K f32 matrix)
-    // dst  = output buffer (N×M f32 matrix, column-major)
-    const weight_buf = &tensor.gpu_buffer;
-    const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
-    const tg_m = (@as(u32, @intCast(M)) + 63) / 64; // threadgroups in M dimension
-    const tg_n = (@as(u32, @intCast(N)) + 31) / 32; // threadgroups in N dimension
-    // push_idx=0: push constants at buffer(0), data buffers shifted to buffer(1..3)
-    // Threadgroup memory: 4096 (A tile) + 4096 (B tile) = 8192 bytes
-    cmd.dispatchV2WithTgMem(&engine.gemm_q4k_pipe, .{ tg_n, tg_m, 1 }, .{ 128, 1, 1 }, &bufs, &push, @sizeOf(GemmQ4kPush), 0, 8192);
-}
-
-/// Dispatch a Q6_K GEMM: same interface as dispatchGemmQ4k but for Q6_K weights.
-fn dispatchGemmQ6k(
-    engine: *InferenceEngine,
-    cmd: *MetalCommand,
-    tensor: *const metal_loader.LoadedTensor,
-    input_buf: *const MetalBuffer,
-    output_buf: *const MetalBuffer,
-    M: u32,
-    K: u32,
-    N: u32,
-) void {
-    const nb01 = @as(u64, K / QK_K) * 210; // Q6_K block size = 210 bytes
-    const push = GemmQ4kPush{ // same layout as Q4_K push — the struct is identical
-        .ne00 = @intCast(K),
-        .ne02 = 1,
-        .nb01 = nb01,
-        .nb02 = nb01 * @as(u64, M),
-        .ne12 = 1,
-        .nb10 = 4,
-        .nb11 = @as(u64, K) * 4,
-        .nb12 = @as(u64, K) * 4 * N,
-        .ne0 = @intCast(M),
-        .ne1 = @intCast(N),
-        .src0_off = tensorPageOffset(engine.model, tensor),
-    };
-    const weight_buf = &tensor.gpu_buffer;
-    const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
-    const tg_m = (@as(u32, @intCast(M)) + 63) / 64;
-    const tg_n = (@as(u32, @intCast(N)) + 31) / 32;
-    cmd.dispatchV2WithTgMem(&engine.gemm_q6k_pipe, .{ tg_n, tg_m, 1 }, .{ 128, 1, 1 }, &bufs, &push, @sizeOf(GemmQ4kPush), 0, 8192);
-}
-
-const QK_K = 256;
-
-/// Push constants for batched causal flash attention.
-const BatchedFlashAttnPush = extern struct {
-    head_dim: u32,
-    n_heads: u32,
-    n_kv_heads: u32,
-    kv_len: u32,
-    n_queries: u32,
-    kv_pos_offset: u32,
-};
-
-/// Dispatch batched causal flash attention for prefill.
-/// Q layout: [n_queries × n_heads × head_dim], contiguous.
-/// KV cache: standard [seq × n_kv_heads × head_dim].
-/// Output: same layout as Q.
-fn dispatchBatchedFlashAttn(
-    engine: *InferenceEngine,
-    cmd: *MetalCommand,
-    q_buf: *const MetalBuffer,
-    k_cache: *const MetalBuffer,
-    v_cache: *const MetalBuffer,
-    out_buf: *const MetalBuffer,
-    head_dim: u32,
-    n_heads: u32,
-    n_kv_heads: u32,
-    n_queries: u32,
-    kv_pos_offset: u32,
-) void {
-    const push = BatchedFlashAttnPush{
-        .head_dim = head_dim,
-        .n_heads = n_heads,
-        .n_kv_heads = n_kv_heads,
-        .kv_len = kv_pos_offset + n_queries,
-        .n_queries = n_queries,
-        .kv_pos_offset = kv_pos_offset,
-    };
-    const bufs = [_]*const MetalBuffer{ q_buf, k_cache, v_cache, out_buf };
-    // Grid: (n_heads, n_queries, 1) — one workgroup per (head, query) pair
-    cmd.dispatchV2(&engine.flash_attn_batched_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnPush), 0);
-}
-
-/// Batched prefill with GEMM: processes all prompt tokens layer-by-layer using
-/// simdgroup matrix multiply for all projections. The GEMM's different accumulation
-/// pattern (fp16 tiles, shared weight dequantization) produces results that match
-/// llama.cpp's batched prefill.
-fn prefillBatched(engine: *InferenceEngine, prompt_tokens: []const u32, allocator: std.mem.Allocator) !void {
-    const n: u32 = @intCast(prompt_tokens.len);
-    if (n == 0) return;
-
-    const cfg = engine.config;
-    const hd = cfg.hidden_dim;
-    const qd: u32 = cfg.n_heads * cfg.head_dim;
-    const kvd: u32 = cfg.n_kv_heads * cfg.head_dim;
-    const inter: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hd * 4;
-    const rd: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
-    const inv_freq_ptr: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
-    const inv_freq = inv_freq_ptr[0 .. rd / 2];
-
-    // Allocate per-token hidden states and batched projection buffers
-    const hs = try allocator.alloc(f32, @as(usize, n) * hd);
-    defer allocator.free(hs);
-    // Batched norm output: [n × hidden_dim] — input to GEMM projections
-    const bn = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * hd * @sizeOf(f32));
-    defer metal_buffer.freeBuffer(@constCast(&bn));
-    // Batched Q/K/V GEMM outputs
-    const bq = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * qd * @sizeOf(f32));
-    defer metal_buffer.freeBuffer(@constCast(&bq));
-    const bk = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * kvd * @sizeOf(f32));
-    defer metal_buffer.freeBuffer(@constCast(&bk));
-    const bv = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * kvd * @sizeOf(f32));
-    defer metal_buffer.freeBuffer(@constCast(&bv));
-    // Batched attention output: same layout as Q
-    const ba = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * qd * @sizeOf(f32));
-    defer metal_buffer.freeBuffer(@constCast(&ba));
-
-    // Load all embeddings
-    for (prompt_tokens, 0..) |tok, t| {
-        try engine.loadTokenEmbedding(tok);
-        const src: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-        @memcpy(hs[t * hd ..][0..hd], src[0..hd]);
-    }
-
-    for (0..cfg.n_layers) |li| {
-        const lt = engine.layer_tensors[li];
-        const q_t = lt.attn_q orelse return error.MissingTensor;
-        const k_t = lt.attn_k orelse return error.MissingTensor;
-        const v_t = lt.attn_v orelse return error.MissingTensor;
-        const o_t = lt.attn_output orelse return error.MissingTensor;
-
-        // Step 1: Batch all tokens' RMS norms into contiguous buffer bn
-        {
-            const norm_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_norm_bufs[li].cpu_ptr.?));
-            const bn_ptr: [*]f32 = @ptrCast(@alignCast(bn.cpu_ptr.?));
-            for (0..n) |t| {
-                cpuRmsNormMul(@ptrCast(hs.ptr + t * hd), norm_w[0..hd], bn_ptr + t * hd, hd, 1, cfg.rms_norm_eps);
-            }
-        }
-
-        // Step 2: GEMM for ALL projections — all tokens simultaneously
-        {
-            var cmd = try metal_command.beginCommand(engine.device.ctx);
-            if (q_t.info.type_ == .q4_k)
-                dispatchGemmQ4k(engine, &cmd, q_t, &bn, &bq, qd, hd, n)
-            else if (q_t.info.type_ == .q6_k)
-                dispatchGemmQ6k(engine, &cmd, q_t, &bn, &bq, qd, hd, n)
-            else
-                dispatchDmmvOnCmd(engine, &cmd, q_t, &bn, &bq, qd, hd, 0);
-
-            if (k_t.info.type_ == .q4_k)
-                dispatchGemmQ4k(engine, &cmd, k_t, &bn, &bk, kvd, hd, n)
-            else if (k_t.info.type_ == .q6_k)
-                dispatchGemmQ6k(engine, &cmd, k_t, &bn, &bk, kvd, hd, n)
-            else
-                dispatchDmmvOnCmd(engine, &cmd, k_t, &bn, &bk, kvd, hd, 0);
-
-            if (v_t.info.type_ == .q4_k)
-                dispatchGemmQ4k(engine, &cmd, v_t, &bn, &bv, kvd, hd, n)
-            else if (v_t.info.type_ == .q6_k)
-                dispatchGemmQ6k(engine, &cmd, v_t, &bn, &bv, kvd, hd, n)
-            else
-                dispatchDmmvOnCmd(engine, &cmd, v_t, &bn, &bv, kvd, hd, 0);
-            cmd.commitAndWait();
-        }
-
-        // Step 3: Per-token RoPE, Q/K norms, KV write
-        {
-            const bq_ptr: [*]f32 = @ptrCast(@alignCast(bq.cpu_ptr.?));
-            const bk_ptr: [*]f32 = @ptrCast(@alignCast(bk.cpu_ptr.?));
-            const bv_ptr: [*]f32 = @ptrCast(@alignCast(bv.cpu_ptr.?));
-            for (0..n) |t| {
-                // Copy this token's Q/K/V from batched GEMM output to engine buffers
-                const q_dst: [*]f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-                const k_dst: [*]f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
-                const v_dst: [*]f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
-                @memcpy(q_dst[0..qd], (bq_ptr + t * qd)[0..qd]);
-                @memcpy(k_dst[0..kvd], (bk_ptr + t * kvd)[0..kvd]);
-                @memcpy(v_dst[0..kvd], (bv_ptr + t * kvd)[0..kvd]);
-
-                // Q/K norms
-                if (engine.attn_q_norm_present[li]) {
-                    const qnw: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[li].cpu_ptr.?));
-                    cpuPerHeadRmsNormMul(q_dst, qnw[0..cfg.head_dim], cfg.head_dim, cfg.n_heads, cfg.rms_norm_eps);
-                }
-                if (engine.attn_k_norm_present[li]) {
-                    const knw: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[li].cpu_ptr.?));
-                    cpuPerHeadRmsNormMul(k_dst, knw[0..cfg.head_dim], cfg.head_dim, cfg.n_kv_heads, cfg.rms_norm_eps);
-                }
-
-                // RoPE
-                cpuRope(q_dst, cfg.head_dim, rd, cfg.n_heads, @intCast(t), inv_freq);
-                cpuRope(k_dst, cfg.head_dim, rd, cfg.n_kv_heads, @intCast(t), inv_freq);
-
-                // KV cache write
-                engine.position = @intCast(t);
-                var kv_cmd = try metal_command.beginCommand(engine.device.ctx);
-                dispatchKvCacheWriteOnCmd(engine, &kv_cmd, li, kvd, @as(u32, @intCast(t)) * kvd);
-                kv_cmd.commitAndWait();
-
-                // Copy RoPE'd Q to batched Q buffer for batched attention
-                @memcpy((bq_ptr + t * qd)[0..qd], q_dst[0..qd]);
-            }
-        }
-
-        // BATCHED causal flash attention: all queries at once
-        {
-            var cmd = try metal_command.beginCommand(engine.device.ctx);
-            dispatchBatchedFlashAttn(engine, &cmd, &bq, &engine.kv_k_cache[li], &engine.kv_v_cache[li], &ba, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, n, 0);
-            cmd.commitAndWait();
-        }
-
-        // Per-token: O projection → attention residual → FFN
-        for (0..n) |t| {
-            // Copy batched attention output to engine buffer
-            const ba_src: [*]const f32 = @ptrCast(@alignCast(ba.cpu_ptr.?));
-            const ao_dst: [*]f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
-            @memcpy(ao_dst[0..qd], (ba_src + t * qd)[0..qd]);
-
-            // Sigmoid gate (Qwen3.5 only)
-            const q_out_dim: u32 = @intCast(q_t.info.dims[1]);
-
-            // Load hidden state
-            const h_dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-            @memcpy(h_dst[0..hd], hs[t * hd ..][0..hd]);
-
-            var cmd = try metal_command.beginCommand(engine.device.ctx);
-            if (q_out_dim > qd) {
-                dispatchSigmoidMulOnCmd(engine, &cmd, &engine.gate_buf, &engine.attn_out_buf, qd);
-                cmd.barrier();
-            }
-            // O projection
-            dispatchDmmvOnCmd(engine, &cmd, o_t, &engine.attn_out_buf, &engine.down_buf, hd, qd, 0);
-            cmd.barrier();
-            // Attention residual
-            {
-                const rp = ScaleAccPush{ .n = hd, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                const rb = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hd + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &rb, &rp, @sizeOf(ScaleAccPush), 0);
-            }
-            cmd.barrier();
-            // FFN norm
-            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[li], hd, 1);
-            cmd.barrier();
-            cmd.commitAndWait();
-
-            // Save norm_buf to batched norm buffer for FFN GEMM
-            {
-                const nm_src: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
-                const bn_dst: [*]f32 = @ptrCast(@alignCast(bn.cpu_ptr.?));
-                @memcpy((bn_dst + t * hd)[0..hd], nm_src[0..hd]);
-            }
-
-            // Save hidden state (post-attention residual)
-            const h_src: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-            @memcpy(hs[t * hd ..][0..hd], h_src[0..hd]);
-        }
-
-        // BATCHED FFN: GEMM gate/up for all tokens, per-token SwiGLU+down+residual
-        {
-            const gt = lt.ffn_gate orelse return error.MissingTensor;
-            const ut = lt.ffn_up orelse return error.MissingTensor;
-            const dt = lt.ffn_down orelse return error.MissingTensor;
-
-            // Allocate batched gate/up/swiglu/down buffers
-            const bg = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * inter * @sizeOf(f32));
-            defer metal_buffer.freeBuffer(@constCast(&bg));
-            const bu = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * inter * @sizeOf(f32));
-            defer metal_buffer.freeBuffer(@constCast(&bu));
-
-            // GEMM gate and up for all tokens
-            {
-                var cmd = try metal_command.beginCommand(engine.device.ctx);
-                if (gt.info.type_ == .q4_k) dispatchGemmQ4k(engine, &cmd, gt, &bn, &bg, inter, hd, n)
-                else if (gt.info.type_ == .q6_k) dispatchGemmQ6k(engine, &cmd, gt, &bn, &bg, inter, hd, n)
-                else dispatchDmmvOnCmd(engine, &cmd, gt, &bn, &bg, inter, hd, 0);
-
-                if (ut.info.type_ == .q4_k) dispatchGemmQ4k(engine, &cmd, ut, &bn, &bu, inter, hd, n)
-                else if (ut.info.type_ == .q6_k) dispatchGemmQ6k(engine, &cmd, ut, &bn, &bu, inter, hd, n)
-                else dispatchDmmvOnCmd(engine, &cmd, ut, &bn, &bu, inter, hd, 0);
-                cmd.commitAndWait();
-            }
-
-            // Per-token: SwiGLU, down projection, residual
-            for (0..n) |t| {
-                // Copy gate/up from batched buffers
-                const bg_src: [*]const f32 = @ptrCast(@alignCast(bg.cpu_ptr.?));
-                const bu_src: [*]const f32 = @ptrCast(@alignCast(bu.cpu_ptr.?));
-                const g_dst: [*]f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
-                const u_dst: [*]f32 = @ptrCast(@alignCast(engine.up_buf.cpu_ptr.?));
-                @memcpy(g_dst[0..inter], (bg_src + t * inter)[0..inter]);
-                @memcpy(u_dst[0..inter], (bu_src + t * inter)[0..inter]);
-
-                // Load hidden state
-                const h_dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-                @memcpy(h_dst[0..hd], hs[t * hd ..][0..hd]);
-
-                var fc = try metal_command.beginCommand(engine.device.ctx);
-                const sp = SwiGLUPush{ .n = inter };
-                const sb = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                fc.dispatchV2(&engine.swiglu_pipe, .{ (inter + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sb, &sp, @sizeOf(SwiGLUPush), 0);
-                fc.barrier();
-                dispatchDmmvOnCmd(engine, &fc, dt, &engine.swiglu_buf, &engine.down_buf, hd, inter, 0);
-                fc.barrier();
-                {
-                    const rp = ScaleAccPush{ .n = hd, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                    const rb = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                    fc.dispatchV2(&engine.scale_acc_pipe, .{ (hd + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &rb, &rp, @sizeOf(ScaleAccPush), 0);
-                }
-                fc.commitAndWait();
-
-                // Save updated hidden state
-                const h_res: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-                @memcpy(hs[t * hd ..][0..hd], h_res[0..hd]);
-            }
-        }
-    }
-
-    // Final: last token → norm → LM head
-    {
-        const h_dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-        @memcpy(h_dst[0..hd], hs[(n - 1) * hd ..][0..hd]);
-    }
-    {
-        var cmd = try metal_command.beginCommand(engine.device.ctx);
-        dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hd, 1);
-        cmd.barrier();
-        dispatchDmmvOnCmd(engine, &cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hd, 0);
-        cmd.commitAndWait();
-    }
-    engine.position = n;
-}
-
-// ---------------------------------------------------------------------------
 // Generate
 // ---------------------------------------------------------------------------
 
@@ -4464,16 +4055,11 @@ pub fn generateWithMetrics(
 
     engine.resetRequestState();
 
-    // Prefill: batched layer-by-layer for dense models, sequential for MoE/SSM
+    // Prefill: process each prompt token through all layers
     const prefill_start = std.time.nanoTimestamp();
-    const use_batched = engine.config.n_experts == 0 and engine.config.ssm_d_inner == 0 and prompt_tokens.len > 1;
-    if (use_batched) {
-        try prefillBatched(engine, prompt_tokens, allocator);
-    } else {
-        for (prompt_tokens) |token_id| {
-            try engine.loadTokenEmbedding(token_id);
-            try runDecodeStep(engine);
-        }
+    for (prompt_tokens) |token_id| {
+        try engine.loadTokenEmbedding(token_id);
+        try runDecodeStep(engine);
     }
     const prefill_end = std.time.nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);

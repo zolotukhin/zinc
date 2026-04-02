@@ -60,6 +60,8 @@ pub const OpType = enum {
     rms_norm_mul,
     /// SwiGLU activation: SiLU(x) * y.
     swiglu,
+    /// GEGLU activation: GELU(x) * y, used by Gemma models.
+    geglu,
     /// Sigmoid gating: sigmoid(x) * y, used by SSM layers.
     sigmoid_mul,
     /// Rotary position embedding with reshape and KV-cache write.

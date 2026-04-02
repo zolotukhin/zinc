@@ -1415,6 +1415,14 @@ pub const InferenceEngine = struct {
         // Dequantize directly into pre-allocated staging buffer (zero alloc)
         const staging_f32: [*]f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
         dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, staging_f32[0..hidden_dim]);
+
+        // Gemma models scale embeddings by sqrt(hidden_dim) before the first layer.
+        if (self.model.config.architecture == .gemma) {
+            const scale: f32 = @sqrt(@as(f32, @floatFromInt(hidden_dim)));
+            for (0..hidden_dim) |i| {
+                staging_f32[i] *= scale;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1845,6 +1853,19 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, q_dim);
                 self.decode_cmd.computeBarrier();
 
+                // Gemma post-attention norm: applied to o_proj BEFORE residual add.
+                // Detected when both post_attention_norm AND ffn_norm tensors exist.
+                const post_attn_norm_tensor = self.findLayerTensor(layer, "post_attention_norm.weight");
+                const has_separate_ffn_norm = self.findLayerTensor(layer, "ffn_norm.weight") != null;
+                if (post_attn_norm_tensor != null and has_separate_ffn_norm) {
+                    const panorm = post_attn_norm_tensor.?;
+                    const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, self.o_proj_buf.handle, hidden_size, panorm.gpu_buffer.handle, panorm.gpu_buffer.size, self.o_proj_buf.handle, hidden_size);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
+                    self.decode_cmd.computeBarrier();
+                }
+
                 // Attention residual: hidden_buf += o_proj_buf
                 {
                     const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
@@ -1946,9 +1967,12 @@ pub const InferenceEngine = struct {
                 self.endProfilePhase(.ssm, ssm_phase);
             }
 
-            // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
-            const ffn_norm_tensor = self.findLayerTensor(layer, "post_attention_norm.weight") orelse
-                self.findLayerTensor(layer, "ffn_norm.weight") orelse return error.TensorNotFound;
+            // --- Pre-FFN norm ---
+            // Gemma: ffn_norm.weight is separate from post_attention_norm (which was applied above).
+            // Qwen3.5: post_attention_norm IS the FFN norm (no separate ffn_norm tensor).
+            // LLaMA: only ffn_norm.weight exists.
+            const ffn_norm_tensor = self.findLayerTensor(layer, "ffn_norm.weight") orelse
+                self.findLayerTensor(layer, "post_attention_norm.weight") orelse return error.TensorNotFound;
             {
                 const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                 const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -2043,13 +2067,19 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_gate_up, moe_gate_up_phase);
 
-                    // SwiGLU: ALL experts at once (N = n_used * inter_dim)
+                    // Activation: ALL experts at once (N = n_used * inter_dim)
+                    // Gemma uses GEGLU, others use SwiGLU
                     const moe_swiglu_phase = self.beginProfilePhase();
                     {
-                        const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
-                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        const ds = try self.allocDescSet(if (config.architecture == .gemma)
+                            (self.elementwise.pipeline_geglu orelse return error.ShaderNotLoaded).descriptor_set_layout
+                        else
+                            (self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded).descriptor_set_layout);
                         self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
-                        try self.elementwise.recordSwiglu(&self.decode_cmd, ds, n_used * inter_dim);
+                        if (config.architecture == .gemma)
+                            try self.elementwise.recordGeglu(&self.decode_cmd, ds, n_used * inter_dim)
+                        else
+                            try self.elementwise.recordSwiglu(&self.decode_cmd, ds, n_used * inter_dim);
                     }
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_swiglu, moe_swiglu_phase);
@@ -2135,7 +2165,12 @@ pub const InferenceEngine = struct {
                         try self.dispatchDmmvWithOffset(up_exps, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, up_offset);
                         self.decode_cmd.computeBarrier();
 
-                        {
+                        if (config.architecture == .gemma) {
+                            const pip = &(self.elementwise.pipeline_geglu orelse return error.ShaderNotLoaded);
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
+                            try self.elementwise.recordGeglu(&self.decode_cmd, ds, inter_dim);
+                        } else {
                             const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                             const ds = try self.allocDescSet(pip.descriptor_set_layout);
                             self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
@@ -2188,7 +2223,12 @@ pub const InferenceEngine = struct {
                     self.endProfilePhase(.shared_proj, shared_proj_phase);
 
                     const shared_swiglu_phase = self.beginProfilePhase();
-                    {
+                    if (config.architecture == .gemma) {
+                        const pip = &(self.elementwise.pipeline_geglu orelse return error.ShaderNotLoaded);
+                        const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(ds2, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
+                        try self.elementwise.recordGeglu(&self.decode_cmd, ds2, shexp_inter_dim);
+                    } else {
                         const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                         const ds2 = try self.allocDescSet(pip.descriptor_set_layout);
                         self.writeDescSet3(ds2, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
@@ -2255,6 +2295,16 @@ pub const InferenceEngine = struct {
                 }
                 self.endProfilePhase(.shared_expert, shared_phase);
 
+                // Gemma post-FFN norm: applied to moe_out_buf before residual add.
+                const moe_post_ffn_norm = self.findLayerTensor(layer, "post_ffw_norm.weight");
+                if (moe_post_ffn_norm) |pfn| {
+                    const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, self.moe_out_buf.handle, hidden_size, pfn.gpu_buffer.handle, pfn.gpu_buffer.size, self.moe_out_buf.handle, hidden_size);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
+                    self.decode_cmd.computeBarrier();
+                }
+
                 // FFN residual: hidden_buf += moe_out_buf
                 {
                     const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
@@ -2263,7 +2313,9 @@ pub const InferenceEngine = struct {
                     try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
                 }
             } else {
-                // Dense FFN: gate → up → SwiGLU → down → residual
+                // Dense FFN: gate → up → activation → down → residual
+                // Gemma uses GEGLU (GELU gating), all others use SwiGLU (SiLU gating).
+                const use_geglu = config.architecture == .gemma;
                 const gate_tensor = self.findLayerTensor(layer, "ffn_gate.weight") orelse return error.TensorNotFound;
                 const up_tensor = self.findLayerTensor(layer, "ffn_up.weight") orelse return error.TensorNotFound;
                 const down_tensor = self.findLayerTensor(layer, "ffn_down.weight") orelse return error.TensorNotFound;
@@ -2272,7 +2324,12 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(up_tensor, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
                 self.decode_cmd.computeBarrier();
 
-                {
+                if (use_geglu) {
+                    const pip = &(self.elementwise.pipeline_geglu orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
+                    try self.elementwise.recordGeglu(&self.decode_cmd, ds, inter_dim);
+                } else {
                     const pip = &(self.elementwise.pipeline_swiglu orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet3(ds, self.gate_buf.handle, self.gate_buf.size, self.up_buf.handle, self.up_buf.size, self.swiglu_buf.handle, self.swiglu_buf.size);
@@ -2338,6 +2395,16 @@ pub const InferenceEngine = struct {
                     _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
+                }
+
+                // Gemma post-FFN norm: applied to down_buf before residual add.
+                const post_ffn_norm_tensor = self.findLayerTensor(layer, "post_ffw_norm.weight");
+                if (post_ffn_norm_tensor) |pfn| {
+                    const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, self.down_buf.handle, hidden_size, pfn.gpu_buffer.handle, pfn.gpu_buffer.size, self.down_buf.handle, hidden_size);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
+                    self.decode_cmd.computeBarrier();
                 }
 
                 // FFN residual: hidden_buf += down_buf

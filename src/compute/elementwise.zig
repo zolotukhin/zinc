@@ -104,6 +104,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_rms_norm: ?Pipeline,
     /// SWIGLU pipeline, or null.
     pipeline_swiglu: ?Pipeline,
+    /// GEGLU pipeline (GELU-gated, used by Gemma), or null.
+    pipeline_geglu: ?Pipeline,
     /// ROPE pipeline, or null.
     pipeline_rope: ?Pipeline,
     /// DEINTERLEAVE pipeline, or null.
@@ -175,6 +177,13 @@ pub const ElementwiseDispatch = struct {
         const swiglu_path = std.fmt.bufPrint(&path_buf, "{s}/swiglu.spv", .{shader_dir}) catch unreachable;
         const pipeline_swiglu = pipeline_mod.createFromSpirv(instance, swiglu_path, 3, @sizeOf(SwigluPush), &.{}, allocator) catch |err| blk: {
             log.warn("swiglu shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // GEGLU: 2 inputs (gate, up) + 1 output = 3 bindings (same layout as SwiGLU)
+        const geglu_path = std.fmt.bufPrint(&path_buf, "{s}/geglu.spv", .{shader_dir}) catch unreachable;
+        const pipeline_geglu = pipeline_mod.createFromSpirv(instance, geglu_path, 3, @sizeOf(SwigluPush), &.{}, allocator) catch |err| blk: {
+            log.warn("geglu shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -258,6 +267,7 @@ pub const ElementwiseDispatch = struct {
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
+            .pipeline_geglu = pipeline_geglu,
             .pipeline_rope = pipeline_rope,
             .pipeline_deinterleave = pipeline_deinterleave,
             .pipeline_sigmoid_mul = pipeline_sigmoid_mul,
@@ -320,6 +330,20 @@ pub const ElementwiseDispatch = struct {
         n_elements: u32,
     ) !void {
         const pip = if (self.pipeline_swiglu) |*p| p else return error.ShaderNotLoaded;
+        const push = SwigluPush{ .N = n_elements };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
+    /// Record a GEGLU activation dispatch (GELU-gated, used by Gemma).
+    /// Same buffer layout as SwiGLU: gate, up → output.
+    pub fn recordGeglu(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+    ) !void {
+        const pip = if (self.pipeline_geglu) |*p| p else return error.ShaderNotLoaded;
         const push = SwigluPush{ .N = n_elements };
         const workgroups = (n_elements + 63) / 64;
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
@@ -519,6 +543,7 @@ pub const ElementwiseDispatch = struct {
     pub fn deinit(self: *ElementwiseDispatch) void {
         if (self.pipeline_rms_norm) |*p| p.deinit();
         if (self.pipeline_swiglu) |*p| p.deinit();
+        if (self.pipeline_geglu) |*p| p.deinit();
         if (self.pipeline_rope) |*p| p.deinit();
         if (self.pipeline_deinterleave) |*p| p.deinit();
         if (self.pipeline_sigmoid_mul) |*p| p.deinit();

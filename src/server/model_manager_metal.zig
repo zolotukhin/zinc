@@ -463,6 +463,7 @@ fn fallbackModelName(model: *const loader_mod.Model) []const u8 {
         .mistral => "mistral",
         .mamba => "mamba",
         .jamba => "jamba",
+        .gemma => "gemma",
         .unknown => "zinc-model",
     };
 }
