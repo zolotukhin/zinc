@@ -70,6 +70,11 @@ function rehypeDocHeadingAnchors() {
 
 export async function getStaticPaths() {
   const docMeta: Record<string, { title: string; description: string; keywords: string }> = {
+    'development': {
+      title: 'ZINC Development Guide',
+      description: 'Build, test, debug, benchmark, and contribute to ZINC — prerequisites, project structure, debug flags, graph export, profiling, and architecture decisions.',
+      keywords: 'ZINC development, build ZINC, test ZINC, debug ZINC, ZINC contributing, Zig build, graph export, GPU profiling, RDNA4 benchmarking, Metal development, Vulkan development',
+    },
     'getting-started': {
       title: 'Getting Started with ZINC',
       description: 'How to build ZINC, verify the Vulkan environment, load a GGUF model, and run your first prompt on AMD GPUs. Includes the current experimental caveats and recommended first steps.',
