@@ -105,6 +105,11 @@ export async function getStaticPaths() {
       description: 'Hardware specs, ISA opcodes, WMMA matrix cores, memory hierarchy, wave execution, register allocation, and Vulkan compute details for AMD RX 9070 XT, RX 7900 XTX, and Radeon AI PRO R9700.',
       keywords: 'RDNA4 specs, RDNA3 specs, gfx1201, gfx1100, RX 9070 XT specs, RX 7900 XTX specs, Radeon AI PRO R9700 specs, AMD GPU ISA, WMMA, wave64, wave32, cooperative matrix, VGPR, LDS, compute unit, Vulkan dispatch, DMMV, V_FMA_F32, V_DOT2_F32_F16, memory bandwidth, GPU ECC, RADV, SPIR-V',
     },
+    'apple-silicon-mlx-reference': {
+      title: 'Apple Silicon + MLX Architecture Reference',
+      description: 'Metal GPU families, MLX framework architecture, M1–M5 capability progression, runtime detection, MSL kernel optimization, and Apple AMX/AGX ISA status for LLM inference on Apple Silicon.',
+      keywords: 'Apple Silicon inference, Metal GPU, MLX framework, M1 M2 M3 M4 M5, Apple GPU family, MTLGPUFamily, Metal Shading Language, MSL kernels, TensorOps, Metal 4, Apple Neural Engine, AMX, AGX, simdgroup, threadgroup, unified memory, Apple Silicon LLM, ZINC Metal backend',
+    },
     'api': {
       title: 'ZINC API Reference',
       description: 'OpenAI-compatible HTTP API — chat completions, text completion, embeddings, model listing, and GPU health endpoints for local LLM inference.',
@@ -144,7 +149,7 @@ const contentHtml = String(
         light: 'github-light',
         dark: 'vitesse-dark',
       },
-      langs: ['zig', 'glsl', 'json', 'bash', 'typescript', 'javascript', 'text', 'c'],
+      langs: ['zig', 'glsl', 'json', 'bash', 'typescript', 'javascript', 'text', 'c', 'objc'],
     })
     .use(rehypeDocHeadingAnchors)
     .use(rehypeStringify)
