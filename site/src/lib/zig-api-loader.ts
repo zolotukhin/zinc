@@ -935,6 +935,7 @@ async function loadZigApiImpl(): Promise<ZigApiIndex> {
   }
 
   if (structSymbols.length > 0) {
+    const structModulePaths = [...new Set(structSymbols.map(s => s.modulePath))];
     const zigScriptContent = `const std = @import("std");
 
 fn dumpStruct(comptime T: type, name: []const u8, first: *bool, w: anytype) !void {
@@ -966,14 +967,14 @@ pub fn main() !void {
     try out.print("{{", .{});
     var first = true;
 ${structSymbols.map((s) => {
-      const modIdx = [...new Set(structSymbols.map(x => x.modulePath))].indexOf(s.modulePath);
+      const modIdx = structModulePaths.indexOf(s.modulePath);
       return `    if (@TypeOf(mod${modIdx}.${s.qualifiedName}) == type) {\n        dumpStruct(mod${modIdx}.${s.qualifiedName}, "${s.qualifiedName}", &first, out) catch {};\n    }`;
     }).join('\n')}
     try out.print("}}", .{});
     try out.flush();
 }
 
-${[...new Set(structSymbols.map(s => s.modulePath))].map((path, idx) => `const mod${idx} = @import("${path}");`).join('\n')}
+${structModulePaths.map((path, idx) => `const mod${idx} = @import("../${path.replace(/^src\//, '')}");`).join('\n')}
 `;
 
     const { mkdir, writeFile } = await import('node:fs/promises');
@@ -981,8 +982,9 @@ ${[...new Set(structSymbols.map(s => s.modulePath))].map((path, idx) => `const m
     const { promisify } = await import('node:util');
     const execFileAsync = promisify(execFile);
 
-    const scriptPath = join(REPO_ROOT, '.zig-struct-analyzer.generated.zig');
-    const cacheRoot = join(REPO_ROOT, '.zig-api-cache');
+    const cacheRoot = join(REPO_ROOT, 'src', '.zig-api-cache');
+    const scriptPath = join(cacheRoot, 'zig-struct-analyzer.generated.zig');
+    const runnerPath = join(REPO_ROOT, 'src', 'zig-struct-analyzer.zig');
     const globalCache = join(cacheRoot, 'global');
     const localCache = join(cacheRoot, 'local');
     await mkdir(globalCache, { recursive: true });
@@ -1012,7 +1014,7 @@ ${[...new Set(structSymbols.map(s => s.modulePath))].map((path, idx) => `const m
         zigArgs.push('-lvulkan');
       }
 
-      zigArgs.push(scriptPath);
+      zigArgs.push(runnerPath);
 
       const { stdout } = await execFileAsync('zig', zigArgs, {
         cwd: REPO_ROOT,

@@ -5,7 +5,7 @@ zig-out/
 .zig-cache-local/
 .zig-global-cache-local/
 .zig-api-cache/
-.zig-struct-analyzer.generated.zig
+src/.zig-api-cache/
 .tmp_gguf_inspect.zig
 *.o
 *.spv
