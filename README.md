@@ -23,12 +23,12 @@
   </a>
 </p>
 
-> Local LLM inference on AMD GPUs and Apple Silicon — no ROCm, no CUDA, one binary.
+> Local LLM inference on AMD GPUs and Apple Silicon — no ROCm, no MLX, one binary.
 
 <p align="center">
   <img src="assets/zinc-chat-demo.gif" alt="ZINC Chat Demo — streaming inference on AMD RDNA4" width="720">
   <br>
-  <em>35B parameter model running locally — Zig + Vulkan/Metal, no ROCm, no CUDA</em>
+  <em>35B parameter model running locally — Zig + Vulkan/Metal, no ROCm, no MLX</em>
 </p>
 
 ## Supported Platforms
