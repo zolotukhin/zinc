@@ -1,5 +1,5 @@
 ---
-title: "Why Zig is the secret weapon behind ZINC"
+title: "Why Zig is the best language for GPU programming across Metal and Vulkan"
 date: "2026-04-02"
 tags:
   - zinc
@@ -17,13 +17,31 @@ keywords:
   - Zig Vulkan backend
   - comptime GPU dispatch
   - Zig FFI Metal
+  - Zig FFI Objective-C
+  - Zig C interop
   - Zig build system
+  - Zig build.zig
   - cross-platform GPU inference
-  - Zig error handling GPU
+  - Zig error handling
+  - Zig allocators
+  - Zig memory management
+  - Zig comptime
+  - Zig vs C++
+  - Zig vs C++ GPU programming
+  - Zig vs Rust GPU
+  - Zig systems programming
+  - Zig real world project
+  - Zig production use case
+  - why use Zig
+  - Zig for AI inference
+  - Zig for machine learning
   - ZINC inference engine
-  - Zig vs C++ GPU
   - local LLM inference Zig
-excerpt: "We did not pick Zig because it was trendy. We picked it because building a dual-backend GPU inference engine across Vulkan and Metal in C++ would have buried us. Comptime, explicit allocators, and a build system that actually works turned out to be the difference between shipping and drowning in glue code."
+  - Zig cross-platform
+  - Zig Metal Shading Language
+  - Zig SPIR-V shaders
+  - Zig Vulkan compute
+excerpt: "Zig is the best systems programming language we have found for GPU work. We used it to build a dual-backend inference engine targeting both Vulkan and Metal from a single codebase. Comptime eliminated runtime dispatch, explicit allocators made memory predictable, and the build system compiled shaders and linked frameworks without a single external tool. Here is why Zig beats C++ for cross-platform GPU programming."
 ---
 
 We did not pick Zig because it was trendy. We picked it because we had a gut feeling that language choice would matter more than any single optimization we could write. Seven weeks and two GPU backends later, that gut feeling turned into a conviction.
@@ -32,7 +50,7 @@ ZINC runs the same LLM inference engine on [AMD GPUs through Vulkan](/blog/2026-
 
 This post is about the moments where the language saved us, the patterns that make GPU programming in Zig surprisingly pleasant, and the honest realization that if we had started this in C++, we would still be writing [CMakeLists](https://cmake.org/cmake/help/latest/manual/cmake-language.7.html).
 
-## One `if` decides the entire backend
+## Zig comptime: one `if` decides the entire GPU backend
 
 Here is the core of our GPU abstraction. This is the entire file:
 
@@ -67,7 +85,7 @@ flowchart LR
 
 Every function call through `backend` is a direct call. The optimizer sees through it completely. There is zero indirection penalty.
 
-## The one Objective-C file
+## Zig FFI: the one Objective-C file
 
 [Metal](https://developer.apple.com/metal/) is an Apple framework. It speaks Objective-C. Our entire project is Zig. That sounds like a problem.
 
@@ -93,7 +111,7 @@ No bridging headers. No Objective-C++. No `@autoreleasepool` blocks leaking into
 
 Compare this to what Metal integration looks like in a C++ codebase. You either pull in Objective-C++ (which means every file that touches Metal becomes `.mm`), or you build an elaborate C wrapper with manual reference counting. We did the second option, but Zig made the wrapper so thin that it barely registers as complexity. The [Apple Silicon blog post](/blog/2026-04-01-bringing-zinc-to-apple-silicon) has more detail on how this shim evolved during the Metal port.
 
-## The build system that builds shaders
+## Zig build system: shaders, frameworks, one file
 
 Here is something that surprised us. [Zig's build system](https://ziglang.org/documentation/master/#Zig-Build-System) handles our entire cross-platform compilation, including GPU shaders, in a single `build.zig`:
 
@@ -143,7 +161,7 @@ flowchart TD
 
 We went from zero to "shaders compile, frameworks link, binary runs on both platforms" in an afternoon. The build system just worked. That is not something you say often in systems programming.
 
-## Errors that actually help
+## Zig error handling on the GPU
 
 GPU programming has a reputation for silent corruption. You write to the wrong buffer offset, and the output is garbage, but nothing crashes. You dispatch with the wrong workgroup size, and the shader reads uninitialized memory. Good luck debugging that at 3 AM. We [cataloged 13 bugs](/blog/2026-03-27-what-broke-first-when-we-built-zinc-on-amd-rdna4) in our first working forward pass, and most of them were exactly this kind of silent failure.
 
@@ -174,7 +192,7 @@ var gpu_buffer = try metal_buffer.wrapMmap(device_ctx, unaligned_ptr, size);
 
 No silent corruption. No garbage output two layers later. The error appeared exactly where the mistake was made.
 
-## No allocator, no allocation
+## Zig allocators: no allocator, no allocation
 
 Zig does not have a default allocator. If a function needs heap memory, it takes an `std.mem.Allocator` parameter. If it does not take one, it does not allocate. This is a guarantee enforced by the type system.
 
@@ -251,7 +269,7 @@ flowchart LR
   <figcaption>Same parser, same metadata, same config. Only the GPU upload path changes, and it is selected at compile time.</figcaption>
 </figure>
 
-## Comptime that writes code for you
+## Zig comptime that writes code for you
 
 One of our favorite patterns is using comptime to generate profiling infrastructure. We define an enum of profiling phases:
 
@@ -279,9 +297,9 @@ Add a new phase to the enum, and every timing array, every accumulator, every re
 
 This pattern shows up everywhere. Shader source lists, quantization type dispatch tables, error sets. Zig lets you write code that writes code, but unlike C++ templates, you can read it.
 
-## What we would have done in C++
+## Zig vs C++ for GPU programming
 
-We think about this sometimes. Not to bash C++ (it powers amazing projects), but to appreciate what we avoided.
+We think about this sometimes. Not to bash C++ (it powers amazing projects), but to appreciate what Zig gave us that C++ could not without significant friction.
 
 | | C++ approach | Zig approach |
 |---|---|---|
@@ -292,7 +310,7 @@ We think about this sometimes. Not to bash C++ (it powers amazing projects), but
 | **Error handling** | Exceptions or error codes (pick one, good luck being consistent) | Error unions everywhere, compiler-enforced handling |
 | **Shader list** | CMake glob or hand-maintained list with a comment saying "keep in sync" | `inline for` over comptime array, always in sync |
 
-None of these are impossible in C++. But each one requires discipline, convention, or tooling. In Zig, the language makes the right thing the easy thing.
+None of these are impossible in C++. But each one requires discipline, convention, or tooling. In Zig, the language makes the right thing the easy thing. That is the core argument for choosing Zig over C++ for systems programming in 2026.
 
 ## The honest part
 
