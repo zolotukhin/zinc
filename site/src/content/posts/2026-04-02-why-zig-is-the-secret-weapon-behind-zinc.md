@@ -44,7 +44,7 @@ keywords:
 excerpt: "Zig is the best systems programming language we have found for GPU work. We used it to build a dual-backend inference engine targeting both Vulkan and Metal from a single codebase. Comptime eliminated runtime dispatch, explicit allocators made memory predictable, and the build system compiled shaders and linked frameworks without a single external tool. Here is why Zig beats C++ for cross-platform GPU programming."
 ---
 
-We did not pick Zig because it was trendy. We picked it because we had a gut feeling that language choice would matter more than any single optimization we could write. Seven weeks and two GPU backends later, that gut feeling turned into a conviction.
+We did not pick Zig because it was trendy. We picked it because we had a gut feeling that language choice would matter more than any single optimization we could write. One week and two GPU backends later, that gut feeling turned into a conviction.
 
 ZINC runs the same LLM inference engine on [AMD GPUs through Vulkan](/blog/2026-03-25-why-we-are-building-zinc) and on [Apple Silicon through Metal](/blog/2026-04-01-bringing-zinc-to-apple-silicon). Not two engines. Not a compatibility layer. One codebase, two backends, zero runtime cost to switch between them. The reason that works is Zig.
 
@@ -320,6 +320,6 @@ But for this specific problem, building a GPU inference engine that targets two 
 
 The comptime system means our abstractions have zero runtime cost. The explicit allocator model means we can account for every byte on memory-constrained devices. The error union system means GPU setup failures surface immediately instead of becoming silent corruption. And the build system means we can compile shaders, link frameworks, and produce platform-native binaries from a single file that a human can actually read.
 
-Seven weeks ago we chose Zig because it seemed like a reasonable systems language. Today we are convinced it is the reason ZINC ships on two GPU platforms instead of one. Language choice matters. For this project, it might matter more than any single kernel optimization we have written.
+A week ago we chose Zig because it seemed like a reasonable systems language. Today we are convinced it is the reason ZINC ships on two GPU platforms instead of one. Language choice matters. For this project, it might matter more than any single kernel optimization we have written.
 
 If you want to see the engine in action, [Getting Started](/zinc/docs/getting-started) will get you running in five minutes. The full source is on [GitHub](https://github.com/zolotukhin/zinc). And if you want to follow the journey from the beginning, start with [why we are building ZINC](/blog/2026-03-25-why-we-are-building-zinc).
