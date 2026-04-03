@@ -58,10 +58,10 @@ export RADV_PERFTEST=coop_matrix  # skip on macOS
 ./zig-out/bin/zinc model list
 
 # Download a model
-./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+./zig-out/bin/zinc model pull llama31-8b-q4k-m
 
 # Run a prompt
-./zig-out/bin/zinc --model-id qwen35-2b-q4k-m --prompt "Hello"
+./zig-out/bin/zinc --model-id llama31-8b-q4k-m --prompt "Hello" --chat
 
 # Or open the chat UI in your browser
 ./zig-out/bin/zinc chat
@@ -109,13 +109,16 @@ The table below lists the exact GGUFs ZINC currently supports end-to-end, not a 
 
 | Model | GGUF | AMD RDNA4 | Apple Silicon |
 |-------|------|-----------|---------------|
+| **Llama 3.1 8B Instruct** | [Q4_K_M](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF) | — | ~10 tok/s |
+| **Qwen3 8B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | — | ~8 tok/s |
 | **Qwen3.5 2B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s | ~17 tok/s |
 | **Qwen3.5 35B-A3B UD** | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s | needs 24+ GB unified |
 
 - **AMD**: Radeon AI PRO R9700 (RDNA4, 32 GB), `RADV_PERFTEST=coop_matrix`
-- **Apple Silicon**: tested on M1 Pro 32 GB (Apple Silicon benchmarks on M4 coming soon)
+- **Apple Silicon**: tested on M1 Max 32 GB
 - All numbers: single-stream CLI decode, `zig build -Doptimize=ReleaseFast`
-- Latest validation: 2026-03-31
+- Latest validation: 2026-04-02
+- Use `zinc model list --json` for machine-readable model metadata
 
 **Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, F16
 
