@@ -37,7 +37,7 @@ layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];     };
 const uint BLOCK_SIZE = 256u;
 shared float s_scores[BLOCK_SIZE];
 // Accumulator for output vector, one element per thread slot
-shared float s_out[256];  // supports head_dim up to 256
+shared float s_out[512];  // supports head_dim up to 512 (Gemma 4 global layers)
 // Running softmax state
 shared float s_max_old;
 shared float s_sum_old;
