@@ -89,6 +89,30 @@ header h1 span{color:var(--accent)}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
 .empty strong{color:var(--accent);font-size:20px;display:block;margin-bottom:4px}
+.model-picker{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;padding:20px;animation:fadeIn .3s ease}
+.model-picker h2{font-size:22px;font-weight:700;color:var(--text);margin-bottom:4px}
+.model-picker .picker-sub{font-size:13px;color:var(--muted);margin-bottom:24px}
+.model-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;width:100%;max-width:600px}
+.model-card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px;cursor:pointer;transition:border-color .15s,transform .1s,box-shadow .15s;display:flex;gap:14px;align-items:flex-start}
+.model-card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 4px 20px rgba(232,114,42,.1)}
+.model-card.disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+.model-card.disabled:hover{border-color:var(--border);transform:none;box-shadow:none}
+.model-card.active-card{border-color:var(--accent);background:rgba(232,114,42,.06)}
+.model-card .card-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden}
+.model-card .card-icon svg{width:28px;height:28px}
+.model-card .card-body{flex:1;min-width:0}
+.model-card .card-name{font-size:14px;font-weight:600;color:var(--text);margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.model-card .card-detail{font-size:11px;color:var(--muted);line-height:1.6}
+.model-card .card-badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:6px;margin-top:6px;letter-spacing:.02em;text-transform:uppercase}
+.model-card .card-badge.download{background:rgba(232,114,42,.15);color:var(--accent)}
+.model-card .card-badge.installed{background:rgba(63,185,80,.12);color:#3fb950}
+.model-card .card-badge.active{background:rgba(63,185,80,.2);color:#3fb950}
+.model-card .card-badge.too-large{background:rgba(244,63,94,.1);color:#f43f5e}
+.model-card .card-badge.downloading{background:rgba(232,114,42,.12);color:var(--accent)}
+@media (max-width:720px){
+.model-grid{grid-template-columns:1fr}
+.model-picker{min-height:auto;margin-top:10vh}
+}
 #ia{padding:12px 20px;background:var(--bg2);border-top:1px solid var(--border)}
 #ia .in{max-width:720px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
 #ia textarea{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;font-size:14px;font-family:inherit;resize:none;min-height:42px;max-height:140px;line-height:1.5;transition:border-color .15s}
@@ -164,7 +188,67 @@ const M=document.getElementById('messages'),I=document.getElementById('i'),B=doc
 const ST=document.getElementById('st'),MN=document.getElementById('mn'),SS=document.getElementById('stats'),MS=document.getElementById('ms');
 const MB=document.getElementById('mbtn'),GM=document.getElementById('gpu'),DL=document.getElementById('dl'),MP=document.getElementById('mp'),MPF=document.getElementById('mpf');
 const TW=document.getElementById('tw'),TH=document.getElementById('th'),TL=document.getElementById('tl');
-const emptyStateHtml='<div class="empty" id="w"><strong>ZINC Inference Engine</strong>AMD RDNA4 GPU &middot; Vulkan Compute<br>Type a message to start</div>';
+const readyEmptyHtml='<div class="empty" id="w"><strong>ZINC Inference Engine</strong>Type a message to start</div>';
+
+function modelFamilyIcon(family){
+  const f=(family||'').toLowerCase();
+  if(f.includes('qwen')) return '<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="46" fill="#1a1a40"/><text x="50" y="68" text-anchor="middle" font-family="system-ui,sans-serif" font-size="52" font-weight="800" fill="#6366f1">Q</text><circle cx="68" cy="70" r="8" fill="#818cf8"/></svg>';
+  if(f.includes('llama')) return '<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="46" fill="#1a1a40"/><path d="M25 52c0-14 11-25 25-25s25 11 25 25" stroke="#60a5fa" stroke-width="7" stroke-linecap="round" fill="none"/><path d="M75 52c0 14-11 25-25 25" stroke="#60a5fa" stroke-width="7" stroke-linecap="round" fill="none"/><path d="M50 77c-9 0-17-5-21-12" stroke="#60a5fa" stroke-width="7" stroke-linecap="round" fill="none"/><circle cx="38" cy="44" r="4" fill="#93c5fd"/><circle cx="62" cy="44" r="4" fill="#93c5fd"/></svg>';
+  return '<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="46" fill="#1a1a40"/><rect x="30" y="35" width="40" height="30" rx="6" stroke="#a78bfa" stroke-width="5" fill="none"/><circle cx="50" cy="50" r="6" fill="#a78bfa"/></svg>';
+}
+
+function renderModelPicker(){
+  let html='<div class="model-picker"><h2>Choose a model</h2><div class="picker-sub">Select a model to get started with ZINC</div><div class="model-grid">';
+  for(let m of models){
+    if(!m.managed||!m.supported_on_current_gpu) continue;
+    let badge='',badgeClass='download',clickable=true;
+    if(m.active){badge='Active';badgeClass='active'}
+    else if(m.downloading){badge='Downloading...';badgeClass='downloading';clickable=false}
+    else if(m.download_phase==='verifying'){badge='Verifying...';badgeClass='downloading';clickable=false}
+    else if(m.installed){badge='Installed \u00b7 click to load';badgeClass='installed'}
+    else if(!m.fits_current_gpu){badge='Too large for GPU';badgeClass='too-large';clickable=false}
+    else{badge='Download \u00b7 '+(m.size_bytes/(1024*1024*1024)).toFixed(1)+' GB';badgeClass='download'}
+    let vram=(m.required_vram_bytes/(1024*1024*1024)).toFixed(0);
+    let cardClass='model-card'+(m.active?' active-card':'')+(clickable?'':' disabled');
+    html+='<div class="'+cardClass+'" data-model-id="'+esc(m.id)+'" data-installed="'+(m.installed?'1':'0')+'">';
+    html+='<div class="card-icon">'+modelFamilyIcon(m.family||m.display_name)+'</div>';
+    html+='<div class="card-body">';
+    html+='<div class="card-name">'+esc(m.display_name||m.id)+'</div>';
+    html+='<div class="card-detail">'+esc(m.quantization||m.format||'')+' \u00b7 '+vram+' GB VRAM'+(m.thinking_stable?' \u00b7 Thinking':'')+'</div>';
+    html+='<span class="card-badge '+badgeClass+'">'+badge+'</span>';
+    html+='</div></div>';
+  }
+  html+='</div></div>';
+  M.innerHTML=html;
+  M.querySelectorAll('.model-card:not(.disabled)').forEach(card=>{
+    card.addEventListener('click',async()=>{
+      let id=card.getAttribute('data-model-id');
+      let installed=card.getAttribute('data-installed')==='1';
+      let m=models.find(x=>x.id===id);
+      if(!m||m.active) return;
+      card.style.pointerEvents='none';card.style.opacity='.6';
+      try{
+        if(installed){
+          await fetch(base+'/models/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:id})});
+        }else{
+          await fetch(base+'/models/pull',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:id})});
+        }
+        await refreshModels();
+        updateEmptyState();
+      }catch(e){card.style.pointerEvents='';card.style.opacity=''}
+    });
+  });
+}
+
+function updateEmptyState(){
+  if(H.length>0) return;
+  let active=activeModel();
+  if(active&&active.active){
+    M.innerHTML=readyEmptyHtml;
+  }else{
+    renderModelPicker();
+  }
+}
 const chatStateKey='zinc.chat.state.v3';
 const chatPrefsKey='zinc.chat.prefs.v1';
 let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false,models=[],modelPollTimer=null,healthPollTimer=null;
@@ -256,7 +340,7 @@ function saveChatState(){
 }
 
 function showEmptyState(){
-  M.innerHTML=emptyStateHtml;
+  updateEmptyState();
 }
 
 function switchableModels(){
@@ -673,6 +757,7 @@ async function refreshModels(){
   updateModelAction();
   updateThinkingUi();
   MS.disabled=isGenerating||models.length<=1;
+  if(H.length===0) updateEmptyState();
 }
 
 async function refreshHealth(){
