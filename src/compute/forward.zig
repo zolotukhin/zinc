@@ -1685,9 +1685,10 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 // RoPE: use per-layer dimensions (Gemma 4 has different head_dim for sliding vs global)
-                // Gemma 4 dual RoPE: sliding layers use rope_freq_base_swa (10000), global use rope_freq_base (1M)
-                const layer_rope_dim: u32 = layer_head_dim;
+                // Gemma 4 dual RoPE: sliding layers use rope_freq_base_swa (10000) and rotate all dims.
+                // Global layers use rope_freq_base (1M) with partial rotation (25% = head_dim/4).
                 const is_sliding_layer = (layer_head_dim < config.head_dim and config.rope_freq_base_swa > 0);
+                const layer_rope_dim: u32 = if (is_sliding_layer) layer_head_dim else if (config.rope_freq_base_swa > 0) layer_head_dim / 4 else layer_head_dim;
                 const layer_rope_freq: f32 = if (is_sliding_layer) config.rope_freq_base_swa else config.rope_freq_base;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
@@ -2459,6 +2460,27 @@ pub const InferenceEngine = struct {
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(ds, self.hidden_buf.handle, hidden_size, self.down_buf.handle, hidden_size);
                     try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
+                }
+            }
+
+            // Gemma 4: per-layer output scaling (layer_output_scale.weight).
+            // hidden_buf *= out_scale. Implemented as: copy to scratch, then hidden += (scale-1)*scratch.
+            const out_scale_tensor = self.findLayerTensor(layer, "layer_output_scale.weight");
+            if (out_scale_tensor) |ost| {
+                // Read scalar scale from GPU buffer (it's f32, shape=[1], uploaded during tensor load)
+                const mmap = self.model.mmap_data orelse return error.NoMmapData;
+                const scale_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + ost.info.offset);
+                const scale_val: f32 = @bitCast(@as(u32, @as(*const u32, @ptrCast(@alignCast(mmap.ptr + scale_off))).*));
+                if (scale_val != 1.0) {
+                    // Copy hidden → down_buf (scratch), then hidden += (scale-1) * down_buf
+                    self.decode_cmd.computeToTransferBarrier();
+                    const copy_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.down_buf.handle, 1, &copy_region);
+                    self.decode_cmd.transferToComputeBarrier();
+                    const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet2(ds, self.hidden_buf.handle, hidden_size, self.down_buf.handle, hidden_size);
+                    try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, scale_val - 1.0);
                 }
             }
 
