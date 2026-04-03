@@ -424,6 +424,7 @@ pub const InferenceEngine = struct {
     position: u32,
     profile_enabled: bool,
     debug_validation_enabled: bool,
+    gpu_layer_snapshots: ?[]f32,
     request_profile: RuntimeProfile,
 
     /// Allocate GPU buffers, compile Metal pipelines, and prepare the KV cache.
@@ -471,6 +472,7 @@ pub const InferenceEngine = struct {
         self.position = 0;
         self.profile_enabled = options.profile_enabled;
         self.debug_validation_enabled = options.debug_validation_enabled;
+        self.gpu_layer_snapshots = if (options.debug_validation_enabled) try allocator.alloc(f32, @as(usize, cfg.hidden_dim) * 8) else null;
         self.request_profile = .{};
 
         self.hidden_buf = try metal_buffer.createBuffer(ctx, hidden_size);
@@ -623,7 +625,7 @@ pub const InferenceEngine = struct {
                         freq_ptr[i] /= freq_factors[i];
                     }
                 }
-                log.info("RoPE: loaded {d} custom frequency factors from rope_freqs.weight", .{half_rot});
+                log.debug("RoPE: loaded {d} custom frequency factors from rope_freqs.weight", .{half_rot});
             }
         }
 
@@ -906,6 +908,7 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.ffn_norm_bufs);
         metal_buffer.freeBuffer(&self.final_norm_gpu);
         metal_buffer.freeBuffer(&self.rope_freq_buf);
+        if (self.gpu_layer_snapshots) |s| self.allocator.free(s);
         self.allocator.free(self.layer_tensors);
 
         metal_pipeline.freePipeline(&self.ssm_conv1d_pipe);
@@ -1121,9 +1124,9 @@ pub const InferenceEngine = struct {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
                 }
                 if (k2048_or_less) {
-                    break :blk .{ .pipe = &self.dmmv_q4k_k2048_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 };
+                    break :blk .{ .pipe = &self.dmmv_q4k_k2048_pipe, .push_idx = 1, .rows_per_wg = 4, .block_size = 64 };
                 }
-                break :blk .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 };
+                break :blk .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 4, .block_size = 64 };
             },
             .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
@@ -1176,7 +1179,8 @@ fn findLayerTensor(model: *const metal_loader.Model, layer: u32, suffix: []const
 
 fn tensorPageOffset(model: *const metal_loader.Model, tensor: *const metal_loader.LoadedTensor) u32 {
     const data_offset: u64 = model.gguf_file.tensor_data_offset + tensor.info.offset;
-    const aligned_offset = (data_offset / 4096) * 4096;
+    const page_size: u64 = std.heap.page_size_min;
+    const aligned_offset = (data_offset / page_size) * page_size;
     return @intCast(data_offset - aligned_offset);
 }
 
@@ -1403,12 +1407,13 @@ fn dispatchRmsNormOnCmd(
 ) void {
     const push = RmsNormPush{ .n = n, .eps = engine.config.rms_norm_eps };
     const bufs = [_]*const MetalBuffer{ input, output, weights };
-    const simd_width = if (engine.rms_norm_pipe.thread_execution_width > 0 and
-        engine.rms_norm_pipe.thread_execution_width <= engine.rms_norm_pipe.max_threads_per_threadgroup)
-        engine.rms_norm_pipe.thread_execution_width
-    else
-        @as(u32, 32);
-    cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ simd_width, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
+    // Use multiple simdgroups for better float32 precision on large vectors.
+    // Clamp to pipeline's max threadgroup size (typically 1024).
+    const tg_size: u32 = @min(
+        @max(engine.rms_norm_pipe.max_threads_per_threadgroup, 32),
+        if (n >= 1024) @as(u32, 1024) else if (n >= 256) @as(u32, 256) else @as(u32, 32),
+    );
+    cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
 }
 
 fn dispatchDeinterleaveOnCmd(
@@ -2244,7 +2249,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
-            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and (engine.position == 4 or engine.position == 5) and (layer_idx == 7 or layer_idx == 31);
+            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and engine.position == 0 and (layer_idx == 3 or layer_idx == 4);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
                 const debug_start = profileStart(profile != null);
@@ -2301,6 +2306,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 // Debug: verify FFN gate/down at layer 0, position 0
                 // (debug removed)
                 for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
+
+                // Snapshot GPU hidden state after each layer for validation
+                // Save GPU snapshot for per-layer comparison with CPU chain
+                if (engine.debug_validation_enabled and engine.position == 0 and engine.gpu_layer_snapshots != null and layer_idx < 8) {
+                    const snap = engine.gpu_layer_snapshots.?;
+                    @memcpy(snap[layer_idx * hidden_dim ..][0..hidden_dim], hidden_ptr[0..hidden_dim]);
+                }
             }
             if (using_local_cmd and is_moe) commitAndWaitProfiled(cmd, profile);
         } else {
@@ -2713,6 +2725,257 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         }
     }
 
+    // ===== Per-layer GPU/CPU comparison (first token only) =====
+    // Save GPU hidden state after each layer to find where CPU/GPU diverge
+    if (engine.debug_validation_enabled and engine.position == 0) {
+        // Re-run: load embedding and run CPU forward pass, comparing after each layer
+        const vda = engine.allocator;
+        const vdm = engine.model.mmap_data orelse return error.NoMmapData;
+        const vdo = engine.model.gguf_file.tensor_data_offset;
+        const vdc = engine.config;
+        const vdhd = hidden_dim;
+        const vdifp: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+        const vdrd: u32 = if (vdc.rope_dim > 0) vdc.rope_dim else vdc.head_dim;
+        const vdifs = vdifp[0 .. vdrd / 2];
+        const bos2: u32 = engine.model.gguf_file.getU32("tokenizer.ggml.bos_token_id") orelse 128000;
+
+        // Run full forward pass on GPU with per-layer snapshots
+        const snap_h = try vda.alloc(f32, vdhd);
+        defer vda.free(snap_h);
+        dequantRow(vdm[vdo + engine.token_embed.info.offset ..], bos2, vdhd, engine.token_embed.info.type_, snap_h);
+
+        // Re-run GPU from scratch for this single token, saving hidden per layer
+        // Actually - the GPU already ran. We need to compare the CPU chain with
+        // the GPU's final result. Let me instead just run the CPU chain and log per-layer CPU values.
+        const cpu2 = try vda.alloc(f32, vdhd);
+        defer vda.free(cpu2);
+        @memcpy(cpu2, snap_h); // start from embedding
+
+        const cpu2n = try vda.alloc(f32, vdhd);
+        defer vda.free(cpu2n);
+        const cpu2q = try vda.alloc(f32, q_dim);
+        defer vda.free(cpu2q);
+        const cpu2v = try vda.alloc(f32, @as(usize, @intCast(vdc.n_kv_heads)) * vdc.head_dim);
+        defer vda.free(cpu2v);
+        const cpu2ao = try vda.alloc(f32, q_dim);
+        defer vda.free(cpu2ao);
+        const cpu2op = try vda.alloc(f32, vdhd);
+        defer vda.free(cpu2op);
+        const cpu2g = try vda.alloc(f32, inter_dim);
+        defer vda.free(cpu2g);
+        const cpu2u = try vda.alloc(f32, inter_dim);
+        defer vda.free(cpu2u);
+        const cpu2s = try vda.alloc(f32, inter_dim);
+        defer vda.free(cpu2s);
+        const cpu2d = try vda.alloc(f32, vdhd);
+        defer vda.free(cpu2d);
+        const cpu2k = try vda.alloc(f32, @as(usize, @intCast(vdc.n_kv_heads)) * vdc.head_dim);
+        defer vda.free(cpu2k);
+
+        for (0..vdc.n_layers) |li| {
+            const llt = engine.layer_tensors[li];
+            const anw: [*]const f32 = @ptrCast(@alignCast(engine.attn_norm_bufs[li].cpu_ptr.?));
+            cpuRmsNormMul(cpu2.ptr, anw[0..vdhd], cpu2n.ptr, vdhd, 1, vdc.rms_norm_eps);
+            const qt2 = llt.attn_q orelse break;
+            const kt2 = llt.attn_k orelse break;
+            const vt2 = llt.attn_v orelse break;
+            const ot2 = llt.attn_output orelse break;
+            try cpuDmmvFallback(vdm, qt2, vdo, cpu2n.ptr, cpu2q.ptr, q_dim, vdhd, 0, vda);
+            try cpuDmmvFallback(vdm, kt2, vdo, cpu2n.ptr, cpu2k.ptr, vdc.n_kv_heads * vdc.head_dim, vdhd, 0, vda);
+            try cpuDmmvFallback(vdm, vt2, vdo, cpu2n.ptr, cpu2v.ptr, vdc.n_kv_heads * vdc.head_dim, vdhd, 0, vda);
+            if (engine.attn_q_norm_present[li]) {
+                const qnw2: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[li].cpu_ptr.?));
+                cpuRmsNormMul(cpu2q.ptr, qnw2[0..vdc.head_dim], cpu2q.ptr, vdc.head_dim, vdc.n_heads, vdc.rms_norm_eps);
+            }
+            if (engine.attn_k_norm_present[li]) {
+                const knw2: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[li].cpu_ptr.?));
+                cpuRmsNormMul(cpu2k.ptr, knw2[0..vdc.head_dim], cpu2k.ptr, vdc.head_dim, vdc.n_kv_heads, vdc.rms_norm_eps);
+            }
+            cpuRope(cpu2q.ptr, vdc.head_dim, vdrd, vdc.n_heads, 0, vdifs);
+            cpuRope(cpu2k.ptr, vdc.head_dim, vdrd, vdc.n_kv_heads, 0, vdifs);
+            const qpkv2 = vdc.n_heads / @max(vdc.n_kv_heads, 1);
+            for (0..vdc.n_heads) |h| {
+                @memcpy(cpu2ao[h * vdc.head_dim ..][0..vdc.head_dim], cpu2v[(h / qpkv2) * vdc.head_dim ..][0..vdc.head_dim]);
+            }
+            try cpuDmmvFallback(vdm, ot2, vdo, cpu2ao.ptr, cpu2op.ptr, vdhd, q_dim, 0, vda);
+            for (0..vdhd) |i| cpu2[i] += cpu2op[i];
+            const fnw: [*]const f32 = @ptrCast(@alignCast(engine.ffn_norm_bufs[li].cpu_ptr.?));
+            cpuRmsNormMul(cpu2.ptr, fnw[0..vdhd], cpu2n.ptr, vdhd, 1, vdc.rms_norm_eps);
+            const gt2 = llt.ffn_gate orelse break;
+            const ut2 = llt.ffn_up orelse break;
+            const dt2 = llt.ffn_down orelse break;
+            try cpuDmmvFallback(vdm, gt2, vdo, cpu2n.ptr, cpu2g.ptr, inter_dim, vdhd, 0, vda);
+            try cpuDmmvFallback(vdm, ut2, vdo, cpu2n.ptr, cpu2u.ptr, inter_dim, vdhd, 0, vda);
+            cpuSwiGLU(cpu2g.ptr, cpu2u.ptr, cpu2s.ptr, inter_dim);
+            try cpuDmmvFallback(vdm, dt2, vdo, cpu2s.ptr, cpu2d.ptr, vdhd, inter_dim, 0, vda);
+            for (0..vdhd) |i| cpu2[i] += cpu2d[i];
+            // Log hidden state rms and max after this layer
+            var rms2: f64 = 0;
+            var max2: f32 = 0;
+            for (cpu2) |v| {
+                rms2 += @as(f64, v) * @as(f64, v);
+                if (@abs(v) > max2) max2 = @abs(v);
+            }
+            if (li < 8 or li == vdc.n_layers - 1) {
+                // Compare with GPU snapshot
+                if (engine.gpu_layer_snapshots) |snaps| {
+                    if (li < 8) {
+                        const gpu_snap = snaps[li * vdhd ..][0..vdhd];
+                        var md: f32 = 0;
+                        var mi: usize = 0;
+                        var sd: f64 = 0;
+                        for (0..vdhd) |i| {
+                            const df = @abs(gpu_snap[i] - cpu2[i]);
+                            if (df > md) { md = df; mi = i; }
+                            sd += @as(f64, df) * @as(f64, df);
+                        }
+                        log.info("L{d} GPU_vs_CPU: max_diff={d:.8} idx={d} gpu={d:.6} cpu={d:.6} rms_diff={d:.10}", .{
+                            li, md, mi, gpu_snap[mi], cpu2[mi],
+                            @as(f32, @floatCast(@sqrt(sd / @as(f64, @floatFromInt(vdhd))))),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== Full CPU forward pass validation (first token only) =====
+    if (false and engine.debug_validation_enabled and engine.position == 0) {
+        const vd_alloc = engine.allocator;
+        const vd_mmap = engine.model.mmap_data orelse return error.NoMmapData;
+        const vd_off = engine.model.gguf_file.tensor_data_offset;
+        const vd_cfg = engine.config;
+        const vd_hd = hidden_dim;
+        const vd_nh: u32 = vd_cfg.n_heads;
+        const vd_nkv: u32 = vd_cfg.n_kv_heads;
+        const vd_headd: u32 = vd_cfg.head_dim;
+        const vd_rd: u32 = if (vd_cfg.rope_dim > 0) vd_cfg.rope_dim else vd_headd;
+        const vd_ifp: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+        const vd_ifs = vd_ifp[0 .. vd_rd / 2];
+        const bos: u32 = engine.model.gguf_file.getU32("tokenizer.ggml.bos_token_id") orelse 128000;
+
+        // Allocate working buffers
+        const cpu_h = try vd_alloc.alloc(f32, vd_hd);
+        defer vd_alloc.free(cpu_h);
+        const cpu_n = try vd_alloc.alloc(f32, vd_hd);
+        defer vd_alloc.free(cpu_n);
+        const cpu_q = try vd_alloc.alloc(f32, q_dim);
+        defer vd_alloc.free(cpu_q);
+        const cpu_k = try vd_alloc.alloc(f32, @as(usize, @intCast(vd_nkv)) * vd_headd);
+        defer vd_alloc.free(cpu_k);
+        const cpu_v = try vd_alloc.alloc(f32, @as(usize, @intCast(vd_nkv)) * vd_headd);
+        defer vd_alloc.free(cpu_v);
+        const cpu_ao = try vd_alloc.alloc(f32, q_dim);
+        defer vd_alloc.free(cpu_ao);
+        const cpu_op = try vd_alloc.alloc(f32, vd_hd);
+        defer vd_alloc.free(cpu_op);
+        const cpu_g = try vd_alloc.alloc(f32, inter_dim);
+        defer vd_alloc.free(cpu_g);
+        const cpu_u = try vd_alloc.alloc(f32, inter_dim);
+        defer vd_alloc.free(cpu_u);
+        const cpu_sw = try vd_alloc.alloc(f32, inter_dim);
+        defer vd_alloc.free(cpu_sw);
+        const cpu_fd = try vd_alloc.alloc(f32, vd_hd);
+        defer vd_alloc.free(cpu_fd);
+
+        // Load embedding
+        dequantRow(vd_mmap[vd_off + engine.token_embed.info.offset ..], bos, vd_hd, engine.token_embed.info.type_, cpu_h);
+
+        // Run all layers on CPU
+        for (0..vd_cfg.n_layers) |li| {
+            const llt = engine.layer_tensors[li];
+            const an_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_norm_bufs[li].cpu_ptr.?));
+            cpuRmsNormMul(cpu_h.ptr, an_w[0..vd_hd], cpu_n.ptr, vd_hd, 1, vd_cfg.rms_norm_eps);
+
+            const qt = llt.attn_q orelse continue;
+            const kt = llt.attn_k orelse continue;
+            const vt = llt.attn_v orelse continue;
+            const ot = llt.attn_output orelse continue;
+            try cpuDmmvFallback(vd_mmap, qt, vd_off, cpu_n.ptr, cpu_q.ptr, q_dim, vd_hd, 0, vd_alloc);
+            try cpuDmmvFallback(vd_mmap, kt, vd_off, cpu_n.ptr, cpu_k.ptr, vd_nkv * vd_headd, vd_hd, 0, vd_alloc);
+            try cpuDmmvFallback(vd_mmap, vt, vd_off, cpu_n.ptr, cpu_v.ptr, vd_nkv * vd_headd, vd_hd, 0, vd_alloc);
+            if (engine.attn_q_norm_present[li]) {
+                const qnw: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[li].cpu_ptr.?));
+                cpuRmsNormMul(cpu_q.ptr, qnw[0..vd_headd], cpu_q.ptr, vd_headd, vd_nh, vd_cfg.rms_norm_eps);
+            }
+            if (engine.attn_k_norm_present[li]) {
+                const knw: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[li].cpu_ptr.?));
+                cpuRmsNormMul(cpu_k.ptr, knw[0..vd_headd], cpu_k.ptr, vd_headd, vd_nkv, vd_cfg.rms_norm_eps);
+            }
+            cpuRope(cpu_q.ptr, vd_headd, vd_rd, vd_nh, 0, vd_ifs);
+            cpuRope(cpu_k.ptr, vd_headd, vd_rd, vd_nkv, 0, vd_ifs);
+
+            // Flash attn with seq_len=1: output = V expanded for GQA
+            const qpkv = vd_nh / @max(vd_nkv, 1);
+            for (0..vd_nh) |h| {
+                const kvh = h / qpkv;
+                @memcpy(cpu_ao[h * vd_headd ..][0..vd_headd], cpu_v[kvh * vd_headd ..][0..vd_headd]);
+            }
+
+            try cpuDmmvFallback(vd_mmap, ot, vd_off, cpu_ao.ptr, cpu_op.ptr, vd_hd, q_dim, 0, vd_alloc);
+            for (0..vd_hd) |i| cpu_h[i] += cpu_op[i];
+
+            // FFN
+            const fn_w: [*]const f32 = @ptrCast(@alignCast(engine.ffn_norm_bufs[li].cpu_ptr.?));
+            cpuRmsNormMul(cpu_h.ptr, fn_w[0..vd_hd], cpu_n.ptr, vd_hd, 1, vd_cfg.rms_norm_eps);
+            const gt = llt.ffn_gate orelse continue;
+            const ut = llt.ffn_up orelse continue;
+            const dt = llt.ffn_down orelse continue;
+            try cpuDmmvFallback(vd_mmap, gt, vd_off, cpu_n.ptr, cpu_g.ptr, inter_dim, vd_hd, 0, vd_alloc);
+            try cpuDmmvFallback(vd_mmap, ut, vd_off, cpu_n.ptr, cpu_u.ptr, inter_dim, vd_hd, 0, vd_alloc);
+            cpuSwiGLU(cpu_g.ptr, cpu_u.ptr, cpu_sw.ptr, inter_dim);
+            try cpuDmmvFallback(vd_mmap, dt, vd_off, cpu_sw.ptr, cpu_fd.ptr, vd_hd, inter_dim, 0, vd_alloc);
+            for (0..vd_hd) |i| cpu_h[i] += cpu_fd[i];
+
+        }
+
+        // Compare CPU vs GPU final hidden state
+        const gpu_h: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+        var mx_d: f32 = 0;
+        var mx_i: usize = 0;
+        var sq: f64 = 0;
+        for (0..vd_hd) |i| {
+            const d = @abs(gpu_h[i] - cpu_h[i]);
+            if (d > mx_d) { mx_d = d; mx_i = i; }
+            sq += @as(f64, d) * @as(f64, d);
+        }
+        log.info("FULL_CPU_REF: max_diff={d:.6} idx={d} cpu={d:.6} gpu={d:.6} rms_diff={d:.8}", .{
+            mx_d, mx_i, cpu_h[mx_i], gpu_h[mx_i], @as(f32, @floatCast(@sqrt(sq / @as(f64, @floatFromInt(vd_hd))))),
+        });
+        // Compute CPU logits for token 12366 ("Paris") and argmax
+        {
+            const fn_w: [*]const f32 = @ptrCast(@alignCast(engine.final_norm_gpu.cpu_ptr.?));
+            var sq2: f64 = 0;
+            for (0..vd_hd) |i| sq2 += @as(f64, cpu_h[i]) * @as(f64, cpu_h[i]);
+            const inv_rms: f32 = @floatCast(1.0 / @sqrt(sq2 / @as(f64, @floatFromInt(vd_hd)) + @as(f64, vd_cfg.rms_norm_eps)));
+            var cpu_normed = try vd_alloc.alloc(f32, vd_hd);
+            defer vd_alloc.free(cpu_normed);
+            for (0..vd_hd) |i| cpu_normed[i] = fn_w[i] * cpu_h[i] * inv_rms;
+            // CPU logit for token 12366 ("Paris")
+            const lm_off: usize = @intCast(vd_off + engine.lm_head.info.offset);
+            const paris_row = try vd_alloc.alloc(f32, vd_hd);
+            defer vd_alloc.free(paris_row);
+            dequantRow(vd_mmap[lm_off..], 12366, vd_hd, engine.lm_head.info.type_, paris_row);
+            var paris_logit: f64 = 0;
+            for (0..vd_hd) |i| paris_logit += @as(f64, cpu_normed[i]) * @as(f64, paris_row[i]);
+            log.info("CPU_LOGIT: token 12366 ('Paris')={d:.4}", .{@as(f32, @floatCast(paris_logit))});
+        // Compute CPU argmax logit
+        var cpu_max_logit: f32 = -std.math.inf(f32);
+        var cpu_argmax: u32 = 0;
+        const lm_row2 = try vd_alloc.alloc(f32, vd_hd);
+        defer vd_alloc.free(lm_row2);
+        // Only check first 1000 tokens (full vocab too slow)
+        for (0..@min(@as(u32, 1000), vd_cfg.vocab_size)) |tid| {
+            dequantRow(vd_mmap[lm_off..], @intCast(tid), vd_hd, engine.lm_head.info.type_, lm_row2);
+            var dot2: f64 = 0;
+            for (0..vd_hd) |i| dot2 += @as(f64, cpu_normed[i]) * @as(f64, lm_row2[i]);
+            const logit: f32 = @floatCast(dot2);
+            if (logit > cpu_max_logit) { cpu_max_logit = logit; cpu_argmax = @intCast(tid); }
+        }
+        log.info("CPU argmax (first 1000): token {d} logit={d:.4}", .{ cpu_argmax, cpu_max_logit });
+        }
+    }
+
     // ===== Final: GPU norm → LM head (batched) =====
     const final_record_start = profileStart(profile != null);
     if (shared_cmd) |cmd| {
@@ -2729,7 +2992,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(&cmd, profile);
     }
-    if (engine.debug_validation_enabled and engine.position == 5) {
+    if (false and engine.debug_validation_enabled and engine.position == 5) {
         const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
         if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);

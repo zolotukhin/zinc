@@ -101,9 +101,9 @@ pub const entries = [_]CatalogEntry{
         .size_bytes = 4_920_739_232,
         .required_vram_bytes = 6 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
-        .recommended_for_chat = false,
+        .recommended_for_chat = true,
         .thinking_stable = false,
-        .status = .experimental,
+        .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,

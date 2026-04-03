@@ -607,6 +607,23 @@ fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u
         return .{ .text = prompt };
     }
 
+    // Llama 3 instruct models need a system prompt for best results.
+    // Detect Llama-style templates (start_header_id) and prepend system message.
+    const needs_system = if (tokenizer.chat_template) |tmpl|
+        std.mem.indexOf(u8, tmpl, "start_header_id") != null
+    else
+        false;
+
+    if (needs_system) {
+        const roles = [_][]const u8{ "system", "user" };
+        const contents = [_][]const u8{ "You are a helpful assistant.", prompt };
+        const chat_capacity = prompt.len + 512;
+        const chat_buf = try allocator.alloc(u8, chat_capacity);
+        errdefer allocator.free(chat_buf);
+        const formatted = try tokenizer.applyChatTemplate(&roles, &contents, chat_buf);
+        return .{ .text = formatted, .owned_buf = chat_buf };
+    }
+
     const roles = [_][]const u8{"user"};
     const contents = [_][]const u8{prompt};
     const chat_capacity = prompt.len + 256;
@@ -1395,7 +1412,6 @@ pub fn main() !void {
                 }
 
                 // Decode tokens to text
-                log.info("Output token IDs: {any}", .{output_tokens[0..@min(output_tokens.len, 10)]});
                 var text_buf: std.ArrayList(u8) = .{};
                 defer text_buf.deinit(allocator);
                 for (output_tokens) |tid| {

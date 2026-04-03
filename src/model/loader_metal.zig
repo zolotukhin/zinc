@@ -310,7 +310,7 @@ pub fn load(
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
 
         // Page-align the offset for Metal buffer wrapping
-        const page_size: u64 = 4096;
+        const page_size: u64 = std.heap.page_size_min;
         const aligned_offset = (data_offset / page_size) * page_size;
         const offset_within_page = data_offset - aligned_offset;
         const aligned_size = ((tensor_size + offset_within_page + page_size - 1) / page_size) * page_size;
