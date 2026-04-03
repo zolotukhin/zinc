@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -907,7 +907,7 @@ async function runAgent(agent: AgentKind, prompt: string, model?: string): Promi
 
 // ── Prompt builder ───────────────────────────────────────────────────
 
-function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
+export function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
   const { cycles, failedApproaches, phase } = state;
 
   const trunc = (s: string, max: number) => s.length > max ? s.slice(0, max) + "…" : s;
@@ -1135,6 +1135,12 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     sections.push("## Reflection (auto-analysis of recent cycles)", reflectionSummary, "");
   }
 
+  // Self-review summaries from periodic reviews
+  if (state.reviewSummaries && state.reviewSummaries.length > 0) {
+    // Include the latest review
+    sections.push(state.reviewSummaries[state.reviewSummaries.length - 1], "");
+  }
+
   sections.push(
     "## Cycle History",
     historyBlock,
@@ -1170,7 +1176,7 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
 
 // ── State ────────────────────────────────────────────────────────────
 
-type CycleResult = {
+export type CycleResult = {
   cycle: number;
   timestamp: string;
   phase: Phase;
@@ -1188,7 +1194,7 @@ type CycleResult = {
   nextIdeas: string[];
 };
 
-type RunState = {
+export type RunState = {
   runId: string;
   cycles: CycleResult[];
   failedApproaches: string[];
@@ -1199,6 +1205,7 @@ type RunState = {
   bestTokPerSec: number;
   lastProfileOutput: string | null;
   lastProfileCycle: number | null;
+  reviewSummaries: string[];
 };
 
 async function loadState(runDir: string): Promise<RunState | null> {
@@ -1221,6 +1228,82 @@ async function runProfileBenchmark(): Promise<string> {
   const combined = (run.stderr + run.stdout).slice(-4000);
   console.log(clr("2", "    profile captured"));
   return combined;
+}
+
+const REVIEW_EVERY = 10;
+
+export function buildSelfReview(state: RunState): string {
+  const recent = state.cycles.slice(-REVIEW_EVERY);
+  if (recent.length === 0) return "";
+
+  const kept = recent.filter(c => c.kept);
+  const reverted = recent.filter(c => !c.kept);
+  const tpsValues = kept.filter(c => c.tokPerSec != null).map(c => c.tokPerSec!);
+  const tpsStart = recent[0].tokPerSec ?? 0;
+  const tpsEnd = recent[recent.length - 1].tokPerSec ?? tpsStart;
+  const delta = tpsEnd - tpsStart;
+
+  // Categorize approaches by keywords
+  const categories: Record<string, { kept: number; reverted: number }> = {};
+  for (const c of recent) {
+    const desc = c.description.toLowerCase();
+    const tags: string[] = [];
+    if (desc.match(/shader|kernel|threadgroup|simd|metal/)) tags.push("shader");
+    if (desc.match(/dispatch|command|encoder|barrier|commit|batch/)) tags.push("dispatch");
+    if (desc.match(/buffer|alloc|pool|reuse|memory/)) tags.push("memory");
+    if (desc.match(/fuse|fusion|merged|combined/)) tags.push("fusion");
+    if (desc.match(/moe|expert|router|topk/)) tags.push("moe");
+    if (desc.match(/attention|flash|kv.?cache|rope/)) tags.push("attention");
+    if (desc.match(/half|float16|bfloat|bf16|f16/)) tags.push("precision");
+    if (tags.length === 0) tags.push("other");
+    for (const tag of tags) {
+      if (!categories[tag]) categories[tag] = { kept: 0, reverted: 0 };
+      if (c.kept) categories[tag].kept++;
+      else categories[tag].reverted++;
+    }
+  }
+
+  const lines: string[] = [
+    `## Self-Review (last ${recent.length} cycles)`,
+    "",
+    `- Kept: ${kept.length}/${recent.length} changes`,
+    `- tok/s movement: ${tpsStart.toFixed(1)} → ${tpsEnd.toFixed(1)} (${delta >= 0 ? "+" : ""}${delta.toFixed(1)})`,
+    `- Best tok/s in window: ${tpsValues.length > 0 ? Math.max(...tpsValues).toFixed(1) : "N/A"}`,
+    "",
+    "### What's working vs not:",
+  ];
+
+  for (const [cat, stats] of Object.entries(categories).sort((a, b) => b[1].kept - a[1].kept)) {
+    const total = stats.kept + stats.reverted;
+    const rate = ((stats.kept / total) * 100).toFixed(0);
+    const indicator = stats.kept > stats.reverted ? "✅" : stats.kept === 0 ? "❌" : "⚠";
+    lines.push(`  ${indicator} ${cat}: ${stats.kept}/${total} kept (${rate}% success)`);
+  }
+
+  lines.push("");
+  if (delta < 1) {
+    lines.push("### ⚠ Low progress — strategic pivot recommended:");
+    lines.push("- STOP trying small variations of what already failed");
+    lines.push("- Focus on categories with >50% success rate above");
+    lines.push("- If no category is working, the bottleneck is elsewhere — profile first");
+  } else {
+    lines.push(`### Progress is positive (+${delta.toFixed(1)} tok/s). Double down on what's working.`);
+  }
+
+  // Most impactful kept changes
+  const impactful = kept
+    .filter(c => c.tokPerSec != null)
+    .sort((a, b) => (b.tokPerSec ?? 0) - (a.tokPerSec ?? 0))
+    .slice(0, 3);
+  if (impactful.length > 0) {
+    lines.push("");
+    lines.push("### Top performing changes:");
+    for (const c of impactful) {
+      lines.push(`  - ${c.description} → ${c.tokPerSec?.toFixed(1)} tok/s`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function extractAgentText(stdout: string): string {
@@ -1252,12 +1335,33 @@ function extractAgentText(stdout: string): string {
 
 // ── Main loop ────────────────────────────────────────────────────────
 
+function findLatestRunDir(): string | null {
+  if (!existsSync(RESULTS_DIR)) return null;
+  const entries = readdirSync(RESULTS_DIR, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name)
+    .sort()
+    .reverse();
+  for (const entry of entries) {
+    const stateFile = join(RESULTS_DIR, entry, "state.json");
+    if (existsSync(stateFile)) return join(RESULTS_DIR, entry);
+  }
+  return null;
+}
+
+function cleanupOldRuns(): void {
+  if (!existsSync(RESULTS_DIR)) return;
+  rmSync(RESULTS_DIR, { recursive: true, force: true });
+  console.log(clr("2", `  Cleaned up old runs: ${RESULTS_DIR}`));
+}
+
 async function main() {
   const args = process.argv.slice(2);
   let maxCycles = 999;
   let dryRun = false;
   let agent: AgentKind = "claude";
   let model: string | undefined;
+  let resume = false;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -1279,6 +1383,9 @@ async function main() {
       case "--dry-run":
         dryRun = true;
         break;
+      case "--resume":
+        resume = true;
+        break;
       case "--help":
         console.log([
           "Usage: bun loops/implement_metal.ts [options]",
@@ -1288,38 +1395,79 @@ async function main() {
           "  --model <name>          Model override for selected agent",
           "  --cycles N              Max cycles (default: 999)",
           "  --dry-run               Build+run only, no agent",
+          "  --resume                Resume the most recent run",
         ].join("\n"));
         process.exit(0);
     }
   }
 
-  const runId = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const runDir = join(RESULTS_DIR, runId);
-  await mkdir(runDir, { recursive: true });
   const agentLabel = agent === "codex" ? "Codex" : "Claude";
 
-  console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
-  console.log(clr("1;36", "║  ZINC Metal Optimization Loop                                ║"));
-  console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${MODEL_PATH.split("/").pop()?.slice(0, 35)}  ║`));
-  console.log(clr("1;36", `║  Run: ${runId}  |  Max cycles: ${maxCycles}               ║`));
-  console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
-  console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
-  console.log(`  Results: ${clr("2", runDir)}`);
+  // Resume or fresh start
+  let runId: string;
+  let runDir: string;
+  let state: RunState;
+  let startCycle: number;
 
-  let state: RunState = {
-    runId,
-    cycles: [],
-    failedApproaches: [],
-    ideas: [],
-    phase: "optimize",
-    currentBest: null,
-    stalledCycles: 0,
-    bestTokPerSec: 0,
-    lastProfileOutput: null,
-    lastProfileCycle: null,
-  };
+  if (resume) {
+    const latestDir = findLatestRunDir();
+    if (!latestDir) {
+      console.error("No previous run found to resume.");
+      process.exit(1);
+    }
+    const loaded = await loadState(latestDir);
+    if (!loaded) {
+      console.error(`No state.json in ${latestDir}`);
+      process.exit(1);
+    }
+    state = loaded;
+    // Backfill fields that may not exist in older state files
+    state.reviewSummaries ??= [];
+    state.stalledCycles ??= 0;
+    state.bestTokPerSec ??= 0;
+    state.lastProfileOutput ??= null;
+    state.lastProfileCycle ??= null;
+    runId = state.runId;
+    runDir = latestDir;
+    startCycle = state.cycles.length + 1;
+    console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
+    console.log(clr("1;36", "║  ZINC Metal Optimization Loop — RESUMING                     ║"));
+    console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${MODEL_PATH.split("/").pop()?.slice(0, 35)}  ║`));
+    console.log(clr("1;36", `║  Run: ${runId}  |  Resuming from cycle ${startCycle}            ║`));
+    console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
+    console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
+    console.log(`  Previous cycles: ${state.cycles.length}, best: ${state.bestTokPerSec.toFixed(2)} tok/s`);
+    console.log(`  Results: ${clr("2", runDir)}`);
+  } else {
+    // Fresh start — clean up old data
+    cleanupOldRuns();
+    runId = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    runDir = join(RESULTS_DIR, runId);
+    await mkdir(runDir, { recursive: true });
+    startCycle = 1;
+    state = {
+      runId,
+      cycles: [],
+      failedApproaches: [],
+      ideas: [],
+      phase: "optimize",
+      currentBest: null,
+      stalledCycles: 0,
+      bestTokPerSec: 0,
+      lastProfileOutput: null,
+      lastProfileCycle: null,
+      reviewSummaries: [],
+    };
+    console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
+    console.log(clr("1;36", "║  ZINC Metal Optimization Loop                                ║"));
+    console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${MODEL_PATH.split("/").pop()?.slice(0, 35)}  ║`));
+    console.log(clr("1;36", `║  Run: ${runId}  |  Max cycles: ${maxCycles}               ║`));
+    console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
+    console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
+    console.log(`  Results: ${clr("2", runDir)}`);
+  }
 
-  for (let cycle = 1; cycle <= maxCycles; cycle++) {
+  for (let cycle = startCycle; cycle <= maxCycles; cycle++) {
     console.log(clr("1;35", "\n" + "═".repeat(64)));
     console.log(clr("1;35", `  CYCLE ${cycle}`));
     console.log(clr("1;35", "═".repeat(64)));
@@ -1476,6 +1624,14 @@ async function main() {
     state.cycles.push(cycleResult);
     for (const idea of newIdeas) {
       if (!state.ideas.includes(idea)) state.ideas.push(idea);
+    }
+
+    // Self-review every REVIEW_EVERY cycles
+    if (state.cycles.length > 0 && state.cycles.length % REVIEW_EVERY === 0) {
+      console.log(clr("1;35", `\n  🔍 Self-review (${state.cycles.length} cycles completed)...`));
+      const review = buildSelfReview(state);
+      state.reviewSummaries.push(review);
+      console.log(clr("2", review));
     }
 
     await saveState(runDir, state);
