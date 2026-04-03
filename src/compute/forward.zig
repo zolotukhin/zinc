@@ -750,23 +750,35 @@ pub const InferenceEngine = struct {
             router_staging.mapped = @ptrCast(map_ptr);
         }
 
-        // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32))
+        // KV cache: per-layer, flat layout (context_length * layer_kv_dim * sizeof(f32))
+        // Gemma 4: layers have varying kv_dim (different head_dim/kv_heads for sliding vs global).
+        // Derive per-layer kv_dim from actual K tensor shapes to avoid over-allocation.
         const max_ctx: u32 = @min(config.context_length, 4096); // cap for now
-        const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
         const kv_k_cache = try allocator.alloc(Buffer, config.n_layers);
         errdefer allocator.free(kv_k_cache);
         const kv_v_cache = try allocator.alloc(Buffer, config.n_layers);
         errdefer allocator.free(kv_v_cache);
 
+        var total_kv_bytes: u64 = 0;
         for (0..config.n_layers) |i| {
-            kv_k_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_per_layer, storage_xfer);
-            kv_v_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_per_layer, storage_xfer);
+            const layer_i: u32 = @intCast(i);
+            // Determine per-layer kv_dim from the K tensor's actual shape
+            var layer_kv_d: u32 = kv_dim; // fallback to config-derived kv_dim
+            var name_buf2: [64]u8 = undefined;
+            const k_name = std.fmt.bufPrint(&name_buf2, "blk.{d}.attn_k.weight", .{layer_i}) catch "";
+            if (model.gguf_file.findTensor(k_name)) |k_tensor_info| {
+                const k_elems: u32 = @intCast(k_tensor_info.numElements());
+                if (config.hidden_dim > 0) layer_kv_d = k_elems / config.hidden_dim;
+            }
+            const kv_cache_this_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, layer_kv_d) * @sizeOf(f32);
+            kv_k_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_this_layer, storage_xfer);
+            kv_v_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_this_layer, storage_xfer);
+            total_kv_bytes += kv_cache_this_layer * 2;
         }
 
-        log.debug("KV cache: {d} layers × {d} MB = {d} MB total", .{
+        log.debug("KV cache: {d} layers | {d} MB total", .{
             config.n_layers,
-            kv_cache_per_layer * 2 / (1024 * 1024),
-            config.n_layers * kv_cache_per_layer * 2 / (1024 * 1024),
+            total_kv_bytes / (1024 * 1024),
         });
 
         // Identity page table for flash attention: page_ids[i] = i (flat KV layout)
@@ -1439,7 +1451,6 @@ pub const InferenceEngine = struct {
         const rms_norm_eps = config.rms_norm_eps;
         const q_dim = @as(u32, config.n_heads) * config.head_dim;
         const kv_dim = @as(u32, config.n_kv_heads) * config.head_dim;
-        const kv_vec_size = @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
         const is_moe = config.n_experts > 0;
         const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else hidden_dim * 4;
         const shexp_inter_dim = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_dim;
@@ -1509,13 +1520,22 @@ pub const InferenceEngine = struct {
 
                 const q_tensor = self.findLayerTensor(layer, "attn_q.weight") orelse return error.TensorNotFound;
                 const k_tensor = self.findLayerTensor(layer, "attn_k.weight") orelse return error.TensorNotFound;
-                const v_tensor = self.findLayerTensor(layer, "attn_v.weight") orelse return error.TensorNotFound;
+                // Gemma 4 global layers: attention_k_eq_v=true — K and V share weights (no attn_v tensor).
+                const v_tensor = self.findLayerTensor(layer, "attn_v.weight") orelse k_tensor;
                 const o_tensor = self.findLayerTensor(layer, "attn_output.weight") orelse return error.TensorNotFound;
                 const attn_gate_tensor = self.findLayerTensor(layer, "attn_gate.weight");
                 const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
                 const k_rows: u32 = @intCast(k_tensor.info.numElements() / hidden_dim);
                 const v_rows: u32 = @intCast(v_tensor.info.numElements() / hidden_dim);
                 const o_cols: u32 = @intCast(o_tensor.info.numElements() / hidden_dim);
+
+                // Gemma 4: per-layer head_dim and n_kv_heads vary (sliding vs global layers).
+                // Derive actual dimensions from tensor shapes instead of using fixed config values.
+                const layer_q_dim = q_rows;
+                const layer_kv_dim = k_rows;
+                const layer_head_dim: u32 = if (config.n_heads > 0) layer_q_dim / config.n_heads else config.head_dim;
+                const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else config.n_kv_heads;
+
                 const packed_q_gate = q_rows == q_dim * 2;
                 const separate_attn_gate = q_rows == q_dim and attn_gate_tensor != null;
                 const apply_attn_gate = packed_q_gate or separate_attn_gate;
@@ -1538,21 +1558,21 @@ pub const InferenceEngine = struct {
                 if (packed_q_gate) {
                     // Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.
                     // Project into a temporary buffer and split each head block out.
-                    const q_full_dim = q_dim * 2;
+                    const q_full_dim = layer_q_dim * 2;
                     try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
                 } else {
                     // Dense qwen35 may store Q and gate as separate tensors.
-                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, q_dim, hidden_dim);
+                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, layer_q_dim, hidden_dim);
                     if (attn_gate_tensor) |gate_tensor| {
-                        try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, q_dim, hidden_dim);
+                        try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, layer_q_dim, hidden_dim);
                     }
                 }
-                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
-                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
+                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, layer_kv_dim, hidden_dim);
+                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, layer_kv_dim, hidden_dim);
                 if (packed_q_gate) {
                     self.decode_cmd.computeToTransferBarrier();
                     {
-                        const hd = config.head_dim;
+                        const hd = layer_head_dim;
                         const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
                         const stride_bytes = hd_bytes * 2;
                         for (0..config.n_heads) |h| {
@@ -1632,47 +1652,48 @@ pub const InferenceEngine = struct {
                     // Apply RMS norm to each Q head (n_heads workgroups, head_dim elements each)
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet3(ds, self.q_buf.handle, self.q_buf.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, self.q_buf.handle, self.q_buf.size); // in-place via same output
-                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_heads, rms_norm_eps);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, layer_head_dim, config.n_heads, rms_norm_eps);
                 }
                 if (k_norm_tensor) |kn| {
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet3(ds, self.k_buf.handle, self.k_buf.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, self.k_buf.handle, self.k_buf.size);
-                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, config.head_dim, config.n_kv_heads, rms_norm_eps);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, layer_head_dim, layer_n_kv_heads, rms_norm_eps);
                 }
                 self.decode_cmd.computeBarrier();
 
-                // Bug fix #5+#6: IMRoPE — only rotate rope_dim of head_dim dimensions
-                const rope_freq = config.rope_freq_base;
-                const rope_dim: u32 = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
+                // RoPE: use per-layer dimensions (Gemma 4 has different head_dim for sliding vs global)
+                const layer_rope_dim: u32 = layer_head_dim;
+                const layer_rope_freq: f32 = config.rope_freq_base;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
                     const q_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size);
-                    try self.elementwise.recordRope(&self.decode_cmd, q_ds, config.head_dim, rope_dim, config.n_heads, state.position, rope_freq);
+                    try self.elementwise.recordRope(&self.decode_cmd, q_ds, layer_head_dim, layer_rope_dim, config.n_heads, state.position, layer_rope_freq);
 
                     const k_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size);
-                    try self.elementwise.recordRope(&self.decode_cmd, k_ds, config.head_dim, rope_dim, config.n_kv_heads, state.position, rope_freq);
+                    try self.elementwise.recordRope(&self.decode_cmd, k_ds, layer_head_dim, layer_rope_dim, layer_n_kv_heads, state.position, layer_rope_freq);
                 }
                 self.decode_cmd.computeBarrier();
 
-                // KV cache write
+                // KV cache write (use per-layer KV dimension)
+                const layer_kv_vec_size = @as(vk.c.VkDeviceSize, layer_kv_dim) * @sizeOf(f32);
                 self.decode_cmd.computeToTransferBarrier();
                 {
-                    const kv_offset = @as(vk.c.VkDeviceSize, state.position) * kv_vec_size;
-                    const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
+                    const kv_offset = @as(vk.c.VkDeviceSize, state.position) * layer_kv_vec_size;
+                    const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
                     vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
-                    const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
+                    const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
                     vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
                 }
                 self.decode_cmd.transferToComputeBarrier();
 
-                // Flash attention
+                // Flash attention (use per-layer dimensions for Gemma's varying head_dim/kv_heads)
                 if (self.attention.pipeline) |*pip| {
                     const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
-                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, 1);
+                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, 1);
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -1844,13 +1865,13 @@ pub const InferenceEngine = struct {
                     if (self.elementwise.pipeline_sigmoid_mul) |*pip| {
                         const gds = try self.allocDescSet(pip.descriptor_set_layout);
                         self.writeDescSet3(gds, self.attn_out_buf.handle, self.attn_out_buf.size, self.gate_buf.handle, self.gate_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
-                        try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, q_dim);
+                        try self.elementwise.recordSigmoidMul(&self.decode_cmd, gds, layer_q_dim);
                         self.decode_cmd.computeBarrier();
                     }
                 }
 
                 // Output projection: attn_output.weight
-                try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, q_dim);
+                try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, layer_q_dim);
                 self.decode_cmd.computeBarrier();
 
                 // Gemma post-attention norm: applied to o_proj BEFORE residual add.

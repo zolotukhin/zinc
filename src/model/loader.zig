@@ -98,7 +98,22 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
 
     const n_kv_heads = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.head_count_kv", .{prefix}) catch break :blk n_heads;
-        break :blk gf.getU32(key) orelse n_heads;
+        if (gf.getU32(key)) |v| break :blk v;
+        // Gemma 4: head_count_kv is a per-layer array. Use the maximum value for buffer sizing.
+        if (gf.metadata.get(key)) |val| {
+            switch (val) {
+                .array => |arr| {
+                    var max_kv: u32 = 0;
+                    for (arr) |item| {
+                        const v = item.asU32() orelse continue;
+                        if (v > max_kv) max_kv = v;
+                    }
+                    if (max_kv > 0) break :blk max_kv;
+                },
+                else => {},
+            }
+        }
+        break :blk n_heads;
     };
 
     const hidden_dim = blk: {
@@ -106,7 +121,9 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         break :blk gf.getU32(key) orelse 0;
     };
 
-    // head_dim: prefer attention.key_length from GGUF (Qwen3.5 uses 256, not hidden_dim/n_heads=128)
+    // head_dim: prefer attention.key_length from GGUF (Qwen3.5 uses 256, not hidden_dim/n_heads=128).
+    // Gemma 4 has separate key_length (global=512) and key_length_swa (sliding=256).
+    // Use the max for buffer allocation; the forward pass derives per-layer dims from tensors.
     const head_dim = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.key_length", .{prefix}) catch break :blk if (n_heads > 0) hidden_dim / n_heads else @as(u32, 0);
         break :blk gf.getU32(key) orelse (if (n_heads > 0) hidden_dim / n_heads else 0);
