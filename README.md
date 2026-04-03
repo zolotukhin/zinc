@@ -60,7 +60,7 @@ export RADV_PERFTEST=coop_matrix  # skip on macOS
 # Download a model
 ./zig-out/bin/zinc model pull llama31-8b-q4k-m
 
-# Run a prompt
+# Run a prompt (--chat applies the model's chat template for instruct models)
 ./zig-out/bin/zinc --model-id llama31-8b-q4k-m --prompt "Hello" --chat
 
 # Or open the chat UI in your browser

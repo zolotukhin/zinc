@@ -98,9 +98,13 @@ This downloads the model into a local cache and verifies the SHA-256 hash.
 
 ## Run your first prompt
 
+The `--chat` flag wraps your prompt in the model's chat template (system prompt, role tags, etc.), which is required for instruct-tuned models like Llama 3.1 to produce proper answers.
+
 ```bash
 ./zig-out/bin/zinc --model-id llama31-8b-q4k-m --prompt "What is the capital of France?" --chat
 ```
+
+Without `--chat`, the model treats the input as raw text completion, which still works but produces less focused output.
 
 On RDNA4 Linux, remember to set the environment variable:
 
