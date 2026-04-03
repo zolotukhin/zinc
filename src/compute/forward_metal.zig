@@ -2948,7 +2948,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     &engine.down_buf,                      &engine.ssm_state_bufs.?[layer_idx],
                     &engine.attn_out_buf,
                 };
-                cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
+                cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, (head_v_dim + 63) / 64, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
             }
             cmd.barrier();
             const should_debug_ssm_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6 and using_local_cmd;
