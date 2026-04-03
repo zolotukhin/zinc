@@ -2127,23 +2127,28 @@ fn dispatchFullAttnPrepOnCmd(
     const q_full_dim = q_dim * 2;
     const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
 
-    // Keep the full-attention prep in a single compute encoder and rely on
-    // Metal's in-order dispatch execution for the straight write->read chain.
+    // Q/K/V projections are independent — concurrent dispatch overlaps them.
     dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
     dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
     dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+    cmd.barrier(); // Q/K/V outputs visible before deinterleave reads attn_out_buf
 
     dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, cfg.head_dim, cfg.n_heads);
+    cmd.barrier(); // q_buf/gate_buf visible before norms
 
+    // Q/K norms are independent — concurrent dispatch overlaps them.
     if (engine.attn_q_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], cfg.head_dim, cfg.n_heads);
     }
     if (engine.attn_k_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], cfg.head_dim, cfg.n_kv_heads);
     }
+    cmd.barrier(); // norm outputs visible before rope
 
+    // RoPE Q/K are independent — concurrent dispatch overlaps them.
     dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
     dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
+    cmd.barrier(); // rope outputs visible before KV cache write
 
     dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
 }
@@ -2592,7 +2597,9 @@ fn recordGpuRoutedBatchedMoeOnCmd(
     const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
 
     dispatchSoftmaxTopkOnCmd(engine, cmd, &engine.router_logits_buf, &engine.router_output_buf, cfg.n_experts, cfg.n_experts_used);
+    cmd.barrier(); // router_output_buf visible before expert DMMVs
 
+    // Phase B: gate+up expert DMMVs + shared expert DMMVs — all independent, overlap in concurrent mode.
     try dispatchDmmvMoeOnCmd(engine, cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
     try dispatchDmmvMoeOnCmd(engine, cmd, up_exps, &engine.norm_buf, &engine.expert_up_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
     if (has_shexp) {
@@ -2602,6 +2609,9 @@ fn recordGpuRoutedBatchedMoeOnCmd(
             dispatchDmmvOnCmd(engine, cmd, tensor, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
         }
     }
+    cmd.barrier(); // gate/up outputs visible before SwiGLU
+
+    // Phase C: SwiGLU — batched experts + shared expert overlap.
     {
         const swiglu_push = SwiGLUPush{ .n = inter_dim };
         const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
@@ -2612,15 +2622,19 @@ fn recordGpuRoutedBatchedMoeOnCmd(
         const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
         cmd.dispatchV2(&engine.swiglu_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
     }
+    cmd.barrier(); // SwiGLU outputs visible before down DMMVs
+
+    // Phase D: down expert DMMVs + shared down — overlap.
     try dispatchDmmvMoeOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
     }
+    cmd.barrier(); // down outputs visible before accumulate
 
-    // Fold the MoE residual add into the weighted accumulation shader so the
-    // fast GPU-routed path does not bounce through an extra hidden-sized buffer.
+    // Phase E: weighted accumulate into hidden_buf.
     dispatchMoeWeightedAccOnCmd(engine, cmd, &engine.hidden_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, cfg.n_experts_used, hidden_dim);
     if (has_shexp) {
+        cmd.barrier(); // hidden_buf visible before shared expert accumulate
         if (gate_inp_shexp != null) {
             dispatchSigmoidScaleAccOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.router_logits_buf, hidden_dim);
         } else {
@@ -2629,6 +2643,7 @@ fn recordGpuRoutedBatchedMoeOnCmd(
             cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
         }
     }
+    cmd.barrier(); // hidden_buf visible to next layer's RMS norm
 }
 
 fn acquireLayerCommand(
@@ -2738,9 +2753,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
             const layer_record_start = profileStart(profile != null);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+            cmd.barrier(); // norm_buf visible before attn prep reads it
             try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
+            cmd.barrier(); // KV cache + q_buf visible before flash attn
             dispatchFlashAttnOnCmd(engine, cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
+            cmd.barrier(); // attn_out_buf visible before sigmoid_mul
             dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+            cmd.barrier(); // attn_out_buf visible before output DMMV
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
@@ -2758,10 +2777,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
                 cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
             }
+            cmd.barrier(); // hidden_buf visible before ffn_norm
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
             if (is_moe) {
+                cmd.barrier(); // norm_buf visible before router DMMV
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+                cmd.barrier(); // router_logits_buf visible before MoE
                 if (use_gpu_routed_moe) {
                     if (profile) |p| p.layer_record_ns += profileElapsedNs(layer_record_start);
                     if (profile) |p| p.gpu_routed_moe_layers += 1;
@@ -2938,6 +2960,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 dispatchDmmvOnCmd(engine, cmd, router_t, &engine.norm_buf, &engine.router_logits_buf, cfg.n_experts, hidden_dim, 0);
+                cmd.barrier(); // router_logits_buf visible before MoE
                 if (use_gpu_routed_moe) {
                     if (profile) |p| p.layer_record_ns += profileElapsedNs(layer_record_start);
                     if (profile) |p| p.gpu_routed_moe_layers += 1;

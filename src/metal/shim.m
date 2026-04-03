@@ -308,7 +308,7 @@ MetalCmd* mtl_begin_command(MetalCtx* ctx) {
         return NULL;
     }
 
-    id<MTLComputeCommandEncoder> encoder = [cmd_buf computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = [cmd_buf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
     if (!encoder) {
         fprintf(stderr, "Error: Failed to create compute command encoder.\n");
         return NULL;

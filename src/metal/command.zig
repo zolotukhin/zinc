@@ -248,7 +248,7 @@ test "barrier separates dispatches" {
     try std.testing.expectApproxEqAbs(@as(f32, 126.0), result[63], 0.001); // 63*2
 }
 
-test "encoder dispatch order preserves buffer write-read chains without barrier" {
+test "concurrent encoder with barrier preserves buffer write-read chains" {
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
     defer shim.mtl_destroy(ctx);
@@ -284,6 +284,7 @@ test "encoder dispatch order preserves buffer write-read chains without barrier"
     const bufs = [_]*const MetalBuffer{&buf};
 
     cmd.dispatch(&pipe_write, .{ 2, 1, 1 }, .{ 32, 1, 1 }, &bufs, null, 0);
+    cmd.barrier(); // concurrent encoder requires explicit barrier for write-then-read
     cmd.dispatch(&pipe_add, .{ 2, 1, 1 }, .{ 32, 1, 1 }, &bufs, null, 0);
     cmd.commitAndWait();
 
