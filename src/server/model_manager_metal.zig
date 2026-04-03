@@ -11,11 +11,13 @@ const metal_device = @import("../metal/device.zig");
 const ModelConfig = config_mod.ModelConfig;
 const MetalDevice = metal_device.MetalDevice;
 
+/// Identifies a model to load: a GGUF file path and optional managed-catalog id.
 pub const LoadSpec = struct {
     model_path: []const u8,
     managed_id: ?[]const u8 = null,
 };
 
+/// Compact view of one catalog entry for the HTTP `/v1/models` response.
 pub const ModelSummary = struct {
     id: []const u8,
     display_name: []const u8,
@@ -32,6 +34,7 @@ pub const ModelSummary = struct {
     supports_thinking_toggle: bool,
 };
 
+/// Snapshot of the full model catalog, filtered by the current GPU profile.
 pub const ModelCatalogView = struct {
     profile: []const u8,
     data: []ModelSummary,
@@ -42,6 +45,7 @@ pub const ModelCatalogView = struct {
     }
 };
 
+/// All GPU and host resources for a loaded model: weights, tokenizer, and inference engine.
 pub const LoadedResources = struct {
     model: loader_mod.Model,
     tokenizer: tokenizer_mod.Tokenizer,
@@ -68,6 +72,8 @@ pub const LoadedResources = struct {
     }
 };
 
+/// Thread-safe manager for the currently active model on the Metal backend.
+/// Handles loading, hot-swapping, catalog queries, and VRAM budget enforcement.
 pub const ModelManager = struct {
     allocator: std.mem.Allocator,
     device: *const MetalDevice,

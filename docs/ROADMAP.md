@@ -59,4 +59,4 @@ The most useful outside input is usually one of:
 - focused tests for edge cases
 - small, well-scoped PRs instead of broad refactors
 
-If you want to help, start with [CONTRIBUTING.md](../CONTRIBUTING.md) and open an issue with concrete hardware, commands, logs, and expected behavior.
+If you want to help, start with [CONTRIBUTING.md](https://github.com/zolotukhin/zinc/blob/main/CONTRIBUTING.md) and open an issue with concrete hardware, commands, logs, and expected behavior.

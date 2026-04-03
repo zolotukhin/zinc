@@ -1,3 +1,8 @@
+//! Vulkan system diagnostics (`zinc --check`).
+//! Probes the host environment, Vulkan driver, GPU capabilities,
+//! shader assets, and optional GGUF model fit to produce a human-readable
+//! preflight report on stdout.
+//! @section Hardware Detection
 const std = @import("std");
 const builtin = @import("builtin");
 const gguf = @import("model/gguf.zig");

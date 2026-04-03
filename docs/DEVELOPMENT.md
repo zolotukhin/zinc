@@ -2,7 +2,7 @@
 
 Everything you need to build, test, debug, and contribute to ZINC.
 
-If you just want to run inference, see [Getting Started](GETTING_STARTED.md). This page is for people who want to modify the engine, add features, fix bugs, or understand the internals.
+If you just want to run inference, see [Getting Started](/zinc/docs/getting-started). This page is for people who want to modify the engine, add features, fix bugs, or understand the internals.
 
 ## Prerequisites
 
@@ -195,7 +195,7 @@ zig build hot-bench -Doptimize=ReleaseFast
 ./zig-out/bin/zinc-hot-bench --shader-dir zig-out/share/zinc/shaders
 ```
 
-For detailed tuning guidance, see [RDNA4 Tuning Guide](RDNA4_TUNING.md) and the [GPU Reference](GPU_REFERENCE.md).
+For detailed tuning guidance, see [RDNA4 Tuning Guide](/zinc/docs/rdna4-tuning) and the [GPU Reference](/zinc/docs/gpu-reference).
 
 ## RDNA4 Test Node
 
@@ -232,17 +232,17 @@ Before making changes to these areas, understand the existing design:
 
 ## Contributing
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for development expectations, workflow, and what makes a good contribution.
+See [CONTRIBUTING.md](https://github.com/zolotukhin/zinc/blob/main/CONTRIBUTING.md) for development expectations, workflow, and what makes a good contribution.
 
-See [Code of Conduct](../CODE_OF_CONDUCT.md) for community standards.
+See [Code of Conduct](https://github.com/zolotukhin/zinc/blob/main/CODE_OF_CONDUCT.md) for community standards.
 
 ## Further Reading
 
-- [Getting Started](GETTING_STARTED.md) — first run, model download, basic usage
-- [Running ZINC](RUNNING_ZINC.md) — CLI reference, server mode, managed models
-- [API Reference](API.md) — OpenAI-compatible HTTP endpoints
-- [Technical Specification](SPEC.md) — architecture, kernels, scheduler
-- [RDNA4 Tuning Guide](RDNA4_TUNING.md) — performance profiling and optimization
-- [GPU Reference](GPU_REFERENCE.md) — RDNA3/RDNA4 hardware details
-- [Apple Silicon Reference](APPLE_SILICON_REFERENCE.md) — M1–M5 capabilities
-- [Apple Metal Reference](APPLE_METAL_REFERENCE.md) — MSL kernel optimization
+- [Getting Started](/zinc/docs/getting-started) — first run, model download, basic usage
+- [Running ZINC](/zinc/docs/running-zinc) — CLI reference, server mode, managed models
+- [API Reference](/zinc/docs/api) — OpenAI-compatible HTTP endpoints
+- [Technical Specification](/zinc/docs/spec) — architecture, kernels, scheduler
+- [RDNA4 Tuning Guide](/zinc/docs/rdna4-tuning) — performance profiling and optimization
+- [GPU Reference](/zinc/docs/gpu-reference) — RDNA3/RDNA4 hardware details
+- [Apple Silicon Reference](/zinc/docs/apple-silicon-reference) — M1–M5 capabilities
+- [Apple Metal Reference](/zinc/docs/apple-metal-reference) — MSL kernel optimization
