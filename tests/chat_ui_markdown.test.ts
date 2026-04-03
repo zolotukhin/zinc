@@ -79,6 +79,9 @@ function makeElement(): any {
     querySelector() {
       return makeElement();
     },
+    querySelectorAll() {
+      return [];
+    },
     remove() {},
     focus() {},
     parentElement: { appendChild() {} },
