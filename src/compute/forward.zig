@@ -4312,6 +4312,31 @@ test "topKSoftmax with uniform logits returns equal weights" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), weights[1], 0.01);
 }
 
+test "topKSoftmax matches selected-only renormalized softmax" {
+    const logits = [_]f32{ -2.0, 1.5, 0.25, 4.0, -0.5, 3.0, 2.5, -1.0 };
+    const k = 4;
+    var ids: [k]u32 = undefined;
+    var weights: [k]f32 = undefined;
+    topKSoftmax(&logits, k, &ids, &weights);
+
+    var max_logit: f32 = -std.math.inf(f32);
+    for (0..k) |i| {
+        max_logit = @max(max_logit, logits[ids[i]]);
+    }
+
+    var selected_weights: [k]f32 = undefined;
+    var sum: f32 = 0.0;
+    for (0..k) |i| {
+        const w = @exp(logits[ids[i]] - max_logit);
+        selected_weights[i] = w;
+        sum += w;
+    }
+    for (0..k) |i| {
+        selected_weights[i] /= sum;
+        try std.testing.expectApproxEqAbs(selected_weights[i], weights[i], 1e-6);
+    }
+}
+
 test "topKSoftmax k=1 picks argmax with weight 1.0" {
     const logits = [_]f32{ -1.0, 5.0, 2.0 };
     var ids: [1]u32 = undefined;

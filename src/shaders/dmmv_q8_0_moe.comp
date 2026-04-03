@@ -29,6 +29,28 @@ const uint Q8_0_BYTES = 34;
 shared float s_sum0[2];
 shared float s_sum1[2];
 
+float dot_q8_block(const uint qs_off, const uint x_base) {
+    float block_sum = 0.0;
+    for (uint i = 0u; i < 8u; i++) {
+        const uint q_off = qs_off + i * 4u;
+        const uint x_off = x_base + i * 4u;
+        const ivec4 qv = ivec4(
+            int(int8_t(a_data[q_off + 0u])),
+            int(int8_t(a_data[q_off + 1u])),
+            int(int8_t(a_data[q_off + 2u])),
+            int(int8_t(a_data[q_off + 3u]))
+        );
+        const vec4 xv = vec4(
+            x_data[x_off + 0u],
+            x_data[x_off + 1u],
+            x_data[x_off + 2u],
+            x_data[x_off + 3u]
+        );
+        block_sum += dot(vec4(qv), xv);
+    }
+    return block_sum;
+}
+
 void main() {
     uint expert_slot = gl_WorkGroupID.y;
     uint expert_id = routing_data[expert_slot];
@@ -52,12 +74,7 @@ void main() {
             uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
             float d = unpackHalf2x16(d_bits).x;
             uint qs_off = byte_off + 2u;
-            float block_sum = 0.0;
-            for (uint e = 0u; e < 32u; e++) {
-                int8_t q = int8_t(a_data[qs_off + e]);
-                block_sum += float(q) * x_data[x_base + e];
-            }
-            sum0 += d * block_sum;
+            sum0 += d * dot_q8_block(qs_off, x_base);
         }
 
         if (row1 < M) {
@@ -65,12 +82,7 @@ void main() {
             uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
             float d = unpackHalf2x16(d_bits).x;
             uint qs_off = byte_off + 2u;
-            float block_sum = 0.0;
-            for (uint e = 0u; e < 32u; e++) {
-                int8_t q = int8_t(a_data[qs_off + e]);
-                block_sum += float(q) * x_data[x_base + e];
-            }
-            sum1 += d * block_sum;
+            sum1 += d * dot_q8_block(qs_off, x_base);
         }
     }
 

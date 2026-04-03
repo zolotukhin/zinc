@@ -32,6 +32,17 @@ pub fn createBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
     };
 }
 
+pub fn createPrivateBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
+    const handle = shim.mtl_create_private_buffer(ctx, size);
+    if (handle == null) return error.MetalBufferAllocFailed;
+    return .{
+        .handle = handle,
+        .size = size,
+        .cpu_ptr = null,
+        .is_mmap_wrapped = false,
+    };
+}
+
 pub fn wrapMmap(ctx: ?*shim.MetalCtx, ptr: [*]u8, size: usize) !MetalBuffer {
     const handle = shim.mtl_wrap_mmap(ctx, ptr, size);
     if (handle == null) return error.MetalMmapWrapFailed;
@@ -93,6 +104,21 @@ test "createBuffer with various sizes" {
     var large = try createBuffer(ctx, 1024 * 1024);
     defer freeBuffer(&large);
     try std.testing.expectEqual(@as(usize, 1024 * 1024), large.size);
+}
+
+test "createPrivateBuffer allocates GPU-only memory without CPU pointer" {
+    const device_shim = @import("c.zig").shim;
+    const ctx = device_shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer device_shim.mtl_destroy(ctx);
+
+    var buf = try createPrivateBuffer(ctx, 4096);
+    defer freeBuffer(&buf);
+
+    try std.testing.expect(buf.handle != null);
+    try std.testing.expectEqual(@as(usize, 4096), buf.size);
+    try std.testing.expect(buf.cpu_ptr == null);
+    try std.testing.expect(!buf.is_mmap_wrapped);
 }
 
 test "createBuffer with zero size returns error" {

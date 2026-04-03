@@ -61,6 +61,36 @@ pub const GenerateResult = struct {
 pub const InitOptions = struct {
     profile_enabled: bool = false,
     debug_validation_enabled: bool = false,
+    q8_tg_override: ?u32 = null,
+    q8_dual_tg_override: ?u32 = null,
+};
+
+fn readThreadgroupOverride(env_name: [:0]const u8, simd_width: u32, max_threads: u32) ?u32 {
+    const raw = std.posix.getenv(env_name) orelse return null;
+    if (simd_width == 0 or max_threads == 0) return null;
+
+    const value = std.fmt.parseUnsigned(u32, raw, 10) catch return null;
+    if (value == 0 or value > max_threads or value % simd_width != 0) return null;
+    return value;
+}
+
+const DmmvPathClass = enum(u8) {
+    other,
+    ssm,
+    full_attn,
+    moe_expert,
+    shared_expert,
+    router,
+    lm_head,
+    dense_ffn,
+};
+
+const Q8ShapeStat = struct {
+    path: DmmvPathClass = .other,
+    rows: u32 = 0,
+    cols: u32 = 0,
+    bytes: u64 = 0,
+    calls: u32 = 0,
 };
 
 pub const RuntimeProfile = struct {
@@ -99,6 +129,7 @@ pub const RuntimeProfile = struct {
     shared_expert_bytes: u64 = 0,
     dense_ffn_bytes: u64 = 0,
     moe_expert_bytes: u64 = 0,
+    q8_shape_stats: [16]Q8ShapeStat = [_]Q8ShapeStat{.{}} ** 16,
 
     fn reset(self: *RuntimeProfile) void {
         self.* = .{};
@@ -135,6 +166,19 @@ fn bytesToGiB(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / 1_073_741_824.0;
 }
 
+fn dmmvPathLabel(path: DmmvPathClass) []const u8 {
+    return switch (path) {
+        .other => "other",
+        .ssm => "ssm",
+        .full_attn => "attn",
+        .moe_expert => "moe",
+        .shared_expert => "shared",
+        .router => "router",
+        .lm_head => "lm-head",
+        .dense_ffn => "dense",
+    };
+}
+
 /// Push constants for DMMV dispatch (matches GLSL layout).
 const DmmvPush = extern struct {
     M: u32, // rows
@@ -142,6 +186,31 @@ const DmmvPush = extern struct {
     a_offset: u32,
     x_offset: u32,
     y_offset: u32,
+};
+
+const DualQ8DmmvPush = extern struct {
+    M0: u32,
+    M1: u32,
+    K: u32,
+    a0_offset: u32,
+    a1_offset: u32,
+    x_offset: u32,
+    y0_offset: u32,
+    y1_offset: u32,
+};
+
+const CopyU32Push = extern struct {
+    n_words: u32,
+    src_offset_words: u32,
+    dst_offset_words: u32,
+};
+
+const CopyF32Push = extern struct {
+    n: u32,
+};
+
+const ZeroF32Push = extern struct {
+    n: u32,
 };
 
 /// Push constants for SwiGLU dispatch (matches SPIRV-Cross layout: buffer(0)).
@@ -187,6 +256,36 @@ const MoeDmmvPush = extern struct {
     x_offset: u32,
     y_offset: u32,
 };
+
+fn createMetalBufferForMode(ctx: ?*shim.MetalCtx, size: usize, use_private: bool) !MetalBuffer {
+    return if (use_private)
+        metal_buffer.createPrivateBuffer(ctx, size)
+    else
+        metal_buffer.createBuffer(ctx, size);
+}
+
+fn modelSupportsPrivateDecodeBuffers(model: *const metal_loader.Model, cfg: ModelConfig) bool {
+    if (cfg.n_experts == 0 or cfg.n_experts_used != 8) return false;
+
+    var saw_moe_experts = false;
+    for (model.tensors.items) |tensor| {
+        const name = tensor.info.name;
+        if (!(std.mem.endsWith(u8, name, "ffn_gate_exps.weight") or
+            std.mem.endsWith(u8, name, "ffn_up_exps.weight") or
+            std.mem.endsWith(u8, name, "ffn_down_exps.weight")))
+        {
+            continue;
+        }
+
+        saw_moe_experts = true;
+        switch (tensor.info.type_) {
+            .q4_k, .q5_k, .q6_k => {},
+            else => return false,
+        }
+    }
+
+    return saw_moe_experts;
+}
 
 /// Push constants for fused batched MoE weighted accumulate.
 /// Reads expert outputs from a contiguous [n_experts_used][hidden_dim] buffer.
@@ -342,7 +441,9 @@ pub const InferenceEngine = struct {
     router_logits_buf: MetalBuffer,
     router_output_buf: MetalBuffer,
     logits_buf: MetalBuffer,
+    logits_readback_buf: MetalBuffer,
     embed_staging: MetalBuffer,
+    lm_head_private_buf: MetalBuffer,
     expert_ids_buf: MetalBuffer,
 
     // Batched MoE buffers ([n_experts_used][dim], contiguous)
@@ -370,6 +471,7 @@ pub const InferenceEngine = struct {
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
     dmmv_q8_0_pipe: MetalPipeline,
+    dmmv_q8_0_dual_pipe: MetalPipeline,
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
@@ -393,6 +495,9 @@ pub const InferenceEngine = struct {
     softmax_topk_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
+    copy_u32_pipe: MetalPipeline,
+    copy_f32_pipe: MetalPipeline,
+    zero_f32_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -424,6 +529,9 @@ pub const InferenceEngine = struct {
 
     // Cached per-layer tensor pointers (init-time, eliminates per-token O(733) scans)
     layer_tensors: []LayerTensors,
+    private_ssm_qkv_bufs: ?[]MetalBuffer,
+    private_ssm_gate_bufs: ?[]MetalBuffer,
+    private_ssm_out_bufs: ?[]MetalBuffer,
     token_embed: *const metal_loader.LoadedTensor,
     lm_head: *const metal_loader.LoadedTensor,
 
@@ -431,6 +539,9 @@ pub const InferenceEngine = struct {
     position: u32,
     profile_enabled: bool,
     debug_validation_enabled: bool,
+    private_decode_buffers: bool,
+    q8_tg_override: ?u32,
+    q8_dual_tg_override: ?u32,
     request_profile: RuntimeProfile,
 
     pub fn init(
@@ -477,29 +588,40 @@ pub const InferenceEngine = struct {
         self.position = 0;
         self.profile_enabled = options.profile_enabled;
         self.debug_validation_enabled = options.debug_validation_enabled;
+        self.private_decode_buffers = !options.debug_validation_enabled and modelSupportsPrivateDecodeBuffers(model, cfg);
+        self.q8_tg_override = null;
+        self.q8_dual_tg_override = null;
         self.request_profile = .{};
+        self.private_ssm_qkv_bufs = null;
+        self.private_ssm_gate_bufs = null;
+        self.private_ssm_out_bufs = null;
 
-        self.hidden_buf = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.residual_buf = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.norm_buf = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.q_buf = try metal_buffer.createBuffer(ctx, head_total);
-        self.k_buf = try metal_buffer.createBuffer(ctx, kv_total);
-        self.v_buf = try metal_buffer.createBuffer(ctx, kv_total);
-        self.attn_out_buf = try metal_buffer.createBuffer(ctx, @max(attn_out_size, 4));
-        self.gate_buf = try metal_buffer.createBuffer(ctx, @max(gate_size, 4));
-        self.up_buf = try metal_buffer.createBuffer(ctx, @max(up_size, 4));
-        self.swiglu_buf = try metal_buffer.createBuffer(ctx, @max(swiglu_size, 4));
-        self.down_buf = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.moe_out_buf = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.router_logits_buf = try metal_buffer.createBuffer(ctx, @max(router_size, 4));
-        self.router_output_buf = try metal_buffer.createBuffer(ctx, router_output_size);
-        self.logits_buf = try metal_buffer.createBuffer(ctx, vocab_size);
+        self.hidden_buf = try createMetalBufferForMode(ctx, hidden_size, self.private_decode_buffers);
+        self.residual_buf = try createMetalBufferForMode(ctx, hidden_size, self.private_decode_buffers);
+        self.norm_buf = try createMetalBufferForMode(ctx, hidden_size, self.private_decode_buffers);
+        self.q_buf = try createMetalBufferForMode(ctx, head_total, self.private_decode_buffers);
+        self.k_buf = try createMetalBufferForMode(ctx, kv_total, self.private_decode_buffers);
+        self.v_buf = try createMetalBufferForMode(ctx, kv_total, self.private_decode_buffers);
+        self.attn_out_buf = try createMetalBufferForMode(ctx, @max(attn_out_size, 4), self.private_decode_buffers);
+        self.gate_buf = try createMetalBufferForMode(ctx, @max(gate_size, 4), self.private_decode_buffers);
+        self.up_buf = try createMetalBufferForMode(ctx, @max(up_size, 4), self.private_decode_buffers);
+        self.swiglu_buf = try createMetalBufferForMode(ctx, @max(swiglu_size, 4), self.private_decode_buffers);
+        self.down_buf = try createMetalBufferForMode(ctx, hidden_size, self.private_decode_buffers);
+        self.moe_out_buf = try createMetalBufferForMode(ctx, hidden_size, self.private_decode_buffers);
+        self.router_logits_buf = try createMetalBufferForMode(ctx, @max(router_size, 4), self.private_decode_buffers);
+        self.router_output_buf = try createMetalBufferForMode(ctx, router_output_size, self.private_decode_buffers);
+        self.logits_buf = try createMetalBufferForMode(ctx, vocab_size, self.private_decode_buffers);
+        self.logits_readback_buf = if (self.private_decode_buffers)
+            try metal_buffer.createBuffer(ctx, vocab_size)
+        else
+            .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
+        self.lm_head_private_buf = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
         self.expert_ids_buf = try metal_buffer.createBuffer(ctx, expert_ids_size);
-        self.expert_gate_batch_buf = try metal_buffer.createBuffer(ctx, expert_inter_batch_size);
-        self.expert_up_batch_buf = try metal_buffer.createBuffer(ctx, expert_inter_batch_size);
-        self.expert_swiglu_batch_buf = try metal_buffer.createBuffer(ctx, expert_inter_batch_size);
-        self.expert_down_batch_buf = try metal_buffer.createBuffer(ctx, expert_hidden_batch_size);
+        self.expert_gate_batch_buf = try createMetalBufferForMode(ctx, expert_inter_batch_size, self.private_decode_buffers);
+        self.expert_up_batch_buf = try createMetalBufferForMode(ctx, expert_inter_batch_size, self.private_decode_buffers);
+        self.expert_swiglu_batch_buf = try createMetalBufferForMode(ctx, expert_inter_batch_size, self.private_decode_buffers);
+        self.expert_down_batch_buf = try createMetalBufferForMode(ctx, expert_hidden_batch_size, self.private_decode_buffers);
 
         // Per-expert intermediate buffers for parallel MoE dispatch (reduces barriers from ~35 to 2 per layer)
         if (cfg.n_experts_used > 0) {
@@ -524,8 +646,8 @@ pub const InferenceEngine = struct {
         self.kv_k_cache = try allocator.alloc(MetalBuffer, cfg.n_layers);
         self.kv_v_cache = try allocator.alloc(MetalBuffer, cfg.n_layers);
         for (0..cfg.n_layers) |i| {
-            self.kv_k_cache[i] = try metal_buffer.createBuffer(ctx, kv_cache_size);
-            self.kv_v_cache[i] = try metal_buffer.createBuffer(ctx, kv_cache_size);
+            self.kv_k_cache[i] = try createMetalBufferForMode(ctx, kv_cache_size, self.private_decode_buffers);
+            self.kv_v_cache[i] = try createMetalBufferForMode(ctx, kv_cache_size, self.private_decode_buffers);
         }
         self.page_table_buf = try metal_buffer.createBuffer(ctx, page_table_size);
         {
@@ -543,6 +665,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
         self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+        self.dmmv_q8_0_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual");
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
@@ -566,6 +689,11 @@ pub const InferenceEngine = struct {
         self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
+        self.copy_u32_pipe = try loadShaderPipeline(ctx, "copy_u32");
+        self.copy_f32_pipe = try loadShaderPipeline(ctx, "copy_f32");
+        self.zero_f32_pipe = try loadShaderPipeline(ctx, "zero_f32");
+        self.q8_tg_override = options.q8_tg_override orelse readThreadgroupOverride("ZINC_METAL_Q8_TG_SIZE", self.dmmv_q8_0_pipe.thread_execution_width, self.dmmv_q8_0_pipe.max_threads_per_threadgroup);
+        self.q8_dual_tg_override = options.q8_dual_tg_override orelse readThreadgroupOverride("ZINC_METAL_Q8_DUAL_TG_SIZE", self.dmmv_q8_0_dual_pipe.thread_execution_width, self.dmmv_q8_0_dual_pipe.max_threads_per_threadgroup);
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -626,12 +754,16 @@ pub const InferenceEngine = struct {
                 const layer_i: u32 = @intCast(i);
                 // Conv state: (d_conv-1) * conv_channels floats, zero-initialized
                 const cs_size: usize = @as(usize, d_conv_1) * conv_channels * @sizeOf(f32);
-                self.ssm_conv_state_bufs.?[i] = try metal_buffer.createBuffer(ctx, @max(cs_size, 4));
-                @memset(self.ssm_conv_state_bufs.?[i].cpu_ptr.?[0..@max(cs_size, 4)], 0);
+                self.ssm_conv_state_bufs.?[i] = try createMetalBufferForMode(ctx, @max(cs_size, 4), self.private_decode_buffers);
+                if (!self.private_decode_buffers) {
+                    @memset(self.ssm_conv_state_bufs.?[i].cpu_ptr.?[0..@max(cs_size, 4)], 0);
+                }
                 // Recurrent state: dt_rank * head_v_dim * head_v_dim floats
                 const st_size: usize = @as(usize, cfg.ssm_dt_rank) * head_v_dim * head_v_dim * @sizeOf(f32);
-                self.ssm_state_bufs.?[i] = try metal_buffer.createBuffer(ctx, @max(st_size, 4));
-                @memset(self.ssm_state_bufs.?[i].cpu_ptr.?[0..@max(st_size, 4)], 0);
+                self.ssm_state_bufs.?[i] = try createMetalBufferForMode(ctx, @max(st_size, 4), self.private_decode_buffers);
+                if (!self.private_decode_buffers) {
+                    @memset(self.ssm_state_bufs.?[i].cpu_ptr.?[0..@max(st_size, 4)], 0);
+                }
                 // Conv kernel: dequant to f32
                 const ck_size: usize = @as(usize, conv_kernel_len) * @sizeOf(f32);
                 self.ssm_conv_kernel_bufs.?[i] = try metal_buffer.createBuffer(ctx, @max(ck_size, 4));
@@ -736,10 +868,70 @@ pub const InferenceEngine = struct {
         self.lm_head = findTensorByName(model, "output.weight") orelse
             findTensorByName(model, "token_embd.weight") orelse return error.MissingTensor;
         self.token_embed = findTensorByName(model, "token_embd.weight") orelse return error.MissingTensor;
+        if (self.private_decode_buffers and self.lm_head.info.type_ == .q8_0) {
+            const lm_head_bytes: usize = @intCast(self.lm_head.info.sizeBytes());
+            if (lm_head_bytes % @sizeOf(u32) == 0) {
+                self.lm_head_private_buf = try metal_buffer.createPrivateBuffer(ctx, lm_head_bytes);
+                var cmd = try metal_command.beginCommand(ctx);
+                dispatchCopyU32OnCmd(
+                    &self,
+                    &cmd,
+                    &self.lm_head.gpu_buffer,
+                    &self.lm_head_private_buf,
+                    @intCast(lm_head_bytes / @sizeOf(u32)),
+                    @intCast(tensorPageOffset(model, self.lm_head) / @sizeOf(u32)),
+                    0,
+                );
+                cmd.commitAndWait();
+            }
+        }
+        if (self.private_decode_buffers) {
+            self.private_ssm_qkv_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+            self.private_ssm_gate_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+            self.private_ssm_out_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+            for (0..cfg.n_layers) |i| {
+                self.private_ssm_qkv_bufs.?[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+                self.private_ssm_gate_bufs.?[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+                self.private_ssm_out_bufs.?[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+            }
+
+            var cmd = try metal_command.beginCommand(ctx);
+            for (0..cfg.n_layers) |i| {
+                if (self.layer_tensors[i].attn_qkv) |tensor| {
+                    const size_bytes: usize = @intCast(tensor.info.sizeBytes());
+                    if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                        self.private_ssm_qkv_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
+                        dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_qkv_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
+                    }
+                }
+                if (self.layer_tensors[i].attn_gate) |tensor| {
+                    const size_bytes: usize = @intCast(tensor.info.sizeBytes());
+                    if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                        self.private_ssm_gate_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
+                        dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_gate_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
+                    }
+                }
+                if (self.layer_tensors[i].ssm_out) |tensor| {
+                    const size_bytes: usize = @intCast(tensor.info.sizeBytes());
+                    if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                        self.private_ssm_out_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
+                        dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_out_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
+                    }
+                }
+            }
+            cmd.commitAndWait();
+        }
 
         log.debug("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
         });
+        log.debug("Metal decode buffers: {s}", .{if (self.private_decode_buffers) "private+staged-readback" else "shared"});
+        if (self.q8_tg_override) |tg| {
+            log.debug("Metal q8_0 threadgroup override: {d}", .{tg});
+        }
+        if (self.q8_dual_tg_override) |tg| {
+            log.debug("Metal q8_0 dual threadgroup override: {d}", .{tg});
+        }
         log.debug(
             "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
             .{
@@ -810,7 +1002,9 @@ pub const InferenceEngine = struct {
         metal_buffer.freeBuffer(&self.router_logits_buf);
         metal_buffer.freeBuffer(&self.router_output_buf);
         metal_buffer.freeBuffer(&self.logits_buf);
+        metal_buffer.freeBuffer(&self.logits_readback_buf);
         metal_buffer.freeBuffer(&self.embed_staging);
+        metal_buffer.freeBuffer(&self.lm_head_private_buf);
         metal_buffer.freeBuffer(&self.expert_ids_buf);
         metal_buffer.freeBuffer(&self.expert_gate_batch_buf);
         metal_buffer.freeBuffer(&self.expert_up_batch_buf);
@@ -843,6 +1037,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
@@ -864,6 +1059,9 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.softmax_topk_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
+        metal_pipeline.freePipeline(&self.copy_u32_pipe);
+        metal_pipeline.freePipeline(&self.copy_f32_pipe);
+        metal_pipeline.freePipeline(&self.zero_f32_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
@@ -913,6 +1111,18 @@ pub const InferenceEngine = struct {
             for (arr) |s| self.allocator.free(s);
             self.allocator.free(arr);
         }
+        if (self.private_ssm_qkv_bufs) |bufs| {
+            for (bufs) |*buf| metal_buffer.freeBuffer(buf);
+            self.allocator.free(bufs);
+        }
+        if (self.private_ssm_gate_bufs) |bufs| {
+            for (bufs) |*buf| metal_buffer.freeBuffer(buf);
+            self.allocator.free(bufs);
+        }
+        if (self.private_ssm_out_bufs) |bufs| {
+            for (bufs) |*buf| metal_buffer.freeBuffer(buf);
+            self.allocator.free(bufs);
+        }
     }
 
     /// Sample the next token greedily (argmax over logits).
@@ -924,7 +1134,8 @@ pub const InferenceEngine = struct {
             mutable.request_profile.sample_ns += profileElapsedNs(sample_start);
         };
 
-        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
+        const logits_src = if (self.private_decode_buffers) &self.logits_readback_buf else &self.logits_buf;
+        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(logits_src.cpu_ptr.?));
         const logits = logits_ptr[0..self.config.vocab_size];
         var max_val: f32 = -std.math.inf(f32);
         var max_idx: u32 = 0;
@@ -937,16 +1148,28 @@ pub const InferenceEngine = struct {
         return max_idx;
     }
 
-    pub fn resetRequestState(self: *InferenceEngine) void {
+    pub fn resetRequestState(self: *InferenceEngine) !void {
         self.position = 0;
         self.request_profile.reset();
 
         if (self.ssm_conv_state_bufs) |bufs| {
-            for (bufs) |buf| {
-                @memset(buf.cpu_ptr.?[0..buf.size], 0);
+            if (self.private_decode_buffers) {
+                var cmd = try metal_command.beginCommand(self.device.ctx);
+                for (bufs) |buf| {
+                    dispatchZeroF32OnCmd(self, &cmd, &buf, @intCast(buf.size / @sizeOf(f32)));
+                }
+                if (self.ssm_state_bufs) |state_bufs| {
+                    for (state_bufs) |buf| {
+                        dispatchZeroF32OnCmd(self, &cmd, &buf, @intCast(buf.size / @sizeOf(f32)));
+                    }
+                }
+                cmd.commitAndWait();
+            } else {
+                for (bufs) |buf| {
+                    @memset(buf.cpu_ptr.?[0..buf.size], 0);
+                }
             }
-        }
-        if (self.ssm_state_bufs) |bufs| {
+        } else if (self.ssm_state_bufs) |bufs| {
             for (bufs) |buf| {
                 @memset(buf.cpu_ptr.?[0..buf.size], 0);
             }
@@ -954,7 +1177,7 @@ pub const InferenceEngine = struct {
     }
 
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
-        self.resetRequestState();
+        try self.resetRequestState();
         state.position = 0;
         state.generated_tokens.clearRetainingCapacity();
 
@@ -1046,6 +1269,44 @@ pub const InferenceEngine = struct {
                 bytesToGiB(profile.lm_head_bytes),
                 bytesToGiB(profile.router_bytes),
             });
+            if (profile.dmmv_q8_0_bytes > 0) {
+                var top_idxs: [4]?usize = .{ null, null, null, null };
+                for (profile.q8_shape_stats, 0..) |slot, idx| {
+                    if (slot.calls == 0) continue;
+                    var insert_pos: ?usize = null;
+                    for (top_idxs, 0..) |maybe_top_idx, rank| {
+                        if (maybe_top_idx) |top_idx| {
+                            if (slot.bytes > profile.q8_shape_stats[top_idx].bytes) {
+                                insert_pos = rank;
+                                break;
+                            }
+                        } else {
+                            insert_pos = rank;
+                            break;
+                        }
+                    }
+                    if (insert_pos) |rank| {
+                        var shift: usize = top_idxs.len - 1;
+                        while (shift > rank) : (shift -= 1) {
+                            top_idxs[shift] = top_idxs[shift - 1];
+                        }
+                        top_idxs[rank] = idx;
+                    }
+                }
+                for (top_idxs, 0..) |maybe_idx, rank| {
+                    if (maybe_idx) |idx| {
+                        const slot = profile.q8_shape_stats[idx];
+                        log.info("  q8 hot #{d}: {s} M={d} K={d} bytes={d:.2} GiB calls={d}", .{
+                            rank + 1,
+                            dmmvPathLabel(slot.path),
+                            slot.rows,
+                            slot.cols,
+                            bytesToGiB(slot.bytes),
+                            slot.calls,
+                        });
+                    }
+                }
+            }
         }
         if (profile.gpu_routed_moe_layers == 0 and profile.fallback_moe_layers > 0 and self.layer_tensors.len > 0) {
             const layer0 = self.layer_tensors[0];
@@ -1069,7 +1330,8 @@ pub const InferenceEngine = struct {
         const mmap = self.model.mmap_data orelse return error.NoMmapData;
         const embed_data_offset = self.model.gguf_file.tensor_data_offset + self.token_embed.info.offset;
         const embed_raw = mmap[embed_data_offset..];
-        const hidden_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
+        const dst_buf = if (self.private_decode_buffers) &self.embed_staging else &self.hidden_buf;
+        const hidden_ptr: [*]f32 = @ptrCast(@alignCast(dst_buf.cpu_ptr.?));
         dequantRow(embed_raw, token_id, self.config.hidden_dim, self.token_embed.info.type_, hidden_ptr[0..self.config.hidden_dim]);
     }
 
@@ -1114,11 +1376,9 @@ pub const InferenceEngine = struct {
             .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q8_0 => blk: {
-                if (K <= 2048 and
-                    self.dmmv_q8_0_pipe.thread_execution_width == 32 and
-                    self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 512)
-                {
-                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 512 };
+                if (self.q8_tg_override) |block_size| {
+                    const simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
+                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = block_size / simd_width, .block_size = block_size };
                 }
                 if (K <= 4096 and
                     self.dmmv_q8_0_pipe.thread_execution_width == 32 and
@@ -1201,6 +1461,64 @@ fn recordDispatchQuantBytes(profile: *RuntimeProfile, quant_type: GGMLType, byte
     }
 }
 
+fn classifyDmmvPath(engine: *InferenceEngine, tensor: *const metal_loader.LoadedTensor) DmmvPathClass {
+    if (tensor == engine.lm_head) return .lm_head;
+
+    const name = tensor.info.name;
+    if (std.mem.endsWith(u8, name, "ffn_gate_inp.weight")) return .router;
+    if (std.mem.indexOf(u8, name, "_shexp.")) |_| return .shared_expert;
+    if (std.mem.endsWith(u8, name, "attn_qkv.weight") or
+        std.mem.endsWith(u8, name, "attn_gate.weight") or
+        std.mem.endsWith(u8, name, "ssm_alpha.weight") or
+        std.mem.endsWith(u8, name, "ssm_beta.weight") or
+        std.mem.endsWith(u8, name, "ssm_out.weight"))
+    {
+        return .ssm;
+    }
+    if (std.mem.endsWith(u8, name, "attn_q.weight") or
+        std.mem.endsWith(u8, name, "attn_k.weight") or
+        std.mem.endsWith(u8, name, "attn_v.weight") or
+        std.mem.endsWith(u8, name, "attn_output.weight"))
+    {
+        return .full_attn;
+    }
+    if (std.mem.endsWith(u8, name, "ffn_gate.weight") or
+        std.mem.endsWith(u8, name, "ffn_up.weight") or
+        std.mem.endsWith(u8, name, "ffn_down.weight"))
+    {
+        return .dense_ffn;
+    }
+    return .other;
+}
+
+fn recordQ8ShapeProfile(
+    profile: *RuntimeProfile,
+    path: DmmvPathClass,
+    rows: u32,
+    cols: u32,
+    bytes: u64,
+) void {
+    for (&profile.q8_shape_stats) |*slot| {
+        if (slot.calls != 0 and slot.path == path and slot.rows == rows and slot.cols == cols) {
+            slot.bytes += bytes;
+            slot.calls += 1;
+            return;
+        }
+    }
+    for (&profile.q8_shape_stats) |*slot| {
+        if (slot.calls == 0) {
+            slot.* = .{
+                .path = path,
+                .rows = rows,
+                .cols = cols,
+                .bytes = bytes,
+                .calls = 1,
+            };
+            return;
+        }
+    }
+}
+
 fn recordDmmvProfile(
     engine: *InferenceEngine,
     tensor: *const metal_loader.LoadedTensor,
@@ -1212,43 +1530,18 @@ fn recordDmmvProfile(
     const bytes = dmmvWeightBytes(tensor.info.type_, rows, cols);
     var profile = &engine.request_profile;
     recordDispatchQuantBytes(profile, tensor.info.type_, bytes);
-
-    if (tensor == engine.lm_head) {
-        profile.lm_head_bytes += bytes;
-        return;
+    const path = classifyDmmvPath(engine, tensor);
+    switch (path) {
+        .lm_head => profile.lm_head_bytes += bytes,
+        .router => profile.router_bytes += bytes,
+        .shared_expert => profile.shared_expert_bytes += bytes,
+        .ssm => profile.ssm_bytes += bytes,
+        .full_attn => profile.full_attn_bytes += bytes,
+        .dense_ffn => profile.dense_ffn_bytes += bytes,
+        else => {},
     }
-
-    const name = tensor.info.name;
-    if (std.mem.endsWith(u8, name, "ffn_gate_inp.weight")) {
-        profile.router_bytes += bytes;
-        return;
-    }
-    if (std.mem.indexOf(u8, name, "_shexp.")) |_| {
-        profile.shared_expert_bytes += bytes;
-        return;
-    }
-    if (std.mem.endsWith(u8, name, "attn_qkv.weight") or
-        std.mem.endsWith(u8, name, "attn_gate.weight") or
-        std.mem.endsWith(u8, name, "ssm_alpha.weight") or
-        std.mem.endsWith(u8, name, "ssm_beta.weight") or
-        std.mem.endsWith(u8, name, "ssm_out.weight"))
-    {
-        profile.ssm_bytes += bytes;
-        return;
-    }
-    if (std.mem.endsWith(u8, name, "attn_q.weight") or
-        std.mem.endsWith(u8, name, "attn_k.weight") or
-        std.mem.endsWith(u8, name, "attn_v.weight") or
-        std.mem.endsWith(u8, name, "attn_output.weight"))
-    {
-        profile.full_attn_bytes += bytes;
-        return;
-    }
-    if (std.mem.endsWith(u8, name, "ffn_gate.weight") or
-        std.mem.endsWith(u8, name, "ffn_up.weight") or
-        std.mem.endsWith(u8, name, "ffn_down.weight"))
-    {
-        profile.dense_ffn_bytes += bytes;
+    if (tensor.info.type_ == .q8_0) {
+        recordQ8ShapeProfile(profile, path, rows, cols, bytes);
     }
 }
 
@@ -1271,11 +1564,111 @@ fn recordMoeDmmvProfile(
 // DMMV dispatch helpers
 // ---------------------------------------------------------------------------
 
-/// Dispatch a DMMV on an existing command buffer (does NOT commit).
-fn dispatchDmmvOnCmd(
+fn dispatchCopyF32OnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    src_buf: *const MetalBuffer,
+    dst_buf: *const MetalBuffer,
+    n: u32,
+) void {
+    if (n == 0) return;
+    const push = CopyF32Push{ .n = n };
+    const bufs = [_]*const MetalBuffer{ src_buf, dst_buf };
+    cmd.dispatchV2(&engine.copy_f32_pipe, .{ (n + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(CopyF32Push), 2);
+}
+
+fn dispatchCopyU32OnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    src_buf: *const MetalBuffer,
+    dst_buf: *const MetalBuffer,
+    n_words: u32,
+    src_offset_words: u32,
+    dst_offset_words: u32,
+) void {
+    if (n_words == 0) return;
+    const push = CopyU32Push{
+        .n_words = n_words,
+        .src_offset_words = src_offset_words,
+        .dst_offset_words = dst_offset_words,
+    };
+    const bufs = [_]*const MetalBuffer{ src_buf, dst_buf };
+    cmd.dispatchV2(&engine.copy_u32_pipe, .{ (n_words + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(CopyU32Push), 2);
+}
+
+fn dispatchZeroF32OnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    dst_buf: *const MetalBuffer,
+    n: u32,
+) void {
+    if (n == 0) return;
+    const push = ZeroF32Push{ .n = n };
+    const bufs = [_]*const MetalBuffer{dst_buf};
+    cmd.dispatchV2(&engine.zero_f32_pipe, .{ (n + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ZeroF32Push), 1);
+}
+
+fn canUseDualQ8Dmmv(
+    engine: *const InferenceEngine,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+    M0: u32,
+    M1: u32,
+    K: u32,
+) bool {
+    const block_size = engine.q8_dual_tg_override orelse 512;
+    return tensor0.info.type_ == .q8_0 and
+        tensor1.info.type_ == .q8_0 and
+        K <= 2048 and
+        M0 > 0 and
+        M1 > 0 and
+        engine.dmmv_q8_0_dual_pipe.thread_execution_width == 32 and
+        engine.dmmv_q8_0_dual_pipe.max_threads_per_threadgroup >= block_size;
+}
+
+fn dispatchDualQ8DmmvOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+    weight0_buf: *const MetalBuffer,
+    weight1_buf: *const MetalBuffer,
+    weight0_offset: u32,
+    weight1_offset: u32,
+    input_buf: *const MetalBuffer,
+    output0_buf: *const MetalBuffer,
+    output1_buf: *const MetalBuffer,
+    M0: u32,
+    M1: u32,
+    K: u32,
+) void {
+    recordDmmvProfile(engine, tensor0, M0, K);
+    recordDmmvProfile(engine, tensor1, M1, K);
+
+    const push = DualQ8DmmvPush{
+        .M0 = M0,
+        .M1 = M1,
+        .K = K,
+        .a0_offset = weight0_offset,
+        .a1_offset = weight1_offset,
+        .x_offset = 0,
+        .y0_offset = 0,
+        .y1_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ weight0_buf, weight1_buf, input_buf, output0_buf, output1_buf };
+    const total_rows = M0 + M1;
+    const block_size = engine.q8_dual_tg_override orelse 512;
+    const simd_width = if (engine.dmmv_q8_0_dual_pipe.thread_execution_width > 0) engine.dmmv_q8_0_dual_pipe.thread_execution_width else @as(u32, 32);
+    const rows_per_wg: u32 = block_size / simd_width;
+    cmd.dispatchV2(&engine.dmmv_q8_0_dual_pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
+}
+
+fn dispatchDmmvOnCmdWithWeightBuf(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
     tensor: *const metal_loader.LoadedTensor,
+    weight_buf: *const MetalBuffer,
+    weight_offset: u32,
     input_buf: *const MetalBuffer,
     output_buf: *const MetalBuffer,
     M: u32,
@@ -1288,17 +1681,46 @@ fn dispatchDmmvOnCmd(
         log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
         return;
     };
-    const page_off = tensorPageOffset(engine.model, tensor);
     const push = DmmvPush{
         .M = M,
         .K = K,
-        .a_offset = page_off + extra_byte_offset,
+        .a_offset = weight_offset + extra_byte_offset,
         .x_offset = 0,
         .y_offset = 0,
     };
-    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf };
+    const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
     const wgs = (M + pip.rows_per_wg - 1) / pip.rows_per_wg;
     cmd.dispatchV2(pip.pipe, .{ wgs, 1, 1 }, .{ pip.block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), pip.push_idx);
+}
+
+fn dispatchLmHeadOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    hidden_dim: u32,
+    vocab_size: u32,
+) void {
+    if (engine.lm_head_private_buf.handle != null) {
+        dispatchDmmvOnCmdWithWeightBuf(engine, cmd, engine.lm_head, &engine.lm_head_private_buf, 0, input_buf, output_buf, vocab_size, hidden_dim, 0);
+        return;
+    }
+
+    dispatchDmmvOnCmd(engine, cmd, engine.lm_head, input_buf, output_buf, vocab_size, hidden_dim, 0);
+}
+
+/// Dispatch a DMMV on an existing command buffer (does NOT commit).
+fn dispatchDmmvOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+) void {
+    dispatchDmmvOnCmdWithWeightBuf(engine, cmd, tensor, &tensor.gpu_buffer, tensorPageOffset(engine.model, tensor), input_buf, output_buf, M, K, extra_byte_offset);
 }
 
 /// Dispatch a single DMMV and wait for completion.
@@ -2297,6 +2719,11 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         shared_cmd_storage = try beginProfiledCommand(engine, profile);
         break :blk &shared_cmd_storage;
     } else null;
+    if (engine.private_decode_buffers) {
+        const cmd = shared_cmd orelse return error.PrivateDecodeFastPathRequiresSharedCommand;
+        dispatchCopyF32OnCmd(engine, cmd, &engine.embed_staging, &engine.hidden_buf, hidden_dim);
+        cmd.barrier();
+    }
 
     for (0..cfg.n_layers) |layer_idx| {
         const layer: u32 = @intCast(layer_idx);
@@ -2362,8 +2789,22 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const z_t = lt.attn_gate orelse return error.MissingTensor;
             const alpha_t = lt.ssm_alpha orelse return error.MissingTensor;
             const beta_t = lt.ssm_beta orelse return error.MissingTensor;
-            dispatchDmmvOnCmd(engine, cmd, wqkv_t, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
-            dispatchDmmvOnCmd(engine, cmd, z_t, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+            const wqkv_buf: *const MetalBuffer = if (engine.private_ssm_qkv_bufs) |bufs|
+                (if (bufs[layer_idx].handle != null) &bufs[layer_idx] else &wqkv_t.gpu_buffer)
+            else
+                &wqkv_t.gpu_buffer;
+            const z_buf: *const MetalBuffer = if (engine.private_ssm_gate_bufs) |bufs|
+                (if (bufs[layer_idx].handle != null) &bufs[layer_idx] else &z_t.gpu_buffer)
+            else
+                &z_t.gpu_buffer;
+            const wqkv_offset: u32 = if (wqkv_buf == &wqkv_t.gpu_buffer) tensorPageOffset(engine.model, wqkv_t) else 0;
+            const z_offset: u32 = if (z_buf == &z_t.gpu_buffer) tensorPageOffset(engine.model, z_t) else 0;
+            if (canUseDualQ8Dmmv(engine, wqkv_t, z_t, conv_channels, d_inner, hidden_dim)) {
+                dispatchDualQ8DmmvOnCmd(engine, cmd, wqkv_t, z_t, wqkv_buf, z_buf, wqkv_offset, z_offset, &engine.norm_buf, &engine.attn_out_buf, &engine.gate_buf, conv_channels, d_inner, hidden_dim);
+            } else {
+                dispatchDmmvOnCmdWithWeightBuf(engine, cmd, wqkv_t, wqkv_buf, wqkv_offset, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
+                dispatchDmmvOnCmdWithWeightBuf(engine, cmd, z_t, z_buf, z_offset, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+            }
             dispatchDmmvOnCmd(engine, cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
             dispatchDmmvOnCmd(engine, cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
             cmd.barrier();
@@ -2452,7 +2893,12 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
             // SSM out DMMV: swiglu_buf → down_buf
             const ssm_out_t = lt.ssm_out orelse return error.MissingTensor;
-            dispatchDmmvOnCmd(engine, cmd, ssm_out_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
+            const ssm_out_buf: *const MetalBuffer = if (engine.private_ssm_out_bufs) |bufs|
+                (if (bufs[layer_idx].handle != null) &bufs[layer_idx] else &ssm_out_t.gpu_buffer)
+            else
+                &ssm_out_t.gpu_buffer;
+            const ssm_out_offset: u32 = if (ssm_out_buf == &ssm_out_t.gpu_buffer) tensorPageOffset(engine.model, ssm_out_t) else 0;
+            dispatchDmmvOnCmdWithWeightBuf(engine, cmd, ssm_out_t, ssm_out_buf, ssm_out_offset, &engine.swiglu_buf, &engine.down_buf, hidden_dim, d_inner, 0);
             cmd.barrier();
             if (should_debug_ssm_compare) {
                 commitAndWaitProfiled(cmd, profile);
@@ -2763,14 +3209,22 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
     if (shared_cmd) |cmd| {
         dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
         cmd.barrier();
-        dispatchDmmvOnCmd(engine, cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
+        dispatchLmHeadOnCmd(engine, cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
+        if (engine.private_decode_buffers) {
+            cmd.barrier();
+            dispatchCopyF32OnCmd(engine, cmd, &engine.logits_buf, &engine.logits_readback_buf, cfg.vocab_size);
+        }
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(cmd, profile);
     } else {
         var cmd = try beginProfiledCommand(engine, profile);
         dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
         cmd.barrier();
-        dispatchDmmvOnCmd(engine, &cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hidden_dim, 0);
+        dispatchLmHeadOnCmd(engine, &cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
+        if (engine.private_decode_buffers) {
+            cmd.barrier();
+            dispatchCopyF32OnCmd(engine, &cmd, &engine.logits_buf, &engine.logits_readback_buf, cfg.vocab_size);
+        }
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(&cmd, profile);
     }
@@ -3617,7 +4071,7 @@ pub fn generateWithMetrics(
     var output: std.ArrayList(u32) = .{};
     errdefer output.deinit(allocator);
 
-    engine.resetRequestState();
+    try engine.resetRequestState();
 
     // Prefill: process each prompt token through all layers
     const prefill_start = std.time.nanoTimestamp();
@@ -5240,6 +5694,111 @@ test "dmmv_q8_0 shader matches CPU reference across many workgroups" {
     const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
     for (0..M) |row| {
         try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.05);
+    }
+}
+
+test "dmmv_q8_0_dual shader matches CPU reference across both outputs" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M0: usize = 65;
+    const M1: usize = 33;
+    const K: usize = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight0_buf = try metal_buffer.createBuffer(ctx, M0 * row_bytes);
+    defer metal_buffer.freeBuffer(&weight0_buf);
+    var weight1_buf = try metal_buffer.createBuffer(ctx, M1 * row_bytes);
+    defer metal_buffer.freeBuffer(&weight1_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output0_buf = try metal_buffer.createBuffer(ctx, M0 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output0_buf);
+    var output1_buf = try metal_buffer.createBuffer(ctx, M1 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output1_buf);
+
+    @memset(weight0_buf.cpu_ptr.?[0..weight0_buf.size], 0);
+    @memset(weight1_buf.cpu_ptr.?[0..weight1_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output0_buf.cpu_ptr.?[0..output0_buf.size], 0);
+    @memset(output1_buf.cpu_ptr.?[0..output1_buf.size], 0);
+
+    for (0..M0) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale_mag = 0.03125 * @as(f32, @floatFromInt(1 + (row % 5) + (blk % 7)));
+            const scale = @as(f16, @floatCast(scale_mag));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight0_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight0_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 11 + blk * 7 + e * 5) % 63);
+                const q: i8 = @intCast(raw_q - 31);
+                weight0_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+    for (0..M1) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale_mag = 0.046875 * @as(f32, @floatFromInt(1 + (row % 3) + (blk % 5)));
+            const scale = @as(f16, @floatCast(scale_mag));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight1_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight1_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 13 + blk * 3 + e * 7) % 61);
+                const q: i8 = @intCast(raw_q - 30);
+                weight1_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 13 + 7) % 29);
+        input_ptr[i] = 0.125 * @as(f32, @floatFromInt(raw - 14));
+    }
+
+    const push = DualQ8DmmvPush{
+        .M0 = @intCast(M0),
+        .M1 = @intCast(M1),
+        .K = @intCast(K),
+        .a0_offset = 0,
+        .a1_offset = 0,
+        .x_offset = 0,
+        .y0_offset = 0,
+        .y1_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight0_buf, &weight1_buf, &input_buf, &output0_buf, &output1_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M0 + M1 + 15) / 16), 1, 1 }, .{ 512, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const output0_ptr: [*]const f32 = @ptrCast(@alignCast(output0_buf.cpu_ptr.?));
+    const output1_ptr: [*]const f32 = @ptrCast(@alignCast(output1_buf.cpu_ptr.?));
+
+    for (0..M0) |row| {
+        var expected: f32 = 0;
+        dequantRow(weight0_buf.cpu_ptr.?[0..weight0_buf.size], @intCast(row), @intCast(K), .q8_0, ref_row);
+        for (0..K) |i| expected += ref_row[i] * input_ptr[i];
+        try std.testing.expectApproxEqAbs(expected, output0_ptr[row], 0.05);
+    }
+    for (0..M1) |row| {
+        var expected: f32 = 0;
+        dequantRow(weight1_buf.cpu_ptr.?[0..weight1_buf.size], @intCast(row), @intCast(K), .q8_0, ref_row);
+        for (0..K) |i| expected += ref_row[i] * input_ptr[i];
+        try std.testing.expectApproxEqAbs(expected, output1_ptr[row], 0.05);
     }
 }
 

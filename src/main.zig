@@ -29,6 +29,7 @@ const gguf_mod = @import("model/gguf.zig");
 const managed_mod = @import("model/managed.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
 const graph_mod = @import("compute/graph.zig");
+const process_lock_mod = @import("gpu/process_lock.zig");
 const server_runtime = @import("server/runtime.zig");
 // These modules import vulkan/ transitively — only available on Linux until T010-T014 refactor.
 // On macOS they are stubbed out; the GPU abstraction refactor will make them platform-independent.
@@ -209,6 +210,21 @@ fn openBrowser(port: u16) void {
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
     _ = child.spawnAndWait() catch {};
+}
+
+fn reportGpuProcessLockError(err: anyerror, backend: process_lock_mod.Backend, device_index: u32) noreturn {
+    switch (err) {
+        error.GpuAlreadyReserved => log.err(
+            "GPU {s}:{d} is already reserved by another zinc process. Stop the other instance before loading a second model on the same GPU.",
+            .{ @tagName(backend), device_index },
+        ),
+        else => log.err("Failed to acquire GPU process lock for {s}:{d}: {s}", .{
+            @tagName(backend),
+            device_index,
+            @errorName(err),
+        }),
+    }
+    std.process.exit(1);
 }
 
 fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, allocator: std.mem.Allocator) void {
@@ -1317,6 +1333,11 @@ pub fn main() !void {
         );
 
         if (config.prompt) |prompt| {
+            var gpu_process_lock = process_lock_mod.acquire(.metal, device.selected_device_index) catch |err| {
+                reportGpuProcessLockError(err, .metal, device.selected_device_index);
+            };
+            defer gpu_process_lock.deinit();
+
             // Load model (zero-copy mmap) for prompt-mode execution.
             var model = metal_loader.load(model_path.?, device.ctx, allocator) catch |err| {
                 log.err("Failed to load model: {s}", .{@errorName(err)});
@@ -1410,6 +1431,9 @@ pub fn main() !void {
 
             var manager = if (resolved_model) |startup_model|
                 model_manager_mod.ModelManager.init(startup_model.spec, &device, allocator) catch |err| {
+                    if (err == error.GpuAlreadyReserved) {
+                        reportGpuProcessLockError(err, .metal, device.selected_device_index);
+                    }
                     log.err("Failed to init Metal model manager: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 }
@@ -1437,6 +1461,11 @@ pub fn main() !void {
     const shader_dir = "zig-out/share/zinc/shaders";
 
     if (config.prompt) |prompt| {
+        var gpu_process_lock = process_lock_mod.acquire(.vulkan, vk_instance.selected_device_index) catch |err| {
+            reportGpuProcessLockError(err, .vulkan, vk_instance.selected_device_index);
+        };
+        defer gpu_process_lock.deinit();
+
         log.debug("Prompt: {s}", .{prompt});
 
         var cmd_pool = try CommandPool.init(&vk_instance);
@@ -1593,6 +1622,9 @@ pub fn main() !void {
 
         var manager = if (resolved_model) |startup_model|
             model_manager_mod.ModelManager.init(startup_model.spec, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
+                if (err == error.GpuAlreadyReserved) {
+                    reportGpuProcessLockError(err, .vulkan, vk_instance.selected_device_index);
+                }
                 log.err("Failed to init model manager: {s}", .{@errorName(err)});
                 std.process.exit(1);
             }

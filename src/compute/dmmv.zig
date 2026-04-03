@@ -105,6 +105,10 @@ pub const DmmvDispatch = struct {
         // array in the Q4_K shader (s_x[SPEC_K]). Must be >= the largest K value
         // used in any Q4_K dispatch (hidden_dim, inter_dim, q_dim, d_inner).
         const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = hidden_dim }};
+        const wave64_options = pipeline_mod.PipelineOptions{
+            .required_subgroup_size = 64,
+            .require_full_subgroups = true,
+        };
 
         var path_buf: [512]u8 = undefined;
 
@@ -115,7 +119,7 @@ pub const DmmvDispatch = struct {
         };
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0 = pipeline_mod.createFromSpirv(instance, q8_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -133,7 +137,7 @@ pub const DmmvDispatch = struct {
         };
 
         const f16_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f16.spv", .{shader_dir}) catch unreachable;
-        const pipeline_f16 = pipeline_mod.createFromSpirv(instance, f16_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_f16 = pipeline_mod.createFromSpirvWithOptions(instance, f16_path, 3, push_size, &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("F16 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

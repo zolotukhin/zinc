@@ -249,17 +249,18 @@ The Metal server serves the same chat UI at `/`, the same `/v1/chat/completions`
 
 ## What the numbers look like
 
-On an M1 Pro with 32 GB unified memory running `Qwen3.5-2B-Q4_K_M`:
+On a **Mac Studio (Mac16,9)** with **Apple M4 Max**, **40-core GPU**, and **64 GB unified memory** running `Qwen3.5-35B-A3B-UD-Q4_K_XL`:
 
 | Metric | Result |
 |---|---|
-| CLI plain decode | ~17 tok/s |
-| Chat template | ~17 tok/s |
-| Memory bandwidth | ~200 GB/s |
+| `bench-metal` plain decode, 256 generated tokens, 1 warmup, 3 measured runs | **35.61 tok/s avg**, `35.58 tok/s` median, `28.1 ms/tok` |
+| `bench-metal` prefill on the same run set | **36.2 tok/s avg**, `36.6 tok/s` median |
+| Raw HTTP `POST /v1/completions`, `max_tokens=256`, `concurrency=1` | **34.74 tok/s**, `7.37s` avg latency |
+| Raw HTTP `POST /v1/completions`, `max_tokens=256`, `concurrency=4` | **34.71 tok/s** aggregate, `18.45s` avg latency, `28.40s` p95 |
 
-These are early numbers on an older chip. The M1 Pro is not the fastest Apple Silicon part, and the Metal kernels have not yet received the same depth of tuning that the RDNA4 Vulkan path has had. **M4 and M5 benchmarks are coming.**
+These are current validated numbers on the exact machine above, measured on April 2, 2026 with `zig build -Doptimize=ReleaseFast`. The earlier M1 Pro bring-up on `Qwen3.5-2B-Q4_K_M` was useful for proving the backend, but it is no longer the public reference point for Apple Silicon performance.
 
-For context, the same model on RDNA4 (576 GB/s) runs at 27 tok/s. The numbers scale with bandwidth, which is exactly what you want to see from a memory-bound decode loop.
+For context, the same 35B model on the AMD RDNA4 test node (Radeon AI PRO R9700, 32 GB, 576 GB/s) currently runs at **37.95 tok/s** in the clean CLI decode benchmark. That is close enough to make the point: the Metal path is real, not a fallback feature.
 
 ## What is next
 
@@ -269,7 +270,7 @@ The Metal backend ships today. Same tests, same API, same models. The optimizati
 
 **Sampling controls.** Temperature, top-p, repetition penalty on Metal to match Vulkan.
 
-**M4/M5 tuning.** Generation-specific kernel variants, especially for M5 with its TensorOps path.
+**Generation-specific tuning.** M4 Max is now measured and tuned, but the current kernels still aim to run across the whole family. The next step is broader M1/M2/M3 coverage plus generation-specific M5 variants where the hardware justifies them.
 
 **Precompiled shaders.** metallib bundles for faster cold starts.
 

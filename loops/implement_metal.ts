@@ -14,7 +14,7 @@
  * Three phases:
  *   FIX       — build errors, test failures, crashes
  *   IMPLEMENT — wire up GPU layer dispatch, produce correct tokens
- *   OPTIMIZE  — once output matches reference: improve tok/s to ≥80
+ *   OPTIMIZE  — once output matches reference: improve tok/s to ≥TARGET_TOK_PER_SEC
  *
  * Usage:
  *   bun loops/implement_metal.ts                     # run indefinitely
@@ -46,8 +46,12 @@ const REPO_ROOT = resolve(import.meta.dir, "..");
 const RESULTS_DIR = resolve(REPO_ROOT, ".metal_optimize");
 const MODEL_PATH = process.env.ZINC_MODEL ?? "/Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf";
 const TEST_PROMPT = "The capital of France is";
-const MAX_TOKENS = 5; // Start small, increase as dispatch is wired up
+const MAX_TOKENS = 64; // Enough tokens for stable decode throughput measurement
 const REFERENCE_TEXT = "Paris"; // Expected in correct output
+const TARGET_TOK_PER_SEC = 50;
+const BENCHMARK_RUNS = 3; // Median of N inference runs for noise reduction
+const PROFILE_EVERY = 5; // Run with --profile every N cycles
+const STALL_THRESHOLD = 5; // Cycles without tok/s improvement before studying references
 
 const BLOCKED_GIT_OPS = [
   "Bash(git checkout:*)",
@@ -485,29 +489,51 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
     };
   }
 
-  console.log(clr("1;33", `  🚀 Running inference (${maxTokens} tokens)...`));
-  const run = await runCommand(
-    "./zig-out/bin/zinc",
-    ["-m", MODEL_PATH, "--prompt", TEST_PROMPT, "-n", String(maxTokens)],
-    { timeout: 300_000 },
-  );
+  console.log(clr("1;33", `  🚀 Running inference (${maxTokens} tokens, ${BENCHMARK_RUNS} samples)...`));
+  const tokPerSecSamples: number[] = [];
+  let lastRun: RunResult = { exitCode: -1, stdout: "", stderr: "" };
+  let lastCombined = "";
 
-  const combined = run.stderr + run.stdout;
-  const tokPerSec = parseTokPerSec(combined);
-  const tokensGenerated = parseTokensGenerated(combined);
-  const outputText = parseOutputText(combined);
+  for (let sample = 0; sample < BENCHMARK_RUNS; sample++) {
+    const run = await runCommand(
+      "./zig-out/bin/zinc",
+      ["-m", MODEL_PATH, "--prompt", TEST_PROMPT, "-n", String(maxTokens)],
+      { timeout: 300_000 },
+    );
+    lastRun = run;
+    lastCombined = run.stderr + run.stdout;
+
+    if (run.exitCode !== 0) break; // crash — no point running more samples
+
+    const tps = parseTokPerSec(lastCombined);
+    if (tps != null) {
+      tokPerSecSamples.push(tps);
+      console.log(clr("2", `    sample ${sample + 1}/${BENCHMARK_RUNS}: ${tps.toFixed(2)} tok/s`));
+    }
+  }
+
+  // Use median of samples for noise-resistant measurement
+  const sorted = [...tokPerSecSamples].sort((a, b) => a - b);
+  const tokPerSec = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : null;
+  const tokensGenerated = parseTokensGenerated(lastCombined);
+  const outputText = parseOutputText(lastCombined);
   const evaluation = evaluateOutputText(outputText);
+
+  if (tokPerSec != null && sorted.length > 1) {
+    const range = sorted[sorted.length - 1] - sorted[0];
+    console.log(clr("1;36", `    median: ${tokPerSec.toFixed(2)} tok/s [${tokPerSecSamples.map(s => s.toFixed(1)).join(", ")}] range=${range.toFixed(1)}`));
+  }
 
   const result: BuildRunResult = {
     buildExitCode: 0,
     buildOutput: build.stderr,
     testExitCode: 0,
     testOutput: "",
-    runExitCode: run.exitCode,
-    runOutput: combined,
+    runExitCode: lastRun.exitCode,
+    runOutput: lastCombined,
     phase: "implement",
     tokPerSec,
-    tokPerSecSamples: tokPerSec != null ? [tokPerSec] : [],
+    tokPerSecSamples,
     tokensGenerated,
     outputText,
     containsReference: evaluation.containsReference,
@@ -515,7 +541,7 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
     outputQualityScore: evaluation.outputQualityScore,
     offTopic: evaluation.offTopic,
     evaluationNotes: evaluation.evaluationNotes,
-    error: run.exitCode !== 0 ? `Runtime exit code ${run.exitCode}` : null,
+    error: lastRun.exitCode !== 0 ? `Runtime exit code ${lastRun.exitCode}` : null,
   };
   result.phase = detectPhase(result);
   return result;
@@ -910,35 +936,80 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
 
   if (lastResult.buildExitCode !== 0) {
     diagnosis.push("## Status: BUILD FAILURE");
-    diagnosis.push("Fix the compilation error shown below.");
+    diagnosis.push("Fix the compilation error shown below. Do NOT attempt performance work until it compiles.");
   } else if (lastResult.testExitCode !== 0) {
     diagnosis.push("## Status: TEST FAILURE");
-    diagnosis.push("Fix the failing test. All 27+ Metal tests must pass.");
+    diagnosis.push("Fix the failing test. All 27+ Metal tests must pass before any perf work.");
   } else if (lastResult.runExitCode !== 0 && lastResult.runExitCode !== null) {
     diagnosis.push(`## Status: RUNTIME CRASH (exit code ${lastResult.runExitCode})`);
-    diagnosis.push("Build and tests pass but ZINC crashes during inference.");
-  } else if (lastResult.tokensGenerated === 0) {
-    diagnosis.push("## Status: NO TOKENS GENERATED");
-    diagnosis.push("Build and tests pass, model loads, but no tokens are produced.");
+    diagnosis.push("Build and tests pass but ZINC crashes during inference. Fix the crash first.");
   } else if (!lastResult.containsReference) {
-    diagnosis.push(`## Status: WRONG OUTPUT — generated ${lastResult.tokensGenerated} tokens but output doesn't contain "Paris"`);
+    diagnosis.push(`## Status: CORRECTNESS REGRESSION — output doesn't contain "Paris"`);
     diagnosis.push(`Output text: "${lastResult.outputText}"`);
-    diagnosis.push("");
-    diagnosis.push("The 40-layer transform is not fully wired up. The decode loop currently skips");
-    diagnosis.push("all layer dispatch and projects raw embeddings directly to logits via CPU matmul.");
-    diagnosis.push("You need to implement GPU dispatch for each layer.");
-  } else if (lastResult.tokPerSec != null && lastResult.tokPerSec < 80) {
-    diagnosis.push(`## Status: CORRECT OUTPUT — ${lastResult.tokPerSec.toFixed(1)} tok/s (target: ≥80)`);
+    diagnosis.push("The previous optimization broke correctness. You MUST restore correct output first.");
+    diagnosis.push("Read the git diff to see what changed and revert the problematic part.");
+  } else if (lastResult.tokPerSec != null && lastResult.tokPerSec < TARGET_TOK_PER_SEC) {
+    const current = lastResult.tokPerSec;
+    const gap = TARGET_TOK_PER_SEC - current;
+    const pctNeeded = ((gap / current) * 100).toFixed(0);
+    diagnosis.push(`## Status: CORRECT OUTPUT — ${current.toFixed(2)} tok/s → target ≥${TARGET_TOK_PER_SEC}`);
+    diagnosis.push(`Gap: ${gap.toFixed(1)} tok/s (need ${pctNeeded}% improvement)`);
     diagnosis.push(`Output: "${trunc(lastResult.outputText, 80)}"`);
-    diagnosis.push("Output is correct! Now optimize for speed. Profile and optimize hot shaders.");
+    if (lastResult.tokPerSecSamples.length > 1) {
+      diagnosis.push(`Benchmark samples: [${lastResult.tokPerSecSamples.map(s => s.toFixed(1)).join(", ")}] tok/s`);
+    }
   } else {
-    diagnosis.push(`## Status: TARGET REACHED — ${lastResult.tokPerSec?.toFixed(1)} tok/s ≥80`);
-    diagnosis.push("🎉 Performance target met!");
+    diagnosis.push(`## Status: TARGET REACHED — ${lastResult.tokPerSec?.toFixed(1)} tok/s ≥${TARGET_TOK_PER_SEC}`);
+    diagnosis.push("Performance target met!");
   }
+
+  // Stall warning
+  if (state.stalledCycles >= STALL_THRESHOLD) {
+    diagnosis.push("");
+    diagnosis.push(`## ⚠ STALL — ${state.stalledCycles} cycles without meaningful improvement. STUDY THE REFERENCES.`);
+    diagnosis.push("");
+    diagnosis.push("Guessing is not working. Before making ANY more changes, you MUST study how");
+    diagnosis.push("production Metal inference engines solve this exact problem:");
+    diagnosis.push("");
+    diagnosis.push("### Step 1: Clone and read llama.cpp Metal backend");
+    diagnosis.push("```bash");
+    diagnosis.push("git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp");
+    diagnosis.push("```");
+    diagnosis.push("Read these files:");
+    diagnosis.push("- `/tmp/llama.cpp/ggml/src/ggml-metal/ggml-metal.m` — the core Metal dispatch loop");
+    diagnosis.push("- Look at how they batch command buffers, manage encoders, handle MoE expert dispatch");
+    diagnosis.push("- Look at their threadgroup sizes for Q4_K DMMV and how they tile matmuls");
+    diagnosis.push("- Note how many commitAndWait calls happen per token (likely 1)");
+    diagnosis.push("");
+    diagnosis.push("### Step 2: Clone and read vLLM Metal / MPS backend");
+    diagnosis.push("```bash");
+    diagnosis.push("git clone --depth 1 https://github.com/vllm-project/vllm /tmp/vllm");
+    diagnosis.push("```");
+    diagnosis.push("Read these files:");
+    diagnosis.push("- `/tmp/vllm/vllm/attention/backends/` — attention dispatch strategies");
+    diagnosis.push("- Look at how they handle MoE routing and expert parallelism");
+    diagnosis.push("- Check their memory management and buffer pooling approach");
+    diagnosis.push("");
+    diagnosis.push("### Step 3: Apply what you learned");
+    diagnosis.push("Identify the SPECIFIC technique from llama.cpp or vLLM that addresses our bottleneck,");
+    diagnosis.push("then implement it. Cite which file/function you're adapting from in @@@DESCRIPTION.");
+    diagnosis.push("Do NOT repeat variations of previously failed approaches.");
+  } else if (state.stalledCycles >= 3) {
+    diagnosis.push("");
+    diagnosis.push(`## Note: ${state.stalledCycles}/${STALL_THRESHOLD} cycles without improvement — will switch to reference study soon`);
+  }
+
+  // Reflection summary from recent cycles
+  const reflectionSummary = cycles.length >= 5
+    ? buildReflectionSummary({ cycles: cycles as any })
+    : null;
 
   const phaseLabel = phase === "fix" ? "FIX" : phase === "implement" ? "IMPLEMENT" : "OPTIMIZE";
 
-  return [
+  // For optimize phase, use a focused prompt
+  const isOptimize = phase === "optimize" || (lastResult.strongAnswer && lastResult.tokPerSec != null);
+
+  const sections: string[] = [
     `# ZINC Metal ${phaseLabel} Task`,
     "",
     ...diagnosis,
@@ -946,106 +1017,155 @@ function buildPrompt(state: RunState, lastResult: BuildRunResult): string {
     "## Hardware",
     "- Mac Studio M4 Max, 64 GB unified memory, 40-core GPU, 546 GB/s bandwidth",
     "- Apple GPU family: Apple9 (M4), simdgroup_matrix = true, bfloat = true",
-    "- macOS, no Vulkan — Metal compute only",
+    "- macOS, Metal compute only",
     "",
-    "## Architecture (Qwen3.5-35B-A3B = hybrid attention + SSM + MoE)",
+    "## Model (Qwen3.5-35B-A3B, Q4_K, 20.7 GB)",
     "- 40 layers: every 4th is full attention (layers 3,7,11,...,39), rest are SSM/delta-net",
     "- MoE FFN: 256 experts, 8 active per token, + shared expert",
     "- head_dim=256, hidden_dim=2048, n_heads=16, n_kv_heads=2",
-    "- rope_dim=64, rope_freq_base=10M",
-    "- Model: Q4_K quantization (20.7 GB)",
+    "- Active parameters per token: ~3B (due to MoE sparsity)",
+    "- Effective working set per decode step: ~1.7 GB at Q4_K",
     "",
-    "## Baseline (llama.cpp Metal on this machine)",
-    "- Prefill (pp512): 1421 tok/s",
-    "- Decode (tg128): 72.93 tok/s",
-    "- ZINC target: ≥80 tok/s single-request decode",
+  ];
+
+  if (isOptimize) {
+    // Optimization-specific sections
+    sections.push(
+      "## Bandwidth Analysis",
+      "- Memory BW: 546 GB/s theoretical, ~480 GB/s achievable",
+      "- Working set per token: ~1.7 GB (only active experts + attention layers)",
+      "- Theoretical BW-limited decode: ~280 tok/s (480 / 1.7)",
+      `- Current: ${lastResult.tokPerSec?.toFixed(1)} tok/s → ${((lastResult.tokPerSec ?? 0) / 280 * 100).toFixed(0)}% of theoretical BW limit`,
+      "- This means MOST time is lost to dispatch overhead, sync, or compute bottlenecks — NOT bandwidth",
+      "",
+      "## Baseline Reference",
+      "- llama.cpp Metal on this machine: 72.93 tok/s decode (tg128)",
+      `- ZINC target: ≥${TARGET_TOK_PER_SEC} tok/s`,
+      `- ZINC current: ${lastResult.tokPerSec?.toFixed(1)} tok/s`,
+      "",
+      "## Optimization Targets (pick ONE per cycle)",
+      "",
+      "### 1. Reduce command buffer submissions",
+      "Each commitAndWait() is a CPU-GPU sync point (~50-100μs overhead).",
+      "Ideal: ONE command buffer submit per decode step. Batch all 40 layers into",
+      "a single command buffer with barriers between dependent dispatches.",
+      "Check how many commits happen per token in forward_metal.zig's decode loop.",
+      "",
+      "### 2. Minimize Metal encoder recreation",
+      "mtl_barrier() creates a new compute command encoder. Each encoder switch costs ~10-30μs.",
+      "Only barrier when there is a true data dependency. Adjacent dispatches to different",
+      "buffers do NOT need a barrier.",
+      "",
+      "### 3. MoE expert dispatch batching",
+      "With 8 active experts per token, if each expert is a separate dispatch, that's 8 small",
+      "dispatches per layer × 30 MoE layers = 240 small dispatches. Each has launch overhead.",
+      "Consider: batch multiple experts into one dispatch with offset indexing, or fuse gate+up.",
+      "",
+      "### 4. Threadgroup size tuning",
+      "M4 Max: max 1024 threads per threadgroup, 32 SIMD width.",
+      "DMMV shaders for Q4_K: check if threadgroup size matches the row count.",
+      "Undersized threadgroups → low occupancy. Oversized → register pressure.",
+      "",
+      "### 5. Use half/bfloat for intermediates",
+      "M4 has 2x throughput for bfloat16 vs float32 in compute.",
+      "If intermediate buffers (hidden state, norm output) can use half precision,",
+      "this halves bandwidth and doubles ALU throughput for those stages.",
+      "",
+      "### 6. Fused kernels",
+      "RMSNorm + first DMMV could be fused to avoid writing norm_buf to memory.",
+      "SwiGLU (gate * silu(up)) is another fusion candidate.",
+      "Each fused kernel saves one global memory round-trip.",
+      "",
+      "### 7. Pipeline state object caching",
+      "If getPipeline() does dictionary lookup per dispatch, cache the PSO pointers",
+      "for hot paths (called 40× per token).",
+      "",
+    );
+  } else {
+    // Fix/implement sections (legacy path, kept for correctness regressions)
+    sections.push(
+      "## Project Structure",
+      "```",
+      "src/compute/forward_metal.zig — Metal inference engine (THE MAIN FILE)",
+      "src/metal/   — shim.h, shim.m (ObjC C API), device.zig, buffer.zig, command.zig",
+      "src/shaders/metal/ — MSL compute shaders (dmmv_q4k, flash_attn, rms_norm_mul, etc.)",
+      "```",
+      "",
+      "## Key Reference: forward.zig (Vulkan version)",
+      "The Vulkan `decodeStep()` at src/compute/forward.zig shows the exact layer dispatch",
+      "sequence. Read it for the correct order of operations, tensor names, and dimensions.",
+      "",
+    );
+  }
+
+  sections.push(
+    "## Key Files to Edit",
+    "- src/compute/forward_metal.zig — decode loop, dispatch sequence, buffer management",
+    "- src/metal/command.zig — command buffer management, barrier implementation",
+    "- src/metal/shim.m — ObjC shim: mtl_dispatch, mtl_barrier, mtl_commit",
+    "- src/shaders/metal/*.metal — shader source (threadgroup sizes, occupancy)",
     "",
-    "## Project Structure",
-    "```",
-    "src/metal/    — shim.h, shim.m (ObjC C API), c.zig (shared import),",
-    "                device.zig, buffer.zig, pipeline.zig, command.zig",
-    "src/gpu/      — interface.zig (comptime Metal/Vulkan selection)",
-    "src/model/    — config.zig (shared types), gguf.zig, loader_metal.zig, tokenizer.zig",
-    "src/compute/  — forward_metal.zig (Metal inference engine — THE MAIN FILE TO EDIT)",
-    "src/shaders/metal/ — 18 cross-compiled MSL shaders (dmmv_q4k, flash_attn, rms_norm_mul, etc.)",
-    "src/main.zig  — CLI, Metal branch wires device→loader→engine→generate",
-    "```",
-    "",
-    "## What's Working",
-    "- ✅ Metal device init (M4 detected, 64 GB memory)",
-    "- ✅ Zero-copy model loading (733 tensors, 21 GB mmap'd)",
-    "- ✅ Tokenizer (GPT-2 BPE, tokens match llama.cpp)",
-    "- ✅ 18 MSL compute shaders cross-compiled from GLSL via SPIRV-Cross",
-    "- ✅ Metal buffer alloc, mmap wrapping, pipeline compilation, GPU dispatch",
-    "- ✅ GPU dispatch verified: command.zig tests prove compute→readback works",
-    "- ✅ CPU LM head matmul produces real logits (slow but functional)",
-    "- ✅ 27 tests passing (device, buffer, pipeline, command, dequant, topK)",
-    "",
-    "## What Needs Implementation",
-    "The `generate()` function in `src/compute/forward_metal.zig` currently:",
-    "1. Dequants embedding on CPU ✅",
-    "2. Uploads to hidden_buf ✅",
-    "3. **SKIPS all 40 layers** ← THIS IS THE GAP",
-    "4. Projects hidden→logits via CPU matmul (slow but works) ✅",
-    "5. Greedy samples and loops ✅",
-    "",
-    "Each layer needs (via Metal GPU dispatch):",
-    "- RMS norm (hidden → norm_buf) using rms_norm_mul.metal",
-    "- QKV projection (DMMV: weight × norm → q/k/v) using dmmv_q4k.metal",
-    "- For attention layers: deinterleave Q+gate, sigmoid gate, RoPE, KV cache write, flash_attn",
-    "- For SSM layers: conv1d, delta-net state update, gated norm",
-    "- MoE FFN: router logits → topK → per-expert gate+up (DMMV) → SwiGLU → down → accumulate",
-    "- Residual add (vadd.metal)",
-    "- Final: RMS norm → LM head DMMV → logits",
-    "",
-    "The Metal shim's `mtl_dispatch()` takes: pipeline, grid[3], block[3], buffers[], push_constants.",
-    "Push constants are passed as a buffer at index n_bufs (see shim.m contract).",
-    "Barriers between dependent dispatches use `mtl_barrier()` (creates new encoder).",
-    "",
-    "## Key Reference: forward.zig (Vulkan version)",
-    "The Vulkan `decodeStep()` at src/compute/forward.zig:1032 shows the exact layer dispatch",
-    "sequence. Read it for the correct order of operations, tensor names, and dimensions.",
-    "Adapt the logic for Metal dispatch (different API but same math).",
-    "",
-    ...(lastResult.buildOutput ? [
-      "## Build Output (last 2000 chars)",
-      "```", buildOut, "```", "",
-    ] : []),
-    ...(lastResult.testOutput ? [
-      "## Test Output (last 2000 chars)",
-      "```", testOut, "```", "",
-    ] : []),
-    ...(lastResult.runOutput ? [
-      "## Run Output (last 3000 chars)",
-      "```", runOut, "```", "",
-    ] : []),
+  );
+
+  // Profile output if available
+  if (state.lastProfileOutput) {
+    sections.push(
+      `## Profile Output (cycle ${state.lastProfileCycle})`,
+      "Use this to identify the actual hotspots. Focus optimization on the slowest phases.",
+      "```",
+      state.lastProfileOutput.slice(-3000),
+      "```",
+      "",
+    );
+  }
+
+  // Build/test/run output
+  if (lastResult.buildOutput) {
+    sections.push("## Build Output (last 2000 chars)", "```", buildOut, "```", "");
+  }
+  if (lastResult.testOutput) {
+    sections.push("## Test Output (last 2000 chars)", "```", testOut, "```", "");
+  }
+  if (lastResult.runOutput) {
+    sections.push("## Run Output (last 3000 chars)", "```", runOut, "```", "");
+  }
+
+  // Reflection
+  if (reflectionSummary) {
+    sections.push("## Reflection (auto-analysis of recent cycles)", reflectionSummary, "");
+  }
+
+  sections.push(
     "## Cycle History",
     historyBlock,
     "",
-    "## Failed Approaches",
+    "## Failed Approaches (DO NOT repeat these)",
     failedBlock,
     "",
     "## Ideas",
     ideasBlock,
     "",
     "## Rules",
-    `1. Make ONE focused change. ${phase === "implement" ? "Implement ONE aspect of the layer dispatch (e.g., just RMS norm + DMMV for one layer)." : ""}`,
-    "2. All 27+ tests must continue passing. Run `zig build test` mentally before saving.",
-    "3. Do NOT modify src/vulkan/, loops/, or .env.",
-    "4. Zig 0.15.2 API: ArrayList is unmanaged (pass allocator to append/deinit).",
-    "5. MSL shaders use 'main0' as entry point (SPIRV-Cross convention).",
-    "6. Metal push constants go in buffer[n_bufs] (see shim.m mtl_dispatch).",
-    "7. The Metal command pattern: beginCommand → dispatch → barrier → dispatch → commitAndWait.",
-    "8. UMA advantage: all buffers are SharedMode — cpu_ptr gives direct CPU access to GPU data.",
-    "9. Start simple: get one layer type working, then expand to all 40.",
-    "10. For DMMV: the cross-compiled shader expects buffers in the same order as the GLSL version.",
+    "1. Make ONE focused change per cycle. Measure, don't guess.",
+    "2. CORRECTNESS IS SACRED. Output MUST contain 'Paris'. Speed without correctness = instant revert.",
+    "3. All 27+ tests must continue passing.",
+    "4. Do NOT modify src/vulkan/, loops/, or .env.",
+    "5. Zig 0.15.2 API: ArrayList is unmanaged (pass allocator to append/deinit).",
+    "6. MSL shaders use 'main0' as entry point (SPIRV-Cross convention).",
+    "7. Metal push constants go in buffer[n_bufs] (see shim.m mtl_dispatch).",
+    "8. The Metal command pattern: beginCommand → dispatch → barrier → dispatch → commitAndWait.",
+    "9. UMA advantage: all buffers are SharedMode — cpu_ptr gives direct CPU access to GPU data.",
+    "10. Read the profile output and run output BEFORE deciding what to optimize.",
+    "11. Prefer changes to forward_metal.zig and shaders. Avoid refactoring infrastructure.",
     "",
     "## Output Format",
     "After making your change, print these 3 lines:",
     "@@@DESCRIPTION: <one-line summary>",
-    "@@@SELF_ANALYSIS: <why this approach and what you expect>",
+    "@@@SELF_ANALYSIS: <why this approach and what you expect, with estimated tok/s impact>",
     "@@@NEXT_IDEAS: <comma-separated ideas for future cycles>",
-  ].join("\n");
+  );
+
+  return sections.join("\n");
 }
 
 // ── State ────────────────────────────────────────────────────────────
@@ -1075,6 +1195,10 @@ type RunState = {
   ideas: string[];
   phase: Phase;
   currentBest: { tokPerSec: number | null; containsReference: boolean } | null;
+  stalledCycles: number;
+  bestTokPerSec: number;
+  lastProfileOutput: string | null;
+  lastProfileCycle: number | null;
 };
 
 async function loadState(runDir: string): Promise<RunState | null> {
@@ -1085,6 +1209,18 @@ async function loadState(runDir: string): Promise<RunState | null> {
 
 async function saveState(runDir: string, state: RunState): Promise<void> {
   await writeFile(join(runDir, "state.json"), JSON.stringify(state, null, 2));
+}
+
+async function runProfileBenchmark(): Promise<string> {
+  console.log(clr("1;33", "  📊 Profiling run (--profile)..."));
+  const run = await runCommand(
+    "./zig-out/bin/zinc",
+    ["-m", MODEL_PATH, "--prompt", TEST_PROMPT, "-n", "32", "--profile"],
+    { timeout: 300_000 },
+  );
+  const combined = (run.stderr + run.stdout).slice(-4000);
+  console.log(clr("2", "    profile captured"));
+  return combined;
 }
 
 function extractAgentText(stdout: string): string {
@@ -1163,9 +1299,9 @@ async function main() {
   const agentLabel = agent === "codex" ? "Codex" : "Claude";
 
   console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
-  console.log(clr("1;36", "║  ZINC Metal Implementation Loop                              ║"));
-  console.log(clr("1;36", `║  Run: ${runId}                                  ║`));
-  console.log(clr("1;36", `║  Max cycles: ${maxCycles}  |  Model: ${MODEL_PATH.split("/").pop()}  ║`));
+  console.log(clr("1;36", "║  ZINC Metal Optimization Loop                                ║"));
+  console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${MODEL_PATH.split("/").pop()?.slice(0, 35)}  ║`));
+  console.log(clr("1;36", `║  Run: ${runId}  |  Max cycles: ${maxCycles}               ║`));
   console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
   console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
   console.log(`  Results: ${clr("2", runDir)}`);
@@ -1175,8 +1311,12 @@ async function main() {
     cycles: [],
     failedApproaches: [],
     ideas: [],
-    phase: "implement",
+    phase: "optimize",
     currentBest: null,
+    stalledCycles: 0,
+    bestTokPerSec: 0,
+    lastProfileOutput: null,
+    lastProfileCycle: null,
   };
 
   for (let cycle = 1; cycle <= maxCycles; cycle++) {
@@ -1187,8 +1327,8 @@ async function main() {
     const cycleDir = join(runDir, `cycle-${String(cycle).padStart(3, "0")}`);
     await mkdir(cycleDir, { recursive: true });
 
-    // Increase max tokens as implementation progresses
-    const currentMaxTokens = state.currentBest?.containsReference ? 32 : MAX_TOKENS;
+    // Always use full token count for stable benchmarking
+    const currentMaxTokens = MAX_TOKENS;
 
     // Step 1: Build + Test + Run
     const result = await buildTestRun(currentMaxTokens);
@@ -1245,48 +1385,73 @@ async function main() {
     const verify = await buildTestRun(currentMaxTokens);
     await writeFile(join(cycleDir, "verify.log"), JSON.stringify(verify, null, 2));
 
-    // Keep/revert decision
+    // Keep/revert decision — tight for optimization
     let kept = false;
+    const prevTps = state.bestTokPerSec;
+    const verifyTps = verify.tokPerSec ?? 0;
+
     if (verify.buildExitCode !== 0 || verify.testExitCode !== 0) {
       // Build or test broken → revert
       console.log(clr("1;31", `  ↩ REVERTING — ${verify.buildExitCode !== 0 ? "build" : "tests"} broken`));
       await runCommand("git", ["reset", "--hard", preHash]);
       state.failedApproaches.push(`${description} — broke ${verify.buildExitCode !== 0 ? "build" : "tests"}`);
+      state.stalledCycles++;
     } else if (verify.runExitCode !== 0 && verify.runExitCode !== null) {
       // Crash → revert
       console.log(clr("1;31", `  ↩ REVERTING — runtime crash`));
       await runCommand("git", ["reset", "--hard", preHash]);
       state.failedApproaches.push(`${description} — runtime crash`);
+      state.stalledCycles++;
+    } else if (!verify.containsReference && state.currentBest?.containsReference) {
+      // Lost correctness → always revert
+      console.log(clr("1;31", `  ↩ REVERTING — lost correctness (output: "${verify.outputText.slice(0, 60)}")`));
+      await runCommand("git", ["reset", "--hard", preHash]);
+      state.failedApproaches.push(`${description} — broke correctness`);
+      state.stalledCycles++;
+    } else if (verify.containsReference && verifyTps > prevTps + 0.5) {
+      // Meaningful speed improvement with correct output
+      kept = true;
+      state.bestTokPerSec = verifyTps;
+      state.stalledCycles = 0;
+      console.log(clr("1;32", `  ✅ KEPT — ${verifyTps.toFixed(2)} tok/s (was ${prevTps.toFixed(2)}, +${(verifyTps - prevTps).toFixed(2)})`));
+    } else if (verify.containsReference && verifyTps >= prevTps - 0.3) {
+      // Within noise band, correct output — keep (might enable future gains)
+      kept = true;
+      if (verifyTps > prevTps) state.bestTokPerSec = verifyTps;
+      state.stalledCycles++;
+      console.log(clr("1;33", `  ≈ KEPT — ${verifyTps.toFixed(2)} tok/s (within noise of ${prevTps.toFixed(2)})`));
+    } else if (verify.containsReference && !state.currentBest?.containsReference) {
+      // Gained correctness for the first time
+      kept = true;
+      state.bestTokPerSec = verifyTps;
+      state.stalledCycles = 0;
+      console.log(clr("1;32", `  ✅ KEPT — gained correct output! ${verifyTps.toFixed(2)} tok/s`));
     } else {
-      // Check improvement
-      const prevRef = state.currentBest?.containsReference ?? false;
-      const prevTps = state.currentBest?.tokPerSec ?? 0;
+      // Regressed speed or no correctness
+      console.log(clr("1;31", `  ↩ REVERTING — ${verifyTps.toFixed(2)} tok/s < ${prevTps.toFixed(2)} (regressed ${(prevTps - verifyTps).toFixed(2)} tok/s)`));
+      await runCommand("git", ["reset", "--hard", preHash]);
+      state.failedApproaches.push(`${description} — regressed from ${prevTps.toFixed(1)} to ${verifyTps.toFixed(1)} tok/s`);
+      state.stalledCycles++;
+    }
 
-      if (verify.containsReference && !prevRef) {
-        // Gained correctness!
-        kept = true;
-        console.log(clr("1;32", `  ✅ KEPT — gained correct output!`));
-      } else if (verify.tokPerSec != null && verify.tokPerSec > prevTps + 1) {
-        // Significant speed improvement
-        kept = true;
-        console.log(clr("1;32", `  ✅ KEPT — ${verify.tokPerSec.toFixed(1)} tok/s (was ${prevTps.toFixed(1)})`));
-      } else if (verify.tokensGenerated > (state.currentBest as any)?.tokensGenerated ?? 0) {
-        // More tokens (progress even if not correct yet)
-        kept = true;
-        console.log(clr("1;32", `  ✅ KEPT — ${verify.tokensGenerated} tokens (progress)`));
-      } else {
-        // No improvement → still keep if it doesn't make things worse
-        kept = true;
-        console.log(clr("1;33", `  ✅ KEPT — no regression`));
-      }
+    if (kept) {
+      state.currentBest = {
+        tokPerSec: verify.tokPerSec,
+        containsReference: verify.containsReference,
+      };
+      await runCommand("git", ["add", "-A", "src/", "build.zig"]).catch(() => {});
+      await runCommand("git", ["commit", "-m", `metal-loop: cycle-${cycle} ${description} (${verifyTps.toFixed(1)} tok/s)`]).catch(() => {});
+    }
 
-      if (kept) {
-        state.currentBest = {
-          tokPerSec: verify.tokPerSec,
-          containsReference: verify.containsReference,
-        };
-        await runCommand("git", ["add", "-A", "src/", "build.zig"]).catch(() => {});
-        await runCommand("git", ["commit", "-m", `metal-loop: cycle-${cycle} ${description}`]).catch(() => {});
+    // Periodic profiling run (after verify, so we profile the current accepted state)
+    // Also profile on cycle 1 so the agent has data from the start
+    if ((cycle === 1 || cycle % PROFILE_EVERY === 0) && kept && verify.containsReference) {
+      try {
+        state.lastProfileOutput = await runProfileBenchmark();
+        state.lastProfileCycle = cycle;
+        await writeFile(join(cycleDir, "profile.log"), state.lastProfileOutput);
+      } catch {
+        console.log(clr("1;33", "  ⚠ Profile run failed, continuing"));
       }
     }
 
@@ -1315,11 +1480,14 @@ async function main() {
 
     await saveState(runDir, state);
 
+    // Status summary
+    console.log(clr("2", `  stall=${state.stalledCycles} best=${state.bestTokPerSec.toFixed(2)} target=${TARGET_TOK_PER_SEC}`));
+
     // Check if we're done
-    if (verify.containsReference && verify.tokPerSec != null && verify.tokPerSec >= 80) {
-      console.log(clr("1;32", "\n" + "🎉".repeat(30)));
-      console.log(clr("1;32", `  TARGET REACHED: ${verify.tokPerSec.toFixed(1)} tok/s with correct output!`));
-      console.log(clr("1;32", "🎉".repeat(30)));
+    if (verify.containsReference && verify.tokPerSec != null && verify.tokPerSec >= TARGET_TOK_PER_SEC) {
+      console.log(clr("1;32", "\n" + "=".repeat(64)));
+      console.log(clr("1;32", `  TARGET REACHED: ${verify.tokPerSec.toFixed(1)} tok/s >= ${TARGET_TOK_PER_SEC} with correct output!`));
+      console.log(clr("1;32", "=".repeat(64)));
       break;
     }
   }
@@ -1327,7 +1495,7 @@ async function main() {
   console.log(clr("1;36", `\nLoop complete. Results: ${runDir}`));
   console.log(clr("1;36", `Total cycles: ${state.cycles.length}`));
   console.log(clr("1;36", `Kept: ${state.cycles.filter(c => c.kept).length}`));
-  console.log(clr("1;36", `Best: ${state.currentBest?.tokPerSec?.toFixed(1) ?? "N/A"} tok/s, correct=${state.currentBest?.containsReference ?? false}`));
+  console.log(clr("1;36", `Best: ${state.bestTokPerSec.toFixed(2)} tok/s (target: ${TARGET_TOK_PER_SEC}), correct=${state.currentBest?.containsReference ?? false}`));
 }
 
 if (import.meta.main) {

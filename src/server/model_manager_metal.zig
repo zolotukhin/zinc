@@ -6,6 +6,7 @@ const managed_mod = @import("../model/managed.zig");
 const loader_mod = @import("../model/loader_metal.zig");
 const tokenizer_mod = @import("../model/tokenizer.zig");
 const forward_mod = @import("../compute/forward_metal.zig");
+const process_lock_mod = @import("../gpu/process_lock.zig");
 const metal_device = @import("../metal/device.zig");
 
 const ModelConfig = config_mod.ModelConfig;
@@ -74,6 +75,7 @@ pub const ModelManager = struct {
     profile: []const u8,
     vram_budget_bytes: u64,
     state_mutex: std.Thread.Mutex = .{},
+    gpu_process_lock: process_lock_mod.ProcessLock = .{},
     current: ?*LoadedResources,
 
     pub const RemoveResult = struct {
@@ -105,6 +107,8 @@ pub const ModelManager = struct {
         device: *const MetalDevice,
         allocator: std.mem.Allocator,
     ) !ModelManager {
+        var gpu_process_lock = try process_lock_mod.acquire(.metal, device.selected_device_index);
+        errdefer gpu_process_lock.deinit();
         const current = try allocator.create(LoadedResources);
         errdefer allocator.destroy(current);
         try loadResourcesInto(current, spec, device, allocator);
@@ -113,6 +117,7 @@ pub const ModelManager = struct {
             .device = device,
             .profile = catalog_mod.profileForMetal(),
             .vram_budget_bytes = memoryBudget(device),
+            .gpu_process_lock = gpu_process_lock,
             .current = current,
         };
     }
@@ -137,6 +142,7 @@ pub const ModelManager = struct {
             current.deinit(self.allocator);
             self.allocator.destroy(current);
         }
+        self.gpu_process_lock.deinit();
     }
 
     pub fn currentResources(self: *ModelManager) ?*LoadedResources {
@@ -280,12 +286,19 @@ pub const ModelManager = struct {
 
         const new_path = try managed_mod.resolveInstalledModelPath(model_id, self.allocator);
         defer self.allocator.free(new_path);
+        var acquired_gpu_lock = false;
+        if (!self.gpu_process_lock.isHeld()) {
+            self.gpu_process_lock = try process_lock_mod.acquire(.metal, self.device.selected_device_index);
+            acquired_gpu_lock = true;
+            errdefer if (acquired_gpu_lock) self.gpu_process_lock.deinit();
+        }
         const switched = try self.allocator.create(LoadedResources);
         errdefer self.allocator.destroy(switched);
         try loadResourcesInto(switched, .{ .model_path = new_path, .managed_id = model_id }, self.device, self.allocator);
 
         const previous = self.current;
         self.current = switched;
+        acquired_gpu_lock = false;
         if (previous) |old| {
             old.deinit(self.allocator);
             self.allocator.destroy(old);
@@ -318,6 +331,9 @@ pub const ModelManager = struct {
         if (previous) |resources| {
             resources.deinit(self.allocator);
             self.allocator.destroy(resources);
+        }
+        if (unloaded_from_gpu) {
+            self.gpu_process_lock.deinit();
         }
 
         const removed = try managed_mod.removeInstalledModel(model_id, self.allocator);

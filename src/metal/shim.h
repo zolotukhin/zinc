@@ -32,6 +32,7 @@ uint64_t mtl_max_threadgroup_memory_length(MetalCtx* ctx);
 
 // Buffer management
 MetalBuf* mtl_create_buffer(MetalCtx* ctx, size_t size, void** cpu_ptr);
+MetalBuf* mtl_create_private_buffer(MetalCtx* ctx, size_t size);
 MetalBuf* mtl_wrap_mmap(MetalCtx* ctx, void* ptr, size_t size);
 void* mtl_buffer_contents(MetalBuf* buf);
 void mtl_free_buffer(MetalBuf* buf);

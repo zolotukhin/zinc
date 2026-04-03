@@ -38,6 +38,7 @@ pub const MetalDevice = struct {
     ctx: ?*shim.MetalCtx,
     chip: GpuFamily,
     caps: MetalCapabilities,
+    selected_device_index: u32,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, _: u32) !MetalDevice {
@@ -64,6 +65,7 @@ pub const MetalDevice = struct {
                 .recommended_max_working_set_size = shim.mtl_recommended_max_working_set_size(ctx),
                 .max_threadgroup_memory_length = shim.mtl_max_threadgroup_memory_length(ctx),
             },
+            .selected_device_index = 0,
             .allocator = allocator,
         };
     }

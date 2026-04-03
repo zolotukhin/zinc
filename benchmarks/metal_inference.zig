@@ -17,6 +17,8 @@ const Config = struct {
     warmup_runs: u32 = 1,
     chat: bool = false,
     device_index: u32 = 0,
+    q8_tg: ?u32 = null,
+    q8_dual_tg: ?u32 = null,
     show_help: bool = false,
 };
 
@@ -51,6 +53,8 @@ fn helpText() []const u8 {
     \\  --warmup <n>             Warmup runs before measurement (default: 1)
     \\  --chat                   Apply the model chat template to the prompt
     \\  -d, --device <index>     Metal device index (default: 0)
+    \\  --q8-tg <threads>        Override q8_0 DMMV threadgroup size
+    \\  --q8-dual-tg <threads>   Override dual q8_0 DMMV threadgroup size
     \\  -h, --help               Show this help text
     \\
     \\Example:
@@ -96,6 +100,14 @@ fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingDeviceIndex;
             config.device_index = try parseU32(args[i]);
+        } else if (std.mem.eql(u8, arg, "--q8-tg")) {
+            i += 1;
+            if (i >= args.len) return error.MissingQ8Threadgroup;
+            config.q8_tg = try parseU32(args[i]);
+        } else if (std.mem.eql(u8, arg, "--q8-dual-tg")) {
+            i += 1;
+            if (i >= args.len) return error.MissingQ8DualThreadgroup;
+            config.q8_dual_tg = try parseU32(args[i]);
         } else {
             return error.UnknownArgument;
         }
@@ -225,7 +237,10 @@ pub fn main() !void {
     const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
     defer allocator.free(prompt_tokens);
 
-    var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, .{});
+    var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, .{
+        .q8_tg_override = config.q8_tg,
+        .q8_dual_tg_override = config.q8_dual_tg,
+    });
     defer engine.deinit();
 
     try stdout.interface.print("Metal inference benchmark\n", .{});

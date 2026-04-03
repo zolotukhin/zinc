@@ -43,8 +43,12 @@ pub const ArgmaxDispatch = struct {
         if (pool_result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
 
         var path_buf: [512]u8 = undefined;
+        const wave64_options = pipeline_mod.PipelineOptions{
+            .required_subgroup_size = 64,
+            .require_full_subgroups = true,
+        };
         const argmax_path = std.fmt.bufPrint(&path_buf, "{s}/argmax.spv", .{shader_dir}) catch unreachable;
-        const pipeline = pipeline_mod.createFromSpirv(instance, argmax_path, 3, @sizeOf(ArgmaxPush), &.{}, allocator) catch |err| blk: {
+        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, argmax_path, 3, @sizeOf(ArgmaxPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("argmax shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

@@ -58,10 +58,14 @@ pub const AttentionDispatch = struct {
         if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
 
         var path_buf: [512]u8 = undefined;
+        const wave64_options = pipeline_mod.PipelineOptions{
+            .required_subgroup_size = 64,
+            .require_full_subgroups = true,
+        };
 
         // Flash attention: 5 bindings (Q, K cache, V cache, page table, output)
         const attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
-        const pipeline = pipeline_mod.createFromSpirv(instance, attn_path, 5, @sizeOf(FlashAttnPush), &.{}, allocator) catch |err| blk: {
+        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, attn_path, 5, @sizeOf(FlashAttnPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("flash_attn shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

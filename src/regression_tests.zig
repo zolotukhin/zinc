@@ -50,11 +50,22 @@ test "prefill resets per-request state before processing prompt tokens" {
     try expectContainsNear(src, "pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "try self.resetRequestState();", 400);
 }
 
-test "softmax_topk shader keeps multi-subgroup fallback" {
+test "softmax_topk shader keeps RADV-safe shared-memory winner scan" {
     const src = @embedFile("shaders/softmax_topk.comp");
-    try expectContains(src, "subgroupMax");
-    try expectContains(src, "subgroupAdd");
-    try expectMultiSubgroupFallback(src, "s_reduce_val");
+    try expectContains(src, "shared float s_local_val[64];");
+    try expectContains(src, "shared uint  s_local_idx[64];");
+    try expectContains(src, "for (uint t = 0; t < 64; t++)");
+    try expectContains(src, "s_logits[global_idx] = -1.0 / 0.0;");
+    try expectNotContains(src, "GL_KHR_shader_subgroup_ballot");
+    try expectNotContains(src, "subgroupBroadcast(");
+}
+
+test "softmax_topk shader renormalizes only selected logits" {
+    const src = @embedFile("shaders/softmax_topk.comp");
+    try expectContains(src, "shared float s_logits[256];");
+    try expectContains(src, "float max_logit = -1.0 / 0.0;");
+    try expectContains(src, "exp(uintBitsToFloat(output_data[k + i]) - max_logit)");
+    try expectNotContains(src, "shared float s_probs[256];");
 }
 
 test "flash_attn shader keeps multi-subgroup fallback" {

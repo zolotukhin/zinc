@@ -783,6 +783,7 @@ fn probeVulkan(allocator: std.mem.Allocator, preferred_device: u32) !VulkanProbe
         .compute_queue_family = compute_queue_family,
         .device_props = device_props,
         .mem_props = mem_props,
+        .selected_device_index = selected_index,
         .allocator = allocator,
     };
 

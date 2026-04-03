@@ -40,6 +40,14 @@ pub const SpecConst = struct {
     value: u32,
 };
 
+/// Optional compute-pipeline knobs for subgroup-sensitive shaders.
+pub const PipelineOptions = struct {
+    /// Request a specific subgroup width when supported by the device.
+    required_subgroup_size: ?u32 = null,
+    /// Require the workgroup to be composed of full subgroups when supported.
+    require_full_subgroups: bool = false,
+};
+
 /// Create a compute pipeline from a SPIR-V file.
 /// @param instance Active Vulkan instance and logical device.
 /// @param spirv_path Filesystem path to the compiled SPIR-V module.
@@ -54,6 +62,27 @@ pub fn createFromSpirv(
     binding_count: u32,
     push_constant_size: u32,
     spec_constants: []const SpecConst,
+    allocator: std.mem.Allocator,
+) !Pipeline {
+    return createFromSpirvWithOptions(
+        instance,
+        spirv_path,
+        binding_count,
+        push_constant_size,
+        spec_constants,
+        .{},
+        allocator,
+    );
+}
+
+/// Create a compute pipeline from a SPIR-V file with optional subgroup controls.
+pub fn createFromSpirvWithOptions(
+    instance: *const Instance,
+    spirv_path: []const u8,
+    binding_count: u32,
+    push_constant_size: u32,
+    spec_constants: []const SpecConst,
+    options: PipelineOptions,
     allocator: std.mem.Allocator,
 ) !Pipeline {
     // Read SPIR-V binary
@@ -163,11 +192,28 @@ pub fn createFromSpirv(
         .pData = if (spec_constants.len > 0) @ptrCast(spec_data.ptr) else null,
     };
 
+    const required_subgroup_size = options.required_subgroup_size orelse 0;
+    const use_required_subgroup_size = required_subgroup_size > 0 and
+        instance.caps.supportsRequiredSubgroupSize(required_subgroup_size);
+    const require_full_subgroups = options.require_full_subgroups and instance.caps.compute_full_subgroups;
+    if (options.required_subgroup_size != null and !use_required_subgroup_size) {
+        log.debug("Ignoring required subgroup size {d} for {s}", .{ required_subgroup_size, spirv_path });
+    }
+    if (options.require_full_subgroups and !require_full_subgroups) {
+        log.debug("Ignoring full-subgroup request for {s}", .{spirv_path});
+    }
+
+    var subgroup_info = vk.c.VkPipelineShaderStageRequiredSubgroupSizeCreateInfo{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+        .pNext = null,
+        .requiredSubgroupSize = required_subgroup_size,
+    };
+
     // Compute pipeline
     const stage_info = vk.c.VkPipelineShaderStageCreateInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
+        .pNext = if (use_required_subgroup_size) &subgroup_info else null,
+        .flags = if (require_full_subgroups) vk.c.VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT else 0,
         .stage = vk.c.VK_SHADER_STAGE_COMPUTE_BIT,
         .module = shader_module,
         .pName = "main",

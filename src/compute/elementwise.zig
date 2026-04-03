@@ -163,10 +163,14 @@ pub const ElementwiseDispatch = struct {
         if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
 
         var path_buf: [512]u8 = undefined;
+        const wave64_options = pipeline_mod.PipelineOptions{
+            .required_subgroup_size = 64,
+            .require_full_subgroups = true,
+        };
 
         // RMS norm: 2 inputs (x, weight) + 1 output = 3 bindings
         const rms_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_mul.spv", .{shader_dir}) catch unreachable;
-        const pipeline_rms_norm = pipeline_mod.createFromSpirv(instance, rms_path, 3, @sizeOf(RmsNormPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_rms_norm = pipeline_mod.createFromSpirvWithOptions(instance, rms_path, 3, @sizeOf(RmsNormPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("rms_norm_mul shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -222,21 +226,21 @@ pub const ElementwiseDispatch = struct {
 
         // SSM delta-net: 7 bindings (conv_out, dt_bias, alpha, beta, ssm_a, state, output)
         const delta_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_delta_net.spv", .{shader_dir}) catch unreachable;
-        const pipeline_ssm_delta_net = pipeline_mod.createFromSpirv(instance, delta_path, 7, @sizeOf(SsmDeltaNetPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_ssm_delta_net = pipeline_mod.createFromSpirvWithOptions(instance, delta_path, 7, @sizeOf(SsmDeltaNetPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("ssm_delta_net shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         // SSM gated norm: 4 bindings (delta_output, z_gate, norm_weights, output)
         const gnorm_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_gated_norm.spv", .{shader_dir}) catch unreachable;
-        const pipeline_ssm_gated_norm = pipeline_mod.createFromSpirv(instance, gnorm_path, 4, @sizeOf(SsmGatedNormPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_ssm_gated_norm = pipeline_mod.createFromSpirvWithOptions(instance, gnorm_path, 4, @sizeOf(SsmGatedNormPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("ssm_gated_norm shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         // Softmax + top-k: 2 bindings (logits, output)
         const topk_path = std.fmt.bufPrint(&path_buf, "{s}/softmax_topk.spv", .{shader_dir}) catch unreachable;
-        const pipeline_softmax_topk = pipeline_mod.createFromSpirv(instance, topk_path, 2, @sizeOf(SoftmaxTopkPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_softmax_topk = pipeline_mod.createFromSpirvWithOptions(instance, topk_path, 2, @sizeOf(SoftmaxTopkPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("softmax_topk shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

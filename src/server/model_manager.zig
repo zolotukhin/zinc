@@ -9,6 +9,7 @@ const catalog_mod = @import("../model/catalog.zig");
 const managed_mod = @import("../model/managed.zig");
 const diagnostics_mod = @import("../diagnostics.zig");
 const forward_mod = @import("../compute/forward.zig");
+const process_lock_mod = @import("../gpu/process_lock.zig");
 const gpu_detect = @import("../vulkan/gpu_detect.zig");
 const instance_mod = @import("../vulkan/instance.zig");
 const CommandPool = @import("../vulkan/command.zig").CommandPool;
@@ -79,6 +80,7 @@ pub const ModelManager = struct {
     vram_budget_bytes: u64,
     shader_dir: []const u8,
     state_mutex: std.Thread.Mutex = .{},
+    gpu_process_lock: process_lock_mod.ProcessLock = .{},
     current: ?*LoadedResources,
 
     pub const RemoveResult = struct {
@@ -94,6 +96,8 @@ pub const ModelManager = struct {
         shader_dir: []const u8,
         allocator: std.mem.Allocator,
     ) !ModelManager {
+        var gpu_process_lock = try process_lock_mod.acquire(.vulkan, instance.selected_device_index);
+        errdefer gpu_process_lock.deinit();
         const current = try allocator.create(LoadedResources);
         errdefer allocator.destroy(current);
         try loadResourcesInto(current, spec, instance, gpu_config_value, shader_dir, allocator);
@@ -103,6 +107,7 @@ pub const ModelManager = struct {
             .gpu_config = gpu_config_value,
             .vram_budget_bytes = instance.vramBytes(),
             .shader_dir = shader_dir,
+            .gpu_process_lock = gpu_process_lock,
             .current = current,
         };
     }
@@ -130,6 +135,7 @@ pub const ModelManager = struct {
             current.deinit(self.instance, self.allocator);
             self.allocator.destroy(current);
         }
+        self.gpu_process_lock.deinit();
     }
 
     pub fn currentResources(self: *ModelManager) ?*LoadedResources {
@@ -293,6 +299,12 @@ pub const ModelManager = struct {
 
         const new_path = try managed_mod.resolveInstalledModelPath(model_id, self.allocator);
         defer self.allocator.free(new_path);
+        var acquired_gpu_lock = false;
+        if (!self.gpu_process_lock.isHeld()) {
+            self.gpu_process_lock = try process_lock_mod.acquire(.vulkan, self.instance.selected_device_index);
+            acquired_gpu_lock = true;
+            errdefer if (acquired_gpu_lock) self.gpu_process_lock.deinit();
+        }
         const switched = try self.allocator.create(LoadedResources);
         errdefer self.allocator.destroy(switched);
         loadResourcesInto(switched, .{ .model_path = new_path, .managed_id = model_id }, self.instance, self.gpu_config, self.shader_dir, self.allocator) catch |switch_err| {
@@ -301,6 +313,7 @@ pub const ModelManager = struct {
 
         const previous = self.current;
         self.current = switched;
+        acquired_gpu_lock = false;
         if (previous) |old| {
             old.deinit(self.instance, self.allocator);
             self.allocator.destroy(old);
@@ -333,6 +346,9 @@ pub const ModelManager = struct {
         if (previous) |resources| {
             resources.deinit(self.instance, self.allocator);
             self.allocator.destroy(resources);
+        }
+        if (unloaded_from_gpu) {
+            self.gpu_process_lock.deinit();
         }
 
         const removed = try managed_mod.removeInstalledModel(model_id, self.allocator);

@@ -146,6 +146,25 @@ MetalBuf* mtl_create_buffer(MetalCtx* ctx, size_t size, void** cpu_ptr) {
     return buf;
 }
 
+MetalBuf* mtl_create_private_buffer(MetalCtx* ctx, size_t size) {
+    if (!ctx || size == 0) return NULL;
+
+    id<MTLBuffer> buffer = [ctx->device newBufferWithLength:size
+                                                    options:MTLResourceStorageModePrivate];
+    if (!buffer) {
+        fprintf(stderr, "Error: Failed to allocate private Metal buffer of %zu bytes.\n", size);
+        return NULL;
+    }
+
+    MetalBuf* buf = (MetalBuf*)calloc(1, sizeof(MetalBuf));
+    if (!buf) return NULL;
+
+    buf->buffer = buffer;
+    buf->size = size;
+    buf->is_mmap = 0;
+    return buf;
+}
+
 MetalBuf* mtl_wrap_mmap(MetalCtx* ctx, void* ptr, size_t size) {
     if (!ctx || !ptr || size == 0) return NULL;
 

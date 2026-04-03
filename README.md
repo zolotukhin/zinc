@@ -109,13 +109,13 @@ The table below lists the exact GGUFs ZINC currently supports end-to-end, not a 
 
 | Model | GGUF | AMD RDNA4 | Apple Silicon |
 |-------|------|-----------|---------------|
-| **Qwen3.5 2B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s | ~17 tok/s |
-| **Qwen3.5 35B-A3B UD** | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s | needs 24+ GB unified |
+| **Qwen3.5 2B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s | ~17 tok/s (M1 Pro, 32 GB) |
+| **Qwen3.5 35B-A3B UD** | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s | **35.6 tok/s** (M4 Max, 64 GB) |
 
 - **AMD**: Radeon AI PRO R9700 (RDNA4, 32 GB), `RADV_PERFTEST=coop_matrix`
-- **Apple Silicon**: tested on M1 Pro 32 GB (Apple Silicon benchmarks on M4 coming soon)
-- All numbers: single-stream CLI decode, `zig build -Doptimize=ReleaseFast`
-- Latest validation: 2026-03-31
+- **Apple Silicon**: current 35B reference box is `Mac Studio (Mac16,9)`, `Apple M4 Max`, `40-core GPU`, `64 GB unified memory`; the older 2B bring-up number was on `M1 Pro`, `32 GB`
+- All numbers: single-stream `ReleaseFast`; Apple 35B numbers use `bench-metal`, AMD numbers use the CLI decode path
+- Latest validation: 2026-04-02
 
 **Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, F16
 
@@ -235,25 +235,39 @@ See also: [CONTRIBUTING.md](./CONTRIBUTING.md) · [Code of Conduct](./CODE_OF_CO
 
 ## Benchmarks
 
-All numbers below were measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) on a clean RDNA4 node using `RADV_PERFTEST=coop_matrix` and `zig build -Doptimize=ReleaseFast`.
+All numbers below were measured with `zig build -Doptimize=ReleaseFast`. AMD and Apple Silicon are listed separately because the validated hardware and benchmark harnesses differ.
 
-### Current Validated Snapshot (2026-03-31)
+### Apple Silicon Snapshot (2026-04-02)
 
-| Path | Shape | Result |
-|------|-------|--------|
-| Qwen3.5-35B-A3B-UD CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **37.95 tok/s**, `26.3 ms/tok` |
-| Qwen3.5-2B-Q4_K_M CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **26.71 tok/s**, `37.4 ms/tok` |
+Measured on **Mac Studio (Mac16,9)** with **Apple M4 Max**, **40-core GPU**, and **64 GB unified memory**.
+
+| Model | Path | Shape | Result |
+|------|------|-------|--------|
+| Qwen3.5-35B-A3B-UD-Q4_K_XL | `bench-metal` plain decode | 256 generated tokens, 1 warmup, 3 runs | **35.61 tok/s avg**, `35.58 tok/s` median, `28.1 ms/tok` |
+| Qwen3.5-35B-A3B-UD-Q4_K_XL | `bench-metal` prefill | same run set | **36.2 tok/s avg**, `36.6 tok/s` median |
+| Qwen3.5-35B-A3B-UD-Q4_K_XL | raw HTTP `/v1/completions` | `max_tokens=256`, `concurrency=1` | **34.74 tok/s**, `7.37s` avg latency |
+| Qwen3.5-35B-A3B-UD-Q4_K_XL | raw HTTP `/v1/completions` | `max_tokens=256`, `concurrency=4` | **34.71 tok/s** aggregate, `18.45s` avg latency, `28.40s` p95 |
+
+### AMD RDNA4 Snapshot (2026-03-31)
+
+Measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) on a clean RDNA4 node using `RADV_PERFTEST=coop_matrix`.
+
+| Model | Path | Shape | Result |
+|------|------|-------|--------|
+| Qwen3.5-35B-A3B-UD-Q4_K_XL | CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **37.95 tok/s**, `26.3 ms/tok` |
+| Qwen3.5-2B-Q4_K_M | CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **26.71 tok/s**, `37.4 ms/tok` |
 
 For reference, the current llama.cpp baseline on the same node and 35B model is about **107 tok/s decode**.
 
 ### What These Numbers Mean
 
-- The clean ReleaseFast decode path is approaching `40 tok/s` on the 35B model.
-- The 2B model is currently slower than the 35B MoE model on this node, which means today's bottleneck is not just "smaller model = faster"; kernel shape, architecture mix, and decode-path efficiency matter more than parameter count alone.
+- The Apple Silicon 35B path is no longer speculative. On the current M4 Max validation box it sustains **35.6 tok/s** locally and keeps the raw HTTP path close behind at about **34.7 tok/s**.
+- The RDNA4 path is still faster on the same 35B model, but the gap is now small enough that the two backends are in the same performance class for single-stream decode.
+- The 2B model is currently slower than the 35B MoE model on the RDNA4 node, which means today's bottleneck is not just "smaller model = faster"; kernel shape, architecture mix, and decode-path efficiency matter more than parameter count alone.
 
 ### Why GPU Bandwidth Is Still Not "Full"
 
-At `33.58 tok/s`, the modeled full-token decode bandwidth is about **112.5 GB/s**, or **19.5%** of the card's `576 GB/s` peak.
+On the RDNA4 node, at `37.95 tok/s`, the modeled full-token decode bandwidth is about **127.1 GB/s**, or **22.1%** of the card's `576 GB/s` peak.
 
 That is not a contradiction. Single-stream decode is not a pure DRAM-streaming workload. The remaining headroom is dominated by serialized medium/small kernels and graph depth, not by large host-side stalls. If the goal is to drive memory bandwidth materially higher than this, the next lever is **concurrent decode / batching**, not expecting one stream to saturate all DRAM bandwidth on its own.
 
@@ -271,9 +285,9 @@ The older March 27–29 optimization logs in `.zinc_optimize/` were useful for c
 | Native BPE tokenizer (from GGUF) | Done |
 | GLSL compute shaders (16) | Done |
 | Compute graph + architecture builders | Done |
-| Forward pass (decode loop) | Working — 33.58 tok/s clean CLI on Qwen3.5-35B-A3B-UD |
-| GPU SSM shaders + cmd batching | Done — clean ReleaseFast path is above 30 tok/s |
-| HTTP server + OpenAI API | Done — 35B raw API ~33.5 tok/s, 2B raw API ~21.9 tok/s, reasoning chat still slower |
+| Forward pass (decode loop) | Working — 37.95 tok/s on RDNA4 and 35.61 tok/s on Apple M4 Max for Qwen3.5-35B-A3B-UD |
+| GPU SSM shaders + cmd batching | Done — Metal and Vulkan decode paths are both above 35 tok/s on the validated 35B boxes |
+| HTTP server + OpenAI API | Done — 35B raw API ~33.5 tok/s on RDNA4 and ~34.7 tok/s on Apple M4 Max; reasoning chat still slower |
 | Continuous batching | Phase 4 |
 | TurboQuant KV compression | Phase 5 |
 

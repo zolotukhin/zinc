@@ -1,15 +1,14 @@
 #version 460
-// ZINC — Fused softmax + top-k for MoE expert routing
-// Computes softmax over all expert logits, selects top-k experts by probability,
-// and renormalizes the selected weights. Replaces CPU topKSoftmax.
+// ZINC — Fused top-k + renormalized softmax for MoE expert routing.
+// Selects top-k experts directly from router logits, then computes normalized
+// weights only for the winners. This is equivalent to softmax-all + top-k
+// because softmax preserves logit ordering and the selected weights are
+// renormalized afterward. Replaces CPU topKSoftmax.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 // Single workgroup dispatch — n_experts (256) fits in shared memory.
 //
-// RADV compatibility: uses only subgroupMax/subgroupAdd for reductions.
-// Top-k selection uses shared memory (no subgroupBallot/subgroupBroadcast).
-
-#extension GL_KHR_shader_subgroup_basic : require
-#extension GL_KHR_shader_subgroup_arithmetic : require
+// RADV compatibility: keeps winner selection in shared memory and avoids the
+// subgroup ballot/broadcast pattern that previously crashed on RDNA4.
 
 layout(local_size_x = 64) in;
 
@@ -27,10 +26,7 @@ layout(push_constant) uniform PushConstants {
     uint k;           // top-k to select (e.g. 8)
 };
 
-shared float s_probs[256];
-shared float s_max_val;
-shared float s_sum;
-shared float s_reduce_val[64];
+shared float s_logits[256];
 
 // Per-thread local max for top-k reduction
 shared float s_local_val[64];
@@ -39,77 +35,24 @@ shared uint  s_local_idx[64];
 void main() {
     uint tid = gl_LocalInvocationID.x;
 
-    // --- Step 1: Load logits and find global max ---
-    float local_max = -1.0 / 0.0; // -inf
+    // --- Step 1: Stage logits in shared memory ---
     for (uint i = tid; i < n_experts; i += 64) {
-        float v = logits[i];
-        s_probs[i] = v;
-        local_max = max(local_max, v);
-    }
-    float wave_max = subgroupMax(local_max);
-    if (gl_NumSubgroups > 1u) {
-        if (gl_SubgroupInvocationID == 0u) {
-            s_reduce_val[gl_SubgroupID] = wave_max;
-        }
-        barrier();
-        if (tid == 0u) {
-            float merged_max = -1.0 / 0.0;
-            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
-                merged_max = max(merged_max, s_reduce_val[sg]);
-            }
-            s_max_val = merged_max;
-        }
-    } else if (tid == 0u) {
-        s_max_val = wave_max;
+        s_logits[i] = logits[i];
     }
     barrier();
 
-    float gmax = s_max_val;
-
-    // --- Step 2: Compute exp(logit - max) and sum ---
-    float local_sum = 0.0;
-    for (uint i = tid; i < n_experts; i += 64) {
-        float e = exp(s_probs[i] - gmax);
-        s_probs[i] = e;
-        local_sum += e;
-    }
-    float wave_sum = subgroupAdd(local_sum);
-    if (gl_NumSubgroups > 1u) {
-        if (gl_SubgroupInvocationID == 0u) {
-            s_reduce_val[gl_SubgroupID] = wave_sum;
-        }
-        barrier();
-        if (tid == 0u) {
-            float merged_sum = 0.0;
-            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
-                merged_sum += s_reduce_val[sg];
-            }
-            s_sum = merged_sum;
-        }
-    } else if (tid == 0u) {
-        s_sum = wave_sum;
-    }
-    barrier();
-
-    float inv_sum = 1.0 / s_sum;
-
-    // --- Step 3: Normalize to probabilities ---
-    for (uint i = tid; i < n_experts; i += 64) {
-        s_probs[i] *= inv_sum;
-    }
-    barrier();
-
-    // --- Step 4: Top-k selection via shared memory reduction ---
+    // --- Step 2: Top-k selection directly on logits via shared memory reduction ---
     // For each of k rounds: each thread finds its local max, writes to shared,
     // thread 0 scans all 64 entries to find the global winner.
-    // No ballot/broadcast — fully RADV compatible.
+    // No ballot/broadcast — fully RADV compatible. The selected logits are
+    // temporarily stored in output_data[k + i] and converted to weights later.
     for (uint ki = 0; ki < k; ki++) {
         // Each thread finds its local max across its strided elements
-        float best_val = -1.0;
+        float best_val = -1.0 / 0.0;
         uint best_idx = 0;
         for (uint i = tid; i < n_experts; i += 64) {
-            if (s_probs[i] > best_val) {
-                best_val = s_probs[i];
+            if (s_logits[i] > best_val) {
+                best_val = s_logits[i];
                 best_idx = i;
             }
         }
@@ -132,17 +75,25 @@ void main() {
             output_data[ki] = global_idx;
             output_data[k + ki] = floatBitsToUint(global_best);
             // Mask out selected expert
-            s_probs[global_idx] = -1.0;
+            s_logits[global_idx] = -1.0 / 0.0;
         }
         barrier();
     }
 
-    // --- Step 5: Renormalize selected weights ---
+    // --- Step 3: Convert selected logits to renormalized routing weights ---
     if (tid == 0) {
+        float max_logit = -1.0 / 0.0;
+        for (uint i = 0; i < k; i++) {
+            max_logit = max(max_logit, uintBitsToFloat(output_data[k + i]));
+        }
+
         float wsum_local = 0.0;
         for (uint i = 0; i < k; i++) {
-            wsum_local += uintBitsToFloat(output_data[k + i]);
+            float w = exp(uintBitsToFloat(output_data[k + i]) - max_logit);
+            output_data[k + i] = floatBitsToUint(w);
+            wsum_local += w;
         }
+
         float inv_wsum = (wsum_local > 0.0) ? (1.0 / wsum_local) : 0.0;
         for (uint i = 0; i < k; i++) {
             float w = uintBitsToFloat(output_data[k + i]) * inv_wsum;

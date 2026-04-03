@@ -69,7 +69,9 @@ kernel void main0(
         #pragma unroll
         for (uint vi = 0u; vi < 8u; ++vi) {
             const char4 q = char4(quants[vi]);
-            acc = fma(scale, dot(float4(q), float4(x_cache4[x_base + vi])), acc);
+            const half4 x = x_cache4[x_base + vi];
+            const half4 q_half = half4(q);
+            acc = fma(scale, float(dot(q_half, x)), acc);
         }
     }
 

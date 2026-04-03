@@ -103,7 +103,7 @@ pub fn detect(instance: *const Instance) GpuConfig {
         .bandwidth_gbps = 0,
         .compute_units = 0,
         .wave_size = 32,
-        .coopmat_support = false,
+        .coopmat_support = instance.caps.cooperative_matrix,
         .l1_cache_kb = 16,
         .l2_cache_mb = 2,
         .max_workgroup_size = props.limits.maxComputeWorkGroupSize[0],
@@ -132,7 +132,6 @@ pub fn detect(instance: *const Instance) GpuConfig {
                 config.l2_cache_mb = 6;
                 config.bandwidth_gbps = 576;
                 config.compute_units = 64;
-                config.coopmat_support = true;
                 config.flash_attn_block_size = 256;
                 config.matmul_tile_m = 16;
                 config.matmul_tile_n = 16;
@@ -147,7 +146,6 @@ pub fn detect(instance: *const Instance) GpuConfig {
                 config.l2_cache_mb = 4;
                 config.bandwidth_gbps = 256; // shared LPDDR5X, not GDDR6
                 config.compute_units = 32;
-                config.coopmat_support = true;
                 config.flash_attn_block_size = 256;
                 config.matmul_tile_m = 16;
                 config.matmul_tile_n = 16;
@@ -158,7 +156,6 @@ pub fn detect(instance: *const Instance) GpuConfig {
                 config.l2_cache_mb = 6;
                 config.bandwidth_gbps = 480;
                 config.compute_units = 48;
-                config.coopmat_support = true;
                 config.flash_attn_block_size = 256;
             },
             else => {

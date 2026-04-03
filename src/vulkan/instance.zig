@@ -7,6 +7,35 @@ const vk = @import("vk.zig");
 
 const log = std.log.scoped(.vulkan);
 
+/// Queried Vulkan device capabilities that affect pipeline creation choices.
+pub const DeviceCapabilities = struct {
+    /// Shader `requiredSubgroupSize` can be requested at pipeline creation.
+    subgroup_size_control: bool = false,
+    /// `REQUIRE_FULL_SUBGROUPS` can be requested for compute stages.
+    compute_full_subgroups: bool = false,
+    /// Shader stages that accept `requiredSubgroupSize`.
+    required_subgroup_size_stages: vk.c.VkShaderStageFlags = 0,
+    /// Minimum supported subgroup width.
+    min_subgroup_size: u32 = 0,
+    /// Maximum supported subgroup width.
+    max_subgroup_size: u32 = 0,
+    /// 16-bit storage-buffer access is supported and enabled.
+    storage_buffer16: bool = false,
+    /// Float16 arithmetic is supported and enabled.
+    shader_float16: bool = false,
+    /// Shader subgroup extended types are supported and enabled.
+    subgroup_extended_types: bool = false,
+    /// Cooperative matrix support is available and enabled.
+    cooperative_matrix: bool = false,
+
+    /// Return whether a compute shader can request the given subgroup size.
+    pub fn supportsRequiredSubgroupSize(self: DeviceCapabilities, size: u32) bool {
+        if (!self.subgroup_size_control) return false;
+        if (size < self.min_subgroup_size or size > self.max_subgroup_size) return false;
+        return (self.required_subgroup_size_stages & vk.c.VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+    }
+};
+
 /// Active Vulkan instance, selected physical device, logical device, and memory metadata.
 pub const Instance = struct {
     /// Vulkan handle.
@@ -23,6 +52,10 @@ pub const Instance = struct {
     device_props: vk.c.VkPhysicalDeviceProperties,
     /// Device memory properties.
     mem_props: vk.c.VkPhysicalDeviceMemoryProperties,
+    /// Actual selected physical-device index after bounds clamping.
+    selected_device_index: u32,
+    /// Queried device capability bits used by pipeline creation.
+    caps: DeviceCapabilities = .{},
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
@@ -92,8 +125,18 @@ pub const Instance = struct {
         var mem_props: vk.c.VkPhysicalDeviceMemoryProperties = undefined;
         vk.c.vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
 
+        const device_caps = try queryDeviceCapabilities(allocator, physical_device);
         const dev_name = std.mem.sliceTo(&device_props.deviceName, 0);
         log.debug("Selected GPU {d}: {s}", .{ dev_idx, dev_name });
+        if (device_caps.subgroup_size_control) {
+            log.debug("Subgroup size control enabled: {d}-{d}", .{
+                device_caps.min_subgroup_size,
+                device_caps.max_subgroup_size,
+            });
+        }
+        if (device_caps.cooperative_matrix) {
+            log.debug("Cooperative matrix enabled", .{});
+        }
 
         // Find compute queue family
         var qf_count: u32 = 0;
@@ -137,16 +180,58 @@ pub const Instance = struct {
             .pQueuePriorities = &queue_priority,
         };
 
+        var enabled_extensions: [1][*:0]const u8 = undefined;
+        var enabled_extension_count: u32 = 0;
+        if (device_caps.cooperative_matrix) {
+            enabled_extensions[enabled_extension_count] = vk.c.VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+            enabled_extension_count += 1;
+        }
+
+        var subgroup_size_control_features = vk.c.VkPhysicalDeviceSubgroupSizeControlFeatures{
+            .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+            .pNext = null,
+            .subgroupSizeControl = if (device_caps.subgroup_size_control) vk.c.VK_TRUE else vk.c.VK_FALSE,
+            .computeFullSubgroups = if (device_caps.compute_full_subgroups) vk.c.VK_TRUE else vk.c.VK_FALSE,
+        };
+        var storage_16bit_features = vk.c.VkPhysicalDevice16BitStorageFeatures{
+            .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+            .pNext = &subgroup_size_control_features,
+            .storageBuffer16BitAccess = if (device_caps.storage_buffer16) vk.c.VK_TRUE else vk.c.VK_FALSE,
+            .uniformAndStorageBuffer16BitAccess = vk.c.VK_FALSE,
+            .storagePushConstant16 = vk.c.VK_FALSE,
+            .storageInputOutput16 = vk.c.VK_FALSE,
+        };
+        var shader_float16_int8_features = vk.c.VkPhysicalDeviceShaderFloat16Int8Features{
+            .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+            .pNext = &storage_16bit_features,
+            .shaderFloat16 = if (device_caps.shader_float16) vk.c.VK_TRUE else vk.c.VK_FALSE,
+            .shaderInt8 = vk.c.VK_FALSE,
+        };
+        var subgroup_extended_types_features = vk.c.VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures{
+            .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES,
+            .pNext = &shader_float16_int8_features,
+            .shaderSubgroupExtendedTypes = if (device_caps.subgroup_extended_types) vk.c.VK_TRUE else vk.c.VK_FALSE,
+        };
+        var cooperative_matrix_features = vk.c.VkPhysicalDeviceCooperativeMatrixFeaturesKHR{
+            .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+            .pNext = &subgroup_extended_types_features,
+            .cooperativeMatrix = if (device_caps.cooperative_matrix) vk.c.VK_TRUE else vk.c.VK_FALSE,
+            .cooperativeMatrixRobustBufferAccess = vk.c.VK_FALSE,
+        };
+
         const device_create_info = vk.c.VkDeviceCreateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = null,
+            .pNext = if (device_caps.cooperative_matrix) &cooperative_matrix_features else &subgroup_extended_types_features,
             .flags = 0,
             .queueCreateInfoCount = 1,
             .pQueueCreateInfos = &queue_create_info,
             .enabledLayerCount = 0,
             .ppEnabledLayerNames = null,
-            .enabledExtensionCount = 0,
-            .ppEnabledExtensionNames = null,
+            .enabledExtensionCount = enabled_extension_count,
+            .ppEnabledExtensionNames = if (enabled_extension_count > 0)
+                enabled_extensions[0..@intCast(enabled_extension_count)].ptr
+            else
+                null,
             .pEnabledFeatures = null,
         };
 
@@ -171,6 +256,8 @@ pub const Instance = struct {
             .compute_queue_family = compute_queue_family,
             .device_props = device_props,
             .mem_props = mem_props,
+            .selected_device_index = dev_idx,
+            .caps = device_caps,
             .allocator = allocator,
         };
     }
@@ -216,6 +303,94 @@ pub const Instance = struct {
         return total;
     }
 };
+
+fn queryDeviceCapabilities(allocator: std.mem.Allocator, physical_device: vk.c.VkPhysicalDevice) !DeviceCapabilities {
+    var ext_count: u32 = 0;
+    var result = vk.c.vkEnumerateDeviceExtensionProperties(physical_device, null, &ext_count, null);
+    if (result != vk.c.VK_SUCCESS) return error.DeviceExtensionEnumerationFailed;
+
+    const ext_props = try allocator.alloc(vk.c.VkExtensionProperties, ext_count);
+    defer allocator.free(ext_props);
+    if (ext_count > 0) {
+        result = vk.c.vkEnumerateDeviceExtensionProperties(physical_device, null, &ext_count, ext_props.ptr);
+        if (result != vk.c.VK_SUCCESS) return error.DeviceExtensionEnumerationFailed;
+    }
+    const extensions = ext_props[0..ext_count];
+    const coop_extension_supported = hasDeviceExtension(extensions, "VK_KHR_cooperative_matrix");
+
+    var subgroup_props = vk.c.VkPhysicalDeviceSubgroupSizeControlProperties{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES,
+        .pNext = null,
+        .minSubgroupSize = 0,
+        .maxSubgroupSize = 0,
+        .maxComputeWorkgroupSubgroups = 0,
+        .requiredSubgroupSizeStages = 0,
+    };
+    var props2 = vk.c.VkPhysicalDeviceProperties2{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &subgroup_props,
+        .properties = undefined,
+    };
+    vk.c.vkGetPhysicalDeviceProperties2(physical_device, &props2);
+
+    var subgroup_size_control_features = vk.c.VkPhysicalDeviceSubgroupSizeControlFeatures{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+        .pNext = null,
+        .subgroupSizeControl = vk.c.VK_FALSE,
+        .computeFullSubgroups = vk.c.VK_FALSE,
+    };
+    var storage_16bit_features = vk.c.VkPhysicalDevice16BitStorageFeatures{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+        .pNext = &subgroup_size_control_features,
+        .storageBuffer16BitAccess = vk.c.VK_FALSE,
+        .uniformAndStorageBuffer16BitAccess = vk.c.VK_FALSE,
+        .storagePushConstant16 = vk.c.VK_FALSE,
+        .storageInputOutput16 = vk.c.VK_FALSE,
+    };
+    var shader_float16_int8_features = vk.c.VkPhysicalDeviceShaderFloat16Int8Features{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+        .pNext = &storage_16bit_features,
+        .shaderFloat16 = vk.c.VK_FALSE,
+        .shaderInt8 = vk.c.VK_FALSE,
+    };
+    var subgroup_extended_types_features = vk.c.VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES,
+        .pNext = &shader_float16_int8_features,
+        .shaderSubgroupExtendedTypes = vk.c.VK_FALSE,
+    };
+    var cooperative_matrix_features = vk.c.VkPhysicalDeviceCooperativeMatrixFeaturesKHR{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        .pNext = &subgroup_extended_types_features,
+        .cooperativeMatrix = vk.c.VK_FALSE,
+        .cooperativeMatrixRobustBufferAccess = vk.c.VK_FALSE,
+    };
+
+    var features2 = vk.c.VkPhysicalDeviceFeatures2{
+        .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = if (coop_extension_supported) &cooperative_matrix_features else &subgroup_extended_types_features,
+        .features = undefined,
+    };
+    vk.c.vkGetPhysicalDeviceFeatures2(physical_device, &features2);
+
+    return .{
+        .subgroup_size_control = subgroup_size_control_features.subgroupSizeControl == vk.c.VK_TRUE,
+        .compute_full_subgroups = subgroup_size_control_features.computeFullSubgroups == vk.c.VK_TRUE,
+        .required_subgroup_size_stages = subgroup_props.requiredSubgroupSizeStages,
+        .min_subgroup_size = subgroup_props.minSubgroupSize,
+        .max_subgroup_size = subgroup_props.maxSubgroupSize,
+        .storage_buffer16 = storage_16bit_features.storageBuffer16BitAccess == vk.c.VK_TRUE,
+        .shader_float16 = shader_float16_int8_features.shaderFloat16 == vk.c.VK_TRUE,
+        .subgroup_extended_types = subgroup_extended_types_features.shaderSubgroupExtendedTypes == vk.c.VK_TRUE,
+        .cooperative_matrix = coop_extension_supported and cooperative_matrix_features.cooperativeMatrix == vk.c.VK_TRUE,
+    };
+}
+
+fn hasDeviceExtension(ext_props: []const vk.c.VkExtensionProperties, name: []const u8) bool {
+    for (ext_props) |ext| {
+        if (std.mem.eql(u8, std.mem.sliceTo(&ext.extensionName, 0), name)) return true;
+    }
+    return false;
+}
 
 test "Instance struct size is reasonable" {
     try std.testing.expect(@sizeOf(Instance) > 0);

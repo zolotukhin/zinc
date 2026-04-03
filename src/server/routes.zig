@@ -505,9 +505,14 @@ fn handleActivateModel(
             error.ModelNotInstalled => "Model is not installed in the local cache",
             error.ModelUnsupportedOnThisGpu => "Model is not marked supported for the current GPU profile",
             error.ModelDoesNotFit => "Model does not fit the current GPU memory budget",
+            error.GpuAlreadyReserved => "Another zinc process already owns this GPU. Stop it before activating a second model on the same device.",
             else => "Model activation failed",
         };
-        try conn.sendError(400, "invalid_request_error", msg);
+        const status: u16 = switch (err) {
+            error.GpuAlreadyReserved => 409,
+            else => 400,
+        };
+        try conn.sendError(status, "invalid_request_error", msg);
         return;
     };
     server_state.clearChatReuseCache();
