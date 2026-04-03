@@ -28,6 +28,7 @@ pub const ModelConfig = struct {
     vocab_size: u32,
     context_length: u32,
     rope_freq_base: f32,
+    rope_freq_base_swa: f32 = 0,
     rms_norm_eps: f32 = 1e-6,
     n_experts: u32,
     n_experts_used: u32,

@@ -27,14 +27,17 @@ float fp16_to_fp32(uint h) {
 // Cooperatively stage the input vector in LDS so weight streaming does not
 // thrash the same cache lines every row.
 shared float s_x[SPEC_K];
+#define X_VAL(idx) (K <= SPEC_K ? s_x[(idx)] : x[x_base + (idx)])
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint x_base = x_offset / 4u;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
+    if (K <= SPEC_K) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x[x_base + i];
+        }
+        barrier();
     }
-    barrier();
 
     uint row = gl_GlobalInvocationID.x;
     if (row >= M) return;
@@ -109,8 +112,8 @@ void main() {
                 float v_lo = float(q_lo | (hb_lo << 4));
                 float v_hi = float(q_hi | (hb_hi << 4));
 
-                sum += (factor_lo * v_lo - bias_lo) * s_x[x_grp + e];
-                sum += (factor_hi * v_hi - bias_hi) * s_x[x_grp + 32u + e];
+                sum += (factor_lo * v_lo - bias_lo) * X_VAL(x_grp + e);
+                sum += (factor_hi * v_hi - bias_hi) * X_VAL(x_grp + 32u + e);
             }
             xi += 64;
         }

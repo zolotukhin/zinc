@@ -575,7 +575,12 @@ pub const InferenceEngine = struct {
         const inter_val = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
         const shexp_val = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_val;
         const d_inner_val = if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim;
-        const max_k = @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val);
+        // Cap SPEC_K to fit in GPU shared memory (64KB / 4 bytes = 16384 floats max).
+        // DMMV shaders with K > SPEC_K read the input vector from global memory instead.
+        const max_k = @min(
+            @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val),
+            16384,
+        );
         var dmmv = try DmmvDispatch.init(instance, &gpu_config, shader_dir, max_k, allocator);
         errdefer dmmv.deinit();
 
@@ -1663,8 +1668,10 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 // RoPE: use per-layer dimensions (Gemma 4 has different head_dim for sliding vs global)
+                // Gemma 4 dual RoPE: sliding layers use rope_freq_base_swa (10000), global use rope_freq_base (1M)
                 const layer_rope_dim: u32 = layer_head_dim;
-                const layer_rope_freq: f32 = config.rope_freq_base;
+                const is_sliding_layer = (layer_head_dim < config.head_dim and config.rope_freq_base_swa > 0);
+                const layer_rope_freq: f32 = if (is_sliding_layer) config.rope_freq_base_swa else config.rope_freq_base;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
                     const q_ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -2549,7 +2556,6 @@ pub const InferenceEngine = struct {
         }
 
         // === Final norm + LM head (after all layers) ===
-        // Stay in the same command buffer so decode uses a single queue submit.
 
         const final_tail_phase = self.beginProfilePhase();
 

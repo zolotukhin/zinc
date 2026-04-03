@@ -26,13 +26,19 @@ float fp16_to_fp32(uint h) {
 
 shared float s_x[SPEC_K];
 
+// When K > SPEC_K, shared memory can't hold the entire input vector.
+// Fall back to reading from global memory (slower but correct).
+#define X_VAL(idx) (K <= SPEC_K ? s_x[(idx)] : x[x_base + (idx)])
+
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint x_base = x_offset / 4u;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
+    if (K <= SPEC_K) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x[x_base + i];
+        }
+        barrier();
     }
-    barrier();
 
     uint row = gl_GlobalInvocationID.x;
     if (row >= M) return;
@@ -75,10 +81,10 @@ void main() {
                 float s4 = float(int(w[sc_off + is + 4])) - (w[sc_off + is + 4] >= 128u ? 256.0 : 0.0);
                 float s6 = float(int(w[sc_off + is + 6])) - (w[sc_off + is + 6] >= 128u ? 256.0 : 0.0);
 
-                sum += d * s0 * (float(q1) - 32.0) * s_x[xi + l];
-                sum += d * s2 * (float(q2) - 32.0) * s_x[xi + l + 32u];
-                sum += d * s4 * (float(q3) - 32.0) * s_x[xi + l + 64u];
-                sum += d * s6 * (float(q4) - 32.0) * s_x[xi + l + 96u];
+                sum += d * s0 * (float(q1) - 32.0) * X_VAL(xi + l);
+                sum += d * s2 * (float(q2) - 32.0) * X_VAL(xi + l + 32u);
+                sum += d * s4 * (float(q3) - 32.0) * X_VAL(xi + l + 64u);
+                sum += d * s6 * (float(q4) - 32.0) * X_VAL(xi + l + 96u);
             }
             xi += 128;
         }

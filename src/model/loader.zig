@@ -276,6 +276,18 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
             }
             break :blk @as(f32, 10000.0);
         },
+        .rope_freq_base_swa = blk: {
+            const swa_key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base_swa", .{prefix}) catch break :blk @as(f32, 0);
+            const swa_val = gf.metadata.get(swa_key);
+            if (swa_val) |v| {
+                switch (v) {
+                    .float32 => |fv| break :blk fv,
+                    .uint32 => |u| break :blk @as(f32, @floatFromInt(u)),
+                    else => {},
+                }
+            }
+            break :blk @as(f32, 0);
+        },
         .rms_norm_eps = rms_norm_eps,
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,

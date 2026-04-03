@@ -61,7 +61,10 @@ const uint Q4K_BYTES      = 144;  // bytes per block
 // Shared memory for input vector — eliminates L1 cache contention with weight reads.
 // 64 threads spanning 72KB of weight data exceed 32KB L1; without this, x_data
 // lines get evicted and re-fetched repeatedly. LDS load is cooperative (32 floats/thread).
+// When K > SPEC_K (Gemma 4 FFN down: K=21504), fall back to global memory reads.
 shared float s_x[SPEC_K];
+uint g_x_base;  // global offset into x_data, set in main()
+#define X_VAL(idx) (K <= SPEC_K ? s_x[(idx)] : x_data[g_x_base + (idx)])
 
 // Decode scale for sub-block sb (0..7) from 12-byte k_scales at ks_off in a_data
 float decode_scale(uint ks_off, uint sb) {
@@ -120,8 +123,8 @@ void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
             uint q_lo = byte_val & 0x0Fu;
             uint q_hi = (byte_val >> 4) & 0x0Fu;
 
-            acc += (factor_lo * float(q_lo) - bias_lo) * s_x[x_sb_lo + e];
-            acc += (factor_hi * float(q_hi) - bias_hi) * s_x[x_sb_hi + e];
+            acc += (factor_lo * float(q_lo) - bias_lo) * X_VAL(x_sb_lo + e);
+            acc += (factor_hi * float(q_hi) - bias_hi) * X_VAL(x_sb_hi + e);
         }
     }
 }
@@ -135,12 +138,15 @@ void main() {
     const uint blocks_per_row = K / Q4K_BLOCK_SIZE;
 
     // Cooperatively load input vector into shared memory (all threads participate)
-    // 64 threads × (K/64) iterations = full vector loaded
+    // When K > SPEC_K (e.g. Gemma 4 FFN down K=21504), skip LDS and read from global.
     uint x_global_base = x_offset / 4u;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x_data[x_global_base + i];
+    g_x_base = x_global_base;
+    if (K <= SPEC_K) {
+        for (uint i = tid; i < K; i += 64u) {
+            s_x[i] = x_data[x_global_base + i];
+        }
+        barrier();
     }
-    barrier();
 
     // Each thread computes one output row (1 thread = 1 row, 64 rows per WG)
     uint row = gl_WorkGroupID.x * 64u + tid;
