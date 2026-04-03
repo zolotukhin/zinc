@@ -1,4 +1,9 @@
 pub const metal_device = @import("metal/device.zig");
 pub const metal_loader = @import("model/loader_metal.zig");
+pub const metal_buffer = @import("metal/buffer.zig");
+pub const metal_command = @import("metal/command.zig");
+pub const metal_pipeline = @import("metal/pipeline.zig");
+pub const metal_c = @import("metal/c.zig");
+pub const gguf = @import("model/gguf.zig");
 pub const tokenizer_mod = @import("model/tokenizer.zig");
 pub const forward_metal = @import("compute/forward_metal.zig");

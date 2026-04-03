@@ -206,6 +206,35 @@ pub fn build(b: *std.Build) void {
 
         const bench_step = b.step("bench", "Run benchmarks");
         bench_step.dependOn(&bench_run.step);
+
+        const bench_shapes_mod = b.createModule(.{
+            .root_source_file = b.path("benchmarks/metal_q8_shapes.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        });
+        bench_shapes_mod.addImport("zinc_bench_support", bench_support_mod);
+        bench_shapes_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        bench_shapes_mod.addIncludePath(b.path("src/metal"));
+        bench_shapes_mod.linkFramework("Metal", .{});
+        bench_shapes_mod.linkFramework("Foundation", .{});
+
+        const bench_shapes_exe = b.addExecutable(.{
+            .name = "zinc-bench-metal-shapes",
+            .root_module = bench_shapes_mod,
+        });
+        b.installArtifact(bench_shapes_exe);
+
+        const bench_shapes_run = b.addRunArtifact(bench_shapes_exe);
+        if (b.args) |args| {
+            bench_shapes_run.addArgs(args);
+        }
+
+        const bench_metal_shapes_step = b.step("bench-metal-shapes", "Run exact-shape Metal q8 hot benchmarks (ReleaseFast)");
+        bench_metal_shapes_step.dependOn(&bench_shapes_run.step);
     }
 
     // --- Unit tests ---

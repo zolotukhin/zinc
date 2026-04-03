@@ -63,6 +63,7 @@ pub const InitOptions = struct {
     debug_validation_enabled: bool = false,
     q8_tg_override: ?u32 = null,
     q8_dual_tg_override: ?u32 = null,
+    kv_cache_q8_override: ?bool = null,
 };
 
 fn readThreadgroupOverride(env_name: [:0]const u8, simd_width: u32, max_threads: u32) ?u32 {
@@ -72,6 +73,13 @@ fn readThreadgroupOverride(env_name: [:0]const u8, simd_width: u32, max_threads:
     const value = std.fmt.parseUnsigned(u32, raw, 10) catch return null;
     if (value == 0 or value > max_threads or value % simd_width != 0) return null;
     return value;
+}
+
+fn readBoolEnv(env_name: [:0]const u8) ?bool {
+    const raw = std.posix.getenv(env_name) orelse return null;
+    if (std.mem.eql(u8, raw, "1") or std.ascii.eqlIgnoreCase(raw, "true") or std.ascii.eqlIgnoreCase(raw, "yes")) return true;
+    if (std.mem.eql(u8, raw, "0") or std.ascii.eqlIgnoreCase(raw, "false") or std.ascii.eqlIgnoreCase(raw, "no")) return false;
+    return null;
 }
 
 const DmmvPathClass = enum(u8) {
@@ -111,7 +119,7 @@ pub const RuntimeProfile = struct {
     fallback_moe_record_ns: u64 = 0,
     dense_ffn_record_ns: u64 = 0,
     final_record_ns: u64 = 0,
-    submit_wait_ns: u64 = 0,
+    gpu_completion_wait_ns: u64 = 0,
     sample_ns: u64 = 0,
     total_step_ns: u64 = 0,
     debug_validation_ns: u64 = 0,
@@ -145,6 +153,37 @@ fn profileElapsedNs(start_ns: i128) u64 {
     const end_ns = std.time.nanoTimestamp();
     if (end_ns <= start_ns) return 0;
     return @intCast(end_ns - start_ns);
+}
+
+fn fullAttentionInterval(cfg: ModelConfig) u32 {
+    return if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+}
+
+fn isFullAttentionLayer(cfg: ModelConfig, layer_idx: usize) bool {
+    return ((@as(u32, @intCast(layer_idx)) + 1) % fullAttentionInterval(cfg)) == 0;
+}
+
+pub fn attentionLayerCount(cfg: ModelConfig) u32 {
+    const interval = fullAttentionInterval(cfg);
+    return if (interval == 0) 0 else @divTrunc(cfg.n_layers, interval);
+}
+
+fn kvDim(config: ModelConfig) u32 {
+    return config.n_kv_heads * config.head_dim;
+}
+
+pub fn defaultKvCacheQ8Enabled(config: ModelConfig, debug_validation_enabled: bool) bool {
+    if (debug_validation_enabled) return false;
+    const kv_dim = kvDim(config);
+    return kv_dim > 0 and config.head_dim > 0 and kv_dim % 32 == 0 and config.head_dim % 32 == 0;
+}
+
+pub fn kvCacheBytesPerToken(config: ModelConfig, q8_enabled: bool) u64 {
+    const kv_dim = @as(u64, kvDim(config));
+    if (q8_enabled) {
+        return @divTrunc(kv_dim, 32) * 34;
+    }
+    return kv_dim * @sizeOf(f32);
 }
 
 fn nsToMs(ns: u64) f64 {
@@ -343,12 +382,15 @@ const FlashAttnPush = extern struct {
     n_kv_heads: u32,
     seq_len: u32,
     page_size: u32,
+    kv_head_stride_bytes: u32,
+    kv_token_stride_bytes: u32,
 };
 
 /// Push constants for GPU KV-cache writes.
 const KvCacheWritePush = extern struct {
     n: u32,
     dst_offset: u32,
+    dst_offset_bytes: u32,
 };
 
 /// Push constants for SSM conv1d + SiLU dispatch (SPIRV-Cross: buffer(0)).
@@ -483,7 +525,9 @@ pub const InferenceEngine = struct {
     // Elementwise compute pipelines (for batched GPU dispatch)
     deinterleave_pipe: MetalPipeline,
     flash_attn_pipe: MetalPipeline,
+    flash_attn_q8_pipe: MetalPipeline,
     kv_cache_write_pipe: MetalPipeline,
+    kv_cache_write_q8_pipe: MetalPipeline,
     rope_pipe: MetalPipeline,
     sigmoid_mul_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
@@ -540,6 +584,9 @@ pub const InferenceEngine = struct {
     profile_enabled: bool,
     debug_validation_enabled: bool,
     private_decode_buffers: bool,
+    kv_cache_q8: bool,
+    kv_cache_head_stride_bytes: u32,
+    kv_cache_bytes_per_token: u32,
     q8_tg_override: ?u32,
     q8_dual_tg_override: ?u32,
     request_profile: RuntimeProfile,
@@ -555,11 +602,19 @@ pub const InferenceEngine = struct {
 
         // Compute dimension-dependent sizes
         const q_dim: u32 = cfg.n_heads * cfg.head_dim;
-        const kv_dim: u32 = cfg.n_kv_heads * cfg.head_dim;
+        const kv_dim: u32 = kvDim(cfg);
         const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else cfg.hidden_dim * 4;
         const shexp_inter_dim: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
         const d_inner: u32 = cfg.ssm_d_inner;
         const conv_channels: u32 = if (d_inner > 0) d_inner + 2 * cfg.ssm_n_group * cfg.ssm_d_state else 0;
+        const kv_cache_q8 = options.kv_cache_q8_override orelse
+            readBoolEnv("ZINC_METAL_KV_Q8") orelse
+            defaultKvCacheQ8Enabled(cfg, options.debug_validation_enabled);
+        const kv_cache_bytes_per_token: usize = @intCast(kvCacheBytesPerToken(cfg, kv_cache_q8));
+        const kv_cache_head_stride_bytes: u32 = if (kv_cache_q8)
+            @intCast(@divTrunc(cfg.head_dim, 32) * 34)
+        else
+            cfg.head_dim * @sizeOf(f32);
 
         // Buffer sizes (max across all uses)
         const hidden_size: usize = @as(usize, cfg.hidden_dim) * @sizeOf(f32);
@@ -571,7 +626,7 @@ pub const InferenceEngine = struct {
         const up_size: usize = @max(@as(usize, inter_dim) * @sizeOf(f32), @as(usize, shexp_inter_dim) * @sizeOf(f32));
         const swiglu_size: usize = @max(up_size, @as(usize, conv_channels) * @sizeOf(f32));
         const vocab_size: usize = @as(usize, cfg.vocab_size) * @sizeOf(f32);
-        const kv_cache_size: usize = @as(usize, 4096) * kv_dim * @sizeOf(f32);
+        const kv_cache_size: usize = @as(usize, 4096) * kv_cache_bytes_per_token;
         const page_table_size: usize = @as(usize, 4096) * @sizeOf(u32);
         const router_size: usize = @max(@as(usize, cfg.n_experts), @as(usize, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1)) * @sizeOf(f32);
         const router_output_size: usize = @max(@as(usize, cfg.n_experts_used) * 2 * @sizeOf(u32), 8);
@@ -589,6 +644,9 @@ pub const InferenceEngine = struct {
         self.profile_enabled = options.profile_enabled;
         self.debug_validation_enabled = options.debug_validation_enabled;
         self.private_decode_buffers = !options.debug_validation_enabled and modelSupportsPrivateDecodeBuffers(model, cfg);
+        self.kv_cache_q8 = kv_cache_q8;
+        self.kv_cache_head_stride_bytes = kv_cache_head_stride_bytes;
+        self.kv_cache_bytes_per_token = @intCast(kv_cache_bytes_per_token);
         self.q8_tg_override = null;
         self.q8_dual_tg_override = null;
         self.request_profile = .{};
@@ -642,12 +700,17 @@ pub const InferenceEngine = struct {
             self.expert_down_bufs = try allocator.alloc(MetalBuffer, 0);
         }
 
-        // Allocate KV cache per layer
+        // Allocate KV cache only for full-attention layers.
         self.kv_k_cache = try allocator.alloc(MetalBuffer, cfg.n_layers);
         self.kv_v_cache = try allocator.alloc(MetalBuffer, cfg.n_layers);
         for (0..cfg.n_layers) |i| {
-            self.kv_k_cache[i] = try createMetalBufferForMode(ctx, kv_cache_size, self.private_decode_buffers);
-            self.kv_v_cache[i] = try createMetalBufferForMode(ctx, kv_cache_size, self.private_decode_buffers);
+            if (isFullAttentionLayer(cfg, i)) {
+                self.kv_k_cache[i] = try createMetalBufferForMode(ctx, kv_cache_size, self.private_decode_buffers);
+                self.kv_v_cache[i] = try createMetalBufferForMode(ctx, kv_cache_size, self.private_decode_buffers);
+            } else {
+                self.kv_k_cache[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+                self.kv_v_cache[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+            }
         }
         self.page_table_buf = try metal_buffer.createBuffer(ctx, page_table_size);
         {
@@ -677,7 +740,9 @@ pub const InferenceEngine = struct {
         // Elementwise pipelines for batched GPU dispatch
         self.deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
         self.flash_attn_pipe = try loadShaderPipeline(ctx, "flash_attn");
+        self.flash_attn_q8_pipe = try loadShaderPipeline(ctx, "flash_attn_q8");
         self.kv_cache_write_pipe = try loadShaderPipeline(ctx, "kv_cache_write");
+        self.kv_cache_write_q8_pipe = try loadShaderPipeline(ctx, "kv_cache_write_q8");
         self.rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
         self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
@@ -932,6 +997,12 @@ pub const InferenceEngine = struct {
         if (self.q8_dual_tg_override) |tg| {
             log.debug("Metal q8_0 dual threadgroup override: {d}", .{tg});
         }
+        if (self.kv_cache_q8) {
+            log.debug("Metal KV cache: q8_0 ({d} B/token, {d} B/head)", .{
+                self.kv_cache_bytes_per_token,
+                self.kv_cache_head_stride_bytes,
+            });
+        }
         log.debug(
             "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
             .{
@@ -1047,7 +1118,9 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_1024_pipe);
         metal_pipeline.freePipeline(&self.deinterleave_pipe);
         metal_pipeline.freePipeline(&self.flash_attn_pipe);
+        metal_pipeline.freePipeline(&self.flash_attn_q8_pipe);
         metal_pipeline.freePipeline(&self.kv_cache_write_pipe);
+        metal_pipeline.freePipeline(&self.kv_cache_write_q8_pipe);
         metal_pipeline.freePipeline(&self.rope_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
@@ -1230,10 +1303,10 @@ pub const InferenceEngine = struct {
             nsToMs(profile.sample_ns),
             avgMs(profile.sample_ns, profile.sample_calls),
         });
-        log.info("  wait: submit {d:.2} ms ({d:.3} ms/step, {d:.1}% of traced time) | record breakdown layer {d:.2} ms gpu-moe {d:.2} ms fallback-moe {d:.2} ms dense {d:.2} ms final {d:.2} ms", .{
-            nsToMs(profile.submit_wait_ns),
-            avgMs(profile.submit_wait_ns, profile.decode_steps),
-            pctOf(traced_request_ns, profile.submit_wait_ns),
+        log.info("  wait: commitAndWait {d:.2} ms ({d:.3} ms/step, {d:.1}% of traced time; includes queued GPU work + CPU wait) | record breakdown layer {d:.2} ms gpu-moe {d:.2} ms fallback-moe {d:.2} ms dense {d:.2} ms final {d:.2} ms", .{
+            nsToMs(profile.gpu_completion_wait_ns),
+            avgMs(profile.gpu_completion_wait_ns, profile.decode_steps),
+            pctOf(traced_request_ns, profile.gpu_completion_wait_ns),
             nsToMs(profile.layer_record_ns),
             nsToMs(profile.gpu_routed_moe_record_ns),
             nsToMs(profile.fallback_moe_record_ns),
@@ -1957,6 +2030,8 @@ fn dispatchFlashAttnOnCmd(
         // [token][kv_head][head_dim] buffer. Use page_size=0 to select the
         // shader's contiguous-addressing fast path and skip page-table math.
         .page_size = 0,
+        .kv_head_stride_bytes = engine.kv_cache_head_stride_bytes,
+        .kv_token_stride_bytes = engine.kv_cache_bytes_per_token,
     };
     const bufs = [_]*const MetalBuffer{
         &engine.page_table_buf,
@@ -1965,7 +2040,8 @@ fn dispatchFlashAttnOnCmd(
         &engine.kv_v_cache[layer_idx],
         &engine.attn_out_buf,
     };
-    cmd.dispatchV2(&engine.flash_attn_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
+    const pipe = if (engine.kv_cache_q8) &engine.flash_attn_q8_pipe else &engine.flash_attn_pipe;
+    cmd.dispatchV2(pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
 }
 
 fn dispatchKvCacheWriteOnCmd(
@@ -1976,8 +2052,9 @@ fn dispatchKvCacheWriteOnCmd(
     dst_offset: u32,
 ) void {
     const push = KvCacheWritePush{
-        .n = kv_dim,
+        .n = if (engine.kv_cache_q8) @divTrunc(kv_dim, 32) else kv_dim,
         .dst_offset = dst_offset,
+        .dst_offset_bytes = if (engine.kv_cache_q8) @intCast((@as(u64, engine.position) * engine.kv_cache_bytes_per_token)) else 0,
     };
     const bufs = [_]*const MetalBuffer{
         &engine.k_buf,
@@ -1985,7 +2062,11 @@ fn dispatchKvCacheWriteOnCmd(
         &engine.kv_k_cache[layer_idx],
         &engine.kv_v_cache[layer_idx],
     };
-    cmd.dispatchV2(&engine.kv_cache_write_pipe, .{ (kv_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
+    if (engine.kv_cache_q8) {
+        cmd.dispatchV2(&engine.kv_cache_write_q8_pipe, .{ @divTrunc(kv_dim, 32), 1, 1 }, .{ 32, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
+    } else {
+        cmd.dispatchV2(&engine.kv_cache_write_pipe, .{ (kv_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
+    }
 }
 
 fn dispatchRopeOnCmd(
@@ -2674,7 +2755,8 @@ fn commitAndWaitProfiled(cmd: *MetalCommand, profile: ?*RuntimeProfile) void {
     cmd.commitAndWait();
     if (profile) |p| {
         p.commit_waits += 1;
-        p.submit_wait_ns += profileElapsedNs(commit_start);
+        // This wall time is the full command-buffer completion wait, not just CPU submit overhead.
+        p.gpu_completion_wait_ns += profileElapsedNs(commit_start);
     }
 }
 
@@ -2695,7 +2777,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
     const is_moe = cfg.n_experts > 0;
     const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
     const shexp_inter_dim: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
-    const full_attn_interval: u32 = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+    const full_attn_interval: u32 = fullAttentionInterval(cfg);
 
     // SSM constants (needed for GPU dispatch sizing)
     const d_inner: u32 = cfg.ssm_d_inner;
