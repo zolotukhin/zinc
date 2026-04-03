@@ -23,6 +23,7 @@ layout(push_constant) uniform PushConstants {
     uint n_kv_heads;    // number of KV heads (n_heads >= n_kv_heads)
     uint seq_len;       // current sequence length (number of cached KV tokens)
     uint page_size;     // tokens per page (16)
+    uint attn_scale_bits; // float attention scale (reinterpreted as uint, 0 = use 1/sqrt(head_dim))
 };
 
 // Buffer bindings
@@ -69,7 +70,7 @@ void main() {
     }
     barrier();
 
-    float scale = inversesqrt(float(head_dim));
+    float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
 
     // Total number of pages covering the sequence
     uint total_pages = (seq_len + page_size - 1u) / page_size;

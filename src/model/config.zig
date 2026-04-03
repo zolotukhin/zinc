@@ -41,6 +41,7 @@ pub const ModelConfig = struct {
     full_attn_interval: u32,
     shared_expert_intermediate_dim: u32,
     final_logit_softcapping: f32 = 0.0,
+    attn_scale: f32 = 0.0,
 };
 
 /// Parse architecture string from GGUF metadata.

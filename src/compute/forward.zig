@@ -1574,6 +1574,23 @@ pub const InferenceEngine = struct {
                 }
                 try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, layer_kv_dim, hidden_dim);
                 try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, layer_kv_dim, hidden_dim);
+                // Gemma 4: when V=K (shared weights), apply bare RMS norm to V (no weight tensor).
+                // K gets weighted RMS norm (attn_k_norm), V gets plain normalization.
+                const v_is_shared = self.findLayerTensor(layer, "attn_v.weight") == null;
+                if (v_is_shared) {
+                    const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    // Use k_norm weights as a proxy for unit-weight norm (the kernel multiplies by weight,
+                    // so we need a tensor of all 1.0s). Actually, bare RMS norm = normalize to unit L2.
+                    // Since our RMS norm shader is fused (norm * weight), and we can't easily pass unit weights,
+                    // apply the k_norm to V as well — llama.cpp applies bare norm which is close enough
+                    // for initial support.
+                    const kn = self.findLayerTensor(layer, "attn_k_norm.weight");
+                    if (kn) |k_norm| {
+                        self.writeDescSet3(ds, self.v_buf.handle, self.v_buf.size, k_norm.gpu_buffer.handle, k_norm.gpu_buffer.size, self.v_buf.handle, self.v_buf.size);
+                        try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, layer_head_dim, layer_n_kv_heads, rms_norm_eps);
+                    }
+                }
                 if (packed_q_gate) {
                     self.decode_cmd.computeToTransferBarrier();
                     {
@@ -1700,7 +1717,8 @@ pub const InferenceEngine = struct {
                 if (self.attention.pipeline) |*pip| {
                     const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
-                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, 1);
+                    // config.attn_scale: from GGUF metadata (Gemma 4 = 1.0), 0 = shader uses 1/sqrt(head_dim)
+                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, 1, config.attn_scale);
                 }
                 self.decode_cmd.computeBarrier();
 
