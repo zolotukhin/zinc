@@ -171,6 +171,8 @@ pub const Config = struct {
     command_force: bool = false,
     /// Show unsupported catalog entries in `zinc model list`.
     show_all_models: bool = false,
+    /// Output `model list` results as pretty-printed JSON.
+    json_output: bool = false,
 };
 
 /// Top-level CLI subcommands parsed from argv.
@@ -406,7 +408,7 @@ const banner =
     \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
     \\
     \\Model management:
-    \\  model list [--all]       List managed models for the detected GPU
+    \\  model list [--all] [--json] List managed models (--json for machine-readable output)
     \\  model pull <id>          Download a supported managed model into the local cache
     \\  model use <id>           Set the active managed model for future runs
     \\  model active             Print the active managed model
@@ -448,7 +450,7 @@ const banner_full =
     \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
     \\
     \\Model management:
-    \\  model list [--all]       List managed models for the detected GPU
+    \\  model list [--all] [--json] List managed models (--json for machine-readable output)
     \\  model pull <id>          Download a supported managed model into the local cache
     \\  model use <id>           Set the active managed model for future runs
     \\  model active             Print the active managed model
@@ -588,6 +590,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             config.check = true;
         } else if (std.mem.eql(u8, arg, "--all")) {
             config.show_all_models = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            config.json_output = true;
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
             config.command_force = true;
         } else {
@@ -780,13 +784,19 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     const backend_name = if (gpu.is_metal) "Metal" else if (gpu.is_vulkan) "Vulkan" else "GPU";
 
     const support = resolveManagedGpuSupport(config.device_index, allocator) catch |err| {
-        if (!config.show_all_models) {
+        if (!config.show_all_models and !config.json_output) {
             var stderr_buffer: [1024]u8 = undefined;
             var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
             try stderr.interface.print("Unable to initialize {s} for GPU detection: {s}\n", .{ backend_name, @errorName(err) });
             try stderr.interface.writeAll("Use `zinc model list --all` to inspect the catalog without live fit checks.\n");
             try stderr.interface.flush();
             return error.GpuDetectionUnavailable;
+        }
+
+        if (config.json_output) {
+            try printManagedModelListJson(&stdout.interface, active_model_id, null, allocator);
+            try stdout.interface.flush();
+            return;
         }
 
         try stdout.interface.print("{s} GPU detection unavailable ({s}). Showing the full catalog without live fit checks.\n\n", .{ backend_name, @errorName(err) });
@@ -813,6 +823,12 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     defer {
         var owned = support;
         owned.deinit(allocator);
+    }
+
+    if (config.json_output) {
+        try printManagedModelListJson(&stdout.interface, active_model_id, &support, allocator);
+        try stdout.interface.flush();
+        return;
     }
 
     try stdout.interface.print(
@@ -863,6 +879,181 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     }
 
     try stdout.interface.flush();
+}
+
+/// Format a byte count as a human-readable size string (e.g. "4.58 GiB").
+fn formatSizeHuman(buf: *[32]u8, size_bytes: u64) []const u8 {
+    const gib: f64 = @as(f64, @floatFromInt(size_bytes)) / (1024.0 * 1024.0 * 1024.0);
+    if (gib >= 1.0) {
+        return std.fmt.bufPrint(buf, "{d:.2} GiB", .{gib}) catch "??";
+    }
+    const mib: f64 = @as(f64, @floatFromInt(size_bytes)) / (1024.0 * 1024.0);
+    return std.fmt.bufPrint(buf, "{d:.2} MiB", .{mib}) catch "??";
+}
+
+/// Write a JSON string value, escaping special characters.
+fn writeJsonString(w: anytype, s: []const u8) !void {
+    try w.writeAll("\"");
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => {
+                const byte = [1]u8{c};
+                try w.writeAll(&byte);
+            },
+        }
+    }
+    try w.writeAll("\"");
+}
+
+/// Output the full catalog as pretty-printed JSON.
+/// When `support` is null, GPU detection was unavailable and fit fields are omitted.
+fn printManagedModelListJson(
+    w: anytype,
+    active_model_id: ?[]const u8,
+    support: ?*const ManagedGpuSupport,
+    allocator: std.mem.Allocator,
+) !void {
+    // Sort entries by id alphabetically.
+    var sorted_indices: [catalog_mod.entries.len]usize = undefined;
+    for (&sorted_indices, 0..) |*slot, idx| slot.* = idx;
+    std.mem.sort(usize, &sorted_indices, {}, struct {
+        fn lessThan(_: void, a: usize, b: usize) bool {
+            return std.mem.order(u8, catalog_mod.entries[a].id, catalog_mod.entries[b].id) == .lt;
+        }
+    }.lessThan);
+
+    try w.writeAll("[\n");
+    var first = true;
+    for (sorted_indices) |idx| {
+        const entry = catalog_mod.entries[idx];
+        if (!first) try w.writeAll(",\n");
+        first = false;
+
+        const installed = managed_mod.isInstalled(entry.id, allocator);
+        const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
+
+        var size_buf: [32]u8 = undefined;
+        const size_human = formatSizeHuman(&size_buf, entry.size_bytes);
+
+        const status_str = @tagName(entry.status);
+
+        // Compute fits_gpu when GPU support is available.
+        const fits_gpu: ?bool = if (support) |s| blk: {
+            const fit = managed_mod.describeFit(entry, s.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
+                .required_vram_bytes = entry.required_vram_bytes,
+                .fits_current_gpu = catalog_mod.fitsGpu(entry, s.vram_budget_bytes),
+                .exact = false,
+            };
+            break :blk fit.fits_current_gpu;
+        } else null;
+
+        try w.writeAll("  {\n");
+
+        try w.writeAll("    \"id\": ");
+        try writeJsonString(w, entry.id);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"display_name\": ");
+        try writeJsonString(w, entry.display_name);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"family\": ");
+        try writeJsonString(w, entry.family);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"release_date\": ");
+        try writeJsonString(w, entry.release_date);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"format\": ");
+        try writeJsonString(w, entry.format);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"quantization\": ");
+        try writeJsonString(w, entry.quantization);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"file_name\": ");
+        try writeJsonString(w, entry.file_name);
+        try w.writeAll(",\n");
+
+        var sz_str_buf: [24]u8 = undefined;
+        const size_bytes_str = std.fmt.bufPrint(&sz_str_buf, "{d}", .{entry.size_bytes}) catch "0";
+        try w.writeAll("    \"size_bytes\": ");
+        try w.writeAll(size_bytes_str);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"size_human\": ");
+        try writeJsonString(w, size_human);
+        try w.writeAll(",\n");
+
+        var vram_str_buf: [24]u8 = undefined;
+        const vram_str = std.fmt.bufPrint(&vram_str_buf, "{d}", .{entry.required_vram_bytes}) catch "0";
+        try w.writeAll("    \"required_vram_bytes\": ");
+        try w.writeAll(vram_str);
+        try w.writeAll(",\n");
+
+        var ctx_str_buf: [12]u8 = undefined;
+        const ctx_str = std.fmt.bufPrint(&ctx_str_buf, "{d}", .{entry.default_context_length}) catch "0";
+        try w.writeAll("    \"default_context_length\": ");
+        try w.writeAll(ctx_str);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"homepage_url\": ");
+        try writeJsonString(w, entry.homepage_url);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"download_url\": ");
+        try writeJsonString(w, entry.download_url);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"sha256\": ");
+        try writeJsonString(w, entry.sha256);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"status\": ");
+        try writeJsonString(w, status_str);
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"recommended_for_chat\": ");
+        try w.writeAll(if (entry.recommended_for_chat) "true" else "false");
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"thinking_stable\": ");
+        try w.writeAll(if (entry.thinking_stable) "true" else "false");
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"tested_profiles\": [");
+        for (entry.tested_profiles, 0..) |profile, pi| {
+            if (pi > 0) try w.writeAll(", ");
+            try writeJsonString(w, profile);
+        }
+        try w.writeAll("],\n");
+
+        try w.writeAll("    \"installed\": ");
+        try w.writeAll(if (installed) "true" else "false");
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"active\": ");
+        try w.writeAll(if (is_active) "true" else "false");
+        try w.writeAll(",\n");
+
+        try w.writeAll("    \"fits_gpu\": ");
+        if (fits_gpu) |fits| {
+            try w.writeAll(if (fits) "true" else "false");
+        } else {
+            try w.writeAll("null");
+        }
+        try w.writeAll("\n");
+
+        try w.writeAll("  }");
+    }
+    try w.writeAll("\n]\n");
 }
 
 const LocalAdminRemoveResponse = struct {
