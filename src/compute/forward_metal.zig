@@ -6210,6 +6210,7 @@ test "kv_cache_write shader writes K and V slices at token offset" {
     const push = KvCacheWritePush{
         .n = kv_dim,
         .dst_offset = dst_offset,
+        .dst_offset_bytes = 0,
     };
     const bufs = [_]*const MetalBuffer{ &src_k, &src_v, &dst_k, &dst_v };
 
@@ -6272,6 +6273,8 @@ test "flash_attn shader handles contiguous Metal KV cache fast path" {
         .n_kv_heads = n_kv_heads,
         .seq_len = seq_len,
         .page_size = 0,
+        .kv_head_stride_bytes = head_dim * @sizeOf(f32),
+        .kv_token_stride_bytes = n_kv_heads * head_dim * @sizeOf(f32),
     };
     const bufs = [_]*const MetalBuffer{ &page_table_buf, &q_buf, &k_cache_buf, &v_cache_buf, &out_buf };
 
