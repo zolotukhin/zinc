@@ -2192,6 +2192,7 @@ fn dispatchMoeWeightedAccOnCmd(
     cmd.dispatchV2(&engine.moe_weighted_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccPush), 3);
 }
 
+/// Returns true if the attention gate (sigmoid gating) should be applied after flash attn.
 fn dispatchFullAttnPrepOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -2200,22 +2201,40 @@ fn dispatchFullAttnPrepOnCmd(
     q_dim: u32,
     kv_dim: u32,
     hidden_dim: u32,
-) !void {
+) !bool {
     const cfg = engine.config;
     const q_tensor = lt.attn_q orelse return error.MissingTensor;
     const k_tensor = lt.attn_k orelse return error.MissingTensor;
     const v_tensor = lt.attn_v orelse return error.MissingTensor;
-    const q_full_dim = q_dim * 2;
     const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
 
-    // Q/K/V projections are independent — concurrent dispatch overlaps them.
-    dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
-    dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
-    dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
-    cmd.barrier(); // Q/K/V outputs visible before deinterleave reads attn_out_buf
+    // Detect packed Q+gate vs separate format (matches Vulkan reference forward.zig:1499-1505).
+    // Packed: attn_q has q_dim*2 rows (interleaved [Q,gate] per head) — Qwen3Next style.
+    // Separate: attn_q has q_dim rows, gate is in a separate attn_gate tensor — Qwen3.5 MoE style.
+    const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
+    const packed_q_gate = q_rows >= q_dim * 2;
+    const separate_attn_gate = !packed_q_gate and lt.attn_gate != null;
+    const apply_attn_gate = packed_q_gate or separate_attn_gate;
 
-    dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, cfg.head_dim, cfg.n_heads);
-    cmd.barrier(); // q_buf/gate_buf visible before norms
+    if (packed_q_gate) {
+        // Packed: project full Q+gate into attn_out_buf, then deinterleave.
+        const q_full_dim = q_dim * 2;
+        dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+        cmd.barrier();
+        dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, cfg.head_dim, cfg.n_heads);
+        cmd.barrier();
+    } else {
+        // Separate: project Q directly to q_buf, gate (if present) to gate_buf.
+        dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.q_buf, q_dim, hidden_dim, 0);
+        if (separate_attn_gate) {
+            dispatchDmmvOnCmd(engine, cmd, lt.attn_gate.?, &engine.norm_buf, &engine.gate_buf, q_dim, hidden_dim, 0);
+        }
+        dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, kv_dim, hidden_dim, 0);
+        cmd.barrier();
+    }
 
     // Q/K norms are independent — concurrent dispatch overlaps them.
     if (engine.attn_q_norm_present[layer_idx]) {
@@ -2232,6 +2251,7 @@ fn dispatchFullAttnPrepOnCmd(
     cmd.barrier(); // rope outputs visible before KV cache write
 
     dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
+    return apply_attn_gate;
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
@@ -2836,11 +2856,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const layer_record_start = profileStart(profile != null);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
             cmd.barrier(); // norm_buf visible before attn prep reads it
-            try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
+            const apply_attn_gate = try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
             cmd.barrier(); // KV cache + q_buf visible before flash attn
             dispatchFlashAttnOnCmd(engine, cmd, layer_idx, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, engine.position + 1);
-            cmd.barrier(); // attn_out_buf visible before sigmoid_mul
-            dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+            if (apply_attn_gate) {
+                cmd.barrier(); // attn_out_buf visible before sigmoid_mul
+                dispatchSigmoidMulOnCmd(engine, cmd, &engine.gate_buf, &engine.attn_out_buf, q_dim);
+            }
             cmd.barrier(); // attn_out_buf visible before output DMMV
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
