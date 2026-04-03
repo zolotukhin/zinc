@@ -499,6 +499,7 @@ pub const InferenceEngine = struct {
     kv_k_cache: []Buffer, // [n_layers] K cache buffers
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
     page_table_buf: Buffer, // identity page table for flash attention (page_ids[i] = i)
+    unit_weight_buf: Buffer, // buffer of all 1.0f values for bare RMS norm (Gemma V norm)
     // SSM state (per-layer, CPU-side, for SSM layers) — legacy, used until GPU SSM is integrated
     ssm_conv_states: [][]f32, // [n_layers] conv state: (kernel_size-1) * conv_channels
     ssm_states: [][]f32, // [n_layers] recurrent state: head_v_dim * head_v_dim * num_v_heads
@@ -575,12 +576,15 @@ pub const InferenceEngine = struct {
         const inter_val = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
         const shexp_val = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_val;
         const d_inner_val = if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim;
-        // Cap SPEC_K to fit in GPU shared memory (64KB / 4 bytes = 16384 floats max).
-        // DMMV shaders with K > SPEC_K read the input vector from global memory instead.
-        const max_k = @min(
-            @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val),
-            16384,
-        );
+        // SPEC_K must fit in GPU shared memory (maxComputeSharedMemorySize).
+        // Gemma 4 FFN inter_dim=21504 exceeds 64KB limit. DMMV shaders with K > SPEC_K
+        // fall back to global memory reads (correct but slower).
+        // Use the actual max K, capped to what fits in shared memory (16384 = 64KB / 4).
+        const uncapped_max_k = @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val);
+        const max_k = @min(uncapped_max_k, 16384);
+        if (uncapped_max_k > 16384) {
+            log.info("DMMV: inter_dim={d} exceeds shared memory, using global fallback for K>{d}", .{ uncapped_max_k, max_k });
+        }
         var dmmv = try DmmvDispatch.init(instance, &gpu_config, shader_dir, max_k, allocator);
         errdefer dmmv.deinit();
 
@@ -799,9 +803,30 @@ pub const InferenceEngine = struct {
             var map_ptr: ?*anyopaque = null;
             const mr_pt = vk.c.vkMapMemory(instance.device, page_table_buf.memory, 0, page_table_size, 0, &map_ptr);
             if (mr_pt != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            page_table_buf.mapped = @ptrCast(map_ptr);
             const pt_u32: [*]u32 = @ptrCast(@alignCast(map_ptr));
             for (0..max_ctx) |i| pt_u32[i] = @intCast(i);
             vk.c.vkUnmapMemory(instance.device, page_table_buf.memory);
+        }
+
+        // Unit weight buffer for bare RMS norm (used by Gemma 4's V normalization on K=V layers).
+        // Shape: [max_head_dim] filled with 1.0f, so fused rms_norm_mul produces pure normalization.
+        const max_head_dim = config.head_dim;
+        const unit_weight_size = @as(vk.c.VkDeviceSize, max_head_dim) * @sizeOf(f32);
+        var unit_weight_buf = try Buffer.init(
+            instance,
+            unit_weight_size,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer unit_weight_buf.deinit();
+        {
+            var uw_ptr: ?*anyopaque = null;
+            const uw_r = vk.c.vkMapMemory(instance.device, unit_weight_buf.memory, 0, unit_weight_size, 0, &uw_ptr);
+            if (uw_r != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            const uw_f32: [*]f32 = @ptrCast(@alignCast(uw_ptr));
+            for (0..max_head_dim) |i| uw_f32[i] = 1.0;
+            vk.c.vkUnmapMemory(instance.device, unit_weight_buf.memory);
         }
 
         // SSM state (CPU-side, for hybrid models)
@@ -967,6 +992,7 @@ pub const InferenceEngine = struct {
             .kv_k_cache = kv_k_cache,
             .kv_v_cache = kv_v_cache,
             .page_table_buf = page_table_buf,
+            .unit_weight_buf = unit_weight_buf,
             .ssm_conv_states = ssm_conv_states,
             .ssm_states = ssm_states,
             .ssm_hidden_staging = ssm_hidden_staging,
@@ -1475,6 +1501,19 @@ pub const InferenceEngine = struct {
             self.profile_token_counters.cpu_embed_ns += @intCast(cpu_embed_end - cpu_embed_start);
         }
 
+        // Gemma 4 debug: log embedding values after scaling
+        if (config.architecture == .gemma and state.position == 0) {
+            const embed_ptr: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+            var embed_rms: f64 = 0;
+            for (0..hidden_dim) |i| embed_rms += @as(f64, embed_ptr[i]) * @as(f64, embed_ptr[i]);
+            embed_rms = @sqrt(embed_rms / @as(f64, @floatFromInt(hidden_dim)));
+            log.info("GEMMA_DBG embed: rms={d:.4} [0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}] scale={d:.1}", .{
+                @as(f32, @floatCast(embed_rms)),
+                embed_ptr[0], embed_ptr[1], embed_ptr[2], embed_ptr[3],
+                @sqrt(@as(f32, @floatFromInt(hidden_dim))),
+            });
+        }
+
         // Per-layer logit5 tracking for BOS diagnostic summary
         var diag_logit5 = [_]f32{0} ** 64;
         var diag_rms_arr = [_]f32{0} ** 64;
@@ -1574,22 +1613,14 @@ pub const InferenceEngine = struct {
                 }
                 try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, layer_kv_dim, hidden_dim);
                 try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, layer_kv_dim, hidden_dim);
-                // Gemma 4: when V=K (shared weights), apply bare RMS norm to V (no weight tensor).
-                // K gets weighted RMS norm (attn_k_norm), V gets plain normalization.
+                // Gemma 4: when V=K (shared weights), apply BARE RMS norm to V (no weight).
+                // K gets weighted RMS norm (attn_k_norm), V gets plain normalization using unit weights.
                 const v_is_shared = self.findLayerTensor(layer, "attn_v.weight") == null;
                 if (v_is_shared) {
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    // Use k_norm weights as a proxy for unit-weight norm (the kernel multiplies by weight,
-                    // so we need a tensor of all 1.0s). Actually, bare RMS norm = normalize to unit L2.
-                    // Since our RMS norm shader is fused (norm * weight), and we can't easily pass unit weights,
-                    // apply the k_norm to V as well — llama.cpp applies bare norm which is close enough
-                    // for initial support.
-                    const kn = self.findLayerTensor(layer, "attn_k_norm.weight");
-                    if (kn) |k_norm| {
-                        self.writeDescSet3(ds, self.v_buf.handle, self.v_buf.size, k_norm.gpu_buffer.handle, k_norm.gpu_buffer.size, self.v_buf.handle, self.v_buf.size);
-                        try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, layer_head_dim, layer_n_kv_heads, rms_norm_eps);
-                    }
+                    self.writeDescSet3(ds, self.v_buf.handle, self.v_buf.size, self.unit_weight_buf.handle, self.unit_weight_buf.size, self.v_buf.handle, self.v_buf.size);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, layer_head_dim, layer_n_kv_heads, rms_norm_eps);
                 }
                 if (packed_q_gate) {
                     self.decode_cmd.computeToTransferBarrier();
@@ -1686,9 +1717,10 @@ pub const InferenceEngine = struct {
 
                 // RoPE: use per-layer dimensions (Gemma 4 has different head_dim for sliding vs global)
                 // Gemma 4 dual RoPE: sliding layers use rope_freq_base_swa (10000) and rotate all dims.
-                // Global layers use rope_freq_base (1M) with partial rotation (25% = head_dim/4).
+                // Global layers use rope_freq_base (1M) with full head_dim for correct pairing.
+                // The high theta naturally suppresses rotation of high-dimension pairs.
                 const is_sliding_layer = (layer_head_dim < config.head_dim and config.rope_freq_base_swa > 0);
-                const layer_rope_dim: u32 = if (is_sliding_layer) layer_head_dim else if (config.rope_freq_base_swa > 0) layer_head_dim / 4 else layer_head_dim;
+                const layer_rope_dim: u32 = layer_head_dim;
                 const layer_rope_freq: f32 = if (is_sliding_layer) config.rope_freq_base_swa else config.rope_freq_base;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
@@ -2444,6 +2476,35 @@ pub const InferenceEngine = struct {
                     try self.decode_cmd.begin();
                 }
 
+                // Debug: check FFN down output for layer 0 (catches DMMV global mem fallback bugs)
+                if (config.architecture == .gemma and state.position == 0 and layer == 0) {
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @min(@as(vk.c.VkDeviceSize, inter_dim) * @sizeOf(f32), self.logits_staging.size) });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                    const sw_p: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    const dn_p: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+                    var sw_rms: f64 = 0;
+                    var dn_rms: f64 = 0;
+                    const sw_n: u32 = @min(inter_dim, @as(u32, @intCast(self.logits_staging.size / @sizeOf(f32))));
+                    for (0..sw_n) |i| sw_rms += @as(f64, sw_p[i]) * @as(f64, sw_p[i]);
+                    for (0..hidden_dim) |i| dn_rms += @as(f64, dn_p[i]) * @as(f64, dn_p[i]);
+                    sw_rms = @sqrt(sw_rms / @as(f64, @floatFromInt(sw_n)));
+                    dn_rms = @sqrt(dn_rms / @as(f64, @floatFromInt(hidden_dim)));
+                    log.info("GEMMA_DBG L0 FFN: geglu_rms={d:.4} down_rms={d:.4} geglu[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}] down[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                        @as(f32, @floatCast(sw_rms)), @as(f32, @floatCast(dn_rms)),
+                        sw_p[0], sw_p[1], sw_p[2], sw_p[3],
+                        dn_p[0], dn_p[1], dn_p[2], dn_p[3],
+                    });
+                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                }
+
                 // Gemma post-FFN norm: applied to down_buf before residual add.
                 const post_ffn_norm_tensor = self.findLayerTensor(layer, "post_ffw_norm.weight");
                 if (post_ffn_norm_tensor) |pfn| {
@@ -2486,6 +2547,37 @@ pub const InferenceEngine = struct {
 
             // The next layer immediately reads hidden_buf as its input.
             self.decode_cmd.computeBarrier();
+
+            // Gemma 4 debug: readback hidden state after layer to track magnitude
+            if (config.architecture == .gemma and state.position == 0 and (layer < 3 or layer == config.n_layers - 1)) {
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
+                // Actually need to record this in a new cmd buf
+                try self.decode_cmd.reset();
+                try self.decode_cmd.begin();
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                const hptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                var h_rms: f64 = 0;
+                var h_max: f32 = 0;
+                var h_nan: u32 = 0;
+                for (0..hidden_dim) |i| {
+                    if (std.math.isNan(hptr[i]) or std.math.isInf(hptr[i])) { h_nan += 1; continue; }
+                    h_rms += @as(f64, hptr[i]) * @as(f64, hptr[i]);
+                    const a = @abs(hptr[i]);
+                    if (a > h_max) h_max = a;
+                }
+                h_rms = @sqrt(h_rms / @as(f64, @floatFromInt(hidden_dim)));
+                log.info("GEMMA_DBG L{d}: rms={d:.4} max={d:.4} nan={d} [0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                    layer, @as(f32, @floatCast(h_rms)), h_max, h_nan,
+                    hptr[0], hptr[1], hptr[2], hptr[3],
+                });
+                _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                try self.decode_cmd.reset();
+                try self.decode_cmd.begin();
+            }
 
             // Command buffer stays open across layers (Phase 3c batching).
             // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
@@ -3415,7 +3507,11 @@ pub const InferenceEngine = struct {
 
     /// Sample a token greedily. Uses GPU argmax when available, otherwise falls back to CPU scan.
     pub fn sampleGreedy(self: *const InferenceEngine) u32 {
-        if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
+        const softcap = self.model.config.final_logit_softcapping;
+
+        // When logit softcapping is active (Gemma 4), must use CPU path
+        // because GPU argmax operates on raw unsoftcapped logits.
+        if (softcap == 0 and self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
             const token_ptr: [*]const u32 = @ptrCast(@alignCast(self.argmax_result_staging.mapped.?));
             return token_ptr[0];
         }
@@ -3424,9 +3520,11 @@ pub const InferenceEngine = struct {
         const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
         const logits = logits_ptr[0..vocab_size];
 
-        var max_val: f32 = logits[0];
+        var max_val: f32 = -std.math.inf(f32);
         var max_idx: u32 = 0;
-        for (logits[1..], 1..) |val, i| {
+        for (logits, 0..) |raw_val, i| {
+            // Apply logit softcapping: cap * tanh(x / cap)
+            const val = if (softcap > 0) softcap * std.math.tanh(raw_val / softcap) else raw_val;
             if (val > max_val) {
                 max_val = val;
                 max_idx = @intCast(i);
@@ -3939,6 +4037,7 @@ pub const InferenceEngine = struct {
         self.router_output_buf.deinit();
         // KV cache + page table
         self.page_table_buf.deinit();
+        self.unit_weight_buf.deinit();
         for (self.kv_k_cache) |*b| b.deinit();
         for (self.kv_v_cache) |*b| b.deinit();
         self.allocator.free(self.kv_k_cache);
@@ -3999,7 +4098,7 @@ fn dumpTop5Logits(engine: *const InferenceEngine, step: u32) void {
             }
         }
     }
-    log.debug("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
+    log.info("TOP5[{d}]: #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2} #{d}={d:.2}", .{
         step,
         top_ids[0],
         top_vals[0],
@@ -4036,6 +4135,9 @@ pub fn generate(
     log.debug("Generating: {d} prompt tokens, max {d} output tokens", .{
         prompt_tokens.len, max_tokens,
     });
+
+    // Enable logits readback for Gemma 4 debugging
+    if (engine.model.config.architecture == .gemma) engine.logits_readback_enabled = true;
 
     // Prefill: batch all prompt tokens in a single GPU submission
     const prefill_start = std.time.nanoTimestamp();

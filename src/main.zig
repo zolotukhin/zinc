@@ -1700,7 +1700,7 @@ pub fn main() !void {
         const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
         defer allocator.free(prompt_tokens);
 
-        log.debug("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
+        log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
         // Decode prompt tokens for verification
         {
             var pt_buf: std.ArrayList(u8) = .{};

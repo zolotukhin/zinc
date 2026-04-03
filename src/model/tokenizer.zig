@@ -299,7 +299,8 @@ pub const Tokenizer = struct {
     /// The returned slice is allocated with `allocator`.
     fn encodeWithSpecialTokens(self: *const Tokenizer, text: []const u8, allocator: std.mem.Allocator) ![]u32 {
         // Fast path: if there are no potential special token markers, just BPE-encode.
-        if (std.mem.indexOf(u8, text, "<|") == null) {
+        // Check for both `<|...|>` (GPT-2/Llama) and `<...>` (Gemma) style markers.
+        if (std.mem.indexOf(u8, text, "<") == null) {
             const bpe = try self.encode(text);
             defer self.freeEncoded(bpe);
             const out = try allocator.alloc(u32, bpe.len);
@@ -312,12 +313,40 @@ pub const Tokenizer = struct {
 
         var pos: usize = 0;
         while (pos < text.len) {
-            // Look for the next `<|` marker.
-            if (std.mem.indexOfPos(u8, text, pos, "<|")) |start| {
-                // Look for the closing `|>` after the opening `<|`.
-                if (std.mem.indexOfPos(u8, text, start + 2, "|>")) |pipe_end| {
-                    const end = pipe_end + 2; // include the `|>`
-                    const candidate = text[start..end];
+            // Look for the next `<` marker (handles both `<|...|>` and `<...>` formats).
+            if (std.mem.indexOfPos(u8, text, pos, "<")) |start| {
+                // Try `<|...|>` first, then `<...>`
+                // Try to match a special token starting at `start`.
+                // Checks <|...|> (GPT-2/Llama) first, then <...> (Gemma).
+                var special_end: usize = 0;
+                var special_candidate: []const u8 = "";
+                var found_special = false;
+                // Try <|...|> (GPT-2/Llama style)
+                if (start + 2 < text.len and text[start + 1] == '|') {
+                    if (std.mem.indexOfPos(u8, text, start + 2, "|>")) |pipe_end| {
+                        const candidate = text[start .. pipe_end + 2];
+                        if (self.token_to_id.get(candidate) != null) {
+                            special_end = pipe_end + 2;
+                            special_candidate = candidate;
+                            found_special = true;
+                        }
+                    }
+                }
+                // Try <...> (Gemma style: <start_of_turn>, <end_of_turn>, etc.)
+                if (!found_special) {
+                    if (std.mem.indexOfPos(u8, text, start + 1, ">")) |gt_pos| {
+                        const candidate = text[start .. gt_pos + 1];
+                        if (self.token_to_id.get(candidate) != null) {
+                            special_end = gt_pos + 1;
+                            special_candidate = candidate;
+                            found_special = true;
+                        }
+                    }
+                }
+
+                if (found_special) {
+                    const end = special_end;
+                    const candidate = special_candidate;
 
                     if (self.token_to_id.get(candidate)) |special_id| {
                         // BPE-encode any text before this special token.
@@ -331,10 +360,10 @@ pub const Tokenizer = struct {
                         continue;
                     }
                 }
-                // The `<|...|>` pattern was not a known special token.
-                // BPE-encode everything up to and including `<|` so the outer
+                // The `<...>` pattern was not a known special token.
+                // BPE-encode everything up to and including `<` so the outer
                 // loop can continue scanning after it.
-                const chunk_end = start + 2;
+                const chunk_end = start + 1;
                 const bpe = try self.encode(text[pos..chunk_end]);
                 defer self.freeEncoded(bpe);
                 try tokens.appendSlice(allocator, bpe);
