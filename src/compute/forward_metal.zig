@@ -3230,7 +3230,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(&cmd, profile);
     }
-    if (false and engine.debug_validation_enabled and engine.position >= 25) {
+    if (false and engine.debug_validation_enabled and engine.position >= 33) {
         const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
         if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
