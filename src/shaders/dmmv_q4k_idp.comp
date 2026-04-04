@@ -1,50 +1,48 @@
 #version 460
 // ZINC — Q4_K × Q8_1 integer dot product DMMV
-// Uses dotPacked4x8EXT (HW-accelerated on RDNA4) for ~4x faster inner loop.
-// B vector must be pre-quantized to Q8_1 format by quantize_q8_1.comp.
+// Uses dotPacked4x8EXT (HW-accelerated unsigned×unsigned on RDNA4).
+// Q8_1 values are biased by +127 to unsigned range [0,254].
+// Bias correction: dot_signed = dot_unsigned - 127 * sum(q4_values)
 //
-// Each thread processes one output row. For each Q4_K superblock (256 elements),
-// it reads the corresponding 8 Q8_1 blocks and computes 4x dotPacked4x8EXT
-// per sub-block pair (16 elements = 4 IDP instructions).
+// B vector must be pre-quantized to Q8_1 (biased unsigned) by quantize_q8_1.comp.
 //
-// Q4_K block: 144 bytes (256 elements)
-// Q8_1 block: 36 bytes (32 elements) — packed as 9 uint32
+// Q4_K block: 144 bytes = 36 uint32 (256 elements)
+// Q8_1 block: 36 bytes = 9 uint32 (32 elements)
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_integer_dot_product : require
 
 layout(local_size_x = 64) in;
 
 layout(push_constant) uniform PushConstants {
-    uint M;           // output rows
-    uint K;           // input elements
-    uint a_offset;    // byte offset into Q4_K weight matrix
-    uint b_offset;    // byte offset into Q8_1 input buffer
-    uint y_offset;    // byte offset into output buffer
+    uint M;
+    uint K;
+    uint a_offset;
+    uint b_offset;
+    uint y_offset;
 };
 
-// Q4_K weights as uint32 for packed reads
 layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
-// Q8_1 quantized input as uint32 (9 words per 32-element block)
 layout(set = 0, binding = 1) readonly buffer VectorB { uint b_u32[]; };
-// Output
 layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[]; };
 
-const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
-const uint Q8_BLOCK_U32 = 9u;    // 36 bytes / 4
+const uint Q4K_BLOCK_U32 = 36u;
+const uint Q8_BLOCK_U32 = 9u;
+
+// Sum of 4 bytes in a uint32 word (each byte 0-15 for Q4K nibbles)
+uint byte_sum(uint w) {
+    return (w & 0xFFu) + ((w >> 8) & 0xFFu) + ((w >> 16) & 0xFFu) + (w >> 24);
+}
 
 void main() {
-    uint tid = gl_LocalInvocationID.x;
-    uint row = gl_WorkGroupID.x * 64u + tid;
+    uint row = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
     if (row >= M) return;
 
     uint a_base = a_offset / 4u;
     uint b_base = b_offset / 4u;
     uint y_base = y_offset / 4u;
     const uint blocks_per_row = K / 256u;
-    const uint q8_blocks_per_row = K / 32u;  // 8 Q8_1 blocks per Q4_K block
 
     float sum = 0.0;
 
@@ -61,59 +59,58 @@ void main() {
         uint sc1 = a_u32[a_blk + 2u];
         uint sc2 = a_u32[a_blk + 3u];
 
-        // Extract all 12 scale bytes
         uint sb[12];
-        sb[0] = sc0 & 0xFFu; sb[1] = (sc0>>8)&0xFFu; sb[2] = (sc0>>16)&0xFFu; sb[3] = (sc0>>24)&0xFFu;
-        sb[4] = sc1 & 0xFFu; sb[5] = (sc1>>8)&0xFFu; sb[6] = (sc1>>16)&0xFFu; sb[7] = (sc1>>24)&0xFFu;
-        sb[8] = sc2 & 0xFFu; sb[9] = (sc2>>8)&0xFFu; sb[10] = (sc2>>16)&0xFFu; sb[11] = (sc2>>24)&0xFFu;
+        sb[0]=sc0&0xFFu; sb[1]=(sc0>>8)&0xFFu; sb[2]=(sc0>>16)&0xFFu; sb[3]=(sc0>>24)&0xFFu;
+        sb[4]=sc1&0xFFu; sb[5]=(sc1>>8)&0xFFu; sb[6]=(sc1>>16)&0xFFu; sb[7]=(sc1>>24)&0xFFu;
+        sb[8]=sc2&0xFFu; sb[9]=(sc2>>8)&0xFFu; sb[10]=(sc2>>16)&0xFFu; sb[11]=(sc2>>24)&0xFFu;
 
-        // Process 8 sub-blocks (each maps to one Q8_1 block)
+        // Process 8 sub-blocks (each = one Q8_1 block of 32 elements)
         for (uint s = 0u; s < 8u; s++) {
-            // Decode 6-bit scale and min for this sub-block
             float sc_val, mn_val;
             if (s < 4u) {
                 sc_val = float(sb[s] & 63u);
                 mn_val = float(sb[s + 4u] & 63u);
             } else {
-                sc_val = float((sb[s + 4u] & 0xFu) | ((sb[s - 4u] >> 6) << 4));
-                mn_val = float(((sb[s + 4u] >> 4) & 0xFu) | ((sb[s] >> 6) << 4));
+                sc_val = float((sb[s+4u]&0xFu)|((sb[s-4u]>>6)<<4));
+                mn_val = float(((sb[s+4u]>>4)&0xFu)|((sb[s]>>6)<<4));
             }
 
-            // Read corresponding Q8_1 block
+            // Read Q8_1 block header
             uint b_blk = b_base + (blk * 8u + s) * Q8_BLOCK_U32;
             uint b_ds = b_u32[b_blk];
             float d_b = unpackHalf2x16(b_ds & 0xFFFFu).x;
-            float ds_y = unpackHalf2x16(b_ds >> 16).x;  // d_b * sum(q8_values)
+            float ds_y = unpackHalf2x16(b_ds >> 16).x;  // d_b * sum(q8_signed)
 
-            // Read 32 Q8_1 values as 8 packed int32 words
-            // Read 32 Q4_K values for this sub-block
-            // Q4_K layout: sub-blocks 0,1 share qs[0..31] (lo/hi nibbles)
-            //              sub-blocks 2,3 share qs[32..63], etc.
-            uint pair = s / 2u;       // which pair (0..3)
-            uint is_hi = s & 1u;      // 0=low nibble, 1=high nibble
-            uint qs_word_base = a_blk + 4u + pair * 8u;  // 32 qs bytes = 8 uint32 words
+            // Q4_K nibble extraction for sub-block s
+            uint pair = s / 2u;
+            uint is_hi = s & 1u;
+            uint qs_base = a_blk + 4u + pair * 8u;  // 32 bytes = 8 uint32 words
 
-            // Integer dot product: 4 words × 4 bytes × dotPacked4x8
-            int q_sum = 0;
+            // Integer dot product with bias correction
+            uint dot_unsigned = 0u;
+            uint sum_q4 = 0u;  // sum of Q4_K nibble values for bias correction
+
             for (uint w = 0u; w < 8u; w++) {
-                // Extract 4 Q4_K nibbles from one uint32 weight word
-                uint qs_word = a_u32[qs_word_base + w];
+                uint qs_word = a_u32[qs_base + w];
                 uint q4_packed;
                 if (is_hi == 0u) {
-                    q4_packed = qs_word & 0x0F0F0F0Fu;  // low nibbles
+                    q4_packed = qs_word & 0x0F0F0F0Fu;
                 } else {
-                    q4_packed = (qs_word >> 4) & 0x0F0F0F0Fu;  // high nibbles
+                    q4_packed = (qs_word >> 4) & 0x0F0F0F0Fu;
                 }
 
-                // Read 4 Q8_1 values (packed int8 in uint32)
                 uint q8_packed = b_u32[b_blk + 1u + w];
 
-                // Integer dot product: 4 × (uint4 × int8) accumulated to int32
-                q_sum += int(dotPacked4x8EXT(q4_packed, q8_packed));
+                // Unsigned × unsigned dot product (Q8_1 biased by +127)
+                dot_unsigned += dotPacked4x8EXT(q4_packed, q8_packed);
+                sum_q4 += byte_sum(q4_packed);
             }
 
-            // Dequantize: d_a * scale * d_b * q_sum - dmin_a * min * ds_y
-            sum += d_a * sc_val * d_b * float(q_sum) - dmin_a * mn_val * ds_y;
+            // Correct for Q8_1 bias: dot_signed = dot_unsigned - 127 * sum_q4
+            int dot_signed = int(dot_unsigned) - 127 * int(sum_q4);
+
+            // Dequantize: d_a * scale * d_b * dot_signed - dmin_a * min * ds_y
+            sum += d_a * sc_val * d_b * float(dot_signed) - dmin_a * mn_val * ds_y;
         }
     }
 

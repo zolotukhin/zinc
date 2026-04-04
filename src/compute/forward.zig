@@ -2914,7 +2914,7 @@ pub const InferenceEngine = struct {
         const qt = tensor.info.type_;
 
         // IDP fast path: quantize input to Q8_1, then use integer dot product DMMV
-        // TODO: fix mixed-signedness handling (Q4_K unsigned × Q8_1 signed)
+        // TODO: fix output corruption — bias correction math needs verification
         if (false and qt == .q4_k and self.dmmv.pipeline_q4k_idp != null and self.dmmv.pipeline_quantize_q8_1 != null) {
             // Step 1: Quantize input vector to Q8_1
             const q8_pip = &(self.dmmv.pipeline_quantize_q8_1 orelse unreachable);

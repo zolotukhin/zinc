@@ -38,12 +38,15 @@ void main() {
     float d = amax / 127.0;
     float id = (d != 0.0) ? 1.0 / d : 0.0;
 
-    // Quantize to int8
-    int qs = int(round(val * id));
-    qs = clamp(qs, -127, 127);
+    // Quantize to unsigned uint8 with bias 127 (for unsigned dotPacked4x8EXT)
+    // Original signed: qs_signed = round(val / d), range [-127, 127]
+    // Biased unsigned: qs = qs_signed + 127, range [0, 254]
+    int qs_signed = int(round(val * id));
+    qs_signed = clamp(qs_signed, -127, 127);
+    int qs = qs_signed + 127;  // unsigned biased value [0, 254]
 
-    // Compute sum of quantized values (for bias correction)
-    int q_sum = subgroupAdd(qs);
+    // Sum of SIGNED values (for bias correction in the DMMV)
+    int q_sum = subgroupAdd(qs_signed);
 
     // Pack 32 int8 values into 8 uint32 words
     // Thread tid writes byte (tid % 4) of word (tid / 4)
