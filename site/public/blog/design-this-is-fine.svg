@@ -16,7 +16,7 @@
     <style>
       .title { font: 700 36px system-ui, -apple-system, sans-serif; fill: #fff7ed; }
       .subtitle { font: 500 18px system-ui, -apple-system, sans-serif; fill: #fed7aa; }
-      .log { font: 700 15px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #fff1f2; }
+      .log { font: 700 14px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #fff1f2; }
       .label { font: 700 24px system-ui, -apple-system, sans-serif; fill: #fff7ed; }
       .small { font: 600 14px system-ui, -apple-system, sans-serif; fill: #fcd9c4; }
     </style>
@@ -43,22 +43,20 @@
     <rect x="332" y="280" width="536" height="18" rx="9" fill="#2f221f"/>
     <rect x="356" y="292" width="20" height="190" rx="10" fill="#2f221f"/>
     <rect x="824" y="292" width="20" height="190" rx="10" fill="#2f221f"/>
-    <rect x="424" y="314" width="360" height="188" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
-    <rect x="448" y="338" width="312" height="116" rx="18" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
-    <text class="log" x="474" y="374" fill="#7ee787">[pass] tokenizer OK</text>
-    <text class="log" x="474" y="404" fill="#fda4af">[warn] descriptor mismatch? check layer 12</text>
-    <text class="log" x="474" y="434" fill="#fde68a">[note] narrow the bug surface before optimizing</text>
-    <text class="small" x="474" y="476">The profiler is not helping until the math is stable.</text>
-
-    <rect x="562" y="514" width="88" height="96" rx="24" fill="#b45309"/>
-    <circle cx="606" cy="440" r="52" fill="#f2c7a7"/>
-    <circle cx="586" cy="428" r="7" fill="#3f2d21"/>
-    <circle cx="626" cy="428" r="7" fill="#3f2d21"/>
-    <path d="M586 456 Q606 468 626 456" fill="none" stroke="#3f2d21" stroke-width="5" stroke-linecap="round"/>
-    <path d="M566 392 L582 372 L590 404" fill="#d97706"/>
-    <path d="M646 392 L630 372 L622 404" fill="#d97706"/>
-    <rect x="520" y="560" width="172" height="38" rx="18" fill="#fff7ed"/>
-    <text class="label" x="606" y="586" text-anchor="middle" fill="#9a3412">This is fine</text>
+    <rect x="404" y="304" width="400" height="198" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
+    <rect x="428" y="328" width="352" height="112" rx="18" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
+    <text class="log" x="454" y="364" fill="#7ee787">[pass] tokenizer OK</text>
+    <text class="log" x="454" y="392" fill="#fda4af">[warn] check layer 12</text>
+    <text class="log" x="454" y="420" fill="#fda4af">descriptor mismatch?</text>
+    <rect x="562" y="520" width="88" height="96" rx="24" fill="#b45309"/>
+    <circle cx="606" cy="474" r="44" fill="#f2c7a7"/>
+    <circle cx="590" cy="462" r="6.5" fill="#3f2d21"/>
+    <circle cx="622" cy="462" r="6.5" fill="#3f2d21"/>
+    <path d="M588 486 Q606 496 624 486" fill="none" stroke="#3f2d21" stroke-width="5" stroke-linecap="round"/>
+    <path d="M576 430 L588 410 L594 438" fill="#d97706"/>
+    <path d="M636 430 L624 410 L618 438" fill="#d97706"/>
+    <rect x="520" y="570" width="172" height="38" rx="18" fill="#fff7ed"/>
+    <text class="label" x="606" y="596" text-anchor="middle" fill="#9a3412">This is fine</text>
   </g>
 
   <g filter="url(#shadow)">

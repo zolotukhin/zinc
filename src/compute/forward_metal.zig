@@ -380,6 +380,10 @@ const LayerTensors = struct {
     ffn_gate_exps: ?*const metal_loader.LoadedTensor = null,
     ffn_up_exps: ?*const metal_loader.LoadedTensor = null,
     ffn_down_exps: ?*const metal_loader.LoadedTensor = null,
+    ffn_gate_exps_bias: ?*const metal_loader.LoadedTensor = null,
+    ffn_up_exps_bias: ?*const metal_loader.LoadedTensor = null,
+    ffn_down_exps_bias: ?*const metal_loader.LoadedTensor = null,
+    ffn_gate_inp_bias: ?*const metal_loader.LoadedTensor = null,
     // Shared expert
     ffn_gate_shexp: ?*const metal_loader.LoadedTensor = null,
     ffn_up_shexp: ?*const metal_loader.LoadedTensor = null,
@@ -881,6 +885,10 @@ pub const InferenceEngine = struct {
                 .ffn_gate_exps = findLayerTensor(model, layer, "ffn_gate_exps.weight"),
                 .ffn_up_exps = findLayerTensor(model, layer, "ffn_up_exps.weight"),
                 .ffn_down_exps = findLayerTensor(model, layer, "ffn_down_exps.weight"),
+                .ffn_gate_exps_bias = findLayerTensor(model, layer, "ffn_gate_exps.bias"),
+                .ffn_up_exps_bias = findLayerTensor(model, layer, "ffn_up_exps.bias"),
+                .ffn_down_exps_bias = findLayerTensor(model, layer, "ffn_down_exps.bias"),
+                .ffn_gate_inp_bias = findLayerTensor(model, layer, "ffn_gate_inp.bias"),
                 .ffn_gate_shexp = findLayerTensor(model, layer, "ffn_gate_shexp.weight"),
                 .ffn_up_shexp = findLayerTensor(model, layer, "ffn_up_shexp.weight"),
                 .ffn_down_shexp = findLayerTensor(model, layer, "ffn_down_shexp.weight"),
@@ -1782,6 +1790,18 @@ fn addBiasFromTensor(engine: *InferenceEngine, dst: [*]f32, bias_tensor: *const 
     }
 }
 
+/// Add bias from a specific expert slice of a 2D bias tensor [dim, n_experts].
+fn addBiasFromTensorSlice(engine: *InferenceEngine, dst: [*]f32, bias_tensor: *const metal_loader.LoadedTensor, expert_id: u32, n: u32) void {
+    const mmap = engine.model.mmap_data orelse return;
+    const off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + bias_tensor.info.offset);
+    // Bias tensor is [dim, n_experts] in f32 → expert_id-th slice starts at expert_id * dim
+    if (bias_tensor.info.type_ == .f32) {
+        const bias: [*]const f32 = @ptrCast(@alignCast(mmap.ptr + off));
+        const base = expert_id * n;
+        for (0..n) |i| dst[i] += bias[base + i];
+    }
+}
+
 fn dispatchFullAttnPrepOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -1943,6 +1963,19 @@ fn cpuSwiGLU(gate: [*]const f32, up: [*]const f32, output: [*]f32, n: u32) void 
     for (0..n) |i| {
         const x = gate[i];
         output[i] = (x / (1.0 + @exp(-x))) * up[i];
+    }
+}
+
+/// OAI SwiGLU variant for gpt-oss MoE experts.
+/// output = (min(gate, limit) / (1 + exp(alpha * -gate))) * (clamp(up, -limit, limit) + 1)
+fn cpuSwiGLU_OAI(gate: [*]const f32, up: [*]const f32, output: [*]f32, n: u32) void {
+    const alpha: f32 = 1.702;
+    const limit: f32 = 7.0;
+    for (0..n) |i| {
+        const x = @min(gate[i], limit);
+        const y = std.math.clamp(up[i], -limit, limit);
+        const glu = x / (1.0 + @exp(alpha * (-x)));
+        output[i] = glu * (y + 1.0);
     }
 }
 
@@ -2327,6 +2360,25 @@ fn recordGpuRoutedBatchedMoeOnCmd(
 
     try dispatchDmmvMoeOnCmd(engine, cmd, gate_exps, &engine.norm_buf, &engine.expert_gate_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
     try dispatchDmmvMoeOnCmd(engine, cmd, up_exps, &engine.norm_buf, &engine.expert_up_batch_buf, &engine.router_output_buf, inter_dim, hidden_dim, expert_gate_bytes, 0, 0);
+
+    // Apply per-expert biases if present (gpt-oss)
+    if (lt.ffn_gate_exps_bias != null or lt.ffn_up_exps_bias != null) {
+        cmd.commitAndWait();
+        // Read selected expert IDs from router output
+        const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_output_buf.cpu_ptr.?));
+        for (0..cfg.n_experts_used) |ei| {
+            const eid: u32 = @intFromFloat(router_ptr[ei]);
+            if (lt.ffn_gate_exps_bias) |b| {
+                const gate_dst: [*]f32 = @ptrCast(@alignCast(engine.expert_gate_batch_buf.cpu_ptr.?));
+                addBiasFromTensorSlice(engine, gate_dst + ei * inter_dim, b, eid, inter_dim);
+            }
+            if (lt.ffn_up_exps_bias) |b| {
+                const up_dst: [*]f32 = @ptrCast(@alignCast(engine.expert_up_batch_buf.cpu_ptr.?));
+                addBiasFromTensorSlice(engine, up_dst + ei * inter_dim, b, eid, inter_dim);
+            }
+        }
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    }
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
         dispatchDmmvOnCmd(engine, cmd, up_shexp.?, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
@@ -2334,7 +2386,17 @@ fn recordGpuRoutedBatchedMoeOnCmd(
             dispatchDmmvOnCmd(engine, cmd, tensor, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
         }
     }
-    {
+    if (cfg.architecture == .gpt_oss) {
+        // OAI SwiGLU variant: must apply on CPU (different formula from standard SwiGLU)
+        cmd.commitAndWait();
+        const gate_ptr: [*]f32 = @ptrCast(@alignCast(engine.expert_gate_batch_buf.cpu_ptr.?));
+        const up_ptr: [*]f32 = @ptrCast(@alignCast(engine.expert_up_batch_buf.cpu_ptr.?));
+        const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.expert_swiglu_batch_buf.cpu_ptr.?));
+        for (0..cfg.n_experts_used) |ei| {
+            cpuSwiGLU_OAI(gate_ptr + ei * inter_dim, up_ptr + ei * inter_dim, out_ptr + ei * inter_dim, inter_dim);
+        }
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    } else {
         const swiglu_push = SwiGLUPush{ .n = inter_dim };
         const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
         const batch_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_batched_pipe else &engine.swiglu_batched_pipe;
@@ -2347,6 +2409,19 @@ fn recordGpuRoutedBatchedMoeOnCmd(
         cmd.dispatchV2(shexp_act_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &sw_push, @sizeOf(SwiGLUPush), 0);
     }
     try dispatchDmmvMoeOnCmd(engine, cmd, down_exps, &engine.expert_swiglu_batch_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, inter_dim, expert_down_bytes, inter_dim, 0);
+
+    // Apply per-expert down biases if present (gpt-oss)
+    if (lt.ffn_down_exps_bias) |b| {
+        cmd.commitAndWait();
+        const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_output_buf.cpu_ptr.?));
+        for (0..cfg.n_experts_used) |ei| {
+            const eid: u32 = @intFromFloat(router_ptr[ei]);
+            const down_dst: [*]f32 = @ptrCast(@alignCast(engine.expert_down_batch_buf.cpu_ptr.?));
+            addBiasFromTensorSlice(engine, down_dst + ei * hidden_dim, b, eid, hidden_dim);
+        }
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    }
+
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
     }
@@ -2728,10 +2803,14 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             if (profile) |p| p.fallback_moe_layers += 1;
             // CPU topK softmax
             const router_start = profileStart(profile != null);
-            const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+            const router_ptr: [*]f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+            // Apply router bias if present (gpt-oss)
+            if (lt.ffn_gate_inp_bias) |b| {
+                addBiasFromTensor(engine, router_ptr, b, cfg.n_experts);
+            }
             var expert_ids: [16]u32 = undefined;
             var expert_weights: [16]f32 = undefined;
-            topKSoftmax(router_ptr[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
             const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6;
             const hidden_before_snapshot: ?[]f32 = if (should_debug_moe_compare) blk: {
                 const snap = try engine.allocator.alloc(f32, hidden_dim);
@@ -2848,17 +2927,38 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     }
                     cmd.barrier();
 
+                    // Apply per-expert gate/up biases if present (gpt-oss)
+                    if (lt.ffn_gate_exps_bias != null or lt.ffn_up_exps_bias != null) {
+                        commitAndWaitProfiled(&cmd, profile);
+                        for (0..cfg.n_experts_used) |ei| {
+                            const eid = expert_ids[ei];
+                            if (lt.ffn_gate_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
+                            if (lt.ffn_up_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
+                        }
+                        cmd = try beginProfiledCommand(engine, profile);
+                    }
+
                     // Phase 2: All activation operations in parallel
-                    const e_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
-                    for (0..cfg.n_experts_used) |ei| {
-                        const swiglu_push = SwiGLUPush{ .n = inter_dim };
-                        const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
-                        cmd.dispatchV2(e_act_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                    if (cfg.architecture == .gpt_oss) {
+                        // OAI SwiGLU on CPU
+                        cmd.commitAndWait();
+                        for (0..cfg.n_experts_used) |ei| {
+                            cpuSwiGLU_OAI(@ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_swiglu_bufs[ei].cpu_ptr.?)), inter_dim);
+                        }
+                        cmd = try beginProfiledCommand(engine, profile);
+                    } else {
+                        const e_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
+                        for (0..cfg.n_experts_used) |ei| {
+                            const swiglu_push = SwiGLUPush{ .n = inter_dim };
+                            const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
+                            cmd.dispatchV2(e_act_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                        }
                     }
                     if (has_shexp) {
                         const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
                         const sw_bufs2 = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                        cmd.dispatchV2(e_act_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
+                        const se_act_pipe = if (cfg.architecture == .gemma) &engine.geglu_pipe else &engine.swiglu_pipe;
+                        cmd.dispatchV2(se_act_pipe, .{ (shexp_inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs2, &sw_push, @sizeOf(SwiGLUPush), 0);
                     }
                     cmd.barrier();
 
@@ -2872,6 +2972,16 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                         dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
                     }
                     cmd.barrier();
+
+                    // Apply per-expert down biases if present (gpt-oss)
+                    if (lt.ffn_down_exps_bias) |b| {
+                        commitAndWaitProfiled(&cmd, profile);
+                        for (0..cfg.n_experts_used) |ei| {
+                            const eid = expert_ids[ei];
+                            addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?)), b, eid, hidden_dim);
+                        }
+                        cmd = try beginProfiledCommand(engine, profile);
+                    }
 
                     // Phase 4: Fused MoE weighted accumulate — hidden += sum(w[i] * expert_down[i]) + w_sh * shared_down
                     // Single dispatch replaces 8+1 sequential scale_accumulate + barriers (eliminates 8 pipeline flushes per layer)

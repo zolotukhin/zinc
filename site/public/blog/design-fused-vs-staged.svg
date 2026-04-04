@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820" role="img" aria-labelledby="title desc">
   <title id="title">Fused versus staged dequantization</title>
   <desc id="desc">A side-by-side comparison. The staged approach dequantizes to an intermediate buffer and then multiplies. The fused approach dequantizes and accumulates in one pass with no intermediate VRAM write.</desc>
   <defs>
@@ -21,7 +21,7 @@
     </style>
   </defs>
 
-  <rect width="1200" height="760" fill="url(#paper)"/>
+  <rect width="1200" height="820" fill="url(#paper)"/>
 
   <g transform="translate(72 76)">
     <text class="title">The intermediate buffer is the enemy</text>
@@ -29,68 +29,77 @@
   </g>
 
   <g filter="url(#shadow)">
-    <rect x="72" y="154" width="486" height="540" rx="28" fill="#fff6f3" stroke="#eac7bc" stroke-width="2"/>
-    <rect x="642" y="154" width="486" height="540" rx="28" fill="#f4fcf8" stroke="#c8e2d4" stroke-width="2"/>
+    <rect x="72" y="154" width="486" height="586" rx="28" fill="#fff6f3" stroke="#eac7bc" stroke-width="2"/>
+    <rect x="642" y="154" width="486" height="586" rx="28" fill="#f4fcf8" stroke="#c8e2d4" stroke-width="2"/>
   </g>
 
   <g transform="translate(108 192)">
     <text class="card-title" fill="#9a3412">Staged approach</text>
-    <text class="card-copy" x="0" y="30">Dequantize first, write an intermediate tensor, then read it again for the dot product.</text>
+    <text class="card-copy" x="0" y="30">
+      <tspan x="0" dy="0">Dequantize first, write an intermediate tensor,</tspan>
+      <tspan x="0" dy="22">then read it again for the dot product.</tspan>
+    </text>
 
-    <rect x="34" y="92" width="304" height="86" rx="22" fill="#fff" stroke="#e9d3cb" stroke-width="2"/>
-    <text class="box-title" x="66" y="132">Quantized weights</text>
-    <text class="box-copy" x="66" y="156">Q4_K blocks come from VRAM once.</text>
+    <rect x="34" y="124" width="304" height="86" rx="22" fill="#fff" stroke="#e9d3cb" stroke-width="2"/>
+    <text class="box-title" x="66" y="164">Quantized weights</text>
+    <text class="box-copy" x="66" y="188">Q4_K blocks come from VRAM once.</text>
 
-    <rect x="34" y="238" width="304" height="104" rx="22" fill="#fff" stroke="#e9d3cb" stroke-width="2"/>
-    <text class="box-title" x="66" y="280">Dequantize to F32 buffer</text>
-    <text class="box-copy" x="66" y="306">Write the unpacked values back to VRAM.</text>
-    <text class="tiny" x="66" y="328" fill="#b45309">tmp[row, k] = scale * q + min</text>
+    <rect x="34" y="274" width="304" height="104" rx="22" fill="#fff" stroke="#e9d3cb" stroke-width="2"/>
+    <text class="box-title" x="66" y="316">Dequantize to F32 buffer</text>
+    <text class="box-copy" x="66" y="342">Write the unpacked values back to VRAM.</text>
+    <text class="tiny" x="66" y="364" fill="#b45309">tmp[row, k] = scale * q + min</text>
 
-    <rect x="34" y="404" width="304" height="86" rx="22" fill="#fff" stroke="#e9d3cb" stroke-width="2"/>
-    <text class="box-title" x="66" y="444">Matmul reads tmp again</text>
-    <text class="box-copy" x="66" y="468">Another full pass over the same data.</text>
+    <rect x="34" y="446" width="304" height="86" rx="22" fill="#fff" stroke="#e9d3cb" stroke-width="2"/>
+    <text class="box-title" x="66" y="486">Matmul reads tmp again</text>
+    <text class="box-copy" x="66" y="510">Another full pass over the same data.</text>
 
-    <rect x="34" y="528" width="304" height="64" rx="18" fill="#9a3412"/>
-    <text class="badge" x="186" y="567" text-anchor="middle" fill="#fff7ed">2x memory traffic on the hot path</text>
+    <rect x="34" y="558" width="304" height="64" rx="18" fill="#9a3412"/>
+    <text class="badge" x="186" y="597" text-anchor="middle" fill="#fff7ed">2x memory traffic on the hot path</text>
 
-    <path d="M186 178 V228" stroke="#c2410c" stroke-width="5" stroke-linecap="round"/>
-    <path d="M174 214 L186 236 L198 214" fill="#c2410c"/>
-    <path d="M186 342 V394" stroke="#c2410c" stroke-width="5" stroke-linecap="round"/>
-    <path d="M174 380 L186 402 L198 380" fill="#c2410c"/>
+    <path d="M186 210 V262" stroke="#c2410c" stroke-width="5" stroke-linecap="round"/>
+    <path d="M174 248 L186 270 L198 248" fill="#c2410c"/>
+    <path d="M186 378 V436" stroke="#c2410c" stroke-width="5" stroke-linecap="round"/>
+    <path d="M174 422 L186 444 L198 422" fill="#c2410c"/>
 
-    <rect x="364" y="220" width="84" height="142" rx="20" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
-    <text class="badge" x="406" y="270" text-anchor="middle" fill="#991b1b">VRAM</text>
-    <text class="box-copy" x="406" y="298" text-anchor="middle">read</text>
-    <text class="box-copy" x="406" y="324" text-anchor="middle">write</text>
-    <text class="box-copy" x="406" y="350" text-anchor="middle">read</text>
+    <rect x="364" y="262" width="84" height="148" rx="20" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+    <text class="badge" x="406" y="314" text-anchor="middle" fill="#991b1b">VRAM</text>
+    <text class="box-copy" x="406" y="344" text-anchor="middle">read</text>
+    <text class="box-copy" x="406" y="372" text-anchor="middle">write</text>
+    <text class="box-copy" x="406" y="400" text-anchor="middle">read</text>
   </g>
 
   <g transform="translate(678 192)">
     <text class="card-title" fill="#166534">Fused approach</text>
-    <text class="card-copy" x="0" y="30">Unpack the quantized block into registers and accumulate immediately.</text>
+    <text class="card-copy" x="0" y="30">
+      <tspan x="0" dy="0">Unpack the quantized block into registers</tspan>
+      <tspan x="0" dy="22">and accumulate immediately.</tspan>
+    </text>
 
-    <rect x="34" y="110" width="360" height="142" rx="24" fill="#fff" stroke="#d2e8dc" stroke-width="2"/>
-    <text class="box-title" x="66" y="152">Fused dequant + dot product</text>
-    <text class="box-copy" x="66" y="178">Read quantized weights once, expand in registers, multiply on the spot.</text>
-    <text class="tiny" x="66" y="208" fill="#166534">sum += (scale * q + min) * x[k]</text>
+    <rect x="34" y="138" width="360" height="142" rx="24" fill="#fff" stroke="#d2e8dc" stroke-width="2"/>
+    <text class="box-title" x="66" y="180">Fused dequant + dot product</text>
+    <text class="box-copy" x="66" y="206">
+      <tspan x="66" dy="0">Read quantized weights once, expand in registers,</tspan>
+      <tspan x="66" dy="22">multiply on the spot.</tspan>
+    </text>
+    <text class="tiny" x="66" y="242" fill="#166534">sum += (scale * q + min) * x[k]</text>
 
-    <rect x="34" y="334" width="360" height="86" rx="22" fill="#fff" stroke="#d2e8dc" stroke-width="2"/>
-    <text class="box-title" x="66" y="374">Write output vector only</text>
-    <text class="box-copy" x="66" y="398">The result leaves the shader once.</text>
+    <rect x="34" y="388" width="360" height="86" rx="22" fill="#fff" stroke="#d2e8dc" stroke-width="2"/>
+    <text class="box-title" x="66" y="428">Write output vector only</text>
+    <text class="box-copy" x="66" y="452">The result leaves the shader once.</text>
 
-    <path d="M214 252 V324" stroke="#16a34a" stroke-width="5" stroke-linecap="round"/>
-    <path d="M202 310 L214 332 L226 310" fill="#16a34a"/>
+    <path d="M214 280 V378" stroke="#16a34a" stroke-width="5" stroke-linecap="round"/>
+    <path d="M202 364 L214 386 L226 364" fill="#16a34a"/>
 
-    <rect x="34" y="528" width="360" height="64" rx="18" fill="#166534"/>
-    <text class="badge" x="214" y="567" text-anchor="middle" fill="#f0fdf4">Zero intermediate buffer</text>
+    <rect x="34" y="558" width="360" height="64" rx="18" fill="#166534"/>
+    <text class="badge" x="214" y="597" text-anchor="middle" fill="#f0fdf4">Zero intermediate buffer</text>
 
-    <g transform="translate(422 150)">
+    <g transform="translate(406 168)">
       <rect x="0" y="0" width="86" height="86" rx="22" fill="#dcfce7" stroke="#22c55e" stroke-width="2"/>
       <text class="badge" x="43" y="42" text-anchor="middle" fill="#166534">VRAM</text>
       <text class="box-copy" x="43" y="66" text-anchor="middle">read once</text>
     </g>
 
-    <g transform="translate(422 344)">
+    <g transform="translate(406 398)">
       <rect x="0" y="0" width="86" height="86" rx="22" fill="#ecfdf3" stroke="#22c55e" stroke-width="2"/>
       <text class="badge" x="43" y="42" text-anchor="middle" fill="#166534">OUT</text>
       <text class="box-copy" x="43" y="66" text-anchor="middle">write once</text>
