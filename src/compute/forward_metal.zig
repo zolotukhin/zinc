@@ -2228,11 +2228,12 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
                 const exp_byte = raw_data[bo];
                 const d: f32 = @bitCast(if (exp_byte == 0) @as(u32, 0x00400000) else @as(u32, @intCast(exp_byte)) << 23);
                 const qs = raw_data[bo + 1 .. bo + 17];
+                // Elements 0-15: low nibble; elements 16-31: high nibble
                 for (0..16) |j| {
-                    output[out_i] = d * lut[qs[j] & 0x0F];
-                    output[out_i + 1] = d * lut[qs[j] >> 4];
-                    out_i += 2;
+                    output[out_i + j] = d * lut[qs[j] & 0x0F];
+                    output[out_i + j + 16] = d * lut[qs[j] >> 4];
                 }
+                out_i += 32;
             }
         },
         else => {
@@ -2263,6 +2264,32 @@ fn readMmapFloats(mmap: []const u8, base_off: usize, tensor_type: GGMLType, outp
 }
 
 /// Select the top-k logits, apply softmax, and write indices and weights.
+/// SOFTMAX_WEIGHT gating (gpt-oss): select top-k from raw logits, then softmax over selected.
+pub fn topKSoftmaxWeight(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
+    const n = logits.len;
+    // Pick top-k from raw logits (no initial softmax)
+    var used = [_]bool{false} ** 256;
+    for (0..k) |ki| {
+        var best_idx: u32 = 0;
+        var best_val: f32 = -std.math.inf(f32);
+        for (0..n) |i| {
+            if (!used[i] and logits[i] > best_val) {
+                best_val = logits[i];
+                best_idx = @intCast(i);
+            }
+        }
+        out_ids[ki] = best_idx;
+        out_weights[ki] = logits[best_idx];
+        used[best_idx] = true;
+    }
+    // Softmax only over selected experts
+    var max_sel: f32 = -std.math.inf(f32);
+    for (0..k) |i| if (out_weights[i] > max_sel) { max_sel = out_weights[i]; };
+    var sum: f32 = 0;
+    for (0..k) |i| { out_weights[i] = @exp(out_weights[i] - max_sel); sum += out_weights[i]; }
+    if (sum > 0) for (0..k) |i| { out_weights[i] /= sum; };
+}
+
 pub fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
     var max_val: f32 = -std.math.inf(f32);
@@ -2810,7 +2837,11 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             }
             var expert_ids: [16]u32 = undefined;
             var expert_weights: [16]f32 = undefined;
-            topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            if (cfg.architecture == .gpt_oss) {
+                topKSoftmaxWeight(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            } else {
+                topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            }
             const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6;
             const hidden_before_snapshot: ?[]f32 = if (should_debug_moe_compare) blk: {
                 const snap = try engine.allocator.alloc(f32, hidden_dim);
