@@ -683,11 +683,12 @@ pub const InferenceEngine = struct {
             // Gemma: ffn_norm.weight is separate from post_attention_norm.
             // Qwen3.5/LLaMA: post_attention_norm or ffn_norm is the FFN pre-norm.
             const fn_t = findLayerTensor(model, layer, "ffn_norm.weight") orelse
-                findLayerTensor(model, layer, "post_attention_norm.weight") orelse return error.MissingTensor;
+                findLayerTensor(model, layer, "post_attention_norm.weight") orelse
+                findLayerTensor(model, layer, "attn_post_norm.weight") orelse return error.MissingTensor;
             self.ffn_norm_bufs[i] = try preloadNormWeights(ctx, model, fn_t, cfg.hidden_dim);
 
             // Gemma post-attention norm (applied before residual add)
-            if (findLayerTensor(model, layer, "post_attention_norm.weight")) |pan| {
+            if (findLayerTensor(model, layer, "post_attention_norm.weight") orelse findLayerTensor(model, layer, "attn_post_norm.weight")) |pan| {
                 if (findLayerTensor(model, layer, "ffn_norm.weight") != null) {
                     // Both exist → Gemma-style: post_attention_norm is separate
                     self.post_attn_norm_bufs[i] = try preloadNormWeights(ctx, model, pan, cfg.hidden_dim);

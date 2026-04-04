@@ -13,6 +13,7 @@ pub const Architecture = enum {
     mamba,
     jamba,
     gemma,
+    gpt_oss,
     unknown,
 };
 
@@ -60,6 +61,9 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "gemma2")) return .gemma;
     if (std.mem.eql(u8, arch_str, "gemma3")) return .gemma;
     if (std.mem.eql(u8, arch_str, "gemma4")) return .gemma;
+    if (std.mem.eql(u8, arch_str, "gpt-oss")) return .gpt_oss;
+    if (std.mem.eql(u8, arch_str, "gpt_oss")) return .gpt_oss;
+    if (std.mem.eql(u8, arch_str, "openai-moe")) return .gpt_oss;
     return .unknown;
 }
 

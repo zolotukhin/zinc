@@ -175,7 +175,7 @@ pub fn buildDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocator
 pub fn buildDecodeGraphDetailed(config: *const ModelConfig, allocator: std.mem.Allocator, gf: ?*const gguf.GGUFFile) !Graph {
     return switch (config.architecture) {
         .mistral, .qwen2 => try buildLlamaDecodeGraph(config, allocator, gf),
-        .qwen2_moe => try buildMoeDecodeGraph(config, allocator, gf),
+        .qwen2_moe, .gpt_oss => try buildMoeDecodeGraph(config, allocator, gf),
         .qwen35, .mamba, .jamba => try buildMambaDecodeGraph(config, allocator, gf),
         .gemma => if (config.n_experts > 0) try buildGemmaMoeDecodeGraph(config, allocator, gf) else try buildGemmaDecodeGraph(config, allocator, gf),
         .unknown => error.UnsupportedArchitecture,
