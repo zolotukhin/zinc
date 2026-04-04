@@ -1,0 +1,100 @@
+#version 460
+// ZINC — Q4_K batch DMMV for prefill (multi-column)
+// Reads each weight row ONCE, computes dot products with up to MAX_COLS input vectors.
+// Gives ~Nx less memory bandwidth vs N separate DMMV dispatches.
+//
+// Layout: X[K, num_cols] (column-major), Y[M, num_cols] (column-major)
+// Each thread: one output row, all columns
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+// Max batch size — compile-time constant for register allocation
+const uint MAX_COLS = 32u;
+
+layout(push_constant) uniform PushConstants {
+    uint M;           // output rows
+    uint K;           // input elements per vector
+    uint a_offset;    // weight matrix byte offset
+    uint x_offset;    // input matrix byte offset
+    uint y_offset;    // output matrix byte offset
+    uint num_cols;    // actual batch size (<= MAX_COLS)
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixX { float x_data[];   };
+layout(set = 0, binding = 2) writeonly buffer MatrixY { float y_data[];  };
+
+const uint Q4K_BLOCK_SIZE = 256;
+const uint Q4K_BYTES      = 144;
+
+float decode_scale(uint ks_off, uint sb) {
+    if (sb < 4u) return float(uint(a_data[ks_off + sb]) & 0x3Fu);
+    return float((uint(a_data[ks_off + sb + 4u]) & 0x0Fu) | ((uint(a_data[ks_off + sb - 4u]) >> 6) << 4));
+}
+
+float decode_min(uint ks_off, uint sb) {
+    if (sb < 4u) return float(uint(a_data[ks_off + sb + 4u]) & 0x3Fu);
+    return float(((uint(a_data[ks_off + sb + 4u]) >> 4) & 0x0Fu) | ((uint(a_data[ks_off + sb]) >> 6) << 4));
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    if (row >= M) return;
+
+    const uint blocks_per_row = K / Q4K_BLOCK_SIZE;
+    uint x_base = x_offset / 4u;
+    uint y_base = y_offset / 4u;
+
+    // Per-column accumulators (register array)
+    float sums[MAX_COLS];
+    for (uint c = 0u; c < num_cols; c++) sums[c] = 0.0;
+
+    // Process weight blocks — weight data read ONCE, reused across all columns
+    for (uint blk = 0u; blk < blocks_per_row; blk++) {
+        uint byte_off = a_offset + row * blocks_per_row * Q4K_BYTES + blk * Q4K_BYTES;
+
+        uint d_bits    = uint(a_data[byte_off])      | (uint(a_data[byte_off + 1u]) << 8);
+        uint dmin_bits = uint(a_data[byte_off + 2u]) | (uint(a_data[byte_off + 3u]) << 8);
+        float d_val    = unpackHalf2x16(d_bits).x;
+        float dmin_val = unpackHalf2x16(dmin_bits).x;
+
+        uint qs_off = byte_off + 16u;
+        uint ks_off = byte_off + 4u;
+        uint x_blk_start = blk * Q4K_BLOCK_SIZE;
+
+        for (uint sp = 0u; sp < 4u; sp++) {
+            uint sb_lo = sp * 2u;
+            uint sb_hi = sp * 2u + 1u;
+
+            float factor_lo = d_val * decode_scale(ks_off, sb_lo);
+            float bias_lo   = dmin_val * decode_min(ks_off, sb_lo);
+            float factor_hi = d_val * decode_scale(ks_off, sb_hi);
+            float bias_hi   = dmin_val * decode_min(ks_off, sb_hi);
+
+            uint elem_lo = x_blk_start + sb_lo * 32u;
+            uint elem_hi = x_blk_start + sb_hi * 32u;
+            uint qs_base = qs_off + sp * 32u;
+
+            for (uint e = 0u; e < 32u; e++) {
+                uint byte_val = uint(a_data[qs_base + e]);
+                float w_lo = factor_lo * float(byte_val & 0x0Fu) - bias_lo;
+                float w_hi = factor_hi * float((byte_val >> 4) & 0x0Fu) - bias_hi;
+
+                // Apply dequantized weight to ALL input columns
+                for (uint c = 0u; c < num_cols; c++) {
+                    uint col_base = x_base + c * K;
+                    sums[c] += w_lo * x_data[col_base + elem_lo + e]
+                             + w_hi * x_data[col_base + elem_hi + e];
+                }
+            }
+        }
+    }
+
+    // Write all column results
+    for (uint c = 0u; c < num_cols; c++) {
+        y_data[y_base + c * M + row] = sums[c];
+    }
+}

@@ -3512,14 +3512,13 @@ pub const InferenceEngine = struct {
             try self.resetRequestState();
         }
 
-        // Run each prompt token through the full transformer (same as decodeStep)
-        // This populates KV cache and SSM state so the first decode token has context.
+        // Sequential prefill: each token goes through all layers independently.
+        // The batch DMMV shader (dmmv_q4k_batch) and recordBatchDispatch are available
+        // for future batch prefill where weights are read once for all N tokens.
         for (prompt_tokens, 0..) |token_id, i| {
             const collect_output = i + 1 == prompt_tokens.len;
             try self.decodeStep(state, token_id, collect_output);
         }
-
-        // Upload last token's embedding
     }
 
     // -----------------------------------------------------------------------
