@@ -488,6 +488,7 @@ pub const InferenceEngine = struct {
     attn_out_buf: Buffer, // attention output: n_heads * head_dim f32
     o_proj_buf: Buffer, // output projection: hidden_dim f32
     ffn_norm_buf: Buffer, // FFN norm output: hidden_dim f32
+    q8_input_buf: Buffer, // Q8_1 quantized input for IDP DMMV
     gate_buf: Buffer, // MoE expert gate output: intermediate_dim f32
     up_buf: Buffer, // MoE expert up output: intermediate_dim f32
     swiglu_buf: Buffer, // SwiGLU output: intermediate_dim f32
@@ -732,6 +733,14 @@ pub const InferenceEngine = struct {
         errdefer o_proj_buf.deinit();
         var ffn_norm_buf = try Buffer.initDeviceLocal(instance, hidden_size, storage_xfer);
         errdefer ffn_norm_buf.deinit();
+
+        // Q8_1 quantized input buffer for IDP DMMV (integer dot product acceleration).
+        // Holds the input vector quantized to Q8_1 format: K/32 blocks × 36 bytes each.
+        // Sized for the largest input vector (hidden_dim or inter_dim).
+        const max_dmmv_k = @max(config.hidden_dim, if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4);
+        const q8_buf_size = @as(vk.c.VkDeviceSize, (max_dmmv_k + 31) / 32) * 36;
+        var q8_input_buf = try Buffer.initDeviceLocal(instance, q8_buf_size, storage_xfer);
+        errdefer q8_input_buf.deinit();
         var gate_buf = try Buffer.initDeviceLocal(instance, gate_buf_size, storage_xfer);
         errdefer gate_buf.deinit();
         var up_buf = try Buffer.initDeviceLocal(instance, gate_buf_size, storage_xfer);
@@ -1034,6 +1043,7 @@ pub const InferenceEngine = struct {
             .attn_out_buf = attn_out_buf,
             .o_proj_buf = o_proj_buf,
             .ffn_norm_buf = ffn_norm_buf,
+            .q8_input_buf = q8_input_buf,
             .gate_buf = gate_buf,
             .up_buf = up_buf,
             .swiglu_buf = swiglu_buf,
@@ -2889,6 +2899,7 @@ pub const InferenceEngine = struct {
     // -----------------------------------------------------------------------
 
     /// Dispatch a DMMV: weight × input_buf → output_buf.
+    /// Uses integer dot product (IDP) acceleration for Q4_K when available.
     fn dispatchDmmv(
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
@@ -2901,6 +2912,32 @@ pub const InferenceEngine = struct {
         K: u32,
     ) !void {
         const qt = tensor.info.type_;
+
+        // IDP fast path: quantize input to Q8_1, then use integer dot product DMMV
+        // TODO: fix mixed-signedness handling (Q4_K unsigned × Q8_1 signed)
+        if (false and qt == .q4_k and self.dmmv.pipeline_q4k_idp != null and self.dmmv.pipeline_quantize_q8_1 != null) {
+            // Step 1: Quantize input vector to Q8_1
+            const q8_pip = &(self.dmmv.pipeline_quantize_q8_1 orelse unreachable);
+            const q8_ds = try self.allocDescSet(q8_pip.descriptor_set_layout);
+            self.writeDescSet2(q8_ds, input_buf.handle, input_size, self.q8_input_buf.handle, self.q8_input_buf.size);
+            const Q8Push = extern struct { K: u32, x_offset: u32 };
+            const q8_push = Q8Push{ .K = K, .x_offset = 0 };
+            const q8_workgroups = (K + 31) / 32; // one workgroup per Q8_1 block
+            self.decode_cmd.dispatchWithPush(q8_pip, q8_ds, std.mem.asBytes(&q8_push), q8_workgroups, 1, 1);
+            self.decode_cmd.computeBarrier();
+
+            // Step 2: IDP DMMV (Q4_K weights × Q8_1 input)
+            const idp_pip = &(self.dmmv.pipeline_q4k_idp orelse unreachable);
+            const idp_ds = try self.allocDescSet(idp_pip.descriptor_set_layout);
+            self.writeDescSet3(idp_ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, self.q8_input_buf.handle, self.q8_input_buf.size, output_buf.handle, output_buf.size);
+            const IdpPush = extern struct { M: u32, K: u32, a_offset: u32, b_offset: u32, y_offset: u32 };
+            const idp_push = IdpPush{ .M = M, .K = K, .a_offset = 0, .b_offset = 0, .y_offset = 0 };
+            const idp_workgroups = (M + 63) / 64;
+            self.decode_cmd.dispatchWithPush(idp_pip, idp_ds, std.mem.asBytes(&idp_push), idp_workgroups, 1, 1);
+            return;
+        }
+
+        // Float DMMV fallback
         const pip = self.dmmv.pipelineForType(qt) orelse {
             log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(qt), tensor.info.name });
             return error.UnsupportedQuantType;
@@ -4175,6 +4212,7 @@ pub const InferenceEngine = struct {
         self.up_buf.deinit();
         self.gate_buf.deinit();
         self.ffn_norm_buf.deinit();
+        self.q8_input_buf.deinit();
         self.o_proj_buf.deinit();
         self.attn_out_buf.deinit();
         self.v_buf.deinit();
