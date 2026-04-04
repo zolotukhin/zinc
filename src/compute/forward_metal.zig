@@ -1504,13 +1504,14 @@ pub const InferenceEngine = struct {
                     const simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
                     break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = block_size / simd_width, .block_size = block_size };
                 }
-                // Q8_0 lm-head: 1024 threads (32 rows/TG) cuts threadgroups from
-                // 31040 → 7760, reducing GPU scheduler overhead 4×.  The k2048
+                // Q8_0 large-M K<=2048: 1024 threads (32 rows/TG) reduces
+                // threadgroup count and GPU scheduler overhead.  The k2048
                 // shader is barrier-free — each simdgroup reads X independently
                 // from L1 — so 1024 threads incur no sync penalty.
+                // Covers lm-head (M=248320), shared expert down (M=2048), and
+                // other Q8_0 dispatches with sufficient rows.
                 if (K <= 2048 and
-                    tensor == self.lm_head and
-                    M >= 65536 and
+                    M >= 1024 and
                     self.dmmv_q8_0_k2048_pipe.thread_execution_width == 32 and
                     self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 1024)
                 {
@@ -1521,6 +1522,15 @@ pub const InferenceEngine = struct {
                     self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 256)
                 {
                     break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
+                }
+                // Q8_0 large-M K<=4096: 1024 threads for SSM out projection
+                // (M=2048, K=4096). X is 16 KiB — within L1 cache.
+                if (K <= 4096 and
+                    M >= 1024 and
+                    self.dmmv_q8_0_pipe.thread_execution_width == 32 and
+                    self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 1024)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 32, .block_size = 1024 };
                 }
                 if (K <= 4096 and
                     self.dmmv_q8_0_pipe.thread_execution_width == 32 and
@@ -1769,7 +1779,7 @@ fn canUseFusedNormDualQ8Dmmv(
     M1: u32,
     K: u32,
 ) bool {
-    const block_size = engine.q8_dual_tg_override orelse 512;
+    const block_size = engine.q8_dual_tg_override orelse 1024;
     return tensor0.info.type_ == .q8_0 and
         tensor1.info.type_ == .q8_0 and
         K <= 2048 and
@@ -1787,7 +1797,7 @@ fn canUseDualQ8Dmmv(
     M1: u32,
     K: u32,
 ) bool {
-    const block_size = engine.q8_dual_tg_override orelse 512;
+    const block_size = engine.q8_dual_tg_override orelse 1024;
     return tensor0.info.type_ == .q8_0 and
         tensor1.info.type_ == .q8_0 and
         K <= 2048 and
@@ -1828,7 +1838,7 @@ fn dispatchDualQ8DmmvOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ weight0_buf, weight1_buf, input_buf, output0_buf, output1_buf };
     const total_rows = M0 + M1;
-    const block_size = engine.q8_dual_tg_override orelse 512;
+    const block_size = engine.q8_dual_tg_override orelse 1024;
     const simd_width = if (engine.dmmv_q8_0_dual_pipe.thread_execution_width > 0) engine.dmmv_q8_0_dual_pipe.thread_execution_width else @as(u32, 32);
     const rows_per_wg: u32 = block_size / simd_width;
     cmd.dispatchV2(&engine.dmmv_q8_0_dual_pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
@@ -1868,7 +1878,7 @@ fn dispatchFusedNormDualQ8DmmvOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ weight0_buf, weight1_buf, hidden_buf, output0_buf, output1_buf, norm_weight_buf };
     const total_rows = M0 + M1;
-    const block_size = engine.q8_dual_tg_override orelse 512;
+    const block_size = engine.q8_dual_tg_override orelse 1024;
     const simd_width = if (engine.dmmv_q8_0_dual_fused_norm_pipe.thread_execution_width > 0) engine.dmmv_q8_0_dual_fused_norm_pipe.thread_execution_width else @as(u32, 32);
     const rows_per_wg: u32 = block_size / simd_width;
     cmd.dispatchV2(&engine.dmmv_q8_0_dual_fused_norm_pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
