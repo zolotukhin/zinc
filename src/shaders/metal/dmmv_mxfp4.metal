@@ -59,13 +59,15 @@ kernel void main0(
         device const uchar* qs = block + 1;
         const uint base = b * 32;
 
+        // Elements 0-15: low nibble of each byte
+        // Elements 16-31: high nibble of each byte
         for (uint j = 0; j < 16; j++) {
             const uchar q_byte = qs[j];
-            const float v0 = d * kvalues_mxfp4[q_byte & 0x0F];
-            const float v1 = d * kvalues_mxfp4[q_byte >> 4];
+            const float v_lo = d * kvalues_mxfp4[q_byte & 0x0F];
+            const float v_hi = d * kvalues_mxfp4[q_byte >> 4];
 
-            sum += v0 * x[base + 2 * j]     +
-                   v1 * x[base + 2 * j + 1];
+            sum += v_lo * x[base + j]      +
+                   v_hi * x[base + j + 16];
         }
     }
 
