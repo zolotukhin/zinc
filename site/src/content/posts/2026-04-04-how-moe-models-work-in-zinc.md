@@ -48,23 +48,32 @@ At a high level, an MoE layer replaces one dense FFN with a small router plus a 
 
 That last point matters. "MoE" is not one architecture. Some models are transformer-only MoE stacks. Some are hybrid models where attention is interleaved with SSM layers. Some include a shared expert path in addition to routed experts. Some use SwiGLU, some use GEGLU, and the norm placement is not always the same.
 
-```mermaid
-flowchart LR
-    H["Hidden state"] --> N["FFN norm"]
-    N --> R["Router projection"]
-    R --> T["Softmax + top-k"]
-    T --> G["Selected expert IDs + weights"]
-    N --> E1["Expert gate + up projections"]
-    G --> E1
-    E1 --> A["SwiGLU / GEGLU"]
-    A --> D["Expert down projections"]
-    D --> W["Weighted accumulation"]
-    N --> S1["Optional shared expert"]
-    N --> S2["Optional shared gate scalar"]
-    S1 --> W
-    S2 --> W
-    W --> O["MoE output + residual"]
-```
+<figure class="diagram-card">
+  <pre class="ascii-diagram" role="img" aria-label="An ASCII flow diagram showing an MoE layer from hidden state through FFN norm, router projection, top-k selection, expert projections, activation, down projection, weighted accumulation, optional shared expert paths, and final MoE output plus residual.">Hidden state
+   |
+FFN norm
+   |
+   +--> Optional shared expert ------+
+   |                                 |
+   +--> Optional shared gate scalar -+
+   |
+Router projection
+   |
+Softmax + top-k
+   |
+Selected expert IDs + weights
+   |
+Expert gate + up projections
+   |
+SwiGLU / GEGLU
+   |
+Expert down projections
+   |
+Weighted accumulation <--------------+
+   |
+MoE output + residual</pre>
+  <figcaption>A minimal MoE layer view: route the token, run only the selected experts, optionally fold in a shared expert, then collapse everything back into one FFN output.</figcaption>
+</figure>
 
 Dense parts of the model still run for every token. Attention still runs. Norms still run. The embedding path still runs. The output projection still runs. MoE makes the FFN sparse, not the entire forward pass.
 

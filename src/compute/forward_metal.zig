@@ -632,7 +632,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
-        self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+        self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_native");
         self.dmmv_q5_0_pipe = try loadShaderPipeline(ctx, "dmmv_q5_0");
         self.dmmv_mxfp4_pipe = try loadShaderPipeline(ctx, "dmmv_mxfp4");
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
@@ -1291,7 +1291,7 @@ pub const InferenceEngine = struct {
             },
             .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
-            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
+            .q8_0 => .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q5_0 => .{ .pipe = &self.dmmv_q5_0_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .mxfp4 => .{ .pipe = &self.dmmv_mxfp4_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
@@ -2839,6 +2839,12 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             var expert_weights: [16]f32 = undefined;
             if (cfg.architecture == .gpt_oss) {
                 topKSoftmaxWeight(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+                if (engine.debug_validation_enabled and engine.position == 0 and layer_idx == 0) {
+                    log.info("MOE_DBG L0: experts=[{d},{d},{d},{d}] weights=[{d:.4},{d:.4},{d:.4},{d:.4}]", .{
+                        expert_ids[0], expert_ids[1], expert_ids[2], expert_ids[3],
+                        expert_weights[0], expert_weights[1], expert_weights[2], expert_weights[3],
+                    });
+                }
             } else {
                 topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
             }
@@ -3012,6 +3018,52 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                             addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?)), b, eid, hidden_dim);
                         }
                         cmd = try beginProfiledCommand(engine, profile);
+                    }
+
+                    // Debug: check expert output norms + compare GPU vs CPU for expert 0
+                    if (engine.debug_validation_enabled and engine.position == 0 and layer_idx == 0) {
+                        // CPU reference for expert 0's down projection
+                        const swiglu_e0: [*]const f32 = @ptrCast(@alignCast(engine.expert_swiglu_bufs[0].cpu_ptr.?));
+                        const cpu_down = try engine.allocator.alloc(f32, hidden_dim);
+                        defer engine.allocator.free(cpu_down);
+                        const mmap = engine.model.mmap_data orelse unreachable;
+                        const tdo = engine.model.gguf_file.tensor_data_offset;
+                        const eid0 = expert_ids[0];
+                        const d_off = eid0 * expert_down_bytes;
+                        try cpuDmmvFallback(mmap, down_exps, tdo, swiglu_e0, cpu_down.ptr, hidden_dim, inter_dim, d_off, engine.allocator);
+                        const gpu_down: [*]const f32 = @ptrCast(@alignCast(engine.expert_down_bufs[0].cpu_ptr.?));
+                        var max_d: f32 = 0;
+                        for (0..hidden_dim) |i| {
+                            const d = @abs(gpu_down[i] - cpu_down[i]);
+                            if (d > max_d) max_d = d;
+                        }
+                        log.info("MOE_DMMV_CHECK: down e0(id={d}) gpu_vs_cpu max_diff={d:.6} gpu[0]={d:.4} cpu[0]={d:.4}", .{
+                            eid0, max_d, gpu_down[0], cpu_down[0],
+                        });
+                        // Also check SwiGLU output norms
+                        var sg_rms: f64 = 0;
+                        for (0..inter_dim) |i| sg_rms += @as(f64, swiglu_e0[i]) * @as(f64, swiglu_e0[i]);
+                        log.info("MOE_SWIGLU_CHECK: e0 rms={d:.4} [0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}]", .{
+                            @as(f32, @floatCast(@sqrt(sg_rms / @as(f64, @floatFromInt(inter_dim))))),
+                            swiglu_e0[0], swiglu_e0[1], swiglu_e0[2], swiglu_e0[3],
+                        });
+                    }
+                    if (engine.debug_validation_enabled and engine.position == 0 and layer_idx == 0) {
+                        for (0..cfg.n_experts_used) |ei| {
+                            const eptr: [*]const f32 = @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?));
+                            var erms: f64 = 0;
+                            var emax: f32 = 0;
+                            for (0..hidden_dim) |i| {
+                                erms += @as(f64, eptr[i]) * @as(f64, eptr[i]);
+                                if (@abs(eptr[i]) > emax) emax = @abs(eptr[i]);
+                            }
+                            log.info("MOE_EXPERT L0 e{d}(id={d}): rms={d:.4} max={d:.4} w={d:.4} [0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}]", .{
+                                ei, expert_ids[ei],
+                                @as(f32, @floatCast(@sqrt(erms / @as(f64, @floatFromInt(hidden_dim))))),
+                                emax, expert_weights[ei],
+                                eptr[0], eptr[1], eptr[2], eptr[3],
+                            });
+                        }
                     }
 
                     // Phase 4: Fused MoE weighted accumulate — hidden += sum(w[i] * expert_down[i]) + w_sh * shared_down
@@ -3372,7 +3424,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(&cmd, profile);
     }
-    if (engine.debug_validation_enabled and engine.position == 5) {
+    if (false and engine.debug_validation_enabled and engine.position >= 8) {
         const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
         if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
@@ -3440,10 +3492,38 @@ fn debugCompareFinalLogits(engine: *InferenceEngine) !void {
         const v = hidden[i];
         sum_sq += @as(f64, v) * @as(f64, v);
     }
-    const rms_inv: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + 1e-6));
+    const rms_inv: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + @as(f64, engine.config.rms_norm_eps)));
     for (0..hidden_dim) |i| {
         normed[i] = norm_w[i] * hidden[i] * rms_inv;
     }
+
+    // Compare GPU norm_buf vs CPU normed values
+    const gpu_norm: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+    var norm_max_d: f32 = 0;
+    for (0..hidden_dim) |i| {
+        const d = @abs(gpu_norm[i] - normed[i]);
+        if (d > norm_max_d) norm_max_d = d;
+    }
+    // Also compute a single logit from GPU's norm_buf using the raw weight tensor
+    {
+        const lm_off2: usize = @intCast(engine.model.gguf_file.tensor_data_offset + engine.lm_head.info.offset);
+        const lm_raw2 = mmap[lm_off2..];
+        var ref_row2: [4096]f32 = undefined;
+        dequantRow(lm_raw2, 0, hidden_dim, engine.lm_head.info.type_, ref_row2[0..hidden_dim]);
+        var dot2: f64 = 0;
+        for (0..hidden_dim) |i| dot2 += @as(f64, ref_row2[i]) * @as(f64, gpu_norm[i]);
+        const gpu_logit0 = gpu_logits[0];
+        log.info("LM_HEAD_CHECK: row0 cpu_dot={d:.6} gpu_logit[0]={d:.6} ratio={d:.4}", .{
+            @as(f32, @floatCast(dot2)), gpu_logit0,
+            if (gpu_logit0 != 0) @as(f32, @floatCast(dot2)) / gpu_logit0 else @as(f32, 0.0),
+        });
+    }
+    log.info("NORM_CHECK pos={d}: hidden_rms={d:.4} rms_inv={d:.8} cpu_norm[0]={d:.6} gpu_norm[0]={d:.6} max_diff={d:.6}", .{
+        engine.position,
+        @as(f32, @floatCast(@sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim))))),
+        rms_inv,
+        normed[0], gpu_norm[0], norm_max_d,
+    });
 
     const lm_off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + engine.lm_head.info.offset);
     const lm_raw = mmap[lm_off..];
