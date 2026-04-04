@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" font-family="system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#0f3460"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Panel 1 -->
+  <rect x="10" y="10" width="380" height="400" rx="12" fill="url(#bg1)" stroke="#30365a" stroke-width="2"/>
+  <text x="200" y="48" text-anchor="middle" fill="#8b949e" font-size="13" font-weight="600" letter-spacing="1.5">STEP 1</text>
+  <rect x="40" y="70" width="320" height="50" rx="8" fill="#21262d" stroke="#30365a" stroke-width="1"/>
+  <text x="200" y="101" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="600">Parse the GGUF header</text>
+
+  <!-- Simple file icon -->
+  <rect x="150" y="150" width="100" height="120" rx="4" fill="#21262d" stroke="#58a6ff" stroke-width="1.5"/>
+  <polyline points="150,150 150,138 162,138 175,150" fill="none" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="200" y="200" text-anchor="middle" fill="#7ee787" font-size="12" font-family="monospace">magic: GGUF</text>
+  <text x="200" y="218" text-anchor="middle" fill="#7ee787" font-size="12" font-family="monospace">version: 3</text>
+  <text x="200" y="236" text-anchor="middle" fill="#7ee787" font-size="12" font-family="monospace">tensors: 562</text>
+
+  <text x="200" y="310" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="600">Done in 589 lines</text>
+  <text x="200" y="370" text-anchor="middle" fill="#8b949e" font-size="42">:)</text>
+
+  <!-- Panel 2 -->
+  <rect x="410" y="10" width="380" height="400" rx="12" fill="url(#bg2)" stroke="#30365a" stroke-width="2"/>
+  <text x="600" y="48" text-anchor="middle" fill="#8b949e" font-size="13" font-weight="600" letter-spacing="1.5">STEP 2</text>
+  <rect x="440" y="70" width="320" height="50" rx="8" fill="#21262d" stroke="#30365a" stroke-width="1"/>
+  <text x="600" y="101" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="600">Draw the rest of the engine</text>
+
+  <!-- Chaotic boxes -->
+  <rect x="435" y="135" width="72" height="24" rx="3" fill="#21262d" stroke="#f85149" stroke-width="1"/>
+  <text x="471" y="151" text-anchor="middle" fill="#f85149" font-size="9">Tokenizer</text>
+
+  <rect x="515" y="135" width="72" height="24" rx="3" fill="#21262d" stroke="#f0883e" stroke-width="1"/>
+  <text x="551" y="151" text-anchor="middle" fill="#f0883e" font-size="9">Embedding</text>
+
+  <rect x="595" y="135" width="72" height="24" rx="3" fill="#21262d" stroke="#d2a8ff" stroke-width="1"/>
+  <text x="631" y="151" text-anchor="middle" fill="#d2a8ff" font-size="9">RMS Norm</text>
+
+  <rect x="675" y="135" width="82" height="24" rx="3" fill="#21262d" stroke="#58a6ff" stroke-width="1"/>
+  <text x="716" y="151" text-anchor="middle" fill="#58a6ff" font-size="9">Flash Attn</text>
+
+  <rect x="435" y="168" width="62" height="24" rx="3" fill="#21262d" stroke="#3fb950" stroke-width="1"/>
+  <text x="466" y="184" text-anchor="middle" fill="#3fb950" font-size="9">RoPE</text>
+
+  <rect x="505" y="168" width="82" height="24" rx="3" fill="#21262d" stroke="#f85149" stroke-width="1"/>
+  <text x="546" y="184" text-anchor="middle" fill="#f85149" font-size="9">KV Cache</text>
+
+  <rect x="595" y="168" width="72" height="24" rx="3" fill="#21262d" stroke="#f0883e" stroke-width="1"/>
+  <text x="631" y="184" text-anchor="middle" fill="#f0883e" font-size="9">MoE Gate</text>
+
+  <rect x="675" y="168" width="82" height="24" rx="3" fill="#21262d" stroke="#d2a8ff" stroke-width="1"/>
+  <text x="716" y="184" text-anchor="middle" fill="#d2a8ff" font-size="9">Top-K</text>
+
+  <rect x="435" y="201" width="82" height="24" rx="3" fill="#21262d" stroke="#58a6ff" stroke-width="1"/>
+  <text x="476" y="217" text-anchor="middle" fill="#58a6ff" font-size="9">DMMV Q4_K</text>
+
+  <rect x="525" y="201" width="82" height="24" rx="3" fill="#21262d" stroke="#3fb950" stroke-width="1"/>
+  <text x="566" y="217" text-anchor="middle" fill="#3fb950" font-size="9">DMMV Q6_K</text>
+
+  <rect x="615" y="201" width="62" height="24" rx="3" fill="#21262d" stroke="#f85149" stroke-width="1"/>
+  <text x="646" y="217" text-anchor="middle" fill="#f85149" font-size="9">SwiGLU</text>
+
+  <rect x="685" y="201" width="72" height="24" rx="3" fill="#21262d" stroke="#f0883e" stroke-width="1"/>
+  <text x="721" y="217" text-anchor="middle" fill="#f0883e" font-size="9">SSM Conv</text>
+
+  <rect x="435" y="234" width="72" height="24" rx="3" fill="#21262d" stroke="#d2a8ff" stroke-width="1"/>
+  <text x="471" y="250" text-anchor="middle" fill="#d2a8ff" font-size="9">Delta Net</text>
+
+  <rect x="515" y="234" width="92" height="24" rx="3" fill="#21262d" stroke="#58a6ff" stroke-width="1"/>
+  <text x="561" y="250" text-anchor="middle" fill="#58a6ff" font-size="9">Page Table</text>
+
+  <rect x="615" y="234" width="62" height="24" rx="3" fill="#21262d" stroke="#3fb950" stroke-width="1"/>
+  <text x="646" y="250" text-anchor="middle" fill="#3fb950" font-size="9">Softmax</text>
+
+  <rect x="685" y="234" width="72" height="24" rx="3" fill="#21262d" stroke="#f85149" stroke-width="1"/>
+  <text x="721" y="250" text-anchor="middle" fill="#f85149" font-size="9">Sigmoid</text>
+
+  <rect x="435" y="267" width="82" height="24" rx="3" fill="#21262d" stroke="#f0883e" stroke-width="1"/>
+  <text x="476" y="283" text-anchor="middle" fill="#f0883e" font-size="9">HTTP Server</text>
+
+  <rect x="525" y="267" width="62" height="24" rx="3" fill="#21262d" stroke="#d2a8ff" stroke-width="1"/>
+  <text x="556" y="283" text-anchor="middle" fill="#d2a8ff" font-size="9">SSE</text>
+
+  <rect x="595" y="267" width="72" height="24" rx="3" fill="#21262d" stroke="#58a6ff" stroke-width="1"/>
+  <text x="631" y="283" text-anchor="middle" fill="#58a6ff" font-size="9">Chat UI</text>
+
+  <rect x="675" y="267" width="82" height="24" rx="3" fill="#21262d" stroke="#3fb950" stroke-width="1"/>
+  <text x="716" y="283" text-anchor="middle" fill="#3fb950" font-size="9">Sampling</text>
+
+  <rect x="435" y="300" width="72" height="24" rx="3" fill="#21262d" stroke="#f85149" stroke-width="1"/>
+  <text x="471" y="316" text-anchor="middle" fill="#f85149" font-size="9">Vulkan</text>
+
+  <rect x="515" y="300" width="62" height="24" rx="3" fill="#21262d" stroke="#f0883e" stroke-width="1"/>
+  <text x="546" y="316" text-anchor="middle" fill="#f0883e" font-size="9">Metal</text>
+
+  <rect x="585" y="300" width="72" height="24" rx="3" fill="#21262d" stroke="#d2a8ff" stroke-width="1"/>
+  <text x="621" y="316" text-anchor="middle" fill="#d2a8ff" font-size="9">BPE</text>
+
+  <rect x="665" y="300" width="92" height="24" rx="3" fill="#21262d" stroke="#58a6ff" stroke-width="1"/>
+  <text x="711" y="316" text-anchor="middle" fill="#58a6ff" font-size="8">x40 layers...</text>
+
+  <!-- Chaotic connecting lines -->
+  <line x1="471" y1="159" x2="546" y2="168" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="551" y1="159" x2="476" y2="201" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="631" y1="159" x2="566" y2="201" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="716" y1="159" x2="646" y2="201" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="466" y1="192" x2="561" y2="234" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="546" y1="192" x2="471" y2="234" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="631" y1="192" x2="721" y2="234" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="476" y1="225" x2="556" y2="267" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="566" y1="225" x2="631" y2="267" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="646" y1="258" x2="476" y2="267" stroke="#30365a" stroke-width="0.8"/>
+  <line x1="721" y1="258" x2="716" y2="267" stroke="#30365a" stroke-width="0.8"/>
+
+  <text x="600" y="365" text-anchor="middle" fill="#f85149" font-size="14" font-weight="600">~22,000 lines of Zig</text>
+  <text x="600" y="390" text-anchor="middle" fill="#8b949e" font-size="42">:|</text>
+</svg>

@@ -248,6 +248,7 @@ const GemmQ4kPush = extern struct {
     nb12: u64, // batch stride 1
     ne0: i32,  // M dimension (output rows)
     ne1: i32,  // N dimension (number of tokens)
+    src0_off: u32, // byte offset to weight data within the Metal buffer
 };
 
 /// Push constants for SwiGLU dispatch (matches SPIRV-Cross layout: buffer(0)).
@@ -500,6 +501,7 @@ pub const InferenceEngine = struct {
     moe_weighted_acc_pipe: MetalPipeline,
     gemm_q4k_pipe: MetalPipeline,
     flash_attn_batched_pipe: MetalPipeline,
+    gemm_q6k_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -683,6 +685,7 @@ pub const InferenceEngine = struct {
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
         self.gemm_q4k_pipe = try loadShaderPipeline(ctx, "gemm_q4k");
         self.flash_attn_batched_pipe = try loadShaderPipeline(ctx, "flash_attn_batched");
+        self.gemm_q6k_pipe = try loadShaderPipeline(ctx, "gemm_q6k");
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -1016,6 +1019,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
         metal_pipeline.freePipeline(&self.gemm_q4k_pipe);
         metal_pipeline.freePipeline(&self.flash_attn_batched_pipe);
+        metal_pipeline.freePipeline(&self.gemm_q6k_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
@@ -4094,7 +4098,6 @@ fn dispatchGemmQ4k(
     N: u32, // number of tokens
 ) void {
     const nb01 = @as(u64, K / QK_K) * 144; // bytes per weight row (Q4_K block size)
-    _ = tensorPageOffset(engine.model, tensor); // offset baked into buffer start
     const push = GemmQ4kPush{
         .ne00 = @intCast(K),
         .ne02 = 1,
@@ -4106,6 +4109,7 @@ fn dispatchGemmQ4k(
         .nb12 = @as(u64, K) * 4 * N,
         .ne0 = @intCast(M),
         .ne1 = @intCast(N),
+        .src0_off = tensorPageOffset(engine.model, tensor),
     };
     // src0 = weight buffer (with page offset baked into the buffer start)
     // src1 = input buffer (N×K f32 matrix)
@@ -4117,6 +4121,38 @@ fn dispatchGemmQ4k(
     // push_idx=0: push constants at buffer(0), data buffers shifted to buffer(1..3)
     // Threadgroup memory: 4096 (A tile) + 4096 (B tile) = 8192 bytes
     cmd.dispatchV2WithTgMem(&engine.gemm_q4k_pipe, .{ tg_n, tg_m, 1 }, .{ 128, 1, 1 }, &bufs, &push, @sizeOf(GemmQ4kPush), 0, 8192);
+}
+
+/// Dispatch a Q6_K GEMM: same interface as dispatchGemmQ4k but for Q6_K weights.
+fn dispatchGemmQ6k(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    N: u32,
+) void {
+    const nb01 = @as(u64, K / QK_K) * 210; // Q6_K block size = 210 bytes
+    const push = GemmQ4kPush{ // same layout as Q4_K push — the struct is identical
+        .ne00 = @intCast(K),
+        .ne02 = 1,
+        .nb01 = nb01,
+        .nb02 = nb01 * @as(u64, M),
+        .ne12 = 1,
+        .nb10 = 4,
+        .nb11 = @as(u64, K) * 4,
+        .nb12 = @as(u64, K) * 4 * N,
+        .ne0 = @intCast(M),
+        .ne1 = @intCast(N),
+        .src0_off = tensorPageOffset(engine.model, tensor),
+    };
+    const weight_buf = &tensor.gpu_buffer;
+    const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
+    const tg_m = (@as(u32, @intCast(M)) + 63) / 64;
+    const tg_n = (@as(u32, @intCast(N)) + 31) / 32;
+    cmd.dispatchV2WithTgMem(&engine.gemm_q6k_pipe, .{ tg_n, tg_m, 1 }, .{ 128, 1, 1 }, &bufs, &push, @sizeOf(GemmQ4kPush), 0, 8192);
 }
 
 const QK_K = 256;
@@ -4161,9 +4197,10 @@ fn dispatchBatchedFlashAttn(
     cmd.dispatchV2(&engine.flash_attn_batched_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnPush), 0);
 }
 
-/// Batched prefill: processes all prompt tokens layer-by-layer with batched
-/// causal flash attention and per-token projections. This changes the computation
-/// pattern to match llama.cpp's batched prefill, fixing LLaMA output quality.
+/// Batched prefill with GEMM: processes all prompt tokens layer-by-layer using
+/// simdgroup matrix multiply for all projections. The GEMM's different accumulation
+/// pattern (fp16 tiles, shared weight dequantization) produces results that match
+/// llama.cpp's batched prefill.
 fn prefillBatched(engine: *InferenceEngine, prompt_tokens: []const u32, allocator: std.mem.Allocator) !void {
     const n: u32 = @intCast(prompt_tokens.len);
     if (n == 0) return;
@@ -4177,12 +4214,19 @@ fn prefillBatched(engine: *InferenceEngine, prompt_tokens: []const u32, allocato
     const inv_freq_ptr: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
     const inv_freq = inv_freq_ptr[0 .. rd / 2];
 
-    // Allocate per-token hidden states
+    // Allocate per-token hidden states and batched projection buffers
     const hs = try allocator.alloc(f32, @as(usize, n) * hd);
     defer allocator.free(hs);
-    // Batched Q buffer: [n × n_heads × head_dim]
+    // Batched norm output: [n × hidden_dim] — input to GEMM projections
+    const bn = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * hd * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(@constCast(&bn));
+    // Batched Q/K/V GEMM outputs
     const bq = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * qd * @sizeOf(f32));
     defer metal_buffer.freeBuffer(@constCast(&bq));
+    const bk = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * kvd * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(@constCast(&bk));
+    const bv = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * kvd * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(@constCast(&bv));
     // Batched attention output: same layout as Q
     const ba = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * qd * @sizeOf(f32));
     defer metal_buffer.freeBuffer(@constCast(&ba));
@@ -4201,44 +4245,78 @@ fn prefillBatched(engine: *InferenceEngine, prompt_tokens: []const u32, allocato
         const v_t = lt.attn_v orelse return error.MissingTensor;
         const o_t = lt.attn_output orelse return error.MissingTensor;
 
-        // Per-token: norm → Q/K/V projections → RoPE → KV write
-        // Also copy Q into batched Q buffer for batched attention
-        const norm_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_norm_bufs[li].cpu_ptr.?));
-        for (0..n) |t| {
-            // CPU RMS norm
-            cpuRmsNormMul(@ptrCast(hs.ptr + t * hd), norm_w[0..hd], @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?)), hd, 1, cfg.rms_norm_eps);
+        // Step 1: Batch all tokens' RMS norms into contiguous buffer bn
+        {
+            const norm_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_norm_bufs[li].cpu_ptr.?));
+            const bn_ptr: [*]f32 = @ptrCast(@alignCast(bn.cpu_ptr.?));
+            for (0..n) |t| {
+                cpuRmsNormMul(@ptrCast(hs.ptr + t * hd), norm_w[0..hd], bn_ptr + t * hd, hd, 1, cfg.rms_norm_eps);
+            }
+        }
 
-            // GPU Q/K/V projections
+        // Step 2: GEMM for ALL projections — all tokens simultaneously
+        {
             var cmd = try metal_command.beginCommand(engine.device.ctx);
-            dispatchDmmvOnCmd(engine, &cmd, q_t, &engine.norm_buf, &engine.q_buf, qd, hd, 0);
-            dispatchDmmvOnCmd(engine, &cmd, k_t, &engine.norm_buf, &engine.k_buf, kvd, hd, 0);
-            dispatchDmmvOnCmd(engine, &cmd, v_t, &engine.norm_buf, &engine.v_buf, kvd, hd, 0);
+            if (q_t.info.type_ == .q4_k)
+                dispatchGemmQ4k(engine, &cmd, q_t, &bn, &bq, qd, hd, n)
+            else if (q_t.info.type_ == .q6_k)
+                dispatchGemmQ6k(engine, &cmd, q_t, &bn, &bq, qd, hd, n)
+            else
+                dispatchDmmvOnCmd(engine, &cmd, q_t, &bn, &bq, qd, hd, 0);
+
+            if (k_t.info.type_ == .q4_k)
+                dispatchGemmQ4k(engine, &cmd, k_t, &bn, &bk, kvd, hd, n)
+            else if (k_t.info.type_ == .q6_k)
+                dispatchGemmQ6k(engine, &cmd, k_t, &bn, &bk, kvd, hd, n)
+            else
+                dispatchDmmvOnCmd(engine, &cmd, k_t, &bn, &bk, kvd, hd, 0);
+
+            if (v_t.info.type_ == .q4_k)
+                dispatchGemmQ4k(engine, &cmd, v_t, &bn, &bv, kvd, hd, n)
+            else if (v_t.info.type_ == .q6_k)
+                dispatchGemmQ6k(engine, &cmd, v_t, &bn, &bv, kvd, hd, n)
+            else
+                dispatchDmmvOnCmd(engine, &cmd, v_t, &bn, &bv, kvd, hd, 0);
             cmd.commitAndWait();
+        }
 
-            // CPU Q/K norms
-            if (engine.attn_q_norm_present[li]) {
-                const qnw: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[li].cpu_ptr.?));
-                cpuPerHeadRmsNormMul(@ptrCast(@alignCast(engine.q_buf.cpu_ptr.?)), qnw[0..cfg.head_dim], cfg.head_dim, cfg.n_heads, cfg.rms_norm_eps);
+        // Step 3: Per-token RoPE, Q/K norms, KV write
+        {
+            const bq_ptr: [*]f32 = @ptrCast(@alignCast(bq.cpu_ptr.?));
+            const bk_ptr: [*]f32 = @ptrCast(@alignCast(bk.cpu_ptr.?));
+            const bv_ptr: [*]f32 = @ptrCast(@alignCast(bv.cpu_ptr.?));
+            for (0..n) |t| {
+                // Copy this token's Q/K/V from batched GEMM output to engine buffers
+                const q_dst: [*]f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+                const k_dst: [*]f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
+                const v_dst: [*]f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
+                @memcpy(q_dst[0..qd], (bq_ptr + t * qd)[0..qd]);
+                @memcpy(k_dst[0..kvd], (bk_ptr + t * kvd)[0..kvd]);
+                @memcpy(v_dst[0..kvd], (bv_ptr + t * kvd)[0..kvd]);
+
+                // Q/K norms
+                if (engine.attn_q_norm_present[li]) {
+                    const qnw: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[li].cpu_ptr.?));
+                    cpuPerHeadRmsNormMul(q_dst, qnw[0..cfg.head_dim], cfg.head_dim, cfg.n_heads, cfg.rms_norm_eps);
+                }
+                if (engine.attn_k_norm_present[li]) {
+                    const knw: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[li].cpu_ptr.?));
+                    cpuPerHeadRmsNormMul(k_dst, knw[0..cfg.head_dim], cfg.head_dim, cfg.n_kv_heads, cfg.rms_norm_eps);
+                }
+
+                // RoPE
+                cpuRope(q_dst, cfg.head_dim, rd, cfg.n_heads, @intCast(t), inv_freq);
+                cpuRope(k_dst, cfg.head_dim, rd, cfg.n_kv_heads, @intCast(t), inv_freq);
+
+                // KV cache write
+                engine.position = @intCast(t);
+                var kv_cmd = try metal_command.beginCommand(engine.device.ctx);
+                dispatchKvCacheWriteOnCmd(engine, &kv_cmd, li, kvd, @as(u32, @intCast(t)) * kvd);
+                kv_cmd.commitAndWait();
+
+                // Copy RoPE'd Q to batched Q buffer for batched attention
+                @memcpy((bq_ptr + t * qd)[0..qd], q_dst[0..qd]);
             }
-            if (engine.attn_k_norm_present[li]) {
-                const knw: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[li].cpu_ptr.?));
-                cpuPerHeadRmsNormMul(@ptrCast(@alignCast(engine.k_buf.cpu_ptr.?)), knw[0..cfg.head_dim], cfg.head_dim, cfg.n_kv_heads, cfg.rms_norm_eps);
-            }
-
-            // CPU RoPE
-            cpuRope(@ptrCast(@alignCast(engine.q_buf.cpu_ptr.?)), cfg.head_dim, rd, cfg.n_heads, @intCast(t), inv_freq);
-            cpuRope(@ptrCast(@alignCast(engine.k_buf.cpu_ptr.?)), cfg.head_dim, rd, cfg.n_kv_heads, @intCast(t), inv_freq);
-
-            // GPU KV cache write
-            engine.position = @intCast(t);
-            var kv_cmd = try metal_command.beginCommand(engine.device.ctx);
-            dispatchKvCacheWriteOnCmd(engine, &kv_cmd, li, kvd, @as(u32, @intCast(t)) * kvd);
-            kv_cmd.commitAndWait();
-
-            // Copy Q to batched Q buffer
-            const q_src: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-            const bq_dst: [*]f32 = @ptrCast(@alignCast(bq.cpu_ptr.?));
-            @memcpy((bq_dst + t * qd)[0..qd], q_src[0..qd]);
         }
 
         // BATCHED causal flash attention: all queries at once
@@ -4282,30 +4360,75 @@ fn prefillBatched(engine: *InferenceEngine, prompt_tokens: []const u32, allocato
             cmd.barrier();
             cmd.commitAndWait();
 
-            // Dense FFN
+            // Save norm_buf to batched norm buffer for FFN GEMM
+            {
+                const nm_src: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+                const bn_dst: [*]f32 = @ptrCast(@alignCast(bn.cpu_ptr.?));
+                @memcpy((bn_dst + t * hd)[0..hd], nm_src[0..hd]);
+            }
+
+            // Save hidden state (post-attention residual)
+            const h_src: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+            @memcpy(hs[t * hd ..][0..hd], h_src[0..hd]);
+        }
+
+        // BATCHED FFN: GEMM gate/up for all tokens, per-token SwiGLU+down+residual
+        {
             const gt = lt.ffn_gate orelse return error.MissingTensor;
             const ut = lt.ffn_up orelse return error.MissingTensor;
             const dt = lt.ffn_down orelse return error.MissingTensor;
-            var fc = try metal_command.beginCommand(engine.device.ctx);
-            dispatchDmmvOnCmd(engine, &fc, gt, &engine.norm_buf, &engine.gate_buf, inter, hd, 0);
-            dispatchDmmvOnCmd(engine, &fc, ut, &engine.norm_buf, &engine.up_buf, inter, hd, 0);
-            fc.barrier();
-            const sp = SwiGLUPush{ .n = inter };
-            const sb = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-            fc.dispatchV2(&engine.swiglu_pipe, .{ (inter + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sb, &sp, @sizeOf(SwiGLUPush), 0);
-            fc.barrier();
-            dispatchDmmvOnCmd(engine, &fc, dt, &engine.swiglu_buf, &engine.down_buf, hd, inter, 0);
-            fc.barrier();
-            {
-                const rp = ScaleAccPush{ .n = hd, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                const rb = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                fc.dispatchV2(&engine.scale_acc_pipe, .{ (hd + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &rb, &rp, @sizeOf(ScaleAccPush), 0);
-            }
-            fc.commitAndWait();
 
-            // Save hidden state
-            const h_src: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-            @memcpy(hs[t * hd ..][0..hd], h_src[0..hd]);
+            // Allocate batched gate/up/swiglu/down buffers
+            const bg = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * inter * @sizeOf(f32));
+            defer metal_buffer.freeBuffer(@constCast(&bg));
+            const bu = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * inter * @sizeOf(f32));
+            defer metal_buffer.freeBuffer(@constCast(&bu));
+
+            // GEMM gate and up for all tokens
+            {
+                var cmd = try metal_command.beginCommand(engine.device.ctx);
+                if (gt.info.type_ == .q4_k) dispatchGemmQ4k(engine, &cmd, gt, &bn, &bg, inter, hd, n)
+                else if (gt.info.type_ == .q6_k) dispatchGemmQ6k(engine, &cmd, gt, &bn, &bg, inter, hd, n)
+                else dispatchDmmvOnCmd(engine, &cmd, gt, &bn, &bg, inter, hd, 0);
+
+                if (ut.info.type_ == .q4_k) dispatchGemmQ4k(engine, &cmd, ut, &bn, &bu, inter, hd, n)
+                else if (ut.info.type_ == .q6_k) dispatchGemmQ6k(engine, &cmd, ut, &bn, &bu, inter, hd, n)
+                else dispatchDmmvOnCmd(engine, &cmd, ut, &bn, &bu, inter, hd, 0);
+                cmd.commitAndWait();
+            }
+
+            // Per-token: SwiGLU, down projection, residual
+            for (0..n) |t| {
+                // Copy gate/up from batched buffers
+                const bg_src: [*]const f32 = @ptrCast(@alignCast(bg.cpu_ptr.?));
+                const bu_src: [*]const f32 = @ptrCast(@alignCast(bu.cpu_ptr.?));
+                const g_dst: [*]f32 = @ptrCast(@alignCast(engine.gate_buf.cpu_ptr.?));
+                const u_dst: [*]f32 = @ptrCast(@alignCast(engine.up_buf.cpu_ptr.?));
+                @memcpy(g_dst[0..inter], (bg_src + t * inter)[0..inter]);
+                @memcpy(u_dst[0..inter], (bu_src + t * inter)[0..inter]);
+
+                // Load hidden state
+                const h_dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+                @memcpy(h_dst[0..hd], hs[t * hd ..][0..hd]);
+
+                var fc = try metal_command.beginCommand(engine.device.ctx);
+                const sp = SwiGLUPush{ .n = inter };
+                const sb = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
+                fc.dispatchV2(&engine.swiglu_pipe, .{ (inter + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sb, &sp, @sizeOf(SwiGLUPush), 0);
+                fc.barrier();
+                dispatchDmmvOnCmd(engine, &fc, dt, &engine.swiglu_buf, &engine.down_buf, hd, inter, 0);
+                fc.barrier();
+                {
+                    const rp = ScaleAccPush{ .n = hd, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                    const rb = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                    fc.dispatchV2(&engine.scale_acc_pipe, .{ (hd + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &rb, &rp, @sizeOf(ScaleAccPush), 0);
+                }
+                fc.commitAndWait();
+
+                // Save updated hidden state
+                const h_res: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+                @memcpy(hs[t * hd ..][0..hd], h_res[0..hd]);
+            }
         }
     }
 
