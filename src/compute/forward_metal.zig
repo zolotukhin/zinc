@@ -1362,15 +1362,6 @@ fn dispatchDmmvOnCmd(
     K: u32,
     extra_byte_offset: u32,
 ) void {
-    // DEBUG: Force CPU fallback for all DMMV to test if GPU kernel is the issue
-    if (engine.debug_validation_enabled) {
-        const mmap = engine.model.mmap_data orelse return;
-        const data_off = engine.model.gguf_file.tensor_data_offset;
-        const in_ptr: [*]const f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
-        const out_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
-        cpuDmmvFallback(mmap, tensor, data_off, in_ptr, out_ptr, M, K, extra_byte_offset, engine.allocator) catch return;
-        return;
-    }
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
         return;
@@ -3424,7 +3415,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(&cmd, profile);
     }
-    if (false and engine.debug_validation_enabled and engine.position >= 8) {
+    if (engine.debug_validation_enabled and engine.position == 9) {
         const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
         if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
@@ -3513,6 +3504,39 @@ fn debugCompareFinalLogits(engine: *InferenceEngine) !void {
         var dot2: f64 = 0;
         for (0..hidden_dim) |i| dot2 += @as(f64, ref_row2[i]) * @as(f64, gpu_norm[i]);
         const gpu_logit0 = gpu_logits[0];
+
+        // Compare first bytes of LM head weight between CPU mmap and GPU buffer
+        const page_off = tensorPageOffset(engine.model, engine.lm_head);
+        const gpu_weight_ptr: [*]const u8 = @ptrCast(engine.lm_head.gpu_buffer.cpu_ptr.?);
+        const cpu_weight_ptr = lm_raw2;
+        var byte_match = true;
+        for (0..34) |bi| { // check first Q8_0 block (34 bytes)
+            if (gpu_weight_ptr[page_off + bi] != cpu_weight_ptr[bi]) { byte_match = false; break; }
+        }
+        // Manually compute row 0 dot product from GPU buffer data
+        {
+            var manual_dot: f64 = 0;
+            const nb2: u32 = hidden_dim / 32;
+            for (0..nb2) |b| {
+                const bo = page_off + b * 34;
+                const scale_bits = @as(u16, gpu_weight_ptr[bo]) | (@as(u16, gpu_weight_ptr[bo + 1]) << 8);
+                const scale: f32 = @floatCast(@as(f16, @bitCast(scale_bits)));
+                var block_sum: f64 = 0;
+                for (0..32) |j| {
+                    const qv: i8 = @bitCast(gpu_weight_ptr[bo + 2 + j]);
+                    block_sum += @as(f64, @as(f32, @floatFromInt(qv))) * @as(f64, gpu_norm[b * 32 + j]);
+                }
+                manual_dot += @as(f64, scale) * block_sum;
+            }
+            log.info("LM_HEAD_MANUAL: row0 manual_dot={d:.6} gpu_logit[0]={d:.6} cpu_dot={d:.6}", .{
+                @as(f32, @floatCast(manual_dot)), gpu_logit0, @as(f32, @floatCast(dot2)),
+            });
+        }
+        log.info("LM_HEAD_BYTES: page_off={d} type={s} byte_match={} cpu[0..4]=[{d},{d},{d},{d}] gpu[0..4]=[{d},{d},{d},{d}]", .{
+            page_off, @tagName(engine.lm_head.info.type_), byte_match,
+            cpu_weight_ptr[0], cpu_weight_ptr[1], cpu_weight_ptr[2], cpu_weight_ptr[3],
+            gpu_weight_ptr[page_off], gpu_weight_ptr[page_off + 1], gpu_weight_ptr[page_off + 2], gpu_weight_ptr[page_off + 3],
+        });
         log.info("LM_HEAD_CHECK: row0 cpu_dot={d:.6} gpu_logit[0]={d:.6} ratio={d:.4}", .{
             @as(f32, @floatCast(dot2)), gpu_logit0,
             if (gpu_logit0 != 0) @as(f32, @floatCast(dot2)) / gpu_logit0 else @as(f32, 0.0),

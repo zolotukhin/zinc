@@ -48,30 +48,38 @@ At a high level, an MoE layer replaces one dense FFN with a small router plus a 
 
 That last point matters. "MoE" is not one architecture. Some models are transformer-only MoE stacks. Some are hybrid models where attention is interleaved with SSM layers. Some include a shared expert path in addition to routed experts. Some use SwiGLU, some use GEGLU, and the norm placement is not always the same.
 
-<figure class="diagram-card">
-  <pre class="ascii-diagram" role="img" aria-label="An ASCII flow diagram showing an MoE layer from hidden state through FFN norm, router projection, top-k selection, expert projections, activation, down projection, weighted accumulation, optional shared expert paths, and final MoE output plus residual.">Hidden state
-   |
-FFN norm
-   |
-   +--> Optional shared expert ------+
-   |                                 |
-   +--> Optional shared gate scalar -+
-   |
-Router projection
-   |
-Softmax + top-k
-   |
-Selected expert IDs + weights
-   |
-Expert gate + up projections
-   |
-SwiGLU / GEGLU
-   |
-Expert down projections
-   |
-Weighted accumulation <--------------+
-   |
-MoE output + residual</pre>
+<figure class="diagram-card diagram-compact">
+  <div class="flow-diagram" role="img" aria-label="A flow diagram showing an MoE layer from hidden state through FFN norm, router projection, top-k selection, expert projections, activation, down projection, optional shared expert paths, weighted accumulation, and final MoE output plus residual.">
+    <div class="flow-main">
+      <div class="flow-node">Hidden state</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">FFN norm</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node flow-node-accent">Router projection</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">Softmax + top-k</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">Selected expert IDs + weights</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">Expert gate + up projections</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">SwiGLU / GEGLU</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">Expert down projections</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">Weighted accumulation</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node flow-node-output">MoE output + residual</div>
+    </div>
+    <div class="flow-branches">
+      <div class="flow-branch-label">Optional side paths folded into weighted accumulation</div>
+      <div class="flow-branch-row">
+        <span class="flow-pill">Shared expert</span>
+        <span class="flow-plus">+</span>
+        <span class="flow-pill">Shared gate scalar</span>
+      </div>
+    </div>
+  </div>
   <figcaption>A minimal MoE layer view: route the token, run only the selected experts, optionally fold in a shared expert, then collapse everything back into one FFN output.</figcaption>
 </figure>
 
