@@ -69,6 +69,109 @@ pub const InitOptions = struct {
     debug_validation_enabled: bool = false,
 };
 
+/// Token sampling parameters for temperature, top-p, top-k, and repetition penalty.
+pub const SamplingParams = struct {
+    temperature: f32 = 0.0,
+    top_p: f32 = 1.0,
+    repetition_penalty: f32 = 1.0,
+    top_k: u32 = 64,
+
+    pub fn requiresLogitsReadback(self: @This()) bool {
+        return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
+    }
+};
+
+fn tokenSeen(history: []const u32, token: u32) bool {
+    for (history) |t| if (t == token) return true;
+    return false;
+}
+
+fn adjustedLogit(logit: f32, token: u32, history: []const u32, repetition_penalty: f32) f32 {
+    if (repetition_penalty <= 1.0001 or !tokenSeen(history, token)) return logit;
+    if (logit >= 0) return logit / repetition_penalty;
+    return logit * repetition_penalty;
+}
+
+fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random) u32 {
+    if (logits.len == 0) return 0;
+
+    if (params.temperature <= 0.0001) {
+        var best_idx: u32 = 0;
+        var best_val = adjustedLogit(logits[0], 0, history, params.repetition_penalty);
+        for (logits[1..], 1..) |raw, i| {
+            const val = adjustedLogit(raw, @intCast(i), history, params.repetition_penalty);
+            if (val > best_val) { best_val = val; best_idx = @intCast(i); }
+        }
+        return best_idx;
+    }
+
+    const max_candidates = 128;
+    const top_k: usize = @min(@max(params.top_k, 1), max_candidates);
+    const safe_top_p = std.math.clamp(params.top_p, 0.0, 1.0);
+    const temperature = @max(params.temperature, 0.0001);
+
+    var candidate_ids: [max_candidates]u32 = undefined;
+    var candidate_logits: [max_candidates]f32 = undefined;
+    var candidate_count: usize = 0;
+
+    for (logits, 0..) |raw_val, i| {
+        if (!std.math.isFinite(raw_val)) continue;
+        const token_id: u32 = @intCast(i);
+        const val = adjustedLogit(raw_val, token_id, history, params.repetition_penalty);
+
+        var insert_at = candidate_count;
+        while (insert_at > 0 and val > candidate_logits[insert_at - 1]) : (insert_at -= 1) {}
+        if (insert_at >= top_k) continue;
+
+        if (candidate_count < top_k) candidate_count += 1;
+
+        var j = candidate_count - 1;
+        while (j > insert_at) : (j -= 1) {
+            candidate_ids[j] = candidate_ids[j - 1];
+            candidate_logits[j] = candidate_logits[j - 1];
+        }
+        candidate_ids[insert_at] = token_id;
+        candidate_logits[insert_at] = val;
+    }
+
+    if (candidate_count == 0) return 0;
+    if (candidate_count == 1) return candidate_ids[0];
+
+    var weights: [max_candidates]f64 = undefined;
+    const max_logit = @as(f64, candidate_logits[0]) / @as(f64, temperature);
+    var total_weight: f64 = 0.0;
+    for (0..candidate_count) |i| {
+        const scaled = @as(f64, candidate_logits[i]) / @as(f64, temperature);
+        const weight = @exp(scaled - max_logit);
+        weights[i] = weight;
+        total_weight += weight;
+    }
+    if (!(total_weight > 0.0) or !std.math.isFinite(total_weight)) return candidate_ids[0];
+
+    var keep_count = candidate_count;
+    if (safe_top_p < 0.9999) {
+        var cumulative: f64 = 0.0;
+        for (0..candidate_count) |i| {
+            cumulative += weights[i] / total_weight;
+            keep_count = i + 1;
+            if (cumulative >= @as(f64, safe_top_p) and i > 0) break;
+        }
+    }
+
+    var kept_weight: f64 = 0.0;
+    for (0..keep_count) |i| kept_weight += weights[i];
+    if (!(kept_weight > 0.0) or !std.math.isFinite(kept_weight)) return candidate_ids[0];
+
+    const target = random.float(f64) * kept_weight;
+    var cumulative: f64 = 0.0;
+    for (0..keep_count) |i| {
+        cumulative += weights[i];
+        if (target <= cumulative) return candidate_ids[i];
+    }
+
+    return candidate_ids[keep_count - 1];
+}
+
 /// Cumulative per-request profiling counters for the Metal decode loop.
 pub const RuntimeProfile = struct {
     decode_steps: u32 = 0,
@@ -966,6 +1069,22 @@ pub const InferenceEngine = struct {
             }
         }
         return max_idx;
+    }
+
+    /// Sample with temperature, top-k, top-p, and repetition penalty.
+    pub fn sample(self: *const InferenceEngine, history: []const u32, params: SamplingParams, random: std.Random) u32 {
+        const sample_start = profileStart(self.profile_enabled);
+        defer if (self.profile_enabled) {
+            const mutable = @constCast(self);
+            mutable.request_profile.sample_calls += 1;
+            mutable.request_profile.sample_ns += profileElapsedNs(sample_start);
+        };
+
+        if (!params.requiresLogitsReadback()) return self.sampleGreedy();
+
+        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
+        const logits = logits_ptr[0..self.config.vocab_size];
+        return sampleFromLogits(logits, history, params, random);
     }
 
     /// Reset position, profile counters, and SSM state for a new request.
@@ -2298,18 +2417,20 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     ffn_cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
                     ffn_cmd.barrier();
                     dispatchDmmvOnCmd(engine, &ffn_cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
+                    ffn_cmd.barrier();
+                    // FFN residual add on GPU (avoids CPU/GPU coherence round-trip)
+                    {
+                        const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                        const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                        ffn_cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
+                    }
                     if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
                     commitAndWaitProfiled(&ffn_cmd, profile);
                 }
-                const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-                const d_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
-                // Debug: verify FFN gate/down at layer 0, position 0
-                // (debug removed)
-                for (0..hidden_dim) |i| hidden_ptr[i] += d_ptr[i];
 
                 // Snapshot GPU hidden state after each layer for validation
-                // Save GPU snapshot for per-layer comparison with CPU chain
                 if (engine.debug_validation_enabled and engine.position == 0 and engine.gpu_layer_snapshots != null and layer_idx < 8) {
+                    const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
                     const snap = engine.gpu_layer_snapshots.?;
                     @memcpy(snap[layer_idx * hidden_dim ..][0..hidden_dim], hidden_ptr[0..hidden_dim]);
                 }

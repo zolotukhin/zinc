@@ -10,7 +10,7 @@ pub const is_vulkan = gpu.is_vulkan;
 /// Whether the backend supports loading/unloading models at runtime.
 pub const supports_model_management = gpu.is_vulkan or gpu.is_metal;
 /// Whether the backend supports temperature, top-p, top-k, and repetition penalty.
-pub const supports_sampling_controls = gpu.is_vulkan;
+pub const supports_sampling_controls = gpu.is_vulkan or gpu.is_metal;
 /// Whether the backend supports GPU kernel profiling during inference.
 pub const supports_runtime_profiling = gpu.is_vulkan or gpu.is_metal;
 
@@ -32,20 +32,8 @@ pub const Model = loader_mod.Model;
 /// Manages loading, unloading, and switching between models at runtime.
 pub const ModelManager = model_manager_mod.ModelManager;
 
-/// Token sampling parameters. On Metal this is a minimal greedy-only stub;
-/// on Vulkan the full forward_mod implementation is used.
-pub const SamplingParams = if (gpu.is_metal) struct {
-    temperature: f32 = 0.0,
-    top_p: f32 = 1.0,
-    repetition_penalty: f32 = 1.0,
-    top_k: u32 = 0,
-
-    /// Always returns false on Metal; logits readback is not supported.
-    pub fn requiresLogitsReadback(self: @This()) bool {
-        _ = self;
-        return false;
-    }
-} else forward_mod.SamplingParams;
+/// Token sampling parameters (shared across Vulkan and Metal backends).
+pub const SamplingParams = forward_mod.SamplingParams;
 
 /// Enable logits readback from GPU so sampling can inspect raw logits.
 pub fn enableLogitsReadback(_engine: *InferenceEngine) void {
@@ -59,7 +47,8 @@ pub fn logitsReadbackEnabled(_engine: *const InferenceEngine) bool {
     if (comptime gpu.is_vulkan) {
         return _engine.logits_readback_enabled;
     }
-    return false;
+    // Metal uses UMA — logits are always CPU-accessible.
+    return true;
 }
 
 /// Set the logits readback flag on the engine (Vulkan-only, no-op on Metal).
@@ -93,7 +82,6 @@ pub fn decodeStep(
 }
 
 /// Sample the next token from the model's logit distribution.
-/// Falls back to greedy sampling on Metal.
 pub fn sample(
     _engine: *const InferenceEngine,
     _state: *const DecodeState,
@@ -103,5 +91,5 @@ pub fn sample(
     if (comptime gpu.is_vulkan) {
         return _engine.sample(_state, _params, _random);
     }
-    return _engine.sampleGreedy();
+    return _engine.sample(_state.generated_tokens.items, _params, _random);
 }
