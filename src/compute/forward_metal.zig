@@ -1504,6 +1504,18 @@ pub const InferenceEngine = struct {
                     const simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
                     break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = block_size / simd_width, .block_size = block_size };
                 }
+                // Q8_0 lm-head: 1024 threads (32 rows/TG) cuts threadgroups from
+                // 31040 → 7760, reducing GPU scheduler overhead 4×.  The k2048
+                // shader is barrier-free — each simdgroup reads X independently
+                // from L1 — so 1024 threads incur no sync penalty.
+                if (K <= 2048 and
+                    tensor == self.lm_head and
+                    M >= 65536 and
+                    self.dmmv_q8_0_k2048_pipe.thread_execution_width == 32 and
+                    self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 1024)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 32, .block_size = 1024 };
+                }
                 if (K <= 2048 and
                     self.dmmv_q8_0_k2048_pipe.thread_execution_width == 32 and
                     self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 256)
