@@ -533,6 +533,8 @@ pub const InferenceEngine = struct {
     dmmv_q8_0_pipe: MetalPipeline,
     dmmv_q8_0_k2048_pipe: MetalPipeline,
     dmmv_q8_0_dual_pipe: MetalPipeline,
+    dmmv_q8_0_k2048_fused_norm_pipe: MetalPipeline,
+    dmmv_q8_0_dual_fused_norm_pipe: MetalPipeline,
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
@@ -753,6 +755,8 @@ pub const InferenceEngine = struct {
         self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
         self.dmmv_q8_0_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048");
         self.dmmv_q8_0_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual");
+        self.dmmv_q8_0_k2048_fused_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048_fused_norm");
+        self.dmmv_q8_0_dual_fused_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual_fused_norm");
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
@@ -1141,6 +1145,8 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q8_0_k2048_fused_norm_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_fused_norm_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
@@ -1732,6 +1738,35 @@ fn dispatchZeroF32OnCmd(
     cmd.dispatchV2(&engine.zero_f32_pipe, .{ (n + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ZeroF32Push), 1);
 }
 
+fn canUseFusedNormQ8Dmmv(
+    engine: *const InferenceEngine,
+    tensor: *const metal_loader.LoadedTensor,
+    K: u32,
+) bool {
+    return tensor.info.type_ == .q8_0 and
+        K <= 2048 and
+        engine.dmmv_q8_0_k2048_fused_norm_pipe.thread_execution_width == 32 and
+        engine.dmmv_q8_0_k2048_fused_norm_pipe.max_threads_per_threadgroup >= 256;
+}
+
+fn canUseFusedNormDualQ8Dmmv(
+    engine: *const InferenceEngine,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+    M0: u32,
+    M1: u32,
+    K: u32,
+) bool {
+    const block_size = engine.q8_dual_tg_override orelse 512;
+    return tensor0.info.type_ == .q8_0 and
+        tensor1.info.type_ == .q8_0 and
+        K <= 2048 and
+        M0 > 0 and
+        M1 > 0 and
+        engine.dmmv_q8_0_dual_fused_norm_pipe.thread_execution_width == 32 and
+        engine.dmmv_q8_0_dual_fused_norm_pipe.max_threads_per_threadgroup >= block_size;
+}
+
 fn canUseDualQ8Dmmv(
     engine: *const InferenceEngine,
     tensor0: *const metal_loader.LoadedTensor,
@@ -1785,6 +1820,75 @@ fn dispatchDualQ8DmmvOnCmd(
     const simd_width = if (engine.dmmv_q8_0_dual_pipe.thread_execution_width > 0) engine.dmmv_q8_0_dual_pipe.thread_execution_width else @as(u32, 32);
     const rows_per_wg: u32 = block_size / simd_width;
     cmd.dispatchV2(&engine.dmmv_q8_0_dual_pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
+}
+
+/// Fused RMSNorm + Dual Q8_0 DMMV: reads raw hidden state, computes norm inline,
+/// eliminating the separate RMSNorm dispatch and barrier.
+fn dispatchFusedNormDualQ8DmmvOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+    weight0_buf: *const MetalBuffer,
+    weight1_buf: *const MetalBuffer,
+    weight0_offset: u32,
+    weight1_offset: u32,
+    hidden_buf: *const MetalBuffer,
+    norm_weight_buf: *const MetalBuffer,
+    output0_buf: *const MetalBuffer,
+    output1_buf: *const MetalBuffer,
+    M0: u32,
+    M1: u32,
+    K: u32,
+) void {
+    recordDmmvProfile(engine, tensor0, M0, K);
+    recordDmmvProfile(engine, tensor1, M1, K);
+
+    const push = DualQ8DmmvPush{
+        .M0 = M0,
+        .M1 = M1,
+        .K = K,
+        .a0_offset = weight0_offset,
+        .a1_offset = weight1_offset,
+        .x_offset = 0,
+        .y0_offset = 0,
+        .y1_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ weight0_buf, weight1_buf, hidden_buf, output0_buf, output1_buf, norm_weight_buf };
+    const total_rows = M0 + M1;
+    const block_size = engine.q8_dual_tg_override orelse 512;
+    const simd_width = if (engine.dmmv_q8_0_dual_fused_norm_pipe.thread_execution_width > 0) engine.dmmv_q8_0_dual_fused_norm_pipe.thread_execution_width else @as(u32, 32);
+    const rows_per_wg: u32 = block_size / simd_width;
+    cmd.dispatchV2(&engine.dmmv_q8_0_dual_fused_norm_pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
+}
+
+/// Fused RMSNorm + Q8_0 DMMV (K <= 2048): reads raw hidden state, computes norm inline.
+fn dispatchFusedNormQ8DmmvOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    weight_buf: *const MetalBuffer,
+    weight_offset: u32,
+    hidden_buf: *const MetalBuffer,
+    norm_weight_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+) void {
+    recordDmmvProfile(engine, tensor, M, K);
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = weight_offset,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ weight_buf, hidden_buf, output_buf, norm_weight_buf };
+    const block_size: u32 = 256;
+    const rows_per_wg: u32 = block_size / 32;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    cmd.dispatchV2(&engine.dmmv_q8_0_k2048_fused_norm_pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
 }
 
 fn dispatchDmmvOnCmdWithWeightBuf(
@@ -2997,9 +3101,6 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             var using_local_cmd = false;
             var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
             const layer_record_start = profileStart(profile != null);
-            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
-            cmd.barrier();
-
             const wqkv_t = lt.attn_qkv orelse return error.MissingTensor;
             const z_t = lt.attn_gate orelse return error.MissingTensor;
             const alpha_t = lt.ssm_alpha orelse return error.MissingTensor;
@@ -3014,14 +3115,30 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 &z_t.gpu_buffer;
             const wqkv_offset: u32 = if (wqkv_buf == &wqkv_t.gpu_buffer) tensorPageOffset(engine.model, wqkv_t) else 0;
             const z_offset: u32 = if (z_buf == &z_t.gpu_buffer) tensorPageOffset(engine.model, z_t) else 0;
-            if (canUseDualQ8Dmmv(engine, wqkv_t, z_t, conv_channels, d_inner, hidden_dim)) {
-                dispatchDualQ8DmmvOnCmd(engine, cmd, wqkv_t, z_t, wqkv_buf, z_buf, wqkv_offset, z_offset, &engine.norm_buf, &engine.attn_out_buf, &engine.gate_buf, conv_channels, d_inner, hidden_dim);
+
+            // Fused RMSNorm + DMMV path: all consumers compute norm inline from L1-cached
+            // hidden state, eliminating the separate RMSNorm dispatch and barrier.
+            const use_fused_norm = canUseFusedNormDualQ8Dmmv(engine, wqkv_t, z_t, conv_channels, d_inner, hidden_dim) and
+                canUseFusedNormQ8Dmmv(engine, alpha_t, hidden_dim) and
+                canUseFusedNormQ8Dmmv(engine, beta_t, hidden_dim);
+
+            if (use_fused_norm) {
+                dispatchFusedNormDualQ8DmmvOnCmd(engine, cmd, wqkv_t, z_t, wqkv_buf, z_buf, wqkv_offset, z_offset, &engine.hidden_buf, &engine.attn_norm_bufs[layer_idx], &engine.attn_out_buf, &engine.gate_buf, conv_channels, d_inner, hidden_dim);
+                dispatchFusedNormQ8DmmvOnCmd(engine, cmd, alpha_t, &alpha_t.gpu_buffer, tensorPageOffset(engine.model, alpha_t), &engine.hidden_buf, &engine.attn_norm_bufs[layer_idx], &engine.router_logits_buf, dt_rank, hidden_dim);
+                dispatchFusedNormQ8DmmvOnCmd(engine, cmd, beta_t, &beta_t.gpu_buffer, tensorPageOffset(engine.model, beta_t), &engine.hidden_buf, &engine.attn_norm_bufs[layer_idx], &engine.down_buf, dt_rank, hidden_dim);
             } else {
-                dispatchDmmvOnCmdWithWeightBuf(engine, cmd, wqkv_t, wqkv_buf, wqkv_offset, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
-                dispatchDmmvOnCmdWithWeightBuf(engine, cmd, z_t, z_buf, z_offset, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+                // Fallback: separate RMSNorm + barrier + DMMVs
+                dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+                cmd.barrier();
+                if (canUseDualQ8Dmmv(engine, wqkv_t, z_t, conv_channels, d_inner, hidden_dim)) {
+                    dispatchDualQ8DmmvOnCmd(engine, cmd, wqkv_t, z_t, wqkv_buf, z_buf, wqkv_offset, z_offset, &engine.norm_buf, &engine.attn_out_buf, &engine.gate_buf, conv_channels, d_inner, hidden_dim);
+                } else {
+                    dispatchDmmvOnCmdWithWeightBuf(engine, cmd, wqkv_t, wqkv_buf, wqkv_offset, &engine.norm_buf, &engine.attn_out_buf, conv_channels, hidden_dim, 0);
+                    dispatchDmmvOnCmdWithWeightBuf(engine, cmd, z_t, z_buf, z_offset, &engine.norm_buf, &engine.gate_buf, d_inner, hidden_dim, 0);
+                }
+                dispatchDmmvOnCmd(engine, cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
             }
-            dispatchDmmvOnCmd(engine, cmd, alpha_t, &engine.norm_buf, &engine.router_logits_buf, dt_rank, hidden_dim, 0);
-            dispatchDmmvOnCmd(engine, cmd, beta_t, &engine.norm_buf, &engine.down_buf, dt_rank, hidden_dim, 0);
             cmd.barrier();
 
             // Conv1d: attn_out_buf → swiglu_buf
