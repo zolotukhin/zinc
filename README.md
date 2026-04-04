@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/zinc_trademark.png" alt="ZINC Logo" width="400">
+  <img src="assets/zinc_trademark_new.png" alt="ZINC Logo" width="400">
 </p>
 
 # ZINC — Zig INferenCe Engine
