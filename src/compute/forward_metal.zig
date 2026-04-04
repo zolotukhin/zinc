@@ -358,9 +358,13 @@ const LayerTensors = struct {
     attn_q: ?*const metal_loader.LoadedTensor = null,
     attn_k: ?*const metal_loader.LoadedTensor = null,
     attn_v: ?*const metal_loader.LoadedTensor = null,
+    attn_q_bias: ?*const metal_loader.LoadedTensor = null,
+    attn_k_bias: ?*const metal_loader.LoadedTensor = null,
+    attn_v_bias: ?*const metal_loader.LoadedTensor = null,
     attn_q_norm: ?*const metal_loader.LoadedTensor = null,
     attn_k_norm: ?*const metal_loader.LoadedTensor = null,
     attn_output: ?*const metal_loader.LoadedTensor = null,
+    attn_output_bias: ?*const metal_loader.LoadedTensor = null,
     // SSM projections (SSM/delta-net layers)
     attn_qkv: ?*const metal_loader.LoadedTensor = null,
     attn_gate: ?*const metal_loader.LoadedTensor = null,
@@ -857,9 +861,13 @@ pub const InferenceEngine = struct {
                 .attn_q = findLayerTensor(model, layer, "attn_q.weight"),
                 .attn_k = findLayerTensor(model, layer, "attn_k.weight"),
                 .attn_v = findLayerTensor(model, layer, "attn_v.weight"),
+                .attn_q_bias = findLayerTensor(model, layer, "attn_q.bias"),
+                .attn_k_bias = findLayerTensor(model, layer, "attn_k.bias"),
+                .attn_v_bias = findLayerTensor(model, layer, "attn_v.bias"),
                 .attn_q_norm = findLayerTensor(model, layer, "attn_q_norm.weight"),
                 .attn_k_norm = findLayerTensor(model, layer, "attn_k_norm.weight"),
                 .attn_output = findLayerTensor(model, layer, "attn_output.weight"),
+                .attn_output_bias = findLayerTensor(model, layer, "attn_output.bias"),
                 .attn_qkv = findLayerTensor(model, layer, "attn_qkv.weight"),
                 .attn_gate = findLayerTensor(model, layer, "attn_gate.weight"),
                 .ssm_alpha = findLayerTensor(model, layer, "ssm_alpha.weight"),
@@ -1757,6 +1765,23 @@ fn dispatchMoeWeightedAccOnCmd(
     cmd.dispatchV2(&engine.moe_weighted_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccPush), 3);
 }
 
+/// Add a bias vector (from a GGUF tensor) to a buffer on CPU.
+fn addBiasFromTensor(engine: *InferenceEngine, dst: [*]f32, bias_tensor: *const metal_loader.LoadedTensor, n: u32) void {
+    const mmap = engine.model.mmap_data orelse return;
+    const off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + bias_tensor.info.offset);
+    // Bias is typically f32
+    if (bias_tensor.info.type_ == .f32) {
+        const bias: [*]const f32 = @ptrCast(@alignCast(mmap.ptr + off));
+        for (0..n) |i| dst[i] += bias[i];
+    } else {
+        // Dequant to temporary buffer then add
+        var buf: [8192]f32 = undefined;
+        const len = @min(n, 8192);
+        dequantRow(mmap[off..], 0, len, bias_tensor.info.type_, buf[0..len]);
+        for (0..len) |i| dst[i] += buf[i];
+    }
+}
+
 fn dispatchFullAttnPrepOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -1790,6 +1815,15 @@ fn dispatchFullAttnPrepOnCmd(
         dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.q_buf, q_dim, hidden_dim, 0);
     }
     cmd.barrier();
+
+    // Apply Q/K/V biases if present (gpt-oss)
+    if (lt.attn_q_bias != null or lt.attn_k_bias != null or lt.attn_v_bias != null) {
+        cmd.commitAndWait();
+        if (lt.attn_q_bias) |b| addBiasFromTensor(engine, @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?)), b, q_dim);
+        if (lt.attn_k_bias) |b| addBiasFromTensor(engine, @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?)), b, kv_dim);
+        if (lt.attn_v_bias) |b| addBiasFromTensor(engine, @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?)), b, kv_dim);
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    }
 
     if (engine.attn_q_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], cfg.head_dim, cfg.n_heads);
@@ -2448,6 +2482,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
+            // Apply O projection bias if present (gpt-oss)
+            if (lt.attn_output_bias) |b| {
+                commitAndWaitProfiled(cmd, profile);
+                addBiasFromTensor(engine, @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?)), b, hidden_dim);
+                local_cmd_storage = try beginProfiledCommand(engine, profile);
+                cmd = &local_cmd_storage;
+            }
             const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and (engine.position == 4 or engine.position == 5) and (layer_idx == 7 or layer_idx == 31);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
