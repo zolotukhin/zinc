@@ -537,6 +537,7 @@ pub const InferenceEngine = struct {
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
     dmmv_q5k_moe_pipe: MetalPipeline,
+    dmmv_q5k_moe_k2048_pipe: MetalPipeline,
     dmmv_q6k_moe_pipe: MetalPipeline,
     dmmv_q4k_moe_k2048_pipe: MetalPipeline,
     dmmv_q4k_moe_k2048_1024_pipe: MetalPipeline,
@@ -756,6 +757,7 @@ pub const InferenceEngine = struct {
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
         self.dmmv_q5k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
+        self.dmmv_q5k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe_k2048");
         self.dmmv_q6k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_moe");
         self.dmmv_q4k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048");
         self.dmmv_q4k_moe_k2048_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048_1024");
@@ -1046,7 +1048,7 @@ pub const InferenceEngine = struct {
             },
         );
         log.debug(
-            "Metal pipeline caps: dmmv_q4k_moe tw={d} max={d} stgmem={d} | dmmv_q5k_moe tw={d} max={d} stgmem={d} | dmmv_q6k_moe tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048 tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048_1024 tw={d} max={d} stgmem={d}",
+            "Metal pipeline caps: dmmv_q4k_moe tw={d} max={d} stgmem={d} | dmmv_q5k_moe tw={d} max={d} stgmem={d} | dmmv_q5k_moe_k2048 tw={d} max={d} stgmem={d} | dmmv_q6k_moe tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048 tw={d} max={d} stgmem={d} | dmmv_q4k_moe_k2048_1024 tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_moe_pipe.thread_execution_width,
                 self.dmmv_q4k_moe_pipe.max_threads_per_threadgroup,
@@ -1054,6 +1056,9 @@ pub const InferenceEngine = struct {
                 self.dmmv_q5k_moe_pipe.thread_execution_width,
                 self.dmmv_q5k_moe_pipe.max_threads_per_threadgroup,
                 self.dmmv_q5k_moe_pipe.static_threadgroup_memory_length,
+                self.dmmv_q5k_moe_k2048_pipe.thread_execution_width,
+                self.dmmv_q5k_moe_k2048_pipe.max_threads_per_threadgroup,
+                self.dmmv_q5k_moe_k2048_pipe.static_threadgroup_memory_length,
                 self.dmmv_q6k_moe_pipe.thread_execution_width,
                 self.dmmv_q6k_moe_pipe.max_threads_per_threadgroup,
                 self.dmmv_q6k_moe_pipe.static_threadgroup_memory_length,
@@ -1140,6 +1145,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_moe_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q5k_moe_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_k2048_1024_pipe);
@@ -1937,10 +1943,13 @@ fn dispatchDmmvMoeQ5kOnCmd(
         .y_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
-    const rows_per_wg: u32 = 8;
-    const block_size: u32 = 256;
+    const k2048_or_less = K <= 2048;
+    const use_k2048 = k2048_or_less and engine.dmmv_q5k_moe_k2048_pipe.max_threads_per_threadgroup >= 512;
+    const rows_per_wg: u32 = if (use_k2048) 16 else 8;
+    const block_size: u32 = if (use_k2048) 512 else 256;
     const wgs = (M + rows_per_wg - 1) / rows_per_wg;
-    cmd.dispatchV2(&engine.dmmv_q5k_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    const pipe = if (use_k2048) &engine.dmmv_q5k_moe_k2048_pipe else &engine.dmmv_q5k_moe_pipe;
+    cmd.dispatchV2(pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
 }
 
 fn dispatchDmmvMoeQ6kOnCmd(
@@ -6094,6 +6103,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&dmmv_pipe);
     var dmmv_q5k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
     defer metal_pipeline.freePipeline(&dmmv_q5k_moe_pipe);
+    var dmmv_q5k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe_k2048");
+    defer metal_pipeline.freePipeline(&dmmv_q5k_moe_k2048_pipe);
     var dmmv_q6k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_moe");
     defer metal_pipeline.freePipeline(&dmmv_q6k_moe_pipe);
 
@@ -6129,6 +6140,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(sigmoid_mul_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
     try std.testing.expect(dmmv_q5k_moe_pipe.handle != null);
+    try std.testing.expect(dmmv_q5k_moe_k2048_pipe.handle != null);
     try std.testing.expect(dmmv_q6k_moe_pipe.handle != null);
     try std.testing.expect(dmmv_pipe_k2048.handle != null);
     try std.testing.expect(dmmv_moe_pipe_k2048.handle != null);
