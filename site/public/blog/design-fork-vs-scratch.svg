@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Fork versus scratch design decision</title>
+  <desc id="desc">A two-panel illustration. The top panel rejects forking llama.cpp and tuning a few shaders. The bottom panel approves writing the engine from scratch to own the parser, kernels, KV cache, and server.</desc>
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7f2ea"/>
+      <stop offset="100%" stop-color="#efe7db"/>
+    </linearGradient>
+    <linearGradient id="reject" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff4f1"/>
+      <stop offset="100%" stop-color="#ffe6de"/>
+    </linearGradient>
+    <linearGradient id="approve" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#eefcf5"/>
+      <stop offset="100%" stop-color="#dff6ea"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#1f2937" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .title { font: 700 38px system-ui, -apple-system, sans-serif; fill: #1f2937; }
+      .subtitle { font: 500 18px system-ui, -apple-system, sans-serif; fill: #6b7280; }
+      .panel-label { font: 700 14px system-ui, -apple-system, sans-serif; letter-spacing: 0.16em; }
+      .panel-title { font: 700 30px system-ui, -apple-system, sans-serif; }
+      .panel-copy { font: 500 18px system-ui, -apple-system, sans-serif; fill: #4b5563; }
+      .bubble-copy { font: 700 26px system-ui, -apple-system, sans-serif; }
+      .chip { font: 700 14px system-ui, -apple-system, sans-serif; }
+      .note { font: 700 16px system-ui, -apple-system, sans-serif; }
+      .tiny { font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" fill="url(#page)"/>
+
+  <g transform="translate(72 74)">
+    <text class="title">Fork the abstraction or own the stack</text>
+    <text class="subtitle" x="0" y="34">The fast-looking option promised less work. The hard option created room for hardware-specific ideas everywhere.</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="154" width="1056" height="224" rx="30" fill="url(#reject)" stroke="#edb8aa" stroke-width="2"/>
+    <rect x="72" y="414" width="1056" height="274" rx="30" fill="url(#approve)" stroke="#b7dfc9" stroke-width="2"/>
+  </g>
+
+  <g transform="translate(116 196)">
+    <text class="panel-label" fill="#b45309">REJECT</text>
+    <circle cx="82" cy="86" r="62" fill="#f59e8b" stroke="#c2410c" stroke-width="3"/>
+    <circle cx="62" cy="74" r="7" fill="#7c2d12"/>
+    <circle cx="102" cy="74" r="7" fill="#7c2d12"/>
+    <path d="M58 112 Q82 92 106 112" fill="none" stroke="#7c2d12" stroke-width="5" stroke-linecap="round"/>
+    <path d="M32 38 L48 28 M116 28 L132 38" stroke="#7c2d12" stroke-width="5" stroke-linecap="round"/>
+
+    <rect x="184" y="10" width="760" height="122" rx="24" fill="#fffdfa" stroke="#e8c4bb" stroke-width="2"/>
+    <text class="bubble-copy" x="222" y="58" fill="#7c2d12">Fork llama.cpp and tune a few shaders.</text>
+    <text class="panel-copy" x="222" y="94">Quick start. Familiar code. But the abstraction still decides where the ceiling is.</text>
+
+    <rect x="186" y="154" width="150" height="34" rx="17" fill="#fff" stroke="#e8c4bb"/>
+    <text class="chip" x="261" y="176" text-anchor="middle" fill="#9a3412">fast start</text>
+    <rect x="352" y="154" width="182" height="34" rx="17" fill="#fff" stroke="#e8c4bb"/>
+    <text class="chip" x="443" y="176" text-anchor="middle" fill="#9a3412">bounded control</text>
+    <rect x="550" y="154" width="208" height="34" rx="17" fill="#fff" stroke="#e8c4bb"/>
+    <text class="chip" x="654" y="176" text-anchor="middle" fill="#9a3412">lowest common denominator</text>
+
+    <rect x="792" y="152" width="136" height="38" rx="12" fill="#7f1d1d"/>
+    <text class="note" x="860" y="177" text-anchor="middle" fill="#fff7ed">No room</text>
+
+    <line x1="996" y1="44" x2="1070" y2="118" stroke="#991b1b" stroke-width="12" stroke-linecap="round"/>
+    <line x1="1070" y1="44" x2="996" y2="118" stroke="#991b1b" stroke-width="12" stroke-linecap="round"/>
+  </g>
+
+  <g transform="translate(116 446)">
+    <text class="panel-label" fill="#047857">APPROVE</text>
+    <circle cx="82" cy="110" r="62" fill="#86efac" stroke="#047857" stroke-width="3"/>
+    <circle cx="62" cy="96" r="7" fill="#14532d"/>
+    <circle cx="102" cy="96" r="7" fill="#14532d"/>
+    <path d="M58 118 Q82 140 106 118" fill="none" stroke="#14532d" stroke-width="5" stroke-linecap="round"/>
+    <path d="M28 70 L44 56 L52 74" fill="none" stroke="#14532d" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="184" y="18" width="760" height="140" rx="24" fill="#fbfffc" stroke="#cde8d9" stroke-width="2"/>
+    <text class="bubble-copy" x="222" y="66" fill="#14532d">Write the engine from scratch and own every seam.</text>
+    <text class="panel-copy" x="222" y="102">Parser, tokenizer, kernels, KV cache, scheduler, server, chat UI.</text>
+    <text class="panel-copy" x="222" y="130">More work upfront. Much more freedom when the profiler points somewhere ugly.</text>
+
+    <rect x="186" y="186" width="182" height="36" rx="18" fill="#fff" stroke="#cde8d9"/>
+    <text class="chip" x="277" y="209" text-anchor="middle" fill="#166534">RDNA4-specific shaders</text>
+    <rect x="384" y="186" width="148" height="36" rx="18" fill="#fff" stroke="#cde8d9"/>
+    <text class="chip" x="458" y="209" text-anchor="middle" fill="#166534">Metal-native path</text>
+    <rect x="548" y="186" width="122" height="36" rx="18" fill="#fff" stroke="#cde8d9"/>
+    <text class="chip" x="609" y="209" text-anchor="middle" fill="#166534">clean seams</text>
+
+    <g transform="translate(760 176)">
+      <rect x="0" y="0" width="180" height="78" rx="18" fill="#0f172a"/>
+      <rect x="16" y="18" width="62" height="16" rx="8" fill="#1d4ed8"/>
+      <rect x="88" y="18" width="76" height="16" rx="8" fill="#7c3aed"/>
+      <rect x="16" y="44" width="56" height="16" rx="8" fill="#ea580c"/>
+      <rect x="80" y="44" width="38" height="16" rx="8" fill="#16a34a"/>
+      <rect x="126" y="44" width="38" height="16" rx="8" fill="#dc2626"/>
+      <text class="tiny" x="90" y="72" text-anchor="middle" fill="#cbd5e1">parser  kernels  server</text>
+    </g>
+  </g>
+</svg>

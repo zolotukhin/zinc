@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">This is fine debugging illustration</title>
+  <desc id="desc">A stylized debugging room scene. A calm developer sits at a desk while red debug cards and flames surround the scene, including SSM state NaN, delta-net drift, zero MoE router logits, and negative infinity in flash attention softmax.</desc>
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2b1d1a"/>
+      <stop offset="100%" stop-color="#1b1416"/>
+    </linearGradient>
+    <linearGradient id="floor" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#352421"/>
+      <stop offset="100%" stop-color="#422824"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+    <style>
+      .title { font: 700 36px system-ui, -apple-system, sans-serif; fill: #fff7ed; }
+      .subtitle { font: 500 18px system-ui, -apple-system, sans-serif; fill: #fed7aa; }
+      .log { font: 700 15px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #fff1f2; }
+      .label { font: 700 24px system-ui, -apple-system, sans-serif; fill: #fff7ed; }
+      .small { font: 600 14px system-ui, -apple-system, sans-serif; fill: #fcd9c4; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" fill="url(#wall)"/>
+  <rect y="540" width="1200" height="220" fill="url(#floor)"/>
+
+  <g opacity="0.9">
+    <path d="M40 544 C72 470, 112 470, 146 544 Z" fill="#fb923c"/>
+    <path d="M92 544 C108 492, 130 494, 146 544 Z" fill="#fde68a"/>
+    <path d="M1010 544 C1042 468, 1084 468, 1116 544 Z" fill="#fb923c"/>
+    <path d="M1060 544 C1076 490, 1098 492, 1114 544 Z" fill="#fde68a"/>
+    <path d="M184 564 C214 506, 248 500, 278 564 Z" fill="#f97316" opacity="0.88"/>
+    <path d="M930 564 C958 506, 994 500, 1024 564 Z" fill="#f97316" opacity="0.88"/>
+  </g>
+
+  <g transform="translate(76 72)">
+    <text class="title">Forward pass debugging, calm on the outside</text>
+    <text class="subtitle" x="0" y="34">The logs said everything was on fire. The only useful move was to keep isolating one subsystem at a time.</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="332" y="280" width="536" height="18" rx="9" fill="#2f221f"/>
+    <rect x="356" y="292" width="20" height="190" rx="10" fill="#2f221f"/>
+    <rect x="824" y="292" width="20" height="190" rx="10" fill="#2f221f"/>
+    <rect x="424" y="314" width="360" height="188" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
+    <rect x="448" y="338" width="312" height="116" rx="18" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
+    <text class="log" x="474" y="374" fill="#7ee787">[pass] tokenizer OK</text>
+    <text class="log" x="474" y="404" fill="#fda4af">[warn] descriptor mismatch? check layer 12</text>
+    <text class="log" x="474" y="434" fill="#fde68a">[note] narrow the bug surface before optimizing</text>
+    <text class="small" x="474" y="476">The profiler is not helping until the math is stable.</text>
+
+    <rect x="562" y="514" width="88" height="96" rx="24" fill="#b45309"/>
+    <circle cx="606" cy="440" r="52" fill="#f2c7a7"/>
+    <circle cx="586" cy="428" r="7" fill="#3f2d21"/>
+    <circle cx="626" cy="428" r="7" fill="#3f2d21"/>
+    <path d="M586 456 Q606 468 626 456" fill="none" stroke="#3f2d21" stroke-width="5" stroke-linecap="round"/>
+    <path d="M566 392 L582 372 L590 404" fill="#d97706"/>
+    <path d="M646 392 L630 372 L622 404" fill="#d97706"/>
+    <rect x="520" y="560" width="172" height="38" rx="18" fill="#fff7ed"/>
+    <text class="label" x="606" y="586" text-anchor="middle" fill="#9a3412">This is fine</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="176" width="300" height="76" rx="18" fill="#7f1d1d" stroke="#ef4444" stroke-width="2"/>
+    <text class="log" x="104" y="220">SSM state NaN at layer 12 token 47</text>
+
+    <rect x="846" y="170" width="272" height="86" rx="18" fill="#7f1d1d" stroke="#ef4444" stroke-width="2"/>
+    <text class="log" x="870" y="210">delta-net Q norm drift:</text>
+    <text class="log" x="870" y="234">0.003 per token</text>
+
+    <rect x="92" y="408" width="264" height="76" rx="18" fill="#7f1d1d" stroke="#ef4444" stroke-width="2"/>
+    <text class="log" x="116" y="452">MoE router logits: all zeros</text>
+
+    <rect x="846" y="404" width="296" height="92" rx="18" fill="#7f1d1d" stroke="#ef4444" stroke-width="2"/>
+    <text class="log" x="870" y="444">flash attention:</text>
+    <text class="log" x="870" y="468">negative infinity in softmax</text>
+  </g>
+</svg>

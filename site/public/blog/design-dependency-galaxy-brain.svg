@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900" role="img" aria-labelledby="title desc">
+  <title id="title">Dependency galaxy brain illustration</title>
+  <desc id="desc">A four-panel escalating brain-style diagram. Each panel increases in glow and commitment: use Python libraries, link llama.cpp, write a GGUF parser, then embed the chat UI in the binary.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <filter id="glow1" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow2" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="20" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow3" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="28" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .title { font: 700 38px system-ui, -apple-system, sans-serif; fill: #f8fafc; }
+      .subtitle { font: 500 18px system-ui, -apple-system, sans-serif; fill: #cbd5e1; }
+      .step { font: 700 14px system-ui, -apple-system, sans-serif; letter-spacing: 0.16em; }
+      .copy { font: 700 28px system-ui, -apple-system, sans-serif; fill: #f8fafc; }
+      .meta { font: 500 16px system-ui, -apple-system, sans-serif; fill: #cbd5e1; }
+      .tiny { font: 600 13px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #e2e8f0; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="900" fill="url(#bg)"/>
+
+  <g transform="translate(72 70)">
+    <text class="title">The ZINC dependency policy, ascending brain edition</text>
+    <text class="subtitle" x="0" y="34">Every step upward removes a dependency and moves more of the stack into one binary we can actually reason about.</text>
+  </g>
+
+  <g transform="translate(72 152)">
+    <rect width="1056" height="150" rx="26" fill="#172033" stroke="#2f3c56" stroke-width="2"/>
+    <text class="step" x="44" y="42" fill="#94a3b8">PANEL 1</text>
+    <circle cx="134" cy="78" r="34" fill="#64748b" opacity="0.35"/>
+    <path d="M118 70 C112 52, 148 48, 150 68 C162 66, 162 94, 146 96 C142 112, 112 106, 118 88 C104 86, 104 64, 118 70 Z" fill="#94a3b8"/>
+    <text class="copy" x="214" y="74">Import PyTorch, transformers, and tokenizers</text>
+    <text class="meta" x="214" y="106">Fastest way to start. Largest runtime surface to debug.</text>
+    <text class="tiny" x="214" y="132">pip install problem-solving</text>
+  </g>
+
+  <g transform="translate(72 332)">
+    <rect width="1056" height="150" rx="26" fill="#172339" stroke="#334b6d" stroke-width="2"/>
+    <text class="step" x="44" y="42" fill="#7dd3fc">PANEL 2</text>
+    <circle cx="134" cy="78" r="36" fill="#38bdf8" opacity="0.22" filter="url(#glow1)"/>
+    <path d="M116 70 C110 50, 148 46, 152 68 C166 66, 166 96, 148 98 C142 114, 108 108, 116 88 C100 86, 102 62, 116 70 Z" fill="#7dd3fc"/>
+    <text class="copy" x="214" y="74">Link llama.cpp and reuse its GGUF loader</text>
+    <text class="meta" x="214" y="106">Smaller stack, but your architecture still bends around somebody else's seams.</text>
+    <text class="tiny" x="214" y="132">one big dependency, one big opinion</text>
+  </g>
+
+  <g transform="translate(72 512)">
+    <rect width="1056" height="150" rx="26" fill="#1a2334" stroke="#5b5f93" stroke-width="2"/>
+    <text class="step" x="44" y="42" fill="#c4b5fd">PANEL 3</text>
+    <circle cx="134" cy="78" r="38" fill="#a78bfa" opacity="0.24" filter="url(#glow2)"/>
+    <path d="M114 70 C108 48, 150 44, 154 68 C168 66, 170 98, 148 102 C142 118, 106 112, 114 88 C98 86, 100 60, 114 70 Z" fill="#d8b4fe"/>
+    <text class="copy" x="214" y="74">Write a GGUF parser in 589 lines</text>
+    <text class="meta" x="214" y="106">Small enough to own. Simple enough to debug. No foreign allocator in sight.</text>
+    <text class="tiny" x="214" y="132">git bisect now reaches the file format too</text>
+  </g>
+
+  <g transform="translate(72 692)">
+    <rect width="1056" height="150" rx="26" fill="#1b2030" stroke="#6ee7b7" stroke-width="2"/>
+    <text class="step" x="44" y="42" fill="#6ee7b7">PANEL 4</text>
+    <circle cx="134" cy="78" r="40" fill="#34d399" opacity="0.26" filter="url(#glow3)"/>
+    <path d="M112 70 C106 46, 150 40, 156 68 C172 66, 174 100, 148 104 C142 122, 104 114, 112 88 C94 86, 96 58, 112 70 Z" fill="#a7f3d0"/>
+    <text class="copy" x="214" y="74">Embed the entire chat UI as a string literal in the binary</text>
+    <text class="meta" x="214" y="106">One executable. One deployment artifact. One fewer place for "works on my machine" to hide.</text>
+    <text class="tiny" x="214" y="132">dependency count: zero, unless you count the GPU driver</text>
+  </g>
+</svg>
