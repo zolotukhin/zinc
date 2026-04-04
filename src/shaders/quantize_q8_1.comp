@@ -1,83 +1,62 @@
 #version 460
-// ZINC — Quantize fp32 vector to Q8_1 format for integer dot product DMMV.
-// Each workgroup of 32 threads quantizes one 32-element block:
-//   d = max(|vals|) / 127.0
-//   qs[i] = round(val[i] / d) as int8
-//   ds.x = d (float16), ds.y = d * sum(qs) (float16)
+// ZINC — Quantize fp32 vector to unsigned-biased Q8_1 for IDP DMMV.
+// Each workgroup of 32 threads quantizes one 32-element block.
+// Q8_1 output: uint32[0] = f16(d) | f16(ds_y), uint32[1..8] = 32 biased uint8 packed.
+// Biased: q8_biased = round(val/d) + 127, range [0, 254]
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_KHR_shader_subgroup_shuffle : require
 
 layout(local_size_x = 32) in;
 
 layout(set = 0, binding = 0) readonly buffer Input { float x[]; };
-layout(set = 0, binding = 1) writeonly buffer Output { uint q8_data[]; };
-// Q8_1 block layout (36 bytes = 9 uint32):
-//   u32[0] = f16 d (low 16 bits) + f16 ds_y (high 16 bits)
-//   u32[1..8] = 32 x int8 packed as 8 x int32
+layout(set = 0, binding = 1) buffer Output { uint q8_data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint K;         // number of input elements
-    uint x_offset;  // byte offset into input buffer
+    uint K;
+    uint x_offset;
 };
 
+shared uint shared_words[8];
+
 void main() {
-    uint tid = gl_LocalInvocationID.x;  // 0..31
+    uint tid = gl_LocalInvocationID.x;
     uint block_id = gl_WorkGroupID.x;
     uint base = x_offset / 4u + block_id * 32u;
 
-    // Load one element per thread
     float val = (base + tid < K + x_offset / 4u) ? x[base + tid] : 0.0;
 
-    // Find max absolute value across the block (subgroup reduction)
+    // Find max absolute value
     float amax = subgroupMax(abs(val));
 
-    // Compute scale
     float d = amax / 127.0;
     float id = (d != 0.0) ? 1.0 / d : 0.0;
 
-    // Quantize to unsigned uint8 with bias 127 (for unsigned dotPacked4x8EXT)
-    // Original signed: qs_signed = round(val / d), range [-127, 127]
-    // Biased unsigned: qs = qs_signed + 127, range [0, 254]
-    int qs_signed = int(round(val * id));
-    qs_signed = clamp(qs_signed, -127, 127);
-    int qs = qs_signed + 127;  // unsigned biased value [0, 254]
+    // Quantize to signed, then bias to unsigned
+    int qs_signed = clamp(int(round(val * id)), -127, 127);
+    uint qs_biased = uint(qs_signed + 127);  // [0, 254]
 
-    // Sum of SIGNED values (for bias correction in the DMMV)
+    // Sum of signed values for bias correction
     int q_sum = subgroupAdd(qs_signed);
 
-    // Pack 32 int8 values into 8 uint32 words
-    // Thread tid writes byte (tid % 4) of word (tid / 4)
+    // Pack 4 bytes per uint32 using shared memory (simpler than shuffle)
     uint word_idx = tid / 4u;
-    uint byte_idx = tid % 4u;
-    uint packed_byte = uint(qs & 0xFF) << (byte_idx * 8u);
+    uint byte_pos = tid % 4u;
 
-    // Combine 4 bytes into one uint32 using subgroup shuffle
-    uint packed_word = subgroupOr(packed_byte);
-    // Only keep the result for the first thread in each group of 4
-    // Actually, subgroupOr across all 32 threads gives wrong result.
-    // Use subgroup shuffle instead:
-    // Thread 0,4,8,...,28 collects its 4-byte word
-    uint word_val = 0u;
-    if (byte_idx == 0u) {
-        for (uint b = 0u; b < 4u; b++) {
-            uint contributor = word_idx * 4u + b;
-            int contrib_qs = subgroupShuffle(qs, contributor);
-            word_val |= (uint(contrib_qs & 0xFF)) << (b * 8u);
-        }
-    }
+    // Atomic OR to build the packed word
+    if (byte_pos == 0u) shared_words[word_idx] = 0u;
+    barrier();
+    atomicOr(shared_words[word_idx], qs_biased << (byte_pos * 8u));
+    barrier();
 
-    // Write output block (9 uint32 words)
+    // Write output
     uint out_base = block_id * 9u;
     if (tid == 0u) {
-        // Pack d and ds_y as two float16 values in one uint32
         float ds_y = d * float(q_sum);
-        uint d_bits = packHalf2x16(vec2(d, ds_y));
-        q8_data[out_base] = d_bits;
+        q8_data[out_base] = packHalf2x16(vec2(d, ds_y));
     }
-    if (byte_idx == 0u) {
-        q8_data[out_base + 1u + word_idx] = word_val;
+    if (tid < 8u) {
+        q8_data[out_base + 1u + tid] = shared_words[tid];
     }
 }

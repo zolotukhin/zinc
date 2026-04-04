@@ -489,6 +489,7 @@ pub const InferenceEngine = struct {
     o_proj_buf: Buffer, // output projection: hidden_dim f32
     ffn_norm_buf: Buffer, // FFN norm output: hidden_dim f32
     q8_input_buf: Buffer, // Q8_1 quantized input for IDP DMMV
+    q8_input_ready: bool = false, // true when q8_input_buf contains valid Q8_1 data for current input
     gate_buf: Buffer, // MoE expert gate output: intermediate_dim f32
     up_buf: Buffer, // MoE expert up output: intermediate_dim f32
     swiglu_buf: Buffer, // SwiGLU output: intermediate_dim f32
@@ -1617,6 +1618,9 @@ pub const InferenceEngine = struct {
             }
             self.decode_cmd.computeBarrier();
 
+            // IDP quantization disabled — float K-parallel DMMV is faster at current bandwidth
+            // self.quantizeForIdp(self.norm_buf, hidden_size, hidden_dim);
+
             const is_full_attn = ((layer + 1) % full_attn_interval == 0);
 
             if (is_full_attn) {
@@ -1999,7 +2003,8 @@ pub const InferenceEngine = struct {
                     }
                 }
 
-                // Output projection: attn_output.weight
+                // Output projection: attn_output.weight (different input buffer, invalidate IDP cache)
+                self.invalidateIdpCache();
                 try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, layer_q_dim);
                 self.decode_cmd.computeBarrier();
 
@@ -2130,6 +2135,9 @@ pub const InferenceEngine = struct {
                 try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
             }
             self.decode_cmd.computeBarrier();
+
+            // IDP quantization disabled — float K-parallel DMMV is faster at current bandwidth
+            // self.quantizeForIdp(self.ffn_norm_buf, hidden_size, hidden_dim);
 
             if (is_moe) {
                 const moe_phase = self.beginProfilePhase();
@@ -2487,6 +2495,7 @@ pub const InferenceEngine = struct {
                 }
                 self.decode_cmd.computeBarrier();
 
+                self.invalidateIdpCache(); // down reads from swiglu_buf, not ffn_norm_buf
                 try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
                 self.decode_cmd.computeBarrier();
 
@@ -2806,6 +2815,7 @@ pub const InferenceEngine = struct {
         self.decode_cmd.computeBarrier();
 
         // LM head: output.weight × norm_buf → logits_buf
+        self.invalidateIdpCache(); // final norm output is different from layer norms
         const lm_tensor = findLoadedTensor(self.model, "output.weight") orelse
             findLoadedTensor(self.model, "token_embd.weight") orelse return error.TensorNotFound;
         try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
@@ -2898,6 +2908,25 @@ pub const InferenceEngine = struct {
     // DMMV dispatch helpers
     // -----------------------------------------------------------------------
 
+    /// Quantize input buffer to Q8_1 for IDP DMMV acceleration.
+    /// Call once before a batch of Q4_K DMMVs that share the same input.
+    fn quantizeForIdp(self: *InferenceEngine, input_buf: Buffer, input_size: vk.c.VkDeviceSize, K: u32) void {
+        if (self.dmmv.pipeline_quantize_q8_1 == null or self.dmmv.pipeline_q4k_idp == null) return;
+        const q8_pip = &(self.dmmv.pipeline_quantize_q8_1 orelse return);
+        const q8_ds = self.allocDescSet(q8_pip.descriptor_set_layout) catch return;
+        self.writeDescSet2(q8_ds, input_buf.handle, input_size, self.q8_input_buf.handle, self.q8_input_buf.size);
+        const Q8Push = extern struct { K: u32, x_offset: u32 };
+        const q8_push = Q8Push{ .K = K, .x_offset = 0 };
+        self.decode_cmd.dispatchWithPush(q8_pip, q8_ds, std.mem.asBytes(&q8_push), (K + 31) / 32, 1, 1);
+        self.decode_cmd.computeBarrier();
+        self.q8_input_ready = true;
+    }
+
+    /// Invalidate Q8_1 cache (call when input buffer changes).
+    fn invalidateIdpCache(self: *InferenceEngine) void {
+        self.q8_input_ready = false;
+    }
+
     /// Dispatch a DMMV: weight × input_buf → output_buf.
     /// Uses integer dot product (IDP) acceleration for Q4_K when available.
     fn dispatchDmmv(
@@ -2913,20 +2942,8 @@ pub const InferenceEngine = struct {
     ) !void {
         const qt = tensor.info.type_;
 
-        // IDP fast path: quantize input to Q8_1, then use integer dot product DMMV
-        // TODO: fix output corruption — bias correction math needs verification
-        if (false and qt == .q4_k and self.dmmv.pipeline_q4k_idp != null and self.dmmv.pipeline_quantize_q8_1 != null) {
-            // Step 1: Quantize input vector to Q8_1
-            const q8_pip = &(self.dmmv.pipeline_quantize_q8_1 orelse unreachable);
-            const q8_ds = try self.allocDescSet(q8_pip.descriptor_set_layout);
-            self.writeDescSet2(q8_ds, input_buf.handle, input_size, self.q8_input_buf.handle, self.q8_input_buf.size);
-            const Q8Push = extern struct { K: u32, x_offset: u32 };
-            const q8_push = Q8Push{ .K = K, .x_offset = 0 };
-            const q8_workgroups = (K + 31) / 32; // one workgroup per Q8_1 block
-            self.decode_cmd.dispatchWithPush(q8_pip, q8_ds, std.mem.asBytes(&q8_push), q8_workgroups, 1, 1);
-            self.decode_cmd.computeBarrier();
-
-            // Step 2: IDP DMMV (Q4_K weights × Q8_1 input)
+        // IDP fast path: use pre-quantized Q8_1 input (quantized once per layer by quantizeForIdp)
+        if (qt == .q4_k and self.dmmv.pipeline_q4k_idp != null and self.q8_input_ready) {
             const idp_pip = &(self.dmmv.pipeline_q4k_idp orelse unreachable);
             const idp_ds = try self.allocDescSet(idp_pip.descriptor_set_layout);
             self.writeDescSet3(idp_ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, self.q8_input_buf.handle, self.q8_input_buf.size, output_buf.handle, output_buf.size);
