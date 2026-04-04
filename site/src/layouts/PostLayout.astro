@@ -283,6 +283,21 @@ const jsonLd = {
     text-align: left;
   }
 
+  .post-content figure.diagram-dual .diagram-mobile-alt {
+    display: none;
+    margin: 0;
+    padding: 1rem 1.05rem;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: var(--color-bg-alt);
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
   /* Image pair grid: two images side by side */
   .post-content .img-pair {
     display: grid;
@@ -308,6 +323,16 @@ const jsonLd = {
     .post-content img {
       max-width: 100%;
     }
+
+    .post-content figure.diagram-dual .diagram-visual {
+      display: none;
+    }
+
+    .post-content figure.diagram-dual .diagram-mobile-alt {
+      display: block;
+      font-size: 0.74rem;
+    }
+
     .post-content .img-pair {
       grid-template-columns: 1fr;
     }

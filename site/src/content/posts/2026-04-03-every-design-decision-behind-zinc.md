@@ -39,8 +39,23 @@ excerpt: "ZINC is a from-scratch LLM inference engine in Zig targeting Vulkan an
 
 There is a meme format where step one is "draw two circles" and step two is "draw the rest of the owl." Building an inference engine from scratch follows the same pattern, except step one is "parse a GGUF file" and step two is "implement the entire forward pass of a 35-billion-parameter model on two different GPU architectures."
 
-<figure class="diagram-card diagram-wide">
-  <img src="/blog/design-draw-the-owl.svg" alt="A two-panel meme. Panel one: 'Step 1: parse the GGUF header' showing a simple file read. Panel two: 'Step 2: draw the rest of the inference engine' showing a massive diagram with tokenizer, embedding, 40 transformer layers, attention, MoE routing, SSM states, KV cache, flash attention, and streaming HTTP — all connected by arrows." loading="lazy" />
+<figure class="diagram-card diagram-wide diagram-dual">
+  <img class="diagram-visual" src="/blog/design-draw-the-owl.svg" alt="A two-panel meme. Panel one: 'Step 1: parse the GGUF header' showing a simple file read. Panel two: 'Step 2: draw the rest of the inference engine' showing a massive diagram with tokenizer, embedding, 40 transformer layers, attention, MoE routing, SSM states, KV cache, flash attention, and streaming HTTP — all connected by arrows." loading="lazy" />
+  <pre class="diagram-mobile-alt" role="img" aria-label="A two-step text version of the draw-the-owl inference engine diagram.">STEP 1
++----------------------+
+| Parse GGUF header    |
++----------------------+
+magic:   GGUF
+version: 3
+tensors: 562
+
+STEP 2
++----------------------+
+| Build the rest       |
++----------------------+
+tokenizer -> embedding
+layers -> attn / MoE / SSM
+KV cache -> server -> chat UI</pre>
   <figcaption>Every inference engine project starts the same way. The interesting part is what happens after you can read the model file.</figcaption>
 </figure>
 
@@ -58,8 +73,19 @@ We decided against it for one reason: llama.cpp's architecture optimizes for bre
 
 llama.cpp supports CUDA, Vulkan, Metal, OpenCL, SYCL, and CPU backends through a tensor-graph abstraction layer ([ggml](https://github.com/ggml-org/ggml)). That abstraction is the right design for a project that needs to run *everywhere*. But it also means every kernel is written to the lowest common denominator of what the abstraction exposes. You cannot write a RDNA4-specific shader that exploits wave64 dispatch, 32 KB of L0 vector cache per CU, and the exact memory coalescing rules of the gfx1201 ISA — because the abstraction does not know those things exist.
 
-<figure class="diagram-card diagram-wide">
-  <img src="/blog/design-fork-vs-scratch.svg" alt="A Drake meme. Top panel, Drake rejecting: 'Fork llama.cpp and tune a few shaders.' Bottom panel, Drake approving: 'Write an entire inference engine from scratch, debug 13 forward-pass bugs, question all life choices, then get 38 tok/s.'" loading="lazy" />
+<figure class="diagram-card diagram-wide diagram-dual">
+  <img class="diagram-visual" src="/blog/design-fork-vs-scratch.svg" alt="A Drake meme. Top panel, Drake rejecting: 'Fork llama.cpp and tune a few shaders.' Bottom panel, Drake approving: 'Write an entire inference engine from scratch, debug 13 forward-pass bugs, question all life choices, then get 38 tok/s.'" loading="lazy" />
+  <pre class="diagram-mobile-alt" role="img" aria-label="A text comparison between forking llama.cpp and building ZINC from scratch.">REJECT
+[ fork llama.cpp ]
+- quick start
+- familiar code
+- abstraction still sets the ceiling
+
+APPROVE
+[ build ZINC from scratch ]
+- parser + kernels + KV cache
+- Metal + Vulkan on native terms
+- more work, more control</pre>
   <figcaption>The decision that turned a weekend project into something much larger.</figcaption>
 </figure>
 
@@ -152,8 +178,17 @@ ZINC has six separate DMMV (dequantize-matrix-multiply-vector) shaders: one each
 
 The alternative would be a two-stage approach: a generic dequantization pass that unpacks any format to F16/F32, followed by a generic matmul. We tried that. It was slower.
 
-<figure class="diagram-card diagram-wide">
-  <img src="/blog/design-fused-vs-staged.svg" alt="A side-by-side comparison. Left: 'Staged approach' with three boxes — dequantize to F32, write to VRAM, then multiply. An arrow labeled '2x memory traffic' points at the intermediate buffer. Right: 'Fused approach' with one box — dequantize and multiply in one pass. An arrow labeled 'zero intermediate buffer' points at the absence of anything between input and output." loading="lazy" />
+<figure class="diagram-card diagram-wide diagram-dual">
+  <img class="diagram-visual" src="/blog/design-fused-vs-staged.svg" alt="A side-by-side comparison. Left: 'Staged approach' with three boxes — dequantize to F32, write to VRAM, then multiply. An arrow labeled '2x memory traffic' points at the intermediate buffer. Right: 'Fused approach' with one box — dequantize and multiply in one pass. An arrow labeled 'zero intermediate buffer' points at the absence of anything between input and output." loading="lazy" />
+  <pre class="diagram-mobile-alt" role="img" aria-label="A text comparison between staged dequantization and fused dequantization.">STAGED
+weights -> tmp -> matmul
+VRAM: read -> write -> read
+cost: 2x hot-path traffic
+
+FUSED
+weights -> dequant+dot -> out
+VRAM: read -> write out
+cost: no intermediate buffer</pre>
   <figcaption>The intermediate buffer is the enemy. Eliminating it is the single most impactful optimization in the DMMV path.</figcaption>
 </figure>
 
@@ -255,8 +290,15 @@ Each fusion cuts the intermediate traffic in half or better. Across 40 layers, t
 
 ZINC has **zero external runtime dependencies** beyond the system GPU driver. The GGUF parser is 589 lines of Zig. The BPE tokenizer reads vocabulary and merge rules directly from GGUF metadata. The HTTP server is a minimal implementation in `std.net`. The chat UI is a single HTML file embedded in the binary.
 
-<figure class="diagram-card diagram-wide">
-  <img src="/blog/design-dependency-galaxy-brain.svg" alt="An expanding brain meme with four panels. Panel 1 (small brain): 'Import PyTorch, transformers, and tokenizers.' Panel 2 (medium brain): 'Link llama.cpp and use its GGUF loader.' Panel 3 (large brain): 'Write a GGUF parser in 589 lines.' Panel 4 (galaxy brain): 'Embed the entire chat UI as a string literal in the binary.'" loading="lazy" />
+<figure class="diagram-card diagram-wide diagram-dual">
+  <img class="diagram-visual" src="/blog/design-dependency-galaxy-brain.svg" alt="An expanding brain meme with four panels. Panel 1 (small brain): 'Import PyTorch, transformers, and tokenizers.' Panel 2 (medium brain): 'Link llama.cpp and use its GGUF loader.' Panel 3 (large brain): 'Write a GGUF parser in 589 lines.' Panel 4 (galaxy brain): 'Embed the entire chat UI as a string literal in the binary.'" loading="lazy" />
+  <pre class="diagram-mobile-alt" role="img" aria-label="A four-step text version of the dependency galaxy brain diagram.">PANEL 1  import PyTorch + transformers
+PANEL 2  link llama.cpp + GGUF loader
+PANEL 3  write the GGUF parser in Zig
+PANEL 4  embed the chat UI in the binary
+
+direction:
+more ownership -> fewer dependencies</pre>
   <figcaption>The dependency count of ZINC is the same as the number of external libraries it links: zero (not counting the GPU driver).</figcaption>
 </figure>
 
@@ -409,8 +451,19 @@ Not every decision was right the first time.
 
 **We over-specified shader workgroup sizes.** Early shaders hardcoded workgroup sizes for specific tensor dimensions. When we tested on a different model with different hidden dimensions, half the shaders dispatched wrong. We now use push constants for all dimension-dependent values and only hardcode the wave size (64 on RDNA, which is a hardware constant, not a model parameter).
 
-<figure class="diagram-card diagram-wide">
-  <img src="/blog/design-this-is-fine.svg" alt="The 'this is fine' meme, but the dog is surrounded by debug logs reading 'SSM state NaN at layer 12 token 47', 'delta-net Q norm drift: 0.003 per token', 'MoE router logits: all zeros', and 'flash attention: negative infinity in softmax.' The dog is labeled 'ZINC developer, day 3 of forward pass debugging.'" loading="lazy" />
+<figure class="diagram-card diagram-wide diagram-dual">
+  <img class="diagram-visual" src="/blog/design-this-is-fine.svg" alt="The 'this is fine' meme, but the dog is surrounded by debug logs reading 'SSM state NaN at layer 12 token 47', 'delta-net Q norm drift: 0.003 per token', 'MoE router logits: all zeros', and 'flash attention: negative infinity in softmax.' The dog is labeled 'ZINC developer, day 3 of forward pass debugging.'" loading="lazy" />
+  <pre class="diagram-mobile-alt" role="img" aria-label="A text version of the this is fine debugging diagram.">[pass] tokenizer OK
+[warn] descriptor mismatch
+[note] stabilize tensors first
+
+fires:
+- SSM state NaN
+- delta-net drift
+- MoE router logits = 0
+- flash attention softmax = -inf
+
+"this is fine"</pre>
   <figcaption>The forward pass worked on the first try. The output was just garbage for the next two weeks.</figcaption>
 </figure>
 
