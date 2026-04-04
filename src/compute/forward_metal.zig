@@ -591,7 +591,7 @@ pub const InferenceEngine = struct {
         self.position = 0;
         self.profile_enabled = options.profile_enabled;
         self.debug_validation_enabled = options.debug_validation_enabled;
-        self.gpu_layer_snapshots = if (options.debug_validation_enabled) try allocator.alloc(f32, @as(usize, cfg.hidden_dim) * 8) else null;
+        self.gpu_layer_snapshots = if (options.debug_validation_enabled) try allocator.alloc(f32, @as(usize, cfg.hidden_dim) * cfg.n_layers) else null;
         self.request_profile = .{};
 
         self.hidden_buf = try metal_buffer.createBuffer(ctx, hidden_size);
@@ -2578,7 +2578,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 }
 
                 // Snapshot GPU hidden state after each layer for validation
-                if (engine.debug_validation_enabled and engine.position == 0 and engine.gpu_layer_snapshots != null and layer_idx < 8) {
+                if (engine.debug_validation_enabled and engine.position == 0 and engine.gpu_layer_snapshots != null) {
                     const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
                     const snap = engine.gpu_layer_snapshots.?;
                     @memcpy(snap[layer_idx * hidden_dim ..][0..hidden_dim], hidden_ptr[0..hidden_dim]);
@@ -3086,10 +3086,10 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 rms2 += @as(f64, v) * @as(f64, v);
                 if (@abs(v) > max2) max2 = @abs(v);
             }
-            if (li < 8 or li == vdc.n_layers - 1) {
-                // Compare with GPU snapshot
+            {
+                // Compare with GPU snapshot at every layer
                 if (engine.gpu_layer_snapshots) |snaps| {
-                    if (li < 8) {
+                    {
                         const gpu_snap = snaps[li * vdhd ..][0..vdhd];
                         var md: f32 = 0;
                         var mi: usize = 0;
