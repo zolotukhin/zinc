@@ -75,6 +75,40 @@ pub const MetalCommand = struct {
         );
     }
 
+    /// Dispatch with explicit threadgroup memory allocation.
+    pub fn dispatchV2WithTgMem(
+        self: *MetalCommand,
+        pipe: *const MetalPipeline,
+        grid: [3]u32,
+        block: [3]u32,
+        bufs: []const *const MetalBuffer,
+        push_data: ?*const anyopaque,
+        push_size: usize,
+        push_idx: u32,
+        tg_mem_size: u32,
+    ) void {
+        if (self.handle == null or pipe.handle == null) return;
+
+        var c_bufs: [32]?*shim.MetalBuf = .{null} ** 32;
+        const n_bufs: u32 = @intCast(@min(bufs.len, 32));
+        for (bufs[0..n_bufs], 0..n_bufs) |b, i| {
+            c_bufs[i] = b.handle;
+        }
+
+        shim.mtl_dispatch_v2_tgmem(
+            self.handle,
+            pipe.handle,
+            &grid,
+            &block,
+            @ptrCast(&c_bufs),
+            n_bufs,
+            push_data,
+            push_size,
+            push_idx,
+            tg_mem_size,
+        );
+    }
+
     /// Insert a memory barrier ensuring all prior dispatches complete before subsequent ones.
     pub fn barrier(self: *MetalCommand) void {
         if (self.handle) |h| shim.mtl_barrier(h);

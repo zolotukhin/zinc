@@ -236,6 +236,20 @@ const DmmvPush = extern struct {
     y_offset: u32,
 };
 
+/// Push constants for Q4_K GEMM dispatch (matches gemm_q4k.metal GemmPush).
+const GemmQ4kPush = extern struct {
+    ne00: i32, // K dimension
+    ne02: i32, // batch dim 0 (always 1 for single-sequence)
+    nb01: u64, // row stride of weight matrix (bytes)
+    nb02: u64, // batch stride 0
+    ne12: i32, // batch dim 1 (always 1)
+    nb10: u64, // element stride of input (4 for f32)
+    nb11: u64, // row stride of input (ne00 * 4)
+    nb12: u64, // batch stride 1
+    ne0: i32,  // M dimension (output rows)
+    ne1: i32,  // N dimension (number of tokens)
+};
+
 /// Push constants for SwiGLU dispatch (matches SPIRV-Cross layout: buffer(0)).
 const SwiGLUPush = extern struct {
     n: u32, // number of elements
@@ -484,6 +498,7 @@ pub const InferenceEngine = struct {
     softmax_topk_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
+    gemm_q4k_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -665,6 +680,7 @@ pub const InferenceEngine = struct {
         self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
+        self.gemm_q4k_pipe = try loadShaderPipeline(ctx, "gemm_q4k");
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -996,6 +1012,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.softmax_topk_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
+        metal_pipeline.freePipeline(&self.gemm_q4k_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
@@ -3926,6 +3943,51 @@ fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, i
         logit5,
     });
 }
+
+// ---------------------------------------------------------------------------
+// GEMM-based prefill dispatch helper
+// ---------------------------------------------------------------------------
+
+/// Dispatch a Q4_K GEMM: weight[M×K] × input[N×K]^T → output[N×M]
+/// where M = output rows, K = inner dim, N = number of tokens.
+/// The output layout is column-major: output[row + col * ne0].
+fn dispatchGemmQ4k(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32, // output rows (e.g. q_dim, kv_dim, inter_dim)
+    K: u32, // inner dim (hidden_dim)
+    N: u32, // number of tokens
+) void {
+    const nb01 = @as(u64, K / QK_K) * 144; // bytes per weight row (Q4_K block size)
+    _ = tensorPageOffset(engine.model, tensor); // offset baked into buffer start
+    const push = GemmQ4kPush{
+        .ne00 = @intCast(K),
+        .ne02 = 1,
+        .nb01 = nb01,
+        .nb02 = nb01 * @as(u64, M),
+        .ne12 = 1,
+        .nb10 = 4, // sizeof(f32)
+        .nb11 = @as(u64, K) * 4,
+        .nb12 = @as(u64, K) * 4 * N,
+        .ne0 = @intCast(M),
+        .ne1 = @intCast(N),
+    };
+    // src0 = weight buffer (with page offset baked into the buffer start)
+    // src1 = input buffer (N×K f32 matrix)
+    // dst  = output buffer (N×M f32 matrix, column-major)
+    const weight_buf = &tensor.gpu_buffer;
+    const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
+    const tg_m = (@as(u32, @intCast(M)) + 63) / 64; // threadgroups in M dimension
+    const tg_n = (@as(u32, @intCast(N)) + 31) / 32; // threadgroups in N dimension
+    // push_idx=0: push constants at buffer(0), data buffers shifted to buffer(1..3)
+    // Threadgroup memory: 4096 (A tile) + 4096 (B tile) = 8192 bytes
+    cmd.dispatchV2WithTgMem(&engine.gemm_q4k_pipe, .{ tg_n, tg_m, 1 }, .{ 128, 1, 1 }, &bufs, &push, @sizeOf(GemmQ4kPush), 0, 8192);
+}
+
+const QK_K = 256;
 
 // ---------------------------------------------------------------------------
 // Generate

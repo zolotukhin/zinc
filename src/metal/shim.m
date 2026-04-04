@@ -354,6 +354,35 @@ void mtl_dispatch_v2(MetalCmd* cmd, MetalPipe* pipe,
     [cmd->encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per];
 }
 
+void mtl_dispatch_v2_tgmem(MetalCmd* cmd, MetalPipe* pipe,
+                     const uint32_t grid[3], const uint32_t block[3],
+                     MetalBuf** bufs, uint32_t n_bufs,
+                     const void* push_data, size_t push_size,
+                     uint32_t push_idx, uint32_t tg_mem_size) {
+    if (!cmd || !pipe) return;
+
+    [cmd->encoder setComputePipelineState:pipe->state];
+
+    for (uint32_t i = 0; i < n_bufs; i++) {
+        uint32_t slot = (i < push_idx) ? i : (i + 1);
+        if (bufs[i]) {
+            [cmd->encoder setBuffer:bufs[i]->buffer offset:0 atIndex:slot];
+        }
+    }
+
+    if (push_data && push_size > 0) {
+        [cmd->encoder setBytes:push_data length:push_size atIndex:push_idx];
+    }
+
+    if (tg_mem_size > 0) {
+        [cmd->encoder setThreadgroupMemoryLength:tg_mem_size atIndex:0];
+    }
+
+    MTLSize threadgroups = MTLSizeMake(grid[0], grid[1], grid[2]);
+    MTLSize threads_per = MTLSizeMake(block[0], block[1], block[2]);
+    [cmd->encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per];
+}
+
 void mtl_barrier(MetalCmd* cmd) {
     if (!cmd) return;
     // Lightweight in-encoder memory barrier — ensures all buffer writes from
