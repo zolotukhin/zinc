@@ -513,6 +513,7 @@ pub const InferenceEngine = struct {
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
     dmmv_q8_0_pipe: MetalPipeline,
+    dmmv_q8_0_k2048_pipe: MetalPipeline,
     dmmv_q8_0_dual_pipe: MetalPipeline,
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
@@ -728,6 +729,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
         self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+        self.dmmv_q8_0_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048");
         self.dmmv_q8_0_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual");
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
@@ -1108,6 +1110,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q8_0_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
@@ -1452,6 +1455,12 @@ pub const InferenceEngine = struct {
                 if (self.q8_tg_override) |block_size| {
                     const simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
                     break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = block_size / simd_width, .block_size = block_size };
+                }
+                if (K <= 2048 and
+                    self.dmmv_q8_0_k2048_pipe.thread_execution_width == 32 and
+                    self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 256)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
                 }
                 if (K <= 4096 and
                     self.dmmv_q8_0_pipe.thread_execution_width == 32 and
