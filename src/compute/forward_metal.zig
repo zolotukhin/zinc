@@ -499,6 +499,7 @@ pub const InferenceEngine = struct {
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
     gemm_q4k_pipe: MetalPipeline,
+    flash_attn_batched_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -681,6 +682,7 @@ pub const InferenceEngine = struct {
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
         self.gemm_q4k_pipe = try loadShaderPipeline(ctx, "gemm_q4k");
+        self.flash_attn_batched_pipe = try loadShaderPipeline(ctx, "flash_attn_batched");
 
         // Preload norm weights into f32 Metal buffers (eliminates per-token alloc + mmap dequant)
         self.attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
@@ -1013,6 +1015,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
         metal_pipeline.freePipeline(&self.gemm_q4k_pipe);
+        metal_pipeline.freePipeline(&self.flash_attn_batched_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
@@ -4086,6 +4089,209 @@ fn dispatchGemmQ4k(
 
 const QK_K = 256;
 
+/// Push constants for batched causal flash attention.
+const BatchedFlashAttnPush = extern struct {
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    kv_len: u32,
+    n_queries: u32,
+    kv_pos_offset: u32,
+};
+
+/// Dispatch batched causal flash attention for prefill.
+/// Q layout: [n_queries × n_heads × head_dim], contiguous.
+/// KV cache: standard [seq × n_kv_heads × head_dim].
+/// Output: same layout as Q.
+fn dispatchBatchedFlashAttn(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    q_buf: *const MetalBuffer,
+    k_cache: *const MetalBuffer,
+    v_cache: *const MetalBuffer,
+    out_buf: *const MetalBuffer,
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    n_queries: u32,
+    kv_pos_offset: u32,
+) void {
+    const push = BatchedFlashAttnPush{
+        .head_dim = head_dim,
+        .n_heads = n_heads,
+        .n_kv_heads = n_kv_heads,
+        .kv_len = kv_pos_offset + n_queries,
+        .n_queries = n_queries,
+        .kv_pos_offset = kv_pos_offset,
+    };
+    const bufs = [_]*const MetalBuffer{ q_buf, k_cache, v_cache, out_buf };
+    // Grid: (n_heads, n_queries, 1) — one workgroup per (head, query) pair
+    cmd.dispatchV2(&engine.flash_attn_batched_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnPush), 0);
+}
+
+/// Batched prefill: processes all prompt tokens layer-by-layer with batched
+/// causal flash attention and per-token projections. This changes the computation
+/// pattern to match llama.cpp's batched prefill, fixing LLaMA output quality.
+fn prefillBatched(engine: *InferenceEngine, prompt_tokens: []const u32, allocator: std.mem.Allocator) !void {
+    const n: u32 = @intCast(prompt_tokens.len);
+    if (n == 0) return;
+
+    const cfg = engine.config;
+    const hd = cfg.hidden_dim;
+    const qd: u32 = cfg.n_heads * cfg.head_dim;
+    const kvd: u32 = cfg.n_kv_heads * cfg.head_dim;
+    const inter: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hd * 4;
+    const rd: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+    const inv_freq_ptr: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+    const inv_freq = inv_freq_ptr[0 .. rd / 2];
+
+    // Allocate per-token hidden states
+    const hs = try allocator.alloc(f32, @as(usize, n) * hd);
+    defer allocator.free(hs);
+    // Batched Q buffer: [n × n_heads × head_dim]
+    const bq = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * qd * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(@constCast(&bq));
+    // Batched attention output: same layout as Q
+    const ba = try metal_buffer.createBuffer(engine.device.ctx, @as(usize, n) * qd * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(@constCast(&ba));
+
+    // Load all embeddings
+    for (prompt_tokens, 0..) |tok, t| {
+        try engine.loadTokenEmbedding(tok);
+        const src: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+        @memcpy(hs[t * hd ..][0..hd], src[0..hd]);
+    }
+
+    for (0..cfg.n_layers) |li| {
+        const lt = engine.layer_tensors[li];
+        const q_t = lt.attn_q orelse return error.MissingTensor;
+        const k_t = lt.attn_k orelse return error.MissingTensor;
+        const v_t = lt.attn_v orelse return error.MissingTensor;
+        const o_t = lt.attn_output orelse return error.MissingTensor;
+
+        // Per-token: norm → Q/K/V projections → RoPE → KV write
+        // Also copy Q into batched Q buffer for batched attention
+        const norm_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_norm_bufs[li].cpu_ptr.?));
+        for (0..n) |t| {
+            // CPU RMS norm
+            cpuRmsNormMul(@ptrCast(hs.ptr + t * hd), norm_w[0..hd], @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?)), hd, 1, cfg.rms_norm_eps);
+
+            // GPU Q/K/V projections
+            var cmd = try metal_command.beginCommand(engine.device.ctx);
+            dispatchDmmvOnCmd(engine, &cmd, q_t, &engine.norm_buf, &engine.q_buf, qd, hd, 0);
+            dispatchDmmvOnCmd(engine, &cmd, k_t, &engine.norm_buf, &engine.k_buf, kvd, hd, 0);
+            dispatchDmmvOnCmd(engine, &cmd, v_t, &engine.norm_buf, &engine.v_buf, kvd, hd, 0);
+            cmd.commitAndWait();
+
+            // CPU Q/K norms
+            if (engine.attn_q_norm_present[li]) {
+                const qnw: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[li].cpu_ptr.?));
+                cpuPerHeadRmsNormMul(@ptrCast(@alignCast(engine.q_buf.cpu_ptr.?)), qnw[0..cfg.head_dim], cfg.head_dim, cfg.n_heads, cfg.rms_norm_eps);
+            }
+            if (engine.attn_k_norm_present[li]) {
+                const knw: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[li].cpu_ptr.?));
+                cpuPerHeadRmsNormMul(@ptrCast(@alignCast(engine.k_buf.cpu_ptr.?)), knw[0..cfg.head_dim], cfg.head_dim, cfg.n_kv_heads, cfg.rms_norm_eps);
+            }
+
+            // CPU RoPE
+            cpuRope(@ptrCast(@alignCast(engine.q_buf.cpu_ptr.?)), cfg.head_dim, rd, cfg.n_heads, @intCast(t), inv_freq);
+            cpuRope(@ptrCast(@alignCast(engine.k_buf.cpu_ptr.?)), cfg.head_dim, rd, cfg.n_kv_heads, @intCast(t), inv_freq);
+
+            // GPU KV cache write
+            engine.position = @intCast(t);
+            var kv_cmd = try metal_command.beginCommand(engine.device.ctx);
+            dispatchKvCacheWriteOnCmd(engine, &kv_cmd, li, kvd, @as(u32, @intCast(t)) * kvd);
+            kv_cmd.commitAndWait();
+
+            // Copy Q to batched Q buffer
+            const q_src: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+            const bq_dst: [*]f32 = @ptrCast(@alignCast(bq.cpu_ptr.?));
+            @memcpy((bq_dst + t * qd)[0..qd], q_src[0..qd]);
+        }
+
+        // BATCHED causal flash attention: all queries at once
+        {
+            var cmd = try metal_command.beginCommand(engine.device.ctx);
+            dispatchBatchedFlashAttn(engine, &cmd, &bq, &engine.kv_k_cache[li], &engine.kv_v_cache[li], &ba, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, n, 0);
+            cmd.commitAndWait();
+        }
+
+        // Per-token: O projection → attention residual → FFN
+        for (0..n) |t| {
+            // Copy batched attention output to engine buffer
+            const ba_src: [*]const f32 = @ptrCast(@alignCast(ba.cpu_ptr.?));
+            const ao_dst: [*]f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
+            @memcpy(ao_dst[0..qd], (ba_src + t * qd)[0..qd]);
+
+            // Sigmoid gate (Qwen3.5 only)
+            const q_out_dim: u32 = @intCast(q_t.info.dims[1]);
+
+            // Load hidden state
+            const h_dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+            @memcpy(h_dst[0..hd], hs[t * hd ..][0..hd]);
+
+            var cmd = try metal_command.beginCommand(engine.device.ctx);
+            if (q_out_dim > qd) {
+                dispatchSigmoidMulOnCmd(engine, &cmd, &engine.gate_buf, &engine.attn_out_buf, qd);
+                cmd.barrier();
+            }
+            // O projection
+            dispatchDmmvOnCmd(engine, &cmd, o_t, &engine.attn_out_buf, &engine.down_buf, hd, qd, 0);
+            cmd.barrier();
+            // Attention residual
+            {
+                const rp = ScaleAccPush{ .n = hd, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                const rb = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hd + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &rb, &rp, @sizeOf(ScaleAccPush), 0);
+            }
+            cmd.barrier();
+            // FFN norm
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[li], hd, 1);
+            cmd.barrier();
+            cmd.commitAndWait();
+
+            // Dense FFN
+            const gt = lt.ffn_gate orelse return error.MissingTensor;
+            const ut = lt.ffn_up orelse return error.MissingTensor;
+            const dt = lt.ffn_down orelse return error.MissingTensor;
+            var fc = try metal_command.beginCommand(engine.device.ctx);
+            dispatchDmmvOnCmd(engine, &fc, gt, &engine.norm_buf, &engine.gate_buf, inter, hd, 0);
+            dispatchDmmvOnCmd(engine, &fc, ut, &engine.norm_buf, &engine.up_buf, inter, hd, 0);
+            fc.barrier();
+            const sp = SwiGLUPush{ .n = inter };
+            const sb = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
+            fc.dispatchV2(&engine.swiglu_pipe, .{ (inter + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sb, &sp, @sizeOf(SwiGLUPush), 0);
+            fc.barrier();
+            dispatchDmmvOnCmd(engine, &fc, dt, &engine.swiglu_buf, &engine.down_buf, hd, inter, 0);
+            fc.barrier();
+            {
+                const rp = ScaleAccPush{ .n = hd, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                const rb = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                fc.dispatchV2(&engine.scale_acc_pipe, .{ (hd + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &rb, &rp, @sizeOf(ScaleAccPush), 0);
+            }
+            fc.commitAndWait();
+
+            // Save hidden state
+            const h_src: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+            @memcpy(hs[t * hd ..][0..hd], h_src[0..hd]);
+        }
+    }
+
+    // Final: last token → norm → LM head
+    {
+        const h_dst: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+        @memcpy(h_dst[0..hd], hs[(n - 1) * hd ..][0..hd]);
+    }
+    {
+        var cmd = try metal_command.beginCommand(engine.device.ctx);
+        dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hd, 1);
+        cmd.barrier();
+        dispatchDmmvOnCmd(engine, &cmd, engine.lm_head, &engine.norm_buf, &engine.logits_buf, cfg.vocab_size, hd, 0);
+        cmd.commitAndWait();
+    }
+    engine.position = n;
+}
+
 // ---------------------------------------------------------------------------
 // Generate
 // ---------------------------------------------------------------------------
@@ -4103,11 +4309,16 @@ pub fn generateWithMetrics(
 
     engine.resetRequestState();
 
-    // Prefill: process each prompt token through all layers
+    // Prefill: batched layer-by-layer for dense models, sequential for MoE/SSM
     const prefill_start = std.time.nanoTimestamp();
-    for (prompt_tokens) |token_id| {
-        try engine.loadTokenEmbedding(token_id);
-        try runDecodeStep(engine);
+    const use_batched = engine.config.n_experts == 0 and engine.config.ssm_d_inner == 0 and prompt_tokens.len > 1;
+    if (use_batched) {
+        try prefillBatched(engine, prompt_tokens, allocator);
+    } else {
+        for (prompt_tokens) |token_id| {
+            try engine.loadTokenEmbedding(token_id);
+            try runDecodeStep(engine);
+        }
     }
     const prefill_end = std.time.nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
