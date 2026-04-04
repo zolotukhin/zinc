@@ -221,6 +221,61 @@ pub fn supportedOnCurrentGpu(entry: CatalogEntry, profile: []const u8, vram_budg
     return supportsProfile(entry, profile) and fitsGpu(entry, vram_budget_bytes);
 }
 
+/// Map a catalog family string to the GGUF architecture string that models in
+/// that family use. Returns null for unrecognized families — the caller should
+/// treat that as an error (a catalog entry with no known architecture mapping).
+pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
+    const families = .{
+        .{ "qwen3.5", "qwen35" },
+        .{ "qwen3", "qwen3" },
+        .{ "qwen2.5", "qwen2" },
+        .{ "qwen2", "qwen2" },
+        .{ "mistral", "mistral" },
+        .{ "gemma4", "gemma4" },
+        .{ "gemma3", "gemma3" },
+        .{ "gemma2", "gemma2" },
+        .{ "gemma", "gemma" },
+        .{ "mamba", "mamba" },
+        .{ "jamba", "jamba" },
+    };
+    inline for (families) |pair| {
+        if (std.mem.eql(u8, family, pair[0])) return pair[1];
+    }
+    return null;
+}
+
+test "every catalog entry maps to a supported architecture" {
+    const config_mod = @import("config.zig");
+    for (&entries) |entry| {
+        const gguf_arch = ggufArchForFamily(entry.family) orelse {
+            std.debug.print("FAIL: catalog entry '{s}' has family '{s}' with no known GGUF architecture mapping\n", .{ entry.id, entry.family });
+            return error.TestExpectedEqual;
+        };
+        const arch = config_mod.parseArchitecture(gguf_arch);
+        if (arch == .unknown) {
+            std.debug.print("FAIL: catalog entry '{s}' (family '{s}') maps to GGUF arch '{s}' which parseArchitecture returns .unknown\n", .{ entry.id, entry.family, gguf_arch });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "catalog IDs are unique" {
+    for (&entries, 0..) |a, i| {
+        for (entries[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.id, b.id)) {
+                std.debug.print("FAIL: duplicate catalog ID '{s}'\n", .{a.id});
+                return error.TestExpectedEqual;
+            }
+        }
+    }
+}
+
+test "find returns null for removed model families" {
+    // Llama was removed — ensure it cannot be found in the catalog.
+    try std.testing.expect(find("llama31-8b-q4k-m") == null);
+    try std.testing.expect(find("llama") == null);
+}
+
 test "find returns known entry" {
     const entry = find("qwen35-2b-q4k-m") orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("Qwen3.5 2B Q4_K_M", entry.display_name);

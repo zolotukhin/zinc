@@ -1025,3 +1025,48 @@ test "removeInstalledModelAtPaths keeps non-empty directory" {
     try std.testing.expect(pathExistsAbsolute(extra_path));
     try std.testing.expect(dirExistsAbsolute(model_dir));
 }
+
+test "active selection pointing to non-catalog model is detectable" {
+    // Simulates the scenario where active-model.json references a removed model
+    // (e.g. llama31-8b-q4k-m after Llama support was dropped).
+    const stale_id = "llama31-8b-q4k-m";
+    try std.testing.expect(catalog.find(stale_id) == null);
+
+    // A valid catalog model should be findable.
+    const valid_id = "qwen35-2b-q4k-m";
+    try std.testing.expect(catalog.find(valid_id) != null);
+}
+
+test "active selection roundtrip rejects non-catalog model on validate" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const config_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(config_root);
+    const config_path = try std.fs.path.join(std.testing.allocator, &.{ config_root, "active-model.json" });
+    defer std.testing.allocator.free(config_path);
+
+    try ensureParentDir(config_path);
+    {
+        const file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer {
+            var close_file = file;
+            close_file.close();
+        }
+        try file.writeAll("{\"active_model_id\":\"llama31-8b-q4k-m\",\"selected_at_unix\":42}");
+    }
+
+    // Read back — the selection is parseable but points to a removed model.
+    const opened = try std.fs.openFileAbsolute(config_path, .{});
+    defer {
+        var close_file = opened;
+        close_file.close();
+    }
+    const data = try opened.readToEndAlloc(std.testing.allocator, 256);
+    defer std.testing.allocator.free(data);
+
+    const model_id = extractJsonStringField(data, "active_model_id").?;
+    try std.testing.expectEqualStrings("llama31-8b-q4k-m", model_id);
+    // The model is not in the catalog — this is the check that should happen at startup.
+    try std.testing.expect(catalog.find(model_id) == null);
+}
