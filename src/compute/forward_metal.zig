@@ -312,6 +312,7 @@ const FlashAttnPush = extern struct {
     n_kv_heads: u32,
     seq_len: u32,
     page_size: u32,
+    window_size: u32 = 0,
 };
 
 /// Push constants for GPU KV-cache writes.
@@ -1627,15 +1628,19 @@ fn dispatchFlashAttnOnCmd(
     n_kv_heads: u32,
     seq_len: u32,
 ) void {
+    // Sliding window for gpt-oss: even layers use 128-token window
+    const cfg = engine.config;
+    const window: u32 = if (cfg.sliding_window_size > 0 and cfg.architecture == .gpt_oss) blk: {
+        break :blk if (layer_idx % 2 == 0) cfg.sliding_window_size else 0;
+    } else 0;
+
     const push = FlashAttnPush{
         .head_dim = head_dim,
         .n_heads = n_heads,
         .n_kv_heads = n_kv_heads,
         .seq_len = seq_len,
-        // Metal currently keeps the KV cache as a flat contiguous
-        // [token][kv_head][head_dim] buffer. Use page_size=0 to select the
-        // shader's contiguous-addressing fast path and skip page-table math.
         .page_size = 0,
+        .window_size = window,
     };
     const bufs = [_]*const MetalBuffer{
         &engine.page_table_buf,
