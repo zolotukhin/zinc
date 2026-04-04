@@ -528,6 +528,7 @@ pub const InferenceEngine = struct {
     dmmv_q4k_lmhead_pipe: MetalPipeline,
     dmmv_q4k_lmhead_1024_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
+    dmmv_q5k_native_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
     dmmv_q8_0_pipe: MetalPipeline,
     dmmv_q8_0_k2048_pipe: MetalPipeline,
@@ -746,6 +747,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
         self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
+        self.dmmv_q5k_native_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_native");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
         self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
         self.dmmv_q8_0_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048");
@@ -1129,6 +1131,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_1024_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q5k_native_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_k2048_pipe);
@@ -1472,7 +1475,17 @@ pub const InferenceEngine = struct {
                 }
                 break :blk .{ .pipe = &self.dmmv_q4k_pipe, .push_idx = 1, .rows_per_wg = 8, .block_size = 256 };
             },
-            .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
+            .q5_k => blk: {
+                // Native simdgroup-per-row Q5_K: 32 threads cooperate on each row
+                // via simd_sum, with half-precision cached X in threadgroup memory.
+                // Replaces the SPIRV-Cross 1-thread-per-row shader.
+                if (self.dmmv_q5k_native_pipe.handle != null and
+                    self.dmmv_q5k_native_pipe.max_threads_per_threadgroup >= 256)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q5k_native_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
+                }
+                break :blk .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 };
+            },
             .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q8_0 => blk: {
                 if (self.q8_tg_override) |block_size| {
