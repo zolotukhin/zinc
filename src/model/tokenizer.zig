@@ -221,15 +221,34 @@ pub const Tokenizer = struct {
             owned_symbols.deinit(self.allocator);
         }
 
+        // SentencePiece models (scores != null) use ▁ (U+2581) for word boundaries
+        // and raw bytes. GPT-2/tiktoken use Ġ (U+0120) for space via Unicode remapping.
+        const is_sentencepiece = self.scores != null;
         for (text) |byte| {
-            const unicode_char = gpt2ByteToUnicode(byte);
-            // Find length of UTF-8 encoding
-            const len: usize = if (unicode_char[0] < 0x80) 1 else if (unicode_char[0] < 0xE0) 2 else 3;
-            // We need to allocate a persistent copy since symbols stores slices
-            const copy = try self.allocator.alloc(u8, len);
-            @memcpy(copy, unicode_char[0..len]);
-            try owned_symbols.append(self.allocator, copy);
-            try symbols.append(self.allocator, copy);
+            if (is_sentencepiece) {
+                if (byte == ' ') {
+                    // SentencePiece: space → ▁ (U+2581, 3 bytes: E2 96 81)
+                    const copy = try self.allocator.alloc(u8, 3);
+                    copy[0] = 0xE2;
+                    copy[1] = 0x96;
+                    copy[2] = 0x81;
+                    try owned_symbols.append(self.allocator, copy);
+                    try symbols.append(self.allocator, copy);
+                } else {
+                    const copy = try self.allocator.alloc(u8, 1);
+                    copy[0] = byte;
+                    try owned_symbols.append(self.allocator, copy);
+                    try symbols.append(self.allocator, copy);
+                }
+            } else {
+                // GPT-2/tiktoken: map bytes through Unicode encoding
+                const unicode_char = gpt2ByteToUnicode(byte);
+                const len: usize = if (unicode_char[0] < 0x80) 1 else if (unicode_char[0] < 0xE0) 2 else 3;
+                const copy = try self.allocator.alloc(u8, len);
+                @memcpy(copy, unicode_char[0..len]);
+                try owned_symbols.append(self.allocator, copy);
+                try symbols.append(self.allocator, copy);
+            }
         }
 
         // If we have merges (GPT-2/tiktoken style), use merge-based BPE
@@ -574,7 +593,17 @@ pub const Tokenizer = struct {
             } else if (cp == 256 + 33 + 34) blk: {
                 // 173 (0xAD) was mapped to U+0143
                 break :blk 0xAD;
+            } else if (cp == 0x2581) blk: {
+                // SentencePiece word boundary marker (▁) → space
+                break :blk ' ';
             } else blk: {
+                // Pass through raw UTF-8 for non-ASCII codepoints (CJK, emoji, etc.)
+                // instead of replacing with '?'
+                if (cp_len <= buf.len - out) {
+                    @memcpy(buf[out..][0..cp_len], gpt2_text[i - cp_len ..][0..cp_len]);
+                    out += cp_len;
+                    continue;
+                }
                 break :blk '?';
             };
             buf[out] = orig_byte;
@@ -639,6 +668,24 @@ pub const Tokenizer = struct {
                     pos += suffix.len;
                 }
             },
+            .gemma => {
+                // Gemma format: <bos> + per-message <turn_start>role\ncontent<turn_end>\n
+                // Gemma 2/3 use <start_of_turn>/<end_of_turn>, Gemma 4 uses <|turn>/<turn|>.
+                const tmpl = self.chat_template orelse "";
+                const is_gemma4 = std.mem.indexOf(u8, tmpl, "<|turn>") != null;
+                const turn_start: []const u8 = if (is_gemma4) "<|turn>" else "<start_of_turn>";
+                const turn_end: []const u8 = if (is_gemma4) "<turn|>" else "<end_of_turn>";
+                const bos = std.fmt.bufPrint(buf[pos..], "<bos>", .{}) catch return error.BufferTooSmall;
+                pos += bos.len;
+                for (0..n) |i| {
+                    const written = std.fmt.bufPrint(buf[pos..], "{s}{s}\n{s}{s}\n", .{ turn_start, roles[i], contents[i], turn_end }) catch return error.BufferTooSmall;
+                    pos += written.len;
+                }
+                if (options.add_generation_prompt) {
+                    const suffix = std.fmt.bufPrint(buf[pos..], "{s}model\n", .{turn_start}) catch return error.BufferTooSmall;
+                    pos += suffix.len;
+                }
+            },
             .generic => {
                 for (0..n) |i| {
                     const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
@@ -649,12 +696,18 @@ pub const Tokenizer = struct {
         return buf[0..pos];
     }
 
-    const TemplateKind = enum { chatml, llama3, generic };
+    const TemplateKind = enum { chatml, llama3, gemma, generic };
+
+    pub fn detectTemplateKindName(self: *const Tokenizer) []const u8 {
+        return @tagName(self.detectTemplateKind());
+    }
 
     fn detectTemplateKind(self: *const Tokenizer) TemplateKind {
         const tmpl = self.chat_template orelse return .chatml;
         if (std.mem.indexOf(u8, tmpl, "im_start") != null) return .chatml;
         if (std.mem.indexOf(u8, tmpl, "start_header_id") != null) return .llama3;
+        if (std.mem.indexOf(u8, tmpl, "start_of_turn") != null or
+            std.mem.indexOf(u8, tmpl, "<|turn>") != null) return .gemma;
         return .generic;
     }
 

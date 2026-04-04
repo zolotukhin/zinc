@@ -446,7 +446,7 @@ function historyTransportContent(answer,raw,enableThinking,supportsThinking){
 }
 
 function chatMaxTokens(enableThinking){
-  return enableThinking?2048:1024;
+  return enableThinking?256:128;
 }
 
 function assistantHtmlFromRaw(raw,isThinking){
@@ -540,7 +540,7 @@ async function fetchRecoveredAnswer(model,messages){
       messages,
       stream:false,
       max_tokens:512,
-      temperature:0.0,
+      temperature:1.0,
       enable_thinking:false
     })
   });
@@ -1507,7 +1507,7 @@ async function send(){
       if(!activeController||stopRequested||errorMessage)return;
       errorMessage='Response timed out — the server is still processing a long prompt. Try a shorter message or wait and retry.';
       activeController.abort();
-    },30000);
+    },120000);
   }
   activeController=new AbortController();stopRequested=false;setGenerating(true);
   try{
@@ -1520,7 +1520,7 @@ async function send(){
     requestMessages=requestMessagesFromHistory(supportsThinkingForHistory);
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:selectedModelId,session_id:chatSessionId,messages:requestMessages,stream:true,max_tokens:maxTokens,temperature:0.0,enable_thinking:enableThinking}),
+      body:JSON.stringify({model:selectedModelId,session_id:chatSessionId,messages:requestMessages,stream:true,max_tokens:maxTokens,temperature:1.0,enable_thinking:enableThinking}),
       signal:activeController.signal});
     if(!r.ok){let e=await r.json().catch(()=>({}));throw new Error(e.error?.message||r.statusText)}
     if(!r.body)throw new Error('Streaming response missing body');

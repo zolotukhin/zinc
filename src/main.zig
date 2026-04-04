@@ -1799,6 +1799,11 @@ pub fn main() !void {
             }
             const output_text = trimCliOutputText(text_buf.items, config.chat);
             log.info("Output text: {s}", .{output_text});
+            // Also log raw token IDs for debugging
+            log.info("Output tokens ({d}): first20={any}", .{
+                output_tokens.len,
+                output_tokens[0..@min(output_tokens.len, 20)],
+            });
         }
     } else {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });

@@ -500,6 +500,7 @@ pub const InferenceEngine = struct {
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
     page_table_buf: Buffer, // identity page table for flash attention (page_ids[i] = i)
     unit_weight_buf: Buffer, // buffer of all 1.0f values for bare RMS norm (Gemma V norm)
+    rope_inv_freq_buf: Buffer, // precomputed inv_freq with freq_factors for proportional RoPE
     // SSM state (per-layer, CPU-side, for SSM layers) — legacy, used until GPU SSM is integrated
     ssm_conv_states: [][]f32, // [n_layers] conv state: (kernel_size-1) * conv_channels
     ssm_states: [][]f32, // [n_layers] recurrent state: head_v_dim * head_v_dim * num_v_heads
@@ -581,7 +582,7 @@ pub const InferenceEngine = struct {
         // fall back to global memory reads (correct but slower).
         // Use the actual max K, capped to what fits in shared memory (16384 = 64KB / 4).
         const uncapped_max_k = @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val);
-        const max_k = @min(uncapped_max_k, 16384);
+        const max_k = @min(uncapped_max_k, 8192);
         if (uncapped_max_k > 16384) {
             log.info("DMMV: inter_dim={d} exceeds shared memory, using global fallback for K>{d}", .{ uncapped_max_k, max_k });
         }
@@ -829,6 +830,57 @@ pub const InferenceEngine = struct {
             vk.c.vkUnmapMemory(instance.device, unit_weight_buf.memory);
         }
 
+        // Precompute inverse frequencies for proportional RoPE (Gemma 4 global layers).
+        // When rope_freqs.weight exists, compute: inv_freq[i] = 1/(theta^(2i/dim) * freq_factor[i])
+        const max_half_rot: u32 = max_head_dim / 2;
+        const rope_inv_freq_size = @as(vk.c.VkDeviceSize, max_half_rot) * @sizeOf(f32);
+        var rope_inv_freq_buf = try Buffer.init(
+            instance,
+            @max(rope_inv_freq_size, 4),
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer rope_inv_freq_buf.deinit();
+        {
+            var rif_ptr: ?*anyopaque = null;
+            const rif_r = vk.c.vkMapMemory(instance.device, rope_inv_freq_buf.memory, 0, @max(rope_inv_freq_size, 4), 0, &rif_ptr);
+            if (rif_r != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            const rif_f32: [*]f32 = @ptrCast(@alignCast(rif_ptr));
+
+            // Check if rope_freqs.weight tensor exists (proportional RoPE)
+            const rope_freqs_tensor = findLoadedTensor(model, "rope_freqs.weight");
+            if (rope_freqs_tensor) |rft| {
+                // Read freq_factors from the tensor data
+                const mmap2 = model.mmap_data orelse return error.NoMmapData;
+                const rf_off: usize = @intCast(model.gguf_file.tensor_data_offset + rft.info.offset);
+                const rf_ptr: [*]const f32 = @ptrCast(@alignCast(mmap2.ptr + rf_off));
+                const n_factors: u32 = @intCast(rft.info.numElements());
+                const theta = config.rope_freq_base;
+                const dim_f: f32 = @floatFromInt(max_head_dim);
+                for (0..max_half_rot) |i| {
+                    const exponent: f32 = @as(f32, @floatFromInt(2 * i)) / dim_f;
+                    const base_freq: f32 = 1.0 / std.math.pow(f32, theta, exponent);
+                    const factor: f32 = if (i < n_factors) rf_ptr[i] else 1.0;
+                    rif_f32[i] = base_freq / factor;
+                }
+                log.info("Proportional RoPE: {d} freq_factors loaded, theta={d:.0}, dim={d} inv_freq[0]={d:.6} inv_freq[63]={d:.6} inv_freq[64]={d:.10} inv_freq[255]={d:.10}", .{
+                    n_factors, theta, max_head_dim,
+                    rif_f32[0], rif_f32[63],
+                    if (max_half_rot > 64) rif_f32[64] else @as(f32, 0),
+                    if (max_half_rot > 255) rif_f32[255] else @as(f32, 0),
+                });
+            } else {
+                // No freq_factors: compute standard inv_freq
+                const theta = config.rope_freq_base;
+                const dim_f: f32 = @floatFromInt(max_head_dim);
+                for (0..max_half_rot) |i| {
+                    const exponent: f32 = @as(f32, @floatFromInt(2 * i)) / dim_f;
+                    rif_f32[i] = 1.0 / std.math.pow(f32, theta, exponent);
+                }
+            }
+            vk.c.vkUnmapMemory(instance.device, rope_inv_freq_buf.memory);
+        }
+
         // SSM state (CPU-side, for hybrid models)
         const ssm_conv_states = try allocator.alloc([]f32, config.n_layers);
         const ssm_states = try allocator.alloc([]f32, config.n_layers);
@@ -993,6 +1045,7 @@ pub const InferenceEngine = struct {
             .kv_v_cache = kv_v_cache,
             .page_table_buf = page_table_buf,
             .unit_weight_buf = unit_weight_buf,
+            .rope_inv_freq_buf = rope_inv_freq_buf,
             .ssm_conv_states = ssm_conv_states,
             .ssm_states = ssm_states,
             .ssm_hidden_staging = ssm_hidden_staging,
@@ -1573,12 +1626,13 @@ pub const InferenceEngine = struct {
                 const v_rows: u32 = @intCast(v_tensor.info.numElements() / hidden_dim);
                 const o_cols: u32 = @intCast(o_tensor.info.numElements() / hidden_dim);
 
-                // Gemma 4: per-layer head_dim and n_kv_heads vary (sliding vs global layers).
-                // Derive actual dimensions from tensor shapes instead of using fixed config values.
+                // Per-layer dimensions from tensor shapes (Gemma 4 has varying head_dim/kv_heads).
                 const layer_q_dim = q_rows;
                 const layer_kv_dim = k_rows;
                 const layer_head_dim: u32 = if (config.n_heads > 0) layer_q_dim / config.n_heads else config.head_dim;
                 const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else config.n_kv_heads;
+
+
 
                 const packed_q_gate = q_rows == q_dim * 2;
                 const separate_attn_gate = q_rows == q_dim and attn_gate_tensor != null;
@@ -1599,6 +1653,9 @@ pub const InferenceEngine = struct {
                     });
                 }
 
+
+
+
                 if (packed_q_gate) {
                     // Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.
                     // Project into a temporary buffer and split each head block out.
@@ -1615,8 +1672,10 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, layer_kv_dim, hidden_dim);
                 // Gemma 4: when V=K (shared weights), apply BARE RMS norm to V (no weight).
                 // K gets weighted RMS norm (attn_k_norm), V gets plain normalization using unit weights.
+                // Barrier: V DMMV must complete before V norm reads v_buf.
                 const v_is_shared = self.findLayerTensor(layer, "attn_v.weight") == null;
                 if (v_is_shared) {
+                    self.decode_cmd.computeBarrier();
                     const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet3(ds, self.v_buf.handle, self.v_buf.size, self.unit_weight_buf.handle, self.unit_weight_buf.size, self.v_buf.handle, self.v_buf.size);
@@ -1721,15 +1780,17 @@ pub const InferenceEngine = struct {
                 // The high theta naturally suppresses rotation of high-dimension pairs.
                 const is_sliding_layer = (layer_head_dim < config.head_dim and config.rope_freq_base_swa > 0);
                 const layer_rope_dim: u32 = layer_head_dim;
-                const layer_rope_freq: f32 = if (is_sliding_layer) config.rope_freq_base_swa else config.rope_freq_base;
+                // Sliding: standard RoPE with theta from GGUF. Global: use precomputed freq buffer (freq_base=0 signals shader).
+                const use_freq_buf = !is_sliding_layer and findLoadedTensor(self.model, "rope_freqs.weight") != null;
+                const layer_rope_freq: f32 = if (use_freq_buf) 0.0 else if (is_sliding_layer) config.rope_freq_base_swa else config.rope_freq_base;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
                     const q_ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet2(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size);
+                    self.writeDescSet3(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size, self.rope_inv_freq_buf.handle, self.rope_inv_freq_buf.size);
                     try self.elementwise.recordRope(&self.decode_cmd, q_ds, layer_head_dim, layer_rope_dim, config.n_heads, state.position, layer_rope_freq);
 
                     const k_ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet2(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size);
+                    self.writeDescSet3(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size, self.rope_inv_freq_buf.handle, self.rope_inv_freq_buf.size);
                     try self.elementwise.recordRope(&self.decode_cmd, k_ds, layer_head_dim, layer_rope_dim, layer_n_kv_heads, state.position, layer_rope_freq);
                 }
                 self.decode_cmd.computeBarrier();
@@ -2419,6 +2480,39 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
                 self.decode_cmd.computeBarrier();
 
+                // Q6K DMMV check for FFN down (K=inter_dim, uses global mem fallback for Gemma 4)
+                if (state.position == 0 and layer == 0 and config.architecture == .gemma) {
+                    self.decode_cmd.computeToTransferBarrier();
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @min(@as(vk.c.VkDeviceSize, inter_dim) * @sizeOf(f32), self.logits_staging.size) });
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size });
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                    const sw_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    const dn_ptr: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+                    const mmap = self.model.mmap_data orelse return error.NoMmapData;
+                    const down_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + down_tensor.info.offset);
+                    // CPU reference for first 4 rows of FFN down (Q6K with K=inter_dim)
+                    const cpu_row_buf = try self.allocator.alloc(f32, inter_dim);
+                    defer self.allocator.free(cpu_row_buf);
+                    var max_diff: f32 = 0;
+                    for (0..4) |row| {
+                        dequantRow(mmap[down_off..], @intCast(row), inter_dim, down_tensor.info.type_, cpu_row_buf);
+                        var dot: f64 = 0;
+                        const sw_n = @min(inter_dim, @as(u32, @intCast(self.logits_staging.size / @sizeOf(f32))));
+                        for (0..sw_n) |d| dot += @as(f64, cpu_row_buf[d]) * @as(f64, sw_ptr[d]);
+                        const diff = @abs(dn_ptr[row] - @as(f32, @floatCast(dot)));
+                        if (diff > max_diff) max_diff = diff;
+                        if (row < 2) log.info("Q6K_CHECK L0 down[{d}]: gpu={d:.6} cpu={d:.6} diff={d:.6}", .{ row, dn_ptr[row], @as(f32, @floatCast(dot)), diff });
+                    }
+                    log.info("Q6K_CHECK L0: type={s} K={d} max_diff={d:.6} ok={s}", .{
+                        @tagName(down_tensor.info.type_), inter_dim, max_diff,
+                        if (max_diff < 0.5) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                    });
+                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+                }
+
                 if (state.position == 0 and self.validation_diagnostics_enabled and layer == 0 and inter_dim <= 8192) {
                     try self.decode_cmd.end();
                     try self.decode_cmd.submitAndWait(self.instance.compute_queue);
@@ -2706,6 +2800,35 @@ pub const InferenceEngine = struct {
             findLoadedTensor(self.model, "token_embd.weight") orelse return error.TensorNotFound;
         try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
 
+        // GPU softcapping: apply tanh softcap in-place on logits_buf before argmax.
+        // This allows GPU argmax to work on softcapped logits (no CPU readback needed for greedy).
+        const softcap = self.model.config.final_logit_softcapping;
+        if (softcap > 0 and self.elementwise.pipeline_softcap != null) {
+            self.decode_cmd.computeBarrier();
+            const sc_pip = &(self.elementwise.pipeline_softcap orelse unreachable);
+            const sc_ds = try self.allocDescSet(sc_pip.descriptor_set_layout);
+            // Softcap shader uses 1 binding: logits buffer (read-write)
+            const desc_info = vk.c.VkDescriptorBufferInfo{
+                .buffer = self.logits_buf.handle,
+                .offset = 0,
+                .range = @as(vk.c.VkDeviceSize, self.model.config.vocab_size) * @sizeOf(f32),
+            };
+            const write = vk.c.VkWriteDescriptorSet{
+                .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = null,
+                .dstSet = sc_ds,
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = null,
+                .pBufferInfo = &desc_info,
+                .pTexelBufferView = null,
+            };
+            vk.c.vkUpdateDescriptorSets(self.instance.device, 1, &write, 0, null);
+            try self.elementwise.recordSoftcap(&self.decode_cmd, sc_ds, self.model.config.vocab_size, softcap);
+        }
+
         const use_gpu_argmax = collect_output and self.argmax.pipeline != null and self.argmax_descriptor_set != null;
         if (use_gpu_argmax) {
             self.decode_cmd.computeBarrier();
@@ -2717,9 +2840,10 @@ pub const InferenceEngine = struct {
             );
         }
 
-        // Read back the 4-byte token id result every token, and full logits only when debugging
-        // or when GPU argmax is unavailable and we must fall back to CPU greedy sampling.
-        const need_logits_readback = collect_output and (self.logits_readback_enabled or self.validation_diagnostics_enabled or !use_gpu_argmax);
+        // Logits readback: needed for CPU temperature sampling or debugging.
+        // GPU softcapping + argmax handles greedy decoding without readback.
+        // Models with softcapping may need temperature sampling, so always readback for them.
+        const need_logits_readback = collect_output and (self.logits_readback_enabled or self.validation_diagnostics_enabled or !use_gpu_argmax or softcap > 0);
         if (self.profile_enabled and collect_output and !use_gpu_argmax) {
             self.profile_token_counters.cpu_argmax_fallbacks += 1;
         }
@@ -3509,9 +3633,8 @@ pub const InferenceEngine = struct {
     pub fn sampleGreedy(self: *const InferenceEngine) u32 {
         const softcap = self.model.config.final_logit_softcapping;
 
-        // When logit softcapping is active (Gemma 4), must use CPU path
-        // because GPU argmax operates on raw unsoftcapped logits.
-        if (softcap == 0 and self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
+        // GPU argmax: works for all models (softcapping is now applied on GPU before argmax).
+        if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
             const token_ptr: [*]const u32 = @ptrCast(@alignCast(self.argmax_result_staging.mapped.?));
             return token_ptr[0];
         }
@@ -3538,9 +3661,10 @@ pub const InferenceEngine = struct {
         if (!params.requiresLogitsReadback()) return self.sampleGreedy();
 
         const vocab_size = self.model.config.vocab_size;
-        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
-        const logits = logits_ptr[0..vocab_size];
-        return sampleFromLogits(logits, state.generated_tokens.items, params, random);
+        const logits_ptr: [*]f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+        // Softcapping is already applied on GPU (softcap.comp shader runs before readback).
+        // No CPU-side softcapping needed.
+        return sampleFromLogits(logits_ptr[0..vocab_size], state.generated_tokens.items, params, random);
     }
 
     // -----------------------------------------------------------------------
@@ -4038,6 +4162,7 @@ pub const InferenceEngine = struct {
         // KV cache + page table
         self.page_table_buf.deinit();
         self.unit_weight_buf.deinit();
+        self.rope_inv_freq_buf.deinit();
         for (self.kv_k_cache) |*b| b.deinit();
         for (self.kv_v_cache) |*b| b.deinit();
         self.allocator.free(self.kv_k_cache);
@@ -4136,8 +4261,8 @@ pub fn generate(
         prompt_tokens.len, max_tokens,
     });
 
-    // Enable logits readback for Gemma 4 debugging
-    if (engine.model.config.architecture == .gemma) engine.logits_readback_enabled = true;
+
+
 
     // Prefill: batch all prompt tokens in a single GPU submission
     const prefill_start = std.time.nanoTimestamp();
@@ -4163,9 +4288,24 @@ pub fn generate(
     var generated: u32 = 0;
     const decode_start = std.time.nanoTimestamp();
 
+    // Use temperature sampling for models with softcapping (Gemma 4) to avoid repetition
+    const sampling_params: SamplingParams = if (engine.model.config.final_logit_softcapping > 0)
+        .{ .temperature = 1.0, .top_p = 0.95, .repetition_penalty = 1.0 }
+    else
+        .{ .temperature = 0.0 };
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
+    if (sampling_params.temperature > 0) {
+        log.info("Sampling: temp={d:.2} top_p={d:.2} rep_pen={d:.2}", .{
+            sampling_params.temperature, sampling_params.top_p, sampling_params.repetition_penalty,
+        });
+    }
+
     // Sample the first output token from prefill logits (no extra decodeStep)
     if (prompt_tokens.len > 0 and max_tokens > 0) {
-        const first_token = engine.sampleGreedy();
+        const first_token = if (sampling_params.requiresLogitsReadback())
+            engine.sample(&state, sampling_params, prng.random())
+        else
+            engine.sampleGreedy();
         try state.generated_tokens.append(allocator, first_token);
         log.debug("decode[0]: token={d} pos={d} (from prefill logits)", .{
             first_token, state.position,
@@ -4183,7 +4323,10 @@ pub fn generate(
         const input_token = state.generated_tokens.items[state.generated_tokens.items.len - 1];
 
         try engine.decodeStep(&state, input_token, true);
-        const token = engine.sampleGreedy();
+        const token = if (sampling_params.requiresLogitsReadback())
+            engine.sample(&state, sampling_params, prng.random())
+        else
+            engine.sampleGreedy();
         try state.generated_tokens.append(allocator, token);
         // Top-5 logits per token for first 5 tokens + last token
         if (generated < 5 or generated == max_tokens - 1) {
@@ -4196,8 +4339,8 @@ pub fn generate(
             generated, token, state.position, tok_ms,
         });
 
-        // Check for EOS token (read from GGUF metadata)
-        if (token == eos_token_id) break;
+        // Check for EOS/EOG tokens (Gemma 4 uses both <turn|>=106 and </s>=1)
+        if (token == eos_token_id or token == 1 or token == 212) break;
     }
     const decode_end = std.time.nanoTimestamp();
 

@@ -3,37 +3,49 @@
 // Rotates only the first rope_dim dimensions per head, copying rest unchanged.
 // stride = full head_dim (spacing between heads in memory)
 // rope_dim = how many dims to rotate (must be <= stride, even)
+//
+// When freq_buf_flag is non-zero, precomputed inverse frequencies are read from
+// the freq buffer (binding 2) instead of being calculated from freq_base.
+// This supports proportional RoPE (Gemma 4 global layers) where per-dimension
+// frequency factors modify the base frequencies.
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) readonly buffer InputQK { float x[]; };
 layout(set = 0, binding = 1) writeonly buffer OutputQK { float y[]; };
+layout(set = 0, binding = 2) readonly buffer FreqBuf { float inv_freq[]; };
 
 layout(push_constant) uniform PushConstants {
     uint  stride;         // full head dimension (distance between heads)
     uint  rope_dim;       // number of dimensions to rotate (<= stride, even)
     uint  n_heads;        // total number of heads
     uint  position;       // token position in the sequence
-    uint  freq_base_bits; // RoPE base frequency as uint bits
+    uint  freq_base_bits; // RoPE base frequency as uint bits (0 = use freq buffer)
 };
 
 void main() {
     uint tid  = gl_LocalInvocationID.x;
     uint head = gl_WorkGroupID.x;
 
-    float freq_base = uintBitsToFloat(freq_base_bits);
     uint base_idx = head * stride;
-
     uint half_rot = rope_dim / 2;
+
+    float freq_base = uintBitsToFloat(freq_base_bits);
+    bool use_freq_buf = (freq_base_bits == 0u);
 
     // Rotate the first rope_dim elements in pairs
     for (uint i = tid; i < half_rot; i += 64) {
         float x_i   = x[base_idx + i];
         float x_ihd = x[base_idx + i + half_rot];
 
-        float exponent = float(2 * i) / float(rope_dim);
-        float freq_i   = 1.0 / pow(freq_base, exponent);
-        float theta    = float(position) * freq_i;
+        float freq_i;
+        if (use_freq_buf) {
+            freq_i = inv_freq[i];
+        } else {
+            float exponent = float(2 * i) / float(rope_dim);
+            freq_i = 1.0 / pow(freq_base, exponent);
+        }
+        float theta = float(position) * freq_i;
 
         float cos_t = cos(theta);
         float sin_t = sin(theta);

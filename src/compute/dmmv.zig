@@ -109,7 +109,7 @@ pub const DmmvDispatch = struct {
         var path_buf: [512]u8 = undefined;
 
         const q4k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k = pipeline_mod.createFromSpirv(instance, q4k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q4k = pipeline_mod.createFromSpirv(instance, q4k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
             log.warn("Q4_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -121,13 +121,13 @@ pub const DmmvDispatch = struct {
         };
 
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
             log.warn("Q6_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -285,11 +285,11 @@ pub const DmmvDispatch = struct {
             .y_offset = y_offset,
         };
 
-        // Workgroup count depends on shader: Q4_K uses 1 row/thread (64 rows/WG),
-        // Q8_0 uses 2 rows/WG, others use 1 row/thread (64 rows/WG)
+        // K-parallel shaders with NUM_ROWS=2 (16 threads per block, subgroupAdd)
         const workgroups_x = switch (quant_type) {
-            .q8_0, .f16 => (M + 1) / 2, // 2 rows per workgroup
-            else => (M + 63) / 64, // 1 row per thread, 64 threads per WG
+            .q4_k, .q5_k, .q6_k => (M + 1) / 2, // K-parallel, NUM_ROWS=2
+            .q8_0, .f16 => (M + 1) / 2,
+            else => (M + 63) / 64,
         };
 
         cmd.dispatchWithPush(
