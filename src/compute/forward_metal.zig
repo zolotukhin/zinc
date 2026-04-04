@@ -2388,8 +2388,40 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
-            // Q4_K/Q6_K DMMV validation: all projections verified correct at positions 0 and 10
-            // (max_diff < 0.00002 after RoPE correction — 2026-04-03 investigation)
+            // Flash attention verified correct at pos=5, layers 0-4 (max_diff < 0.0000004)
+            if (false and engine.debug_validation_enabled and using_local_cmd and engine.position == 5 and layer_idx < 5) {
+                commitAndWaitProfiled(cmd, profile);
+                // CPU flash attention reference
+                const q_ptr: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+                const kc_ptr: [*]const f32 = @ptrCast(@alignCast(engine.kv_k_cache[layer_idx].cpu_ptr.?));
+                const vc_ptr: [*]const f32 = @ptrCast(@alignCast(engine.kv_v_cache[layer_idx].cpu_ptr.?));
+                const attn_gpu: [*]const f32 = @ptrCast(@alignCast(engine.attn_out_buf.cpu_ptr.?));
+                const seq_len: usize = @intCast(engine.position + 1);
+                const cpu_attn = try engine.allocator.alloc(f32, q_dim);
+                defer engine.allocator.free(cpu_attn);
+                refFlashAttnContiguous(
+                    q_ptr[0..q_dim],
+                    kc_ptr[0 .. seq_len * kv_dim],
+                    vc_ptr[0 .. seq_len * kv_dim],
+                    cpu_attn,
+                    @intCast(cfg.head_dim),
+                    @intCast(cfg.n_heads),
+                    @intCast(cfg.n_kv_heads),
+                    seq_len,
+                );
+                var attn_max_d: f32 = 0;
+                var attn_max_i: usize = 0;
+                for (0..q_dim) |i| {
+                    const d = @abs(attn_gpu[i] - cpu_attn[i]);
+                    if (d > attn_max_d) { attn_max_d = d; attn_max_i = i; }
+                }
+                log.info("FLASH_CHECK pos={d} L{d}: max_diff={d:.8} idx={d} gpu={d:.6} cpu={d:.6}", .{
+                    engine.position, layer_idx, attn_max_d, attn_max_i, attn_gpu[attn_max_i], cpu_attn[attn_max_i],
+                });
+                local_cmd_storage = try beginProfiledCommand(engine, profile);
+                cmd = &local_cmd_storage;
+            }
+
             if (false and engine.debug_validation_enabled and using_local_cmd and (engine.position == 0 or engine.position == 10) and layer_idx == 0) {
                 // At position 10: overwrite norm_buf with 1.0 to test with known input
                 if (engine.position == 10) {
