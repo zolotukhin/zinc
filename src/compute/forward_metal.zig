@@ -2970,7 +2970,11 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     &engine.down_buf,                      &engine.ssm_state_bufs.?[layer_idx],
                     &engine.attn_out_buf,
                 };
-                cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, (head_v_dim + 63) / 64, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
+                // SPIRV-Cross Metal shader loops over all head_v_dim rows internally
+                // (stride-64), unlike the GLSL original which uses gl_WorkGroupID.y
+                // for row tiling. grid.y must be 1 to avoid duplicate workgroups
+                // racing on the same SSM state memory. (All unit tests already use y=1.)
+                cmd.dispatchV2(&engine.ssm_delta_net_pipe, .{ dt_rank, 1, 1 }, .{ 64, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPush), 0);
             }
             cmd.barrier();
             const should_debug_ssm_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6 and using_local_cmd;
