@@ -69,6 +69,86 @@ pub const InitOptions = struct {
     debug_validation_enabled: bool = false,
 };
 
+/// Token sampling parameters for temperature, top-p, top-k, and repetition penalty.
+pub const SamplingParams = struct {
+    temperature: f32 = 0.0,
+    top_p: f32 = 1.0,
+    repetition_penalty: f32 = 1.0,
+    top_k: u32 = 64,
+
+    pub fn requiresLogitsReadback(self: @This()) bool {
+        return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
+    }
+};
+
+fn tokenSeen(history: []const u32, token: u32) bool {
+    for (history) |t| if (t == token) return true;
+    return false;
+}
+
+fn adjustedLogit(logit: f32, token: u32, history: []const u32, repetition_penalty: f32) f32 {
+    if (repetition_penalty <= 1.0001 or !tokenSeen(history, token)) return logit;
+    if (logit >= 0) return logit / repetition_penalty;
+    return logit * repetition_penalty;
+}
+
+fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random) u32 {
+    if (logits.len == 0) return 0;
+    if (params.temperature <= 0.0001) {
+        var best_idx: u32 = 0;
+        var best_val = adjustedLogit(logits[0], 0, history, params.repetition_penalty);
+        for (logits[1..], 1..) |raw, i| {
+            const val = adjustedLogit(raw, @intCast(i), history, params.repetition_penalty);
+            if (val > best_val) { best_val = val; best_idx = @intCast(i); }
+        }
+        return best_idx;
+    }
+    const max_candidates = 128;
+    const top_k: usize = @min(@max(params.top_k, 1), max_candidates);
+    const temperature = @max(params.temperature, 0.0001);
+    var candidate_ids: [max_candidates]u32 = undefined;
+    var candidate_logits: [max_candidates]f32 = undefined;
+    var candidate_count: usize = 0;
+    for (logits, 0..) |raw_val, i| {
+        if (!std.math.isFinite(raw_val)) continue;
+        const val = adjustedLogit(raw_val, @intCast(i), history, params.repetition_penalty);
+        var insert_at = candidate_count;
+        while (insert_at > 0 and val > candidate_logits[insert_at - 1]) : (insert_at -= 1) {}
+        if (insert_at >= top_k) continue;
+        if (candidate_count < top_k) candidate_count += 1;
+        var j = candidate_count - 1;
+        while (j > insert_at) : (j -= 1) {
+            candidate_ids[j] = candidate_ids[j - 1];
+            candidate_logits[j] = candidate_logits[j - 1];
+        }
+        candidate_ids[insert_at] = @intCast(i);
+        candidate_logits[insert_at] = val;
+    }
+    if (candidate_count <= 1) return if (candidate_count == 1) candidate_ids[0] else 0;
+    var weights: [max_candidates]f64 = undefined;
+    const max_logit = @as(f64, candidate_logits[0]) / @as(f64, temperature);
+    var total_weight: f64 = 0.0;
+    for (0..candidate_count) |i| {
+        const w = @exp(@as(f64, candidate_logits[i]) / @as(f64, temperature) - max_logit);
+        weights[i] = w;
+        total_weight += w;
+    }
+    if (!(total_weight > 0.0) or !std.math.isFinite(total_weight)) return candidate_ids[0];
+    const safe_top_p = std.math.clamp(params.top_p, 0.0, 1.0);
+    var keep_count = candidate_count;
+    if (safe_top_p < 0.9999) {
+        var cum: f64 = 0.0;
+        for (0..candidate_count) |i| { cum += weights[i] / total_weight; keep_count = i + 1; if (cum >= @as(f64, safe_top_p) and i > 0) break; }
+    }
+    var kept_w: f64 = 0.0;
+    for (0..keep_count) |i| kept_w += weights[i];
+    if (!(kept_w > 0.0)) return candidate_ids[0];
+    const target = random.float(f64) * kept_w;
+    var cum: f64 = 0.0;
+    for (0..keep_count) |i| { cum += weights[i]; if (target <= cum) return candidate_ids[i]; }
+    return candidate_ids[keep_count - 1];
+}
+
 /// Cumulative per-request profiling counters for the Metal decode loop.
 pub const RuntimeProfile = struct {
     decode_steps: u32 = 0,
@@ -1009,6 +1089,14 @@ pub const InferenceEngine = struct {
             }
         }
         return max_idx;
+    }
+
+    /// Sample with temperature, top-k, top-p, and repetition penalty.
+    pub fn sample(self: *const InferenceEngine, history: []const u32, params: SamplingParams, random: std.Random) u32 {
+        if (!params.requiresLogitsReadback()) return self.sampleGreedy();
+        const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
+        const logits = logits_ptr[0..self.config.vocab_size];
+        return sampleFromLogits(logits, history, params, random);
     }
 
     /// Reset position, profile counters, and SSM state for a new request.
