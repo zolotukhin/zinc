@@ -361,6 +361,23 @@ const RmsNormPush = extern struct {
     eps: f32, // epsilon
 };
 
+/// Push constants for fused residual-add + RMS norm (matches residual_rms_norm.metal: buffer(0)).
+/// Eliminates one barrier per layer vs separate scale_acc + rms_norm.
+const ResidualRmsNormPush = extern struct {
+    n: u32,
+    eps: f32,
+    scale: f32,
+};
+
+/// Push constants for fused MoE weighted acc + shared expert (matches moe_weighted_acc_shared.metal: buffer(3)).
+/// Eliminates one barrier per layer vs separate moe_weighted_acc + sigmoid_scale_acc.
+const MoeWeightedAccSharedPush = extern struct {
+    n: u32,
+    n_used: u32,
+    src_stride: u32,
+    has_gate: u32,
+};
+
 /// Push constants for sigmoid multiply dispatch (matches sigmoid_mul.metal: buffer(0)).
 const SigmoidMulPush = extern struct {
     n: u32,
@@ -540,6 +557,8 @@ pub const InferenceEngine = struct {
     softmax_topk_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
+    residual_rms_norm_pipe: MetalPipeline,
+    moe_weighted_acc_shared_pipe: MetalPipeline,
     copy_u32_pipe: MetalPipeline,
     copy_f32_pipe: MetalPipeline,
     zero_f32_pipe: MetalPipeline,
@@ -756,6 +775,8 @@ pub const InferenceEngine = struct {
         self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
+        self.residual_rms_norm_pipe = try loadShaderPipeline(ctx, "residual_rms_norm");
+        self.moe_weighted_acc_shared_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_shared");
         self.copy_u32_pipe = try loadShaderPipeline(ctx, "copy_u32");
         self.copy_f32_pipe = try loadShaderPipeline(ctx, "copy_f32");
         self.zero_f32_pipe = try loadShaderPipeline(ctx, "zero_f32");
@@ -1135,6 +1156,8 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.softmax_topk_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
+        metal_pipeline.freePipeline(&self.residual_rms_norm_pipe);
+        metal_pipeline.freePipeline(&self.moe_weighted_acc_shared_pipe);
         metal_pipeline.freePipeline(&self.copy_u32_pipe);
         metal_pipeline.freePipeline(&self.copy_f32_pipe);
         metal_pipeline.freePipeline(&self.zero_f32_pipe);
@@ -2006,6 +2029,24 @@ fn dispatchRmsNormOnCmd(
     cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ simd_width, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
 }
 
+/// Fused residual-add + RMS norm: hidden += scale * residual; norm_out = weights * normalize(hidden).
+/// Eliminates one barrier per layer vs separate scale_acc + barrier + rms_norm.
+/// residual_rms_norm.metal: buffer(0)=push, buffer(1)=hidden, buffer(2)=residual, buffer(3)=norm_out, buffer(4)=weights.
+fn dispatchResidualRmsNormOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    hidden: *const MetalBuffer,
+    residual: *const MetalBuffer,
+    norm_out: *const MetalBuffer,
+    weights: *const MetalBuffer,
+    n: u32,
+    scale: f32,
+) void {
+    const push = ResidualRmsNormPush{ .n = n, .eps = 1e-6, .scale = scale };
+    const bufs = [_]*const MetalBuffer{ hidden, residual, norm_out, weights };
+    cmd.dispatchV2(&engine.residual_rms_norm_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ResidualRmsNormPush), 0);
+}
+
 fn dispatchDeinterleaveOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -2199,6 +2240,33 @@ fn dispatchMoeWeightedAccOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ accum, src, routing };
     cmd.dispatchV2(&engine.moe_weighted_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccPush), 3);
+}
+
+/// Fused MoE weighted accumulate + shared expert: accum += sum(w_i * expert_i) + sh_weight * shared.
+/// Eliminates one barrier per layer vs separate moe_weighted_acc + sigmoid_scale_acc.
+/// moe_weighted_acc_shared.metal: buffer(0)=accum, buffer(1)=src, buffer(2)=routing, buffer(3)=push,
+///                                buffer(4)=shared_src, buffer(5)=gate.
+fn dispatchMoeWeightedAccSharedOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    accum: *const MetalBuffer,
+    src: *const MetalBuffer,
+    routing: *const MetalBuffer,
+    shared_src: *const MetalBuffer,
+    gate: *const MetalBuffer,
+    n: u32,
+    n_used: u32,
+    src_stride: u32,
+    has_gate: bool,
+) void {
+    const push = MoeWeightedAccSharedPush{
+        .n = n,
+        .n_used = n_used,
+        .src_stride = src_stride,
+        .has_gate = if (has_gate) 1 else 0,
+    };
+    const bufs = [_]*const MetalBuffer{ accum, src, routing, shared_src, gate };
+    cmd.dispatchV2(&engine.moe_weighted_acc_shared_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccSharedPush), 3);
 }
 
 /// Returns true if the attention gate (sigmoid gating) should be applied after flash attn.
@@ -2681,7 +2749,7 @@ fn canUseGpuRoutedBatchedMoe(engine: *const InferenceEngine, lt: LayerTensors) b
     if (!canUseGpuRoutedMoeDown(engine, down_exps.info.type_)) return false;
 
     const has_shexp = lt.ffn_gate_shexp != null and lt.ffn_up_shexp != null and lt.ffn_down_shexp != null;
-    if (has_shexp and lt.ffn_gate_inp_shexp != null and engine.sigmoid_scale_acc_pipe.handle == null) return false;
+    if (has_shexp and engine.moe_weighted_acc_shared_pipe.handle == null) return false;
 
     return engine.softmax_topk_pipe.handle != null and engine.moe_weighted_acc_pipe.handle != null;
 }
@@ -2741,17 +2809,12 @@ fn recordGpuRoutedBatchedMoeOnCmd(
     }
     cmd.barrier(); // down outputs visible before accumulate
 
-    // Phase E: weighted accumulate into hidden_buf.
-    dispatchMoeWeightedAccOnCmd(engine, cmd, &engine.hidden_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, cfg.n_experts_used, hidden_dim);
+    // Phase E: weighted accumulate + shared expert into hidden_buf (fused — saves one barrier per layer).
     if (has_shexp) {
-        cmd.barrier(); // hidden_buf visible before shared expert accumulate
-        if (gate_inp_shexp != null) {
-            dispatchSigmoidScaleAccOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.router_logits_buf, hidden_dim);
-        } else {
-            const shexp_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-            const shexp_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-            cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &shexp_bufs, &shexp_push, @sizeOf(ScaleAccPush), 0);
-        }
+        const gate_buf = if (gate_inp_shexp != null) &engine.router_logits_buf else &engine.down_buf;
+        dispatchMoeWeightedAccSharedOnCmd(engine, cmd, &engine.hidden_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, &engine.down_buf, gate_buf, hidden_dim, cfg.n_experts_used, hidden_dim, gate_inp_shexp != null);
+    } else {
+        dispatchMoeWeightedAccOnCmd(engine, cmd, &engine.hidden_buf, &engine.expert_down_batch_buf, &engine.router_output_buf, hidden_dim, cfg.n_experts_used, hidden_dim);
     }
     cmd.barrier(); // hidden_buf visible to next layer's RMS norm
 }
@@ -2885,13 +2948,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
-            {
-                const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
-            }
-            cmd.barrier(); // hidden_buf visible before ffn_norm
-            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            // Fused residual-add + RMS norm (saves one barrier vs separate scale_acc + rms_norm)
+            dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
             if (is_moe) {
                 cmd.barrier(); // norm_buf visible before router DMMV
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
@@ -3065,14 +3123,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 cmd = &local_cmd_storage;
             }
 
-            // Residual + FFN norm + router (same as attention batch2)
-            {
-                const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
-            }
-            cmd.barrier();
-            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            // Fused residual-add + FFN norm (saves one barrier vs separate scale_acc + rms_norm)
+            dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
             cmd.barrier();
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
