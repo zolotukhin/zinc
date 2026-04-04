@@ -12,10 +12,12 @@ struct DualQ8DmmvPush {
     uint y1_offset;
 };
 
-// Dual-output q8_0 decode path for SSM pre-projections that share the same
-// normalized hidden-state input. This stages X once per workgroup and then
-// routes each row to one of two q8 matrices, reducing repeated activation
-// fetches on the 8192x2048 + 4096x2048 pair that dominates SSM token time.
+// Dual-output Q8_0 DMMV — barrier-free, L1-cached X reads.
+//
+// Fuses two Q8_0 matrix-vector multiplies that share the same input vector
+// (e.g. SSM qkv 8192x2048 + gate 4096x2048) into a single dispatch.
+// Each simdgroup reads X directly from device/L1 cache with no threadgroup
+// memory or barrier, maximizing independent memory streams per GPU core.
 kernel void main0(
     constant DualQ8DmmvPush& p [[buffer(0)]],
     device const uchar* W0 [[buffer(1)]],
@@ -24,24 +26,15 @@ kernel void main0(
     device float* Y0 [[buffer(4)]],
     device float* Y1 [[buffer(5)]],
     uint tg_id [[threadgroup_position_in_grid]],
-    uint local_id [[thread_position_in_threadgroup]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint simdgroups_per_tg [[simdgroups_per_threadgroup]]
 ) {
-    threadgroup half4 x_cache4[512];
-
-    const uint tg_size = simdgroups_per_tg * 32u;
-    device const float* input = X + (p.x_offset >> 2);
-    const uint k_vec4 = p.K >> 2;
-    for (uint i = local_id; i < k_vec4; i += tg_size) {
-        x_cache4[i] = half4(*(device const float4*)(input + (i << 2)));
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
     const uint linear_row = tg_id * simdgroups_per_tg + sg_idx;
     const uint total_rows = p.M0 + p.M1;
     if (linear_row >= total_rows) return;
+
+    device const float* input = X + (p.x_offset >> 2);
 
     const bool first = linear_row < p.M0;
     const uint row = first ? linear_row : (linear_row - p.M0);
@@ -57,13 +50,13 @@ kernel void main0(
         device const uchar* block = row_ptr + bi * 34u;
         const float scale = float(as_type<half>(*(device const ushort*)(block)));
         device const packed_char4* quants = (device const packed_char4*)(block + 2u);
-        const uint x_base = bi * 8u;
+        const uint x_base = bi << 5;  // bi * 32 elements
 
         #pragma unroll
         for (uint vi = 0u; vi < 8u; ++vi) {
             const char4 q = char4(quants[vi]);
-            const half4 x = x_cache4[x_base + vi];
             const half4 q_half = half4(q);
+            const half4 x = half4(*(device const float4*)(input + x_base + (vi << 2)));
             acc = fma(scale, float(dot(q_half, x)), acc);
         }
     }
