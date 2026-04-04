@@ -2385,6 +2385,103 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             cmd.barrier();
+            // Q4_K/Q6_K DMMV validation: all projections verified correct at positions 0 and 10
+            // (max_diff < 0.00002 after RoPE correction — 2026-04-03 investigation)
+            if (false and engine.debug_validation_enabled and using_local_cmd and (engine.position == 0 or engine.position == 10) and layer_idx == 0) {
+                // At position 10: overwrite norm_buf with 1.0 to test with known input
+                if (engine.position == 10) {
+                    commitAndWaitProfiled(cmd, profile);
+                    const test_norm: [*]f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+                    for (0..hidden_dim) |i| test_norm[i] = 1.0;
+                    // Re-dispatch Q/K/V DMMVs with the synthetic input
+                    local_cmd_storage = try beginProfiledCommand(engine, profile);
+                    cmd = &local_cmd_storage;
+                    try dispatchFullAttnPrepOnCmd(engine, cmd, layer_idx, lt, q_dim, kv_dim, hidden_dim);
+                    cmd.barrier();
+                }
+                commitAndWaitProfiled(cmd, profile);
+                // Compare V (Q6_K) and Q (Q4_K) against CPU
+                const v_tensor_dbg = lt.attn_v orelse unreachable;
+                const q_tensor_dbg = lt.attn_q orelse unreachable;
+                const norm_in: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+                const v_gpu: [*]const f32 = @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?));
+                const q_gpu: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+                const mmap = engine.model.mmap_data orelse unreachable;
+                const td_off = engine.model.gguf_file.tensor_data_offset;
+                const v_cpu = try engine.allocator.alloc(f32, kv_dim);
+                defer engine.allocator.free(v_cpu);
+                const q_cpu = try engine.allocator.alloc(f32, q_dim);
+                defer engine.allocator.free(q_cpu);
+                try cpuDmmvFallback(mmap, v_tensor_dbg, td_off, norm_in, v_cpu.ptr, kv_dim, hidden_dim, 0, engine.allocator);
+                const k_tensor_dbg = lt.attn_k orelse unreachable;
+                const k_gpu: [*]const f32 = @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?));
+                const k_cpu = try engine.allocator.alloc(f32, kv_dim);
+                defer engine.allocator.free(k_cpu);
+                try cpuDmmvFallback(mmap, k_tensor_dbg, td_off, norm_in, k_cpu.ptr, kv_dim, hidden_dim, 0, engine.allocator);
+                try cpuDmmvFallback(mmap, q_tensor_dbg, td_off, norm_in, q_cpu.ptr, q_dim, hidden_dim, 0, engine.allocator);
+                // Apply RoPE to CPU reference to match GPU output
+                {
+                    const rd: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
+                    const ifp: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+                    cpuRope(q_cpu.ptr, cfg.head_dim, rd, cfg.n_heads, engine.position, ifp[0 .. rd / 2]);
+                    cpuRope(k_cpu.ptr, cfg.head_dim, rd, cfg.n_kv_heads, engine.position, ifp[0 .. rd / 2]);
+                }
+                var v_max_d: f32 = 0;
+                var v_max_i: usize = 0;
+                var q_max_d: f32 = 0;
+                var q_max_i: usize = 0;
+                for (0..kv_dim) |i| {
+                    const d = @abs(v_gpu[i] - v_cpu[i]);
+                    if (d > v_max_d) { v_max_d = d; v_max_i = i; }
+                }
+                for (0..q_dim) |i| {
+                    const d = @abs(q_gpu[i] - q_cpu[i]);
+                    if (d > q_max_d) { q_max_d = d; q_max_i = i; }
+                }
+                var k_max_d: f32 = 0;
+                for (0..kv_dim) |i| {
+                    const d = @abs(k_gpu[i] - k_cpu[i]);
+                    if (d > k_max_d) k_max_d = d;
+                }
+                log.info("Q6K_CHECK pos={d} L0: V(q6k) max_diff={d:.8} | K(q4k,M=1024) max_diff={d:.8} | Q(q4k,M=4096) max_diff={d:.8} idx={d} gpu={d:.6} cpu={d:.6}", .{
+                    engine.position, v_max_d, k_max_d, q_max_d, q_max_i, q_gpu[q_max_i], q_cpu[q_max_i],
+                });
+                // Count how many Q elements have large errors
+                var big_err_count: u32 = 0;
+                for (0..q_dim) |i| {
+                    if (@abs(q_gpu[i] - q_cpu[i]) > 0.1) big_err_count += 1;
+                }
+                if (big_err_count > 0) {
+                    log.err("Q4K DMMV BUG: {d} elements with error > 0.1 at pos={d} L0", .{ big_err_count, engine.position });
+                    // Check input norm_buf stats
+                    var norm_max: f32 = 0;
+                    var norm_rms: f64 = 0;
+                    for (0..hidden_dim) |i| {
+                        const v = @abs(norm_in[i]);
+                        if (v > norm_max) norm_max = v;
+                        norm_rms += @as(f64, norm_in[i]) * @as(f64, norm_in[i]);
+                    }
+                    log.err("  input norm_buf: max={d:.4} rms={d:.6} [0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                        norm_max,
+                        @as(f32, @floatCast(@sqrt(norm_rms / @as(f64, @floatFromInt(hidden_dim))))),
+                        norm_in[0], norm_in[1], norm_in[2], norm_in[3],
+                    });
+                    // Find first few bad indices
+                    var shown: u32 = 0;
+                    for (0..q_dim) |i| {
+                        if (@abs(q_gpu[i] - q_cpu[i]) > 1.0 and shown < 5) {
+                            // Which Q4_K block and position within the row
+                            const block_idx = i / 4; // which threadgroup row?
+                            log.err("  bad[{d}]: gpu={d:.4} cpu={d:.4} diff={d:.4} (row {d}, block~{d})", .{
+                                i, q_gpu[i], q_cpu[i], q_gpu[i] - q_cpu[i], i, block_idx,
+                            });
+                            shown += 1;
+                        }
+                    }
+                }
+                local_cmd_storage = try beginProfiledCommand(engine, profile);
+                cmd = &local_cmd_storage;
+            }
             const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and engine.position == 0 and (layer_idx == 3 or layer_idx == 4);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
