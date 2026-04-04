@@ -2127,6 +2127,47 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
                 }
             }
         },
+        .q5_0 => {
+            const bpb: usize = 22;
+            const bpr = @as(usize, cols) / 32;
+            const row_off = @as(usize, row) * bpr * bpb;
+            var out_i: usize = 0;
+            for (0..bpr) |b| {
+                const bo = row_off + b * bpb;
+                const d: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, raw_data[bo..][0..2], .little))));
+                const qh = std.mem.readInt(u32, raw_data[bo + 2 ..][0..4], .little);
+                const qs = raw_data[bo + 6 .. bo + 22];
+                for (0..16) |j| {
+                    const lo: u8 = qs[j] & 0x0F;
+                    const hi: u8 = qs[j] >> 4;
+                    const bit_lo: u8 = @intCast((qh >> @intCast(2 * j)) & 1);
+                    const bit_hi: u8 = @intCast((qh >> @intCast(2 * j + 1)) & 1);
+                    output[out_i] = d * @as(f32, @floatFromInt(@as(i32, @intCast(lo | (bit_lo << 4))) - 16));
+                    output[out_i + 16] = d * @as(f32, @floatFromInt(@as(i32, @intCast(hi | (bit_hi << 4))) - 16));
+                    out_i += 1;
+                }
+                out_i += 16; // skip over the second half we already filled
+            }
+        },
+        .mxfp4 => {
+            const bpb: usize = 17;
+            const bpr = @as(usize, cols) / 32;
+            const row_off = @as(usize, row) * bpr * bpb;
+            const lut = [16]f32{ 0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+            var out_i: usize = 0;
+            for (0..bpr) |b| {
+                const bo = row_off + b * bpb;
+                // E8M0 shared exponent → float
+                const exp_byte = raw_data[bo];
+                const d: f32 = @bitCast(if (exp_byte == 0) @as(u32, 0x00400000) else @as(u32, @intCast(exp_byte)) << 23);
+                const qs = raw_data[bo + 1 .. bo + 17];
+                for (0..16) |j| {
+                    output[out_i] = d * lut[qs[j] & 0x0F];
+                    output[out_i + 1] = d * lut[qs[j] >> 4];
+                    out_i += 2;
+                }
+            }
+        },
         else => {
             log.warn("Unsupported quant type {d}, using zeros", .{@intFromEnum(quant_type)});
             @memset(output, 0);
