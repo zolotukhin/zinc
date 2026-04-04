@@ -43,6 +43,9 @@ pub const ModelConfig = struct {
     shared_expert_intermediate_dim: u32,
     final_logit_softcapping: f32 = 0.0,
     attn_scale: f32 = 0.0,
+    sliding_window_size: u32 = 0,
+    rope_scaling_factor: f32 = 0.0,
+    rope_original_context: u32 = 0,
 };
 
 /// Parse architecture string from GGUF metadata.

@@ -756,6 +756,30 @@ pub const InferenceEngine = struct {
                 }
                 log.info("RoPE: loaded {d} custom frequency factors from rope_freqs.weight", .{half_rot});
             }
+
+            // YaRN RoPE scaling for extended context (gpt-oss)
+            if (cfg.rope_scaling_factor > 1.0 and cfg.rope_original_context > 0) {
+                const factor = cfg.rope_scaling_factor;
+                const orig_ctx = @as(f32, @floatFromInt(cfg.rope_original_context));
+                const beta_fast: f32 = 32.0;
+                const beta_slow: f32 = 1.0;
+                const low_freq_wavelen = orig_ctx / beta_slow;
+                const high_freq_wavelen = orig_ctx / beta_fast;
+                for (0..half_rot) |i| {
+                    const freq = freq_ptr[i];
+                    const wavelen = 2.0 * std.math.pi / freq;
+                    if (wavelen < high_freq_wavelen) {
+                        // High frequency: no scaling
+                    } else if (wavelen > low_freq_wavelen) {
+                        freq_ptr[i] = freq / factor;
+                    } else {
+                        const t = (orig_ctx / wavelen - beta_slow) / (beta_fast - beta_slow);
+                        const smooth = @max(@as(f32, 0.0), @min(@as(f32, 1.0), t));
+                        freq_ptr[i] = freq * ((1.0 - smooth) / factor + smooth);
+                    }
+                }
+                log.info("RoPE: applied YaRN scaling factor={d:.1} orig_ctx={d}", .{ factor, cfg.rope_original_context });
+            }
         }
 
         // SSM GPU pipelines
@@ -3415,7 +3439,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         commitAndWaitProfiled(&cmd, profile);
     }
-    if (engine.debug_validation_enabled and engine.position == 9) {
+    if (engine.debug_validation_enabled and engine.position >= 4) {
         const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
         if (profile) |p| p.debug_validation_ns += profileElapsedNs(debug_start);
