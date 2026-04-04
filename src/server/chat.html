@@ -194,21 +194,18 @@ const readyEmptyHtml='<div class="empty" id="w"><strong>ZINC Inference Engine</s
 
 const ICON_QWEN='<svg viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M174.82 108.75L155.38 75L165.64 57.75C166.46 56.31 166.46 54.53 165.64 53.09L155.38 35.84C154.86 34.91 153.87 34.33 152.78 34.33H114.88L106.14 19.03C105.62 18.1 104.63 17.52 103.54 17.52H83.3C82.21 17.52 81.22 18.1 80.7 19.03L61.26 52.77H41.02C39.93 52.77 38.94 53.35 38.42 54.28L28.16 71.53C27.34 72.97 27.34 74.75 28.16 76.19L45.52 107.5L36.78 122.8C35.96 124.24 35.96 126.02 36.78 127.46L47.04 144.71C47.56 145.64 48.55 146.22 49.64 146.22H87.54L96.28 161.52C96.8 162.45 97.79 163.03 98.88 163.03H119.12C120.21 163.03 121.2 162.45 121.72 161.52L141.16 127.78H158.52C159.61 127.78 160.6 127.2 161.12 126.27L171.38 109.02C172.2 107.58 172.2 105.8 171.38 104.36L174.82 108.75Z" fill="url(#qic0)"/><path d="M119.12 163.03H98.88L87.54 144.71H49.64L61.26 126.39H80.7L38.42 55.29H61.26L83.3 19.03L93.56 37.35L83.3 55.29H161.58L151.32 72.54L170.76 106.28H151.32L141.16 88.34L101.18 163.03H119.12Z" fill="white"/><path d="M127.86 79.83H76.14L101.18 122.11L127.86 79.83Z" fill="url(#qic1)"/><defs><radialGradient id="qic0" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(100 100) rotate(90) scale(100)"><stop stop-color="#665CEE"/><stop offset="1" stop-color="#332E91"/></radialGradient><radialGradient id="qic1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(100 100) rotate(90) scale(100)"><stop stop-color="#665CEE"/><stop offset="1" stop-color="#332E91"/></radialGradient></defs></svg>';
 const ICON_GOOGLE='<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09a6.97 6.97 0 0 1 0-4.17V7.07H2.18A11.97 11.97 0 0 0 0 12c0 1.94.46 3.77 1.28 5.4l3.56-2.77.01-.54z" fill="#FBBC05"/><path d="M12 4.75c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 1.09 14.97 0 12 0 7.7 0 3.99 2.47 2.18 6.07l3.66 2.84c.87-2.6 3.3-4.16 6.16-4.16z" fill="#EA4335"/></svg>';
-const ICON_LLAMA='<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="46" fill="#1a1a40"/><path d="M25 52c0-14 11-25 25-25s25 11 25 25" stroke="#60a5fa" stroke-width="7" stroke-linecap="round" fill="none"/><path d="M75 52c0 14-11 25-25 25" stroke="#60a5fa" stroke-width="7" stroke-linecap="round" fill="none"/><path d="M50 77c-9 0-17-5-21-12" stroke="#60a5fa" stroke-width="7" stroke-linecap="round" fill="none"/><circle cx="38" cy="44" r="4" fill="#93c5fd"/><circle cx="62" cy="44" r="4" fill="#93c5fd"/></svg>';
 const ICON_DEFAULT='<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="46" fill="#1a1a40"/><rect x="30" y="35" width="40" height="30" rx="6" stroke="#a78bfa" stroke-width="5" fill="none"/><circle cx="50" cy="50" r="6" fill="#a78bfa"/></svg>';
 
 function modelFamilyFromName(name){
   const f=(name||'').toLowerCase();
   if(f.includes('qwen')) return 'qwen';
   if(f.includes('gemma')) return 'google';
-  if(f.includes('llama')) return 'llama';
   return 'default';
 }
 function modelFamilyIcon(family){
   const f=modelFamilyFromName(family);
   if(f==='qwen') return ICON_QWEN;
   if(f==='google') return ICON_GOOGLE;
-  if(f==='llama') return ICON_LLAMA;
   return ICON_DEFAULT;
 }
 
@@ -408,7 +405,6 @@ function modelHrefForName(name){
   if(n.includes('qwen3.5-35b')||n.includes('qwen3.5-35b-a3b')) return 'https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF';
   if(n.includes('qwen3-30b-a3b')) return 'https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF';
   if(n.includes('qwen2.5-32b')||n.includes('qwen2-32b')) return 'https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF';
-  if(n.includes('llama-3.1-8b')||n.includes('llama 3.1 8b')) return 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF';
   return 'https://huggingface.co/';
 }
 
