@@ -379,6 +379,11 @@ pub fn load(
 
     const config = extractConfig(&gf);
 
+    if (config.architecture == .unknown) {
+        log.err("Unsupported model architecture. Supported: qwen2, qwen2_moe, qwen35, mistral, mamba, jamba", .{});
+        return error.UnsupportedArchitecture;
+    }
+
     // Load tensors to GPU
     var loaded_tensors: std.ArrayList(LoadedTensor) = .{};
     errdefer {
@@ -434,7 +439,7 @@ pub fn load(
 }
 
 test "parseArchitecture" {
-    try std.testing.expectEqual(Architecture.llama, parseArchitecture("llama"));
+    try std.testing.expectEqual(Architecture.unknown, parseArchitecture("llama"));
     try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen2"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
     try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));

@@ -295,6 +295,11 @@ pub fn load(
 
     const config = extractConfig(&gf);
 
+    if (config.architecture == .unknown) {
+        log.err("Unsupported model architecture. Supported: qwen2, qwen2_moe, qwen35, mistral, mamba, jamba", .{});
+        return error.UnsupportedArchitecture;
+    }
+
     // Wrap tensor data as Metal shared buffers (zero-copy from mmap)
     var loaded_tensors: std.ArrayList(LoadedTensor) = .{};
     errdefer {

@@ -317,7 +317,6 @@ Latest single-stream reference results with `zig build -Doptimize=ReleaseFast`:
 
 **Apple Silicon** (M1 Max 32 GB, 2026-04-02):
 - CLI plain decode on `Qwen3.5-2B-Q4_K_M.gguf`: `~17 tok/s`
-- CLI plain decode on `Llama-3.1-8B-Instruct-Q4_K_M.gguf`: `~10 tok/s`
 - CLI plain decode on `Qwen3-8B-Q4_K_M.gguf`: `~8 tok/s`
 
 ### Measure hot decode kernels directly

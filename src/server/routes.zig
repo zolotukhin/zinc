@@ -2274,7 +2274,6 @@ fn fallbackModelName(model: *const Model) []const u8 {
         .qwen35 => "qwen3.5",
         .qwen2_moe => "qwen3.5-35b",
         .qwen2 => "qwen2",
-        .llama => "llama",
         .mistral => "mistral",
         .mamba => "mamba",
         .jamba => "jamba",

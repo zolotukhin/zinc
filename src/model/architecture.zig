@@ -174,7 +174,7 @@ pub fn buildDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocator
 /// Build a compute graph with per-op weight-size annotations derived from a GGUF file.
 pub fn buildDecodeGraphDetailed(config: *const ModelConfig, allocator: std.mem.Allocator, gf: ?*const gguf.GGUFFile) !Graph {
     return switch (config.architecture) {
-        .llama, .mistral, .qwen2 => try buildLlamaDecodeGraph(config, allocator, gf),
+        .mistral, .qwen2 => try buildLlamaDecodeGraph(config, allocator, gf),
         .qwen2_moe => try buildMoeDecodeGraph(config, allocator, gf),
         .qwen35, .mamba, .jamba => try buildMambaDecodeGraph(config, allocator, gf),
         .unknown => error.UnsupportedArchitecture,
@@ -741,10 +741,10 @@ fn buildMambaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
     return g;
 }
 
-test "buildDecodeGraph: llama 2 layers" {
+test "buildDecodeGraph: standard transformer 2 layers" {
     const allocator = std.testing.allocator;
     const config = ModelConfig{
-        .architecture = .llama,
+        .architecture = .qwen2,
         .n_layers = 2,
         .n_heads = 32,
         .n_kv_heads = 8,

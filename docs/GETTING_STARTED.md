@@ -24,7 +24,6 @@ This list is intentionally narrow. It shows the exact GGUFs that have been valid
 
 | Model | Exact GGUF | Fits on |
 |------|------------|---------|
-| **Llama 3.1 8B Instruct** | [Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF) | 16+ GB VRAM or unified |
 | **Qwen3 8B** | [Qwen3-8B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | 16+ GB VRAM or unified |
 | **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 16+ GB VRAM or unified |
 | **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 24+ GB VRAM or unified |
@@ -91,7 +90,7 @@ The catalog auto-detects your GPU profile (`amd-rdna4-32gb`, `apple-silicon`, et
 ## Download a model
 
 ```bash
-./zig-out/bin/zinc model pull llama31-8b-q4k-m
+./zig-out/bin/zinc model pull qwen3-8b-q4k-m
 ```
 
 This downloads the model into a local cache and verifies the SHA-256 hash.
@@ -101,7 +100,7 @@ This downloads the model into a local cache and verifies the SHA-256 hash.
 The `--chat` flag wraps your prompt in the model's chat template (system prompt, role tags, etc.), which is required for instruct-tuned models like Llama 3.1 to produce proper answers.
 
 ```bash
-./zig-out/bin/zinc --model-id llama31-8b-q4k-m --prompt "What is the capital of France?" --chat
+./zig-out/bin/zinc --model-id qwen3-8b-q4k-m --prompt "What is the capital of France?" --chat
 ```
 
 Without `--chat`, the model treats the input as raw text completion, which still works but produces less focused output.
@@ -110,7 +109,7 @@ On RDNA4 Linux, remember to set the environment variable:
 
 ```bash
 export RADV_PERFTEST=coop_matrix
-./zig-out/bin/zinc --model-id llama31-8b-q4k-m --prompt "What is the capital of France?" --chat
+./zig-out/bin/zinc --model-id qwen3-8b-q4k-m --prompt "What is the capital of France?" --chat
 ```
 
 Good first-run signals in the logs:
@@ -135,7 +134,7 @@ This starts the server (default port 9090) and opens the built-in chat UI in you
 You can also start the server manually:
 
 ```bash
-./zig-out/bin/zinc --model-id llama31-8b-q4k-m -p 8080
+./zig-out/bin/zinc --model-id qwen3-8b-q4k-m -p 8080
 ```
 
 Then open `http://localhost:8080/` in your browser.
@@ -144,13 +143,13 @@ Then open `http://localhost:8080/` in your browser.
 
 ```bash
 # Set a default model for future runs
-./zig-out/bin/zinc model use llama31-8b-q4k-m
+./zig-out/bin/zinc model use qwen3-8b-q4k-m
 
 # Check the active default
 ./zig-out/bin/zinc model active
 
 # Remove a cached model
-./zig-out/bin/zinc model rm llama31-8b-q4k-m
+./zig-out/bin/zinc model rm qwen3-8b-q4k-m
 ```
 
 ## What to read next
