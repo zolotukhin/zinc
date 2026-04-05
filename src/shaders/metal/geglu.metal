@@ -18,6 +18,8 @@ kernel void main0(
     // gelu_tanh(g) = 0.5 * g * (1.0 + tanh(sqrt(2/pi) * (g + 0.044715 * g^3)))
     float g3 = g * g * g;
     float inner = 0.7978845608f * (g + 0.044715f * g3);
-    float gelu_g = 0.5f * g * (1.0f + tanh(inner));
+    // Clamp to avoid NaN from fast tanh with extreme inputs.
+    inner = clamp(inner, -15.0f, 15.0f);
+    float gelu_g = 0.5f * g * (1.0f + precise::tanh(inner));
     y[idx] = gelu_g * up[idx];
 }

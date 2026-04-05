@@ -1407,6 +1407,12 @@ pub const InferenceEngine = struct {
         // Dequantize directly into pre-allocated staging buffer (zero alloc)
         const staging_f32: [*]f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
         dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, staging_f32[0..hidden_dim]);
+
+        // Gemma models scale embeddings by sqrt(hidden_dim).
+        if (self.model.config.architecture == .gemma) {
+            const scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))));
+            for (staging_f32[0..hidden_dim]) |*v| v.* *= scale;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1656,7 +1662,7 @@ pub const InferenceEngine = struct {
                 if (self.attention.pipeline) |*pip| {
                     const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
-                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, 1);
+                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, 1, config.attn_scale);
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -1837,6 +1843,18 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, q_dim);
                 self.decode_cmd.computeBarrier();
 
+                // Gemma post-attention norm: RMS norm on o_proj output before residual add
+                if (self.findLayerTensor(layer, "post_attention_norm.weight")) |pan_tensor| {
+                    if (self.findLayerTensor(layer, "ffn_norm.weight") != null) {
+                        // Both exist → post_attention_norm is a separate norm on o_proj output
+                        const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet3(ds, self.o_proj_buf.handle, hidden_size, pan_tensor.gpu_buffer.handle, pan_tensor.gpu_buffer.size, self.o_proj_buf.handle, hidden_size);
+                        try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
+                        self.decode_cmd.computeBarrier();
+                    }
+                }
+
                 // Attention residual: hidden_buf += o_proj_buf
                 {
                     const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
@@ -1938,9 +1956,10 @@ pub const InferenceEngine = struct {
                 self.endProfilePhase(.ssm, ssm_phase);
             }
 
-            // --- Post-attention norm (Qwen3.5 uses post_attention_norm, not ffn_norm) ---
-            const ffn_norm_tensor = self.findLayerTensor(layer, "post_attention_norm.weight") orelse
-                self.findLayerTensor(layer, "ffn_norm.weight") orelse return error.TensorNotFound;
+            // --- FFN norm: prefer ffn_norm.weight, fall back to post_attention_norm for models
+            // that use a single norm between attention and FFN (e.g. Qwen3.5).
+            const ffn_norm_tensor = self.findLayerTensor(layer, "ffn_norm.weight") orelse
+                self.findLayerTensor(layer, "post_attention_norm.weight") orelse return error.TensorNotFound;
             {
                 const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                 const ds = try self.allocDescSet(pip.descriptor_set_layout);
@@ -2274,6 +2293,15 @@ pub const InferenceEngine = struct {
 
                 try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
                 self.decode_cmd.computeBarrier();
+
+                // Gemma post-FFN norm: RMS norm on down_proj output before residual add
+                if (self.findLayerTensor(layer, "post_ffw_norm.weight")) |pfn_tensor| {
+                    const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
+                    const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, self.down_buf.handle, hidden_size, pfn_tensor.gpu_buffer.handle, pfn_tensor.gpu_buffer.size, self.down_buf.handle, hidden_size);
+                    try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
+                    self.decode_cmd.computeBarrier();
+                }
 
                 if (state.position == 0 and self.validation_diagnostics_enabled and layer == 0 and inter_dim <= 8192) {
                     try self.decode_cmd.end();

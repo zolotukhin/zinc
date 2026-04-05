@@ -161,7 +161,9 @@ fn preflightCatalogDrift(
     }
 
     if (metadata.sha256_hex) |sha256_hex| {
-        if (!std.ascii.eqlIgnoreCase(sha256_hex[0..], entry.sha256)) {
+        if (entry.sha256.len == 0) {
+            // No pinned sha256 — accept whatever the remote provides.
+        } else if (!std.ascii.eqlIgnoreCase(sha256_hex[0..], entry.sha256)) {
             try writer.print(
                 "Catalog stale: upstream sha256 is {s} but pinned catalog sha256 is {s}\n",
                 .{ sha256_hex[0..], entry.sha256 },
@@ -528,10 +530,12 @@ pub fn pullModelWithObserver(
         if (obs.on_verifying) |cb| cb(obs.context, stat.size);
     }
 
-    const actual_sha = try computeFileSha256Hex(partial_path, allocator);
-    defer allocator.free(actual_sha);
-    if (!std.ascii.eqlIgnoreCase(actual_sha, entry.sha256)) {
-        return error.ChecksumMismatch;
+    if (entry.sha256.len > 0) {
+        const actual_sha = try computeFileSha256Hex(partial_path, allocator);
+        defer allocator.free(actual_sha);
+        if (!std.ascii.eqlIgnoreCase(actual_sha, entry.sha256)) {
+            return error.ChecksumMismatch;
+        }
     }
 
     std.fs.deleteFileAbsolute(final_path) catch {};
