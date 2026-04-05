@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 #include "shim.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <mach/mach.h>
 
 #ifndef MTLGPUFamilyApple10
@@ -31,6 +32,7 @@ struct MetalPipe {
 struct MetalCmd {
     id<MTLCommandBuffer> cmd_buf;
     id<MTLComputeCommandEncoder> encoder;
+    uint8_t is_concurrent;
 };
 
 // --- Device lifecycle ---
@@ -300,6 +302,10 @@ void mtl_free_pipeline(MetalPipe* pipe) {
 // --- Command buffer & dispatch ---
 
 MetalCmd* mtl_begin_command(MetalCtx* ctx) {
+    return mtl_begin_command_mode(ctx, 0);
+}
+
+MetalCmd* mtl_begin_command_mode(MetalCtx* ctx, uint8_t serial) {
     if (!ctx) return NULL;
 
     id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
@@ -308,7 +314,8 @@ MetalCmd* mtl_begin_command(MetalCtx* ctx) {
         return NULL;
     }
 
-    id<MTLComputeCommandEncoder> encoder = [cmd_buf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+    MTLDispatchType dispatch_type = serial ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent;
+    id<MTLComputeCommandEncoder> encoder = [cmd_buf computeCommandEncoderWithDispatchType:dispatch_type];
     if (!encoder) {
         fprintf(stderr, "Error: Failed to create compute command encoder.\n");
         return NULL;
@@ -318,6 +325,7 @@ MetalCmd* mtl_begin_command(MetalCtx* ctx) {
     if (!cmd) return NULL;
     cmd->cmd_buf = cmd_buf;
     cmd->encoder = encoder;
+    cmd->is_concurrent = serial ? 0 : 1;
     return cmd;
 }
 

@@ -19,6 +19,9 @@ const Config = struct {
     device_index: u32 = 0,
     q8_tg: ?u32 = null,
     q8_dual_tg: ?u32 = null,
+    private_decode: ?bool = null,
+    command_encoder_mode: ?forward_metal.CommandEncoderMode = null,
+    profile: bool = false,
     show_help: bool = false,
 };
 
@@ -55,6 +58,10 @@ fn helpText() []const u8 {
     \\  -d, --device <index>     Metal device index (default: 0)
     \\  --q8-tg <threads>        Override q8_0 DMMV threadgroup size
     \\  --q8-dual-tg <threads>   Override dual q8_0 DMMV threadgroup size
+    \\  --private-decode <0|1>   Override Metal private decode buffers
+    \\  --serial-encoder         Force serial Metal compute encoder
+    \\  --concurrent-encoder     Force concurrent Metal compute encoder
+    \\  --profile                Print Metal runtime profile summary per run
     \\  -h, --help               Show this help text
     \\
     \\Example:
@@ -108,6 +115,23 @@ fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingQ8DualThreadgroup;
             config.q8_dual_tg = try parseU32(args[i]);
+        } else if (std.mem.eql(u8, arg, "--private-decode")) {
+            i += 1;
+            if (i >= args.len) return error.MissingPrivateDecode;
+            const raw = args[i];
+            if (std.mem.eql(u8, raw, "1") or std.ascii.eqlIgnoreCase(raw, "true") or std.ascii.eqlIgnoreCase(raw, "yes")) {
+                config.private_decode = true;
+            } else if (std.mem.eql(u8, raw, "0") or std.ascii.eqlIgnoreCase(raw, "false") or std.ascii.eqlIgnoreCase(raw, "no")) {
+                config.private_decode = false;
+            } else {
+                return error.InvalidPrivateDecode;
+            }
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            config.profile = true;
+        } else if (std.mem.eql(u8, arg, "--serial-encoder")) {
+            config.command_encoder_mode = .serial;
+        } else if (std.mem.eql(u8, arg, "--concurrent-encoder")) {
+            config.command_encoder_mode = .concurrent;
         } else {
             return error.UnknownArgument;
         }
@@ -118,6 +142,14 @@ fn parseArgs(args: []const [:0]const u8) !Config {
     }
     if (config.runs == 0) return error.InvalidRuns;
     return config;
+}
+
+fn encoderModeLabel(mode: forward_metal.CommandEncoderMode) []const u8 {
+    return @tagName(mode);
+}
+
+fn encoderModeOverrideLabel(mode: ?forward_metal.CommandEncoderMode) []const u8 {
+    return if (mode) |value| encoderModeLabel(value) else "default";
 }
 
 fn preparePrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8, chat: bool, allocator: std.mem.Allocator) !PreparedPrompt {
@@ -201,6 +233,126 @@ fn computeSummaryStats(allocator: std.mem.Allocator, values: []const f64) !Summa
     };
 }
 
+fn nsToMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+}
+
+fn avgMs(ns: u64, count: u32) f64 {
+    if (count == 0) return 0.0;
+    return nsToMs(ns) / @as(f64, @floatFromInt(count));
+}
+
+fn bytesToGiB(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
+}
+
+fn pctOf(total: u64, part: u64) f64 {
+    if (total == 0 or part == 0) return 0.0;
+    return @as(f64, @floatFromInt(part)) * 100.0 / @as(f64, @floatFromInt(total));
+}
+
+fn printProfileSummary(
+    writer: *std.Io.Writer,
+    engine: *const forward_metal.InferenceEngine,
+    label: []const u8,
+    prompt_tokens: usize,
+    completion_tokens: u32,
+) !void {
+    const profile = engine.request_profile;
+    if (profile.decode_steps == 0 and profile.sample_calls == 0) return;
+
+    const record_ns = profile.layer_record_ns +
+        profile.gpu_routed_moe_record_ns +
+        profile.fallback_moe_record_ns +
+        profile.dense_ffn_record_ns +
+        profile.final_record_ns;
+
+    try writer.print(
+        "Profile {s}: steps={d} prompt={d} completion={d} shared_steps={d} cmds={d} commits={d}\n",
+        .{
+            label,
+            profile.decode_steps,
+            prompt_tokens,
+            completion_tokens,
+            profile.shared_cmd_steps,
+            profile.command_buffers,
+            profile.commit_waits,
+        },
+    );
+    try writer.print(
+        "  cmd: dispatches={d} ({d:.1}/step) barriers={d} ({d:.1}/step)\n",
+        .{
+            profile.dispatch_calls,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.dispatch_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            profile.barrier_calls,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+        },
+    );
+    try writer.print(
+        "  barrier split: embed {d:.1} attn {d:.1} ssm {d:.1} router {d:.1} gpu-moe {d:.1} fallback {d:.1} dense {d:.1} final {d:.1}\n",
+        .{
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.embed_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.full_attn_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.ssm_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.router_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.gpu_routed_moe_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.fallback_moe_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.dense_ffn_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.final_barrier_calls)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+        },
+    );
+    try writer.print(
+        "  cpu: embed {d:.2} ms ({d:.3} ms/step) | record {d:.2} ms ({d:.3} ms/step) | router {d:.2} ms | sample {d:.2} ms ({d:.3} ms/sample)\n",
+        .{
+            nsToMs(profile.embedding_ns),
+            avgMs(profile.embedding_ns, profile.decode_steps),
+            nsToMs(record_ns),
+            avgMs(record_ns, profile.decode_steps),
+            nsToMs(profile.router_cpu_ns),
+            nsToMs(profile.sample_ns),
+            avgMs(profile.sample_ns, profile.sample_calls),
+        },
+    );
+    try writer.print(
+        "  wait: commitAndWait {d:.2} ms ({d:.3} ms/step) | mix/step attn {d:.1} ssm {d:.1} gpu-moe {d:.1} fallback-moe {d:.1} dense {d:.1}\n",
+        .{
+            nsToMs(profile.gpu_completion_wait_ns),
+            avgMs(profile.gpu_completion_wait_ns, profile.decode_steps),
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.full_attn_layers)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.ssm_layers)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.gpu_routed_moe_layers)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.fallback_moe_layers)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+            if (profile.decode_steps > 0) @as(f64, @floatFromInt(profile.dense_ffn_layers)) / @as(f64, @floatFromInt(profile.decode_steps)) else 0.0,
+        },
+    );
+    if (profile.dmmv_total_bytes > 0) {
+        try writer.print(
+            "  dmmv bytes: q8_0 {d:.2} GiB ({d:.1}%) q4_k {d:.2} GiB ({d:.1}%) q5_k {d:.2} GiB ({d:.1}%) q6_k {d:.2} GiB ({d:.1}%)\n",
+            .{
+                bytesToGiB(profile.dmmv_q8_0_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q8_0_bytes),
+                bytesToGiB(profile.dmmv_q4k_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q4k_bytes),
+                bytesToGiB(profile.dmmv_q5k_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q5k_bytes),
+                bytesToGiB(profile.dmmv_q6k_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q6k_bytes),
+            },
+        );
+        try writer.print(
+            "  path bytes: ssm {d:.2} GiB attn {d:.2} GiB moe-expert {d:.2} GiB shared {d:.2} GiB lm-head {d:.2} GiB router {d:.2} GiB\n",
+            .{
+                bytesToGiB(profile.ssm_bytes),
+                bytesToGiB(profile.full_attn_bytes),
+                bytesToGiB(profile.moe_expert_bytes),
+                bytesToGiB(profile.shared_expert_bytes),
+                bytesToGiB(profile.lm_head_bytes),
+                bytesToGiB(profile.router_bytes),
+            },
+        );
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -240,6 +392,9 @@ pub fn main() !void {
     var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, .{
         .q8_tg_override = config.q8_tg,
         .q8_dual_tg_override = config.q8_dual_tg,
+        .private_decode_buffers_override = config.private_decode,
+        .command_encoder_mode = config.command_encoder_mode,
+        .profile_enabled = config.profile,
     });
     defer engine.deinit();
 
@@ -255,8 +410,19 @@ pub fn main() !void {
         },
     );
     try stdout.interface.print(
-        "Prompt tokens: {d} | decode tokens: {d} | warmup: {d} | runs: {d} | chat={}\n\n",
-        .{ prompt_tokens.len, config.max_tokens, config.warmup_runs, config.runs, config.chat },
+        "Prompt tokens: {d} | decode tokens: {d} | warmup: {d} | runs: {d} | chat={} | private_decode_override={any} | private_decode_effective={} | encoder_override={s} | encoder_effective={s} | profile={}\n\n",
+        .{
+            prompt_tokens.len,
+            config.max_tokens,
+            config.warmup_runs,
+            config.runs,
+            config.chat,
+            config.private_decode,
+            engine.private_decode_buffers,
+            encoderModeOverrideLabel(config.command_encoder_mode),
+            encoderModeLabel(engine.command_encoder_mode),
+            config.profile,
+        },
     );
 
     var warmup_idx: u32 = 0;
@@ -273,6 +439,9 @@ pub fn main() !void {
                 warmup.metrics.generated_tokens,
             },
         );
+        if (config.profile) {
+            try printProfileSummary(@constCast(&stdout.interface), &engine, "warmup", prompt_tokens.len, warmup.metrics.generated_tokens);
+        }
     }
     if (config.warmup_runs > 0) {
         try stdout.interface.writeAll("\n");
@@ -311,6 +480,9 @@ pub fn main() !void {
                 run.metrics.generated_tokens,
             },
         );
+        if (config.profile) {
+            try printProfileSummary(@constCast(&stdout.interface), &engine, "bench-run", prompt_tokens.len, run.metrics.generated_tokens);
+        }
     }
 
     const prefill_stats = try computeSummaryStats(allocator, prefill_tps);

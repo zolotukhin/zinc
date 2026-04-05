@@ -47,6 +47,7 @@ void mtl_free_pipeline(MetalPipe* pipe);
 
 // Command buffer & dispatch
 MetalCmd* mtl_begin_command(MetalCtx* ctx);
+MetalCmd* mtl_begin_command_mode(MetalCtx* ctx, uint8_t serial);
 void mtl_dispatch(MetalCmd* cmd, MetalPipe* pipe,
                   const uint32_t grid[3], const uint32_t block[3],
                   MetalBuf** bufs, uint32_t n_bufs,

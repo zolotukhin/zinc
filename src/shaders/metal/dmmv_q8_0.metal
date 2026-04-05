@@ -14,9 +14,9 @@ struct DmmvPush {
 // Q8_0 is the dominant path for router, shared-expert, and SSM projections on
 // the target Qwen3.5-35B-A3B model (74.5% of all DMMV data).
 //
-// Each simdgroup (32 lanes) handles one output row independently.  X is read
+// Each simdgroup (32 lanes) handles one output row independently. X is read
 // directly from device memory and cached in L1 (X is at most 16 KiB for
-// K<=4096, well within the per-core L1).  No threadgroup memory or barrier
+// K<=4096, well within the per-core L1). No threadgroup memory or barrier
 // is used, making all simdgroups fully independent and maximizing memory
 // pipeline utilization on Apple Silicon.
 //
@@ -48,7 +48,7 @@ kernel void main0(
         device const uchar* block = row_ptr + bi * 34u;
         const float scale = float(as_type<half>(*(device const ushort*)(block)));
         device const packed_char4* quants = (device const packed_char4*)(block + 2u);
-        const uint x_base = bi << 5;  // bi * 32 elements
+        const uint x_base = bi << 5;
 
         #pragma unroll
         for (uint vi = 0u; vi < 8u; ++vi) {

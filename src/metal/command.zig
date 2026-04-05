@@ -4,10 +4,18 @@ const shim = @import("c.zig").shim;
 const MetalBuffer = @import("buffer.zig").MetalBuffer;
 const MetalPipeline = @import("pipeline.zig").MetalPipeline;
 
+pub const CommandEncoderMode = enum(u8) {
+    concurrent = 0,
+    serial = 1,
+};
+
 /// A recorded command buffer that encodes compute dispatches for the GPU.
 pub const MetalCommand = struct {
     /// Opaque handle to the C shim command buffer.
     handle: ?*shim.MetalCmd,
+    dispatch_count: u32,
+    barrier_count: u32,
+    barrier_enabled: bool,
 
     /// Encode a compute dispatch binding buffers, push constants, grid, and block sizes.
     pub fn dispatch(
@@ -20,6 +28,7 @@ pub const MetalCommand = struct {
         push_size: usize,
     ) void {
         if (self.handle == null or pipe.handle == null) return;
+        self.dispatch_count += 1;
 
         // Build array of MetalBuf pointers for the C shim
         var c_bufs: [32]?*shim.MetalBuf = .{null} ** 32;
@@ -55,6 +64,7 @@ pub const MetalCommand = struct {
         push_idx: u32,
     ) void {
         if (self.handle == null or pipe.handle == null) return;
+        self.dispatch_count += 1;
 
         var c_bufs: [32]?*shim.MetalBuf = .{null} ** 32;
         const n_bufs: u32 = @intCast(@min(bufs.len, 32));
@@ -111,7 +121,11 @@ pub const MetalCommand = struct {
 
     /// Insert a memory barrier ensuring all prior dispatches complete before subsequent ones.
     pub fn barrier(self: *MetalCommand) void {
-        if (self.handle) |h| shim.mtl_barrier(h);
+        if (!self.barrier_enabled) return;
+        if (self.handle) |h| {
+            self.barrier_count += 1;
+            shim.mtl_barrier(h);
+        }
     }
 
     /// Commit the command buffer to the GPU and block until execution completes.
@@ -141,9 +155,18 @@ pub const MetalCommand = struct {
 
 /// Allocate a new command buffer from the given Metal context.
 pub fn beginCommand(ctx: ?*shim.MetalCtx) !MetalCommand {
-    const handle = shim.mtl_begin_command(ctx);
+    return beginCommandWithMode(ctx, .concurrent);
+}
+
+pub fn beginCommandWithMode(ctx: ?*shim.MetalCtx, mode: CommandEncoderMode) !MetalCommand {
+    const handle = shim.mtl_begin_command_mode(ctx, @intFromEnum(mode));
     if (handle == null) return error.MetalCommandBufferFailed;
-    return .{ .handle = handle };
+    return .{
+        .handle = handle,
+        .dispatch_count = 0,
+        .barrier_count = 0,
+        .barrier_enabled = mode == .concurrent,
+    };
 }
 
 const buffer_mod = @import("buffer.zig");
