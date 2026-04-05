@@ -637,9 +637,13 @@ const LayerTensors = struct {
     attn_q: ?*const metal_loader.LoadedTensor = null,
     attn_k: ?*const metal_loader.LoadedTensor = null,
     attn_v: ?*const metal_loader.LoadedTensor = null,
+    attn_q_bias: ?*const metal_loader.LoadedTensor = null,
+    attn_k_bias: ?*const metal_loader.LoadedTensor = null,
+    attn_v_bias: ?*const metal_loader.LoadedTensor = null,
     attn_q_norm: ?*const metal_loader.LoadedTensor = null,
     attn_k_norm: ?*const metal_loader.LoadedTensor = null,
     attn_output: ?*const metal_loader.LoadedTensor = null,
+    attn_output_bias: ?*const metal_loader.LoadedTensor = null,
     // SSM projections (SSM/delta-net layers)
     attn_qkv: ?*const metal_loader.LoadedTensor = null,
     attn_gate: ?*const metal_loader.LoadedTensor = null,
@@ -655,6 +659,10 @@ const LayerTensors = struct {
     ffn_gate_exps: ?*const metal_loader.LoadedTensor = null,
     ffn_up_exps: ?*const metal_loader.LoadedTensor = null,
     ffn_down_exps: ?*const metal_loader.LoadedTensor = null,
+    ffn_gate_exps_bias: ?*const metal_loader.LoadedTensor = null,
+    ffn_up_exps_bias: ?*const metal_loader.LoadedTensor = null,
+    ffn_down_exps_bias: ?*const metal_loader.LoadedTensor = null,
+    ffn_gate_inp_bias: ?*const metal_loader.LoadedTensor = null,
     // Shared expert
     ffn_gate_shexp: ?*const metal_loader.LoadedTensor = null,
     ffn_up_shexp: ?*const metal_loader.LoadedTensor = null,
@@ -1180,9 +1188,13 @@ pub const InferenceEngine = struct {
                 .attn_q = findLayerTensor(model, layer, "attn_q.weight"),
                 .attn_k = findLayerTensor(model, layer, "attn_k.weight"),
                 .attn_v = findLayerTensor(model, layer, "attn_v.weight"),
+                .attn_q_bias = findLayerTensor(model, layer, "attn_q.bias"),
+                .attn_k_bias = findLayerTensor(model, layer, "attn_k.bias"),
+                .attn_v_bias = findLayerTensor(model, layer, "attn_v.bias"),
                 .attn_q_norm = findLayerTensor(model, layer, "attn_q_norm.weight"),
                 .attn_k_norm = findLayerTensor(model, layer, "attn_k_norm.weight"),
                 .attn_output = findLayerTensor(model, layer, "attn_output.weight"),
+                .attn_output_bias = findLayerTensor(model, layer, "attn_output.bias"),
                 .attn_qkv = findLayerTensor(model, layer, "attn_qkv.weight"),
                 .attn_gate = findLayerTensor(model, layer, "attn_gate.weight"),
                 .ssm_alpha = findLayerTensor(model, layer, "ssm_alpha.weight"),
@@ -1196,6 +1208,10 @@ pub const InferenceEngine = struct {
                 .ffn_gate_exps = findLayerTensor(model, layer, "ffn_gate_exps.weight"),
                 .ffn_up_exps = findLayerTensor(model, layer, "ffn_up_exps.weight"),
                 .ffn_down_exps = findLayerTensor(model, layer, "ffn_down_exps.weight"),
+                .ffn_gate_exps_bias = findLayerTensor(model, layer, "ffn_gate_exps.bias"),
+                .ffn_up_exps_bias = findLayerTensor(model, layer, "ffn_up_exps.bias"),
+                .ffn_down_exps_bias = findLayerTensor(model, layer, "ffn_down_exps.bias"),
+                .ffn_gate_inp_bias = findLayerTensor(model, layer, "ffn_gate_inp.bias"),
                 .ffn_gate_shexp = findLayerTensor(model, layer, "ffn_gate_shexp.weight"),
                 .ffn_up_shexp = findLayerTensor(model, layer, "ffn_up_shexp.weight"),
                 .ffn_down_shexp = findLayerTensor(model, layer, "ffn_down_shexp.weight"),
@@ -2765,6 +2781,15 @@ fn dispatchFullAttnPrepOnCmd(
         profileBarrier(cmd, profile, .full_attn);
     }
 
+    // Apply Q/K/V biases if present (gpt-oss)
+    if (lt.attn_q_bias != null or lt.attn_k_bias != null or lt.attn_v_bias != null) {
+        cmd.commitAndWait();
+        if (lt.attn_q_bias) |b| addBiasFromTensor(engine, @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?)), b, q_dim);
+        if (lt.attn_k_bias) |b| addBiasFromTensor(engine, @ptrCast(@alignCast(engine.k_buf.cpu_ptr.?)), b, kv_dim);
+        if (lt.attn_v_bias) |b| addBiasFromTensor(engine, @ptrCast(@alignCast(engine.v_buf.cpu_ptr.?)), b, kv_dim);
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    }
+
     // Q/K norms are independent — concurrent dispatch overlaps them.
     if (engine.attn_q_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], cfg.head_dim, cfg.n_heads);
@@ -2884,11 +2909,41 @@ fn cpuRope(data: [*]f32, stride: u32, rope_dim: u32, n_heads: u32, position: u32
     }
 }
 
+/// Add bias from a tensor to a CPU buffer (f32 only).
+fn addBiasFromTensor(engine: *InferenceEngine, output: [*]f32, tensor: *const metal_loader.LoadedTensor, n: u32) void {
+    const mmap = engine.model.mmap_data orelse return;
+    const off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + tensor.info.offset);
+    const bias_ptr: [*]const f32 = @ptrCast(@alignCast(mmap[off..].ptr));
+    for (0..n) |i| output[i] += bias_ptr[i];
+}
+
+/// Add bias from a slice of a per-expert tensor (2D: [n, n_experts], row-major).
+fn addBiasFromTensorSlice(engine: *InferenceEngine, output: [*]f32, tensor: *const metal_loader.LoadedTensor, expert_id: u32, n: u32) void {
+    const mmap = engine.model.mmap_data orelse return;
+    const off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + tensor.info.offset);
+    const base: usize = @as(usize, expert_id) * @as(usize, n) * 4;
+    const bias_ptr: [*]const f32 = @ptrCast(@alignCast(mmap[off + base ..].ptr));
+    for (0..n) |i| output[i] += bias_ptr[i];
+}
+
 /// SwiGLU: output[i] = SiLU(gate[i]) * up[i]
 fn cpuSwiGLU(gate: [*]const f32, up: [*]const f32, output: [*]f32, n: u32) void {
     for (0..n) |i| {
         const x = gate[i];
         output[i] = (x / (1.0 + @exp(-x))) * up[i];
+    }
+}
+
+/// OAI SwiGLU variant for gpt-oss MoE experts.
+/// output = (min(gate, limit) / (1 + exp(alpha * -gate))) * (clamp(up, -limit, limit) + 1)
+fn cpuSwiGLU_OAI(gate: [*]const f32, up: [*]const f32, output: [*]f32, n: u32) void {
+    const alpha: f32 = 1.702;
+    const limit: f32 = 7.0;
+    for (0..n) |i| {
+        const x = @min(gate[i], limit);
+        const y = std.math.clamp(up[i], -limit, limit);
+        const glu = x / (1.0 + @exp(alpha * (-x)));
+        output[i] = glu * (y + 1.0);
     }
 }
 
@@ -3133,6 +3188,32 @@ fn readMmapFloats(mmap: []const u8, base_off: usize, tensor_type: GGMLType, outp
         },
     }
 }
+
+/// Select the top-k logits, apply softmax, and write indices and weights.
+/// SOFTMAX_WEIGHT gating (gpt-oss): select top-k from raw logits, then softmax over selected.
+pub fn topKSoftmaxWeight(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
+    const n = logits.len;
+    var used = [_]bool{false} ** 256;
+    for (0..k) |ki| {
+        var best_idx: u32 = 0;
+        var best_val: f32 = -std.math.inf(f32);
+        for (0..n) |i| {
+            if (!used[i] and logits[i] > best_val) {
+                best_val = logits[i];
+                best_idx = @intCast(i);
+            }
+        }
+        out_ids[ki] = best_idx;
+        out_weights[ki] = logits[best_idx];
+        used[best_idx] = true;
+    }
+    var max_sel: f32 = -std.math.inf(f32);
+    for (0..k) |i| if (out_weights[i] > max_sel) { max_sel = out_weights[i]; };
+    var sum: f32 = 0;
+    for (0..k) |i| { out_weights[i] = @exp(out_weights[i] - max_sel); sum += out_weights[i]; }
+    if (sum > 0) for (0..k) |i| { out_weights[i] /= sum; };
+}
+
 
 pub fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
@@ -3397,6 +3478,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             const o_tensor = lt.attn_output orelse return error.MissingTensor;
             dispatchDmmvOnCmd(engine, cmd, o_tensor, &engine.attn_out_buf, &engine.down_buf, hidden_dim, q_dim, 0);
             profileBarrier(cmd, profile, .full_attn);
+            // Apply O projection bias if present (gpt-oss)
+            if (lt.attn_output_bias) |b| {
+                commitAndWaitProfiled(cmd, profile);
+                addBiasFromTensor(engine, @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?)), b, hidden_dim);
+                local_cmd_storage = try beginProfiledCommand(engine, profile);
+                cmd = &local_cmd_storage;
+            }
             const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and engine.position == 5 and (layer_idx == 7 or layer_idx == 31);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
@@ -3637,10 +3725,18 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             if (profile) |p| p.fallback_moe_layers += 1;
             // CPU topK softmax
             const router_start = profileStart(profile != null);
-            const router_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+            const router_ptr: [*]f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+            // Apply router bias if present (gpt-oss)
+            if (lt.ffn_gate_inp_bias) |b| {
+                addBiasFromTensor(engine, router_ptr, b, cfg.n_experts);
+            }
             var expert_ids: [16]u32 = undefined;
             var expert_weights: [16]f32 = undefined;
-            topKSoftmax(router_ptr[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            if (cfg.architecture == .gpt_oss) {
+                topKSoftmaxWeight(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            } else {
+                topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
+            }
             const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6;
             const hidden_before_snapshot: ?[]f32 = if (should_debug_moe_compare) blk: {
                 const snap = try engine.allocator.alloc(f32, hidden_dim);
@@ -3755,8 +3851,26 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     }
                     profileBarrier(&cmd, profile, .fallback_moe);
 
+                    // Apply per-expert gate/up biases if present (gpt-oss)
+                    if (lt.ffn_gate_exps_bias != null or lt.ffn_up_exps_bias != null) {
+                        cmd.commitAndWait();
+                        for (0..cfg.n_experts_used) |ei| {
+                            const eid = expert_ids[ei];
+                            if (lt.ffn_gate_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
+                            if (lt.ffn_up_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
+                        }
+                        cmd = try beginProfiledCommand(engine, profile);
+                    }
+
                     // Phase 2: All SwiGLU operations in parallel
-                    for (0..cfg.n_experts_used) |ei| {
+                    if (cfg.architecture == .gpt_oss) {
+                        // OAI SwiGLU on CPU (different formula from standard SwiGLU)
+                        cmd.commitAndWait();
+                        for (0..cfg.n_experts_used) |ei| {
+                            cpuSwiGLU_OAI(@ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_swiglu_bufs[ei].cpu_ptr.?)), inter_dim);
+                        }
+                        cmd = try beginProfiledCommand(engine, profile);
+                    } else for (0..cfg.n_experts_used) |ei| {
                         const swiglu_push = SwiGLUPush{ .n = inter_dim };
                         const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
                         cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
@@ -3778,6 +3892,16 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                         dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
                     }
                     profileBarrier(&cmd, profile, .fallback_moe);
+
+                    // Apply per-expert down biases if present (gpt-oss)
+                    if (lt.ffn_down_exps_bias) |b| {
+                        cmd.commitAndWait();
+                        for (0..cfg.n_experts_used) |ei| {
+                            const eid = expert_ids[ei];
+                            addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?)), b, eid, hidden_dim);
+                        }
+                        cmd = try beginProfiledCommand(engine, profile);
+                    }
 
                     // Phase 4: Fused MoE weighted accumulate — hidden += sum(w[i] * expert_down[i]) + w_sh * shared_down
                     // Single dispatch replaces 8+1 sequential scale_accumulate + barriers (eliminates 8 pipeline flushes per layer)
