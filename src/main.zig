@@ -1598,7 +1598,7 @@ pub fn main() !void {
             } else {
                 if (config.profile) {
                     const vocab_size = model.config.vocab_size;
-                    const logits_src = if (engine.private_decode_buffers) &engine.logits_readback_buf else &engine.logits_buf;
+                    const logits_src = &engine.logits_buf;
                     const logits_ptr: [*]const f32 = @ptrCast(@alignCast(logits_src.cpu_ptr.?));
                     const logits = logits_ptr[0..vocab_size];
                     var top_ids: [5]u32 = .{ 0, 0, 0, 0, 0 };

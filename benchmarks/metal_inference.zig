@@ -20,7 +20,7 @@ const Config = struct {
     q8_tg: ?u32 = null,
     q8_dual_tg: ?u32 = null,
     private_decode: ?bool = null,
-    command_encoder_mode: ?forward_metal.CommandEncoderMode = null,
+    command_encoder_mode: ?u32 = null, // TODO: restore CommandEncoderMode after merge
     profile: bool = false,
     show_help: bool = false,
 };
@@ -129,9 +129,9 @@ fn parseArgs(args: []const [:0]const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--profile")) {
             config.profile = true;
         } else if (std.mem.eql(u8, arg, "--serial-encoder")) {
-            config.command_encoder_mode = .serial;
+            config.command_encoder_mode = 0;
         } else if (std.mem.eql(u8, arg, "--concurrent-encoder")) {
-            config.command_encoder_mode = .concurrent;
+            config.command_encoder_mode = 1;
         } else {
             return error.UnknownArgument;
         }
@@ -390,10 +390,10 @@ pub fn main() !void {
     defer allocator.free(prompt_tokens);
 
     var engine = try forward_metal.InferenceEngine.init(&model, &device, allocator, .{
-        .q8_tg_override = config.q8_tg,
-        .q8_dual_tg_override = config.q8_dual_tg,
-        .private_decode_buffers_override = config.private_decode,
-        .command_encoder_mode = config.command_encoder_mode,
+        //.q8_tg_override = config.q8_tg, // TODO: restore after merge
+        //.q8_dual_tg_override = config.q8_dual_tg,
+        //.private_decode_buffers_override = config.private_decode,
+        //.command_encoder_mode = config.command_encoder_mode,
         .profile_enabled = config.profile,
     });
     defer engine.deinit();
@@ -418,9 +418,9 @@ pub fn main() !void {
             config.runs,
             config.chat,
             config.private_decode,
-            engine.private_decode_buffers,
-            encoderModeOverrideLabel(config.command_encoder_mode),
-            encoderModeLabel(engine.command_encoder_mode),
+            false, // private_decode_buffers
+            @as(?u32, null), // command_encoder_mode override
+            @as(?u32, null), // command_encoder_mode
             config.profile,
         },
     );
