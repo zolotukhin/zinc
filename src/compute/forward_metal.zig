@@ -1244,7 +1244,13 @@ fn dispatchDmmvOnCmd(
     extra_byte_offset: u32,
 ) void {
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
-        log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
+        // CPU fallback for unsupported quant types
+        cmd.commitAndWait();
+        const mmap = engine.model.mmap_data orelse return;
+        const tdo = engine.model.gguf_file.tensor_data_offset;
+        const in_ptr: [*]const f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+        const out_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+        cpuDmmvFallback(mmap, tensor, tdo, in_ptr, out_ptr, M, K, extra_byte_offset, engine.allocator) catch return;
         return;
     };
     const page_off = tensorPageOffset(engine.model, tensor);
