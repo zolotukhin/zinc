@@ -572,6 +572,14 @@ const RopePush = extern struct {
     position: u32,
 };
 
+/// Push constants for native RoPE dispatch (matches rope_native.metal: buffer(0)).
+const RopeNativePush = extern struct {
+    stride: u32,
+    rope_dim: u32,
+    n_heads: u32,
+    position: u32,
+};
+
 /// Push constants for flash attention dispatch (matches flash_attn.metal: buffer(0)).
 const FlashAttnPush = extern struct {
     head_dim: u32,
@@ -735,6 +743,7 @@ pub const InferenceEngine = struct {
     kv_cache_write_pipe: MetalPipeline,
     kv_cache_write_q8_pipe: MetalPipeline,
     rope_pipe: MetalPipeline,
+    rope_native_pipe: MetalPipeline,
     sigmoid_mul_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
     swiglu_batched_pipe: MetalPipeline,
@@ -969,6 +978,7 @@ pub const InferenceEngine = struct {
         self.kv_cache_write_pipe = try loadShaderPipeline(ctx, "kv_cache_write");
         self.kv_cache_write_q8_pipe = try loadShaderPipeline(ctx, "kv_cache_write_q8");
         self.rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
+        self.rope_native_pipe = try loadShaderPipeline(ctx, "rope_native");
         self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
@@ -1402,6 +1412,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.kv_cache_write_pipe);
         metal_pipeline.freePipeline(&self.kv_cache_write_q8_pipe);
         metal_pipeline.freePipeline(&self.rope_pipe);
+        metal_pipeline.freePipeline(&self.rope_native_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
