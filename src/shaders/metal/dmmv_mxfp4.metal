@@ -22,13 +22,15 @@ constant float kvalues_mxfp4[16] = {
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
 };
 
-// E8M0 to float: pure exponent, no mantissa
+// E8M0 to float (full): equal to 2^(x-127) for x>=1.
+// Used with un-doubled E2M1 kvalues_mxfp4 table (0,0.5,1,...,6).
+// Note: llama.cpp uses halved E8M0 + doubled kvalues; product is identical.
 static inline float e8m0_to_fp32(uchar x) {
     uint bits;
-    if (x == 0) {
-        bits = 0x00400000u; // smallest non-zero
+    if (x == 0u) {
+        bits = 0x00400000u; // 2^(-127) denormal
     } else {
-        bits = uint(x) << 23;
+        bits = uint(x) << 23; // 2^(x-127)
     }
     return as_type<float>(bits);
 }

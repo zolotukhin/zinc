@@ -45,21 +45,22 @@ kernel void main0(
 
         const uint base = b * 32;
 
+        // Elements 0-15: low nibble of bytes 0-15 + qh even bits
+        // Elements 16-31: high nibble of bytes 0-15 + qh odd bits
         for (uint j = 0; j < 16; j++) {
             const uchar q_byte = qs[j];
             const uint lo = q_byte & 0x0F;
             const uint hi = q_byte >> 4;
 
-            // Extract 5th bit from qh
-            const uint bit_lo = (qh >> (2 * j))     & 1;
-            const uint bit_hi = (qh >> (2 * j + 1)) & 1;
+            // qh bits 0-15 → elements 0-15 (low nibble), bits 16-31 → elements 16-31 (high nibble)
+            const uint bit_lo = (qh >> j)        & 1;
+            const uint bit_hi = (qh >> (j + 16)) & 1;
 
-            // 5-bit value (0-31), subtract 16 for signed
             const float v0 = float(d) * float(int(lo | (bit_lo << 4)) - 16);
             const float v1 = float(d) * float(int(hi | (bit_hi << 4)) - 16);
 
             sum += v0 * x[base + j]      +
-                   v1 * x[base + j + 16];
+                   v1 * x[base + 16 + j];
         }
     }
 

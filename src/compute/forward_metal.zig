@@ -582,6 +582,8 @@ const FlashAttnPush = extern struct {
     page_size: u32,
     kv_head_stride_bytes: u32,
     kv_token_stride_bytes: u32,
+    window_size: u32 = 0,
+    has_sinks: u32 = 0, // 1 = sinks buffer is valid
 };
 
 /// Push constants for GPU KV-cache writes.
@@ -703,6 +705,7 @@ pub const InferenceEngine = struct {
     kv_k_cache: []MetalBuffer,
     kv_v_cache: []MetalBuffer,
     page_table_buf: MetalBuffer,
+    attn_sinks_buf: MetalBuffer, // Per-head attention sink values (reusable per layer)
 
     // DMMV compute pipelines (one per quant type)
     dmmv_q4k_pipe: MetalPipeline,
@@ -774,6 +777,9 @@ pub const InferenceEngine = struct {
     ssm_a_bufs: ?[]MetalBuffer,
     ssm_norm_weight_bufs: ?[]MetalBuffer,
     ssm_norm_per_head: ?[]bool,
+
+    // Preloaded attention sink values (per-layer, per-head f32 — passed to flash attention)
+    attn_sink_values: ?[][]f32,
 
     // Preloaded shared expert gate weights (per-layer, f32 — eliminates mid-MoE commitAndWait)
     shexp_gate_weights: ?[][]f32,
@@ -934,6 +940,8 @@ pub const InferenceEngine = struct {
                 page_table_ptr[i] = @intCast(i);
             }
         }
+        // Attention sinks buffer: holds per-head f32 values, updated per layer
+        self.attn_sinks_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, cfg.n_heads) * @sizeOf(f32), 4));
 
         // Load DMMV compute pipelines for all quant types
         self.dmmv_q4k_pipe = try loadShaderPipeline(ctx, "dmmv_q4k");
@@ -1105,6 +1113,35 @@ pub const InferenceEngine = struct {
             self.ssm_a_bufs = null;
             self.ssm_norm_weight_bufs = null;
             self.ssm_norm_per_head = null;
+        }
+
+        // Preload attention sink values (per-layer, per-head f32)
+        {
+            var has_any_sinks = false;
+            for (0..cfg.n_layers) |i| {
+                if (findLayerTensor(model, @intCast(i), "attn_sinks.weight") != null) {
+                    has_any_sinks = true;
+                    break;
+                }
+            }
+            if (has_any_sinks) {
+                self.attn_sink_values = try allocator.alloc([]f32, cfg.n_layers);
+                for (0..cfg.n_layers) |i| {
+                    const layer_i: u32 = @intCast(i);
+                    if (findLayerTensor(model, layer_i, "attn_sinks.weight")) |t| {
+                        const n_heads_for_sinks = @as(usize, t.info.dims[0]);
+                        self.attn_sink_values.?[i] = try allocator.alloc(f32, n_heads_for_sinks);
+                        const sinks_mmap = model.mmap_data orelse return error.NoMmapData;
+                        const off: usize = @intCast(model.gguf_file.tensor_data_offset + t.info.offset);
+                        readMmapFloats(sinks_mmap, off, t.info.type_, self.attn_sink_values.?[i]);
+                    } else {
+                        self.attn_sink_values.?[i] = &.{};
+                    }
+                }
+                log.info("Attention sinks: loaded for {d} layers", .{cfg.n_layers});
+            } else {
+                self.attn_sink_values = null;
+            }
         }
 
         // Preload shared expert gate weights (1 × hidden_dim per layer, avoids mid-MoE commitAndWait)
@@ -1337,6 +1374,11 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.kv_k_cache);
         self.allocator.free(self.kv_v_cache);
         metal_buffer.freeBuffer(&self.page_table_buf);
+        metal_buffer.freeBuffer(&self.attn_sinks_buf);
+        if (self.attn_sink_values) |vals| {
+            for (vals) |v| if (v.len > 0) self.allocator.free(v);
+            self.allocator.free(vals);
+        }
 
         metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
@@ -2445,6 +2487,24 @@ fn dispatchFlashAttnOnCmd(
     n_kv_heads: u32,
     seq_len: u32,
 ) void {
+    // Sliding window for gpt-oss ISWA: 3 SWA layers + 1 full (period=4)
+    // Layers 3,7,11,15,19,23 are full attention; all others are SWA
+    const cfg = engine.config;
+    const window: u32 = if (cfg.sliding_window_size > 0 and cfg.architecture == .gpt_oss) blk: {
+        const is_full = ((layer_idx + 1) % 4 == 0); // full attention every 4th layer
+        break :blk if (is_full) 0 else cfg.sliding_window_size;
+    } else 0;
+
+    // Load per-head sink values if available
+    var has_sinks: u32 = 0;
+    if (engine.attn_sink_values) |sink_vals| {
+        if (sink_vals[layer_idx].len > 0) {
+            has_sinks = 1;
+            const sink_ptr: [*]f32 = @ptrCast(@alignCast(engine.attn_sinks_buf.cpu_ptr.?));
+            @memcpy(sink_ptr[0..sink_vals[layer_idx].len], sink_vals[layer_idx]);
+        }
+    }
+
     const push = FlashAttnPush{
         .head_dim = head_dim,
         .n_heads = n_heads,
@@ -2456,6 +2516,8 @@ fn dispatchFlashAttnOnCmd(
         .page_size = 0,
         .kv_head_stride_bytes = engine.kv_cache_head_stride_bytes,
         .kv_token_stride_bytes = engine.kv_cache_bytes_per_token,
+        .window_size = window,
+        .has_sinks = has_sinks,
     };
     const bufs = [_]*const MetalBuffer{
         &engine.page_table_buf,
@@ -2463,6 +2525,7 @@ fn dispatchFlashAttnOnCmd(
         &engine.kv_k_cache[layer_idx],
         &engine.kv_v_cache[layer_idx],
         &engine.attn_out_buf,
+        &engine.attn_sinks_buf,
     };
     const pipe = if (engine.kv_cache_q8) &engine.flash_attn_q8_pipe else &engine.flash_attn_pipe;
     cmd.dispatchV2(pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
@@ -3027,6 +3090,49 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
                     qo += 32;
                     is += 2;
                 }
+            }
+        },
+        .q5_0 => {
+            const bpb: usize = 22;
+            const bpr = @as(usize, cols) / 32;
+            const row_off = @as(usize, row) * bpr * bpb;
+            var out_i: usize = 0;
+            for (0..bpr) |b| {
+                const bo = row_off + b * bpb;
+                const d: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, raw_data[bo..][0..2], .little))));
+                const qh = std.mem.readInt(u32, raw_data[bo + 2 ..][0..4], .little);
+                const qs = raw_data[bo + 6 .. bo + 22];
+                for (0..16) |j| {
+                    const lo: u8 = qs[j] & 0x0F;
+                    const hi: u8 = qs[j] >> 4;
+                    const bit_lo: u8 = @intCast((qh >> @intCast(j)) & 1);
+                    const bit_hi: u8 = @intCast((qh >> @intCast(j + 16)) & 1);
+                    output[out_i] = d * @as(f32, @floatFromInt(@as(i32, @intCast(lo | (bit_lo << 4))) - 16));
+                    output[out_i + 16] = d * @as(f32, @floatFromInt(@as(i32, @intCast(hi | (bit_hi << 4))) - 16));
+                    out_i += 1;
+                }
+                out_i += 16; // skip over the second half we already filled
+            }
+        },
+        .mxfp4 => {
+            const bpb: usize = 17;
+            const bpr = @as(usize, cols) / 32;
+            const row_off = @as(usize, row) * bpr * bpb;
+            const lut = [16]f32{ 0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+            var out_i: usize = 0;
+            for (0..bpr) |b| {
+                const bo = row_off + b * bpb;
+                // E8M0 shared exponent → float (full E8M0: 2^(x-127))
+                // Our kvalues table uses un-doubled E2M1 values, so use full (not halved) exponent.
+                const exp_byte = raw_data[bo];
+                const d: f32 = @bitCast(if (exp_byte == 0) @as(u32, 0x00400000) else @as(u32, @intCast(exp_byte)) << 23);
+                const qs = raw_data[bo + 1 .. bo + 17];
+                // Elements 0-15: low nibble; elements 16-31: high nibble
+                for (0..16) |j| {
+                    output[out_i + j] = d * lut[qs[j] & 0x0F];
+                    output[out_i + j + 16] = d * lut[qs[j] >> 4];
+                }
+                out_i += 32;
             }
         },
         else => {
@@ -6732,6 +6838,8 @@ test "flash_attn shader handles contiguous Metal KV cache fast path" {
     defer metal_buffer.freeBuffer(&v_cache_buf);
     var out_buf = try metal_buffer.createBuffer(ctx, n_heads * head_dim * @sizeOf(f32));
     defer metal_buffer.freeBuffer(&out_buf);
+    var sinks_buf = try metal_buffer.createBuffer(ctx, n_heads * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&sinks_buf);
 
     const page_table_ptr: [*]u32 = @ptrCast(@alignCast(page_table_buf.cpu_ptr.?));
     page_table_ptr[0] = 0;
@@ -6763,7 +6871,7 @@ test "flash_attn shader handles contiguous Metal KV cache fast path" {
         .kv_head_stride_bytes = head_dim * @sizeOf(f32),
         .kv_token_stride_bytes = n_kv_heads * head_dim * @sizeOf(f32),
     };
-    const bufs = [_]*const MetalBuffer{ &page_table_buf, &q_buf, &k_cache_buf, &v_cache_buf, &out_buf };
+    const bufs = [_]*const MetalBuffer{ &page_table_buf, &q_buf, &k_cache_buf, &v_cache_buf, &out_buf, &sinks_buf };
 
     var cmd = try metal_command.beginCommand(ctx);
     cmd.dispatchV2(&pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);

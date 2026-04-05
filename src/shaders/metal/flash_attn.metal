@@ -7,7 +7,10 @@ struct FlashAttnPush {
     uint n_kv_heads;
     uint seq_len;
     uint page_size;
+    uint kv_head_stride_bytes;  // bytes between consecutive KV heads
+    uint kv_token_stride_bytes; // bytes between consecutive tokens in KV cache
     uint window_size; // 0 = full, >0 = sliding window (attend to last N tokens)
+    uint has_sinks;   // 1 = sinks buffer is valid, 0 = no sinks
 };
 
 constant uint FLASH_TG_SIZE = 64;
@@ -91,6 +94,7 @@ kernel void main0(
     device const float* k_cache [[buffer(3)]],
     device const float* v_cache [[buffer(4)]],
     device float* out [[buffer(5)]],
+    device const float* sinks [[buffer(6)]],
     uint head [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]],
     uint subgroup_size [[thread_execution_width]],
@@ -188,7 +192,22 @@ kernel void main0(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    const float inv_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
+    // Attention sink: include virtual token in softmax denominator (no V contribution).
+    // The sink value is a per-head learned scalar that absorbs excess attention weight.
+    float final_sum = running_sum;
+    if (p.has_sinks != 0u) {
+        const float sink_val = sinks[head];
+        // Rescale existing sum to account for potential new max
+        const float sink_max = fast::max(running_max, sink_val);
+        const float rescale_sink = running_sum > 0.0f ? fast::exp(running_max - sink_max) : 0.0f;
+        final_sum = running_sum * rescale_sink + fast::exp(sink_val - sink_max);
+        // Also rescale accumulator
+        if (tid < vec4_dim) {
+            acc_cache4[tid] *= rescale_sink;
+        }
+    }
+
+    const float inv_sum = final_sum > 0.0f ? 1.0f / final_sum : 0.0f;
     if (tid < vec4_dim) {
         *(device float4*)(out + q_base + (tid << 2)) = acc_cache4[tid] * inv_sum;
     }
