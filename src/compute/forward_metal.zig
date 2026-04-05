@@ -1536,33 +1536,24 @@ fn dispatchRopeOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
     input: *const MetalBuffer,
-    output: *const MetalBuffer,
+    _: *const MetalBuffer, // output (unused — native shader modifies input in-place)
     stride: u32,
     rope_dim: u32,
     n_heads: u32,
     position: u32,
 ) void {
-    // Use native RoPE with precomputed YaRN frequencies when scaling is active
-    if (engine.config.rope_scaling_factor > 1.0) {
-        const push = RopeNativePush{
-            .stride = stride,
-            .rope_dim = rope_dim,
-            .n_heads = n_heads,
-            .position = position,
-        };
-        // Native shader: buffer(0)=push, buffer(1)=data (in-place), buffer(2)=freqs
-        const bufs = [_]*const MetalBuffer{ input, &engine.rope_freq_buf };
-        cmd.dispatchV2(&engine.rope_native_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeNativePush), 0);
-        return;
-    }
-    const push = RopePush{
+    // Always use native RoPE with precomputed frequencies (supports YaRN, rope_freqs.weight, etc.)
+    // The SPIRV-Cross rope_fused shader lost its freq_base_bits push constant field,
+    // so it can no longer compute frequencies correctly. The native shader reads from
+    // the precomputed rope_freq_buf which handles all scaling variants.
+    const push = RopeNativePush{
         .stride = stride,
         .rope_dim = rope_dim,
         .n_heads = n_heads,
         .position = position,
     };
-    const bufs = [_]*const MetalBuffer{ input, output, &engine.rope_freq_buf };
-    cmd.dispatchV2(&engine.rope_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopePush), 0);
+    const bufs = [_]*const MetalBuffer{ input, &engine.rope_freq_buf };
+    cmd.dispatchV2(&engine.rope_native_pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeNativePush), 0);
 }
 
 fn dispatchSigmoidMulOnCmd(
