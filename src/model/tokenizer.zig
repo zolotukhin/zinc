@@ -26,6 +26,8 @@ pub const Tokenizer = struct {
     scores: ?[]const f32,
     /// Chat template string from GGUF metadata, or null
     chat_template: ?[]const u8 = null,
+    /// Byte-level BPE pretokenizer style for GPT-2/Qwen-family vocabularies.
+    pretokenizer: Pretokenizer = .legacy,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
@@ -33,6 +35,11 @@ pub const Tokenizer = struct {
         first: []const u8,
         second: []const u8,
         rank: u32,
+    };
+
+    const Pretokenizer = enum {
+        legacy,
+        gpt2_ascii,
     };
 
     /// Initialize tokenizer from GGUF metadata.
@@ -152,6 +159,14 @@ pub const Tokenizer = struct {
 
         const chat_template = gf.getString("tokenizer.chat_template");
         if (chat_template) |tmpl| log.debug("Chat template: {d} chars", .{tmpl.len});
+        const pre_name = gf.getString("tokenizer.ggml.pre") orelse "";
+        const pretokenizer: Pretokenizer = if (scores == null and merges_list.items.len > 0 and
+            (std.mem.eql(u8, model_type, "gpt2") or
+                std.mem.eql(u8, pre_name, "qwen2") or
+                std.mem.eql(u8, pre_name, "qwen35")))
+            .gpt2_ascii
+        else
+            .legacy;
 
         return Tokenizer{
             .vocab = vocab,
@@ -163,6 +178,7 @@ pub const Tokenizer = struct {
             .prepend_bos = prepend_bos,
             .add_eos_token = add_eos_token,
             .chat_template = chat_template,
+            .pretokenizer = pretokenizer,
             .allocator = allocator,
         };
     }
@@ -208,7 +224,7 @@ pub const Tokenizer = struct {
 
     /// Encode UTF-8 text into a token ID slice using the tokenizer's own allocator.
     /// Callers must free the returned slice with `freeEncoded`, not an arbitrary request allocator.
-    pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
+    fn encodeChunk(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
 
         // Start with GPT-2 byte-level encoding: each raw byte maps to a Unicode char
@@ -273,6 +289,115 @@ pub const Tokenizer = struct {
                     try tokens.append(self.allocator, byte_token);
                 }
             }
+        }
+
+        return try tokens.toOwnedSlice(self.allocator);
+    }
+
+    fn isAsciiLetter(byte: u8) bool {
+        return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z');
+    }
+
+    fn isAsciiDigit(byte: u8) bool {
+        return byte >= '0' and byte <= '9';
+    }
+
+    fn isAsciiSpace(byte: u8) bool {
+        return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r';
+    }
+
+    fn matchAsciiContraction(text: []const u8, start: usize) usize {
+        if (start >= text.len or text[start] != '\'') return 0;
+        const rest = text[start..];
+        const candidates = [_][]const u8{ "'re", "'ve", "'ll", "'s", "'t", "'m", "'d" };
+        for (candidates) |candidate| {
+            if (rest.len >= candidate.len and std.ascii.eqlIgnoreCase(rest[0..candidate.len], candidate)) {
+                return candidate.len;
+            }
+        }
+        return 0;
+    }
+
+    fn nextGpt2PretokenChunk(text: []const u8, pos: *usize) []const u8 {
+        if (pos.* >= text.len) return text[text.len..text.len];
+
+        const start = pos.*;
+        var i = start;
+
+        const const_len = matchAsciiContraction(text, start);
+        if (const_len > 0) {
+            pos.* = start + const_len;
+            return text[start..pos.*];
+        }
+
+        if (text[i] == ' ') {
+            if (i + 1 < text.len and isAsciiLetter(text[i + 1])) {
+                i += 2;
+                while (i < text.len and isAsciiLetter(text[i])) : (i += 1) {}
+                pos.* = i;
+                return text[start..i];
+            }
+            if (i + 1 < text.len and isAsciiDigit(text[i + 1])) {
+                i += 2;
+                while (i < text.len and isAsciiDigit(text[i])) : (i += 1) {}
+                pos.* = i;
+                return text[start..i];
+            }
+            if (i + 1 < text.len and !isAsciiSpace(text[i + 1]) and !isAsciiLetter(text[i + 1]) and !isAsciiDigit(text[i + 1])) {
+                i += 2;
+                while (i < text.len and !isAsciiSpace(text[i]) and !isAsciiLetter(text[i]) and !isAsciiDigit(text[i])) : (i += 1) {}
+                pos.* = i;
+                return text[start..i];
+            }
+            i += 1;
+            while (i < text.len and isAsciiSpace(text[i])) : (i += 1) {}
+            pos.* = i;
+            return text[start..i];
+        }
+
+        if (isAsciiLetter(text[i])) {
+            i += 1;
+            while (i < text.len and isAsciiLetter(text[i])) : (i += 1) {}
+            pos.* = i;
+            return text[start..i];
+        }
+
+        if (isAsciiDigit(text[i])) {
+            i += 1;
+            while (i < text.len and isAsciiDigit(text[i])) : (i += 1) {}
+            pos.* = i;
+            return text[start..i];
+        }
+
+        if (isAsciiSpace(text[i])) {
+            i += 1;
+            while (i < text.len and isAsciiSpace(text[i])) : (i += 1) {}
+            pos.* = i;
+            return text[start..i];
+        }
+
+        i += 1;
+        while (i < text.len and !isAsciiSpace(text[i]) and !isAsciiLetter(text[i]) and !isAsciiDigit(text[i])) : (i += 1) {}
+        pos.* = i;
+        return text[start..i];
+    }
+
+    pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
+        if (text.len == 0) return try self.allocator.alloc(u32, 0);
+        if (self.scores != null or self.merges.len == 0 or self.pretokenizer == .legacy) {
+            return self.encodeChunk(text);
+        }
+
+        var tokens: std.ArrayList(u32) = .{};
+        errdefer tokens.deinit(self.allocator);
+
+        var pos: usize = 0;
+        while (pos < text.len) {
+            const chunk = nextGpt2PretokenChunk(text, &pos);
+            if (chunk.len == 0) break;
+            const chunk_tokens = try self.encodeChunk(chunk);
+            defer self.allocator.free(chunk_tokens);
+            try tokens.appendSlice(self.allocator, chunk_tokens);
         }
 
         return try tokens.toOwnedSlice(self.allocator);

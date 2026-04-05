@@ -201,6 +201,12 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
             const key4 = std.fmt.bufPrint(&key_buf, "{s}.final_logit_softcapping", .{prefix}) catch break :blk @as(f32, 0.0);
             break :blk gf.getF32(key4) orelse 0.0;
         },
+        .attn_scale = blk: {
+            const key5 = std.fmt.bufPrint(&key_buf, "{s}.attention.scale", .{prefix}) catch break :blk @as(f32, 0.0);
+            if (gf.getF32(key5)) |v| break :blk v;
+            if (std.mem.eql(u8, arch_str, "gemma4")) break :blk @as(f32, 1.0);
+            break :blk @as(f32, 0.0);
+        },
         .sliding_window_size = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.attention.sliding_window", .{prefix}) catch "") orelse 0,
         .rope_scaling_factor = blk: {
             const rsk = std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.factor", .{prefix}) catch break :blk @as(f32, 0.0);

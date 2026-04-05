@@ -86,7 +86,7 @@ kernel void main0(
         // Pointer to quants for this block
         device const ushort* q1 = (device const ushort*)(x_base + (uint64_t)ib * BLOCK_SIZE + 16) + 16 * iq + 4 * ir;
         // Pointer to d/dmin halves for this block
-        device const half*   dh = (device const half*)(x_base + (uint64_t)ib * BLOCK_SIZE);
+        device const half* dh = (device const half*)(x_base + (uint64_t)ib * BLOCK_SIZE);
 
         for (short row = 0; row < NR0; row++) {
             sc16[0] = sc[0] & kmask1;
@@ -100,21 +100,21 @@ kernel void main0(
             float4 acc2 = {0.f, 0.f, 0.f, 0.f};
 
             for (short i = 0; i < 4; ++i) {
-                acc1[0] += yl[2*i + 0] * (q1[i] & 0x000F);
-                acc1[1] += yl[2*i + 1] * (q1[i] & 0x0F00);
-                acc1[2] += yl[2*i + 8] * (q1[i] & 0x00F0);
-                acc1[3] += yl[2*i + 9] * (q1[i] & 0xF000);
-                acc2[0] += yh[2*i + 0] * (q2[i] & 0x000F);
-                acc2[1] += yh[2*i + 1] * (q2[i] & 0x0F00);
-                acc2[2] += yh[2*i + 8] * (q2[i] & 0x00F0);
-                acc2[3] += yh[2*i + 9] * (q2[i] & 0xF000);
+                acc1[0] += yl[2 * i + 0] * (q1[i] & 0x000F);
+                acc1[1] += yl[2 * i + 1] * (q1[i] & 0x0F00);
+                acc1[2] += yl[2 * i + 8] * (q1[i] & 0x00F0);
+                acc1[3] += yl[2 * i + 9] * (q1[i] & 0xF000);
+                acc2[0] += yh[2 * i + 0] * (q2[i] & 0x000F);
+                acc2[1] += yh[2 * i + 1] * (q2[i] & 0x0F00);
+                acc2[2] += yh[2 * i + 8] * (q2[i] & 0x00F0);
+                acc2[3] += yh[2 * i + 9] * (q2[i] & 0xF000);
             }
 
-            sumf[row] += dh[0] * ((acc1[0] + 1.f/256.f * acc1[1]) * sc8[0] +
-                                   (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f +
-                                   (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4] +
-                                   (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f) -
-                         dh[1] * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
+            sumf[row] += dh[0] * ((acc1[0] + 1.f / 256.f * acc1[1]) * sc8[0] +
+                    (acc1[2] + 1.f / 256.f * acc1[3]) * sc8[1] * 1.f / 16.f +
+                    (acc2[0] + 1.f / 256.f * acc2[1]) * sc8[4] +
+                    (acc2[2] + 1.f / 256.f * acc2[3]) * sc8[5] * 1.f / 16.f) -
+                dh[1] * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
 
             // Advance to next row: nb01/2 is stride in uint16 units
             q1 += nb01 / 2;

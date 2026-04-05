@@ -7,6 +7,7 @@ struct FlashAttnPush {
     uint n_kv_heads;
     uint seq_len;
     uint page_size;
+    uint attn_scale_bits;
     uint kv_head_stride_bytes;
     uint kv_token_stride_bytes;
 };
@@ -112,7 +113,7 @@ kernel void main0(
     const uint kv_head = head / q_per_kv;
     const uint q_base = head * p.head_dim;
     const uint vec4_dim = p.head_dim >> 2;
-    const float scale = rsqrt((float)p.head_dim);
+    const float scale = p.attn_scale_bits != 0u ? as_type<float>(p.attn_scale_bits) : rsqrt((float)p.head_dim);
     const bool contiguous_kv = p.page_size == 0u;
 
     threadgroup float4 q_cache4[FLASH_MAX_HEAD_VEC4];
