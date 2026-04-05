@@ -93,6 +93,7 @@ kernel void main0(
     device const float* k_cache [[buffer(3)]],
     device const float* v_cache [[buffer(4)]],
     device float* out [[buffer(5)]],
+    device const float* sinks [[buffer(6)]],  // per-head attention sink values
     uint head [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]],
     uint subgroup_size [[thread_execution_width]],
@@ -190,7 +191,20 @@ kernel void main0(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    const float inv_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
+    // Attention sink: per-head learned scalar acts as virtual token in softmax.
+    // Absorbs excess attention weight (no V contribution). sinks[head] = NaN means disabled.
+    float final_sum = running_sum;
+    const float sink_val = sinks[head];
+    if (!isnan(sink_val)) {
+        const float sink_max = fast::max(running_max, sink_val);
+        const float rescale_s = running_sum > 0.0f ? fast::exp(running_max - sink_max) : 0.0f;
+        final_sum = running_sum * rescale_s + fast::exp(sink_val - sink_max);
+        if (tid < vec4_dim) {
+            acc_cache4[tid] *= rescale_s;
+        }
+    }
+
+    const float inv_sum = final_sum > 0.0f ? 1.0f / final_sum : 0.0f;
     if (tid < vec4_dim) {
         *(device float4*)(out + q_base + (tid << 2)) = acc_cache4[tid] * inv_sum;
     }

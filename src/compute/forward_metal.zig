@@ -735,6 +735,8 @@ pub const InferenceEngine = struct {
     kv_k_cache: []MetalBuffer,
     kv_v_cache: []MetalBuffer,
     page_table_buf: MetalBuffer,
+    attn_sinks_buf: MetalBuffer, // Per-head attention sink values (reused per layer)
+    attn_sink_values: ?[][]f32,  // Preloaded per-layer sink values
 
     // DMMV compute pipelines (one per quant type)
     dmmv_q4k_pipe: MetalPipeline,
@@ -968,6 +970,36 @@ pub const InferenceEngine = struct {
             const page_table_ptr: [*]u32 = @ptrCast(@alignCast(self.page_table_buf.cpu_ptr.?));
             for (0..4096) |i| {
                 page_table_ptr[i] = @intCast(i);
+            }
+        }
+        // Attention sinks buffer + preloaded values
+        self.attn_sinks_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, cfg.n_heads) * @sizeOf(f32), 4));
+        {
+            // Fill with NaN (disabled) by default
+            const sink_ptr: [*]f32 = @ptrCast(@alignCast(self.attn_sinks_buf.cpu_ptr.?));
+            for (0..cfg.n_heads) |i| sink_ptr[i] = std.math.nan(f32);
+        }
+        {
+            var has_sinks = false;
+            for (0..cfg.n_layers) |i| {
+                if (findLayerTensor(model, @intCast(i), "attn_sinks.weight") != null) { has_sinks = true; break; }
+            }
+            if (has_sinks) {
+                self.attn_sink_values = try allocator.alloc([]f32, cfg.n_layers);
+                for (0..cfg.n_layers) |i| {
+                    if (findLayerTensor(model, @intCast(i), "attn_sinks.weight")) |t| {
+                        const n_heads_for_sinks = @as(usize, t.info.dims[0]);
+                        self.attn_sink_values.?[i] = try allocator.alloc(f32, n_heads_for_sinks);
+                        const sinks_mmap = model.mmap_data orelse return error.NoMmapData;
+                        const off: usize = @intCast(model.gguf_file.tensor_data_offset + t.info.offset);
+                        readMmapFloats(sinks_mmap, off, t.info.type_, self.attn_sink_values.?[i]);
+                    } else {
+                        self.attn_sink_values.?[i] = &.{};
+                    }
+                }
+                log.info("Attention sinks: loaded for {d} layers", .{cfg.n_layers});
+            } else {
+                self.attn_sink_values = null;
             }
         }
 
@@ -1415,6 +1447,11 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.kv_k_cache);
         self.allocator.free(self.kv_v_cache);
         metal_buffer.freeBuffer(&self.page_table_buf);
+        metal_buffer.freeBuffer(&self.attn_sinks_buf);
+        if (self.attn_sink_values) |vals| {
+            for (vals) |v| if (v.len > 0) self.allocator.free(v);
+            self.allocator.free(vals);
+        }
 
         metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
@@ -2562,12 +2599,20 @@ fn dispatchFlashAttnOnCmd(
         .kv_head_stride_bytes = engine.kv_cache_head_stride_bytes,
         .kv_token_stride_bytes = engine.kv_cache_bytes_per_token,
     };
+    // Load per-head sink values for this layer (if available)
+    if (engine.attn_sink_values) |sink_vals| {
+        if (sink_vals[layer_idx].len > 0) {
+            const sink_ptr: [*]f32 = @ptrCast(@alignCast(engine.attn_sinks_buf.cpu_ptr.?));
+            @memcpy(sink_ptr[0..sink_vals[layer_idx].len], sink_vals[layer_idx]);
+        }
+    }
     const bufs = [_]*const MetalBuffer{
         &engine.page_table_buf,
         &engine.q_buf,
         &engine.kv_k_cache[layer_idx],
         &engine.kv_v_cache[layer_idx],
         &engine.attn_out_buf,
+        &engine.attn_sinks_buf,
     };
     const pipe = if (engine.kv_cache_q8) &engine.flash_attn_q8_pipe else &engine.flash_attn_pipe;
     cmd.dispatchV2(pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
@@ -3903,7 +3948,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
                     // Phase 2: All SwiGLU operations in parallel
                     if (cfg.architecture == .gpt_oss) {
-                        // OAI SwiGLU on CPU (different formula from standard SwiGLU)
+                        // OAI SwiGLU on CPU
                         cmd.commitAndWait();
                         for (0..cfg.n_experts_used) |ei| {
                             cpuSwiGLU_OAI(@ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_swiglu_bufs[ei].cpu_ptr.?)), inter_dim);
@@ -7145,6 +7190,13 @@ test "flash_attn shader handles contiguous Metal KV cache fast path" {
     defer metal_buffer.freeBuffer(&v_cache_buf);
     var out_buf = try metal_buffer.createBuffer(ctx, n_heads * head_dim * @sizeOf(f32));
     defer metal_buffer.freeBuffer(&out_buf);
+    var sinks_buf = try metal_buffer.createBuffer(ctx, n_heads * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&sinks_buf);
+    {
+        // Fill sinks with NaN (disabled)
+        const sp: [*]f32 = @ptrCast(@alignCast(sinks_buf.cpu_ptr.?));
+        sp[0] = std.math.nan(f32);
+    }
 
     const page_table_ptr: [*]u32 = @ptrCast(@alignCast(page_table_buf.cpu_ptr.?));
     page_table_ptr[0] = 0;
@@ -7177,7 +7229,7 @@ test "flash_attn shader handles contiguous Metal KV cache fast path" {
         .kv_head_stride_bytes = head_dim * @sizeOf(f32),
         .kv_token_stride_bytes = n_kv_heads * head_dim * @sizeOf(f32),
     };
-    const bufs = [_]*const MetalBuffer{ &page_table_buf, &q_buf, &k_cache_buf, &v_cache_buf, &out_buf };
+    const bufs = [_]*const MetalBuffer{ &page_table_buf, &q_buf, &k_cache_buf, &v_cache_buf, &out_buf, &sinks_buf };
 
     var cmd = try metal_command.beginCommand(ctx);
     cmd.dispatchV2(&pipe, .{ n_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
