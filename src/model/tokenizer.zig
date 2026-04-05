@@ -811,6 +811,18 @@ pub const Tokenizer = struct {
                     pos += suffix.len;
                 }
             },
+            .openai_moe => {
+                // OpenAI MoE (gpt-oss): <|start|>role<|message|>content<|end|>
+                for (0..n) |i| {
+                    const end_tag = if (std.mem.eql(u8, roles[i], "assistant")) "<|return|>" else "<|end|>";
+                    const written = std.fmt.bufPrint(buf[pos..], "<|start|>{s}<|message|>{s}{s}", .{ roles[i], contents[i], end_tag }) catch return error.BufferTooSmall;
+                    pos += written.len;
+                }
+                if (options.add_generation_prompt) {
+                    const suffix = std.fmt.bufPrint(buf[pos..], "<|start|>assistant<|message|>", .{}) catch return error.BufferTooSmall;
+                    pos += suffix.len;
+                }
+            },
             .generic => {
                 for (0..n) |i| {
                     const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
@@ -821,7 +833,7 @@ pub const Tokenizer = struct {
         return buf[0..pos];
     }
 
-    const TemplateKind = enum { chatml, llama3, gemma, generic };
+    const TemplateKind = enum { chatml, llama3, gemma, openai_moe, generic };
 
     pub fn detectTemplateKindName(self: *const Tokenizer) []const u8 {
         return @tagName(self.detectTemplateKind());
@@ -833,6 +845,8 @@ pub const Tokenizer = struct {
         if (std.mem.indexOf(u8, tmpl, "start_header_id") != null) return .llama3;
         if (std.mem.indexOf(u8, tmpl, "start_of_turn") != null or
             std.mem.indexOf(u8, tmpl, "<|turn>") != null) return .gemma;
+        if (std.mem.indexOf(u8, tmpl, "<|start|>") != null and
+            std.mem.indexOf(u8, tmpl, "<|message|>") != null) return .openai_moe;
         return .generic;
     }
 
