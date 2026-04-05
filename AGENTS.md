@@ -309,11 +309,15 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "\
     --output /tmp/zinc_api_raw_benchmark.json"
 ```
 
-Latest single-stream reference result from a clean RDNA4 node on 2026-03-31 with `zig build -Doptimize=ReleaseFast`:
+Latest single-stream reference results with `zig build -Doptimize=ReleaseFast`:
 
+**AMD RDNA4** (Radeon AI PRO R9700, 32 GB, 2026-03-31):
 - CLI plain decode on `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`: `37.95 tok/s`, `26.3 ms/tok`
 - CLI plain decode on `Qwen3.5-2B-Q4_K_M.gguf`: `26.71 tok/s`, `37.4 ms/tok`
-- Previous reference (2026-03-30): 35B was `35.24 tok/s`, 2B was `22.93 tok/s`
+
+**Apple Silicon** (M1 Max 32 GB, 2026-04-02):
+- CLI plain decode on `Qwen3.5-2B-Q4_K_M.gguf`: `~17 tok/s`
+- CLI plain decode on `Qwen3-8B-Q4_K_M.gguf`: `~8 tok/s`
 
 ### Measure hot decode kernels directly
 

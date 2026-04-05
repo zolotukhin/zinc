@@ -12,27 +12,33 @@ const metal_device = @import("../metal/device.zig");
 const ModelConfig = config_mod.ModelConfig;
 const MetalDevice = metal_device.MetalDevice;
 
+/// Identifies a model to load: a GGUF file path and optional managed-catalog id.
 pub const LoadSpec = struct {
     model_path: []const u8,
     managed_id: ?[]const u8 = null,
 };
 
+/// Compact view of one catalog entry for the HTTP `/v1/models` response.
 pub const ModelSummary = struct {
     id: []const u8,
     display_name: []const u8,
     release_date: []const u8,
     homepage_url: []const u8,
+    family: []const u8,
+    quantization: []const u8,
     installed: bool,
     active: bool,
     managed: bool,
     supported_on_current_gpu: bool,
     fits_current_gpu: bool,
     required_vram_bytes: u64,
+    size_bytes: u64,
     exact_fit: bool,
     status_label: []const u8,
     supports_thinking_toggle: bool,
 };
 
+/// Snapshot of the full model catalog, filtered by the current GPU profile.
 pub const ModelCatalogView = struct {
     profile: []const u8,
     data: []ModelSummary,
@@ -43,6 +49,7 @@ pub const ModelCatalogView = struct {
     }
 };
 
+/// All GPU and host resources for a loaded model: weights, tokenizer, and inference engine.
 pub const LoadedResources = struct {
     model: loader_mod.Model,
     tokenizer: tokenizer_mod.Tokenizer,
@@ -69,6 +76,8 @@ pub const LoadedResources = struct {
     }
 };
 
+/// Thread-safe manager for the currently active model on the Metal backend.
+/// Handles loading, hot-swapping, catalog queries, and VRAM budget enforcement.
 pub const ModelManager = struct {
     allocator: std.mem.Allocator,
     device: *const MetalDevice,
@@ -218,12 +227,15 @@ pub const ModelManager = struct {
                 .display_name = entry.display_name,
                 .release_date = entry.release_date,
                 .homepage_url = entry.homepage_url,
+                .family = entry.family,
+                .quantization = entry.quantization,
                 .installed = installed,
                 .active = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id),
                 .managed = true,
                 .supported_on_current_gpu = supported_now,
                 .fits_current_gpu = fit.fits_current_gpu,
                 .required_vram_bytes = fit.required_vram_bytes,
+                .size_bytes = entry.size_bytes,
                 .exact_fit = fit.exact,
                 .status_label = status_label,
                 .supports_thinking_toggle = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id) and active_supports_thinking_toggle,
@@ -236,12 +248,15 @@ pub const ModelManager = struct {
                 .display_name = active_display_name,
                 .release_date = "",
                 .homepage_url = "",
+                .family = "",
+                .quantization = "",
                 .installed = true,
                 .active = true,
                 .managed = false,
                 .supported_on_current_gpu = true,
                 .fits_current_gpu = true,
                 .required_vram_bytes = 0,
+                .size_bytes = 0,
                 .exact_fit = true,
                 .status_label = "raw",
                 .supports_thinking_toggle = active_supports_thinking_toggle,
@@ -461,10 +476,11 @@ fn fallbackModelName(model: *const loader_mod.Model) []const u8 {
         .qwen35 => "qwen3.5",
         .qwen2_moe => "qwen3.5-35b",
         .qwen2 => "qwen2",
-        .llama => "llama",
         .mistral => "mistral",
         .mamba => "mamba",
         .jamba => "jamba",
+        .gemma => "gemma",
+        .gpt_oss => "gpt-oss-20b",
         .unknown => "zinc-model",
     };
 }

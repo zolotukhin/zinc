@@ -2,9 +2,10 @@
 interface Props {
   title?: string;
   code: string;
+  density?: 'default' | 'compact';
 }
 
-const { title = 'Terminal', code } = Astro.props;
+const { title = 'Terminal', code, density = 'default' } = Astro.props;
 
 function escapeHtml(value: string): string {
   return value
@@ -53,7 +54,7 @@ function highlightShellLine(line: string): string {
 const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
 ---
 
-<div class="terminal-window" data-terminal-window>
+<div class="terminal-window" data-terminal-window data-density={density}>
   <div class="terminal-window__header">
     <div class="terminal-window__left">
       <span class="terminal-window__dots" aria-hidden="true">
@@ -99,13 +100,40 @@ const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
 
 <style>
   .terminal-window {
+    --terminal-radius: 16px;
+    --terminal-shadow: 0 16px 32px rgba(18, 24, 40, 0.1);
+    --terminal-header-padding: 0.7rem 0.9rem;
+    --terminal-header-gap: 0.7rem;
+    --terminal-dot-size: 0.62rem;
+    --terminal-dot-gap: 0.32rem;
+    --terminal-title-size: 0.78rem;
+    --terminal-copy-padding: 0.28rem 0.68rem;
+    --terminal-copy-size: 0.78rem;
+    --terminal-pre-padding: 1rem 1.05rem 1.1rem;
+    --terminal-code-size: 0.92rem;
+    --terminal-code-line-height: 1.65;
     border: 1px solid var(--color-border);
-    border-radius: 16px;
+    border-radius: var(--terminal-radius);
     overflow: hidden;
     background:
       linear-gradient(180deg, rgba(211, 84, 0, 0.06), transparent 90px),
       var(--color-bg-alt);
-    box-shadow: 0 16px 32px rgba(18, 24, 40, 0.1);
+    box-shadow: var(--terminal-shadow);
+  }
+
+  .terminal-window[data-density='compact'] {
+    --terminal-radius: 14px;
+    --terminal-shadow: 0 12px 24px rgba(18, 24, 40, 0.08);
+    --terminal-header-padding: 0.56rem 0.72rem;
+    --terminal-header-gap: 0.58rem;
+    --terminal-dot-size: 0.52rem;
+    --terminal-dot-gap: 0.24rem;
+    --terminal-title-size: 0.72rem;
+    --terminal-copy-padding: 0.2rem 0.56rem;
+    --terminal-copy-size: 0.72rem;
+    --terminal-pre-padding: 0.78rem 0.82rem 0.86rem;
+    --terminal-code-size: 0.84rem;
+    --terminal-code-line-height: 1.48;
   }
 
   .terminal-window__header {
@@ -113,7 +141,7 @@ const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
     align-items: center;
     justify-content: space-between;
     gap: var(--space-sm);
-    padding: 0.7rem 0.9rem;
+    padding: var(--terminal-header-padding);
     border-bottom: 1px solid var(--color-border);
     background: rgba(255, 255, 255, 0.68);
     backdrop-filter: blur(10px);
@@ -122,18 +150,18 @@ const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
   .terminal-window__left {
     display: flex;
     align-items: center;
-    gap: 0.7rem;
+    gap: var(--terminal-header-gap);
     min-width: 0;
   }
 
   .terminal-window__dots {
     display: inline-flex;
-    gap: 0.32rem;
+    gap: var(--terminal-dot-gap);
   }
 
   .terminal-window__dots i {
-    width: 0.62rem;
-    height: 0.62rem;
+    width: var(--terminal-dot-size);
+    height: var(--terminal-dot-size);
     border-radius: 999px;
     display: block;
   }
@@ -143,7 +171,7 @@ const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
   .terminal-window__dots i:nth-child(3) { background: #28c840; }
 
   .terminal-window__title {
-    font-size: 0.78rem;
+    font-size: var(--terminal-title-size);
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -156,9 +184,9 @@ const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
     background: var(--color-bg);
     color: var(--color-text-muted);
     border-radius: 999px;
-    padding: 0.28rem 0.68rem;
+    padding: var(--terminal-copy-padding);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--terminal-copy-size);
     font-weight: 600;
     cursor: pointer;
     transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
@@ -177,7 +205,7 @@ const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
 
   .terminal-window pre {
     margin: 0;
-    padding: 1rem 1.05rem 1.1rem;
+    padding: var(--terminal-pre-padding);
     border: 0;
     border-radius: 0;
     background: transparent;
@@ -187,8 +215,8 @@ const highlightedCode = code.split('\n').map(highlightShellLine).join('\n');
   .terminal-window pre code {
     display: block;
     font-family: var(--font-mono);
-    font-size: 0.92rem;
-    line-height: 1.65;
+    font-size: var(--terminal-code-size);
+    line-height: var(--terminal-code-line-height);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     background: none;

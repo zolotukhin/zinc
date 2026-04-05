@@ -13,11 +13,13 @@ const CommandPool = @import("../vulkan/command.zig").CommandPool;
 
 const log = std.log.scoped(.loader);
 
-// Re-export from config.zig for backward compatibility
+/// Supported model architectures (re-exported from config.zig).
 pub const Architecture = config_mod.Architecture;
 
+/// Normalized model dimensions and hyperparameters (re-exported from config.zig).
 pub const ModelConfig = config_mod.ModelConfig;
 
+/// Summary returned by `inspectModel`: config plus file and tensor size statistics.
 pub const ModelInspection = struct {
     config: ModelConfig,
     file_size: u64,
@@ -96,7 +98,22 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
 
     const n_kv_heads = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.head_count_kv", .{prefix}) catch break :blk n_heads;
-        break :blk gf.getU32(key) orelse n_heads;
+        if (gf.getU32(key)) |v| break :blk v;
+        // Gemma 4: head_count_kv is a per-layer array. Use the maximum value for buffer sizing.
+        if (gf.metadata.get(key)) |val| {
+            switch (val) {
+                .array => |arr| {
+                    var max_kv: u32 = 0;
+                    for (arr) |item| {
+                        const v = item.asU32() orelse continue;
+                        if (v > max_kv) max_kv = v;
+                    }
+                    if (max_kv > 0) break :blk max_kv;
+                },
+                else => {},
+            }
+        }
+        break :blk n_heads;
     };
 
     const hidden_dim = blk: {
@@ -104,7 +121,9 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         break :blk gf.getU32(key) orelse 0;
     };
 
-    // head_dim: prefer attention.key_length from GGUF (Qwen3.5 uses 256, not hidden_dim/n_heads=128)
+    // head_dim: prefer attention.key_length from GGUF (Qwen3.5 uses 256, not hidden_dim/n_heads=128).
+    // Gemma 4 has separate key_length (global=512) and key_length_swa (sliding=256).
+    // Use the max for buffer allocation; the forward pass derives per-layer dims from tensors.
     const head_dim = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.key_length", .{prefix}) catch break :blk if (n_heads > 0) hidden_dim / n_heads else @as(u32, 0);
         break :blk gf.getU32(key) orelse (if (n_heads > 0) hidden_dim / n_heads else 0);
@@ -186,7 +205,8 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
-    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse 4;
+    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse
+        if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
 
     if (log_metadata) {
         log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
@@ -256,6 +276,18 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
             }
             break :blk @as(f32, 10000.0);
         },
+        .rope_freq_base_swa = blk: {
+            const swa_key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base_swa", .{prefix}) catch break :blk @as(f32, 0);
+            const swa_val = gf.metadata.get(swa_key);
+            if (swa_val) |v| {
+                switch (v) {
+                    .float32 => |fv| break :blk fv,
+                    .uint32 => |u| break :blk @as(f32, @floatFromInt(u)),
+                    else => {},
+                }
+            }
+            break :blk @as(f32, 0);
+        },
         .rms_norm_eps = rms_norm_eps,
         .n_experts = n_experts,
         .n_experts_used = n_experts_used,
@@ -267,6 +299,22 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         .ssm_n_group = ssm_n_group,
         .full_attn_interval = full_attn_interval,
         .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
+        .final_logit_softcapping = blk: {
+            const key4 = std.fmt.bufPrint(&key_buf, "{s}.final_logit_softcapping", .{prefix}) catch break :blk @as(f32, 0.0);
+            break :blk gf.getF32(key4) orelse 0.0;
+        },
+        .attn_scale = blk: {
+            const key5 = std.fmt.bufPrint(&key_buf, "{s}.attention.scale", .{prefix}) catch break :blk @as(f32, 0.0);
+            if (gf.getF32(key5)) |v| break :blk v;
+            if (std.mem.eql(u8, arch_str, "gemma4")) break :blk @as(f32, 1.0);
+            break :blk @as(f32, 0.0);
+        },
+        .sliding_window_size = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.attention.sliding_window", .{prefix}) catch "") orelse 0,
+        .rope_scaling_factor = blk: {
+            const rsk = std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.factor", .{prefix}) catch break :blk @as(f32, 0.0);
+            break :blk gf.getF32(rsk) orelse 0.0;
+        },
+        .rope_original_context = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.original_context_length", .{prefix}) catch "") orelse 0,
     };
 }
 
@@ -376,6 +424,11 @@ pub fn load(
 
     const config = extractConfig(&gf);
 
+    if (config.architecture == .unknown) {
+        log.err("Unsupported model architecture. Supported: qwen2, qwen2_moe, qwen35, mistral, mamba, jamba", .{});
+        return error.UnsupportedArchitecture;
+    }
+
     // Load tensors to GPU
     var loaded_tensors: std.ArrayList(LoadedTensor) = .{};
     errdefer {
@@ -431,7 +484,7 @@ pub fn load(
 }
 
 test "parseArchitecture" {
-    try std.testing.expectEqual(Architecture.llama, parseArchitecture("llama"));
+    try std.testing.expectEqual(Architecture.unknown, parseArchitecture("llama"));
     try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen2"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
     try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));

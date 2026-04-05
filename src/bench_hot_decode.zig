@@ -1,3 +1,8 @@
+//! Hot-path decode kernel microbenchmarks.
+//! Measures per-dispatch GPU latency, memory bandwidth, and VRAM utilisation
+//! for individual compute kernels (DMMV, SSM delta-net) in isolation.
+//! Run via `zig build hot-bench -Doptimize=ReleaseFast`.
+//! @section Inference Runtime
 const std = @import("std");
 const vk = @import("vulkan/vk.zig");
 const Instance = @import("vulkan/instance.zig").Instance;

@@ -6,26 +6,43 @@ const std = @import("std");
 
 const log = std.log.scoped(.graph);
 
+/// Where a graph node executes: GPU compute, GPU transfer, or CPU host.
 pub const ExecDomain = enum {
+    /// Dispatched as a compute shader on the GPU.
     gpu_compute,
+    /// Buffer copy or DMA transfer on the GPU.
     gpu_transfer,
+    /// Work performed on the CPU, typically a readback or synchronization point.
     cpu_host,
 };
 
+/// Classification of the dominant performance bottleneck for a graph node.
 pub const BottleneckKind = enum {
+    /// Runtime dominated by memory traffic (low arithmetic intensity).
     memory_bandwidth,
+    /// Too few waves to saturate compute units.
     occupancy,
+    /// Dispatch is too small to amortize kernel launch overhead.
     launch_latency,
+    /// Blocked by CPU-visible synchronization or readback.
     host_sync,
+    /// Dominated by buffer copy / DMA transfer traffic.
     transfer,
+    /// ALU-bound with high arithmetic intensity.
     compute,
+    /// Mixed or unclassifiable characteristics.
     unknown,
 };
 
+/// Hardware parameters used by bottleneck and utilization heuristics.
 pub const HardwareInfo = struct {
+    /// Peak memory bandwidth in GB/s.
     bandwidth_gbps: u32 = 0,
+    /// Number of compute units (CUs / SMs).
     compute_units: u32 = 0,
+    /// Threads per hardware wave (wavefront / warp size).
     wave_size: u32 = 64,
+    /// Recommended workgroup size for this device.
     preferred_workgroup_size: u32 = 64,
 };
 
@@ -43,6 +60,8 @@ pub const OpType = enum {
     rms_norm_mul,
     /// SwiGLU activation: SiLU(x) * y.
     swiglu,
+    /// GEGLU activation: GELU(x) * y, used by Gemma models.
+    geglu,
     /// Sigmoid gating: sigmoid(x) * y, used by SSM layers.
     sigmoid_mul,
     /// Rotary position embedding with reshape and KV-cache write.
@@ -170,8 +189,9 @@ pub const NodeAnalysis = struct {
     name: []const u8,
     /// Operation type.
     op: OpType,
-    /// Upstream dependencies.
+    /// Number of upstream dependencies.
     dependency_count: u32,
+    /// Number of nodes that depend on this one.
     dependent_count: u32,
     /// Depth from nearest root.
     depth: u32,
@@ -179,36 +199,65 @@ pub const NodeAnalysis = struct {
     is_root: bool,
     /// True if nothing depends on this.
     is_leaf: bool,
+    /// True if this node lies on the longest dependency chain.
     is_on_critical_path: bool,
+    /// Transformer layer index, if applicable.
     layer_index: ?u32,
+    /// Execution domain (GPU compute, transfer, or CPU).
     domain: ExecDomain,
+    /// Workgroup counts in x, y, z dimensions.
     workgroups: [3]u32,
+    /// Threads launched per workgroup.
     threads_per_workgroup: u32,
+    /// Product of workgroup counts across all dimensions.
     total_workgroups: u64,
+    /// Estimated activation read bytes.
     read_bytes: u64,
+    /// Estimated write bytes.
     write_bytes: u64,
+    /// Estimated weight payload bytes.
     weight_bytes: u64,
+    /// Sum of read, write, and weight bytes.
     total_bytes: u64,
+    /// Estimated floating-point operations.
     flops: u64,
+    /// FLOPs / total bytes -- higher means more compute-bound.
     arithmetic_intensity: f64,
+    /// Estimated wall time in microseconds at peak bandwidth.
     estimated_bandwidth_time_us: ?f64,
+    /// Percentage of peak bandwidth utilization at full occupancy.
     bandwidth_ceiling_pct: ?f64,
+    /// Dominant performance bottleneck classification.
     bottleneck: BottleneckKind,
+    /// Whether this node forces a host-visible sync.
     requires_host_sync: bool,
+    /// Human-readable explanation of the bottleneck classification.
     bottleneck_reason: []const u8,
+    /// Optional static diagnostic note.
     note: ?[]const u8,
 };
 
+/// A node ranked among the top contributors to estimated decode time.
 pub const Hotspot = struct {
+    /// Node ID in the parent graph.
     id: u32,
+    /// Human-readable node label.
     name: []const u8,
+    /// Operation type.
     op: OpType,
+    /// Transformer layer index, if applicable.
     layer_index: ?u32,
+    /// Estimated share of total decode time as a percentage.
     estimated_share_pct: f64,
+    /// Estimated wall time in microseconds at peak bandwidth.
     estimated_bandwidth_time_us: ?f64,
+    /// Combined read + write + weight bytes.
     total_bytes: u64,
+    /// Estimated floating-point operations.
     flops: u64,
+    /// Dominant performance bottleneck classification.
     bottleneck: BottleneckKind,
+    /// Human-readable explanation of the bottleneck.
     bottleneck_reason: []const u8,
 };
 
@@ -218,26 +267,45 @@ pub const GraphAnalysis = struct {
     name: []const u8,
     /// Total nodes in graph.
     node_count: u32,
+    /// Total dependency edges.
     edge_count: u32,
+    /// Nodes with no incoming dependencies.
     root_count: u32,
+    /// Nodes with no outgoing dependents.
     leaf_count: u32,
+    /// Length of the longest dependency chain.
     max_depth: u32,
+    /// Number of nodes on the critical path.
     critical_path_node_count: u32,
+    /// Number of edges on the critical path.
     critical_path_edge_count: u32,
+    /// Maximum number of nodes at any single depth level.
     max_parallel_width: u32,
+    /// Sequence length assumed when computing cost estimates.
     assumed_decode_seq_len: u32,
+    /// Hardware parameters used for utilization heuristics.
     hardware: HardwareInfo,
+    /// Sum of activation read bytes across all nodes.
     total_read_bytes: u64,
+    /// Sum of write bytes across all nodes.
     total_write_bytes: u64,
+    /// Sum of weight payload bytes across all nodes.
     total_weight_bytes: u64,
+    /// Sum of all byte traffic across all nodes.
     total_bytes: u64,
+    /// Sum of FLOPs across all nodes.
     total_flops: u64,
+    /// Number of nodes at each dependency depth level.
     depth_widths: []u32,
+    /// Per-operation-type node counts, sorted descending.
     op_counts: []OpCount,
+    /// Nodes on the longest dependency chain, in execution order.
     critical_path: []CriticalPathNode,
+    /// Top nodes ranked by estimated contribution to decode time.
     hotspots: []Hotspot,
-    /// Graph nodes.
+    /// Per-node structural and performance metrics.
     nodes: []NodeAnalysis,
+    /// All dependency edges in the graph.
     edges: []Edge,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
@@ -434,18 +502,22 @@ pub const Graph = struct {
         self.nodes.items[node_id].workgroup_count = .{ x, y, z };
     }
 
+    /// Assign a transformer layer index to a node for per-layer diagnostics.
     pub fn setLayerIndex(self: *Graph, node_id: u32, layer_index: ?u32) void {
         self.nodes.items[node_id].layer_index = layer_index;
     }
 
+    /// Override the execution domain for a node (defaults to `gpu_compute`).
     pub fn setExecDomain(self: *Graph, node_id: u32, domain: ExecDomain) void {
         self.nodes.items[node_id].domain = domain;
     }
 
+    /// Set the number of threads per workgroup for occupancy estimates.
     pub fn setThreadsPerWorkgroup(self: *Graph, node_id: u32, threads_per_workgroup: u32) void {
         self.nodes.items[node_id].threads_per_workgroup = threads_per_workgroup;
     }
 
+    /// Attach byte-traffic and FLOP cost estimates used by the bottleneck heuristics.
     pub fn setCostEstimate(self: *Graph, node_id: u32, read_bytes: u64, write_bytes: u64, weight_bytes: u64, flops: u64) void {
         var node = &self.nodes.items[node_id];
         node.read_bytes = read_bytes;
@@ -454,18 +526,22 @@ pub const Graph = struct {
         node.flops = flops;
     }
 
+    /// Mark whether a node requires host-visible synchronization or readback.
     pub fn setHostSync(self: *Graph, node_id: u32, requires_host_sync: bool) void {
         self.nodes.items[node_id].requires_host_sync = requires_host_sync;
     }
 
+    /// Attach an optional static diagnostic note to a node.
     pub fn setNote(self: *Graph, node_id: u32, note: ?[]const u8) void {
         self.nodes.items[node_id].note = note;
     }
 
+    /// Record the sequence length assumed when building decode-time cost estimates.
     pub fn setAssumedDecodeSeqLen(self: *Graph, assumed_decode_seq_len: u32) void {
         self.assumed_decode_seq_len = assumed_decode_seq_len;
     }
 
+    /// Provide hardware parameters used by occupancy and bandwidth heuristics.
     pub fn setHardwareContext(self: *Graph, hardware: HardwareInfo) void {
         self.hardware = hardware;
     }

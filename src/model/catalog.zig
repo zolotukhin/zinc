@@ -5,6 +5,7 @@
 const std = @import("std");
 const gpu_detect = @import("../vulkan/gpu_detect.zig");
 
+/// Lifecycle status of a catalog entry, controlling visibility and UI treatment.
 pub const CatalogStatus = enum {
     supported,
     experimental,
@@ -12,6 +13,8 @@ pub const CatalogStatus = enum {
     deprecated,
 };
 
+/// A single managed-model entry describing its identity, download location,
+/// hardware requirements, and tested GPU profiles.
 pub const CatalogEntry = struct {
     id: []const u8,
     display_name: []const u8,
@@ -35,8 +38,10 @@ pub const CatalogEntry = struct {
     tested_profiles: []const []const u8,
 };
 
+/// Shared GPU profile string used for all Apple Silicon (Metal) devices.
 pub const apple_silicon_profile = "apple-silicon";
 
+/// The complete list of ZINC-validated managed models available for download.
 pub const entries = [_]CatalogEntry{
     .{
         .id = "qwen35-2b-q4k-m",
@@ -82,8 +87,118 @@ pub const entries = [_]CatalogEntry{
             apple_silicon_profile,
         },
     },
+    .{
+        .id = "gpt-oss-20b-q4k-m",
+        .display_name = "OpenAI GPT-OSS 20B Q4_K_M",
+        .release_date = "2025-06-25",
+        .family = "gpt-oss",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "openai_gpt-oss-20b-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF",
+        .download_url = "https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF/resolve/main/openai_gpt-oss-20b-Q4_K_M.gguf?download=true",
+        .sha256 = "",
+        .size_bytes = 11_670_000_000,
+        .required_vram_bytes = 14 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = false,
+        .status = .experimental,
+        .tested_profiles = &.{
+            apple_silicon_profile,
+        },
+    },
+    .{
+        .id = "qwen3-8b-q4k-m",
+        .display_name = "Qwen3 8B Q4_K_M",
+        .release_date = "2025-04-29",
+        .family = "qwen3",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "Qwen3-8B-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/unsloth/Qwen3-8B-GGUF",
+        .download_url = "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true",
+        .sha256 = "120307ba529eb2439d6c430d94104dabd578497bc7bfe7e322b5d9933b449bd4",
+        .size_bytes = 5_027_784_512,
+        .required_vram_bytes = 6 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .supported,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
+    .{
+        .id = "gemma3-12b-q4k-m",
+        .display_name = "Gemma 3 12B Q4_K_M",
+        .release_date = "2025-03-12",
+        .family = "gemma3",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "gemma-3-12b-it-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF",
+        .download_url = "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf?download=true",
+        .sha256 = "",
+        .size_bytes = 7_330_000_000,
+        .required_vram_bytes = 9 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = false,
+        .status = .supported,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
+    .{
+        .id = "gemma4-31b-q4k-m",
+        .display_name = "Gemma 4 31B Q4_K_M",
+        .release_date = "2026-04-02",
+        .family = "gemma4",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "gemma-4-31B-it-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF",
+        .download_url = "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF/resolve/main/gemma-4-31B-it-Q4_K_M.gguf?download=true",
+        .sha256 = "",
+        .size_bytes = 19_650_000_000,
+        .required_vram_bytes = 21 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .supported,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
+    .{
+        .id = "gemma4-12b-q4k-m",
+        .display_name = "Gemma 4 12B (26B-A4B MoE) Q4_K_M",
+        .release_date = "2026-04-02",
+        .family = "gemma4",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "gemma-4-26B-A4B-it-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF",
+        .download_url = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf?download=true",
+        .sha256 = "",
+        .size_bytes = 14_500_000_000,
+        .required_vram_bytes = 16 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .experimental,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
 };
 
+/// Look up a catalog entry by its short identifier, returning null if not found.
 pub fn find(id: []const u8) ?*const CatalogEntry {
     for (&entries) |*entry| {
         if (std.mem.eql(u8, entry.id, id)) return entry;
@@ -91,6 +206,7 @@ pub fn find(id: []const u8) ?*const CatalogEntry {
     return null;
 }
 
+/// Map a detected Vulkan GPU configuration to its catalog profile string.
 pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
     return switch (config.vendor) {
         .amd_rdna4 => if (config.vram_mb >= 28 * 1024) "amd-rdna4-32gb" else if (config.vram_mb >= 14 * 1024) "amd-rdna4-16gb" else "amd-rdna4-small",
@@ -103,10 +219,12 @@ pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
     };
 }
 
+/// Return the catalog profile string for Apple Silicon Metal devices.
 pub fn profileForMetal() []const u8 {
     return apple_silicon_profile;
 }
 
+/// Return whether the entry has been tested on the given GPU profile.
 pub fn supportsProfile(entry: CatalogEntry, profile: []const u8) bool {
     for (entry.tested_profiles) |tested| {
         if (std.mem.eql(u8, tested, profile)) return true;
@@ -114,12 +232,70 @@ pub fn supportsProfile(entry: CatalogEntry, profile: []const u8) bool {
     return false;
 }
 
+/// Return whether the model's VRAM requirement fits within the given budget.
 pub fn fitsGpu(entry: CatalogEntry, vram_budget_bytes: u64) bool {
     return entry.required_vram_bytes <= vram_budget_bytes;
 }
 
+/// Return whether the model is both tested on the given profile and fits in VRAM.
 pub fn supportedOnCurrentGpu(entry: CatalogEntry, profile: []const u8, vram_budget_bytes: u64) bool {
     return supportsProfile(entry, profile) and fitsGpu(entry, vram_budget_bytes);
+}
+
+/// Map a catalog family string to the GGUF architecture string that models in
+/// that family use. Returns null for unrecognized families — the caller should
+/// treat that as an error (a catalog entry with no known architecture mapping).
+pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
+    const families = .{
+        .{ "qwen3.5", "qwen35" },
+        .{ "qwen3", "qwen3" },
+        .{ "qwen2.5", "qwen2" },
+        .{ "qwen2", "qwen2" },
+        .{ "mistral", "mistral" },
+        .{ "gemma4", "gemma4" },
+        .{ "gemma3", "gemma3" },
+        .{ "gemma2", "gemma2" },
+        .{ "gemma", "gemma" },
+        .{ "mamba", "mamba" },
+        .{ "jamba", "jamba" },
+        .{ "gpt-oss", "gpt-oss" },
+    };
+    inline for (families) |pair| {
+        if (std.mem.eql(u8, family, pair[0])) return pair[1];
+    }
+    return null;
+}
+
+test "every catalog entry maps to a supported architecture" {
+    const config_mod = @import("config.zig");
+    for (&entries) |entry| {
+        const gguf_arch = ggufArchForFamily(entry.family) orelse {
+            std.debug.print("FAIL: catalog entry '{s}' has family '{s}' with no known GGUF architecture mapping\n", .{ entry.id, entry.family });
+            return error.TestExpectedEqual;
+        };
+        const arch = config_mod.parseArchitecture(gguf_arch);
+        if (arch == .unknown) {
+            std.debug.print("FAIL: catalog entry '{s}' (family '{s}') maps to GGUF arch '{s}' which parseArchitecture returns .unknown\n", .{ entry.id, entry.family, gguf_arch });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "catalog IDs are unique" {
+    for (&entries, 0..) |a, i| {
+        for (entries[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.id, b.id)) {
+                std.debug.print("FAIL: duplicate catalog ID '{s}'\n", .{a.id});
+                return error.TestExpectedEqual;
+            }
+        }
+    }
+}
+
+test "find returns null for removed model families" {
+    // Llama was removed — ensure it cannot be found in the catalog.
+    try std.testing.expect(find("llama31-8b-q4k-m") == null);
+    try std.testing.expect(find("llama") == null);
 }
 
 test "find returns known entry" {

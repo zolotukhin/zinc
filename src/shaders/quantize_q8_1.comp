@@ -1,0 +1,62 @@
+#version 460
+// ZINC — Quantize fp32 vector to unsigned-biased Q8_1 for IDP DMMV.
+// Each workgroup of 32 threads quantizes one 32-element block.
+// Q8_1 output: uint32[0] = f16(d) | f16(ds_y), uint32[1..8] = 32 biased uint8 packed.
+// Biased: q8_biased = round(val/d) + 127, range [0, 254]
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1) buffer Output { uint q8_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint K;
+    uint x_offset;
+};
+
+shared uint shared_words[8];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint block_id = gl_WorkGroupID.x;
+    uint base = x_offset / 4u + block_id * 32u;
+
+    float val = (base + tid < K + x_offset / 4u) ? x[base + tid] : 0.0;
+
+    // Find max absolute value
+    float amax = subgroupMax(abs(val));
+
+    float d = amax / 127.0;
+    float id = (d != 0.0) ? 1.0 / d : 0.0;
+
+    // Quantize to signed, then bias to unsigned
+    int qs_signed = clamp(int(round(val * id)), -127, 127);
+    uint qs_biased = uint(qs_signed + 127);  // [0, 254]
+
+    // Sum of signed values for bias correction
+    int q_sum = subgroupAdd(qs_signed);
+
+    // Pack 4 bytes per uint32 using shared memory (simpler than shuffle)
+    uint word_idx = tid / 4u;
+    uint byte_pos = tid % 4u;
+
+    // Atomic OR to build the packed word
+    if (byte_pos == 0u) shared_words[word_idx] = 0u;
+    barrier();
+    atomicOr(shared_words[word_idx], qs_biased << (byte_pos * 8u));
+    barrier();
+
+    // Write output
+    uint out_base = block_id * 9u;
+    if (tid == 0u) {
+        float ds_y = d * float(q_sum);
+        q8_data[out_base] = packHalf2x16(vec2(d, ds_y));
+    }
+    if (tid < 8u) {
+        q8_data[out_base + 1u + tid] = shared_words[tid];
+    }
+}

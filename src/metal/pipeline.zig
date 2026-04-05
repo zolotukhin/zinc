@@ -2,13 +2,19 @@
 const std = @import("std");
 const shim = @import("c.zig").shim;
 
+/// A compiled Metal compute pipeline state ready for dispatch.
 pub const MetalPipeline = struct {
+    /// Opaque handle to the C shim pipeline object.
     handle: ?*shim.MetalPipe,
+    /// Maximum threads the pipeline supports per threadgroup.
     max_threads_per_threadgroup: u32,
+    /// SIMD execution width (warp size) for this pipeline.
     thread_execution_width: u32,
+    /// Bytes of threadgroup memory statically allocated by the kernel.
     static_threadgroup_memory_length: u32,
 };
 
+/// Compile an MSL source string into a compute pipeline for the given function name.
 pub fn createPipeline(ctx: ?*shim.MetalCtx, msl_source: [*:0]const u8, fn_name: [*:0]const u8) !MetalPipeline {
     const handle = shim.mtl_create_pipeline(ctx, msl_source, fn_name);
     if (handle == null) return error.MetalPipelineCreateFailed;
@@ -20,6 +26,7 @@ pub fn createPipeline(ctx: ?*shim.MetalCtx, msl_source: [*:0]const u8, fn_name: 
     };
 }
 
+/// Create a compute pipeline from a precompiled metallib binary blob.
 pub fn createPipelineFromLib(ctx: ?*shim.MetalCtx, lib_data: [*]const u8, lib_size: usize, fn_name: [*:0]const u8) !MetalPipeline {
     const handle = shim.mtl_create_pipeline_from_lib(ctx, lib_data, lib_size, fn_name);
     if (handle == null) return error.MetalPipelineCreateFailed;
@@ -31,6 +38,7 @@ pub fn createPipelineFromLib(ctx: ?*shim.MetalCtx, lib_data: [*]const u8, lib_si
     };
 }
 
+/// Release the pipeline handle. Safe to call with a null handle.
 pub fn freePipeline(pipe: *MetalPipeline) void {
     if (pipe.handle) |h| {
         shim.mtl_free_pipeline(h);

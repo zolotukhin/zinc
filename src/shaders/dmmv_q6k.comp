@@ -1,8 +1,19 @@
 #version 460
-#extension GL_EXT_shader_explicit_arithmetic_types : require
-layout(local_size_x = 64) in;
+// ZINC — Q6_K DMMV, K-parallel (llama.cpp-style)
+// 16 threads per Q6_K superblock, 4 blocks processed in parallel.
+// Each thread handles 16 weight elements via packed reads + vec4 B.
+// Wave64 subgroupAdd reduction. Zero shared memory.
+//
+// Q6_K block (256 elements, 210 bytes):
+//   [0..127]   ql (128 bytes, low 4 bits)
+//   [128..191] qh (64 bytes, high 2 bits)
+//   [192..207] scales (16 signed int8)
+//   [208..209] d (f16)
 
-layout(constant_id = 1) const uint SPEC_K = 4096;
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
 layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
@@ -16,73 +27,78 @@ layout(push_constant) uniform PC {
     uint y_offset;
 };
 
-// Q6_K block: 210 bytes / 256 elements
-// Layout: ql[128] qh[64] scales[16] d(f16,2)
-// ql at 0, qh at 128, scales at 192, d at 208
+const uint NUM_ROWS = 2u;
 
 float fp16_to_fp32(uint h) {
     return unpackHalf2x16(h).x;
 }
 
-shared float s_x[SPEC_K];
-
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
     uint x_base = x_offset / 4u;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
-    }
-    barrier();
+    uint y_base = y_offset / 4u;
+    uint blocks_per_row = K / 256u;
 
-    uint row = gl_GlobalInvocationID.x;
-    if (row >= M) return;
+    // 16 threads per block, 4 blocks per iteration
+    uint itid = tid % 16u;
+    uint ix = tid / 16u;
 
-    uint blocks_per_row = K / 256;
-    uint row_offset = a_offset + row * blocks_per_row * 210;
-    uint y_base = y_offset / 4;
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
 
-    float sum = 0.0;
-    uint xi = 0;
+        uint row_offset = a_offset + row * blocks_per_row * 210u;
+        float sum = 0.0;
 
-    for (uint b = 0; b < blocks_per_row; b++) {
-        uint bb = row_offset + b * 210;
+        // Each thread processes 16 elements per block:
+        // itid determines which 16 elements within the 256-element block
+        // Split: 2 halves of 128, each half has 4 groups of 32
+        // Thread handles: 4 elements from each of 4 positions
+        uint half_id = itid / 8u;  // 0 or 1 (which 128-element half)
+        uint local_id = itid % 8u; // 0..7 within half
 
-        uint d_bits = uint(w[bb + 208]) | (uint(w[bb + 209]) << 8);
-        float d = fp16_to_fp32(d_bits);
+        for (uint b = ix; b < blocks_per_row; b += 4u) {
+            uint bb = row_offset + b * 210u;
+            uint d_bits = uint(w[bb + 208u]) | (uint(w[bb + 209u]) << 8);
+            float d = fp16_to_fp32(d_bits);
 
-        // Process 256 elements in 2 halves of 128
-        for (uint hh = 0; hh < 2; hh++) {
-            uint ql_off = bb + hh * 64;
-            uint qh_off = bb + 128 + hh * 32;
-            uint sc_off = bb + 192 + hh * 8;
+            uint xi = b * 256u;
+            uint ql_base = bb + half_id * 64u;
+            uint qh_base = bb + 128u + half_id * 32u;
+            uint sc_base = bb + 192u + half_id * 8u;
 
-            for (uint l = 0; l < 32; l++) {
-                uint is = l / 16;
+            // Each thread handles 4 elements at offset local_id*4 within each of 4 sub-groups
+            // Process 2 sub-groups of 32 elements each (ql_lo/ql_hi pairs)
+            uint e_start = local_id * 4u;
 
-                uint ql_lo = uint(w[ql_off + l]);
-                uint ql_hi = uint(w[ql_off + l + 32]);
-                uint qh_v = uint(w[qh_off + l]);
+            for (uint l = e_start; l < e_start + 4u; l++) {
+                uint is = l / 16u;
+                uint ql_lo = uint(w[ql_base + l]);
+                uint ql_hi = uint(w[ql_base + l + 32u]);
+                uint qh_v = uint(w[qh_base + l]);
 
-                // 6-bit values: 4 bits from ql + 2 bits from qh
                 uint q1 = (ql_lo & 0xFu) | (((qh_v >> 0) & 3u) << 4);
                 uint q2 = (ql_hi & 0xFu) | (((qh_v >> 2) & 3u) << 4);
                 uint q3 = (ql_lo >> 4) | (((qh_v >> 4) & 3u) << 4);
                 uint q4 = (ql_hi >> 4) | (((qh_v >> 6) & 3u) << 4);
 
-                // Scales are signed int8 — convert from uint8 manually
-                float s0 = float(int(w[sc_off + is])) - (w[sc_off + is] >= 128u ? 256.0 : 0.0);
-                float s2 = float(int(w[sc_off + is + 2])) - (w[sc_off + is + 2] >= 128u ? 256.0 : 0.0);
-                float s4 = float(int(w[sc_off + is + 4])) - (w[sc_off + is + 4] >= 128u ? 256.0 : 0.0);
-                float s6 = float(int(w[sc_off + is + 6])) - (w[sc_off + is + 6] >= 128u ? 256.0 : 0.0);
+                float s0 = float(int(w[sc_base + is])) - (w[sc_base + is] >= 128u ? 256.0 : 0.0);
+                float s2 = float(int(w[sc_base + is + 2u])) - (w[sc_base + is + 2u] >= 128u ? 256.0 : 0.0);
+                float s4 = float(int(w[sc_base + is + 4u])) - (w[sc_base + is + 4u] >= 128u ? 256.0 : 0.0);
+                float s6 = float(int(w[sc_base + is + 6u])) - (w[sc_base + is + 6u] >= 128u ? 256.0 : 0.0);
 
-                sum += d * s0 * (float(q1) - 32.0) * s_x[xi + l];
-                sum += d * s2 * (float(q2) - 32.0) * s_x[xi + l + 32u];
-                sum += d * s4 * (float(q3) - 32.0) * s_x[xi + l + 64u];
-                sum += d * s6 * (float(q4) - 32.0) * s_x[xi + l + 96u];
+                uint x_off = xi + half_id * 128u;
+                sum += d * s0 * (float(q1) - 32.0) * x[x_base + x_off + l];
+                sum += d * s2 * (float(q2) - 32.0) * x[x_base + x_off + l + 32u];
+                sum += d * s4 * (float(q3) - 32.0) * x[x_base + x_off + l + 64u];
+                sum += d * s6 * (float(q4) - 32.0) * x[x_base + x_off + l + 96u];
             }
-            xi += 128;
+        }
+
+        sum = subgroupAdd(sum);
+        if (tid == 0u) {
+            y[y_base + row] = sum;
         }
     }
-
-    y[y_base + row] = sum;
 }

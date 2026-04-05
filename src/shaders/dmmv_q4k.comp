@@ -1,168 +1,179 @@
 #version 460
-// ZINC — Q4_K dequantize + matrix-vector multiply (decode, single token)
-// RDNA4-optimized: wave64 (64 threads/workgroup), 1 row per thread, 64 rows per WG
+// ZINC — Q4_K DMMV, K-parallel (llama.cpp-style)
+// 16 threads per Q4_K superblock, 4 blocks processed in parallel per iteration.
+// Each thread handles 16 weight elements via packed uint32 loads + vec4 B reads.
+// Wave64 subgroupAdd reduction. Zero shared memory.
 //
-// Key optimizations:
-// 1. 1-thread-per-row: with K=2048 → blocks_per_row=8, strided loops waste
-//    56/64 threads. Instead, each thread computes one full output row.
-// 2. Shared memory input vector: cooperative load of x_data into LDS eliminates
-//    L1 cache contention between weight reads and input vector reads. With 64
-//    threads spanning 72KB of weight data (> 32KB L1), x_data would be
-//    repeatedly evicted. LDS provides dedicated, high-bandwidth storage.
-//
-// Q4_K block layout (QK_K=256 elements, 144 bytes):
-//   [0..1]    f16 d      — super-block scale
-//   [2..3]    f16 dmin   — super-block minimum scale
-//   [4..15]   k_scales   — 12 bytes encoding 8 six-bit scales + 8 six-bit mins
-//   [16..143] qs         — 128 bytes of 4-bit quantized values
-//
-// Quantized data layout in qs[0..127] — consecutive sub-block pairs share 32 bytes:
-//   For group g (0..3): qs[g*32+l] & 0x0F = element (2g)*32+l    (sub-block 2g)
-//                       qs[g*32+l] >> 4   = element (2g+1)*32+l  (sub-block 2g+1)
-//
-// k_scales packing (12 bytes encode 8 scales and 8 mins, each 6 bits):
-//   bytes [0..3]  bits [5:0] = scales[0..3]
-//   bytes [0..3]  bits [7:6] = high 2 bits of scales[4..7]
-//   bytes [4..7]  bits [5:0] = mins[0..3]
-//   bytes [4..7]  bits [7:6] = high 2 bits of mins[4..7]
-//   bytes [8..11] bits [3:0] = low 4 bits of scales[4..7]
-//   bytes [8..11] bits [7:4] = low 4 bits of mins[4..7]
-//
-// Dequantize element in sub-block sb:
-//   val = d * scales[sb] * q  -  dmin * mins[sb]
+// Q4_K block (256 elements, 144 bytes = 36 uint32):
+//   [0..3]    d(f16) + dmin(f16)      — u32[0]
+//   [4..15]   k_scales (12 bytes)     — u32[1..3]
+//   [16..143] qs (128 bytes)          — u32[4..35]
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
 
-// Specialization constants for compile-time dimension tuning
-layout(constant_id = 0) const uint SPEC_M = 4096;  // number of output rows
-layout(constant_id = 1) const uint SPEC_K = 4096;  // number of input columns
-
-// Push constants for runtime parameters
 layout(push_constant) uniform PushConstants {
-    uint M;           // actual number of output rows
-    uint K;           // actual number of input columns (elements)
-    uint a_offset;    // byte offset into matrix A buffer
-    uint x_offset;    // byte offset into vector x buffer
-    uint y_offset;    // byte offset into vector y buffer
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
 };
 
-// Buffer bindings
-layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
-layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[];   };
-layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];  };
+// Weight data as uint32 for packed reads
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+// B vector as vec4 for coalesced reads
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
+layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[]; };
 
-// Q4_K block constants
-const uint Q4K_BLOCK_SIZE = 256;  // elements per block
-const uint Q4K_BYTES      = 144;  // bytes per block
+const uint NUM_ROWS = 2u;
+const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
 
-// Shared memory for input vector — eliminates L1 cache contention with weight reads.
-// 64 threads spanning 72KB of weight data exceed 32KB L1; without this, x_data
-// lines get evicted and re-fetched repeatedly. LDS load is cooperative (32 floats/thread).
-shared float s_x[SPEC_K];
-
-// Decode scale for sub-block sb (0..7) from 12-byte k_scales at ks_off in a_data
-float decode_scale(uint ks_off, uint sb) {
-    if (sb < 4u) {
-        return float(uint(a_data[ks_off + sb]) & 0x3Fu);
-    } else {
-        uint lo = uint(a_data[ks_off + sb + 4u]) & 0x0Fu;       // bytes 8..11 low nibble
-        uint hi = (uint(a_data[ks_off + sb - 4u]) >> 6) & 0x03u; // bytes 0..3 bits [7:6]
-        return float(lo | (hi << 4));
-    }
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
 }
-
-// Decode min for sub-block sb (0..7) from 12-byte k_scales at ks_off in a_data
-float decode_min(uint ks_off, uint sb) {
-    if (sb < 4u) {
-        return float(uint(a_data[ks_off + sb + 4u]) & 0x3Fu);
-    } else {
-        uint lo = (uint(a_data[ks_off + sb + 4u]) >> 4) & 0x0Fu; // bytes 8..11 high nibble
-        uint hi = (uint(a_data[ks_off + sb]) >> 6) & 0x03u;       // bytes 4..7 bits [7:6]
-        return float(lo | (hi << 4));
-    }
-}
-
-// Accumulate dot product for one row's block into acc.
-// qs_off: byte offset of qs[0] for this block in a_data
-// ks_off: byte offset of k_scales[0] for this block in a_data
-// d_val, dmin_val: super-block scales
-// x_local: element offset into s_x[] for this block's 256 elements
-//
-// Optimization: fuse consecutive sub-block pairs (2*sp, 2*sp+1) to read each
-// qs byte once and extract both nibbles. Each 32-byte qs chunk encodes two
-// consecutive sub-blocks: low nibble → sub-block 2*sp, high → sub-block 2*sp+1.
-void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
-                 uint x_local, inout float acc) {
-    for (uint sp = 0u; sp < 4u; sp++) {
-        // Consecutive sub-block pair: low nibble = sub-block 2*sp, high = 2*sp+1
-        uint sb_lo = sp * 2u;
-        uint sb_hi = sp * 2u + 1u;
-
-        float sc_lo = decode_scale(ks_off, sb_lo);
-        float mn_lo = decode_min(ks_off, sb_lo);
-        float factor_lo = d_val * sc_lo;
-        float bias_lo   = dmin_val * mn_lo;
-
-        float sc_hi = decode_scale(ks_off, sb_hi);
-        float mn_hi = decode_min(ks_off, sb_hi);
-        float factor_hi = d_val * sc_hi;
-        float bias_hi   = dmin_val * mn_hi;
-
-        uint x_sb_lo = x_local + sb_lo * 32u;
-        uint x_sb_hi = x_local + sb_hi * 32u;
-        uint qs_base = qs_off + sp * 32u;
-
-        for (uint e = 0u; e < 32u; e++) {
-            uint byte_val = uint(a_data[qs_base + e]);
-            uint q_lo = byte_val & 0x0Fu;
-            uint q_hi = (byte_val >> 4) & 0x0Fu;
-
-            acc += (factor_lo * float(q_lo) - bias_lo) * s_x[x_sb_lo + e];
-            acc += (factor_hi * float(q_hi) - bias_hi) * s_x[x_sb_hi + e];
-        }
-    }
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
 }
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
 
-    // Use push-constant K for loop bounds (not SPEC_K) because K varies across
-    // dispatches: gate/up use K=hidden_dim, down uses K=inter_dim, O proj uses
-    // K=q_dim. SPEC_K only sizes the shared memory array to fit the largest K.
-    const uint blocks_per_row = K / Q4K_BLOCK_SIZE;
+    // 16 threads per block, 4 blocks per iteration
+    const uint THREADS_PER_BLOCK = 16u;
+    const uint it_size = 64u / THREADS_PER_BLOCK;  // = 4
+    uint itid = tid % THREADS_PER_BLOCK;  // 0..15 within a block
+    uint ix = tid / THREADS_PER_BLOCK;    // 0..3 which block in parallel
 
-    // Cooperatively load input vector into shared memory (all threads participate)
-    // 64 threads × (K/64) iterations = full vector loaded
-    uint x_global_base = x_offset / 4u;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x_data[x_global_base + i];
-    }
-    barrier();
+    // Thread's position within the 256-element block:
+    // il = itid/4 (0..3), ir = itid%4 (0..3)
+    // Each thread processes 4 elements from each of 4 sub-positions (16 total)
+    uint il = itid / 4u;
+    uint ir = itid % 4u;
+    uint v_im = il / 2u;     // 0 or 1: which 128-element half
+    uint v_in = il % 2u;     // 0 or 1: which 64-element sub-half
+    uint l0 = 4u * (2u * ir + v_in);  // element offset within half: 0,4,8,...,28
+    uint q_offset = 32u * v_im + l0;  // offset into qs (in bytes)
+    uint y_offset_local = 64u * v_im + l0;  // offset into B vector (in elements)
 
-    // Each thread computes one output row (1 thread = 1 row, 64 rows per WG)
-    uint row = gl_WorkGroupID.x * 64u + tid;
-    if (row >= M) return;
-
-    float sum = 0.0;
-
-    // Process all blocks for this row sequentially (compile-time trip count)
-    for (uint blk = 0u; blk < blocks_per_row; blk++) {
-        uint x_local = blk * Q4K_BLOCK_SIZE;
-        uint byte_off = a_offset + row * blocks_per_row * Q4K_BYTES + blk * Q4K_BYTES;
-
-        // Read f16 super-block scales: d and dmin
-        uint d_bits    = uint(a_data[byte_off])      | (uint(a_data[byte_off + 1u]) << 8);
-        uint dmin_bits = uint(a_data[byte_off + 2u]) | (uint(a_data[byte_off + 3u]) << 8);
-        float d_val    = unpackHalf2x16(d_bits).x;
-        float dmin_val = unpackHalf2x16(dmin_bits).x;
-
-        accum_block(byte_off + 16u, byte_off + 4u, d_val, dmin_val, x_local, sum);
-    }
-
-    // Each thread writes its own result — no reduction needed
+    uint x_base = x_offset / 16u;  // vec4 base (bytes/16 = vec4 index)
     uint y_base = y_offset / 4u;
-    y_data[y_base + row] = sum;
+    uint blocks_per_row = K / 256u;
+    uint a_base = a_offset / 4u;  // uint32 base
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
+
+        uint row_u32 = a_base + row * blocks_per_row * Q4K_BLOCK_U32;
+        float sum = 0.0;
+
+        // Stride over blocks: ix, ix+4, ix+8, ...
+        for (uint i = ix; i < blocks_per_row; i += it_size) {
+            uint blk_u32 = row_u32 + i * Q4K_BLOCK_U32;
+
+            // Read d and dmin from u32[0]
+            uint d_dmin = a_u32[blk_u32];
+            float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+            // Read scales: u32[1..3] = 12 bytes of packed 6-bit scales
+            uint sc0 = a_u32[blk_u32 + 1u];
+            uint sc1 = a_u32[blk_u32 + 2u];
+            uint sc2 = a_u32[blk_u32 + 3u];
+
+            // Decode scale and min for the 4 sub-blocks this thread touches
+            // Sub-blocks: sb0 = 2*v_im + 0, sb1 = 2*v_im + 1 (from v_in)
+            // But we access 4 sub-blocks: at y_offset positions 0, 32, 64, 96
+            uint sb0 = v_im * 4u + v_in * 2u;
+            uint sb1 = sb0 + 1u;
+
+            // Simple scale decode from raw bytes
+            // scales are at blk_u32+1 as raw bytes
+            uint scales_byte_off = a_offset + i * 144u + row * blocks_per_row * 144u + 4u;
+
+            // Fall back to simple approach for scale decode
+            // Read qs as packed uint32 (4 bytes = 4 nibble-pairs = 8 q values)
+            uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset / 4u];
+            uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u]; // +64 bytes = +16 u32
+
+            // Extract low and high nibbles as vec4
+            vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
+            vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
+            vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
+            vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
+
+            // Load B vector as vec4 (4 floats per load, 4 loads = 16 floats)
+            uint b_idx = (i * 256u + y_offset_local) / 4u;
+            vec4 by0 = x_v4[x_base + b_idx];
+            vec4 by1 = x_v4[x_base + b_idx + 8u];  // +32 elements = +8 vec4
+            uint b_idx2 = (i * 256u + y_offset_local + 128u) / 4u;
+            vec4 by2 = x_v4[x_base + b_idx2];
+            vec4 by3 = x_v4[x_base + b_idx2 + 8u];
+
+            // Decode scales for sub-blocks accessed by this thread
+            // Sub-block indices for the 4 dot products:
+            //   q0_lo uses sb = 2*v_im + 0 = sb0
+            //   q0_hi uses sb = 2*v_im + 1 = sb1
+            //   q1_lo uses sb = 2*v_im + 4 + 0 (second half)
+            //   q1_hi uses sb = 2*v_im + 4 + 1
+
+            // Read raw scale bytes (from uint8 view would be cleaner, but we only have uint32)
+            // Reconstruct from the 3 scale uint32s
+            // bytes 0..3 -> sc0, bytes 4..7 -> sc1, bytes 8..11 -> sc2
+            // For sub-blocks 0..3: scale = byte[sb] & 63
+            // For sub-blocks 4..7: scale = (byte[sb+4] & 0xF) | ((byte[sb-4] >> 6) << 4)
+
+            // Extract individual scale bytes from packed uint32s
+            float factor0, bias0, factor1, bias1, factor2, bias2, factor3, bias3;
+            {
+                // Simple per-byte extraction from uint32 scale words
+                uint sb_a = 2u * v_im;       // sub-block for first half low nibble
+                uint sb_b = 2u * v_im + 1u;  // sub-block for first half high nibble
+                uint sb_c = 2u * v_im + 4u;  // sub-block for second half low nibble
+                uint sb_d = 2u * v_im + 5u;  // sub-block for second half high nibble
+
+                // Extract scale/min bytes
+                // bytes[0..11] packed in sc0(bytes 0..3), sc1(bytes 4..7), sc2(bytes 8..11)
+                uint bytes[12];
+                bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
+                bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
+                bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
+
+                float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
+                // Decode 6-bit scales and mins
+                if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a+4u] & 63u); }
+                else { sc_a = float((bytes[sb_a+4u]&0xFu)|((bytes[sb_a-4u]>>6)<<4)); mn_a = float(((bytes[sb_a+4u]>>4)&0xFu)|((bytes[sb_a]>>6)<<4)); }
+                if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b+4u] & 63u); }
+                else { sc_b = float((bytes[sb_b+4u]&0xFu)|((bytes[sb_b-4u]>>6)<<4)); mn_b = float(((bytes[sb_b+4u]>>4)&0xFu)|((bytes[sb_b]>>6)<<4)); }
+                if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c+4u] & 63u); }
+                else { sc_c = float((bytes[sb_c+4u]&0xFu)|((bytes[sb_c-4u]>>6)<<4)); mn_c = float(((bytes[sb_c+4u]>>4)&0xFu)|((bytes[sb_c]>>6)<<4)); }
+                if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d+4u] & 63u); }
+                else { sc_d = float((bytes[sb_d+4u]&0xFu)|((bytes[sb_d-4u]>>6)<<4)); mn_d = float(((bytes[sb_d+4u]>>4)&0xFu)|((bytes[sb_d]>>6)<<4)); }
+
+                factor0 = d_val * sc_a; bias0 = dmin_val * mn_a;
+                factor1 = d_val * sc_b; bias1 = dmin_val * mn_b;
+                factor2 = d_val * sc_c; bias2 = dmin_val * mn_c;
+                factor3 = d_val * sc_d; bias3 = dmin_val * mn_d;
+            }
+
+            // 4 dot products: factor * q - bias, dot with B
+            sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+            sum += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+            sum += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+            sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+        }
+
+        // Subgroup reduction (wave64: single subgroupAdd covers all 64 threads)
+        sum = subgroupAdd(sum);
+        if (tid == 0u) {
+            y_data[y_base + row] = sum;
+        }
+    }
 }

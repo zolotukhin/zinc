@@ -25,6 +25,16 @@ const DmmvPushConstants = extern struct {
     y_offset: u32,
 };
 
+/// Push constants for batch DMMV shaders (prefill: multiple columns).
+const BatchDmmvPushConstants = extern struct {
+    M: u32,
+    K: u32,
+    a_offset: u32,
+    x_offset: u32,
+    y_offset: u32,
+    num_cols: u32,
+};
+
 /// Push constants for MoE DMMV shaders (must match GLSL layout).
 /// Batched expert dispatch: workgroup Y dimension selects expert slot.
 const MoeDmmvPushConstants = extern struct {
@@ -50,6 +60,12 @@ pub const DmmvDispatch = struct {
     pipeline_f16: ?Pipeline,
     /// F32 pipeline, or null.
     pipeline_f32: ?Pipeline,
+    /// Batch Q4K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
+    pipeline_q4k_batch: ?Pipeline,
+    /// Q4K integer dot product pipeline (3 bindings: A_q4k, B_q8_1, Y).
+    pipeline_q4k_idp: ?Pipeline,
+    /// Q8_1 quantization pipeline (2 bindings: X_f32, Q8_1_out).
+    pipeline_quantize_q8_1: ?Pipeline,
     /// MoE Q4K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q4k_moe: ?Pipeline,
     /// MoE Q5K pipeline (4 bindings: A, x, y, routing), or null.
@@ -113,7 +129,7 @@ pub const DmmvDispatch = struct {
         var path_buf: [512]u8 = undefined;
 
         const q4k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k = pipeline_mod.createFromSpirv(instance, q4k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q4k = pipeline_mod.createFromSpirv(instance, q4k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
             log.warn("Q4_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -125,13 +141,13 @@ pub const DmmvDispatch = struct {
         };
 
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
             log.warn("Q6_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -147,6 +163,34 @@ pub const DmmvDispatch = struct {
             log.warn("F32 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+
+        // Batch DMMV for prefill: 3 bindings (A, X_batch, Y_batch), batch push constants
+        const batch_push_size = @sizeOf(BatchDmmvPushConstants);
+        const q4k_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_batch.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_batch = pipeline_mod.createFromSpirv(instance, q4k_batch_path, 3, batch_push_size, &.{}, allocator) catch |err| blk: {
+            log.warn("Q4_K batch shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Integer dot product (IDP) DMMV: Q4_K × Q8_1 with dotPacked4x8EXT
+        const IdpPush = extern struct { M: u32, K: u32, a_offset: u32, b_offset: u32, y_offset: u32 };
+        const q4k_idp_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_idp.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_idp = pipeline_mod.createFromSpirv(instance, q4k_idp_path, 3, @sizeOf(IdpPush), &.{}, allocator) catch |err| blk: {
+            log.warn("Q4_K IDP shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Q8_1 quantization shader: 2 bindings (f32 input, Q8_1 output)
+        const Q8Push = extern struct { K: u32, x_offset: u32 };
+        const q8_path2 = std.fmt.bufPrint(&path_buf, "{s}/quantize_q8_1.spv", .{shader_dir}) catch unreachable;
+        const pipeline_quantize_q8_1 = pipeline_mod.createFromSpirv(instance, q8_path2, 2, @sizeOf(Q8Push), &.{}, allocator) catch |err| blk: {
+            log.warn("quantize_q8_1 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        if (pipeline_q4k_idp != null and pipeline_quantize_q8_1 != null) {
+            log.info("IDP DMMV pipeline loaded — integer dot product acceleration enabled", .{});
+        }
 
         // MoE DMMV pipelines: 4 bindings (A, x, y, routing), different push constants
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
@@ -180,6 +224,9 @@ pub const DmmvDispatch = struct {
             .pipeline_q8_0 = pipeline_q8_0,
             .pipeline_f16 = pipeline_f16,
             .pipeline_f32 = pipeline_f32,
+            .pipeline_q4k_batch = pipeline_q4k_batch,
+            .pipeline_q4k_idp = pipeline_q4k_idp,
+            .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
             .pipeline_q6k_moe = pipeline_q6k_moe,
@@ -289,11 +336,37 @@ pub const DmmvDispatch = struct {
             .y_offset = y_offset,
         };
 
-        // Workgroup count depends on shader: Q4_K uses 1 row/thread (64 rows/WG),
-        // Q8_0 uses 2 rows/WG, others use 1 row/thread (64 rows/WG)
-        const workgroups_x = switch (quant_type) {
-            .q8_0, .f16 => (M + 1) / 2, // 2 rows per workgroup
-            else => (M + 63) / 64, // 1 row per thread, 64 threads per WG
+        // K-parallel (NUM_ROWS=2) for most DMMVs.
+        // For very large M (LM head with M>64K), K-parallel creates too many workgroups.
+        // Use the batch shader (1 thread per row, 64 rows/WG) which has fewer WGs and
+        // better memory access patterns for large fan-out.
+        const use_kparallel = switch (quant_type) {
+            .q4_k => M <= 65536,
+            .q5_k, .q6_k => true,
+            else => false,
+        };
+        const workgroups_x = if (use_kparallel) switch (quant_type) {
+            .q4_k, .q5_k, .q6_k => (M + 1) / 2,
+            else => unreachable,
+        } else switch (quant_type) {
+            .q4_k => blk: {
+                // Use batch shader in single-column mode (1 thread per row)
+                if (self.pipeline_q4k_batch) |*batch_pip| {
+                    const batch_push = BatchDmmvPushConstants{
+                        .M = M,
+                        .K = K,
+                        .a_offset = a_offset,
+                        .x_offset = x_offset,
+                        .y_offset = y_offset,
+                        .num_cols = 1,
+                    };
+                    cmd.dispatchWithPush(batch_pip, descriptor_set, std.mem.asBytes(&batch_push), (M + 63) / 64, 1, 1);
+                    return;
+                }
+                break :blk (M + 1) / 2; // fallback to K-parallel
+            },
+            .q8_0, .f16 => (M + 1) / 2,
+            else => (M + 63) / 64,
         };
 
         cmd.dispatchWithPush(
@@ -306,6 +379,60 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Record a batch DMMV dispatch for prefill (multiple input columns).
+    /// Weight matrix read once, multiplied against num_cols input vectors.
+    /// Input/output are column-major: X[K, num_cols], Y[M, num_cols].
+    pub fn recordBatchDispatch(
+        self: *const DmmvDispatch,
+        cmd: *const CommandBuffer,
+        quant_type: GGMLType,
+        descriptor_set: vk.c.VkDescriptorSet,
+        M: u32,
+        K: u32,
+        a_offset: u32,
+        x_offset: u32,
+        y_offset: u32,
+        num_cols: u32,
+    ) !void {
+        // Currently only Q4_K has a batch shader; fall back to sequential for others
+        const pip = if (quant_type == .q4_k)
+            (if (self.pipeline_q4k_batch) |*p| p else null)
+        else
+            null;
+
+        if (pip) |p| {
+            const push = BatchDmmvPushConstants{
+                .M = M,
+                .K = K,
+                .a_offset = a_offset,
+                .x_offset = x_offset,
+                .y_offset = y_offset,
+                .num_cols = num_cols,
+            };
+            const workgroups_x = (M + 63) / 64;
+            cmd.dispatchWithPush(p, descriptor_set, std.mem.asBytes(&push), workgroups_x, 1, 1);
+        } else {
+            // Fallback: dispatch N single-column DMMVs
+            const single_pip = self.pipelineForType(quant_type) orelse return error.UnsupportedQuantType;
+            for (0..num_cols) |col| {
+                const col_u32: u32 = @intCast(col);
+                const push = DmmvPushConstants{
+                    .M = M,
+                    .K = K,
+                    .a_offset = a_offset,
+                    .x_offset = x_offset + col_u32 * K * @sizeOf(f32),
+                    .y_offset = y_offset + col_u32 * M * @sizeOf(f32),
+                };
+                const workgroups_x_single = switch (quant_type) {
+                    .q4_k, .q5_k, .q6_k => (M + 1) / 2,
+                    .q8_0, .f16 => (M + 1) / 2,
+                    else => (M + 63) / 64,
+                };
+                cmd.dispatchWithPush(single_pip, descriptor_set, std.mem.asBytes(&push), workgroups_x_single, 1, 1);
+            }
+        }
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -315,6 +442,9 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q8_0) |*p| p.deinit();
         if (self.pipeline_f16) |*p| p.deinit();
         if (self.pipeline_f32) |*p| p.deinit();
+        if (self.pipeline_q4k_batch) |*p| p.deinit();
+        if (self.pipeline_q4k_idp) |*p| p.deinit();
+        if (self.pipeline_quantize_q8_1) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();

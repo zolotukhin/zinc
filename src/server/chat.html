@@ -29,7 +29,9 @@ header h1 span{color:var(--accent)}
 .thinking-toggle input{accent-color:var(--accent)}
 .thinking-toggle.disabled{opacity:.5}
 .thinking-toggle.disabled input{cursor:not-allowed}
-.model-tag{font-size:12px;color:var(--muted);background:var(--bg3);padding:3px 10px;border-radius:6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-tag{font-size:12px;color:var(--muted);background:var(--bg3);padding:3px 10px;border-radius:6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.model-tag .model-icon{width:14px;height:14px;flex-shrink:0;display:inline-block;vertical-align:middle}
+.model-tag .model-icon svg{width:14px;height:14px}
 .stats{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .top-status{padding:8px 20px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .model-progress{position:relative;flex:1 1 220px;min-width:180px;height:8px;background:var(--bg3);border:1px solid var(--border);border-radius:999px;overflow:hidden}
@@ -89,6 +91,30 @@ header h1 span{color:var(--accent)}
 .cursor{display:inline-block;width:7px;height:1.1em;background:var(--accent);margin-left:1px;vertical-align:text-bottom;border-radius:1px;opacity:.85}
 .empty{text-align:center;color:var(--muted);margin-top:25vh;line-height:2}
 .empty strong{color:var(--accent);font-size:20px;display:block;margin-bottom:4px}
+.model-picker{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;padding:20px;animation:fadeIn .3s ease}
+.model-picker h2{font-size:22px;font-weight:700;color:var(--text);margin-bottom:4px}
+.model-picker .picker-sub{font-size:13px;color:var(--muted);margin-bottom:24px}
+.model-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;width:100%;max-width:600px}
+.model-card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px;cursor:pointer;transition:border-color .15s,transform .1s,box-shadow .15s;display:flex;gap:14px;align-items:flex-start}
+.model-card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 4px 20px rgba(232,114,42,.1)}
+.model-card.disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+.model-card.disabled:hover{border-color:var(--border);transform:none;box-shadow:none}
+.model-card.active-card{border-color:var(--accent);background:rgba(232,114,42,.06)}
+.model-card .card-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden}
+.model-card .card-icon svg{width:28px;height:28px}
+.model-card .card-body{flex:1;min-width:0}
+.model-card .card-name{font-size:14px;font-weight:600;color:var(--text);margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.model-card .card-detail{font-size:11px;color:var(--muted);line-height:1.6}
+.model-card .card-badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:6px;margin-top:6px;letter-spacing:.02em;text-transform:uppercase}
+.model-card .card-badge.download{background:rgba(232,114,42,.15);color:var(--accent)}
+.model-card .card-badge.installed{background:rgba(63,185,80,.12);color:#3fb950}
+.model-card .card-badge.active{background:rgba(63,185,80,.2);color:#3fb950}
+.model-card .card-badge.too-large{background:rgba(244,63,94,.1);color:#f43f5e}
+.model-card .card-badge.downloading{background:rgba(232,114,42,.12);color:var(--accent)}
+@media (max-width:720px){
+.model-grid{grid-template-columns:1fr}
+.model-picker{min-height:auto;margin-top:10vh}
+}
 #ia{padding:12px 20px;background:var(--bg2);border-top:1px solid var(--border)}
 #ia .in{max-width:720px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
 #ia textarea{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;font-size:14px;font-family:inherit;resize:none;min-height:42px;max-height:140px;line-height:1.5;transition:border-color .15s}
@@ -164,7 +190,77 @@ const M=document.getElementById('messages'),I=document.getElementById('i'),B=doc
 const ST=document.getElementById('st'),MN=document.getElementById('mn'),SS=document.getElementById('stats'),MS=document.getElementById('ms');
 const MB=document.getElementById('mbtn'),GM=document.getElementById('gpu'),DL=document.getElementById('dl'),MP=document.getElementById('mp'),MPF=document.getElementById('mpf');
 const TW=document.getElementById('tw'),TH=document.getElementById('th'),TL=document.getElementById('tl');
-const emptyStateHtml='<div class="empty" id="w"><strong>ZINC Inference Engine</strong>AMD RDNA4 GPU &middot; Vulkan Compute<br>Type a message to start</div>';
+const readyEmptyHtml='<div class="empty" id="w"><strong>ZINC Inference Engine</strong>Type a message to start</div>';
+
+const ICON_QWEN='<svg viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M174.82 108.75L155.38 75L165.64 57.75C166.46 56.31 166.46 54.53 165.64 53.09L155.38 35.84C154.86 34.91 153.87 34.33 152.78 34.33H114.88L106.14 19.03C105.62 18.1 104.63 17.52 103.54 17.52H83.3C82.21 17.52 81.22 18.1 80.7 19.03L61.26 52.77H41.02C39.93 52.77 38.94 53.35 38.42 54.28L28.16 71.53C27.34 72.97 27.34 74.75 28.16 76.19L45.52 107.5L36.78 122.8C35.96 124.24 35.96 126.02 36.78 127.46L47.04 144.71C47.56 145.64 48.55 146.22 49.64 146.22H87.54L96.28 161.52C96.8 162.45 97.79 163.03 98.88 163.03H119.12C120.21 163.03 121.2 162.45 121.72 161.52L141.16 127.78H158.52C159.61 127.78 160.6 127.2 161.12 126.27L171.38 109.02C172.2 107.58 172.2 105.8 171.38 104.36L174.82 108.75Z" fill="url(#qic0)"/><path d="M119.12 163.03H98.88L87.54 144.71H49.64L61.26 126.39H80.7L38.42 55.29H61.26L83.3 19.03L93.56 37.35L83.3 55.29H161.58L151.32 72.54L170.76 106.28H151.32L141.16 88.34L101.18 163.03H119.12Z" fill="white"/><path d="M127.86 79.83H76.14L101.18 122.11L127.86 79.83Z" fill="url(#qic1)"/><defs><radialGradient id="qic0" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(100 100) rotate(90) scale(100)"><stop stop-color="#665CEE"/><stop offset="1" stop-color="#332E91"/></radialGradient><radialGradient id="qic1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(100 100) rotate(90) scale(100)"><stop stop-color="#665CEE"/><stop offset="1" stop-color="#332E91"/></radialGradient></defs></svg>';
+const ICON_GOOGLE='<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09a6.97 6.97 0 0 1 0-4.17V7.07H2.18A11.97 11.97 0 0 0 0 12c0 1.94.46 3.77 1.28 5.4l3.56-2.77.01-.54z" fill="#FBBC05"/><path d="M12 4.75c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 1.09 14.97 0 12 0 7.7 0 3.99 2.47 2.18 6.07l3.66 2.84c.87-2.6 3.3-4.16 6.16-4.16z" fill="#EA4335"/></svg>';
+const ICON_DEFAULT='<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="46" fill="#1a1a40"/><rect x="30" y="35" width="40" height="30" rx="6" stroke="#a78bfa" stroke-width="5" fill="none"/><circle cx="50" cy="50" r="6" fill="#a78bfa"/></svg>';
+
+function modelFamilyFromName(name){
+  const f=(name||'').toLowerCase();
+  if(f.includes('qwen')) return 'qwen';
+  if(f.includes('gemma')) return 'google';
+  return 'default';
+}
+function modelFamilyIcon(family){
+  const f=modelFamilyFromName(family);
+  if(f==='qwen') return ICON_QWEN;
+  if(f==='google') return ICON_GOOGLE;
+  return ICON_DEFAULT;
+}
+
+function renderModelPicker(){
+  let html='<div class="model-picker"><h2>Choose a model</h2><div class="picker-sub">Select a model to get started with ZINC</div><div class="model-grid">';
+  for(let m of models){
+    if(!m.managed||!m.supported_on_current_gpu) continue;
+    let badge='',badgeClass='download',clickable=true;
+    if(m.active){badge='Active';badgeClass='active'}
+    else if(m.downloading){badge='Downloading...';badgeClass='downloading';clickable=false}
+    else if(m.download_phase==='verifying'){badge='Verifying...';badgeClass='downloading';clickable=false}
+    else if(m.installed){badge='Installed \u00b7 click to load';badgeClass='installed'}
+    else if(!m.fits_current_gpu){badge='Too large for GPU';badgeClass='too-large';clickable=false}
+    else{badge='Download \u00b7 '+(m.size_bytes/(1024*1024*1024)).toFixed(1)+' GB';badgeClass='download'}
+    let vram=(m.required_vram_bytes/(1024*1024*1024)).toFixed(0);
+    let cardClass='model-card'+(m.active?' active-card':'')+(clickable?'':' disabled');
+    html+='<div class="'+cardClass+'" data-model-id="'+esc(m.id)+'" data-installed="'+(m.installed?'1':'0')+'">';
+    html+='<div class="card-icon">'+modelFamilyIcon(m.family||m.display_name)+'</div>';
+    html+='<div class="card-body">';
+    html+='<div class="card-name">'+esc(m.display_name||m.id)+'</div>';
+    html+='<div class="card-detail">'+esc(m.quantization||m.format||'')+' \u00b7 '+vram+' GB VRAM'+(m.thinking_stable?' \u00b7 Thinking':'')+'</div>';
+    html+='<span class="card-badge '+badgeClass+'">'+badge+'</span>';
+    html+='</div></div>';
+  }
+  html+='</div></div>';
+  M.innerHTML=html;
+  M.querySelectorAll('.model-card:not(.disabled)').forEach(card=>{
+    card.addEventListener('click',async()=>{
+      let id=card.getAttribute('data-model-id');
+      let installed=card.getAttribute('data-installed')==='1';
+      let m=models.find(x=>x.id===id);
+      if(!m||m.active) return;
+      card.style.pointerEvents='none';card.style.opacity='.6';
+      try{
+        if(installed){
+          await fetch(base+'/models/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:id})});
+        }else{
+          await fetch(base+'/models/pull',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:id})});
+        }
+        await refreshModels();
+        updateEmptyState();
+      }catch(e){card.style.pointerEvents='';card.style.opacity=''}
+    });
+  });
+}
+
+function updateEmptyState(){
+  if(H.length>0) return;
+  let active=activeModel();
+  if(active&&active.active){
+    M.innerHTML=readyEmptyHtml;
+  }else{
+    renderModelPicker();
+  }
+}
 const chatStateKey='zinc.chat.state.v3';
 const chatPrefsKey='zinc.chat.prefs.v1';
 let H=[],base=location.origin+'/v1',activeController=null,isGenerating=false,stopRequested=false,models=[],modelPollTimer=null,healthPollTimer=null;
@@ -256,7 +352,7 @@ function saveChatState(){
 }
 
 function showEmptyState(){
-  M.innerHTML=emptyStateHtml;
+  updateEmptyState();
 }
 
 function switchableModels(){
@@ -309,13 +405,14 @@ function modelHrefForName(name){
   if(n.includes('qwen3.5-35b')||n.includes('qwen3.5-35b-a3b')) return 'https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF';
   if(n.includes('qwen3-30b-a3b')) return 'https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF';
   if(n.includes('qwen2.5-32b')||n.includes('qwen2-32b')) return 'https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF';
-  if(n.includes('llama-3.1-8b')||n.includes('llama 3.1 8b')) return 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF';
   return 'https://huggingface.co/';
 }
 
 function setModelTag(name){
   const label=name&&name.trim()?name:'-';
-  MN.textContent=label;
+  const fam=modelFamilyFromName(label);
+  const icon=fam!=='default'?'<span class="model-icon">'+modelFamilyIcon(label)+'</span>':'';
+  MN.innerHTML=icon+label;
   MN.href=modelHrefForName(label);
 }
 
@@ -362,7 +459,7 @@ function historyTransportContent(answer,raw,enableThinking,supportsThinking){
 }
 
 function chatMaxTokens(enableThinking){
-  return enableThinking?2048:1024;
+  return enableThinking?256:128;
 }
 
 function assistantHtmlFromRaw(raw,isThinking){
@@ -456,7 +553,7 @@ async function fetchRecoveredAnswer(model,messages){
       messages,
       stream:false,
       max_tokens:512,
-      temperature:0.0,
+      temperature:1.0,
       enable_thinking:false
     })
   });
@@ -518,8 +615,11 @@ function restoreChatState(){
 
 function setCurrentModel(model){
   if(!model){setModelTag('-');return}
-  MN.textContent=model.display_name||model.id;
-  MN.href=model.homepage_url||modelHrefForName(model.display_name||model.id);
+  const label=model.display_name||model.id;
+  const fam=modelFamilyFromName(label);
+  const icon=fam!=='default'?'<span class="model-icon">'+modelFamilyIcon(label)+'</span>':'';
+  MN.innerHTML=icon+label;
+  MN.href=model.homepage_url||modelHrefForName(label);
 }
 
 function setGpuMemory(info,budgetArg){
@@ -673,6 +773,7 @@ async function refreshModels(){
   updateModelAction();
   updateThinkingUi();
   MS.disabled=isGenerating||models.length<=1;
+  if(H.length===0) updateEmptyState();
 }
 
 async function refreshHealth(){
@@ -1422,7 +1523,7 @@ async function send(){
       if(!activeController||stopRequested||errorMessage)return;
       errorMessage='Response timed out — the server is still processing a long prompt. Try a shorter message or wait and retry.';
       activeController.abort();
-    },30000);
+    },120000);
   }
   activeController=new AbortController();stopRequested=false;setGenerating(true);
   try{
@@ -1435,7 +1536,7 @@ async function send(){
     requestMessages=requestMessagesFromHistory(supportsThinkingForHistory);
     let r=await fetch(base+'/chat/completions',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:selectedModelId,session_id:chatSessionId,messages:requestMessages,stream:true,max_tokens:maxTokens,temperature:0.0,enable_thinking:enableThinking}),
+      body:JSON.stringify({model:selectedModelId,session_id:chatSessionId,messages:requestMessages,stream:true,max_tokens:maxTokens,temperature:1.0,enable_thinking:enableThinking}),
       signal:activeController.signal});
     if(!r.ok){let e=await r.json().catch(()=>({}));throw new Error(e.error?.message||r.statusText)}
     if(!r.body)throw new Error('Streaming response missing body');

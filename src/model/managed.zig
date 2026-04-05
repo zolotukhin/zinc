@@ -9,10 +9,12 @@ const catalog = @import("catalog.zig");
 const diagnostics = if (gpu.is_metal) @import("../diagnostics_metal.zig") else @import("../diagnostics.zig");
 const loader_mod = if (gpu.is_metal) @import("loader_metal.zig") else @import("loader.zig");
 
+/// Resolved cache and config directory paths for the current platform.
 pub const RuntimePaths = struct {
     cache_root: []u8,
     config_root: []u8,
 
+    /// Frees the owned path slices and invalidates the struct.
     pub fn deinit(self: *RuntimePaths, allocator: std.mem.Allocator) void {
         allocator.free(self.cache_root);
         allocator.free(self.config_root);
@@ -20,28 +22,33 @@ pub const RuntimePaths = struct {
     }
 };
 
+/// VRAM budget check result for a single catalog model.
 pub const ModelFit = struct {
     required_vram_bytes: u64,
     fits_current_gpu: bool,
     exact: bool,
 };
 
+/// The currently active managed model as persisted in the config directory.
 pub const ActiveSelection = struct {
     model_id: []u8,
     selected_at_unix: i64,
 
+    /// Frees the owned model_id slice and invalidates the struct.
     pub fn deinit(self: *ActiveSelection, allocator: std.mem.Allocator) void {
         allocator.free(self.model_id);
         self.* = undefined;
     }
 };
 
+/// Cached GPU capability profile used to avoid re-probing the device on every run.
 pub const CachedGpuProfile = struct {
     profile: []u8,
     device_name: []u8,
     vram_budget_bytes: u64,
     cached_at_unix: i64,
 
+    /// Frees the owned string slices and invalidates the struct.
     pub fn deinit(self: *CachedGpuProfile, allocator: std.mem.Allocator) void {
         allocator.free(self.profile);
         allocator.free(self.device_name);
@@ -49,23 +56,27 @@ pub const CachedGpuProfile = struct {
     }
 };
 
+/// On-disk manifest written alongside an installed GGUF model file.
 pub const InstalledManifest = struct {
     size_bytes: u64,
     sha256: []u8,
     required_vram_bytes: ?u64,
 
+    /// Frees the owned sha256 slice and invalidates the struct.
     pub fn deinit(self: *InstalledManifest, allocator: std.mem.Allocator) void {
         allocator.free(self.sha256);
         self.* = undefined;
     }
 };
 
+/// Outcome of a model removal: which artifacts were actually deleted.
 pub const RemoveInstalledModelResult = struct {
     deleted_model: bool,
     deleted_manifest: bool,
     removed_dir: bool,
 };
 
+/// Callback hooks for observing model download lifecycle events.
 pub const DownloadObserver = struct {
     context: ?*anyopaque = null,
     on_start: ?*const fn (context: ?*anyopaque, total_bytes: ?u64) void = null,
@@ -161,6 +172,7 @@ fn preflightCatalogDrift(
     }
 }
 
+/// Returns the resolved cache and config root directories for the current platform.
 pub fn runtimePaths(allocator: std.mem.Allocator) !RuntimePaths {
     return .{
         .cache_root = try resolveCacheRoot(allocator),
@@ -168,30 +180,35 @@ pub fn runtimePaths(allocator: std.mem.Allocator) !RuntimePaths {
     };
 }
 
+/// Returns the absolute path to the installed GGUF file for the given model id.
 pub fn resolveInstalledModelPath(model_id: []const u8, allocator: std.mem.Allocator) ![]u8 {
     var paths = try runtimePaths(allocator);
     defer paths.deinit(allocator);
     return try std.fs.path.join(allocator, &.{ paths.cache_root, "models", model_id, "model.gguf" });
 }
 
+/// Returns the absolute path to the manifest JSON for the given model id.
 pub fn resolveManifestPath(model_id: []const u8, allocator: std.mem.Allocator) ![]u8 {
     var paths = try runtimePaths(allocator);
     defer paths.deinit(allocator);
     return try std.fs.path.join(allocator, &.{ paths.cache_root, "models", model_id, "manifest.json" });
 }
 
+/// Returns the absolute path to the active-model config file.
 pub fn resolveActiveConfigPath(allocator: std.mem.Allocator) ![]u8 {
     const root = try resolveConfigRoot(allocator);
     defer allocator.free(root);
     return try std.fs.path.join(allocator, &.{ root, "active-model.json" });
 }
 
+/// Returns the absolute path to the cached GPU profile JSON for the given device index.
 pub fn resolveGpuProfileCachePath(device_index: u32, allocator: std.mem.Allocator) ![]u8 {
     const root = try resolveConfigRoot(allocator);
     defer allocator.free(root);
     return try std.fmt.allocPrint(allocator, "{s}/gpu-profile-device-{d}.json", .{ root, device_index });
 }
 
+/// Returns true if the model GGUF file exists in the local cache.
 pub fn isInstalled(model_id: []const u8, allocator: std.mem.Allocator) bool {
     const path = resolveInstalledModelPath(model_id, allocator) catch return false;
     defer allocator.free(path);
@@ -199,6 +216,7 @@ pub fn isInstalled(model_id: []const u8, allocator: std.mem.Allocator) bool {
     return true;
 }
 
+/// Reads the persisted active-model selection, or returns null if none is set.
 pub fn readActiveSelection(allocator: std.mem.Allocator) !?ActiveSelection {
     const path = try resolveActiveConfigPath(allocator);
     defer allocator.free(path);
@@ -224,6 +242,7 @@ pub fn readActiveSelection(allocator: std.mem.Allocator) !?ActiveSelection {
     };
 }
 
+/// Persists the given model id as the active selection with the current timestamp.
 pub fn writeActiveSelection(model_id: []const u8, allocator: std.mem.Allocator) !void {
     const path = try resolveActiveConfigPath(allocator);
     defer allocator.free(path);
@@ -243,12 +262,14 @@ pub fn writeActiveSelection(model_id: []const u8, allocator: std.mem.Allocator) 
     try writer.interface.flush();
 }
 
+/// Removes the active-model config file. Returns true if a file was deleted.
 pub fn clearActiveSelection(allocator: std.mem.Allocator) !bool {
     const path = try resolveActiveConfigPath(allocator);
     defer allocator.free(path);
     return deleteFileIfExistsAbsolute(path);
 }
 
+/// Clears the active selection only if it currently points to the given model id.
 pub fn clearActiveSelectionIfMatches(model_id: []const u8, allocator: std.mem.Allocator) !bool {
     var active = try readActiveSelection(allocator);
     defer if (active) |*selection| selection.deinit(allocator);
@@ -260,6 +281,7 @@ pub fn clearActiveSelectionIfMatches(model_id: []const u8, allocator: std.mem.Al
     return false;
 }
 
+/// Reads the cached GPU profile for the given device, or returns null if not cached.
 pub fn readCachedGpuProfile(device_index: u32, allocator: std.mem.Allocator) !?CachedGpuProfile {
     const path = try resolveGpuProfileCachePath(device_index, allocator);
     defer allocator.free(path);
@@ -290,6 +312,7 @@ pub fn readCachedGpuProfile(device_index: u32, allocator: std.mem.Allocator) !?C
     };
 }
 
+/// Persists a GPU capability profile to disk for the given device index.
 pub fn writeCachedGpuProfile(
     device_index: u32,
     profile: []const u8,
@@ -320,6 +343,8 @@ pub fn writeCachedGpuProfile(
     try writer.interface.flush();
 }
 
+/// Checks whether a catalog model fits in the given VRAM budget, using the
+/// installed manifest when available or falling back to catalog estimates.
 pub fn describeFit(entry: catalog.CatalogEntry, vram_budget_bytes: u64, allocator: std.mem.Allocator) !ModelFit {
     if (isInstalled(entry.id, allocator)) {
         const installed_path = try resolveInstalledModelPath(entry.id, allocator);
@@ -358,12 +383,14 @@ pub fn describeFit(entry: catalog.CatalogEntry, vram_budget_bytes: u64, allocato
     };
 }
 
+/// Verifies that the active model is installed and fits in the given VRAM budget.
 pub fn verifyActiveSelectionFits(model_id: []const u8, vram_budget_bytes: u64, allocator: std.mem.Allocator) !ModelFit {
     const entry = catalog.find(model_id) orelse return error.UnknownManagedModel;
     if (!isInstalled(model_id, allocator)) return error.ModelNotInstalled;
     return describeFit(entry.*, vram_budget_bytes, allocator);
 }
 
+/// Deletes an installed model's GGUF, manifest, and (if empty) its directory.
 pub fn removeInstalledModel(model_id: []const u8, allocator: std.mem.Allocator) !RemoveInstalledModelResult {
     const model_dir = try resolveInstalledModelDir(model_id, allocator);
     defer allocator.free(model_dir);
@@ -375,10 +402,12 @@ pub fn removeInstalledModel(model_id: []const u8, allocator: std.mem.Allocator) 
     return removeInstalledModelAtPaths(model_dir, model_path, manifest_path);
 }
 
+/// Downloads and installs a model from the catalog, verifying its sha256 checksum.
 pub fn pullModel(entry: catalog.CatalogEntry, allocator: std.mem.Allocator, writer: anytype) !void {
     try pullModelWithObserver(entry, allocator, writer, null);
 }
 
+/// Downloads and installs a model, reporting progress via an optional observer.
 pub fn pullModelWithObserver(
     entry: catalog.CatalogEntry,
     allocator: std.mem.Allocator,
@@ -467,6 +496,11 @@ pub fn pullModelWithObserver(
     progress_started = true;
 
     while (true) {
+        // Guard: stop once all expected bytes are received.
+        // Zig 0.15 std.http panics if we read past the content-length boundary.
+        if (total_bytes) |total| {
+            if (downloaded_bytes >= total) break;
+        }
         const n = reader.readSliceShort(&download_buffer) catch |err| switch (err) {
             error.ReadFailed => return response.bodyErr().?,
         };
@@ -510,6 +544,7 @@ pub fn pullModelWithObserver(
     try writer.print("sha256 verified\nInstalled: {s}\n", .{final_path});
 }
 
+/// Converts a byte count to gibibytes (GiB) as a floating-point value.
 pub fn bytesToGiB(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
 }
@@ -989,4 +1024,49 @@ test "removeInstalledModelAtPaths keeps non-empty directory" {
     try std.testing.expect(!result.removed_dir);
     try std.testing.expect(pathExistsAbsolute(extra_path));
     try std.testing.expect(dirExistsAbsolute(model_dir));
+}
+
+test "active selection pointing to non-catalog model is detectable" {
+    // Simulates the scenario where active-model.json references a removed model
+    // (e.g. llama31-8b-q4k-m after Llama support was dropped).
+    const stale_id = "llama31-8b-q4k-m";
+    try std.testing.expect(catalog.find(stale_id) == null);
+
+    // A valid catalog model should be findable.
+    const valid_id = "qwen35-2b-q4k-m";
+    try std.testing.expect(catalog.find(valid_id) != null);
+}
+
+test "active selection roundtrip rejects non-catalog model on validate" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const config_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(config_root);
+    const config_path = try std.fs.path.join(std.testing.allocator, &.{ config_root, "active-model.json" });
+    defer std.testing.allocator.free(config_path);
+
+    try ensureParentDir(config_path);
+    {
+        const file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer {
+            var close_file = file;
+            close_file.close();
+        }
+        try file.writeAll("{\"active_model_id\":\"llama31-8b-q4k-m\",\"selected_at_unix\":42}");
+    }
+
+    // Read back — the selection is parseable but points to a removed model.
+    const opened = try std.fs.openFileAbsolute(config_path, .{});
+    defer {
+        var close_file = opened;
+        close_file.close();
+    }
+    const data = try opened.readToEndAlloc(std.testing.allocator, 256);
+    defer std.testing.allocator.free(data);
+
+    const model_id = extractJsonStringField(data, "active_model_id").?;
+    try std.testing.expectEqualStrings("llama31-8b-q4k-m", model_id);
+    // The model is not in the catalog — this is the check that should happen at startup.
+    try std.testing.expect(catalog.find(model_id) == null);
 }

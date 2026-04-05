@@ -10,6 +10,7 @@ const MetalBuffer = metal_buffer.MetalBuffer;
 
 const log = std.log.scoped(.loader);
 
+/// Summary returned by `inspectModel`: config plus file and tensor size statistics.
 pub const ModelInspection = struct {
     config: ModelConfig,
     file_size: u64,
@@ -33,6 +34,7 @@ pub const Model = struct {
     mmap_file: ?std.fs.File,
     allocator: std.mem.Allocator,
 
+    /// Release Metal buffers, GGUF metadata, and the backing file mapping.
     pub fn deinit(self: *Model) void {
         for (self.tensors.items) |*t| {
             metal_buffer.freeBuffer(&t.gpu_buffer);
@@ -141,7 +143,8 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
     const ssm_d_state = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.state_size", .{prefix}) catch "") orelse 0;
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
-    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse 4;
+    const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse
+        if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
 
     const rope_freq_base: f32 = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
@@ -194,6 +197,16 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         .ssm_n_group = ssm_n_group,
         .full_attn_interval = full_attn_interval,
         .shared_expert_intermediate_dim = shared_expert_intermediate_dim,
+        .final_logit_softcapping = blk: {
+            const key4 = std.fmt.bufPrint(&key_buf, "{s}.final_logit_softcapping", .{prefix}) catch break :blk @as(f32, 0.0);
+            break :blk gf.getF32(key4) orelse 0.0;
+        },
+        .sliding_window_size = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.attention.sliding_window", .{prefix}) catch "") orelse 0,
+        .rope_scaling_factor = blk: {
+            const rsk = std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.factor", .{prefix}) catch break :blk @as(f32, 0.0);
+            break :blk gf.getF32(rsk) orelse 0.0;
+        },
+        .rope_original_context = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.original_context_length", .{prefix}) catch "") orelse 0,
     };
 }
 
@@ -226,6 +239,7 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     return extractConfigWithLogging(&gf, false);
 }
 
+/// Inspect a GGUF file and return exact tensor upload bytes plus normalized config.
 pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspection {
     const file = try std.fs.cwd().openFile(path, .{});
     defer {
@@ -291,6 +305,11 @@ pub fn load(
 
     const config = extractConfig(&gf);
 
+    if (config.architecture == .unknown) {
+        log.err("Unsupported model architecture. Supported: qwen2, qwen2_moe, qwen35, mistral, mamba, jamba", .{});
+        return error.UnsupportedArchitecture;
+    }
+
     // Wrap tensor data as Metal shared buffers (zero-copy from mmap)
     var loaded_tensors: std.ArrayList(LoadedTensor) = .{};
     errdefer {
@@ -306,7 +325,7 @@ pub fn load(
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
 
         // Page-align the offset for Metal buffer wrapping
-        const page_size: u64 = 4096;
+        const page_size: u64 = std.heap.page_size_min;
         const aligned_offset = (data_offset / page_size) * page_size;
         const offset_within_page = data_offset - aligned_offset;
         const aligned_size = ((tensor_size + offset_within_page + page_size - 1) / page_size) * page_size;

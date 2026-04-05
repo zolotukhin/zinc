@@ -1,8 +1,19 @@
 #version 460
-#extension GL_EXT_shader_explicit_arithmetic_types : require
-layout(local_size_x = 64) in;
+// ZINC — Q5_K DMMV, K-parallel (llama.cpp-style)
+// 16 threads per Q5_K superblock, 4 blocks processed in parallel.
+// Wave64 subgroupAdd reduction. Zero shared memory.
+//
+// Q5_K block (256 elements, 176 bytes):
+//   [0..1]    d (f16)
+//   [2..3]    dmin (f16)
+//   [4..15]   scales (12 bytes, 8 x 6-bit scales + 8 x 6-bit mins)
+//   [16..47]  qh (32 bytes, high bits)
+//   [48..175] qs (128 bytes, low 4 bits)
 
-layout(constant_id = 1) const uint SPEC_K = 4096;
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
 layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
@@ -16,71 +27,63 @@ layout(push_constant) uniform PC {
     uint y_offset;
 };
 
-// Q5_K block: 176 bytes / 256 elements
-// Layout: d(f16,2) dmin(f16,2) scales(12) qh(32) qs(128)
-// d at offset 0, dmin at offset 2, scales at 4, qh at 16, qs at 48
+const uint NUM_ROWS = 2u;
 
 float fp16_to_fp32(uint h) {
     return unpackHalf2x16(h).x;
 }
 
-// Cooperatively stage the input vector in LDS so weight streaming does not
-// thrash the same cache lines every row.
-shared float s_x[SPEC_K];
-
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
     uint x_base = x_offset / 4u;
-    for (uint i = tid; i < K; i += 64u) {
-        s_x[i] = x[x_base + i];
-    }
-    barrier();
+    uint y_base = y_offset / 4u;
+    uint blocks_per_row = K / 256u;
 
-    uint row = gl_GlobalInvocationID.x;
-    if (row >= M) return;
+    uint itid = tid % 16u;
+    uint ix = tid / 16u;
 
-    uint blocks_per_row = K / 256;
-    uint row_offset = a_offset + row * blocks_per_row * 176;
-    uint y_base = y_offset / 4;
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
 
-    float sum = 0.0;
-    uint xi = 0;
+        uint row_offset = a_offset + row * blocks_per_row * 176u;
+        float sum = 0.0;
 
-    for (uint b = 0; b < blocks_per_row; b++) {
-        uint bb = row_offset + b * 176;
+        // Each of 16 threads handles 16 elements per block (4 groups x 4 elements)
+        // itid/4 = which group pair, itid%4 = which 4-element slice
+        uint group_pair = itid / 4u;  // 0..3
+        uint slice = itid % 4u;       // 0..3
+        uint e_start = slice * 4u;    // 0, 4, 8, 12 within the 32-element sub-block
 
-        uint d_bits = uint(w[bb]) | (uint(w[bb + 1]) << 8);
-        float d = fp16_to_fp32(d_bits);
-        uint dm_bits = uint(w[bb + 2]) | (uint(w[bb + 3]) << 8);
-        float dmin = fp16_to_fp32(dm_bits);
+        // Each group pair covers 2 sub-blocks (low nibble + high nibble)
+        uint sb_lo = group_pair * 2u;
+        uint sb_hi = group_pair * 2u + 1u;
 
-        // 6-bit scales packed in 12 bytes at offset 4
-        // 32 bytes of high bits at offset 16
-        // 128 bytes of low nibbles at offset 48
+        for (uint b = ix; b < blocks_per_row; b += 4u) {
+            uint bb = row_offset + b * 176u;
+            uint xi = b * 256u;
 
-        // Process 4 groups of 64 elements each (matching GGML's dequantize_row_q5_K).
-        // Each 64-element group is laid out as two contiguous 32-element halves:
-        // low nibble -> x[l], high nibble -> x[32 + l].
-        // Each group uses 32 bytes of qs. qh bits: group*2 for low, group*2+1 for high.
-        for (uint g = 0; g < 4; g++) {
-            uint sb_lo = g * 2;       // sub-block index for low-nibble half
-            uint sb_hi = g * 2 + 1;   // sub-block index for high-nibble half
+            uint d_bits = uint(w[bb]) | (uint(w[bb + 1u]) << 8);
+            float d = fp16_to_fp32(d_bits);
+            uint dm_bits = uint(w[bb + 2u]) | (uint(w[bb + 3u]) << 8);
+            float dmin = fp16_to_fp32(dm_bits);
 
-            // Decode scale/min for both sub-blocks in this group
+            // Decode scales for our sub-blocks
             uint sc_lo, m_lo, sc_hi, m_hi;
-            if (sb_lo < 4) {
-                sc_lo = uint(w[bb + 4 + sb_lo]) & 63u;
-                m_lo  = uint(w[bb + 4 + sb_lo + 4]) & 63u;
+            if (sb_lo < 4u) {
+                sc_lo = uint(w[bb + 4u + sb_lo]) & 63u;
+                m_lo  = uint(w[bb + 4u + sb_lo + 4u]) & 63u;
             } else {
-                sc_lo = (uint(w[bb + 4 + sb_lo + 4]) & 0xFu) | ((uint(w[bb + 4 + sb_lo - 4]) >> 6) << 4);
-                m_lo  = (uint(w[bb + 4 + sb_lo + 4]) >> 4) | ((uint(w[bb + 4 + sb_lo]) >> 6) << 4);
+                sc_lo = (uint(w[bb + 4u + sb_lo + 4u]) & 0xFu) | ((uint(w[bb + 4u + sb_lo - 4u]) >> 6) << 4);
+                m_lo  = (uint(w[bb + 4u + sb_lo + 4u]) >> 4) | ((uint(w[bb + 4u + sb_lo]) >> 6) << 4);
             }
-            if (sb_hi < 4) {
-                sc_hi = uint(w[bb + 4 + sb_hi]) & 63u;
-                m_hi  = uint(w[bb + 4 + sb_hi + 4]) & 63u;
+            if (sb_hi < 4u) {
+                sc_hi = uint(w[bb + 4u + sb_hi]) & 63u;
+                m_hi  = uint(w[bb + 4u + sb_hi + 4u]) & 63u;
             } else {
-                sc_hi = (uint(w[bb + 4 + sb_hi + 4]) & 0xFu) | ((uint(w[bb + 4 + sb_hi - 4]) >> 6) << 4);
-                m_hi  = (uint(w[bb + 4 + sb_hi + 4]) >> 4) | ((uint(w[bb + 4 + sb_hi]) >> 6) << 4);
+                sc_hi = (uint(w[bb + 4u + sb_hi + 4u]) & 0xFu) | ((uint(w[bb + 4u + sb_hi - 4u]) >> 6) << 4);
+                m_hi  = (uint(w[bb + 4u + sb_hi + 4u]) >> 4) | ((uint(w[bb + 4u + sb_hi]) >> 6) << 4);
             }
 
             float factor_lo = d * float(sc_lo);
@@ -88,33 +91,27 @@ void main() {
             float factor_hi = d * float(sc_hi);
             float bias_hi   = dmin * float(m_hi);
 
-            uint qs_base = bb + 48 + g * 32;   // 32 qs bytes per group
-            uint qh_bit_lo = sb_lo;             // = g*2
-            uint qh_bit_hi = sb_hi;             // = g*2+1
-            // Q5_K element ordering is CONTIGUOUS-HALF:
-            // GGML dequantize_row_q5_K outputs y[l] from the low nibble and y[32 + l]
-            // from the high nibble, so the staged input remains in contiguous halves.
-            uint x_grp = xi;                    // start of 64-element group in staged input
+            uint qs_base = bb + 48u + group_pair * 32u;
+            uint qh_bit_lo = sb_lo;
+            uint qh_bit_hi = sb_hi;
+            uint x_grp = xi + group_pair * 64u;
 
-            for (uint e = 0; e < 32; e++) {
+            for (uint e = e_start; e < e_start + 4u; e++) {
                 uint byte_val = uint(w[qs_base + e]);
                 uint q_lo = byte_val & 0xFu;
                 uint q_hi = byte_val >> 4;
-
-                // High bit from qh[e], different bit position per sub-block
-                uint qh_val = uint(w[bb + 16 + e]);
+                uint qh_val = uint(w[bb + 16u + e]);
                 uint hb_lo = (qh_val >> qh_bit_lo) & 1u;
                 uint hb_hi = (qh_val >> qh_bit_hi) & 1u;
 
-                float v_lo = float(q_lo | (hb_lo << 4));
-                float v_hi = float(q_hi | (hb_hi << 4));
-
-                sum += (factor_lo * v_lo - bias_lo) * s_x[x_grp + e];
-                sum += (factor_hi * v_hi - bias_hi) * s_x[x_grp + 32u + e];
+                sum += (factor_lo * float(q_lo | (hb_lo << 4)) - bias_lo) * x[x_base + x_grp + e];
+                sum += (factor_hi * float(q_hi | (hb_hi << 4)) - bias_hi) * x[x_base + x_grp + 32u + e];
             }
-            xi += 64;
+        }
+
+        sum = subgroupAdd(sum);
+        if (tid == 0u) {
+            y[y_base + row] = sum;
         }
     }
-
-    y[y_base + row] = sum;
 }

@@ -127,6 +127,7 @@ const ChatReuseCache = struct {
     }
 };
 
+/// Shared server state tracking active requests, context usage, and generation serialization.
 pub const ServerState = struct {
     started_at: i64,
     active_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -136,6 +137,7 @@ pub const ServerState = struct {
     downloads: DownloadTracker = .{},
     chat_reuse_cache: ChatReuseCache,
 
+    /// Create a new server state anchored to the given UNIX timestamp.
     pub fn init(started_at: i64) ServerState {
         return .{
             .started_at = started_at,
@@ -143,14 +145,17 @@ pub const ServerState = struct {
         };
     }
 
+    /// Release owned resources (chat reuse cache).
     pub fn deinit(self: *ServerState) void {
         self.chat_reuse_cache.deinit();
     }
 
+    /// Return elapsed seconds since the server started.
     pub fn uptimeSeconds(self: *const ServerState, now: i64) u64 {
         return @intCast(@max(now - self.started_at, 0));
     }
 
+    /// Atomically capture current request and context counters for the health endpoint.
     pub fn snapshot(self: *const ServerState, now: i64) HealthSnapshot {
         return .{
             .active_requests = self.active_requests.load(.monotonic),
@@ -160,18 +165,22 @@ pub const ServerState = struct {
         };
     }
 
+    /// Update the active KV-cache token count reported by the health endpoint.
     pub fn setActiveContextTokens(self: *ServerState, tokens: u32) void {
         self.active_context_tokens.store(tokens, .monotonic);
     }
 
+    /// Reset the active context token count to zero.
     pub fn clearActiveContext(self: *ServerState) void {
         self.active_context_tokens.store(0, .monotonic);
     }
 
+    /// Evict all entries from the chat prompt-reuse cache.
     pub fn clearChatReuseCache(self: *ServerState) void {
         self.chat_reuse_cache.clear();
     }
 
+    /// Remove a single session from the chat prompt-reuse cache.
     pub fn clearChatReuseSession(self: *ServerState, session_id: []const u8) void {
         self.chat_reuse_cache.removeSession(session_id);
     }
@@ -447,13 +456,16 @@ fn handleModels(
         const download_phase = if (is_download_target) @tagName(download.phase) else "idle";
         const download_error = if (is_download_target) download.errorMessage() else "";
         try body.writer(allocator).print(
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","display_name":"{s}","release_date":"{s}","homepage_url":"{s}","installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}} 
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"zinc","display_name":"{s}","release_date":"{s}","homepage_url":"{s}","family":"{s}","quantization":"{s}","size_bytes":{d},"installed":{s},"active":{s},"managed":{s},"supported_on_current_gpu":{s},"fits_current_gpu":{s},"required_vram_bytes":{d},"fit_source":"{s}","status":"{s}","supports_thinking_toggle":{s},"downloading":{s},"download_phase":"{s}","downloaded_bytes":{d},"download_total_bytes":{d},"download_error":"{s}"}}
         , .{
             entry.id,
             ts,
             entry.display_name,
             entry.release_date,
             entry.homepage_url,
+            entry.family,
+            entry.quantization,
+            entry.size_bytes,
             if (entry.installed) "true" else "false",
             if (entry.active) "true" else "false",
             if (entry.managed) "true" else "false",
@@ -1580,6 +1592,12 @@ fn handleChatCompletions(
         // Decode loop with buffered stop detection.
         // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
         const eos = tokenizer.eosId();
+        // Additional EOG tokens (Gemma 4 uses <eos>=1 and </s>=212 alongside <turn|>=106)
+        const isEog = struct {
+            fn check(token: u32, primary_eos: u32) bool {
+                return token == primary_eos or token == 1 or token == 212;
+            }
+        }.check;
         const stop_strs = chat_stop_strs[0..];
         var pending_tokens: [16]u32 = undefined; // tokens waiting to be sent
         var pending_count: usize = 0;
@@ -1595,7 +1613,7 @@ fn handleChatCompletions(
             var prev_token = runtime.sample(engine, &state, sampling, random);
             var generated: u32 = 0;
 
-            while (generated < max_tokens and prev_token != eos and !stopped) {
+            while (generated < max_tokens and !isEog(prev_token, eos) and !stopped) {
                 if (conn.isPeerClosed()) return;
 
                 // Accumulate this token's decoded text
@@ -1617,6 +1635,50 @@ fn handleChatCompletions(
                 if (gen_text_len + tok_text.len < gen_text_buf.len) {
                     @memcpy(gen_text_buf[gen_text_len..][0..tok_text.len], tok_text);
                     gen_text_len += tok_text.len;
+                }
+
+                // Translate Gemma 4 thinking channel to <think> tags for the chat UI.
+                // Model generates: <|channel>thought\n...<channel|>response
+                // We convert to: <think>\n...\n</think>\nresponse
+                if (sent_text_len == 0 and gen_text_len >= 18) {
+                    const gemma_open = "<|channel>thought\n";
+                    const gemma_empty = "<|channel>thought\n<channel|>";
+                    if (std.mem.startsWith(u8, gen_text_buf[0..gen_text_len], gemma_empty)) {
+                        // Empty thinking: replace with <think>\n</think>\n
+                        const replacement = "<think>\n</think>\n";
+                        @memcpy(gen_text_buf[0..replacement.len], replacement);
+                        if (gen_text_len > gemma_empty.len) {
+                            const rest_len = gen_text_len - gemma_empty.len;
+                            std.mem.copyForwards(u8, gen_text_buf[replacement.len..], gen_text_buf[gemma_empty.len..][0..rest_len]);
+                        }
+                        gen_text_len = gen_text_len - gemma_empty.len + replacement.len;
+                    } else if (std.mem.startsWith(u8, gen_text_buf[0..gen_text_len], gemma_open)) {
+                        // Has thinking content: replace <|channel>thought\n with <think>\n
+                        const replacement = "<think>\n";
+                        @memcpy(gen_text_buf[0..replacement.len], replacement);
+                        if (gen_text_len > gemma_open.len) {
+                            const rest_len = gen_text_len - gemma_open.len;
+                            std.mem.copyForwards(u8, gen_text_buf[replacement.len..], gen_text_buf[gemma_open.len..][0..rest_len]);
+                        }
+                        gen_text_len = gen_text_len - gemma_open.len + replacement.len;
+                    }
+                }
+                // Also replace <channel|> with </think>\n anywhere in the text
+                {
+                    const gemma_close = "<channel|>";
+                    const think_close = "</think>\n";
+                    if (gen_text_len >= gemma_close.len) {
+                        if (std.mem.indexOf(u8, gen_text_buf[0..gen_text_len], gemma_close)) |idx| {
+                            @memcpy(gen_text_buf[idx..][0..think_close.len], think_close);
+                            if (gen_text_len > idx + gemma_close.len) {
+                                const rest_start = idx + gemma_close.len;
+                                const dest_start = idx + think_close.len;
+                                const rest_len = gen_text_len - rest_start;
+                                std.mem.copyForwards(u8, gen_text_buf[dest_start..], gen_text_buf[rest_start..][0..rest_len]);
+                            }
+                            gen_text_len = gen_text_len - gemma_close.len + think_close.len;
+                        }
+                    }
                 }
 
                 // Add to pending queue
@@ -1688,7 +1750,7 @@ fn handleChatCompletions(
                 } else break;
             }
 
-            if (!stopped and prev_token != eos and generated >= max_tokens) {
+            if (!stopped and !isEog(prev_token, eos) and generated >= max_tokens) {
                 finish_reason = .length;
             }
 
@@ -1732,11 +1794,16 @@ fn handleChatCompletions(
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
         const ns_eos = tokenizer.eosId();
+        const nsIsEog = struct {
+            fn check(token: u32, primary_eos: u32) bool {
+                return token == primary_eos or token == 1 or token == 212;
+            }
+        }.check;
         const ns_stops = chat_stop_strs[0..];
         var finish_reason: FinishReason = .stop;
         if (max_tokens > 0) {
             var prev = runtime.sample(engine, &state, sampling, random);
-            while (ns_gen < max_tokens and prev != ns_eos) {
+            while (ns_gen < max_tokens and !nsIsEog(prev, ns_eos)) {
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
@@ -1759,7 +1826,7 @@ fn handleChatCompletions(
                 server_state.setActiveContextTokens(state.position);
                 prev = runtime.sample(engine, &state, sampling, random);
             }
-            if (prev != ns_eos and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
+            if (!nsIsEog(prev, ns_eos) and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
                 finish_reason = .length;
             }
         }
@@ -2267,10 +2334,11 @@ fn fallbackModelName(model: *const Model) []const u8 {
         .qwen35 => "qwen3.5",
         .qwen2_moe => "qwen3.5-35b",
         .qwen2 => "qwen2",
-        .llama => "llama",
         .mistral => "mistral",
         .mamba => "mamba",
         .jamba => "jamba",
+        .gemma => "gemma",
+        .gpt_oss => "gpt-oss-20b",
         .unknown => "zinc-model",
     };
 }

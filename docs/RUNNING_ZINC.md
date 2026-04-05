@@ -146,33 +146,39 @@ The built-in managed catalog only lists models ZINC has explicitly revalidated f
 ./zig-out/bin/zinc model active
 ```
 
-On the shared RDNA4 host on March 29, 2026, `./zig-out/bin/zinc model list` returned:
+Example `./zig-out/bin/zinc model list` output on Apple Silicon:
 
 ```bash
-Detected GPU profile: amd-rdna4-32gb
+Detected GPU profile: apple-silicon
 
 ID                             Released     Status      Fit    Installed   Active   Notes
-qwen35-2b-q4k-m                2026-02-16   supported   yes    no          no       tested + catalog fit
-qwen35-35b-a3b-q4k-xl          2026-02-16   supported   yes    no          no       tested + catalog fit
+qwen35-2b-q4k-m                2026-02-16   supported   yes    yes         no       tested + exact fit
+qwen3-8b-q4k-m                 2025-04-29   supported   yes    yes         yes      tested + exact fit
+```
+
+For machine-readable output (useful for AI agents and scripts):
+
+```bash
+./zig-out/bin/zinc model list --json
 ```
 
 If you want ZINC to manage downloads and the default startup model for you:
 
 ```bash
 # Download one managed model into the local cache
-./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+./zig-out/bin/zinc model pull qwen3-8b-q4k-m
 
 # Mark it as the default managed model for future runs
-./zig-out/bin/zinc model use qwen35-2b-q4k-m
+./zig-out/bin/zinc model use qwen3-8b-q4k-m
 
 # Inspect the current managed default
 ./zig-out/bin/zinc model active
 
 # Remove a cached managed model
-./zig-out/bin/zinc model rm qwen35-2b-q4k-m
+./zig-out/bin/zinc model rm qwen3-8b-q4k-m
 
 # Force-unload it from the local server first if it is still active there
-./zig-out/bin/zinc model rm --force qwen35-2b-q4k-m
+./zig-out/bin/zinc model rm --force qwen3-8b-q4k-m
 ```
 
 `model rm` is conservative by default: if the local ZINC server still has that model loaded in GPU memory, the command refuses and leaves the cache untouched. Use `--force` to have the local server unload it first. If your server uses a non-default port, add `--port <port>` before `model rm`.

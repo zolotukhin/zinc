@@ -1,3 +1,8 @@
+//! Vulkan system diagnostics (`zinc --check`).
+//! Probes the host environment, Vulkan driver, GPU capabilities,
+//! shader assets, and optional GGUF model fit to produce a human-readable
+//! preflight report on stdout.
+//! @section Hardware Detection
 const std = @import("std");
 const builtin = @import("builtin");
 const gguf = @import("model/gguf.zig");
@@ -10,19 +15,31 @@ const Instance = instance_mod.Instance;
 const ModelConfig = loader_mod.ModelConfig;
 const ModelInspection = loader_mod.ModelInspection;
 
+/// Configuration for a Vulkan diagnostics run.
 pub const Options = struct {
+    /// GPU device index to probe (0 = default).
     device_index: u32 = 0,
+    /// Path to a GGUF model file for inspection, or null to skip.
     model_path: ?[]const u8 = null,
+    /// Managed model catalog entry, if selected via `--model-id`.
     managed_model: ?ManagedModelInfo = null,
+    /// Directory containing compiled SPIR-V shader assets.
     shader_dir: []const u8 = "zig-out/share/zinc/shaders",
 };
 
+/// Catalog metadata for a managed (downloadable) model.
 pub const ManagedModelInfo = struct {
+    /// Unique model identifier used in the catalog.
     id: []const u8,
+    /// Human-readable model name shown in UI.
     display_name: []const u8,
+    /// GGUF filename within the local cache.
     file_name: []const u8,
+    /// On-disk size in bytes.
     size_bytes: u64,
+    /// Minimum VRAM required for inference.
     required_vram_bytes: u64,
+    /// Short status string (e.g. "installed", "available").
     status_label: []const u8,
 };
 
@@ -101,14 +118,23 @@ const VulkanProbe = struct {
     }
 };
 
+/// Estimated VRAM breakdown for running a model on a discrete GPU.
 pub const FitEstimate = struct {
+    /// Tensor weight payload bytes uploaded to device-local VRAM.
     weights_bytes: u64,
+    /// Activation and scratch buffers allocated in device-local VRAM.
     runtime_device_local_bytes: u64,
+    /// Staging buffers allocated in host-visible memory.
     host_visible_bytes: u64,
+    /// KV cache bytes allocated in device-local VRAM.
     kv_cache_bytes: u64,
+    /// SSM convolution and recurrent state bytes on the GPU.
     gpu_ssm_bytes: u64,
+    /// Sum of weights + runtime + KV cache + SSM state in device-local VRAM.
     total_device_local_bytes: u64,
+    /// Available VRAM budget reported by the Vulkan driver.
     vram_budget_bytes: u64,
+    /// Maximum context length used for KV cache sizing (capped at 4096).
     max_ctx: u32,
 
     fn headroomBytes(self: FitEstimate) i128 {
@@ -606,6 +632,7 @@ fn readGgufHeader(file: std.fs.File) !GgufHeader {
     };
 }
 
+/// Estimate device-local and host-visible VRAM usage for a model given a VRAM budget.
 pub fn estimateFit(inspection: ModelInspection, vram_budget_bytes: u64) FitEstimate {
     const config = inspection.config;
 

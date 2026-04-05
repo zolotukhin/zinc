@@ -79,6 +79,9 @@ function makeElement(): any {
     querySelector() {
       return makeElement();
     },
+    querySelectorAll() {
+      return [];
+    },
     remove() {},
     focus() {},
     parentElement: { appendChild() {} },
@@ -456,8 +459,8 @@ test("historyTransportContent compacts long assistant history", () => {
 test("chatMaxTokens gives longer budget to non-thinking replies", () => {
   const { chatMaxTokens } = loadChatUiApi();
 
-  expect(chatMaxTokens(false)).toBe(1024);
-  expect(chatMaxTokens(true)).toBe(2048);
+  expect(chatMaxTokens(false)).toBe(128);
+  expect(chatMaxTokens(true)).toBe(256);
 });
 
 test("reasoningIsLowSignal flags trivial meta reasoning", () => {

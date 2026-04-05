@@ -104,6 +104,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_rms_norm: ?Pipeline,
     /// SWIGLU pipeline, or null.
     pipeline_swiglu: ?Pipeline,
+    /// GEGLU pipeline (GELU-gated, used by Gemma), or null.
+    pipeline_geglu: ?Pipeline,
     /// ROPE pipeline, or null.
     pipeline_rope: ?Pipeline,
     /// DEINTERLEAVE pipeline, or null.
@@ -126,6 +128,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_sigmoid_scale_acc: ?Pipeline,
     /// MOE WEIGHTED ACC pipeline: a[i] += routing_weight * b[i], 3 bindings (accum, src, routing).
     pipeline_moe_weighted_acc: ?Pipeline,
+    /// SOFTCAP pipeline: in-place logit softcapping, 1 binding (logits buffer).
+    pipeline_softcap: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -182,9 +186,16 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
-        // RoPE: 1 input + 1 output = 2 bindings
+        // GEGLU: 2 inputs (gate, up) + 1 output = 3 bindings (same layout as SwiGLU)
+        const geglu_path = std.fmt.bufPrint(&path_buf, "{s}/geglu.spv", .{shader_dir}) catch unreachable;
+        const pipeline_geglu = pipeline_mod.createFromSpirv(instance, geglu_path, 3, @sizeOf(SwigluPush), &.{}, allocator) catch |err| blk: {
+            log.warn("geglu shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // RoPE: 1 input + 1 output + 1 freq_buf = 3 bindings
         const rope_path = std.fmt.bufPrint(&path_buf, "{s}/rope_fused.spv", .{shader_dir}) catch unreachable;
-        const pipeline_rope = pipeline_mod.createFromSpirv(instance, rope_path, 2, @sizeOf(RopePush), &.{}, allocator) catch |err| blk: {
+        const pipeline_rope = pipeline_mod.createFromSpirv(instance, rope_path, 3, @sizeOf(RopePush), &.{}, allocator) catch |err| blk: {
             log.warn("rope_fused shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -259,9 +270,18 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // softcap: in-place logit softcapping, 1 binding (logits buffer)
+        const SoftcapPush = extern struct { N: u32, softcap_bits: u32 };
+        const softcap_path = std.fmt.bufPrint(&path_buf, "{s}/softcap.spv", .{shader_dir}) catch unreachable;
+        const pipeline_softcap = pipeline_mod.createFromSpirv(instance, softcap_path, 1, @sizeOf(SoftcapPush), &.{}, allocator) catch |err| blk: {
+            log.warn("softcap shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
+            .pipeline_geglu = pipeline_geglu,
             .pipeline_rope = pipeline_rope,
             .pipeline_deinterleave = pipeline_deinterleave,
             .pipeline_sigmoid_mul = pipeline_sigmoid_mul,
@@ -273,6 +293,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_softmax_topk = pipeline_softmax_topk,
             .pipeline_sigmoid_scale_acc = pipeline_sigmoid_scale_acc,
             .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
+            .pipeline_softcap = pipeline_softcap,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -324,6 +345,20 @@ pub const ElementwiseDispatch = struct {
         n_elements: u32,
     ) !void {
         const pip = if (self.pipeline_swiglu) |*p| p else return error.ShaderNotLoaded;
+        const push = SwigluPush{ .N = n_elements };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
+    /// Record a GEGLU activation dispatch (GELU-gated, used by Gemma).
+    /// Same buffer layout as SwiGLU: gate, up → output.
+    pub fn recordGeglu(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+    ) !void {
+        const pip = if (self.pipeline_geglu) |*p| p else return error.ShaderNotLoaded;
         const push = SwigluPush{ .N = n_elements };
         const workgroups = (n_elements + 63) / 64;
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
@@ -518,11 +553,27 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
+    /// Record in-place logit softcapping: logits[i] = cap * tanh(logits[i] / cap).
+    pub fn recordSoftcap(
+        self: *const ElementwiseDispatch,
+        cmd: *const CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+        softcap: f32,
+    ) !void {
+        const pip = if (self.pipeline_softcap) |*p| p else return error.ShaderNotLoaded;
+        const SoftcapPush = extern struct { N: u32, softcap_bits: u32 };
+        const push = SoftcapPush{ .N = n_elements, .softcap_bits = @bitCast(softcap) };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *ElementwiseDispatch) void {
         if (self.pipeline_rms_norm) |*p| p.deinit();
         if (self.pipeline_swiglu) |*p| p.deinit();
+        if (self.pipeline_geglu) |*p| p.deinit();
         if (self.pipeline_rope) |*p| p.deinit();
         if (self.pipeline_deinterleave) |*p| p.deinit();
         if (self.pipeline_sigmoid_mul) |*p| p.deinit();
@@ -534,6 +585,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_softmax_topk) |*p| p.deinit();
         if (self.pipeline_sigmoid_scale_acc) |*p| p.deinit();
         if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
+        if (self.pipeline_softcap) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

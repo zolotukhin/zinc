@@ -7,6 +7,7 @@ struct FlashAttnPush {
     uint n_kv_heads;
     uint seq_len;
     uint page_size;
+    uint window_size; // 0 = full, >0 = sliding window (attend to last N tokens)
 };
 
 constant uint FLASH_TG_SIZE = 64;
@@ -121,7 +122,8 @@ kernel void main0(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint block_start = 0; block_start < p.seq_len; block_start += FLASH_BLOCK_TOKENS) {
+    const uint effective_start = (p.window_size > 0u && p.seq_len > p.window_size) ? (p.seq_len - p.window_size) : 0u;
+    for (uint block_start = effective_start; block_start < p.seq_len; block_start += FLASH_BLOCK_TOKENS) {
         const uint block_tokens = min(FLASH_BLOCK_TOKENS, p.seq_len - block_start);
         const uint block_base = (block_start * token_stride) + kv_head * p.head_dim;
         float local_max = -INFINITY;

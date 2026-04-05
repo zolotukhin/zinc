@@ -56,6 +56,11 @@ void mtl_dispatch_v2(MetalCmd* cmd, MetalPipe* pipe,
                      MetalBuf** bufs, uint32_t n_bufs,
                      const void* push_data, size_t push_size,
                      uint32_t push_idx);
+void mtl_dispatch_v2_tgmem(MetalCmd* cmd, MetalPipe* pipe,
+                     const uint32_t grid[3], const uint32_t block[3],
+                     MetalBuf** bufs, uint32_t n_bufs,
+                     const void* push_data, size_t push_size,
+                     uint32_t push_idx, uint32_t tg_mem_size);
 void mtl_barrier(MetalCmd* cmd);
 void mtl_commit_and_wait(MetalCmd* cmd);
 void mtl_commit_async(MetalCmd* cmd);

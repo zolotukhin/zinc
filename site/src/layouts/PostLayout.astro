@@ -267,6 +267,32 @@ const jsonLd = {
     margin-right: 0;
   }
 
+  .post-content figure.diagram-compact {
+    max-width: 28rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .post-content figure.diagram-compact .flow-diagram {
+    gap: 0.72rem;
+    padding: 0.85rem;
+  }
+
+  .post-content figure.diagram-compact .flow-node {
+    width: min(100%, 22rem);
+    padding: 0.56rem 0.72rem;
+    font-size: 0.86rem;
+  }
+
+  .post-content figure.diagram-compact .flow-arrow {
+    font-size: 0.92rem;
+  }
+
+  .post-content figure.diagram-compact .flow-pill {
+    padding: 0.42rem 0.68rem;
+    font-size: 0.75rem;
+  }
+
   .post-content figure.diagram-card img {
     max-width: 100%;
     width: 100%;
@@ -281,6 +307,106 @@ const jsonLd = {
     line-height: 1.6;
     color: var(--color-text-muted);
     text-align: left;
+  }
+
+  .post-content .flow-diagram {
+    display: grid;
+    gap: 0.9rem;
+    margin: 0;
+    padding: 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    background:
+      radial-gradient(circle at top left, color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 42%),
+      var(--color-bg-alt);
+  }
+
+  .post-content .flow-main {
+    display: grid;
+    justify-items: center;
+    gap: 0.45rem;
+  }
+
+  .post-content .flow-node {
+    width: min(100%, 28rem);
+    padding: 0.68rem 0.9rem;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: var(--color-bg);
+    text-align: center;
+    font-size: 0.92rem;
+    line-height: 1.35;
+    font-weight: 600;
+  }
+
+  .post-content .flow-node-accent {
+    border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
+    color: var(--color-accent);
+  }
+
+  .post-content .flow-node-output {
+    background: color-mix(in srgb, var(--color-accent) 9%, var(--color-bg));
+  }
+
+  .post-content .flow-arrow {
+    color: var(--color-text-muted);
+    font-size: 1.05rem;
+    line-height: 1;
+  }
+
+  .post-content .flow-branches {
+    display: grid;
+    gap: 0.55rem;
+    padding-top: 0.15rem;
+    border-top: 1px dashed var(--color-border);
+  }
+
+  .post-content .flow-branch-label {
+    text-align: center;
+    font-size: 0.75rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .post-content .flow-branch-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+  }
+
+  .post-content .flow-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.48rem 0.8rem;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-bg);
+    font-size: 0.8rem;
+    line-height: 1.2;
+    color: var(--color-text-muted);
+  }
+
+  .post-content .flow-plus {
+    color: var(--color-text-muted);
+    font-weight: 700;
+  }
+
+  .post-content figure.diagram-dual .diagram-mobile-alt {
+    display: none;
+    margin: 0;
+    padding: 1rem 1.05rem;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: var(--color-bg-alt);
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre;
+    overflow-x: auto;
   }
 
   /* Image pair grid: two images side by side */
@@ -308,6 +434,33 @@ const jsonLd = {
     .post-content img {
       max-width: 100%;
     }
+
+    .post-content figure.diagram-dual .diagram-visual {
+      display: none;
+    }
+
+    .post-content figure.diagram-dual .diagram-mobile-alt {
+      display: block;
+      font-size: 0.74rem;
+    }
+
+    .post-content .flow-diagram {
+      padding: 0.85rem;
+    }
+
+    .post-content .flow-node {
+      font-size: 0.86rem;
+      width: 100%;
+    }
+
+    .post-content .flow-branch-row {
+      gap: 0.4rem;
+    }
+
+    .post-content .flow-pill {
+      font-size: 0.75rem;
+    }
+
     .post-content .img-pair {
       grid-template-columns: 1fr;
     }
