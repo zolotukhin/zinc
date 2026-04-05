@@ -88,6 +88,27 @@ pub const entries = [_]CatalogEntry{
         },
     },
     .{
+        .id = "gpt-oss-20b-q4k-m",
+        .display_name = "OpenAI GPT-OSS 20B Q4_K_M",
+        .release_date = "2025-06-25",
+        .family = "gpt-oss",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "openai_gpt-oss-20b-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF",
+        .download_url = "https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF/resolve/main/openai_gpt-oss-20b-Q4_K_M.gguf?download=true",
+        .sha256 = "",
+        .size_bytes = 11_670_000_000,
+        .required_vram_bytes = 14 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = false,
+        .status = .experimental,
+        .tested_profiles = &.{
+            apple_silicon_profile,
+        },
+    },
+    .{
         .id = "qwen3-8b-q4k-m",
         .display_name = "Qwen3 8B Q4_K_M",
         .release_date = "2025-04-29",
@@ -237,6 +258,7 @@ pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
         .{ "gemma", "gemma" },
         .{ "mamba", "mamba" },
         .{ "jamba", "jamba" },
+        .{ "gpt-oss", "gpt-oss" },
     };
     inline for (families) |pair| {
         if (std.mem.eql(u8, family, pair[0])) return pair[1];
