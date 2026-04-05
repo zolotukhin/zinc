@@ -674,6 +674,22 @@ const LayerTensors = struct {
     ffn_down: ?*const metal_loader.LoadedTensor = null,
 };
 
+const FullAttnGateMode = struct {
+    packed_q_gate: bool,
+    separate_attn_gate: bool,
+    apply_attn_gate: bool,
+};
+
+fn classifyFullAttnGate(q_rows: u32, q_dim: u32, has_attn_gate: bool) FullAttnGateMode {
+    const packed_q_gate = q_rows >= q_dim * 2;
+    const separate_attn_gate = !packed_q_gate and has_attn_gate;
+    return .{
+        .packed_q_gate = packed_q_gate,
+        .separate_attn_gate = separate_attn_gate,
+        .apply_attn_gate = packed_q_gate or separate_attn_gate,
+    };
+}
+
 /// Metal inference engine — owns GPU buffers, pipelines, and KV cache.
 pub const InferenceEngine = struct {
     model: *const metal_loader.Model,
@@ -2757,11 +2773,9 @@ fn dispatchFullAttnPrepOnCmd(
     // Packed: attn_q has q_dim*2 rows (interleaved [Q,gate] per head) — Qwen3Next style.
     // Separate: attn_q has q_dim rows, gate is in a separate attn_gate tensor — Qwen3.5 MoE style.
     const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
-    const packed_q_gate = q_rows >= q_dim * 2;
-    const separate_attn_gate = !packed_q_gate and lt.attn_gate != null;
-    const apply_attn_gate = packed_q_gate or separate_attn_gate;
+    const gate_mode = classifyFullAttnGate(q_rows, q_dim, lt.attn_gate != null);
 
-    if (packed_q_gate) {
+    if (gate_mode.packed_q_gate) {
         // Packed: project full Q+gate into attn_out_buf, then deinterleave.
         const q_full_dim = q_dim * 2;
         dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
@@ -2773,7 +2787,7 @@ fn dispatchFullAttnPrepOnCmd(
     } else {
         // Separate: project Q directly to q_buf, gate (if present) to gate_buf.
         dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.q_buf, q_dim, hidden_dim, 0);
-        if (separate_attn_gate) {
+        if (gate_mode.separate_attn_gate) {
             dispatchDmmvOnCmd(engine, cmd, lt.attn_gate.?, &engine.norm_buf, &engine.gate_buf, q_dim, hidden_dim, 0);
         }
         dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, kv_dim, hidden_dim, 0);
@@ -2805,7 +2819,7 @@ fn dispatchFullAttnPrepOnCmd(
     profileBarrier(cmd, profile, .full_attn); // rope outputs visible before KV cache write
 
     dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
-    return apply_attn_gate;
+    return gate_mode.apply_attn_gate;
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
@@ -2924,6 +2938,25 @@ fn addBiasFromTensorSlice(engine: *InferenceEngine, output: [*]f32, tensor: *con
     const base: usize = @as(usize, expert_id) * @as(usize, n) * 4;
     const bias_ptr: [*]const f32 = @ptrCast(@alignCast(mmap[off + base ..].ptr));
     for (0..n) |i| output[i] += bias_ptr[i];
+}
+
+fn cpuRopeWithFreqs(data: [*]f32, stride: u32, rope_dim: u32, n_heads: u32, position: u32, inv_freq: []const f32) void {
+    const half_rot = rope_dim / 2;
+    std.debug.assert(inv_freq.len >= half_rot);
+    for (0..n_heads) |h| {
+        const base_idx = @as(u32, @intCast(h)) * stride;
+        for (0..half_rot) |i| {
+            const theta = @as(f32, @floatFromInt(position)) * inv_freq[i];
+            const cos_t = @cos(theta);
+            const sin_t = @sin(theta);
+            const idx0 = base_idx + @as(u32, @intCast(i));
+            const idx1 = idx0 + half_rot;
+            const x0 = data[idx0];
+            const x1 = data[idx1];
+            data[idx0] = x0 * cos_t - x1 * sin_t;
+            data[idx1] = x0 * sin_t + x1 * cos_t;
+        }
+    }
 }
 
 /// SwiGLU: output[i] = SiLU(gate[i]) * up[i]
@@ -3208,12 +3241,18 @@ pub fn topKSoftmaxWeight(logits: []const f32, k: u32, out_ids: []u32, out_weight
         used[best_idx] = true;
     }
     var max_sel: f32 = -std.math.inf(f32);
-    for (0..k) |i| if (out_weights[i] > max_sel) { max_sel = out_weights[i]; };
+    for (0..k) |i| if (out_weights[i] > max_sel) {
+        max_sel = out_weights[i];
+    };
     var sum: f32 = 0;
-    for (0..k) |i| { out_weights[i] = @exp(out_weights[i] - max_sel); sum += out_weights[i]; }
-    if (sum > 0) for (0..k) |i| { out_weights[i] /= sum; };
+    for (0..k) |i| {
+        out_weights[i] = @exp(out_weights[i] - max_sel);
+        sum += out_weights[i];
+    }
+    if (sum > 0) for (0..k) |i| {
+        out_weights[i] /= sum;
+    };
 }
-
 
 pub fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
@@ -4652,8 +4691,7 @@ fn debugCompareAttentionLayer(
     const v_tensor = lt.attn_v orelse return error.MissingTensor;
     const o_tensor = lt.attn_output orelse return error.MissingTensor;
     const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
-    const packed_q_gate = q_rows >= q_dim * 2;
-    const apply_attn_gate = packed_q_gate or lt.attn_gate != null;
+    const gate_mode = classifyFullAttnGate(q_rows, q_dim, lt.attn_gate != null);
 
     const norm_in: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
     const q_actual: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
@@ -4680,7 +4718,7 @@ fn debugCompareAttentionLayer(
     const oproj_ref = try allocator.alloc(f32, hidden_dim);
     defer allocator.free(oproj_ref);
 
-    if (packed_q_gate) {
+    if (gate_mode.packed_q_gate) {
         const q_full_dim: u32 = q_dim * 2;
         const q_full_ref = try allocator.alloc(f32, q_full_dim);
         defer allocator.free(q_full_ref);
@@ -4763,7 +4801,7 @@ fn debugCompareAttentionLayer(
     logDebugSliceDiff(layer, "attn_q", q_ref[0..q_dim], q_actual[0..q_dim]);
     logDebugSliceDiff(layer, "attn_k", k_ref[0..kv_dim], k_actual[0..kv_dim]);
     logDebugSliceDiff(layer, "attn_v", v_ref[0..kv_dim], v_actual[0..kv_dim]);
-    if (apply_attn_gate) {
+    if (gate_mode.apply_attn_gate) {
         logDebugSliceDiff(layer, "attn_gate", gate_ref[0..q_dim], gate_actual[0..q_dim]);
     }
     logDebugSliceDiff(layer, "kv_write_k", k_ref[0..kv_dim], k_cache_actual[kv_offset .. kv_offset + kv_dim]);
@@ -4781,7 +4819,7 @@ fn debugCompareAttentionLayer(
         cfg.attn_scale,
     );
     for (0..@as(usize, q_dim)) |i| {
-        if (apply_attn_gate) {
+        if (gate_mode.apply_attn_gate) {
             const g = gate_ref[i];
             gated_ref[i] = flash_ref[i] * (1.0 / (1.0 + @exp(-g)));
         } else {
@@ -5140,6 +5178,132 @@ test "topKSoftmax selects correct top-k with renormalization" {
     try std.testing.expectEqual(@as(u32, 7), ids[2]);
     const wsum = weights[0] + weights[1] + weights[2];
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), wsum, 0.01);
+}
+
+test "classifyFullAttnGate handles packed, separate, and plain layouts" {
+    const packed_mode = classifyFullAttnGate(16, 8, false);
+    try std.testing.expect(packed_mode.packed_q_gate);
+    try std.testing.expect(!packed_mode.separate_attn_gate);
+    try std.testing.expect(packed_mode.apply_attn_gate);
+
+    const separate_mode = classifyFullAttnGate(8, 8, true);
+    try std.testing.expect(!separate_mode.packed_q_gate);
+    try std.testing.expect(separate_mode.separate_attn_gate);
+    try std.testing.expect(separate_mode.apply_attn_gate);
+
+    const plain_mode = classifyFullAttnGate(8, 8, false);
+    try std.testing.expect(!plain_mode.packed_q_gate);
+    try std.testing.expect(!plain_mode.separate_attn_gate);
+    try std.testing.expect(!plain_mode.apply_attn_gate);
+
+    const packed_wins = classifyFullAttnGate(16, 8, true);
+    try std.testing.expect(packed_wins.packed_q_gate);
+    try std.testing.expect(!packed_wins.separate_attn_gate);
+    try std.testing.expect(packed_wins.apply_attn_gate);
+}
+
+test "rope_native dispatch uses precomputed inverse frequencies" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "rope_native");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const stride: u32 = 6;
+    const rope_dim: u32 = 4;
+    const n_heads: u32 = 2;
+    const position: u32 = 7;
+
+    var data_buf = try metal_buffer.createBuffer(ctx, n_heads * stride * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&data_buf);
+    var freq_buf = try metal_buffer.createBuffer(ctx, (rope_dim / 2) * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&freq_buf);
+
+    const input = [_]f32{
+        1.0,  -2.0, 0.5, 3.0,  9.0, -9.0,
+        -1.5, 4.0,  2.5, -0.5, 7.0, 8.0,
+    };
+    const inv_freq = [_]f32{ 0.125, 0.03125 };
+
+    const data_ptr: [*]f32 = @ptrCast(@alignCast(data_buf.cpu_ptr.?));
+    const freq_ptr: [*]f32 = @ptrCast(@alignCast(freq_buf.cpu_ptr.?));
+    @memcpy(data_ptr[0 .. n_heads * stride], input[0 .. n_heads * stride]);
+    @memcpy(freq_ptr[0 .. rope_dim / 2], inv_freq[0 .. rope_dim / 2]);
+
+    var expected = input;
+    cpuRopeWithFreqs(expected[0..].ptr, stride, rope_dim, n_heads, position, inv_freq[0..]);
+
+    var engine: InferenceEngine = undefined;
+    engine.rope_native_pipe = pipe;
+    engine.rope_freq_buf = freq_buf;
+
+    var cmd = try metal_command.beginCommand(ctx);
+    dispatchRopeOnCmd(&engine, &cmd, &data_buf, &data_buf, stride, rope_dim, n_heads, position, 10_000.0);
+    cmd.commitAndWait();
+
+    for (0..expected.len) |i| {
+        try std.testing.expectApproxEqAbs(expected[i], data_ptr[i], 1e-5);
+    }
+    try std.testing.expectEqual(input[4], data_ptr[4]);
+    try std.testing.expectEqual(input[5], data_ptr[5]);
+    try std.testing.expectEqual(input[10], data_ptr[10]);
+    try std.testing.expectEqual(input[11], data_ptr[11]);
+}
+
+test "residual_rms_norm dispatch normalizes post-residual hidden state" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "residual_rms_norm");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const n: u32 = 8;
+    var hidden_buf = try metal_buffer.createBuffer(ctx, n * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&hidden_buf);
+    var residual_buf = try metal_buffer.createBuffer(ctx, n * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&residual_buf);
+    var norm_buf = try metal_buffer.createBuffer(ctx, n * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&norm_buf);
+    var weight_buf = try metal_buffer.createBuffer(ctx, n * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&weight_buf);
+
+    const hidden_init = [_]f32{ 1.0, -2.0, 0.5, 3.0, -1.5, 0.25, 2.0, -0.75 };
+    const residual_init = [_]f32{ 0.5, 1.0, -1.5, 0.25, 2.0, -0.5, -1.0, 0.75 };
+    const weights = [_]f32{ 1.0, 0.5, 2.0, -1.0, 0.75, 1.25, -0.5, 1.5 };
+
+    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(hidden_buf.cpu_ptr.?));
+    const residual_ptr: [*]f32 = @ptrCast(@alignCast(residual_buf.cpu_ptr.?));
+    const norm_ptr: [*]f32 = @ptrCast(@alignCast(norm_buf.cpu_ptr.?));
+    const weight_ptr: [*]f32 = @ptrCast(@alignCast(weight_buf.cpu_ptr.?));
+    @memcpy(hidden_ptr[0..n], hidden_init[0..n]);
+    @memcpy(residual_ptr[0..n], residual_init[0..n]);
+    @memcpy(weight_ptr[0..n], weights[0..n]);
+    @memset(norm_buf.cpu_ptr.?[0..norm_buf.size], 0);
+
+    var expected_hidden = hidden_init;
+    for (0..n) |i| expected_hidden[i] += residual_init[i];
+    var expected_norm: [n]f32 = undefined;
+    cpuRmsNormMul(expected_hidden[0..].ptr, weights[0..], expected_norm[0..].ptr, n, 1, 1e-6);
+
+    var stale_norm: [n]f32 = undefined;
+    cpuRmsNormMul(hidden_init[0..].ptr, weights[0..], stale_norm[0..].ptr, n, 1, 1e-6);
+
+    var engine: InferenceEngine = undefined;
+    engine.residual_rms_norm_pipe = pipe;
+
+    var cmd = try metal_command.beginCommand(ctx);
+    dispatchResidualRmsNormOnCmd(&engine, &cmd, &hidden_buf, &residual_buf, &norm_buf, &weight_buf, n, 1.0);
+    cmd.commitAndWait();
+
+    var differs_from_stale = false;
+    for (0..n) |i| {
+        try std.testing.expectApproxEqAbs(expected_hidden[i], hidden_ptr[i], 1e-5);
+        try std.testing.expectApproxEqAbs(expected_norm[i], norm_ptr[i], 1e-5);
+        if (@abs(norm_ptr[i] - stale_norm[i]) > 1e-3) differs_from_stale = true;
+    }
+    try std.testing.expect(differs_from_stale);
 }
 
 test "ssm_delta_net shader matches CPU reference" {
