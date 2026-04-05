@@ -3935,29 +3935,33 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                     }
                     profileBarrier(&cmd, profile, .fallback_moe);
 
-                    // Apply per-expert gate/up biases if present (gpt-oss)
-                    if (lt.ffn_gate_exps_bias != null or lt.ffn_up_exps_bias != null) {
+                    // Phase 2: Bias + SwiGLU activation
+                    if (cfg.architecture == .gpt_oss) {
+                        // gpt-oss: apply expert biases + OAI SwiGLU on CPU in one block
                         cmd.commitAndWait();
                         for (0..cfg.n_experts_used) |ei| {
                             const eid = expert_ids[ei];
                             if (lt.ffn_gate_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
                             if (lt.ffn_up_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
-                        }
-                        cmd = try beginProfiledCommand(engine, profile);
-                    }
-
-                    // Phase 2: All SwiGLU operations in parallel
-                    if (cfg.architecture == .gpt_oss) {
-                        // OAI SwiGLU on CPU
-                        cmd.commitAndWait();
-                        for (0..cfg.n_experts_used) |ei| {
                             cpuSwiGLU_OAI(@ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), @ptrCast(@alignCast(engine.expert_swiglu_bufs[ei].cpu_ptr.?)), inter_dim);
                         }
                         cmd = try beginProfiledCommand(engine, profile);
-                    } else for (0..cfg.n_experts_used) |ei| {
-                        const swiglu_push = SwiGLUPush{ .n = inter_dim };
-                        const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
-                        cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                    } else {
+                        // Standard: apply biases on CPU if needed, then GPU SwiGLU
+                        if (lt.ffn_gate_exps_bias != null or lt.ffn_up_exps_bias != null) {
+                            cmd.commitAndWait();
+                            for (0..cfg.n_experts_used) |ei| {
+                                const eid = expert_ids[ei];
+                                if (lt.ffn_gate_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_gate_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
+                                if (lt.ffn_up_exps_bias) |b| addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_up_bufs[ei].cpu_ptr.?)), b, eid, inter_dim);
+                            }
+                            cmd = try beginProfiledCommand(engine, profile);
+                        }
+                        for (0..cfg.n_experts_used) |ei| {
+                            const swiglu_push = SwiGLUPush{ .n = inter_dim };
+                            const sw_bufs = [_]*const MetalBuffer{ &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei] };
+                            cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                        }
                     }
                     if (has_shexp) {
                         const sw_push = SwiGLUPush{ .n = shexp_inter_dim };
