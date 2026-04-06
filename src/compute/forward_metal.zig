@@ -3670,73 +3670,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
-            // Focused Q5_0 precision test at L0 pos0: fill input with 1.0
-            if (engine.debug_validation_enabled and engine.position == 0 and layer_idx == 0 and cfg.architecture == .gpt_oss) {
-                commitAndWaitProfiled(cmd, profile);
-                // Save real norm_buf, fill with identity (only element 0 = 1.0)
-                const norm_ptr: [*]f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
-                const save = try engine.allocator.alloc(f32, hidden_dim);
-                defer engine.allocator.free(save);
-                @memcpy(save, norm_ptr[0..hidden_dim]);
-                @memset(norm_ptr[0..hidden_dim], 0);
-                norm_ptr[0] = 1.0;
-                // Clear q_buf and do GPU Q5_0 DMMV with identity input
-                @memset(engine.q_buf.cpu_ptr.?[0..engine.q_buf.size], 0);
-                var test_cmd = try metal_command.beginCommand(engine.device.ctx);
-                const q_tensor = lt.attn_q orelse unreachable;
-                dispatchDmmvOnCmd(engine, &test_cmd, q_tensor, &engine.norm_buf, &engine.q_buf, q_dim, hidden_dim, 0);
-                test_cmd.commitAndWait();
-                const gpu_q: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-                // CPU Q5_0 DMMV with all-ones input
-                const cpu_q = try engine.allocator.alloc(f32, q_dim);
-                defer engine.allocator.free(cpu_q);
-                const mmap = engine.model.mmap_data orelse unreachable;
-                const tdo = engine.model.gguf_file.tensor_data_offset;
-                try cpuDmmvFallback(mmap, q_tensor, tdo, norm_ptr, cpu_q.ptr, q_dim, hidden_dim, 0, engine.allocator);
-                // Compare
-                var mx: f32 = 0;
-                var mx_i: usize = 0;
-                for (0..q_dim) |ii| {
-                    const d = @abs(gpu_q[ii] - cpu_q[ii]);
-                    if (d > mx) { mx = d; mx_i = ii; }
-                }
-                log.info("Q5_0_ONES_TEST: max_diff={d:.6} idx={d} gpu={d:.6} cpu={d:.6}", .{ mx, mx_i, gpu_q[mx_i], cpu_q[mx_i] });
-                // Print first 8 rows comparison
-                for (0..16) |ri| {
-                    log.info("Q5_0_ROW{d}: gpu={d:.6} cpu={d:.6} diff={d:.6}", .{ ri, gpu_q[ri], cpu_q[ri], gpu_q[ri] - cpu_q[ri] });
-                }
-                // Print the a_offset being used
-                {
-                    const po = tensorPageOffset(engine.model, q_tensor);
-                    log.info("Q5_0_OFFSET: page_off={d} tensor.offset={d} tds={d}", .{
-                        po, q_tensor.info.offset, engine.model.gguf_file.tensor_data_offset,
-                    });
-                }
-                // Verify gpu_buffer data matches mmap at row 1417
-                {
-                    const row1417: u32 = @min(mx_i, q_dim - 1);
-                    const page_off2 = tensorPageOffset(engine.model, q_tensor);
-                    const row_byte_off: usize = @as(usize, row1417) * 90 * 22;
-                    const buf_data: [*]const u8 = @ptrCast(q_tensor.gpu_buffer.cpu_ptr.?);
-                    const mmap_off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + q_tensor.info.offset);
-                    const mmap_data2: [*]const u8 = mmap.ptr;
-                    // First 6 bytes of row (d + qh) from buffer vs mmap
-                    log.info("Q5_0_BYTES: row={d} page_off={d} buf[0..5]=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] mmap[0..5]=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]", .{
-                        row1417, page_off2,
-                        buf_data[page_off2 + row_byte_off], buf_data[page_off2 + row_byte_off + 1],
-                        buf_data[page_off2 + row_byte_off + 2], buf_data[page_off2 + row_byte_off + 3],
-                        buf_data[page_off2 + row_byte_off + 4], buf_data[page_off2 + row_byte_off + 5],
-                        mmap_data2[mmap_off + row_byte_off], mmap_data2[mmap_off + row_byte_off + 1],
-                        mmap_data2[mmap_off + row_byte_off + 2], mmap_data2[mmap_off + row_byte_off + 3],
-                        mmap_data2[mmap_off + row_byte_off + 4], mmap_data2[mmap_off + row_byte_off + 5],
-                    });
-                }
-                // Restore real norm_buf
-                @memcpy(norm_ptr[0..hidden_dim], save);
-                local_cmd_storage = try beginProfiledCommand(engine, profile);
-                cmd = &local_cmd_storage;
-            }
-            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and (engine.position == 0 or engine.position == 5) and (layer_idx == 0 or layer_idx == 7);
+            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and engine.position == 5 and (layer_idx == 0 or layer_idx == 7);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
                 const debug_start = profileStart(profile != null);
@@ -3993,7 +3927,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             } else {
                 topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
             }
-            const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and (layer_idx == 0 or layer_idx == 6);
+            const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6;
             const hidden_before_snapshot: ?[]f32 = if (should_debug_moe_compare) blk: {
                 const snap = try engine.allocator.alloc(f32, hidden_dim);
                 const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
