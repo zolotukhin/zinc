@@ -63,24 +63,11 @@ This creates **30 GPU pipeline flushes per token**.
 
 ## 3. Optimization Roadmap
 
-### Phase 0: Re-enable GPU SSM (11 → 35-40 tok/s) — 1 day
+### Phase 0: Re-enable GPU SSM (11 → 39 tok/s) — ✅ DONE
 
-The GPU SSM shaders already exist and were working before the delta-net guard was added. The fix:
+Commit `ac988d4`: Changed SSM guard from `!has_delta_net` to shader-availability check. Eliminates 30 `submitAndWait` stalls per token.
 
-```zig
-// forward.zig line 1997-1998
-// FROM:
-const has_delta_net = config.full_attn_interval > 1;
-const use_gpu_ssm = self.elementwise.pipeline_ssm_conv1d != null and !has_delta_net;
-// TO:
-const use_gpu_ssm = self.elementwise.pipeline_ssm_conv1d != null and
-    self.elementwise.pipeline_ssm_delta_net != null and
-    self.elementwise.pipeline_ssm_gated_norm != null;
-```
-
-This eliminates all 30 `submitAndWait` calls, keeping the entire decode in a single command buffer. Historical data shows 38 tok/s when this path was active.
-
-**Validation**: Compare GPU delta-net output vs CPU reference at layer 0 position 0 using existing diagnostic infrastructure.
+**Results**: Qwen3.5-35B 11→38.8 tok/s (3.5×), Qwen3.5-2B 33.8→138.6 tok/s (4.1×), BW 2.4%→21.8%.
 
 ### Phase 1: Kernel-Level Optimizations (38 → 55-65 tok/s) — 1-2 weeks
 
@@ -144,12 +131,12 @@ RDNA4 supports IDP. Once RADV+glslc compatibility is confirmed, use it for Q4_K/
 
 ### Milestones
 
-| Phase | Target | Key change |
-|-------|--------|------------|
-| Phase 0 | 35-40 tok/s | GPU SSM enabled |
-| Phase 1 | 55-65 tok/s | Packed MoE DMMV, fused router+topk |
-| Phase 2 | 70-80 tok/s | Pre-alloc descriptors, buffer barriers |
-| Phase 3 | 100+ tok/s | Fused MoE, delta-net occupancy, multi-queue |
+| Phase | Target | Key change | Status |
+|-------|--------|------------|--------|
+| Phase 0 | 35-40 tok/s | GPU SSM enabled | ✅ 38.8 tok/s |
+| Phase 1 | 55-65 tok/s | Packed MoE DMMV, fused router+topk | 🔄 |
+| Phase 2 | 70-80 tok/s | Pre-alloc descriptors, buffer barriers | |
+| Phase 3 | 100+ tok/s | Fused MoE, delta-net occupancy, multi-queue | |
 
 ## 4. Micro-benchmarks
 
