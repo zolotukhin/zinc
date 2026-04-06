@@ -90,11 +90,68 @@ test "Q5_K shader keeps GGML contiguous half ordering" {
     try expectNotContains(src, "2u * e");
 }
 
+test "Q5_K shader processes all 32 qs bytes per group_pair (not 16)" {
+    // Regression: Q5_K DMMV previously used slice*4 and loop of 4, processing
+    // only 16 of 32 qs bytes per group_pair. This silently dropped half the
+    // dot-product terms, producing wrong results for Q5_K tensors (Qwen3.5 SSM).
+    const src = @embedFile("shaders/dmmv_q5k.comp");
+    try expectContains(src, "slice * 8u");
+    try expectContains(src, "e_start + 8u");
+    try expectNotContains(src, "slice * 4u");
+    try expectNotContains(src, "e_start + 4u");
+}
+
 test "Q5_K MoE shader keeps GGML contiguous half ordering" {
     const src = @embedFile("shaders/dmmv_q5k_moe.comp");
     try expectContains(src, "x[x_grp + e]");
     try expectContains(src, "x[x_grp + 32u + e]");
     try expectNotContains(src, "2u * e");
+}
+
+test "IMROPE frequency uses global pair index, not per-section reset" {
+    // Regression: IMROPE precomputation used per-section independent exponents,
+    // resetting to 0 at each section boundary. For text IMROPE (all position IDs
+    // equal), frequencies must use a single global progression: freq[k] = 1/base^(2k/rope_dim).
+    // The per-section code caused pairs at section boundaries (11, 22) to get freq=1.0
+    // instead of the correct monotonically decreasing values.
+    const src = @embedFile("compute/forward.zig");
+    // Must use total_pairs (global), not sec_pairs (per-section)
+    try expectContains(src, "total_pairs = config.rope_sections[0] + config.rope_sections[1]");
+    try expectContains(src, "for (0..total_pairs)");
+    // Must NOT have per-section loop that resets exponents
+    try expectNotContains(src, "for (0..sec_pairs)");
+}
+
+test "Metal Gemma embedding scaling applied before debug logging" {
+    // Regression: Metal backend was missing sqrt(hidden_dim) embedding scaling
+    // for Gemma models, causing ~62x smaller initial hidden states.
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContains(src, "Gemma models scale embeddings by sqrt(hidden_dim).");
+    try expectContains(src, "config.architecture == .gemma");
+}
+
+test "Metal FFN norm prefers ffn_norm over post_attention_norm" {
+    // Regression: Metal used post_attention_norm.weight as FFN norm (wrong for Gemma
+    // where both exist). Must prefer ffn_norm.weight, falling back to post_attention_norm.
+    const src = @embedFile("compute/forward_metal.zig");
+    // The ffn_norm_bufs init should try ffn_norm FIRST
+    try expectContainsNear(src, "FFN norm: prefer ffn_norm.weight", "findLayerTensor(model, layer, \"ffn_norm.weight\")", 200);
+}
+
+test "Metal supports Gemma post-attention and post-FFN norms" {
+    // Regression: Metal was missing post_attention_norm and post_ffw_norm dispatches,
+    // which Gemma3 requires for correctness.
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContains(src, "post_attn_norm_bufs");
+    try expectContains(src, "post_ffw_norm_bufs");
+    try expectContains(src, "post_ffw_norm.weight");
+}
+
+test "Metal loads GEGLU pipeline for Gemma activation" {
+    // Regression: Metal used SwiGLU for all models, but Gemma requires GEGLU.
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContains(src, "geglu_pipe");
+    try expectContains(src, "cfg.architecture == .gemma");
 }
 
 test "chat UI derives the model link from the reported model name" {
