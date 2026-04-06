@@ -64,7 +64,7 @@ void main() {
 
         // Thread 0 scans all 64 entries to find global winner
         if (tid == 0) {
-            float global_best = -1.0;
+            float global_best = -1.0 / 0.0;
             uint global_idx = 0;
             for (uint t = 0; t < 64; t++) {
                 if (s_local_val[t] > global_best) {

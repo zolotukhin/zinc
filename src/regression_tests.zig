@@ -147,6 +147,17 @@ test "Metal supports Gemma post-attention and post-FFN norms" {
     try expectContains(src, "post_ffw_norm.weight");
 }
 
+test "softmax_topk shader uses -inf for global_best init, not -1.0" {
+    // Regression: softmax_topk used -1.0 as the initial value for the global
+    // winner search. When router logits are all < -1.0, this silently selects
+    // expert 0 instead of the actual best expert, corrupting MoE routing.
+    const src = @embedFile("shaders/softmax_topk.comp");
+    // global_best must be -inf
+    try expectContains(src, "float global_best = -1.0 / 0.0;");
+    // Must NOT use -1.0 as init
+    try expectNotContains(src, "float global_best = -1.0;");
+}
+
 test "Metal loads GEGLU pipeline for Gemma activation" {
     // Regression: Metal used SwiGLU for all models, but Gemma requires GEGLU.
     const src = @embedFile("compute/forward_metal.zig");
