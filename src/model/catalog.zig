@@ -102,8 +102,8 @@ pub const entries = [_]CatalogEntry{
         .required_vram_bytes = 14 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
         .recommended_for_chat = true,
-        .thinking_stable = false,
-        .status = .experimental,
+        .thinking_stable = true,
+        .status = .supported,
         .tested_profiles = &.{
             apple_silicon_profile,
         },
