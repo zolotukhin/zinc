@@ -165,6 +165,70 @@ test "Metal loads GEGLU pipeline for Gemma activation" {
     try expectContains(src, "cfg.architecture == .gemma");
 }
 
+test "router_logits_buf sized for max(n_experts, ssm_dt_rank)" {
+    // Regression: router_logits_buf was sized for n_experts=1 (non-MoE) but SSM alpha
+    // projection writes dt_rank floats. Buffer overflow corrupted alpha[1..15].
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "@max(if (config.n_experts > 0) config.n_experts else @as(u32, 1), config.ssm_dt_rank)");
+}
+
+test "delta-net hybrid models use CPU SSM path via full_attn_interval guard" {
+    // Regression: GPU SSM guard checked `architecture != .qwen35` but qwen35moe
+    // maps to .qwen2_moe, bypassing the guard. Use full_attn_interval > 1 to
+    // detect all delta-net hybrids regardless of architecture enum.
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "const has_delta_net = config.full_attn_interval > 1;");
+    try expectContains(src, "!has_delta_net");
+    // Must NOT use architecture-specific check
+    try expectNotContains(src, "config.architecture != .qwen35");
+}
+
+test "Vulkan FFN norm prefers ffn_norm over post_attention_norm" {
+    // Same fix as Metal — Vulkan must also prefer ffn_norm.weight first.
+    const src = @embedFile("compute/forward.zig");
+    try expectContainsNear(src, "ffn_norm_tensor", "findLayerTensor(layer, \"ffn_norm.weight\")", 120);
+}
+
+test "Vulkan Gemma embedding scaling matches Metal" {
+    // Both backends must scale Gemma embeddings by sqrt(hidden_dim).
+    const vulkan_src = @embedFile("compute/forward.zig");
+    try expectContains(vulkan_src, "Gemma models scale embeddings by sqrt(hidden_dim).");
+}
+
+test "Vulkan post-attention norm applied before attn residual" {
+    // Gemma3 requires RMS norm on o_proj output before residual add.
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "Gemma post-attention norm: RMS norm on o_proj output before residual add");
+}
+
+test "Vulkan post-FFN norm applied before FFN residual" {
+    // Gemma3 requires RMS norm on down_proj output before residual add.
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "Gemma post-FFN norm: RMS norm on down_proj output before residual add");
+}
+
+test "rope_sections loaded from GGUF metadata" {
+    // IMROPE requires rope.dimension_sections from GGUF for Qwen3.5 models.
+    const src = @embedFile("model/loader.zig");
+    try expectContains(src, "rope.dimension_sections");
+}
+
+test "RoPE shader supports freq buffer path for IMROPE" {
+    // When freq_base_bits=0, the RoPE shader reads precomputed frequencies from
+    // binding 2 instead of computing from freq_base. This supports IMROPE and
+    // proportional RoPE (Gemma 4).
+    const src = @embedFile("shaders/rope_fused.comp");
+    try expectContains(src, "freq_base_bits == 0u");
+    try expectContains(src, "inv_freq[i]");
+}
+
+test "Q5_K MoE shader processes all 32 elements per sub-block pair" {
+    // The MoE Q5_K shader must iterate e from 0 to 31 (not 0..15 like the
+    // old dense Q5_K bug). Each sub-block pair has 32 bytes of qs data.
+    const src = @embedFile("shaders/dmmv_q5k_moe.comp");
+    try expectContains(src, "for (uint e = 0; e < 32; e++)");
+}
+
 test "chat UI derives the model link from the reported model name" {
     const src = @embedFile("server/chat.html");
     try expectContains(src, "const chatStateKey='zinc.chat.state.v3';");
