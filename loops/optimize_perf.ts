@@ -722,10 +722,52 @@ async function main() {
     // Spawn agent
     await spawnAgent(effortFile, plan, baseline, cycle, history, model, agent);
 
-    // Sync and benchmark
+    // Sync and benchmark — with up to 2 fix-up retries if build fails
     console.log(c("2", "  Syncing changes..."));
     await rsyncToRemote();
-    const result = await buildAndBench(modelPath);
+    let result = await buildAndBench(modelPath);
+
+    const MAX_FIX_RETRIES = 2;
+    for (let fix = 0; fix < MAX_FIX_RETRIES && !result.buildOk; fix++) {
+      console.log(c("1;33", `  \u26A0 Build failed — sending errors to agent for fix (retry ${fix + 1}/${MAX_FIX_RETRIES})`));
+      const fixPrompt = `The build FAILED after your changes. Fix the errors and make it compile.
+
+## Build errors:
+\`\`\`
+${result.buildOutput.slice(-2000)}
+\`\`\`
+
+## Rules:
+- Fix ONLY the build errors. Do not add new features.
+- The code must compile: zig build must succeed on the remote node.
+- rsync to remote: rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
+- Build on remote: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build 2>&1"
+- Shader compilation: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"`;
+
+      if (agent === "codex") {
+        await runCommand("codex", ["exec", "--full-auto", "--json", fixPrompt], {
+          cwd: REPO_ROOT, timeout: 600_000, streamOutput: true,
+          stdoutLineFormatter: (line) => formatCodexStreamLine(line),
+        });
+      } else {
+        const fixState: ClaudeStreamState = {
+          currentToolName: null, currentBlockIsToolUse: false,
+          inputJsonBuffer: "", inTextBlock: false, sawTextDeltaInCurrentMessage: false,
+        };
+        await runCommand("claude", [
+          "-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages",
+          `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
+          "--permission-mode", "bypassPermissions", fixPrompt,
+        ], {
+          cwd: REPO_ROOT, timeout: 600_000, streamOutput: true,
+          stdoutLineFormatter: (line) => formatClaudeStreamLine(line, fixState),
+        });
+      }
+
+      console.log(c("2", "  Re-syncing after fix..."));
+      await rsyncToRemote();
+      result = await buildAndBench(modelPath);
+    }
 
     // Check ALL models for coherent output (not just the benchmark model)
     let coherenceError: string | null = null;
