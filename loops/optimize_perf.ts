@@ -493,10 +493,10 @@ Files you may edit:
   let result: RunResult;
 
   if (agent === "codex") {
-    // Codex: uses `codex` CLI with --full-auto and plain text streaming
+    // Codex: uses `codex exec` with --full-auto for non-interactive mode
     result = await runCommand("codex", [
+      "exec",
       "--full-auto",
-      "--quiet",
       prompt,
     ], {
       cwd: REPO_ROOT,
