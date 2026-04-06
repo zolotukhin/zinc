@@ -13,12 +13,11 @@
  *   7. Loop back to 3
  *
  * Usage:
- *   bun loops/optimize_perf.ts --effort 1              # Push descriptors
- *   bun loops/optimize_perf.ts --effort 2              # Fused gate+up
- *   bun loops/optimize_perf.ts --effort 3              # Batch prefill
- *   bun loops/optimize_perf.ts --effort 1 --cycles 10  # Max 10 cycles
- *   bun loops/optimize_perf.ts --effort 1 --dry-run    # Build+bench only
- *   bun loops/optimize_perf.ts --effort 3 --model gemma4  # Use Gemma 4 31B
+ *   bun loops/optimize_perf.ts --effort 1                        # Push descriptors
+ *   bun loops/optimize_perf.ts --effort 2 --model qwen35b       # Fused gate+up on Qwen 35B
+ *   bun loops/optimize_perf.ts --effort 3 --agent codex         # Batch prefill with Codex
+ *   bun loops/optimize_perf.ts --effort 1 --resume               # Resume previous run
+ *   bun loops/optimize_perf.ts --effort 1 --cycles 10 --dry-run  # Baseline only
  */
 
 import { spawn } from "node:child_process";
@@ -88,27 +87,47 @@ const REVERTABLE_PATHS = ["src/"];
 
 // -- CLI parsing -------------------------------------------------------------
 
+type AgentType = "claude" | "codex";
+
 function parseArgs() {
   const args = process.argv.slice(2);
   let effort = 0;
   let cycles = 20;
   let dryRun = false;
-  let model = "gemma3";
+  let model = "qwen35b";
+  let resume = false;
+  let agent: AgentType = "claude";
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--effort" && args[i + 1]) effort = parseInt(args[++i], 10);
     else if (args[i] === "--cycles" && args[i + 1]) cycles = parseInt(args[++i], 10);
     else if (args[i] === "--dry-run") dryRun = true;
+    else if (args[i] === "--resume") resume = true;
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
   }
   if (!effort || !EFFORT_DOCS[effort]) {
-    console.error("Usage: bun loops/optimize_perf.ts --effort <1|2|3> [--cycles N] [--model gemma3|gemma4]");
-    console.error("  1 = Push descriptors (~3% decode speedup)");
-    console.error("  2 = Fused gate+up DMMV (~1.2% decode speedup)");
-    console.error("  3 = Batch prefill (~4x prefill speedup)");
+    console.error("Usage: bun loops/optimize_perf.ts --effort <1|2|3> [options]");
+    console.error("");
+    console.error("Options:");
+    console.error("  --effort <1|2|3>         Optimization to run (required)");
+    console.error("  --cycles N               Max cycles (default: 20)");
+    console.error("  --model NAME             Model: qwen35b, qwen2b, gemma3 (default: qwen35b)");
+    console.error("  --agent claude|codex     AI agent to use (default: claude)");
+    console.error("  --resume                 Resume from previous run (read history from log)");
+    console.error("  --dry-run                Build+bench baseline only, skip agent");
+    console.error("");
+    console.error("Efforts:");
+    console.error("  1 = Push descriptors (~2.5% decode speedup)");
+    console.error("  2 = Fused gate+up DMMV (~1-2% decode speedup)");
+    console.error("  3 = Batch prefill (~4-8x prefill speedup)");
     process.exit(1);
   }
-  return { effort, cycles, dryRun, model };
+  if (agent !== "claude" && agent !== "codex") {
+    console.error(`Unknown agent: ${agent}. Use 'claude' or 'codex'.`);
+    process.exit(1);
+  }
+  return { effort, cycles, dryRun, model, resume, agent };
 }
 
 // -- Display helpers ---------------------------------------------------------
@@ -366,8 +385,9 @@ async function spawnAgent(
   cycleNum: number,
   history: string,
   model: string,
+  agent: AgentType = "claude",
 ): Promise<RunResult> {
-  const modelPath = MODELS[model] ?? MODELS.gemma3;
+  const modelPath = MODELS[model] ?? MODELS.qwen35b;
   const prompt = `You are implementing a performance optimization for the ZINC Vulkan inference engine.
 
 ## Optimization Plan
@@ -416,7 +436,7 @@ Files you may edit:
 - src/main.zig`;
 
   console.log(c("1;34", SEP));
-  console.log(c("1;34", `  \uD83E\uDDE0 Agent cycle ${cycleNum}`));
+  console.log(c("1;34", `  \uD83E\uDDE0 Agent cycle ${cycleNum} (${agent})`));
   console.log(c("1;34", SEP));
 
   const startedAt = Date.now();
@@ -426,29 +446,45 @@ Files you may edit:
     );
   }, 30_000);
 
-  const claudeState: ClaudeStreamState = {
-    currentToolName: null,
-    currentBlockIsToolUse: false,
-    inputJsonBuffer: "",
-    inTextBlock: false,
-    sawTextDeltaInCurrentMessage: false,
-  };
+  let result: RunResult;
 
-  const result = await runCommand("claude", [
-    "-p",
-    "--verbose",
-    "--output-format", "stream-json",
-    "--include-partial-messages",
-    `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
-    "--permission-mode", "bypassPermissions",
-    "--effort", "high",
-    prompt,
-  ], {
-    cwd: REPO_ROOT,
-    timeout: 1_800_000, // 30 min — large refactors need time
-    streamOutput: true,
-    stdoutLineFormatter: (line) => formatClaudeStreamLine(line, claudeState),
-  });
+  if (agent === "codex") {
+    // Codex: uses `codex` CLI with --full-auto and plain text streaming
+    result = await runCommand("codex", [
+      "--full-auto",
+      "--quiet",
+      prompt,
+    ], {
+      cwd: REPO_ROOT,
+      timeout: 1_800_000,
+      streamOutput: true,
+    });
+  } else {
+    // Claude: uses stream-json for rich tool-use display
+    const claudeState: ClaudeStreamState = {
+      currentToolName: null,
+      currentBlockIsToolUse: false,
+      inputJsonBuffer: "",
+      inTextBlock: false,
+      sawTextDeltaInCurrentMessage: false,
+    };
+
+    result = await runCommand("claude", [
+      "-p",
+      "--verbose",
+      "--output-format", "stream-json",
+      "--include-partial-messages",
+      `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
+      "--permission-mode", "bypassPermissions",
+      "--effort", "high",
+      prompt,
+    ], {
+      cwd: REPO_ROOT,
+      timeout: 1_800_000,
+      streamOutput: true,
+      stdoutLineFormatter: (line) => formatClaudeStreamLine(line, claudeState),
+    });
+  }
 
   clearInterval(heartbeat);
   console.log(c("1;36", SEP));
@@ -460,6 +496,50 @@ Files you may edit:
   }
 
   return result;
+}
+
+// -- Resume from previous run ------------------------------------------------
+
+type LogEntry = {
+  cycle: number;
+  effort: number;
+  tokPerSec: number | null;
+  bandwidthUtil: number | null;
+  correct: boolean;
+  improved: boolean;
+  broken: boolean;
+  outputText: string;
+  timestamp: string;
+};
+
+async function loadPreviousRun(effort: number): Promise<{ history: string; bestTokPerSec: number; lastCycle: number }> {
+  const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
+  let history = "";
+  let bestTokPerSec = 0;
+  let lastCycle = 0;
+
+  try {
+    const content = await readFile(logPath, "utf8");
+    for (const line of content.split("\n").filter(Boolean)) {
+      try {
+        const entry = JSON.parse(line) as LogEntry;
+        if (entry.effort !== effort) continue;
+        lastCycle = Math.max(lastCycle, entry.cycle);
+        if (entry.broken) {
+          history += `\nCycle ${entry.cycle}: REVERTED \u2014 broken (${entry.outputText?.slice(0, 60)})`;
+        } else if (entry.improved) {
+          history += `\nCycle ${entry.cycle}: KEPT \u2014 ${entry.tokPerSec?.toFixed(2)} tok/s`;
+          if (entry.tokPerSec != null && entry.tokPerSec > bestTokPerSec) {
+            bestTokPerSec = entry.tokPerSec;
+          }
+        } else {
+          history += `\nCycle ${entry.cycle}: REVERTED \u2014 no improvement (${entry.tokPerSec?.toFixed(2)} tok/s)`;
+        }
+      } catch { /* skip malformed lines */ }
+    }
+  } catch { /* no log file yet */ }
+
+  return { history, bestTokPerSec, lastCycle };
 }
 
 // -- Selective revert (only src/, not loops/ or config) ----------------------
@@ -479,8 +559,8 @@ async function revertAgentChanges(): Promise<void> {
 // -- Main loop ---------------------------------------------------------------
 
 async function main() {
-  const { effort, cycles, dryRun, model } = parseArgs();
-  const modelPath = MODELS[model] ?? MODELS.gemma3;
+  const { effort, cycles, dryRun, model, resume, agent } = parseArgs();
+  const modelPath = MODELS[model] ?? MODELS.qwen35b;
   const effortFile = EFFORT_DOCS[effort];
   const plan = await readFile(join(REPO_ROOT, effortFile), "utf8");
 
@@ -490,6 +570,8 @@ async function main() {
   console.log(c("1;37", `\u2551  ZINC Performance Optimization Loop \u2014 Effort ${effort}          \u2551`));
   console.log(c("1;37", `\u2551  ${effortFile.padEnd(54)}\u2551`));
   console.log(c("1;37", `\u2551  Model: ${model.padEnd(49)}\u2551`));
+  console.log(c("1;37", `\u2551  Agent: ${agent.padEnd(49)}\u2551`));
+  if (resume) console.log(c("1;37", `\u2551  Resuming from previous run                        \u2551`));
   console.log(c("1;37", `\u255A${"═".repeat(58)}\u255D\n`));
 
   // Step 1: Sync and get baseline
@@ -511,10 +593,25 @@ async function main() {
 
   let bestTokPerSec = baseline.tokPerSec ?? 0;
   let history = "";
+  let startCycle = 1;
+
+  // Resume: load history from previous run
+  if (resume) {
+    const prev = await loadPreviousRun(effort);
+    if (prev.lastCycle > 0) {
+      history = prev.history;
+      startCycle = prev.lastCycle + 1;
+      if (prev.bestTokPerSec > bestTokPerSec) bestTokPerSec = prev.bestTokPerSec;
+      console.log(c("1;36", `  Resumed: ${prev.lastCycle} previous cycles, best ${prev.bestTokPerSec.toFixed(2)} tok/s`));
+      console.log(c("2", `  History:${prev.history}`));
+    } else {
+      console.log(c("2", "  No previous run found, starting fresh."));
+    }
+  }
 
   // Step 2: Optimization cycles
-  for (let cycle = 1; cycle <= cycles; cycle++) {
-    console.log(c("1;33", `\n\u2500\u2500 Cycle ${cycle}/${cycles} ` + "\u2500".repeat(50)));
+  for (let cycle = startCycle; cycle < startCycle + cycles; cycle++) {
+    console.log(c("1;33", `\n\u2500\u2500 Cycle ${cycle} ` + "\u2500".repeat(54)));
 
     if (dryRun) {
       console.log(c("2", "  Dry run \u2014 skipping agent."));
@@ -522,7 +619,7 @@ async function main() {
     }
 
     // Spawn agent
-    await spawnAgent(effortFile, plan, baseline, cycle, history, model);
+    await spawnAgent(effortFile, plan, baseline, cycle, history, model, agent);
 
     // Sync and benchmark
     console.log(c("2", "  Syncing changes..."));
