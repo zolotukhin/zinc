@@ -1123,6 +1123,30 @@ pub const InferenceEngine = struct {
                     }
                 }
             }
+
+            // YaRN RoPE scaling for extended context (gpt-oss)
+            if (cfg.rope_scaling_factor > 1.0 and cfg.rope_original_context > 0) {
+                const factor = cfg.rope_scaling_factor;
+                const orig_ctx = @as(f32, @floatFromInt(cfg.rope_original_context));
+                const beta_fast: f32 = 32.0;
+                const beta_slow: f32 = 1.0;
+                const low_freq_wavelen = orig_ctx / beta_slow;
+                const high_freq_wavelen = orig_ctx / beta_fast;
+                for (0..half_rot) |i| {
+                    const freq = freq_ptr[i];
+                    const wavelen = 2.0 * std.math.pi / freq;
+                    if (wavelen < high_freq_wavelen) {
+                        // High frequency: no scaling
+                    } else if (wavelen > low_freq_wavelen) {
+                        freq_ptr[i] = freq / factor;
+                    } else {
+                        const t = (orig_ctx / wavelen - beta_slow) / (beta_fast - beta_slow);
+                        const smooth = @max(@as(f32, 0.0), @min(@as(f32, 1.0), t));
+                        freq_ptr[i] = freq * ((1.0 - smooth) / factor + smooth);
+                    }
+                }
+                log.info("RoPE: applied YaRN scaling factor={d:.1} orig_ctx={d}", .{ factor, cfg.rope_original_context });
+            }
         }
 
         // SSM GPU pipelines
@@ -1782,6 +1806,12 @@ pub const InferenceEngine = struct {
         const dst_buf = if (self.private_decode_buffers) &self.embed_staging else &self.hidden_buf;
         const hidden_ptr: [*]f32 = @ptrCast(@alignCast(dst_buf.cpu_ptr.?));
         dequantRow(embed_raw, token_id, self.config.hidden_dim, self.token_embed.info.type_, hidden_ptr[0..self.config.hidden_dim]);
+        if (self.position <= 1) {
+            log.info("EMBED: pos={d} token={d} private={} h[0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}] type={s}", .{
+                self.position, token_id, self.private_decode_buffers, hidden_ptr[0], hidden_ptr[1], hidden_ptr[2], hidden_ptr[3],
+                @tagName(self.token_embed.info.type_),
+            });
+        }
     }
 
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
@@ -2859,9 +2889,39 @@ fn dispatchFullAttnPrepOnCmd(
     profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
 
     // RoPE Q/K are independent — concurrent dispatch overlaps them.
+    // Save pre-RoPE Q for comparison at L0 pos0
+    var pre_rope_q: ?[]f32 = null;
+    // Check hidden_buf before attn_norm
+    if (engine.position <= 1 and layer_idx == 0 and cfg.architecture == .gpt_oss) {
+        cmd.commitAndWait();
+        const hp: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+        const np: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+        log.info("EMBED_DBG pos{d}: hidden[0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}] norm[0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}]", .{
+            engine.position, hp[0], hp[1], hp[2], hp[3], np[0], np[1], np[2], np[3],
+        });
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    }
+    if (engine.position <= 1 and layer_idx == 0 and cfg.architecture == .gpt_oss) {
+        cmd.commitAndWait();
+        pre_rope_q = try engine.allocator.alloc(f32, 8);
+        const qp: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+        @memcpy(pre_rope_q.?[0..8], qp[0..8]);
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    }
     dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
     dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
     profileBarrier(cmd, profile, .full_attn); // rope outputs visible before KV cache write
+    // Verify RoPE at L0 pos0
+    if (pre_rope_q) |prq| {
+        defer engine.allocator.free(prq);
+        cmd.commitAndWait();
+        const qp: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
+        const inv_freq: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+        log.info("ROPE_DBG L0 pos{d}: pre=[{d:.4},{d:.4},{d:.4},{d:.4}] post=[{d:.4},{d:.4},{d:.4},{d:.4}] freq[0..1]=[{d:.6},{d:.6}]", .{ engine.position,
+            prq[0], prq[1], prq[2], prq[3], qp[0], qp[1], qp[2], qp[3], inv_freq[0], inv_freq[1],
+        });
+        cmd.* = try metal_command.beginCommand(engine.device.ctx);
+    }
 
     dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
     return gate_mode.apply_attn_gate;
@@ -3238,6 +3298,46 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
                     qo += 32;
                     is += 2;
                 }
+            }
+        },
+        .q5_0 => {
+            const bpb: usize = 22;
+            const bpr = @as(usize, cols) / 32;
+            const row_off = @as(usize, row) * bpr * bpb;
+            var out_i: usize = 0;
+            for (0..bpr) |b| {
+                const bo = row_off + b * bpb;
+                const d: f32 = @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, raw_data[bo..][0..2], .little))));
+                const qh = std.mem.readInt(u32, raw_data[bo + 2 ..][0..4], .little);
+                const qs = raw_data[bo + 6 .. bo + 22];
+                for (0..16) |j| {
+                    const lo: u8 = qs[j] & 0x0F;
+                    const hi: u8 = qs[j] >> 4;
+                    const bit_lo: u8 = @intCast((qh >> @intCast(j)) & 1);
+                    const bit_hi: u8 = @intCast((qh >> @intCast(j + 16)) & 1);
+                    output[out_i] = d * @as(f32, @floatFromInt(@as(i32, @intCast(lo | (bit_lo << 4))) - 16));
+                    output[out_i + 16] = d * @as(f32, @floatFromInt(@as(i32, @intCast(hi | (bit_hi << 4))) - 16));
+                    out_i += 1;
+                }
+                out_i += 16;
+            }
+        },
+        .mxfp4 => {
+            const bpb: usize = 17;
+            const bpr = @as(usize, cols) / 32;
+            const row_off = @as(usize, row) * bpr * bpb;
+            const lut = [16]f32{ 0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+            var out_i: usize = 0;
+            for (0..bpr) |b| {
+                const bo = row_off + b * bpb;
+                const exp_byte = raw_data[bo];
+                const d: f32 = @bitCast(if (exp_byte == 0) @as(u32, 0x00400000) else @as(u32, @intCast(exp_byte)) << 23);
+                const qs = raw_data[bo + 1 .. bo + 17];
+                for (0..16) |j| {
+                    output[out_i + j] = d * lut[qs[j] & 0x0F];
+                    output[out_i + j + 16] = d * lut[qs[j] >> 4];
+                }
+                out_i += 32;
             }
         },
         else => {
@@ -3937,7 +4037,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
                     // Phase 2: Bias + SwiGLU activation
                     if (cfg.architecture == .gpt_oss) {
-                        // gpt-oss: apply expert biases + OAI SwiGLU on CPU in one block
+                        // gpt-oss: apply expert biases + OAI SwiGLU on CPU
                         cmd.commitAndWait();
                         for (0..cfg.n_experts_used) |ei| {
                             const eid = expert_ids[ei];
