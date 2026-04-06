@@ -66,8 +66,15 @@ const EFFORT_DOCS: Record<number, string> = {
   3: "MULTI_HOUR_EFFORT_3_BATCH_PREFILL.md",
 };
 
-const CORRECTNESS_PROMPT = "The capital of France is";
-const CORRECTNESS_EXPECT = "Paris";
+// Multiple prompts to catch different failure modes:
+// - Short factual: catches total corruption
+// - Arithmetic: catches subtle numeric drift (wrong MoE routing, bad dequant)
+// - Listing: catches mid-sequence divergence (broken RoPE, bad KV cache)
+const COHERENCE_CHECKS: { prompt: string; expect: string[] }[] = [
+  { prompt: "The capital of France is", expect: ["Paris"] },
+  { prompt: "What is 2+2?", expect: ["4"] },
+  { prompt: "List the first 4 planets: Mercury,", expect: ["Venus", "Earth", "Mars"] },
+];
 
 // All models that must produce coherent output after every change.
 // The primary model (--model flag) is benchmarked; these are correctness-only.
@@ -255,9 +262,10 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
 
   console.log(c("2", "  Running correctness test..."));
   let runOutput: string;
+  const firstCheck = COHERENCE_CHECKS[0];
   try {
     runOutput = await ssh(
-      `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt '${CORRECTNESS_PROMPT}' --chat -n 32 2>&1`,
+      `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt '${firstCheck.prompt}' -n 32 2>&1`,
       180_000,
     );
   } catch (e) {
@@ -267,31 +275,35 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
   const tokPerSec = parseTokPerSec(runOutput);
   const textMatch = runOutput.match(/Output text:\s*(.+)/i);
   const outputText = textMatch ? textMatch[1].trim() : "";
-  const correct = outputText.toLowerCase().includes(CORRECTNESS_EXPECT.toLowerCase());
+  const correct = firstCheck.expect.every(e => outputText.toLowerCase().includes(e.toLowerCase()));
   const bandwidthUtil = parseBandwidthUtil(runOutput);
 
   return { buildOk: true, buildOutput, tokPerSec, correct, outputText, bandwidthUtil, error: null };
 }
 
-/// Run correctness check on ALL models (not just the benchmark model).
+/// Run ALL coherence prompts on ALL models.
 /// Returns null if all pass, or an error string describing which failed.
 async function checkAllModelsCoherent(): Promise<string | null> {
   const failures: string[] = [];
   for (const { name, path } of COHERENCE_MODELS) {
-    try {
-      const out = await ssh(
-        `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${path} --prompt '${CORRECTNESS_PROMPT}' -n 20 2>&1`,
-        120_000,
-      );
-      const textMatch = out.match(/Output text:\s*(.+)/i);
-      const outputText = textMatch ? textMatch[1].trim() : "";
-      if (!outputText.toLowerCase().includes(CORRECTNESS_EXPECT.toLowerCase())) {
-        failures.push(`${name}: "${outputText.slice(0, 60)}"`);
-      } else {
-        console.log(c("2", `    ${name}: OK ("${outputText.slice(0, 40)}")`));
+    for (const check of COHERENCE_CHECKS) {
+      try {
+        const out = await ssh(
+          `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${path} --prompt '${check.prompt}' -n 30 2>&1`,
+          120_000,
+        );
+        const textMatch = out.match(/Output text:\s*(.+)/i);
+        const outputText = textMatch ? textMatch[1].trim() : "";
+        const pass = check.expect.every(e => outputText.toLowerCase().includes(e.toLowerCase()));
+        if (!pass) {
+          failures.push(`${name} [${check.prompt.slice(0, 25)}]: "${outputText.slice(0, 50)}"`);
+        }
+      } catch (e) {
+        failures.push(`${name} [${check.prompt.slice(0, 25)}]: crashed`);
       }
-    } catch (e) {
-      failures.push(`${name}: crashed (${String(e).slice(0, 60)})`);
+    }
+    if (!failures.some(f => f.startsWith(name))) {
+      console.log(c("2", `    ${name}: all ${COHERENCE_CHECKS.length} prompts OK`));
     }
   }
   return failures.length > 0 ? `Coherence failures: ${failures.join("; ")}` : null;
@@ -428,7 +440,7 @@ ${plan}
 ## Current Baseline
 - tok/s: ${baseline.tokPerSec?.toFixed(2) ?? "unknown"}
 - bandwidth utilization: ${baseline.bandwidthUtil?.toFixed(1) ?? "unknown"}%
-- output: "${baseline.outputText}" (must still contain "${CORRECTNESS_EXPECT}" after changes)
+- output: "${baseline.outputText}" (coherence tested with 3 prompts on 3 models after every change)
 
 ## Previous Attempts
 ${history || "None yet."}
