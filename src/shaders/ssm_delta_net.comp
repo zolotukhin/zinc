@@ -4,11 +4,14 @@
 // replacing the CPU-side computation with a fully GPU-resident kernel.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 //
-// Each workgroup handles one 64-row tile of one head.
-// Dispatch shape: dt_rank × ceil(head_v_dim / 64) × 1.
+// Each workgroup handles one 16-row tile of one head.
+// Dispatch shape: dt_rank × ceil(head_v_dim / 16) × 1.
 // State per head is head_v_dim × head_v_dim (128×128 = 16384 floats).
-// With 64 threads, each thread owns one row in the selected tile and
-// processes all head_v_dim columns for that row.
+// With 64 threads and 16 rows, only threads 0-15 own rows; threads 16-63
+// participate in Q/K loading and normalization reductions but are idle
+// during the per-row state update. The smaller tile size increases
+// workgroup count from 64 to 256 (4 per CU on RDNA4's 64 CUs),
+// significantly improving memory latency hiding.
 //
 // Algorithm per head h:
 //   1. Extract Q, K, V slices from conv_out
@@ -100,7 +103,8 @@ void main() {
 
     uint qk_dim = d_state * n_group;
     uint k_len = min(head_v_dim, d_state);
-    uint row = row_block * 64u + tid;
+    uint rows_per_tile = 16u;
+    uint row = row_block * rows_per_tile + tid;
 
     // --- Step 1: Load Q and K into shared memory ---
     // conv_out layout: [Q(qk_dim), K(qk_dim), V(d_inner)]
@@ -209,7 +213,7 @@ void main() {
     }
     barrier();
 
-    if (row >= head_v_dim) return;
+    if (tid >= rows_per_tile || row >= head_v_dim) return;
 
     float g_val = s_gate;
     float b_val = s_beta_val;
