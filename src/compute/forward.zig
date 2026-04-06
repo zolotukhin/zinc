@@ -733,8 +733,7 @@ pub const InferenceEngine = struct {
         var moe_out_buf = try Buffer.initDeviceLocal(instance, hidden_size, storage_xfer);
         errdefer moe_out_buf.deinit();
 
-        // +1 for atomic counter used by fused router_topk_f32 shader
-        const router_size = @as(vk.c.VkDeviceSize, n_experts_total + 1) * @sizeOf(f32);
+        const router_size = @as(vk.c.VkDeviceSize, n_experts_total) * @sizeOf(f32);
         var router_logits_buf = try Buffer.initDeviceLocal(instance, router_size, storage_xfer);
         errdefer router_logits_buf.deinit();
         var router_staging = try Buffer.init(
@@ -2031,6 +2030,9 @@ pub const InferenceEngine = struct {
                 // --- MoE: router DMMV → top-k → expert dispatch ---
                 const router_tensor = self.findLayerTensor(layer, "ffn_gate_inp.weight") orelse return error.TensorNotFound;
                 const moe_router_phase = self.beginProfilePhase();
+                try self.dispatchDmmv(router_tensor, self.ffn_norm_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
+                self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
+                self.endProfilePhase(.moe_router, moe_router_phase);
 
                 const n_used = config.n_experts_used;
 
@@ -2068,58 +2070,22 @@ pub const InferenceEngine = struct {
                     // === GPU MoE path: BATCHED expert dispatch — all experts in parallel ===
                     // All 8 experts' gate/up/down DMMVs run as Y workgroups in a single dispatch.
                     // This gives ~8× better GPU utilization vs serial per-expert dispatch.
+                    // Reduces dispatches from 32 to 5, barriers from 32 to 4 per MoE layer.
 
-                    // Fused router DMMV + top-k: single dispatch, eliminates 2 barriers/layer
-                    const use_fused_router = self.dmmv.pipeline_router_topk_f32 != null and
-                        router_tensor.info.type_ == .f32;
-
-                    if (use_fused_router) {
-                        // Fused path: M+1 workgroups — M for DMMV, 1 for top-k
-                        // Eliminates 2 barriers per MoE layer (router→topk, topk→gate)
-                        const pip = &(self.dmmv.pipeline_router_topk_f32 orelse unreachable);
+                    // softmax_topk writes expert_ids + weights to router_output_buf
+                    const moe_topk_phase = self.beginProfilePhase();
+                    {
+                        const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
                         const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet4(
+                        self.writeDescSet2(
                             ds,
-                            router_tensor.gpu_buffer.handle,
-                            router_tensor.gpu_buffer.size,
-                            self.ffn_norm_buf.handle,
-                            hidden_size,
                             self.router_logits_buf.handle,
-                            self.router_logits_buf.size,
+                            @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32),
                             self.router_output_buf.handle,
                             self.router_output_buf.size,
                         );
-                        const RouterTopkPush = extern struct { M: u32, K: u32, a_offset: u32, x_offset: u32, top_k: u32 };
-                        const push = RouterTopkPush{
-                            .M = config.n_experts,
-                            .K = hidden_dim,
-                            .a_offset = 0,
-                            .x_offset = 0,
-                            .top_k = n_used,
-                        };
-                        self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), config.n_experts + 1, 1, 1);
-                        // Combined router+topk time reported under moe_router
-                        self.endProfilePhase(.moe_router, moe_router_phase);
-                    } else {
-                        // Separate router DMMV + top-k (fallback)
-                        try self.dispatchDmmv(router_tensor, self.ffn_norm_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
-                        self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
-                        self.endProfilePhase(.moe_router, moe_router_phase);
-                        {
-                            const pip = &(self.elementwise.pipeline_softmax_topk orelse unreachable);
-                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet2(
-                                ds,
-                                self.router_logits_buf.handle,
-                                @as(vk.c.VkDeviceSize, config.n_experts) * @sizeOf(f32),
-                                self.router_output_buf.handle,
-                                self.router_output_buf.size,
-                            );
-                            try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
-                        }
+                        try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
                     }
-                    // Single barrier: router_output_buf ready for expert DMMVs
-                    const moe_topk_phase = self.beginProfilePhase();
                     self.decode_cmd.computeBufferBarrier(self.router_output_buf.handle, self.router_output_buf.size);
                     self.endProfilePhase(.moe_topk, moe_topk_phase);
 
