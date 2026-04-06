@@ -4,14 +4,13 @@
 // replacing the CPU-side computation with a fully GPU-resident kernel.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 //
-// Each workgroup handles one 16-row tile of one head.
+// Each workgroup handles one 16-row tile of one head, with 4 threads per row.
 // Dispatch shape: dt_rank × ceil(head_v_dim / 16) × 1.
 // State per head is head_v_dim × head_v_dim (128×128 = 16384 floats).
-// With 64 threads and 16 rows, only threads 0-15 own rows; threads 16-63
-// participate in Q/K loading and normalization reductions but are idle
-// during the per-row state update. The smaller tile size increases
-// workgroup count from 64 to 256 (4 per CU on RDNA4's 64 CUs),
-// significantly improving memory latency hiding.
+// With 64 threads = 16 rows × 4 threads/row, ALL threads are active during
+// state update. Each thread handles a strided subset of columns, then
+// subgroupShuffleXor reduces partial sums across the 4 threads per row.
+// Adjacent threads within a row read adjacent state elements → good coalescing.
 //
 // Algorithm per head h:
 //   1. Extract Q, K, V slices from conv_out
@@ -27,6 +26,7 @@
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
 
@@ -213,40 +213,54 @@ void main() {
     }
     barrier();
 
-    if (tid >= rows_per_tile || row >= head_v_dim) return;
+    // --- Steps 4-6: State update and readout (4 threads per row) ---
+    // Thread mapping: tid = row_in_tile * 4 + col_thread
+    const uint THREADS_PER_ROW = 4u;
+    uint row_in_tile = tid / THREADS_PER_ROW;  // 0..15
+    uint col_thread = tid % THREADS_PER_ROW;   // 0..3
+    row = row_block * rows_per_tile + row_in_tile;
+
+    if (row_in_tile >= rows_per_tile || row >= head_v_dim) return;
 
     float g_val = s_gate;
     float b_val = s_beta_val;
     float v_val = conv_out[v_offset + row];
 
-    // --- Steps 4-6: State update and readout ---
     // State layout: state[h * head_v_dim * head_v_dim + row * head_v_dim + col]
     uint s_base = h * head_v_dim * head_v_dim;
     uint row_base = s_base + row * head_v_dim;
 
-    // Step 4: Decay state for this row.
-    for (uint col = 0; col < head_v_dim; col++) {
+    // Step 4: Decay state (strided across 4 threads)
+    for (uint col = col_thread; col < head_v_dim; col += THREADS_PER_ROW) {
         state[row_base + col] *= g_val;
     }
 
-    // Step 5: Compute sk = dot(state[row], k)
+    // Step 5: Compute sk = dot(state[row], k) — partial sum per thread
     float sk = 0.0;
-    for (uint col = 0; col < k_len; col++) {
+    for (uint col = col_thread; col < k_len; col += THREADS_PER_ROW) {
         sk += state[row_base + col] * s_k[col];
     }
+    // Reduce across 4 threads per row via subgroup shuffle
+    sk += subgroupShuffleXor(sk, 1u);
+    sk += subgroupShuffleXor(sk, 2u);
 
     // d = beta * (v[row] - sk)
     float d_val = b_val * (v_val - sk);
 
-    // Update state: s[row][col] += k[col] * d_val
-    for (uint col = 0; col < k_len; col++) {
+    // Update state: s[row][col] += k[col] * d_val (strided)
+    for (uint col = col_thread; col < k_len; col += THREADS_PER_ROW) {
         state[row_base + col] += s_k[col] * d_val;
     }
 
     // Step 6: Readout: output[h*head_v_dim + row] = dot(state[row], q)
     float o_val = 0.0;
-    for (uint col = 0; col < k_len; col++) {
+    for (uint col = col_thread; col < k_len; col += THREADS_PER_ROW) {
         o_val += state[row_base + col] * s_q[col];
     }
-    out_data[h * head_v_dim + row] = o_val;
+    o_val += subgroupShuffleXor(o_val, 1u);
+    o_val += subgroupShuffleXor(o_val, 2u);
+
+    if (col_thread == 0u) {
+        out_data[h * head_v_dim + row] = o_val;
+    }
 }
