@@ -811,7 +811,8 @@ pub const Tokenizer = struct {
                     pos += written.len;
                 }
                 if (options.add_generation_prompt) {
-                    const suffix = std.fmt.bufPrint(buf[pos..], "<|start|>assistant<|message|>", .{}) catch return error.BufferTooSmall;
+                    // Match llama.cpp: omit <|message|> — model generates it
+                    const suffix = std.fmt.bufPrint(buf[pos..], "<|start|>assistant", .{}) catch return error.BufferTooSmall;
                     pos += suffix.len;
                 }
             },
