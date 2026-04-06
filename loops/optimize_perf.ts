@@ -260,23 +260,41 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
     return { buildOk: false, buildOutput, tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: "build errors" };
   }
 
+  // Quick correctness check (short prompt, few tokens)
   console.log(c("2", "  Running correctness test..."));
-  let runOutput: string;
+  let correctnessOutput: string;
   const firstCheck = COHERENCE_CHECKS[0];
   try {
-    runOutput = await ssh(
-      `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt '${firstCheck.prompt}' -n 32 2>&1`,
+    correctnessOutput = await ssh(
+      `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt '${firstCheck.prompt}' -n 20 2>&1`,
       180_000,
     );
   } catch (e) {
     return { buildOk: true, buildOutput, tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: `run failed: ${e}` };
   }
 
-  const tokPerSec = parseTokPerSec(runOutput);
-  const textMatch = runOutput.match(/Output text:\s*(.+)/i);
+  const textMatch = correctnessOutput.match(/Output text:\s*(.+)/i);
   const outputText = textMatch ? textMatch[1].trim() : "";
   const correct = firstCheck.expect.every(e => outputText.toLowerCase().includes(e.toLowerCase()));
-  const bandwidthUtil = parseBandwidthUtil(runOutput);
+
+  if (!correct) {
+    return { buildOk: true, buildOutput, tokPerSec: null, correct: false, outputText, bandwidthUtil: null, error: "incorrect output" };
+  }
+
+  // Proper benchmark: long prompt, 200 tokens for stable measurement
+  console.log(c("2", "  Benchmarking (200 tokens)..."));
+  let benchOutput: string;
+  try {
+    benchOutput = await ssh(
+      `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt 'Write a detailed essay about the history of computing, from mechanical calculators to modern artificial intelligence.' -n 200 2>&1`,
+      300_000,
+    );
+  } catch (e) {
+    return { buildOk: true, buildOutput, tokPerSec: null, correct: true, outputText, bandwidthUtil: null, error: `bench failed: ${e}` };
+  }
+
+  const tokPerSec = parseTokPerSec(benchOutput);
+  const bandwidthUtil = parseBandwidthUtil(benchOutput);
 
   return { buildOk: true, buildOutput, tokPerSec, correct, outputText, bandwidthUtil, error: null };
 }
