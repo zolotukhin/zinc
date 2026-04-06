@@ -1991,7 +1991,11 @@ pub const InferenceEngine = struct {
                 self.endProfilePhase(.attention, attention_phase);
             } else {
                 // === SSM / LINEAR ATTENTION LAYER ===
-                const use_gpu_ssm = self.elementwise.pipeline_ssm_conv1d != null and config.architecture != .qwen35;
+                // Force CPU SSM for delta-net models (qwen35, qwen35moe) until GPU shader
+                // is validated — the GPU SSM path was written for Mamba/Jamba state-space
+                // models and may not match the delta-net update rule.
+                const has_delta_net = config.full_attn_interval > 1;
+                const use_gpu_ssm = self.elementwise.pipeline_ssm_conv1d != null and !has_delta_net;
                 if (state.position == 0 and layer == 0) {
                     log.info("FASTPATH: gpu_ssm={} arch={s} ssm_shader={}", .{
                         use_gpu_ssm,
