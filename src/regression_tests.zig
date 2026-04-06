@@ -172,15 +172,15 @@ test "router_logits_buf sized for max(n_experts, ssm_dt_rank)" {
     try expectContains(src, "@max(if (config.n_experts > 0) config.n_experts else @as(u32, 1), config.ssm_dt_rank)");
 }
 
-test "delta-net hybrid models use CPU SSM path via full_attn_interval guard" {
-    // Regression: GPU SSM guard checked `architecture != .qwen35` but qwen35moe
-    // maps to .qwen2_moe, bypassing the guard. Use full_attn_interval > 1 to
-    // detect all delta-net hybrids regardless of architecture enum.
+test "GPU SSM path enabled when all three shaders are available" {
+    // The GPU SSM path requires conv1d + delta-net + gated_norm shaders.
+    // Must NOT gate on architecture enum (qwen35 vs qwen2_moe confusion).
     const src = @embedFile("compute/forward.zig");
-    try expectContains(src, "const has_delta_net = config.full_attn_interval > 1;");
-    try expectContains(src, "!has_delta_net");
-    // Must NOT use architecture-specific check
+    try expectContains(src, "pipeline_ssm_conv1d != null");
+    try expectContains(src, "pipeline_ssm_delta_net != null");
+    try expectContains(src, "pipeline_ssm_gated_norm != null");
     try expectNotContains(src, "config.architecture != .qwen35");
+    try expectNotContains(src, "!has_delta_net");
 }
 
 test "Vulkan FFN norm prefers ffn_norm over post_attention_norm" {
