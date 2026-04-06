@@ -37,6 +37,10 @@ glslc --target-env=vulkan1.3 -O -o out.spv src/shaders/name.comp
 ```
 src/
 ├── main.zig                     # CLI entry, arg parsing, server startup, chat subcommand
+├── bench_hot_decode.zig         # Hot decode microbenchmark binary
+├── bench_support.zig            # Shared helpers for Metal benchmarks
+├── regression_tests.zig         # Source-level regression guards
+├── zig-struct-analyzer.zig      # Zig API/doc structure extraction helper
 ├── compute/
 │   ├── forward.zig              # Vulkan inference engine — prefill + decode loop
 │   ├── forward_metal.zig        # Metal inference engine — prefill + decode loop
@@ -69,51 +73,99 @@ src/
 │   ├── gpu_detect.zig           # GPU vendor/capability detection
 │   └── vk.zig                   # Vulkan C API bindings
 ├── metal/
+│   ├── c.zig                    # Shared C shim import for Metal bindings
 │   ├── device.zig               # Metal device init and capability query
 │   ├── pipeline.zig             # MSL compute pipeline compilation
 │   ├── buffer.zig               # Metal buffer management
 │   ├── command.zig              # Command buffer and encoder
+│   ├── shim.h                   # C header exposed to Zig
 │   └── shim.m                   # Objective-C shim (Metal.framework bridge)
 ├── gpu/
-│   └── interface.zig            # Backend abstraction (Vulkan vs Metal)
+│   ├── interface.zig            # Backend abstraction (Vulkan vs Metal)
+│   └── process_lock.zig         # Cross-process GPU reservation lock
 ├── scheduler/
+│   ├── request.zig              # Request/response scheduler types
 │   ├── scheduler.zig            # Request scheduling
 │   └── kv_cache.zig             # KV cache management
 ├── diagnostics.zig              # --check system diagnostics (Vulkan)
 ├── diagnostics_metal.zig        # --check system diagnostics (Metal)
 ├── shaders/
-│   ├── *.comp                   # GLSL compute shaders (Vulkan/SPIR-V) — 24 shaders
-│   └── metal/*.metal            # MSL compute shaders (Apple Silicon) — 31 shaders
+│   ├── *.comp                   # GLSL compute shaders (Vulkan/SPIR-V) — 39 shaders
+│   └── metal/*.metal            # MSL compute shaders (Apple Silicon) — 57 shaders
 
 benchmarks/
 ├── bandwidth.zig                # DMMV bandwidth utilization benchmark
 ├── dispatch.zig                 # Vulkan dispatch overhead benchmark
-└── metal_inference.zig          # Metal inference benchmark
+├── dispatch_overhead.c          # Vulkan dispatch overhead C helper
+├── metal_inference.zig          # Metal inference benchmark
+└── metal_q8_shapes.zig          # Exact-shape Metal q8 benchmark suite
 
 loops/                           # Self-improving optimization loops
-├── optimize_zinc.ts             #   ZINC loop: rsync → build → run → agent → keep/revert
-├── optimize_zinc.test.ts        #   Tests for ZINC loop
-├── implement_metal.ts           #   Metal implementation loop
-└── implement_metal.test.ts      #   Tests for Metal loop
+├── guided_change.ts             # Guided single-change optimization loop
+├── guided_change.test.ts        # Tests for guided_change
+├── implement_metal.ts           # Metal implementation loop
+├── implement_metal.test.ts      # Tests for implement_metal
+├── optimize_llm_tps.ts          # LLM-throughput optimization loop
+├── optimize_llm_tps.test.ts     # Tests for optimize_llm_tps
+├── optimize_perf.ts             # Performance optimization loop
+├── optimize_perf.test.ts        # Tests for optimize_perf
+├── optimize_zinc.ts             # ZINC loop: rsync → build → run → agent → keep/revert
+└── optimize_zinc.test.ts        # Tests for optimize_zinc
 
 docs/                            # Technical documentation (published to site)
-├── DEVELOPMENT.md               #   Development guide (canonical dev reference)
-├── GETTING_STARTED.md           #   First run guide
-├── RUNNING_ZINC.md              #   CLI usage and server mode
-├── API.md                       #   OpenAI-compatible API spec
-├── SPEC.md                      #   Architecture overview
-├── RDNA4_TUNING.md              #   RDNA4-specific optimizations
-├── GPU_REFERENCE.md             #   RDNA3/RDNA4 hardware reference
-├── TURBOQUANT_SPEC.md           #   TurboQuant KV cache compression spec
-├── APPLE_SILICON_REFERENCE.md   #   Apple Silicon M1–M5 reference
-├── APPLE_METAL_REFERENCE.md     #   Metal/MSL kernel reference
-└── APPLE_SILICON_METAL_ENABLEMENT.md # Metal port implementation notes
+├── API.md                       # OpenAI-compatible API spec
+├── APPLE_METAL_REFERENCE.md     # Metal/MSL kernel reference
+├── APPLE_SILICON_METAL_ENABLEMENT.md # Metal port implementation notes
+├── APPLE_SILICON_REFERENCE.md   # Apple Silicon M1–M5 reference
+├── DECODE_THROUGHPUT_PLAN.md    # Decode-performance planning notes
+├── DEVELOPMENT.md               # Development guide (canonical dev reference)
+├── GETTING_STARTED.md           # First run guide
+├── GPU_REFERENCE.md             # RDNA3/RDNA4 hardware reference
+├── HARDWARE_REQUIREMENTS.md     # GPU and host sizing guidance
+├── METAL_PERFORMANCE_PLAN.md    # Metal performance work plan
+├── PERFORMANCE_GAP_ANALYSIS.md  # ZINC vs llama.cpp gap analysis
+├── RDNA4_PERFORMANCE_JOURNEY.md # RDNA4 optimization log
+├── RDNA4_PERFORMANCE_PLAN.md    # RDNA4 performance work plan
+├── RDNA4_TUNING.md              # RDNA4-specific optimizations
+├── ROADMAP.md                   # Project roadmap
+├── RUNNING_ZINC.md              # CLI usage and server mode
+├── SPEC.md                      # Architecture overview
+└── TURBOQUANT_SPEC.md           # TurboQuant KV cache compression spec
 
-site/                            # Astro website (zolotukhin.ai)
-tools/                           # API benchmark, standalone utilities
-specs/                           # Feature specs and planning artifacts
+site/                            # Astro website + docs frontend (zolotukhin.ai)
+├── src/components/              # Shared Astro UI components
+├── src/content/posts/           # Blog post markdown sources
+├── src/layouts/                 # Page layouts
+├── src/lib/                     # Search/docs/data loaders and tests
+├── src/pages/                   # Site routes, docs, and API-ish endpoints
+├── src/styles/                  # Global site styling
+└── public/                      # Static assets served by Astro
+
+specs/                           # Spec Kit artifacts by feature
+├── 001-zinc-inference-engine/
+├── 002-microblog-zolotukhin-ai/
+├── 003-decode-performance/
+├── 004-openai-api-server/
+└── 005-apple-silicon-inference/
+
+tools/                           # API benchmark, HTML tooling, graph/report helpers
+├── benchmark_api.mjs
+├── chat.html
+├── dump_struct_layouts.zig
+├── print_test_summary.ts
+└── render_graph_report.ts
+
+tests/                           # TypeScript integration/smoke tests
+├── chat_ui_markdown.test.ts
+├── test_openai_sdk.ts
+├── test_openai_sdk.test.ts
+├── test_qwen_smoke.ts
+└── test_qwen_smoke.test.ts
+
+assets/                          # Shared repo/media assets
+research/                        # Analysis notes and external comparisons
 scripts/                         # Deployment scripts
-tests/                           # TypeScript test files
+writing/                         # Draft writing and publishing notes
 ```
 
 ## Module Dependency Graph
