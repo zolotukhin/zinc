@@ -8,8 +8,8 @@
  *   2. Build & benchmark baseline on remote RDNA4 node
  *   3. Spawn AI agent to implement ONE concrete step from the plan
  *   4. Build, run tests, benchmark
- *   5. If tok/s improved AND output correct → commit, update plan
- *   6. If regressed or broken → revert, log what went wrong
+ *   5. If tok/s improved AND output correct -> commit, update plan
+ *   6. If regressed or broken -> revert, log what went wrong
  *   7. Loop back to 3
  *
  * Usage:
@@ -27,14 +27,11 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   parseTokPerSec,
-  parseTokensGenerated,
-  isGarbageOutput,
-  isCoherentText,
   parseBandwidthUtil,
-  parseEffectiveBW,
 } from "./optimize_zinc";
+import { formatElapsed } from "./optimize_llm_tps";
 
-// ── Config ──────────────────────────────────────────────────────────
+// -- Config ------------------------------------------------------------------
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const RESULTS_DIR = resolve(REPO_ROOT, ".perf_optimize");
@@ -59,8 +56,9 @@ const ZINC_USER = process.env.ZINC_USER ?? ENV.ZINC_USER ?? "root";
 const REMOTE_DIR = "/root/zinc";
 
 const MODELS: Record<string, string> = {
+  qwen35b: "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
+  qwen2b: "/root/models/Qwen3.5-2B-Q4_K_M.gguf",
   gemma3: "/root/models/gemma-3-12b-it-Q4_K_M.gguf",
-  gemma4: "/root/models/gemma-4-31B-it-Q4_K_M.gguf",
 };
 
 const EFFORT_DOCS: Record<number, string> = {
@@ -85,7 +83,10 @@ const BLOCKED_GIT_OPS = [
   "Bash(git push:*)", "Bash(git commit:*)",
 ];
 
-// ── CLI parsing ─────────────────────────────────────────────────────
+// Directories the agent may change (used for selective revert)
+const REVERTABLE_PATHS = ["src/"];
+
+// -- CLI parsing -------------------------------------------------------------
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -110,30 +111,70 @@ function parseArgs() {
   return { effort, cycles, dryRun, model };
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// -- Display helpers ---------------------------------------------------------
 
 const CLR = process.stdout.isTTY && !("NO_COLOR" in process.env);
 const c = (code: string, t: string) => CLR ? `\x1b[${code}m${t}\x1b[0m` : t;
+const SEP = "\u2500".repeat(64);
+
+// -- Command runner with streaming -------------------------------------------
 
 type RunResult = { exitCode: number; stdout: string; stderr: string };
 
-async function run(cmd: string, args: string[], opts: { cwd?: string; timeout?: number } = {}): Promise<RunResult> {
+async function runCommand(
+  cmd: string,
+  args: string[],
+  opts: {
+    cwd?: string;
+    timeout?: number;
+    streamOutput?: boolean;
+    stdoutLineFormatter?: (line: string) => string | null;
+  } = {},
+): Promise<RunResult> {
+  const streamOutput = opts.streamOutput ?? false;
   return new Promise((res, rej) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd ?? REPO_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: opts.timeout ?? 120_000,
     });
-    let stdout = "", stderr = "";
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+    let stdout = "", stderr = "", lineBuffer = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stdout += text;
+      if (!streamOutput) return;
+      if (opts.stdoutLineFormatter) {
+        lineBuffer += text;
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const f = opts.stdoutLineFormatter(line);
+          if (f !== null) process.stdout.write(f);
+        }
+      } else {
+        process.stdout.write(text);
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stderr += text;
+      if (streamOutput) process.stderr.write(text);
+    });
     child.on("error", rej);
-    child.on("close", (code) => res({ exitCode: code ?? 1, stdout, stderr }));
+    child.on("close", (code) => {
+      if (streamOutput && opts.stdoutLineFormatter && lineBuffer.trim()) {
+        const f = opts.stdoutLineFormatter(lineBuffer);
+        if (f !== null) process.stdout.write(f);
+      }
+      res({ exitCode: code ?? 1, stdout, stderr });
+    });
   });
 }
 
+// -- SSH & rsync -------------------------------------------------------------
+
 async function ssh(command: string, timeout = 120_000): Promise<string> {
-  const { stdout, stderr, exitCode } = await run("ssh", [
+  const { stdout, stderr, exitCode } = await runCommand("ssh", [
     "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
     "-p", String(ZINC_PORT), `${ZINC_USER}@${ZINC_HOST}`, command,
   ], { timeout });
@@ -143,7 +184,7 @@ async function ssh(command: string, timeout = 120_000): Promise<string> {
 }
 
 async function rsyncToRemote(): Promise<void> {
-  const { exitCode, stderr } = await run("rsync", [
+  const { exitCode, stderr } = await runCommand("rsync", [
     "-avz", "--checksum", "--delete",
     "-e", `ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no`,
     "--exclude", ".zig-cache", "--exclude", "zig-out", "--exclude", "node_modules",
@@ -154,7 +195,7 @@ async function rsyncToRemote(): Promise<void> {
   if (exitCode !== 0) throw new Error(`rsync failed: ${stderr.slice(0, 300)}`);
 }
 
-// ── Build & benchmark ───────────────────────────────────────────────
+// -- Build & benchmark -------------------------------------------------------
 
 type BenchResult = {
   buildOk: boolean;
@@ -167,7 +208,6 @@ type BenchResult = {
 };
 
 async function buildAndBench(modelPath: string): Promise<BenchResult> {
-  // Compile shaders
   console.log(c("2", "  Compiling shaders..."));
   try {
     await ssh(`cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute $f -o \${f%.comp}.spv 2>&1; done`, 60_000);
@@ -175,7 +215,6 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
     return { buildOk: false, buildOutput: String(e), tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: "shader compile failed" };
   }
 
-  // Zig build
   console.log(c("2", "  Building..."));
   let buildOutput: string;
   try {
@@ -187,7 +226,6 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
     return { buildOk: false, buildOutput, tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: "build errors" };
   }
 
-  // Run correctness test
   console.log(c("2", "  Running correctness test..."));
   let runOutput: string;
   try {
@@ -208,15 +246,128 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
   return { buildOk: true, buildOutput, tokPerSec, correct, outputText, bandwidthUtil, error: null };
 }
 
-// ── Agent spawn ─────────────────────────────────────────────────────
+// -- Claude stream formatter -------------------------------------------------
+
+type ClaudeStreamState = {
+  currentToolName: string | null;
+  currentBlockIsToolUse: boolean;
+  inputJsonBuffer: string;
+  inTextBlock: boolean;
+  sawTextDeltaInCurrentMessage: boolean;
+};
+
+function formatToolInput(name: string, rawJson: string): string {
+  let input: Record<string, unknown> = {};
+  try { input = JSON.parse(rawJson) as Record<string, unknown>; } catch { /* empty */ }
+
+  const out: string[] = [];
+  const shortPath = (fp: string) => fp.split("/").slice(-3).join("/");
+  if (name === "edit") {
+    out.push(c("2", ` \u2192 ${shortPath((input.file_path as string) ?? "?")}`));
+  } else if (name === "write") {
+    const lineCount = ((input.content as string) ?? "").split("\n").length;
+    out.push(c("2", ` \u2192 ${shortPath((input.file_path as string) ?? "?")} (${lineCount} lines)`));
+  } else if (name === "bash") {
+    const cmd = (input.command as string) ?? "?";
+    out.push(c("2", `   $ ${cmd.length > 120 ? cmd.slice(0, 120) + "\u2026" : cmd}`));
+  } else if (name === "read") {
+    out.push(c("2", ` \u2192 ${shortPath((input.file_path as string) ?? "?")}`));
+  } else if (name === "grep") {
+    out.push(c("2", ` \u2192 /${(input.pattern as string) ?? "?"}/`));
+  } else if (name === "glob") {
+    out.push(c("2", ` \u2192 ${(input.pattern as string) ?? "?"}`));
+  }
+  return out.length > 0 ? out.join("\n") + "\n" : "";
+}
+
+function formatClaudeStreamLine(rawLine: string, state: ClaudeStreamState): string | null {
+  if (!rawLine.trim()) return null;
+  let event: Record<string, unknown>;
+  try { event = JSON.parse(rawLine) as Record<string, unknown>; } catch { return rawLine + "\n"; }
+
+  if (event.type === "stream_event") {
+    const e = event.event as Record<string, unknown> | undefined;
+    if (!e) return null;
+    if (e.type === "content_block_start") {
+      const block = e.content_block as Record<string, unknown> | undefined;
+      if (block?.type === "tool_use") {
+        state.currentToolName = (block.name as string) ?? "tool";
+        state.currentBlockIsToolUse = true;
+        state.inputJsonBuffer = "";
+        state.inTextBlock = false;
+        return `\n${c("33", `\uD83D\uDD27 ${state.currentToolName}`)}`;
+      }
+      if (block?.type === "text") {
+        state.inTextBlock = true;
+        state.currentBlockIsToolUse = false;
+        return CLR ? "\n\x1b[96m" : "\n";
+      }
+      state.inTextBlock = false;
+      state.currentBlockIsToolUse = false;
+      return null;
+    }
+    if (e.type === "content_block_delta") {
+      const delta = e.delta as Record<string, unknown> | undefined;
+      if (delta?.type === "input_json_delta") {
+        state.inputJsonBuffer += (delta.partial_json as string) ?? "";
+        return null;
+      }
+      if (delta?.type === "text_delta" && state.inTextBlock) {
+        state.sawTextDeltaInCurrentMessage = true;
+        return delta.text as string;
+      }
+      return null;
+    }
+    if (e.type === "content_block_stop") {
+      if (state.currentBlockIsToolUse) {
+        state.currentBlockIsToolUse = false;
+        const detail = formatToolInput(state.currentToolName ?? "", state.inputJsonBuffer);
+        state.inputJsonBuffer = "";
+        return detail || null;
+      }
+      if (state.inTextBlock) {
+        state.inTextBlock = false;
+        return CLR ? "\x1b[0m\n" : "\n";
+      }
+      return null;
+    }
+    return null;
+  }
+  if (event.type === "assistant") {
+    const msg = event.message as Record<string, unknown> | undefined;
+    if (!msg) return null;
+    const content = msg.content;
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const block of content) {
+        const b = block as Record<string, unknown>;
+        if (b?.type === "text" && typeof b.text === "string" && b.text.trim())
+          parts.push(b.text);
+      }
+      const text = parts.join("\n");
+      if (!text.trim()) return null;
+      if (state.sawTextDeltaInCurrentMessage) {
+        state.sawTextDeltaInCurrentMessage = false;
+        return null;
+      }
+      return c("96", text) + "\n";
+    }
+    return null;
+  }
+  return null;
+}
+
+// -- Agent spawn -------------------------------------------------------------
 
 async function spawnAgent(
-  effortDoc: string,
+  _effortDoc: string,
   plan: string,
   baseline: BenchResult,
   cycleNum: number,
   history: string,
-): Promise<void> {
+  model: string,
+): Promise<RunResult> {
+  const modelPath = MODELS[model] ?? MODELS.gemma3;
   const prompt = `You are implementing a performance optimization for the ZINC Vulkan inference engine.
 
 ## Optimization Plan
@@ -233,13 +384,27 @@ ${history || "None yet."}
 ## Your Task (Cycle ${cycleNum})
 Implement ONE concrete step from the optimization plan above. Pick the next unfinished step.
 
-Rules:
-- Make ONE focused change. Don't try to do everything at once.
-- The change must compile (zig build) and produce correct output ("${CORRECTNESS_EXPECT}").
-- Test your change by building and running on the remote node:
-  ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build && ./zig-out/bin/zinc -m ${MODELS.gemma3} --prompt '${CORRECTNESS_PROMPT}' --chat -n 16"
-- If you need to compile shaders: glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
-- After verifying it works, stop. The loop will benchmark and decide whether to keep or revert.
+## CRITICAL RULES — READ CAREFULLY
+
+1. **BUILD MUST PASS.** Before you declare yourself done, you MUST:
+   a. rsync your changes to the remote node
+   b. Compile shaders: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"
+   c. Build: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build 2>&1"
+   d. If the build fails, FIX THE ERRORS before finishing. Do NOT leave broken code.
+
+2. **Incremental steps.** If the optimization requires changing many call sites (e.g. 60+ descriptor set conversions), break it into compilable stages:
+   - Add new infrastructure (new functions, new fields) FIRST — the old code can coexist.
+   - Convert call sites in batches, building after each batch to catch errors.
+   - Remove old infrastructure LAST.
+   - The code MUST compile at every stage.
+
+3. **ONE focused change per cycle.** Don't try to convert the entire codebase in one shot.
+
+4. **Test on remote node:**
+   rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
+   ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build && ./zig-out/bin/zinc -m ${modelPath} --prompt '${CORRECTNESS_PROMPT}' --chat -n 16"
+
+5. **Shader compilation:** glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
 
 Files you may edit:
 - src/compute/*.zig (forward.zig, dmmv.zig, elementwise.zig, attention.zig, argmax.zig)
@@ -250,24 +415,68 @@ Files you may edit:
 - src/shaders/*.comp (GLSL compute shaders)
 - src/main.zig`;
 
-  console.log(c("1;36", `  Spawning agent for cycle ${cycleNum}...`));
+  console.log(c("1;34", SEP));
+  console.log(c("1;34", `  \uD83E\uDDE0 Agent cycle ${cycleNum}`));
+  console.log(c("1;34", SEP));
 
-  const { exitCode } = await run("claude", [
-    "--print", "--dangerously-skip-permissions",
-    "--allowedTools", [
-      "Read", "Write", "Edit", "Glob", "Grep", "Bash",
-      ...BLOCKED_GIT_OPS.map(b => `!${b}`),
-      ...BLOCKED_FILE_OPS.map(b => `!${b}`),
-    ].join(","),
-    "-p", prompt,
-  ], { cwd: REPO_ROOT, timeout: 600_000 });
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    process.stdout.write(
+      c("2", `\n\u23F3 still running (${formatElapsed(startedAt)} elapsed)...\n`),
+    );
+  }, 30_000);
 
-  if (exitCode !== 0) {
-    console.log(c("1;31", `  Agent exited with code ${exitCode}`));
+  const claudeState: ClaudeStreamState = {
+    currentToolName: null,
+    currentBlockIsToolUse: false,
+    inputJsonBuffer: "",
+    inTextBlock: false,
+    sawTextDeltaInCurrentMessage: false,
+  };
+
+  const result = await runCommand("claude", [
+    "-p",
+    "--verbose",
+    "--output-format", "stream-json",
+    "--include-partial-messages",
+    `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
+    "--permission-mode", "bypassPermissions",
+    "--effort", "high",
+    prompt,
+  ], {
+    cwd: REPO_ROOT,
+    timeout: 1_800_000, // 30 min — large refactors need time
+    streamOutput: true,
+    stdoutLineFormatter: (line) => formatClaudeStreamLine(line, claudeState),
+  });
+
+  clearInterval(heartbeat);
+  console.log(c("1;36", SEP));
+  console.log(c("1;32", `  \u2705 Agent done in ${formatElapsed(startedAt)}`));
+  console.log(c("1;36", SEP));
+
+  if (result.exitCode !== 0) {
+    console.log(c("1;31", `  Agent exited with code ${result.exitCode}`));
   }
+
+  return result;
 }
 
-// ── Main loop ───────────────────────────────────────────────────────
+// -- Selective revert (only src/, not loops/ or config) ----------------------
+
+async function revertAgentChanges(): Promise<void> {
+  for (const path of REVERTABLE_PATHS) {
+    await runCommand("git", ["checkout", "--", path], { cwd: REPO_ROOT });
+  }
+  // Also clean any new untracked files the agent may have created in src/
+  const { stdout: untracked } = await runCommand("git", ["ls-files", "--others", "--exclude-standard", "src/"], { cwd: REPO_ROOT });
+  for (const f of untracked.split("\n").filter(Boolean)) {
+    await runCommand("rm", ["-f", f], { cwd: REPO_ROOT });
+  }
+  console.log(c("2", "  Reverted agent changes (src/ only)."));
+}
+
+// -- Main loop ---------------------------------------------------------------
 
 async function main() {
   const { effort, cycles, dryRun, model } = parseArgs();
@@ -277,14 +486,14 @@ async function main() {
 
   await mkdir(RESULTS_DIR, { recursive: true });
 
-  console.log(c("1;37", `\n╔══════════════════════════════════════════════════════════╗`));
-  console.log(c("1;37", `║  ZINC Performance Optimization Loop — Effort ${effort}          ║`));
-  console.log(c("1;37", `║  ${effortFile.padEnd(54)}║`));
-  console.log(c("1;37", `║  Model: ${model.padEnd(49)}║`));
-  console.log(c("1;37", `╚══════════════════════════════════════════════════════════╝\n`));
+  console.log(c("1;37", `\n\u2554${"═".repeat(58)}\u2557`));
+  console.log(c("1;37", `\u2551  ZINC Performance Optimization Loop \u2014 Effort ${effort}          \u2551`));
+  console.log(c("1;37", `\u2551  ${effortFile.padEnd(54)}\u2551`));
+  console.log(c("1;37", `\u2551  Model: ${model.padEnd(49)}\u2551`));
+  console.log(c("1;37", `\u255A${"═".repeat(58)}\u255D\n`));
 
   // Step 1: Sync and get baseline
-  console.log(c("1;33", "── Baseline ──────────────────────────────────────────────"));
+  console.log(c("1;33", "\u2500\u2500 Baseline " + "\u2500".repeat(54)));
   await rsyncToRemote();
   const baseline = await buildAndBench(modelPath);
 
@@ -305,19 +514,15 @@ async function main() {
 
   // Step 2: Optimization cycles
   for (let cycle = 1; cycle <= cycles; cycle++) {
-    console.log(c("1;33", `\n── Cycle ${cycle}/${cycles} ──────────────────────────────────────────`));
+    console.log(c("1;33", `\n\u2500\u2500 Cycle ${cycle}/${cycles} ` + "\u2500".repeat(50)));
 
     if (dryRun) {
-      console.log(c("2", "  Dry run — skipping agent."));
+      console.log(c("2", "  Dry run \u2014 skipping agent."));
       break;
     }
 
-    // Save current state for revert
-    const { stdout: stashRef } = await run("git", ["stash", "create"], { cwd: REPO_ROOT });
-    const canRevert = stashRef.trim().length > 0;
-
     // Spawn agent
-    await spawnAgent(effortFile, plan, baseline, cycle, history);
+    await spawnAgent(effortFile, plan, baseline, cycle, history, model);
 
     // Sync and benchmark
     console.log(c("2", "  Syncing changes..."));
@@ -333,33 +538,23 @@ async function main() {
       : "?";
 
     if (broken) {
-      console.log(c("1;31", `  ❌ BROKEN: ${result.error ?? "incorrect output"}`));
+      console.log(c("1;31", `  \u274C BROKEN: ${result.error ?? "incorrect output"}`));
       console.log(c("1;31", `     Output: "${result.outputText?.slice(0, 80)}"`));
-      history += `\nCycle ${cycle}: REVERTED — ${result.error ?? "incorrect output"}`;
-
-      // Revert
-      if (canRevert) {
-        await run("git", ["checkout", "."], { cwd: REPO_ROOT });
-        console.log(c("2", "  Reverted changes."));
-      }
+      history += `\nCycle ${cycle}: REVERTED \u2014 ${result.error ?? "incorrect output"}`;
+      await revertAgentChanges();
     } else if (improved) {
-      console.log(c("1;32", `  ✅ IMPROVED: ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`));
+      console.log(c("1;32", `  \u2705 IMPROVED: ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`));
       bestTokPerSec = result.tokPerSec!;
-      history += `\nCycle ${cycle}: KEPT — ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`;
+      history += `\nCycle ${cycle}: KEPT \u2014 ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`;
 
       // Commit
-      await run("git", ["add", "-A"], { cwd: REPO_ROOT });
-      await run("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} — ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`], { cwd: REPO_ROOT });
+      await runCommand("git", ["add", "src/"], { cwd: REPO_ROOT });
+      await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} \u2014 ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`], { cwd: REPO_ROOT });
       console.log(c("2", "  Committed."));
     } else {
-      console.log(c("1;33", `  ⚠ NO IMPROVEMENT: ${result.tokPerSec?.toFixed(2)} tok/s (${delta}%)`));
-      history += `\nCycle ${cycle}: REVERTED — no improvement (${result.tokPerSec?.toFixed(2)} tok/s, ${delta}%)`;
-
-      // Revert
-      if (canRevert) {
-        await run("git", ["checkout", "."], { cwd: REPO_ROOT });
-        console.log(c("2", "  Reverted changes."));
-      }
+      console.log(c("1;33", `  \u26A0 NO IMPROVEMENT: ${result.tokPerSec?.toFixed(2)} tok/s (${delta}%)`));
+      history += `\nCycle ${cycle}: REVERTED \u2014 no improvement (${result.tokPerSec?.toFixed(2)} tok/s, ${delta}%)`;
+      await revertAgentChanges();
     }
 
     // Log cycle result
@@ -377,7 +572,7 @@ async function main() {
   }
 
   // Summary
-  console.log(c("1;37", `\n══════════════════════════════════════════════════════════`));
+  console.log(c("1;37", `\n${"═".repeat(58)}`));
   console.log(c("1;37", `  Effort ${effort} complete.`));
   console.log(c("1;37", `  Baseline: ${baseline.tokPerSec?.toFixed(2)} tok/s`));
   console.log(c("1;37", `  Best:     ${bestTokPerSec.toFixed(2)} tok/s`));
@@ -385,7 +580,7 @@ async function main() {
     const gain = ((bestTokPerSec - (baseline.tokPerSec ?? 0)) / (baseline.tokPerSec ?? 1) * 100).toFixed(1);
     console.log(c("1;32", `  Gain:     +${gain}%`));
   }
-  console.log(c("1;37", `══════════════════════════════════════════════════════════\n`));
+  console.log(c("1;37", `${"═".repeat(58)}\n`));
 }
 
 main().catch((e) => {

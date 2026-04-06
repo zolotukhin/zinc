@@ -1,156 +1,260 @@
 # Optimization 1: Push Descriptors (VK_KHR_push_descriptor)
 
+## Current State (2026-04-05)
+
+- **Qwen3.5-35B-A3B**: 62.4 tok/s (16.0 ms/tok) on RX 9070 RDNA4
+- **CPU record time**: 0.55 ms/tok (3.4% of total)
+- **Descriptor allocs**: 1022 per token, 1022 writes, 3266 bindings
+- **Target**: Reduce CPU overhead from 0.55 ms to ~0.1 ms
+
 ## Why
 
-Every DMMV, norm, attention, and activation dispatch allocates a descriptor set from a Vulkan pool via `vkAllocateDescriptorSets`. Profiling shows **914 allocations per token** taking **7.27ms of CPU recording time** — that's **4.3% of total decode time** (168ms).
+Every dispatch in the decode loop calls `allocDescSet → writeDescSet → vkCmdBindDescriptorSets`. With 1022 allocations per token:
+- `vkAllocateDescriptorSets`: ~0.3 µs × 1022 = ~0.3 ms
+- `vkUpdateDescriptorSets`: ~0.2 µs × 1022 = ~0.2 ms
 
-Push descriptors write buffer bindings directly into the command buffer, bypassing the pool allocator entirely. On RADV (Mesa AMD driver), `vkAllocateDescriptorSets` costs ~8us per call. Push descriptors cost ~1-2us (just a memcpy into the command buffer).
+Push descriptors write buffer bindings directly into the command buffer via `vkCmdPushDescriptorSetKHR`, bypassing the pool allocator. On RADV, this eliminates per-allocation bookkeeping and pool fragmentation.
 
-Expected savings: 914 × 6us = **~5.5ms per token** → from 168ms to ~163ms → **3.0% decode speedup** (6.05 → 6.23 tok/s for Gemma 3 12B).
+**Expected savings**: 0.55 ms → ~0.15 ms CPU record time. At 62.4 tok/s (16.0 ms/tok), this saves ~0.4 ms → **~64.0 tok/s (+2.5%)**.
 
-## What
+## GPU Support (verified)
 
-Replace all `allocDescSet + writeDescSet* + vkCmdBindDescriptorSets` with `vkCmdPushDescriptorSetKHR`. This is a plumbing change — no shader modifications, no algorithm changes.
-
-### GPU support (verified)
 ```
-VK_KHR_push_descriptor : extension revision 2  (RDNA4)
+VK_KHR_push_descriptor : extension revision 2  (RDNA4, RADV)
 ```
 
-## How
+## Detailed Steps
 
-### Step 1: Enable push descriptor layouts in pipeline creation
+### Step 1: Load `vkCmdPushDescriptorSetKHR` function pointer
 
-**File: `src/vulkan/pipeline.zig:103-109`**
+**File: `src/vulkan/instance.zig`**
 
-Change the descriptor set layout creation to use the push descriptor flag:
+Add to the Instance struct:
+
+```zig
+push_descriptor_fn: ?*const fn (
+    vk.c.VkCommandBuffer,
+    vk.c.VkPipelineBindPoint,
+    vk.c.VkPipelineLayout,
+    u32,
+    u32,
+    [*]const vk.c.VkWriteDescriptorSet,
+) callconv(.C) void,
+```
+
+Load after device creation:
+
+```zig
+self.push_descriptor_fn = @ptrCast(vk.c.vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR"));
+if (self.push_descriptor_fn != null) {
+    log.info("VK_KHR_push_descriptor available", .{});
+}
+```
+
+**Build check**: `zig build test` must still pass. No behavior change yet.
+
+### Step 2: Enable push descriptor flag in pipeline layouts
+
+**File: `src/vulkan/pipeline.zig`**
+
+In `createDescriptorSetLayout` (or wherever `VkDescriptorSetLayoutCreateInfo` is built):
+
 ```zig
 // BEFORE:
 .flags = 0,
 
 // AFTER:
-.flags = vk.c.VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+.flags = if (instance.push_descriptor_fn != null)
+    vk.c.VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR
+else
+    0,
 ```
 
-**IMPORTANT**: With this flag, `vkAllocateDescriptorSets` will FAIL for these layouts. The push descriptor dispatch path MUST be implemented before this change goes live.
+**CRITICAL**: Once this flag is set, `vkAllocateDescriptorSets` will FAIL for these layouts. Step 3 MUST be done in the same commit/cycle, or the code breaks.
 
-### Step 2: Load `vkCmdPushDescriptorSetKHR` function pointer
+**Strategy**: Do NOT apply this flag yet. First implement the push dispatch path (Step 3), then flip the flag.
 
-**File: `src/vulkan/instance.zig` or `src/vulkan/command.zig`**
+### Step 3: Add `pushDescAndDispatch` to CommandBuffer
 
-Load the function pointer at device creation time:
-```zig
-const vkCmdPushDescriptorSetKHR = @as(
-    ?*const fn(VkCommandBuffer, VkPipelineBindPoint, VkPipelineLayout, u32, u32, [*]const VkWriteDescriptorSet) callconv(.C) void,
-    @ptrCast(vk.c.vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR"))
-);
-```
-
-Store this in the Instance or InferenceEngine struct for reuse.
-
-### Step 3: Add `pushAndDispatch` helper to CommandBuffer
-
-**File: `src/vulkan/command.zig`** — add after `dispatchWithPush` (line 236):
+**File: `src/vulkan/command.zig`**
 
 ```zig
-pub fn pushAndDispatch(
+/// Dispatch using push descriptors — no descriptor set allocation needed.
+pub fn pushDescAndDispatch(
     self: *const CommandBuffer,
     pipeline: *const Pipeline,
-    writes: []const vk.c.VkWriteDescriptorSet,
+    push_desc_fn: @TypeOf(Instance.push_descriptor_fn),
+    buffer_infos: []const vk.c.VkDescriptorBufferInfo,
     push_data: []const u8,
-    group_count_x: u32, group_count_y: u32, group_count_z: u32,
-    push_desc_fn: PushDescFnType,
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
 ) void {
     vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
-    vk.c.vkCmdPushConstants(self.handle, pipeline.pipeline_layout,
-        vk.c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @intCast(push_data.len), push_data.ptr);
-    push_desc_fn(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE,
-        pipeline.pipeline_layout, 0, @intCast(writes.len), writes.ptr);
+    if (push_data.len > 0) {
+        vk.c.vkCmdPushConstants(self.handle, pipeline.pipeline_layout,
+            vk.c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @intCast(push_data.len), push_data.ptr);
+    }
+
+    // Build VkWriteDescriptorSet array on the stack
+    var writes: [8]vk.c.VkWriteDescriptorSet = undefined;
+    for (buffer_infos, 0..) |_, i| {
+        writes[i] = .{
+            .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = null, // push descriptors don't use a set handle
+            .dstBinding = @intCast(i),
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pImageInfo = null,
+            .pBufferInfo = &buffer_infos[i],
+            .pTexelBufferView = null,
+        };
+    }
+
+    push_desc_fn.?(
+        self.handle,
+        vk.c.VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipeline.pipeline_layout,
+        0, // set index
+        @intCast(buffer_infos.len),
+        &writes,
+    );
+
     vk.c.vkCmdDispatch(self.handle, group_count_x, group_count_y, group_count_z);
 }
 ```
 
-### Step 4: Replace allocDescSet + writeDescSet + dispatch pattern
+**Build check**: `zig build test` — no call sites yet, just the new function.
 
-**File: `src/compute/forward.zig`** — 45 call sites need updating.
+### Step 4: Add push-descriptor dispatch helpers to InferenceEngine
 
-**BEFORE (typical pattern, repeated 45× across the file):**
+**File: `src/compute/forward.zig`**
+
+Add helpers that mirror the existing `writeDescSet*` + dispatch pattern:
+
 ```zig
-const ds = try self.allocDescSet(pip.descriptor_set_layout);
-self.writeDescSet3(ds, buf0.handle, buf0.size, buf1.handle, buf1.size, buf2.handle, buf2.size);
-self.decode_cmd.dispatchWithPush(pip, ds, push_data, wg_x, 1, 1);
-```
-
-**AFTER:**
-```zig
-var infos = [3]vk.c.VkDescriptorBufferInfo{
-    .{ .buffer = buf0.handle, .offset = 0, .range = buf0.size },
-    .{ .buffer = buf1.handle, .offset = 0, .range = buf1.size },
-    .{ .buffer = buf2.handle, .offset = 0, .range = buf2.size },
-};
-var writes: [3]vk.c.VkWriteDescriptorSet = undefined;
-for (0..3) |i| {
-    writes[i] = .{
-        .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .pNext = null, .dstSet = null, .dstBinding = @intCast(i),
-        .dstArrayElement = 0, .descriptorCount = 1,
-        .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .pImageInfo = null, .pBufferInfo = &infos[i], .pTexelBufferView = null,
+fn pushDispatch3(
+    self: *InferenceEngine,
+    pip: *const Pipeline,
+    push_data: []const u8,
+    buf0: vk.c.VkBuffer, size0: vk.c.VkDeviceSize,
+    buf1: vk.c.VkBuffer, size1: vk.c.VkDeviceSize,
+    buf2: vk.c.VkBuffer, size2: vk.c.VkDeviceSize,
+    wg_x: u32, wg_y: u32, wg_z: u32,
+) void {
+    const infos = [3]vk.c.VkDescriptorBufferInfo{
+        .{ .buffer = buf0, .offset = 0, .range = size0 },
+        .{ .buffer = buf1, .offset = 0, .range = size1 },
+        .{ .buffer = buf2, .offset = 0, .range = size2 },
     };
+    self.decode_cmd.pushDescAndDispatch(pip, self.instance.push_descriptor_fn,
+        &infos, push_data, wg_x, wg_y, wg_z);
 }
-self.decode_cmd.pushAndDispatch(&pip, &writes, push_data, wg_x, 1, 1, self.push_desc_fn);
+
+// Similarly: pushDispatch2, pushDispatch4, pushDispatch5, pushDispatch7
 ```
 
-**To reduce verbosity**: Create helper functions `makePushWrites3`, `makePushWrites5` that build the write arrays from buffer handles/sizes. Then each call site becomes:
+**Build check**: `zig build test` — no call sites changed yet.
+
+### Step 5: Convert call sites incrementally
+
+**File: `src/compute/forward.zig`** — 1022 descriptor allocs across ~60 call sites.
+
+Convert in batches of ~10 call sites per cycle, building after each batch:
+
+**Batch A: Elementwise dispatches (RMS norm, scale_acc, swiglu, sigmoid_mul)**
+
+Find all `allocDescSet + writeDescSet3 + recordRmsNorm/recordSwiglu/recordScaleAcc` patterns and replace:
+
 ```zig
-var infos: [3]vk.c.VkDescriptorBufferInfo = undefined;
-var writes: [3]vk.c.VkWriteDescriptorSet = undefined;
-makePushWrites3(&infos, &writes, buf0, size0, buf1, size1, buf2, size2);
-self.decode_cmd.pushAndDispatch(&pip, &writes, push_data, wg_x, 1, 1, self.push_desc_fn);
+// BEFORE:
+const ds = try self.allocDescSet(pip.descriptor_set_layout);
+self.writeDescSet3(ds, buf0, size0, buf1, size1, buf2, size2);
+try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, eps);
+
+// AFTER:
+self.pushDispatch3(pip, std.mem.asBytes(&push), buf0, size0, buf1, size1, buf2, size2, 1, 1, 1);
 ```
 
-### Step 5: Remove descriptor pool infrastructure
+Note: `recordRmsNorm` calls `dispatchWithPush(pip, ds, ...)` internally. We need to either:
+- (a) Extract the push constant construction from `recordRmsNorm` and call `pushDispatch3` directly, or
+- (b) Add `recordRmsNormPush(cmd, push_data, infos)` variants to `elementwise.zig`
 
-Once all 45 call sites are converted:
+**Recommended approach (a)**: Replace the dispatch call inline. This avoids changing the elementwise API.
+
+**Batch B: DMMV dispatches (dispatchDmmv)**
+
+The `dispatchDmmv` function in forward.zig calls `self.dmmv.recordDispatch(...)` which internally does `cmd.dispatchWithPush(pip, ds, ...)`. Convert `recordDispatch` to accept push descriptor parameters.
+
+**Batch C: MoE dispatches**
+
+Convert `recordMoeDispatch`, `recordSoftmaxTopk`, `recordMoeWeightedAcc`.
+
+**Batch D: Flash attention, SSM, RoPE**
+
+These have more complex binding patterns (5-7 bindings).
+
+**Build after EACH batch.** Run correctness test after each batch.
+
+### Step 6: Enable push descriptor layout flag
+
+**File: `src/vulkan/pipeline.zig`**
+
+Once ALL call sites are converted (no more `allocDescSet` calls remain):
+
+```zig
+.flags = vk.c.VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+```
+
+### Step 7: Remove old descriptor pool infrastructure
+
 - Remove `shared_pool` field from InferenceEngine
-- Remove `vkCreateDescriptorPool` in init (lines 1008-1014)
-- Remove all 24 `vkResetDescriptorPool` calls
+- Remove `vkCreateDescriptorPool` in init
+- Remove all `vkResetDescriptorPool` calls (search: 24 occurrences)
 - Remove `allocDescSet` function
-- Remove `writeDescSet2/3/4/5` functions (replaced by `makePushWrites*`)
+- Remove `writeDescSet2/3/4/5` functions
+- Keep argmax's dedicated pool (1 static set, negligible overhead)
 
-### Step 6: Handle special cases
+### Step 8: Verify with profiling
 
-- **Argmax descriptor set** (`src/compute/argmax.zig:86-99`): Has its own pool. Either convert to push descriptors or keep its dedicated pool (only 1 set, minimal overhead).
-- **MoE DMMV** (`src/compute/dmmv.zig`): Has its own descriptor pool. Same treatment as argmax.
-- **Debug readback blocks** (lines 1882, 2100, etc.): These reset the shared_pool. With push descriptors, these resets become no-ops (remove them).
+```bash
+# On RDNA node:
+./zig-out/bin/zinc -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+    --prompt 'Write a detailed essay.' --profile -n 200
 
-## Call sites to update (complete list)
+# Check:
+# - avg CPU record should drop from 0.55 ms to ~0.15 ms
+# - avg descriptor allocs should show 0 (push descriptors bypass pool)
+# - tok/s should improve ~2-3%
+```
 
-| Location | Function | Bindings | Notes |
-|----------|----------|----------|-------|
-| forward.zig:1615 | allocDescSet+writeDescSet3 | 3 | Attn input norm |
-| forward.zig:1694 | allocDescSet+writeDescSet3 | 3 | V bare norm |
-| forward.zig:1779 | allocDescSet+writeDescSet3 | 3 | Q norm |
-| forward.zig:1785 | allocDescSet+writeDescSet3 | 3 | K norm |
-| forward.zig:1802-1806 | allocDescSet+writeDescSet3 | 3 | RoPE Q+K |
-| forward.zig:1826 | allocDescSet+writeDescSet5 | 5 | Flash attention |
-| forward.zig:1999 | allocDescSet+writeDescSet3 | 3 | Sigmoid mul gate |
-| forward.zig:2018-2027 | allocDescSet+writeDescSet3/2 | 3,2 | Post-attn norm + residual |
-| forward.zig:2133 | allocDescSet+writeDescSet3 | 3 | FFN norm |
-| forward.zig:2481-2499 | allocDescSet+writeDescSet3 | 3×3 | Gate+Up+Activation+Down |
-| forward.zig:2625-2656 | allocDescSet+writeDescSet3/2 | 3,2,3 | Post-FFN norm + residual + scale |
-| forward.zig:2811-2829 | allocDescSet+writeDescSet3 | 3 | Final norm + LM head |
-| + ~10 more in MoE/SSM/shared expert paths | | | |
+## Call Site Inventory
 
-## Testing
+Search `self.allocDescSet` in forward.zig to find all sites. Current count: ~60 unique call sites.
 
-1. **Correctness**: Run Gemma 3 `--prompt 'What is the capital of France?' --chat -n 16` → must output "The capital of France is **Paris**."
-2. **Performance**: Profile with `--profile` → check `avg CPU record` drops from ~7.3ms to ~2ms
-3. **Gemma 4**: Same test with Gemma 4 31B to verify softcap + IDP paths still work
-4. **Benchmark**: Compare tok/s before/after across 3 runs (expect ~3% improvement)
+Major categories:
+- RMS norm dispatches: ~12 sites (pre-attn norm, FFN norm, post-norms, final norm)
+- DMMV dispatches (via dispatchDmmv): ~15 sites (Q/K/V/O proj, FFN gate/up/down, SSM proj)
+- MoE dispatches: ~8 sites (router, topk, gate/up/down MoE, weighted_acc)
+- Shared expert: ~6 sites (gate/up/gate_scalar, swiglu, down, gate_acc)
+- Activation: ~4 sites (swiglu, geglu, sigmoid_mul)
+- Flash attention: ~2 sites
+- SSM: ~8 sites (conv1d, delta-net, gated_norm)
+- RoPE: ~2 sites
+- Residual/scale: ~6 sites
+
+## Models to Test
+
+| Model | Prompt | Expected |
+|-------|--------|----------|
+| Qwen3.5-35B | "The capital of France is" | "Paris." |
+| Qwen3.5-2B | "The capital of France is" | "Paris." |
+| Gemma3-12B | "The capital of France is" | "Paris." |
 
 ## Risk
 
-- **Low correctness risk**: Push descriptors are semantically identical to pool-allocated sets — same buffer bindings, same shader access. No compute logic changes.
-- **Medium refactor risk**: 45 call sites across a 4000-line file. Easy to miss one or get a binding index wrong. Systematic search for `allocDescSet` catches all sites.
-- **Driver compatibility**: VK_KHR_push_descriptor is core in Vulkan 1.3. All target GPUs support it.
+- **Low correctness risk**: Push descriptors are semantically identical to pool-allocated sets.
+- **Medium refactor risk**: 60 call sites. Convert incrementally with builds between batches.
+- **Driver compatibility**: VK_KHR_push_descriptor is widely supported. RADV has had it since Mesa 21.0.
