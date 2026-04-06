@@ -1,4 +1,5 @@
 //! Source-level regression guards for bugs that are hard to cover with unit-only GPU tests.
+const builtin = @import("builtin");
 const std = @import("std");
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -298,6 +299,8 @@ test "Q5_0 shader reads qh via byte assembly, not unaligned uint32 cast" {
 }
 
 test "Q5_0 dequantRow matches expected values for known block" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
     const forward_metal = @import("compute/forward_metal.zig");
     // Build a Q5_0 block: d=0.5, qh=0x0000FFFF (bits 0-15 set), qs all 0x53 (lo=3, hi=5)
     // Element j (0-15): lo=3, bit_lo=1 → quant=3|(1<<4)=19 → value=0.5*(19-16)=1.5
