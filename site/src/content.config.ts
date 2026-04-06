@@ -8,6 +8,10 @@ const posts = defineCollection({
     date: z.coerce.date(),
     tags: z.array(z.string()).optional().default([]),
     keywords: z.array(z.string()).optional().default([]),
+    faqs: z.array(z.object({
+      question: z.string(),
+      answer: z.string(),
+    })).optional().default([]),
     excerpt: z.string(),
     draft: z.boolean().optional().default(false),
   }),

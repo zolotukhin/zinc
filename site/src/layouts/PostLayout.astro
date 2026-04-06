@@ -9,17 +9,23 @@ interface PostLink {
   excerpt: string;
 }
 
+interface FAQItem {
+  question: string;
+  answer: string;
+}
+
 interface Props {
   title: string;
   date: Date;
   excerpt: string;
   tags?: string[];
   keywords?: string[];
+  faqs?: FAQItem[];
   prevPost?: PostLink | null;
   nextPost?: PostLink | null;
 }
 
-const { title, date, excerpt, tags, keywords, prevPost, nextPost } = Astro.props;
+const { title, date, excerpt, tags, keywords, faqs, prevPost, nextPost } = Astro.props;
 
 const isoDate = date.toISOString().split('T')[0];
 const formattedDate = new Intl.DateTimeFormat('en-US', {
@@ -69,6 +75,17 @@ const jsonLd = {
       keywords: keywordList,
       mainEntityOfPage: Astro.url.href,
     },
+    ...(faqs && faqs.length > 0 ? [{
+      '@type': 'FAQPage',
+      mainEntity: faqs.map((faq) => ({
+        '@type': 'Question',
+        name: faq.question,
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: faq.answer,
+        },
+      })),
+    }] : []),
     buildBreadcrumbList(siteUrl, breadcrumbItems),
   ],
 };
@@ -394,6 +411,128 @@ const jsonLd = {
     font-weight: 700;
   }
 
+  .post-content .schema-grid {
+    display: grid;
+    gap: 0.9rem;
+    margin: 0;
+    padding: 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    background:
+      radial-gradient(circle at top left, color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 42%),
+      var(--color-bg-alt);
+    align-items: stretch;
+    min-width: 0;
+  }
+
+  .post-content .schema-grid.schema-grid-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .post-content .schema-grid.schema-grid-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .post-content .schema-card {
+    position: relative;
+    display: grid;
+    align-content: start;
+    gap: 0.55rem;
+    padding: 0.95rem;
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    background: var(--color-bg);
+    min-width: 0;
+  }
+
+  .post-content .schema-grid.schema-grid-3 .schema-card:not(:last-of-type)::after,
+  .post-content .schema-grid.schema-grid-4 .schema-card:not(:last-of-type)::after {
+    content: "→";
+    position: absolute;
+    top: 50%;
+    right: -0.72rem;
+    transform: translateY(-50%);
+    width: 1.2rem;
+    height: 1.2rem;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    z-index: 1;
+  }
+
+  .post-content .schema-card.schema-card-accent {
+    border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
+
+  .post-content .schema-kicker {
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-weight: 700;
+  }
+
+  .post-content .schema-title {
+    font-size: 1rem;
+    line-height: 1.25;
+    font-weight: 700;
+    color: var(--color-text);
+    overflow-wrap: anywhere;
+  }
+
+  .post-content .schema-copy {
+    font-size: 0.84rem;
+    line-height: 1.55;
+    color: var(--color-text-muted);
+    overflow-wrap: anywhere;
+  }
+
+  .post-content .schema-list {
+    display: grid;
+    gap: 0.45rem;
+  }
+
+  .post-content .schema-line {
+    display: block;
+    padding: 0.45rem 0.55rem;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--color-accent) 4%, var(--color-bg));
+    border: 1px solid color-mix(in srgb, var(--color-border) 78%, var(--color-accent) 22%);
+    font-size: 0.8rem;
+    line-height: 1.4;
+    color: var(--color-text);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .post-content .schema-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    padding-top: 0.2rem;
+    margin-top: 0.15rem;
+    border-top: 1px dashed var(--color-border);
+    grid-column: 1 / -1;
+  }
+
+  .post-content .schema-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.42rem 0.7rem;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-bg);
+    font-size: 0.76rem;
+    line-height: 1.2;
+    color: var(--color-text-muted);
+  }
+
   .post-content figure.diagram-dual .diagram-mobile-alt {
     display: none;
     margin: 0;
@@ -459,6 +598,24 @@ const jsonLd = {
 
     .post-content .flow-pill {
       font-size: 0.75rem;
+    }
+
+    .post-content .schema-grid.schema-grid-3,
+    .post-content .schema-grid.schema-grid-4 {
+      grid-template-columns: 1fr;
+    }
+
+    .post-content .schema-grid.schema-grid-3 .schema-card:not(:last-of-type)::after,
+    .post-content .schema-grid.schema-grid-4 .schema-card:not(:last-of-type)::after {
+      content: none;
+    }
+
+    .post-content .schema-card {
+      padding: 0.85rem;
+    }
+
+    .post-content .schema-title {
+      font-size: 0.95rem;
     }
 
     .post-content .img-pair {
