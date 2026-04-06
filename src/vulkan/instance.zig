@@ -7,6 +7,15 @@ const vk = @import("vk.zig");
 
 const log = std.log.scoped(.vulkan);
 
+pub const PushDescriptorFn = *const fn (
+    vk.c.VkCommandBuffer,
+    vk.c.VkPipelineBindPoint,
+    vk.c.VkPipelineLayout,
+    u32,
+    u32,
+    [*]const vk.c.VkWriteDescriptorSet,
+) callconv(.c) void;
+
 /// Queried Vulkan device capabilities that affect pipeline creation choices.
 pub const DeviceCapabilities = struct {
     /// Shader `requiredSubgroupSize` can be requested at pipeline creation.
@@ -27,6 +36,8 @@ pub const DeviceCapabilities = struct {
     subgroup_extended_types: bool = false,
     /// Cooperative matrix support is available and enabled.
     cooperative_matrix: bool = false,
+    /// Push descriptors are supported by the device extension list.
+    push_descriptor: bool = false,
 
     /// Return whether a compute shader can request the given subgroup size.
     pub fn supportsRequiredSubgroupSize(self: DeviceCapabilities, size: u32) bool {
@@ -56,6 +67,8 @@ pub const Instance = struct {
     selected_device_index: u32,
     /// Queried device capability bits used by pipeline creation.
     caps: DeviceCapabilities = .{},
+    /// Loaded `vkCmdPushDescriptorSetKHR` entrypoint when push descriptors are enabled.
+    push_descriptor_fn: ?PushDescriptorFn = null,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
@@ -180,10 +193,14 @@ pub const Instance = struct {
             .pQueuePriorities = &queue_priority,
         };
 
-        var enabled_extensions: [1][*:0]const u8 = undefined;
+        var enabled_extensions: [2][*:0]const u8 = undefined;
         var enabled_extension_count: u32 = 0;
         if (device_caps.cooperative_matrix) {
             enabled_extensions[enabled_extension_count] = vk.c.VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+            enabled_extension_count += 1;
+        }
+        if (device_caps.push_descriptor) {
+            enabled_extensions[enabled_extension_count] = vk.c.VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
             enabled_extension_count += 1;
         }
 
@@ -246,6 +263,17 @@ pub const Instance = struct {
         var compute_queue: vk.c.VkQueue = null;
         vk.c.vkGetDeviceQueue(device, compute_queue_family, 0, &compute_queue);
 
+        const push_descriptor_fn: ?PushDescriptorFn = if (device_caps.push_descriptor)
+            if (vk.c.vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR")) |fn_ptr|
+                @ptrCast(fn_ptr)
+            else
+                null
+        else
+            null;
+        if (push_descriptor_fn != null) {
+            log.info("VK_KHR_push_descriptor available", .{});
+        }
+
         log.debug("Vulkan device ready — compute queue family {d}", .{compute_queue_family});
 
         return Instance{
@@ -258,6 +286,7 @@ pub const Instance = struct {
             .mem_props = mem_props,
             .selected_device_index = dev_idx,
             .caps = device_caps,
+            .push_descriptor_fn = push_descriptor_fn,
             .allocator = allocator,
         };
     }
@@ -317,6 +346,7 @@ fn queryDeviceCapabilities(allocator: std.mem.Allocator, physical_device: vk.c.V
     }
     const extensions = ext_props[0..ext_count];
     const coop_extension_supported = hasDeviceExtension(extensions, "VK_KHR_cooperative_matrix");
+    const push_descriptor_supported = hasDeviceExtension(extensions, "VK_KHR_push_descriptor");
 
     var subgroup_props = vk.c.VkPhysicalDeviceSubgroupSizeControlProperties{
         .sType = vk.c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES,
@@ -382,6 +412,7 @@ fn queryDeviceCapabilities(allocator: std.mem.Allocator, physical_device: vk.c.V
         .shader_float16 = shader_float16_int8_features.shaderFloat16 == vk.c.VK_TRUE,
         .subgroup_extended_types = subgroup_extended_types_features.shaderSubgroupExtendedTypes == vk.c.VK_TRUE,
         .cooperative_matrix = coop_extension_supported and cooperative_matrix_features.cooperativeMatrix == vk.c.VK_TRUE,
+        .push_descriptor = push_descriptor_supported,
     };
 }
 
