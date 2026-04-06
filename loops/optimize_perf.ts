@@ -329,7 +329,7 @@ async function checkAllModelsCoherent(): Promise<string | null> {
 
 // -- Codex stream formatter --------------------------------------------------
 
-function formatCodexStreamLine(rawLine: string): string | null {
+export function formatCodexStreamLine(rawLine: string): string | null {
   if (!rawLine.trim()) return null;
   let event: Record<string, unknown>;
   try { event = JSON.parse(rawLine) as Record<string, unknown>; } catch { return null; }
@@ -384,7 +384,7 @@ function formatCodexStreamLine(rawLine: string): string | null {
 
 // -- Claude stream formatter -------------------------------------------------
 
-type ClaudeStreamState = {
+export type ClaudeStreamState = {
   currentToolName: string | null;
   currentBlockIsToolUse: boolean;
   inputJsonBuffer: string;
@@ -392,7 +392,7 @@ type ClaudeStreamState = {
   sawTextDeltaInCurrentMessage: boolean;
 };
 
-function formatToolInput(name: string, rawJson: string): string {
+export function formatToolInput(name: string, rawJson: string): string {
   let input: Record<string, unknown> = {};
   try { input = JSON.parse(rawJson) as Record<string, unknown>; } catch { /* empty */ }
 
@@ -416,7 +416,7 @@ function formatToolInput(name: string, rawJson: string): string {
   return out.length > 0 ? out.join("\n") + "\n" : "";
 }
 
-function formatClaudeStreamLine(rawLine: string, state: ClaudeStreamState): string | null {
+export function formatClaudeStreamLine(rawLine: string, state: ClaudeStreamState): string | null {
   if (!rawLine.trim()) return null;
   let event: Record<string, unknown>;
   try { event = JSON.parse(rawLine) as Record<string, unknown>; } catch { return rawLine + "\n"; }
@@ -566,10 +566,10 @@ Files you may edit:
   let result: RunResult;
 
   if (agent === "codex") {
-    // Codex: uses `codex exec` with --full-auto and --json for JSONL streaming
+    // Codex: uses `codex exec` with bypass sandbox (needs SSH/rsync to RDNA node)
     result = await runCommand("codex", [
       "exec",
-      "--full-auto",
+      "--dangerously-bypass-approvals-and-sandbox",
       "--json",
       prompt,
     ], {
@@ -631,7 +631,7 @@ type LogEntry = {
   timestamp: string;
 };
 
-async function loadPreviousRun(effort: number): Promise<{ history: string; bestTokPerSec: number; lastCycle: number }> {
+export async function loadPreviousRun(effort: number): Promise<{ history: string; bestTokPerSec: number; lastCycle: number }> {
   const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
   let history = "";
   let bestTokPerSec = 0;
@@ -763,7 +763,7 @@ ${result.buildOutput.slice(-2000)}
 - Shader compilation: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"`;
 
       if (agent === "codex") {
-        await runCommand("codex", ["exec", "--full-auto", "--json", fixPrompt], {
+        await runCommand("codex", ["exec", "--dangerously-bypass-approvals-and-sandbox", "--json", fixPrompt], {
           cwd: REPO_ROOT, timeout: 600_000, streamOutput: true,
           stdoutLineFormatter: (line) => formatCodexStreamLine(line),
         });
@@ -851,7 +851,14 @@ ${result.buildOutput.slice(-2000)}
   console.log(c("1;37", `${"═".repeat(58)}\n`));
 }
 
-main().catch((e) => {
-  console.error(c("1;31", `Fatal: ${e}`));
-  process.exit(1);
-});
+// Only run main when executed directly, not when imported by tests
+const isMainModule = typeof Bun !== "undefined"
+  ? Bun.main === import.meta.path
+  : !process.argv[1]?.includes(".test.");
+
+if (isMainModule) {
+  main().catch((e) => {
+    console.error(c("1;31", `Fatal: ${e}`));
+    process.exit(1);
+  });
+}
