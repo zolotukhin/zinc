@@ -222,6 +222,22 @@ test "RoPE shader supports freq buffer path for IMROPE" {
     try expectContains(src, "inv_freq[i]");
 }
 
+test "Q4_K MoE shader uses packed uint32 reads, not byte access" {
+    // Performance: Q4_K MoE DMMV must use uint32 packed reads (36 u32 per block)
+    // instead of uint8_t byte access (144 individual reads). The packed path
+    // gives 4x fewer memory transactions and enables vec4 dot products.
+    const src = @embedFile("shaders/dmmv_q4k_moe.comp");
+    // Must use uint buffer, not uint8_t
+    try expectContains(src, "uint a_u32[]");
+    try expectNotContains(src, "uint8_t a_data[]");
+    // Must use vec4 dot products
+    try expectContains(src, "unpack_nibbles_lo");
+    try expectContains(src, "unpack_nibbles_hi");
+    try expectContains(src, "dot(vec4(factor_lo)");
+    // Must NOT have individual byte reads
+    try expectNotContains(src, "a_data[");
+}
+
 test "Q5_K MoE shader processes all 32 elements per sub-block pair" {
     // The MoE Q5_K shader must iterate e from 0 to 31 (not 0..15 like the
     // old dense Q5_K bug). Each sub-block pair has 32 bytes of qs data.

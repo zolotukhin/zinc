@@ -3,9 +3,13 @@
 // All selected experts run in parallel — gl_WorkGroupID.y selects the expert slot.
 // Expert IDs are read from GPU routing buffer written by softmax_topk.comp.
 //
-// Binding 3: MoE routing buffer from softmax_topk output:
-//   routing_data[0..k-1]   = expert_ids (uint32)
-//   routing_data[k..2k-1]  = expert_weights (floatBitsToUint)
+// Uses uint32 packed reads and vec4 dot products for memory coalescing
+// (4x fewer memory transactions vs byte-level access).
+//
+// Q4_K block (256 elements, 144 bytes = 36 uint32):
+//   u32[0]     d(f16) + dmin(f16)
+//   u32[1..3]  k_scales (12 bytes)
+//   u32[4..35] qs (128 bytes, 4-bit nibbles)
 //
 // Dispatch: ((M+63)/64, n_experts_used, 1) — Y workgroups = experts in parallel
 
@@ -26,65 +30,23 @@ layout(push_constant) uniform PushConstants {
     uint y_offset;         // byte offset for output vector (first expert)
 };
 
-layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
 layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[];   };
 layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];  };
 layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
 
-const uint Q4K_BLOCK_SIZE = 256;
-const uint Q4K_BYTES      = 144;
+const uint Q4K_BLOCK_SIZE = 256u;
+const uint Q4K_U32        = 36u;   // 144 bytes / 4
 
 shared float s_x[SPEC_K];
 
-float decode_scale(uint ks_off, uint sb) {
-    if (sb < 4u) {
-        return float(uint(a_data[ks_off + sb]) & 0x3Fu);
-    } else {
-        uint lo = uint(a_data[ks_off + sb + 4u]) & 0x0Fu;
-        uint hi = (uint(a_data[ks_off + sb - 4u]) >> 6) & 0x03u;
-        return float(lo | (hi << 4));
-    }
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
 }
-
-float decode_min(uint ks_off, uint sb) {
-    if (sb < 4u) {
-        return float(uint(a_data[ks_off + sb + 4u]) & 0x3Fu);
-    } else {
-        uint lo = (uint(a_data[ks_off + sb + 4u]) >> 4) & 0x0Fu;
-        uint hi = (uint(a_data[ks_off + sb]) >> 6) & 0x03u;
-        return float(lo | (hi << 4));
-    }
-}
-
-void accum_block(uint qs_off, uint ks_off, float d_val, float dmin_val,
-                 uint x_local, inout float acc) {
-    for (uint sp = 0u; sp < 4u; sp++) {
-        uint sb_lo = sp * 2u;
-        uint sb_hi = sp * 2u + 1u;
-
-        float sc_lo = decode_scale(ks_off, sb_lo);
-        float mn_lo = decode_min(ks_off, sb_lo);
-        float factor_lo = d_val * sc_lo;
-        float bias_lo   = dmin_val * mn_lo;
-
-        float sc_hi = decode_scale(ks_off, sb_hi);
-        float mn_hi = decode_min(ks_off, sb_hi);
-        float factor_hi = d_val * sc_hi;
-        float bias_hi   = dmin_val * mn_hi;
-
-        uint x_sb_lo = x_local + sb_lo * 32u;
-        uint x_sb_hi = x_local + sb_hi * 32u;
-        uint qs_base = qs_off + sp * 32u;
-
-        for (uint e = 0u; e < 32u; e++) {
-            uint byte_val = uint(a_data[qs_base + e]);
-            uint q_lo = byte_val & 0x0Fu;
-            uint q_hi = (byte_val >> 4) & 0x0Fu;
-
-            acc += (factor_lo * float(q_lo) - bias_lo) * s_x[x_sb_lo + e];
-            acc += (factor_hi * float(q_hi) - bias_hi) * s_x[x_sb_hi + e];
-        }
-    }
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
 }
 
 void main() {
@@ -93,12 +55,11 @@ void main() {
 
     // Read expert_id from GPU routing buffer — no CPU readback needed
     uint expert_id = routing_data[expert_slot];
-    uint a_offset = expert_id * expert_stride;
+    uint a_offset_u32 = (expert_id * expert_stride) / 4u;
 
     const uint blocks_per_row = K / Q4K_BLOCK_SIZE;
 
-    // Load input vector: x_expert_stride=0 means shared input (gate/up),
-    // x_expert_stride=K means per-expert input (down projection from swiglu_buf)
+    // Load input vector into shared memory
     uint x_global_base = x_offset / 4u + expert_slot * x_expert_stride;
     for (uint i = tid; i < K; i += 64u) {
         s_x[i] = x_data[x_global_base + i];
@@ -109,20 +70,81 @@ void main() {
     if (row >= M) return;
 
     float sum = 0.0;
+    uint row_u32 = a_offset_u32 + row * blocks_per_row * Q4K_U32;
 
     for (uint blk = 0u; blk < blocks_per_row; blk++) {
+        uint blk_u32 = row_u32 + blk * Q4K_U32;
         uint x_local = blk * Q4K_BLOCK_SIZE;
-        uint byte_off = a_offset + row * blocks_per_row * Q4K_BYTES + blk * Q4K_BYTES;
 
-        uint d_bits    = uint(a_data[byte_off])      | (uint(a_data[byte_off + 1u]) << 8);
-        uint dmin_bits = uint(a_data[byte_off + 2u]) | (uint(a_data[byte_off + 3u]) << 8);
-        float d_val    = unpackHalf2x16(d_bits).x;
-        float dmin_val = unpackHalf2x16(dmin_bits).x;
+        // d + dmin from single uint32 read
+        uint d_dmin = a_u32[blk_u32];
+        float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+        float dmin_val = unpackHalf2x16(d_dmin >> 16u).x;
 
-        accum_block(byte_off + 16u, byte_off + 4u, d_val, dmin_val, x_local, sum);
+        // Scales: 3 uint32 reads = 12 bytes
+        uint sc0 = a_u32[blk_u32 + 1u];
+        uint sc1 = a_u32[blk_u32 + 2u];
+        uint sc2 = a_u32[blk_u32 + 3u];
+        uint bytes[12];
+        bytes[0]  = sc0 & 0xFFu;        bytes[1]  = (sc0 >> 8) & 0xFFu;
+        bytes[2]  = (sc0 >> 16) & 0xFFu; bytes[3]  = (sc0 >> 24) & 0xFFu;
+        bytes[4]  = sc1 & 0xFFu;        bytes[5]  = (sc1 >> 8) & 0xFFu;
+        bytes[6]  = (sc1 >> 16) & 0xFFu; bytes[7]  = (sc1 >> 24) & 0xFFu;
+        bytes[8]  = sc2 & 0xFFu;        bytes[9]  = (sc2 >> 8) & 0xFFu;
+        bytes[10] = (sc2 >> 16) & 0xFFu; bytes[11] = (sc2 >> 24) & 0xFFu;
+
+        // Process 4 sub-block pairs (8 sub-blocks total = 256 elements)
+        for (uint sp = 0u; sp < 4u; sp++) {
+            uint sb_lo = sp * 2u;
+            uint sb_hi = sp * 2u + 1u;
+
+            // Decode 6-bit scales and mins
+            float sc_lo, mn_lo, sc_hi, mn_hi;
+            if (sb_lo < 4u) {
+                sc_lo = float(bytes[sb_lo] & 63u);
+                mn_lo = float(bytes[sb_lo + 4u] & 63u);
+            } else {
+                sc_lo = float((bytes[sb_lo + 4u] & 0xFu) | ((bytes[sb_lo - 4u] >> 6) << 4));
+                mn_lo = float(((bytes[sb_lo + 4u] >> 4) & 0xFu) | ((bytes[sb_lo] >> 6) << 4));
+            }
+            if (sb_hi < 4u) {
+                sc_hi = float(bytes[sb_hi] & 63u);
+                mn_hi = float(bytes[sb_hi + 4u] & 63u);
+            } else {
+                sc_hi = float((bytes[sb_hi + 4u] & 0xFu) | ((bytes[sb_hi - 4u] >> 6) << 4));
+                mn_hi = float(((bytes[sb_hi + 4u] >> 4) & 0xFu) | ((bytes[sb_hi] >> 6) << 4));
+            }
+
+            float factor_lo = d_val * sc_lo;
+            float bias_lo   = dmin_val * mn_lo;
+            float factor_hi = d_val * sc_hi;
+            float bias_hi   = dmin_val * mn_hi;
+
+            uint x_sb_lo = x_local + sb_lo * 32u;
+            uint x_sb_hi = x_local + sb_hi * 32u;
+            // qs offset: u32[4] is start of qs, each sub-block pair = 32 bytes = 8 uint32
+            uint qs_u32 = blk_u32 + 4u + sp * 8u;
+
+            // 8 uint32 reads = 32 bytes = 32 nibble-pairs = 64 elements per sub-block pair
+            for (uint w = 0u; w < 8u; w++) {
+                uint qs_word = a_u32[qs_u32 + w];
+                uint e_base = w * 4u;
+
+                vec4 q_lo = unpack_nibbles_lo(qs_word);
+                vec4 q_hi = unpack_nibbles_hi(qs_word);
+
+                vec4 xv_lo = vec4(s_x[x_sb_lo + e_base], s_x[x_sb_lo + e_base + 1u],
+                                  s_x[x_sb_lo + e_base + 2u], s_x[x_sb_lo + e_base + 3u]);
+                vec4 xv_hi = vec4(s_x[x_sb_hi + e_base], s_x[x_sb_hi + e_base + 1u],
+                                  s_x[x_sb_hi + e_base + 2u], s_x[x_sb_hi + e_base + 3u]);
+
+                sum += dot(vec4(factor_lo) * q_lo - vec4(bias_lo), xv_lo);
+                sum += dot(vec4(factor_hi) * q_hi - vec4(bias_hi), xv_hi);
+            }
+        }
     }
 
-    // Output at expert_slot * M offset (batched experts write to separate regions)
+    // Output at expert_slot * M offset
     uint y_base = y_offset / 4u + expert_slot * M;
     y_data[y_base + row] = sum;
 }
