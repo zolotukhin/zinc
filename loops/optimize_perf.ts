@@ -309,6 +309,61 @@ async function checkAllModelsCoherent(): Promise<string | null> {
   return failures.length > 0 ? `Coherence failures: ${failures.join("; ")}` : null;
 }
 
+// -- Codex stream formatter --------------------------------------------------
+
+function formatCodexStreamLine(rawLine: string): string | null {
+  if (!rawLine.trim()) return null;
+  let event: Record<string, unknown>;
+  try { event = JSON.parse(rawLine) as Record<string, unknown>; } catch { return null; }
+
+  const type = event.type as string | undefined;
+
+  // Agent message with text
+  if (type === "message" || type === "agent") {
+    const content = (event.content ?? event.message) as string | undefined;
+    if (content && typeof content === "string" && content.trim()) {
+      return c("96", content.trim()) + "\n";
+    }
+    return null;
+  }
+
+  // Tool/function call
+  if (type === "function_call" || type === "tool_use" || type === "action") {
+    const name = (event.name ?? event.tool ?? event.function) as string | undefined;
+    const cmdOrInput = (event.command ?? event.input ?? event.arguments) as string | Record<string, unknown> | undefined;
+    if (name === "shell" || name === "bash" || name === "terminal") {
+      const cmd = typeof cmdOrInput === "string" ? cmdOrInput : (cmdOrInput as Record<string, unknown>)?.command as string ?? "";
+      return `\n${c("33", "\uD83D\uDD27 shell")}${c("2", `   $ ${cmd.length > 120 ? cmd.slice(0, 120) + "\u2026" : cmd}`)}\n`;
+    }
+    if (name === "write" || name === "create_file" || name === "patch" || name === "apply_diff") {
+      const fp = typeof cmdOrInput === "string" ? cmdOrInput : (cmdOrInput as Record<string, unknown>)?.path as string ?? (cmdOrInput as Record<string, unknown>)?.file_path as string ?? "";
+      const short = fp.split("/").slice(-3).join("/");
+      return `\n${c("33", `\uD83D\uDD27 ${name}`)}${c("2", ` \u2192 ${short}`)}\n`;
+    }
+    if (name === "read" || name === "read_file") {
+      const fp = typeof cmdOrInput === "string" ? cmdOrInput : (cmdOrInput as Record<string, unknown>)?.path as string ?? (cmdOrInput as Record<string, unknown>)?.file_path as string ?? "";
+      const short = fp.split("/").slice(-3).join("/");
+      return `${c("33", `\uD83D\uDD27 ${name}`)}${c("2", ` \u2192 ${short}`)}\n`;
+    }
+    if (name) {
+      return `\n${c("33", `\uD83D\uDD27 ${name}`)}\n`;
+    }
+    return null;
+  }
+
+  // Function call output / result — skip (too verbose)
+  if (type === "function_call_output" || type === "action_output" || type === "tool_result") {
+    return null;
+  }
+
+  // Thinking / reasoning — show brief indicator
+  if (type === "thinking" || type === "reasoning") {
+    return c("2", "  \u2026 thinking\n");
+  }
+
+  return null;
+}
+
 // -- Claude stream formatter -------------------------------------------------
 
 type ClaudeStreamState = {
@@ -493,15 +548,17 @@ Files you may edit:
   let result: RunResult;
 
   if (agent === "codex") {
-    // Codex: uses `codex exec` with --full-auto for non-interactive mode
+    // Codex: uses `codex exec` with --full-auto and --json for JSONL streaming
     result = await runCommand("codex", [
       "exec",
       "--full-auto",
+      "--json",
       prompt,
     ], {
       cwd: REPO_ROOT,
       timeout: 1_800_000,
       streamOutput: true,
+      stdoutLineFormatter: (line) => formatCodexStreamLine(line),
     });
   } else {
     // Claude: uses stream-json for rich tool-use display
