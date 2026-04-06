@@ -144,9 +144,9 @@ RDNA4 supports IDP. Once RADV+glslc compatibility is confirmed, use it for Q4_K/
 | Phase 0 | 35-40 tok/s | GPU SSM enabled | ✅ 38.8 tok/s |
 | Phase 1a | 48+ tok/s | F32 shared memory, packed MoE DMMV | ✅ 48.2 tok/s |
 | Phase 1a′ | 55+ tok/s | F32 K-parallel via subgroupAdd | ✅ 55.1 tok/s |
-| Phase 1b-c | 60-65 tok/s | Fused router+topk, fused gate+up | 🔄 |
-| Phase 2 | 70-80 tok/s | Pre-alloc descriptors, buffer barriers | |
-| Phase 3 | 100+ tok/s | Fused MoE, delta-net occupancy, multi-queue | |
+| Phase 1b | 62+ tok/s | Delta-net 8 threads/row + 8-row tiles | ✅ 62.4 tok/s |
+| Phase 2 | 70-80 tok/s | Pre-alloc descriptors, pre-record cmd bufs | |
+| Phase 3 | 100+ tok/s | Fused MoE, multi-queue overlap | |
 
 ## 4. Micro-benchmarks
 
