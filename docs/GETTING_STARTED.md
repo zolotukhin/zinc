@@ -97,7 +97,7 @@ This downloads the model into a local cache and verifies the SHA-256 hash.
 
 ## Run your first prompt
 
-The `--chat` flag wraps your prompt in the model's chat template (system prompt, role tags, etc.), which is required for instruct-tuned models like Llama 3.1 to produce proper answers.
+The `--chat` flag wraps your prompt in the model's chat template (system prompt, role tags, etc.), which is required for instruct-tuned models to produce proper answers.
 
 ```bash
 ./zig-out/bin/zinc --model-id qwen3-8b-q4k-m --prompt "What is the capital of France?" --chat

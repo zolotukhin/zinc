@@ -1121,7 +1121,7 @@ pub const InferenceEngine = struct {
         self.final_norm_gpu = try preloadNormWeights(ctx, model, final_t, cfg.hidden_dim);
 
         // Precompute inverse RoPE frequencies into a Metal buffer.
-        // If the model provides rope_freqs.weight (e.g. Llama 3.1), divide by those factors.
+        // If the model provides rope_freqs.weight, divide by those factors.
         {
             const rope_dim: u32 = if (cfg.rope_dim > 0) cfg.rope_dim else cfg.head_dim;
             const half_rot: u32 = rope_dim / 2;

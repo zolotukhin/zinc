@@ -1031,9 +1031,9 @@ test "removeInstalledModelAtPaths keeps non-empty directory" {
 }
 
 test "active selection pointing to non-catalog model is detectable" {
-    // Simulates the scenario where active-model.json references a removed model
-    // (e.g. llama31-8b-q4k-m after Llama support was dropped).
-    const stale_id = "llama31-8b-q4k-m";
+    // Simulates the scenario where active-model.json references a model
+    // that is no longer in the catalog.
+    const stale_id = "removed-model-q4k-m";
     try std.testing.expect(catalog.find(stale_id) == null);
 
     // A valid catalog model should be findable.
@@ -1057,7 +1057,7 @@ test "active selection roundtrip rejects non-catalog model on validate" {
             var close_file = file;
             close_file.close();
         }
-        try file.writeAll("{\"active_model_id\":\"llama31-8b-q4k-m\",\"selected_at_unix\":42}");
+        try file.writeAll("{\"active_model_id\":\"removed-model-q4k-m\",\"selected_at_unix\":42}");
     }
 
     // Read back — the selection is parseable but points to a removed model.
@@ -1070,7 +1070,7 @@ test "active selection roundtrip rejects non-catalog model on validate" {
     defer std.testing.allocator.free(data);
 
     const model_id = extractJsonStringField(data, "active_model_id").?;
-    try std.testing.expectEqualStrings("llama31-8b-q4k-m", model_id);
+    try std.testing.expectEqualStrings("removed-model-q4k-m", model_id);
     // The model is not in the catalog — this is the check that should happen at startup.
     try std.testing.expect(catalog.find(model_id) == null);
 }

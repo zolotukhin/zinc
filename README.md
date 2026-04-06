@@ -58,10 +58,10 @@ export RADV_PERFTEST=coop_matrix  # skip on macOS
 ./zig-out/bin/zinc model list
 
 # Download a model
-./zig-out/bin/zinc model pull llama31-8b-q4k-m
+./zig-out/bin/zinc model pull qwen35-2b-q4k-m
 
 # Run a prompt (--chat applies the model's chat template for instruct models)
-./zig-out/bin/zinc --model-id llama31-8b-q4k-m --prompt "Hello" --chat
+./zig-out/bin/zinc --model-id qwen35-2b-q4k-m --prompt "Hello" --chat
 
 # Or open the chat UI in your browser
 ./zig-out/bin/zinc chat
@@ -109,7 +109,6 @@ The table below lists the exact GGUFs ZINC currently supports end-to-end, not a 
 
 | Model | GGUF | AMD RDNA4 | Apple Silicon |
 |-------|------|-----------|---------------|
-| **Llama 3.1 8B Instruct** | [Q4_K_M](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF) | — | ~10 tok/s |
 | **Qwen3 8B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | — | ~8 tok/s |
 | **Qwen3.5 2B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s | ~17 tok/s (M1 Pro, 32 GB) |
 | **Qwen3.5 35B-A3B UD** | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s | **35.6 tok/s** (M4 Max, 64 GB) |

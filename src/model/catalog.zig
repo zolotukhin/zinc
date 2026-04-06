@@ -292,10 +292,8 @@ test "catalog IDs are unique" {
     }
 }
 
-test "find returns null for removed model families" {
-    // Llama was removed — ensure it cannot be found in the catalog.
-    try std.testing.expect(find("llama31-8b-q4k-m") == null);
-    try std.testing.expect(find("llama") == null);
+test "find returns null for unknown model" {
+    try std.testing.expect(find("nonexistent-model-id") == null);
 }
 
 test "find returns known entry" {

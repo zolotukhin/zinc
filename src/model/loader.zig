@@ -497,7 +497,6 @@ pub fn load(
 }
 
 test "parseArchitecture" {
-    try std.testing.expectEqual(Architecture.unknown, parseArchitecture("llama"));
     try std.testing.expectEqual(Architecture.qwen2, parseArchitecture("qwen2"));
     try std.testing.expectEqual(Architecture.qwen2_moe, parseArchitecture("qwen2moe"));
     try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));
