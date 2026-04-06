@@ -374,6 +374,7 @@ pub const Tokenizer = struct {
         return text[start..i];
     }
 
+    /// Encode text into token IDs using BPE merges. Caller owns returned slice.
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
         if (self.scores != null or self.merges.len == 0 or self.pretokenizer == .legacy) {
@@ -828,6 +829,7 @@ pub const Tokenizer = struct {
 
     const TemplateKind = enum { chatml, llama3, gemma, openai_moe, generic };
 
+    /// Return the detected chat template kind as a human-readable string (e.g. "chatml", "openai_moe").
     pub fn detectTemplateKindName(self: *const Tokenizer) []const u8 {
         return @tagName(self.detectTemplateKind());
     }

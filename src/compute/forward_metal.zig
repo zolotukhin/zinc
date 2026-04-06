@@ -38,6 +38,7 @@ pub const DecodeState = struct {
     }
 };
 
+/// Metrics from generateWithMetrics: prefill/decode token counts, timing, and throughput.
 pub const GenerateMetrics = struct {
     prefill_tokens: usize,
     prefill_ns: u64,
@@ -49,6 +50,7 @@ pub const GenerateMetrics = struct {
     eos_at_first_position: bool,
 };
 
+/// Output tokens and performance metrics from a generation run.
 pub const GenerateResult = struct {
     output_tokens: []u32,
     metrics: GenerateMetrics,
@@ -59,6 +61,7 @@ pub const GenerateResult = struct {
     }
 };
 
+/// Token sampling parameters: temperature, top-k, top-p, and repetition penalty.
 pub const SamplingParams = struct {
     temperature: f32 = 0.0,
     top_p: f32 = 1.0,
@@ -70,6 +73,7 @@ pub const SamplingParams = struct {
     }
 };
 
+/// Options for `InferenceEngine.init`: profiling, debug validation, KV cache, and dispatch tuning.
 pub const InitOptions = struct {
     profile_enabled: bool = false,
     debug_validation_enabled: bool = false,
@@ -252,6 +256,7 @@ const BarrierClass = enum(u8) {
     final,
 };
 
+/// Per-request profiling counters for dispatch, barrier, and timing breakdown.
 pub const RuntimeProfile = struct {
     decode_steps: u32 = 0,
     shared_cmd_steps: u32 = 0,
@@ -340,6 +345,7 @@ fn isFullAttentionLayer(cfg: ModelConfig, layer_idx: usize) bool {
     return ((@as(u32, @intCast(layer_idx)) + 1) % fullAttentionInterval(cfg)) == 0;
 }
 
+/// Return the number of full-attention layers in the model.
 pub fn attentionLayerCount(cfg: ModelConfig) u32 {
     const interval = fullAttentionInterval(cfg);
     return if (interval == 0) 0 else @divTrunc(cfg.n_layers, interval);
@@ -349,6 +355,7 @@ fn kvDim(config: ModelConfig) u32 {
     return config.n_kv_heads * config.head_dim;
 }
 
+/// Whether Q8 KV cache quantization should be enabled by default for this model.
 pub fn defaultKvCacheQ8Enabled(config: ModelConfig, debug_validation_enabled: bool) bool {
     if (debug_validation_enabled) return false;
     // Disable Q8 KV cache for gpt-oss — the OAI SwiGLU activation is sensitive to
@@ -358,6 +365,7 @@ pub fn defaultKvCacheQ8Enabled(config: ModelConfig, debug_validation_enabled: bo
     return kv_dim > 0 and config.head_dim > 0 and kv_dim % 32 == 0 and config.head_dim % 32 == 0;
 }
 
+/// Bytes consumed per token in the KV cache (depends on Q8 quantization setting).
 pub fn kvCacheBytesPerToken(config: ModelConfig, q8_enabled: bool) u64 {
     const kv_dim = @as(u64, kvDim(config));
     if (q8_enabled) {
@@ -843,6 +851,7 @@ pub const InferenceEngine = struct {
     q8_dual_tg_override: ?u32,
     request_profile: RuntimeProfile,
 
+    /// Initialize the Metal inference engine, allocating GPU buffers and compiling pipelines.
     pub fn init(
         model: *const metal_loader.Model,
         device: *const metal_device.MetalDevice,
@@ -1453,6 +1462,7 @@ pub const InferenceEngine = struct {
         return self;
     }
 
+    /// Release all GPU buffers, pipelines, and associated resources.
     pub fn deinit(self: *InferenceEngine) void {
         metal_buffer.freeBuffer(&self.hidden_buf);
         metal_buffer.freeBuffer(&self.residual_buf);
@@ -1644,6 +1654,8 @@ pub const InferenceEngine = struct {
         return max_idx;
     }
 
+    /// Sample next token using temperature, top-k, top-p, and repetition penalty.
+    /// Falls back to greedy if parameters are near-default or buffers are private.
     pub fn sample(self: *const InferenceEngine, history: []const u32, params: SamplingParams, random: std.Random) u32 {
         if (!params.requiresLogitsReadback()) return self.sampleGreedy();
         if (self.private_decode_buffers) return self.sampleGreedy();
@@ -1652,6 +1664,7 @@ pub const InferenceEngine = struct {
         return sampleFromLogits(logits, history, params, random);
     }
 
+    /// Reset position, profiling counters, and SSM state for a new request.
     pub fn resetRequestState(self: *InferenceEngine) !void {
         self.position = 0;
         self.request_profile.reset();
@@ -3150,6 +3163,7 @@ fn getScaleMinK4(j: usize, scales: []const u8) struct { sc: u8, m: u8 } {
     }
 }
 
+/// Dequantize one row of quantized weights to f32. Supports f32, f16, Q4_K, Q5_K, Q6_K, and Q8_0.
 pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, output: []f32) void {
     switch (quant_type) {
         .f32 => {
@@ -3400,6 +3414,7 @@ pub fn topKSoftmaxWeight(logits: []const f32, k: u32, out_ids: []u32, out_weight
     };
 }
 
+/// Select top-k experts by logit value, returning softmax-normalized probabilities.
 pub fn topKSoftmax(logits: []const f32, k: u32, out_ids: []u32, out_weights: []f32) void {
     const n = logits.len;
     var max_val: f32 = -std.math.inf(f32);
@@ -5108,6 +5123,7 @@ fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, i
 // Generate
 // ---------------------------------------------------------------------------
 
+/// Run prefill + autoregressive decode, returning generated tokens and timing metrics.
 pub fn generateWithMetrics(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
@@ -5196,6 +5212,7 @@ pub fn generateWithMetrics(
     };
 }
 
+/// Convenience wrapper around `generateWithMetrics` that logs timing and returns tokens.
 pub fn generate(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
