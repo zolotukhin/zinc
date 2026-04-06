@@ -71,10 +71,11 @@ const Model = struct {
 - Support split files (model-00001-of-00003.gguf)
 - Parse architecture metadata to build compute graph
 
-### 2.2 Supported Architectures (Phase 1)
-- LLaMA / Mistral / Qwen (standard transformer)
-- Qwen MoE (mixture of experts)
-- Mamba / Jamba (SSM hybrid)
+### 2.2 Supported Architectures
+- Qwen3 / Qwen3.5 (standard transformer + MoE variants)
+- Gemma 3 (GeGLU activation, Gemma-specific normalization)
+- OpenAI GPT-OSS (MoE with OAI SwiGLU, MXFP4 experts, attention sinks, ISWA, YaRN RoPE)
+- Mamba / Jamba (SSM hybrid — Vulkan only)
 
 ## 3. Request Scheduler
 

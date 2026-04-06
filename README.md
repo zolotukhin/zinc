@@ -109,6 +109,8 @@ The table below lists the exact GGUFs ZINC currently supports end-to-end, not a 
 
 | Model | GGUF | AMD RDNA4 | Apple Silicon |
 |-------|------|-----------|---------------|
+| **OpenAI GPT-OSS 20B** | [Q4_K_M](https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF) | — | ~7 tok/s |
+| **Gemma 3 12B** | [Q4_K_M](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | — | ~5 tok/s |
 | **Qwen3 8B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | — | ~8 tok/s |
 | **Qwen3.5 2B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s | ~17 tok/s (M1 Pro, 32 GB) |
 | **Qwen3.5 35B-A3B UD** | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s | **35.6 tok/s** (M4 Max, 64 GB) |
@@ -116,10 +118,10 @@ The table below lists the exact GGUFs ZINC currently supports end-to-end, not a 
 - **AMD**: Radeon AI PRO R9700 (RDNA4, 32 GB), `RADV_PERFTEST=coop_matrix`
 - **Apple Silicon**: current 35B reference box is `Mac Studio (Mac16,9)`, `Apple M4 Max`, `40-core GPU`, `64 GB unified memory`; the older 2B bring-up number was on `M1 Pro`, `32 GB`
 - All numbers: single-stream `ReleaseFast`; Apple 35B numbers use `bench-metal`, AMD numbers use the CLI decode path
-- Latest validation: 2026-04-02
+- Latest validation: 2026-04-05
 - Use `zinc model list --json` for machine-readable model metadata
 
-**Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, F16
+**Quantization formats**: Q4_K, Q5_K, Q6_K, Q8_0, Q5_0, MXFP4, F16, F32
 
 ## Quick Start
 

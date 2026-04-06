@@ -21,9 +21,16 @@ glslc --target-env=vulkan1.3 -O -o out.spv src/shaders/name.comp
 ## Tech Stack
 
 - **Zig 0.15.2+** — host code, build system
-- **GLSL 460** — compute shaders compiled to SPIR-V via `glslc`
-- **Vulkan 1.3** — GPU API (direct C ABI calls via `@cImport`)
+- **GLSL 460** — compute shaders compiled to SPIR-V via `glslc` (Vulkan backend)
+- **MSL** — Metal Shading Language compute shaders (Apple Silicon backend)
+- **Vulkan 1.3** — GPU API for AMD RDNA3/RDNA4
+- **Metal** — GPU API for Apple Silicon (M1–M5)
 - **GGUF** — model format (parsed natively in Zig)
+
+### Supported Architectures
+- **Qwen3 / Qwen3.5** — dense and MoE variants
+- **Gemma 3** — with GeGLU activation and Gemma-specific normalization
+- **OpenAI GPT-OSS** — MoE with OAI SwiGLU, MXFP4 experts, attention sinks, ISWA, YaRN RoPE
 
 ## Project Structure
 

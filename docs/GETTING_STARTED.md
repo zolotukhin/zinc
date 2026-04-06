@@ -16,7 +16,7 @@ ZINC currently targets:
 
 - **Linux** with AMD RDNA3/RDNA4 GPUs through Vulkan 1.3
 - **macOS** with Apple Silicon (M1 through M5) through Metal
-- **GGUF models** (Q4_K, Q5_K, Q6_K, Q8_0, F16 quantizations)
+- **GGUF models** (Q4_K, Q5_K, Q6_K, Q8_0, Q5_0, MXFP4, F16, F32 quantizations)
 
 ### Supported models
 
@@ -24,6 +24,8 @@ This list is intentionally narrow. It shows the exact GGUFs that have been valid
 
 | Model | Exact GGUF | Fits on |
 |------|------------|---------|
+| **OpenAI GPT-OSS 20B** | [openai_gpt-oss-20b-Q4_K_M.gguf](https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF) | 16+ GB unified (Apple Silicon) |
+| **Gemma 3 12B** | [gemma-3-12b-it-Q4_K_M.gguf](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | 16+ GB VRAM or unified |
 | **Qwen3 8B** | [Qwen3-8B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | 16+ GB VRAM or unified |
 | **Qwen3.5 2B** | [Qwen3.5-2B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 16+ GB VRAM or unified |
 | **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 24+ GB VRAM or unified |
