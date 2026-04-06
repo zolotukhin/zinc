@@ -281,3 +281,39 @@ test "chat UI derives the model link from the reported model name" {
     try expectNotContains(src, "setCurrentModel(selectedModel());");
     try expectNotContains(src, "href=\"https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF\"");
 }
+
+test "Q5_0 shader reads qh via byte assembly, not unaligned uint32 cast" {
+    // Regression guard: the Q5_0 block stores qh at byte offset 2 within a 22-byte block.
+    // Reading via *((device const uint*)&block[2]) silently returns wrong values on Apple
+    // Silicon for non-4-byte-aligned addresses. The fix reads bytes individually.
+    const src = @embedFile("shaders/metal/dmmv_q5_0.metal");
+    // Must NOT contain the broken unaligned cast pattern
+    try expectNotContains(src, "uint*)&block[2]");
+    try expectNotContains(src, "uint*)(block + 2)");
+    // Must contain the safe byte-by-byte assembly
+    try expectContains(src, "uint(block[2])");
+    try expectContains(src, "uint(block[3])");
+    try expectContains(src, "uint(block[4])");
+    try expectContains(src, "uint(block[5])");
+}
+
+test "Q5_0 dequantRow matches expected values for known block" {
+    const forward_metal = @import("compute/forward_metal.zig");
+    // Build a Q5_0 block: d=0.5, qh=0x0000FFFF (bits 0-15 set), qs all 0x53 (lo=3, hi=5)
+    // Element j (0-15): lo=3, bit_lo=1 → quant=3|(1<<4)=19 → value=0.5*(19-16)=1.5
+    // Element 16+j:     hi=5, bit_hi=0 → quant=5|(0<<4)=5  → value=0.5*(5-16)=-5.5
+    var block: [22]u8 = undefined;
+    const d_bits: u16 = @bitCast(@as(f16, 0.5));
+    block[0] = @truncate(d_bits);
+    block[1] = @truncate(d_bits >> 8);
+    block[2] = 0xFF; block[3] = 0xFF; block[4] = 0x00; block[5] = 0x00; // qh = 0x0000FFFF
+    @memset(block[6..22], 0x53); // lo=3, hi=5
+    var output: [32]f32 = undefined;
+    forward_metal.dequantRow(&block, 0, 32, .q5_0, &output);
+    for (0..16) |j| {
+        try std.testing.expectApproxEqAbs(@as(f32, 1.5), output[j], 0.001);
+    }
+    for (16..32) |j| {
+        try std.testing.expectApproxEqAbs(@as(f32, -5.5), output[j], 0.001);
+    }
+}
