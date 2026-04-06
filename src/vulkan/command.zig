@@ -256,6 +256,34 @@ pub const CommandBuffer = struct {
         );
     }
 
+    /// Insert a buffer-specific compute barrier (only synchronizes the given buffer).
+    /// May allow the driver to avoid flushing unrelated caches.
+    pub fn computeBufferBarrier(self: *const CommandBuffer, buffer: vk.c.VkBuffer, size: vk.c.VkDeviceSize) void {
+        const buf_barrier = vk.c.VkBufferMemoryBarrier{
+            .sType = vk.c.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
+            .srcQueueFamilyIndex = vk.c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = vk.c.VK_QUEUE_FAMILY_IGNORED,
+            .buffer = buffer,
+            .offset = 0,
+            .size = size,
+        };
+        vk.c.vkCmdPipelineBarrier(
+            self.handle,
+            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0,
+            null,
+            1,
+            &buf_barrier,
+            0,
+            null,
+        );
+    }
+
     /// Insert a compute-to-compute pipeline barrier (shader write → shader read).
     /// @param self Command buffer currently being recorded.
     /// @note Uses a coarse global memory barrier; prefer buffer barriers for fine-grained sync.

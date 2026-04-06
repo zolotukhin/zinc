@@ -2031,7 +2031,7 @@ pub const InferenceEngine = struct {
                 const router_tensor = self.findLayerTensor(layer, "ffn_gate_inp.weight") orelse return error.TensorNotFound;
                 const moe_router_phase = self.beginProfilePhase();
                 try self.dispatchDmmv(router_tensor, self.ffn_norm_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
-                self.decode_cmd.computeBarrier();
+                self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
                 self.endProfilePhase(.moe_router, moe_router_phase);
 
                 const n_used = config.n_experts_used;
@@ -2086,7 +2086,7 @@ pub const InferenceEngine = struct {
                         );
                         try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, config.n_experts, n_used);
                     }
-                    self.decode_cmd.computeBarrier();
+                    self.decode_cmd.computeBufferBarrier(self.router_output_buf.handle, self.router_output_buf.size);
                     self.endProfilePhase(.moe_topk, moe_topk_phase);
 
                     // gate DMMV: ALL experts at once (Y=n_used workgroups)
