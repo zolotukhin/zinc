@@ -69,27 +69,31 @@ Commit `ac988d4`: Changed SSM guard from `!has_delta_net` to shader-availability
 
 **Results**: Qwen3.5-35B 11→38.8 tok/s (3.5×), Qwen3.5-2B 33.8→138.6 tok/s (4.1×), BW 2.4%→21.8%.
 
-### Phase 1: Kernel-Level Optimizations (38 → 55-65 tok/s) — 1-2 weeks
+### Phase 1: Kernel-Level Optimizations (38 → 48+ tok/s) — 🔄 IN PROGRESS
 
-**1a. Q4_K MoE DMMV — packed reads**
+**1a. Q4_K MoE DMMV — packed reads** ✅ DONE
 
-Current `dmmv_q4k_moe.comp` uses `uint8_t` byte access. Each thread reads individual bytes from scattered addresses — terrible for coalescing. The non-MoE `dmmv_q4k.comp` uses packed `uint` reads.
+Rewrote `dmmv_q4k_moe.comp` from `uint8_t` byte access to `uint` packed reads with vec4 dot products. Each Q4_K block (144 bytes) read as 36 uint32 words instead of 144 individual bytes.
 
-Fix: Rewrite MoE shader to load Q4_K blocks as 36 `uint32` words instead of 144 individual bytes.
+**Result**: Marginal improvement (~0.3 tok/s). RADV driver was already coalescing byte reads. The real bottleneck was elsewhere.
 
-Expected: 1-3 ms saved across 40 MoE layers.
+**1a′. F32 DMMV shared memory for input vector** �� DONE
+
+The f32 DMMV shader (used by MoE router, 256×2048) had no shared memory — each of 256 threads read the full 8KB input vector independently from global memory. Added cooperative shared memory loading, eliminating 2MB of redundant reads per layer.
+
+**Result**: Router DMMV 8.89→2.40 ms (-73%). Total GPU decode 38.7→21.2 ms. **39→48 tok/s (+23%)**. Unexpectedly, all other phases also improved due to reduced cache pressure.
 
 **1b. Fuse router DMMV + softmax_topk**
 
 Router output (256 floats) fits in shared memory. A fused kernel computes the 256 dot products and immediately selects top-8, eliminating one barrier + dispatch per layer.
 
-Expected: ~3-4 ms saved across 40 layers.
+Expected: ~2 ms saved across 40 layers (topk is now 2.08 ms).
 
 **1c. Fuse shared expert gate+up**
 
-Both read the same input (`ffn_norm_buf`). A fused kernel reads the input once and writes both gate and up outputs.
+Both read the same input (`ffn_norm_buf`). A fused kernel reads the input once and writes both outputs, halving the input bandwidth.
 
-Expected: ~1-2 ms saved.
+Expected: ~1 ms saved (shared proj is now 2.18 ms).
 
 ### Phase 2: Infrastructure (55 → 70-80 tok/s) — 1-2 weeks
 
@@ -134,7 +138,8 @@ RDNA4 supports IDP. Once RADV+glslc compatibility is confirmed, use it for Q4_K/
 | Phase | Target | Key change | Status |
 |-------|--------|------------|--------|
 | Phase 0 | 35-40 tok/s | GPU SSM enabled | ✅ 38.8 tok/s |
-| Phase 1 | 55-65 tok/s | Packed MoE DMMV, fused router+topk | 🔄 |
+| Phase 1a | 48+ tok/s | F32 shared memory, packed MoE DMMV | ✅ 48.2 tok/s |
+| Phase 1b-c | 55-65 tok/s | Fused router+topk, fused gate+up | 🔄 |
 | Phase 2 | 70-80 tok/s | Pre-alloc descriptors, buffer barriers | |
 | Phase 3 | 100+ tok/s | Fused MoE, delta-net occupancy, multi-queue | |
 
