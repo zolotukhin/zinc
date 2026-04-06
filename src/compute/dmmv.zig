@@ -72,6 +72,8 @@ pub const DmmvDispatch = struct {
     pipeline_q5k_moe: ?Pipeline,
     /// MoE Q6K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q6k_moe: ?Pipeline,
+    /// Fused router DMMV + top-k pipeline (4 bindings: weight, x, logits, output), or null.
+    pipeline_router_topk_f32: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -217,6 +219,14 @@ pub const DmmvDispatch = struct {
             log.info("MoE DMMV pipelines loaded — GPU expert dispatch enabled (no readback)", .{});
         }
 
+        // Fused router DMMV + top-k pipeline: 4 bindings (weight, x, logits, output)
+        const RouterTopkPush = extern struct { M: u32, K: u32, a_offset: u32, x_offset: u32, top_k: u32 };
+        const rt_path = std.fmt.bufPrint(&path_buf, "{s}/router_topk_f32.spv", .{shader_dir}) catch unreachable;
+        const pipeline_router_topk_f32 = pipeline_mod.createFromSpirv(instance, rt_path, 4, @sizeOf(RouterTopkPush), &spec_k, allocator) catch |err| blk: {
+            log.warn("router_topk_f32 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q5k = pipeline_q5k,
@@ -230,6 +240,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
             .pipeline_q6k_moe = pipeline_q6k_moe,
+            .pipeline_router_topk_f32 = pipeline_router_topk_f32,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -449,6 +460,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
+        if (self.pipeline_router_topk_f32) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

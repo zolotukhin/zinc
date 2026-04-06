@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_q5k_moe",
         "dmmv_q6k_moe",
         "moe_weighted_acc",
+        "router_topk_f32",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;
