@@ -1,9 +1,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Q5_0 DMMV kernel — multiple threads per row with SIMD reduction.
-// Uses 32 threads per row (1 simdgroup), each thread handles a subset of blocks.
-// This dramatically improves float32 accumulation precision vs single-thread.
+// Q5_0 DMMV kernel — ported from llama.cpp's optimized approach.
+// Key optimization: factor out the 'd' scale and '-16' bias per block,
+// reducing float32 multiplications from 64 to ~36 per block and
+// improving accumulation precision.
 //
 // Q5_0 block: 32 elements, 22 bytes
 //   [0..1]  d    (float16) — scale
@@ -43,18 +44,22 @@ kernel void main0(
         device const uchar* block = src + b * bpb;
 
         // Read scale (fp16 at bytes 0-1)
-        const half d = *((device const half*)block);
+        const float d = float(*((device const half*)block));
 
-        // Read 5th-bit mask (uint32 at bytes 2-5)
-        const uint qh = *((device const uint*)&block[2]);
+        // Read 5th-bit mask (uint32 at bytes 2-5) — use byte reads for safe alignment
+        const uint qh = uint(block[2]) | (uint(block[3]) << 8) | (uint(block[4]) << 16) | (uint(block[5]) << 24);
 
         // Read lower nibbles (16 bytes at bytes 6-21)
         device const uchar* qs = block + 6;
 
         const uint base = b * 32;
 
-        // Accumulate all 32 elements of this block
-        float block_sum = 0.0f;
+        // Accumulate raw (unsigned) quant * input products and input sum separately.
+        // This factors out the -16 bias: d * (sum_qx - 16 * sum_x)
+        // Reduces per-element float muls and improves precision.
+        float sum_qx = 0.0f;
+        float sum_x = 0.0f;
+
         for (uint j = 0; j < 16; j++) {
             const uchar q_byte = qs[j];
             const uint lo = q_byte & 0x0F;
@@ -63,13 +68,19 @@ kernel void main0(
             const uint bit_lo = (qh >> j)        & 1;
             const uint bit_hi = (qh >> (j + 16)) & 1;
 
-            const float v0 = float(d) * float(int(lo | (bit_lo << 4)) - 16);
-            const float v1 = float(d) * float(int(hi | (bit_hi << 4)) - 16);
+            // Unsigned quant values (0-31)
+            const uint q0 = lo | (bit_lo << 4);
+            const uint q1 = hi | (bit_hi << 4);
 
-            block_sum += v0 * x[base + j]      +
-                         v1 * x[base + 16 + j];
+            const float x0 = x[base + j];
+            const float x1 = x[base + 16 + j];
+
+            sum_qx += float(q0) * x0 + float(q1) * x1;
+            sum_x  += x0 + x1;
         }
-        sum += block_sum;
+
+        // Apply scale and bias: d * (sum_qx - 16 * sum_x)
+        sum += d * (sum_qx - 16.0f * sum_x);
     }
 
     // SIMD reduction across 32 threads
