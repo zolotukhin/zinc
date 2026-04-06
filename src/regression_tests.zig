@@ -222,6 +222,19 @@ test "RoPE shader supports freq buffer path for IMROPE" {
     try expectContains(src, "inv_freq[i]");
 }
 
+test "F32 DMMV uses K-parallel reduction via subgroupAdd" {
+    // Performance: F32 DMMV must use K-parallel (1 row per workgroup, 64 threads
+    // collaborate via subgroupAdd) instead of M-parallel (64 rows per workgroup,
+    // 1 thread per row). K-parallel gives M workgroups instead of ceil(M/64),
+    // dramatically improving GPU utilization for small M (MoE router, M=256).
+    const src = @embedFile("shaders/dmmv_f32.comp");
+    try expectContains(src, "subgroupAdd");
+    try expectContains(src, "shared float s_x[SPEC_K]");
+    try expectContains(src, "row = gl_WorkGroupID.x");
+    // Must NOT use gl_GlobalInvocationID (old M-parallel pattern)
+    try expectNotContains(src, "gl_GlobalInvocationID");
+}
+
 test "Q4_K MoE shader uses packed uint32 reads, not byte access" {
     // Performance: Q4_K MoE DMMV must use uint32 packed reads (36 u32 per block)
     // instead of uint8_t byte access (144 individual reads). The packed path

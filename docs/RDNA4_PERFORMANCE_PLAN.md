@@ -79,9 +79,13 @@ Rewrote `dmmv_q4k_moe.comp` from `uint8_t` byte access to `uint` packed reads wi
 
 **1a′. F32 DMMV shared memory for input vector** �� DONE
 
-The f32 DMMV shader (used by MoE router, 256×2048) had no shared memory — each of 256 threads read the full 8KB input vector independently from global memory. Added cooperative shared memory loading, eliminating 2MB of redundant reads per layer.
+Two improvements to the f32 DMMV shader (MoE router, 256×2048):
 
-**Result**: Router DMMV 8.89→2.40 ms (-73%). Total GPU decode 38.7→21.2 ms. **39→48 tok/s (+23%)**. Unexpectedly, all other phases also improved due to reduced cache pressure.
+1. **Shared memory for x vector**: Eliminated redundant global reads (256 threads × 8KB = 2MB wasted per dispatch). Router DMMV 8.89→2.40 ms (-73%).
+
+2. **K-parallel via subgroupAdd**: Changed from M-parallel (64 rows/WG, 4 WGs total) to K-parallel (1 row/WG, M WGs, 64 threads collaborate via subgroupAdd). Router 2.40→0.87 ms (-64%).
+
+**Result**: Router 8.89→0.87 ms (-90%), shared expert 7.73→0.90 ms (-88%). GPU decode 38.7→18.8 ms. **39→55 tok/s (+41%)**.
 
 **1b. Fuse router DMMV + softmax_topk**
 
@@ -139,7 +143,8 @@ RDNA4 supports IDP. Once RADV+glslc compatibility is confirmed, use it for Q4_K/
 |-------|--------|------------|--------|
 | Phase 0 | 35-40 tok/s | GPU SSM enabled | ✅ 38.8 tok/s |
 | Phase 1a | 48+ tok/s | F32 shared memory, packed MoE DMMV | ✅ 48.2 tok/s |
-| Phase 1b-c | 55-65 tok/s | Fused router+topk, fused gate+up | 🔄 |
+| Phase 1a′ | 55+ tok/s | F32 K-parallel via subgroupAdd | ✅ 55.1 tok/s |
+| Phase 1b-c | 60-65 tok/s | Fused router+topk, fused gate+up | 🔄 |
 | Phase 2 | 70-80 tok/s | Pre-alloc descriptors, buffer barriers | |
 | Phase 3 | 100+ tok/s | Fused MoE, delta-net occupancy, multi-queue | |
 

@@ -191,14 +191,43 @@ void main() {
 
 The shared expert projection improvement was unexpected — it uses Q8_0, not f32. But by cutting the f32 router's cache footprint in half, we reduced contention in the L2 cache for every other dispatch on the GPU. This cascading effect across all phases was larger than the direct savings.
 
-### Current breakdown at 48 tok/s (~21 ms/tok)
+### 1a″. K-parallel reduction: M workgroups via subgroupAdd (another major win)
+
+The shared memory fix cut redundant reads, but the shader still had only `ceil(M/64) = 4` workgroups — one per 64 output rows. On a 64-CU GPU, this meant 93.75% of CUs were idle during router DMMV.
+
+The fix was radical: instead of each thread computing one full row's dot product (M-parallel), have all 64 threads in a workgroup collaborate on a SINGLE row's dot product (K-parallel). Each thread handles a strided slice of the K dimension, then `subgroupAdd` reduces the partial sums:
+
+```glsl
+uint row = gl_WorkGroupID.x;    // 1 row per workgroup, M workgroups total
+
+float partial = 0.0;
+for (uint j = tid; j < K; j += 64) {  // stride across K
+    partial += w[w_base + j] * s_x[j];
+}
+float sum = subgroupAdd(partial);      // wave64 = full workgroup reduction
+```
+
+This gives M workgroups instead of ceil(M/64). For the router (M=256): 256 workgroups = 4 wavefronts per CU. Memory accesses are perfectly coalesced — adjacent threads read adjacent weight elements within the same row.
+
+**Results:**
+
+| Phase | Shared-memory only | + K-parallel | Change |
+|-------|--------------------|--------------| -------|
+| MoE router | 2.40 ms | 0.87 ms | **-64%** |
+| Shared expert proj | 2.18 ms | 0.90 ms | **-59%** |
+| GPU total | 21.2 ms | 18.8 ms | -11% |
+| **Overall** | **48 tok/s** | **55 tok/s** | **+14%** |
+
+The combined effect of shared memory + K-parallel: router DMMV dropped from 8.89 ms to 0.87 ms — a **90% reduction** from a 30-line shader rewrite. The shared expert projections (which are Q8_0, not f32) also benefited from reduced L2 cache contention.
+
+### Current breakdown at 55 tok/s (~18 ms/tok)
 
 | Phase | Time | % of Token |
 |-------|------|-----------|
-| SSM (delta-net + proj + conv + norm) | 5.71 ms | 27% |
-| MoE (router + topk + gate/up + down + acc) | 7.16 ms | 34% |
-| Attention | 3.39 ms | 16% |
-| Shared expert | 2.85 ms | 13% |
+| SSM (delta-net + proj + conv + norm) | 5.82 ms | 31% |
+| MoE (router + topk + gate/up + down + acc) | 5.74 ms | 31% |
+| Attention | 3.45 ms | 18% |
+| Shared expert | 1.58 ms | 8% |
 | Tail (norm + LM head + argmax) | 0.90 ms | 4% |
 | CPU overhead | 0.60 ms | 3% |
 
@@ -208,8 +237,9 @@ The shared expert projection improvement was unexpected — it uses Q8_0, not f3
 |-----------|-------|-----|--------|
 | Starting point | 11 | 2.4% | ✅ Bugs fixed |
 | Phase 0: GPU SSM | 39 | 21.8% | ✅ Done |
-| Phase 1a: Shared memory + packed DMMV | 48 | 27% | ✅ Done |
-| Phase 1b-c: Kernel fusion | 55-65 | 30-36% | 🔄 In progress |
+| Phase 1a: F32 shared memory | 48 | 27% | ✅ Done |
+| Phase 1a″: K-parallel subgroupAdd | 55 | 31% | ✅ Done |
+| Phase 1b-c: Kernel fusion | 60-65 | 33-36% | 🔄 Next |
 | Phase 2: Infrastructure | 70-80 | 39-44% | Planned |
 | Phase 3: Advanced | 100+ | 55%+ | Planned |
 | llama.cpp reference | 102 | ~23%* | Target |
@@ -229,6 +259,8 @@ The shared expert projection improvement was unexpected — it uses Q8_0, not f3
 5. **Profile before you optimize.** The Q4_K packed reads were the "obvious" optimization — the MoE expert DMMV was supposedly the bottleneck. Profiling revealed the real bottleneck was the trivial f32 router shader, where a missing shared memory declaration wasted more bandwidth than the Q4_K byte access pattern.
 
 6. **Cache effects cascade.** Fixing one shader's memory access pattern improved performance across every other dispatch on the GPU. The L2 cache is a shared resource — reducing pressure in one kernel directly benefits all others running on adjacent CUs.
+
+7. **GPU utilization matters more than instruction efficiency.** The K-parallel shader does MORE instructions per element than M-parallel (subgroupAdd + strided access vs. sequential access). But with 64× more workgroups, the GPU's CUs are actually occupied, and the memory subsystem can hide latency. On RDNA4, going from 4 to 256 wavefronts outweighs any instruction overhead.
 
 ---
 
