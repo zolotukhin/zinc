@@ -135,7 +135,7 @@ pub const DmmvDispatch = struct {
         };
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &spec_k, wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

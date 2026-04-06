@@ -37,27 +37,23 @@ layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];  };
 const uint Q8_0_BLOCK_SIZE = 32;   // elements per block
 const uint Q8_0_BYTES      = 34;   // bytes per block
 
-// Shared memory for cross-subgroup reduction (needed when subgroup size < 64)
+// Shared memory for input vector caching and cross-subgroup reduction
+shared float s_x[SPEC_K];
 shared float s_sum0[2];  // max 2 subgroups for workgroup size 64
 shared float s_sum1[2];
 
-float dot_q8_block(const uint qs_off, const uint x_base) {
+float dot_q8_block(const uint qs_off, const uint sx_base) {
     float block_sum = 0.0;
     for (uint i = 0u; i < 8u; i++) {
         const uint q_off = qs_off + i * 4u;
-        const uint x_off = x_base + i * 4u;
+        const uint x_off = sx_base + i * 4u;
         const ivec4 qv = ivec4(
             int(int8_t(a_data[q_off + 0u])),
             int(int8_t(a_data[q_off + 1u])),
             int(int8_t(a_data[q_off + 2u])),
             int(int8_t(a_data[q_off + 3u]))
         );
-        const vec4 xv = vec4(
-            x_data[x_off + 0u],
-            x_data[x_off + 1u],
-            x_data[x_off + 2u],
-            x_data[x_off + 3u]
-        );
+        const vec4 xv = vec4(s_x[x_off], s_x[x_off + 1u], s_x[x_off + 2u], s_x[x_off + 3u]);
         block_sum += dot(vec4(qv), xv);
     }
     return block_sum;
@@ -70,6 +66,13 @@ void main() {
     uint row1 = row0 + 1u;
     uint tid = gl_LocalInvocationID.x;  // 0..63
 
+    // Cooperatively load input vector into shared memory
+    uint x_global = x_offset / 4u;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x_data[x_global + i];
+    }
+    barrier();
+
     // Number of Q8_0 blocks per row
     uint blocks_per_row = K / Q8_0_BLOCK_SIZE;
 
@@ -78,8 +81,8 @@ void main() {
 
     // Each thread processes blocks in a strided pattern: tid, tid+64, tid+128, ...
     for (uint blk = tid; blk < blocks_per_row; blk += 64u) {
-        // x vector elements for this block
-        uint x_base = x_offset / 4u + blk * Q8_0_BLOCK_SIZE;
+        // x vector elements for this block (from shared memory)
+        uint x_base = blk * Q8_0_BLOCK_SIZE;
 
         // --- Row 0 ---
         if (row0 < M) {
