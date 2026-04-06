@@ -1,7 +1,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Q5_0 DMMV kernel — one thread per output row.
+// Q5_0 DMMV kernel — multiple threads per row with SIMD reduction.
+// Uses 32 threads per row (1 simdgroup), each thread handles a subset of blocks.
+// This dramatically improves float32 accumulation precision vs single-thread.
+//
 // Q5_0 block: 32 elements, 22 bytes
 //   [0..1]  d    (float16) — scale
 //   [2..5]  qh   (4 bytes) — 5th bit for each of 32 elements
@@ -20,18 +23,23 @@ kernel void main0(
     device const uchar* W [[buffer(1)]],
     device const float* X [[buffer(2)]],
     device float* Y [[buffer(3)]],
-    uint gid [[thread_position_in_grid]]
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_index_in_simdgroup]],
+    uint sgid [[simdgroup_index_in_threadgroup]]
 ) {
-    if (gid >= p.M) return;
+    // 32 threads per simdgroup, 2 simdgroups per threadgroup = 2 rows per workgroup
+    const uint row = tgid * 2 + sgid;
+    if (row >= p.M) return;
 
     const uint nb = p.K / 32;      // blocks per row
     const uint bpb = 22;            // bytes per Q5_0 block
-    device const uchar* src = W + p.a_offset + gid * nb * bpb;
+    device const uchar* src = W + p.a_offset + row * nb * bpb;
     device const float* x = X + (p.x_offset / 4);
 
     float sum = 0.0f;
 
-    for (uint b = 0; b < nb; b++) {
+    // Each of 32 threads handles blocks [tid, tid+32, tid+64, ...]
+    for (uint b = tid; b < nb; b += 32) {
         device const uchar* block = src + b * bpb;
 
         // Read scale (fp16 at bytes 0-1)
@@ -45,24 +53,30 @@ kernel void main0(
 
         const uint base = b * 32;
 
-        // Elements 0-15: low nibble of bytes 0-15 + qh even bits
-        // Elements 16-31: high nibble of bytes 0-15 + qh odd bits
+        // Accumulate all 32 elements of this block
+        float block_sum = 0.0f;
         for (uint j = 0; j < 16; j++) {
             const uchar q_byte = qs[j];
             const uint lo = q_byte & 0x0F;
             const uint hi = q_byte >> 4;
 
-            // qh bits 0-15 → elements 0-15 (low nibble), bits 16-31 → elements 16-31 (high nibble)
             const uint bit_lo = (qh >> j)        & 1;
             const uint bit_hi = (qh >> (j + 16)) & 1;
 
             const float v0 = float(d) * float(int(lo | (bit_lo << 4)) - 16);
             const float v1 = float(d) * float(int(hi | (bit_hi << 4)) - 16);
 
-            sum += v0 * x[base + j]      +
-                   v1 * x[base + 16 + j];
+            block_sum += v0 * x[base + j]      +
+                         v1 * x[base + 16 + j];
         }
+        sum += block_sum;
     }
 
-    Y[(p.y_offset / 4) + gid] = sum;
+    // SIMD reduction across 32 threads
+    sum = simd_sum(sum);
+
+    // Thread 0 writes the result
+    if (tid == 0) {
+        Y[(p.y_offset / 4) + row] = sum;
+    }
 }
