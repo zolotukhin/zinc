@@ -1,5 +1,13 @@
 #version 460
+// ZINC — F32 DMMV with shared memory for input vector caching.
+// Each workgroup loads x once into shared memory, eliminating redundant
+// global reads (M threads × K reads → 1 cooperative load of K elements).
+// Used by MoE router (256 × 2048 f32) where low workgroup count makes
+// redundant x reads the dominant memory cost.
+
 layout(local_size_x = 64) in;
+
+layout(constant_id = 1) const uint SPEC_K = 4096;
 
 layout(set = 0, binding = 0) readonly buffer Weight { float w[]; };
 layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
@@ -13,17 +21,30 @@ layout(push_constant) uniform PC {
     uint y_offset;  // byte offset into output buffer
 };
 
+shared float s_x[SPEC_K];
+
 void main() {
-    uint row = gl_GlobalInvocationID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    // Cooperatively load input vector into shared memory
+    uint x_base = x_offset / 4;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x[x_base + i];
+    }
+    barrier();
+
+    uint row = gl_WorkGroupID.x * 64u + tid;
     if (row >= M) return;
 
-    uint w_base = a_offset / 4 + row * K;  // float offset
-    uint x_base = x_offset / 4;
+    uint w_base = a_offset / 4 + row * K;
     uint y_base = y_offset / 4;
 
     float sum = 0.0;
-    for (uint j = 0; j < K; j++) {
-        sum += w[w_base + j] * x[x_base + j];
+    for (uint j = 0u; j < K; j += 4u) {
+        sum += w[w_base + j]      * s_x[j]
+             + w[w_base + j + 1u] * s_x[j + 1u]
+             + w[w_base + j + 2u] * s_x[j + 2u]
+             + w[w_base + j + 3u] * s_x[j + 3u];
     }
     y[y_base + row] = sum;
 }

@@ -159,7 +159,7 @@ pub const DmmvDispatch = struct {
         };
 
         const f32_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f32.spv", .{shader_dir}) catch unreachable;
-        const pipeline_f32 = pipeline_mod.createFromSpirv(instance, f32_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_f32 = pipeline_mod.createFromSpirv(instance, f32_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
             log.warn("F32 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
