@@ -1909,13 +1909,16 @@ pub const InferenceEngine = struct {
                 }
 
                 // Attention residual: hidden_buf += o_proj_buf
-                {
+                // If fused norm+residual is available, defer the add to the FFN norm dispatch.
+                // Otherwise, do the separate add + barrier.
+                if (self.elementwise.pipeline_rms_norm_residual == null) {
                     const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
                     const ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet2(ds, self.hidden_buf.handle, hidden_size, self.o_proj_buf.handle, hidden_size);
                     try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
+                    self.decode_cmd.computeBarrier();
                 }
-                self.decode_cmd.computeBarrier();
+                // When fused: the residual add is done inside the FFN norm dispatch below
 
                 // --- Mid-layer diagnostic: o_proj RMS at attention layers (BOS only) ---
                 // Single readback per attention layer — reads o_proj_buf (before residual add)
@@ -2017,7 +2020,16 @@ pub const InferenceEngine = struct {
             // that use a single norm between attention and FFN (e.g. Qwen3.5).
             const ffn_norm_tensor = self.findLayerTensor(layer, "ffn_norm.weight") orelse
                 self.findLayerTensor(layer, "post_attention_norm.weight") orelse return error.TensorNotFound;
-            {
+            if (self.elementwise.pipeline_rms_norm_residual != null) {
+                // Fused residual + norm: hidden_buf += residual; ffn_norm = norm(hidden_buf)
+                // The residual source is o_proj_buf (attention) or the SSM output.
+                // This eliminates 1 dispatch + 1 barrier per layer transition.
+                const residual_buf = self.o_proj_buf; // attention/SSM output
+                const pip = &(self.elementwise.pipeline_rms_norm_residual orelse unreachable);
+                const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                self.writeDescSet4(ds, self.hidden_buf.handle, hidden_size, ffn_norm_tensor.gpu_buffer.handle, ffn_norm_tensor.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, residual_buf.handle, hidden_size);
+                try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, 1, rms_norm_eps);
+            } else {
                 const pip = &(self.elementwise.pipeline_rms_norm orelse return error.ShaderNotLoaded);
                 const ds = try self.allocDescSet(pip.descriptor_set_layout);
                 self.writeDescSet3(ds, self.hidden_buf.handle, hidden_size, ffn_norm_tensor.gpu_buffer.handle, ffn_norm_tensor.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size);
@@ -3011,13 +3023,14 @@ pub const InferenceEngine = struct {
         self.decode_cmd.computeBarrier();
 
         // Residual: hidden_buf += o_proj_buf
-        {
+        // Skip when fused norm+residual is available (deferred to FFN norm dispatch)
+        if (self.elementwise.pipeline_rms_norm_residual == null) {
             const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
             self.writeDescSet2(ds, self.hidden_buf.handle, hidden_size, self.o_proj_buf.handle, hidden_size);
             try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
+            self.decode_cmd.computeBarrier();
         }
-        self.decode_cmd.computeBarrier();
     }
 
     /// Run one SSM layer entirely on GPU via compute shaders (Phase 3c).
@@ -3211,13 +3224,14 @@ pub const InferenceEngine = struct {
         self.decode_cmd.computeBarrier();
 
         // Residual: hidden_buf += o_proj_buf
-        {
+        // Skip when fused norm+residual is available (deferred to FFN norm dispatch)
+        if (self.elementwise.pipeline_rms_norm_residual == null) {
             const pip = &(self.elementwise.pipeline_scale_acc orelse return error.ShaderNotLoaded);
             const ds = try self.allocDescSet(pip.descriptor_set_layout);
             self.writeDescSet2(ds, self.hidden_buf.handle, hidden_size, self.o_proj_buf.handle, hidden_size);
             try self.elementwise.recordScaleAcc(&self.decode_cmd, ds, hidden_dim, 1.0);
+            self.decode_cmd.computeBarrier();
         }
-        self.decode_cmd.computeBarrier();
         self.endProfilePhase(.ssm_out, ssm_out_phase);
     }
 

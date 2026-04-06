@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
         "tq_quantize_values",
         "tq_attention_scores",
         "tq_decompress_values",
+        "rms_norm_residual",
         "dmmv_q4k_moe",
         "dmmv_q5k_moe",
         "dmmv_q6k_moe",

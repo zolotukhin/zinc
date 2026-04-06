@@ -122,6 +122,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_ssm_delta_net: ?Pipeline,
     /// SSM GATED NORM pipeline, or null.
     pipeline_ssm_gated_norm: ?Pipeline,
+    /// Fused residual+RMS norm pipeline (4 bindings: x, weight, y, residual), or null.
+    pipeline_rms_norm_residual: ?Pipeline,
     /// SOFTMAX TOPK pipeline, or null.
     pipeline_softmax_topk: ?Pipeline,
     /// SIGMOID SCALE ACC pipeline: a[i] += sigmoid(c[0]) * b[i], 3 bindings.
@@ -176,6 +178,13 @@ pub const ElementwiseDispatch = struct {
         const rms_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_mul.spv", .{shader_dir}) catch unreachable;
         const pipeline_rms_norm = pipeline_mod.createFromSpirvWithOptions(instance, rms_path, 3, @sizeOf(RmsNormPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("rms_norm_mul shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Fused residual add + RMS norm: 4 bindings (x, weight, y, residual)
+        const rms_res_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_residual.spv", .{shader_dir}) catch unreachable;
+        const pipeline_rms_norm_residual = pipeline_mod.createFromSpirvWithOptions(instance, rms_res_path, 4, @sizeOf(RmsNormPush), &.{}, wave64_options, allocator) catch |err| blk: {
+            log.warn("rms_norm_residual shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -280,6 +289,7 @@ pub const ElementwiseDispatch = struct {
 
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
+            .pipeline_rms_norm_residual = pipeline_rms_norm_residual,
             .pipeline_swiglu = pipeline_swiglu,
             .pipeline_geglu = pipeline_geglu,
             .pipeline_rope = pipeline_rope,
@@ -572,6 +582,7 @@ pub const ElementwiseDispatch = struct {
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *ElementwiseDispatch) void {
         if (self.pipeline_rms_norm) |*p| p.deinit();
+        if (self.pipeline_rms_norm_residual) |*p| p.deinit();
         if (self.pipeline_swiglu) |*p| p.deinit();
         if (self.pipeline_geglu) |*p| p.deinit();
         if (self.pipeline_rope) |*p| p.deinit();
