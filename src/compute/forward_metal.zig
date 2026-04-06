@@ -351,6 +351,9 @@ fn kvDim(config: ModelConfig) u32 {
 
 pub fn defaultKvCacheQ8Enabled(config: ModelConfig, debug_validation_enabled: bool) bool {
     if (debug_validation_enabled) return false;
+    // Disable Q8 KV cache for gpt-oss — the OAI SwiGLU activation is sensitive to
+    // quantization noise in the KV cache, causing degenerate output.
+    if (config.architecture == .gpt_oss) return false;
     const kv_dim = kvDim(config);
     return kv_dim > 0 and config.head_dim > 0 and kv_dim % 32 == 0 and config.head_dim % 32 == 0;
 }
