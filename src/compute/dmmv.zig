@@ -366,6 +366,7 @@ pub const DmmvDispatch = struct {
                 break :blk (M + 1) / 2; // fallback to K-parallel
             },
             .q8_0, .f16 => (M + 1) / 2,
+            .f32 => M, // K-parallel: 64 threads per row via subgroupAdd
             else => (M + 63) / 64,
         };
 

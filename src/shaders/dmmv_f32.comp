@@ -1,9 +1,15 @@
 #version 460
-// ZINC — F32 DMMV with shared memory for input vector caching.
-// Each workgroup loads x once into shared memory, eliminating redundant
-// global reads (M threads × K reads → 1 cooperative load of K elements).
-// Used by MoE router (256 × 2048 f32) where low workgroup count makes
-// redundant x reads the dominant memory cost.
+// ZINC — F32 DMMV with K-parallel reduction.
+// Each workgroup of 64 threads computes ONE output row cooperatively:
+// threads stripe across K columns, then reduce via subgroupAdd.
+// This gives M workgroups (one per row) instead of ceil(M/64),
+// dramatically improving GPU utilization for small M (e.g. MoE router
+// with M=256 gets 256 workgroups = 4 per CU on RDNA4's 64 CUs).
+//
+// Memory access is perfectly coalesced: adjacent threads read adjacent
+// weight elements within the same row.
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
 
@@ -25,6 +31,8 @@ shared float s_x[SPEC_K];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.x;
+    if (row >= M) return;
 
     // Cooperatively load input vector into shared memory
     uint x_base = x_offset / 4;
@@ -33,18 +41,18 @@ void main() {
     }
     barrier();
 
-    uint row = gl_WorkGroupID.x * 64u + tid;
-    if (row >= M) return;
-
+    // K-parallel dot product: each thread handles K/64 strided elements
+    // Adjacent threads read adjacent memory addresses → perfect coalescing
     uint w_base = a_offset / 4 + row * K;
-    uint y_base = y_offset / 4;
-
-    float sum = 0.0;
-    for (uint j = 0u; j < K; j += 4u) {
-        sum += w[w_base + j]      * s_x[j]
-             + w[w_base + j + 1u] * s_x[j + 1u]
-             + w[w_base + j + 2u] * s_x[j + 2u]
-             + w[w_base + j + 3u] * s_x[j + 3u];
+    float partial = 0.0;
+    for (uint j = tid; j < K; j += 64u) {
+        partial += w[w_base + j] * s_x[j];
     }
-    y[y_base + row] = sum;
+
+    // Subgroup reduction (RDNA4 wave64 = full workgroup in one subgroup)
+    float sum = subgroupAdd(partial);
+
+    if (tid == 0u) {
+        y[y_offset / 4 + row] = sum;
+    }
 }
