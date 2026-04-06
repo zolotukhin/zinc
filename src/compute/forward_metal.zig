@@ -1840,12 +1840,6 @@ pub const InferenceEngine = struct {
             const scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(self.config.hidden_dim))));
             for (hidden_ptr[0..self.config.hidden_dim]) |*v| v.* *= scale;
         }
-        if (self.position <= 1) {
-            log.info("EMBED: pos={d} token={d} private={} h[0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}] type={s}", .{
-                self.position, token_id, self.private_decode_buffers, hidden_ptr[0], hidden_ptr[1], hidden_ptr[2], hidden_ptr[3],
-                @tagName(self.token_embed.info.type_),
-            });
-        }
     }
 
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
@@ -2923,39 +2917,9 @@ fn dispatchFullAttnPrepOnCmd(
     profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
 
     // RoPE Q/K are independent — concurrent dispatch overlaps them.
-    // Save pre-RoPE Q for comparison at L0 pos0
-    var pre_rope_q: ?[]f32 = null;
-    // Check hidden_buf before attn_norm
-    if (engine.position <= 1 and layer_idx == 0 and cfg.architecture == .gpt_oss) {
-        cmd.commitAndWait();
-        const hp: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-        const np: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
-        log.info("EMBED_DBG pos{d}: hidden[0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}] norm[0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}]", .{
-            engine.position, hp[0], hp[1], hp[2], hp[3], np[0], np[1], np[2], np[3],
-        });
-        cmd.* = try metal_command.beginCommand(engine.device.ctx);
-    }
-    if (engine.position <= 1 and layer_idx == 0 and cfg.architecture == .gpt_oss) {
-        cmd.commitAndWait();
-        pre_rope_q = try engine.allocator.alloc(f32, 8);
-        const qp: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-        @memcpy(pre_rope_q.?[0..8], qp[0..8]);
-        cmd.* = try metal_command.beginCommand(engine.device.ctx);
-    }
     dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
     dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
     profileBarrier(cmd, profile, .full_attn); // rope outputs visible before KV cache write
-    // Verify RoPE at L0 pos0
-    if (pre_rope_q) |prq| {
-        defer engine.allocator.free(prq);
-        cmd.commitAndWait();
-        const qp: [*]const f32 = @ptrCast(@alignCast(engine.q_buf.cpu_ptr.?));
-        const inv_freq: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
-        log.info("ROPE_DBG L0 pos{d}: pre=[{d:.4},{d:.4},{d:.4},{d:.4}] post=[{d:.4},{d:.4},{d:.4},{d:.4}] freq[0..1]=[{d:.6},{d:.6}]", .{ engine.position,
-            prq[0], prq[1], prq[2], prq[3], qp[0], qp[1], qp[2], qp[3], inv_freq[0], inv_freq[1],
-        });
-        cmd.* = try metal_command.beginCommand(engine.device.ctx);
-    }
 
     dispatchKvCacheWriteOnCmd(engine, cmd, layer_idx, kv_dim, engine.position * kv_dim);
     return gate_mode.apply_attn_gate;
