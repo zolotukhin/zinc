@@ -66,8 +66,16 @@ const EFFORT_DOCS: Record<number, string> = {
   3: "MULTI_HOUR_EFFORT_3_BATCH_PREFILL.md",
 };
 
-const CORRECTNESS_PROMPT = "What is the capital of France?";
+const CORRECTNESS_PROMPT = "The capital of France is";
 const CORRECTNESS_EXPECT = "Paris";
+
+// All models that must produce coherent output after every change.
+// The primary model (--model flag) is benchmarked; these are correctness-only.
+const COHERENCE_MODELS: { name: string; path: string }[] = [
+  { name: "Qwen3.5-35B", path: "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf" },
+  { name: "Qwen3.5-2B", path: "/root/models/Qwen3.5-2B-Q4_K_M.gguf" },
+  { name: "Gemma3-12B", path: "/root/models/gemma-3-12b-it-Q4_K_M.gguf" },
+];
 
 const BLOCKED_FILE_OPS = [
   "Edit(loops/*)", "Write(loops/*)", "Edit(site/*)", "Write(site/*)",
@@ -263,6 +271,30 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
   const bandwidthUtil = parseBandwidthUtil(runOutput);
 
   return { buildOk: true, buildOutput, tokPerSec, correct, outputText, bandwidthUtil, error: null };
+}
+
+/// Run correctness check on ALL models (not just the benchmark model).
+/// Returns null if all pass, or an error string describing which failed.
+async function checkAllModelsCoherent(): Promise<string | null> {
+  const failures: string[] = [];
+  for (const { name, path } of COHERENCE_MODELS) {
+    try {
+      const out = await ssh(
+        `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${path} --prompt '${CORRECTNESS_PROMPT}' -n 20 2>&1`,
+        120_000,
+      );
+      const textMatch = out.match(/Output text:\s*(.+)/i);
+      const outputText = textMatch ? textMatch[1].trim() : "";
+      if (!outputText.toLowerCase().includes(CORRECTNESS_EXPECT.toLowerCase())) {
+        failures.push(`${name}: "${outputText.slice(0, 60)}"`);
+      } else {
+        console.log(c("2", `    ${name}: OK ("${outputText.slice(0, 40)}")`));
+      }
+    } catch (e) {
+      failures.push(`${name}: crashed (${String(e).slice(0, 60)})`);
+    }
+  }
+  return failures.length > 0 ? `Coherence failures: ${failures.join("; ")}` : null;
 }
 
 // -- Claude stream formatter -------------------------------------------------
@@ -626,8 +658,18 @@ async function main() {
     await rsyncToRemote();
     const result = await buildAndBench(modelPath);
 
+    // Check ALL models for coherent output (not just the benchmark model)
+    let coherenceError: string | null = null;
+    if (result.buildOk && result.correct) {
+      console.log(c("2", "  Checking all models for coherence..."));
+      coherenceError = await checkAllModelsCoherent();
+      if (coherenceError) {
+        console.log(c("1;31", `  ${coherenceError}`));
+      }
+    }
+
     const improved = result.tokPerSec != null && result.tokPerSec > bestTokPerSec * 1.001;
-    const correct = result.correct;
+    const correct = result.correct && coherenceError == null;
     const broken = !result.buildOk || !correct;
 
     const delta = result.tokPerSec != null && bestTokPerSec > 0
