@@ -3670,7 +3670,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
-            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and engine.position == 5 and (layer_idx == 7 or layer_idx == 31);
+            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and (engine.position == 0 or engine.position == 5) and (layer_idx == 0 or layer_idx == 7);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
                 const debug_start = profileStart(profile != null);
@@ -3927,7 +3927,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             } else {
                 topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
             }
-            const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and layer_idx == 6;
+            const should_debug_moe_compare = engine.debug_validation_enabled and engine.position == 0 and (layer_idx == 0 or layer_idx == 6);
             const hidden_before_snapshot: ?[]f32 = if (should_debug_moe_compare) blk: {
                 const snap = try engine.allocator.alloc(f32, hidden_dim);
                 const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
@@ -4949,6 +4949,11 @@ fn debugCompareAttentionLayer(
         allocator,
     );
 
+    // Apply Q/K/V biases to CPU reference (gpt-oss)
+    if (lt.attn_q_bias) |b| addBiasFromTensor(engine, q_ref.ptr, b, q_dim);
+    if (lt.attn_k_bias) |b| addBiasFromTensor(engine, k_ref.ptr, b, kv_dim);
+    if (lt.attn_v_bias) |b| addBiasFromTensor(engine, v_ref.ptr, b, kv_dim);
+
     if (engine.attn_q_norm_present[layer_idx]) {
         const qn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_q_norm_bufs[layer_idx].cpu_ptr.?));
         cpuRmsNormMul(q_ref.ptr, qn_w[0..head_dim], q_ref.ptr, cfg.head_dim, cfg.n_heads, 1e-6);
@@ -4957,8 +4962,11 @@ fn debugCompareAttentionLayer(
         const kn_w: [*]const f32 = @ptrCast(@alignCast(engine.attn_k_norm_bufs[layer_idx].cpu_ptr.?));
         cpuRmsNormMul(k_ref.ptr, kn_w[0..head_dim], k_ref.ptr, cfg.head_dim, cfg.n_kv_heads, 1e-6);
     }
-    cpuRope(q_ref.ptr, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, cfg.rope_freq_base);
-    cpuRope(k_ref.ptr, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, cfg.rope_freq_base);
+    // Use precomputed frequencies (includes YaRN scaling) for CPU reference
+    const inv_freq_ptr: [*]const f32 = @ptrCast(@alignCast(engine.rope_freq_buf.cpu_ptr.?));
+    const inv_freq_slice = inv_freq_ptr[0..rope_dim / 2];
+    cpuRopeWithFreqs(q_ref.ptr, cfg.head_dim, rope_dim, cfg.n_heads, engine.position, inv_freq_slice);
+    cpuRopeWithFreqs(k_ref.ptr, cfg.head_dim, rope_dim, cfg.n_kv_heads, engine.position, inv_freq_slice);
 
     const kv_offset: usize = @intCast(engine.position * kv_dim);
     logDebugSliceDiff(layer, "attn_q", q_ref[0..q_dim], q_actual[0..q_dim]);
