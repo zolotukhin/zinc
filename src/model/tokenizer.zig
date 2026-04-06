@@ -122,21 +122,13 @@ pub const Tokenizer = struct {
         }
 
         // Read special token IDs.
-        // Qwen3.5 GGUFs observed in this repo omit BOS metadata but still expect
-        // the historical leading BOS=1 behavior that older working revisions used.
-        const arch = gf.getString("general.architecture") orelse "";
-        const is_qwen35_family =
-            std.mem.eql(u8, arch, "qwen35") or
-            std.mem.eql(u8, arch, "qwen35moe");
-        const bos_id = gf.getU32("tokenizer.ggml.bos_token_id") orelse
-            if (is_qwen35_family) @as(u32, 1) else null;
+        const bos_id = gf.getU32("tokenizer.ggml.bos_token_id");
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
         const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse blk: {
             // Default: prepend BOS when a BOS token ID is defined.
-            // Qwen3.5 GGUFs omit BOS metadata but still expect leading BOS=1.
             // Llama 3 uses GPT2 tokenizer format but requires BOS (128000).
-            // Qwen3 explicitly sets add_bos_token=false in GGUF metadata.
+            // Qwen3/3.5 explicitly omit BOS metadata — do NOT prepend.
             break :blk bos_id != null;
         };
         const add_eos_token = gf.getBool("tokenizer.ggml.add_eos_token") orelse false;
@@ -893,7 +885,7 @@ test "shouldPrependBos is false when BOS metadata is absent" {
     try std.testing.expectEqual(@as(u32, 2), tok.bosId());
 }
 
-test "initFromGGUF restores BOS fallback for qwen35 family" {
+test "initFromGGUF omits BOS for qwen35 family (no BOS in GGUF)" {
     const allocator = std.testing.allocator;
 
     var gf = gguf.GGUFFile{
@@ -919,8 +911,8 @@ test "initFromGGUF restores BOS fallback for qwen35 family" {
     var tok = try Tokenizer.initFromGGUF(&gf, allocator);
     defer tok.deinit();
 
-    try std.testing.expectEqual(@as(u32, 1), tok.bosId());
-    try std.testing.expect(tok.shouldPrependBos());
+    // Qwen3.5 GGUFs omit BOS metadata — should NOT prepend BOS
+    try std.testing.expect(!tok.shouldPrependBos());
 }
 
 test "preparePromptTokens skips BOS when prepend_bos is false" {

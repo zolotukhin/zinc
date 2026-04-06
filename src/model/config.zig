@@ -46,6 +46,7 @@ pub const ModelConfig = struct {
     sliding_window_size: u32 = 0,
     rope_scaling_factor: f32 = 0.0,
     rope_original_context: u32 = 0,
+    rope_sections: [4]u32 = .{ 0, 0, 0, 0 },
 };
 
 /// Parse architecture string from GGUF metadata.

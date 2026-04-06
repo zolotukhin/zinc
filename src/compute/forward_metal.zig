@@ -773,6 +773,7 @@ pub const InferenceEngine = struct {
     sigmoid_mul_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
     swiglu_batched_pipe: MetalPipeline,
+    geglu_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
     rms_norm_pipe: MetalPipeline,
     moe_acc_pipe: MetalPipeline,
@@ -794,6 +795,8 @@ pub const InferenceEngine = struct {
     attn_q_norm_present: []bool,
     attn_k_norm_present: []bool,
     ffn_norm_bufs: []MetalBuffer,
+    post_attn_norm_bufs: []MetalBuffer, // Gemma: post-attention norm (before attn residual)
+    post_ffw_norm_bufs: []MetalBuffer, // Gemma: post-FFN norm (before FFN residual)
     final_norm_gpu: MetalBuffer,
     rope_freq_buf: MetalBuffer,
 
@@ -1038,6 +1041,7 @@ pub const InferenceEngine = struct {
         self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
+        self.geglu_pipe = try loadShaderPipeline(ctx, "geglu");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
         self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
         self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
@@ -1067,6 +1071,8 @@ pub const InferenceEngine = struct {
         self.attn_q_norm_present = try allocator.alloc(bool, cfg.n_layers);
         self.attn_k_norm_present = try allocator.alloc(bool, cfg.n_layers);
         self.ffn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.post_attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        self.post_ffw_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
         for (0..cfg.n_layers) |i| {
             const layer: u32 = @intCast(i);
             const an = findLayerTensor(model, layer, "attn_norm.weight") orelse return error.MissingTensor;
@@ -1087,9 +1093,26 @@ pub const InferenceEngine = struct {
                 @memset(self.attn_k_norm_bufs[i].cpu_ptr.?[0..4], 0);
                 self.attn_k_norm_present[i] = false;
             }
-            const fn_t = findLayerTensor(model, layer, "post_attention_norm.weight") orelse
-                findLayerTensor(model, layer, "ffn_norm.weight") orelse return error.MissingTensor;
+            // FFN norm: prefer ffn_norm.weight, fall back to post_attention_norm.weight (Qwen3.5)
+            const fn_t = findLayerTensor(model, layer, "ffn_norm.weight") orelse
+                findLayerTensor(model, layer, "post_attention_norm.weight") orelse return error.MissingTensor;
             self.ffn_norm_bufs[i] = try preloadNormWeights(ctx, model, fn_t, cfg.hidden_dim);
+            // Gemma post-attention norm: separate norm on o_proj output before residual add
+            if (findLayerTensor(model, layer, "post_attention_norm.weight")) |pan| {
+                if (findLayerTensor(model, layer, "ffn_norm.weight") != null) {
+                    self.post_attn_norm_bufs[i] = try preloadNormWeights(ctx, model, pan, cfg.hidden_dim);
+                } else {
+                    self.post_attn_norm_bufs[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+                }
+            } else {
+                self.post_attn_norm_bufs[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+            }
+            // Gemma post-FFN norm: separate norm on down_proj output before residual add
+            if (findLayerTensor(model, layer, "post_ffw_norm.weight")) |pfn| {
+                self.post_ffw_norm_bufs[i] = try preloadNormWeights(ctx, model, pfn, cfg.hidden_dim);
+            } else {
+                self.post_ffw_norm_bufs[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
+            }
         }
         const final_t = findTensorByName(model, "output_norm.weight") orelse return error.MissingTensor;
         self.final_norm_gpu = try preloadNormWeights(ctx, model, final_t, cfg.hidden_dim);
@@ -1509,6 +1532,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
+        metal_pipeline.freePipeline(&self.geglu_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
         metal_pipeline.freePipeline(&self.rms_norm_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_pipe);
@@ -1528,6 +1552,8 @@ pub const InferenceEngine = struct {
             metal_buffer.freeBuffer(&self.attn_q_norm_bufs[i]);
             metal_buffer.freeBuffer(&self.attn_k_norm_bufs[i]);
             metal_buffer.freeBuffer(&self.ffn_norm_bufs[i]);
+            if (self.post_attn_norm_bufs[i].handle != null) metal_buffer.freeBuffer(&self.post_attn_norm_bufs[i]);
+            if (self.post_ffw_norm_bufs[i].handle != null) metal_buffer.freeBuffer(&self.post_ffw_norm_bufs[i]);
         }
         self.allocator.free(self.attn_norm_bufs);
         self.allocator.free(self.attn_q_norm_bufs);
@@ -1535,6 +1561,8 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.attn_q_norm_present);
         self.allocator.free(self.attn_k_norm_present);
         self.allocator.free(self.ffn_norm_bufs);
+        self.allocator.free(self.post_attn_norm_bufs);
+        self.allocator.free(self.post_ffw_norm_bufs);
         metal_buffer.freeBuffer(&self.final_norm_gpu);
         metal_buffer.freeBuffer(&self.rope_freq_buf);
         self.allocator.free(self.layer_tensors);
@@ -1806,6 +1834,12 @@ pub const InferenceEngine = struct {
         const dst_buf = if (self.private_decode_buffers) &self.embed_staging else &self.hidden_buf;
         const hidden_ptr: [*]f32 = @ptrCast(@alignCast(dst_buf.cpu_ptr.?));
         dequantRow(embed_raw, token_id, self.config.hidden_dim, self.token_embed.info.type_, hidden_ptr[0..self.config.hidden_dim]);
+
+        // Gemma models scale embeddings by sqrt(hidden_dim).
+        if (self.config.architecture == .gemma) {
+            const scale: f32 = @floatCast(@sqrt(@as(f64, @floatFromInt(self.config.hidden_dim))));
+            for (hidden_ptr[0..self.config.hidden_dim]) |*v| v.* *= scale;
+        }
         if (self.position <= 1) {
             log.info("EMBED: pos={d} token={d} private={} h[0..3]=[{d:.4},{d:.4},{d:.4},{d:.4}] type={s}", .{
                 self.position, token_id, self.private_decode_buffers, hidden_ptr[0], hidden_ptr[1], hidden_ptr[2], hidden_ptr[3],
@@ -3678,6 +3712,11 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
+            // Gemma post-attention norm: RMS norm on o_proj output before residual add
+            if (engine.post_attn_norm_bufs[layer_idx].handle != null) {
+                dispatchRmsNormOnCmd(engine, cmd, &engine.down_buf, &engine.down_buf, &engine.post_attn_norm_bufs[layer_idx], hidden_dim, 1);
+                profileBarrier(cmd, profile, .full_attn);
+            }
             {
                 const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
                 const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
@@ -4173,11 +4212,19 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
 
                 const swiglu_push = SwiGLUPush{ .n = inter_dim };
                 const sw_bufs = [_]*const MetalBuffer{ &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf };
-                cmd.dispatchV2(&engine.swiglu_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
+                const use_geglu = cfg.architecture == .gemma;
+                const act_pipe = if (use_geglu) &engine.geglu_pipe else &engine.swiglu_pipe;
+                cmd.dispatchV2(act_pipe, .{ (inter_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &sw_bufs, &swiglu_push, @sizeOf(SwiGLUPush), 0);
                 profileBarrier(&cmd, profile, .dense_ffn);
 
                 dispatchDmmvOnCmd(engine, &cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
                 profileBarrier(&cmd, profile, .dense_ffn);
+
+                // Gemma post-FFN norm: RMS norm on down_proj output before residual add
+                if (engine.post_ffw_norm_bufs[layer_idx].handle != null) {
+                    dispatchRmsNormOnCmd(engine, &cmd, &engine.down_buf, &engine.down_buf, &engine.post_ffw_norm_bufs[layer_idx], hidden_dim, 1);
+                    profileBarrier(&cmd, profile, .dense_ffn);
+                }
 
                 if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
                 commitAndWaitProfiled(&cmd, profile);

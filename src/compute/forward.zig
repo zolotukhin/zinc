@@ -494,6 +494,7 @@ pub const InferenceEngine = struct {
     moe_out_buf: Buffer, // weighted expert accumulator: hidden_dim f32
     router_logits_buf: Buffer, // MoE router: n_experts f32
     router_staging: Buffer, // host-visible router readback
+    rope_freq_buf: Buffer, // IMROPE precomputed inverse frequencies (rope_dim/2 f32)
     // KV cache (per-layer, for attention layers)
     kv_k_cache: []Buffer, // [n_layers] K cache buffers
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
@@ -692,7 +693,7 @@ pub const InferenceEngine = struct {
         const ssm_conv_channels: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
         const max_inter = @max(@max(inter_dim, shexp_inter), @max(if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim, ssm_conv_channels));
         const inter_size = @as(vk.c.VkDeviceSize, max_inter) * @sizeOf(f32);
-        const n_experts_total = if (config.n_experts > 0) config.n_experts else @as(u32, 1);
+        const n_experts_total = @max(if (config.n_experts > 0) config.n_experts else @as(u32, 1), config.ssm_dt_rank);
         const n_experts_used: u32 = if (config.n_experts_used > 0) config.n_experts_used else 8;
 
         // Batched MoE: gate/up/swiglu buffers must fit n_experts_used * inter_dim,
@@ -747,6 +748,47 @@ pub const InferenceEngine = struct {
             const mr = vk.c.vkMapMemory(instance.device, router_staging.memory, 0, router_size, 0, &map_ptr);
             if (mr != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
             router_staging.mapped = @ptrCast(map_ptr);
+        }
+
+        // IMROPE frequency buffer: precompute per-pair inverse frequencies for sectioned RoPE
+        const rope_dim_val: u32 = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
+        const half_rot = rope_dim_val / 2;
+        const rope_freq_size = @as(vk.c.VkDeviceSize, half_rot) * @sizeOf(f32);
+        var rope_freq_buf = try Buffer.init(
+            instance,
+            @max(rope_freq_size, 4),
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer rope_freq_buf.deinit();
+        {
+            var map_ptr: ?*anyopaque = null;
+            const mr = vk.c.vkMapMemory(instance.device, rope_freq_buf.memory, 0, @max(rope_freq_size, 4), 0, &map_ptr);
+            if (mr != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            rope_freq_buf.mapped = @ptrCast(map_ptr);
+        }
+        // Compute IMROPE frequencies if sections are present.
+        // For text, all position IDs (t/h/w/e) are identical, so IMROPE reduces to
+        // standard NeoX RoPE with a single global frequency progression:
+        //   freq[k] = 1 / base^(2k / rope_dim)  for global pair index k.
+        // The section boundaries only affect which position axis is used (vision), NOT
+        // the frequency schedule — all four theta values advance by the same theta_scale.
+        const has_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;
+        if (has_imrope) {
+            const freq_ptr: [*]f32 = @ptrCast(@alignCast(rope_freq_buf.mapped.?));
+            const total_pairs = config.rope_sections[0] + config.rope_sections[1] +
+                config.rope_sections[2] + config.rope_sections[3];
+            const rope_full_dim: f32 = @floatFromInt(2 * total_pairs);
+            for (0..total_pairs) |k| {
+                const exponent = @as(f32, @floatFromInt(2 * k)) / rope_full_dim;
+                freq_ptr[k] = 1.0 / std.math.pow(f32, config.rope_freq_base, exponent);
+            }
+            log.info("IMROPE: sections=[{d},{d},{d},{d}] total_pairs={d} freq[0]={d:.6} freq[11]={d:.6} freq[31]={d:.6}", .{
+                config.rope_sections[0], config.rope_sections[1], config.rope_sections[2], config.rope_sections[3],
+                total_pairs, freq_ptr[0],
+                if (total_pairs > 11) freq_ptr[11] else 0.0,
+                if (total_pairs > 31) freq_ptr[31] else 0.0,
+            });
         }
 
         // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32))
@@ -939,6 +981,7 @@ pub const InferenceEngine = struct {
             .moe_out_buf = moe_out_buf,
             .router_logits_buf = router_logits_buf,
             .router_staging = router_staging,
+            .rope_freq_buf = rope_freq_buf,
             .kv_k_cache = kv_k_cache,
             .kv_v_cache = kv_v_cache,
             .page_table_buf = page_table_buf,
@@ -1633,16 +1676,26 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 // Bug fix #5+#6: IMRoPE — only rotate rope_dim of head_dim dimensions
-                const rope_freq = config.rope_freq_base;
+                // IMROPE: use precomputed per-pair frequencies when sections are present
+                const use_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;
+                const rope_freq: f32 = if (use_imrope) 0.0 else config.rope_freq_base;
                 const rope_dim: u32 = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
                 {
                     const pip = &(self.elementwise.pipeline_rope orelse return error.ShaderNotLoaded);
                     const q_ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet2(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size);
+                    if (use_imrope) {
+                        self.writeDescSet3(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size, self.rope_freq_buf.handle, self.rope_freq_buf.size);
+                    } else {
+                        self.writeDescSet2(q_ds, self.q_buf.handle, self.q_buf.size, self.q_buf.handle, self.q_buf.size);
+                    }
                     try self.elementwise.recordRope(&self.decode_cmd, q_ds, config.head_dim, rope_dim, config.n_heads, state.position, rope_freq);
 
                     const k_ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet2(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size);
+                    if (use_imrope) {
+                        self.writeDescSet3(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size, self.rope_freq_buf.handle, self.rope_freq_buf.size);
+                    } else {
+                        self.writeDescSet2(k_ds, self.k_buf.handle, self.k_buf.size, self.k_buf.handle, self.k_buf.size);
+                    }
                     try self.elementwise.recordRope(&self.decode_cmd, k_ds, config.head_dim, rope_dim, config.n_kv_heads, state.position, rope_freq);
                 }
                 self.decode_cmd.computeBarrier();
@@ -2448,13 +2501,12 @@ pub const InferenceEngine = struct {
                     diag_logit5[layer] = logit5;
                     diag_rms_arr[layer] = diag_rms;
                 }
-                log.info("L{d} {s}: rms={d:.4} max={d:.4} h0={d:.6} logit5={d:.4}", .{
+                log.info("p{d}L{d}{s}: h[0..4]=[{d:.8},{d:.8},{d:.8},{d:.8}] rms={d:.6}", .{
+                    state.position,
                     layer,
                     if (is_full_attn) @as([]const u8, "A") else @as([]const u8, "S"),
+                    hptr[0], hptr[1], hptr[2], hptr[3],
                     diag_rms,
-                    diag_max_abs,
-                    hptr[0],
-                    logit5,
                 });
                 // Re-open cmd buffer for next layer (diagnostic closed it)
                 _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
@@ -2684,6 +2736,7 @@ pub const InferenceEngine = struct {
         const alpha_cpu = staging_f32[conv_channels + d_inner ..][0..dt_rank];
         const beta_cpu = staging_f32[conv_channels + d_inner + dt_rank ..][0..dt_rank];
 
+
         // Conv1d with state
         const conv_state = self.ssm_conv_states[layer_idx];
         const d_conv_1 = d_conv - 1;
@@ -2733,6 +2786,7 @@ pub const InferenceEngine = struct {
         var q_ssm = conv_out[0..qk_dim];
         var k_ssm = conv_out[qk_dim .. 2 * qk_dim];
         const v_ssm = conv_out[2 * qk_dim .. 2 * qk_dim + d_inner];
+
         // Bug fix #8: L2 normalize per-head, not across all heads
         for (0..n_group) |h| {
             l2Normalize(q_ssm[h * d_state ..][0..d_state]);
@@ -3832,6 +3886,7 @@ pub const InferenceEngine = struct {
         // Layer intermediates
         self.router_staging.deinit();
         self.router_logits_buf.deinit();
+        self.rope_freq_buf.deinit();
         self.moe_out_buf.deinit();
         self.down_buf.deinit();
         self.swiglu_buf.deinit();
@@ -3955,7 +4010,7 @@ pub fn generate(
             first_token, state.position,
         });
         // Dump top-5 logits from prefill for comparison with llama.cpp
-        if (engine.logits_readback_enabled) dumpTop5Logits(engine, 0);
+        if (engine.logits_readback_enabled or engine.validation_diagnostics_enabled) dumpTop5Logits(engine, 0);
         generated = 1;
         if (first_token == eos_token_id) generated = max_tokens; // stop early
     }

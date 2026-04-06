@@ -650,7 +650,9 @@ fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u
     const chat_buf = try allocator.alloc(u8, chat_capacity);
     errdefer allocator.free(chat_buf);
 
-    const formatted = try tokenizer.applyChatTemplate(&roles, &contents, chat_buf);
+    // Skip the thinking template wrapper for CLI prompts — let the model generate
+    // naturally (models like Qwen3.5 will enter thinking mode on their own).
+    const formatted = try tokenizer.applyChatTemplateWithOptions(&roles, &contents, .{ .skip_thinking_template = true }, chat_buf);
     return .{
         .text = formatted,
         .owned_buf = chat_buf,

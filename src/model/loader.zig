@@ -315,6 +315,19 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
             break :blk gf.getF32(rsk) orelse 0.0;
         },
         .rope_original_context = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.original_context_length", .{prefix}) catch "") orelse 0,
+        .rope_sections = blk: {
+            var sections = [_]u32{ 0, 0, 0, 0 };
+            if (gf.metadata.get(std.fmt.bufPrint(&key_buf, "{s}.rope.dimension_sections", .{prefix}) catch "")) |val| {
+                switch (val) {
+                    .array => |arr| {
+                        const n = @min(arr.len, sections.len);
+                        for (arr[0..n], 0..) |item, i| sections[i] = item.asU32() orelse 0;
+                    },
+                    else => {},
+                }
+            }
+            break :blk sections;
+        },
     };
 }
 
