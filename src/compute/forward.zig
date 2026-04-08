@@ -2981,11 +2981,12 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_down, moe_down_phase);
 
-                    // Weighted accumulation: sum ALL experts at once (writes result, no zero needed)
-                    // moe_out_buf[i] = sum_j(weight_j * down_buf[j * hidden_dim + i])
+                    // Weighted accumulation: sum ALL experts at once, accumulate directly into hidden_buf
+                    // hidden_buf[i] += sum_j(weight_j * down_buf[j * hidden_dim + i])
+                    // Eliminates separate FFN residual dispatch + barrier per layer.
                     const moe_acc_phase = self.beginProfilePhase();
                     try self.dispatchMoeWeightedAcc(
-                        self.moe_out_buf.handle,
+                        self.hidden_buf.handle,
                         hidden_size,
                         self.down_buf.handle,
                         self.down_buf.size,
@@ -3129,12 +3130,13 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.shared_down, shared_down_phase);
 
-                    // Apply shared expert gate: moe_out_buf += sigmoid(gate) * down_buf
+                    // Apply shared expert gate: accumulate into hidden_buf (GPU MoE) or moe_out_buf (CPU fallback)
+                    const shexp_acc_buf = if (use_gpu_moe) self.hidden_buf.handle else self.moe_out_buf.handle;
                     const shared_gate_phase = self.beginProfilePhase();
                     if (shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
                         // GPU path: sigmoid_scale_acc reads gate from router_logits_buf[0]
                         try self.dispatchSigmoidScaleAcc(
-                            self.moe_out_buf.handle,
+                            shexp_acc_buf,
                             hidden_size,
                             self.down_buf.handle,
                             hidden_size,
@@ -3164,7 +3166,7 @@ pub const InferenceEngine = struct {
                         try self.decode_cmd.reset();
                         try self.decode_cmd.begin();
                         try self.dispatchScaleAcc(
-                            self.moe_out_buf.handle,
+                            shexp_acc_buf,
                             hidden_size,
                             self.down_buf.handle,
                             hidden_size,
@@ -3174,7 +3176,7 @@ pub const InferenceEngine = struct {
                     } else {
                         // No shared expert gate — just accumulate with weight 1.0
                         try self.dispatchScaleAcc(
-                            self.moe_out_buf.handle,
+                            shexp_acc_buf,
                             hidden_size,
                             self.down_buf.handle,
                             hidden_size,
@@ -3187,15 +3189,17 @@ pub const InferenceEngine = struct {
                 }
                 self.endProfilePhase(.shared_expert, shared_phase);
 
-                // FFN residual: hidden_buf += moe_out_buf
-                try self.dispatchScaleAcc(
-                    self.hidden_buf.handle,
-                    hidden_size,
-                    self.moe_out_buf.handle,
-                    hidden_size,
-                    hidden_dim,
-                    1.0,
-                );
+                // FFN residual: only needed for CPU MoE fallback (GPU MoE accumulated directly into hidden_buf)
+                if (!use_gpu_moe) {
+                    try self.dispatchScaleAcc(
+                        self.hidden_buf.handle,
+                        hidden_size,
+                        self.moe_out_buf.handle,
+                        hidden_size,
+                        hidden_dim,
+                        1.0,
+                    );
+                }
             } else {
                 // Dense FFN: gate → up → SwiGLU → down → residual
                 const gate_tensor = lt.ffn_gate orelse return error.TensorNotFound;

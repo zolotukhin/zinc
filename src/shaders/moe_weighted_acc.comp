@@ -10,7 +10,7 @@
 
 layout(local_size_x = 64) in;
 
-layout(set = 0, binding = 0) writeonly buffer Accum { float a[]; };
+layout(set = 0, binding = 0) buffer Accum { float a[]; };
 layout(set = 0, binding = 1) readonly buffer Src { float b[]; };
 layout(set = 0, binding = 2) readonly buffer MoeRouting { uint routing_data[]; };
 
@@ -29,5 +29,5 @@ void main() {
         float weight = uintBitsToFloat(routing_data[n_used + j]);
         sum += weight * b[j * src_stride + i];
     }
-    a[i] = sum;
+    a[i] += sum;
 }
