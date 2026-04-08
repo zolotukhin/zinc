@@ -1274,6 +1274,8 @@ pub const InferenceEngine = struct {
         self.post_attn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
         self.post_attn_norm_present = try allocator.alloc(bool, cfg.n_layers);
         self.ffn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
+        // post_ffw_norm_bufs mirror GGUF post_ffw_norm.weight tensors for
+        // Gemma-style post-FFN RMS norms.
         self.post_ffn_norm_bufs = try allocator.alloc(MetalBuffer, cfg.n_layers);
         self.post_ffn_norm_present = try allocator.alloc(bool, cfg.n_layers);
         self.layer_output_scales = try allocator.alloc(f32, cfg.n_layers);
@@ -1306,6 +1308,7 @@ pub const InferenceEngine = struct {
                 @memset(self.post_attn_norm_bufs[i].cpu_ptr.?[0..4], 0);
                 self.post_attn_norm_present[i] = false;
             }
+            // FFN norm: prefer ffn_norm.weight via findLayerTensor(model, layer, "ffn_norm.weight"), then fall back to post_attention_norm.weight.
             const fn_t = findLayerTensor(model, layer, "ffn_norm.weight") orelse
                 findLayerTensor(model, layer, "post_attention_norm.weight") orelse return error.MissingTensor;
             self.ffn_norm_bufs[i] = try preloadNormWeights(ctx, model, fn_t, cfg.hidden_dim);
@@ -2075,6 +2078,8 @@ pub const InferenceEngine = struct {
         const dst_buf = if (self.private_decode_buffers) &self.embed_staging else &self.hidden_buf;
         const hidden_ptr: [*]f32 = @ptrCast(@alignCast(dst_buf.cpu_ptr.?));
         dequantRow(embed_raw, token_id, self.config.hidden_dim, self.token_embed.info.type_, hidden_ptr[0..self.config.hidden_dim]);
+        // Gemma models scale embeddings by sqrt(hidden_dim). Keep parity when
+        // config.architecture == .gemma.
         if (self.config.architecture == .gemma) {
             const scale = @as(f32, @floatCast(@sqrt(@as(f64, @floatFromInt(self.config.hidden_dim)))));
             for (hidden_ptr[0..self.config.hidden_dim]) |*value| value.* *= scale;
