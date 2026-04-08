@@ -44,6 +44,15 @@ fn transferToComputeBarrierSpec() MemoryBarrierSpec {
     };
 }
 
+fn computeToComputeAndTransferBarrierSpec() MemoryBarrierSpec {
+    return .{
+        .src_stage = vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        .dst_stage = vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .src_access = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+        .dst_access = vk.c.VK_ACCESS_SHADER_READ_BIT | vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+    };
+}
+
 /// Command pool for allocating command buffers.
 pub const CommandPool = struct {
     /// Vulkan handle.
@@ -365,6 +374,13 @@ pub const CommandBuffer = struct {
     /// @note Ensures prior transfer writes are visible before subsequent compute dispatches.
     pub fn transferToComputeBarrier(self: *const CommandBuffer) void {
         self.recordMemoryBarrier(transferToComputeBarrierSpec());
+    }
+
+    /// Insert a combined compute→compute+transfer barrier.
+    /// Shader writes become visible to both subsequent compute dispatches and transfer reads.
+    /// Use when compute output feeds both a shader read and a buffer copy in the same stage.
+    pub fn computeAndTransferBarrier(self: *const CommandBuffer) void {
+        self.recordMemoryBarrier(computeToComputeAndTransferBarrierSpec());
     }
 
     /// Finalize command recording so the buffer can be submitted.

@@ -2492,10 +2492,9 @@ pub const InferenceEngine = struct {
                     state.position,
                     rope_freq,
                 );
-                self.decode_cmd.computeBarrier();
-
-                // KV cache write
-                self.decode_cmd.computeToTransferBarrier();
+                // Combined barrier: RoPE writes visible for both flash attention (compute)
+                // and KV cache copy (transfer) — merges two vkCmdPipelineBarrier calls into one
+                self.decode_cmd.computeAndTransferBarrier();
                 {
                     const physical_token = try self.physicalTokenIndex(state.position);
                     const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * kv_vec_size;
@@ -2854,6 +2853,7 @@ pub const InferenceEngine = struct {
             );
             self.decode_cmd.computeBarrier();
 
+            var gpu_moe_barriers_cover_hidden = false;
             if (is_moe) {
                 const moe_phase = self.beginProfilePhase();
                 // --- MoE: router DMMV → top-k → expert dispatch ---
@@ -2962,6 +2962,23 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_swiglu, moe_swiglu_phase);
 
+                    // Shared expert tensors — looked up here to interleave with MoE dispatches
+                    const gate_shexp = lt.ffn_gate_shexp;
+                    const up_shexp = lt.ffn_up_shexp;
+                    const down_shexp = lt.ffn_down_shexp;
+                    const shexp_gate = lt.ffn_gate_inp_shexp;
+                    const has_shared_expert = gate_shexp != null and up_shexp != null and down_shexp != null;
+                    const shexp_size = @as(vk.c.VkDeviceSize, shexp_inter_dim) * @sizeOf(f32);
+
+                    if (state.position == 0 and layer == 0) {
+                        log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s}", .{
+                            if (gate_shexp) |t| @tagName(t.info.type_) else "none",
+                            if (up_shexp) |t| @tagName(t.info.type_) else "none",
+                            if (down_shexp) |t| @tagName(t.info.type_) else "none",
+                            if (shexp_gate) |t| @tagName(t.info.type_) else "none",
+                        });
+                    }
+
                     // down DMMV: ALL experts at once
                     // x_expert_stride=inter_dim: each expert reads from its own swiglu section
                     const moe_down_phase = self.beginProfilePhase();
@@ -2978,12 +2995,21 @@ pub const InferenceEngine = struct {
                             try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, hidden_dim, inter_dim, expert_down_row_bytes, n_used, inter_dim, 0, 0);
                         }
                     }
+                    // Overlap: dispatch shared expert gate/up alongside MoE down.
+                    // No buffer conflicts: MoE down reads swiglu_buf/writes down_buf;
+                    // shared gate/up read ffn_norm_buf/write gate_buf,up_buf,router_logits_buf.
+                    if (has_shared_expert) {
+                        try self.dispatchDmmv(gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
+                        try self.dispatchDmmv(up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, shexp_inter_dim, hidden_dim);
+                        if (shexp_gate) |sg| {
+                            try self.dispatchDmmv(sg, self.ffn_norm_buf, hidden_size, self.router_logits_buf, 1, hidden_dim);
+                        }
+                    }
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_down, moe_down_phase);
 
                     // Weighted accumulation: sum ALL experts at once, accumulate directly into hidden_buf
                     // hidden_buf[i] += sum_j(weight_j * down_buf[j * hidden_dim + i])
-                    // Eliminates separate FFN residual dispatch + barrier per layer.
                     const moe_acc_phase = self.beginProfilePhase();
                     try self.dispatchMoeWeightedAcc(
                         self.hidden_buf.handle,
@@ -2996,8 +3022,86 @@ pub const InferenceEngine = struct {
                         n_used,
                         hidden_dim,
                     );
+                    // Overlap: dispatch shared expert SwiGLU alongside weighted_acc.
+                    // No buffer conflicts: weighted_acc reads down_buf+router_output_buf/writes hidden_buf;
+                    // SwiGLU reads gate_buf+up_buf/writes swiglu_buf.
+                    if (has_shared_expert) {
+                        try self.dispatchSwiglu(
+                            self.gate_buf.handle,
+                            self.gate_buf.size,
+                            self.up_buf.handle,
+                            self.up_buf.size,
+                            self.swiglu_buf.handle,
+                            self.swiglu_buf.size,
+                            shexp_inter_dim,
+                        );
+                    }
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_weighted_acc, moe_acc_phase);
+
+                    // Remaining shared expert steps (sequential — buffer reuse prevents further overlap)
+                    if (has_shared_expert) {
+                        // Shared down DMMV: swiglu_buf → down_buf
+                        const shared_down_phase = self.beginProfilePhase();
+                        try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
+                        self.decode_cmd.computeBarrier();
+                        self.endProfilePhase(.shared_down, shared_down_phase);
+
+                        // Shared expert accumulation into hidden_buf
+                        const shared_gate_phase = self.beginProfilePhase();
+                        if (shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
+                            try self.dispatchSigmoidScaleAcc(
+                                self.hidden_buf.handle,
+                                hidden_size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                self.router_logits_buf.handle,
+                                @sizeOf(f32),
+                                hidden_dim,
+                            );
+                        } else if (shexp_gate != null) {
+                            if (self.profile_enabled) self.profile_token_counters.cpu_shared_gate_fallbacks += 1;
+                            {
+                                const bar = vk.c.VkMemoryBarrier{
+                                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                    .pNext = null,
+                                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                                };
+                                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(f32) };
+                                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &rgn);
+                            }
+                            try self.decode_cmd.end();
+                            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                            const gate_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
+                            const shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
+                            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                            try self.decode_cmd.reset();
+                            try self.decode_cmd.begin();
+                            try self.dispatchScaleAcc(
+                                self.hidden_buf.handle,
+                                hidden_size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                shexp_weight,
+                            );
+                        } else {
+                            try self.dispatchScaleAcc(
+                                self.hidden_buf.handle,
+                                hidden_size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1.0,
+                            );
+                        }
+                        self.decode_cmd.computeBarrier();
+                        self.endProfilePhase(.shared_gate_acc, shared_gate_phase);
+                    }
+                    // GPU MoE path: hidden_buf is fully barriered (weighted_acc or shared_gate_acc)
+                    gpu_moe_barriers_cover_hidden = true;
                 } else {
                     if (self.profile_enabled) self.profile_token_counters.cpu_moe_fallbacks += 1;
                     if (self.profile_enabled and !self.profile_logged_cpu_moe_fallback) {
@@ -3082,112 +3186,88 @@ pub const InferenceEngine = struct {
                 }
                 self.endProfilePhase(.moe_routed, moe_phase);
 
-                // Bug fix #3: Shared expert — runs every token alongside the routed experts
-                const gate_shexp = lt.ffn_gate_shexp;
-                const up_shexp = lt.ffn_up_shexp;
-                const down_shexp = lt.ffn_down_shexp;
-                const shexp_gate = lt.ffn_gate_inp_shexp;
-                const shared_phase = self.beginProfilePhase();
-                if (state.position == 0 and layer == 0) {
-                    log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s}", .{
-                        if (gate_shexp) |t| @tagName(t.info.type_) else "none",
-                        if (up_shexp) |t| @tagName(t.info.type_) else "none",
-                        if (down_shexp) |t| @tagName(t.info.type_) else "none",
-                        if (shexp_gate) |t| @tagName(t.info.type_) else "none",
-                    });
-                }
+                // Shared expert for CPU MoE fallback only (GPU MoE handles shared expert inline above)
+                if (!use_gpu_moe) {
+                    const cpu_gate_shexp = lt.ffn_gate_shexp;
+                    const cpu_up_shexp = lt.ffn_up_shexp;
+                    const cpu_down_shexp = lt.ffn_down_shexp;
+                    const cpu_shexp_gate = lt.ffn_gate_inp_shexp;
+                    if (cpu_gate_shexp != null and cpu_up_shexp != null and cpu_down_shexp != null) {
+                        const cpu_shexp_size = @as(vk.c.VkDeviceSize, shexp_inter_dim) * @sizeOf(f32);
 
-                if (gate_shexp != null and up_shexp != null and down_shexp != null) {
-                    // Shared expert has its own intermediate dim (feed_forward_length), different from per-expert dim
-                    const shexp_size = @as(vk.c.VkDeviceSize, shexp_inter_dim) * @sizeOf(f32);
-
-                    // Shared expert FFN: gate + up → SwiGLU → down
-                    const shared_proj_phase = self.beginProfilePhase();
-                    try self.dispatchDmmv(gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
-                    try self.dispatchDmmv(up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, shexp_inter_dim, hidden_dim);
-                    // Dispatch shared expert gate projection in parallel (1 scalar output)
-                    if (shexp_gate) |sg| {
-                        try self.dispatchDmmv(sg, self.ffn_norm_buf, hidden_size, self.router_logits_buf, 1, hidden_dim);
-                    }
-                    self.decode_cmd.computeBarrier();
-                    self.endProfilePhase(.shared_proj, shared_proj_phase);
-
-                    const shared_swiglu_phase = self.beginProfilePhase();
-                    try self.dispatchSwiglu(
-                        self.gate_buf.handle,
-                        self.gate_buf.size,
-                        self.up_buf.handle,
-                        self.up_buf.size,
-                        self.swiglu_buf.handle,
-                        self.swiglu_buf.size,
-                        shexp_inter_dim,
-                    );
-                    self.decode_cmd.computeBarrier();
-                    self.endProfilePhase(.shared_swiglu, shared_swiglu_phase);
-
-                    const shared_down_phase = self.beginProfilePhase();
-                    try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
-                    self.decode_cmd.computeBarrier();
-                    self.endProfilePhase(.shared_down, shared_down_phase);
-
-                    // Apply shared expert gate: accumulate into hidden_buf (GPU MoE) or moe_out_buf (CPU fallback)
-                    const shexp_acc_buf = if (use_gpu_moe) self.hidden_buf.handle else self.moe_out_buf.handle;
-                    const shared_gate_phase = self.beginProfilePhase();
-                    if (shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
-                        // GPU path: sigmoid_scale_acc reads gate from router_logits_buf[0]
-                        try self.dispatchSigmoidScaleAcc(
-                            shexp_acc_buf,
-                            hidden_size,
-                            self.down_buf.handle,
-                            hidden_size,
-                            self.router_logits_buf.handle,
-                            @sizeOf(f32),
-                            hidden_dim,
-                        );
-                    } else if (shexp_gate != null) {
-                        if (self.profile_enabled) self.profile_token_counters.cpu_shared_gate_fallbacks += 1;
-                        // CPU fallback: readback gate scalar, compute sigmoid on CPU
-                        {
-                            const bar = vk.c.VkMemoryBarrier{
-                                .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                                .pNext = null,
-                                .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
-                                .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
-                            };
-                            vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
-                            const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(f32) };
-                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &rgn);
+                        try self.dispatchDmmv(cpu_gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
+                        try self.dispatchDmmv(cpu_up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, shexp_inter_dim, hidden_dim);
+                        if (cpu_shexp_gate) |sg| {
+                            try self.dispatchDmmv(sg, self.ffn_norm_buf, hidden_size, self.router_logits_buf, 1, hidden_dim);
                         }
-                        try self.decode_cmd.end();
-                        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-                        const gate_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
-                        const shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
-                        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-                        try self.decode_cmd.reset();
-                        try self.decode_cmd.begin();
-                        try self.dispatchScaleAcc(
-                            shexp_acc_buf,
-                            hidden_size,
-                            self.down_buf.handle,
-                            hidden_size,
-                            hidden_dim,
-                            shexp_weight,
+                        self.decode_cmd.computeBarrier();
+
+                        try self.dispatchSwiglu(
+                            self.gate_buf.handle,
+                            self.gate_buf.size,
+                            self.up_buf.handle,
+                            self.up_buf.size,
+                            self.swiglu_buf.handle,
+                            self.swiglu_buf.size,
+                            shexp_inter_dim,
                         );
-                    } else {
-                        // No shared expert gate — just accumulate with weight 1.0
-                        try self.dispatchScaleAcc(
-                            shexp_acc_buf,
-                            hidden_size,
-                            self.down_buf.handle,
-                            hidden_size,
-                            hidden_dim,
-                            1.0,
-                        );
+                        self.decode_cmd.computeBarrier();
+
+                        try self.dispatchDmmv(cpu_down_shexp.?, self.swiglu_buf, cpu_shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
+                        self.decode_cmd.computeBarrier();
+
+                        const shexp_acc_buf = self.moe_out_buf.handle;
+                        if (cpu_shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
+                            try self.dispatchSigmoidScaleAcc(
+                                shexp_acc_buf,
+                                hidden_size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                self.router_logits_buf.handle,
+                                @sizeOf(f32),
+                                hidden_dim,
+                            );
+                        } else if (cpu_shexp_gate != null) {
+                            if (self.profile_enabled) self.profile_token_counters.cpu_shared_gate_fallbacks += 1;
+                            {
+                                const bar = vk.c.VkMemoryBarrier{
+                                    .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                    .pNext = null,
+                                    .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                                    .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                                };
+                                vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &bar, 0, null, 0, null);
+                                const rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(f32) };
+                                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.router_staging.handle, 1, &rgn);
+                            }
+                            try self.decode_cmd.end();
+                            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+                            const gate_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
+                            const shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
+                            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                            try self.decode_cmd.reset();
+                            try self.decode_cmd.begin();
+                            try self.dispatchScaleAcc(
+                                shexp_acc_buf,
+                                hidden_size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                shexp_weight,
+                            );
+                        } else {
+                            try self.dispatchScaleAcc(
+                                shexp_acc_buf,
+                                hidden_size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1.0,
+                            );
+                        }
+                        self.decode_cmd.computeBarrier();
                     }
-                    self.decode_cmd.computeBarrier();
-                    self.endProfilePhase(.shared_gate_acc, shared_gate_phase);
                 }
-                self.endProfilePhase(.shared_expert, shared_phase);
 
                 // FFN residual: only needed for CPU MoE fallback (GPU MoE accumulated directly into hidden_buf)
                 if (!use_gpu_moe) {
@@ -3309,7 +3389,10 @@ pub const InferenceEngine = struct {
             }
 
             // The next layer immediately reads hidden_buf as its input.
-            self.decode_cmd.computeBarrier();
+            // GPU MoE path already barriered hidden_buf after weighted_acc/shared_gate_acc.
+            if (!gpu_moe_barriers_cover_hidden) {
+                self.decode_cmd.computeBarrier();
+            }
 
             // Command buffer stays open across layers (Phase 3c batching).
             // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
