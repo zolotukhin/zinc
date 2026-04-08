@@ -84,19 +84,26 @@ So what was left?
 
 Quite a lot.
 
-<figure class="diagram-card diagram-wide">
-
-```mermaid
-flowchart LR
-    A[Harmony chat prompt] --> B[GGUF tokenizer + OpenAI MoE template]
-    B --> C[Zero-copy Metal model loading]
-    C --> D[q5_0 and MXFP4 DMMV kernels]
-    D --> E[Attention sinks + YaRN RoPE]
-    E --> F[SOFTMAX_WEIGHT top-k routing]
-    F --> G[OAI SwiGLU expert activation]
-    G --> H[GPT-OSS 20B decode on Metal]
-```
-
+<figure class="diagram-card diagram-compact">
+  <div class="flow-diagram" role="img" aria-label="A vertical flow diagram showing GPT-OSS support moving from Harmony chat formatting through tokenizer updates, zero-copy Metal loading, new quantized kernels, attention semantics, MoE routing, OAI SwiGLU activation, and final GPT-OSS 20B decode on Metal.">
+    <div class="flow-main">
+      <div class="flow-node">Harmony chat prompt</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">GGUF tokenizer + OpenAI MoE template</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">Zero-copy Metal model loading</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node flow-node-accent">`q5_0` and `mxfp4` DMMV kernels</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">Attention sinks + YaRN RoPE</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">`SOFTMAX_WEIGHT` top-k routing</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">OAI SwiGLU expert activation</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node flow-node-output">GPT-OSS 20B decode on Metal</div>
+    </div>
+  </div>
   <figcaption>GPT-OSS support cut across tokenizer, loader, kernel coverage, attention math, and MoE math. No single fix unlocked the model by itself.</figcaption>
 </figure>
 

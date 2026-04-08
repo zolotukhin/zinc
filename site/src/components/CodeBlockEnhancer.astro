@@ -51,10 +51,11 @@
       if (pre.closest('.code-shell') || pre.closest('[data-terminal-window]')) continue;
 
       const code = pre.querySelector('code');
+      const language = inferLanguage(pre, code);
+      if (language === 'mermaid') continue;
+
       const rawText = code?.textContent?.replace(/\s+$/, '') ?? pre.textContent?.replace(/\s+$/, '') ?? '';
       if (!rawText) continue;
-
-      const language = inferLanguage(pre, code);
       const label = pre.dataset.codeLabel || LABELS[language] || inferLabelFromText(rawText);
       const isTerminal = label === 'Terminal';
 
