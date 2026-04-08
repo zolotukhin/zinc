@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gguf = @import("model/gguf.zig");
+const memory_plan = @import("gpu/memory_plan.zig");
 const loader_mod = @import("model/loader.zig");
 const gpu_detect = @import("vulkan/gpu_detect.zig");
 const instance_mod = @import("vulkan/instance.zig");
@@ -21,6 +22,8 @@ pub const Options = struct {
     device_index: u32 = 0,
     /// Path to a GGUF model file for inspection, or null to skip.
     model_path: ?[]const u8 = null,
+    /// Requested runtime context ceiling from CLI/server configuration.
+    requested_context_length: ?u32 = null,
     /// Managed model catalog entry, if selected via `--model-id`.
     managed_model: ?ManagedModelInfo = null,
     /// Directory containing compiled SPIR-V shader assets.
@@ -134,8 +137,10 @@ pub const FitEstimate = struct {
     total_device_local_bytes: u64,
     /// Available VRAM budget reported by the Vulkan driver.
     vram_budget_bytes: u64,
-    /// Maximum context length used for KV cache sizing (capped at 4096).
+    /// Current runtime context cap used for KV cache sizing.
     max_ctx: u32,
+    /// Maximum context the current VRAM budget could sustain if runtime caps were lifted.
+    budget_max_ctx: u32,
 
     fn headroomBytes(self: FitEstimate) i128 {
         return @as(i128, self.vram_budget_bytes) - @as(i128, self.total_device_local_bytes);
@@ -240,7 +245,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     } else if (opts.model_path != null) {
         try printCheckingLine(stdout, styles, "GGUF model header");
     }
-    try printModelCheck(stdout, styles, &summary, opts.model_path, opts.managed_model, vram_budget_bytes, allocator);
+    try printModelCheck(stdout, styles, &summary, opts.model_path, opts.managed_model, vram_budget_bytes, opts.requested_context_length, allocator);
     try printStepDuration(stdout, styles, step5_start);
 
     try printSummary(stdout, summary);
@@ -431,6 +436,7 @@ fn printModelCheck(
     model_path: ?[]const u8,
     managed_model: ?ManagedModelInfo,
     vram_budget_bytes: ?u64,
+    requested_context_length: ?u32,
     allocator: std.mem.Allocator,
 ) !void {
     if (managed_model) |managed| {
@@ -442,7 +448,7 @@ fn printModelCheck(
 
             try printStatusLine(writer, styles, summary, .ok, "Managed model", "{s} ({s})", .{ managed.display_name, managed.id });
             try printDetailLine(writer, "Resolved path", "{s}", .{path});
-            try printInspectedModelDetails(writer, styles, summary, inspection, vram_budget_bytes);
+            try printInspectedModelDetails(writer, styles, summary, inspection, vram_budget_bytes, requested_context_length);
             return;
         }
 
@@ -501,7 +507,7 @@ fn printModelCheck(
     };
 
     try printStatusLine(writer, styles, summary, .ok, "Model", "{s}", .{path});
-    try printInspectedModelDetails(writer, styles, summary, inspection, vram_budget_bytes);
+    try printInspectedModelDetails(writer, styles, summary, inspection, vram_budget_bytes, requested_context_length);
 }
 
 fn printInspectedModelDetails(
@@ -510,6 +516,7 @@ fn printInspectedModelDetails(
     summary: *Summary,
     inspection: ModelInspection,
     vram_budget_bytes: ?u64,
+    requested_context_length: ?u32,
 ) !void {
     try printDetailLine(writer, "File size", "{d:.2} GiB", .{bytesToGiB(inspection.file_size)});
     try printDetailLine(writer, "Tensor upload", "{d:.2} GiB device-local weights", .{bytesToGiB(inspection.tensor_bytes)});
@@ -528,7 +535,7 @@ fn printInspectedModelDetails(
     );
 
     if (vram_budget_bytes) |budget| {
-        const fit = estimateFit(inspection, budget);
+        const fit = estimateFit(inspection, budget, requested_context_length);
         const fit_status = fit.fitStatus();
         const headroom = fit.headroomBytes();
         if (headroom >= 0) {
@@ -563,6 +570,7 @@ fn printInspectedModelDetails(
         try printDetailLine(writer, "  weights", "{d:.2} GiB", .{bytesToGiB(fit.weights_bytes)});
         try printDetailLine(writer, "  runtime device-local", "{d:.2} GiB", .{bytesToGiB(fit.runtime_device_local_bytes)});
         try printDetailLine(writer, "  KV cache", "{d:.2} GiB (ctx cap {d})", .{ bytesToGiB(fit.kv_cache_bytes), fit.max_ctx });
+        try printDetailLine(writer, "  budget-fit ctx", "{d} tokens at current VRAM budget", .{fit.budget_max_ctx});
         try printDetailLine(writer, "  GPU SSM state", "{d:.2} GiB", .{bytesToGiB(fit.gpu_ssm_bytes)});
         try printDetailLine(writer, "  host-visible staging", "{d:.2} GiB (reported separately)", .{bytesToGiB(fit.host_visible_bytes)});
         try printDetailLine(writer, "  note", "Fit excludes Vulkan alignment, descriptor pools, query pools, and driver overhead", .{});
@@ -633,70 +641,29 @@ fn readGgufHeader(file: std.fs.File) !GgufHeader {
 }
 
 /// Estimate device-local and host-visible VRAM usage for a model given a VRAM budget.
-pub fn estimateFit(inspection: ModelInspection, vram_budget_bytes: u64) FitEstimate {
+pub fn estimateFit(inspection: ModelInspection, vram_budget_bytes: u64, requested_context_length: ?u32) FitEstimate {
     const config = inspection.config;
-
-    const hidden_size = @as(u64, config.hidden_dim) * @sizeOf(f32);
-    const logits_size = @as(u64, config.vocab_size) * @sizeOf(f32);
-    const q_dim = @as(u64, config.n_heads) * config.head_dim;
-    const kv_dim = @as(u64, config.n_kv_heads) * config.head_dim;
-    const q_size = q_dim * @sizeOf(f32);
-    const kv_size = kv_dim * @sizeOf(f32);
-    const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
-    const shexp_inter = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_dim;
-    const ssm_conv_channels: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
-    const max_inter = @max(
-        @max(inter_dim, shexp_inter),
-        @max(if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim, ssm_conv_channels),
+    const profile = memory_plan.profile(config);
+    const max_ctx = memory_plan.effectiveContextCeiling(config, requested_context_length);
+    const kv_cache_bytes = profile.deviceLocalContextBytes(max_ctx);
+    const runtime_device_local_bytes = profile.runtimeDeviceLocalBytes(max_ctx);
+    const host_visible_bytes = profile.runtimeHostVisibleBytes(max_ctx);
+    const budget_max_ctx = profile.maxContextTokensForDeviceLocalBudget(
+        inspection.tensor_bytes,
+        vram_budget_bytes,
+        config.context_length,
     );
-    const inter_size = @as(u64, max_inter) * @sizeOf(f32);
-    const n_experts_total: u32 = if (config.n_experts > 0) config.n_experts else 1;
-    const n_experts_used: u32 = if (config.n_experts_used > 0) config.n_experts_used else 8;
-    const batched_inter_size = @as(u64, n_experts_used) * inter_dim * @sizeOf(f32);
-    const batched_down_size = @as(u64, n_experts_used) * hidden_size;
-    const gate_buf_size = @max(inter_size, batched_inter_size);
-    const down_buf_size = @max(hidden_size, batched_down_size);
-    const q_full_size = @as(u64, q_dim * 2) * @sizeOf(f32);
-    const conv_ch: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
-    const attn_out_size = @max(q_full_size, @as(u64, conv_ch) * @sizeOf(f32));
-    const router_size = @as(u64, n_experts_total) * @sizeOf(f32);
-    const max_ctx: u32 = @min(config.context_length, 4096);
-    const kv_cache_per_layer = @as(u64, max_ctx) * kv_dim * @sizeOf(f32);
-    const kv_cache_bytes = @as(u64, config.n_layers) * kv_cache_per_layer * 2;
-
-    const gpu_ssm_bytes = blk: {
-        if (config.ssm_d_inner == 0) break :blk @as(u64, 0);
-        const d_inner = config.ssm_d_inner;
-        const dt_rank = config.ssm_dt_rank;
-        if (dt_rank == 0) break :blk @as(u64, 0);
-        const head_v_dim = d_inner / dt_rank;
-        const gpu_conv_ch = d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
-        const gpu_conv_size = @as(u64, (config.ssm_d_conv - 1) * gpu_conv_ch) * @sizeOf(f32);
-        const gpu_state_size = @as(u64, dt_rank) * head_v_dim * head_v_dim * @sizeOf(f32);
-        break :blk @as(u64, config.n_layers) * (gpu_conv_size + gpu_state_size);
-    };
-
-    const runtime_device_local_bytes =
-        hidden_size + hidden_size + hidden_size + logits_size +
-        q_size + kv_size + kv_size + attn_out_size + hidden_size + hidden_size +
-        gate_buf_size + gate_buf_size + gate_buf_size + down_buf_size + hidden_size +
-        router_size + kv_cache_bytes + gpu_ssm_bytes;
-
-    const page_table_size = @as(u64, max_ctx) * @sizeOf(u32);
-    const ssm_staging_size = @max(hidden_size, @as(u64, if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim) * @sizeOf(f32));
-    const router_out_size = @as(u64, n_experts_used) * (@sizeOf(u32) + @sizeOf(f32));
-    const host_visible_bytes =
-        logits_size + hidden_size + router_size + page_table_size + ssm_staging_size + router_out_size;
 
     return .{
         .weights_bytes = inspection.tensor_bytes,
         .runtime_device_local_bytes = runtime_device_local_bytes,
         .host_visible_bytes = host_visible_bytes,
         .kv_cache_bytes = kv_cache_bytes,
-        .gpu_ssm_bytes = gpu_ssm_bytes,
+        .gpu_ssm_bytes = profile.gpu_ssm_bytes,
         .total_device_local_bytes = inspection.tensor_bytes + runtime_device_local_bytes,
         .vram_budget_bytes = vram_budget_bytes,
         .max_ctx = max_ctx,
+        .budget_max_ctx = budget_max_ctx,
     };
 }
 
@@ -905,8 +872,9 @@ test "estimateFit includes weights, kv cache, and runtime buffers" {
         .metadata_count = 52,
     };
 
-    const fit = estimateFit(inspection, 32 * 1024 * 1024 * 1024);
+    const fit = estimateFit(inspection, 32 * 1024 * 1024 * 1024, 4096);
     try std.testing.expectEqual(@as(u32, 4096), fit.max_ctx);
+    try std.testing.expect(fit.budget_max_ctx >= fit.max_ctx);
     try std.testing.expect(fit.weights_bytes == inspection.tensor_bytes);
     try std.testing.expect(fit.kv_cache_bytes > 0);
     try std.testing.expect(fit.runtime_device_local_bytes > fit.kv_cache_bytes);

@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const metal_c = @import("metal/c.zig").shim;
 const metal_device = @import("metal/device.zig");
 const metal_pipeline = @import("metal/pipeline.zig");
+const forward_metal = @import("compute/forward_metal.zig");
+const memory_plan = @import("gpu/memory_plan.zig");
 const config_mod = @import("model/config.zig");
 const loader_metal = @import("model/loader_metal.zig");
 
@@ -16,6 +18,8 @@ pub const Options = struct {
     device_index: u32 = 0,
     /// Path to a GGUF model file for inspection, or null to skip.
     model_path: ?[]const u8 = null,
+    /// Requested runtime context ceiling from CLI/server configuration.
+    requested_context_length: ?u32 = null,
     /// Managed model catalog entry, if selected via `--model-id`.
     managed_model: ?ManagedModelInfo = null,
     /// Directory containing Metal shader source files.
@@ -120,8 +124,10 @@ pub const UnifiedFitEstimate = struct {
     total_memory_bytes: u64,
     /// KV cache bytes included in the runtime estimate.
     kv_cache_bytes: u64,
-    /// Maximum context length used for KV cache sizing (capped at 4096).
+    /// Current runtime context cap used for KV cache sizing.
     max_ctx: u32,
+    /// Maximum context the current UMA budget could sustain if runtime caps were lifted.
+    budget_max_ctx: u32,
 
     fn headroomBytes(self: UnifiedFitEstimate) i128 {
         return @as(i128, self.recommended_working_set_bytes) - @as(i128, self.total_unified_bytes);
@@ -319,7 +325,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
         try printDetailLine(stdout, "  display name", "{s}", .{managed.display_name});
         try printDetailLine(stdout, "  catalog size", "{d:.2} GiB", .{bytesToGiB(managed.size_bytes)});
     }
-    try printModelCheck(stdout, styles, &summary, opts.model_path, opts.managed_model, maybe_device, allocator);
+    try printModelCheck(stdout, styles, &summary, opts.model_path, opts.managed_model, maybe_device, opts.requested_context_length, allocator);
     try printStepDuration(stdout, styles, step4_start);
 
     try printSummary(stdout, summary);
@@ -339,6 +345,7 @@ fn printModelCheck(
     model_path: ?[]const u8,
     managed_model: ?ManagedModelInfo,
     maybe_device: ?MetalDevice,
+    requested_context_length: ?u32,
     allocator: std.mem.Allocator,
 ) !void {
     if (model_path) |path| {
@@ -367,7 +374,7 @@ fn printModelCheck(
         try printDetailLine(writer, "  metadata entries", "{d}", .{inspection.metadata_count});
 
         if (maybe_device) |device| {
-            const fit = estimateUnifiedFit(inspection, device.recommendedMaxWorkingSetSize(), device.totalMemory());
+            const fit = estimateUnifiedFit(inspection, device.recommendedMaxWorkingSetSize(), device.totalMemory(), requested_context_length);
             const status = fit.fitStatus();
             const total_memory_status = fitStatusForUnifiedBytes(fit.total_unified_bytes, fit.total_memory_bytes, fit.total_memory_bytes);
             const headroom = fit.headroomBytes();
@@ -419,6 +426,7 @@ fn printModelCheck(
             try printDetailLine(writer, "  weights", "{d:.2} GiB", .{bytesToGiB(fit.weights_bytes)});
             try printDetailLine(writer, "  runtime shared buffers", "{d:.2} GiB", .{bytesToGiB(fit.runtime_unified_bytes)});
             try printDetailLine(writer, "  KV cache", "{d:.2} GiB (ctx cap {d})", .{ bytesToGiB(fit.kv_cache_bytes), fit.max_ctx });
+            try printDetailLine(writer, "  budget-fit ctx", "{d} tokens at current UMA budget", .{fit.budget_max_ctx});
             try printDetailLine(writer, "  total memory fit", "{s}", .{total_memory_status.label()});
             try printDetailLine(writer, "  note", "Conservative UMA estimate counts shared runtime buffers and KV cache", .{});
         } else {
@@ -454,71 +462,34 @@ pub fn estimateUnifiedFit(
     inspection: ModelInspection,
     recommended_working_set_bytes: u64,
     total_memory_bytes: u64,
+    requested_context_length: ?u32,
 ) UnifiedFitEstimate {
     const config = inspection.config;
-
-    const hidden_size = @as(u64, config.hidden_dim) * @sizeOf(f32);
-    const logits_size = @as(u64, config.vocab_size) * @sizeOf(f32);
-    const q_dim = @as(u64, config.n_heads) * config.head_dim;
-    const kv_dim = @as(u64, config.n_kv_heads) * config.head_dim;
-    const q_size = q_dim * @sizeOf(f32);
-    const kv_size = kv_dim * @sizeOf(f32);
-    const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
-    const shexp_inter = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_dim;
-    const ssm_conv_channels: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
-    const max_inter = @max(
-        @max(inter_dim, shexp_inter),
-        @max(if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim, ssm_conv_channels),
+    const profile = memory_plan.profile(config);
+    const max_ctx = memory_plan.requestedContextTokens(
+        config,
+        requested_context_length,
+        forward_metal.runtime_context_cap,
     );
-    const inter_size = @as(u64, max_inter) * @sizeOf(f32);
-    const n_experts_total: u32 = if (config.n_experts > 0) config.n_experts else 1;
-    const n_experts_used: u32 = if (config.n_experts_used > 0) config.n_experts_used else 8;
-    const batched_inter_size = @as(u64, n_experts_used) * inter_dim * @sizeOf(f32);
-    const batched_down_size = @as(u64, n_experts_used) * hidden_size;
-    const gate_buf_size = @max(inter_size, batched_inter_size);
-    const down_buf_size = @max(hidden_size, batched_down_size);
-    const q_full_size = @as(u64, q_dim * 2) * @sizeOf(f32);
-    const conv_ch: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
-    const attn_out_size = @max(q_full_size, @as(u64, conv_ch) * @sizeOf(f32));
-    const router_size = @as(u64, n_experts_total) * @sizeOf(f32);
-    const max_ctx: u32 = @min(config.context_length, 4096);
-    const kv_cache_per_layer = @as(u64, max_ctx) * kv_dim * @sizeOf(f32);
-    const kv_cache_bytes = @as(u64, config.n_layers) * kv_cache_per_layer * 2;
-
-    const gpu_ssm_bytes = blk: {
-        if (config.ssm_d_inner == 0) break :blk @as(u64, 0);
-        const d_inner = config.ssm_d_inner;
-        const dt_rank = config.ssm_dt_rank;
-        if (dt_rank == 0) break :blk @as(u64, 0);
-        const head_v_dim = d_inner / dt_rank;
-        const gpu_conv_ch = d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
-        const gpu_conv_size = @as(u64, (config.ssm_d_conv - 1) * gpu_conv_ch) * @sizeOf(f32);
-        const gpu_state_size = @as(u64, dt_rank) * head_v_dim * head_v_dim * @sizeOf(f32);
-        break :blk @as(u64, config.n_layers) * (gpu_conv_size + gpu_state_size);
-    };
-
-    const runtime_core_bytes =
-        hidden_size + hidden_size + hidden_size + logits_size +
-        q_size + kv_size + kv_size + attn_out_size + hidden_size + hidden_size +
-        gate_buf_size + gate_buf_size + gate_buf_size + down_buf_size + hidden_size +
-        router_size + kv_cache_bytes + gpu_ssm_bytes;
-
-    const page_table_size = @as(u64, max_ctx) * @sizeOf(u32);
-    const ssm_staging_size = @max(hidden_size, @as(u64, if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim) * @sizeOf(f32));
-    const router_out_size = @as(u64, n_experts_used) * (@sizeOf(u32) + @sizeOf(f32));
-    const conservative_aux_bytes =
-        logits_size + hidden_size + router_size + page_table_size + ssm_staging_size + router_out_size;
+    const kv_cache_bytes = profile.deviceLocalContextBytes(max_ctx);
+    const runtime_unified_bytes = profile.runtimeUnifiedBytes(max_ctx);
 
     const recommended = if (recommended_working_set_bytes > 0) recommended_working_set_bytes else total_memory_bytes;
+    const budget_max_ctx = profile.maxContextTokensForUnifiedBudget(
+        inspection.tensor_bytes,
+        recommended,
+        config.context_length,
+    );
 
     return .{
         .weights_bytes = inspection.tensor_bytes,
-        .runtime_unified_bytes = runtime_core_bytes + conservative_aux_bytes,
-        .total_unified_bytes = inspection.tensor_bytes + runtime_core_bytes + conservative_aux_bytes,
+        .runtime_unified_bytes = runtime_unified_bytes,
+        .total_unified_bytes = inspection.tensor_bytes + runtime_unified_bytes,
         .recommended_working_set_bytes = recommended,
         .total_memory_bytes = total_memory_bytes,
         .kv_cache_bytes = kv_cache_bytes,
         .max_ctx = max_ctx,
+        .budget_max_ctx = budget_max_ctx,
     };
 }
 
@@ -728,11 +699,51 @@ test "estimateUnifiedFit includes weights, runtime buffers, and kv cache" {
         .metadata_count = 52,
     };
 
-    const fit = estimateUnifiedFit(inspection, 48 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024);
+    const fit = estimateUnifiedFit(inspection, 48 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024, null);
     try std.testing.expectEqual(@as(u32, 4096), fit.max_ctx);
+    try std.testing.expect(fit.budget_max_ctx >= fit.max_ctx);
     try std.testing.expect(fit.weights_bytes == inspection.tensor_bytes);
     try std.testing.expect(fit.kv_cache_bytes > 0);
     try std.testing.expect(fit.runtime_unified_bytes > fit.kv_cache_bytes);
     try std.testing.expect(fit.total_unified_bytes > fit.weights_bytes);
     try std.testing.expectEqual(CheckStatus.ok, fit.fitStatus());
+}
+
+test "estimateUnifiedFit respects requested context ceiling on Metal" {
+    const config = ModelConfig{
+        .architecture = .qwen2_moe,
+        .n_layers = 40,
+        .n_heads = 16,
+        .n_kv_heads = 2,
+        .head_dim = 256,
+        .hidden_dim = 2048,
+        .intermediate_dim = 512,
+        .vocab_size = 248320,
+        .context_length = 32768,
+        .rope_freq_base = 10000000.0,
+        .rms_norm_eps = 1e-6,
+        .n_experts = 256,
+        .n_experts_used = 8,
+        .rope_dim = 64,
+        .ssm_d_conv = 4,
+        .ssm_d_inner = 4096,
+        .ssm_d_state = 128,
+        .ssm_dt_rank = 32,
+        .ssm_n_group = 16,
+        .full_attn_interval = 4,
+        .shared_expert_intermediate_dim = 512,
+    };
+    const inspection = ModelInspection{
+        .config = config,
+        .file_size = 0,
+        .tensor_bytes = 21 * 1024 * 1024 * 1024,
+        .tensor_count = 733,
+        .metadata_count = 52,
+    };
+
+    const requested_small = estimateUnifiedFit(inspection, 48 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024, 2048);
+    try std.testing.expectEqual(@as(u32, 2048), requested_small.max_ctx);
+
+    const requested_large = estimateUnifiedFit(inspection, 48 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024, 8192);
+    try std.testing.expectEqual(@as(u32, forward_metal.runtime_context_cap), requested_large.max_ctx);
 }

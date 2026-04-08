@@ -5,6 +5,7 @@ const std = @import("std");
 const config_mod = @import("../model/config.zig");
 const ModelConfig = config_mod.ModelConfig;
 const gguf = @import("../model/gguf.zig");
+const memory_plan = @import("../gpu/memory_plan.zig");
 const metal_loader = @import("../model/loader_metal.zig");
 const metal_device = @import("../metal/device.zig");
 const metal_buffer = @import("../metal/buffer.zig");
@@ -17,17 +18,20 @@ pub const CommandEncoderMode = metal_command.CommandEncoderMode;
 const shim = @import("../metal/c.zig").shim;
 
 const log = std.log.scoped(.forward);
+pub const runtime_context_cap: u32 = 4096;
 
 /// Runtime state for the decode loop.
 pub const DecodeState = struct {
     position: u32,
     generated_tokens: std.ArrayList(u32),
+    requested_context_tokens: u32,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) DecodeState {
         return .{
             .position = 0,
             .generated_tokens = .{},
+            .requested_context_tokens = 0,
             .allocator = allocator,
         };
     }
@@ -83,6 +87,20 @@ pub const InitOptions = struct {
     private_decode_buffers_override: ?bool = null,
     command_encoder_mode: ?CommandEncoderMode = null,
 };
+
+fn tensorBytes(model: *const metal_loader.Model) u64 {
+    var total: u64 = 0;
+    for (model.gguf_file.tensors.items) |tensor_info| {
+        total += tensor_info.sizeBytes();
+    }
+    return total;
+}
+
+fn memoryBudget(device: *const metal_device.MetalDevice) u64 {
+    const working_set = device.recommendedMaxWorkingSetSize();
+    if (working_set > 0) return working_set;
+    return device.totalMemory();
+}
 
 fn tokenSeen(history: []const u32, token: u32) bool {
     for (history) |t| {
@@ -1026,6 +1044,7 @@ pub const InferenceEngine = struct {
 
     // Decode state
     position: u32,
+    max_context_tokens: u32,
     profile_enabled: bool,
     debug_validation_enabled: bool,
     private_decode_buffers: bool,
@@ -1046,6 +1065,31 @@ pub const InferenceEngine = struct {
     ) !InferenceEngine {
         const cfg = model.config;
         const ctx = device.ctx;
+        const weights_bytes = tensorBytes(model);
+        const runtime_profile = memory_plan.profile(cfg);
+        const requested_ctx = memory_plan.requestedContextTokens(cfg, null, runtime_context_cap);
+        const max_ctx = runtime_profile.maxContextTokensForUnifiedBudget(
+            weights_bytes,
+            memoryBudget(device),
+            requested_ctx,
+        );
+        if (max_ctx == 0) {
+            log.err("No decode context fits within {d:.2} GiB Metal working-set budget", .{
+                @as(f64, @floatFromInt(memoryBudget(device))) / (1024.0 * 1024.0 * 1024.0),
+            });
+            return error.ContextLengthDoesNotFit;
+        }
+        if (max_ctx < requested_ctx) {
+            log.warn("Metal context trimmed from {d} to {d} tokens to fit current UMA budget", .{
+                requested_ctx,
+                max_ctx,
+            });
+        } else {
+            log.info("Metal KV cache planned context: requested {d}, reserved {d}", .{
+                requested_ctx,
+                max_ctx,
+            });
+        }
 
         // Compute dimension-dependent sizes
         const q_dim: u32 = cfg.n_heads * cfg.head_dim;
@@ -1073,8 +1117,8 @@ pub const InferenceEngine = struct {
         const up_size: usize = @max(@as(usize, inter_dim) * @sizeOf(f32), @as(usize, shexp_inter_dim) * @sizeOf(f32));
         const swiglu_size: usize = @max(up_size, @as(usize, conv_channels) * @sizeOf(f32));
         const vocab_size: usize = @as(usize, cfg.vocab_size) * @sizeOf(f32);
-        const kv_cache_size: usize = @as(usize, 4096) * kv_cache_bytes_per_token;
-        const page_table_size: usize = @as(usize, 4096) * @sizeOf(u32);
+        const kv_cache_size: usize = @as(usize, max_ctx) * kv_cache_bytes_per_token;
+        const page_table_size: usize = @as(usize, max_ctx) * @sizeOf(u32);
         const router_size: usize = @max(@as(usize, cfg.n_experts), @as(usize, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1)) * @sizeOf(f32);
         const router_output_size: usize = @max(@as(usize, cfg.n_experts_used) * 2 * @sizeOf(u32), 8);
         const expert_ids_size: usize = @max(@as(usize, cfg.n_experts_used) * @sizeOf(u32), 4);
@@ -1088,6 +1132,7 @@ pub const InferenceEngine = struct {
         self.config = cfg;
         self.allocator = allocator;
         self.position = 0;
+        self.max_context_tokens = max_ctx;
         self.profile_enabled = options.profile_enabled;
         self.debug_validation_enabled = options.debug_validation_enabled;
         self.private_decode_buffers = if (options.debug_validation_enabled)
@@ -1169,7 +1214,7 @@ pub const InferenceEngine = struct {
         self.page_table_buf = try metal_buffer.createBuffer(ctx, page_table_size);
         {
             const page_table_ptr: [*]u32 = @ptrCast(@alignCast(self.page_table_buf.cpu_ptr.?));
-            for (0..4096) |i| {
+            for (0..max_ctx) |i| {
                 page_table_ptr[i] = @intCast(i);
             }
         }
@@ -1892,8 +1937,15 @@ pub const InferenceEngine = struct {
         return sampleFromLogits(logits, history, params, random, self.config.final_logit_softcapping);
     }
 
+    fn normalizeRequestedContext(self: *const InferenceEngine, requested_context_tokens: u32, minimum_tokens: u32) u32 {
+        const floor = if (minimum_tokens > 0) minimum_tokens else @as(u32, 1);
+        const desired = if (requested_context_tokens > floor) requested_context_tokens else floor;
+        return @min(desired, self.max_context_tokens);
+    }
+
     /// Reset position, profiling counters, and SSM state for a new request.
-    pub fn resetRequestState(self: *InferenceEngine) !void {
+    pub fn resetRequestState(self: *InferenceEngine, requested_context_tokens: u32) !void {
+        _ = self.normalizeRequestedContext(requested_context_tokens, 1);
         self.position = 0;
         self.request_profile.reset();
 
@@ -1922,9 +1974,22 @@ pub const InferenceEngine = struct {
     }
 
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
-        try self.resetRequestState();
-        state.position = 0;
-        state.generated_tokens.clearRetainingCapacity();
+        if (prompt_tokens.len == 0) return;
+
+        const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+        const target_context_tokens = if (state.requested_context_tokens > 0)
+            @max(state.requested_context_tokens, state.position +| prompt_token_count)
+        else
+            state.position +| prompt_token_count;
+        if (target_context_tokens > self.max_context_tokens) return error.ContextLengthExceeded;
+
+        if (state.position == 0 and state.generated_tokens.items.len == 0) {
+            try self.resetRequestState(target_context_tokens);
+            state.position = 0;
+            state.generated_tokens.clearRetainingCapacity();
+        } else if (state.position != self.position) {
+            return error.KvStateNotAvailable;
+        }
 
         for (prompt_tokens) |token_id| {
             try self.loadTokenEmbedding(token_id);
@@ -1934,6 +1999,13 @@ pub const InferenceEngine = struct {
     }
 
     pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32) !void {
+        if (state.position >= self.max_context_tokens) return error.ContextLengthExceeded;
+        if (state.position != self.position) return error.KvStateNotAvailable;
+        const next_token_target = if (state.requested_context_tokens > 0)
+            @max(state.requested_context_tokens, state.position + 1)
+        else
+            state.position + 1;
+        if (next_token_target > self.max_context_tokens) return error.ContextLengthExceeded;
         try self.loadTokenEmbedding(token_id);
         try runDecodeStep(self);
         state.position = self.position;
@@ -5931,7 +6003,6 @@ fn debugCompareAttentionLayer(
         cpuRope(q_ref.ptr, attn.head_dim, rope_dim, cfg.n_heads, engine.position, attn.rope_freq_base);
         cpuRope(k_ref.ptr, attn.head_dim, rope_dim, attn.n_kv_heads, engine.position, attn.rope_freq_base);
     }
-
     const kv_offset: usize = @intCast(engine.position * kv_dim);
     logDebugSliceDiff(layer, "attn_q", q_ref[0..q_dim], q_actual[0..q_dim]);
     logDebugSliceDiff(layer, "attn_k", k_ref[0..kv_dim], k_actual[0..kv_dim]);
@@ -6090,13 +6161,21 @@ pub fn generateWithMetrics(
     var output: std.ArrayList(u32) = .{};
     errdefer output.deinit(allocator);
 
-    try engine.resetRequestState();
+    const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+    if (prompt_token_count > engine.max_context_tokens) return error.ContextLengthExceeded;
+    const request_budget = memory_plan.requestBudget(prompt_token_count, max_tokens, engine.max_context_tokens);
+    const decode_budget = request_budget.completion_tokens;
+
+    var state = DecodeState.init(allocator);
+    defer state.deinit();
+    state.requested_context_tokens = request_budget.target_context_tokens;
 
     // Prefill: process each prompt token through all layers
     const prefill_start = std.time.nanoTimestamp();
-    for (prompt_tokens) |token_id| {
-        try engine.loadTokenEmbedding(token_id);
-        try runDecodeStep(engine);
+    if (prompt_tokens.len > 0) {
+        try engine.prefillBatch(&state, prompt_tokens);
+    } else {
+        try engine.resetRequestState(state.requested_context_tokens);
     }
     const prefill_end = std.time.nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
@@ -6107,7 +6186,7 @@ pub fn generateWithMetrics(
 
     // Sample first output token from prefill logits
     var eos_at_first_position = false;
-    if (prompt_tokens.len > 0 and max_tokens > 0) {
+    if (prompt_tokens.len > 0 and decode_budget > 0) {
         const first_token = engine.sampleGreedy();
         if (first_token == eos_id) {
             eos_at_first_position = true;
@@ -6126,20 +6205,21 @@ pub fn generateWithMetrics(
             };
         }
         try output.append(allocator, first_token);
+        try state.generated_tokens.append(allocator, first_token);
     }
 
     // Decode loop
     const decode_start = std.time.nanoTimestamp();
     var tokens_generated: u32 = @intCast(output.items.len);
-    while (tokens_generated < max_tokens and output.items.len > 0) {
+    while (tokens_generated < decode_budget and output.items.len > 0) {
         const input_token = output.items[output.items.len - 1];
-        try engine.loadTokenEmbedding(input_token);
-        try runDecodeStep(engine);
+        try engine.decodeStep(&state, input_token);
 
         const next_token = engine.sampleGreedy();
         if (next_token == eos_id) break;
 
         try output.append(allocator, next_token);
+        try state.generated_tokens.append(allocator, next_token);
         tokens_generated += 1;
     }
     const decode_end = std.time.nanoTimestamp();

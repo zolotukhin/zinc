@@ -6,6 +6,7 @@ const managed_mod = @import("../model/managed.zig");
 const loader_mod = @import("../model/loader_metal.zig");
 const tokenizer_mod = @import("../model/tokenizer.zig");
 const forward_mod = @import("../compute/forward_metal.zig");
+const memory_plan = @import("../gpu/memory_plan.zig");
 const process_lock_mod = @import("../gpu/process_lock.zig");
 const metal_device = @import("../metal/device.zig");
 
@@ -16,6 +17,7 @@ const MetalDevice = metal_device.MetalDevice;
 pub const LoadSpec = struct {
     model_path: []const u8,
     managed_id: ?[]const u8 = null,
+    requested_context_length: ?u32 = null,
 };
 
 /// Compact view of one catalog entry for the HTTP `/v1/models` response.
@@ -85,6 +87,7 @@ pub const ModelManager = struct {
     vram_budget_bytes: u64,
     state_mutex: std.Thread.Mutex = .{},
     gpu_process_lock: process_lock_mod.ProcessLock = .{},
+    requested_context_length: ?u32 = null,
     current: ?*LoadedResources,
 
     pub const RemoveResult = struct {
@@ -127,12 +130,14 @@ pub const ModelManager = struct {
             .profile = catalog_mod.profileForMetal(),
             .vram_budget_bytes = memoryBudget(device),
             .gpu_process_lock = gpu_process_lock,
+            .requested_context_length = spec.requested_context_length,
             .current = current,
         };
     }
 
     pub fn initEmpty(
         device: *const MetalDevice,
+        requested_context_length: ?u32,
         allocator: std.mem.Allocator,
     ) ModelManager {
         return .{
@@ -140,6 +145,7 @@ pub const ModelManager = struct {
             .device = device,
             .profile = catalog_mod.profileForMetal(),
             .vram_budget_bytes = memoryBudget(device),
+            .requested_context_length = requested_context_length,
             .current = null,
         };
     }
@@ -309,7 +315,11 @@ pub const ModelManager = struct {
         }
         const switched = try self.allocator.create(LoadedResources);
         errdefer self.allocator.destroy(switched);
-        try loadResourcesInto(switched, .{ .model_path = new_path, .managed_id = model_id }, self.device, self.allocator);
+        try loadResourcesInto(switched, .{
+            .model_path = new_path,
+            .managed_id = model_id,
+            .requested_context_length = self.requested_context_length,
+        }, self.device, self.allocator);
 
         const previous = self.current;
         self.current = switched;
@@ -372,6 +382,7 @@ fn loadResourcesInto(
 
     resources.model = try loader_mod.load(spec.model_path, device.ctx, allocator);
     errdefer resources.model.deinit();
+    memory_plan.applyRequestedContextLimit(&resources.model.config, spec.requested_context_length);
 
     resources.tokenizer = try tokenizer_mod.Tokenizer.initFromGGUF(&resources.model.gguf_file, allocator);
     errdefer resources.tokenizer.deinit();
@@ -389,7 +400,12 @@ fn loadResourcesInto(
     errdefer allocator.free(resources.display_name);
 
     const weights_bytes = tensorBytes(&resources.model);
-    const usage = estimateMemoryUsage(resources.model.config, weights_bytes, memoryBudget(device));
+    const usage = estimateMemoryUsage(
+        resources.model.config,
+        weights_bytes,
+        memoryBudget(device),
+        resources.engine.max_context_tokens,
+    );
     resources.weights_bytes = usage.weights_bytes;
     resources.runtime_device_local_bytes = usage.runtime_device_local_bytes;
     resources.context_reserved_bytes = usage.context_reserved_bytes;
@@ -413,59 +429,17 @@ fn memoryBudget(device: *const MetalDevice) u64 {
     return device.totalMemory();
 }
 
-fn estimateMemoryUsage(config: ModelConfig, weights_bytes: u64, budget_bytes: u64) ModelManager.MemoryUsage {
-    const hidden_size = @as(u64, config.hidden_dim) * @sizeOf(f32);
-    const logits_size = @as(u64, config.vocab_size) * @sizeOf(f32);
-    const q_dim = @as(u64, config.n_heads) * config.head_dim;
-    const kv_dim = @as(u64, config.n_kv_heads) * config.head_dim;
-    const q_size = q_dim * @sizeOf(f32);
-    const kv_size = kv_dim * @sizeOf(f32);
-    const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
-    const shexp_inter = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_dim;
-    const ssm_conv_channels: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
-    const max_inter = @max(
-        @max(inter_dim, shexp_inter),
-        @max(if (config.ssm_d_inner > 0) config.ssm_d_inner else inter_dim, ssm_conv_channels),
-    );
-    const inter_size = @as(u64, max_inter) * @sizeOf(f32);
-    const n_experts_total: u32 = if (config.n_experts > 0) config.n_experts else 1;
-    const n_experts_used: u32 = if (config.n_experts_used > 0) config.n_experts_used else 8;
-    const batched_inter_size = @as(u64, n_experts_used) * inter_dim * @sizeOf(f32);
-    const batched_down_size = @as(u64, n_experts_used) * hidden_size;
-    const gate_buf_size = @max(inter_size, batched_inter_size);
-    const down_buf_size = @max(hidden_size, batched_down_size);
-    const q_full_size = @as(u64, q_dim * 2) * @sizeOf(f32);
-    const conv_ch: u32 = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else 0;
-    const attn_out_size = @max(q_full_size, @as(u64, conv_ch) * @sizeOf(f32));
-    const router_size = @as(u64, n_experts_total) * @sizeOf(f32);
-    const max_ctx: u32 = @min(config.context_length, 4096);
-    const kv_cache_per_layer = @as(u64, max_ctx) * kv_dim * @sizeOf(f32);
-    const kv_cache_bytes = @as(u64, config.n_layers) * kv_cache_per_layer * 2;
-
-    const gpu_ssm_bytes = blk: {
-        if (config.ssm_d_inner == 0) break :blk @as(u64, 0);
-        const d_inner = config.ssm_d_inner;
-        const dt_rank = config.ssm_dt_rank;
-        if (dt_rank == 0) break :blk @as(u64, 0);
-        const head_v_dim = d_inner / dt_rank;
-        const gpu_conv_ch = d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
-        const gpu_conv_size = @as(u64, (config.ssm_d_conv - 1) * gpu_conv_ch) * @sizeOf(f32);
-        const gpu_state_size = @as(u64, dt_rank) * head_v_dim * head_v_dim * @sizeOf(f32);
-        break :blk @as(u64, config.n_layers) * (gpu_conv_size + gpu_state_size);
-    };
-
-    const runtime_device_local_bytes =
-        hidden_size + hidden_size + hidden_size + logits_size +
-        q_size + kv_size + kv_size + attn_out_size + hidden_size + hidden_size +
-        gate_buf_size + gate_buf_size + gate_buf_size + down_buf_size + hidden_size +
-        router_size + kv_cache_bytes + gpu_ssm_bytes;
+fn estimateMemoryUsage(config: ModelConfig, weights_bytes: u64, budget_bytes: u64, runtime_ctx: u32) ModelManager.MemoryUsage {
+    const profile = memory_plan.profile(config);
+    const kv_cache_bytes = profile.deviceLocalContextBytes(runtime_ctx);
+    const runtime_device_local_bytes = profile.runtimeDeviceLocalBytes(runtime_ctx);
 
     return .{
         .weights_bytes = weights_bytes,
         .runtime_device_local_bytes = runtime_device_local_bytes,
         .context_reserved_bytes = kv_cache_bytes,
-        .context_capacity_tokens = max_ctx,
-        .context_bytes_per_token = if (max_ctx == 0) 0 else @divTrunc(kv_cache_bytes, max_ctx),
+        .context_capacity_tokens = runtime_ctx,
+        .context_bytes_per_token = if (runtime_ctx == 0) 0 else @divTrunc(kv_cache_bytes, runtime_ctx),
         .device_local_bytes = weights_bytes + runtime_device_local_bytes,
         .device_local_budget_bytes = budget_bytes,
     };
@@ -503,4 +477,35 @@ test "MemoryUsage active context bytes clamp to capacity" {
     };
     try std.testing.expectEqual(@as(u32, 4), usage.activeContextTokens(99));
     try std.testing.expectEqual(@as(u64, 1024), usage.activeContextBytes(99));
+}
+
+test "estimateMemoryUsage follows the reserved runtime context" {
+    const config = ModelConfig{
+        .architecture = .qwen2_moe,
+        .n_layers = 40,
+        .n_heads = 16,
+        .n_kv_heads = 2,
+        .head_dim = 256,
+        .hidden_dim = 2048,
+        .intermediate_dim = 512,
+        .vocab_size = 248320,
+        .context_length = 32768,
+        .rope_freq_base = 10000000.0,
+        .rms_norm_eps = 1e-6,
+        .n_experts = 256,
+        .n_experts_used = 8,
+        .rope_dim = 64,
+        .ssm_d_conv = 4,
+        .ssm_d_inner = 4096,
+        .ssm_d_state = 128,
+        .ssm_dt_rank = 32,
+        .ssm_n_group = 16,
+        .full_attn_interval = 4,
+        .shared_expert_intermediate_dim = 512,
+    };
+
+    const usage = estimateMemoryUsage(config, 21 * 1024 * 1024 * 1024, 48 * 1024 * 1024 * 1024, 2048);
+    try std.testing.expectEqual(@as(u32, 2048), usage.context_capacity_tokens);
+    try std.testing.expect(usage.context_reserved_bytes > 0);
+    try std.testing.expect(usage.runtime_device_local_bytes > usage.context_reserved_bytes);
 }

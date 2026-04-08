@@ -96,9 +96,9 @@ const UpstreamArtifactMetadata = struct {
 
 fn estimateRequiredBytes(inspection: loader_mod.ModelInspection) u64 {
     if (comptime gpu.is_metal) {
-        return diagnostics.estimateUnifiedFit(inspection, std.math.maxInt(u64), std.math.maxInt(u64)).total_unified_bytes;
+        return diagnostics.estimateUnifiedFit(inspection, std.math.maxInt(u64), std.math.maxInt(u64), 4096).total_unified_bytes;
     }
-    return diagnostics.estimateFit(inspection, std.math.maxInt(u64)).total_device_local_bytes;
+    return diagnostics.estimateFit(inspection, std.math.maxInt(u64), 4096).total_device_local_bytes;
 }
 
 fn findHeaderValue(head: std.http.Client.Response.Head, name: []const u8) ?[]const u8 {

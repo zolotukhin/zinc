@@ -21,8 +21,11 @@ const ElementwiseDispatch = @import("elementwise.zig").ElementwiseDispatch;
 const AttentionDispatch = @import("attention.zig").AttentionDispatch;
 const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
+const memory_plan = @import("../gpu/memory_plan.zig");
+const kv_cache_mod = @import("../scheduler/kv_cache.zig");
 
 const log = std.log.scoped(.forward);
+const kv_page_size_tokens: u32 = 16;
 
 /// Runtime state for the decode loop.
 pub const DecodeState = struct {
@@ -30,6 +33,8 @@ pub const DecodeState = struct {
     position: u32,
     /// Generated token IDs.
     generated_tokens: std.ArrayList(u32),
+    /// Soft target for request-local KV reservation; runtime may grow beyond this if needed.
+    requested_context_tokens: u32,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
@@ -40,6 +45,7 @@ pub const DecodeState = struct {
         return .{
             .position = 0,
             .generated_tokens = .{},
+            .requested_context_tokens = 0,
             .allocator = allocator,
         };
     }
@@ -444,6 +450,37 @@ fn findLoadedTensor(model: *const Model, name: []const u8) ?*const LoadedTensor 
     return null;
 }
 
+fn tensorBytes(model: *const Model) u64 {
+    var total: u64 = 0;
+    for (model.gguf_file.tensors.items) |tensor_info| {
+        total += tensor_info.sizeBytes();
+    }
+    return total;
+}
+
+fn kvPageCountForContext(context_tokens: u32) u32 {
+    if (context_tokens == 0) return 0;
+    return @divTrunc(context_tokens + kv_page_size_tokens - 1, kv_page_size_tokens);
+}
+
+fn sortPageIdsAscending(page_ids: []u32) void {
+    var i: usize = 1;
+    while (i < page_ids.len) : (i += 1) {
+        const value = page_ids[i];
+        var j = i;
+        while (j > 0 and page_ids[j - 1] > value) : (j -= 1) {
+            page_ids[j] = page_ids[j - 1];
+        }
+        page_ids[j] = value;
+    }
+}
+
+fn logicalTokenToPhysicalToken(page_ids: []const u32, logical_token: u32) !u32 {
+    const page_slot: usize = @intCast(@divTrunc(logical_token, kv_page_size_tokens));
+    if (page_slot >= page_ids.len) return error.ContextLengthExceeded;
+    return page_ids[page_slot] * kv_page_size_tokens + (logical_token % kv_page_size_tokens);
+}
+
 // ---------------------------------------------------------------------------
 // Inference engine
 // ---------------------------------------------------------------------------
@@ -498,7 +535,12 @@ pub const InferenceEngine = struct {
     // KV cache (per-layer, for attention layers)
     kv_k_cache: []Buffer, // [n_layers] K cache buffers
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
-    page_table_buf: Buffer, // identity page table for flash attention (page_ids[i] = i)
+    page_table_buf: Buffer, // active per-request page table for flash attention
+    page_table_staging: Buffer, // host-visible upload staging for the active page table
+    kv_page_pool: kv_cache_mod.KvPagePool, // request-owned page allocator for the reserved KV arena
+    active_kv_page_ids: ?[]u32, // current request's logical→physical page mapping
+    active_kv_request_id: ?u64, // owner ID stamped into kv_page_pool
+    next_kv_request_id: u64, // monotonically increasing request ID for kv_page_pool ownership
     // SSM state (per-layer, CPU-side, for SSM layers) — legacy, used until GPU SSM is integrated
     ssm_conv_states: [][]f32, // [n_layers] conv state: (kernel_size-1) * conv_channels
     ssm_states: [][]f32, // [n_layers] recurrent state: head_v_dim * head_v_dim * num_v_heads
@@ -515,6 +557,8 @@ pub const InferenceEngine = struct {
     instance: *const Instance,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
+    /// Actual runtime context reserved from the current VRAM budget.
+    max_context_tokens: u32,
     // Profiling (Phase 3c, --profile flag)
     profile_enabled: bool = false,
     logits_readback_enabled: bool = false,
@@ -587,8 +631,36 @@ pub const InferenceEngine = struct {
         var argmax = try ArgmaxDispatch.init(instance, shader_dir, allocator);
         errdefer argmax.deinit();
 
+        const weights_bytes = tensorBytes(model);
+        const runtime_profile = memory_plan.profile(config.*);
+        const requested_ctx = config.context_length;
+        const max_ctx = runtime_profile.maxContextTokensForDeviceLocalBudget(
+            weights_bytes,
+            instance.vramBytes(),
+            requested_ctx,
+        );
+        if (max_ctx == 0) {
+            log.err("No decode context fits within {d:.2} GiB VRAM budget", .{
+                @as(f64, @floatFromInt(instance.vramBytes())) / (1024.0 * 1024.0 * 1024.0),
+            });
+            return error.ContextLengthDoesNotFit;
+        }
+        if (max_ctx < requested_ctx) {
+            log.warn("Context trimmed from {d} to {d} tokens to fit current VRAM budget", .{
+                requested_ctx,
+                max_ctx,
+            });
+        } else {
+            log.info("KV cache planned context: requested {d}, reserved {d}", .{
+                requested_ctx,
+                max_ctx,
+            });
+        }
+
         // Build the decode graph (for diagnostics / future full-graph dispatch)
-        var decode_graph = try architecture.buildDecodeGraphDetailed(config, allocator, &model.gguf_file);
+        var graph_config = config.*;
+        graph_config.context_length = max_ctx;
+        var decode_graph = try architecture.buildDecodeGraphDetailed(&graph_config, allocator, &model.gguf_file);
         decode_graph.setHardwareContext(.{
             .bandwidth_gbps = gpu_config.bandwidth_gbps,
             .compute_units = gpu_config.compute_units,
@@ -784,15 +856,12 @@ pub const InferenceEngine = struct {
                 freq_ptr[k] = 1.0 / std.math.pow(f32, config.rope_freq_base, exponent);
             }
             log.info("IMROPE: sections=[{d},{d},{d},{d}] total_pairs={d} freq[0]={d:.6} freq[11]={d:.6} freq[31]={d:.6}", .{
-                config.rope_sections[0], config.rope_sections[1], config.rope_sections[2], config.rope_sections[3],
-                total_pairs, freq_ptr[0],
-                if (total_pairs > 11) freq_ptr[11] else 0.0,
-                if (total_pairs > 31) freq_ptr[31] else 0.0,
+                config.rope_sections[0], config.rope_sections[1], config.rope_sections[2],                     config.rope_sections[3],
+                total_pairs,             freq_ptr[0],             if (total_pairs > 11) freq_ptr[11] else 0.0, if (total_pairs > 31) freq_ptr[31] else 0.0,
             });
         }
 
         // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32))
-        const max_ctx: u32 = @min(config.context_length, 4096); // cap for now
         const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
         const kv_k_cache = try allocator.alloc(Buffer, config.n_layers);
         errdefer allocator.free(kv_k_cache);
@@ -810,22 +879,22 @@ pub const InferenceEngine = struct {
             config.n_layers * kv_cache_per_layer * 2 / (1024 * 1024),
         });
 
-        // Identity page table for flash attention: page_ids[i] = i (flat KV layout)
-        const page_table_size = @as(vk.c.VkDeviceSize, max_ctx) * @sizeOf(u32);
+        // Active page table for flash attention, backed by a request-owned page pool.
+        const kv_page_count = kvPageCountForContext(max_ctx);
+        const page_table_size = @as(vk.c.VkDeviceSize, kv_page_count) * @sizeOf(u32);
         var page_table_buf = try Buffer.initDeviceLocal(
             instance,
             page_table_size,
             vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         );
         errdefer page_table_buf.deinit();
-        {
-            var page_table_staging = try Buffer.initStaging(instance, page_table_size);
-            defer page_table_staging.deinit();
-
-            const pt_u32: [*]u32 = @ptrCast(@alignCast(page_table_staging.mapped.?));
-            for (0..max_ctx) |i| pt_u32[i] = @intCast(i);
-            try buffer_mod.copyBuffer(instance, cmd_pool.handle, &page_table_staging, &page_table_buf, page_table_size);
-        }
+        var page_table_staging = try Buffer.initStaging(instance, page_table_size);
+        errdefer page_table_staging.deinit();
+        const pt_u32: [*]u32 = @ptrCast(@alignCast(page_table_staging.mapped.?));
+        @memset(pt_u32[0..kv_page_count], 0);
+        try buffer_mod.copyBuffer(instance, cmd_pool.handle, &page_table_staging, &page_table_buf, page_table_size);
+        var kv_page_pool = try kv_cache_mod.KvPagePool.init(allocator, kv_page_count, kv_page_size_tokens);
+        errdefer kv_page_pool.deinit();
 
         // SSM state (CPU-side, for hybrid models)
         const ssm_conv_states = try allocator.alloc([]f32, config.n_layers);
@@ -985,6 +1054,11 @@ pub const InferenceEngine = struct {
             .kv_k_cache = kv_k_cache,
             .kv_v_cache = kv_v_cache,
             .page_table_buf = page_table_buf,
+            .page_table_staging = page_table_staging,
+            .kv_page_pool = kv_page_pool,
+            .active_kv_page_ids = null,
+            .active_kv_request_id = null,
+            .next_kv_request_id = 1,
             .ssm_conv_states = ssm_conv_states,
             .ssm_states = ssm_states,
             .ssm_hidden_staging = ssm_hidden_staging,
@@ -994,6 +1068,7 @@ pub const InferenceEngine = struct {
             .shared_pool = shared_pool,
             .instance = instance,
             .allocator = allocator,
+            .max_context_tokens = max_ctx,
             .modeled_decode_bytes_per_token = modeled_decode_bytes_per_token,
         };
     }
@@ -1091,7 +1166,94 @@ pub const InferenceEngine = struct {
             1_000_000.0;
     }
 
-    fn resetRequestState(self: *InferenceEngine) !void {
+    fn freeActiveKvPages(self: *InferenceEngine) void {
+        if (self.active_kv_request_id) |request_id| {
+            self.kv_page_pool.freePages(request_id);
+            self.active_kv_request_id = null;
+        }
+        if (self.active_kv_page_ids) |page_ids| {
+            self.allocator.free(page_ids);
+            self.active_kv_page_ids = null;
+        }
+    }
+
+    fn uploadActivePageTable(self: *InferenceEngine, page_ids: []const u32) !void {
+        const staging_u32: [*]u32 = @ptrCast(@alignCast(self.page_table_staging.mapped.?));
+        @memcpy(staging_u32[0..page_ids.len], page_ids);
+        try buffer_mod.copyBuffer(
+            self.instance,
+            self.cmd_pool.handle,
+            &self.page_table_staging,
+            &self.page_table_buf,
+            @as(vk.c.VkDeviceSize, page_ids.len) * @sizeOf(u32),
+        );
+    }
+
+    fn normalizeRequestedContext(self: *const InferenceEngine, requested_context_tokens: u32, minimum_tokens: u32) u32 {
+        const floor = if (minimum_tokens > 0) minimum_tokens else @as(u32, 1);
+        const desired = if (requested_context_tokens > floor) requested_context_tokens else floor;
+        return @min(desired, self.max_context_tokens);
+    }
+
+    fn ensureKvPagesForContext(self: *InferenceEngine, target_context_tokens: u32) !void {
+        const normalized_context = self.normalizeRequestedContext(target_context_tokens, 1);
+        const required_pages = kvPageCountForContext(normalized_context);
+        if (required_pages == 0) return error.ContextLengthDoesNotFit;
+
+        if (self.active_kv_page_ids) |existing_pages| {
+            const existing_page_count: u32 = @intCast(existing_pages.len);
+            if (existing_page_count >= required_pages) return;
+
+            const request_id = self.active_kv_request_id orelse return error.KvPagesNotAllocated;
+            const additional_page_count = required_pages - existing_page_count;
+            const additional_pages = try self.kv_page_pool.allocPages(request_id, additional_page_count);
+            errdefer self.allocator.free(additional_pages);
+            sortPageIdsAscending(additional_pages);
+
+            const grown_pages = try self.allocator.alloc(u32, @intCast(required_pages));
+            errdefer self.allocator.free(grown_pages);
+            @memcpy(grown_pages[0..existing_pages.len], existing_pages);
+            @memcpy(grown_pages[existing_pages.len..], additional_pages);
+
+            var clear_request_on_failure = true;
+            errdefer if (clear_request_on_failure) {
+                self.kv_page_pool.freePages(request_id);
+                self.active_kv_request_id = null;
+                self.allocator.free(existing_pages);
+                self.active_kv_page_ids = null;
+            };
+
+            try self.uploadActivePageTable(grown_pages);
+            clear_request_on_failure = false;
+
+            self.allocator.free(existing_pages);
+            self.allocator.free(additional_pages);
+            self.active_kv_page_ids = grown_pages;
+            return;
+        }
+
+        const request_id = self.next_kv_request_id;
+        self.next_kv_request_id += 1;
+        const page_ids = try self.kv_page_pool.allocPages(request_id, @intCast(required_pages));
+        errdefer {
+            self.kv_page_pool.freePages(request_id);
+            self.allocator.free(page_ids);
+        }
+        sortPageIdsAscending(page_ids);
+        try self.uploadActivePageTable(page_ids);
+        self.active_kv_page_ids = page_ids;
+        self.active_kv_request_id = request_id;
+    }
+
+    fn physicalTokenIndex(self: *const InferenceEngine, logical_token: u32) !u32 {
+        const page_ids = self.active_kv_page_ids orelse return error.KvPagesNotAllocated;
+        return logicalTokenToPhysicalToken(page_ids, logical_token);
+    }
+
+    fn resetRequestState(self: *InferenceEngine, requested_context_tokens: u32) !void {
+        self.freeActiveKvPages();
+        try self.ensureKvPagesForContext(requested_context_tokens);
+
         for (self.ssm_conv_states) |state_buf| {
             if (state_buf.len > 0) @memset(state_buf, 0);
         }
@@ -1466,6 +1628,14 @@ pub const InferenceEngine = struct {
     /// embed → [per-layer: norm → QKV → RoPE → KV write → attention → O proj → residual
     ///          → FFN norm → MoE routing → expert DMMVs → residual] → final norm → LM head → logits
     pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32, collect_output: bool) !void {
+        if (state.position >= self.max_context_tokens) {
+            return error.ContextLengthExceeded;
+        }
+        const next_token_target = if (state.requested_context_tokens > 0)
+            @max(state.requested_context_tokens, state.position + 1)
+        else
+            state.position + 1;
+        try self.ensureKvPagesForContext(next_token_target);
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
@@ -1703,7 +1873,8 @@ pub const InferenceEngine = struct {
                 // KV cache write
                 self.decode_cmd.computeToTransferBarrier();
                 {
-                    const kv_offset = @as(vk.c.VkDeviceSize, state.position) * kv_vec_size;
+                    const physical_token = try self.physicalTokenIndex(state.position);
+                    const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * kv_vec_size;
                     const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
                     vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
                     const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
@@ -1715,7 +1886,7 @@ pub const InferenceEngine = struct {
                 if (self.attention.pipeline) |*pip| {
                     const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
                     self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
-                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, 1, config.attn_scale);
+                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale);
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -1814,9 +1985,9 @@ pub const InferenceEngine = struct {
 
                     const dbg_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
                     const q_vals = dbg_ptr[0..q_dim];
-                    const k_vals = dbg_ptr[@intCast(k_off / @sizeOf(f32)) ..][0 .. seq_len_dbg * kv_dim];
-                    const v_vals = dbg_ptr[@intCast(v_off / @sizeOf(f32)) ..][0 .. seq_len_dbg * kv_dim];
-                    const attn_vals = dbg_ptr[@intCast(attn_off / @sizeOf(f32)) ..][0..q_dim];
+                    const k_vals = dbg_ptr[@intCast(k_off / @sizeOf(f32))..][0 .. seq_len_dbg * kv_dim];
+                    const v_vals = dbg_ptr[@intCast(v_off / @sizeOf(f32))..][0 .. seq_len_dbg * kv_dim];
+                    const attn_vals = dbg_ptr[@intCast(attn_off / @sizeOf(f32))..][0..q_dim];
 
                     const seq_len_usize: usize = @intCast(seq_len_dbg);
                     const q_dim_usize: usize = @intCast(q_dim);
@@ -2509,7 +2680,10 @@ pub const InferenceEngine = struct {
                     state.position,
                     layer,
                     if (is_full_attn) @as([]const u8, "A") else @as([]const u8, "S"),
-                    hptr[0], hptr[1], hptr[2], hptr[3],
+                    hptr[0],
+                    hptr[1],
+                    hptr[2],
+                    hptr[3],
                     diag_rms,
                 });
                 // Re-open cmd buffer for next layer (diagnostic closed it)
@@ -2739,7 +2913,6 @@ pub const InferenceEngine = struct {
         const z_cpu = staging_f32[conv_channels..][0..d_inner];
         const alpha_cpu = staging_f32[conv_channels + d_inner ..][0..dt_rank];
         const beta_cpu = staging_f32[conv_channels + d_inner + dt_rank ..][0..dt_rank];
-
 
         // Conv1d with state
         const conv_state = self.ssm_conv_states[layer_idx];
@@ -3236,8 +3409,18 @@ pub const InferenceEngine = struct {
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         if (prompt_tokens.len == 0) return;
 
+        const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+        const target_context_tokens = if (state.requested_context_tokens > 0)
+            @max(state.requested_context_tokens, state.position +| prompt_token_count)
+        else
+            state.position +| prompt_token_count;
+
         if (state.position == 0 and state.generated_tokens.items.len == 0) {
-            try self.resetRequestState();
+            try self.resetRequestState(target_context_tokens);
+        } else if (state.position > 0 and self.active_kv_page_ids == null) {
+            return error.KvStateNotAvailable;
+        } else {
+            try self.ensureKvPagesForContext(target_context_tokens);
         }
 
         // Run each prompt token through the full transformer (same as decodeStep)
@@ -3758,11 +3941,10 @@ pub const InferenceEngine = struct {
                 if (d > gate_mdiff) gate_mdiff = d;
             }
             dlog.info("DMMV_CHECK: ffn_gate type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
-                @tagName(gt.info.type_), inter_d, hidden_dim,
-                gpu_g[0], gpu_g[1], gpu_g[2],
-                cpu_gate_r[0], cpu_gate_r[1], cpu_gate_r[2],
-                gate_mdiff,
-                if (gate_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                @tagName(gt.info.type_), inter_d,                                                                 hidden_dim,
+                gpu_g[0],                gpu_g[1],                                                                gpu_g[2],
+                cpu_gate_r[0],           cpu_gate_r[1],                                                           cpu_gate_r[2],
+                gate_mdiff,              if (gate_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
             });
         }
 
@@ -3804,11 +3986,10 @@ pub const InferenceEngine = struct {
                 if (d > up_mdiff) up_mdiff = d;
             }
             dlog.info("DMMV_CHECK: ffn_up type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
-                @tagName(ut.info.type_), inter_d, hidden_dim,
-                gpu_u[0], gpu_u[1], gpu_u[2],
-                cpu_up_r[0], cpu_up_r[1], cpu_up_r[2],
-                up_mdiff,
-                if (up_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                @tagName(ut.info.type_), inter_d,                                                               hidden_dim,
+                gpu_u[0],                gpu_u[1],                                                              gpu_u[2],
+                cpu_up_r[0],             cpu_up_r[1],                                                           cpu_up_r[2],
+                up_mdiff,                if (up_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
             });
         }
 
@@ -3850,11 +4031,10 @@ pub const InferenceEngine = struct {
                 if (d > q_mdiff) q_mdiff = d;
             }
             dlog.info("DMMV_CHECK: attn_q type={s} M={d} K={d} gpu[0..2]={d:.4},{d:.4},{d:.4} cpu[0..2]={d:.4},{d:.4},{d:.4} max_diff={d:.6} ok={s}", .{
-                @tagName(qt.info.type_), q_dim, hidden_dim,
-                gpu_q[0], gpu_q[1], gpu_q[2],
-                cpu_q_r[0], cpu_q_r[1], cpu_q_r[2],
-                q_mdiff,
-                if (q_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                @tagName(qt.info.type_), q_dim,                                                                hidden_dim,
+                gpu_q[0],                gpu_q[1],                                                             gpu_q[2],
+                cpu_q_r[0],              cpu_q_r[1],                                                           cpu_q_r[2],
+                q_mdiff,                 if (q_mdiff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
             });
         }
 
@@ -3882,6 +4062,9 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.gpu_ssm_states);
         self.router_output_buf.deinit();
         // KV cache + page table
+        self.freeActiveKvPages();
+        self.kv_page_pool.deinit();
+        self.page_table_staging.deinit();
         self.page_table_buf.deinit();
         for (self.kv_k_cache) |*b| b.deinit();
         for (self.kv_v_cache) |*b| b.deinit();
@@ -3975,11 +4158,30 @@ pub fn generate(
 ) ![]u32 {
     var state = DecodeState.init(allocator);
     defer state.deinit();
+    const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+    if (prompt_token_count > engine.max_context_tokens) {
+        log.err("Prompt exceeds reserved context: prompt={d} capacity={d}", .{
+            prompt_token_count,
+            engine.max_context_tokens,
+        });
+        return error.ContextLengthExceeded;
+    }
+    const request_budget = memory_plan.requestBudget(prompt_token_count, max_tokens, engine.max_context_tokens);
+    const effective_max_tokens = request_budget.completion_tokens;
+    state.requested_context_tokens = request_budget.target_context_tokens;
+    if (effective_max_tokens < max_tokens) {
+        log.info("Clamped decode budget from {d} to {d} tokens (prompt={d}, capacity={d})", .{
+            max_tokens,
+            effective_max_tokens,
+            prompt_token_count,
+            engine.max_context_tokens,
+        });
+    }
     engine.diag_summary_len = 0;
     engine.resetProfilingSamples();
 
     log.debug("Generating: {d} prompt tokens, max {d} output tokens", .{
-        prompt_tokens.len, max_tokens,
+        prompt_tokens.len, effective_max_tokens,
     });
 
     // Prefill: batch all prompt tokens in a single GPU submission
@@ -4007,7 +4209,7 @@ pub fn generate(
     const decode_start = std.time.nanoTimestamp();
 
     // Sample the first output token from prefill logits (no extra decodeStep)
-    if (prompt_tokens.len > 0 and max_tokens > 0) {
+    if (prompt_tokens.len > 0 and effective_max_tokens > 0) {
         const first_token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, first_token);
         log.debug("decode[0]: token={d} pos={d} (from prefill logits)", .{
@@ -4016,10 +4218,10 @@ pub fn generate(
         // Dump top-5 logits from prefill for comparison with llama.cpp
         if (engine.logits_readback_enabled or engine.validation_diagnostics_enabled) dumpTop5Logits(engine, 0);
         generated = 1;
-        if (first_token == eos_token_id) generated = max_tokens; // stop early
+        if (first_token == eos_token_id) generated = effective_max_tokens; // stop early
     }
 
-    while (generated < max_tokens) : (generated += 1) {
+    while (generated < effective_max_tokens) : (generated += 1) {
         const tok_start = std.time.nanoTimestamp();
 
         // Feed the last generated token as input
@@ -4029,7 +4231,7 @@ pub fn generate(
         const token = engine.sampleGreedy();
         try state.generated_tokens.append(allocator, token);
         // Top-5 logits per token for first 5 tokens + last token
-        if (generated < 5 or generated == max_tokens - 1) {
+        if (generated < 5 or generated == effective_max_tokens - 1) {
             if (engine.logits_readback_enabled) dumpTop5Logits(engine, generated);
         }
 
@@ -4210,7 +4412,7 @@ test "sampleFromLogits greedy path returns argmax" {
 
 test "sampleFromLogits repetition penalty can break a simple loop" {
     const logits = [_]f32{ 10.0, 9.0, 1.0 };
-    const history = [_]u32{0, 0, 0};
+    const history = [_]u32{ 0, 0, 0 };
     var prng = std.Random.DefaultPrng.init(42);
     const token = InferenceEngine.sampleFromLogits(&logits, &history, .{
         .temperature = 0.0,
@@ -4629,6 +4831,45 @@ test "conv1d sliding window: convolve then shift state" {
     try std.testing.expectApproxEqAbs(@as(f32, 7.0), state[3], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 8.0), state[4], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 9.0), state[5], 1e-6);
+}
+
+test "kv page count rounds context up to 16-token pages" {
+    try std.testing.expectEqual(@as(u32, 0), kvPageCountForContext(0));
+    try std.testing.expectEqual(@as(u32, 1), kvPageCountForContext(1));
+    try std.testing.expectEqual(@as(u32, 1), kvPageCountForContext(16));
+    try std.testing.expectEqual(@as(u32, 2), kvPageCountForContext(17));
+    try std.testing.expectEqual(@as(u32, 256), kvPageCountForContext(4096));
+}
+
+test "kv page ids sort ascending for stable logical order" {
+    var page_ids = [_]u32{ 7, 2, 5, 1 };
+    sortPageIdsAscending(&page_ids);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 5, 7 }, &page_ids);
+}
+
+test "logical token maps through paged kv table" {
+    const page_ids = [_]u32{ 3, 1, 4 };
+    try std.testing.expectEqual(@as(u32, 48), try logicalTokenToPhysicalToken(&page_ids, 0));
+    try std.testing.expectEqual(@as(u32, 63), try logicalTokenToPhysicalToken(&page_ids, 15));
+    try std.testing.expectEqual(@as(u32, 16), try logicalTokenToPhysicalToken(&page_ids, 16));
+    try std.testing.expectEqual(@as(u32, 18), try logicalTokenToPhysicalToken(&page_ids, 18));
+    try std.testing.expectEqual(@as(u32, 64), try logicalTokenToPhysicalToken(&page_ids, 32));
+}
+
+test "request budget keeps small generations on fewer kv pages" {
+    const small = memory_plan.requestBudget(64, 64, 4096);
+    const large = memory_plan.requestBudget(64, 4096, 4096);
+    const near_full = memory_plan.requestBudget(4090, 64, 4096);
+
+    try std.testing.expectEqual(@as(u32, 128), small.target_context_tokens);
+    try std.testing.expectEqual(@as(u32, 8), kvPageCountForContext(small.target_context_tokens));
+
+    try std.testing.expectEqual(@as(u32, 4096), large.target_context_tokens);
+    try std.testing.expectEqual(@as(u32, 256), kvPageCountForContext(large.target_context_tokens));
+
+    try std.testing.expectEqual(@as(u32, 6), near_full.completion_tokens);
+    try std.testing.expectEqual(@as(u32, 4096), near_full.target_context_tokens);
+    try std.testing.expectEqual(@as(u32, 256), kvPageCountForContext(near_full.target_context_tokens));
 }
 
 test "push constant struct sizes match GLSL expectations" {

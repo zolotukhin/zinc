@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildAgentPrompt,
   formatCodexStreamLine,
   formatToolInput,
   formatClaudeStreamLine,
+  improvementThreshold,
+  isMaterialImprovement,
   loadPreviousRun,
+  median,
   type ClaudeStreamState,
 } from "./optimize_perf";
 
@@ -167,6 +171,96 @@ describe("loadPreviousRun", () => {
     expect(result.history).toBe("");
     expect(result.bestTokPerSec).toBe(0);
     expect(result.lastCycle).toBe(0);
+    expect(result.bestCycle).toBeNull();
+    expect(result.bestCommitHash).toBeNull();
+  });
+});
+
+// -- Controller helpers ------------------------------------------------------
+
+describe("controller helpers", () => {
+  test("median returns the middle sample", () => {
+    expect(median([37.4, 38.5, 37.2])).toBe(37.4);
+  });
+
+  test("improvement threshold uses absolute floor", () => {
+    expect(improvementThreshold(37.2)).toBe(0.5);
+  });
+
+  test("material improvement rejects noisy outlier-sized deltas below threshold", () => {
+    const currentBest = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 37.28,
+      tokPerSecSamples: [37.1, 37.3, 37.4],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: 21.7,
+      bandwidthSamples: [21.6, 21.7, 21.8],
+      error: null,
+    };
+    const candidate = {
+      ...currentBest,
+      tokPerSec: 37.62,
+      tokPerSecSamples: [37.5, 37.6, 37.7],
+    };
+    expect(isMaterialImprovement(candidate, currentBest)).toBe(false);
+  });
+
+  test("material improvement accepts clear gains over the current accepted baseline", () => {
+    const currentBest = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 37.28,
+      tokPerSecSamples: [37.1, 37.3, 37.4],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: 21.7,
+      bandwidthSamples: [21.6, 21.7, 21.8],
+      error: null,
+    };
+    const candidate = {
+      ...currentBest,
+      tokPerSec: 38.1,
+      tokPerSecSamples: [38.0, 38.1, 38.2],
+    };
+    expect(isMaterialImprovement(candidate, currentBest)).toBe(true);
+  });
+
+  test("agent prompt uses current accepted baseline rather than original baseline", () => {
+    const originalBaseline = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 37.28,
+      tokPerSecSamples: [37.0, 37.3, 37.4],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: 21.7,
+      bandwidthSamples: [21.6, 21.7, 21.8],
+      error: null,
+    };
+    const currentBest = {
+      ...originalBaseline,
+      tokPerSec: 38.52,
+      tokPerSecSamples: [38.4, 38.5, 38.6],
+      bandwidthUtil: 22.4,
+      bandwidthSamples: [22.3, 22.4, 22.5],
+    };
+
+    const prompt = buildAgentPrompt(
+      "Step 1",
+      originalBaseline,
+      currentBest,
+      2,
+      "\nCycle 1: KEPT — 38.52 tok/s",
+      "qwen35b",
+    );
+
+    expect(prompt).toContain("Current Accepted Baseline");
+    expect(prompt).toContain("38.52 tok/s [38.40, 38.50, 38.60]");
+    expect(prompt).toContain("Original Run Baseline");
+    expect(prompt).toContain("37.28 tok/s [37.00, 37.30, 37.40]");
+    expect(prompt).toContain("must beat the current accepted baseline");
   });
 });
 
@@ -205,5 +299,10 @@ describe("config", () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("git push");
     expect(src).toContain("git commit");
+  });
+
+  test("startup banner shows cycles for the current run", async () => {
+    const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
+    expect(src).toContain("Cycles this run:");
   });
 });

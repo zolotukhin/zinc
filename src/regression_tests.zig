@@ -48,7 +48,13 @@ test "decode loop keeps layer-boundary compute barrier after FFN residual" {
 
 test "prefill resets per-request state before processing prompt tokens" {
     const src = @embedFile("compute/forward.zig");
-    try expectContainsNear(src, "pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "try self.resetRequestState();", 400);
+    try expectContainsNear(src, "pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "try self.resetRequestState(target_context_tokens);", 900);
+}
+
+test "Metal prefill preserves cached prefixes instead of resetting unconditionally" {
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContainsNear(src, "pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "if (state.position == 0 and state.generated_tokens.items.len == 0)", 900);
+    try expectContainsNear(src, "pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "return error.KvStateNotAvailable;", 1400);
 }
 
 test "softmax_topk shader keeps RADV-safe shared-memory winner scan" {
@@ -309,7 +315,10 @@ test "Q5_0 dequantRow matches expected values for known block" {
     const d_bits: u16 = @bitCast(@as(f16, 0.5));
     block[0] = @truncate(d_bits);
     block[1] = @truncate(d_bits >> 8);
-    block[2] = 0xFF; block[3] = 0xFF; block[4] = 0x00; block[5] = 0x00; // qh = 0x0000FFFF
+    block[2] = 0xFF;
+    block[3] = 0xFF;
+    block[4] = 0x00;
+    block[5] = 0x00; // qh = 0x0000FFFF
     @memset(block[6..22], 0x53); // lo=3, hi=5
     var output: [32]f32 = undefined;
     forward_metal.dequantRow(&block, 0, 32, .q5_0, &output);

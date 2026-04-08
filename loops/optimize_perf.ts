@@ -66,6 +66,11 @@ const EFFORT_DOCS: Record<number, string> = {
   3: "MULTI_HOUR_EFFORT_3_BATCH_PREFILL.md",
 };
 
+const BENCHMARK_SAMPLES = 3;
+const MIN_IMPROVEMENT_ABS_TPS = 0.5;
+const MIN_IMPROVEMENT_PCT = 0.01;
+const HISTORY_LINES_IN_PROMPT = 20;
+
 // Multiple prompts to catch different failure modes:
 // - Short factual: catches total corruption
 // - Arithmetic: catches subtle numeric drift (wrong MoE routing, bad dequant)
@@ -150,6 +155,12 @@ function parseArgs() {
 const CLR = process.stdout.isTTY && !("NO_COLOR" in process.env);
 const c = (code: string, t: string) => CLR ? `\x1b[${code}m${t}\x1b[0m` : t;
 const SEP = "\u2500".repeat(64);
+const BOX_INNER_WIDTH = 58;
+
+function boxLine(text: string): string {
+  const content = text.slice(0, BOX_INNER_WIDTH - 1);
+  return `\u2551 ${content.padEnd(BOX_INNER_WIDTH - 1)}\u2551`;
+}
 
 // -- Command runner with streaming -------------------------------------------
 
@@ -231,22 +242,132 @@ async function rsyncToRemote(): Promise<void> {
 
 // -- Build & benchmark -------------------------------------------------------
 
-type BenchResult = {
+export type BenchResult = {
   buildOk: boolean;
   buildOutput: string;
   tokPerSec: number | null;
+  tokPerSecSamples: number[];
   correct: boolean;
   outputText: string;
   bandwidthUtil: number | null;
+  bandwidthSamples: number[];
   error: string | null;
 };
+
+export function median(samples: number[]): number | null {
+  if (samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)] ?? null;
+}
+
+function formatSampleList(samples: number[], digits = 2): string {
+  if (samples.length === 0) return "";
+  return ` [${samples.map((s) => s.toFixed(digits)).join(", ")}]`;
+}
+
+function summarizeBenchMetric(value: number | null, samples: number[], unit: string, digits = 2): string {
+  if (value == null) return "unknown";
+  return `${value.toFixed(digits)} ${unit}${formatSampleList(samples, digits)}`;
+}
+
+function tailHistory(history: string, maxLines = HISTORY_LINES_IN_PROMPT): string {
+  const lines = history.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.slice(-maxLines).join("\n");
+}
+
+export function improvementThreshold(currentTokPerSec: number | null): number {
+  if (currentTokPerSec == null || currentTokPerSec <= 0) return MIN_IMPROVEMENT_ABS_TPS;
+  return Math.max(MIN_IMPROVEMENT_ABS_TPS, currentTokPerSec * MIN_IMPROVEMENT_PCT);
+}
+
+export function isMaterialImprovement(candidate: BenchResult, currentBest: BenchResult): boolean {
+  if (candidate.tokPerSec == null) return false;
+  const threshold = improvementThreshold(currentBest.tokPerSec);
+  const current = currentBest.tokPerSec ?? 0;
+  return candidate.tokPerSec > current + threshold;
+}
+
+export function buildAgentPrompt(
+  plan: string,
+  originalBaseline: BenchResult,
+  currentBest: BenchResult,
+  cycleNum: number,
+  history: string,
+  model: string,
+): string {
+  const modelPath = MODELS[model] ?? MODELS.qwen35b;
+  const historySummary = tailHistory(history);
+  return `You are implementing a performance optimization for the ZINC Vulkan inference engine.
+
+## Optimization Plan
+${plan}
+
+## Current Accepted Baseline (build on this code)
+- tok/s: ${summarizeBenchMetric(currentBest.tokPerSec, currentBest.tokPerSecSamples, "tok/s")}
+- bandwidth utilization: ${summarizeBenchMetric(currentBest.bandwidthUtil, currentBest.bandwidthSamples, "%", 1)}
+- output: "${currentBest.outputText}" (coherence tested with 3 prompts on 3 models after every change)
+- This is the performance of the code currently checked out in the worktree. Every kept cycle is already included here.
+
+## Original Run Baseline (for total gain only)
+- tok/s: ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}
+- bandwidth utilization: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}
+- output: "${originalBaseline.outputText}"
+
+## Previous Attempts
+${historySummary || "None yet."}
+
+## Your Task (Cycle ${cycleNum})
+Implement ONE concrete step from the optimization plan above. Pick the next unfinished step.
+Your change must beat the current accepted baseline above, not the original run baseline.
+
+## CRITICAL RULES — READ CAREFULLY
+
+1. **BUILD MUST PASS.** Before you declare yourself done, you MUST:
+   a. rsync your changes to the remote node
+   b. Compile shaders: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"
+   c. Build: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build 2>&1"
+   d. If the build fails, FIX THE ERRORS before finishing. Do NOT leave broken code.
+
+2. **Incremental steps.** If the optimization requires changing many call sites (e.g. 60+ descriptor set conversions), break it into compilable stages:
+   - Add new infrastructure (new functions, new fields) FIRST — the old code can coexist.
+   - Convert call sites in batches, building after each batch to catch errors.
+   - Remove old infrastructure LAST.
+   - The code MUST compile at every stage.
+
+3. **ONE focused change per cycle.** Don't try to convert the entire codebase in one shot.
+
+4. **Test on remote node:**
+   rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
+   ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build && ./zig-out/bin/zinc -m ${modelPath} --prompt '${COHERENCE_CHECKS[0].prompt}' -n 16"
+
+5. **Shader compilation:** glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
+
+Files you may edit:
+- src/compute/*.zig (forward.zig, dmmv.zig, elementwise.zig, attention.zig, argmax.zig)
+- src/vulkan/*.zig (pipeline.zig, command.zig, buffer.zig, instance.zig)
+- src/model/*.zig (tokenizer.zig, loader.zig, config.zig, architecture.zig)
+- src/server/*.zig (routes.zig, runtime.zig)
+- src/server/chat.html
+- src/shaders/*.comp (GLSL compute shaders)
+- src/main.zig`;
+}
 
 async function buildAndBench(modelPath: string): Promise<BenchResult> {
   console.log(c("2", "  Compiling shaders..."));
   try {
     await ssh(`cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute $f -o \${f%.comp}.spv 2>&1; done`, 60_000);
   } catch (e) {
-    return { buildOk: false, buildOutput: String(e), tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: "shader compile failed" };
+    return {
+      buildOk: false,
+      buildOutput: String(e),
+      tokPerSec: null,
+      tokPerSecSamples: [],
+      correct: false,
+      outputText: "",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: "shader compile failed",
+    };
   }
 
   console.log(c("2", "  Building..."));
@@ -254,10 +375,30 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
   try {
     buildOutput = await ssh(`cd ${REMOTE_DIR} && zig build 2>&1`, 300_000);
   } catch (e) {
-    return { buildOk: false, buildOutput: String(e), tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: "zig build failed" };
+    return {
+      buildOk: false,
+      buildOutput: String(e),
+      tokPerSec: null,
+      tokPerSecSamples: [],
+      correct: false,
+      outputText: "",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: "zig build failed",
+    };
   }
   if (buildOutput.includes("error:")) {
-    return { buildOk: false, buildOutput, tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: "build errors" };
+    return {
+      buildOk: false,
+      buildOutput,
+      tokPerSec: null,
+      tokPerSecSamples: [],
+      correct: false,
+      outputText: "",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: "build errors",
+    };
   }
 
   // Quick correctness check (short prompt, few tokens)
@@ -270,7 +411,17 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
       180_000,
     );
   } catch (e) {
-    return { buildOk: true, buildOutput, tokPerSec: null, correct: false, outputText: "", bandwidthUtil: null, error: `run failed: ${e}` };
+    return {
+      buildOk: true,
+      buildOutput,
+      tokPerSec: null,
+      tokPerSecSamples: [],
+      correct: false,
+      outputText: "",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: `run failed: ${e}`,
+    };
   }
 
   const textMatch = correctnessOutput.match(/Output text:\s*(.+)/i);
@@ -278,25 +429,69 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
   const correct = firstCheck.expect.every(e => outputText.toLowerCase().includes(e.toLowerCase()));
 
   if (!correct) {
-    return { buildOk: true, buildOutput, tokPerSec: null, correct: false, outputText, bandwidthUtil: null, error: "incorrect output" };
+    return {
+      buildOk: true,
+      buildOutput,
+      tokPerSec: null,
+      tokPerSecSamples: [],
+      correct: false,
+      outputText,
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: "incorrect output",
+    };
   }
 
-  // Proper benchmark: long prompt, 200 tokens for stable measurement
-  console.log(c("2", "  Benchmarking (200 tokens)..."));
-  let benchOutput: string;
-  try {
-    benchOutput = await ssh(
-      `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt 'Write a detailed essay about the history of computing, from mechanical calculators to modern artificial intelligence.' -n 200 2>&1`,
-      300_000,
-    );
-  } catch (e) {
-    return { buildOk: true, buildOutput, tokPerSec: null, correct: true, outputText, bandwidthUtil: null, error: `bench failed: ${e}` };
+  // Proper benchmark: long prompt, 200 tokens for stable measurement.
+  // Use the median of multiple samples so we do not keep a lucky outlier.
+  console.log(c("2", `  Benchmarking (${BENCHMARK_SAMPLES} x 200 tokens)...`));
+  const tokPerSecSamples: number[] = [];
+  const bandwidthSamples: number[] = [];
+  for (let sample = 0; sample < BENCHMARK_SAMPLES; sample++) {
+    let benchOutput: string;
+    try {
+      benchOutput = await ssh(
+        `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt 'Write a detailed essay about the history of computing, from mechanical calculators to modern artificial intelligence.' -n 200 2>&1`,
+        300_000,
+      );
+    } catch (e) {
+      return {
+        buildOk: true,
+        buildOutput,
+        tokPerSec: null,
+        tokPerSecSamples,
+        correct: true,
+        outputText,
+        bandwidthUtil: null,
+        bandwidthSamples,
+        error: `bench failed: ${e}`,
+      };
+    }
+
+    const tps = parseTokPerSec(benchOutput);
+    const bw = parseBandwidthUtil(benchOutput);
+    if (tps != null) tokPerSecSamples.push(tps);
+    if (bw != null) bandwidthSamples.push(bw);
+    console.log(c(
+      "2",
+      `    sample ${sample + 1}/${BENCHMARK_SAMPLES}: ${tps?.toFixed(2) ?? "?"} tok/s${bw != null ? `, BW ${bw.toFixed(1)}%` : ""}`,
+    ));
   }
 
-  const tokPerSec = parseTokPerSec(benchOutput);
-  const bandwidthUtil = parseBandwidthUtil(benchOutput);
+  const tokPerSec = median(tokPerSecSamples);
+  const bandwidthUtil = median(bandwidthSamples);
 
-  return { buildOk: true, buildOutput, tokPerSec, correct, outputText, bandwidthUtil, error: null };
+  return {
+    buildOk: true,
+    buildOutput,
+    tokPerSec,
+    tokPerSecSamples,
+    correct,
+    outputText,
+    bandwidthUtil,
+    bandwidthSamples,
+    error: tokPerSec == null ? "benchmark parse failed" : null,
+  };
 }
 
 /// Run ALL coherence prompts on ALL models.
@@ -498,59 +693,14 @@ export function formatClaudeStreamLine(rawLine: string, state: ClaudeStreamState
 async function spawnAgent(
   _effortDoc: string,
   plan: string,
-  baseline: BenchResult,
+  originalBaseline: BenchResult,
+  currentBest: BenchResult,
   cycleNum: number,
   history: string,
   model: string,
   agent: AgentType = "claude",
 ): Promise<RunResult> {
-  const modelPath = MODELS[model] ?? MODELS.qwen35b;
-  const prompt = `You are implementing a performance optimization for the ZINC Vulkan inference engine.
-
-## Optimization Plan
-${plan}
-
-## Current Baseline
-- tok/s: ${baseline.tokPerSec?.toFixed(2) ?? "unknown"}
-- bandwidth utilization: ${baseline.bandwidthUtil?.toFixed(1) ?? "unknown"}%
-- output: "${baseline.outputText}" (coherence tested with 3 prompts on 3 models after every change)
-
-## Previous Attempts
-${history || "None yet."}
-
-## Your Task (Cycle ${cycleNum})
-Implement ONE concrete step from the optimization plan above. Pick the next unfinished step.
-
-## CRITICAL RULES — READ CAREFULLY
-
-1. **BUILD MUST PASS.** Before you declare yourself done, you MUST:
-   a. rsync your changes to the remote node
-   b. Compile shaders: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"
-   c. Build: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build 2>&1"
-   d. If the build fails, FIX THE ERRORS before finishing. Do NOT leave broken code.
-
-2. **Incremental steps.** If the optimization requires changing many call sites (e.g. 60+ descriptor set conversions), break it into compilable stages:
-   - Add new infrastructure (new functions, new fields) FIRST — the old code can coexist.
-   - Convert call sites in batches, building after each batch to catch errors.
-   - Remove old infrastructure LAST.
-   - The code MUST compile at every stage.
-
-3. **ONE focused change per cycle.** Don't try to convert the entire codebase in one shot.
-
-4. **Test on remote node:**
-   rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
-   ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build && ./zig-out/bin/zinc -m ${modelPath} --prompt '${COHERENCE_CHECKS[0].prompt}' -n 16"
-
-5. **Shader compilation:** glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
-
-Files you may edit:
-- src/compute/*.zig (forward.zig, dmmv.zig, elementwise.zig, attention.zig, argmax.zig)
-- src/vulkan/*.zig (pipeline.zig, command.zig, buffer.zig, instance.zig)
-- src/model/*.zig (tokenizer.zig, loader.zig, config.zig, architecture.zig)
-- src/server/*.zig (routes.zig, runtime.zig)
-- src/server/chat.html
-- src/shaders/*.comp (GLSL compute shaders)
-- src/main.zig`;
+  const prompt = buildAgentPrompt(plan, originalBaseline, currentBest, cycleNum, history, model);
 
   console.log(c("1;34", SEP));
   console.log(c("1;34", `  \uD83E\uDDE0 Agent cycle ${cycleNum} (${agent})`));
@@ -623,19 +773,30 @@ type LogEntry = {
   cycle: number;
   effort: number;
   tokPerSec: number | null;
+  tokPerSecSamples?: number[];
   bandwidthUtil: number | null;
+  bandwidthSamples?: number[];
   correct: boolean;
   improved: boolean;
   broken: boolean;
   outputText: string;
+  commitHash?: string | null;
   timestamp: string;
 };
 
-export async function loadPreviousRun(effort: number): Promise<{ history: string; bestTokPerSec: number; lastCycle: number }> {
+export async function loadPreviousRun(effort: number): Promise<{
+  history: string;
+  bestTokPerSec: number;
+  lastCycle: number;
+  bestCycle: number | null;
+  bestCommitHash: string | null;
+}> {
   const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
   let history = "";
   let bestTokPerSec = 0;
   let lastCycle = 0;
+  let bestCycle: number | null = null;
+  let bestCommitHash: string | null = null;
 
   try {
     const content = await readFile(logPath, "utf8");
@@ -647,18 +808,20 @@ export async function loadPreviousRun(effort: number): Promise<{ history: string
         if (entry.broken) {
           history += `\nCycle ${entry.cycle}: REVERTED \u2014 broken (${entry.outputText?.slice(0, 60)})`;
         } else if (entry.improved) {
-          history += `\nCycle ${entry.cycle}: KEPT \u2014 ${entry.tokPerSec?.toFixed(2)} tok/s`;
+          history += `\nCycle ${entry.cycle}: KEPT \u2014 ${entry.tokPerSec?.toFixed(2)} tok/s${entry.tokPerSecSamples?.length ? ` ${formatSampleList(entry.tokPerSecSamples)}` : ""}`;
           if (entry.tokPerSec != null && entry.tokPerSec > bestTokPerSec) {
             bestTokPerSec = entry.tokPerSec;
+            bestCycle = entry.cycle;
+            bestCommitHash = entry.commitHash ?? null;
           }
         } else {
-          history += `\nCycle ${entry.cycle}: REVERTED \u2014 no improvement (${entry.tokPerSec?.toFixed(2)} tok/s)`;
+          history += `\nCycle ${entry.cycle}: REVERTED \u2014 no improvement (${entry.tokPerSec?.toFixed(2)} tok/s${entry.tokPerSecSamples?.length ? ` ${formatSampleList(entry.tokPerSecSamples)}` : ""})`;
         }
       } catch { /* skip malformed lines */ }
     }
   } catch { /* no log file yet */ }
 
-  return { history, bestTokPerSec, lastCycle };
+  return { history, bestTokPerSec, lastCycle, bestCycle, bestCommitHash };
 }
 
 // -- Selective revert (only src/, not loops/ or config) ----------------------
@@ -685,34 +848,37 @@ async function main() {
 
   await mkdir(RESULTS_DIR, { recursive: true });
 
-  console.log(c("1;37", `\n\u2554${"═".repeat(58)}\u2557`));
-  console.log(c("1;37", `\u2551  ZINC Performance Optimization Loop \u2014 Effort ${effort}          \u2551`));
-  console.log(c("1;37", `\u2551  ${effortFile.padEnd(54)}\u2551`));
-  console.log(c("1;37", `\u2551  Model: ${model.padEnd(49)}\u2551`));
-  console.log(c("1;37", `\u2551  Agent: ${agent.padEnd(49)}\u2551`));
-  if (resume) console.log(c("1;37", `\u2551  Resuming from previous run                        \u2551`));
-  console.log(c("1;37", `\u255A${"═".repeat(58)}\u255D\n`));
+  console.log(c("1;37", `\n\u2554${"═".repeat(BOX_INNER_WIDTH)}\u2557`));
+  console.log(c("1;37", boxLine(`ZINC Performance Optimization Loop — Effort ${effort}`)));
+  console.log(c("1;37", boxLine(effortFile)));
+  console.log(c("1;37", boxLine(`Model: ${model}`)));
+  console.log(c("1;37", boxLine(`Agent: ${agent}`)));
+  console.log(c("1;37", boxLine(`Cycles this run: ${cycles}`)));
+  if (resume) console.log(c("1;37", boxLine("Resuming from previous run")));
+  console.log(c("1;37", `\u255A${"═".repeat(BOX_INNER_WIDTH)}\u255D\n`));
 
   // Step 1: Sync and get baseline
   console.log(c("1;33", "\u2500\u2500 Baseline " + "\u2500".repeat(54)));
   await rsyncToRemote();
-  const baseline = await buildAndBench(modelPath);
+  const originalBaseline = await buildAndBench(modelPath);
 
-  if (!baseline.buildOk) {
+  if (!originalBaseline.buildOk) {
     console.error(c("1;31", "Baseline build failed! Fix build errors first."));
     process.exit(1);
   }
-  if (!baseline.correct) {
-    console.error(c("1;31", `Baseline output incorrect: "${baseline.outputText}". Fix correctness first.`));
+  if (!originalBaseline.correct) {
+    console.error(c("1;31", `Baseline output incorrect: "${originalBaseline.outputText}". Fix correctness first.`));
     process.exit(1);
   }
 
-  console.log(c("1;32", `  Baseline: ${baseline.tokPerSec?.toFixed(2)} tok/s, BW: ${baseline.bandwidthUtil?.toFixed(1)}%`));
-  console.log(c("1;32", `  Output: "${baseline.outputText.slice(0, 80)}"`));
+  console.log(c("1;32", `  Baseline: ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}, BW: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}`));
+  console.log(c("1;32", `  Output: "${originalBaseline.outputText.slice(0, 80)}"`));
 
-  let bestTokPerSec = baseline.tokPerSec ?? 0;
+  let currentBest = originalBaseline;
+  let bestTokPerSec = currentBest.tokPerSec ?? 0;
   let history = "";
   let startCycle = 1;
+  const headCommit = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || null;
 
   // Resume: load history from previous run
   if (resume) {
@@ -720,9 +886,15 @@ async function main() {
     if (prev.lastCycle > 0) {
       history = prev.history;
       startCycle = prev.lastCycle + 1;
-      if (prev.bestTokPerSec > bestTokPerSec) bestTokPerSec = prev.bestTokPerSec;
-      console.log(c("1;36", `  Resumed: ${prev.lastCycle} previous cycles, best ${prev.bestTokPerSec.toFixed(2)} tok/s`));
+      console.log(c("1;36", `  Resumed: ${prev.lastCycle} previous cycles, recorded best ${prev.bestTokPerSec.toFixed(2)} tok/s`));
       console.log(c("2", `  History:${prev.history}`));
+      if (prev.bestTokPerSec > bestTokPerSec + improvementThreshold(bestTokPerSec)) {
+        const bestCommitNote = prev.bestCommitHash ? ` on commit ${prev.bestCommitHash.slice(0, 8)}` : "";
+        console.log(c(
+          "1;33",
+          `  Resume note: recorded best cycle ${prev.bestCycle ?? "?"}${bestCommitNote} was faster than the current HEAD benchmark. The loop will branch from the code you currently have checked out, not from that historical metric.`,
+        ));
+      }
     } else {
       console.log(c("2", "  No previous run found, starting fresh."));
     }
@@ -738,7 +910,7 @@ async function main() {
     }
 
     // Spawn agent
-    await spawnAgent(effortFile, plan, baseline, cycle, history, model, agent);
+    await spawnAgent(effortFile, plan, originalBaseline, currentBest, cycle, history, model, agent);
 
     // Sync and benchmark — with up to 2 fix-up retries if build fails
     console.log(c("2", "  Syncing changes..."));
@@ -797,12 +969,13 @@ ${result.buildOutput.slice(-2000)}
       }
     }
 
-    const improved = result.tokPerSec != null && result.tokPerSec > bestTokPerSec * 1.001;
+    const improved = isMaterialImprovement(result, currentBest);
     const correct = result.correct && coherenceError == null;
     const broken = !result.buildOk || !correct;
+    const threshold = improvementThreshold(currentBest.tokPerSec);
 
-    const delta = result.tokPerSec != null && bestTokPerSec > 0
-      ? ((result.tokPerSec - bestTokPerSec) / bestTokPerSec * 100).toFixed(2)
+    const delta = result.tokPerSec != null && (currentBest.tokPerSec ?? 0) > 0
+      ? ((result.tokPerSec - (currentBest.tokPerSec ?? 0)) / (currentBest.tokPerSec ?? 1) * 100).toFixed(2)
       : "?";
 
     if (broken) {
@@ -811,28 +984,36 @@ ${result.buildOutput.slice(-2000)}
       history += `\nCycle ${cycle}: REVERTED \u2014 ${result.error ?? "incorrect output"}`;
       await revertAgentChanges();
     } else if (improved) {
-      console.log(c("1;32", `  \u2705 IMPROVED: ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`));
+      console.log(c("1;32", `  \u2705 IMPROVED: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (+${delta}%, threshold +${threshold.toFixed(2)} tok/s vs accepted baseline)`));
+      currentBest = result;
       bestTokPerSec = result.tokPerSec!;
-      history += `\nCycle ${cycle}: KEPT \u2014 ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`;
+      history += `\nCycle ${cycle}: KEPT \u2014 ${result.tokPerSec?.toFixed(2)} tok/s${formatSampleList(result.tokPerSecSamples)} (+${delta}%)`;
 
       // Commit
       await runCommand("git", ["add", "src/"], { cwd: REPO_ROOT });
       await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} \u2014 ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`], { cwd: REPO_ROOT });
       console.log(c("2", "  Committed."));
     } else {
-      console.log(c("1;33", `  \u26A0 NO IMPROVEMENT: ${result.tokPerSec?.toFixed(2)} tok/s (${delta}%)`));
-      history += `\nCycle ${cycle}: REVERTED \u2014 no improvement (${result.tokPerSec?.toFixed(2)} tok/s, ${delta}%)`;
+      console.log(c("1;33", `  \u26A0 NO IMPROVEMENT: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${delta}%, needed +${threshold.toFixed(2)} tok/s vs accepted baseline)`));
+      history += `\nCycle ${cycle}: REVERTED \u2014 no improvement (${result.tokPerSec?.toFixed(2)} tok/s${formatSampleList(result.tokPerSecSamples)}, ${delta}%)`;
       await revertAgentChanges();
     }
+
+    const commitHash = improved
+      ? (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || headCommit
+      : null;
 
     // Log cycle result
     const logEntry = {
       cycle, effort,
       tokPerSec: result.tokPerSec,
+      tokPerSecSamples: result.tokPerSecSamples,
       bandwidthUtil: result.bandwidthUtil,
+      bandwidthSamples: result.bandwidthSamples,
       correct: result.correct,
       improved, broken,
       outputText: result.outputText?.slice(0, 200),
+      commitHash,
       timestamp: new Date().toISOString(),
     };
     const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
@@ -842,10 +1023,10 @@ ${result.buildOutput.slice(-2000)}
   // Summary
   console.log(c("1;37", `\n${"═".repeat(58)}`));
   console.log(c("1;37", `  Effort ${effort} complete.`));
-  console.log(c("1;37", `  Baseline: ${baseline.tokPerSec?.toFixed(2)} tok/s`));
+  console.log(c("1;37", `  Baseline: ${originalBaseline.tokPerSec?.toFixed(2)} tok/s`));
   console.log(c("1;37", `  Best:     ${bestTokPerSec.toFixed(2)} tok/s`));
-  if (bestTokPerSec > (baseline.tokPerSec ?? 0)) {
-    const gain = ((bestTokPerSec - (baseline.tokPerSec ?? 0)) / (baseline.tokPerSec ?? 1) * 100).toFixed(1);
+  if (bestTokPerSec > (originalBaseline.tokPerSec ?? 0)) {
+    const gain = ((bestTokPerSec - (originalBaseline.tokPerSec ?? 0)) / (originalBaseline.tokPerSec ?? 1) * 100).toFixed(1);
     console.log(c("1;32", `  Gain:     +${gain}%`));
   }
   console.log(c("1;37", `${"═".repeat(58)}\n`));

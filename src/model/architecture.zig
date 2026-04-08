@@ -135,6 +135,10 @@ fn flashAttnMetrics(head_dim: u32, n_heads: u32, n_kv_heads: u32, seq_len: u32) 
     };
 }
 
+fn modeledDecodeSeqLen(config: *const ModelConfig) u32 {
+    return config.context_length;
+}
+
 fn addMetrics(n_elems: u32) MetricSpec {
     return .{
         .read_bytes = vecBytes(@as(u64, n_elems) * 2),
@@ -194,7 +198,7 @@ fn buildLlamaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
     const kv_dim = config.n_kv_heads * config.head_dim;
     const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
     const rope_dim = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
-    const seq_len = @min(config.context_length, 4096);
+    const seq_len = modeledDecodeSeqLen(config);
     g.setAssumedDecodeSeqLen(seq_len);
 
     // Token embedding lookup
@@ -373,7 +377,7 @@ fn buildMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocator,
     const kv_dim = config.n_kv_heads * config.head_dim;
     const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
     const rope_dim = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
-    const seq_len = @min(config.context_length, 4096);
+    const seq_len = modeledDecodeSeqLen(config);
     const n_used = if (config.n_experts_used > 0) config.n_experts_used else 8;
     g.setAssumedDecodeSeqLen(seq_len);
 
@@ -552,7 +556,7 @@ fn buildMambaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
     const kv_dim = config.n_kv_heads * config.head_dim;
     const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
     const rope_dim = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
-    const seq_len = @min(config.context_length, 4096);
+    const seq_len = modeledDecodeSeqLen(config);
     const full_attn_interval = if (config.full_attn_interval > 0) config.full_attn_interval else 6;
     const conv_channels = if (config.ssm_d_inner > 0) config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state else config.hidden_dim;
     g.setAssumedDecodeSeqLen(seq_len);
@@ -755,7 +759,7 @@ fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
     const kv_dim = config.n_kv_heads * config.head_dim;
     const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
     const rope_dim = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
-    const seq_len = @min(config.context_length, 4096);
+    const seq_len = modeledDecodeSeqLen(config);
     g.setAssumedDecodeSeqLen(seq_len);
 
     // Token embedding lookup (+ sqrt(hidden_dim) scaling handled at runtime)
@@ -782,35 +786,43 @@ fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
 
         // QKV projection
         const q_proj = try addAnnotatedNode(&g, layer, .dmmv, "q_proj", dmmvMetrics(
-            q_dim, config.hidden_dim,
+            q_dim,
+            config.hidden_dim,
             layerTensorBytes(gf, layer, "attn_q.weight", approxF16TensorBytes(q_dim, config.hidden_dim)),
-            q_dim, 1,
+            q_dim,
+            1,
         ));
         g.addDependency(q_proj, input_norm);
 
         const k_proj = try addAnnotatedNode(&g, layer, .dmmv, "k_proj", dmmvMetrics(
-            kv_dim, config.hidden_dim,
+            kv_dim,
+            config.hidden_dim,
             layerTensorBytes(gf, layer, "attn_k.weight", approxF16TensorBytes(kv_dim, config.hidden_dim)),
-            kv_dim, 1,
+            kv_dim,
+            1,
         ));
         g.addDependency(k_proj, input_norm);
 
         const v_proj = try addAnnotatedNode(&g, layer, .dmmv, "v_proj", dmmvMetrics(
-            kv_dim, config.hidden_dim,
+            kv_dim,
+            config.hidden_dim,
             layerTensorBytes(gf, layer, "attn_v.weight", approxF16TensorBytes(kv_dim, config.hidden_dim)),
-            kv_dim, 1,
+            kv_dim,
+            1,
         ));
         g.addDependency(v_proj, input_norm);
 
         // Q/K RMS norms (Gemma 3+ applies per-head norm before RoPE)
         const q_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "q_norm", rmsNormMetrics(
-            config.head_dim, config.n_heads,
+            config.head_dim,
+            config.n_heads,
             layerTensorBytes(gf, layer, "attn_q_norm.weight", config.head_dim * @sizeOf(f32)),
         ));
         g.addDependency(q_norm, q_proj);
 
         const k_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "k_norm", rmsNormMetrics(
-            config.head_dim, config.n_kv_heads,
+            config.head_dim,
+            config.n_kv_heads,
             layerTensorBytes(gf, layer, "attn_k_norm.weight", config.head_dim * @sizeOf(f32)),
         ));
         g.addDependency(k_norm, k_proj);
@@ -829,22 +841,28 @@ fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
 
         // Flash attention
         const attn = try addAnnotatedNode(&g, layer, .flash_attn, "flash_attn", flashAttnMetrics(
-            config.head_dim, config.n_heads, config.n_kv_heads, seq_len,
+            config.head_dim,
+            config.n_heads,
+            config.n_kv_heads,
+            seq_len,
         ));
         g.addDependency(attn, rope_q);
         g.addDependency(attn, kv_write);
 
         // Attention output projection
         const o_proj = try addAnnotatedNode(&g, layer, .dmmv, "o_proj", dmmvMetrics(
-            config.hidden_dim, q_dim,
+            config.hidden_dim,
+            q_dim,
             layerTensorBytes(gf, layer, "attn_output.weight", approxF16TensorBytes(config.hidden_dim, q_dim)),
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
         ));
         g.addDependency(o_proj, attn);
 
         // Post-attention RMS norm (applied before residual add)
         const post_attn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "post_attn_norm", rmsNormMetrics(
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
             layerTensorBytes(gf, layer, "post_attention_norm.weight", config.hidden_dim * @sizeOf(f32)),
         ));
         g.addDependency(post_attn_norm, o_proj);
@@ -856,23 +874,28 @@ fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
 
         // Pre-FFN RMS norm
         const ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "ffn_norm", rmsNormMetrics(
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
             layerTensorBytes(gf, layer, "ffn_norm.weight", config.hidden_dim * @sizeOf(f32)),
         ));
         g.addDependency(ffn_norm, attn_residual);
 
         // Gate + Up projection (GEGLU FFN)
         const gate_proj = try addAnnotatedNode(&g, layer, .dmmv, "gate_proj", dmmvMetrics(
-            inter_dim, config.hidden_dim,
+            inter_dim,
+            config.hidden_dim,
             layerTensorBytes(gf, layer, "ffn_gate.weight", approxF16TensorBytes(inter_dim, config.hidden_dim)),
-            inter_dim, 1,
+            inter_dim,
+            1,
         ));
         g.addDependency(gate_proj, ffn_norm);
 
         const up_proj = try addAnnotatedNode(&g, layer, .dmmv, "up_proj", dmmvMetrics(
-            inter_dim, config.hidden_dim,
+            inter_dim,
+            config.hidden_dim,
             layerTensorBytes(gf, layer, "ffn_up.weight", approxF16TensorBytes(inter_dim, config.hidden_dim)),
-            inter_dim, 1,
+            inter_dim,
+            1,
         ));
         g.addDependency(up_proj, ffn_norm);
 
@@ -883,15 +906,18 @@ fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
 
         // Down projection
         const down_proj = try addAnnotatedNode(&g, layer, .dmmv, "down_proj", dmmvMetrics(
-            config.hidden_dim, inter_dim,
+            config.hidden_dim,
+            inter_dim,
             layerTensorBytes(gf, layer, "ffn_down.weight", approxF16TensorBytes(config.hidden_dim, inter_dim)),
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
         ));
         g.addDependency(down_proj, geglu);
 
         // Post-FFN RMS norm (applied before residual add)
         const post_ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "post_ffn_norm", rmsNormMetrics(
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
             layerTensorBytes(gf, layer, "post_ffw_norm.weight", config.hidden_dim * @sizeOf(f32)),
         ));
         g.addDependency(post_ffn_norm, down_proj);
@@ -906,20 +932,23 @@ fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
 
     // Final normalization
     const final_norm = try addAnnotatedNode(&g, null, .rms_norm_mul, "final_norm", rmsNormMetrics(
-        config.hidden_dim, 1,
+        config.hidden_dim,
+        1,
         globalTensorBytes(gf, "output_norm.weight", config.hidden_dim * @sizeOf(f32)),
     ));
     g.addDependency(final_norm, prev_residual);
 
     // LM head (tied embeddings: falls back to token_embd.weight)
     const lm_head = try addAnnotatedNode(&g, null, .dmmv, "lm_head", dmmvMetrics(
-        config.vocab_size, config.hidden_dim,
+        config.vocab_size,
+        config.hidden_dim,
         blk: {
             const out_bytes = globalTensorBytes(gf, "output.weight", 0);
             if (out_bytes > 0) break :blk out_bytes;
             break :blk globalTensorBytes(gf, "token_embd.weight", approxF16TensorBytes(config.vocab_size, config.hidden_dim));
         },
-        config.vocab_size, 1,
+        config.vocab_size,
+        1,
     ));
     g.addDependency(lm_head, final_norm);
 
@@ -940,7 +969,7 @@ fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Alloc
     const kv_dim = config.n_kv_heads * config.head_dim;
     const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else config.hidden_dim * 4;
     const rope_dim = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
-    const seq_len = @min(config.context_length, 4096);
+    const seq_len = modeledDecodeSeqLen(config);
     const n_used = if (config.n_experts_used > 0) config.n_experts_used else 8;
     g.setAssumedDecodeSeqLen(seq_len);
 
@@ -958,7 +987,8 @@ fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Alloc
 
         // Attention block (same as Gemma dense)
         const input_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "input_norm", rmsNormMetrics(
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
             layerTensorBytes(gf, layer, "attn_norm.weight", config.hidden_dim * @sizeOf(f32)),
         ));
         g.addDependency(input_norm, prev_residual);
@@ -996,7 +1026,8 @@ fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Alloc
 
         // Pre-FFN norm
         const ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "ffn_norm", rmsNormMetrics(
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
             layerTensorBytes(gf, layer, "ffn_norm.weight", config.hidden_dim * @sizeOf(f32)),
         ));
         g.addDependency(ffn_norm, attn_residual);
@@ -1013,17 +1044,21 @@ fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Alloc
 
         // Sparse expert GEGLU (gate+up → GEGLU → down)
         const gate_proj = try addAnnotatedNode(&g, layer, .dmmv, "expert_gate", dmmvMetrics(
-            inter_dim * n_used, config.hidden_dim,
+            inter_dim * n_used,
+            config.hidden_dim,
             layerTensorBytes(gf, layer, "ffn_gate_exps.weight", approxF16TensorBytes(inter_dim * config.n_experts, config.hidden_dim)) / @max(@as(u64, 1), @as(u64, config.n_experts)) * n_used,
-            inter_dim, n_used,
+            inter_dim,
+            n_used,
         ));
         g.addDependency(gate_proj, ffn_norm);
         g.addDependency(gate_proj, moe_gate);
 
         const up_proj = try addAnnotatedNode(&g, layer, .dmmv, "expert_up", dmmvMetrics(
-            inter_dim * n_used, config.hidden_dim,
+            inter_dim * n_used,
+            config.hidden_dim,
             layerTensorBytes(gf, layer, "ffn_up_exps.weight", approxF16TensorBytes(inter_dim * config.n_experts, config.hidden_dim)) / @max(@as(u64, 1), @as(u64, config.n_experts)) * n_used,
-            inter_dim, n_used,
+            inter_dim,
+            n_used,
         ));
         g.addDependency(up_proj, ffn_norm);
         g.addDependency(up_proj, moe_gate);
@@ -1033,9 +1068,11 @@ fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Alloc
         g.addDependency(geglu, up_proj);
 
         const down_proj = try addAnnotatedNode(&g, layer, .dmmv, "expert_down", dmmvMetrics(
-            config.hidden_dim * n_used, inter_dim,
+            config.hidden_dim * n_used,
+            inter_dim,
             layerTensorBytes(gf, layer, "ffn_down_exps.weight", approxF16TensorBytes(config.hidden_dim * config.n_experts, inter_dim)) / @max(@as(u64, 1), @as(u64, config.n_experts)) * n_used,
-            config.hidden_dim, n_used,
+            config.hidden_dim,
+            n_used,
         ));
         g.addDependency(down_proj, geglu);
 
@@ -1045,7 +1082,8 @@ fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Alloc
 
         // Post-FFN norm
         const post_ffn_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "post_ffn_norm", rmsNormMetrics(
-            config.hidden_dim, 1,
+            config.hidden_dim,
+            1,
             layerTensorBytes(gf, layer, "post_ffw_norm.weight", config.hidden_dim * @sizeOf(f32)),
         ));
         g.addDependency(post_ffn_norm, moe_gather);
@@ -1058,19 +1096,22 @@ fn buildGemmaMoeDecodeGraph(config: *const ModelConfig, allocator: std.mem.Alloc
     }
 
     const final_norm = try addAnnotatedNode(&g, null, .rms_norm_mul, "final_norm", rmsNormMetrics(
-        config.hidden_dim, 1,
+        config.hidden_dim,
+        1,
         globalTensorBytes(gf, "output_norm.weight", config.hidden_dim * @sizeOf(f32)),
     ));
     g.addDependency(final_norm, prev_residual);
 
     const lm_head = try addAnnotatedNode(&g, null, .dmmv, "lm_head", dmmvMetrics(
-        config.vocab_size, config.hidden_dim,
+        config.vocab_size,
+        config.hidden_dim,
         blk: {
             const out_bytes = globalTensorBytes(gf, "output.weight", 0);
             if (out_bytes > 0) break :blk out_bytes;
             break :blk globalTensorBytes(gf, "token_embd.weight", approxF16TensorBytes(config.vocab_size, config.hidden_dim));
         },
-        config.vocab_size, 1,
+        config.vocab_size,
+        1,
     ));
     g.addDependency(lm_head, final_norm);
 

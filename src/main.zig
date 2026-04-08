@@ -29,6 +29,7 @@ const gguf_mod = @import("model/gguf.zig");
 const managed_mod = @import("model/managed.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
 const graph_mod = @import("compute/graph.zig");
+const memory_plan = @import("gpu/memory_plan.zig");
 const process_lock_mod = @import("gpu/process_lock.zig");
 const server_runtime = @import("server/runtime.zig");
 // These modules import vulkan/ transitively — only available on Linux until T010-T014 refactor.
@@ -564,7 +565,6 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.context_length = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidContext;
-            if (config.context_length > 32768) return error.InvalidContext;
         } else if (std.mem.eql(u8, arg, "--parallel")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -682,21 +682,32 @@ fn resolveStartupModel(config: Config, allocator: std.mem.Allocator) !ResolvedSt
         const path = try managed_mod.resolveInstalledModelPath(model_id, allocator);
         const model_id_copy = try allocator.dupe(u8, model_id);
         return .{
-            .spec = .{ .model_path = path, .managed_id = model_id_copy },
+            .spec = .{
+                .model_path = path,
+                .managed_id = model_id_copy,
+                .requested_context_length = config.context_length,
+            },
             .owned_path = path,
             .owned_managed_id = model_id_copy,
         };
     }
 
     if (config.model_path) |model_path| {
-        return .{ .spec = .{ .model_path = model_path } };
+        return .{ .spec = .{
+            .model_path = model_path,
+            .requested_context_length = config.context_length,
+        } };
     }
 
     const active = try managed_mod.readActiveSelection(allocator);
     if (active) |selection| {
         const path = try managed_mod.resolveInstalledModelPath(selection.model_id, allocator);
         return .{
-            .spec = .{ .model_path = path, .managed_id = selection.model_id },
+            .spec = .{
+                .model_path = path,
+                .managed_id = selection.model_id,
+                .requested_context_length = config.context_length,
+            },
             .owned_path = path,
             .owned_managed_id = selection.model_id,
         };
@@ -1459,6 +1470,7 @@ pub fn main() !void {
         diagnostics_mod.run(.{
             .device_index = config.device_index,
             .model_path = check_target.model_path,
+            .requested_context_length = config.context_length,
             .managed_model = check_target.managed_model,
             .shader_dir = if (gpu.is_metal) "src/shaders/metal" else "zig-out/share/zinc/shaders",
         }, allocator) catch |err| {
@@ -1568,6 +1580,7 @@ pub fn main() !void {
                 std.process.exit(1);
             };
             defer model.deinit();
+            memory_plan.applyRequestedContextLimit(&model.config, config.context_length);
 
             log.info("Prompt: {s}", .{prompt});
 
@@ -1675,7 +1688,7 @@ pub fn main() !void {
                     std.process.exit(1);
                 }
             else
-                model_manager_mod.ModelManager.initEmpty(&device, allocator);
+                model_manager_mod.ModelManager.initEmpty(&device, config.context_length, allocator);
             defer manager.deinit();
 
             runHttpServer(config, &manager, allocator);
@@ -1713,6 +1726,7 @@ pub fn main() !void {
             std.process.exit(1);
         };
         defer model.deinit(&vk_instance);
+        memory_plan.applyRequestedContextLimit(&model.config, config.context_length);
 
         var engine = forward_mod.InferenceEngine.init(&model, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
             log.err("Failed to init inference engine: {s}", .{@errorName(err)});
@@ -1871,7 +1885,7 @@ pub fn main() !void {
                 std.process.exit(1);
             }
         else
-            model_manager_mod.ModelManager.initEmpty(&vk_instance, gpu_config, shader_dir, allocator);
+            model_manager_mod.ModelManager.initEmpty(&vk_instance, gpu_config, shader_dir, config.context_length, allocator);
         defer manager.deinit();
         runHttpServer(config, &manager, allocator);
     }
@@ -1911,6 +1925,12 @@ test "parseArgs: full args" {
     try std.testing.expectEqual(@as(u8, 3), config.kv_quant);
     try std.testing.expectEqualStrings("graph.json", config.graph_report_path.?);
     try std.testing.expectEqualStrings("graph.dot", config.graph_dot_path.?);
+}
+
+test "parseArgs: allows large context requests" {
+    const args = [_][:0]const u8{ "zinc", "-c", "65536" };
+    const config = try parseArgs(&args);
+    try std.testing.expectEqual(@as(u32, 65536), config.context_length);
 }
 
 test "parseArgs: help flag" {

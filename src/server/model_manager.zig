@@ -7,8 +7,8 @@ const loader_mod = @import("../model/loader.zig");
 const tokenizer_mod = @import("../model/tokenizer.zig");
 const catalog_mod = @import("../model/catalog.zig");
 const managed_mod = @import("../model/managed.zig");
-const diagnostics_mod = @import("../diagnostics.zig");
 const forward_mod = @import("../compute/forward.zig");
+const memory_plan = @import("../gpu/memory_plan.zig");
 const process_lock_mod = @import("../gpu/process_lock.zig");
 const gpu_detect = @import("../vulkan/gpu_detect.zig");
 const instance_mod = @import("../vulkan/instance.zig");
@@ -20,6 +20,7 @@ const Instance = instance_mod.Instance;
 pub const LoadSpec = struct {
     model_path: []const u8,
     managed_id: ?[]const u8 = null,
+    requested_context_length: ?u32 = null,
 };
 
 /// Flat representation of a catalog model for JSON serialization to API clients.
@@ -90,6 +91,7 @@ pub const ModelManager = struct {
     shader_dir: []const u8,
     state_mutex: std.Thread.Mutex = .{},
     gpu_process_lock: process_lock_mod.ProcessLock = .{},
+    requested_context_length: ?u32 = null,
     current: ?*LoadedResources,
 
     /// Outcome of a managed model removal, including whether it was unloaded from the GPU.
@@ -119,6 +121,7 @@ pub const ModelManager = struct {
             .vram_budget_bytes = instance.vramBytes(),
             .shader_dir = shader_dir,
             .gpu_process_lock = gpu_process_lock,
+            .requested_context_length = spec.requested_context_length,
             .current = current,
         };
     }
@@ -128,6 +131,7 @@ pub const ModelManager = struct {
         instance: *const Instance,
         gpu_config_value: gpu_detect.GpuConfig,
         shader_dir: []const u8,
+        requested_context_length: ?u32,
         allocator: std.mem.Allocator,
     ) ModelManager {
         return .{
@@ -136,6 +140,7 @@ pub const ModelManager = struct {
             .gpu_config = gpu_config_value,
             .vram_budget_bytes = instance.vramBytes(),
             .shader_dir = shader_dir,
+            .requested_context_length = requested_context_length,
             .current = null,
         };
     }
@@ -336,7 +341,11 @@ pub const ModelManager = struct {
         }
         const switched = try self.allocator.create(LoadedResources);
         errdefer self.allocator.destroy(switched);
-        loadResourcesInto(switched, .{ .model_path = new_path, .managed_id = model_id }, self.instance, self.gpu_config, self.shader_dir, self.allocator) catch |switch_err| {
+        loadResourcesInto(switched, .{
+            .model_path = new_path,
+            .managed_id = model_id,
+            .requested_context_length = self.requested_context_length,
+        }, self.instance, self.gpu_config, self.shader_dir, self.allocator) catch |switch_err| {
             return switch_err;
         };
 
@@ -403,11 +412,9 @@ fn loadResourcesInto(
     defer cmd_pool.deinit();
 
     resources.* = undefined;
-    const inspection = try loader_mod.inspectModel(spec.model_path, allocator);
-    const fit = diagnostics_mod.estimateFit(inspection, instance.vramBytes());
-
     resources.model = try loader_mod.load(spec.model_path, instance, &cmd_pool, allocator);
     errdefer resources.model.deinit(instance);
+    memory_plan.applyRequestedContextLimit(&resources.model.config, spec.requested_context_length);
 
     resources.tokenizer = try tokenizer_mod.Tokenizer.initFromGGUF(&resources.model.gguf_file, allocator);
     errdefer resources.tokenizer.deinit();
@@ -425,15 +432,28 @@ fn loadResourcesInto(
 
     resources.display_name = try allocator.dupe(u8, modelDisplayName(&resources.model));
     errdefer allocator.free(resources.display_name);
-    resources.weights_bytes = inspection.tensor_bytes;
-    resources.runtime_device_local_bytes = fit.runtime_device_local_bytes;
-    resources.context_reserved_bytes = fit.kv_cache_bytes;
-    resources.context_capacity_tokens = fit.max_ctx;
-    resources.context_bytes_per_token = if (fit.max_ctx == 0) 0 else @divTrunc(fit.kv_cache_bytes, fit.max_ctx);
-    resources.device_local_bytes = fit.total_device_local_bytes;
-    resources.device_local_budget_bytes = fit.vram_budget_bytes;
+    const weights_bytes = tensorBytes(&resources.model);
+    const profile = memory_plan.profile(resources.model.config);
+    const runtime_ctx = resources.engine.max_context_tokens;
+    const kv_cache_bytes = profile.deviceLocalContextBytes(runtime_ctx);
+    const runtime_device_local_bytes = profile.runtimeDeviceLocalBytes(runtime_ctx);
+    resources.weights_bytes = weights_bytes;
+    resources.runtime_device_local_bytes = runtime_device_local_bytes;
+    resources.context_reserved_bytes = kv_cache_bytes;
+    resources.context_capacity_tokens = runtime_ctx;
+    resources.context_bytes_per_token = if (runtime_ctx == 0) 0 else @divTrunc(kv_cache_bytes, runtime_ctx);
+    resources.device_local_bytes = weights_bytes + runtime_device_local_bytes;
+    resources.device_local_budget_bytes = instance.vramBytes();
 
     std.debug.assert(resources.engine.model == &resources.model);
+}
+
+fn tensorBytes(model: *const loader_mod.Model) u64 {
+    var total: u64 = 0;
+    for (model.gguf_file.tensors.items) |tensor_info| {
+        total += tensor_info.sizeBytes();
+    }
+    return total;
 }
 
 fn fallbackModelName(model: *const loader_mod.Model) []const u8 {

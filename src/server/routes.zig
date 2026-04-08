@@ -11,6 +11,7 @@ const managed_mod = if (runtime.supports_model_management) @import("../model/man
 const model_manager_mod = runtime.model_manager_mod;
 const tokenizer_mod = runtime.tokenizer_mod;
 const Model = runtime.Model;
+const memory_plan = @import("../gpu/memory_plan.zig");
 
 const log = std.log.scoped(.routes);
 
@@ -752,6 +753,14 @@ const thinking_prefix = "<think>\n";
 const empty_thinking_prefix = "<think>\n\n</think>\n\n";
 const thinking_open_tag = "<think>";
 const thinking_close_tag = "</think>";
+const harmony_analysis_prefix = "<|channel|>analysis<|message|>";
+const harmony_final_prefix = "<|channel|>final<|message|>";
+const harmony_stop_strs = [_][]const u8{
+    "<|end|>",
+    "<|return|>",
+    "<|start|>",
+    "<|channel|>",
+};
 const chat_history_answer_limit_bytes: usize = 640;
 const default_chat_system_prompt =
     "Answer directly. If a user term is ambiguous or looks misspelled, say that briefly and continue with the most likely interpretation. Never output self-referential planning or phrases like 'I need to complete the response'.";
@@ -760,6 +769,13 @@ const FinishReason = enum {
     stop,
     length,
 };
+
+fn completionFinishReason(requested_max_tokens: u32, effective_max_tokens: u32, produced_tokens: usize) FinishReason {
+    if (requested_max_tokens > effective_max_tokens and produced_tokens >= @as(usize, effective_max_tokens)) {
+        return .length;
+    }
+    return .stop;
+}
 
 const ChatMessage = struct {
     role: []const u8 = "",
@@ -1152,6 +1168,48 @@ fn findStreamingStopStart(text: []const u8) ?usize {
     return first;
 }
 
+fn extractHarmonyMessage(text: []const u8, prefix: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, text, prefix) orelse return "";
+    const body = text[start + prefix.len ..];
+    const end = findFirstStop(body, harmony_stop_strs[0..]) orelse body.len;
+    return std.mem.trim(u8, body[0..end], " \t\r\n");
+}
+
+fn normalizeStructuredAssistantOutput(
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    text: []const u8,
+    thinking_enabled: bool,
+    buf: []u8,
+) ![]const u8 {
+    if (!std.mem.eql(u8, tokenizer.detectTemplateKindName(), "openai_moe")) return text;
+
+    const analysis = extractHarmonyMessage(text, harmony_analysis_prefix);
+    const final = extractHarmonyMessage(text, harmony_final_prefix);
+    if (analysis.len == 0 and final.len == 0) return text;
+    if (!thinking_enabled or analysis.len == 0) return final;
+
+    const joiner = if (final.len > 0) "\n" else "";
+    const close = "\n</think>";
+    const total_len = thinking_prefix.len + analysis.len + close.len + joiner.len + final.len;
+    if (total_len > buf.len) return error.BufferTooSmall;
+
+    @memcpy(buf[0..thinking_prefix.len], thinking_prefix);
+    var pos = thinking_prefix.len;
+    @memcpy(buf[pos .. pos + analysis.len], analysis);
+    pos += analysis.len;
+    @memcpy(buf[pos .. pos + close.len], close);
+    pos += close.len;
+    if (joiner.len > 0) {
+        @memcpy(buf[pos .. pos + joiner.len], joiner);
+        pos += joiner.len;
+    }
+    if (final.len > 0) {
+        @memcpy(buf[pos .. pos + final.len], final);
+        pos += final.len;
+    }
+    return buf[0..pos];
+}
+
 fn sanitizeAnswerTail(text: []const u8) []const u8 {
     return trimRestartedAnswer(trimLeakedNoThinkingOutput(trimUnexpectedThinkingTail(trimTrailingChatArtifacts(text))));
 }
@@ -1490,10 +1548,20 @@ fn handleChatCompletions(
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
     }
-    server_state.setActiveContextTokens(@intCast(@min(prompt_tokens.len, std.math.maxInt(u32))));
+    const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+    if (prompt_token_count > resources.context_capacity_tokens) {
+        try conn.sendError(400, "context_length_exceeded", "Prompt exceeds context capacity");
+        return;
+    }
+    server_state.setActiveContextTokens(prompt_token_count);
 
     const ts = @divTrunc(std.time.timestamp(), 1);
-    const max_tokens = parsed.max_tokens;
+    const request_budget = memory_plan.requestBudget(
+        prompt_token_count,
+        parsed.max_tokens,
+        resources.context_capacity_tokens,
+    );
+    const max_tokens = request_budget.completion_tokens;
     const req_id = "chatcmpl-zinc0001"; // TODO: T013 unique IDs
     const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
     const seed_ns: i128 = std.time.nanoTimestamp();
@@ -1504,6 +1572,15 @@ fn handleChatCompletions(
 
     var state = forward_mod.DecodeState.init(allocator);
     defer state.deinit();
+    state.requested_context_tokens = request_budget.target_context_tokens;
+    if (max_tokens < parsed.max_tokens) {
+        log.info("Clamped chat decode budget from {d} to {d} tokens (prompt={d}, capacity={d})", .{
+            parsed.max_tokens,
+            max_tokens,
+            prompt_token_count,
+            resources.context_capacity_tokens,
+        });
+    }
 
     var processed_generated_tokens: std.ArrayList(u32) = .{};
     defer processed_generated_tokens.deinit(allocator);
@@ -1607,7 +1684,7 @@ fn handleChatCompletions(
         var sent_visible_len: usize = 0; // cleaned visible bytes already streamed when thinking is disabled
         var visible_buf: [4096]u8 = undefined;
         var stopped = false;
-        var finish_reason: FinishReason = .stop;
+        var finish_reason: FinishReason = if (max_tokens == 0 and parsed.max_tokens > 0) .length else .stop;
 
         if (max_tokens > 0) {
             var prev_token = runtime.sample(engine, &state, sampling, random);
@@ -1800,7 +1877,7 @@ fn handleChatCompletions(
             }
         }.check;
         const ns_stops = chat_stop_strs[0..];
-        var finish_reason: FinishReason = .stop;
+        var finish_reason: FinishReason = if (max_tokens == 0 and parsed.max_tokens > 0) .length else .stop;
         if (max_tokens > 0) {
             var prev = runtime.sample(engine, &state, sampling, random);
             while (ns_gen < max_tokens and !nsIsEog(prev, ns_eos)) {
@@ -1832,11 +1909,13 @@ fn handleChatCompletions(
         }
 
         // Escape the full text for JSON
+        var structured_buf: [16384]u8 = undefined;
+        const structured_text = normalizeStructuredAssistantOutput(tokenizer, text_buf.items, thinking_enabled, &structured_buf) catch text_buf.items;
         var strip_buf: [16384]u8 = undefined;
         const base_text = if (thinking_enabled)
-            text_buf.items
+            structured_text
         else
-            stripThinkingForDisabledResponse(text_buf.items, &strip_buf) catch text_buf.items;
+            stripThinkingForDisabledResponse(structured_text, &strip_buf) catch structured_text;
         const trimmed_text = trimTrailingChatArtifacts(base_text);
         var thinking_buf: [16384]u8 = undefined;
         const prefixed_text = prefixThinkingEnvelope(trimmed_text, thinking_enabled, &thinking_buf) catch trimmed_text;
@@ -1909,12 +1988,31 @@ fn handleCompletions(
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
     }
-    server_state.setActiveContextTokens(@intCast(@min(prompt_tokens.len, std.math.maxInt(u32))));
+    const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+    if (prompt_token_count > resources.context_capacity_tokens) {
+        try conn.sendError(400, "context_length_exceeded", "Prompt exceeds context capacity");
+        return;
+    }
+    server_state.setActiveContextTokens(prompt_token_count);
+    const request_budget = memory_plan.requestBudget(
+        prompt_token_count,
+        parsed.max_tokens,
+        resources.context_capacity_tokens,
+    );
+    const max_tokens = request_budget.completion_tokens;
+    if (max_tokens < parsed.max_tokens) {
+        log.info("Clamped completion decode budget from {d} to {d} tokens (prompt={d}, capacity={d})", .{
+            parsed.max_tokens,
+            max_tokens,
+            prompt_token_count,
+            resources.context_capacity_tokens,
+        });
+    }
 
     const ts = @divTrunc(std.time.timestamp(), 1);
     const req_id = "cmpl-zinc0001";
 
-    const output_tokens = forward_mod.generate(engine, prompt_tokens, parsed.max_tokens, tokenizer.eosId(), allocator) catch {
+    const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator) catch {
         try conn.sendError(500, "internal_error", "Generation failed");
         return;
     };
@@ -1927,16 +2025,18 @@ fn handleCompletions(
         text_buf.appendSlice(allocator, t) catch break;
     }
 
+    const finish_reason = completionFinishReason(parsed.max_tokens, max_tokens, output_tokens.len);
+
     var escaped_buf: [16384]u8 = undefined;
     const escaped_text = jsonEscape(text_buf.items, &escaped_buf);
 
     var resp_buf: [32768]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf,
-        \\{{"id":"{s}","object":"text_completion","created":{d},"model":"{s}","choices":[{{"index":0,"text":"{s}","finish_reason":"stop"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
+        \\{{"id":"{s}","object":"text_completion","created":{d},"model":"{s}","choices":[{{"index":0,"text":"{s}","finish_reason":"{s}"}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
     , .{
-        req_id,                                ts,                model_name,
-        escaped_text,                          prompt_tokens.len, output_tokens.len,
-        prompt_tokens.len + output_tokens.len,
+        req_id,            ts,                                    model_name,
+        escaped_text,      @tagName(finish_reason),               prompt_tokens.len,
+        output_tokens.len, prompt_tokens.len + output_tokens.len,
     }) catch {
         try conn.sendError(500, "internal_error", "Response too large");
         return;
@@ -2234,6 +2334,13 @@ test "parseRequestBody handles escaped content and multiple messages" {
 test "normalizeRole falls back to user" {
     try std.testing.expectEqualStrings("user", normalizeRole("tool"));
     try std.testing.expectEqualStrings("assistant", normalizeRole("assistant"));
+}
+
+test "completionFinishReason reports clamped generations as length" {
+    try std.testing.expectEqual(FinishReason.length, completionFinishReason(256, 64, 64));
+    try std.testing.expectEqual(FinishReason.length, completionFinishReason(32, 0, 0));
+    try std.testing.expectEqual(FinishReason.stop, completionFinishReason(256, 64, 12));
+    try std.testing.expectEqual(FinishReason.stop, completionFinishReason(64, 64, 64));
 }
 
 test "ParsedRequest defaults" {
@@ -2580,6 +2687,30 @@ test "sanitizeThinkingOutput strips reopened think block from answer tail" {
         "<think>\nReasoning.\n</think>\nZig is promising for kernel programming.",
         cleaned,
     );
+}
+
+test "normalizeStructuredAssistantOutput strips Harmony analysis when thinking is disabled" {
+    var tok = makeTestTokenizer("<|start|>assistant<|message|>");
+    defer tok.token_to_id.deinit();
+
+    const raw =
+        "<|channel|>analysis<|message|>We need to answer briefly.<|end|>" ++
+        "<|start|>assistant<|channel|>final<|message|>Paris<|return|>";
+    var buf: [512]u8 = undefined;
+    const cleaned = try normalizeStructuredAssistantOutput(&tok, raw, false, &buf);
+    try std.testing.expectEqualStrings("Paris", cleaned);
+}
+
+test "normalizeStructuredAssistantOutput preserves Harmony analysis when thinking is enabled" {
+    var tok = makeTestTokenizer("<|start|>assistant<|message|>");
+    defer tok.token_to_id.deinit();
+
+    const raw =
+        "<|channel|>analysis<|message|>We need to answer briefly.<|end|>" ++
+        "<|start|>assistant<|channel|>final<|message|>Paris<|return|>";
+    var buf: [512]u8 = undefined;
+    const cleaned = try normalizeStructuredAssistantOutput(&tok, raw, true, &buf);
+    try std.testing.expectEqualStrings("<think>\nWe need to answer briefly.\n</think>\nParis", cleaned);
 }
 
 test "sanitizeStreamingThinkingOutput strips reopened think block from answer tail" {
