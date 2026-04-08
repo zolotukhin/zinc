@@ -92,7 +92,7 @@ pub const AttentionDispatch = struct {
     /// @note The helper dispatches one workgroup per query head.
     pub fn recordFlashAttn(
         self: *const AttentionDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         /// Per-head dimension.

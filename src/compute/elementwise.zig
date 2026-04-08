@@ -317,7 +317,7 @@ pub const ElementwiseDispatch = struct {
     /// @note The helper dispatches one workgroup per token.
     pub fn recordRmsNorm(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         /// Hidden state width.
@@ -343,7 +343,7 @@ pub const ElementwiseDispatch = struct {
     /// @note Workgroups are sized as `ceil(n_elements / 64)`.
     pub fn recordSwiglu(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
@@ -358,7 +358,7 @@ pub const ElementwiseDispatch = struct {
     /// Same buffer layout as SwiGLU: gate, up → output.
     pub fn recordGeglu(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
     ) !void {
@@ -386,7 +386,7 @@ pub const ElementwiseDispatch = struct {
     /// @param rope_dim Number of dimensions to rotate (rest copied unchanged).
     pub fn recordRope(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         stride: u32,
@@ -412,7 +412,7 @@ pub const ElementwiseDispatch = struct {
     /// Record a deinterleave dispatch: split element-interleaved Q+gate into separate buffers.
     pub fn recordDeinterleave(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         /// Per-head dimension.
@@ -430,7 +430,7 @@ pub const ElementwiseDispatch = struct {
     /// Record a sigmoid multiply dispatch: out = input * sigmoid(gate).
     pub fn recordSigmoidMul(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
@@ -444,7 +444,7 @@ pub const ElementwiseDispatch = struct {
     /// Record a vector add dispatch: c = a + b.
     pub fn recordVadd(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
@@ -458,7 +458,7 @@ pub const ElementwiseDispatch = struct {
     /// Record a scale-accumulate dispatch: a[i] += scale * b[i].
     pub fn recordScaleAcc(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Allocated descriptor set.
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
@@ -473,7 +473,7 @@ pub const ElementwiseDispatch = struct {
     /// Record SSM conv1d + SiLU dispatch.
     pub fn recordSsmConv1d(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         conv_channels: u32,
         d_conv: u32,
@@ -492,7 +492,7 @@ pub const ElementwiseDispatch = struct {
     /// Record SSM delta-net state update dispatch.
     pub fn recordSsmDeltaNet(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         push: SsmDeltaNetPush,
     ) !void {
@@ -504,7 +504,7 @@ pub const ElementwiseDispatch = struct {
     /// Record SSM gated norm dispatch.
     pub fn recordSsmGatedNorm(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         push: SsmGatedNormPush,
     ) !void {
@@ -515,7 +515,7 @@ pub const ElementwiseDispatch = struct {
     /// Record softmax + top-k MoE router dispatch.
     pub fn recordSoftmaxTopk(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         n_experts: u32,
         k: u32,
@@ -528,7 +528,7 @@ pub const ElementwiseDispatch = struct {
     /// Record sigmoid-gated scale-accumulate: a[i] += sigmoid(c[0]) * b[i].
     pub fn recordSigmoidScaleAcc(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
     ) !void {
@@ -545,7 +545,7 @@ pub const ElementwiseDispatch = struct {
     /// src_stride: elements per expert in the source buffer (typically = n_elements).
     pub fn recordMoeWeightedAcc(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
         n_used: u32,
@@ -560,7 +560,7 @@ pub const ElementwiseDispatch = struct {
     /// Record in-place logit softcapping: logits[i] = cap * tanh(logits[i] / cap).
     pub fn recordSoftcap(
         self: *const ElementwiseDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         n_elements: u32,
         softcap: f32,

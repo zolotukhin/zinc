@@ -274,7 +274,7 @@ pub const DmmvDispatch = struct {
     /// x_expert_stride: elements between experts' inputs (0=shared input, K=per-expert).
     pub fn recordMoeDispatch(
         self: *const DmmvDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         quant_type: GGMLType,
         descriptor_set: vk.c.VkDescriptorSet,
         M: u32,
@@ -318,7 +318,7 @@ pub const DmmvDispatch = struct {
     /// @note The helper uses one workgroup per 64 output rows.
     pub fn recordDispatch(
         self: *const DmmvDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         /// Quantization type.
         quant_type: GGMLType,
         /// Allocated descriptor set.
@@ -391,7 +391,7 @@ pub const DmmvDispatch = struct {
     /// Input/output are column-major: X[K, num_cols], Y[M, num_cols].
     pub fn recordBatchDispatch(
         self: *const DmmvDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         quant_type: GGMLType,
         descriptor_set: vk.c.VkDescriptorSet,
         M: u32,

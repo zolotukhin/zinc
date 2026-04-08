@@ -100,6 +100,8 @@ pub const CommandBuffer = struct {
     fence: vk.c.VkFence,
     /// Logical device.
     device: vk.c.VkDevice,
+    /// Last bound compute pipeline (skip redundant vkCmdBindPipeline calls).
+    last_bound_pipeline: vk.c.VkPipeline = null,
 
     /// Allocate a primary command buffer and fence from a compute command pool.
     /// @param instance Active Vulkan instance and logical device.
@@ -145,7 +147,7 @@ pub const CommandBuffer = struct {
     /// @param self Command buffer to begin recording into.
     /// @returns `error.BeginCommandBufferFailed` when Vulkan rejects the begin request.
     /// @note Use `reset()` or wait for prior submissions before recording into the same buffer again.
-    pub fn begin(self: *const CommandBuffer) !void {
+    pub fn begin(self: *CommandBuffer) !void {
         const begin_info = vk.c.VkCommandBufferBeginInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .pNext = null,
@@ -154,13 +156,14 @@ pub const CommandBuffer = struct {
         };
         const result = vk.c.vkBeginCommandBuffer(self.handle, &begin_info);
         if (result != vk.c.VK_SUCCESS) return error.BeginCommandBufferFailed;
+        self.last_bound_pipeline = null;
     }
 
     /// Begin recording for a single submit-and-discard style workload.
     /// @param self Command buffer to begin recording into.
     /// @returns `error.BeginCommandBufferFailed` when Vulkan rejects the begin request.
     /// @note This sets `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` so the driver can optimize transient work.
-    pub fn beginOneTime(self: *const CommandBuffer) !void {
+    pub fn beginOneTime(self: *CommandBuffer) !void {
         const begin_info = vk.c.VkCommandBufferBeginInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .pNext = null,
@@ -169,6 +172,7 @@ pub const CommandBuffer = struct {
         };
         const result = vk.c.vkBeginCommandBuffer(self.handle, &begin_info);
         if (result != vk.c.VK_SUCCESS) return error.BeginCommandBufferFailed;
+        self.last_bound_pipeline = null;
     }
 
     /// Record a compute dispatch with an already-created descriptor set.
@@ -180,7 +184,7 @@ pub const CommandBuffer = struct {
     /// @param group_count_z Workgroup count in the Z dimension.
     /// @note This helper binds pipeline and descriptors only; required barriers must be recorded separately.
     pub fn dispatch(
-        self: *const CommandBuffer,
+        self: *CommandBuffer,
         /// Vulkan compute pipeline, or null if unavailable.
         pipeline: *const Pipeline,
         /// Allocated descriptor set.
@@ -189,7 +193,10 @@ pub const CommandBuffer = struct {
         group_count_y: u32,
         group_count_z: u32,
     ) void {
-        vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+        if (self.last_bound_pipeline != pipeline.pipeline) {
+            vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+            self.last_bound_pipeline = pipeline.pipeline;
+        }
         vk.c.vkCmdBindDescriptorSets(
             self.handle,
             vk.c.VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -213,7 +220,7 @@ pub const CommandBuffer = struct {
     /// @param group_count_z Workgroup count in the Z dimension.
     /// @note The caller is responsible for matching `push_data` to the shader layout declared by `pipeline`.
     pub fn dispatchWithPush(
-        self: *const CommandBuffer,
+        self: *CommandBuffer,
         /// Vulkan compute pipeline, or null if unavailable.
         pipeline: *const Pipeline,
         /// Allocated descriptor set.
@@ -223,7 +230,10 @@ pub const CommandBuffer = struct {
         group_count_y: u32,
         group_count_z: u32,
     ) void {
-        vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+        if (self.last_bound_pipeline != pipeline.pipeline) {
+            vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+            self.last_bound_pipeline = pipeline.pipeline;
+        }
         vk.c.vkCmdPushConstants(
             self.handle,
             pipeline.pipeline_layout,
@@ -255,7 +265,7 @@ pub const CommandBuffer = struct {
     /// @param group_count_y Workgroup count in the Y dimension.
     /// @param group_count_z Workgroup count in the Z dimension.
     pub fn pushDescAndDispatch(
-        self: *const CommandBuffer,
+        self: *CommandBuffer,
         pipeline: *const Pipeline,
         push_desc_fn: ?PushDescriptorFn,
         buffer_infos: []const vk.c.VkDescriptorBufferInfo,
@@ -267,7 +277,10 @@ pub const CommandBuffer = struct {
         std.debug.assert(push_desc_fn != null);
         std.debug.assert(buffer_infos.len <= 8);
 
-        vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+        if (self.last_bound_pipeline != pipeline.pipeline) {
+            vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+            self.last_bound_pipeline = pipeline.pipeline;
+        }
         if (push_data.len > 0) {
             vk.c.vkCmdPushConstants(
                 self.handle,

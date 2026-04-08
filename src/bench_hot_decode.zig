@@ -412,7 +412,7 @@ const SsmDeltaSlot = struct {
 };
 
 fn recordRepeatedDmmv(
-    cmd: *const CommandBuffer,
+    cmd: *CommandBuffer,
     timer: *const TimestampTimer,
     dispatch: *const DmmvDispatch,
     descriptor_sets: []const vk.c.VkDescriptorSet,
@@ -430,7 +430,7 @@ fn recordRepeatedDmmv(
 }
 
 fn recordRepeatedSsmDelta(
-    cmd: *const CommandBuffer,
+    cmd: *CommandBuffer,
     timer: *const TimestampTimer,
     dispatch: *const ElementwiseDispatch,
     descriptor_sets: []const vk.c.VkDescriptorSet,

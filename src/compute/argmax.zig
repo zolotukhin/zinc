@@ -65,7 +65,7 @@ pub const ArgmaxDispatch = struct {
     /// Record the two-phase argmax reduction into a command buffer.
     pub fn record(
         self: *const ArgmaxDispatch,
-        cmd: *const CommandBuffer,
+        cmd: *CommandBuffer,
         descriptor_set: vk.c.VkDescriptorSet,
         n_logits: u32,
         phase0_workgroups: u32,
