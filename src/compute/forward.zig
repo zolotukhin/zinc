@@ -500,6 +500,47 @@ fn logicalTokenToPhysicalToken(page_ids: []const u32, logical_token: u32) !u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Pre-resolved per-layer tensor pointers (eliminates ~960 hash lookups/token)
+// ---------------------------------------------------------------------------
+
+const LayerTensors = struct {
+    // Attention (most frequently accessed first for cache-line locality)
+    attn_norm: ?*const LoadedTensor = null,
+    attn_q: ?*const LoadedTensor = null,
+    attn_k: ?*const LoadedTensor = null,
+    attn_v: ?*const LoadedTensor = null,
+    attn_output: ?*const LoadedTensor = null,
+    attn_gate: ?*const LoadedTensor = null,
+    attn_q_norm: ?*const LoadedTensor = null,
+    attn_k_norm: ?*const LoadedTensor = null,
+    post_attention_norm: ?*const LoadedTensor = null,
+    // FFN
+    ffn_norm: ?*const LoadedTensor = null,
+    ffn_gate: ?*const LoadedTensor = null,
+    ffn_up: ?*const LoadedTensor = null,
+    ffn_down: ?*const LoadedTensor = null,
+    post_ffw_norm: ?*const LoadedTensor = null,
+    // MoE
+    ffn_gate_inp: ?*const LoadedTensor = null,
+    ffn_gate_exps: ?*const LoadedTensor = null,
+    ffn_up_exps: ?*const LoadedTensor = null,
+    ffn_down_exps: ?*const LoadedTensor = null,
+    ffn_gate_shexp: ?*const LoadedTensor = null,
+    ffn_up_shexp: ?*const LoadedTensor = null,
+    ffn_down_shexp: ?*const LoadedTensor = null,
+    ffn_gate_inp_shexp: ?*const LoadedTensor = null,
+    // SSM / delta-net
+    attn_qkv: ?*const LoadedTensor = null,
+    ssm_alpha: ?*const LoadedTensor = null,
+    ssm_beta: ?*const LoadedTensor = null,
+    ssm_conv1d: ?*const LoadedTensor = null,
+    ssm_out: ?*const LoadedTensor = null,
+    ssm_dt_bias: ?*const LoadedTensor = null,
+    ssm_a: ?*const LoadedTensor = null,
+    ssm_norm: ?*const LoadedTensor = null,
+};
+
+// ---------------------------------------------------------------------------
 // Inference engine
 // ---------------------------------------------------------------------------
 
@@ -573,6 +614,8 @@ pub const InferenceEngine = struct {
     shared_pool: vk.c.VkDescriptorPool,
     // Pre-built tensor name → pointer map (O(1) lookup, replaces O(n) linear scan)
     tensor_map: std.StringHashMap(*const LoadedTensor),
+    // Pre-resolved per-layer tensor pointers (O(1) indexed access, no hash/format per token)
+    layer_tensors: []LayerTensors,
     /// Vulkan instance.
     instance: *const Instance,
     /// Allocator for owned resources.
@@ -1041,6 +1084,52 @@ pub const InferenceEngine = struct {
             tensor_map.putAssumeCapacity(t.info.name, t);
         }
 
+        // Pre-resolve per-layer tensor pointers to eliminate ~960 hash lookups per token.
+        const layer_tensors = try allocator.alloc(LayerTensors, config.n_layers);
+        errdefer allocator.free(layer_tensors);
+        for (0..config.n_layers) |li| {
+            var lt = LayerTensors{};
+            const l: u32 = @intCast(li);
+            const resolve = struct {
+                fn f(map: std.StringHashMap(*const LoadedTensor), layer: u32, name: []const u8) ?*const LoadedTensor {
+                    var buf: [128]u8 = undefined;
+                    const key = std.fmt.bufPrint(&buf, "blk.{d}.{s}", .{ layer, name }) catch return null;
+                    return map.get(key);
+                }
+            }.f;
+            lt.attn_norm = resolve(tensor_map, l, "attn_norm.weight");
+            lt.attn_q = resolve(tensor_map, l, "attn_q.weight");
+            lt.attn_k = resolve(tensor_map, l, "attn_k.weight");
+            lt.attn_v = resolve(tensor_map, l, "attn_v.weight");
+            lt.attn_output = resolve(tensor_map, l, "attn_output.weight");
+            lt.attn_gate = resolve(tensor_map, l, "attn_gate.weight");
+            lt.attn_q_norm = resolve(tensor_map, l, "attn_q_norm.weight");
+            lt.attn_k_norm = resolve(tensor_map, l, "attn_k_norm.weight");
+            lt.post_attention_norm = resolve(tensor_map, l, "post_attention_norm.weight");
+            lt.ffn_norm = resolve(tensor_map, l, "ffn_norm.weight");
+            lt.ffn_gate = resolve(tensor_map, l, "ffn_gate.weight");
+            lt.ffn_up = resolve(tensor_map, l, "ffn_up.weight");
+            lt.ffn_down = resolve(tensor_map, l, "ffn_down.weight");
+            lt.post_ffw_norm = resolve(tensor_map, l, "post_ffw_norm.weight");
+            lt.ffn_gate_inp = resolve(tensor_map, l, "ffn_gate_inp.weight");
+            lt.ffn_gate_exps = resolve(tensor_map, l, "ffn_gate_exps.weight");
+            lt.ffn_up_exps = resolve(tensor_map, l, "ffn_up_exps.weight");
+            lt.ffn_down_exps = resolve(tensor_map, l, "ffn_down_exps.weight");
+            lt.ffn_gate_shexp = resolve(tensor_map, l, "ffn_gate_shexp.weight");
+            lt.ffn_up_shexp = resolve(tensor_map, l, "ffn_up_shexp.weight");
+            lt.ffn_down_shexp = resolve(tensor_map, l, "ffn_down_shexp.weight");
+            lt.ffn_gate_inp_shexp = resolve(tensor_map, l, "ffn_gate_inp_shexp.weight");
+            lt.attn_qkv = resolve(tensor_map, l, "attn_qkv.weight");
+            lt.ssm_alpha = resolve(tensor_map, l, "ssm_alpha.weight");
+            lt.ssm_beta = resolve(tensor_map, l, "ssm_beta.weight");
+            lt.ssm_conv1d = resolve(tensor_map, l, "ssm_conv1d.weight");
+            lt.ssm_out = resolve(tensor_map, l, "ssm_out.weight");
+            lt.ssm_dt_bias = resolve(tensor_map, l, "ssm_dt.bias");
+            lt.ssm_a = resolve(tensor_map, l, "ssm_a");
+            lt.ssm_norm = resolve(tensor_map, l, "ssm_norm.weight");
+            layer_tensors[li] = lt;
+        }
+
         log.debug("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}, tensor_map={d}", .{
             decode_graph.nodeCount(), config.hidden_dim, config.vocab_size, tensor_map.count(),
         });
@@ -1096,6 +1185,7 @@ pub const InferenceEngine = struct {
             .router_output_buf = router_output_buf,
             .shared_pool = shared_pool,
             .tensor_map = tensor_map,
+            .layer_tensors = layer_tensors,
             .instance = instance,
             .allocator = allocator,
             .max_context_tokens = max_ctx,
@@ -2189,6 +2279,7 @@ pub const InferenceEngine = struct {
 
         for (0..config.n_layers) |layer_idx| {
             const layer: u32 = @intCast(layer_idx);
+            const lt = self.layer_tensors[layer_idx];
 
             // --- Upload embedding (only first layer) ---
             if (layer == 0) {
@@ -2200,7 +2291,7 @@ pub const InferenceEngine = struct {
             }
 
             // --- Input RMS norm: hidden_buf → norm_buf ---
-            const attn_norm = self.findLayerTensor(layer, "attn_norm.weight") orelse {
+            const attn_norm = lt.attn_norm orelse {
                 log.err("Layer {d}: attn_norm.weight not found", .{layer});
                 return error.TensorNotFound;
             };
@@ -2225,11 +2316,11 @@ pub const InferenceEngine = struct {
                 // Q/gate projection → Q/K norm → K/V proj → RoPE → KV cache → flash attention
                 // → sigmoid gate → output projection → residual
 
-                const q_tensor = self.findLayerTensor(layer, "attn_q.weight") orelse return error.TensorNotFound;
-                const k_tensor = self.findLayerTensor(layer, "attn_k.weight") orelse return error.TensorNotFound;
-                const v_tensor = self.findLayerTensor(layer, "attn_v.weight") orelse return error.TensorNotFound;
-                const o_tensor = self.findLayerTensor(layer, "attn_output.weight") orelse return error.TensorNotFound;
-                const attn_gate_tensor = self.findLayerTensor(layer, "attn_gate.weight");
+                const q_tensor = lt.attn_q orelse return error.TensorNotFound;
+                const k_tensor = lt.attn_k orelse return error.TensorNotFound;
+                const v_tensor = lt.attn_v orelse return error.TensorNotFound;
+                const o_tensor = lt.attn_output orelse return error.TensorNotFound;
+                const attn_gate_tensor = lt.attn_gate;
                 const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
                 const k_rows: u32 = @intCast(k_tensor.info.numElements() / hidden_dim);
                 const v_rows: u32 = @intCast(v_tensor.info.numElements() / hidden_dim);
@@ -2289,8 +2380,8 @@ pub const InferenceEngine = struct {
 
                 // Bug fix #1: Q/K normalization (per-head RMS norm)
                 // attn_q_norm and attn_k_norm are per-head norms with head_dim weights
-                const q_norm_tensor = self.findLayerTensor(layer, "attn_q_norm.weight");
-                const k_norm_tensor = self.findLayerTensor(layer, "attn_k_norm.weight");
+                const q_norm_tensor = lt.attn_q_norm;
+                const k_norm_tensor = lt.attn_k_norm;
                 if (state.position == 0 and layer == full_attn_interval - 1) {
                     log.debug("ATTN_NORM layout L{d}: q_norm_elems={d} k_norm_elems={d} q_norm_type={s} k_norm_type={s} head_dim={d} n_heads={d} n_kv_heads={d}", .{
                         layer,
@@ -2304,7 +2395,7 @@ pub const InferenceEngine = struct {
                     });
                     if (self.validation_diagnostics_enabled) {
                         const mmap = self.model.mmap_data orelse return error.NoMmapData;
-                        if (self.findLayerTensor(layer, "attn_norm.weight")) |attn_norm_tensor| {
+                        if (lt.attn_norm) |attn_norm_tensor| {
                             var attn_norm_preview = [_]f32{0} ** 4;
                             const n = @min(attn_norm_tensor.info.numElements(), attn_norm_preview.len);
                             const off: usize = @intCast(self.model.gguf_file.tensor_data_offset + attn_norm_tensor.info.offset);
@@ -2621,8 +2712,8 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 // Gemma post-attention norm: RMS norm on o_proj output before residual add
-                if (self.findLayerTensor(layer, "post_attention_norm.weight")) |pan_tensor| {
-                    if (self.findLayerTensor(layer, "ffn_norm.weight") != null) {
+                if (lt.post_attention_norm) |pan_tensor| {
+                    if (lt.ffn_norm != null) {
                         // Both exist → post_attention_norm is a separate norm on o_proj output
                         try self.dispatchRmsNorm(
                             self.o_proj_buf.handle,
@@ -2748,8 +2839,8 @@ pub const InferenceEngine = struct {
 
             // --- FFN norm: prefer ffn_norm.weight, fall back to post_attention_norm for models
             // that use a single norm between attention and FFN (e.g. Qwen3.5).
-            const ffn_norm_tensor = self.findLayerTensor(layer, "ffn_norm.weight") orelse
-                self.findLayerTensor(layer, "post_attention_norm.weight") orelse return error.TensorNotFound;
+            const ffn_norm_tensor = lt.ffn_norm orelse
+                lt.post_attention_norm orelse return error.TensorNotFound;
             try self.dispatchRmsNorm(
                 self.hidden_buf.handle,
                 hidden_size,
@@ -2766,7 +2857,7 @@ pub const InferenceEngine = struct {
             if (is_moe) {
                 const moe_phase = self.beginProfilePhase();
                 // --- MoE: router DMMV → top-k → expert dispatch ---
-                const router_tensor = self.findLayerTensor(layer, "ffn_gate_inp.weight") orelse return error.TensorNotFound;
+                const router_tensor = lt.ffn_gate_inp orelse return error.TensorNotFound;
                 const moe_router_phase = self.beginProfilePhase();
                 try self.dispatchDmmv(router_tensor, self.ffn_norm_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
                 self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
@@ -2775,9 +2866,9 @@ pub const InferenceEngine = struct {
                 const n_used = config.n_experts_used;
 
                 // Dispatch each selected expert
-                const gate_exps = self.findLayerTensor(layer, "ffn_gate_exps.weight") orelse return error.TensorNotFound;
-                const up_exps = self.findLayerTensor(layer, "ffn_up_exps.weight") orelse return error.TensorNotFound;
-                const down_exps = self.findLayerTensor(layer, "ffn_down_exps.weight") orelse return error.TensorNotFound;
+                const gate_exps = lt.ffn_gate_exps orelse return error.TensorNotFound;
+                const up_exps = lt.ffn_up_exps orelse return error.TensorNotFound;
+                const down_exps = lt.ffn_down_exps orelse return error.TensorNotFound;
 
                 const gate_quant = gate_exps.info.type_;
                 const down_quant = down_exps.info.type_;
@@ -2991,10 +3082,10 @@ pub const InferenceEngine = struct {
                 self.endProfilePhase(.moe_routed, moe_phase);
 
                 // Bug fix #3: Shared expert — runs every token alongside the routed experts
-                const gate_shexp = self.findLayerTensor(layer, "ffn_gate_shexp.weight");
-                const up_shexp = self.findLayerTensor(layer, "ffn_up_shexp.weight");
-                const down_shexp = self.findLayerTensor(layer, "ffn_down_shexp.weight");
-                const shexp_gate = self.findLayerTensor(layer, "ffn_gate_inp_shexp.weight");
+                const gate_shexp = lt.ffn_gate_shexp;
+                const up_shexp = lt.ffn_up_shexp;
+                const down_shexp = lt.ffn_down_shexp;
+                const shexp_gate = lt.ffn_gate_inp_shexp;
                 const shared_phase = self.beginProfilePhase();
                 if (state.position == 0 and layer == 0) {
                     log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s}", .{
@@ -3107,9 +3198,9 @@ pub const InferenceEngine = struct {
                 );
             } else {
                 // Dense FFN: gate → up → SwiGLU → down → residual
-                const gate_tensor = self.findLayerTensor(layer, "ffn_gate.weight") orelse return error.TensorNotFound;
-                const up_tensor = self.findLayerTensor(layer, "ffn_up.weight") orelse return error.TensorNotFound;
-                const down_tensor = self.findLayerTensor(layer, "ffn_down.weight") orelse return error.TensorNotFound;
+                const gate_tensor = lt.ffn_gate orelse return error.TensorNotFound;
+                const up_tensor = lt.ffn_up orelse return error.TensorNotFound;
+                const down_tensor = lt.ffn_down orelse return error.TensorNotFound;
 
                 try self.dispatchDmmv(gate_tensor, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim);
                 try self.dispatchDmmv(up_tensor, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
@@ -3130,7 +3221,7 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBarrier();
 
                 // Gemma post-FFN norm: RMS norm on down_proj output before residual add
-                if (self.findLayerTensor(layer, "post_ffw_norm.weight")) |pfn_tensor| {
+                if (lt.post_ffw_norm) |pfn_tensor| {
                     try self.dispatchRmsNorm(
                         self.down_buf.handle,
                         hidden_size,
@@ -3278,11 +3369,12 @@ pub const InferenceEngine = struct {
 
                 // Also log tensor quant types on first layer to identify untested DMMV paths
                 if (layer == 0) {
-                    const qt_attn_norm = if (self.findLayerTensor(0, "attn_norm.weight")) |t| @tagName(t.info.type_) else "?";
-                    const qt_qkv = if (self.findLayerTensor(0, "attn_qkv.weight")) |t| @tagName(t.info.type_) else "?";
-                    const qt_gate_exps = if (self.findLayerTensor(0, "ffn_gate_exps.weight")) |t| @tagName(t.info.type_) else "?";
-                    const qt_down_exps = if (self.findLayerTensor(0, "ffn_down_exps.weight")) |t| @tagName(t.info.type_) else "?";
-                    const qt_ssm_out = if (self.findLayerTensor(0, "ssm_out.weight")) |t| @tagName(t.info.type_) else "?";
+                    const lt0 = self.layer_tensors[0];
+                    const qt_attn_norm = if (lt0.attn_norm) |t| @tagName(t.info.type_) else "?";
+                    const qt_qkv = if (lt0.attn_qkv) |t| @tagName(t.info.type_) else "?";
+                    const qt_gate_exps = if (lt0.ffn_gate_exps) |t| @tagName(t.info.type_) else "?";
+                    const qt_down_exps = if (lt0.ffn_down_exps) |t| @tagName(t.info.type_) else "?";
+                    const qt_ssm_out = if (lt0.ssm_out) |t| @tagName(t.info.type_) else "?";
                     log.info("QUANT: attn_norm={s} qkv={s} gate_exps={s} down_exps={s} ssm_out={s}", .{
                         qt_attn_norm, qt_qkv, qt_gate_exps, qt_down_exps, qt_ssm_out,
                     });
@@ -3530,22 +3622,23 @@ pub const InferenceEngine = struct {
 
         const head_v_dim = d_inner / dt_rank;
         const conv_channels = d_inner + 2 * n_group * d_state;
+        const lt = self.layer_tensors[layer];
 
         // --- GPU phase 1: Run large projections via DMMV ---
-        const wqkv_tensor = self.findLayerTensor(layer, "attn_qkv.weight") orelse return;
+        const wqkv_tensor = lt.attn_qkv orelse return;
         try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
 
-        const z_tensor = self.findLayerTensor(layer, "attn_gate.weight") orelse return;
+        const z_tensor = lt.attn_gate orelse return;
         try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
 
-        const alpha_tensor = self.findLayerTensor(layer, "ssm_alpha.weight") orelse return;
+        const alpha_tensor = lt.ssm_alpha orelse return;
         try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
 
-        const beta_tensor = self.findLayerTensor(layer, "ssm_beta.weight") orelse return;
+        const beta_tensor = lt.ssm_beta orelse return;
         try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
         if (layer == 0) {
-            const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
-            const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+            const conv_tensor = lt.ssm_conv1d orelse return;
+            const ssm_out_tensor = lt.ssm_out orelse return;
             log.info("FASTPATH: ssm qkv={s} gate={s} alpha={s} beta={s} conv={s} out={s}", .{
                 @tagName(wqkv_tensor.info.type_),
                 @tagName(z_tensor.info.type_),
@@ -3593,7 +3686,7 @@ pub const InferenceEngine = struct {
         const conv_state = self.ssm_conv_states[layer_idx];
         const d_conv_1 = d_conv - 1;
         const mmap = self.model.mmap_data orelse return error.NoMmapData;
-        const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
+        const conv_tensor = lt.ssm_conv1d orelse return;
         const conv_data_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + conv_tensor.info.offset);
         // Bug fix #14: Read conv kernel handling f16 storage — direct f32 cast corrupts values
         const conv_kernel_len = conv_channels * d_conv;
@@ -3602,8 +3695,8 @@ pub const InferenceEngine = struct {
         readMmapFloats(mmap, conv_data_off, conv_tensor.info.type_, conv_kernel_buf);
         if (layer == 0) log.info("SSM tensor types: conv1d={s} dt_bias={s} ssm_a={s} n_group={d} dt_rank={d} d_state={d} head_v={d}", .{
             @tagName(conv_tensor.info.type_),
-            if (self.findLayerTensor(layer, "ssm_dt.bias")) |t| @tagName(t.info.type_) else "N/A",
-            if (self.findLayerTensor(layer, "ssm_a")) |t| @tagName(t.info.type_) else "N/A",
+            if (lt.ssm_dt_bias) |t| @tagName(t.info.type_) else "N/A",
+            if (lt.ssm_a) |t| @tagName(t.info.type_) else "N/A",
             n_group,
             dt_rank,
             d_state,
@@ -3647,7 +3740,7 @@ pub const InferenceEngine = struct {
 
         // Compute gate and beta
         // Bug fix #14: Read dt_bias and ssm_a handling f16 storage type
-        const dt_bias_tensor = self.findLayerTensor(layer, "ssm_dt.bias");
+        const dt_bias_tensor = lt.ssm_dt_bias;
         const dt_bias_f32 = try self.allocator.alloc(f32, dt_rank);
         defer self.allocator.free(dt_bias_f32);
         if (dt_bias_tensor) |t| {
@@ -3655,7 +3748,7 @@ pub const InferenceEngine = struct {
             readMmapFloats(mmap, off, t.info.type_, dt_bias_f32);
         }
 
-        const ssm_a_tensor = self.findLayerTensor(layer, "ssm_a");
+        const ssm_a_tensor = lt.ssm_a;
         const ssm_a_f32 = try self.allocator.alloc(f32, dt_rank);
         defer self.allocator.free(ssm_a_f32);
         if (ssm_a_tensor) |t| {
@@ -3783,7 +3876,7 @@ pub const InferenceEngine = struct {
         }
 
         // Gated normalization: RMS_norm(o) * SiLU(z)
-        const norm_tensor = self.findLayerTensor(layer, "ssm_norm.weight");
+        const norm_tensor = lt.ssm_norm;
         // Determine norm weight indexing: per-head (d_inner elements) vs shared (d_state elements)
         const norm_elems: u32 = if (norm_tensor) |t| @intCast(t.info.numElements()) else 0;
         const norm_per_head = norm_elems >= d_inner;
@@ -3854,7 +3947,7 @@ pub const InferenceEngine = struct {
         }
         self.decode_cmd.transferToComputeBarrier();
 
-        const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+        const ssm_out_tensor = lt.ssm_out orelse return;
         try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
         self.decode_cmd.computeBarrier();
 
@@ -3892,13 +3985,14 @@ pub const InferenceEngine = struct {
         const ab_bytes = @as(vk.c.VkDeviceSize, dt_rank) * @sizeOf(f32);
 
         // --- GPU: 4 DMMV projections (same as CPU path) ---
-        const wqkv_tensor = self.findLayerTensor(layer, "attn_qkv.weight") orelse return;
-        const z_tensor = self.findLayerTensor(layer, "attn_gate.weight") orelse return;
-        const alpha_tensor = self.findLayerTensor(layer, "ssm_alpha.weight") orelse return;
-        const beta_tensor = self.findLayerTensor(layer, "ssm_beta.weight") orelse return;
+        const lt = self.layer_tensors[layer];
+        const wqkv_tensor = lt.attn_qkv orelse return;
+        const z_tensor = lt.attn_gate orelse return;
+        const alpha_tensor = lt.ssm_alpha orelse return;
+        const beta_tensor = lt.ssm_beta orelse return;
         if (state.position == 0 and layer == 0) {
-            const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
-            const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+            const conv_tensor = lt.ssm_conv1d orelse return;
+            const ssm_out_tensor = lt.ssm_out orelse return;
             log.info("FASTPATH: ssm qkv={s} gate={s} alpha={s} beta={s} conv={s} out={s}", .{
                 @tagName(wqkv_tensor.info.type_),
                 @tagName(z_tensor.info.type_),
@@ -3919,7 +4013,7 @@ pub const InferenceEngine = struct {
         // --- GPU: conv1d + SiLU ---
         // Input: attn_out_buf (QKV projection), conv kernel from GPU tensor, persistent conv state
         // Output: swiglu_buf (reused as conv1d output)
-        const conv_tensor = self.findLayerTensor(layer, "ssm_conv1d.weight") orelse return;
+        const conv_tensor = lt.ssm_conv1d orelse return;
         const conv_kernel_is_f16 = conv_tensor.info.type_ == .f16;
         const ssm_conv_phase = self.beginProfilePhase();
         {
@@ -3982,8 +4076,8 @@ pub const InferenceEngine = struct {
         // --- GPU: delta-net state update ---
         // Input: conv1d output (swiglu_buf), alpha (router_logits_buf), beta (down_buf), ssm_a + dt_bias from tensors
         // Output: attn_out_buf (reused, now free after conv1d consumed it)
-        const dt_bias_tensor = self.findLayerTensor(layer, "ssm_dt.bias");
-        const ssm_a_tensor = self.findLayerTensor(layer, "ssm_a");
+        const dt_bias_tensor = lt.ssm_dt_bias;
+        const ssm_a_tensor = lt.ssm_a;
         // Use a dummy zero buffer for missing tensors (dt_bias or ssm_a)
         const dt_bias_buf = if (dt_bias_tensor) |t| t.gpu_buffer.handle else self.down_buf.handle;
         const dt_bias_size = if (dt_bias_tensor) |t| t.gpu_buffer.size else ab_bytes;
@@ -4034,7 +4128,7 @@ pub const InferenceEngine = struct {
         // --- GPU: gated norm ---
         // Input: delta_net output (attn_out_buf), z gate (gate_buf), norm weights from tensor
         // Output: swiglu_buf (reused, now free after delta_net consumed it)
-        const norm_tensor = self.findLayerTensor(layer, "ssm_norm.weight");
+        const norm_tensor = lt.ssm_norm;
         const norm_elems: u32 = if (norm_tensor) |t| @intCast(t.info.numElements()) else 0;
         const norm_per_head = norm_elems >= d_inner;
         const norm_buf_handle = if (norm_tensor) |t| t.gpu_buffer.handle else self.down_buf.handle;
@@ -4071,7 +4165,7 @@ pub const InferenceEngine = struct {
         self.endProfilePhase(.ssm_gated_norm, ssm_gated_norm_phase);
 
         // --- GPU: ssm_out DMMV + residual (same as CPU path's GPU phase 2) ---
-        const ssm_out_tensor = self.findLayerTensor(layer, "ssm_out.weight") orelse return;
+        const ssm_out_tensor = lt.ssm_out orelse return;
         const ssm_out_phase = self.beginProfilePhase();
         try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
         self.decode_cmd.computeBarrier();
@@ -4486,13 +4580,14 @@ pub const InferenceEngine = struct {
 
         // ── STAGE 4: Verify DMMV for non-Q8_0 quant types ──
         // norm_buf still has BOS embedding norm from STAGE 2 (STAGE 3 only read it)
-        const wqkv_diag = self.findLayerTensor(0, "attn_qkv.weight");
-        const ffn_gate_diag = self.findLayerTensor(0, "ffn_gate.weight");
-        const ffn_up_diag = self.findLayerTensor(0, "ffn_up.weight");
-        const gate_exps_diag = self.findLayerTensor(0, "ffn_gate_exps.weight");
-        const down_exps_diag = self.findLayerTensor(0, "ffn_down_exps.weight");
-        const ssm_out_diag = self.findLayerTensor(0, "ssm_out.weight");
-        const attn_q_diag = self.findLayerTensor(3, "attn_q.weight"); // layer 3 = first attn layer
+        const lt0_diag = self.layer_tensors[0];
+        const wqkv_diag = lt0_diag.attn_qkv;
+        const ffn_gate_diag = lt0_diag.ffn_gate;
+        const ffn_up_diag = lt0_diag.ffn_up;
+        const gate_exps_diag = lt0_diag.ffn_gate_exps;
+        const down_exps_diag = lt0_diag.ffn_down_exps;
+        const ssm_out_diag = lt0_diag.ssm_out;
+        const attn_q_diag = if (self.layer_tensors.len > 3) self.layer_tensors[3].attn_q else null; // layer 3 = first attn layer
         dlog.info("QUANT: wqkv={s} ffn_gate={s} ffn_up={s} gate_exps={s} down_exps={s} ssm_out={s} attn_q={s}", .{
             if (wqkv_diag) |t| @tagName(t.info.type_) else "N/A",
             if (ffn_gate_diag) |t| @tagName(t.info.type_) else "N/A",
@@ -4750,6 +4845,7 @@ pub const InferenceEngine = struct {
         if (self.timestamp_query_pool != null) vk.c.vkDestroyQueryPool(self.instance.device, self.timestamp_query_pool, null);
         vk.c.vkDestroyDescriptorPool(self.instance.device, self.shared_pool, null);
         self.tensor_map.deinit();
+        self.allocator.free(self.layer_tensors);
         // SSM state
         for (self.ssm_conv_states) |s| if (s.len > 0) self.allocator.free(s);
         for (self.ssm_states) |s| if (s.len > 0) self.allocator.free(s);
