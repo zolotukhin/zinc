@@ -1,13 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildAnalysisReport,
   buildAgentPrompt,
+  buildSelfReview,
+  classifyApproachTags,
   formatCodexStreamLine,
   formatToolInput,
   formatClaudeStreamLine,
   improvementThreshold,
   isMaterialImprovement,
   loadPreviousRun,
+  mergeUniqueEntries,
   median,
+  parseAgentReport,
+  shouldKeepFoundationStep,
   type ClaudeStreamState,
 } from "./optimize_perf";
 
@@ -254,13 +260,273 @@ describe("controller helpers", () => {
       2,
       "\nCycle 1: KEPT — 38.52 tok/s",
       "qwen35b",
+      {
+        cycles: [],
+        failedApproaches: ["descriptor plumbing variant regressed 0.2 tok/s"],
+        ideas: ["convert dmmv path after helper exists"],
+        stalledCycles: 4,
+        consecutiveFoundationKeeps: 1,
+        reviewSummary: "Repeated dead ends: descriptor(3).",
+        bestPerf: {
+          cycle: 1,
+          tokPerSec: 38.52,
+          tokPerSecSamples: [38.4, 38.5, 38.6],
+          bandwidthUtil: 22.4,
+          bandwidthSamples: [22.3, 22.4, 22.5],
+          outputText: "Paris.",
+          commitHash: "04d0942b9fe04aca9611691bea2a66f3394225c0",
+        },
+      },
     );
 
-    expect(prompt).toContain("Current Accepted Baseline");
+    expect(prompt).toContain("Current Checked-Out Code");
+    expect(prompt).toContain("Best Accepted Performance Checkpoint");
     expect(prompt).toContain("38.52 tok/s [38.40, 38.50, 38.60]");
     expect(prompt).toContain("Original Run Baseline");
     expect(prompt).toContain("37.28 tok/s [37.00, 37.30, 37.40]");
-    expect(prompt).toContain("must beat the current accepted baseline");
+    expect(prompt).toContain("must beat the best accepted performance checkpoint");
+    expect(prompt).toContain("Failed Approaches");
+    expect(prompt).toContain("@@@DESCRIPTION:");
+  });
+});
+
+describe("controller memory helpers", () => {
+  test("mergeUniqueEntries deduplicates normalized duplicates", () => {
+    const merged = mergeUniqueEntries(
+      ["descriptor plumbing regressed 0.2 tok/s"],
+      ["Descriptor plumbing regressed 0.2 tok/s!", "switch to dmmv hotspot"],
+      10,
+    );
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toContain("descriptor plumbing");
+    expect(merged[1]).toContain("switch to dmmv");
+  });
+
+  test("parseAgentReport extracts markers and ideas", () => {
+    const stdout = [
+      JSON.stringify({ type: "message", content: "@@@DESCRIPTION: Add push descriptor helper" }),
+      JSON.stringify({ type: "message", content: "@@@STEP_KIND: enablement" }),
+      JSON.stringify({ type: "message", content: "@@@SELF_ANALYSIS: This unlocks dmmv conversion next." }),
+      JSON.stringify({ type: "message", content: "@@@NEXT_IDEAS: convert dmmv; measure flash attention" }),
+    ].join("\n");
+
+    const report = parseAgentReport(stdout);
+    expect(report.description).toContain("Add push descriptor helper");
+    expect(report.stepKind).toBe("enablement");
+    expect(report.selfAnalysis).toContain("unlocks dmmv");
+    expect(report.nextIdeas).toEqual(["convert dmmv", "measure flash attention"]);
+  });
+
+  test("classifyApproachTags tags descriptor and dmmv work", () => {
+    const tags = classifyApproachTags(
+      "Convert push descriptor plumbing for DMMV dispatch",
+      ["src/compute/dmmv.zig", "src/vulkan/pipeline.zig"],
+    );
+    expect(tags).toContain("dmmv");
+    expect(tags).toContain("descriptor");
+  });
+
+  test("buildSelfReview highlights repeated dead ends", () => {
+    const review = buildSelfReview({
+      stalledCycles: 5,
+      consecutiveFoundationKeeps: 1,
+      cycles: [
+        {
+          cycle: 1,
+          timestamp: "",
+          description: "descriptor attempt 1",
+          selfAnalysis: "",
+          nextIdeas: [],
+          stepKind: "optimization",
+          changedFiles: ["src/vulkan/pipeline.zig"],
+          categoryTags: ["descriptor"],
+          tokPerSec: 37.1,
+          tokPerSecSamples: [37.1],
+          bandwidthUtil: 21.5,
+          bandwidthSamples: [21.5],
+          correct: true,
+          improved: false,
+          broken: false,
+          kept: false,
+          foundationKeep: false,
+          decisionReason: "no improvement",
+          outputText: "Paris.",
+          commitHash: null,
+        },
+        {
+          cycle: 2,
+          timestamp: "",
+          description: "descriptor attempt 2",
+          selfAnalysis: "",
+          nextIdeas: [],
+          stepKind: "optimization",
+          changedFiles: ["src/vulkan/command.zig"],
+          categoryTags: ["descriptor"],
+          tokPerSec: 37.2,
+          tokPerSecSamples: [37.2],
+          bandwidthUtil: 21.5,
+          bandwidthSamples: [21.5],
+          correct: true,
+          improved: false,
+          broken: false,
+          kept: false,
+          foundationKeep: false,
+          decisionReason: "no improvement",
+          outputText: "Paris.",
+          commitHash: null,
+        },
+      ],
+    });
+
+    expect(review).toContain("Repeated dead ends");
+    expect(review).toContain("Stall warning");
+    expect(review).toContain("Foundation debt");
+  });
+
+  test("shouldKeepFoundationStep accepts enablement within tight noise band", () => {
+    const bestPerf = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 38.0,
+      tokPerSecSamples: [37.9, 38.0, 38.1],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: 22.0,
+      bandwidthSamples: [21.9, 22.0, 22.1],
+      error: null,
+    };
+    const candidate = {
+      ...bestPerf,
+      tokPerSec: 37.84,
+      tokPerSecSamples: [37.8, 37.84, 37.9],
+    };
+    const keep = shouldKeepFoundationStep(
+      candidate,
+      bestPerf,
+      3,
+      0,
+      {
+        description: "Add enablement helper for later DMMV conversion",
+        selfAnalysis: "Plumbing only, follow-up converts hot call sites.",
+        nextIdeas: [],
+        stepKind: "enablement",
+        rawText: "",
+      },
+      ["src/compute/forward.zig"],
+    );
+    expect(keep).toBe(true);
+  });
+
+  test("shouldKeepFoundationStep rejects larger regressions", () => {
+    const bestPerf = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 38.0,
+      tokPerSecSamples: [37.9, 38.0, 38.1],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: 22.0,
+      bandwidthSamples: [21.9, 22.0, 22.1],
+      error: null,
+    };
+    const candidate = {
+      ...bestPerf,
+      tokPerSec: 37.5,
+      tokPerSecSamples: [37.4, 37.5, 37.6],
+    };
+    const keep = shouldKeepFoundationStep(
+      candidate,
+      bestPerf,
+      4,
+      0,
+      {
+        description: "Add enablement helper for later DMMV conversion",
+        selfAnalysis: "Plumbing only, follow-up converts hot call sites.",
+        nextIdeas: [],
+        stepKind: "enablement",
+        rawText: "",
+      },
+      ["src/compute/forward.zig"],
+    );
+    expect(keep).toBe(false);
+  });
+
+  test("buildAnalysisReport summarizes kept and reverted cycles", () => {
+    const report = buildAnalysisReport({
+      effort: 1,
+      planDoc: "MULTI_HOUR_EFFORT_1_PUSH_DESCRIPTORS.md",
+      runStartedAt: "2026-04-07T00:00:00.000Z",
+      lastUpdatedAt: "2026-04-07T01:00:00.000Z",
+      lastCycle: 2,
+      bestTokPerSec: 38.02,
+      bestCycle: 2,
+      bestCommitHash: "04d0942b9fe04aca9611691bea2a66f3394225c0",
+      bestResult: {
+        cycle: 2,
+        tokPerSec: 38.02,
+        tokPerSecSamples: [38.0, 38.02, 38.1],
+        bandwidthUtil: 22.1,
+        bandwidthSamples: [22.0, 22.1, 22.2],
+        outputText: "Paris.",
+        commitHash: "04d0942b9fe04aca9611691bea2a66f3394225c0",
+      },
+      stalledCycles: 3,
+      consecutiveFoundationKeeps: 0,
+      failedApproaches: ["descriptor helper variant regressed"],
+      ideas: ["switch to dmmv hot path"],
+      reviewSummaries: ["Last 2 cycles: 1 perf keep, 1 reverted."],
+      cycles: [
+        {
+          cycle: 1,
+          timestamp: "2026-04-07T00:10:00.000Z",
+          description: "Descriptor helper",
+          selfAnalysis: "",
+          nextIdeas: [],
+          stepKind: "enablement",
+          changedFiles: ["src/vulkan/command.zig"],
+          categoryTags: ["descriptor"],
+          tokPerSec: 37.7,
+          tokPerSecSamples: [37.7, 37.8, 37.9],
+          bandwidthUtil: 21.8,
+          bandwidthSamples: [21.7, 21.8, 21.9],
+          correct: true,
+          improved: false,
+          broken: false,
+          kept: false,
+          foundationKeep: false,
+          decisionReason: "no improvement",
+          outputText: "Paris.",
+          commitHash: null,
+        },
+        {
+          cycle: 2,
+          timestamp: "2026-04-07T00:20:00.000Z",
+          description: "Convert elementwise push descriptors",
+          selfAnalysis: "",
+          nextIdeas: [],
+          stepKind: "optimization",
+          changedFiles: ["src/compute/elementwise.zig"],
+          categoryTags: ["descriptor", "elementwise"],
+          tokPerSec: 38.02,
+          tokPerSecSamples: [38.0, 38.02, 38.1],
+          bandwidthUtil: 22.1,
+          bandwidthSamples: [22.0, 22.1, 22.2],
+          correct: true,
+          improved: true,
+          broken: false,
+          kept: true,
+          foundationKeep: false,
+          decisionReason: "improved",
+          outputText: "Paris.",
+          commitHash: "04d0942b9fe04aca9611691bea2a66f3394225c0",
+        },
+      ],
+    });
+
+    expect(report).toContain("Cycles: 2 total, 1 perf keeps");
+    expect(report).toContain("descriptor:");
+    expect(report).toContain("Recent cycles:");
+    expect(report).toContain("Failed approaches:");
   });
 });
 

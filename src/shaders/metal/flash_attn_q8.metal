@@ -6,6 +6,7 @@ struct FlashAttnPush {
     uint n_heads;
     uint n_kv_heads;
     uint seq_len;
+    uint sliding_window_size;
     uint page_size;
     uint attn_scale_bits;
     uint kv_head_stride_bytes;
@@ -115,6 +116,8 @@ kernel void main0(
     const uint vec4_dim = p.head_dim >> 2;
     const float scale = p.attn_scale_bits != 0u ? as_type<float>(p.attn_scale_bits) : rsqrt((float)p.head_dim);
     const bool contiguous_kv = p.page_size == 0u;
+    const bool use_sliding_window = p.sliding_window_size > 0u && p.sliding_window_size < p.seq_len;
+    const uint sliding_start = use_sliding_window ? (p.seq_len - p.sliding_window_size) : 0u;
 
     threadgroup float4 q_cache4[FLASH_MAX_HEAD_VEC4];
     threadgroup float4 acc_cache4[FLASH_MAX_HEAD_VEC4];
@@ -140,6 +143,10 @@ kernel void main0(
 
         for (uint token_offset = tid; token_offset < block_tokens; token_offset += FLASH_TG_SIZE) {
             const uint token_idx = block_start + token_offset;
+            if (use_sliding_window && token_idx < sliding_start) {
+                scores[token_offset] = -INFINITY;
+                continue;
+            }
             const uint kv_base = contiguous_kv
                 ? (block_base + token_offset * p.kv_token_stride_bytes)
                 : kvBaseForTokenBytes(page_table, p, kv_head, token_idx);

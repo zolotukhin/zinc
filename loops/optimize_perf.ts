@@ -1050,7 +1050,6 @@ function extractAgentText(stdout: string): string {
   const texts: string[] = [];
   for (const line of stdout.split("\n")) {
     if (!line.trim()) continue;
-    if (line.includes("@@@")) texts.push(line);
     try {
       const evt = JSON.parse(line) as Record<string, unknown>;
       const type = evt.type;
@@ -1073,7 +1072,7 @@ function extractAgentText(stdout: string): string {
         }
       }
     } catch {
-      // Ignore non-JSON lines. Marker lines were already captured above.
+      if (line.trim().startsWith("@@@")) texts.push(line.trim());
     }
   }
   return texts.join("\n");
@@ -1344,12 +1343,22 @@ async function revertAgentChanges(): Promise<void> {
 // -- Main loop ---------------------------------------------------------------
 
 async function main() {
-  const { effort, cycles, dryRun, model, resume, agent } = parseArgs();
+  const { effort, cycles, dryRun, model, resume, agent, analyze } = parseArgs();
   const modelPath = MODELS[model] ?? MODELS.qwen35b;
   const effortFile = EFFORT_DOCS[effort];
   const plan = await readFile(join(REPO_ROOT, effortFile), "utf8");
 
   await mkdir(RESULTS_DIR, { recursive: true });
+
+  if (analyze) {
+    const saved = await loadLoopState(effort);
+    if (!saved) {
+      console.error(c("1;31", `No saved state found for effort ${effort}.`));
+      process.exit(1);
+    }
+    console.log(buildAnalysisReport(saved));
+    return;
+  }
 
   console.log(c("1;37", `\n\u2554${"═".repeat(BOX_INNER_WIDTH)}\u2557`));
   console.log(c("1;37", boxLine(`ZINC Performance Optimization Loop — Effort ${effort}`)));
@@ -1377,31 +1386,42 @@ async function main() {
   console.log(c("1;32", `  Baseline: ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}, BW: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}`));
   console.log(c("1;32", `  Output: "${originalBaseline.outputText.slice(0, 80)}"`));
 
-  let currentBest = originalBaseline;
-  let bestTokPerSec = currentBest.tokPerSec ?? 0;
-  let history = "";
+  let currentCode = originalBaseline;
+  let bestPerf = originalBaseline;
+  let bestTokPerSec = bestPerf.tokPerSec ?? 0;
   let startCycle = 1;
   const headCommit = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || null;
+  let state = createInitialState(effort, effortFile, originalBaseline, headCommit);
 
-  // Resume: load history from previous run
   if (resume) {
-    const prev = await loadPreviousRun(effort);
-    if (prev.lastCycle > 0) {
-      history = prev.history;
-      startCycle = prev.lastCycle + 1;
-      console.log(c("1;36", `  Resumed: ${prev.lastCycle} previous cycles, recorded best ${prev.bestTokPerSec.toFixed(2)} tok/s`));
-      console.log(c("2", `  History:${prev.history}`));
-      if (prev.bestTokPerSec > bestTokPerSec + improvementThreshold(bestTokPerSec)) {
-        const bestCommitNote = prev.bestCommitHash ? ` on commit ${prev.bestCommitHash.slice(0, 8)}` : "";
+    const saved = await loadLoopState(effort);
+    if (saved) {
+      state = saved;
+      startCycle = saved.lastCycle + 1;
+      if (saved.bestResult) {
+        bestPerf = checkpointToBenchResult(saved.bestResult);
+        bestTokPerSec = saved.bestTokPerSec;
+      }
+      console.log(c("1;36", `  Resumed: ${saved.lastCycle} previous cycles, recorded best ${saved.bestTokPerSec.toFixed(2)} tok/s`));
+      if (saved.cycles.length > 0) {
+        console.log(c("2", `  Recent cycles:\n${buildRecentCycleBlock(saved.cycles)}`));
+      }
+      if (saved.bestTokPerSec > (currentCode.tokPerSec ?? 0) + improvementThreshold(currentCode.tokPerSec)) {
+        const bestCommitNote = saved.bestCommitHash ? ` on commit ${saved.bestCommitHash.slice(0, 8)}` : "";
         console.log(c(
           "1;33",
-          `  Resume note: recorded best cycle ${prev.bestCycle ?? "?"}${bestCommitNote} was faster than the current HEAD benchmark. The loop will branch from the code you currently have checked out, not from that historical metric.`,
+          `  Resume note: recorded best cycle ${saved.bestCycle ?? "?"}${bestCommitNote} was faster than the current HEAD benchmark. The loop will branch from the code you currently have checked out, not from that historical metric.`,
         ));
+      }
+      if (saved.reviewSummaries.length > 0) {
+        console.log(c("2", `  Latest review:\n${saved.reviewSummaries.at(-1)}`));
       }
     } else {
       console.log(c("2", "  No previous run found, starting fresh."));
     }
   }
+
+  let history = buildHistoryFromCycles(state.cycles);
 
   // Step 2: Optimization cycles
   for (let cycle = startCycle; cycle < startCycle + cycles; cycle++) {
@@ -1412,8 +1432,91 @@ async function main() {
       break;
     }
 
-    // Spawn agent
-    await spawnAgent(effortFile, plan, originalBaseline, currentBest, cycle, history, model, agent);
+    const promptContext: PromptContext = {
+      cycles: state.cycles,
+      failedApproaches: state.failedApproaches,
+      ideas: state.ideas,
+      stalledCycles: state.stalledCycles,
+      consecutiveFoundationKeeps: state.consecutiveFoundationKeeps,
+      reviewSummary: state.reviewSummaries.at(-1) ?? null,
+      bestPerf: state.bestResult ?? benchResultToCheckpoint(bestPerf, 0, state.bestCommitHash),
+    };
+
+    const agentRun = await spawnAgent(effortFile, plan, originalBaseline, currentCode, cycle, history, model, agent, promptContext);
+    const agentReport = parseAgentReport(agentRun.stdout);
+
+    let changedFiles = await listChangedFiles();
+    if (changedFiles.length === 0) {
+      const decisionReason = "no source changes; skipped sync and benchmark";
+      console.log(c("1;33", `  \u26A0 NO-OP: ${decisionReason}`));
+
+      state.failedApproaches = mergeUniqueEntries(
+        state.failedApproaches,
+        [`${agentReport.description} — ${decisionReason}`],
+        FAILED_APPROACH_LIMIT,
+      );
+      state.ideas = mergeUniqueEntries(state.ideas, agentReport.nextIdeas, IDEA_LIMIT);
+      state.stalledCycles++;
+      state.consecutiveFoundationKeeps = 0;
+      state.lastCycle = cycle;
+
+      const cycleRecord: CycleRecord = {
+        cycle,
+        timestamp: new Date().toISOString(),
+        description: agentReport.description,
+        selfAnalysis: agentReport.selfAnalysis,
+        nextIdeas: agentReport.nextIdeas,
+        stepKind: agentReport.stepKind,
+        changedFiles: [],
+        categoryTags: classifyApproachTags(agentReport.description, []),
+        tokPerSec: null,
+        tokPerSecSamples: [],
+        bandwidthUtil: null,
+        bandwidthSamples: [],
+        correct: false,
+        improved: false,
+        broken: false,
+        kept: false,
+        foundationKeep: false,
+        decisionReason,
+        outputText: "",
+        commitHash: null,
+      };
+      state.cycles.push(cycleRecord);
+
+      if (state.cycles.length % SELF_REVIEW_EVERY === 0) {
+        const review = buildSelfReview(state);
+        if (review) state.reviewSummaries = [...state.reviewSummaries.slice(-(REVIEW_SUMMARY_LIMIT - 1)), review];
+      }
+
+      await saveLoopState(state);
+      history = buildHistoryFromCycles(state.cycles);
+
+      const logEntry: LogEntry = {
+        cycle,
+        effort,
+        tokPerSec: null,
+        tokPerSecSamples: [],
+        bandwidthUtil: null,
+        bandwidthSamples: [],
+        correct: false,
+        improved: false,
+        broken: false,
+        kept: false,
+        foundationKeep: false,
+        decisionReason,
+        description: agentReport.description,
+        stepKind: agentReport.stepKind,
+        changedFiles: [],
+        outputText: "",
+        commitHash: null,
+        timestamp: new Date().toISOString(),
+      };
+      const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
+      await writeFile(logPath, JSON.stringify(logEntry) + "\n", { flag: "a" });
+      console.log(c("2", `  stall=${state.stalledCycles} best=${bestTokPerSec.toFixed(2)} current=${currentCode.tokPerSec?.toFixed(2) ?? "?"}`));
+      continue;
+    }
 
     // Sync and benchmark — with up to 2 fix-up retries if build fails
     console.log(c("2", "  Syncing changes..."));
@@ -1462,9 +1565,20 @@ ${result.buildOutput.slice(-2000)}
       result = await buildAndBench(modelPath);
     }
 
-    // Check ALL models for coherent output (not just the benchmark model)
+    changedFiles = await listChangedFiles();
+    const categoryTags = classifyApproachTags(agentReport.description, changedFiles);
+    const improved = isMaterialImprovement(result, bestPerf);
+    const foundationCandidate = shouldKeepFoundationStep(
+      result,
+      bestPerf,
+      state.stalledCycles,
+      state.consecutiveFoundationKeeps,
+      agentReport,
+      changedFiles,
+    );
+
     let coherenceError: string | null = null;
-    if (result.buildOk && result.correct) {
+    if (result.buildOk && result.correct && (improved || foundationCandidate)) {
       console.log(c("2", "  Checking all models for coherence..."));
       coherenceError = await checkAllModelsCoherent();
       if (coherenceError) {
@@ -1472,55 +1586,137 @@ ${result.buildOutput.slice(-2000)}
       }
     }
 
-    const improved = isMaterialImprovement(result, currentBest);
     const correct = result.correct && coherenceError == null;
     const broken = !result.buildOk || !correct;
-    const threshold = improvementThreshold(currentBest.tokPerSec);
+    const threshold = improvementThreshold(bestPerf.tokPerSec);
 
-    const delta = result.tokPerSec != null && (currentBest.tokPerSec ?? 0) > 0
-      ? ((result.tokPerSec - (currentBest.tokPerSec ?? 0)) / (currentBest.tokPerSec ?? 1) * 100).toFixed(2)
+    const deltaVsBest = result.tokPerSec != null && (bestPerf.tokPerSec ?? 0) > 0
+      ? ((result.tokPerSec - (bestPerf.tokPerSec ?? 0)) / (bestPerf.tokPerSec ?? 1) * 100).toFixed(2)
       : "?";
+
+    let kept = false;
+    let foundationKeep = false;
+    let decisionReason = "";
+    let commitHash: string | null = null;
 
     if (broken) {
       console.log(c("1;31", `  \u274C BROKEN: ${result.error ?? "incorrect output"}`));
       console.log(c("1;31", `     Output: "${result.outputText?.slice(0, 80)}"`));
-      history += `\nCycle ${cycle}: REVERTED \u2014 ${result.error ?? "incorrect output"}`;
+      decisionReason = result.error ?? "incorrect output";
+      state.failedApproaches = mergeUniqueEntries(
+        state.failedApproaches,
+        [`${agentReport.description} — ${decisionReason}`],
+        FAILED_APPROACH_LIMIT,
+      );
+      state.stalledCycles++;
+      state.consecutiveFoundationKeeps = 0;
       await revertAgentChanges();
     } else if (improved) {
-      console.log(c("1;32", `  \u2705 IMPROVED: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (+${delta}%, threshold +${threshold.toFixed(2)} tok/s vs accepted baseline)`));
-      currentBest = result;
+      kept = true;
+      console.log(c("1;32", `  \u2705 IMPROVED: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (+${deltaVsBest}%, threshold +${threshold.toFixed(2)} tok/s vs best checkpoint)`));
+      currentCode = result;
+      bestPerf = result;
       bestTokPerSec = result.tokPerSec!;
-      history += `\nCycle ${cycle}: KEPT \u2014 ${result.tokPerSec?.toFixed(2)} tok/s${formatSampleList(result.tokPerSecSamples)} (+${delta}%)`;
+      state.stalledCycles = 0;
+      state.consecutiveFoundationKeeps = 0;
+      decisionReason = `improved by ${deltaVsBest}% vs best checkpoint`;
 
-      // Commit
       await runCommand("git", ["add", "src/"], { cwd: REPO_ROOT });
-      await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} \u2014 ${result.tokPerSec?.toFixed(2)} tok/s (+${delta}%)`], { cwd: REPO_ROOT });
+      await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} \u2014 ${result.tokPerSec?.toFixed(2)} tok/s (+${deltaVsBest}%)`], { cwd: REPO_ROOT });
+      commitHash = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || headCommit;
+      state.bestTokPerSec = bestTokPerSec;
+      state.bestCycle = cycle;
+      state.bestCommitHash = commitHash;
+      state.bestResult = benchResultToCheckpoint(result, cycle, commitHash);
       console.log(c("2", "  Committed."));
+    } else if (foundationCandidate) {
+      kept = true;
+      foundationKeep = true;
+      currentCode = result;
+      state.stalledCycles++;
+      state.consecutiveFoundationKeeps++;
+      decisionReason = `kept enablement step within ${FOUNDATION_KEEP_MAX_DROP_TPS.toFixed(2)} tok/s of best checkpoint`;
+      console.log(c("1;36", `  \u2248 FOUNDATION KEEP: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${deltaVsBest}% vs best checkpoint)`));
+      await runCommand("git", ["add", "src/"], { cwd: REPO_ROOT });
+      await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} foundation \u2014 ${trunc(agentReport.description, 72)}`], { cwd: REPO_ROOT });
+      commitHash = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || headCommit;
+      console.log(c("2", "  Committed foundation step."));
     } else {
-      console.log(c("1;33", `  \u26A0 NO IMPROVEMENT: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${delta}%, needed +${threshold.toFixed(2)} tok/s vs accepted baseline)`));
-      history += `\nCycle ${cycle}: REVERTED \u2014 no improvement (${result.tokPerSec?.toFixed(2)} tok/s${formatSampleList(result.tokPerSecSamples)}, ${delta}%)`;
+      decisionReason = `no improvement (needed +${threshold.toFixed(2)} tok/s vs best checkpoint)`;
+      console.log(c("1;33", `  \u26A0 NO IMPROVEMENT: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${deltaVsBest}%, needed +${threshold.toFixed(2)} tok/s vs best checkpoint)`));
+      state.failedApproaches = mergeUniqueEntries(
+        state.failedApproaches,
+        [`${agentReport.description} — ${decisionReason}`],
+        FAILED_APPROACH_LIMIT,
+      );
+      state.stalledCycles++;
+      state.consecutiveFoundationKeeps = 0;
       await revertAgentChanges();
     }
 
-    const commitHash = improved
-      ? (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || headCommit
-      : null;
+    state.ideas = mergeUniqueEntries(state.ideas, agentReport.nextIdeas, IDEA_LIMIT);
+    state.lastCycle = cycle;
 
-    // Log cycle result
-    const logEntry = {
-      cycle, effort,
+    const cycleRecord: CycleRecord = {
+      cycle,
+      timestamp: new Date().toISOString(),
+      description: agentReport.description,
+      selfAnalysis: agentReport.selfAnalysis,
+      nextIdeas: agentReport.nextIdeas,
+      stepKind: agentReport.stepKind,
+      changedFiles,
+      categoryTags,
       tokPerSec: result.tokPerSec,
       tokPerSecSamples: result.tokPerSecSamples,
       bandwidthUtil: result.bandwidthUtil,
       bandwidthSamples: result.bandwidthSamples,
-      correct: result.correct,
-      improved, broken,
+      correct,
+      improved,
+      broken,
+      kept,
+      foundationKeep,
+      decisionReason,
+      outputText: result.outputText?.slice(0, 200),
+      commitHash,
+    };
+    state.cycles.push(cycleRecord);
+
+    if (state.cycles.length % SELF_REVIEW_EVERY === 0) {
+      const review = buildSelfReview(state);
+      if (review) {
+        state.reviewSummaries = [...state.reviewSummaries.slice(-(REVIEW_SUMMARY_LIMIT - 1)), review];
+        console.log(c("1;35", `  \uD83D\uDD0D Self-review (${state.cycles.length} cycles)`));
+        console.log(c("2", review));
+      }
+    }
+
+    await saveLoopState(state);
+    history = buildHistoryFromCycles(state.cycles);
+
+    // Log cycle result
+    const logEntry: LogEntry = {
+      cycle,
+      effort,
+      tokPerSec: result.tokPerSec,
+      tokPerSecSamples: result.tokPerSecSamples,
+      bandwidthUtil: result.bandwidthUtil,
+      bandwidthSamples: result.bandwidthSamples,
+      correct,
+      improved,
+      broken,
+      kept,
+      foundationKeep,
+      decisionReason,
+      description: agentReport.description,
+      stepKind: agentReport.stepKind,
+      changedFiles: changedFiles.slice(0, MAX_CHANGED_FILES_IN_PROMPT),
       outputText: result.outputText?.slice(0, 200),
       commitHash,
       timestamp: new Date().toISOString(),
     };
     const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
     await writeFile(logPath, JSON.stringify(logEntry) + "\n", { flag: "a" });
+    console.log(c("2", `  stall=${state.stalledCycles} best=${bestTokPerSec.toFixed(2)} current=${currentCode.tokPerSec?.toFixed(2) ?? "?"}`));
   }
 
   // Summary
@@ -1528,10 +1724,13 @@ ${result.buildOutput.slice(-2000)}
   console.log(c("1;37", `  Effort ${effort} complete.`));
   console.log(c("1;37", `  Baseline: ${originalBaseline.tokPerSec?.toFixed(2)} tok/s`));
   console.log(c("1;37", `  Best:     ${bestTokPerSec.toFixed(2)} tok/s`));
+  console.log(c("1;37", `  Current:  ${currentCode.tokPerSec?.toFixed(2) ?? "?"} tok/s`));
   if (bestTokPerSec > (originalBaseline.tokPerSec ?? 0)) {
     const gain = ((bestTokPerSec - (originalBaseline.tokPerSec ?? 0)) / (originalBaseline.tokPerSec ?? 1) * 100).toFixed(1);
     console.log(c("1;32", `  Gain:     +${gain}%`));
   }
+  console.log(c("1;37", `  Stall:    ${state.stalledCycles} cycles`));
+  console.log(c("1;37", `  State:    ${statePathForEffort(effort)}`));
   console.log(c("1;37", `${"═".repeat(58)}\n`));
 }
 
