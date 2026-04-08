@@ -5,6 +5,7 @@
 const std = @import("std");
 const vk = @import("vk.zig");
 const Instance = @import("instance.zig").Instance;
+const PushDescriptorFn = @import("instance.zig").PushDescriptorFn;
 const Pipeline = @import("pipeline.zig").Pipeline;
 
 const log = std.log.scoped(.command);
@@ -231,6 +232,67 @@ pub const CommandBuffer = struct {
             &descriptor_set,
             0,
             null,
+        );
+        vk.c.vkCmdDispatch(self.handle, group_count_x, group_count_y, group_count_z);
+    }
+
+    /// Record a compute dispatch using `VK_KHR_push_descriptor`.
+    /// @param self Command buffer currently being recorded.
+    /// @param pipeline Compute pipeline whose set-0 layout was created for push descriptors.
+    /// @param push_desc_fn Loaded `vkCmdPushDescriptorSetKHR` function pointer.
+    /// @param buffer_infos Storage-buffer bindings to push into set `0`.
+    /// @param push_data Raw bytes copied into the pipeline's push-constant range at offset `0`.
+    /// @param group_count_x Workgroup count in the X dimension.
+    /// @param group_count_y Workgroup count in the Y dimension.
+    /// @param group_count_z Workgroup count in the Z dimension.
+    pub fn pushDescAndDispatch(
+        self: *const CommandBuffer,
+        pipeline: *const Pipeline,
+        push_desc_fn: ?PushDescriptorFn,
+        buffer_infos: []const vk.c.VkDescriptorBufferInfo,
+        push_data: []const u8,
+        group_count_x: u32,
+        group_count_y: u32,
+        group_count_z: u32,
+    ) void {
+        std.debug.assert(push_desc_fn != null);
+        std.debug.assert(buffer_infos.len <= 8);
+
+        vk.c.vkCmdBindPipeline(self.handle, vk.c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+        if (push_data.len > 0) {
+            vk.c.vkCmdPushConstants(
+                self.handle,
+                pipeline.pipeline_layout,
+                vk.c.VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                @intCast(push_data.len),
+                push_data.ptr,
+            );
+        }
+
+        var writes: [8]vk.c.VkWriteDescriptorSet = undefined;
+        for (buffer_infos, 0..) |*buffer_info, i| {
+            writes[i] = .{
+                .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = null,
+                .dstSet = null,
+                .dstBinding = @intCast(i),
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = null,
+                .pBufferInfo = buffer_info,
+                .pTexelBufferView = null,
+            };
+        }
+
+        push_desc_fn.?(
+            self.handle,
+            vk.c.VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipeline.pipeline_layout,
+            0,
+            @intCast(buffer_infos.len),
+            &writes,
         );
         vk.c.vkCmdDispatch(self.handle, group_count_x, group_count_y, group_count_z);
     }

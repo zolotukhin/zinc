@@ -14,13 +14,13 @@ const descriptor_pool_max_sets: u32 = 256;
 const max_storage_buffers_per_set: u32 = 7;
 
 /// Push constants for RMS norm shader.
-const RmsNormPush = extern struct {
+pub const RmsNormPush = extern struct {
     N: u32,
     eps_bits: u32, // float bits reinterpreted as u32
 };
 
 /// Push constants for SwiGLU shader.
-const SwigluPush = extern struct {
+pub const SwigluPush = extern struct {
     N: u32,
 };
 
@@ -36,18 +36,18 @@ const DeinterleavePush = extern struct {
 };
 
 /// Push constants for sigmoid multiply shader.
-const SigmoidMulPush = extern struct {
+pub const SigmoidMulPush = extern struct {
     N: u32,
 };
 
 /// Push constants for scale-accumulate shader.
-const ScaleAccPush = extern struct {
+pub const ScaleAccPush = extern struct {
     N: u32,
     scale_bits: u32, // float reinterpreted as u32
 };
 
 /// Push constants for RoPE shader (with partial rotation / IMRoPE support).
-const RopePush = extern struct {
+pub const RopePush = extern struct {
     stride: u32, // full head dimension (distance between heads in memory)
     rope_dim: u32, // number of dimensions to rotate (<= stride)
     n_heads: u32,
@@ -171,17 +171,25 @@ pub const ElementwiseDispatch = struct {
             .required_subgroup_size = 64,
             .require_full_subgroups = true,
         };
+        const push_options = pipeline_mod.PipelineOptions{
+            .push_descriptors = instance.push_descriptor_fn != null,
+        };
+        const push_wave64_options = pipeline_mod.PipelineOptions{
+            .required_subgroup_size = 64,
+            .require_full_subgroups = true,
+            .push_descriptors = instance.push_descriptor_fn != null,
+        };
 
         // RMS norm: 2 inputs (x, weight) + 1 output = 3 bindings
         const rms_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_mul.spv", .{shader_dir}) catch unreachable;
-        const pipeline_rms_norm = pipeline_mod.createFromSpirvWithOptions(instance, rms_path, 3, @sizeOf(RmsNormPush), &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline_rms_norm = pipeline_mod.createFromSpirvWithOptions(instance, rms_path, 3, @sizeOf(RmsNormPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
             log.warn("rms_norm_mul shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         // SwiGLU: 2 inputs (gate, up) + 1 output = 3 bindings
         const swiglu_path = std.fmt.bufPrint(&path_buf, "{s}/swiglu.spv", .{shader_dir}) catch unreachable;
-        const pipeline_swiglu = pipeline_mod.createFromSpirv(instance, swiglu_path, 3, @sizeOf(SwigluPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_swiglu = pipeline_mod.createFromSpirvWithOptions(instance, swiglu_path, 3, @sizeOf(SwigluPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("swiglu shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -195,7 +203,7 @@ pub const ElementwiseDispatch = struct {
 
         // RoPE: 1 input + 1 output + 1 freq_buf = 3 bindings
         const rope_path = std.fmt.bufPrint(&path_buf, "{s}/rope_fused.spv", .{shader_dir}) catch unreachable;
-        const pipeline_rope = pipeline_mod.createFromSpirv(instance, rope_path, 3, @sizeOf(RopePush), &.{}, allocator) catch |err| blk: {
+        const pipeline_rope = pipeline_mod.createFromSpirvWithOptions(instance, rope_path, 3, @sizeOf(RopePush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("rope_fused shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -209,7 +217,7 @@ pub const ElementwiseDispatch = struct {
 
         // sigmoid_mul: 2 inputs + 1 output = 3 bindings
         const sigmoid_path = std.fmt.bufPrint(&path_buf, "{s}/sigmoid_mul.spv", .{shader_dir}) catch unreachable;
-        const pipeline_sigmoid_mul = pipeline_mod.createFromSpirv(instance, sigmoid_path, 3, @sizeOf(SigmoidMulPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_sigmoid_mul = pipeline_mod.createFromSpirvWithOptions(instance, sigmoid_path, 3, @sizeOf(SigmoidMulPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("sigmoid_mul shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -223,7 +231,7 @@ pub const ElementwiseDispatch = struct {
 
         // scale_accumulate: 1 read-write + 1 read = 2 bindings
         const sacc_path = std.fmt.bufPrint(&path_buf, "{s}/scale_accumulate.spv", .{shader_dir}) catch unreachable;
-        const pipeline_scale_acc = pipeline_mod.createFromSpirv(instance, sacc_path, 2, @sizeOf(ScaleAccPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_scale_acc = pipeline_mod.createFromSpirvWithOptions(instance, sacc_path, 2, @sizeOf(ScaleAccPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("scale_accumulate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -251,21 +259,21 @@ pub const ElementwiseDispatch = struct {
 
         // Softmax + top-k: 2 bindings (logits, output)
         const topk_path = std.fmt.bufPrint(&path_buf, "{s}/softmax_topk.spv", .{shader_dir}) catch unreachable;
-        const pipeline_softmax_topk = pipeline_mod.createFromSpirvWithOptions(instance, topk_path, 2, @sizeOf(SoftmaxTopkPush), &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline_softmax_topk = pipeline_mod.createFromSpirvWithOptions(instance, topk_path, 2, @sizeOf(SoftmaxTopkPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
             log.warn("softmax_topk shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         // sigmoid_scale_acc: a[i] += sigmoid(c[0]) * b[i], 3 bindings (accum, src, gate)
         const ssa_path = std.fmt.bufPrint(&path_buf, "{s}/sigmoid_scale_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_sigmoid_scale_acc = pipeline_mod.createFromSpirv(instance, ssa_path, 3, @sizeOf(ScaleAccPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_sigmoid_scale_acc = pipeline_mod.createFromSpirvWithOptions(instance, ssa_path, 3, @sizeOf(ScaleAccPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("sigmoid_scale_acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         // moe_weighted_acc: a[i] += routing_weight * b[i], 3 bindings (accum, src, routing)
         const mwa_path = std.fmt.bufPrint(&path_buf, "{s}/moe_weighted_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_moe_weighted_acc = pipeline_mod.createFromSpirv(instance, mwa_path, 3, @sizeOf(MoeWeightedAccPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_moe_weighted_acc = pipeline_mod.createFromSpirvWithOptions(instance, mwa_path, 3, @sizeOf(MoeWeightedAccPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("moe_weighted_acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

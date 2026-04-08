@@ -18,6 +18,8 @@ pub const Pipeline = struct {
     pipeline_layout: vk.c.VkPipelineLayout,
     /// Vulkan compute pipeline, or null if unavailable.
     pipeline: vk.c.VkPipeline,
+    /// Whether this pipeline's descriptor set layout is push-descriptor-only.
+    uses_push_descriptors: bool,
     /// Logical device.
     device: vk.c.VkDevice,
 
@@ -46,6 +48,8 @@ pub const PipelineOptions = struct {
     required_subgroup_size: ?u32 = null,
     /// Require the workgroup to be composed of full subgroups when supported.
     require_full_subgroups: bool = false,
+    /// Build the descriptor set layout for push-descriptor recording.
+    push_descriptors: bool = false,
 };
 
 /// Create a compute pipeline from a SPIR-V file.
@@ -132,7 +136,10 @@ pub fn createFromSpirvWithOptions(
     const ds_layout_info = vk.c.VkDescriptorSetLayoutCreateInfo{
         .sType = vk.c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .pNext = null,
-        .flags = 0,
+        .flags = if (options.push_descriptors and instance.push_descriptor_fn != null)
+            vk.c.VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR
+        else
+            0,
         .bindingCount = binding_count,
         .pBindings = bindings.ptr,
     };
@@ -249,6 +256,7 @@ pub fn createFromSpirvWithOptions(
         .descriptor_set_layout = descriptor_set_layout,
         .pipeline_layout = pipeline_layout,
         .pipeline = pipeline,
+        .uses_push_descriptors = options.push_descriptors and instance.push_descriptor_fn != null,
         .device = instance.device,
     };
 }
