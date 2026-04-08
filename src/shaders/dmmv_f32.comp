@@ -17,7 +17,7 @@ layout(constant_id = 1) const uint SPEC_K = 4096;
 
 layout(set = 0, binding = 0) readonly buffer Weight { float w[]; };
 layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
-layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 2) buffer Output { float y[]; };
 
 layout(push_constant) uniform PC {
     uint M;         // output rows
@@ -25,6 +25,7 @@ layout(push_constant) uniform PC {
     uint a_offset;  // byte offset into weight buffer
     uint x_offset;  // byte offset into input buffer
     uint y_offset;  // byte offset into output buffer
+    uint acc_mode;  // 0 = overwrite, 1 = accumulate
 };
 
 shared float s_x[SPEC_K];
@@ -53,6 +54,9 @@ void main() {
     float sum = subgroupAdd(partial);
 
     if (tid == 0u) {
-        y[y_offset / 4 + row] = sum;
+        if (acc_mode != 0u)
+            y[y_offset / 4 + row] += sum;
+        else
+            y[y_offset / 4 + row] = sum;
     }
 }

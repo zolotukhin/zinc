@@ -21,13 +21,14 @@ layout(push_constant) uniform PushConstants {
     uint a_offset;
     uint x_offset;
     uint y_offset;
+    uint acc_mode; // 0 = overwrite, 1 = accumulate (y += result)
 };
 
 // Weight data as uint32 for packed reads
 layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
 // B vector as vec4 for coalesced reads
 layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
-layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[]; };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
 
 const uint NUM_ROWS = 2u;
 const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
@@ -173,7 +174,10 @@ void main() {
         // Subgroup reduction (wave64: single subgroupAdd covers all 64 threads)
         sum = subgroupAdd(sum);
         if (tid == 0u) {
-            y_data[y_base + row] = sum;
+            if (acc_mode != 0u)
+                y_data[y_base + row] += sum;
+            else
+                y_data[y_base + row] = sum;
         }
     }
 }

@@ -26,12 +26,13 @@ layout(push_constant) uniform PushConstants {
     uint a_offset;    // byte offset into matrix A buffer
     uint x_offset;    // byte offset into vector x buffer
     uint y_offset;    // byte offset into vector y buffer
+    uint acc_mode;    // 0 = overwrite, 1 = accumulate
 };
 
 // Buffer bindings
 layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
 layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[];   };
-layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[];  };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[];  };
 
 // Q8_0 block constants
 const uint Q8_0_BLOCK_SIZE = 32;   // elements per block
@@ -129,7 +130,12 @@ void main() {
     // Thread 0 writes final results
     if (tid == 0u) {
         uint y_base = y_offset / 4u;
-        if (row0 < M) y_data[y_base + row0] = sum0;
-        if (row1 < M) y_data[y_base + row1] = sum1;
+        if (acc_mode != 0u) {
+            if (row0 < M) y_data[y_base + row0] += sum0;
+            if (row1 < M) y_data[y_base + row1] += sum1;
+        } else {
+            if (row0 < M) y_data[y_base + row0] = sum0;
+            if (row1 < M) y_data[y_base + row1] = sum1;
+        }
     }
 }

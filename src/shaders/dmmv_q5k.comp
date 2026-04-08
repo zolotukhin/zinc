@@ -17,7 +17,7 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
 layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
-layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 2) buffer Output { float y[]; };
 
 layout(push_constant) uniform PC {
     uint M;
@@ -25,6 +25,7 @@ layout(push_constant) uniform PC {
     uint a_offset;
     uint x_offset;
     uint y_offset;
+    uint acc_mode;
 };
 
 const uint NUM_ROWS = 2u;
@@ -111,7 +112,10 @@ void main() {
 
         sum = subgroupAdd(sum);
         if (tid == 0u) {
-            y[y_base + row] = sum;
+            if (acc_mode != 0u)
+                y[y_base + row] += sum;
+            else
+                y[y_base + row] = sum;
         }
     }
 }

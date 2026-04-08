@@ -23,6 +23,7 @@ pub const DmmvPushConstants = extern struct {
     a_offset: u32,
     x_offset: u32,
     y_offset: u32,
+    acc_mode: u32 = 0, // 0 = overwrite (y = result), 1 = accumulate (y += result)
 };
 
 /// Push constants for batch DMMV shaders (prefill: multiple columns).

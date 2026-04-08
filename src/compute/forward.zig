@@ -2706,39 +2706,47 @@ pub const InferenceEngine = struct {
                     }
                 }
 
-                // Output projection: attn_output.weight
-                try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, q_dim);
-                self.decode_cmd.computeBarrier();
+                // Output projection + attention residual
+                const has_post_attn_norm = lt.post_attention_norm != null and lt.ffn_norm != null;
+                if (!has_post_attn_norm and !self.validation_diagnostics_enabled) {
+                    // Fused: O-proj DMMV accumulates directly into hidden_buf,
+                    // eliminating separate scale_acc dispatch + barrier
+                    try self.dispatchDmmvAcc(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.hidden_buf, hidden_dim, q_dim);
+                    self.decode_cmd.computeBarrier();
+                } else {
+                    // Unfused path: needed when post-attn norm exists (Gemma) or diagnostics enabled
+                    try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, q_dim);
+                    self.decode_cmd.computeBarrier();
 
-                // Gemma post-attention norm: RMS norm on o_proj output before residual add
-                if (lt.post_attention_norm) |pan_tensor| {
-                    if (lt.ffn_norm != null) {
-                        // Both exist → post_attention_norm is a separate norm on o_proj output
-                        try self.dispatchRmsNorm(
-                            self.o_proj_buf.handle,
-                            hidden_size,
-                            pan_tensor.gpu_buffer.handle,
-                            pan_tensor.gpu_buffer.size,
-                            self.o_proj_buf.handle,
-                            hidden_size,
-                            hidden_dim,
-                            1,
-                            rms_norm_eps,
-                        );
-                        self.decode_cmd.computeBarrier();
+                    // Gemma post-attention norm: RMS norm on o_proj output before residual add
+                    if (lt.post_attention_norm) |pan_tensor| {
+                        if (lt.ffn_norm != null) {
+                            try self.dispatchRmsNorm(
+                                self.o_proj_buf.handle,
+                                hidden_size,
+                                pan_tensor.gpu_buffer.handle,
+                                pan_tensor.gpu_buffer.size,
+                                self.o_proj_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1,
+                                rms_norm_eps,
+                            );
+                            self.decode_cmd.computeBarrier();
+                        }
                     }
-                }
 
-                // Attention residual: hidden_buf += o_proj_buf
-                try self.dispatchScaleAcc(
-                    self.hidden_buf.handle,
-                    hidden_size,
-                    self.o_proj_buf.handle,
-                    hidden_size,
-                    hidden_dim,
-                    1.0,
-                );
-                self.decode_cmd.computeBarrier();
+                    // Attention residual: hidden_buf += o_proj_buf
+                    try self.dispatchScaleAcc(
+                        self.hidden_buf.handle,
+                        hidden_size,
+                        self.o_proj_buf.handle,
+                        hidden_size,
+                        hidden_dim,
+                        1.0,
+                    );
+                    self.decode_cmd.computeBarrier();
+                }
 
                 // --- Mid-layer diagnostic: o_proj RMS at attention layers (BOS only) ---
                 // Single readback per attention layer — reads o_proj_buf (before residual add)
@@ -3301,91 +3309,98 @@ pub const InferenceEngine = struct {
                 );
                 self.decode_cmd.computeBarrier();
 
-                try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
-                self.decode_cmd.computeBarrier();
-
-                // Gemma post-FFN norm: RMS norm on down_proj output before residual add
-                if (lt.post_ffw_norm) |pfn_tensor| {
-                    try self.dispatchRmsNorm(
-                        self.down_buf.handle,
-                        hidden_size,
-                        pfn_tensor.gpu_buffer.handle,
-                        pfn_tensor.gpu_buffer.size,
-                        self.down_buf.handle,
-                        hidden_size,
-                        hidden_dim,
-                        1,
-                        rms_norm_eps,
-                    );
+                if (lt.post_ffw_norm == null and !self.validation_diagnostics_enabled) {
+                    // Fused: down DMMV accumulates directly into hidden_buf,
+                    // eliminating separate scale_acc dispatch + barrier
+                    try self.dispatchDmmvAcc(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.hidden_buf, hidden_dim, inter_dim);
+                } else {
+                    // Unfused path: needed for Gemma post-FFN norm or diagnostics
+                    try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
                     self.decode_cmd.computeBarrier();
-                }
 
-                if (state.position == 0 and self.validation_diagnostics_enabled and layer == 0 and inter_dim <= 8192) {
-                    try self.decode_cmd.end();
-                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-
-                    try self.decode_cmd.reset();
-                    try self.decode_cmd.begin();
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
-                        .srcOffset = 0,
-                        .dstOffset = 0,
-                        .size = @as(vk.c.VkDeviceSize, inter_dim) * @sizeOf(f32),
-                    });
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{
-                        .srcOffset = 0,
-                        .dstOffset = 0,
-                        .size = hidden_size,
-                    });
-                    try self.decode_cmd.end();
-                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-
-                    const sw_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
-                    const sw_vals = sw_ptr[0..inter_dim];
-                    const dn_ptr: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
-                    const mmap = self.model.mmap_data orelse return error.NoMmapData;
-                    const down_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + down_tensor.info.offset);
-                    var cpu_row_buf: [8192]f32 = undefined;
-                    var cpu_vals: [4]f32 = [_]f32{0} ** 4;
-                    const down_rows: u32 = @min(hidden_dim, cpu_vals.len);
-                    var down_max_diff: f32 = 0;
-                    for (0..down_rows) |row| {
-                        dequantRow(mmap[down_off..], @intCast(row), inter_dim, down_tensor.info.type_, cpu_row_buf[0..inter_dim]);
-                        var dot: f64 = 0;
-                        for (0..inter_dim) |i| dot += @as(f64, cpu_row_buf[i]) * @as(f64, sw_vals[i]);
-                        cpu_vals[row] = @floatCast(dot);
-                        const diff = @abs(dn_ptr[row] - cpu_vals[row]);
-                        if (diff > down_max_diff) down_max_diff = diff;
+                    // Gemma post-FFN norm: RMS norm on down_proj output before residual add
+                    if (lt.post_ffw_norm) |pfn_tensor| {
+                        try self.dispatchRmsNorm(
+                            self.down_buf.handle,
+                            hidden_size,
+                            pfn_tensor.gpu_buffer.handle,
+                            pfn_tensor.gpu_buffer.size,
+                            self.down_buf.handle,
+                            hidden_size,
+                            hidden_dim,
+                            1,
+                            rms_norm_eps,
+                        );
+                        self.decode_cmd.computeBarrier();
                     }
-                    log.info("DMMV_CHECK: ffn_down type={s} M={d} K={d} gpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] cpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] max_diff={d:.6} ok={s}", .{
-                        @tagName(down_tensor.info.type_),
+
+                    if (state.position == 0 and self.validation_diagnostics_enabled and layer == 0 and inter_dim <= 8192) {
+                        try self.decode_cmd.end();
+                        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                        try self.decode_cmd.reset();
+                        try self.decode_cmd.begin();
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.logits_staging.handle, 1, &vk.c.VkBufferCopy{
+                            .srcOffset = 0,
+                            .dstOffset = 0,
+                            .size = @as(vk.c.VkDeviceSize, inter_dim) * @sizeOf(f32),
+                        });
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.embed_staging.handle, 1, &vk.c.VkBufferCopy{
+                            .srcOffset = 0,
+                            .dstOffset = 0,
+                            .size = hidden_size,
+                        });
+                        try self.decode_cmd.end();
+                        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                        const sw_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                        const sw_vals = sw_ptr[0..inter_dim];
+                        const dn_ptr: [*]const f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+                        const mmap = self.model.mmap_data orelse return error.NoMmapData;
+                        const down_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + down_tensor.info.offset);
+                        var cpu_row_buf: [8192]f32 = undefined;
+                        var cpu_vals: [4]f32 = [_]f32{0} ** 4;
+                        const down_rows: u32 = @min(hidden_dim, cpu_vals.len);
+                        var down_max_diff: f32 = 0;
+                        for (0..down_rows) |row| {
+                            dequantRow(mmap[down_off..], @intCast(row), inter_dim, down_tensor.info.type_, cpu_row_buf[0..inter_dim]);
+                            var dot: f64 = 0;
+                            for (0..inter_dim) |i| dot += @as(f64, cpu_row_buf[i]) * @as(f64, sw_vals[i]);
+                            cpu_vals[row] = @floatCast(dot);
+                            const diff = @abs(dn_ptr[row] - cpu_vals[row]);
+                            if (diff > down_max_diff) down_max_diff = diff;
+                        }
+                        log.info("DMMV_CHECK: ffn_down type={s} M={d} K={d} gpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] cpu[0..3]=[{d:.6},{d:.6},{d:.6},{d:.6}] max_diff={d:.6} ok={s}", .{
+                            @tagName(down_tensor.info.type_),
+                            hidden_dim,
+                            inter_dim,
+                            dn_ptr[0],
+                            dn_ptr[1],
+                            dn_ptr[2],
+                            dn_ptr[3],
+                            cpu_vals[0],
+                            cpu_vals[1],
+                            cpu_vals[2],
+                            cpu_vals[3],
+                            down_max_diff,
+                            if (down_max_diff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
+                        });
+
+                        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                        try self.decode_cmd.reset();
+                        try self.decode_cmd.begin();
+                    }
+
+                    // FFN residual: hidden_buf += down_buf
+                    try self.dispatchScaleAcc(
+                        self.hidden_buf.handle,
+                        hidden_size,
+                        self.down_buf.handle,
+                        hidden_size,
                         hidden_dim,
-                        inter_dim,
-                        dn_ptr[0],
-                        dn_ptr[1],
-                        dn_ptr[2],
-                        dn_ptr[3],
-                        cpu_vals[0],
-                        cpu_vals[1],
-                        cpu_vals[2],
-                        cpu_vals[3],
-                        down_max_diff,
-                        if (down_max_diff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
-                    });
-
-                    if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-                    try self.decode_cmd.reset();
-                    try self.decode_cmd.begin();
+                        1.0,
+                    );
                 }
-
-                // FFN residual: hidden_buf += down_buf
-                try self.dispatchScaleAcc(
-                    self.hidden_buf.handle,
-                    hidden_size,
-                    self.down_buf.handle,
-                    hidden_size,
-                    hidden_dim,
-                    1.0,
-                );
             }
 
             // The next layer immediately reads hidden_buf as its input.
@@ -3600,7 +3615,20 @@ pub const InferenceEngine = struct {
         M: u32,
         K: u32,
     ) !void {
-        return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0);
+        return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 0);
+    }
+
+    /// Dispatch a DMMV with accumulation: output_buf += weight × input_buf.
+    fn dispatchDmmvAcc(
+        self: *InferenceEngine,
+        tensor: *const LoadedTensor,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
+        output_buf: Buffer,
+        M: u32,
+        K: u32,
+    ) !void {
+        return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 1);
     }
 
     /// Dispatch a DMMV with byte offset into stacked weight tensor (for MoE experts).
@@ -3617,7 +3645,7 @@ pub const InferenceEngine = struct {
         /// Weight buffer byte offset.
         a_offset: u32,
     ) !void {
-        return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, a_offset, 0, 0);
+        return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, a_offset, 0, 0, 0);
     }
 
     /// Inner dispatch for DMMV — push-descriptor or pool-allocated path.
@@ -3632,6 +3660,7 @@ pub const InferenceEngine = struct {
         a_offset: u32,
         x_offset: u32,
         y_offset: u32,
+        acc_mode: u32,
     ) !void {
         const qt = tensor.info.type_;
         const pip = self.dmmv.pipelineForType(qt) orelse {
@@ -3663,6 +3692,7 @@ pub const InferenceEngine = struct {
             const push = DmmvPushConstants{
                 .M = M, .K = K,
                 .a_offset = a_offset, .x_offset = x_offset, .y_offset = y_offset,
+                .acc_mode = acc_mode,
             };
             // Workgroup calculation (mirrors dmmv.recordDispatch)
             const wg_x: u32 = switch (qt) {
@@ -4034,19 +4064,9 @@ pub const InferenceEngine = struct {
         }
         self.decode_cmd.transferToComputeBarrier();
 
+        // Fused: ssm_out DMMV accumulates directly into hidden_buf
         const ssm_out_tensor = lt.ssm_out orelse return;
-        try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
-        self.decode_cmd.computeBarrier();
-
-        // Residual: hidden_buf += o_proj_buf
-        try self.dispatchScaleAcc(
-            self.hidden_buf.handle,
-            hidden_size,
-            self.o_proj_buf.handle,
-            hidden_size,
-            hidden_dim,
-            1.0,
-        );
+        try self.dispatchDmmvAcc(ssm_out_tensor, self.swiglu_buf, z_bytes, self.hidden_buf, hidden_dim, @intCast(d_inner));
         self.decode_cmd.computeBarrier();
     }
 
@@ -4251,21 +4271,10 @@ pub const InferenceEngine = struct {
         self.decode_cmd.computeBarrier();
         self.endProfilePhase(.ssm_gated_norm, ssm_gated_norm_phase);
 
-        // --- GPU: ssm_out DMMV + residual (same as CPU path's GPU phase 2) ---
+        // --- GPU: ssm_out DMMV + residual (fused: accumulate directly into hidden_buf) ---
         const ssm_out_tensor = lt.ssm_out orelse return;
         const ssm_out_phase = self.beginProfilePhase();
-        try self.dispatchDmmv(ssm_out_tensor, self.swiglu_buf, z_bytes, self.o_proj_buf, hidden_dim, @intCast(d_inner));
-        self.decode_cmd.computeBarrier();
-
-        // Residual: hidden_buf += o_proj_buf
-        try self.dispatchScaleAcc(
-            self.hidden_buf.handle,
-            hidden_size,
-            self.o_proj_buf.handle,
-            hidden_size,
-            hidden_dim,
-            1.0,
-        );
+        try self.dispatchDmmvAcc(ssm_out_tensor, self.swiglu_buf, z_bytes, self.hidden_buf, hidden_dim, @intCast(d_inner));
         self.decode_cmd.computeBarrier();
         self.endProfilePhase(.ssm_out, ssm_out_phase);
     }
