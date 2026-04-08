@@ -650,9 +650,19 @@ fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u
     const chat_buf = try allocator.alloc(u8, chat_capacity);
     errdefer allocator.free(chat_buf);
 
-    // Skip the thinking template wrapper for CLI prompts — let the model generate
-    // naturally (models like Qwen3.5 will enter thinking mode on their own).
-    const formatted = try tokenizer.applyChatTemplateWithOptions(&roles, &contents, .{ .skip_thinking_template = true }, chat_buf);
+    const use_gemma_turn_template = if (tokenizer.chat_template) |tmpl|
+        std.mem.indexOf(u8, tmpl, "<|turn>") != null
+    else
+        false;
+
+    const formatted = if (use_gemma_turn_template)
+        // Gemma templates already define the default generation scaffold.
+        // Respect that instead of forcing the explicit thinking branch.
+        try tokenizer.applyChatTemplate(&roles, &contents, chat_buf)
+    else if (tokenizer.supportsThinkingToggle())
+        try tokenizer.applyChatTemplateWithOptions(&roles, &contents, .{ .skip_thinking_template = true }, chat_buf)
+    else
+        try tokenizer.applyChatTemplate(&roles, &contents, chat_buf);
     return .{
         .text = formatted,
         .owned_buf = chat_buf,
@@ -1626,6 +1636,18 @@ pub fn main() !void {
                     }
                 }
 
+                if (config.debug) {
+                    log.debug("Output tokens ({d}): {any}", .{
+                        output_tokens.len,
+                        output_tokens[0..@min(output_tokens.len, 20)],
+                    });
+                    const show_n = @min(output_tokens.len, 5);
+                    for (0..show_n) |ti| {
+                        const tok_str = if (output_tokens[ti] < tokenizer.vocab.len) tokenizer.vocab[output_tokens[ti]] else "?";
+                        log.debug("  gen[{d}]: id={d} \"{s}\"", .{ ti, output_tokens[ti], tok_str });
+                    }
+                }
+
                 // Decode tokens to text
                 var text_buf: std.ArrayList(u8) = .{};
                 defer text_buf.deinit(allocator);
@@ -2081,6 +2103,21 @@ test "prepareCliPrompt returns full owned chat buffer" {
     try std.testing.expect(prepared.text.ptr == prepared.owned_buf.?.ptr);
     try std.testing.expect(prepared.owned_buf.?.len >= prepared.text.len);
     try std.testing.expectEqualStrings("<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n", prepared.text);
+}
+
+test "prepareCliPrompt uses gemma4 default closed-thought prompt in chat mode" {
+    var tok = makeTestTokenizer(
+        "{%- if enable_thinking is defined and enable_thinking -%}<|turn>system\n<|think|><turn|>\n{%- endif -%}<|turn>{{ role }}\n{{ content }}<turn|>\n{%- if add_generation_prompt -%}<|turn>model\n<|channel>thought\n<channel|>{%- endif -%}",
+    );
+    defer tok.token_to_id.deinit();
+    tok.prepend_bos = true;
+    tok.bos_id = 2;
+
+    var prepared = try prepareCliPrompt(&tok, "Hello", true, std.testing.allocator);
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, prepared.text, "<bos><|turn>system\n<|think|><turn|>\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prepared.text, "<bos><|turn>user\nHello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>") != null);
 }
 
 test "trimCliOutputText strips chat terminator only in chat mode" {

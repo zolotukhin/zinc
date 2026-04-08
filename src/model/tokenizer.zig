@@ -40,6 +40,7 @@ pub const Tokenizer = struct {
     const Pretokenizer = enum {
         legacy,
         gpt2_ascii,
+        gemma4_bpe,
     };
 
     /// Initialize tokenizer from GGUF metadata.
@@ -152,7 +153,9 @@ pub const Tokenizer = struct {
         const chat_template = gf.getString("tokenizer.chat_template");
         if (chat_template) |tmpl| log.debug("Chat template: {d} chars", .{tmpl.len});
         const pre_name = gf.getString("tokenizer.ggml.pre") orelse "";
-        const pretokenizer: Pretokenizer = if (scores == null and merges_list.items.len > 0 and
+        const pretokenizer: Pretokenizer = if (std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, pre_name, "gemma4"))
+            .gemma4_bpe
+        else if (scores == null and merges_list.items.len > 0 and
             (std.mem.eql(u8, model_type, "gpt2") or
                 std.mem.eql(u8, pre_name, "qwen2") or
                 std.mem.eql(u8, pre_name, "qwen35")))
@@ -214,6 +217,14 @@ pub const Tokenizer = struct {
         }
     }
 
+    fn utf8SequenceLength(byte0: u8) usize {
+        if (byte0 < 0x80) return 1;
+        if ((byte0 & 0xE0) == 0xC0) return 2;
+        if ((byte0 & 0xF0) == 0xE0) return 3;
+        if ((byte0 & 0xF8) == 0xF0) return 4;
+        return 1;
+    }
+
     /// Encode UTF-8 text into a token ID slice using the tokenizer's own allocator.
     /// Callers must free the returned slice with `freeEncoded`, not an arbitrary request allocator.
     fn encodeChunk(self: *const Tokenizer, text: []const u8) ![]u32 {
@@ -229,27 +240,32 @@ pub const Tokenizer = struct {
             owned_symbols.deinit(self.allocator);
         }
 
-        // SentencePiece models (scores != null) use ▁ (U+2581) for word boundaries
-        // and raw bytes. GPT-2/tiktoken use Ġ (U+0120) for space via Unicode remapping.
-        const is_sentencepiece = self.scores != null;
-        for (text) |byte| {
-            if (is_sentencepiece) {
-                if (byte == ' ') {
-                    // SentencePiece: space → ▁ (U+2581, 3 bytes: E2 96 81)
+        // SentencePiece and Gemma4 BPE use raw UTF-8 symbols with spaces normalized to ▁.
+        // GPT-2/Qwen use byte-level Unicode remapping.
+        const use_spm_style_bpe = self.scores != null or self.pretokenizer == .gemma4_bpe;
+        if (use_spm_style_bpe) {
+            var pos: usize = 0;
+            while (pos < text.len) {
+                if (text[pos] == ' ') {
                     const copy = try self.allocator.alloc(u8, 3);
                     copy[0] = 0xE2;
                     copy[1] = 0x96;
                     copy[2] = 0x81;
                     try owned_symbols.append(self.allocator, copy);
                     try symbols.append(self.allocator, copy);
-                } else {
-                    const copy = try self.allocator.alloc(u8, 1);
-                    copy[0] = byte;
-                    try owned_symbols.append(self.allocator, copy);
-                    try symbols.append(self.allocator, copy);
+                    pos += 1;
+                    continue;
                 }
-            } else {
-                // GPT-2/tiktoken: map bytes through Unicode encoding
+
+                const seq_len = @min(utf8SequenceLength(text[pos]), text.len - pos);
+                const copy = try self.allocator.alloc(u8, seq_len);
+                @memcpy(copy, text[pos .. pos + seq_len]);
+                try owned_symbols.append(self.allocator, copy);
+                try symbols.append(self.allocator, copy);
+                pos += seq_len;
+            }
+        } else {
+            for (text) |byte| {
                 const unicode_char = gpt2ByteToUnicode(byte);
                 const len: usize = if (unicode_char[0] < 0x80) 1 else if (unicode_char[0] < 0xE0) 2 else 3;
                 const copy = try self.allocator.alloc(u8, len);
@@ -259,11 +275,16 @@ pub const Tokenizer = struct {
             }
         }
 
-        // If we have merges (GPT-2/tiktoken style), use merge-based BPE
-        if (self.merges.len > 0) {
+        // Gemma4 uses SentencePiece-style BPE. Its GGUF metadata carries both
+        // token scores and a merge list, but the scored piece merges match the
+        // reference tokenizer behavior more closely than the raw merge ranks.
+        if (self.pretokenizer == .gemma4_bpe and self.scores != null) {
+            try self.applySentencePieceMerges(&symbols, &owned_symbols);
+        } else if (self.merges.len > 0) {
+            // GPT-2/tiktoken-style merge ranks.
             try self.applyMerges(&symbols, &owned_symbols);
         } else if (self.scores != null) {
-            // SentencePiece style: greedily merge the pair with highest combined score
+            // SentencePiece-style scored piece merges.
             try self.applySentencePieceMerges(&symbols, &owned_symbols);
         }
 
@@ -374,9 +395,39 @@ pub const Tokenizer = struct {
         return text[start..i];
     }
 
-    /// Encode text into token IDs using BPE merges. Caller owns returned slice.
+    fn nextGemma4PretokenChunk(text: []const u8, pos: *usize) []const u8 {
+        if (pos.* >= text.len) return text[text.len..text.len];
+
+        const start = pos.*;
+        const is_newline = text[start] == '\n';
+        var i = start + 1;
+        while (i < text.len and (text[i] == '\n') == is_newline) : (i += 1) {}
+        pos.* = i;
+        return text[start..i];
+    }
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
+        if (self.pretokenizer == .gemma4_bpe) {
+            var tokens: std.ArrayList(u32) = .{};
+            errdefer tokens.deinit(self.allocator);
+
+            var pos: usize = 0;
+            while (pos < text.len) {
+                const chunk = nextGemma4PretokenChunk(text, &pos);
+                if (chunk.len == 0) break;
+
+                if (self.token_to_id.get(chunk)) |id| {
+                    try tokens.append(self.allocator, id);
+                    continue;
+                }
+
+                const chunk_tokens = try self.encodeChunk(chunk);
+                defer self.allocator.free(chunk_tokens);
+                try tokens.appendSlice(self.allocator, chunk_tokens);
+            }
+
+            return try tokens.toOwnedSlice(self.allocator);
+        }
         if (self.scores != null or self.merges.len == 0 or self.pretokenizer == .legacy) {
             return self.encodeChunk(text);
         }
@@ -738,11 +789,45 @@ pub const Tokenizer = struct {
         skip_thinking_template: bool = false,
     };
 
+    fn appendTrimmed(dst: []u8, pos: *usize, text: []const u8) !void {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        if (pos.* + trimmed.len > dst.len) return error.BufferTooSmall;
+        @memcpy(dst[pos.*..][0..trimmed.len], trimmed);
+        pos.* += trimmed.len;
+    }
+
+    fn appendGemma4ThinkingStripped(dst: []u8, pos: *usize, text: []const u8) !void {
+        var src_pos: usize = 0;
+        var wrote_any = false;
+        while (src_pos < text.len) {
+            if (std.mem.indexOfPos(u8, text, src_pos, "<|channel>")) |open_idx| {
+                const chunk = if (wrote_any) text[src_pos..open_idx] else std.mem.trimLeft(u8, text[src_pos..open_idx], " \t\r\n");
+                if (pos.* + chunk.len > dst.len) return error.BufferTooSmall;
+                @memcpy(dst[pos.*..][0..chunk.len], chunk);
+                pos.* += chunk.len;
+                wrote_any = wrote_any or chunk.len > 0;
+
+                if (std.mem.indexOfPos(u8, text, open_idx, "<channel|>")) |close_idx| {
+                    src_pos = close_idx + "<channel|>".len;
+                } else {
+                    break;
+                }
+            } else {
+                const chunk = if (wrote_any) std.mem.trimRight(u8, text[src_pos..], " \t\r\n") else std.mem.trim(u8, text[src_pos..], " \t\r\n");
+                if (pos.* + chunk.len > dst.len) return error.BufferTooSmall;
+                @memcpy(dst[pos.*..][0..chunk.len], chunk);
+                pos.* += chunk.len;
+                break;
+            }
+        }
+    }
+
     /// Return whether the model's chat template supports an explicit thinking toggle.
     pub fn supportsThinkingToggle(self: *const Tokenizer) bool {
         return if (self.chat_template) |tmpl|
             std.mem.indexOf(u8, tmpl, "enable_thinking") != null and
-                std.mem.indexOf(u8, tmpl, "<think>") != null
+                (std.mem.indexOf(u8, tmpl, "<think>") != null or
+                    std.mem.indexOf(u8, tmpl, "<|think|>") != null)
         else
             false;
     }
@@ -795,13 +880,55 @@ pub const Tokenizer = struct {
                 const turn_end: []const u8 = if (is_gemma4) "<turn|>" else "<end_of_turn>";
                 const bos = std.fmt.bufPrint(buf[pos..], "<bos>", .{}) catch return error.BufferTooSmall;
                 pos += bos.len;
-                for (0..n) |i| {
-                    const written = std.fmt.bufPrint(buf[pos..], "{s}{s}\n{s}{s}\n", .{ turn_start, roles[i], contents[i], turn_end }) catch return error.BufferTooSmall;
-                    pos += written.len;
-                }
-                if (options.add_generation_prompt) {
-                    const suffix = std.fmt.bufPrint(buf[pos..], "{s}model\n", .{turn_start}) catch return error.BufferTooSmall;
-                    pos += suffix.len;
+                if (is_gemma4) {
+                    var start_idx: usize = 0;
+                    const thinking_enabled = options.enable_thinking orelse false;
+                    const has_leading_system = n > 0 and
+                        (std.mem.eql(u8, roles[0], "system") or std.mem.eql(u8, roles[0], "developer"));
+                    if (thinking_enabled or has_leading_system) {
+                        const system_turn = std.fmt.bufPrint(buf[pos..], "{s}system\n", .{turn_start}) catch return error.BufferTooSmall;
+                        pos += system_turn.len;
+                        if (thinking_enabled) {
+                            const think_token = std.fmt.bufPrint(buf[pos..], "<|think|>", .{}) catch return error.BufferTooSmall;
+                            pos += think_token.len;
+                        }
+                        if (has_leading_system) {
+                            const system_text = std.fmt.bufPrint(buf[pos..], "{s}", .{std.mem.trim(u8, contents[0], " \t\r\n")}) catch return error.BufferTooSmall;
+                            pos += system_text.len;
+                            start_idx = 1;
+                        }
+                        const system_end = std.fmt.bufPrint(buf[pos..], "{s}\n", .{turn_end}) catch return error.BufferTooSmall;
+                        pos += system_end.len;
+                    }
+                    for (start_idx..n) |i| {
+                        const rendered_role = if (std.mem.eql(u8, roles[i], "assistant")) "model" else roles[i];
+                        const prefix = std.fmt.bufPrint(buf[pos..], "{s}{s}\n", .{ turn_start, rendered_role }) catch return error.BufferTooSmall;
+                        pos += prefix.len;
+                        if (std.mem.eql(u8, rendered_role, "model")) {
+                            try appendGemma4ThinkingStripped(buf, &pos, contents[i]);
+                        } else {
+                            try appendTrimmed(buf, &pos, contents[i]);
+                        }
+                        const suffix = std.fmt.bufPrint(buf[pos..], "{s}\n", .{turn_end}) catch return error.BufferTooSmall;
+                        pos += suffix.len;
+                    }
+                    if (options.add_generation_prompt) {
+                        const suffix = std.fmt.bufPrint(buf[pos..], "{s}model\n", .{turn_start}) catch return error.BufferTooSmall;
+                        pos += suffix.len;
+                        if (!options.skip_thinking_template and !thinking_enabled) {
+                            const channel = std.fmt.bufPrint(buf[pos..], "<|channel>thought\n<channel|>", .{}) catch return error.BufferTooSmall;
+                            pos += channel.len;
+                        }
+                    }
+                } else {
+                    for (0..n) |i| {
+                        const written = std.fmt.bufPrint(buf[pos..], "{s}{s}\n{s}{s}\n", .{ turn_start, roles[i], contents[i], turn_end }) catch return error.BufferTooSmall;
+                        pos += written.len;
+                    }
+                    if (options.add_generation_prompt) {
+                        const suffix = std.fmt.bufPrint(buf[pos..], "{s}model\n", .{turn_start}) catch return error.BufferTooSmall;
+                        pos += suffix.len;
+                    }
                 }
             },
             .openai_moe => {
@@ -916,6 +1043,68 @@ test "initFromGGUF omits BOS for qwen35 family (no BOS in GGUF)" {
 
     // Qwen3.5 GGUFs omit BOS metadata — should NOT prepend BOS
     try std.testing.expect(!tok.shouldPrependBos());
+}
+
+test "initFromGGUF respects gemma4 add_bos_token=false" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    const tokens = try allocator.alloc(gguf.MetadataValue, 3);
+    tokens[0] = .{ .string = try allocator.dupe(u8, "a") };
+    tokens[1] = .{ .string = try allocator.dupe(u8, "b") };
+    tokens[2] = .{ .string = try allocator.dupe(u8, "<bos>") };
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.tokens"), .{ .array = tokens });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.model"), .{ .string = try allocator.dupe(u8, "gemma4") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "gemma4") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.bos_token_id"), .{ .uint32 = 2 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.eos_token_id"), .{ .uint32 = 1 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.add_bos_token"), .{ .bool_ = false });
+
+    var tok = try Tokenizer.initFromGGUF(&gf, allocator);
+    defer tok.deinit();
+
+    try std.testing.expect(!tok.shouldPrependBos());
+}
+
+test "initFromGGUF respects gemma4 add_bos_token=true" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    const tokens = try allocator.alloc(gguf.MetadataValue, 3);
+    tokens[0] = .{ .string = try allocator.dupe(u8, "a") };
+    tokens[1] = .{ .string = try allocator.dupe(u8, "b") };
+    tokens[2] = .{ .string = try allocator.dupe(u8, "<bos>") };
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.tokens"), .{ .array = tokens });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.model"), .{ .string = try allocator.dupe(u8, "gemma4") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "gemma4") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.bos_token_id"), .{ .uint32 = 2 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.eos_token_id"), .{ .uint32 = 1 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.add_bos_token"), .{ .bool_ = true });
+
+    var tok = try Tokenizer.initFromGGUF(&gf, allocator);
+    defer tok.deinit();
+
+    try std.testing.expect(tok.shouldPrependBos());
 }
 
 test "preparePromptTokens skips BOS when prepend_bos is false" {
@@ -1065,6 +1254,75 @@ test "applyChatTemplate with im_start template uses ChatML" {
     try std.testing.expect(std.mem.indexOf(u8, result, "system") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "You help.") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "Hi") != null);
+}
+
+test "applyChatTemplate gemma4 defaults to closed thought channel prompt" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 2,
+        .eos_id = 106,
+        .prepend_bos = true,
+        .chat_template = "{%- if enable_thinking is defined and enable_thinking -%}<|turn>system\n<|think|><turn|>\n{%- endif -%}<|turn>{{ role }}\n{{ content }}<turn|>",
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [256]u8 = undefined;
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"Hello"};
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "<bos><|turn>user\nHello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|turn>assistant\n") == null);
+}
+
+test "applyChatTemplate gemma4 rewrites assistant history to model role" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 2,
+        .eos_id = 106,
+        .prepend_bos = true,
+        .chat_template = "{%- if enable_thinking is defined and enable_thinking -%}<|turn>system\n<|think|><turn|>\n{%- endif -%}<|turn>{{ role }}\n{{ content }}<turn|>",
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [256]u8 = undefined;
+    const roles = [_][]const u8{ "user", "assistant" };
+    const contents = [_][]const u8{ "Hello", "Hi there" };
+    const result = try tok.applyChatTemplateWithOptions(&roles, &contents, .{ .add_generation_prompt = false }, &buf);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|turn>assistant\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|turn>model\nHi there<turn|>\n") != null);
+}
+
+test "applyChatTemplate gemma4 thinking mode emits synthetic system turn" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = 2,
+        .eos_id = 106,
+        .prepend_bos = true,
+        .chat_template = "{%- if enable_thinking is defined and enable_thinking -%}<|turn>system\n<|think|><turn|>\n{%- endif -%}<|turn>{{ role }}\n{{ content }}<turn|>",
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [256]u8 = undefined;
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"Hello"};
+    const result = try tok.applyChatTemplateWithOptions(&roles, &contents, .{ .enable_thinking = true }, &buf);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "<bos><|turn>system\n<|think|><turn|>\n<|turn>user\nHello<turn|>\n<|turn>model\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<|channel>thought\n<channel|>") == null);
 }
 
 test "applyChatTemplate llama3 template uses header tokens" {
@@ -1297,6 +1555,103 @@ test "encode frees temporary buffers for sentencepiece merges" {
 
     try std.testing.expectEqual(@as(usize, 1), tokens.len);
     try std.testing.expectEqual(@as(u32, 2), tokens[0]);
+}
+
+test "encode gemma4_bpe normalizes spaces to ▁ before BPE merges" {
+    const vocab = [_][]const u8{ "▁", "a", "b", "▁a", "▁ab" };
+    const merges = [_]Tokenizer.Merge{
+        .{ .first = "▁", .second = "a", .rank = 0 },
+        .{ .first = "▁a", .second = "b", .rank = 1 },
+    };
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &merges,
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 0,
+        .prepend_bos = false,
+        .pretokenizer = .gemma4_bpe,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("▁", 0);
+    try tok.token_to_id.put("a", 1);
+    try tok.token_to_id.put("b", 2);
+    try tok.token_to_id.put("▁a", 3);
+    try tok.token_to_id.put("▁ab", 4);
+
+    const tokens = try tok.encode(" ab");
+    defer std.testing.allocator.free(tokens);
+
+    try std.testing.expectEqualSlices(u32, &.{4}, tokens);
+}
+
+test "encode gemma4_bpe keeps newline runs as direct tokens when present" {
+    const vocab = [_][]const u8{ "\n\n", "\n", "a" };
+    const merges = [_]Tokenizer.Merge{};
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &merges,
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 0,
+        .prepend_bos = false,
+        .pretokenizer = .gemma4_bpe,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("\n\n", 0);
+    try tok.token_to_id.put("\n", 1);
+    try tok.token_to_id.put("a", 2);
+
+    const tokens = try tok.encode("\n\n");
+    defer std.testing.allocator.free(tokens);
+
+    try std.testing.expectEqualSlices(u32, &.{0}, tokens);
+}
+
+test "encode gemma4_bpe prefers score merges over merge ranks when both exist" {
+    const vocab = [_][]const u8{ "a", "b", "c", "ab", "bc" };
+    const merges = [_]Tokenizer.Merge{
+        .{ .first = "a", .second = "b", .rank = 0 },
+        .{ .first = "b", .second = "c", .rank = 1 },
+    };
+    const scores = try std.testing.allocator.dupe(f32, &[_]f32{
+        -1.0, // a
+        -1.0, // b
+        -1.0, // c
+        0.5, // ab
+        2.0, // bc
+    });
+    defer std.testing.allocator.free(scores);
+
+    var tok = Tokenizer{
+        .vocab = &vocab,
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &merges,
+        .scores = scores,
+        .bos_id = null,
+        .eos_id = 0,
+        .prepend_bos = false,
+        .pretokenizer = .gemma4_bpe,
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    try tok.token_to_id.put("a", 0);
+    try tok.token_to_id.put("b", 1);
+    try tok.token_to_id.put("c", 2);
+    try tok.token_to_id.put("ab", 3);
+    try tok.token_to_id.put("bc", 4);
+
+    const tokens = try tok.encode("abc");
+    defer std.testing.allocator.free(tokens);
+
+    try std.testing.expectEqualSlices(u32, &.{ 0, 4 }, tokens);
 }
 
 test "encodeWithSpecialTokens maps known special tokens to their IDs" {

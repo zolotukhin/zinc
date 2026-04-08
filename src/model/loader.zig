@@ -306,6 +306,8 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         .attn_scale = blk: {
             const key5 = std.fmt.bufPrint(&key_buf, "{s}.attention.scale", .{prefix}) catch break :blk @as(f32, 0.0);
             if (gf.getF32(key5)) |v| break :blk v;
+            // Gemma 4 uses a fixed attention scaling factor of 1.0 even when
+            // the GGUF omits an explicit attention.scale key.
             if (std.mem.eql(u8, arch_str, "gemma4")) break :blk @as(f32, 1.0);
             break :blk @as(f32, 0.0);
         },
@@ -502,4 +504,61 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.qwen35, parseArchitecture("qwen35"));
     try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
+}
+
+test "extractConfig defaults gemma4 attention scale to 1.0" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "gemma4") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.block_count"), .{ .uint32 = 30 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.attention.head_count"), .{ .uint32 = 16 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.embedding_length"), .{ .uint32 = 2816 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.attention.key_length"), .{ .uint32 = 512 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.vocab_size"), .{ .uint32 = 262144 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.context_length"), .{ .uint32 = 8192 });
+
+    const cfg = extractConfigWithLogging(&gf, false);
+    try std.testing.expectEqual(@as(f32, 1.0), cfg.attn_scale);
+}
+
+test "extractConfig uses max gemma4 head_count_kv array entry" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    const kv_heads = try allocator.alloc(gguf.MetadataValue, 4);
+    kv_heads[0] = .{ .int32 = 2 };
+    kv_heads[1] = .{ .int32 = 8 };
+    kv_heads[2] = .{ .int32 = 4 };
+    kv_heads[3] = .{ .int32 = 1 };
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "gemma4") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.block_count"), .{ .uint32 = 30 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.attention.head_count"), .{ .uint32 = 16 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.attention.head_count_kv"), .{ .array = kv_heads });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.embedding_length"), .{ .uint32 = 2816 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.attention.key_length"), .{ .uint32 = 512 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.vocab_size"), .{ .uint32 = 262144 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gemma4.context_length"), .{ .uint32 = 8192 });
+
+    const cfg = extractConfigWithLogging(&gf, false);
+    try std.testing.expectEqual(@as(u32, 8), cfg.n_kv_heads);
 }
