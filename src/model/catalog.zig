@@ -57,9 +57,9 @@ pub const entries = [_]CatalogEntry{
         .size_bytes = 1_280_835_840,
         .required_vram_bytes = 3 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
-        .recommended_for_chat = true,
+        .recommended_for_chat = false,
         .thinking_stable = false,
-        .status = .supported,
+        .status = .deprecated,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,
@@ -341,9 +341,16 @@ test "supportedOnCurrentGpu requires both tested profile and fit" {
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 20 * 1024 * 1024 * 1024));
 }
 
-test "thinking_stable is false for 2B and true for 35B" {
+test "small qwen35 2B is deprecated and qwen3 8B remains the recommended small chat model" {
     const small = find("qwen35-2b-q4k-m") orelse return error.TestExpectedEqual;
     try std.testing.expect(!small.thinking_stable);
+    try std.testing.expect(!small.recommended_for_chat);
+    try std.testing.expectEqual(CatalogStatus.deprecated, small.status);
+
+    const qwen3 = find("qwen3-8b-q4k-m") orelse return error.TestExpectedEqual;
+    try std.testing.expect(qwen3.recommended_for_chat);
+    try std.testing.expect(qwen3.thinking_stable);
+
     const large = find("qwen35-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
     try std.testing.expect(large.thinking_stable);
 }

@@ -94,7 +94,7 @@ const COHERENCE_CHECKS: { prompt: string; expect: string[] }[] = [
 // The primary model (--model flag) is benchmarked; these are correctness-only.
 const COHERENCE_MODELS: { name: string; path: string }[] = [
   { name: "Qwen3.5-35B", path: "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf" },
-  { name: "Qwen3.5-2B", path: "/root/models/Qwen3.5-2B-Q4_K_M.gguf" },
+  { name: "Qwen3-8B", path: "/root/models/Qwen3-8B-Q4_K_M.gguf" },
   { name: "Gemma3-12B", path: "/root/models/gemma-3-12b-it-Q4_K_M.gguf" },
 ];
 

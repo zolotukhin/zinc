@@ -261,7 +261,7 @@ Activate an installed managed model in a running server. The model must already 
 
 ```json
 {
-  "model": "qwen35-2b-q4k-m"
+  "model": "qwen3-8b-q4k-m"
 }
 ```
 
@@ -270,7 +270,7 @@ Activate an installed managed model in a running server. The model must already 
 ```json
 {
   "object": "model.activation",
-  "id": "qwen35-2b-q4k-m",
+  "id": "qwen3-8b-q4k-m",
   "active": true
 }
 ```
@@ -282,7 +282,7 @@ Activate an installed managed model in a running server. The model must already 
 curl http://localhost:8080/v1/models/activate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-2b-q4k-m"
+    "model": "qwen3-8b-q4k-m"
   }'
 ```
 
@@ -296,7 +296,7 @@ Remove an installed managed model from the local cache. If the target model is c
 
 ```json
 {
-  "model": "qwen35-2b-q4k-m",
+  "model": "qwen3-8b-q4k-m",
   "force": false
 }
 ```
@@ -306,7 +306,7 @@ Remove an installed managed model from the local cache. If the target model is c
 ```json
 {
   "object": "model.remove",
-  "id": "qwen35-2b-q4k-m",
+  "id": "qwen3-8b-q4k-m",
   "removed": true,
   "unloaded_from_gpu": false,
   "cleared_active_selection": true,
@@ -323,14 +323,14 @@ Remove an installed managed model from the local cache. If the target model is c
 curl http://localhost:8080/v1/models/remove \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-2b-q4k-m"
+    "model": "qwen3-8b-q4k-m"
   }'
 
 # Force-unload it from the running server first
 curl http://localhost:8080/v1/models/remove \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-2b-q4k-m",
+    "model": "qwen3-8b-q4k-m",
     "force": true
   }'
 ```

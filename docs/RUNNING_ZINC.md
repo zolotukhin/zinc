@@ -152,7 +152,7 @@ Example `./zig-out/bin/zinc model list` output on Apple Silicon:
 Detected GPU profile: apple-silicon
 
 ID                             Released     Status      Fit    Installed   Active   Notes
-qwen35-2b-q4k-m                2026-02-16   supported   yes    yes         no       tested + exact fit
+qwen35-2b-q4k-m                2026-02-16   deprecated  yes    yes         no       unstable on chat; prefer qwen3-8b
 gpt-oss-20b-q4k-m              2025-06-25   supported   yes    yes         no       tested + exact fit
 qwen3-8b-q4k-m                 2025-04-29   supported   yes    yes         yes      tested + exact fit
 gemma3-12b-q4k-m               2025-03-12   supported   yes    no          no       tested + catalog fit
@@ -323,7 +323,7 @@ curl http://localhost:8080/v1/models
 curl http://localhost:8080/v1/models/activate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-2b-q4k-m"
+    "model": "qwen3-8b-q4k-m"
   }'
 ```
 
@@ -334,14 +334,14 @@ curl http://localhost:8080/v1/models/activate \
 curl http://localhost:8080/v1/models/remove \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-2b-q4k-m"
+    "model": "qwen3-8b-q4k-m"
   }'
 
 # Force the server to unload it first if it is still active
 curl http://localhost:8080/v1/models/remove \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-2b-q4k-m",
+    "model": "qwen3-8b-q4k-m",
     "force": true
   }'
 ```

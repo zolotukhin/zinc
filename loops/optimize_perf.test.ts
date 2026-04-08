@@ -550,7 +550,7 @@ describe("config", () => {
   test("all three models are listed for coherence", async () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("Qwen3.5-35B");
-    expect(src).toContain("Qwen3.5-2B");
+    expect(src).toContain("Qwen3-8B");
     expect(src).toContain("Gemma3-12B");
   });
 
