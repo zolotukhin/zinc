@@ -8,7 +8,7 @@ This is an internal reference note for the next article. It is not polished blog
 
 Models covered in this pass:
 
-- `Qwen3.5-2B-Q4_K_M.gguf`
+- a smaller dense Qwen3.5 reference GGUF
 - `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`
 
 Primary runtime surfaces covered:
@@ -46,7 +46,7 @@ Current validated state:
 
 - 2B smoke: first token `11751`, output contains `Paris`
 - 35B smoke: first token `11751`, output contains `Paris`
-- live `9090` endpoint serves `Qwen3.5-2B`
+- live `9090` endpoint serves the smaller dense Qwen3.5 reference
 - live streaming chat no longer fails with `Error: Failed to fetch`
 
 ## Why "multi-model Qwen support" was hard
@@ -380,7 +380,7 @@ We codified that into an opt-in smoke suite:
 
 The smoke suite now validates both:
 
-- `Qwen3.5-2B-Q4_K_M.gguf`
+- the smaller dense Qwen3.5 reference GGUF
 - `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`
 
 with the same prompt and expected first token.
@@ -435,9 +435,9 @@ That was a good reminder that "the model loads and answers a smoke prompt" is no
 
 Beyond inference correctness, the repo now carries explicit managed-model metadata for both Qwen3.5 targets.
 
-Catalog entries now exist for:
+Catalog entries existed for:
 
-- `qwen35-2b-q4k-m`
+- a smaller dense Qwen3.5 managed entry
 - `qwen35-35b-a3b-q4k-xl`
 
 The catalog records:
@@ -557,7 +557,7 @@ Remote CLI smoke:
 ssh -p "$ZINC_PORT" "$ZINC_USER@$ZINC_HOST" \
   'cd /tmp/zinc-qwen35-clean && \
    RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc \
-   --model /root/models/Qwen3.5-2B-Q4_K_M.gguf \
+   --model /root/models/<smaller-dense-qwen35-reference>.gguf \
    --prompt "The capital of France is" \
    --max-tokens 8'
 ```
@@ -574,7 +574,7 @@ ssh -p "$ZINC_PORT" "$ZINC_USER@$ZINC_HOST" \
 Bun smoke suite:
 
 ```bash
-ZINC_QWEN35_2B_MODEL=/root/models/Qwen3.5-2B-Q4_K_M.gguf \
+ZINC_QWEN3_8B_MODEL=/root/models/Qwen3-8B-Q4_K_M.gguf \
 ZINC_QWEN35_35B_MODEL=/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
 bun test tests/test_qwen_smoke.test.ts
 ```
@@ -708,7 +708,7 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST \
   'cd /tmp/zinc-qwen35-clean && \
    timeout 30 env ZINC_DEBUG=1 RADV_PERFTEST=coop_matrix \
    ./zig-out/bin/zinc --profile \
-   -m /root/models/Qwen3.5-2B-Q4_K_M.gguf \
+   -m /root/models/<smaller-dense-qwen35-reference>.gguf \
    --prompt "The capital of France is" 2>&1 | \
    rg --line-buffered "decode\\[0\\]|TOP5\\[0\\]|Output text:"'
 ```
