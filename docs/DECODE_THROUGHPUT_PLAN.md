@@ -25,7 +25,7 @@ Measured on March 31, 2026 on the RDNA4 test node from the current checkout sync
 
 - clean `ReleaseFast` CLI run: `37.95 tok/s` (`26.3 ms/tok`)
 - modeled decode bandwidth at `37.95 tok/s`: `127.1 GB/s`, about `22.1%` of `576 GB/s`
-- Qwen3.5-2B-Q4_K_M CLI plain decode: `26.71 tok/s` (`37.4 ms/tok`)
+- historical small-dense reference run on the same node: `26.71 tok/s` (`37.4 ms/tok`)
 
 Previous reference (March 30):
 
@@ -529,5 +529,5 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST "cd /root/zinc && \
 
 - The old "stuck at `7 tok/s`" story was partly a tooling problem and partly an architecture problem. That is no longer the current state.
 - The current fast path is healthy enough that the next wins should be measured as milliseconds removed from `29.8 ms/tok`, not as vague utilization improvements.
-- The smaller `Qwen3.5-2B-Q4_K_M` still being slower than the 35B MoE model is a useful clue: this codebase is now dominated by decode-kernel regime and control overhead, not just raw model size.
+- The earlier small-dense reference run still being slower than the 35B MoE model is a useful clue: this codebase is now dominated by decode-kernel regime and control overhead, not just raw model size.
 - Full single-stream memory-bandwidth saturation should not be treated as the immediate success metric for this target.

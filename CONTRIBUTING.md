@@ -73,7 +73,7 @@ zig build test --summary all
 If you want to require the integration smoke tests instead of letting them skip when their env is missing:
 
 ```bash
-ZINC_QWEN35_2B_MODEL=/path/to/Qwen3.5-2B-Q4_K_M.gguf \
+ZINC_QWEN3_8B_MODEL=/path/to/Qwen3-8B-Q4_K_M.gguf \
 ZINC_QWEN35_35B_MODEL=/path/to/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
 ZINC_API_BASE_URL=http://localhost:8080/v1 \
 zig build test --summary all -Dfull-tests=true

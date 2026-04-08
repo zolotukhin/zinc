@@ -7,10 +7,10 @@ const requireFull = process.env.ZINC_REQUIRE_FULL_TESTS === "1";
 if (!hasSmokeEnv()) {
   if (requireFull) {
     test("Qwen CLI smoke", () => {
-      throw new Error("Missing ZINC_QWEN35_2B_MODEL and/or ZINC_QWEN35_35B_MODEL");
+      throw new Error("Missing ZINC_QWEN3_8B_MODEL and/or ZINC_QWEN35_35B_MODEL");
     });
   } else {
-    test.skip("Qwen smoke requires ZINC_QWEN35_2B_MODEL and ZINC_QWEN35_35B_MODEL", () => {});
+    test.skip("Qwen smoke requires ZINC_QWEN3_8B_MODEL and ZINC_QWEN35_35B_MODEL", () => {});
   }
 } else {
   test("Qwen CLI smoke", async () => {

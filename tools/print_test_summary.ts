@@ -11,7 +11,7 @@ function statusLine(label: string, status: string, detail?: string): string {
 
 const requireFull = process.env.ZINC_REQUIRE_FULL_TESTS === "1";
 const hasQwenSmoke =
-  hasEnv("ZINC_QWEN35_2B_MODEL") &&
+  hasEnv("ZINC_QWEN3_8B_MODEL") &&
   hasEnv("ZINC_QWEN35_35B_MODEL");
 const hasApiSmoke = hasEnv("ZINC_API_BASE_URL");
 
@@ -22,7 +22,7 @@ console.log(
   statusLine(
     "Qwen smoke",
     hasQwenSmoke ? "ran" : requireFull ? "required but missing env" : "skipped",
-    hasQwenSmoke ? process.env.ZINC_QWEN35_2B_MODEL : "needs ZINC_QWEN35_2B_MODEL and ZINC_QWEN35_35B_MODEL",
+    hasQwenSmoke ? process.env.ZINC_QWEN3_8B_MODEL : "needs ZINC_QWEN3_8B_MODEL and ZINC_QWEN35_35B_MODEL",
   ),
 );
 console.log(

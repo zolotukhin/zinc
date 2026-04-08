@@ -107,7 +107,7 @@ This eliminated all 30 `submitAndWait` calls. The entire 40-layer decode now run
 
 **Results:**
 - Qwen3.5-35B-A3B: 11 → 38.8 tok/s (3.5×)
-- Qwen3.5-2B: 33.8 → 138.6 tok/s (4.1×)
+- Historical small dense reference: 33.8 → 138.6 tok/s (4.1×)
 - Bandwidth utilization: 2.4% → 21.8%
 
 ## Phase 1: The Shared Memory Revelation (39 → 48 tok/s)

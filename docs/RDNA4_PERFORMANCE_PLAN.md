@@ -67,7 +67,7 @@ This creates **30 GPU pipeline flushes per token**.
 
 Commit `ac988d4`: Changed SSM guard from `!has_delta_net` to shader-availability check. Eliminates 30 `submitAndWait` stalls per token.
 
-**Results**: Qwen3.5-35B 11→38.8 tok/s (3.5×), Qwen3.5-2B 33.8→138.6 tok/s (4.1×), BW 2.4%→21.8%.
+**Results**: Qwen3.5-35B 11→38.8 tok/s (3.5×), historical small dense reference 33.8→138.6 tok/s (4.1×), BW 2.4%→21.8%.
 
 ### Phase 1: Kernel-Level Optimizations (38 → 48+ tok/s) — 🔄 IN PROGRESS
 

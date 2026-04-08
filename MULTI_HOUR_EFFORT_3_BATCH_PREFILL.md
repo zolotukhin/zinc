@@ -350,7 +350,7 @@ With attention+MoE sequential bottleneck: **~4-8× overall prefill speedup**.
 | Model | Architecture | Test point |
 |-------|-------------|------------|
 | Qwen3.5-35B | MoE + SSM | Primary target |
-| Qwen3.5-2B | SSM (no MoE) | Full batch benefit |
+| Qwen3-8B | Dense attention | Small-model regression guard |
 | Gemma3-12B | Dense attention | Full batch benefit |
 
 ## CRITICAL Lessons from Phase 1

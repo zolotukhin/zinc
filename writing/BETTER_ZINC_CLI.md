@@ -84,7 +84,7 @@ Example output:
 Detected GPU profile: amd-rdna4-32gb
 
 ID                             Released     Status      Fit    Installed   Active   Notes
-qwen35-2b-q4k-m                2026-02-16   supported   yes    yes         no       tested + catalog fit
+qwen3-8b-q4k-m                 2025-04-29   supported   yes    yes         no       tested + catalog fit
 qwen35-35b-a3b-q4k-xl          2026-02-16   supported   yes    yes         yes      tested + catalog fit
 ```
 

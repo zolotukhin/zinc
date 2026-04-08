@@ -258,7 +258,7 @@ On a **Mac Studio (Mac16,9)** with **Apple M4 Max**, **40-core GPU**, and **64 G
 | Raw HTTP `POST /v1/completions`, `max_tokens=256`, `concurrency=1` | **34.74 tok/s**, `7.37s` avg latency |
 | Raw HTTP `POST /v1/completions`, `max_tokens=256`, `concurrency=4` | **34.71 tok/s** aggregate, `18.45s` avg latency, `28.40s` p95 |
 
-These are current validated numbers on the exact machine above, measured on April 2, 2026 with `zig build -Doptimize=ReleaseFast`. The earlier M1 Pro bring-up on `Qwen3.5-2B-Q4_K_M` was useful for proving the backend, but it is no longer the public reference point for Apple Silicon performance.
+These are current validated numbers on the exact machine above, measured on April 2, 2026 with `zig build -Doptimize=ReleaseFast`. The earlier small-model M1 Pro bring-up was useful for proving the backend, but it is no longer the public reference point for Apple Silicon performance.
 
 For context, the same 35B model on the AMD RDNA4 test node (Radeon AI PRO R9700, 32 GB, 576 GB/s) currently runs at **37.95 tok/s** in the clean CLI decode benchmark. That is close enough to make the point: the Metal path is real, not a fallback feature.
 

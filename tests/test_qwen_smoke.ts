@@ -91,23 +91,23 @@ async function runSmokeCase(binary: string, smokeCase: SmokeCase, timeoutMs: num
 }
 
 export function hasSmokeEnv(): boolean {
-  return !!getEnv("ZINC_QWEN35_2B_MODEL") && !!getEnv("ZINC_QWEN35_35B_MODEL");
+  return !!getEnv("ZINC_QWEN3_8B_MODEL") && !!getEnv("ZINC_QWEN35_35B_MODEL");
 }
 
 export async function runSmokeSuite(binary: string): Promise<void> {
-  const model2b = getEnv("ZINC_QWEN35_2B_MODEL");
+  const model8b = getEnv("ZINC_QWEN3_8B_MODEL");
   const model35b = getEnv("ZINC_QWEN35_35B_MODEL");
-  assert(model2b, "Missing ZINC_QWEN35_2B_MODEL");
+  assert(model8b, "Missing ZINC_QWEN3_8B_MODEL");
   assert(model35b, "Missing ZINC_QWEN35_35B_MODEL");
 
   const timeoutMs = Number(getEnv("ZINC_QWEN_SMOKE_TIMEOUT_MS") ?? "120000");
   const prompt = "The capital of France is";
   const cases: SmokeCase[] = [
     {
-      label: "Qwen3.5 2B smoke",
-      modelPath: model2b,
+      label: "Qwen3 8B smoke",
+      modelPath: model8b,
       prompt,
-      expectedFirstToken: 11751,
+      expectedFirstToken: 12095,
       expectedTextSubstrings: ["Paris"],
     },
     {

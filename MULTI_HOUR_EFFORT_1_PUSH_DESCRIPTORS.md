@@ -250,7 +250,7 @@ Major categories:
 | Model | Prompt | Expected |
 |-------|--------|----------|
 | Qwen3.5-35B | "The capital of France is" | "Paris." |
-| Qwen3.5-2B | "The capital of France is" | "Paris." |
+| Qwen3-8B | "The capital of France is" | "Paris." |
 | Gemma3-12B | "The capital of France is" | "Paris." |
 
 ## Risk

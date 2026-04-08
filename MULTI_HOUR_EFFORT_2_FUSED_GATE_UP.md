@@ -236,7 +236,7 @@ Same pattern: replace two `dispatchDmmv` calls with one fused dispatch.
 
 **File: `src/compute/forward.zig`** — in the dense FFN section (~line 2339)
 
-For non-MoE layers (Gemma3, Qwen3.5-2B), replace the two dense dispatches.
+For non-MoE layers (Gemma3, Qwen3-8B), replace the two dense dispatches.
 
 ### Step 7: (Optional) Fused gate+up+SwiGLU
 
@@ -268,7 +268,7 @@ After each step, run:
 ./zig-out/bin/zinc -m /root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf --prompt 'The capital of France is' -n 20
 # → Must output "Paris."
 
-./zig-out/bin/zinc -m /root/models/Qwen3.5-2B-Q4_K_M.gguf --prompt 'The capital of France is' -n 20
+./zig-out/bin/zinc -m /root/models/Qwen3-8B-Q4_K_M.gguf --prompt 'The capital of France is' -n 20
 # → Must output "Paris."
 
 ./zig-out/bin/zinc -m /root/models/gemma-3-12b-it-Q4_K_M.gguf --prompt 'The capital of France is' -n 20

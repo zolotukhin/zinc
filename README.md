@@ -58,10 +58,10 @@ export RADV_PERFTEST=coop_matrix  # skip on macOS
 ./zig-out/bin/zinc model list
 
 # Download a model
-./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+./zig-out/bin/zinc model pull qwen3-8b-q4k-m
 
 # Run a prompt (--chat applies the model's chat template for instruct models)
-./zig-out/bin/zinc --model-id qwen35-2b-q4k-m --prompt "Hello" --chat
+./zig-out/bin/zinc --model-id qwen3-8b-q4k-m --prompt "Hello" --chat
 
 # Or open the chat UI in your browser
 ./zig-out/bin/zinc chat
@@ -71,7 +71,7 @@ The server exposes the built-in chat UI at `/` and an OpenAI-compatible API at `
 
 ## What Works Today
 
-- Single-stream CLI inference on the validated Qwen3.5 models listed below
+- Single-stream CLI inference on the validated models listed below
 - OpenAI-compatible `/v1` API with streaming
 - Built-in browser chat UI with thinking mode support
 - Managed model workflow: `list`, `pull`, `use`, `active`, `rm`
@@ -112,11 +112,10 @@ The table below lists the exact GGUFs ZINC currently supports end-to-end, not a 
 | **OpenAI GPT-OSS 20B** | [Q4_K_M](https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF) | — | ~7 tok/s |
 | **Gemma 3 12B** | [Q4_K_M](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | — | ~5 tok/s |
 | **Qwen3 8B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | — | ~8 tok/s |
-| **Qwen3.5 2B** | [Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~27 tok/s | ~17 tok/s (M1 Pro, 32 GB) |
 | **Qwen3.5 35B-A3B UD** | [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | ~38 tok/s | **35.6 tok/s** (M4 Max, 64 GB) |
 
 - **AMD**: Radeon AI PRO R9700 (RDNA4, 32 GB), `RADV_PERFTEST=coop_matrix`
-- **Apple Silicon**: current 35B reference box is `Mac Studio (Mac16,9)`, `Apple M4 Max`, `40-core GPU`, `64 GB unified memory`; the older 2B bring-up number was on `M1 Pro`, `32 GB`
+- **Apple Silicon**: current 35B reference box is `Mac Studio (Mac16,9)`, `Apple M4 Max`, `40-core GPU`, `64 GB unified memory`
 - All numbers: single-stream `ReleaseFast`; Apple 35B numbers use `bench-metal`, AMD numbers use the CLI decode path
 - Latest validation: 2026-04-05
 - Use `zinc model list --json` for machine-readable model metadata
@@ -259,7 +258,6 @@ Measured on **AMD Radeon AI PRO R9700** (RDNA4, 32 GB, 576 GB/s) on a clean RDNA
 | Model | Path | Shape | Result |
 |------|------|-------|--------|
 | Qwen3.5-35B-A3B-UD-Q4_K_XL | CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **37.95 tok/s**, `26.3 ms/tok` |
-| Qwen3.5-2B-Q4_K_M | CLI plain decode | `--prompt "The capital of France is"`; 128 generated tokens | **26.71 tok/s**, `37.4 ms/tok` |
 
 For reference, the current llama.cpp baseline on the same node and 35B model is about **107 tok/s decode**.
 
@@ -267,7 +265,7 @@ For reference, the current llama.cpp baseline on the same node and 35B model is 
 
 - The Apple Silicon 35B path is no longer speculative. On the current M4 Max validation box it sustains **35.6 tok/s** locally and keeps the raw HTTP path close behind at about **34.7 tok/s**.
 - The RDNA4 path is still faster on the same 35B model, but the gap is now small enough that the two backends are in the same performance class for single-stream decode.
-- The 2B model is currently slower than the 35B MoE model on the RDNA4 node, which means today's bottleneck is not just "smaller model = faster"; kernel shape, architecture mix, and decode-path efficiency matter more than parameter count alone.
+- Earlier small-model validation on the RDNA4 node ended up slower than the 35B MoE path, which means today's bottleneck is not just "smaller model = faster"; kernel shape, architecture mix, and decode-path efficiency matter more than parameter count alone.
 
 ### Why GPU Bandwidth Is Still Not "Full"
 

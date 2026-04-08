@@ -115,8 +115,8 @@ On the clean node, the current numbers now look like this:
 | `Qwen3.5-35B-A3B-UD-Q4_K_XL` | Raw `/v1/completions` | **33.55 tok/s** | AMD Radeon AI PRO R9700 (RDNA4, 32 GB) |
 | `Qwen3.5-35B-A3B-UD-Q4_K_XL` | Raw `/v1/completions`, `concurrency=4` | **33.98 tok/s aggregate** | AMD Radeon AI PRO R9700 (RDNA4, 32 GB) |
 | `Qwen3.5-35B-A3B-UD-Q4_K_XL` | Reasoning chat | **24.94 to 28.56 tok/s** | AMD Radeon AI PRO R9700 (RDNA4, 32 GB) |
-| `Qwen3.5-2B-Q4_K_M` | CLI plain decode | **22.93 tok/s** | AMD Radeon AI PRO R9700 (RDNA4, 32 GB) |
-| `Qwen3.5-2B-Q4_K_M` | Raw `/v1/completions` | **21.88 tok/s** | AMD Radeon AI PRO R9700 (RDNA4, 32 GB) |
+| Historical small dense reference | CLI plain decode | **22.93 tok/s** | AMD Radeon AI PRO R9700 (RDNA4, 32 GB) |
+| Historical small dense reference | Raw `/v1/completions` | **21.88 tok/s** | AMD Radeon AI PRO R9700 (RDNA4, 32 GB) |
 
 That table immediately makes one thing clear: the raw decode problem is no longer "how do we get above 7 tok/s?" The new problem is more specific:
 
@@ -141,9 +141,9 @@ That may sound like benchmark housekeeping, but it is not optional. If the machi
 
 ## The strange result that taught us the most
 
-The smaller model is slower.
+The older small dense reference is slower.
 
-On the current clean node, `Qwen3.5-2B-Q4_K_M` measures **22.93 tok/s**, while the larger `Qwen3.5-35B-A3B-UD-Q4_K_XL` path measures **33.58 tok/s**.
+On the current clean node, that historical small dense reference measures **22.93 tok/s**, while the larger `Qwen3.5-35B-A3B-UD-Q4_K_XL` path measures **33.58 tok/s**.
 
 That is not what people expect if they think model size alone determines speed.
 
