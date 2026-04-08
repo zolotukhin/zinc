@@ -34,6 +34,7 @@ const MoeWeightedAccPush = elementwise_mod.MoeWeightedAccPush;
 const SsmConv1dPush = elementwise_mod.SsmConv1dPush;
 const SsmDeltaNetPush = elementwise_mod.SsmDeltaNetPush;
 const SsmGatedNormPush = elementwise_mod.SsmGatedNormPush;
+const DeinterleavePush = elementwise_mod.DeinterleavePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
@@ -2359,21 +2360,36 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
                 try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
                 if (packed_q_gate) {
-                    self.decode_cmd.computeToTransferBarrier();
+                    // Wait for all DMMV outputs (Q+gate, K, V) before deinterleave
+                    self.decode_cmd.computeBarrier();
+                    // Deinterleave Q+gate using compute shader instead of per-head buffer copies.
+                    // Replaces computeToTransfer + n_heads*2 vkCmdCopyBuffer + transferToCompute
+                    // with a single compute dispatch, avoiding transfer stage overhead.
                     {
-                        const hd = config.head_dim;
-                        const hd_bytes = @as(vk.c.VkDeviceSize, hd) * @sizeOf(f32);
-                        const stride_bytes = hd_bytes * 2;
-                        for (0..config.n_heads) |h| {
-                            const src_off = @as(vk.c.VkDeviceSize, @intCast(h)) * stride_bytes;
-                            const dst_off = @as(vk.c.VkDeviceSize, @intCast(h)) * hd_bytes;
-                            const qr = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = dst_off, .size = hd_bytes };
-                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.q_buf.handle, 1, &qr);
-                            const gr = vk.c.VkBufferCopy{ .srcOffset = src_off + hd_bytes, .dstOffset = dst_off, .size = hd_bytes };
-                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.gate_buf.handle, 1, &gr);
+                        const pip = &(self.elementwise.pipeline_deinterleave orelse return error.ShaderNotLoaded);
+                        const total = config.head_dim * config.n_heads;
+                        const q_full_size = @as(vk.c.VkDeviceSize, q_dim * 2) * @sizeOf(f32);
+                        const q_size = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32);
+                        if (pip.uses_push_descriptors) {
+                            const push = DeinterleavePush{
+                                .head_dim = config.head_dim,
+                                .n_heads = config.n_heads,
+                            };
+                            self.pushDispatch3(
+                                pip,
+                                std.mem.asBytes(&push),
+                                self.attn_out_buf.handle, q_full_size,
+                                self.q_buf.handle, q_size,
+                                self.gate_buf.handle, q_size,
+                                (total + 63) / 64, 1, 1,
+                            );
+                        } else {
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet3(ds, self.attn_out_buf.handle, q_full_size, self.q_buf.handle, q_size, self.gate_buf.handle, q_size);
+                            try self.elementwise.recordDeinterleave(&self.decode_cmd, ds, config.head_dim, config.n_heads);
                         }
                     }
-                    self.decode_cmd.transferToComputeBarrier();
+                    self.decode_cmd.computeBarrier();
                 } else {
                     self.decode_cmd.computeBarrier();
                 }

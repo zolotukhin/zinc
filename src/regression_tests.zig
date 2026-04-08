@@ -23,11 +23,11 @@ fn expectMultiSubgroupFallback(shader_src: []const u8, reduce_name: []const u8) 
     try expectContains(shader_src, "barrier();");
 }
 
-test "decode loop keeps transfer-copy split for packed Q and gate" {
+test "decode loop keeps deinterleave split for packed Q and gate" {
     const src = @embedFile("compute/forward.zig");
     try expectContains(src, "Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.");
-    try expectContains(src, "self.decode_cmd.computeToTransferBarrier();");
-    try expectContains(src, "self.decode_cmd.transferToComputeBarrier();");
+    try expectContains(src, "Deinterleave Q+gate using compute shader");
+    try expectContains(src, "pipeline_deinterleave");
 }
 
 test "decode loop applies packed attention gate after flash attention" {

@@ -30,7 +30,7 @@ const VaddPush = extern struct {
 };
 
 /// Push constants for deinterleave shader.
-const DeinterleavePush = extern struct {
+pub const DeinterleavePush = extern struct {
     head_dim: u32,
     n_heads: u32,
 };
