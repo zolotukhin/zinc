@@ -35,6 +35,7 @@ const SsmConv1dPush = elementwise_mod.SsmConv1dPush;
 const SsmDeltaNetPush = elementwise_mod.SsmDeltaNetPush;
 const SsmGatedNormPush = elementwise_mod.SsmGatedNormPush;
 const DeinterleavePush = elementwise_mod.DeinterleavePush;
+const KvCacheWritePush = elementwise_mod.KvCacheWritePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
@@ -2508,18 +2509,44 @@ pub const InferenceEngine = struct {
                     state.position,
                     rope_freq,
                 );
-                // Combined barrier: RoPE writes visible for both flash attention (compute)
-                // and KV cache copy (transfer) — merges two vkCmdPipelineBarrier calls into one
-                self.decode_cmd.computeAndTransferBarrier();
+                // KV cache write: use compute shader to stay in compute pipeline,
+                // avoiding compute→transfer + transfer→compute stage transitions.
                 {
                     const physical_token = try self.physicalTokenIndex(state.position);
-                    const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * kv_vec_size;
-                    const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
-                    const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
+                    if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
+                        // Compute path: RoPE → computeBarrier → KV copy dispatch → computeBarrier → flash attn
+                        self.decode_cmd.computeBarrier();
+                        const push = KvCacheWritePush{
+                            .kv_dim = kv_dim,
+                            .dst_offset = physical_token * kv_dim,
+                        };
+                        if (kv_pip.uses_push_descriptors) {
+                            self.pushDispatch4(
+                                kv_pip,
+                                std.mem.asBytes(&push),
+                                self.k_buf.handle, self.k_buf.size,
+                                self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
+                                self.v_buf.handle, self.v_buf.size,
+                                self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
+                                (kv_dim + 63) / 64, 1, 1,
+                            );
+                        } else {
+                            const ds = try self.allocDescSet(kv_pip.descriptor_set_layout);
+                            self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
+                            self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (kv_dim + 63) / 64, 1, 1);
+                        }
+                        self.decode_cmd.computeBarrier();
+                    } else {
+                        // Fallback: transfer-based copy with mixed-stage barriers
+                        self.decode_cmd.computeAndTransferBarrier();
+                        const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * kv_vec_size;
+                        const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
+                        const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
+                        self.decode_cmd.transferToComputeBarrier();
+                    }
                 }
-                self.decode_cmd.transferToComputeBarrier();
 
                 // Flash attention
                 if (self.attention.pipeline) |*pip| {

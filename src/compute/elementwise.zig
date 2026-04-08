@@ -98,6 +98,12 @@ pub const MoeWeightedAccPush = extern struct {
     src_stride: u32,
 };
 
+/// Push constants for KV cache write compute shader.
+pub const KvCacheWritePush = extern struct {
+    kv_dim: u32,
+    dst_offset: u32,
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -130,6 +136,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_moe_weighted_acc: ?Pipeline,
     /// SOFTCAP pipeline: in-place logit softcapping, 1 binding (logits buffer).
     pipeline_softcap: ?Pipeline,
+    /// KV CACHE WRITE pipeline: compute-based KV cache copy, 4 bindings (k_src, k_dst, v_src, v_dst).
+    pipeline_kv_cache_write: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -282,6 +290,13 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // kv_cache_write: 4 bindings (k_src, k_dst, v_src, v_dst)
+        const kvcw_path = std.fmt.bufPrint(&path_buf, "{s}/kv_cache_write.spv", .{shader_dir}) catch unreachable;
+        const pipeline_kv_cache_write = pipeline_mod.createFromSpirvWithOptions(instance, kvcw_path, 4, @sizeOf(KvCacheWritePush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("kv_cache_write shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -298,6 +313,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_sigmoid_scale_acc = pipeline_sigmoid_scale_acc,
             .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
             .pipeline_softcap = pipeline_softcap,
+            .pipeline_kv_cache_write = pipeline_kv_cache_write,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -590,6 +606,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_sigmoid_scale_acc) |*p| p.deinit();
         if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
         if (self.pipeline_softcap) |*p| p.deinit();
+        if (self.pipeline_kv_cache_write) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
