@@ -44,28 +44,6 @@ pub const apple_silicon_profile = "apple-silicon";
 /// The complete list of ZINC-validated managed models available for download.
 pub const entries = [_]CatalogEntry{
     .{
-        .id = "qwen35-2b-q4k-m",
-        .display_name = "Qwen3.5 2B Q4_K_M",
-        .release_date = "2026-02-16",
-        .family = "qwen3.5",
-        .format = "gguf",
-        .quantization = "Q4_K_M",
-        .file_name = "Qwen3.5-2B-Q4_K_M.gguf",
-        .homepage_url = "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF",
-        .download_url = "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf?download=true",
-        .sha256 = "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
-        .size_bytes = 1_280_835_840,
-        .required_vram_bytes = 3 * 1024 * 1024 * 1024,
-        .default_context_length = 4096,
-        .recommended_for_chat = false,
-        .thinking_stable = false,
-        .status = .deprecated,
-        .tested_profiles = &.{
-            "amd-rdna4-32gb",
-            apple_silicon_profile,
-        },
-    },
-    .{
         .id = "qwen35-35b-a3b-q4k-xl",
         .display_name = "Qwen3.5 35B-A3B UD Q4_K_XL",
         .release_date = "2026-02-16",
@@ -296,10 +274,14 @@ test "find returns null for unknown model" {
     try std.testing.expect(find("nonexistent-model-id") == null);
 }
 
+test "removed qwen35 2B managed id is absent from catalog" {
+    try std.testing.expect(find("qwen35-2b-q4k-m") == null);
+}
+
 test "find returns known entry" {
-    const entry = find("qwen35-2b-q4k-m") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("Qwen3.5 2B Q4_K_M", entry.display_name);
-    try std.testing.expectEqualStrings("2026-02-16", entry.release_date);
+    const entry = find("qwen3-8b-q4k-m") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("Qwen3 8B Q4_K_M", entry.display_name);
+    try std.testing.expectEqualStrings("2025-04-29", entry.release_date);
 }
 
 test "profileForGpu maps RDNA4 32 GB boards" {
@@ -341,12 +323,7 @@ test "supportedOnCurrentGpu requires both tested profile and fit" {
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 20 * 1024 * 1024 * 1024));
 }
 
-test "small qwen35 2B is deprecated and qwen3 8B remains the recommended small chat model" {
-    const small = find("qwen35-2b-q4k-m") orelse return error.TestExpectedEqual;
-    try std.testing.expect(!small.thinking_stable);
-    try std.testing.expect(!small.recommended_for_chat);
-    try std.testing.expectEqual(CatalogStatus.deprecated, small.status);
-
+test "qwen3 8B remains the recommended small chat model" {
     const qwen3 = find("qwen3-8b-q4k-m") orelse return error.TestExpectedEqual;
     try std.testing.expect(qwen3.recommended_for_chat);
     try std.testing.expect(qwen3.thinking_stable);

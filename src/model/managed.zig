@@ -877,7 +877,7 @@ test "active selection roundtrip via explicit config path" {
         var close_file = file;
         close_file.close();
     }
-    try file.writeAll("{\"active_model_id\":\"qwen35-2b-q4k-m\",\"selected_at_unix\":42}");
+    try file.writeAll("{\"active_model_id\":\"qwen3-8b-q4k-m\",\"selected_at_unix\":42}");
 
     const opened = try std.fs.openFileAbsolute(config_path, .{});
     defer {
@@ -886,7 +886,7 @@ test "active selection roundtrip via explicit config path" {
     }
     const data = try opened.readToEndAlloc(std.testing.allocator, 256);
     defer std.testing.allocator.free(data);
-    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", extractJsonStringField(data, "active_model_id").?);
+    try std.testing.expectEqualStrings("qwen3-8b-q4k-m", extractJsonStringField(data, "active_model_id").?);
     try std.testing.expectEqual(@as(?i64, 42), extractJsonI64Field(data, "selected_at_unix"));
 }
 
@@ -964,7 +964,7 @@ test "removeInstalledModelAtPaths deletes known artifacts and empty dir" {
 
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root);
-    const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen35-2b-q4k-m" });
+    const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen3-8b-q4k-m" });
     defer std.testing.allocator.free(model_dir);
     try std.fs.cwd().makePath(model_dir);
 
@@ -1003,7 +1003,7 @@ test "removeInstalledModelAtPaths keeps non-empty directory" {
 
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root);
-    const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen35-2b-q4k-m" });
+    const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen3-8b-q4k-m" });
     defer std.testing.allocator.free(model_dir);
     try std.fs.cwd().makePath(model_dir);
 
@@ -1033,11 +1033,11 @@ test "removeInstalledModelAtPaths keeps non-empty directory" {
 test "active selection pointing to non-catalog model is detectable" {
     // Simulates the scenario where active-model.json references a model
     // that is no longer in the catalog.
-    const stale_id = "removed-model-q4k-m";
+    const stale_id = "qwen35-2b-q4k-m";
     try std.testing.expect(catalog.find(stale_id) == null);
 
     // A valid catalog model should be findable.
-    const valid_id = "qwen35-2b-q4k-m";
+    const valid_id = "qwen3-8b-q4k-m";
     try std.testing.expect(catalog.find(valid_id) != null);
 }
 
@@ -1057,7 +1057,7 @@ test "active selection roundtrip rejects non-catalog model on validate" {
             var close_file = file;
             close_file.close();
         }
-        try file.writeAll("{\"active_model_id\":\"removed-model-q4k-m\",\"selected_at_unix\":42}");
+        try file.writeAll("{\"active_model_id\":\"qwen35-2b-q4k-m\",\"selected_at_unix\":42}");
     }
 
     // Read back — the selection is parseable but points to a removed model.
@@ -1070,7 +1070,7 @@ test "active selection roundtrip rejects non-catalog model on validate" {
     defer std.testing.allocator.free(data);
 
     const model_id = extractJsonStringField(data, "active_model_id").?;
-    try std.testing.expectEqualStrings("removed-model-q4k-m", model_id);
+    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", model_id);
     // The model is not in the catalog — this is the check that should happen at startup.
     try std.testing.expect(catalog.find(model_id) == null);
 }

@@ -56,7 +56,6 @@ const REMOTE_DIR = "/root/zinc";
 
 const MODELS: Record<string, string> = {
   qwen35b: "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
-  qwen2b: "/root/models/Qwen3.5-2B-Q4_K_M.gguf",
   gemma3: "/root/models/gemma-3-12b-it-Q4_K_M.gguf",
 };
 
@@ -143,7 +142,7 @@ function parseArgs() {
     console.error("Options:");
     console.error("  --effort <1|2|3>         Optimization to run (required)");
     console.error("  --cycles N               Max cycles (default: 20)");
-    console.error("  --model NAME             Model: qwen35b, qwen2b, gemma3 (default: qwen35b)");
+    console.error("  --model NAME             Model: qwen35b, gemma3 (default: qwen35b)");
     console.error("  --agent claude|codex     AI agent to use (default: claude)");
     console.error("  --resume                 Resume from previous run (read history from log)");
     console.error("  --analyze                Print controller analysis from saved run state");

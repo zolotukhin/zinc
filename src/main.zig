@@ -1906,7 +1906,7 @@ test "parseArgs: defaults" {
 
 test "parseArgs: full args" {
     const args = [_][:0]const u8{
-        "zinc",           "-m",         "model.gguf",  "--model-id", "qwen35-2b-q4k-m",
+        "zinc",           "-m",         "model.gguf",  "--model-id", "qwen3-8b-q4k-m",
         "-p",             "9090",       "-d",          "1",          "-c",
         "8192",           "--parallel", "8",           "--prompt",   "hello",
         "--max-tokens",   "32",         "--chat",      "--kv-quant", "3",
@@ -1914,7 +1914,7 @@ test "parseArgs: full args" {
     };
     const config = try parseArgs(&args);
     try std.testing.expectEqualStrings("model.gguf", config.model_path.?);
-    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", config.model_id.?);
+    try std.testing.expectEqualStrings("qwen3-8b-q4k-m", config.model_id.?);
     try std.testing.expectEqual(@as(u16, 9090), config.port);
     try std.testing.expectEqual(@as(u32, 1), config.device_index);
     try std.testing.expectEqual(@as(u32, 8192), config.context_length);
@@ -2006,27 +2006,27 @@ test "parseArgs: managed model subcommands" {
     try std.testing.expectEqual(Command.model_list, list_config.command);
     try std.testing.expect(list_config.show_all_models);
 
-    const pull_args = [_][:0]const u8{ "zinc", "model", "pull", "qwen35-2b-q4k-m" };
+    const pull_args = [_][:0]const u8{ "zinc", "model", "pull", "qwen3-8b-q4k-m" };
     const pull_config = try parseArgs(&pull_args);
     try std.testing.expectEqual(Command.model_pull, pull_config.command);
-    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", pull_config.command_model_id.?);
+    try std.testing.expectEqualStrings("qwen3-8b-q4k-m", pull_config.command_model_id.?);
 
     const active_args = [_][:0]const u8{ "zinc", "model", "active" };
     const active_config = try parseArgs(&active_args);
     try std.testing.expectEqual(Command.model_active, active_config.command);
 
-    const rm_args = [_][:0]const u8{ "zinc", "model", "rm", "-f", "qwen35-2b-q4k-m" };
+    const rm_args = [_][:0]const u8{ "zinc", "model", "rm", "-f", "qwen3-8b-q4k-m" };
     const rm_config = try parseArgs(&rm_args);
     try std.testing.expectEqual(Command.model_rm, rm_config.command);
     try std.testing.expect(rm_config.command_force);
-    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", rm_config.command_model_id.?);
+    try std.testing.expectEqualStrings("qwen3-8b-q4k-m", rm_config.command_model_id.?);
 }
 
 test "parseArgs: chat command" {
-    const args = [_][:0]const u8{ "zinc", "chat", "--model-id", "qwen35-2b-q4k-m" };
+    const args = [_][:0]const u8{ "zinc", "chat", "--model-id", "qwen3-8b-q4k-m" };
     const config = try parseArgs(&args);
     try std.testing.expectEqual(Command.chat, config.command);
-    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", config.model_id.?);
+    try std.testing.expectEqualStrings("qwen3-8b-q4k-m", config.model_id.?);
     try std.testing.expectEqual(@as(u16, 9090), config.port);
 }
 
@@ -2074,14 +2074,14 @@ test "resolveCheckTarget uses raw gguf path when no managed id is provided" {
 
 test "resolveCheckTarget prefers managed model id over raw gguf path" {
     const config = Config{
-        .model_id = "qwen35-2b-q4k-m",
+        .model_id = "qwen3-8b-q4k-m",
         .model_path = "raw.gguf",
     };
     var target = try resolveCheckTarget(config, std.testing.allocator);
     defer target.deinit(std.testing.allocator);
 
     try std.testing.expect(target.managed_model != null);
-    try std.testing.expectEqualStrings("qwen35-2b-q4k-m", target.managed_model.?.id);
+    try std.testing.expectEqualStrings("qwen3-8b-q4k-m", target.managed_model.?.id);
     if (target.model_path) |path| {
         try std.testing.expect(!std.mem.eql(u8, path, "raw.gguf"));
     }

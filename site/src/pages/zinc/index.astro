@@ -53,7 +53,7 @@ const jsonLd = {
           name: 'What performance does ZINC achieve on RDNA4 and Apple Silicon?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode numbers are 37.95 tok/s on Qwen3.5-35B-A3B-UD-Q4_K_XL (26.3 ms/tok) and 26.71 tok/s on Qwen3.5-2B-Q4_K_M (37.4 ms/tok). On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.5-35B-A3B-UD-Q4_K_XL measures 35.61 tok/s in the Metal benchmark and about 34.74 tok/s through raw HTTP /v1/completions.',
+            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode number is 37.95 tok/s on Qwen3.5-35B-A3B-UD-Q4_K_XL (26.3 ms/tok). On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.5-35B-A3B-UD-Q4_K_XL measures 35.61 tok/s in the Metal benchmark and about 34.74 tok/s through raw HTTP /v1/completions.',
           },
         },
         {
@@ -138,7 +138,6 @@ const jsonLd = {
       </thead>
       <tbody>
         <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>CLI plain decode</td><td>37.95 tok/s (26.3 ms/tok)</td></tr>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-2B-Q4_K_M</td><td>CLI plain decode</td><td>26.71 tok/s (37.4 ms/tok)</td></tr>
       </tbody>
     </table>
 

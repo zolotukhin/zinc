@@ -109,14 +109,14 @@ export RADV_PERFTEST=coop_matrix
 ./zig-out/bin/zinc model list
 
 # Pull one managed model from the built-in catalog
-./zig-out/bin/zinc model pull qwen35-2b-q4k-m
+./zig-out/bin/zinc model pull qwen3-8b-q4k-m
 
 # Check the managed model before the first run
-./zig-out/bin/zinc --check --model-id qwen35-2b-q4k-m
+./zig-out/bin/zinc --check --model-id qwen3-8b-q4k-m
 
 # Run a prompt with that managed model
 ./zig-out/bin/zinc \\
-  --model-id qwen35-2b-q4k-m \\
+  --model-id qwen3-8b-q4k-m \\
   --prompt "The capital of France is"
 
 # If you already have a local GGUF file, use it directly instead
