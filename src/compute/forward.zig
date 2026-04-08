@@ -2179,7 +2179,7 @@ pub const InferenceEngine = struct {
         const cpu_record_start = if (self.profile_enabled) std.time.nanoTimestamp() else 0;
 
         // Begin single command buffer for all layers (Phase 3c batching)
-        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
         try self.decode_cmd.beginOneTime();
 
@@ -2484,7 +2484,7 @@ pub const InferenceEngine = struct {
                         v_vals[3],
                     });
 
-                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
                 }
@@ -2594,7 +2594,7 @@ pub const InferenceEngine = struct {
                         cpu_attn[3],
                     });
 
-                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
                 }
@@ -2717,7 +2717,7 @@ pub const InferenceEngine = struct {
                     }
 
                     // Restart command buffer
-                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
                 }
@@ -2944,7 +2944,7 @@ pub const InferenceEngine = struct {
                     topKSoftmax(router_logits, n_used, expert_ids[0..n_used], expert_weights[0..n_used]);
 
                     // New command buffer for expert FFN dispatch
-                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
 
@@ -3069,7 +3069,7 @@ pub const InferenceEngine = struct {
                         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
                         const gate_ptr: [*]const f32 = @ptrCast(@alignCast(self.router_staging.mapped.?));
                         const shexp_weight = 1.0 / (1.0 + @exp(-gate_ptr[0]));
-                        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                         try self.decode_cmd.reset();
                         try self.decode_cmd.begin();
                         try self.dispatchScaleAcc(
@@ -3197,7 +3197,7 @@ pub const InferenceEngine = struct {
                         if (down_max_diff < 0.1) @as([]const u8, "YES") else @as([]const u8, "NO"),
                     });
 
-                    _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                    if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                     try self.decode_cmd.reset();
                     try self.decode_cmd.begin();
                 }
@@ -3224,7 +3224,7 @@ pub const InferenceEngine = struct {
                 // Flush current batched cmd buffer for diagnostic readback
                 try self.decode_cmd.end();
                 try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-                _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                 try self.decode_cmd.reset();
                 try self.decode_cmd.begin();
                 const diag_rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
@@ -3303,7 +3303,7 @@ pub const InferenceEngine = struct {
                     diag_rms,
                 });
                 // Re-open cmd buffer for next layer (diagnostic closed it)
-                _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
                 try self.decode_cmd.reset();
                 try self.decode_cmd.begin();
             }
@@ -3461,7 +3461,7 @@ pub const InferenceEngine = struct {
         };
 
         if (pip.uses_push_descriptors) {
-            // For Q4K large M (LM head), use batch shader which has its own non-push layout
+            // For Q4K large M (LM head), use batch shader for better parallelism
             if (qt == .q4_k and M > 65536) {
                 if (self.dmmv.pipeline_q4k_batch) |*batch_pip| {
                     const batch_push = BatchDmmvPushConstants{
@@ -3469,10 +3469,14 @@ pub const InferenceEngine = struct {
                         .a_offset = a_offset, .x_offset = x_offset, .y_offset = y_offset,
                         .num_cols = 1,
                     };
-                    // Batch pipeline does NOT use push descriptors — allocate from shared pool
-                    const ds = try self.allocDescSet(batch_pip.descriptor_set_layout);
-                    self.writeDescSet3(ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, input_buf.handle, input_size, output_buf.handle, output_buf.size);
-                    self.decode_cmd.dispatchWithPush(batch_pip, ds, std.mem.asBytes(&batch_push), (M + 63) / 64, 1, 1);
+                    self.pushDispatch3(
+                        batch_pip,
+                        std.mem.asBytes(&batch_push),
+                        tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
+                        input_buf.handle, input_size,
+                        output_buf.handle, output_buf.size,
+                        (M + 63) / 64, 1, 1,
+                    );
                     return;
                 }
             }
@@ -3840,7 +3844,7 @@ pub const InferenceEngine = struct {
 
         @memcpy(out_staging[0..d_inner], ssm_output);
 
-        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
         try self.decode_cmd.begin();
 
@@ -3970,7 +3974,7 @@ pub const InferenceEngine = struct {
                 ptr[0], ptr[1], ptr[2], ptr[3], l2,
             });
             // Restart cmd buffer
-            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.begin();
         }
@@ -4347,7 +4351,7 @@ pub const InferenceEngine = struct {
         // ── STAGE 1: GPU embedding upload + readback hidden_buf ──
         try self.embedToken(bos_token);
 
-        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
         try self.decode_cmd.begin();
         {
@@ -4387,7 +4391,7 @@ pub const InferenceEngine = struct {
 
         // ── STAGE 2: RMS norm → readback norm_buf ──
         // hidden_buf still has the embedding (only read in stage 1 readback)
-        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
         try self.decode_cmd.begin();
         try self.dispatchRmsNorm(
@@ -4434,7 +4438,7 @@ pub const InferenceEngine = struct {
 
         // ── STAGE 3: LM head DMMV → readback logits ──
         // norm_buf still has the norm output (only read in stage 2 readback)
-        _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
         try self.decode_cmd.begin();
         try self.dispatchDmmv(lm_t, self.norm_buf, hidden_size, self.logits_buf, config.vocab_size, hidden_dim);
@@ -4517,7 +4521,7 @@ pub const InferenceEngine = struct {
             }
 
             // GPU: dispatch wqkv DMMV and readback first n_chk elements
-            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.begin();
             try self.dispatchDmmv(wt, self.norm_buf, hidden_size, self.logits_buf, conv_ch, hidden_dim);
@@ -4566,7 +4570,7 @@ pub const InferenceEngine = struct {
             }
 
             // GPU: dispatch gate_exps DMMV for expert 0 (offset=0)
-            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.begin();
             try self.dispatchDmmvWithOffset(gt, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim, 0);
@@ -4611,7 +4615,7 @@ pub const InferenceEngine = struct {
                 cpu_gate_r[row] = @floatCast(dot_d);
             }
 
-            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.begin();
             try self.dispatchDmmv(gt, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim);
@@ -4656,7 +4660,7 @@ pub const InferenceEngine = struct {
                 cpu_up_r[row] = @floatCast(dot_d);
             }
 
-            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.begin();
             try self.dispatchDmmv(ut, self.norm_buf, hidden_size, self.logits_buf, @intCast(inter_d), hidden_dim);
@@ -4701,7 +4705,7 @@ pub const InferenceEngine = struct {
                 cpu_q_r[row] = @floatCast(dot_d);
             }
 
-            _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.begin();
             try self.dispatchDmmv(qt, self.norm_buf, hidden_size, self.logits_buf, q_dim, hidden_dim);

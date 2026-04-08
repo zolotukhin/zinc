@@ -172,7 +172,7 @@ pub const DmmvDispatch = struct {
         // Batch DMMV for prefill: 3 bindings (A, X_batch, Y_batch), batch push constants
         const batch_push_size = @sizeOf(BatchDmmvPushConstants);
         const q4k_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_batch.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_batch = pipeline_mod.createFromSpirv(instance, q4k_batch_path, 3, batch_push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q4k_batch = pipeline_mod.createFromSpirvWithOptions(instance, q4k_batch_path, 3, batch_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K batch shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
