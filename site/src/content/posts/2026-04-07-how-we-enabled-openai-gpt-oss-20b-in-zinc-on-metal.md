@@ -13,6 +13,11 @@ tags:
 keywords:
   - OpenAI GPT-OSS 20B Metal
   - GPT-OSS Apple Silicon inference
+  - GPT-OSS Mac
+  - GPT-OSS MacBook
+  - GPT-OSS 20B MacBook Pro
+  - GPT-OSS 20B MacBook Air
+  - run GPT-OSS on Mac
   - ZINC GPT-OSS
   - q5_0 Metal shader
   - MXFP4 Metal shader
@@ -21,7 +26,14 @@ keywords:
   - Apple Silicon GGUF inference
   - Metal unified memory LLM
   - GPT-OSS GGUF Apple Silicon
-excerpt: "OpenAI's GPT-OSS 20B looked like a straightforward new GGUF to support in ZINC. It was not. The model forced our Metal backend to learn new quantization formats, new attention semantics, a new chat template, and a different MoE activation path. This is the technical story of how it came together on Apple Silicon."
+faqs:
+  - question: "Can GPT-OSS 20B run on a Mac or MacBook?"
+    answer: "Yes, on Apple Silicon Macs. In ZINC, GPT-OSS 20B is a supported managed model on the Metal backend. The practical floor in our docs is 16+ GB of unified memory, with 32 GB being a more comfortable target."
+  - question: "Does GPT-OSS 20B fit on a 16 GB MacBook?"
+    answer: "It can fit, but it is a tight deployment. The GGUF we use is about 11.67 GB on disk, and ZINC treats GPT-OSS 20B as a 14 GiB managed-memory target with a conservative 4096-token default context."
+  - question: "Why does ZINC not use GPT-OSS 20B's full 128k context on Mac today?"
+    answer: "Because the model's architectural maximum and a practical local deployment budget are different things. On Apple Silicon, ZINC currently prioritizes exact-fit, stable deployment and conservative context reservation over advertising the theoretical maximum context window."
+excerpt: "OpenAI's GPT-OSS 20B can run locally on Apple Silicon Macs in ZINC, but getting there was not just a loader change. The model forced our Metal backend to learn new quantization formats, new attention semantics, a new chat template, and a different MoE activation path."
 ---
 
 The easiest way to misunderstand GPT-OSS 20B is to look only at the file size.
@@ -31,6 +43,8 @@ On disk, the managed GGUF we ship in ZINC is about **11.67 GB**. In the catalog 
 That was the wrong mental model.
 
 What GPT-OSS 20B actually did was expose every shortcut we could no longer take. It brought in quantization formats our Vulkan path did not support, model-specific Mixture of Experts math, attention sinks, YaRN-scaled RoPE, Harmony-style chat formatting, and a memory-quality problem severe enough that we had to disable one of our normal Metal KV optimizations just for this model family. By the time it worked cleanly, GPT-OSS had become less of a new model entry and more of a forcing function for the Metal backend.
+
+If you are coming at this from the practical search side, the short answer is: **yes, GPT-OSS 20B can run on a Mac or MacBook when that Mac is Apple Silicon and has enough unified memory**. In ZINC, the current managed guidance is **16+ GB unified memory**, with a **4096-token default context** because we would rather ship a stable exact-fit deployment than pretend every Mac should reserve the model's full 128k architectural window.
 
 This post is the technical story of that bring-up. If you want the broader engine context first, read [Bringing ZINC to Apple Silicon](/blog/2026-04-01-bringing-zinc-to-apple-silicon), [How Mixture of Experts models work in ZINC](/blog/2026-04-04-how-moe-models-work-in-zinc), and [Every design decision behind ZINC](/blog/2026-04-03-every-design-decision-behind-zinc).
 
