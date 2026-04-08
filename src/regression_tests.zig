@@ -38,12 +38,13 @@ test "decode loop applies packed attention gate after flash attention" {
 
 test "decode loop keeps compute-to-transfer barrier before KV cache writes" {
     const src = @embedFile("compute/forward.zig");
-    try expectContainsNear(src, "// KV cache write", "self.decode_cmd.computeToTransferBarrier();", 220);
+    try expectContainsNear(src, "self.decode_cmd.computeAndTransferBarrier();", "vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle", 500);
+    try expectContains(src, "self.decode_cmd.transferToComputeBarrier();");
 }
 
 test "decode loop keeps layer-boundary compute barrier after FFN residual" {
     const src = @embedFile("compute/forward.zig");
-    try expectContainsNear(src, "The next layer immediately reads hidden_buf as its input.", "self.decode_cmd.computeBarrier();", 120);
+    try expectContainsNear(src, "// FFN residual: hidden_buf += down_buf", "self.decode_cmd.computeBarrier();", 1200);
 }
 
 test "prefill resets per-request state before processing prompt tokens" {
@@ -193,7 +194,8 @@ test "GPU SSM path enabled when all three shaders are available" {
 test "Vulkan FFN norm prefers ffn_norm over post_attention_norm" {
     // Same fix as Metal — Vulkan must also prefer ffn_norm.weight first.
     const src = @embedFile("compute/forward.zig");
-    try expectContainsNear(src, "ffn_norm_tensor", "findLayerTensor(layer, \"ffn_norm.weight\")", 120);
+    try expectContainsNear(src, "FFN norm: prefer ffn_norm.weight", "const ffn_norm_tensor = lt.ffn_norm orelse", 500);
+    try expectContains(src, "lt.post_attention_norm orelse return error.TensorNotFound;");
 }
 
 test "Vulkan Gemma embedding scaling matches Metal" {
