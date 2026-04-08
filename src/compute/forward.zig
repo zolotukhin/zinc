@@ -1073,8 +1073,10 @@ pub const InferenceEngine = struct {
             .pPoolSizes = &pool_sizes,
         };
         var shared_pool: vk.c.VkDescriptorPool = null;
-        const pool_result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &shared_pool);
-        if (pool_result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        if (instance.push_descriptor_fn == null) {
+            const pool_result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &shared_pool);
+            if (pool_result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        }
         errdefer vk.c.vkDestroyDescriptorPool(instance.device, shared_pool, null);
 
         // Build tensor name → pointer hash map for O(1) lookup (replaces O(n) linear scan

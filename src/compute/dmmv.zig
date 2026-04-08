@@ -112,8 +112,10 @@ pub const DmmvDispatch = struct {
             .pPoolSizes = &pool_size,
         };
         var descriptor_pool: vk.c.VkDescriptorPool = null;
-        const result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &descriptor_pool);
-        if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        if (instance.push_descriptor_fn == null) {
+            const result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &descriptor_pool);
+            if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        }
 
         // Load pipelines (3 bindings: A matrix, x vector, y output)
         const push_size = @sizeOf(DmmvPushConstants);
@@ -181,7 +183,7 @@ pub const DmmvDispatch = struct {
         // Integer dot product (IDP) DMMV: Q4_K × Q8_1 with dotPacked4x8EXT
         const IdpPush = extern struct { M: u32, K: u32, a_offset: u32, b_offset: u32, y_offset: u32 };
         const q4k_idp_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_idp.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_idp = pipeline_mod.createFromSpirv(instance, q4k_idp_path, 3, @sizeOf(IdpPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_q4k_idp = pipeline_mod.createFromSpirvWithOptions(instance, q4k_idp_path, 3, @sizeOf(IdpPush), &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K IDP shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -189,7 +191,7 @@ pub const DmmvDispatch = struct {
         // Q8_1 quantization shader: 2 bindings (f32 input, Q8_1 output)
         const Q8Push = extern struct { K: u32, x_offset: u32 };
         const q8_path2 = std.fmt.bufPrint(&path_buf, "{s}/quantize_q8_1.spv", .{shader_dir}) catch unreachable;
-        const pipeline_quantize_q8_1 = pipeline_mod.createFromSpirv(instance, q8_path2, 2, @sizeOf(Q8Push), &.{}, allocator) catch |err| blk: {
+        const pipeline_quantize_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path2, 2, @sizeOf(Q8Push), &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("quantize_q8_1 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

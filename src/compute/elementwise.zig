@@ -171,8 +171,10 @@ pub const ElementwiseDispatch = struct {
             .pPoolSizes = &pool_size,
         };
         var descriptor_pool: vk.c.VkDescriptorPool = null;
-        const result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &descriptor_pool);
-        if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        if (instance.push_descriptor_fn == null) {
+            const result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &descriptor_pool);
+            if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        }
 
         var path_buf: [512]u8 = undefined;
         const push_options = pipeline_mod.PipelineOptions{
@@ -200,7 +202,7 @@ pub const ElementwiseDispatch = struct {
 
         // GEGLU: 2 inputs (gate, up) + 1 output = 3 bindings (same layout as SwiGLU)
         const geglu_path = std.fmt.bufPrint(&path_buf, "{s}/geglu.spv", .{shader_dir}) catch unreachable;
-        const pipeline_geglu = pipeline_mod.createFromSpirv(instance, geglu_path, 3, @sizeOf(SwigluPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_geglu = pipeline_mod.createFromSpirvWithOptions(instance, geglu_path, 3, @sizeOf(SwigluPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("geglu shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -214,7 +216,7 @@ pub const ElementwiseDispatch = struct {
 
         // deinterleave: 1 input + 2 outputs = 3 bindings
         const deinterleave_path = std.fmt.bufPrint(&path_buf, "{s}/deinterleave.spv", .{shader_dir}) catch unreachable;
-        const pipeline_deinterleave = pipeline_mod.createFromSpirv(instance, deinterleave_path, 3, @sizeOf(DeinterleavePush), &.{}, allocator) catch |err| blk: {
+        const pipeline_deinterleave = pipeline_mod.createFromSpirvWithOptions(instance, deinterleave_path, 3, @sizeOf(DeinterleavePush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("deinterleave shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -228,7 +230,7 @@ pub const ElementwiseDispatch = struct {
 
         // vadd: 2 inputs + 1 output = 3 bindings
         const vadd_path = std.fmt.bufPrint(&path_buf, "{s}/vadd.spv", .{shader_dir}) catch unreachable;
-        const pipeline_vadd = pipeline_mod.createFromSpirv(instance, vadd_path, 3, @sizeOf(VaddPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_vadd = pipeline_mod.createFromSpirvWithOptions(instance, vadd_path, 3, @sizeOf(VaddPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("vadd shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -285,7 +287,7 @@ pub const ElementwiseDispatch = struct {
         // softcap: in-place logit softcapping, 1 binding (logits buffer)
         const SoftcapPush = extern struct { N: u32, softcap_bits: u32 };
         const softcap_path = std.fmt.bufPrint(&path_buf, "{s}/softcap.spv", .{shader_dir}) catch unreachable;
-        const pipeline_softcap = pipeline_mod.createFromSpirv(instance, softcap_path, 1, @sizeOf(SoftcapPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_softcap = pipeline_mod.createFromSpirvWithOptions(instance, softcap_path, 1, @sizeOf(SoftcapPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("softcap shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

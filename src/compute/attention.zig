@@ -55,8 +55,10 @@ pub const AttentionDispatch = struct {
             .pPoolSizes = &pool_size,
         };
         var descriptor_pool: vk.c.VkDescriptorPool = null;
-        const result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &descriptor_pool);
-        if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        if (instance.push_descriptor_fn == null) {
+            const result = vk.c.vkCreateDescriptorPool(instance.device, &pool_info, null, &descriptor_pool);
+            if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
+        }
 
         var path_buf: [512]u8 = undefined;
         const wave64_push_options = pipeline_mod.PipelineOptions{
