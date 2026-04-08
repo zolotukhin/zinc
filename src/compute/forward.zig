@@ -562,6 +562,8 @@ pub const InferenceEngine = struct {
     router_output_buf: Buffer, // GPU-side expert_ids[k] u32 + expert_weights[k] f32 for fast MoE routing
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
+    // Pre-built tensor name → pointer map (O(1) lookup, replaces O(n) linear scan)
+    tensor_map: std.StringHashMap(*const LoadedTensor),
     /// Vulkan instance.
     instance: *const Instance,
     /// Allocator for owned resources.
@@ -1021,8 +1023,17 @@ pub const InferenceEngine = struct {
         if (pool_result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
         errdefer vk.c.vkDestroyDescriptorPool(instance.device, shared_pool, null);
 
-        log.debug("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}", .{
-            decode_graph.nodeCount(), config.hidden_dim, config.vocab_size,
+        // Build tensor name → pointer hash map for O(1) lookup (replaces O(n) linear scan
+        // in findLayerTensor, called ~960 times per token across 64 layers).
+        var tensor_map = std.StringHashMap(*const LoadedTensor).init(allocator);
+        errdefer tensor_map.deinit();
+        try tensor_map.ensureTotalCapacity(@intCast(model.tensors.items.len));
+        for (model.tensors.items) |*t| {
+            tensor_map.putAssumeCapacity(t.info.name, t);
+        }
+
+        log.debug("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}, tensor_map={d}", .{
+            decode_graph.nodeCount(), config.hidden_dim, config.vocab_size, tensor_map.count(),
         });
 
         return InferenceEngine{
@@ -1075,6 +1086,7 @@ pub const InferenceEngine = struct {
             .gpu_ssm_states = gpu_ssm_states,
             .router_output_buf = router_output_buf,
             .shared_pool = shared_pool,
+            .tensor_map = tensor_map,
             .instance = instance,
             .allocator = allocator,
             .max_context_tokens = max_ctx,
@@ -1427,7 +1439,7 @@ pub const InferenceEngine = struct {
     fn findLayerTensor(self: *const InferenceEngine, layer: u32, name: []const u8) ?*const LoadedTensor {
         var buf: [128]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "blk.{d}.{s}", .{ layer, name }) catch return null;
-        return findLoadedTensor(self.model, key);
+        return self.tensor_map.get(key);
     }
 
     // -----------------------------------------------------------------------
@@ -1979,7 +1991,7 @@ pub const InferenceEngine = struct {
         const hidden_dim = self.model.config.hidden_dim;
         const safe_id = @min(token_id, self.model.config.vocab_size -| 1);
 
-        const embd = findLoadedTensor(self.model, "token_embd.weight") orelse {
+        const embd = self.tensor_map.get("token_embd.weight") orelse {
             log.err("token_embd.weight not found", .{});
             return error.TensorNotFound;
         };
@@ -2049,7 +2061,7 @@ pub const InferenceEngine = struct {
         // Begin single command buffer for all layers (Phase 3c batching)
         _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
-        try self.decode_cmd.begin();
+        try self.decode_cmd.beginOneTime();
 
         // Reset profiling timestamps for this token
         self.resetTimestamps();
@@ -3087,9 +3099,9 @@ pub const InferenceEngine = struct {
                 if (hidden_dim <= 8192) {
                     if (self.model.mmap_data) |m| {
                         const rms_inv: f32 = @floatCast(1.0 / @sqrt(diag_sum_sq / @as(f64, @floatFromInt(hidden_dim)) + rms_norm_eps));
-                        const norm_t = findLoadedTensor(self.model, "output_norm.weight");
-                        const lm_t = findLoadedTensor(self.model, "output.weight") orelse
-                            findLoadedTensor(self.model, "token_embd.weight");
+                        const norm_t = self.tensor_map.get("output_norm.weight");
+                        const lm_t = self.tensor_map.get("output.weight") orelse
+                            self.tensor_map.get("token_embd.weight");
                         if (norm_t != null and lm_t != null) {
                             const norm_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + norm_t.?.info.offset);
                             const lm_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + lm_t.?.info.offset);
@@ -3170,7 +3182,7 @@ pub const InferenceEngine = struct {
         const final_tail_phase = self.beginProfilePhase();
 
         // Final RMS norm: hidden_buf → norm_buf
-        const final_norm_tensor = findLoadedTensor(self.model, "output_norm.weight") orelse return error.TensorNotFound;
+        const final_norm_tensor = self.tensor_map.get("output_norm.weight") orelse return error.TensorNotFound;
         try self.dispatchRmsNorm(
             self.hidden_buf.handle,
             hidden_size,
@@ -3185,8 +3197,8 @@ pub const InferenceEngine = struct {
         self.decode_cmd.computeBarrier();
 
         // LM head: output.weight × norm_buf → logits_buf
-        const lm_tensor = findLoadedTensor(self.model, "output.weight") orelse
-            findLoadedTensor(self.model, "token_embd.weight") orelse return error.TensorNotFound;
+        const lm_tensor = self.tensor_map.get("output.weight") orelse
+            self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
         try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
 
         const use_gpu_argmax = collect_output and self.argmax.pipeline != null and self.argmax_descriptor_set != null;
@@ -4060,14 +4072,14 @@ pub const InferenceEngine = struct {
 
         // ── CPU reference ──
         // 1. Dequantize BOS embedding
-        const embd_t = findLoadedTensor(self.model, "token_embd.weight") orelse return;
+        const embd_t = self.tensor_map.get("token_embd.weight") orelse return;
         const embd_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd_t.info.offset);
         var cpu_embed_buf: [8192]f32 = undefined;
         const cpu_embed = cpu_embed_buf[0..hidden_dim];
         dequantRow(mmap[embd_off..], bos_token, hidden_dim, embd_t.info.type_, cpu_embed);
 
         // 2. CPU RMS norm with output_norm.weight
-        const norm_t = findLoadedTensor(self.model, "output_norm.weight") orelse return;
+        const norm_t = self.tensor_map.get("output_norm.weight") orelse return;
         const norm_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + norm_t.info.offset);
         var cpu_nw_buf: [8192]f32 = undefined;
         const cpu_nw = cpu_nw_buf[0..hidden_dim];
@@ -4082,8 +4094,8 @@ pub const InferenceEngine = struct {
         for (0..hidden_dim) |i| cpu_normed[i] = cpu_nw[i] * (cpu_embed[i] * rms_inv);
 
         // 3. CPU dot products for first 10 logits
-        const lm_t = findLoadedTensor(self.model, "output.weight") orelse
-            findLoadedTensor(self.model, "token_embd.weight") orelse return;
+        const lm_t = self.tensor_map.get("output.weight") orelse
+            self.tensor_map.get("token_embd.weight") orelse return;
         const lm_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + lm_t.info.offset);
         const lm_data = mmap[lm_off..];
 
@@ -4517,6 +4529,7 @@ pub const InferenceEngine = struct {
     pub fn deinit(self: *InferenceEngine) void {
         if (self.timestamp_query_pool != null) vk.c.vkDestroyQueryPool(self.instance.device, self.timestamp_query_pool, null);
         vk.c.vkDestroyDescriptorPool(self.instance.device, self.shared_pool, null);
+        self.tensor_map.deinit();
         // SSM state
         for (self.ssm_conv_states) |s| if (s.len > 0) self.allocator.free(s);
         for (self.ssm_states) |s| if (s.len > 0) self.allocator.free(s);
