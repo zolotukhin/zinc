@@ -12,7 +12,7 @@ const CommandBuffer = @import("../vulkan/command.zig").CommandBuffer;
 const log = std.log.scoped(.attention);
 
 /// Push constants for flash attention shader.
-const FlashAttnPush = extern struct {
+pub const FlashAttnPush = extern struct {
     head_dim: u32,
     n_heads: u32,
     n_kv_heads: u32,
@@ -59,14 +59,15 @@ pub const AttentionDispatch = struct {
         if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
 
         var path_buf: [512]u8 = undefined;
-        const wave64_options = pipeline_mod.PipelineOptions{
+        const wave64_push_options = pipeline_mod.PipelineOptions{
             .required_subgroup_size = 64,
             .require_full_subgroups = true,
+            .push_descriptors = instance.push_descriptor_fn != null,
         };
 
         // Flash attention: 5 bindings (Q, K cache, V cache, page table, output)
         const attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
-        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, attn_path, 5, @sizeOf(FlashAttnPush), &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, attn_path, 5, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
             log.warn("flash_attn shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

@@ -17,7 +17,11 @@ const ModelConfig = loader.ModelConfig;
 const LoadedTensor = loader.LoadedTensor;
 const architecture = @import("../model/architecture.zig");
 const Graph = @import("graph.zig").Graph;
-const DmmvDispatch = @import("dmmv.zig").DmmvDispatch;
+const dmmv_mod = @import("dmmv.zig");
+const DmmvDispatch = dmmv_mod.DmmvDispatch;
+const DmmvPushConstants = dmmv_mod.DmmvPushConstants;
+const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
+const MoeDmmvPushConstants = dmmv_mod.MoeDmmvPushConstants;
 const elementwise_mod = @import("elementwise.zig");
 const ElementwiseDispatch = elementwise_mod.ElementwiseDispatch;
 const RmsNormPush = elementwise_mod.RmsNormPush;
@@ -27,7 +31,12 @@ const ScaleAccPush = elementwise_mod.ScaleAccPush;
 const RopePush = elementwise_mod.RopePush;
 const SoftmaxTopkPush = elementwise_mod.SoftmaxTopkPush;
 const MoeWeightedAccPush = elementwise_mod.MoeWeightedAccPush;
-const AttentionDispatch = @import("attention.zig").AttentionDispatch;
+const SsmConv1dPush = elementwise_mod.SsmConv1dPush;
+const SsmDeltaNetPush = elementwise_mod.SsmDeltaNetPush;
+const SsmGatedNormPush = elementwise_mod.SsmGatedNormPush;
+const attn_mod = @import("attention.zig");
+const AttentionDispatch = attn_mod.AttentionDispatch;
+const FlashAttnPush = attn_mod.FlashAttnPush;
 const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 const memory_plan = @import("../gpu/memory_plan.zig");
@@ -1669,6 +1678,117 @@ pub const InferenceEngine = struct {
         );
     }
 
+    fn pushDispatch4(
+        self: *InferenceEngine,
+        pip: *const Pipeline,
+        push_data: []const u8,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
+        wg_x: u32,
+        wg_y: u32,
+        wg_z: u32,
+    ) void {
+        const infos = [4]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+            .{ .buffer = buf1, .offset = 0, .range = size1 },
+            .{ .buffer = buf2, .offset = 0, .range = size2 },
+            .{ .buffer = buf3, .offset = 0, .range = size3 },
+        };
+        self.decode_cmd.pushDescAndDispatch(
+            pip,
+            self.instance.push_descriptor_fn,
+            infos[0..],
+            push_data,
+            wg_x,
+            wg_y,
+            wg_z,
+        );
+    }
+
+    fn pushDispatch5(
+        self: *InferenceEngine,
+        pip: *const Pipeline,
+        push_data: []const u8,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
+        buf4: vk.c.VkBuffer,
+        size4: vk.c.VkDeviceSize,
+        wg_x: u32,
+        wg_y: u32,
+        wg_z: u32,
+    ) void {
+        const infos = [5]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+            .{ .buffer = buf1, .offset = 0, .range = size1 },
+            .{ .buffer = buf2, .offset = 0, .range = size2 },
+            .{ .buffer = buf3, .offset = 0, .range = size3 },
+            .{ .buffer = buf4, .offset = 0, .range = size4 },
+        };
+        self.decode_cmd.pushDescAndDispatch(
+            pip,
+            self.instance.push_descriptor_fn,
+            infos[0..],
+            push_data,
+            wg_x,
+            wg_y,
+            wg_z,
+        );
+    }
+
+    fn pushDispatch7(
+        self: *InferenceEngine,
+        pip: *const Pipeline,
+        push_data: []const u8,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
+        buf4: vk.c.VkBuffer,
+        size4: vk.c.VkDeviceSize,
+        buf5: vk.c.VkBuffer,
+        size5: vk.c.VkDeviceSize,
+        buf6: vk.c.VkBuffer,
+        size6: vk.c.VkDeviceSize,
+        wg_x: u32,
+        wg_y: u32,
+        wg_z: u32,
+    ) void {
+        const infos = [7]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+            .{ .buffer = buf1, .offset = 0, .range = size1 },
+            .{ .buffer = buf2, .offset = 0, .range = size2 },
+            .{ .buffer = buf3, .offset = 0, .range = size3 },
+            .{ .buffer = buf4, .offset = 0, .range = size4 },
+            .{ .buffer = buf5, .offset = 0, .range = size5 },
+            .{ .buffer = buf6, .offset = 0, .range = size6 },
+        };
+        self.decode_cmd.pushDescAndDispatch(
+            pip,
+            self.instance.push_descriptor_fn,
+            infos[0..],
+            push_data,
+            wg_x,
+            wg_y,
+            wg_z,
+        );
+    }
+
     fn dispatchRmsNorm(
         self: *InferenceEngine,
         input_buf: vk.c.VkBuffer,
@@ -2297,9 +2417,21 @@ pub const InferenceEngine = struct {
 
                 // Flash attention
                 if (self.attention.pipeline) |*pip| {
-                    const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
-                    self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
-                    try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale);
+                    if (pip.uses_push_descriptors) {
+                        const push = FlashAttnPush{
+                            .head_dim = config.head_dim,
+                            .n_heads = config.n_heads,
+                            .n_kv_heads = config.n_kv_heads,
+                            .seq_len = state.position + 1,
+                            .page_size = kv_page_size_tokens,
+                            .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
+                        };
+                        self.pushDispatch5(pip, std.mem.asBytes(&push), self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size, config.n_heads, 1, 1);
+                    } else {
+                        const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
+                        try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale);
+                    }
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -2698,17 +2830,29 @@ pub const InferenceEngine = struct {
                     {
                         const qt = gate_exps.info.type_;
                         const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
-                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet4(ds, gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
-                        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                        if (pip.uses_push_descriptors) {
+                            const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
+                            const wg_x: u32 = switch (qt) { .q8_0, .f16 => (inter_dim + 1) / 2, else => (inter_dim + 63) / 64 };
+                            self.pushDispatch4(pip, std.mem.asBytes(&push), gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
+                        } else {
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet4(ds, gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                            try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                        }
                     }
                     // up DMMV: ALL experts at once
                     {
                         const qt = up_exps.info.type_;
                         const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
-                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet4(ds, up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
-                        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                        if (pip.uses_push_descriptors) {
+                            const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
+                            const wg_x: u32 = switch (qt) { .q8_0, .f16 => (inter_dim + 1) / 2, else => (inter_dim + 63) / 64 };
+                            self.pushDispatch4(pip, std.mem.asBytes(&push), up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
+                        } else {
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet4(ds, up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                            try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                        }
                     }
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_gate_up, moe_gate_up_phase);
@@ -2733,9 +2877,15 @@ pub const InferenceEngine = struct {
                     {
                         const qt = down_exps.info.type_;
                         const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
-                        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                        self.writeDescSet4(ds, down_exps.gpu_buffer.handle, down_exps.gpu_buffer.size, self.swiglu_buf.handle, self.swiglu_buf.size, self.down_buf.handle, self.down_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
-                        try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, hidden_dim, inter_dim, expert_down_row_bytes, n_used, inter_dim, 0, 0);
+                        if (pip.uses_push_descriptors) {
+                            const push = MoeDmmvPushConstants{ .M = hidden_dim, .K = inter_dim, .expert_stride = expert_down_row_bytes, .x_expert_stride = inter_dim, .x_offset = 0, .y_offset = 0 };
+                            const wg_x: u32 = switch (qt) { .q8_0, .f16 => (hidden_dim + 1) / 2, else => (hidden_dim + 63) / 64 };
+                            self.pushDispatch4(pip, std.mem.asBytes(&push), down_exps.gpu_buffer.handle, down_exps.gpu_buffer.size, self.swiglu_buf.handle, self.swiglu_buf.size, self.down_buf.handle, self.down_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
+                        } else {
+                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                            self.writeDescSet4(ds, down_exps.gpu_buffer.handle, down_exps.gpu_buffer.size, self.swiglu_buf.handle, self.swiglu_buf.size, self.down_buf.handle, self.down_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                            try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, hidden_dim, inter_dim, expert_down_row_bytes, n_used, inter_dim, 0, 0);
+                        }
                     }
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_down, moe_down_phase);
@@ -3271,14 +3421,7 @@ pub const InferenceEngine = struct {
         M: u32,
         K: u32,
     ) !void {
-        const qt = tensor.info.type_;
-        const pip = self.dmmv.pipelineForType(qt) orelse {
-            log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(qt), tensor.info.name });
-            return error.UnsupportedQuantType;
-        };
-        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-        self.writeDescSet3(ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, input_buf.handle, input_size, output_buf.handle, output_buf.size);
-        try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, 0, 0, 0);
+        return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0);
     }
 
     /// Dispatch a DMMV with byte offset into stacked weight tensor (for MoE experts).
@@ -3295,14 +3438,71 @@ pub const InferenceEngine = struct {
         /// Weight buffer byte offset.
         a_offset: u32,
     ) !void {
+        return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, a_offset, 0, 0);
+    }
+
+    /// Inner dispatch for DMMV — push-descriptor or pool-allocated path.
+    fn dispatchDmmvInner(
+        self: *InferenceEngine,
+        tensor: *const LoadedTensor,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
+        output_buf: Buffer,
+        M: u32,
+        K: u32,
+        a_offset: u32,
+        x_offset: u32,
+        y_offset: u32,
+    ) !void {
         const qt = tensor.info.type_;
         const pip = self.dmmv.pipelineForType(qt) orelse {
             log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(qt), tensor.info.name });
             return error.UnsupportedQuantType;
         };
+
+        if (pip.uses_push_descriptors) {
+            // For Q4K large M (LM head), use batch shader which has its own non-push layout
+            if (qt == .q4_k and M > 65536) {
+                if (self.dmmv.pipeline_q4k_batch) |*batch_pip| {
+                    const batch_push = BatchDmmvPushConstants{
+                        .M = M, .K = K,
+                        .a_offset = a_offset, .x_offset = x_offset, .y_offset = y_offset,
+                        .num_cols = 1,
+                    };
+                    // Batch pipeline does NOT use push descriptors — allocate from shared pool
+                    const ds = try self.allocDescSet(batch_pip.descriptor_set_layout);
+                    self.writeDescSet3(ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, input_buf.handle, input_size, output_buf.handle, output_buf.size);
+                    self.decode_cmd.dispatchWithPush(batch_pip, ds, std.mem.asBytes(&batch_push), (M + 63) / 64, 1, 1);
+                    return;
+                }
+            }
+
+            const push = DmmvPushConstants{
+                .M = M, .K = K,
+                .a_offset = a_offset, .x_offset = x_offset, .y_offset = y_offset,
+            };
+            // Workgroup calculation (mirrors dmmv.recordDispatch)
+            const wg_x: u32 = switch (qt) {
+                .q4_k, .q5_k, .q6_k => (M + 1) / 2,
+                .q8_0, .f16 => (M + 1) / 2,
+                .f32 => M,
+                else => (M + 63) / 64,
+            };
+            self.pushDispatch3(
+                pip,
+                std.mem.asBytes(&push),
+                tensor.gpu_buffer.handle, tensor.gpu_buffer.size,
+                input_buf.handle, input_size,
+                output_buf.handle, output_buf.size,
+                wg_x, 1, 1,
+            );
+            return;
+        }
+
+        // Fallback: pool-allocated descriptor set
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet3(ds, tensor.gpu_buffer.handle, tensor.gpu_buffer.size, input_buf.handle, input_size, output_buf.handle, output_buf.size);
-        try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, a_offset, 0, 0);
+        try self.dmmv.recordDispatch(&self.decode_cmd, qt, ds, M, K, a_offset, x_offset, y_offset);
     }
 
     /// Dispatch a MoE DMMV — expert offset computed on GPU from routing buffer.
@@ -3720,19 +3920,28 @@ pub const InferenceEngine = struct {
         const ssm_conv_phase = self.beginProfilePhase();
         {
             const pip = &(self.elementwise.pipeline_ssm_conv1d orelse return error.ShaderNotLoaded);
-            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-            self.writeDescSet4(
-                ds,
-                self.attn_out_buf.handle,
-                qkv_bytes, // binding 0: current_input
-                conv_tensor.gpu_buffer.handle,
-                conv_tensor.gpu_buffer.size, // binding 1: conv kernel
-                self.gpu_ssm_conv_states[layer_idx].handle,
-                self.gpu_ssm_conv_states[layer_idx].size, // binding 2: state
-                self.swiglu_buf.handle,
-                qkv_bytes, // binding 3: output
-            );
-            try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16);
+            if (pip.uses_push_descriptors) {
+                const push = SsmConv1dPush{
+                    .conv_channels = conv_channels,
+                    .d_conv = d_conv,
+                    .kernel_is_f16 = if (conv_kernel_is_f16) 1 else 0,
+                };
+                self.pushDispatch4(pip, std.mem.asBytes(&push), self.attn_out_buf.handle, qkv_bytes, conv_tensor.gpu_buffer.handle, conv_tensor.gpu_buffer.size, self.gpu_ssm_conv_states[layer_idx].handle, self.gpu_ssm_conv_states[layer_idx].size, self.swiglu_buf.handle, qkv_bytes, (conv_channels + 63) / 64, 1, 1);
+            } else {
+                const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                self.writeDescSet4(
+                    ds,
+                    self.attn_out_buf.handle,
+                    qkv_bytes, // binding 0: current_input
+                    conv_tensor.gpu_buffer.handle,
+                    conv_tensor.gpu_buffer.size, // binding 1: conv kernel
+                    self.gpu_ssm_conv_states[layer_idx].handle,
+                    self.gpu_ssm_conv_states[layer_idx].size, // binding 2: state
+                    self.swiglu_buf.handle,
+                    qkv_bytes, // binding 3: output
+                );
+                try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16);
+            }
         }
         self.decode_cmd.computeBarrier();
         self.endProfilePhase(.ssm_conv, ssm_conv_phase);
@@ -3779,26 +3988,7 @@ pub const InferenceEngine = struct {
         const ssm_delta_phase = self.beginProfilePhase();
         {
             const pip = &(self.elementwise.pipeline_ssm_delta_net orelse return error.ShaderNotLoaded);
-            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-            // (ElementwiseDispatch imported at file scope)
-            self.writeDescSet7(
-                ds,
-                self.swiglu_buf.handle,
-                qkv_bytes, // binding 0: conv_out
-                dt_bias_buf,
-                dt_bias_size, // binding 1: dt_bias
-                self.router_logits_buf.handle,
-                ab_bytes, // binding 2: alpha
-                self.down_buf.handle,
-                ab_bytes, // binding 3: beta
-                ssm_a_buf,
-                ssm_a_size, // binding 4: ssm_a
-                self.gpu_ssm_states[layer_idx].handle,
-                self.gpu_ssm_states[layer_idx].size, // binding 5: state
-                self.attn_out_buf.handle,
-                z_bytes, // binding 6: output (d_inner floats)
-            );
-            const push = @import("elementwise.zig").SsmDeltaNetPush{
+            const push = SsmDeltaNetPush{
                 .d_inner = d_inner,
                 .dt_rank = dt_rank,
                 .head_v_dim = head_v_dim,
@@ -3809,7 +3999,30 @@ pub const InferenceEngine = struct {
                 .has_dt_bias = if (dt_bias_tensor != null) 1 else 0,
                 .has_ssm_a = if (ssm_a_tensor != null) 1 else 0,
             };
-            try self.elementwise.recordSsmDeltaNet(&self.decode_cmd, ds, push);
+            if (pip.uses_push_descriptors) {
+                const row_blocks = (head_v_dim + 7) / 8;
+                self.pushDispatch7(pip, std.mem.asBytes(&push), self.swiglu_buf.handle, qkv_bytes, dt_bias_buf, dt_bias_size, self.router_logits_buf.handle, ab_bytes, self.down_buf.handle, ab_bytes, ssm_a_buf, ssm_a_size, self.gpu_ssm_states[layer_idx].handle, self.gpu_ssm_states[layer_idx].size, self.attn_out_buf.handle, z_bytes, dt_rank, row_blocks, 1);
+            } else {
+                const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                self.writeDescSet7(
+                    ds,
+                    self.swiglu_buf.handle,
+                    qkv_bytes, // binding 0: conv_out
+                    dt_bias_buf,
+                    dt_bias_size, // binding 1: dt_bias
+                    self.router_logits_buf.handle,
+                    ab_bytes, // binding 2: alpha
+                    self.down_buf.handle,
+                    ab_bytes, // binding 3: beta
+                    ssm_a_buf,
+                    ssm_a_size, // binding 4: ssm_a
+                    self.gpu_ssm_states[layer_idx].handle,
+                    self.gpu_ssm_states[layer_idx].size, // binding 5: state
+                    self.attn_out_buf.handle,
+                    z_bytes, // binding 6: output (d_inner floats)
+                );
+                try self.elementwise.recordSsmDeltaNet(&self.decode_cmd, ds, push);
+            }
         }
         self.decode_cmd.computeBarrier();
         self.endProfilePhase(.ssm_delta, ssm_delta_phase);
@@ -3825,27 +4038,30 @@ pub const InferenceEngine = struct {
         const ssm_gated_norm_phase = self.beginProfilePhase();
         {
             const pip = &(self.elementwise.pipeline_ssm_gated_norm orelse return error.ShaderNotLoaded);
-            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-            // (ElementwiseDispatch imported at file scope)
-            self.writeDescSet4(
-                ds,
-                self.attn_out_buf.handle,
-                z_bytes, // binding 0: delta_net output
-                self.gate_buf.handle,
-                z_bytes, // binding 1: z_gate
-                norm_buf_handle,
-                norm_buf_size, // binding 2: norm weights
-                self.swiglu_buf.handle,
-                z_bytes, // binding 3: output
-            );
-            const push = @import("elementwise.zig").SsmGatedNormPush{
+            const push = SsmGatedNormPush{
                 .d_inner = d_inner,
                 .dt_rank = dt_rank,
                 .head_v_dim = head_v_dim,
                 .d_state = d_state,
                 .norm_per_head = if (norm_per_head) 1 else 0,
             };
-            try self.elementwise.recordSsmGatedNorm(&self.decode_cmd, ds, push);
+            if (pip.uses_push_descriptors) {
+                self.pushDispatch4(pip, std.mem.asBytes(&push), self.attn_out_buf.handle, z_bytes, self.gate_buf.handle, z_bytes, norm_buf_handle, norm_buf_size, self.swiglu_buf.handle, z_bytes, dt_rank, 1, 1);
+            } else {
+                const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                self.writeDescSet4(
+                    ds,
+                    self.attn_out_buf.handle,
+                    z_bytes, // binding 0: delta_net output
+                    self.gate_buf.handle,
+                    z_bytes, // binding 1: z_gate
+                    norm_buf_handle,
+                    norm_buf_size, // binding 2: norm weights
+                    self.swiglu_buf.handle,
+                    z_bytes, // binding 3: output
+                );
+                try self.elementwise.recordSsmGatedNorm(&self.decode_cmd, ds, push);
+            }
         }
         self.decode_cmd.computeBarrier();
         self.endProfilePhase(.ssm_gated_norm, ssm_gated_norm_phase);

@@ -17,7 +17,7 @@ const descriptor_pool_max_sets: u32 = 256;
 const descriptors_per_set: u32 = 3;
 
 /// Push constants for DMMV shaders (must match GLSL layout).
-const DmmvPushConstants = extern struct {
+pub const DmmvPushConstants = extern struct {
     M: u32,
     K: u32,
     a_offset: u32,
@@ -26,7 +26,7 @@ const DmmvPushConstants = extern struct {
 };
 
 /// Push constants for batch DMMV shaders (prefill: multiple columns).
-const BatchDmmvPushConstants = extern struct {
+pub const BatchDmmvPushConstants = extern struct {
     M: u32,
     K: u32,
     a_offset: u32,
@@ -37,7 +37,7 @@ const BatchDmmvPushConstants = extern struct {
 
 /// Push constants for MoE DMMV shaders (must match GLSL layout).
 /// Batched expert dispatch: workgroup Y dimension selects expert slot.
-const MoeDmmvPushConstants = extern struct {
+pub const MoeDmmvPushConstants = extern struct {
     M: u32,
     K: u32,
     expert_stride: u32,
@@ -121,45 +121,50 @@ pub const DmmvDispatch = struct {
         // array in the Q4_K shader (s_x[SPEC_K]). Must be >= the largest K value
         // used in any Q4_K dispatch (hidden_dim, inter_dim, q_dim, d_inner).
         const spec_k = [_]pipeline_mod.SpecConst{.{ .id = 1, .value = hidden_dim }};
-        const wave64_options = pipeline_mod.PipelineOptions{
+        const has_push_desc = instance.push_descriptor_fn != null;
+        const push_desc_options = pipeline_mod.PipelineOptions{
+            .push_descriptors = has_push_desc,
+        };
+        const push_desc_wave64_options = pipeline_mod.PipelineOptions{
             .required_subgroup_size = 64,
             .require_full_subgroups = true,
+            .push_descriptors = has_push_desc,
         };
 
         var path_buf: [512]u8 = undefined;
 
         const q4k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k = pipeline_mod.createFromSpirv(instance, q4k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q4k = pipeline_mod.createFromSpirvWithOptions(instance, q4k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k = pipeline_mod.createFromSpirv(instance, q5k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k = pipeline_mod.createFromSpirv(instance, q6k_path, 3, push_size, &.{}, allocator) catch |err| blk: {
+        const pipeline_q6k = pipeline_mod.createFromSpirvWithOptions(instance, q6k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q6_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const f16_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f16.spv", .{shader_dir}) catch unreachable;
-        const pipeline_f16 = pipeline_mod.createFromSpirvWithOptions(instance, f16_path, 3, push_size, &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline_f16 = pipeline_mod.createFromSpirvWithOptions(instance, f16_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("F16 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const f32_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f32.spv", .{shader_dir}) catch unreachable;
-        const pipeline_f32 = pipeline_mod.createFromSpirv(instance, f32_path, 3, push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_f32 = pipeline_mod.createFromSpirvWithOptions(instance, f32_path, 3, push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("F32 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -196,19 +201,19 @@ pub const DmmvDispatch = struct {
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
 
         const q4k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_moe = pipeline_mod.createFromSpirv(instance, q4k_moe_path, 4, moe_push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q4k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k_moe = pipeline_mod.createFromSpirv(instance, q5k_moe_path, 4, moe_push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q5k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_K MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k_moe = pipeline_mod.createFromSpirv(instance, q6k_moe_path, 4, moe_push_size, &spec_k, allocator) catch |err| blk: {
+        const pipeline_q6k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q6k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q6_K MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

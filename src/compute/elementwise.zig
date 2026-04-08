@@ -167,10 +167,6 @@ pub const ElementwiseDispatch = struct {
         if (result != vk.c.VK_SUCCESS) return error.DescriptorPoolCreateFailed;
 
         var path_buf: [512]u8 = undefined;
-        const wave64_options = pipeline_mod.PipelineOptions{
-            .required_subgroup_size = 64,
-            .require_full_subgroups = true,
-        };
         const push_options = pipeline_mod.PipelineOptions{
             .push_descriptors = instance.push_descriptor_fn != null,
         };
@@ -238,21 +234,21 @@ pub const ElementwiseDispatch = struct {
 
         // SSM conv1d + SiLU: 4 bindings (input, kernel, state, output)
         const conv1d_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_conv1d.spv", .{shader_dir}) catch unreachable;
-        const pipeline_ssm_conv1d = pipeline_mod.createFromSpirv(instance, conv1d_path, 4, @sizeOf(SsmConv1dPush), &.{}, allocator) catch |err| blk: {
+        const pipeline_ssm_conv1d = pipeline_mod.createFromSpirvWithOptions(instance, conv1d_path, 4, @sizeOf(SsmConv1dPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("ssm_conv1d shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         // SSM delta-net: 7 bindings (conv_out, dt_bias, alpha, beta, ssm_a, state, output)
         const delta_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_delta_net.spv", .{shader_dir}) catch unreachable;
-        const pipeline_ssm_delta_net = pipeline_mod.createFromSpirvWithOptions(instance, delta_path, 7, @sizeOf(SsmDeltaNetPush), &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline_ssm_delta_net = pipeline_mod.createFromSpirvWithOptions(instance, delta_path, 7, @sizeOf(SsmDeltaNetPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
             log.warn("ssm_delta_net shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         // SSM gated norm: 4 bindings (delta_output, z_gate, norm_weights, output)
         const gnorm_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_gated_norm.spv", .{shader_dir}) catch unreachable;
-        const pipeline_ssm_gated_norm = pipeline_mod.createFromSpirvWithOptions(instance, gnorm_path, 4, @sizeOf(SsmGatedNormPush), &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline_ssm_gated_norm = pipeline_mod.createFromSpirvWithOptions(instance, gnorm_path, 4, @sizeOf(SsmGatedNormPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
             log.warn("ssm_gated_norm shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
