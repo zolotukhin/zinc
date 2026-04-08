@@ -70,6 +70,15 @@ const BENCHMARK_SAMPLES = 3;
 const MIN_IMPROVEMENT_ABS_TPS = 0.5;
 const MIN_IMPROVEMENT_PCT = 0.01;
 const HISTORY_LINES_IN_PROMPT = 20;
+const RECENT_CYCLES_IN_PROMPT = 12;
+const FAILED_APPROACH_LIMIT = 30;
+const IDEA_LIMIT = 24;
+const REVIEW_SUMMARY_LIMIT = 6;
+const SELF_REVIEW_EVERY = 10;
+const STALL_WARNING_THRESHOLD = 4;
+const FOUNDATION_KEEP_MAX_DROP_TPS = 0.25;
+const MAX_FOUNDATION_KEEPS_IN_A_ROW = 2;
+const MAX_CHANGED_FILES_IN_PROMPT = 10;
 
 // Multiple prompts to catch different failure modes:
 // - Short factual: catches total corruption
@@ -117,12 +126,14 @@ function parseArgs() {
   let model = "qwen35b";
   let resume = false;
   let agent: AgentType = "claude";
+  let analyze = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--effort" && args[i + 1]) effort = parseInt(args[++i], 10);
     else if (args[i] === "--cycles" && args[i + 1]) cycles = parseInt(args[++i], 10);
     else if (args[i] === "--dry-run") dryRun = true;
     else if (args[i] === "--resume") resume = true;
+    else if (args[i] === "--analyze") analyze = true;
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
     else if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
   }
@@ -135,6 +146,7 @@ function parseArgs() {
     console.error("  --model NAME             Model: qwen35b, qwen2b, gemma3 (default: qwen35b)");
     console.error("  --agent claude|codex     AI agent to use (default: claude)");
     console.error("  --resume                 Resume from previous run (read history from log)");
+    console.error("  --analyze                Print controller analysis from saved run state");
     console.error("  --dry-run                Build+bench baseline only, skip agent");
     console.error("");
     console.error("Efforts:");
@@ -147,7 +159,7 @@ function parseArgs() {
     console.error(`Unknown agent: ${agent}. Use 'claude' or 'codex'.`);
     process.exit(1);
   }
-  return { effort, cycles, dryRun, model, resume, agent };
+  return { effort, cycles, dryRun, model, resume, agent, analyze };
 }
 
 // -- Display helpers ---------------------------------------------------------
@@ -254,6 +266,134 @@ export type BenchResult = {
   error: string | null;
 };
 
+export type StepKind = "optimization" | "enablement" | "analysis" | "fix" | "rollback" | "unknown";
+
+export type AgentReport = {
+  description: string;
+  selfAnalysis: string;
+  nextIdeas: string[];
+  stepKind: StepKind;
+  rawText: string;
+};
+
+export type CycleRecord = {
+  cycle: number;
+  timestamp: string;
+  description: string;
+  selfAnalysis: string;
+  nextIdeas: string[];
+  stepKind: StepKind;
+  changedFiles: string[];
+  categoryTags: string[];
+  tokPerSec: number | null;
+  tokPerSecSamples: number[];
+  bandwidthUtil: number | null;
+  bandwidthSamples: number[];
+  correct: boolean;
+  improved: boolean;
+  broken: boolean;
+  kept: boolean;
+  foundationKeep: boolean;
+  decisionReason: string;
+  outputText: string;
+  commitHash: string | null;
+};
+
+export type BenchCheckpoint = {
+  cycle: number;
+  tokPerSec: number | null;
+  tokPerSecSamples: number[];
+  bandwidthUtil: number | null;
+  bandwidthSamples: number[];
+  outputText: string;
+  commitHash: string | null;
+};
+
+export type LoopState = {
+  effort: number;
+  planDoc: string;
+  runStartedAt: string;
+  lastUpdatedAt: string;
+  lastCycle: number;
+  bestTokPerSec: number;
+  bestCycle: number | null;
+  bestCommitHash: string | null;
+  bestResult: BenchCheckpoint | null;
+  stalledCycles: number;
+  consecutiveFoundationKeeps: number;
+  cycles: CycleRecord[];
+  failedApproaches: string[];
+  ideas: string[];
+  reviewSummaries: string[];
+};
+
+export type PromptContext = {
+  cycles: CycleRecord[];
+  failedApproaches: string[];
+  ideas: string[];
+  stalledCycles: number;
+  consecutiveFoundationKeeps: number;
+  reviewSummary: string | null;
+  bestPerf: BenchCheckpoint | null;
+};
+
+function canonicalizeMemoryEntry(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[`"'()[\],.:;!?-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function mergeUniqueEntries(existing: string[], incoming: string[], maxEntries: number): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...existing, ...incoming]) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const key = canonicalizeMemoryEntry(trimmed)
+      .split(" ")
+      .filter(Boolean)
+      .sort()
+      .join(" ");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(trimmed);
+    if (merged.length >= maxEntries) break;
+  }
+  return merged;
+}
+
+function trunc(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function benchResultToCheckpoint(result: BenchResult, cycle: number, commitHash: string | null): BenchCheckpoint {
+  return {
+    cycle,
+    tokPerSec: result.tokPerSec,
+    tokPerSecSamples: [...result.tokPerSecSamples],
+    bandwidthUtil: result.bandwidthUtil,
+    bandwidthSamples: [...result.bandwidthSamples],
+    outputText: result.outputText,
+    commitHash,
+  };
+}
+
+function checkpointToBenchResult(checkpoint: BenchCheckpoint): BenchResult {
+  return {
+    buildOk: true,
+    buildOutput: "",
+    tokPerSec: checkpoint.tokPerSec,
+    tokPerSecSamples: [...checkpoint.tokPerSecSamples],
+    correct: true,
+    outputText: checkpoint.outputText,
+    bandwidthUtil: checkpoint.bandwidthUtil,
+    bandwidthSamples: [...checkpoint.bandwidthSamples],
+    error: null,
+  };
+}
+
 export function median(samples: number[]): number | null {
   if (samples.length === 0) return null;
   const sorted = [...samples].sort((a, b) => a - b);
@@ -275,6 +415,168 @@ function tailHistory(history: string, maxLines = HISTORY_LINES_IN_PROMPT): strin
   return lines.slice(-maxLines).join("\n");
 }
 
+function inferStepKind(description: string, selfAnalysis: string): StepKind {
+  const haystack = `${description}\n${selfAnalysis}`.toLowerCase();
+  if (!haystack.trim()) return "unknown";
+  if (/\b(fix|compile|build|correctness|crash|error)\b/.test(haystack)) return "fix";
+  if (/\b(rollback|revert|undo|back out|step back)\b/.test(haystack)) return "rollback";
+  if (/\b(measure|instrument|benchmark|profile|analy[sz]e|study|inspect)\b/.test(haystack)) return "analysis";
+  if (/\b(enablement|plumbing|infrastructure|helper|wrapper|scaffold|layout|pipeline plumbing|descriptor plumbing)\b/.test(haystack)) {
+    return "enablement";
+  }
+  if (/\b(push descriptor|descriptor|dispatch helper|call site conversion|pipeline layout)\b/.test(haystack)) {
+    return "enablement";
+  }
+  return "optimization";
+}
+
+export function classifyApproachTags(description: string, changedFiles: string[]): string[] {
+  const haystack = `${description}\n${changedFiles.join("\n")}`.toLowerCase();
+  const tags: string[] = [];
+  if (/\bdmmv\b|dmmv\.zig|matmul|q4_k|q5_k|q6_k|q8_0/.test(haystack)) tags.push("dmmv");
+  if (/\b(attention|flash_attn|kv cache|kv_cache|rope)\b|attention\.zig/.test(haystack)) tags.push("attention");
+  if (/\b(ssm|delta|conv1d|mamba)\b/.test(haystack)) tags.push("ssm");
+  if (/\b(elementwise|swiglu|rms norm|sigmoid|softmax topk|scale acc)\b|elementwise\.zig/.test(haystack)) tags.push("elementwise");
+  if (/\b(descriptor|push descriptor|pipeline layout)\b|pipeline\.zig|instance\.zig|command\.zig/.test(haystack)) tags.push("descriptor");
+  if (/\b(shader|glsl|\.comp\b)\b|src\/shaders\//.test(haystack)) tags.push("shader");
+  if (/\b(buffer|pool|alloc|memory|reuse)\b|buffer\.zig/.test(haystack)) tags.push("memory");
+  if (/\b(check|test|correctness|coherence|output)\b/.test(haystack)) tags.push("correctness");
+  if (/\b(bench|benchmark|measure|profile|instrument)\b/.test(haystack)) tags.push("measurement");
+  if (tags.length === 0) tags.push("other");
+  return [...new Set(tags)];
+}
+
+function isEnablementLike(report: AgentReport, changedFiles: string[]): boolean {
+  if (report.stepKind === "enablement") return true;
+  const text = `${report.description}\n${report.selfAnalysis}\n${changedFiles.join("\n")}`.toLowerCase();
+  return /\b(enablement|plumbing|infrastructure|helper|wrapper|layout|pipeline|descriptor|call site conversion|scaffold)\b/.test(text);
+}
+
+function buildCycleHistoryEntry(cycle: CycleRecord): string {
+  const outcome = cycle.improved
+    ? "KEPT"
+    : cycle.foundationKeep
+      ? "KEPT-FOUNDATION"
+      : cycle.broken
+        ? "REVERTED-BROKEN"
+        : "REVERTED";
+  const metric = cycle.tokPerSec != null ? ` (${cycle.tokPerSec.toFixed(2)} tok/s)` : "";
+  const tags = cycle.categoryTags.length > 0 ? ` [${cycle.categoryTags.join(", ")}]` : "";
+  return `#${cycle.cycle}: ${outcome}${metric}${tags} ${trunc(cycle.description || cycle.decisionReason, 96)}`;
+}
+
+function buildHistoryFromCycles(cycles: CycleRecord[]): string {
+  if (cycles.length === 0) return "";
+  return cycles.slice(-HISTORY_LINES_IN_PROMPT).map(buildCycleHistoryEntry).join("\n");
+}
+
+function buildRecentCycleBlock(cycles: CycleRecord[]): string {
+  if (cycles.length === 0) return "  (none yet)";
+  return cycles.slice(-RECENT_CYCLES_IN_PROMPT).map((cycle) => `  ${buildCycleHistoryEntry(cycle)}`).join("\n");
+}
+
+export function buildSelfReview(state: Pick<LoopState, "cycles" | "stalledCycles" | "consecutiveFoundationKeeps">): string {
+  const recent = state.cycles.slice(-SELF_REVIEW_EVERY);
+  if (recent.length === 0) return "";
+
+  const improved = recent.filter((cycle) => cycle.improved).length;
+  const foundation = recent.filter((cycle) => cycle.foundationKeep).length;
+  const broken = recent.filter((cycle) => cycle.broken).length;
+  const reverted = recent.filter((cycle) => !cycle.kept).length;
+  const tagStats = new Map<string, { kept: number; reverted: number }>();
+
+  for (const cycle of recent) {
+    for (const tag of cycle.categoryTags) {
+      const entry = tagStats.get(tag) ?? { kept: 0, reverted: 0 };
+      if (cycle.kept) entry.kept++;
+      else entry.reverted++;
+      tagStats.set(tag, entry);
+    }
+  }
+
+  const deadEnds = [...tagStats.entries()]
+    .filter(([, stats]) => stats.reverted > 0 && stats.kept === 0)
+    .sort((a, b) => b[1].reverted - a[1].reverted)
+    .slice(0, 3)
+    .map(([tag, stats]) => `${tag}(${stats.reverted})`);
+
+  const productive = [...tagStats.entries()]
+    .filter(([, stats]) => stats.kept > 0)
+    .sort((a, b) => (b[1].kept - a[1].kept) || (a[1].reverted - b[1].reverted))
+    .slice(0, 3)
+    .map(([tag, stats]) => `${tag}(${stats.kept} kept/${stats.reverted} reverted)`);
+
+  const lines = [
+    `Last ${recent.length} cycles: ${improved} perf keep, ${foundation} foundation keep, ${reverted} reverted, ${broken} broken.`,
+  ];
+
+  if (productive.length > 0) lines.push(`Productive directions: ${productive.join(", ")}.`);
+  if (deadEnds.length > 0) lines.push(`Repeated dead ends: ${deadEnds.join(", ")}.`);
+  if (state.consecutiveFoundationKeeps > 0) {
+    lines.push(`Foundation debt: ${state.consecutiveFoundationKeeps} neutral keep(s) in a row; next cycles should either harvest a speed win or step back.`);
+  }
+  if (state.stalledCycles >= STALL_WARNING_THRESHOLD) {
+    lines.push(`Stall warning: ${state.stalledCycles} cycles without a best-perf win. Stop repeating the last rejected category; pick a different hotspot or a smaller prerequisite.`);
+  }
+
+  return lines.join("\n");
+}
+
+export function buildAnalysisReport(state: LoopState): string {
+  const total = state.cycles.length;
+  const improved = state.cycles.filter((cycle) => cycle.improved).length;
+  const foundation = state.cycles.filter((cycle) => cycle.foundationKeep).length;
+  const broken = state.cycles.filter((cycle) => cycle.broken).length;
+  const reverted = state.cycles.filter((cycle) => !cycle.kept).length;
+
+  const tagStats = new Map<string, { kept: number; improved: number; reverted: number }>();
+  for (const cycle of state.cycles) {
+    for (const tag of cycle.categoryTags) {
+      const entry = tagStats.get(tag) ?? { kept: 0, improved: 0, reverted: 0 };
+      if (cycle.kept) entry.kept++;
+      if (cycle.improved) entry.improved++;
+      if (!cycle.kept) entry.reverted++;
+      tagStats.set(tag, entry);
+    }
+  }
+
+  const tagLines = [...tagStats.entries()]
+    .sort((a, b) => (b[1].improved - a[1].improved) || (b[1].kept - a[1].kept) || (b[1].reverted - a[1].reverted))
+    .slice(0, 8)
+    .map(([tag, stats]) => `- ${tag}: ${stats.improved} perf keeps, ${stats.kept} total keeps, ${stats.reverted} reverts`);
+
+  const recent = buildRecentCycleBlock(state.cycles);
+  const failed = state.failedApproaches.length > 0
+    ? state.failedApproaches.slice(-10).map((entry) => `- ${entry}`).join("\n")
+    : "- none";
+  const ideas = state.ideas.length > 0
+    ? state.ideas.slice(-10).map((entry) => `- ${entry}`).join("\n")
+    : "- none";
+  const review = state.reviewSummaries.at(-1) ?? buildSelfReview(state);
+
+  return [
+    `Run started: ${state.runStartedAt}`,
+    `Cycles: ${total} total, ${improved} perf keeps, ${foundation} foundation keeps, ${reverted} reverted, ${broken} broken`,
+    `Best checkpoint: ${state.bestTokPerSec.toFixed(2)} tok/s (cycle ${state.bestCycle ?? "?"}${state.bestCommitHash ? `, ${state.bestCommitHash.slice(0, 8)}` : ""})`,
+    `Current stall count: ${state.stalledCycles}`,
+    "",
+    "Recent review:",
+    review || "No review yet.",
+    "",
+    "Category stats:",
+    tagLines.length > 0 ? tagLines.join("\n") : "- none",
+    "",
+    "Recent cycles:",
+    recent,
+    "",
+    "Failed approaches:",
+    failed,
+    "",
+    "Idea bank:",
+    ideas,
+  ].join("\n");
+}
+
 export function improvementThreshold(currentTokPerSec: number | null): number {
   if (currentTokPerSec == null || currentTokPerSec <= 0) return MIN_IMPROVEMENT_ABS_TPS;
   return Math.max(MIN_IMPROVEMENT_ABS_TPS, currentTokPerSec * MIN_IMPROVEMENT_PCT);
@@ -294,31 +596,75 @@ export function buildAgentPrompt(
   cycleNum: number,
   history: string,
   model: string,
+  context: PromptContext | null = null,
 ): string {
   const modelPath = MODELS[model] ?? MODELS.qwen35b;
   const historySummary = tailHistory(history);
+  const failedBlock = context?.failedApproaches?.length
+    ? context.failedApproaches.slice(-12).map((entry, i) => `${i + 1}. ${trunc(entry, 140)}`).join("\n")
+    : "None yet.";
+  const ideasBlock = context?.ideas?.length
+    ? context.ideas.slice(-10).map((entry, i) => `${i + 1}. ${trunc(entry, 140)}`).join("\n")
+    : "None yet.";
+  const recentCyclesBlock = context ? buildRecentCycleBlock(context.cycles) : "  (state unavailable)";
+  const reviewBlock = context?.reviewSummary || "No self-review yet.";
+  const bestPerf = context?.bestPerf ?? benchResultToCheckpoint(currentBest, 0, null);
+  const currentVsBestNote = bestPerf.tokPerSec != null && currentBest.tokPerSec != null && bestPerf.tokPerSec > currentBest.tokPerSec + 0.05
+    ? `- Note: the current checked-out code is ${currentBest.tokPerSec.toFixed(2)} tok/s, below the best checkpoint ${bestPerf.tokPerSec.toFixed(2)} tok/s. You are editing the current code, but real wins are still judged against the best checkpoint.`
+    : "- Note: current code and best checkpoint are effectively the same right now.";
+  const controllerMode = context && context.stalledCycles >= STALL_WARNING_THRESHOLD
+    ? "STEP_BACK"
+    : context && context.consecutiveFoundationKeeps > 0
+      ? "HARVEST"
+      : "ADVANCE";
   return `You are implementing a performance optimization for the ZINC Vulkan inference engine.
 
 ## Optimization Plan
 ${plan}
 
-## Current Accepted Baseline (build on this code)
+## Current Checked-Out Code (build on this code)
 - tok/s: ${summarizeBenchMetric(currentBest.tokPerSec, currentBest.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(currentBest.bandwidthUtil, currentBest.bandwidthSamples, "%", 1)}
 - output: "${currentBest.outputText}" (coherence tested with 3 prompts on 3 models after every change)
-- This is the performance of the code currently checked out in the worktree. Every kept cycle is already included here.
+- This is the performance of the code currently checked out in the worktree.
+
+## Best Accepted Performance Checkpoint
+- tok/s: ${summarizeBenchMetric(bestPerf.tokPerSec, bestPerf.tokPerSecSamples, "tok/s")}
+- bandwidth utilization: ${summarizeBenchMetric(bestPerf.bandwidthUtil, bestPerf.bandwidthSamples, "%", 1)}
+- output: "${bestPerf.outputText}"
+- cycle: ${bestPerf.cycle}${bestPerf.commitHash ? `, commit ${bestPerf.commitHash.slice(0, 8)}` : ""}
+${currentVsBestNote}
 
 ## Original Run Baseline (for total gain only)
 - tok/s: ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}
 - output: "${originalBaseline.outputText}"
 
+## Controller State
+- mode: ${controllerMode}
+- stalled cycles without a new best checkpoint: ${context?.stalledCycles ?? 0}
+- consecutive neutral foundation keeps: ${context?.consecutiveFoundationKeeps ?? 0}
+
+## Recent Cycle Ledger
+${recentCyclesBlock}
+
+## Reflection (auto-analysis of recent cycles)
+${reviewBlock}
+
 ## Previous Attempts
 ${historySummary || "None yet."}
 
+## Failed Approaches (do not repeat)
+${failedBlock}
+
+## Idea Bank
+${ideasBlock}
+
 ## Your Task (Cycle ${cycleNum})
 Implement ONE concrete step from the optimization plan above. Pick the next unfinished step.
-Your change must beat the current accepted baseline above, not the original run baseline.
+Your change must beat the best accepted performance checkpoint above, not the original run baseline.
+If controller mode is STEP_BACK, do not repeat the same hotspot as the last rejected cycles. Either choose a smaller prerequisite, finish a kept enablement step, or switch to a different bottleneck category.
+If you intentionally do a plumbing/enabling step that may be performance-neutral this cycle, mark it as enablement and explain exactly which next step it unlocks.
 
 ## CRITICAL RULES — READ CAREFULLY
 
@@ -336,11 +682,16 @@ Your change must beat the current accepted baseline above, not the original run 
 
 3. **ONE focused change per cycle.** Don't try to convert the entire codebase in one shot.
 
-4. **Test on remote node:**
+4. **Avoid repeated dead ends.**
+   - Read the recent cycle ledger and failed approaches first.
+   - If the last few rejected cycles hit the same subsystem, do NOT do another cosmetic variation of that same idea.
+   - If you are uncertain, add a tiny enabling or measurement step instead of another large speculative refactor.
+
+5. **Test on remote node:**
    rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
    ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build && ./zig-out/bin/zinc -m ${modelPath} --prompt '${COHERENCE_CHECKS[0].prompt}' -n 16"
 
-5. **Shader compilation:** glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
+6. **Shader compilation:** glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
 
 Files you may edit:
 - src/compute/*.zig (forward.zig, dmmv.zig, elementwise.zig, attention.zig, argmax.zig)
@@ -349,7 +700,14 @@ Files you may edit:
 - src/server/*.zig (routes.zig, runtime.zig)
 - src/server/chat.html
 - src/shaders/*.comp (GLSL compute shaders)
-- src/main.zig`;
+- src/main.zig
+
+## Output Format
+After making your change, print these lines:
+@@@DESCRIPTION: <one-line summary of the change>
+@@@STEP_KIND: <optimization|enablement|analysis|fix|rollback>
+@@@SELF_ANALYSIS: <why this direction, expected effect, and what should happen next>
+@@@NEXT_IDEAS: <semicolon-separated follow-up ideas>`;
 }
 
 async function buildAndBench(modelPath: string): Promise<BenchResult> {
@@ -688,6 +1046,75 @@ export function formatClaudeStreamLine(rawLine: string, state: ClaudeStreamState
   return null;
 }
 
+function extractAgentText(stdout: string): string {
+  const texts: string[] = [];
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    if (line.includes("@@@")) texts.push(line);
+    try {
+      const evt = JSON.parse(line) as Record<string, unknown>;
+      const type = evt.type;
+      if (type === "assistant") {
+        const content = (evt.message as Record<string, unknown> | undefined)?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            const text = (block as Record<string, unknown>)?.text;
+            if (typeof text === "string" && text.trim()) texts.push(text);
+          }
+        }
+      } else if (type === "message" || type === "agent") {
+        const text = evt.content ?? evt.message;
+        if (typeof text === "string" && text.trim()) texts.push(text);
+      } else if (type === "item.completed") {
+        const item = evt.item as Record<string, unknown> | undefined;
+        if (item?.type === "agent_message") {
+          const text = item.text ?? item.message ?? item.output_text ?? item.content;
+          if (typeof text === "string" && text.trim()) texts.push(text);
+        }
+      }
+    } catch {
+      // Ignore non-JSON lines. Marker lines were already captured above.
+    }
+  }
+  return texts.join("\n");
+}
+
+export function parseAgentReport(stdout: string): AgentReport {
+  const rawText = extractAgentText(stdout).trim();
+  const window = rawText.slice(-4000);
+  const description = window.match(/@@@DESCRIPTION:\s*(.+)/im)?.[1]?.trim()
+    ?? rawText.split("\n").map((line) => line.trim()).find(Boolean)
+    ?? "Agent made changes";
+  const selfAnalysis = window.match(/@@@SELF_ANALYSIS:\s*(.+)/im)?.[1]?.trim() ?? "";
+  const stepKindRaw = window.match(/@@@STEP_KIND:\s*(.+)/im)?.[1]?.trim().toLowerCase() ?? "";
+  const stepKind = ["optimization", "enablement", "analysis", "fix", "rollback"].includes(stepKindRaw)
+    ? stepKindRaw as StepKind
+    : inferStepKind(description, selfAnalysis);
+  const ideasRaw = window.match(/@@@NEXT_IDEAS:\s*(.+)/im)?.[1]?.trim() ?? "";
+  const nextIdeas = ideasRaw
+    .split(/[;,]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 3);
+
+  return {
+    description,
+    selfAnalysis,
+    nextIdeas,
+    stepKind,
+    rawText,
+  };
+}
+
+async function listChangedFiles(): Promise<string[]> {
+  const tracked = await runCommand("git", ["diff", "--name-only", "--", "src/"], { cwd: REPO_ROOT });
+  const untracked = await runCommand("git", ["ls-files", "--others", "--exclude-standard", "src/"], { cwd: REPO_ROOT });
+  const files = [
+    ...tracked.stdout.split("\n"),
+    ...untracked.stdout.split("\n"),
+  ].map((entry) => entry.trim()).filter(Boolean);
+  return [...new Set(files)].sort();
+}
+
 // -- Agent spawn -------------------------------------------------------------
 
 async function spawnAgent(
@@ -699,8 +1126,9 @@ async function spawnAgent(
   history: string,
   model: string,
   agent: AgentType = "claude",
+  context: PromptContext | null = null,
 ): Promise<RunResult> {
-  const prompt = buildAgentPrompt(plan, originalBaseline, currentBest, cycleNum, history, model);
+  const prompt = buildAgentPrompt(plan, originalBaseline, currentBest, cycleNum, history, model, context);
 
   console.log(c("1;34", SEP));
   console.log(c("1;34", `  \uD83E\uDDE0 Agent cycle ${cycleNum} (${agent})`));
@@ -779,10 +1207,72 @@ type LogEntry = {
   correct: boolean;
   improved: boolean;
   broken: boolean;
+  kept?: boolean;
+  foundationKeep?: boolean;
+  decisionReason?: string;
+  description?: string;
+  stepKind?: StepKind;
+  changedFiles?: string[];
   outputText: string;
   commitHash?: string | null;
   timestamp: string;
 };
+
+function statePathForEffort(effort: number): string {
+  return join(RESULTS_DIR, `effort_${effort}_state.json`);
+}
+
+async function loadLoopState(effort: number): Promise<LoopState | null> {
+  const statePath = statePathForEffort(effort);
+  if (!existsSync(statePath)) return null;
+  return JSON.parse(await readFile(statePath, "utf8")) as LoopState;
+}
+
+async function saveLoopState(state: LoopState): Promise<void> {
+  state.lastUpdatedAt = new Date().toISOString();
+  await writeFile(statePathForEffort(state.effort), JSON.stringify(state, null, 2));
+}
+
+function createInitialState(effort: number, planDoc: string, baseline: BenchResult, headCommit: string | null): LoopState {
+  const now = new Date().toISOString();
+  return {
+    effort,
+    planDoc,
+    runStartedAt: now,
+    lastUpdatedAt: now,
+    lastCycle: 0,
+    bestTokPerSec: baseline.tokPerSec ?? 0,
+    bestCycle: 0,
+    bestCommitHash: headCommit,
+    bestResult: benchResultToCheckpoint(baseline, 0, headCommit),
+    stalledCycles: 0,
+    consecutiveFoundationKeeps: 0,
+    cycles: [],
+    failedApproaches: [],
+    ideas: [],
+    reviewSummaries: [],
+  };
+}
+
+export function shouldKeepFoundationStep(
+  candidate: BenchResult,
+  bestPerf: BenchResult,
+  stalledCycles: number,
+  consecutiveFoundationKeeps: number,
+  report: AgentReport,
+  changedFiles: string[],
+): boolean {
+  if (!candidate.buildOk || !candidate.correct || candidate.tokPerSec == null) return false;
+  if (!isEnablementLike(report, changedFiles)) return false;
+  if (consecutiveFoundationKeeps >= MAX_FOUNDATION_KEEPS_IN_A_ROW) return false;
+  if (changedFiles.length === 0) return false;
+
+  const bestTokPerSec = bestPerf.tokPerSec ?? 0;
+  if (candidate.tokPerSec > bestTokPerSec + improvementThreshold(bestTokPerSec)) return false;
+  if (candidate.tokPerSec < bestTokPerSec - FOUNDATION_KEEP_MAX_DROP_TPS) return false;
+
+  return stalledCycles >= 2 || report.stepKind === "enablement";
+}
 
 export async function loadPreviousRun(effort: number): Promise<{
   history: string;
@@ -791,6 +1281,17 @@ export async function loadPreviousRun(effort: number): Promise<{
   bestCycle: number | null;
   bestCommitHash: string | null;
 }> {
+  const state = await loadLoopState(effort);
+  if (state) {
+    return {
+      history: buildHistoryFromCycles(state.cycles),
+      bestTokPerSec: state.bestTokPerSec,
+      lastCycle: state.lastCycle,
+      bestCycle: state.bestCycle,
+      bestCommitHash: state.bestCommitHash,
+    };
+  }
+
   const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
   let history = "";
   let bestTokPerSec = 0;
@@ -806,7 +1307,7 @@ export async function loadPreviousRun(effort: number): Promise<{
         if (entry.effort !== effort) continue;
         lastCycle = Math.max(lastCycle, entry.cycle);
         if (entry.broken) {
-          history += `\nCycle ${entry.cycle}: REVERTED \u2014 broken (${entry.outputText?.slice(0, 60)})`;
+          history += `\nCycle ${entry.cycle}: REVERTED \u2014 ${entry.decisionReason ?? `broken (${entry.outputText?.slice(0, 60)})`}`;
         } else if (entry.improved) {
           history += `\nCycle ${entry.cycle}: KEPT \u2014 ${entry.tokPerSec?.toFixed(2)} tok/s${entry.tokPerSecSamples?.length ? ` ${formatSampleList(entry.tokPerSecSamples)}` : ""}`;
           if (entry.tokPerSec != null && entry.tokPerSec > bestTokPerSec) {
@@ -814,8 +1315,10 @@ export async function loadPreviousRun(effort: number): Promise<{
             bestCycle = entry.cycle;
             bestCommitHash = entry.commitHash ?? null;
           }
+        } else if (entry.foundationKeep) {
+          history += `\nCycle ${entry.cycle}: KEPT-FOUNDATION \u2014 ${entry.description ?? entry.decisionReason ?? "enablement step"}`;
         } else {
-          history += `\nCycle ${entry.cycle}: REVERTED \u2014 no improvement (${entry.tokPerSec?.toFixed(2)} tok/s${entry.tokPerSecSamples?.length ? ` ${formatSampleList(entry.tokPerSecSamples)}` : ""})`;
+          history += `\nCycle ${entry.cycle}: REVERTED \u2014 ${entry.decisionReason ?? `no improvement (${entry.tokPerSec?.toFixed(2)} tok/s${entry.tokPerSecSamples?.length ? ` ${formatSampleList(entry.tokPerSecSamples)}` : ""})`}`;
         }
       } catch { /* skip malformed lines */ }
     }
