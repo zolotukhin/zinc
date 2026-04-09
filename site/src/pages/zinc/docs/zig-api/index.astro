@@ -48,6 +48,7 @@ const agentArtifacts = [
 const description = 'Generated reference for the ZINC Zig codebase, grouped by runtime responsibility with module pages and stable symbol anchors.';
 const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, inference runtime, GGUF parser, AMD GPU';
 const zigCodeLines = zigApi.codeLineCount.toLocaleString('en-US');
+const githubSrcUrl = 'https://github.com/zolotukhin/zinc/tree/main/src';
 ---
 
 <DocLayout title="Zig API" description={description} keywords={keywords} lastmod={zigApi.lastmod}>
@@ -64,6 +65,10 @@ const zigCodeLines = zigApi.codeLineCount.toLocaleString('en-US');
     <div class="hero-actions">
       <a href="#sections" class="button button-primary">Browse API Sections</a>
       {zigApi.modules[0] && <a href={zigApi.modules[0].href} class="button button-secondary">Open First Module</a>}
+      <a href={githubSrcUrl} class="button button-metric" target="_blank" rel="noreferrer">
+        <span class="button-metric-label">Zig Lines</span>
+        <strong>{zigCodeLines}</strong>
+      </a>
     </div>
 
     <div class="stats-grid">
@@ -74,10 +79,6 @@ const zigCodeLines = zigApi.codeLineCount.toLocaleString('en-US');
       <div class="stat-card">
         <span>Modules</span>
         <strong>{zigApi.moduleCount}</strong>
-      </div>
-      <div class="stat-card">
-        <span>Zig Lines</span>
-        <strong>{zigCodeLines}</strong>
       </div>
       <div class="stat-card">
         <span>Exports</span>
@@ -327,6 +328,31 @@ const zigCodeLines = zigApi.codeLineCount.toLocaleString('en-US');
   .button-secondary {
     color: var(--color-text);
     background: var(--color-bg);
+  }
+
+  .button-metric {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0.1rem;
+    min-height: 3.2rem;
+    padding: 0.55rem 1rem 0.6rem;
+    background: rgba(255, 255, 255, 0.72);
+    border-color: rgba(211, 84, 0, 0.24);
+    color: var(--color-text);
+  }
+
+  .button-metric-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .button-metric strong {
+    font-size: 1.05rem;
+    line-height: 1.1;
+    font-weight: 700;
   }
 
   .button:hover {
