@@ -47,6 +47,7 @@ const agentArtifacts = [
 
 const description = 'Generated reference for the ZINC Zig codebase, grouped by runtime responsibility with module pages and stable symbol anchors.';
 const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, inference runtime, GGUF parser, AMD GPU';
+const zigCodeLines = zigApi.codeLineCount.toLocaleString('en-US');
 ---
 
 <DocLayout title="Zig API" description={description} keywords={keywords} lastmod={zigApi.lastmod}>
@@ -73,6 +74,10 @@ const keywords = 'ZINC Zig API, generated docs, Zig reference, Vulkan runtime, i
       <div class="stat-card">
         <span>Modules</span>
         <strong>{zigApi.moduleCount}</strong>
+      </div>
+      <div class="stat-card">
+        <span>Zig Lines</span>
+        <strong>{zigCodeLines}</strong>
       </div>
       <div class="stat-card">
         <span>Exports</span>

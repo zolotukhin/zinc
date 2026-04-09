@@ -78,7 +78,7 @@ export function renderLlmsTxt(zigApi: ZigApiIndex, docs: DocPage[], siteUrl: str
     `- ZINC Zig API Text: ${absoluteUrl(base, '/zinc/docs/zig-api.txt')}`,
     `- ZINC Docs Landing: ${absoluteUrl(base, '/zinc/docs')}`,
     '',
-    `Zig API coverage: ${zigApi.sections.length} sections, ${zigApi.moduleCount} modules, ${zigApi.exportCount} exports, ${zigApi.memberCount} methods.`,
+    `Zig API coverage: ${zigApi.sections.length} sections, ${zigApi.moduleCount} modules, ${zigApi.codeLineCount} Zig code lines, ${zigApi.exportCount} exports, ${zigApi.memberCount} methods.`,
     '',
     '## Supplemental ZINC Documentation',
     ...supplemental.map(doc => `- ${doc.title}: ${doc.url}`),

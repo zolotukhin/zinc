@@ -9,6 +9,7 @@ import { loadZigApi } from '../../../lib/zig-api-loader';
 
 const docs = await loadDocs();
 const zigApi = await loadZigApi();
+const zigCodeLines = zigApi.codeLineCount.toLocaleString('en-US');
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const breadcrumbItems = [
   { name: 'Home', href: '/' },
@@ -166,6 +167,7 @@ export RADV_PERFTEST=coop_matrix
           <div class="card-stats">
             <span>{zigApi.sections.length} sections</span>
             <span>{zigApi.moduleCount} modules</span>
+            <span>{zigCodeLines} Zig lines</span>
             <span>{zigApi.exportCount} exports</span>
           </div>
         </a>

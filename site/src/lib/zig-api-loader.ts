@@ -67,6 +67,7 @@ export interface ZigApiModule {
   overview: string[];
   href: string;
   symbols: ZigApiSymbol[];
+  codeLineCount: number;
   exportCount: number;
   memberCount: number;
   symbolCount: number;
@@ -85,6 +86,7 @@ export interface ZigApiIndex {
   generatedAt: string;
   lastmod: string;
   moduleCount: number;
+  codeLineCount: number;
   exportCount: number;
   memberCount: number;
   symbolCount: number;
@@ -693,6 +695,7 @@ function parseZigModuleContent(content: string, relativePath: string): ZigApiMod
     overview: moduleDoc.description,
     href,
     symbols,
+    codeLineCount: countZigCodeLines(content),
     exportCount: symbols.length,
     memberCount,
     symbolCount: symbols.length + memberCount,
@@ -741,6 +744,51 @@ function normalizeDocBlock(doc: ZigApiDocBlock) {
   };
 }
 
+function countZigCodeLines(content: string): number {
+  const lines = content.split(/\r?\n/);
+  let count = 0;
+  let inBlockComment = false;
+
+  for (const line of lines) {
+    let index = 0;
+    let hasCode = false;
+
+    while (index < line.length) {
+      if (inBlockComment) {
+        const blockEnd = line.indexOf('*/', index);
+        if (blockEnd === -1) {
+          index = line.length;
+          break;
+        }
+        inBlockComment = false;
+        index = blockEnd + 2;
+        continue;
+      }
+
+      const ch = line[index];
+      if (ch === ' ' || ch === '\t') {
+        index += 1;
+        continue;
+      }
+
+      if (line.startsWith('//', index)) break;
+
+      if (line.startsWith('/*', index)) {
+        inBlockComment = true;
+        index += 2;
+        continue;
+      }
+
+      hasCode = true;
+      break;
+    }
+
+    if (hasCode) count += 1;
+  }
+
+  return count;
+}
+
 export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
   const base = siteBaseUrl(siteUrl);
 
@@ -758,6 +806,7 @@ export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
     counts: {
       sections: api.sections.length,
       modules: api.moduleCount,
+      code_lines: api.codeLineCount,
       exports: api.exportCount,
       methods: api.memberCount,
       symbols: api.symbolCount,
@@ -779,6 +828,7 @@ export function createZigApiAgentPayload(api: ZigApiIndex, siteUrl: string) {
         source_path: module.sourcePath,
         source_url: sourceHref(module.sourcePath, module.symbols[0]?.line ?? 1),
         counts: {
+          code_lines: module.codeLineCount,
           exports: module.exportCount,
           methods: module.memberCount,
           symbols: module.symbolCount,
@@ -831,7 +881,7 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
     `Text export: ${payload.text_url}`,
     `LLMs index: ${payload.llms_url}`,
     `Last updated: ${payload.last_updated}`,
-    `Counts: ${payload.counts.sections} sections, ${payload.counts.modules} modules, ${payload.counts.exports} exports, ${payload.counts.methods} methods.`,
+    `Counts: ${payload.counts.sections} sections, ${payload.counts.modules} modules, ${payload.counts.code_lines} Zig code lines, ${payload.counts.exports} exports, ${payload.counts.methods} methods.`,
     '',
     'Guidance: Use the generated Zig API as the canonical internal runtime reference. Use the Serving HTTP API doc only for the client-facing network protocol.',
   ];
@@ -845,6 +895,7 @@ export function renderZigApiAgentText(api: ZigApiIndex, siteUrl: string): string
         `### Module: ${module.title}`,
         `URL: ${module.url}`,
         `Source: ${module.source_path}`,
+        `Code lines: ${module.counts.code_lines}`,
         `Summary: ${module.summary}`
       );
 
@@ -1065,6 +1116,7 @@ ${structModulePaths.map((path, idx) => `const mod${idx} = @import("../${path.rep
     return groups;
   }, new Map());
 
+  const codeLineCount = modules.reduce((count, module) => count + module.codeLineCount, 0);
   const exportCount = modules.reduce((count, module) => count + module.exportCount, 0);
   const memberCount = modules.reduce((count, module) => count + module.memberCount, 0);
 
@@ -1072,6 +1124,7 @@ ${structModulePaths.map((path, idx) => `const mod${idx} = @import("../${path.rep
     generatedAt: new Date().toISOString().split('T')[0],
     lastmod: latestMtime ? new Date(latestMtime).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
     moduleCount: modules.length,
+    codeLineCount,
     exportCount,
     memberCount,
     symbolCount: exportCount + memberCount,

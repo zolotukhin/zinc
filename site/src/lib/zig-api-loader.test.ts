@@ -39,6 +39,7 @@ pub fn compute(
     expect(module?.summary).toBe('Example module summary.');
     expect(module?.overview).toEqual(['Example module overview paragraph.']);
     expect(module?.symbols.map(symbol => symbol.name)).toEqual(['Example', 'compute']);
+    expect(module?.codeLineCount).toBe(12);
     expect(module?.symbols[0]?.members).toHaveLength(1);
     expect(module?.symbols[0]?.members[0]?.qualifiedName).toBe('Example.init');
     expect(module?.symbols[0]?.members[0]?.doc.params[0]).toEqual({
@@ -69,6 +70,7 @@ describe('loadZigApi', () => {
     const api = await loadZigApi();
 
     expect(api.moduleCount).toBeGreaterThan(0);
+    expect(api.codeLineCount).toBeGreaterThan(1000);
     expect(api.exportCount).toBeGreaterThan(10);
     expect(api.memberCount).toBeGreaterThan(10);
     expect(api.sections.some(section => section.title === 'Vulkan Runtime')).toBe(true);
@@ -99,10 +101,12 @@ describe('loadZigApi', () => {
 
     expect(payload.root_url).toBe('https://zolotukhin.ai/zinc/docs/zig-api');
     expect(payload.json_url).toBe('https://zolotukhin.ai/zinc/docs/zig-api.json');
+    expect(payload.counts.code_lines).toBeGreaterThan(1000);
     expect(payload.sections.length).toBeGreaterThan(0);
     expect(payload.sections.some(section => section.modules.some(module => module.symbols.length > 0))).toBe(true);
     expect(text).toContain('# ZINC Zig API');
     expect(text).toContain('JSON export: https://zolotukhin.ai/zinc/docs/zig-api.json');
+    expect(text).toContain('Zig code lines');
     expect(text).toContain('Guidance: Use the generated Zig API as the canonical internal runtime reference.');
   }, 30000);
 
