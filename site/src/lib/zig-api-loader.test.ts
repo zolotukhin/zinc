@@ -105,4 +105,13 @@ describe('loadZigApi', () => {
     expect(text).toContain('JSON export: https://zolotukhin.ai/zinc/docs/zig-api.json');
     expect(text).toContain('Guidance: Use the generated Zig API as the canonical internal runtime reference.');
   }, 30000);
+
+  it('keeps module-level Zig API docs populated for exported modules', async () => {
+    const api = await loadZigApi();
+    const missingOverview = api.modules.filter(module => module.overview.length === 0);
+    const genericSummary = api.modules.filter(module => module.summary.startsWith('Public API surface for '));
+
+    expect(missingOverview.map(module => module.sourcePath)).toEqual([]);
+    expect(genericSummary.map(module => module.sourcePath)).toEqual([]);
+  }, 30000);
 });

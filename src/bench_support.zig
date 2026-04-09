@@ -1,3 +1,8 @@
+//! Shared helpers for benchmark and standalone runner entrypoints.
+//!
+//! This module re-exports the Metal runtime pieces that the benchmark tools
+//! need and centralizes the GPU-process-lock error path so the small bench
+//! binaries do not duplicate server/runtime boilerplate.
 const std = @import("std");
 
 pub const metal_device = @import("metal/device.zig");

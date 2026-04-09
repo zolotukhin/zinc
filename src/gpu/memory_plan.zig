@@ -1,4 +1,8 @@
 //! Shared runtime memory accounting helpers for Vulkan and Metal backends.
+//!
+//! The helpers in this module turn model dimensions plus backend-specific
+//! runtime characteristics into a comparable memory budget so diagnostics,
+//! server load policy, and inference engines size context and KV consistently.
 const std = @import("std");
 const config_mod = @import("../model/config.zig");
 

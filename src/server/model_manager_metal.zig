@@ -1,4 +1,8 @@
 //! Metal-backed active-model runtime state for the HTTP server.
+//!
+//! The server uses this manager to load one Metal model at a time, track the
+//! tokenizer and runtime allocations that belong to it, and project fit/status
+//! information back into the OpenAI-compatible model-management endpoints.
 const std = @import("std");
 const catalog_mod = @import("../model/catalog.zig");
 const config_mod = @import("../model/config.zig");

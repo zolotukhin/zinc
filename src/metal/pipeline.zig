@@ -1,4 +1,8 @@
 //! Metal compute pipeline wrapper — MSL source or precompiled metallib.
+//!
+//! It compiles or loads Metal kernels, exposes the threadgroup capabilities
+//! that dispatch code needs for tuning, and keeps pipeline lifecycle handling
+//! out of the higher-level runtime and benchmark paths.
 const std = @import("std");
 const shim = @import("c.zig").shim;
 

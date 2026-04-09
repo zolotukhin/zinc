@@ -1,4 +1,8 @@
 //! Cross-process GPU reservation lock keyed by backend and selected device.
+//!
+//! ZINC uses a filesystem lock to stop multiple inference processes from
+//! loading different models onto the same physical GPU at once, which would
+//! otherwise produce confusing OOM failures and unstable benchmark results.
 const std = @import("std");
 
 pub const Backend = enum {

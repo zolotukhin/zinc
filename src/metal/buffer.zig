@@ -1,4 +1,8 @@
 //! Metal buffer wrapper — shared-mode GPU buffers with zero-copy mmap support.
+//!
+//! The Metal backend allocates shared-storage buffers so CPU code, the model
+//! loader, and GPU kernels can all see the same memory without an explicit
+//! staging copy. This module owns that wrapper and its mmap integration.
 const std = @import("std");
 const shim = @import("c.zig").shim;
 
