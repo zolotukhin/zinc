@@ -337,8 +337,9 @@ const githubSrcUrl = 'https://github.com/zolotukhin/zinc/tree/main/src';
     gap: 0.1rem;
     min-height: 3.2rem;
     padding: 0.55rem 1rem 0.6rem;
-    background: rgba(255, 255, 255, 0.72);
-    border-color: rgba(211, 84, 0, 0.24);
+    background: color-mix(in srgb, var(--color-accent) 7%, var(--color-bg));
+    border-color: color-mix(in srgb, var(--color-accent) 28%, var(--color-border));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 10%, transparent);
     color: var(--color-text);
   }
 
@@ -346,13 +347,18 @@ const githubSrcUrl = 'https://github.com/zolotukhin/zinc/tree/main/src';
     font-size: 0.68rem;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--color-text-muted);
+    color: var(--color-accent);
   }
 
   .button-metric strong {
     font-size: 1.05rem;
     line-height: 1.1;
     font-weight: 700;
+  }
+
+  .button-metric:hover {
+    border-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 11%, var(--color-bg));
   }
 
   .button:hover {
