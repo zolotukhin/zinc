@@ -22,6 +22,8 @@ bun.lockb
 # Optimization loop state
 .llm_optimize/
 .zinc_optimize/
+.perf_optimize/
+.metal_optimize/
 .worktrees/
 
 # Environment
@@ -43,4 +45,3 @@ Thumbs.db
 
 research/turboquant-pytorch-master/
 research/__pycache__/
-.metal_optimize/
