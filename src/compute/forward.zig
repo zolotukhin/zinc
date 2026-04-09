@@ -2489,17 +2489,7 @@ pub const InferenceEngine = struct {
                 const use_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;
                 const rope_freq: f32 = if (use_imrope) 0.0 else config.rope_freq_base;
                 const rope_dim: u32 = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
-                try self.dispatchRopeInPlace(
-                    self.q_buf.handle,
-                    self.q_buf.size,
-                    if (use_imrope) self.rope_freq_buf.handle else null,
-                    self.rope_freq_buf.size,
-                    config.head_dim,
-                    rope_dim,
-                    config.n_heads,
-                    state.position,
-                    rope_freq,
-                );
+                // K RoPE first — KV cache write reads k_buf, so it must complete before the write.
                 try self.dispatchRopeInPlace(
                     self.k_buf.handle,
                     self.k_buf.size,
@@ -2516,7 +2506,9 @@ pub const InferenceEngine = struct {
                 {
                     const physical_token = try self.physicalTokenIndex(state.position);
                     if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
-                        // Compute path: RoPE → computeBarrier → KV copy dispatch → computeBarrier → flash attn
+                        // Compute path: K RoPE → barrier → KV write + Q RoPE (overlap) → barrier → flash attn
+                        // Q RoPE is dispatched after KV write to allow GPU overlap: KV write touches
+                        // k_buf/v_buf/kv_caches while Q RoPE only touches q_buf (independent buffers).
                         self.decode_cmd.computeBarrier();
                         const push = KvCacheWritePush{
                             .kv_dim = kv_dim,
@@ -2537,9 +2529,32 @@ pub const InferenceEngine = struct {
                             self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
                             self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (kv_dim + 63) / 64, 1, 1);
                         }
+                        // Q RoPE overlaps with KV write — no data dependency between them.
+                        try self.dispatchRopeInPlace(
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            if (use_imrope) self.rope_freq_buf.handle else null,
+                            self.rope_freq_buf.size,
+                            config.head_dim,
+                            rope_dim,
+                            config.n_heads,
+                            state.position,
+                            rope_freq,
+                        );
                         self.decode_cmd.computeBarrier();
                     } else {
-                        // Fallback: transfer-based copy with mixed-stage barriers
+                        // Transfer fallback: Q RoPE before barrier (original order preserved)
+                        try self.dispatchRopeInPlace(
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            if (use_imrope) self.rope_freq_buf.handle else null,
+                            self.rope_freq_buf.size,
+                            config.head_dim,
+                            rope_dim,
+                            config.n_heads,
+                            state.position,
+                            rope_freq,
+                        );
                         self.decode_cmd.computeAndTransferBarrier();
                         const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * kv_vec_size;
                         const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
