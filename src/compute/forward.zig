@@ -36,6 +36,7 @@ const SsmDeltaNetPush = elementwise_mod.SsmDeltaNetPush;
 const SsmGatedNormPush = elementwise_mod.SsmGatedNormPush;
 const DeinterleavePush = elementwise_mod.DeinterleavePush;
 const KvCacheWritePush = elementwise_mod.KvCacheWritePush;
+const NormRopePush = elementwise_mod.NormRopePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
@@ -2084,6 +2085,54 @@ pub const InferenceEngine = struct {
         try self.elementwise.recordRope(&self.decode_cmd, ds, stride, rope_dim, n_heads, position, freq_base);
     }
 
+    /// Fused RMS norm + RoPE in-place on a head buffer.
+    /// Eliminates 1 dispatch + 1 barrier vs separate norm then RoPE.
+    fn dispatchNormRopeInPlace(
+        self: *InferenceEngine,
+        buf: vk.c.VkBuffer,
+        buf_size: vk.c.VkDeviceSize,
+        weight_buf: vk.c.VkBuffer,
+        weight_size: vk.c.VkDeviceSize,
+        freq_buf: ?vk.c.VkBuffer,
+        freq_size: vk.c.VkDeviceSize,
+        head_dim: u32,
+        rope_dim: u32,
+        n_heads: u32,
+        position: u32,
+        freq_base: f32,
+        eps: f32,
+    ) void {
+        const pip = &(self.elementwise.pipeline_norm_rope orelse return);
+        const push = NormRopePush{
+            .head_dim = head_dim,
+            .rope_dim = rope_dim,
+            .n_heads = n_heads,
+            .position = position,
+            .freq_base_bits = @bitCast(freq_base),
+            .eps_bits = @bitCast(eps),
+        };
+        if (freq_buf) |fb| {
+            self.pushDispatch3(
+                pip,
+                std.mem.asBytes(&push),
+                buf, buf_size,
+                weight_buf, weight_size,
+                fb, freq_size,
+                n_heads, 1, 1,
+            );
+        } else {
+            // Bind a dummy buffer for the unused freq binding
+            self.pushDispatch3(
+                pip,
+                std.mem.asBytes(&push),
+                buf, buf_size,
+                weight_buf, weight_size,
+                buf, buf_size,
+                n_heads, 1, 1,
+            );
+        }
+    }
+
     fn dispatchSoftmaxTopk(
         self: *InferenceEngine,
         logits_buf: vk.c.VkBuffer,
@@ -2455,61 +2504,76 @@ pub const InferenceEngine = struct {
                         }
                     }
                 }
-                if (q_norm_tensor) |qn| {
-                    // Apply RMS norm to each Q head (n_heads workgroups, head_dim elements each)
-                    try self.dispatchRmsNorm(
-                        self.q_buf.handle,
-                        self.q_buf.size,
-                        qn.gpu_buffer.handle,
-                        qn.gpu_buffer.size,
-                        self.q_buf.handle,
-                        self.q_buf.size,
-                        config.head_dim,
-                        config.n_heads,
-                        rms_norm_eps,
-                    );
-                }
-                if (k_norm_tensor) |kn| {
-                    try self.dispatchRmsNorm(
-                        self.k_buf.handle,
-                        self.k_buf.size,
-                        kn.gpu_buffer.handle,
-                        kn.gpu_buffer.size,
-                        self.k_buf.handle,
-                        self.k_buf.size,
-                        config.head_dim,
-                        config.n_kv_heads,
-                        rms_norm_eps,
-                    );
-                }
-                self.decode_cmd.computeBarrier();
-
                 // Bug fix #5+#6: IMRoPE — only rotate rope_dim of head_dim dimensions
                 // IMROPE: use precomputed per-pair frequencies when sections are present
                 const use_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;
                 const rope_freq: f32 = if (use_imrope) 0.0 else config.rope_freq_base;
                 const rope_dim: u32 = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
-                // K RoPE first — KV cache write reads k_buf, so it must complete before the write.
-                try self.dispatchRopeInPlace(
-                    self.k_buf.handle,
-                    self.k_buf.size,
-                    if (use_imrope) self.rope_freq_buf.handle else null,
-                    self.rope_freq_buf.size,
-                    config.head_dim,
-                    rope_dim,
-                    config.n_kv_heads,
-                    state.position,
-                    rope_freq,
-                );
+                const freq_buf_handle = if (use_imrope) self.rope_freq_buf.handle else null;
+
+                // Fused norm+rope: when both norm and rope are needed, combine them into
+                // a single dispatch per head set, eliminating 1 barrier + 2 dispatches.
+                const use_fused_norm_rope = self.elementwise.pipeline_norm_rope != null;
+                var q_rope_done = false;
+                var k_rope_done = false;
+
+                if (q_norm_tensor) |qn| {
+                    if (use_fused_norm_rope) {
+                        // Fused Q norm + Q RoPE in a single dispatch
+                        self.dispatchNormRopeInPlace(
+                            self.q_buf.handle, self.q_buf.size,
+                            qn.gpu_buffer.handle, qn.gpu_buffer.size,
+                            freq_buf_handle, self.rope_freq_buf.size,
+                            config.head_dim, rope_dim, config.n_heads,
+                            state.position, rope_freq, rms_norm_eps,
+                        );
+                        q_rope_done = true;
+                    } else {
+                        try self.dispatchRmsNorm(
+                            self.q_buf.handle, self.q_buf.size,
+                            qn.gpu_buffer.handle, qn.gpu_buffer.size,
+                            self.q_buf.handle, self.q_buf.size,
+                            config.head_dim, config.n_heads, rms_norm_eps,
+                        );
+                    }
+                }
+                if (k_norm_tensor) |kn| {
+                    if (use_fused_norm_rope) {
+                        // Fused K norm + K RoPE in a single dispatch
+                        self.dispatchNormRopeInPlace(
+                            self.k_buf.handle, self.k_buf.size,
+                            kn.gpu_buffer.handle, kn.gpu_buffer.size,
+                            freq_buf_handle, self.rope_freq_buf.size,
+                            config.head_dim, rope_dim, config.n_kv_heads,
+                            state.position, rope_freq, rms_norm_eps,
+                        );
+                        k_rope_done = true;
+                    } else {
+                        try self.dispatchRmsNorm(
+                            self.k_buf.handle, self.k_buf.size,
+                            kn.gpu_buffer.handle, kn.gpu_buffer.size,
+                            self.k_buf.handle, self.k_buf.size,
+                            config.head_dim, config.n_kv_heads, rms_norm_eps,
+                        );
+                    }
+                }
+                self.decode_cmd.computeBarrier();
+
+                if (!k_rope_done) {
+                    // K RoPE first — KV cache write reads k_buf, so it must complete before the write.
+                    try self.dispatchRopeInPlace(
+                        self.k_buf.handle, self.k_buf.size,
+                        freq_buf_handle, self.rope_freq_buf.size,
+                        config.head_dim, rope_dim, config.n_kv_heads,
+                        state.position, rope_freq,
+                    );
+                }
                 // KV cache write: use compute shader to stay in compute pipeline,
                 // avoiding compute→transfer + transfer→compute stage transitions.
                 {
                     const physical_token = try self.physicalTokenIndex(state.position);
                     if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
-                        // Compute path: K RoPE → barrier → KV write + Q RoPE (overlap) → barrier → flash attn
-                        // Q RoPE is dispatched after KV write to allow GPU overlap: KV write touches
-                        // k_buf/v_buf/kv_caches while Q RoPE only touches q_buf (independent buffers).
-                        self.decode_cmd.computeBarrier();
+                        if (!k_rope_done) self.decode_cmd.computeBarrier();
                         const push = KvCacheWritePush{
                             .kv_dim = kv_dim,
                             .dst_offset = physical_token * kv_dim,
@@ -2529,32 +2593,26 @@ pub const InferenceEngine = struct {
                             self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
                             self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (kv_dim + 63) / 64, 1, 1);
                         }
-                        // Q RoPE overlaps with KV write — no data dependency between them.
-                        try self.dispatchRopeInPlace(
-                            self.q_buf.handle,
-                            self.q_buf.size,
-                            if (use_imrope) self.rope_freq_buf.handle else null,
-                            self.rope_freq_buf.size,
-                            config.head_dim,
-                            rope_dim,
-                            config.n_heads,
-                            state.position,
-                            rope_freq,
-                        );
+                        if (!q_rope_done) {
+                            // Q RoPE overlaps with KV write — no data dependency between them.
+                            try self.dispatchRopeInPlace(
+                                self.q_buf.handle, self.q_buf.size,
+                                freq_buf_handle, self.rope_freq_buf.size,
+                                config.head_dim, rope_dim, config.n_heads,
+                                state.position, rope_freq,
+                            );
+                        }
                         self.decode_cmd.computeBarrier();
                     } else {
                         // Transfer fallback: Q RoPE before barrier (original order preserved)
-                        try self.dispatchRopeInPlace(
-                            self.q_buf.handle,
-                            self.q_buf.size,
-                            if (use_imrope) self.rope_freq_buf.handle else null,
-                            self.rope_freq_buf.size,
-                            config.head_dim,
-                            rope_dim,
-                            config.n_heads,
-                            state.position,
-                            rope_freq,
-                        );
+                        if (!q_rope_done) {
+                            try self.dispatchRopeInPlace(
+                                self.q_buf.handle, self.q_buf.size,
+                                freq_buf_handle, self.rope_freq_buf.size,
+                                config.head_dim, rope_dim, config.n_heads,
+                                state.position, rope_freq,
+                            );
+                        }
                         self.decode_cmd.computeAndTransferBarrier();
                         const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * kv_vec_size;
                         const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };

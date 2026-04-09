@@ -104,6 +104,16 @@ pub const KvCacheWritePush = extern struct {
     dst_offset: u32,
 };
 
+/// Push constants for fused RMS norm + RoPE shader.
+pub const NormRopePush = extern struct {
+    head_dim: u32,
+    rope_dim: u32,
+    n_heads: u32,
+    position: u32,
+    freq_base_bits: u32,
+    eps_bits: u32,
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -138,6 +148,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_softcap: ?Pipeline,
     /// KV CACHE WRITE pipeline: compute-based KV cache copy, 4 bindings (k_src, k_dst, v_src, v_dst).
     pipeline_kv_cache_write: ?Pipeline,
+    /// NORM ROPE pipeline: fused RMS norm + RoPE per head, 3 bindings (data, weight, freq).
+    pipeline_norm_rope: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -299,6 +311,13 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // norm_rope: fused RMS norm + RoPE, 3 bindings (data, weight, freq)
+        const norm_rope_path = std.fmt.bufPrint(&path_buf, "{s}/norm_rope.spv", .{shader_dir}) catch unreachable;
+        const pipeline_norm_rope = pipeline_mod.createFromSpirvWithOptions(instance, norm_rope_path, 3, @sizeOf(NormRopePush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("norm_rope shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -316,6 +335,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
             .pipeline_softcap = pipeline_softcap,
             .pipeline_kv_cache_write = pipeline_kv_cache_write,
+            .pipeline_norm_rope = pipeline_norm_rope,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -609,6 +629,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
         if (self.pipeline_softcap) |*p| p.deinit();
         if (self.pipeline_kv_cache_write) |*p| p.deinit();
+        if (self.pipeline_norm_rope) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

@@ -1,0 +1,87 @@
+#version 460
+// Fused RMS normalization + Rotary Position Embedding (RoPE) per head.
+// Each workgroup processes one head: normalize in-place, then apply RoPE.
+// Eliminates one dispatch + barrier vs separate norm then rope passes.
+//
+// Bindings: 0 = data (read-write in-place), 1 = norm weights, 2 = freq buffer
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer Data { float data[]; };
+layout(set = 0, binding = 1) readonly buffer Weight { float weight[]; };
+layout(set = 0, binding = 2) readonly buffer FreqBuf { float inv_freq[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint  head_dim;
+    uint  rope_dim;
+    uint  n_heads;
+    uint  position;
+    uint  freq_base_bits; // 0 = use freq buffer
+    uint  eps_bits;
+};
+
+shared float s_partial[64];
+
+void main() {
+    uint tid  = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    uint base = head * head_dim;
+    float eps = uintBitsToFloat(eps_bits);
+
+    // --- Pass 1: sum of squares for RMS norm ---
+    float sum_sq = 0.0;
+    for (uint i = tid; i < head_dim; i += 64) {
+        float val = data[base + i];
+        sum_sq += val * val;
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+
+    if (gl_SubgroupSize < 64) {
+        s_partial[tid] = sum_sq;
+        barrier();
+        if (tid == 0) {
+            float total = 0.0;
+            uint num_sg = (64 + gl_SubgroupSize - 1) / gl_SubgroupSize;
+            for (uint s = 0; s < num_sg; s++) {
+                total += s_partial[s * gl_SubgroupSize];
+            }
+            s_partial[0] = total;
+        }
+        barrier();
+        sum_sq = s_partial[0];
+    }
+
+    float rms_inv = inversesqrt(sum_sq / float(head_dim) + eps);
+
+    // --- Pass 2: normalize + RoPE ---
+    float freq_base = uintBitsToFloat(freq_base_bits);
+    bool use_freq_buf = (freq_base_bits == 0u);
+    uint half_rot = rope_dim / 2;
+
+    // Rotated dimensions: normalize then rotate pairs
+    for (uint i = tid; i < half_rot; i += 64) {
+        float x_lo = weight[i]            * (data[base + i]            * rms_inv);
+        float x_hi = weight[i + half_rot] * (data[base + i + half_rot] * rms_inv);
+
+        float freq_i;
+        if (use_freq_buf) {
+            freq_i = inv_freq[i];
+        } else {
+            float exponent = float(2 * i) / float(rope_dim);
+            freq_i = 1.0 / pow(freq_base, exponent);
+        }
+        float theta = float(position) * freq_i;
+        float cos_t = cos(theta);
+        float sin_t = sin(theta);
+
+        data[base + i]            = x_lo * cos_t - x_hi * sin_t;
+        data[base + i + half_rot] = x_lo * sin_t + x_hi * cos_t;
+    }
+
+    // Non-rotated dimensions: just normalize
+    for (uint i = rope_dim + tid; i < head_dim; i += 64) {
+        data[base + i] = weight[i] * (data[base + i] * rms_inv);
+    }
+}
