@@ -15,7 +15,9 @@ struct FlashAttnPush {
 
 constant uint FLASH_TG_SIZE = 64;
 constant uint FLASH_BLOCK_TOKENS = 256;
-constant uint FLASH_MAX_HEAD_DIM = 256;
+// Max head_dim supported. Gemma 4 global attention layers use head_dim=512;
+// SWA layers use 256. Sized for the larger value so a single shader handles both.
+constant uint FLASH_MAX_HEAD_DIM = 512;
 constant uint FLASH_MAX_HEAD_VEC4 = FLASH_MAX_HEAD_DIM / 4;
 
 inline float reduceThreadgroupMax(
@@ -119,9 +121,11 @@ kernel void main0(
     threadgroup float running_max;
     threadgroup float running_sum;
 
-    if (tid < vec4_dim) {
-        q_cache4[tid] = *(device const float4*)(q + q_base + (tid << 2));
-        acc_cache4[tid] = float4(0.0f);
+    // Strided loop: vec4_dim may exceed FLASH_TG_SIZE when head_dim > 256
+    // (e.g. Gemma 4 global attention layers use head_dim=512 → vec4_dim=128).
+    for (uint i = tid; i < vec4_dim; i += FLASH_TG_SIZE) {
+        q_cache4[i] = *(device const float4*)(q + q_base + (i << 2));
+        acc_cache4[i] = float4(0.0f);
     }
     if (tid == 0) {
         running_max = -INFINITY;
@@ -170,9 +174,10 @@ kernel void main0(
         const float block_sum = reduceThreadgroupSum(local_sum, reduce, tid, subgroup_size, simd_lane, simd_group);
         const float rescale = running_sum > 0.0f ? fast::exp(running_max - next_max) : 0.0f;
 
-        if (tid < vec4_dim) {
-            float4 acc = acc_cache4[tid] * rescale;
-            const uint dim_base = tid << 2;
+        // Strided loop over head_dim slices when vec4_dim > FLASH_TG_SIZE.
+        for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE) {
+            float4 acc = acc_cache4[vi] * rescale;
+            const uint dim_base = vi << 2;
 
             if (contiguous_kv) {
                 uint kv_base = block_base + dim_base;
@@ -187,7 +192,7 @@ kernel void main0(
                 }
             }
 
-            acc_cache4[tid] = acc;
+            acc_cache4[vi] = acc;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -206,13 +211,13 @@ kernel void main0(
         const float sink_max = fast::max(running_max, sink_val);
         const float rescale_s = running_sum > 0.0f ? fast::exp(running_max - sink_max) : 0.0f;
         final_sum = running_sum * rescale_s + fast::exp(sink_val - sink_max);
-        if (tid < vec4_dim) {
-            acc_cache4[tid] *= rescale_s;
+        for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE) {
+            acc_cache4[vi] *= rescale_s;
         }
     }
 
     const float inv_sum = final_sum > 0.0f ? 1.0f / final_sum : 0.0f;
-    if (tid < vec4_dim) {
-        *(device float4*)(out + q_base + (tid << 2)) = acc_cache4[tid] * inv_sum;
+    for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE) {
+        *(device float4*)(out + q_base + (vi << 2)) = acc_cache4[vi] * inv_sum;
     }
 }

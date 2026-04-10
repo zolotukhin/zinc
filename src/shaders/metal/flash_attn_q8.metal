@@ -15,7 +15,8 @@ struct FlashAttnPush {
 
 constant uint FLASH_TG_SIZE = 64;
 constant uint FLASH_BLOCK_TOKENS = 256;
-constant uint FLASH_MAX_HEAD_DIM = 256;
+// Max head_dim supported. Gemma 4 global attention layers use head_dim=512.
+constant uint FLASH_MAX_HEAD_DIM = 512;
 constant uint FLASH_MAX_HEAD_VEC4 = FLASH_MAX_HEAD_DIM / 4;
 
 inline float reduceThreadgroupMax(
@@ -126,9 +127,10 @@ kernel void main0(
     threadgroup float running_max;
     threadgroup float running_sum;
 
-    if (tid < vec4_dim) {
-        q_cache4[tid] = *(device const float4*)(q + q_base + (tid << 2));
-        acc_cache4[tid] = float4(0.0f);
+    // Strided loop in case vec4_dim > FLASH_TG_SIZE (head_dim=512 → vec4_dim=128).
+    for (uint i = tid; i < vec4_dim; i += FLASH_TG_SIZE) {
+        q_cache4[i] = *(device const float4*)(q + q_base + (i << 2));
+        acc_cache4[i] = float4(0.0f);
     }
     if (tid == 0u) {
         running_max = -INFINITY;
@@ -175,23 +177,23 @@ kernel void main0(
         const float block_sum = reduceThreadgroupSum(local_sum, reduce, tid, subgroup_size, simd_lane, simd_group);
         const float rescale = running_sum > 0.0f ? fast::exp(running_max - next_max) : 0.0f;
 
-        if (tid < vec4_dim) {
-            float4 acc = acc_cache4[tid] * rescale;
+        for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE) {
+            float4 acc = acc_cache4[vi] * rescale;
 
             if (contiguous_kv) {
                 uint kv_base = block_base;
                 for (uint token_offset = 0; token_offset < block_tokens; ++token_offset) {
-                    acc += loadQ8_0Vec4(v_cache + kv_base, tid) * scores[token_offset];
+                    acc += loadQ8_0Vec4(v_cache + kv_base, vi) * scores[token_offset];
                     kv_base += p.kv_token_stride_bytes;
                 }
             } else {
                 for (uint token_offset = 0; token_offset < block_tokens; ++token_offset) {
                     const uint kv_base = kvBaseForTokenBytes(page_table, p, kv_head, block_start + token_offset);
-                    acc += loadQ8_0Vec4(v_cache + kv_base, tid) * scores[token_offset];
+                    acc += loadQ8_0Vec4(v_cache + kv_base, vi) * scores[token_offset];
                 }
             }
 
-            acc_cache4[tid] = acc;
+            acc_cache4[vi] = acc;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -203,7 +205,7 @@ kernel void main0(
     }
 
     const float inv_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
-    if (tid < vec4_dim) {
-        *(device float4*)(out + q_base + (tid << 2)) = acc_cache4[tid] * inv_sum;
+    for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE) {
+        *(device float4*)(out + q_base + (vi << 2)) = acc_cache4[vi] * inv_sum;
     }
 }

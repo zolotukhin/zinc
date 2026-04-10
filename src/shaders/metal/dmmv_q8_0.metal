@@ -50,12 +50,15 @@ kernel void main0(
         device const packed_char4* quants = (device const packed_char4*)(block + 2u);
         const uint x_base = bi << 5;
 
+        // Use float dot product instead of half to avoid overflow when input
+        // values are large (Gemma 4 attn_norm weights up to ~300 produce
+        // norm_buf values up to ~3000; half-precision products overflow at 65504).
         #pragma unroll
         for (uint vi = 0u; vi < 8u; ++vi) {
             const char4 q = char4(quants[vi]);
-            const half4 q_half = half4(q);
-            const half4 x = half4(*(device const float4*)(input + x_base + (vi << 2)));
-            acc = fma(scale, float(dot(q_half, x)), acc);
+            const float4 q_f = float4(q);
+            const float4 x_f = *(device const float4*)(input + x_base + (vi << 2));
+            acc = fma(scale, dot(q_f, x_f), acc);
         }
     }
 
