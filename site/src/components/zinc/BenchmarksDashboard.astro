@@ -1,0 +1,1310 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Breadcrumbs from '../../components/Breadcrumbs.astro';
+import { buildBreadcrumbList } from '../../lib/structured-data';
+import benchmarkData from '../../data/zinc-performance.json';
+
+interface Props {
+  pagePath?: string;
+  canonicalPath?: string;
+}
+
+const {
+  pagePath = '/zinc/benchmarks',
+  canonicalPath = '/zinc/benchmarks',
+} = Astro.props;
+
+const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const canonicalUrl = `${siteUrl}${canonicalPath}`;
+const pageUrl = `${siteUrl}${pagePath}`;
+const breadcrumbItems = [
+  { name: 'Home', href: '/' },
+  { name: 'ZINC', href: '/zinc' },
+  { name: 'Benchmarks' },
+];
+
+const scenarioOrder = ['core', 'context-medium', 'context-long', 'decode-extended'];
+const hiddenBenchmarkModels = new Set(['qwen35-2b-q4k-m']);
+const scenarioMeta: Record<string, { label: string; short: string; eyebrow: string; description: string }> = {
+  core: {
+    label: 'Quick Answer',
+    short: 'Quick',
+    eyebrow: 'Short prompt · short decode',
+    description: 'Headline workload for a short answer with minimal prompt overhead.',
+  },
+  'context-medium': {
+    label: 'Context Retrieval',
+    short: 'Context',
+    eyebrow: 'Short retrieval prompt',
+    description: 'A retrieval-style prompt with explicit context so prompt throughput becomes visible.',
+  },
+  'context-long': {
+    label: 'Long Context Retrieval',
+    short: 'Long ctx',
+    eyebrow: 'Prefill-heavy workload',
+    description: 'A long prompt with the answer embedded near the end to expose prefill bottlenecks.',
+  },
+  'decode-extended': {
+    label: 'Long Decode',
+    short: 'Long decode',
+    eyebrow: 'Sustained generation',
+    description: 'A longer generation target that stresses steady-state decode instead of a short factual completion.',
+  },
+};
+
+function metricValue(summary: any) {
+  return summary?.median ?? summary?.avg ?? null;
+}
+
+function formatNumber(value: number | null | undefined, digits = 1) {
+  if (value == null || Number.isNaN(value)) return 'n/a';
+  return value.toFixed(digits);
+}
+
+function formatMetric(value: number | null | undefined, suffix: string, digits = 1) {
+  if (value == null || Number.isNaN(value)) return 'n/a';
+  return `${value.toFixed(digits)} ${suffix}`;
+}
+
+function formatPercent(value: number | null | undefined, digits = 0) {
+  if (value == null || Number.isNaN(value)) return 'n/a';
+  return `${value.toFixed(digits)}%`;
+}
+
+function formatDate(iso: string | null | undefined) {
+  if (!iso) return 'unknown';
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(iso));
+}
+
+function mean(values: Array<number | null>) {
+  const xs = values.filter((value): value is number => value != null && !Number.isNaN(value));
+  if (!xs.length) return null;
+  return xs.reduce((sum, value) => sum + value, 0) / xs.length;
+}
+
+function meterWidth(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value) || value <= 0) return 0;
+  return Math.max(6, Math.min(100, value));
+}
+
+function ensureScenarios(model: any) {
+  if (Array.isArray(model.scenarios) && model.scenarios.length > 0) return model.scenarios;
+  return [{
+    id: 'core',
+    label: 'Quick Answer',
+    short_label: 'Quick',
+    prompt_mode: model.prompt_mode,
+    prompt: model.prompt,
+    max_tokens: model.max_tokens,
+    notes: model.notes ?? [],
+    zinc: model.zinc,
+    baseline: model.baseline,
+    comparison: model.comparison,
+  }];
+}
+
+function scenarioForModel(model: any, scenarioId: string) {
+  return ensureScenarios(model).find((scenario: any) => scenario.id === scenarioId) ?? null;
+}
+
+function decodeValue(scenario: any) {
+  return metricValue(scenario?.zinc?.decode_tps);
+}
+
+function baselineDecodeValue(scenario: any) {
+  return metricValue(scenario?.baseline?.decode_tps);
+}
+
+function promptValue(scenario: any) {
+  return metricValue(scenario?.zinc?.prefill_tps);
+}
+
+function baselinePromptValue(scenario: any) {
+  return metricValue(scenario?.baseline?.prefill_tps);
+}
+
+function promptTokensValue(scenario: any) {
+  return scenario?.zinc?.prompt_tokens ?? scenario?.baseline?.prompt_tokens ?? null;
+}
+
+function prefillMsValue(scenario: any) {
+  return metricValue(scenario?.zinc?.prefill_ms);
+}
+
+function totalLatencyValue(scenario: any) {
+  return metricValue(scenario?.zinc?.total_latency_ms);
+}
+
+function endToEndValue(scenario: any) {
+  return metricValue(scenario?.zinc?.end_to_end_tps);
+}
+
+function promptRatioValue(scenario: any) {
+  return scenario?.comparison?.prompt_pct_of_baseline ?? null;
+}
+
+function decodeRatioValue(scenario: any) {
+  return scenario?.comparison?.pct_of_baseline ?? null;
+}
+
+function ratioTone(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) return 'neutral';
+  if (value >= 90) return 'positive';
+  if (value >= 50) return 'caution';
+  return 'negative';
+}
+
+function warningText(scenario: any) {
+  return scenario?.zinc?.unavailable_reason ?? scenario?.baseline?.unavailable_reason ?? null;
+}
+
+function compactReason(reason: string | null | undefined) {
+  if (!reason) return null;
+  if (reason.startsWith('ZINC run failed:')) return 'ZINC benchmark run failed on this target.';
+  if (reason.startsWith('RDNA baseline failed:') || reason.startsWith('Local baseline failed:')) {
+    return 'llama.cpp baseline collection failed for this model.';
+  }
+  if (reason.includes('No local llama-server or llama-cli binary found')) return 'llama.cpp baseline is not configured on this machine.';
+  if (reason.length > 120) return `${reason.slice(0, 117)}...`;
+  return reason;
+}
+
+function scenarioStatus(scenario: any) {
+  const zincOk = promptValue(scenario) != null || decodeValue(scenario) != null || endToEndValue(scenario) != null;
+  const baselineOk = baselinePromptValue(scenario) != null || baselineDecodeValue(scenario) != null;
+  const reason = compactReason(warningText(scenario));
+
+  if (zincOk && baselineOk) {
+    return {
+      tone: 'positive',
+      label: 'Compared',
+      note: 'ZINC and llama.cpp both completed this workload.',
+    };
+  }
+
+  if (zincOk) {
+    return {
+      tone: 'caution',
+      label: 'ZINC Only',
+      note: reason ?? 'Baseline is unavailable for this model on this target.',
+    };
+  }
+
+  return {
+    tone: 'negative',
+    label: 'Run Failed',
+    note: reason ?? 'No benchmark result recorded for this model.',
+  };
+}
+
+function normalizeTarget(target: any) {
+  const visibleModels = [...(target.models ?? [])]
+    .filter((model: any) => !hiddenBenchmarkModels.has(model.id))
+    .map((model: any) => ({
+      ...model,
+      scenarios: ensureScenarios(model),
+    }));
+
+  const successful = visibleModels.filter((model: any) => model?.zinc?.decode_tps);
+  const compared = visibleModels.filter((model: any) => model?.comparison?.pct_of_baseline != null);
+  const fastest = successful.length > 0
+    ? [...successful].sort((a, b) => (b.zinc.decode_tps.median ?? b.zinc.decode_tps.avg ?? 0) - (a.zinc.decode_tps.median ?? a.zinc.decode_tps.avg ?? 0))[0]
+    : null;
+
+  return {
+    ...target,
+    models: visibleModels,
+    summary: {
+      ...(target.summary ?? {}),
+      fastest_model_id: fastest?.id ?? null,
+      fastest_model_label: fastest?.label ?? null,
+      fastest_decode_tps: fastest ? (fastest.zinc.decode_tps.median ?? fastest.zinc.decode_tps.avg ?? null) : null,
+      benchmarked_models: visibleModels.length,
+      successful_models: successful.length,
+      compared_models: compared.length,
+      average_decode_tps: mean(successful.map((model: any) => model.zinc.decode_tps.median ?? model.zinc.decode_tps.avg ?? null)),
+      average_prompt_tps: mean(successful.map((model: any) => model.zinc.prefill_tps?.median ?? model.zinc.prefill_tps?.avg ?? null)),
+      average_pct_of_llama: mean(compared.map((model: any) => model.comparison.pct_of_baseline)),
+    },
+  };
+}
+
+function scenarioIdsForTarget(target: any) {
+  const ids = new Set<string>();
+  for (const model of target.models) {
+    for (const scenario of ensureScenarios(model)) ids.add(scenario.id);
+  }
+  return scenarioOrder.filter((id) => ids.has(id));
+}
+
+const targetOrder = ['rdna', 'metal'];
+const targets = [...benchmarkData.targets]
+  .sort((a, b) => targetOrder.indexOf(a.id) - targetOrder.indexOf(b.id))
+  .map(normalizeTarget);
+
+const totalBenchmarkedModels = targets.reduce((sum, target) => sum + (target.summary?.benchmarked_models ?? target.models.length ?? 0), 0);
+const totalSuccessfulModels = targets.reduce((sum, target) => sum + (target.summary?.successful_models ?? 0), 0);
+const totalComparedModels = targets.reduce((sum, target) => sum + (target.summary?.compared_models ?? 0), 0);
+
+function benchmarkedCount(target: any) {
+  return target.summary?.benchmarked_models ?? target.models.length ?? 0;
+}
+
+function scenarioRows(target: any, scenarioId: string) {
+  return [...target.models]
+    .map((model: any) => ({
+      model,
+      scenario: scenarioForModel(model, scenarioId),
+    }))
+    .filter((row) => row.scenario != null)
+    .sort((a, b) => (decodeValue(b.scenario) ?? 0) - (decodeValue(a.scenario) ?? 0));
+}
+
+function scenarioSummary(target: any, scenarioId: string) {
+  const rows = scenarioRows(target, scenarioId);
+  return {
+    count: rows.length,
+    comparedCount: rows.filter((row) => row.scenario?.comparison?.pct_of_baseline != null).length,
+    avgPrompt: mean(rows.map((row) => promptValue(row.scenario))),
+    avgDecode: mean(rows.map((row) => decodeValue(row.scenario))),
+    avgEndToEnd: mean(rows.map((row) => endToEndValue(row.scenario))),
+    avgLatency: mean(rows.map((row) => totalLatencyValue(row.scenario))),
+    avgPromptTokens: mean(rows.map((row) => promptTokensValue(row.scenario))),
+    avgPrefillMs: mean(rows.map((row) => prefillMsValue(row.scenario))),
+    avgPromptGap: mean(rows.map((row) => promptRatioValue(row.scenario))),
+    avgDecodeGap: mean(rows.map((row) => decodeRatioValue(row.scenario))),
+  };
+}
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'CollectionPage',
+      name: 'ZINC Benchmarks vs llama.cpp',
+      description: 'ZINC benchmark dashboard for AMD RDNA and Apple Silicon, including prompt throughput, prefill latency, decode throughput, total latency, and same-machine comparison against llama.cpp.',
+      url: pageUrl,
+      about: {
+        '@type': 'SoftwareApplication',
+        name: 'ZINC',
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Linux, macOS',
+        codeRepository: 'https://github.com/zolotukhin/zinc',
+      },
+      keywords: 'ZINC benchmarks, llama.cpp comparison, Apple Silicon Metal benchmark, AMD RDNA benchmark, local LLM benchmark, prefill throughput, decode throughput, latency benchmark',
+    },
+    {
+      '@type': 'Dataset',
+      name: 'ZINC benchmark artifact',
+      description: 'Structured benchmark artifact used to render the public ZINC benchmarks dashboard across RDNA and Metal targets.',
+      dateModified: benchmarkData.generated_at,
+      distribution: {
+        '@type': 'DataDownload',
+        encodingFormat: 'application/json',
+        contentUrl: canonicalUrl,
+      },
+    },
+    buildBreadcrumbList(siteUrl, breadcrumbItems),
+  ],
+};
+---
+
+<BaseLayout
+  title="ZINC Benchmarks vs llama.cpp"
+  description="ZINC benchmark dashboard for AMD RDNA and Apple Silicon, with scenario-based prompt throughput, prefill latency, decode throughput, end-to-end throughput, and same-machine comparison against llama.cpp."
+  keywords="ZINC benchmarks, llama.cpp comparison, Apple Silicon Metal benchmark, AMD RDNA benchmark, local LLM benchmark, prefill throughput, decode throughput, latency benchmark"
+  canonicalUrl={canonicalUrl}
+  jsonLd={jsonLd}
+>
+  <Breadcrumbs items={breadcrumbItems} />
+
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Benchmarks</p>
+      <h1>ZINC vs llama.cpp</h1>
+      <p class="intro">This page is organized as a benchmark board, not a pile of model cards. Pick RDNA or Metal, switch workloads, and read prefill and decode head-to-head in the same row.</p>
+    </div>
+    <div class="hero-stats">
+      <article class="stat-card">
+        <span>Targets</span>
+        <strong>{targets.length}</strong>
+      </article>
+      <article class="stat-card">
+        <span>Benchmarked models</span>
+        <strong>{totalBenchmarkedModels}</strong>
+      </article>
+      <article class="stat-card">
+        <span>Successful runs</span>
+        <strong>{totalSuccessfulModels}</strong>
+      </article>
+      <article class="stat-card">
+        <span>Same-machine comparisons</span>
+        <strong>{totalComparedModels}</strong>
+      </article>
+    </div>
+  </section>
+
+  <nav class="target-tabs" aria-label="Benchmark targets" role="tablist">
+    {targets.map((target, index) => (
+      <button
+        type="button"
+        role="tab"
+        id={`tab-${target.id}`}
+        aria-controls={`panel-${target.id}`}
+        aria-selected={index === 0 ? 'true' : 'false'}
+        class:list={['target-tab', { active: index === 0 }]}
+        data-bench-target-tab={target.id}
+      >
+        <span>{target.label}</span>
+        <small>{target.machine.gpu}</small>
+        <strong>{benchmarkedCount(target)} models</strong>
+      </button>
+    ))}
+  </nav>
+
+  {targets.map((target, index) => {
+    const scenarioIds = scenarioIdsForTarget(target);
+    const defaultScenario = scenarioIds[0] ?? 'core';
+
+    return (
+      <section
+        id={`panel-${target.id}`}
+        role="tabpanel"
+        aria-labelledby={`tab-${target.id}`}
+        class:list={['target-panel', { active: index === 0 }]}
+        data-bench-target-panel={target.id}
+        data-default-scenario={defaultScenario}
+        hidden={index !== 0}
+      >
+        <header class="panel-header">
+          <div>
+            <p class="eyebrow">{target.machine.label}</p>
+            <h2>{target.label} Benchmark Board</h2>
+            <p class="panel-copy">{target.description}</p>
+          </div>
+          <dl class="machine-card">
+            <div>
+              <dt>GPU</dt>
+              <dd>{target.machine.gpu}</dd>
+            </div>
+            <div>
+              <dt>Chip</dt>
+              <dd>{target.machine.chip ?? 'n/a'}</dd>
+            </div>
+            <div>
+              <dt>Memory</dt>
+              <dd>{target.machine.memory ?? 'n/a'}</dd>
+            </div>
+            <div>
+              <dt>Artifact</dt>
+              <dd>{formatDate(target.generated_at)}</dd>
+            </div>
+          </dl>
+        </header>
+
+        <div class="summary-grid">
+          <article class="summary-card">
+            <span>Fastest decode</span>
+            <strong>{formatMetric(target.summary?.fastest_decode_tps, 'tok/s')}</strong>
+            <small>{target.summary?.fastest_model_label ?? 'n/a'}</small>
+          </article>
+          <article class="summary-card">
+            <span>Average prompt</span>
+            <strong>{formatMetric(target.summary?.average_prompt_tps, 'tok/s')}</strong>
+            <small>Core workload, ZINC</small>
+          </article>
+          <article class="summary-card">
+            <span>Average decode</span>
+            <strong>{formatMetric(target.summary?.average_decode_tps, 'tok/s')}</strong>
+            <small>Core workload, ZINC</small>
+          </article>
+          <article class="summary-card">
+            <span>Average vs llama.cpp</span>
+            <strong>{formatPercent(target.summary?.average_pct_of_llama)}</strong>
+            <small>Core decode ratio</small>
+          </article>
+        </div>
+
+        <nav class="scenario-tabs" aria-label={`${target.label} scenarios`}>
+          {scenarioIds.map((scenarioId, scenarioIndex) => (
+            <button
+              type="button"
+              class:list={['scenario-tab', { active: scenarioIndex === 0 }]}
+              data-bench-scenario-target={target.id}
+              data-bench-scenario={scenarioId}
+              aria-pressed={scenarioIndex === 0 ? 'true' : 'false'}
+            >
+              <span>{scenarioMeta[scenarioId]?.short ?? scenarioId}</span>
+              <small>{scenarioMeta[scenarioId]?.eyebrow ?? scenarioId}</small>
+            </button>
+          ))}
+        </nav>
+
+        {scenarioIds.map((scenarioId, scenarioIndex) => {
+          const rows = scenarioRows(target, scenarioId);
+          const summary = scenarioSummary(target, scenarioId);
+
+          return (
+            <section
+              class:list={['scenario-panel', { active: scenarioIndex === 0 }]}
+              data-bench-scenario-panel={target.id}
+              data-bench-scenario-id={scenarioId}
+              hidden={scenarioIndex !== 0}
+            >
+              <article class="scenario-banner">
+                <div>
+                  <p class="eyebrow">{scenarioMeta[scenarioId]?.eyebrow ?? 'Benchmark workload'}</p>
+                  <h3>{scenarioMeta[scenarioId]?.label ?? scenarioId}</h3>
+                  <p>{scenarioMeta[scenarioId]?.description ?? 'Scenario benchmark slice.'}</p>
+                </div>
+                <div class="scenario-stats">
+                  <div>
+                    <span>Models</span>
+                    <strong>{summary.count}</strong>
+                  </div>
+                  <div>
+                    <span>Avg prompt tokens</span>
+                    <strong>{formatMetric(summary.avgPromptTokens, 'tok', 0)}</strong>
+                  </div>
+                  <div>
+                    <span>Avg prefill vs llama</span>
+                    <strong>{formatPercent(summary.avgPromptGap)}</strong>
+                  </div>
+                  <div>
+                    <span>Avg decode vs llama</span>
+                    <strong>{formatPercent(summary.avgDecodeGap)}</strong>
+                  </div>
+                </div>
+              </article>
+
+              <article class="board-card">
+                <header class="board-head">
+                  <div>
+                    <h3>Head-to-Head Metrics</h3>
+                    <p>Each row compares prompt processing and token generation side by side. Cold wall-clock totals stay in the JSON artifact, but they are intentionally omitted here because the current runners use different transports.</p>
+                  </div>
+                  <div class="legend">
+                    <span><i class="legend-swatch zinc"></i>ZINC</span>
+                    <span><i class="legend-swatch baseline"></i>llama.cpp</span>
+                  </div>
+                </header>
+
+                <div class="table-wrap">
+                  <table class="bench-table">
+                    <thead>
+                      <tr>
+                        <th>Model</th>
+                        <th>Workload</th>
+                        <th>Prefill</th>
+                        <th>Decode</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row) => {
+                        const promptRatio = promptRatioValue(row.scenario);
+                        const decodeRatio = decodeRatioValue(row.scenario);
+                        const status = scenarioStatus(row.scenario);
+                        return (
+                          <tr>
+                            <th scope="row" class="model-cell">
+                              <strong>{row.model.label}</strong>
+                              <div class="chip-row">
+                                <span class="chip">{row.model.family}</span>
+                                <span class="chip">{row.model.quant}</span>
+                                <span class="chip">{row.scenario.prompt_mode === 'chat' ? 'Chat' : 'Raw'}</span>
+                              </div>
+                            </th>
+                            <td>
+                              <div class="workload-cell">
+                                <strong>{formatMetric(promptTokensValue(row.scenario), 'tok prompt', 0)}</strong>
+                                <small>{formatMetric(row.scenario.max_tokens, 'token cap', 0)}</small>
+                                <small>{scenarioMeta[scenarioId]?.label ?? row.scenario.label ?? 'Scenario benchmark'}</small>
+                              </div>
+                            </td>
+                            <td>
+                              <div class="compare-stack">
+                                <div class="backend-line">
+                                  <span class="backend-pill zinc">ZINC</span>
+                                  <div>
+                                    <strong>{formatMetric(promptValue(row.scenario), 'tok/s')}</strong>
+                                    <small>{formatMetric(prefillMsValue(row.scenario), 'ms')}</small>
+                                  </div>
+                                </div>
+                                <div class="backend-line baseline">
+                                  <span class="backend-pill baseline">llama.cpp</span>
+                                  <div>
+                                    <strong>{formatMetric(baselinePromptValue(row.scenario), 'tok/s')}</strong>
+                                    <small>{formatMetric(metricValue(row.scenario?.baseline?.prefill_ms), 'ms')}</small>
+                                  </div>
+                                </div>
+                                <strong class:list={['ratio-pill', ratioTone(promptRatio)]}>{formatPercent(promptRatio)}</strong>
+                                <div class="meter-track">
+                                  <div class:list={['meter-fill', ratioTone(promptRatio)]} style={`width:${meterWidth(promptRatio)}%`}></div>
+                                </div>
+                              </div>
+                            </td>
+                            <td>
+                              <div class="compare-stack">
+                                <div class="backend-line">
+                                  <span class="backend-pill zinc">ZINC</span>
+                                  <div>
+                                    <strong>{formatMetric(decodeValue(row.scenario), 'tok/s')}</strong>
+                                    <small>{formatMetric(metricValue(row.scenario?.zinc?.ms_per_token), 'ms/tok')}</small>
+                                  </div>
+                                </div>
+                                <div class="backend-line baseline">
+                                  <span class="backend-pill baseline">llama.cpp</span>
+                                  <div>
+                                    <strong>{formatMetric(baselineDecodeValue(row.scenario), 'tok/s')}</strong>
+                                    <small>{formatMetric(metricValue(row.scenario?.baseline?.ms_per_token), 'ms/tok')}</small>
+                                  </div>
+                                </div>
+                                <strong class:list={['ratio-pill', ratioTone(decodeRatio)]}>{formatPercent(decodeRatio)}</strong>
+                                <div class="meter-track">
+                                  <div class:list={['meter-fill', ratioTone(decodeRatio)]} style={`width:${meterWidth(decodeRatio)}%`}></div>
+                                </div>
+                              </div>
+                            </td>
+                            <td class="status-cell">
+                              <strong class:list={['status-pill', status.tone]}>{status.label}</strong>
+                              <small>{status.note}</small>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+
+              <div class="scenario-kpis">
+                <article class="kpi-card">
+                  <span>Average ZINC prompt</span>
+                  <strong>{formatMetric(summary.avgPrompt, 'tok/s')}</strong>
+                  <small>{formatMetric(summary.avgPrefillMs, 'ms')} average prefill latency</small>
+                </article>
+                <article class="kpi-card">
+                  <span>Average ZINC decode</span>
+                  <strong>{formatMetric(summary.avgDecode, 'tok/s')}</strong>
+                  <small>{formatPercent(summary.avgDecodeGap)} of llama.cpp</small>
+                </article>
+                <article class="kpi-card">
+                  <span>Average prompt vs llama</span>
+                  <strong>{formatPercent(summary.avgPromptGap)}</strong>
+                  <small>{summary.comparedCount} same-machine comparisons</small>
+                </article>
+                <article class="kpi-card">
+                  <span>Models in scenario</span>
+                  <strong>{formatMetric(summary.count, 'models', 0)}</strong>
+                  <small>{formatMetric(summary.avgPromptTokens, 'average prompt tok', 0)}</small>
+                </article>
+              </div>
+            </section>
+          );
+        })}
+
+        <article class="method-card">
+          <header class="board-head">
+            <div>
+              <h3>Methodology</h3>
+              <p>{target.methodology.runner} · {target.methodology.benchmark_style}</p>
+            </div>
+          </header>
+          <ul class="method-list">
+            {target.methodology.notes.map((note) => <li>{note}</li>)}
+          </ul>
+        </article>
+      </section>
+    );
+  })}
+
+  <script is:inline>
+    function initBenchmarksDashboard() {
+      const targetTabs = Array.from(document.querySelectorAll('[data-bench-target-tab]'));
+      const targetPanels = Array.from(document.querySelectorAll('[data-bench-target-panel]'));
+      const scenarioTabs = Array.from(document.querySelectorAll('[data-bench-scenario-target]'));
+      const scenarioPanels = Array.from(document.querySelectorAll('[data-bench-scenario-panel]'));
+
+      function setActiveScenario(targetId, scenarioId) {
+        for (const tab of scenarioTabs) {
+          const active = tab.dataset.benchScenarioTarget === targetId && tab.dataset.benchScenario === scenarioId;
+          tab.classList.toggle('active', active);
+          tab.setAttribute('aria-pressed', active ? 'true' : 'false');
+        }
+        for (const panel of scenarioPanels) {
+          const active = panel.dataset.benchScenarioPanel === targetId && panel.dataset.benchScenarioId === scenarioId;
+          panel.hidden = !active;
+          panel.classList.toggle('active', active);
+        }
+      }
+
+      function setActiveTarget(targetId) {
+        for (const tab of targetTabs) {
+          const active = tab.dataset.benchTargetTab === targetId;
+          tab.classList.toggle('active', active);
+          tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        }
+        for (const panel of targetPanels) {
+          const active = panel.dataset.benchTargetPanel === targetId;
+          panel.hidden = !active;
+          panel.classList.toggle('active', active);
+        }
+
+        const panel = targetPanels.find((candidate) => candidate.dataset.benchTargetPanel === targetId);
+        const activeScenarioTab = scenarioTabs.find((tab) => tab.dataset.benchScenarioTarget === targetId && tab.classList.contains('active'));
+        const fallbackScenario = activeScenarioTab?.dataset.benchScenario || panel?.dataset.defaultScenario || 'core';
+        setActiveScenario(targetId, fallbackScenario);
+      }
+
+      for (const tab of targetTabs) {
+        tab.addEventListener('click', () => {
+          const targetId = tab.dataset.benchTargetTab || targetTabs[0]?.dataset.benchTargetTab || 'metal';
+          setActiveTarget(targetId);
+          history.replaceState(null, '', `#${targetId}`);
+        });
+      }
+
+      for (const tab of scenarioTabs) {
+        tab.addEventListener('click', () => {
+          const targetId = tab.dataset.benchScenarioTarget || targetTabs[0]?.dataset.benchTargetTab || 'metal';
+          const scenarioId = tab.dataset.benchScenario || 'core';
+          setActiveScenario(targetId, scenarioId);
+        });
+      }
+
+      const knownTargets = new Set(targetTabs.map((tab) => tab.dataset.benchTargetTab).filter(Boolean));
+      const hashedTarget = location.hash ? location.hash.slice(1) : null;
+      const initialTarget = hashedTarget && knownTargets.has(hashedTarget)
+        ? hashedTarget
+        : (targetTabs[0]?.dataset.benchTargetTab || 'metal');
+      setActiveTarget(initialTarget);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initBenchmarksDashboard, { once: true });
+    } else {
+      initBenchmarksDashboard();
+    }
+  </script>
+</BaseLayout>
+
+<style>
+  :global(main.container) {
+    max-width: 1360px;
+    --bench-surface: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--color-bg) 88%, var(--color-bg-alt) 12%),
+      color-mix(in srgb, var(--color-bg-alt) 78%, var(--color-bg) 22%)
+    );
+    --bench-surface-plain: color-mix(in srgb, var(--color-bg) 90%, var(--color-bg-alt) 10%);
+    --bench-surface-soft: color-mix(in srgb, var(--color-bg-alt) 84%, var(--color-bg) 16%);
+    --bench-tab-bg: color-mix(in srgb, var(--color-bg-alt) 88%, var(--color-bg) 12%);
+    --bench-tab-active: color-mix(in srgb, var(--color-accent) 12%, var(--color-bg) 88%);
+    --bench-table-head-bg: color-mix(in srgb, var(--color-accent) 7%, var(--color-bg-alt) 93%);
+    --bench-table-head-text: color-mix(in srgb, var(--color-text) 88%, var(--color-accent) 12%);
+    --bench-row-odd: color-mix(in srgb, var(--color-bg) 88%, var(--color-bg-alt) 12%);
+    --bench-row-even: color-mix(in srgb, var(--color-bg-alt) 72%, var(--color-bg) 28%);
+    --bench-meter-track: color-mix(in srgb, var(--color-border) 36%, var(--color-bg-alt) 64%);
+    --bench-shadow: 0 16px 32px -28px rgba(15, 23, 42, 0.18);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :global(main.container) {
+      --bench-surface: linear-gradient(
+        180deg,
+        color-mix(in srgb, #121217 82%, var(--color-bg-alt) 18%),
+        color-mix(in srgb, #0f1014 86%, var(--color-bg) 14%)
+      );
+      --bench-surface-plain: color-mix(in srgb, #13151a 92%, var(--color-bg-alt) 8%);
+      --bench-surface-soft: color-mix(in srgb, #171a20 86%, var(--color-bg-alt) 14%);
+      --bench-tab-bg: color-mix(in srgb, #171a20 88%, var(--color-bg) 12%);
+      --bench-tab-active: color-mix(in srgb, var(--color-accent) 16%, #171a20 84%);
+      --bench-table-head-bg: color-mix(in srgb, var(--color-accent) 12%, #171a20 88%);
+      --bench-table-head-text: color-mix(in srgb, #f3cfb4 68%, var(--color-text) 32%);
+      --bench-row-odd: color-mix(in srgb, #12151a 90%, var(--color-bg) 10%);
+      --bench-row-even: color-mix(in srgb, #181c22 84%, var(--color-bg) 16%);
+      --bench-meter-track: color-mix(in srgb, #303641 72%, var(--color-bg-alt) 28%);
+      --bench-shadow: 0 26px 46px -34px rgba(0, 0, 0, 0.72);
+    }
+  }
+
+  .hero,
+  .panel-header,
+  .summary-grid,
+  .scenario-stats,
+  .scenario-kpis,
+  .hero-stats {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .hero {
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+    align-items: end;
+    padding: 0.4rem 0 1.5rem;
+  }
+
+  .eyebrow {
+    margin: 0 0 0.55rem;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #c45c13;
+  }
+
+  .hero h1,
+  .panel-header h2,
+  .scenario-banner h3,
+  .board-head h3 {
+    margin: 0;
+    letter-spacing: -0.05em;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.5rem, 5.2vw, 4.4rem);
+    line-height: 0.94;
+    margin-bottom: 0.7rem;
+  }
+
+  .panel-header h2 {
+    font-size: clamp(1.9rem, 3vw, 2.8rem);
+    margin-bottom: 0.45rem;
+  }
+
+  .intro,
+  .panel-copy,
+  .scenario-banner p,
+  .board-head p {
+    margin: 0;
+    color: var(--color-text-muted);
+  }
+
+  .hero-stats,
+  .summary-grid,
+  .scenario-kpis {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .stat-card,
+  .summary-card,
+  .kpi-card,
+  .board-card,
+  .method-card,
+  .scenario-banner,
+  .machine-card {
+    border: 1px solid color-mix(in srgb, var(--color-border) 86%, #d97706 14%);
+    border-radius: 20px;
+    background: var(--bench-surface);
+    box-shadow: var(--bench-shadow);
+  }
+
+  .stat-card,
+  .summary-card,
+  .kpi-card,
+  .board-card,
+  .method-card,
+  .scenario-banner,
+  .machine-card {
+    padding: 1rem 1.05rem;
+  }
+
+  .stat-card span,
+  .summary-card span,
+  .kpi-card span,
+  .scenario-stats span,
+  .machine-card dt,
+  .method-list,
+  .target-tab small,
+  .scenario-tab small,
+  .model-cell small {
+    color: var(--color-text-muted);
+  }
+
+  .stat-card strong,
+  .summary-card strong,
+  .kpi-card strong,
+  .scenario-stats strong {
+    display: block;
+    margin-top: 0.25rem;
+  }
+
+  .target-tabs,
+  .scenario-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    padding: 0.45rem;
+    margin-bottom: 1rem;
+    border-radius: 22px;
+    border: 1px solid color-mix(in srgb, var(--color-border) 84%, #d97706 16%);
+    background: var(--bench-surface-soft);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  }
+
+  .target-tabs {
+    align-items: stretch;
+  }
+
+  .scenario-tabs {
+    align-items: stretch;
+  }
+
+  .target-tab,
+  .scenario-tab {
+    appearance: none;
+    text-align: left;
+    border-radius: 16px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--color-text);
+    cursor: pointer;
+    padding: 0.85rem 1rem;
+    transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+  }
+
+  .target-tab {
+    min-width: 220px;
+    flex: 1 1 260px;
+  }
+
+  .scenario-tab {
+    min-width: 160px;
+    flex: 1 1 180px;
+  }
+
+  .target-tab span,
+  .target-tab small,
+  .target-tab strong,
+  .scenario-tab span,
+  .scenario-tab small {
+    display: block;
+  }
+
+  .target-tab span,
+  .scenario-tab span {
+    font-weight: 700;
+  }
+
+  .target-tab strong {
+    margin-top: 0.45rem;
+    font-size: 0.92rem;
+  }
+
+  .target-tab.active,
+  .scenario-tab.active {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--color-accent) 42%, var(--color-border));
+    border-color: #d97706;
+    background: var(--bench-tab-active);
+    box-shadow: 0 14px 24px -24px rgba(0, 0, 0, 0.45), inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
+  }
+
+  .target-tab:focus-visible,
+  .scenario-tab:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-accent) 65%, transparent);
+    outline-offset: 2px;
+  }
+
+  .target-panel,
+  .scenario-panel {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .target-panel[hidden],
+  .scenario-panel[hidden] {
+    display: none !important;
+  }
+
+  .target-panel {
+    margin-bottom: 2rem;
+  }
+
+  .panel-header {
+    grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.95fr);
+    align-items: start;
+  }
+
+  .machine-card {
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.9rem;
+  }
+
+  .machine-card dt,
+  .machine-card dd {
+    margin: 0;
+  }
+
+  .machine-card dd {
+    font-weight: 700;
+    margin-top: 0.16rem;
+  }
+
+  .scenario-banner {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr);
+    gap: 1rem;
+    align-items: start;
+  }
+
+  .scenario-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .board-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: start;
+    margin-bottom: 1rem;
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    align-items: center;
+    color: var(--color-text-muted);
+    font-size: 0.88rem;
+  }
+
+  .legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    display: inline-block;
+  }
+
+  .legend-swatch.zinc {
+    background: #d97706;
+  }
+
+  .legend-swatch.baseline {
+    background: #2563eb;
+  }
+
+  .table-wrap {
+    overflow-x: auto;
+    border-radius: 16px;
+    border: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
+    background: var(--bench-surface-plain);
+  }
+
+  .bench-table {
+    width: 100%;
+    min-width: 980px;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .bench-table thead th {
+    background: var(--bench-table-head-bg);
+    color: var(--bench-table-head-text);
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.9rem 0.8rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 84%, transparent);
+    text-align: left;
+  }
+
+  .bench-table tbody tr:nth-child(odd) {
+    background: var(--bench-row-odd);
+  }
+
+  .bench-table tbody tr:nth-child(even) {
+    background: var(--bench-row-even);
+  }
+
+  .bench-table td,
+  .bench-table th[scope='row'] {
+    padding: 0.95rem 0.8rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 74%, transparent);
+    vertical-align: top;
+  }
+
+  .bench-table tbody tr:last-child td,
+  .bench-table tbody tr:last-child th[scope='row'] {
+    border-bottom: 0;
+  }
+
+  .bench-table th:first-child,
+  .bench-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: inherit;
+  }
+
+  .model-cell {
+    min-width: 240px;
+  }
+
+  .model-cell strong,
+  .numeric strong {
+    display: block;
+  }
+
+  .model-cell strong {
+    margin-bottom: 0.2rem;
+    font-size: 0.98rem;
+  }
+
+  .model-cell small,
+  .numeric small {
+    display: block;
+    margin-top: 0.22rem;
+    line-height: 1.35;
+  }
+
+  .numeric {
+    white-space: nowrap;
+  }
+
+  .chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.55rem;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 10%, var(--bench-surface-soft) 90%);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 22%, var(--color-border) 78%);
+    color: var(--color-text-muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  .workload-cell,
+  .compare-stack,
+  .status-cell {
+    display: grid;
+    gap: 0.45rem;
+  }
+
+  .workload-cell strong {
+    display: block;
+    margin: 0;
+    font-size: 0.98rem;
+  }
+
+  .workload-cell small {
+    display: block;
+    color: var(--color-text-muted);
+    line-height: 1.35;
+  }
+
+  .compare-stack {
+    display: grid;
+    gap: 0.5rem;
+    min-width: 170px;
+  }
+
+  .backend-line {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.65rem;
+    align-items: start;
+  }
+
+  .backend-line strong {
+    display: block;
+    margin: 0;
+  }
+
+  .backend-line small {
+    display: block;
+    margin-top: 0.16rem;
+    color: var(--color-text-muted);
+  }
+
+  .backend-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 4.8rem;
+    padding: 0.28rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .backend-pill.zinc {
+    background: color-mix(in srgb, #d97706 18%, transparent);
+    color: #d97706;
+  }
+
+  .backend-pill.baseline {
+    background: color-mix(in srgb, #2563eb 16%, transparent);
+    color: #2563eb;
+  }
+
+  .ratio-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: fit-content;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.76rem;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .ratio-pill.positive {
+    background: color-mix(in srgb, #16a34a 18%, transparent);
+    color: #15803d;
+  }
+
+  .ratio-pill.caution {
+    background: color-mix(in srgb, #d97706 18%, transparent);
+    color: #b45309;
+  }
+
+  .ratio-pill.negative {
+    background: color-mix(in srgb, #dc2626 18%, transparent);
+    color: #b91c1c;
+  }
+
+  .ratio-pill.neutral {
+    background: color-mix(in srgb, #64748b 18%, transparent);
+    color: #64748b;
+  }
+
+  .meter-track {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--bench-meter-track);
+    overflow: hidden;
+  }
+
+  .meter-fill {
+    height: 100%;
+    border-radius: 999px;
+  }
+
+  .meter-fill.positive {
+    background: linear-gradient(90deg, #16803c, #4ade80);
+  }
+
+  .meter-fill.caution {
+    background: linear-gradient(90deg, #b45309, #f59e0b);
+  }
+
+  .meter-fill.negative {
+    background: linear-gradient(90deg, #c2410c, #fb923c);
+  }
+
+  .meter-fill.neutral {
+    background: linear-gradient(90deg, #64748b, #94a3b8);
+  }
+
+  .status-cell {
+    min-width: 180px;
+  }
+
+  .status-cell small {
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: fit-content;
+    padding: 0.24rem 0.62rem;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .status-pill.positive {
+    background: color-mix(in srgb, #16a34a 18%, transparent);
+    color: #15803d;
+  }
+
+  .status-pill.caution {
+    background: color-mix(in srgb, #d97706 18%, transparent);
+    color: #b45309;
+  }
+
+  .status-pill.negative {
+    background: color-mix(in srgb, #dc2626 18%, transparent);
+    color: #b91c1c;
+  }
+
+  .method-list {
+    margin: 0;
+    padding-left: 1.2rem;
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  @media (max-width: 1100px) {
+    .hero,
+    .panel-header,
+    .scenario-banner {
+      grid-template-columns: 1fr;
+    }
+
+    .hero-stats,
+    .summary-grid,
+    .scenario-kpis {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 760px) {
+    :global(main.container) {
+      max-width: 100%;
+    }
+
+    .hero-stats,
+    .summary-grid,
+    .scenario-kpis,
+    .machine-card,
+    .scenario-stats {
+      grid-template-columns: 1fr;
+    }
+
+    .target-tabs,
+    .scenario-tabs {
+      flex-direction: column;
+    }
+
+    .board-head {
+      flex-direction: column;
+    }
+
+    .bench-table {
+      min-width: 900px;
+    }
+  }
+</style>
