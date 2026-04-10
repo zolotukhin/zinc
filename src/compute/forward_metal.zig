@@ -2954,7 +2954,7 @@ fn dispatchResidualRmsNormOnCmd(
     n: u32,
     scale: f32,
 ) void {
-    const push = ResidualRmsNormPush{ .n = n, .eps = 1e-6, .scale = scale };
+    const push = ResidualRmsNormPush{ .n = n, .eps = engine.config.rms_norm_eps, .scale = scale };
     const bufs = [_]*const MetalBuffer{ hidden, residual, norm_out, weights };
     cmd.dispatchV2(&engine.residual_rms_norm_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ResidualRmsNormPush), 0);
 }
@@ -4505,18 +4505,13 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
-            {
-                const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
-            }
+            // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
+            // Eliminates one barrier vs separate scale_acc + barrier + rms_norm.
+            dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
             if (!is_moe) {
-                profileBarrier(cmd, profile, .dense_ffn);
-                dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+                // dense FFN: norm_buf is ready (no barrier needed between fused dispatch and FFN)
             }
             if (is_moe) {
-                profileBarrier(cmd, profile, .router);
-                dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
                 profileBarrier(cmd, profile, .router); // norm_buf visible before router DMMV
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 const router_in_buf: *const MetalBuffer = blk: {
@@ -4708,13 +4703,9 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
                 cmd = &local_cmd_storage;
             }
 
-            {
-                const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
-            }
-            profileBarrier(cmd, profile, .router);
-            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1);
+            // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
+            // Eliminates one barrier vs separate scale_acc + barrier + rms_norm.
+            dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
             profileBarrier(cmd, profile, .router);
             if (is_moe) {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;

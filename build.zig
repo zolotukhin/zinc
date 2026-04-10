@@ -194,10 +194,21 @@ pub fn build(b: *std.Build) void {
         bench_mod.addIncludePath(b.path("src/metal"));
         bench_mod.linkFramework("Metal", .{});
         bench_mod.linkFramework("Foundation", .{});
+        const bench_exe = b.addExecutable(.{
+            .name = "zinc-bench-metal",
+            .root_module = bench_mod,
+        });
+        b.installArtifact(bench_exe);
+
+        const bench_run = b.addRunArtifact(bench_exe);
+        if (b.args) |args| {
+            bench_run.addArgs(args);
+        }
+
         const bench_metal_step = b.step("bench-metal", "Run the Metal inference benchmark (ReleaseFast)");
-        _ = bench_metal_step;
+        bench_metal_step.dependOn(&bench_run.step);
         const bench_step = b.step("bench", "Run benchmarks");
-        _ = bench_step;
+        bench_step.dependOn(&bench_run.step);
 
         const bench_shapes_mod = b.createModule(.{
             .root_source_file = b.path("benchmarks/metal_q8_shapes.zig"),
