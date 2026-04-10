@@ -308,7 +308,11 @@ MetalCmd* mtl_begin_command(MetalCtx* ctx) {
 MetalCmd* mtl_begin_command_mode(MetalCtx* ctx, uint8_t serial) {
     if (!ctx) return NULL;
 
-    id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
+    // Use unretained references to avoid buffer retain/release overhead during
+    // command encoding — matches llama.cpp's ggml-metal-context.m approach.
+    // Safe because all Metal buffers are owned by the InferenceEngine and
+    // outlive every command buffer.
+    id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBufferWithUnretainedReferences];
     if (!cmd_buf) {
         fprintf(stderr, "Error: Failed to create Metal command buffer.\n");
         return NULL;

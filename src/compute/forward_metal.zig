@@ -2219,6 +2219,14 @@ pub const InferenceEngine = struct {
                     if (preferApple9Q8WidePath(tensor, M, K) and self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 512) {
                         break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 512 };
                     }
+                    // lm_head (M=248320 for Qwen3.5-35B): use 512-thread wide path
+                    // matching SSM tensors for consistent GPU core utilization.
+                    // Adapted from llama.cpp's Q8_0 mul_mat_vec threadgroup sizing.
+                    if (K <= 2048 and M >= 65536 and tensor == self.lm_head and
+                        self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 512)
+                    {
+                        break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 512 };
+                    }
                 }
                 if (self.q8_tg_override) |block_size| {
                     if (!shouldUseGlobalQ8Override(self.config.architecture, tensor.info.name)) {
