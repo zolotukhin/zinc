@@ -55,6 +55,8 @@ pub const DmmvDispatch = struct {
     pipeline_q5k: ?Pipeline,
     /// Q6K pipeline, or null.
     pipeline_q6k: ?Pipeline,
+    /// Q5_1 pipeline, or null.
+    pipeline_q5_1: ?Pipeline,
     /// Q8 0 pipeline, or null.
     pipeline_q8_0: ?Pipeline,
     /// F16 pipeline, or null.
@@ -148,6 +150,12 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        const q5_1_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q5_1 = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q5_1 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
         const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
@@ -227,6 +235,7 @@ pub const DmmvDispatch = struct {
 
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
+            .pipeline_q5_1 = pipeline_q5_1,
             .pipeline_q5k = pipeline_q5k,
             .pipeline_q6k = pipeline_q6k,
             .pipeline_q8_0 = pipeline_q8_0,
@@ -251,6 +260,7 @@ pub const DmmvDispatch = struct {
     pub fn pipelineForType(self: *const DmmvDispatch, quant_type: GGMLType) ?*const Pipeline {
         return switch (quant_type) {
             .q4_k => if (self.pipeline_q4k) |*p| p else null,
+            .q5_1 => if (self.pipeline_q5_1) |*p| p else null,
             .q5_k => if (self.pipeline_q5k) |*p| p else null,
             .q6_k => if (self.pipeline_q6k) |*p| p else null,
             .q8_0 => if (self.pipeline_q8_0) |*p| p else null,
@@ -446,6 +456,7 @@ pub const DmmvDispatch = struct {
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
+        if (self.pipeline_q5_1) |*p| p.deinit();
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();
         if (self.pipeline_q8_0) |*p| p.deinit();
