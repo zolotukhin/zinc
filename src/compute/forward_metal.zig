@@ -2214,25 +2214,26 @@ pub const InferenceEngine = struct {
                         self.dmmv_q8_0_k2048_pipe.thread_execution_width == 32 and
                         self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 512)
                     {
-                        break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 512 };
+                        // nr=2: each SG processes 2 rows
+                        break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 32, .block_size = 512 };
                     }
                     if (preferApple9Q8WidePath(tensor, M, K) and self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 512) {
-                        break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 512 };
+                        break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 32, .block_size = 512 };
                     }
-                    // lm_head (M=248320 for Qwen3.5-35B): use 512-thread wide path
-                    // matching SSM tensors for consistent GPU core utilization.
-                    // Adapted from llama.cpp's Q8_0 mul_mat_vec threadgroup sizing.
+                    // lm_head (M=248320 for Qwen3.5-35B): use 512-thread wide path.
+                    // Adapted from llama.cpp's Q8_0 mul_mat_vec with N_R0=2 (nr=2).
                     if (K <= 2048 and M >= 65536 and tensor == self.lm_head and
                         self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 512)
                     {
-                        break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 512 };
+                        break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 32, .block_size = 512 };
                     }
                 }
                 if (self.q8_tg_override) |block_size| {
                     if (!shouldUseGlobalQ8Override(self.config.architecture, tensor.info.name)) {
-                        break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
+                        break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 256 };
                     }
-                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = block_size / simd_width, .block_size = block_size };
+                    // nr=2: double the rows per workgroup
+                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = block_size / simd_width * 2, .block_size = block_size };
                 }
                 if (K <= 2048 and
                     M >= 1024 and
@@ -2240,13 +2241,13 @@ pub const InferenceEngine = struct {
                     self.dmmv_q8_0_k2048_pipe.thread_execution_width == 32 and
                     self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 1024)
                 {
-                    break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 32, .block_size = 1024 };
+                    break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 1024 };
                 }
                 if (K <= 2048 and
                     self.dmmv_q8_0_k2048_pipe.thread_execution_width == 32 and
                     self.dmmv_q8_0_k2048_pipe.max_threads_per_threadgroup >= 256)
                 {
-                    break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
+                    break :blk .{ .pipe = &self.dmmv_q8_0_k2048_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 256 };
                 }
                 if (K <= 4096 and
                     M >= 1024 and
@@ -2254,15 +2255,15 @@ pub const InferenceEngine = struct {
                     self.dmmv_q8_0_pipe.thread_execution_width == 32 and
                     self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 1024)
                 {
-                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 32, .block_size = 1024 };
+                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 1024 };
                 }
                 if (K <= 4096 and
                     self.dmmv_q8_0_pipe.thread_execution_width == 32 and
                     self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 256)
                 {
-                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
+                    break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 16, .block_size = 256 };
                 }
-                break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 };
+                break :blk .{ .pipe = &self.dmmv_q8_0_pipe, .push_idx = 0, .rows_per_wg = 4, .block_size = 64 };
             },
             .f16 => .{ .pipe = &self.dmmv_f16_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
             .f32 => .{ .pipe = &self.dmmv_f32_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
