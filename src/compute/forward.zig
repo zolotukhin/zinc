@@ -527,6 +527,7 @@ const LayerTensors = struct {
     ffn_gate_inp: ?*const LoadedTensor = null,
     ffn_gate_exps: ?*const LoadedTensor = null,
     ffn_up_exps: ?*const LoadedTensor = null,
+    ffn_gate_up_exps: ?*const LoadedTensor = null,
     ffn_down_exps: ?*const LoadedTensor = null,
     ffn_gate_shexp: ?*const LoadedTensor = null,
     ffn_up_shexp: ?*const LoadedTensor = null,
@@ -1119,10 +1120,16 @@ pub const InferenceEngine = struct {
             lt.ffn_gate_inp = resolve(tensor_map, l, "ffn_gate_inp.weight");
             lt.ffn_gate_exps = resolve(tensor_map, l, "ffn_gate_exps.weight");
             lt.ffn_up_exps = resolve(tensor_map, l, "ffn_up_exps.weight");
+            lt.ffn_gate_up_exps = resolve(tensor_map, l, "ffn_gate_up_exps.weight");
             lt.ffn_down_exps = resolve(tensor_map, l, "ffn_down_exps.weight");
-            lt.ffn_gate_shexp = resolve(tensor_map, l, "ffn_gate_shexp.weight");
-            lt.ffn_up_shexp = resolve(tensor_map, l, "ffn_up_shexp.weight");
-            lt.ffn_down_shexp = resolve(tensor_map, l, "ffn_down_shexp.weight");
+            // Gemma 4 MoE: shared expert uses ffn_gate/up/down when ffn_gate_shexp is absent
+            const is_gemma_moe = config.architecture == .gemma and lt.ffn_gate_up_exps != null;
+            lt.ffn_gate_shexp = resolve(tensor_map, l, "ffn_gate_shexp.weight") orelse
+                if (is_gemma_moe) resolve(tensor_map, l, "ffn_gate.weight") else null;
+            lt.ffn_up_shexp = resolve(tensor_map, l, "ffn_up_shexp.weight") orelse
+                if (is_gemma_moe) resolve(tensor_map, l, "ffn_up.weight") else null;
+            lt.ffn_down_shexp = resolve(tensor_map, l, "ffn_down_shexp.weight") orelse
+                if (is_gemma_moe) resolve(tensor_map, l, "ffn_down.weight") else null;
             lt.ffn_gate_inp_shexp = resolve(tensor_map, l, "ffn_gate_inp_shexp.weight");
             lt.attn_qkv = resolve(tensor_map, l, "attn_qkv.weight");
             lt.ssm_alpha = resolve(tensor_map, l, "ssm_alpha.weight");
@@ -1957,6 +1964,44 @@ pub const InferenceEngine = struct {
         try self.elementwise.recordSigmoidMul(&self.decode_cmd, ds, n_elements);
     }
 
+    /// Dispatch the correct FFN activation (SwiGLU for most models, GEGLU for Gemma).
+    fn dispatchFfnActivation(
+        self: *InferenceEngine,
+        gate_buf: vk.c.VkBuffer,
+        gate_size: vk.c.VkDeviceSize,
+        up_buf: vk.c.VkBuffer,
+        up_size: vk.c.VkDeviceSize,
+        output_buf: vk.c.VkBuffer,
+        output_size: vk.c.VkDeviceSize,
+        n_elements: u32,
+    ) !void {
+        if (self.model.config.architecture == .gemma) {
+            return self.dispatchGeglu(gate_buf, gate_size, up_buf, up_size, output_buf, output_size, n_elements);
+        }
+        return self.dispatchSwiglu(gate_buf, gate_size, up_buf, up_size, output_buf, output_size, n_elements);
+    }
+
+    fn dispatchGeglu(
+        self: *InferenceEngine,
+        gate_buf: vk.c.VkBuffer,
+        gate_size: vk.c.VkDeviceSize,
+        up_buf: vk.c.VkBuffer,
+        up_size: vk.c.VkDeviceSize,
+        output_buf: vk.c.VkBuffer,
+        output_size: vk.c.VkDeviceSize,
+        n_elements: u32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_geglu orelse return error.ShaderNotLoaded);
+        if (pip.uses_push_descriptors) {
+            const push = SwigluPush{ .N = n_elements };
+            self.pushDispatch3(pip, std.mem.asBytes(&push), gate_buf, gate_size, up_buf, up_size, output_buf, output_size, (n_elements + 63) / 64, 1, 1);
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet3(ds, gate_buf, gate_size, up_buf, up_size, output_buf, output_size);
+        try self.elementwise.recordGeglu(&self.decode_cmd, ds, n_elements);
+    }
+
     fn dispatchSwiglu(
         self: *InferenceEngine,
         gate_buf: vk.c.VkBuffer,
@@ -2295,7 +2340,10 @@ pub const InferenceEngine = struct {
         const rms_norm_eps = config.rms_norm_eps;
         const q_dim = @as(u32, config.n_heads) * config.head_dim;
         const kv_dim = @as(u32, config.n_kv_heads) * config.head_dim;
+        // kv_dim is only used for buffer allocation; per-layer kv_dim (layer_kv_dim)
+        // is computed from tensor shapes for dispatch.
         const kv_vec_size = @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
+        _ = kv_vec_size;
         const is_moe = config.n_experts > 0;
         const inter_dim = if (config.intermediate_dim > 0) config.intermediate_dim else hidden_dim * 4;
         const shexp_inter_dim = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_dim;
@@ -2371,13 +2419,29 @@ pub const InferenceEngine = struct {
 
                 const q_tensor = lt.attn_q orelse return error.TensorNotFound;
                 const k_tensor = lt.attn_k orelse return error.TensorNotFound;
-                const v_tensor = lt.attn_v orelse return error.TensorNotFound;
+                // Gemma 4 global attention layers share K as V (no separate attn_v tensor).
+                const use_k_as_v = lt.attn_v == null and config.architecture == .gemma;
+                const v_tensor = lt.attn_v orelse if (use_k_as_v) k_tensor else return error.TensorNotFound;
                 const o_tensor = lt.attn_output orelse return error.TensorNotFound;
                 const attn_gate_tensor = lt.attn_gate;
                 const q_rows: u32 = @intCast(q_tensor.info.numElements() / hidden_dim);
                 const k_rows: u32 = @intCast(k_tensor.info.numElements() / hidden_dim);
                 const v_rows: u32 = @intCast(v_tensor.info.numElements() / hidden_dim);
                 const o_cols: u32 = @intCast(o_tensor.info.numElements() / hidden_dim);
+
+                // Derive per-layer head_dim from Q/K norm tensor or K tensor shape.
+                // Gemma 4 has mixed dimensions: SWA layers use head_dim=256, global use 512.
+                const layer_head_dim: u32 = if (lt.attn_q_norm) |qn|
+                    @intCast(qn.info.numElements())
+                else if (lt.attn_k_norm) |kn|
+                    @intCast(kn.info.numElements())
+                else
+                    config.head_dim;
+                const layer_kv_dim: u32 = k_rows;
+                const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else config.n_kv_heads;
+                const layer_kv_vec_size = @as(vk.c.VkDeviceSize, layer_kv_dim) * @sizeOf(f32);
+                const layer_rope_dim: u32 = @min(if (config.rope_dim > 0) config.rope_dim else layer_head_dim, layer_head_dim);
+
                 const packed_q_gate = q_rows == q_dim * 2;
                 const separate_attn_gate = q_rows == q_dim and attn_gate_tensor != null;
                 const apply_attn_gate = packed_q_gate or separate_attn_gate;
@@ -2419,7 +2483,7 @@ pub const InferenceEngine = struct {
                     // with a single compute dispatch, avoiding transfer stage overhead.
                     {
                         const pip = &(self.elementwise.pipeline_deinterleave orelse return error.ShaderNotLoaded);
-                        const total = config.head_dim * config.n_heads;
+                        const total = layer_head_dim * config.n_heads;
                         const q_full_size = @as(vk.c.VkDeviceSize, q_dim * 2) * @sizeOf(f32);
                         const q_size = @as(vk.c.VkDeviceSize, q_dim) * @sizeOf(f32);
                         if (pip.uses_push_descriptors) {
@@ -2438,7 +2502,7 @@ pub const InferenceEngine = struct {
                         } else {
                             const ds = try self.allocDescSet(pip.descriptor_set_layout);
                             self.writeDescSet3(ds, self.attn_out_buf.handle, q_full_size, self.q_buf.handle, q_size, self.gate_buf.handle, q_size);
-                            try self.elementwise.recordDeinterleave(&self.decode_cmd, ds, config.head_dim, config.n_heads);
+                            try self.elementwise.recordDeinterleave(&self.decode_cmd, ds, layer_head_dim, config.n_heads);
                         }
                     }
                     self.decode_cmd.computeBarrier();
@@ -2508,7 +2572,7 @@ pub const InferenceEngine = struct {
                 // IMROPE: use precomputed per-pair frequencies when sections are present
                 const use_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;
                 const rope_freq: f32 = if (use_imrope) 0.0 else config.rope_freq_base;
-                const rope_dim: u32 = if (config.rope_dim > 0) config.rope_dim else config.head_dim;
+                // rope_dim is replaced by layer_rope_dim (derived per-layer from tensor shapes)
                 const freq_buf_handle = if (use_imrope) self.rope_freq_buf.handle else null;
 
                 // Fused norm+rope: when both norm and rope are needed, combine them into
@@ -2524,7 +2588,7 @@ pub const InferenceEngine = struct {
                             self.q_buf.handle, self.q_buf.size,
                             qn.gpu_buffer.handle, qn.gpu_buffer.size,
                             freq_buf_handle, self.rope_freq_buf.size,
-                            config.head_dim, rope_dim, config.n_heads,
+                            layer_head_dim, layer_rope_dim, config.n_heads,
                             state.position, rope_freq, rms_norm_eps,
                         );
                         q_rope_done = true;
@@ -2533,7 +2597,7 @@ pub const InferenceEngine = struct {
                             self.q_buf.handle, self.q_buf.size,
                             qn.gpu_buffer.handle, qn.gpu_buffer.size,
                             self.q_buf.handle, self.q_buf.size,
-                            config.head_dim, config.n_heads, rms_norm_eps,
+                            layer_head_dim, config.n_heads, rms_norm_eps,
                         );
                     }
                 }
@@ -2544,7 +2608,7 @@ pub const InferenceEngine = struct {
                             self.k_buf.handle, self.k_buf.size,
                             kn.gpu_buffer.handle, kn.gpu_buffer.size,
                             freq_buf_handle, self.rope_freq_buf.size,
-                            config.head_dim, rope_dim, config.n_kv_heads,
+                            layer_head_dim, layer_rope_dim, layer_n_kv_heads,
                             state.position, rope_freq, rms_norm_eps,
                         );
                         k_rope_done = true;
@@ -2553,7 +2617,7 @@ pub const InferenceEngine = struct {
                             self.k_buf.handle, self.k_buf.size,
                             kn.gpu_buffer.handle, kn.gpu_buffer.size,
                             self.k_buf.handle, self.k_buf.size,
-                            config.head_dim, config.n_kv_heads, rms_norm_eps,
+                            layer_head_dim, layer_n_kv_heads, rms_norm_eps,
                         );
                     }
                 }
@@ -2564,7 +2628,7 @@ pub const InferenceEngine = struct {
                     try self.dispatchRopeInPlace(
                         self.k_buf.handle, self.k_buf.size,
                         freq_buf_handle, self.rope_freq_buf.size,
-                        config.head_dim, rope_dim, config.n_kv_heads,
+                        layer_head_dim, layer_rope_dim, layer_n_kv_heads,
                         state.position, rope_freq,
                     );
                 }
@@ -2575,8 +2639,8 @@ pub const InferenceEngine = struct {
                     if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
                         if (!k_rope_done) self.decode_cmd.computeBarrier();
                         const push = KvCacheWritePush{
-                            .kv_dim = kv_dim,
-                            .dst_offset = physical_token * kv_dim,
+                            .kv_dim = layer_kv_dim,
+                            .dst_offset = physical_token * layer_kv_dim,
                         };
                         if (kv_pip.uses_push_descriptors) {
                             self.pushDispatch4(
@@ -2586,19 +2650,19 @@ pub const InferenceEngine = struct {
                                 self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
                                 self.v_buf.handle, self.v_buf.size,
                                 self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
-                                (kv_dim + 63) / 64, 1, 1,
+                                (layer_kv_dim + 63) / 64, 1, 1,
                             );
                         } else {
                             const ds = try self.allocDescSet(kv_pip.descriptor_set_layout);
                             self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
-                            self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (kv_dim + 63) / 64, 1, 1);
+                            self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (layer_kv_dim + 63) / 64, 1, 1);
                         }
                         if (!q_rope_done) {
                             // Q RoPE overlaps with KV write — no data dependency between them.
                             try self.dispatchRopeInPlace(
                                 self.q_buf.handle, self.q_buf.size,
                                 freq_buf_handle, self.rope_freq_buf.size,
-                                config.head_dim, rope_dim, config.n_heads,
+                                layer_head_dim, layer_rope_dim, config.n_heads,
                                 state.position, rope_freq,
                             );
                         }
@@ -2609,15 +2673,15 @@ pub const InferenceEngine = struct {
                             try self.dispatchRopeInPlace(
                                 self.q_buf.handle, self.q_buf.size,
                                 freq_buf_handle, self.rope_freq_buf.size,
-                                config.head_dim, rope_dim, config.n_heads,
+                                layer_head_dim, layer_rope_dim, config.n_heads,
                                 state.position, rope_freq,
                             );
                         }
                         self.decode_cmd.computeAndTransferBarrier();
-                        const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * kv_vec_size;
-                        const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
+                        const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * layer_kv_vec_size;
+                        const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
                         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
-                        const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = kv_vec_size };
+                        const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
                         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
                         self.decode_cmd.transferToComputeBarrier();
                     }
@@ -2627,9 +2691,9 @@ pub const InferenceEngine = struct {
                 if (self.attention.pipeline) |*pip| {
                     if (pip.uses_push_descriptors) {
                         const push = FlashAttnPush{
-                            .head_dim = config.head_dim,
+                            .head_dim = layer_head_dim,
                             .n_heads = config.n_heads,
-                            .n_kv_heads = config.n_kv_heads,
+                            .n_kv_heads = layer_n_kv_heads,
                             .seq_len = state.position + 1,
                             .page_size = kv_page_size_tokens,
                             .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
@@ -2638,7 +2702,7 @@ pub const InferenceEngine = struct {
                     } else {
                         const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
                         self.writeDescSet5(attn_ds, self.q_buf.handle, self.q_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, self.attn_out_buf.handle, self.attn_out_buf.size);
-                        try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, config.head_dim, config.n_heads, config.n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale);
+                        try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale);
                     }
                 }
                 self.decode_cmd.computeBarrier();
@@ -2991,15 +3055,20 @@ pub const InferenceEngine = struct {
 
                 const n_used = config.n_experts_used;
 
-                // Dispatch each selected expert
-                const gate_exps = lt.ffn_gate_exps orelse return error.TensorNotFound;
-                const up_exps = lt.ffn_up_exps orelse return error.TensorNotFound;
+                // Dispatch each selected expert — handle both separate and fused gate+up layouts.
+                // Gemma 4 26B-A4B uses fused ffn_gate_up_exps instead of separate gate/up.
+                const fused_gate_up = lt.ffn_gate_up_exps;
+                const gate_exps = lt.ffn_gate_exps orelse fused_gate_up orelse return error.TensorNotFound;
+                const up_exps = lt.ffn_up_exps orelse fused_gate_up orelse return error.TensorNotFound;
                 const down_exps = lt.ffn_down_exps orelse return error.TensorNotFound;
 
                 const gate_quant = gate_exps.info.type_;
                 const down_quant = down_exps.info.type_;
-                // Expert weight offset: each expert has inter_dim rows of K=hidden_dim
-                const expert_gate_row_bytes = expertSliceBytes(gate_quant, inter_dim, hidden_dim);
+                // Expert weight offset: for fused gate_up, stride covers both halves (2*inter_dim)
+                const fused_inter = if (fused_gate_up != null) inter_dim * 2 else inter_dim;
+                const expert_gate_row_bytes = expertSliceBytes(gate_quant, fused_inter, hidden_dim);
+                // Byte offset to the up half within a fused gate_up expert slice
+                const up_base_offset: u32 = if (fused_gate_up != null) expertSliceBytes(gate_quant, inter_dim, hidden_dim) else 0;
                 // Down projection: each expert has hidden_dim rows of K=inter_dim
                 const expert_down_row_bytes = expertSliceBytes(down_quant, hidden_dim, inter_dim);
 
@@ -3076,7 +3145,7 @@ pub const InferenceEngine = struct {
 
                     // SwiGLU: ALL experts at once (N = n_used * inter_dim)
                     const moe_swiglu_phase = self.beginProfilePhase();
-                    try self.dispatchSwiglu(
+                    try self.dispatchFfnActivation(
                         self.gate_buf.handle,
                         self.gate_buf.size,
                         self.up_buf.handle,
@@ -3152,7 +3221,7 @@ pub const InferenceEngine = struct {
                     // No buffer conflicts: weighted_acc reads down_buf+router_output_buf/writes hidden_buf;
                     // SwiGLU reads gate_buf+up_buf/writes swiglu_buf.
                     if (has_shared_expert) {
-                        try self.dispatchSwiglu(
+                        try self.dispatchFfnActivation(
                             self.gate_buf.handle,
                             self.gate_buf.size,
                             self.up_buf.handle,
@@ -3278,14 +3347,14 @@ pub const InferenceEngine = struct {
                         const eid = expert_ids[ei];
                         const weight = expert_weights[ei];
                         const gate_offset = eid * expert_gate_row_bytes;
-                        const up_offset = eid * expert_gate_row_bytes;
+                        const up_offset = eid * expert_gate_row_bytes + up_base_offset;
                         const down_offset = eid * expert_down_row_bytes;
 
                         try self.dispatchDmmvWithOffset(gate_exps, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim, gate_offset);
                         try self.dispatchDmmvWithOffset(up_exps, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, up_offset);
                         self.decode_cmd.computeBarrier();
 
-                        try self.dispatchSwiglu(
+                        try self.dispatchFfnActivation(
                             self.gate_buf.handle,
                             self.gate_buf.size,
                             self.up_buf.handle,
@@ -3328,7 +3397,7 @@ pub const InferenceEngine = struct {
                         }
                         self.decode_cmd.computeBarrier();
 
-                        try self.dispatchSwiglu(
+                        try self.dispatchFfnActivation(
                             self.gate_buf.handle,
                             self.gate_buf.size,
                             self.up_buf.handle,
@@ -3416,7 +3485,7 @@ pub const InferenceEngine = struct {
                 try self.dispatchDmmv(up_tensor, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
                 self.decode_cmd.computeBarrier();
 
-                try self.dispatchSwiglu(
+                try self.dispatchFfnActivation(
                     self.gate_buf.handle,
                     self.gate_buf.size,
                     self.up_buf.handle,
