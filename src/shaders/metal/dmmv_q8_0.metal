@@ -19,9 +19,6 @@ struct DmmvPush {
 // sharing the L1-cached X vector (at most 16 KiB for K<=4096).  This doubles
 // useful compute per X fetch, improving pipeline utilization.
 //
-// Weight data is loaded via aligned int32_t reads (4 bytes at once) instead of
-// individual byte loads, matching llama.cpp's char4(*(int*)) pattern.
-//
 // Q8_0 block layout (34 bytes, 32 elements):
 //   [0..1]   d  (float16) scale
 //   [2..33]  qs (32 x int8)
@@ -55,14 +52,15 @@ kernel void main0(
         device const uchar* blk1 = row1 + bi * 34u;
         const float s0 = float(as_type<half>(*(device const ushort*)(blk0)));
         const float s1 = float(as_type<half>(*(device const ushort*)(blk1)));
+        device const packed_char4* q0 = (device const packed_char4*)(blk0 + 2u);
+        device const packed_char4* q1 = (device const packed_char4*)(blk1 + 2u);
         const uint x_base = bi << 5;
 
         #pragma unroll
         for (uint vi = 0u; vi < 8u; ++vi) {
-            const uint qo = 2u + (vi << 2);
             const float4 x = *(device const float4*)(input + x_base + (vi << 2));
-            acc0 = fma(s0, dot(float4(as_type<char4>(*(device const int*)(blk0 + qo))), x), acc0);
-            acc1 = fma(s1, dot(float4(as_type<char4>(*(device const int*)(blk1 + qo))), x), acc1);
+            acc0 = fma(s0, dot(float4(char4(q0[vi])), x), acc0);
+            acc1 = fma(s1, dot(float4(char4(q1[vi])), x), acc1);
         }
     }
 

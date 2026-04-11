@@ -8297,8 +8297,10 @@ test "dmmv_q8_0 shader matches CPU reference across many workgroups" {
     };
     const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
 
+    // nr=2: each SG handles 2 rows, block_size=64 → 2 SGs per WG → 4 rows per WG
+    const rows_per_wg: usize = 4;
     var cmd = try metal_command.beginCommand(ctx);
-    cmd.dispatchV2(&pipe, .{ @intCast((M + 1) / 2), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + rows_per_wg - 1) / rows_per_wg), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
     cmd.commitAndWait();
 
     const allocator = std.testing.allocator;
@@ -9335,5 +9337,643 @@ test "repacked Q8_0 shader matches CPU reference" {
     const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
     for (0..M) |row| {
         try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.5);
+    }
+}
+
+test "dmmv_q8_0_k2048 shader matches CPU reference (nr=2)" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 17; // odd M to test nr=2 boundary (last SG has only 1 valid row)
+    const K: u32 = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.0625 * @as(f32, @floatFromInt(1 + (row % 7) + (blk % 5)))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 3 + blk * 13 + e * 7) % 51);
+                const q: i8 = @intCast(raw_q - 25);
+                weight_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 7 + 3) % 19);
+        input_ptr[i] = 0.25 * @as(f32, @floatFromInt(raw - 9));
+    }
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    // nr=2 dispatch: 2 rows per SG
+    const simd_w: u32 = if (pipe.thread_execution_width > 0) pipe.thread_execution_width else 32;
+    const block_size: u32 = @min(256, pipe.max_threads_per_threadgroup);
+    const sgs_per_wg = block_size / simd_w;
+    const rows_per_wg = sgs_per_wg * 2; // nr=2
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    var ref_row: [2048]f32 = undefined;
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), K, .q8_0, &ref_row);
+        var expected: f32 = 0;
+        for (0..K) |i| expected += ref_row[i] * input_ptr[i];
+        try std.testing.expectApproxEqAbs(expected, output_ptr[row], 0.05);
+    }
+}
+
+test "dmmv_q8_0 nr=2 odd M produces correct last row" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    // M=3: the last SG has base_row=2, row1 at row 3 is out-of-bounds for the weight
+    // buffer. Verify that row 2's result is still correct and no out-of-bounds write
+    // corrupts memory.
+    const M: u32 = 3;
+    const K: u32 = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    // Allocate extra row of padding to detect OOB writes
+    var weight_buf = try metal_buffer.createBuffer(ctx, (M + 1) * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    // Extra sentinel slot at output[M] to detect OOB write
+    var output_buf = try metal_buffer.createBuffer(ctx, (M + 1) * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.25 * @as(f32, @floatFromInt(1 + row + (blk % 4)))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 5 + blk * 3 + e) % 31);
+                const q: i8 = @intCast(raw_q - 15);
+                weight_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast(i % 11);
+        input_ptr[i] = @as(f32, @floatFromInt(raw - 5));
+    }
+
+    // Write sentinel to detect OOB write at output[M]
+    const sentinel: f32 = -999.0;
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    output_ptr[M] = sentinel;
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    // nr=2 dispatch
+    const rows_per_wg: u32 = 4; // 2 SGs × 2 rows
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ (M + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    var ref_row: [2048]f32 = undefined;
+    for (0..M) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), K, .q8_0, &ref_row);
+        var expected: f32 = 0;
+        for (0..K) |i| expected += ref_row[i] * input_ptr[i];
+        try std.testing.expectApproxEqAbs(expected, output_ptr[row], 0.01);
+    }
+
+    // Sentinel must be untouched — shader must not write past M
+    try std.testing.expectApproxEqAbs(sentinel, output_ptr[M], 0.0);
+}
+
+test "repacked Q8_0 shader matches CPU reference with multiple groups per row" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_repacked");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 8;
+    const K: u32 = 2048; // 64 blocks per row = 2 groups per row
+    const blocks_per_row: u32 = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var orig_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&orig_buf);
+
+    var rng = std.Random.DefaultPrng.init(12345);
+    const random = rng.random();
+    for (0..M) |row| {
+        for (0..blocks_per_row) |bi| {
+            const off = row * row_bytes + bi * 34;
+            const scale_bits: u16 = @bitCast(@as(f16, @floatFromInt(@as(i8, @intCast(@as(i32, random.intRangeAtMost(i8, -8, 8)))))));
+            orig_buf.cpu_ptr.?[off] = @truncate(scale_bits);
+            orig_buf.cpu_ptr.?[off + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |j| {
+                orig_buf.cpu_ptr.?[off + 2 + j] = @bitCast(random.intRangeAtMost(i8, -120, 120));
+            }
+        }
+    }
+
+    var repacked_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&repacked_buf);
+    repackQ8_0Blocks(orig_buf.cpu_ptr.?, repacked_buf.cpu_ptr.?, M, K);
+
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        input_ptr[i] = @as(f32, @floatFromInt(@as(i32, @intCast(i % 13)))) - 6.0;
+    }
+
+    // CPU reference from original (non-repacked) data
+    var expected: [8]f32 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (0..M) |row| {
+        var dot: f32 = 0;
+        for (0..blocks_per_row) |bi| {
+            const off = row * row_bytes + bi * 34;
+            const scale = @as(f32, @as(f16, @bitCast(@as(u16, orig_buf.cpu_ptr.?[off]) | (@as(u16, orig_buf.cpu_ptr.?[off + 1]) << 8))));
+            for (0..32) |j| {
+                const q: f32 = @floatFromInt(@as(i8, @bitCast(orig_buf.cpu_ptr.?[off + 2 + j])));
+                dot += scale * q * input_ptr[bi * 32 + j];
+            }
+        }
+        expected[row] = dot;
+    }
+
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &repacked_buf, &input_buf, &output_buf };
+    const simd_w: u32 = if (pipe.thread_execution_width > 0) pipe.thread_execution_width else 32;
+    const block_size: u32 = @min(512, pipe.max_threads_per_threadgroup);
+    const rows_per_wg: u32 = block_size / simd_w * 2;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.5);
+    }
+}
+
+test "canRepackQ8 boundary conditions" {
+    try std.testing.expect(!canRepackQ8(0));
+    try std.testing.expect(!canRepackQ8(512));
+    try std.testing.expect(canRepackQ8(1024));
+    try std.testing.expect(!canRepackQ8(1536));
+    try std.testing.expect(canRepackQ8(2048));
+    try std.testing.expect(canRepackQ8(4096));
+}
+
+test "repackQ8_0Blocks round-trip preserves data" {
+    // Verify repacking preserves data by checking specific byte positions
+    const M: u32 = 2;
+    const K: u32 = 1024; // 32 blocks per row = 1 group
+    const blocks_per_row: u32 = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+    const total = M * row_bytes;
+
+    const allocator = std.testing.allocator;
+    const src = try allocator.alloc(u8, total);
+    defer allocator.free(src);
+    const dst = try allocator.alloc(u8, total);
+    defer allocator.free(dst);
+
+    // Fill with predictable pattern
+    for (0..total) |i| {
+        src[i] = @truncate(i *% 37 +% 11);
+    }
+    repackQ8_0Blocks(src.ptr, dst.ptr, M, K);
+
+    // Verify structure: for each group, scales are contiguous then qs chunks
+    for (0..M) |row| {
+        for (0..1) |gi| {
+            // Check scale of block 0 in this group
+            const src_blk0_scale_lo = src[row * row_bytes + gi * 32 * 34];
+            const src_blk0_scale_hi = src[row * row_bytes + gi * 32 * 34 + 1];
+            const dst_group = (row * 1 + gi) * 1088;
+            try std.testing.expectEqual(src_blk0_scale_lo, dst[dst_group]);
+            try std.testing.expectEqual(src_blk0_scale_hi, dst[dst_group + 1]);
+
+            // Check first quant byte of block 0, chunk 0
+            const src_q0 = src[row * row_bytes + gi * 32 * 34 + 2];
+            try std.testing.expectEqual(src_q0, dst[dst_group + 64]);
+        }
+    }
+}
+
+test "dmmv_q8_0_k2048_fused_norm shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048_fused_norm");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 5;
+    const K: u32 = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var hidden_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&hidden_buf);
+    var norm_weight_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&norm_weight_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    // Fill weights
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.0625 * @as(f32, @floatFromInt(1 + (row % 3) + (blk % 5)))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 7 + blk * 3 + e * 11) % 41);
+                const q: i8 = @intCast(raw_q - 20);
+                weight_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    // Fill hidden state and norm weights
+    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(hidden_buf.cpu_ptr.?));
+    const norm_ptr: [*]f32 = @ptrCast(@alignCast(norm_weight_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 17 + 5) % 23);
+        hidden_ptr[i] = 0.5 * @as(f32, @floatFromInt(raw - 11));
+        norm_ptr[i] = 0.8 + 0.01 * @as(f32, @floatFromInt(@as(i32, @intCast(i % 13))));
+    }
+
+    // CPU reference: RMSNorm then DMMV
+    var sq_sum: f64 = 0;
+    for (0..K) |i| sq_sum += @as(f64, hidden_ptr[i]) * @as(f64, hidden_ptr[i]);
+    const rms_inv: f32 = @floatCast(1.0 / @sqrt(sq_sum / @as(f64, K) + 1e-6));
+
+    var normed_input: [2048]f32 = undefined;
+    for (0..K) |i| normed_input[i] = norm_ptr[i] * (hidden_ptr[i] * rms_inv);
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    // fused_norm shader: buffer(0)=push, buffer(1)=W, buffer(2)=hidden, buffer(3)=Y, buffer(4)=norm_weight
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &hidden_buf, &output_buf, &norm_weight_buf };
+    const block_size: u32 = 256;
+    const rows_per_wg = block_size / 32;
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ (M + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), K, .q8_0, ref_row);
+        var expected: f32 = 0;
+        for (0..K) |i| expected += ref_row[i] * normed_input[i];
+        // fused_norm uses half-precision intermediate; allow wider tolerance
+        try std.testing.expectApproxEqAbs(expected, output_ptr[row], 1.5);
+    }
+}
+
+test "dmmv_q8_0_dual_fused_norm shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual_fused_norm");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M0: u32 = 4;
+    const M1: u32 = 3;
+    const K: u32 = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight0_buf = try metal_buffer.createBuffer(ctx, M0 * row_bytes);
+    defer metal_buffer.freeBuffer(&weight0_buf);
+    var weight1_buf = try metal_buffer.createBuffer(ctx, M1 * row_bytes);
+    defer metal_buffer.freeBuffer(&weight1_buf);
+    var hidden_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&hidden_buf);
+    var norm_weight_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&norm_weight_buf);
+    var output0_buf = try metal_buffer.createBuffer(ctx, M0 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output0_buf);
+    var output1_buf = try metal_buffer.createBuffer(ctx, M1 * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output1_buf);
+
+    @memset(weight0_buf.cpu_ptr.?[0..weight0_buf.size], 0);
+    @memset(weight1_buf.cpu_ptr.?[0..weight1_buf.size], 0);
+    @memset(output0_buf.cpu_ptr.?[0..output0_buf.size], 0);
+    @memset(output1_buf.cpu_ptr.?[0..output1_buf.size], 0);
+
+    for (0..M0) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.0625 * @as(f32, @floatFromInt(1 + (row % 4) + (blk % 6)))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight0_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight0_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 5 + blk * 9 + e * 3) % 47);
+                const q: i8 = @intCast(raw_q - 23);
+                weight0_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+    for (0..M1) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + (row % 3) + (blk % 8)))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight1_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight1_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 13 + blk * 7 + e * 11) % 53);
+                const q: i8 = @intCast(raw_q - 26);
+                weight1_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(hidden_buf.cpu_ptr.?));
+    const norm_ptr: [*]f32 = @ptrCast(@alignCast(norm_weight_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 11 + 3) % 19);
+        hidden_ptr[i] = 0.25 * @as(f32, @floatFromInt(raw - 9));
+        norm_ptr[i] = 0.9 + 0.02 * @as(f32, @floatFromInt(@as(i32, @intCast(i % 7))));
+    }
+
+    // CPU reference: RMSNorm then DMMV
+    var sq_sum: f64 = 0;
+    for (0..K) |i| sq_sum += @as(f64, hidden_ptr[i]) * @as(f64, hidden_ptr[i]);
+    const rms_inv: f32 = @floatCast(1.0 / @sqrt(sq_sum / @as(f64, K) + 1e-6));
+
+    var normed_input: [2048]f32 = undefined;
+    for (0..K) |i| normed_input[i] = norm_ptr[i] * (hidden_ptr[i] * rms_inv);
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const push = DualQ8DmmvPush{
+        .M0 = M0,
+        .M1 = M1,
+        .K = K,
+        .a0_offset = 0,
+        .a1_offset = 0,
+        .x_offset = 0,
+        .y0_offset = 0,
+        .y1_offset = 0,
+    };
+    // dual_fused_norm: buffer(0)=push, buffer(1)=W0, buffer(2)=W1, buffer(3)=hidden, buffer(4)=Y0, buffer(5)=Y1, buffer(6)=norm_weight
+    const bufs = [_]*const MetalBuffer{ &weight0_buf, &weight1_buf, &hidden_buf, &output0_buf, &output1_buf, &norm_weight_buf };
+    const total_rows = M0 + M1;
+    const block_size: u32 = 256;
+    const rows_per_wg = block_size / 32;
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const output0_ptr: [*]const f32 = @ptrCast(@alignCast(output0_buf.cpu_ptr.?));
+    const output1_ptr: [*]const f32 = @ptrCast(@alignCast(output1_buf.cpu_ptr.?));
+    for (0..M0) |row| {
+        dequantRow(weight0_buf.cpu_ptr.?[0..weight0_buf.size], @intCast(row), K, .q8_0, ref_row);
+        var expected: f32 = 0;
+        for (0..K) |i| expected += ref_row[i] * normed_input[i];
+        try std.testing.expectApproxEqAbs(expected, output0_ptr[row], 1.5);
+    }
+    for (0..M1) |row| {
+        dequantRow(weight1_buf.cpu_ptr.?[0..weight1_buf.size], @intCast(row), K, .q8_0, ref_row);
+        var expected: f32 = 0;
+        for (0..K) |i| expected += ref_row[i] * normed_input[i];
+        try std.testing.expectApproxEqAbs(expected, output1_ptr[row], 1.5);
+    }
+}
+
+test "dmmv_q8_0_native scalar shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_native");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 7;
+    const K: u32 = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.125 * @as(f32, @floatFromInt(1 + (row % 4) + (blk % 3)))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 3 + blk * 7 + e * 11) % 37);
+                const q: i8 = @intCast(raw_q - 18);
+                weight_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 7 + 2) % 13);
+        input_ptr[i] = @as(f32, @floatFromInt(raw - 6));
+    }
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    // native shader: one thread per row
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ M, 1, 1 }, .{ 1, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    var ref_row: [2048]f32 = undefined;
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), K, .q8_0, &ref_row);
+        var expected: f32 = 0;
+        for (0..K) |i| expected += ref_row[i] * input_ptr[i];
+        try std.testing.expectApproxEqAbs(expected, output_ptr[row], 0.01);
+    }
+}
+
+test "dmmv_q8_0_k2048 large M across many workgroups (nr=2)" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 513; // odd, crosses many WG boundaries with nr=2
+    const K: usize = 2048;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    const allocator = std.testing.allocator;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + (row % 11) + (blk % 7)))));
+            const scale_bits = @as(u16, @bitCast(scale));
+            weight_buf.cpu_ptr.?[base] = @truncate(scale_bits);
+            weight_buf.cpu_ptr.?[base + 1] = @truncate(scale_bits >> 8);
+            for (0..32) |e| {
+                const raw_q: i32 = @intCast((row * 7 + blk * 13 + e * 3) % 59);
+                const q: i8 = @intCast(raw_q - 29);
+                weight_buf.cpu_ptr.?[base + 2 + e] = @bitCast(q);
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 11 + 1) % 23);
+        input_ptr[i] = 0.125 * @as(f32, @floatFromInt(raw - 11));
+    }
+
+    const push = DmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf };
+
+    // nr=2 dispatch with 512-thread WGs (matching real engine config)
+    const block_size: u32 = 512;
+    const sgs_per_wg = block_size / 32;
+    const rows_per_wg = sgs_per_wg * 2; // nr=2
+    const wgs: u32 = @intCast((M + rows_per_wg - 1) / rows_per_wg);
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+    const expected = try allocator.alloc(f32, M);
+    defer allocator.free(expected);
+    @memset(expected[0..M], 0);
+
+    for (0..M) |row| {
+        dequantRow(weight_buf.cpu_ptr.?[0..weight_buf.size], @intCast(row), @intCast(K), .q8_0, ref_row);
+        for (0..K) |i| expected[row] += ref_row[i] * input_ptr[i];
+    }
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.05);
     }
 }

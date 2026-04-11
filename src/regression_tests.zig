@@ -325,20 +325,26 @@ test "Metal Q8_0 DMMV uses float dot products, not half (overflow at large norm 
     // Gemma 4 attn_norm weights up to ~300 produce norm_buf values up to ~3000;
     // int8(127) × half(3000) = 381,000 overflows f16 max (65504) → -inf.
     // Fix: use float4 dot products in all Q8_0 DMMV variants.
+    //
+    // Also: quants must be read via packed_char4 (not int* cast) because Q8_0
+    // quants start at byte offset 2 within 34-byte blocks — misaligned for int*.
     const src = @embedFile("shaders/metal/dmmv_q8_0.metal");
-    try expectContains(src, "float4 q_f = float4(q)");
-    try expectContains(src, "dot(q_f, x_f)");
+    try expectContains(src, "packed_char4");
+    try expectContains(src, "dot(float4(");
     // Must NOT convert input to half
     try expectNotContains(src, "half4 x = half4(");
     try expectNotContains(src, "half4 q_half");
+    // Must NOT use misaligned int* cast for quant reads
+    try expectNotContains(src, "device const int*)(blk");
 }
 
 test "Metal Q8_0 k2048 DMMV uses float dot products" {
     const src = @embedFile("shaders/metal/dmmv_q8_0_k2048.metal");
-    try expectContains(src, "float4 q_f = float4(q)");
-    try expectContains(src, "dot(q_f, x_f)");
+    try expectContains(src, "packed_char4");
+    try expectContains(src, "dot(float4(");
     try expectNotContains(src, "half4 x = half4(");
     try expectNotContains(src, "half4 q_half");
+    try expectNotContains(src, "device const int*)(blk");
 }
 
 test "Metal Q8_0 dual DMMV uses float dot products" {

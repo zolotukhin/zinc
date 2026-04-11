@@ -410,7 +410,7 @@ pub fn main() !void {
         },
     );
     try stdout.interface.print(
-        "Prompt tokens: {d} | decode tokens: {d} | warmup: {d} | runs: {d} | chat={} | private_decode_override={any} | private_decode_effective={} | encoder_override={s} | encoder_effective={s} | profile={}\n\n",
+        "Prompt tokens: {d} | decode tokens: {d} | warmup: {d} | runs: {d} | chat={} | private_decode_override={any} | private_decode_effective={} | encoder_override={?d} | encoder_effective={?d} | profile={}\n\n",
         .{
             prompt_tokens.len,
             config.max_tokens,
