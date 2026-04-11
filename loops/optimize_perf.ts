@@ -400,6 +400,7 @@ export type BenchCheckpoint = {
 export type LoopState = {
   effort: number;
   planDoc: string;
+  benchmarkSignature?: string;
   runStartedAt: string;
   lastUpdatedAt: string;
   lastCycle: number;
@@ -1389,11 +1390,33 @@ async function saveLoopState(state: LoopState): Promise<void> {
   await writeFile(statePathForEffort(state.effort), JSON.stringify(state, null, 2));
 }
 
-function createInitialState(effort: number, planDoc: string, baseline: BenchResult, headCommit: string | null): LoopState {
+export function benchmarkSignatureForSpec(spec: EffortSpec): string {
+  return JSON.stringify({
+    doc: spec.doc,
+    metricMode: spec.metricMode,
+    primaryMetricLabel: spec.primaryMetricLabel,
+    benchmarkPrompt: spec.benchmarkPrompt,
+    benchmarkMaxTokens: spec.benchmarkMaxTokens,
+    benchmarkMethod: spec.benchmarkMethod,
+  });
+}
+
+export function isResumeStateCompatible(saved: LoopState, spec: EffortSpec): boolean {
+  return saved.benchmarkSignature === benchmarkSignatureForSpec(spec);
+}
+
+function createInitialState(
+  effort: number,
+  planDoc: string,
+  baseline: BenchResult,
+  headCommit: string | null,
+  benchmarkSignature: string,
+): LoopState {
   const now = new Date().toISOString();
   return {
     effort,
     planDoc,
+    benchmarkSignature,
     runStartedAt: now,
     lastUpdatedAt: now,
     lastCycle: 0,
@@ -1547,35 +1570,43 @@ async function main() {
   console.log(c("1;32", `  Baseline (${effortSpec.primaryMetricLabel}): ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}, BW: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}`));
   console.log(c("1;32", `  Output: "${originalBaseline.outputText.slice(0, 80)}"`));
 
+  const benchmarkSignature = benchmarkSignatureForSpec(effortSpec);
   let currentCode = originalBaseline;
   let bestPerf = originalBaseline;
   let bestTokPerSec = bestPerf.tokPerSec ?? 0;
   let startCycle = 1;
   const headCommit = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || null;
-  let state = createInitialState(effort, effortFile, originalBaseline, headCommit);
+  let state = createInitialState(effort, effortFile, originalBaseline, headCommit, benchmarkSignature);
 
   if (resume) {
     const saved = await loadLoopState(effort);
     if (saved) {
-      state = saved;
-      startCycle = saved.lastCycle + 1;
-      if (saved.bestResult) {
-        bestPerf = checkpointToBenchResult(saved.bestResult);
-        bestTokPerSec = saved.bestTokPerSec;
-      }
-      console.log(c("1;36", `  Resumed: ${saved.lastCycle} previous cycles, recorded best ${saved.bestTokPerSec.toFixed(2)} tok/s (${effortSpec.primaryMetricLabel})`));
-      if (saved.cycles.length > 0) {
-        console.log(c("2", `  Recent cycles:\n${buildRecentCycleBlock(saved.cycles)}`));
-      }
-      if (saved.bestTokPerSec > (currentCode.tokPerSec ?? 0) + improvementThreshold(currentCode.tokPerSec)) {
-        const bestCommitNote = saved.bestCommitHash ? ` on commit ${saved.bestCommitHash.slice(0, 8)}` : "";
+      if (!isResumeStateCompatible(saved, effortSpec)) {
         console.log(c(
           "1;33",
-          `  Resume note: recorded best cycle ${saved.bestCycle ?? "?"}${bestCommitNote} was faster than the current HEAD benchmark. The loop will branch from the code you currently have checked out, not from that historical metric.`,
+          "  Resume note: saved state uses an older or different benchmark signature. Ignoring it and starting fresh for this effort.",
         ));
-      }
-      if (saved.reviewSummaries.length > 0) {
-        console.log(c("2", `  Latest review:\n${saved.reviewSummaries.at(-1)}`));
+      } else {
+        state = saved;
+        startCycle = saved.lastCycle + 1;
+        if (saved.bestResult) {
+          bestPerf = checkpointToBenchResult(saved.bestResult);
+          bestTokPerSec = saved.bestTokPerSec;
+        }
+        console.log(c("1;36", `  Resumed: ${saved.lastCycle} previous cycles, recorded best ${saved.bestTokPerSec.toFixed(2)} tok/s (${effortSpec.primaryMetricLabel})`));
+        if (saved.cycles.length > 0) {
+          console.log(c("2", `  Recent cycles:\n${buildRecentCycleBlock(saved.cycles)}`));
+        }
+        if (saved.bestTokPerSec > (currentCode.tokPerSec ?? 0) + improvementThreshold(currentCode.tokPerSec)) {
+          const bestCommitNote = saved.bestCommitHash ? ` on commit ${saved.bestCommitHash.slice(0, 8)}` : "";
+          console.log(c(
+            "1;33",
+            `  Resume note: recorded best cycle ${saved.bestCycle ?? "?"}${bestCommitNote} was faster than the current HEAD benchmark. The loop will branch from the code you currently have checked out, not from that historical metric.`,
+          ));
+        }
+        if (saved.reviewSummaries.length > 0) {
+          console.log(c("2", `  Latest review:\n${saved.reviewSummaries.at(-1)}`));
+        }
       }
     } else {
       console.log(c("2", "  No previous run found, starting fresh."));

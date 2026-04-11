@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  benchmarkSignatureForSpec,
   buildAnalysisReport,
   buildAgentPrompt,
   buildSelfReview,
@@ -10,6 +11,7 @@ import {
   formatClaudeStreamLine,
   getEffortSpec,
   improvementThreshold,
+  isResumeStateCompatible,
   isMaterialImprovement,
   loadPreviousRun,
   mergeUniqueEntries,
@@ -326,6 +328,49 @@ describe("controller helpers", () => {
     expect(prompt).toContain("Benchmark Focus");
     expect(prompt).toContain("prefill tok/s");
     expect(prompt).toContain("long-context prefill benchmark");
+  });
+
+  test("resume compatibility rejects state from older benchmark regimes", () => {
+    const spec = getEffortSpec(3);
+    expect(spec).not.toBeNull();
+    const compatible = isResumeStateCompatible({
+      effort: 3,
+      planDoc: "MULTI_HOUR_EFFORT_3_BATCH_PREFILL.md",
+      benchmarkSignature: benchmarkSignatureForSpec(spec!),
+      runStartedAt: "2026-04-07T00:00:00.000Z",
+      lastUpdatedAt: "2026-04-07T00:00:00.000Z",
+      lastCycle: 0,
+      bestTokPerSec: 73.7,
+      bestCycle: 0,
+      bestCommitHash: null,
+      bestResult: null,
+      stalledCycles: 0,
+      consecutiveFoundationKeeps: 0,
+      cycles: [],
+      failedApproaches: [],
+      ideas: [],
+      reviewSummaries: [],
+    }, spec!);
+    expect(compatible).toBe(true);
+
+    const legacyStateCompatible = isResumeStateCompatible({
+      effort: 3,
+      planDoc: "MULTI_HOUR_EFFORT_3_BATCH_PREFILL.md",
+      runStartedAt: "2026-04-07T00:00:00.000Z",
+      lastUpdatedAt: "2026-04-07T00:00:00.000Z",
+      lastCycle: 98,
+      bestTokPerSec: 34.04,
+      bestCycle: 0,
+      bestCommitHash: null,
+      bestResult: null,
+      stalledCycles: 98,
+      consecutiveFoundationKeeps: 0,
+      cycles: [],
+      failedApproaches: [],
+      ideas: [],
+      reviewSummaries: [],
+    }, spec!);
+    expect(legacyStateCompatible).toBe(false);
   });
 });
 
