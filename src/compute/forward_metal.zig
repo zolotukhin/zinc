@@ -960,6 +960,7 @@ pub const InferenceEngine = struct {
     dmmv_q8_0_dual_pipe: MetalPipeline,
     dmmv_q8_0_k2048_fused_norm_pipe: MetalPipeline,
     dmmv_q8_0_dual_fused_norm_pipe: MetalPipeline,
+    dmmv_q8_0_repacked_pipe: MetalPipeline,
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
@@ -1269,6 +1270,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q8_0_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual");
         self.dmmv_q8_0_k2048_fused_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048_fused_norm");
         self.dmmv_q8_0_dual_fused_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual_fused_norm");
+        self.dmmv_q8_0_repacked_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_repacked");
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
@@ -1605,7 +1607,15 @@ pub const InferenceEngine = struct {
         });
         if (self.private_decode_buffers and self.lm_head.info.type_ == .q8_0) {
             const lm_head_bytes: usize = @intCast(self.lm_head.info.sizeBytes());
-            if (lm_head_bytes % @sizeOf(u32) == 0) {
+            const lm_K: u32 = @intCast(self.lm_head.info.dims[0]);
+            if (self.dmmv_q8_0_repacked_pipe.handle != null and canRepackQ8(lm_K)) {
+                self.lm_head_private_buf = try metal_buffer.createBuffer(ctx, lm_head_bytes);
+                self.lm_head_private_buf.is_repacked_q8 = true;
+                const lm_M: u32 = @intCast(self.lm_head.info.dims[1]);
+                const src_ptr: [*]const u8 = self.lm_head.gpu_buffer.cpu_ptr.? + tensorPageOffset(model, self.lm_head);
+                repackQ8_0Blocks(src_ptr, self.lm_head_private_buf.cpu_ptr.?, lm_M, lm_K);
+                log.info("Metal: repacked lm_head Q8_0 ({d}x{d}) for coalesced access", .{ lm_M, lm_K });
+            } else if (lm_head_bytes % @sizeOf(u32) == 0) {
                 self.lm_head_private_buf = try metal_buffer.createPrivateBuffer(ctx, lm_head_bytes);
                 var cmd = try metal_command.beginCommand(ctx);
                 dispatchCopyU32OnCmd(
@@ -1630,31 +1640,57 @@ pub const InferenceEngine = struct {
                 self.private_ssm_out_bufs.?[i] = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
             }
 
-            var cmd = try metal_command.beginCommand(ctx);
+            const has_repacked = self.dmmv_q8_0_repacked_pipe.handle != null;
+            var need_gpu_copy = false;
+            var cmd: MetalCommand = undefined;
             for (0..cfg.n_layers) |i| {
                 if (self.layer_tensors[i].attn_qkv) |tensor| {
                     const size_bytes: usize = @intCast(tensor.info.sizeBytes());
-                    if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                    const t_K: u32 = @intCast(tensor.info.dims[0]);
+                    if (tensor.info.type_ == .q8_0 and has_repacked and canRepackQ8(t_K)) {
+                        var buf = try metal_buffer.createBuffer(ctx, size_bytes);
+                        buf.is_repacked_q8 = true;
+                        const t_M: u32 = @intCast(tensor.info.dims[1]);
+                        repackQ8_0Blocks(tensor.gpu_buffer.cpu_ptr.? + tensorPageOffset(model, tensor), buf.cpu_ptr.?, t_M, t_K);
+                        self.private_ssm_qkv_bufs.?[i] = buf;
+                    } else if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                        if (!need_gpu_copy) { cmd = try metal_command.beginCommand(ctx); need_gpu_copy = true; }
                         self.private_ssm_qkv_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
                         dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_qkv_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
                     }
                 }
                 if (self.layer_tensors[i].attn_gate) |tensor| {
                     const size_bytes: usize = @intCast(tensor.info.sizeBytes());
-                    if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                    const t_K: u32 = @intCast(tensor.info.dims[0]);
+                    if (tensor.info.type_ == .q8_0 and has_repacked and canRepackQ8(t_K)) {
+                        var buf = try metal_buffer.createBuffer(ctx, size_bytes);
+                        buf.is_repacked_q8 = true;
+                        const t_M: u32 = @intCast(tensor.info.dims[1]);
+                        repackQ8_0Blocks(tensor.gpu_buffer.cpu_ptr.? + tensorPageOffset(model, tensor), buf.cpu_ptr.?, t_M, t_K);
+                        self.private_ssm_gate_bufs.?[i] = buf;
+                    } else if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                        if (!need_gpu_copy) { cmd = try metal_command.beginCommand(ctx); need_gpu_copy = true; }
                         self.private_ssm_gate_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
                         dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_gate_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
                     }
                 }
                 if (self.layer_tensors[i].ssm_out) |tensor| {
                     const size_bytes: usize = @intCast(tensor.info.sizeBytes());
-                    if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                    const t_K: u32 = @intCast(tensor.info.dims[0]);
+                    if (tensor.info.type_ == .q8_0 and has_repacked and canRepackQ8(t_K)) {
+                        var buf = try metal_buffer.createBuffer(ctx, size_bytes);
+                        buf.is_repacked_q8 = true;
+                        const t_M: u32 = @intCast(tensor.info.dims[1]);
+                        repackQ8_0Blocks(tensor.gpu_buffer.cpu_ptr.? + tensorPageOffset(model, tensor), buf.cpu_ptr.?, t_M, t_K);
+                        self.private_ssm_out_bufs.?[i] = buf;
+                    } else if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
+                        if (!need_gpu_copy) { cmd = try metal_command.beginCommand(ctx); need_gpu_copy = true; }
                         self.private_ssm_out_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
                         dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_out_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
                     }
                 }
             }
-            cmd.commitAndWait();
+            if (need_gpu_copy) cmd.commitAndWait();
         }
 
         log.debug("Metal inference engine initialized: {d} layers, {d}x{d} heads, dim={d}", .{
@@ -1796,6 +1832,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_k2048_fused_norm_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_fused_norm_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q8_0_repacked_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
@@ -2316,6 +2353,57 @@ fn tensorPageOffset(model: *const metal_loader.Model, tensor: *const metal_loade
     return tensor.buffer_offset;
 }
 
+/// Repack Q8_0 blocks into a SIMD-coalesced layout for efficient GPU reads.
+///
+/// Standard Q8_0: each 34-byte block is [2B scale | 32B qs]. When each SIMD
+/// lane reads a separate block, the stride-34 access wastes ~88% of bandwidth.
+///
+/// Repacked: groups of 32 blocks are interleaved so adjacent lanes read
+/// adjacent bytes:
+///   [0..63]     32 × half scales
+///   [64..191]   chunk 0: 32 × char4 qs[0..3]
+///   [192..319]  chunk 1: 32 × char4 qs[4..7]  ...etc
+///   Total: 1088 bytes (same as 32 × 34)
+///
+/// Requires: blocks_per_row is a multiple of 32 (K % 1024 == 0).
+fn repackQ8_0Blocks(src: [*]const u8, dst: [*]u8, M: u32, K: u32) void {
+    const blocks_per_row = K / 32;
+    const groups_per_row = blocks_per_row / 32;
+    const block_bytes: u32 = 34;
+    const group_bytes: u32 = 32 * block_bytes; // 1088
+
+    for (0..M) |row| {
+        for (0..groups_per_row) |gi| {
+            const src_group: usize = (row * blocks_per_row + gi * 32) * block_bytes;
+            const dst_group: usize = (row * groups_per_row + gi) * group_bytes;
+
+            // Pack 32 scales (2 bytes each) into contiguous 64 bytes
+            for (0..32) |bi| {
+                const so = src_group + bi * block_bytes;
+                dst[dst_group + bi * 2] = src[so];
+                dst[dst_group + bi * 2 + 1] = src[so + 1];
+            }
+
+            // Pack qs: 8 chunks of 32 × 4 bytes = 128 bytes each
+            for (0..8) |vi| {
+                for (0..32) |bi| {
+                    const so = src_group + bi * block_bytes + 2 + vi * 4;
+                    const do_ = dst_group + 64 + vi * 128 + bi * 4;
+                    dst[do_] = src[so];
+                    dst[do_ + 1] = src[so + 1];
+                    dst[do_ + 2] = src[so + 2];
+                    dst[do_ + 3] = src[so + 3];
+                }
+            }
+        }
+    }
+}
+
+/// Check whether a Q8_0 tensor can use the repacked kernel (K must be a multiple of 1024).
+fn canRepackQ8(K: u32) bool {
+    return K >= 1024 and K % 1024 == 0;
+}
+
 fn dmmvWeightBytes(quant_type: GGMLType, rows: u32, cols: u32) u64 {
     const bs = quant_type.blockSize();
     const bpb = quant_type.bytesPerBlock();
@@ -2663,6 +2751,27 @@ fn dispatchDmmvOnCmdWithWeightBuf(
     extra_byte_offset: u32,
 ) void {
     recordDmmvProfile(engine, tensor, M, K);
+
+    // Fast path: SIMD-coalesced repacked Q8_0 layout
+    if (weight_buf.is_repacked_q8 and engine.dmmv_q8_0_repacked_pipe.handle != null) {
+        const push = DmmvPush{
+            .M = M,
+            .K = K,
+            .a_offset = weight_offset + extra_byte_offset,
+            .x_offset = 0,
+            .y_offset = 0,
+        };
+        const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
+        const simd_w: u32 = if (engine.dmmv_q8_0_repacked_pipe.thread_execution_width > 0)
+            engine.dmmv_q8_0_repacked_pipe.thread_execution_width
+        else
+            32;
+        const block_size: u32 = @min(512, engine.dmmv_q8_0_repacked_pipe.max_threads_per_threadgroup);
+        const rows_per_wg: u32 = block_size / simd_w * 2; // nr=2
+        const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+        cmd.dispatchV2(&engine.dmmv_q8_0_repacked_pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+        return;
+    }
 
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         log.err("No DMMV pipeline for quant type {d} (tensor {s})", .{ @intFromEnum(tensor.info.type_), tensor.info.name });
@@ -9137,5 +9246,94 @@ test "dmmv_mxfp4 shader matches CPU reference" {
     const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
     for (0..M) |row| {
         try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.01);
+    }
+}
+
+test "repacked Q8_0 shader matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_repacked");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: u32 = 4;
+    const K: u32 = 1024; // 32 blocks per row = 1 group
+    const blocks_per_row: u32 = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    // Original Q8_0 data
+    var orig_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&orig_buf);
+
+    // Fill with deterministic test data
+    var rng = std.Random.DefaultPrng.init(42);
+    const random = rng.random();
+    for (0..M) |row| {
+        for (0..blocks_per_row) |bi| {
+            const off = row * row_bytes + bi * 34;
+            // Scale: small random half value
+            const scale_bits: u16 = @bitCast(@as(f16, @floatFromInt(@as(i8, @intCast(@as(i32, random.intRangeAtMost(i8, -10, 10)))))));
+            orig_buf.cpu_ptr.?[off] = @truncate(scale_bits);
+            orig_buf.cpu_ptr.?[off + 1] = @truncate(scale_bits >> 8);
+            // qs: random int8 values
+            for (0..32) |j| {
+                orig_buf.cpu_ptr.?[off + 2 + j] = @bitCast(random.intRangeAtMost(i8, -127, 127));
+            }
+        }
+    }
+
+    // Repack
+    var repacked_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&repacked_buf);
+    repackQ8_0Blocks(orig_buf.cpu_ptr.?, repacked_buf.cpu_ptr.?, M, K);
+
+    // Input vector
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        input_ptr[i] = @as(f32, @floatFromInt(@as(i32, @intCast(i % 7)))) - 3.0;
+    }
+
+    // CPU reference
+    var expected: [4]f32 = .{ 0, 0, 0, 0 };
+    for (0..M) |row| {
+        var dot: f32 = 0;
+        for (0..blocks_per_row) |bi| {
+            const off = row * row_bytes + bi * 34;
+            const scale = @as(f32, @as(f16, @bitCast(@as(u16, orig_buf.cpu_ptr.?[off]) | (@as(u16, orig_buf.cpu_ptr.?[off + 1]) << 8))));
+            for (0..32) |j| {
+                const q: f32 = @floatFromInt(@as(i8, @bitCast(orig_buf.cpu_ptr.?[off + 2 + j])));
+                dot += scale * q * input_ptr[bi * 32 + j];
+            }
+        }
+        expected[row] = dot;
+    }
+
+    // GPU dispatch with repacked kernel
+    var output_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const push = DmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = 0,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &repacked_buf, &input_buf, &output_buf };
+    const simd_w: u32 = if (pipe.thread_execution_width > 0) pipe.thread_execution_width else 32;
+    const block_size: u32 = @min(512, pipe.max_threads_per_threadgroup);
+    const rows_per_wg: u32 = block_size / simd_w * 2;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..M) |row| {
+        try std.testing.expectApproxEqAbs(expected[row], output_ptr[row], 0.5);
     }
 }

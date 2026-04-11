@@ -13,6 +13,8 @@ pub const MetalBuffer = struct {
     cpu_ptr: ?[*]u8,
     /// True if wrapping an external mmap, false if buffer owns its memory.
     is_mmap_wrapped: bool,
+    /// True if this buffer holds Q8_0 data in the SIMD-coalesced repacked layout.
+    is_repacked_q8: bool = false,
 
     pub fn contents(self: *const MetalBuffer) ?[*]u8 {
         return self.cpu_ptr;
