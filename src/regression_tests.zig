@@ -291,6 +291,145 @@ test "chat UI derives the model link from the reported model name" {
     try expectNotContains(src, "href=\"https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF\"");
 }
 
+test "Metal flash_attn supports head_dim=512 for Gemma 4 global attention layers" {
+    // Regression: FLASH_MAX_HEAD_DIM was 256. Gemma 4 has mixed attention where
+    // SWA layers use head_dim=256 but global layers (every 6th) use head_dim=512.
+    // The threadgroup arrays were too small and per-thread loops used `if (tid < vec4_dim)`
+    // instead of strided loops, leaving the second half of Q/acc uninitialized → NaN.
+    const src = @embedFile("shaders/metal/flash_attn.metal");
+    try expectContains(src, "FLASH_MAX_HEAD_DIM = 512");
+    // Must use strided loops, not single-pass `if (tid < vec4_dim)`
+    try expectContains(src, "for (uint i = tid; i < vec4_dim; i += FLASH_TG_SIZE)");
+    try expectContains(src, "for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE)");
+    try expectNotContains(src, "if (tid < vec4_dim)");
+}
+
+test "Metal flash_attn_q8 supports head_dim=512" {
+    const src = @embedFile("shaders/metal/flash_attn_q8.metal");
+    try expectContains(src, "FLASH_MAX_HEAD_DIM = 512");
+    try expectContains(src, "for (uint i = tid; i < vec4_dim; i += FLASH_TG_SIZE)");
+    try expectContains(src, "for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE)");
+    try expectNotContains(src, "if (tid < vec4_dim)");
+}
+
+test "Metal flash_attn_batched supports head_dim=512" {
+    const src = @embedFile("shaders/metal/flash_attn_batched.metal");
+    try expectContains(src, "FLASH_MAX_HEAD_DIM = 512");
+    try expectContains(src, "for (uint i = tid; i < vec4_dim; i += FLASH_TG_SIZE)");
+    try expectContains(src, "for (uint vi = tid; vi < vec4_dim; vi += FLASH_TG_SIZE)");
+    try expectNotContains(src, "if (tid < vec4_dim)");
+}
+
+test "Metal Q8_0 DMMV uses float dot products, not half (overflow at large norm values)" {
+    // Regression: Q8_0 shader converted float input to half4 for dot products.
+    // Gemma 4 attn_norm weights up to ~300 produce norm_buf values up to ~3000;
+    // int8(127) × half(3000) = 381,000 overflows f16 max (65504) → -inf.
+    // Fix: use float4 dot products in all Q8_0 DMMV variants.
+    const src = @embedFile("shaders/metal/dmmv_q8_0.metal");
+    try expectContains(src, "float4 q_f = float4(q)");
+    try expectContains(src, "dot(q_f, x_f)");
+    // Must NOT convert input to half
+    try expectNotContains(src, "half4 x = half4(");
+    try expectNotContains(src, "half4 q_half");
+}
+
+test "Metal Q8_0 k2048 DMMV uses float dot products" {
+    const src = @embedFile("shaders/metal/dmmv_q8_0_k2048.metal");
+    try expectContains(src, "float4 q_f = float4(q)");
+    try expectContains(src, "dot(q_f, x_f)");
+    try expectNotContains(src, "half4 x = half4(");
+    try expectNotContains(src, "half4 q_half");
+}
+
+test "Metal Q8_0 dual DMMV uses float dot products" {
+    const src = @embedFile("shaders/metal/dmmv_q8_0_dual.metal");
+    try expectContains(src, "float4 q_f = float4(q)");
+    try expectContains(src, "dot(q_f, x_f)");
+    try expectNotContains(src, "half4 x = half4(");
+    try expectNotContains(src, "half4 q_half");
+}
+
+test "Metal Q5_1 DMMV shader exists and uses factored d*sum(q*x)+m*sum(x)" {
+    // Q5_1 expert down projections in Gemma 4 26B-A4B MoE were falling back to CPU.
+    const src = @embedFile("shaders/metal/dmmv_q5_1.metal");
+    // Q5_1 block: 24 bytes (d=f16 + m=f16 + qh=u32 + qs=16 bytes)
+    try expectContains(src, "bpb = 24");
+    // Factored dot product: d * sum(q*x) + m * sum(x)
+    try expectContains(src, "d * sum_qx + m * sum_x");
+    // Must read min value from bytes 2-3
+    try expectContains(src, "half*)(block + 2)");
+    // Must read qh from bytes 4-7
+    try expectContains(src, "block[4]");
+}
+
+test "Vulkan Q5_1 DMMV shader exists and uses factored dot product" {
+    const src = @embedFile("shaders/dmmv_q5_1.comp");
+    try expectContains(src, "Q5_1_BYTES      = 24");
+    try expectContains(src, "d * sum_qx + m * sum_x");
+}
+
+test "Vulkan flash_attn supports head_dim up to 512" {
+    // Gemma 4 global attention layers use head_dim=512.
+    // The Vulkan shader uses shared memory sized for 512 and strided loops.
+    const src = @embedFile("shaders/flash_attn.comp");
+    try expectContains(src, "s_out[512]");
+    // Uses strided loop (tid increments by 64) that naturally handles any head_dim
+    try expectContains(src, "for (uint d = tid; d < head_dim; d += 64u)");
+}
+
+test "Metal forward derives per-layer head_dim from attn_q_norm tensor" {
+    // Regression: Gemma 4 has mixed head_dim per layer (256 for SWA, 512 for global).
+    // The Metal forward must derive head_dim from attn_q_norm or attn_k_norm tensors,
+    // not use the global config.head_dim for all layers.
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContains(src, "if (lt.attn_q_norm) |qn|");
+    try expectContainsNear(src, "if (lt.attn_q_norm) |qn|", "head_dim = @intCast(qn.info.numElements())", 200);
+}
+
+test "Metal forward handles use_k_as_v for Gemma global attention layers" {
+    // Regression: Gemma 4 global attention layers have no attn_v tensor — they share K as V.
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContains(src, "use_k_as_v = lt.attn_v == null and cfg.architecture == .gemma");
+}
+
+test "Vulkan forward handles use_k_as_v for Gemma global attention layers" {
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "use_k_as_v = lt.attn_v == null and config.architecture == .gemma");
+}
+
+test "Vulkan forward derives per-layer head_dim from attn_q_norm tensor" {
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "layer_head_dim");
+    try expectContains(src, "layer_kv_dim");
+    try expectContains(src, "layer_n_kv_heads");
+}
+
+test "Vulkan forward handles fused ffn_gate_up_exps for Gemma 4 MoE" {
+    // Gemma 4 26B-A4B uses fused ffn_gate_up_exps instead of separate gate/up tensors.
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "fused_gate_up = lt.ffn_gate_up_exps");
+    try expectContains(src, "up_base_offset");
+}
+
+test "Vulkan forward uses GEGLU activation for Gemma architecture" {
+    // Gemma models use GEGLU, not SwiGLU. The dispatchFfnActivation helper
+    // selects the right shader based on architecture.
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "fn dispatchFfnActivation(");
+    try expectContains(src, "fn dispatchGeglu(");
+    try expectContains(src, "self.model.config.architecture == .gemma");
+    // All MoE/FFN activation calls must use dispatchFfnActivation, not dispatchSwiglu directly
+    try expectNotContains(src, "try self.dispatchSwiglu(");
+}
+
+test "Gemma 4 12B MoE catalog entry has correct download URL with UD prefix" {
+    const src = @embedFile("model/catalog.zig");
+    // The Unsloth Dynamic quantization uses UD- prefix in filenames
+    try expectContains(src, "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf");
+    // Must NOT have the old incorrect filename without UD-
+    try expectNotContains(src, "gemma-4-26B-A4B-it-Q4_K_M.gguf");
+}
+
 test "Q5_0 shader reads qh via byte assembly, not unaligned uint32 cast" {
     // Regression guard: the Q5_0 block stores qh at byte offset 2 within a 22-byte block.
     // Reading via *((device const uint*)&block[2]) silently returns wrong values on Apple
