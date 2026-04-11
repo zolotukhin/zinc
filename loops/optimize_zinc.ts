@@ -127,12 +127,9 @@ export type BuildRunResult = {
   error: string | null;
 };
 
-/** Parse decode tok/s from ZINC output (the "Generated N tokens in T ms — X tok/s" line). */
-export function parseTokPerSec(output: string): number | null {
-  // Match the decode-specific line: "Generated 256 tokens in 5635.3 ms — 45.43 tok/s"
+function parseDecodeTokPerSec(output: string): number | null {
   const decodeMatch = output.match(/Generated\s+\d+\s+tokens\s+in\s+[\d.]+\s*(?:ms|s)\s*[—–-]\s*(\d+\.?\d*)\s*tok\/s/i);
   if (decodeMatch) return parseFloat(decodeMatch[1]);
-  // Fallback: compute from "Generated N tokens in T ms/s"
   const genMatch = output.match(/Generated\s+(\d+)\s+tokens\s+in\s+(\d+\.?\d*)\s*(ms|s)/i);
   if (genMatch) {
     const tokens = parseInt(genMatch[1], 10);
@@ -140,7 +137,28 @@ export function parseTokPerSec(output: string): number | null {
     if (genMatch[3] === "ms") seconds /= 1000;
     if (seconds > 0) return tokens / seconds;
   }
-  // Last resort: any tok/s (will catch prefill-only output)
+  return null;
+}
+
+export function parsePrefillTokPerSec(output: string): number | null {
+  const prefillMatch = output.match(/Prefill(?:\s+complete)?\s*:\s*(\d+)\s+tokens\s+in\s+(\d+\.?\d*)\s*(ms|s)\s*\((\d+\.?\d*)\s*tok\/s\)/i);
+  if (prefillMatch) return parseFloat(prefillMatch[4]);
+  const timingOnlyMatch = output.match(/Prefill(?:\s+complete)?\s*:\s*(\d+)\s+tokens\s+in\s+(\d+\.?\d*)\s*(ms|s)/i);
+  if (timingOnlyMatch) {
+    const tokens = parseInt(timingOnlyMatch[1], 10);
+    let seconds = parseFloat(timingOnlyMatch[2]);
+    if (timingOnlyMatch[3] === "ms") seconds /= 1000;
+    if (seconds > 0) return tokens / seconds;
+  }
+  return null;
+}
+
+/** Parse decode tok/s from ZINC output, falling back to prefill tok/s if decode is absent. */
+export function parseTokPerSec(output: string): number | null {
+  const decode = parseDecodeTokPerSec(output);
+  if (decode != null) return decode;
+  const prefill = parsePrefillTokPerSec(output);
+  if (prefill != null) return prefill;
   const m = output.match(/(\d+\.?\d*)\s*tok\/s/i);
   if (m) return parseFloat(m[1]);
   return null;

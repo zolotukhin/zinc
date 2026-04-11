@@ -26,6 +26,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   parseTokPerSec,
+  parsePrefillTokPerSec,
   parseBandwidthUtil,
 } from "./optimize_zinc";
 import { formatElapsed } from "./optimize_llm_tps";
@@ -59,11 +60,84 @@ const MODELS: Record<string, string> = {
   gemma3: "/root/models/gemma-3-12b-it-Q4_K_M.gguf",
 };
 
-const EFFORT_DOCS: Record<number, string> = {
-  1: "MULTI_HOUR_EFFORT_1_PUSH_DESCRIPTORS.md",
-  2: "MULTI_HOUR_EFFORT_2_FUSED_GATE_UP.md",
-  3: "MULTI_HOUR_EFFORT_3_BATCH_PREFILL.md",
+const REMOTE_ZINC_ENV = "RADV_PERFTEST=coop_matrix";
+const LONG_CONTEXT_BENCH_SENTENCE =
+  "Benchmark context only. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu.";
+
+function repeatContext(lines: number): string {
+  return Array.from({ length: lines }, () => LONG_CONTEXT_BENCH_SENTENCE).join(" ");
+}
+
+function shellQuote(value: string): string {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+const PREFILL_BENCHMARK_PROMPT = [
+  "Long reference packet for benchmark purposes only:",
+  "",
+  repeatContext(6),
+  "",
+  "Important fact near the end: Paris is the capital of France.",
+  "",
+  "Ignore unrelated filler and answer from the reference packet.",
+  "",
+  "Based on the reference above, the capital of France is",
+].join("\n");
+
+type MetricMode = "decode" | "prefill";
+
+type EffortSpec = {
+  doc: string;
+  summary: string;
+  metricMode: MetricMode;
+  primaryMetricLabel: string;
+  benchmarkPrompt: string;
+  benchmarkMaxTokens: number;
+  benchmarkMethod: string;
 };
+
+const EFFORT_SPECS: Record<number, EffortSpec> = {
+  1: {
+    doc: "MULTI_HOUR_EFFORT_1_PUSH_DESCRIPTORS.md",
+    summary: "Push descriptors (~2.5% decode speedup)",
+    metricMode: "decode",
+    primaryMetricLabel: "decode tok/s",
+    benchmarkPrompt: "Write a detailed essay about the history of computing, from mechanical calculators to modern artificial intelligence.",
+    benchmarkMaxTokens: 200,
+    benchmarkMethod: "200-token decode benchmark on the primary model",
+  },
+  2: {
+    doc: "MULTI_HOUR_EFFORT_2_FUSED_GATE_UP.md",
+    summary: "Fused gate+up DMMV (~1-2% decode speedup)",
+    metricMode: "decode",
+    primaryMetricLabel: "decode tok/s",
+    benchmarkPrompt: "Write a detailed essay about the history of computing, from mechanical calculators to modern artificial intelligence.",
+    benchmarkMaxTokens: 200,
+    benchmarkMethod: "200-token decode benchmark on the primary model",
+  },
+  3: {
+    doc: "MULTI_HOUR_EFFORT_3_BATCH_PREFILL.md",
+    summary: "Batch prefill (~4-8x prefill speedup)",
+    metricMode: "prefill",
+    primaryMetricLabel: "prefill tok/s",
+    benchmarkPrompt: PREFILL_BENCHMARK_PROMPT,
+    benchmarkMaxTokens: 8,
+    benchmarkMethod: "long-context prefill benchmark aligned with the site report",
+  },
+  4: {
+    doc: "MULTI_HOUR_EFFORT_4_PREFILL_RECOVERY.md",
+    summary: "Prefill recovery (close the long-context gap vs llama.cpp)",
+    metricMode: "prefill",
+    primaryMetricLabel: "prefill tok/s",
+    benchmarkPrompt: PREFILL_BENCHMARK_PROMPT,
+    benchmarkMaxTokens: 8,
+    benchmarkMethod: "long-context prefill benchmark aligned with the site report",
+  },
+};
+
+export function getEffortSpec(effort: number): EffortSpec | null {
+  return EFFORT_SPECS[effort] ?? null;
+}
 
 const BENCHMARK_SAMPLES = 3;
 const MIN_IMPROVEMENT_ABS_TPS = 0.5;
@@ -96,6 +170,20 @@ const COHERENCE_MODELS: { name: string; path: string }[] = [
   { name: "Qwen3-8B", path: "/root/models/Qwen3-8B-Q4_K_M.gguf" },
   { name: "Gemma3-12B", path: "/root/models/gemma-3-12b-it-Q4_K_M.gguf" },
 ];
+
+type CoherenceFailure = {
+  id: string;
+  label: string;
+  model: string;
+  prompt: string;
+  outputText: string;
+  kind: "mismatch" | "crash";
+};
+
+type CoherenceSweep = {
+  failures: CoherenceFailure[];
+  failureIds: string[];
+};
 
 const BLOCKED_FILE_OPS = [
   "Edit(loops/*)", "Write(loops/*)", "Edit(site/*)", "Write(site/*)",
@@ -136,11 +224,12 @@ function parseArgs() {
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
     else if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
   }
-  if (!effort || !EFFORT_DOCS[effort]) {
-    console.error("Usage: bun loops/optimize_perf.ts --effort <1|2|3> [options]");
+  if (!effort || !getEffortSpec(effort)) {
+    const effortKeys = Object.keys(EFFORT_SPECS).join("|");
+    console.error(`Usage: bun loops/optimize_perf.ts --effort <${effortKeys}> [options]`);
     console.error("");
     console.error("Options:");
-    console.error("  --effort <1|2|3>         Optimization to run (required)");
+    console.error(`  --effort <${effortKeys}>         Optimization to run (required)`);
     console.error("  --cycles N               Max cycles (default: 20)");
     console.error("  --model NAME             Model: qwen35b, gemma3 (default: qwen35b)");
     console.error("  --agent claude|codex     AI agent to use (default: claude)");
@@ -149,9 +238,9 @@ function parseArgs() {
     console.error("  --dry-run                Build+bench baseline only, skip agent");
     console.error("");
     console.error("Efforts:");
-    console.error("  1 = Push descriptors (~2.5% decode speedup)");
-    console.error("  2 = Fused gate+up DMMV (~1-2% decode speedup)");
-    console.error("  3 = Batch prefill (~4-8x prefill speedup)");
+    for (const [id, spec] of Object.entries(EFFORT_SPECS)) {
+      console.error(`  ${id} = ${spec.summary}`);
+    }
     process.exit(1);
   }
   if (agent !== "claude" && agent !== "codex") {
@@ -552,11 +641,12 @@ export function buildAnalysisReport(state: LoopState): string {
     ? state.ideas.slice(-10).map((entry) => `- ${entry}`).join("\n")
     : "- none";
   const review = state.reviewSummaries.at(-1) ?? buildSelfReview(state);
+  const metricLabel = getEffortSpec(state.effort)?.primaryMetricLabel ?? "tok/s";
 
   return [
     `Run started: ${state.runStartedAt}`,
     `Cycles: ${total} total, ${improved} perf keeps, ${foundation} foundation keeps, ${reverted} reverted, ${broken} broken`,
-    `Best checkpoint: ${state.bestTokPerSec.toFixed(2)} tok/s (cycle ${state.bestCycle ?? "?"}${state.bestCommitHash ? `, ${state.bestCommitHash.slice(0, 8)}` : ""})`,
+    `Best checkpoint (${metricLabel}): ${state.bestTokPerSec.toFixed(2)} tok/s (cycle ${state.bestCycle ?? "?"}${state.bestCommitHash ? `, ${state.bestCommitHash.slice(0, 8)}` : ""})`,
     `Current stall count: ${state.stalledCycles}`,
     "",
     "Recent review:",
@@ -596,8 +686,11 @@ export function buildAgentPrompt(
   history: string,
   model: string,
   context: PromptContext | null = null,
+  options: { primaryMetricLabel?: string; benchmarkMethod?: string } = {},
 ): string {
   const modelPath = MODELS[model] ?? MODELS.qwen35b;
+  const primaryMetricLabel = options.primaryMetricLabel ?? "decode tok/s";
+  const benchmarkMethod = options.benchmarkMethod ?? "200-token decode benchmark on the primary model";
   const historySummary = tailHistory(history);
   const failedBlock = context?.failedApproaches?.length
     ? context.failedApproaches.slice(-12).map((entry, i) => `${i + 1}. ${trunc(entry, 140)}`).join("\n")
@@ -621,21 +714,26 @@ export function buildAgentPrompt(
 ## Optimization Plan
 ${plan}
 
+## Benchmark Focus
+- primary metric: ${primaryMetricLabel}
+- benchmark method: ${benchmarkMethod}
+- success is judged on the primary metric above, not on one lucky decode sample from a different workload.
+
 ## Current Checked-Out Code (build on this code)
-- tok/s: ${summarizeBenchMetric(currentBest.tokPerSec, currentBest.tokPerSecSamples, "tok/s")}
+- primary metric (${primaryMetricLabel}): ${summarizeBenchMetric(currentBest.tokPerSec, currentBest.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(currentBest.bandwidthUtil, currentBest.bandwidthSamples, "%", 1)}
 - output: "${currentBest.outputText}" (coherence tested with 3 prompts on 3 models after every change)
 - This is the performance of the code currently checked out in the worktree.
 
 ## Best Accepted Performance Checkpoint
-- tok/s: ${summarizeBenchMetric(bestPerf.tokPerSec, bestPerf.tokPerSecSamples, "tok/s")}
+- primary metric (${primaryMetricLabel}): ${summarizeBenchMetric(bestPerf.tokPerSec, bestPerf.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(bestPerf.bandwidthUtil, bestPerf.bandwidthSamples, "%", 1)}
 - output: "${bestPerf.outputText}"
 - cycle: ${bestPerf.cycle}${bestPerf.commitHash ? `, commit ${bestPerf.commitHash.slice(0, 8)}` : ""}
 ${currentVsBestNote}
 
 ## Original Run Baseline (for total gain only)
-- tok/s: ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}
+- primary metric (${primaryMetricLabel}): ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}
 - output: "${originalBaseline.outputText}"
 
@@ -664,13 +762,15 @@ Implement ONE concrete step from the optimization plan above. Pick the next unfi
 Your change must beat the best accepted performance checkpoint above, not the original run baseline.
 If controller mode is STEP_BACK, do not repeat the same hotspot as the last rejected cycles. Either choose a smaller prerequisite, finish a kept enablement step, or switch to a different bottleneck category.
 If you intentionally do a plumbing/enabling step that may be performance-neutral this cycle, mark it as enablement and explain exactly which next step it unlocks.
+Do not use sub-agents, delegation, spawn_agent, or wait_agent. Work directly in this repo.
+Before editing any file, re-read the exact current contents from disk. Do not rely on stale context, guessed line numbers, or cached snippets.
 
 ## CRITICAL RULES — READ CAREFULLY
 
 1. **BUILD MUST PASS.** Before you declare yourself done, you MUST:
    a. rsync your changes to the remote node
    b. Compile shaders: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"
-   c. Build: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build 2>&1"
+   c. Build: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build -Doptimize=ReleaseFast 2>&1"
    d. If the build fails, FIX THE ERRORS before finishing. Do NOT leave broken code.
 
 2. **Incremental steps.** If the optimization requires changing many call sites (e.g. 60+ descriptor set conversions), break it into compilable stages:
@@ -688,7 +788,7 @@ If you intentionally do a plumbing/enabling step that may be performance-neutral
 
 5. **Test on remote node:**
    rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
-   ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build && ./zig-out/bin/zinc -m ${modelPath} --prompt '${COHERENCE_CHECKS[0].prompt}' -n 16"
+   ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build -Doptimize=ReleaseFast && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc -m ${modelPath} --prompt ${shellQuote(COHERENCE_CHECKS[0].prompt)} -n 16"
 
 6. **Shader compilation:** glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
 
@@ -709,7 +809,15 @@ After making your change, print these lines:
 @@@NEXT_IDEAS: <semicolon-separated follow-up ideas>`;
 }
 
-async function buildAndBench(modelPath: string): Promise<BenchResult> {
+function metricParserForSpec(spec: EffortSpec): (output: string) => number | null {
+  return spec.metricMode === "prefill" ? parsePrefillTokPerSec : parseTokPerSec;
+}
+
+function zincRemoteCommand(modelPath: string, prompt: string, maxTokens: number): string {
+  return `cd ${REMOTE_DIR} && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc -m ${shellQuote(modelPath)} --prompt ${shellQuote(prompt)} -n ${maxTokens} 2>&1`;
+}
+
+async function buildAndBench(modelPath: string, effortSpec: EffortSpec): Promise<BenchResult> {
   console.log(c("2", "  Compiling shaders..."));
   try {
     await ssh(`cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute $f -o \${f%.comp}.spv 2>&1; done`, 60_000);
@@ -730,7 +838,7 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
   console.log(c("2", "  Building..."));
   let buildOutput: string;
   try {
-    buildOutput = await ssh(`cd ${REMOTE_DIR} && zig build 2>&1`, 300_000);
+    buildOutput = await ssh(`cd ${REMOTE_DIR} && zig build -Doptimize=ReleaseFast 2>&1`, 300_000);
   } catch (e) {
     return {
       buildOk: false,
@@ -763,10 +871,7 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
   let correctnessOutput: string;
   const firstCheck = COHERENCE_CHECKS[0];
   try {
-    correctnessOutput = await ssh(
-      `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt '${firstCheck.prompt}' -n 20 2>&1`,
-      180_000,
-    );
+    correctnessOutput = await ssh(zincRemoteCommand(modelPath, firstCheck.prompt, 20), 180_000);
   } catch (e) {
     return {
       buildOk: true,
@@ -799,16 +904,18 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
     };
   }
 
-  // Proper benchmark: long prompt, 200 tokens for stable measurement.
-  // Use the median of multiple samples so we do not keep a lucky outlier.
-  console.log(c("2", `  Benchmarking (${BENCHMARK_SAMPLES} x 200 tokens)...`));
+  const parseMetric = metricParserForSpec(effortSpec);
+  console.log(c(
+    "2",
+    `  Benchmarking (${BENCHMARK_SAMPLES} x ${effortSpec.benchmarkMethod}, primary metric: ${effortSpec.primaryMetricLabel})...`,
+  ));
   const tokPerSecSamples: number[] = [];
   const bandwidthSamples: number[] = [];
   for (let sample = 0; sample < BENCHMARK_SAMPLES; sample++) {
     let benchOutput: string;
     try {
       benchOutput = await ssh(
-        `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${modelPath} --prompt 'Write a detailed essay about the history of computing, from mechanical calculators to modern artificial intelligence.' -n 200 2>&1`,
+        zincRemoteCommand(modelPath, effortSpec.benchmarkPrompt, effortSpec.benchmarkMaxTokens),
         300_000,
       );
     } catch (e) {
@@ -825,13 +932,13 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
       };
     }
 
-    const tps = parseTokPerSec(benchOutput);
-    const bw = parseBandwidthUtil(benchOutput);
+    const tps = parseMetric(benchOutput);
+    const bw = effortSpec.metricMode === "decode" ? parseBandwidthUtil(benchOutput) : null;
     if (tps != null) tokPerSecSamples.push(tps);
     if (bw != null) bandwidthSamples.push(bw);
     console.log(c(
       "2",
-      `    sample ${sample + 1}/${BENCHMARK_SAMPLES}: ${tps?.toFixed(2) ?? "?"} tok/s${bw != null ? `, BW ${bw.toFixed(1)}%` : ""}`,
+      `    sample ${sample + 1}/${BENCHMARK_SAMPLES}: ${tps?.toFixed(2) ?? "?"} tok/s (${effortSpec.primaryMetricLabel})${bw != null ? `, BW ${bw.toFixed(1)}%` : ""}`,
     ));
   }
 
@@ -847,36 +954,83 @@ async function buildAndBench(modelPath: string): Promise<BenchResult> {
     outputText,
     bandwidthUtil,
     bandwidthSamples,
-    error: tokPerSec == null ? "benchmark parse failed" : null,
+    error: tokPerSec == null ? `${effortSpec.primaryMetricLabel} parse failed` : null,
   };
 }
 
 /// Run ALL coherence prompts on ALL models.
-/// Returns null if all pass, or an error string describing which failed.
-async function checkAllModelsCoherent(): Promise<string | null> {
-  const failures: string[] = [];
+/// Returns the full sweep so the controller can enforce non-regression against
+/// the accepted baseline instead of demanding global cross-model cleanliness.
+function coherenceCaseId(model: string, prompt: string): string {
+  return `${model}::${prompt}`;
+}
+
+function coherenceCaseLabel(model: string, prompt: string): string {
+  return `${model} [${prompt.slice(0, 25)}]`;
+}
+
+function formatCoherenceFailure(failure: CoherenceFailure): string {
+  return failure.kind === "crash"
+    ? `${failure.label}: crashed`
+    : `${failure.label}: "${failure.outputText.slice(0, 50)}"`;
+}
+
+export function formatCoherenceFailureList(failures: CoherenceFailure[]): string {
+  return failures.map((failure) => formatCoherenceFailure(failure)).join("; ");
+}
+
+export function summarizeCoherenceRegression(
+  candidate: CoherenceSweep,
+  acceptedFailureIds: string[],
+): string | null {
+  const accepted = new Set(acceptedFailureIds);
+  const regressions = candidate.failures.filter((failure) => !accepted.has(failure.id));
+  if (regressions.length === 0) return null;
+  return `New coherence failures vs accepted baseline: ${formatCoherenceFailureList(regressions)}`;
+}
+
+async function runCoherenceSweep(): Promise<CoherenceSweep> {
+  const failures: CoherenceFailure[] = [];
   for (const { name, path } of COHERENCE_MODELS) {
     for (const check of COHERENCE_CHECKS) {
+      const label = coherenceCaseLabel(name, check.prompt);
       try {
         const out = await ssh(
-          `cd ${REMOTE_DIR} && ./zig-out/bin/zinc -m ${path} --prompt '${check.prompt}' -n 30 2>&1`,
+          zincRemoteCommand(path, check.prompt, 30),
           120_000,
         );
         const textMatch = out.match(/Output text:\s*(.+)/i);
         const outputText = textMatch ? textMatch[1].trim() : "";
         const pass = check.expect.every(e => outputText.toLowerCase().includes(e.toLowerCase()));
         if (!pass) {
-          failures.push(`${name} [${check.prompt.slice(0, 25)}]: "${outputText.slice(0, 50)}"`);
+          failures.push({
+            id: coherenceCaseId(name, check.prompt),
+            label,
+            model: name,
+            prompt: check.prompt,
+            outputText,
+            kind: "mismatch",
+          });
         }
       } catch (e) {
-        failures.push(`${name} [${check.prompt.slice(0, 25)}]: crashed`);
+        failures.push({
+          id: coherenceCaseId(name, check.prompt),
+          label,
+          model: name,
+          prompt: check.prompt,
+          outputText: "",
+          kind: "crash",
+        });
       }
     }
-    if (!failures.some(f => f.startsWith(name))) {
+    if (!failures.some((failure) => failure.model === name)) {
       console.log(c("2", `    ${name}: all ${COHERENCE_CHECKS.length} prompts OK`));
     }
   }
-  return failures.length > 0 ? `Coherence failures: ${failures.join("; ")}` : null;
+  return {
+    failures,
+    failureIds: failures.map((failure) => failure.id),
+  };
 }
 
 // -- Codex stream formatter --------------------------------------------------
@@ -1125,8 +1279,12 @@ async function spawnAgent(
   model: string,
   agent: AgentType = "claude",
   context: PromptContext | null = null,
+  effortSpec: EffortSpec | null = null,
 ): Promise<RunResult> {
-  const prompt = buildAgentPrompt(plan, originalBaseline, currentBest, cycleNum, history, model, context);
+  const prompt = buildAgentPrompt(plan, originalBaseline, currentBest, cycleNum, history, model, context, {
+    primaryMetricLabel: effortSpec?.primaryMetricLabel,
+    benchmarkMethod: effortSpec?.benchmarkMethod,
+  });
 
   console.log(c("1;34", SEP));
   console.log(c("1;34", `  \uD83E\uDDE0 Agent cycle ${cycleNum} (${agent})`));
@@ -1344,7 +1502,11 @@ async function revertAgentChanges(): Promise<void> {
 async function main() {
   const { effort, cycles, dryRun, model, resume, agent, analyze } = parseArgs();
   const modelPath = MODELS[model] ?? MODELS.qwen35b;
-  const effortFile = EFFORT_DOCS[effort];
+  const effortSpec = getEffortSpec(effort);
+  if (!effortSpec) {
+    throw new Error(`Unknown effort: ${effort}`);
+  }
+  const effortFile = effortSpec.doc;
   const plan = await readFile(join(REPO_ROOT, effortFile), "utf8");
 
   await mkdir(RESULTS_DIR, { recursive: true });
@@ -1371,7 +1533,7 @@ async function main() {
   // Step 1: Sync and get baseline
   console.log(c("1;33", "\u2500\u2500 Baseline " + "\u2500".repeat(54)));
   await rsyncToRemote();
-  const originalBaseline = await buildAndBench(modelPath);
+  const originalBaseline = await buildAndBench(modelPath, effortSpec);
 
   if (!originalBaseline.buildOk) {
     console.error(c("1;31", "Baseline build failed! Fix build errors first."));
@@ -1382,7 +1544,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(c("1;32", `  Baseline: ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}, BW: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}`));
+  console.log(c("1;32", `  Baseline (${effortSpec.primaryMetricLabel}): ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}, BW: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}`));
   console.log(c("1;32", `  Output: "${originalBaseline.outputText.slice(0, 80)}"`));
 
   let currentCode = originalBaseline;
@@ -1401,7 +1563,7 @@ async function main() {
         bestPerf = checkpointToBenchResult(saved.bestResult);
         bestTokPerSec = saved.bestTokPerSec;
       }
-      console.log(c("1;36", `  Resumed: ${saved.lastCycle} previous cycles, recorded best ${saved.bestTokPerSec.toFixed(2)} tok/s`));
+      console.log(c("1;36", `  Resumed: ${saved.lastCycle} previous cycles, recorded best ${saved.bestTokPerSec.toFixed(2)} tok/s (${effortSpec.primaryMetricLabel})`));
       if (saved.cycles.length > 0) {
         console.log(c("2", `  Recent cycles:\n${buildRecentCycleBlock(saved.cycles)}`));
       }
@@ -1418,6 +1580,13 @@ async function main() {
     } else {
       console.log(c("2", "  No previous run found, starting fresh."));
     }
+  }
+
+  console.log(c("2", "  Capturing accepted coherence baseline..."));
+  let acceptedCoherence = await runCoherenceSweep();
+  if (acceptedCoherence.failures.length > 0) {
+    console.log(c("1;33", "  Accepted baseline already has cross-model failures; enforcing non-regression only."));
+    console.log(c("2", `    ${formatCoherenceFailureList(acceptedCoherence.failures)}`));
   }
 
   let history = buildHistoryFromCycles(state.cycles);
@@ -1441,7 +1610,7 @@ async function main() {
       bestPerf: state.bestResult ?? benchResultToCheckpoint(bestPerf, 0, state.bestCommitHash),
     };
 
-    const agentRun = await spawnAgent(effortFile, plan, originalBaseline, currentCode, cycle, history, model, agent, promptContext);
+    const agentRun = await spawnAgent(effortFile, plan, originalBaseline, currentCode, cycle, history, model, agent, promptContext, effortSpec);
     const agentReport = parseAgentReport(agentRun.stdout);
 
     let changedFiles = await listChangedFiles();
@@ -1520,7 +1689,7 @@ async function main() {
     // Sync and benchmark — with up to 2 fix-up retries if build fails
     console.log(c("2", "  Syncing changes..."));
     await rsyncToRemote();
-    let result = await buildAndBench(modelPath);
+    let result = await buildAndBench(modelPath, effortSpec);
 
     const MAX_FIX_RETRIES = 2;
     for (let fix = 0; fix < MAX_FIX_RETRIES && !result.buildOk; fix++) {
@@ -1534,9 +1703,11 @@ ${result.buildOutput.slice(-2000)}
 
 ## Rules:
 - Fix ONLY the build errors. Do not add new features.
-- The code must compile: zig build must succeed on the remote node.
+- The code must compile: zig build -Doptimize=ReleaseFast must succeed on the remote node.
+- Do not use sub-agents, delegation, spawn_agent, or wait_agent.
+- Re-read the file right before patching it; do not patch against stale context.
 - rsync to remote: rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
-- Build on remote: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build 2>&1"
+- Build on remote: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build -Doptimize=ReleaseFast 2>&1"
 - Shader compilation: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"`;
 
       if (agent === "codex") {
@@ -1561,7 +1732,7 @@ ${result.buildOutput.slice(-2000)}
 
       console.log(c("2", "  Re-syncing after fix..."));
       await rsyncToRemote();
-      result = await buildAndBench(modelPath);
+      result = await buildAndBench(modelPath, effortSpec);
     }
 
     changedFiles = await listChangedFiles();
@@ -1577,11 +1748,17 @@ ${result.buildOutput.slice(-2000)}
     );
 
     let coherenceError: string | null = null;
+    let coherenceSweep: CoherenceSweep | null = null;
     if (result.buildOk && result.correct && (improved || foundationCandidate)) {
       console.log(c("2", "  Checking all models for coherence..."));
-      coherenceError = await checkAllModelsCoherent();
+      coherenceSweep = await runCoherenceSweep();
+      coherenceError = summarizeCoherenceRegression(coherenceSweep, acceptedCoherence.failureIds);
       if (coherenceError) {
         console.log(c("1;31", `  ${coherenceError}`));
+      } else if (coherenceSweep.failures.length > 0) {
+        console.log(c("2", `  Coherence unchanged vs accepted baseline (${coherenceSweep.failures.length} known failing case(s)).`));
+      } else if (acceptedCoherence.failures.length > 0) {
+        console.log(c("1;36", "  Coherence improved: all accepted-baseline failures cleared."));
       }
     }
 
@@ -1599,9 +1776,10 @@ ${result.buildOutput.slice(-2000)}
     let commitHash: string | null = null;
 
     if (broken) {
-      console.log(c("1;31", `  \u274C BROKEN: ${result.error ?? "incorrect output"}`));
+      const failureReason = coherenceError ?? result.error ?? "incorrect output";
+      console.log(c("1;31", `  \u274C BROKEN: ${failureReason}`));
       console.log(c("1;31", `     Output: "${result.outputText?.slice(0, 80)}"`));
-      decisionReason = result.error ?? "incorrect output";
+      decisionReason = failureReason;
       state.failedApproaches = mergeUniqueEntries(
         state.failedApproaches,
         [`${agentReport.description} — ${decisionReason}`],
@@ -1612,16 +1790,17 @@ ${result.buildOutput.slice(-2000)}
       await revertAgentChanges();
     } else if (improved) {
       kept = true;
-      console.log(c("1;32", `  \u2705 IMPROVED: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (+${deltaVsBest}%, threshold +${threshold.toFixed(2)} tok/s vs best checkpoint)`));
+      console.log(c("1;32", `  \u2705 IMPROVED: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${effortSpec.primaryMetricLabel}, +${deltaVsBest}%, threshold +${threshold.toFixed(2)} tok/s vs best checkpoint)`));
       currentCode = result;
       bestPerf = result;
       bestTokPerSec = result.tokPerSec!;
+      if (coherenceSweep) acceptedCoherence = coherenceSweep;
       state.stalledCycles = 0;
       state.consecutiveFoundationKeeps = 0;
       decisionReason = `improved by ${deltaVsBest}% vs best checkpoint`;
 
       await runCommand("git", ["add", "src/"], { cwd: REPO_ROOT });
-      await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} \u2014 ${result.tokPerSec?.toFixed(2)} tok/s (+${deltaVsBest}%)`], { cwd: REPO_ROOT });
+      await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} \u2014 ${result.tokPerSec?.toFixed(2)} ${effortSpec.primaryMetricLabel} (+${deltaVsBest}%)`], { cwd: REPO_ROOT });
       commitHash = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || headCommit;
       state.bestTokPerSec = bestTokPerSec;
       state.bestCycle = cycle;
@@ -1632,17 +1811,18 @@ ${result.buildOutput.slice(-2000)}
       kept = true;
       foundationKeep = true;
       currentCode = result;
+      if (coherenceSweep) acceptedCoherence = coherenceSweep;
       state.stalledCycles++;
       state.consecutiveFoundationKeeps++;
       decisionReason = `kept enablement step within ${FOUNDATION_KEEP_MAX_DROP_TPS.toFixed(2)} tok/s of best checkpoint`;
-      console.log(c("1;36", `  \u2248 FOUNDATION KEEP: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${deltaVsBest}% vs best checkpoint)`));
+      console.log(c("1;36", `  \u2248 FOUNDATION KEEP: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${effortSpec.primaryMetricLabel}, ${deltaVsBest}% vs best checkpoint)`));
       await runCommand("git", ["add", "src/"], { cwd: REPO_ROOT });
       await runCommand("git", ["commit", "-m", `perf(effort-${effort}): cycle ${cycle} foundation \u2014 ${trunc(agentReport.description, 72)}`], { cwd: REPO_ROOT });
       commitHash = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || headCommit;
       console.log(c("2", "  Committed foundation step."));
     } else {
       decisionReason = `no improvement (needed +${threshold.toFixed(2)} tok/s vs best checkpoint)`;
-      console.log(c("1;33", `  \u26A0 NO IMPROVEMENT: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${deltaVsBest}%, needed +${threshold.toFixed(2)} tok/s vs best checkpoint)`));
+      console.log(c("1;33", `  \u26A0 NO IMPROVEMENT: ${summarizeBenchMetric(result.tokPerSec, result.tokPerSecSamples, "tok/s")} (${effortSpec.primaryMetricLabel}, ${deltaVsBest}%, needed +${threshold.toFixed(2)} tok/s vs best checkpoint)`));
       state.failedApproaches = mergeUniqueEntries(
         state.failedApproaches,
         [`${agentReport.description} — ${decisionReason}`],
@@ -1721,9 +1901,9 @@ ${result.buildOutput.slice(-2000)}
   // Summary
   console.log(c("1;37", `\n${"═".repeat(58)}`));
   console.log(c("1;37", `  Effort ${effort} complete.`));
-  console.log(c("1;37", `  Baseline: ${originalBaseline.tokPerSec?.toFixed(2)} tok/s`));
-  console.log(c("1;37", `  Best:     ${bestTokPerSec.toFixed(2)} tok/s`));
-  console.log(c("1;37", `  Current:  ${currentCode.tokPerSec?.toFixed(2) ?? "?"} tok/s`));
+  console.log(c("1;37", `  Baseline (${effortSpec.primaryMetricLabel}): ${originalBaseline.tokPerSec?.toFixed(2)} tok/s`));
+  console.log(c("1;37", `  Best (${effortSpec.primaryMetricLabel}):     ${bestTokPerSec.toFixed(2)} tok/s`));
+  console.log(c("1;37", `  Current (${effortSpec.primaryMetricLabel}):  ${currentCode.tokPerSec?.toFixed(2) ?? "?"} tok/s`));
   if (bestTokPerSec > (originalBaseline.tokPerSec ?? 0)) {
     const gain = ((bestTokPerSec - (originalBaseline.tokPerSec ?? 0)) / (originalBaseline.tokPerSec ?? 1) * 100).toFixed(1);
     console.log(c("1;32", `  Gain:     +${gain}%`));

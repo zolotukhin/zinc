@@ -5,8 +5,10 @@ import {
   buildSelfReview,
   classifyApproachTags,
   formatCodexStreamLine,
+  formatCoherenceFailureList,
   formatToolInput,
   formatClaudeStreamLine,
+  getEffortSpec,
   improvementThreshold,
   isMaterialImprovement,
   loadPreviousRun,
@@ -14,6 +16,7 @@ import {
   median,
   parseAgentReport,
   shouldKeepFoundationStep,
+  summarizeCoherenceRegression,
   type ClaudeStreamState,
 } from "./optimize_perf";
 
@@ -288,6 +291,42 @@ describe("controller helpers", () => {
     expect(prompt).toContain("Failed Approaches");
     expect(prompt).toContain("@@@DESCRIPTION:");
   });
+
+  test("prefill effort advertises the correct benchmark focus", () => {
+    const spec = getEffortSpec(4);
+    expect(spec?.primaryMetricLabel).toBe("prefill tok/s");
+    expect(spec?.benchmarkMethod).toContain("long-context prefill");
+
+    const baseline = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 73.7,
+      tokPerSecSamples: [73.7],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: null,
+    };
+
+    const prompt = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      1,
+      "",
+      "qwen35b",
+      null,
+      {
+        primaryMetricLabel: spec?.primaryMetricLabel,
+        benchmarkMethod: spec?.benchmarkMethod,
+      },
+    );
+
+    expect(prompt).toContain("Benchmark Focus");
+    expect(prompt).toContain("prefill tok/s");
+    expect(prompt).toContain("long-context prefill benchmark");
+  });
 });
 
 describe("controller memory helpers", () => {
@@ -449,6 +488,92 @@ describe("controller memory helpers", () => {
       ["src/compute/forward.zig"],
     );
     expect(keep).toBe(false);
+  });
+
+  test("coherence non-regression ignores already-accepted failing cases", () => {
+    const candidate = {
+      failures: [
+        {
+          id: "Qwen3-8B::The capital of France is",
+          label: "Qwen3-8B [The capital of France is]",
+          model: "Qwen3-8B",
+          prompt: "The capital of France is",
+          outputText: "",
+          kind: "crash" as const,
+        },
+        {
+          id: "Gemma3-12B::What is 2+2?",
+          label: "Gemma3-12B [What is 2+2?]",
+          model: "Gemma3-12B",
+          prompt: "What is 2+2?",
+          outputText: "What is 5-3?",
+          kind: "mismatch" as const,
+        },
+      ],
+      failureIds: [
+        "Qwen3-8B::The capital of France is",
+        "Gemma3-12B::What is 2+2?",
+      ],
+    };
+
+    expect(summarizeCoherenceRegression(candidate, candidate.failureIds)).toBeNull();
+  });
+
+  test("coherence non-regression flags newly introduced failures", () => {
+    const candidate = {
+      failures: [
+        {
+          id: "Qwen3-8B::The capital of France is",
+          label: "Qwen3-8B [The capital of France is]",
+          model: "Qwen3-8B",
+          prompt: "The capital of France is",
+          outputText: "",
+          kind: "crash" as const,
+        },
+        {
+          id: "Qwen3.5-35B::What is 2+2?",
+          label: "Qwen3.5-35B [What is 2+2?]",
+          model: "Qwen3.5-35B",
+          prompt: "What is 2+2?",
+          outputText: "five",
+          kind: "mismatch" as const,
+        },
+      ],
+      failureIds: [
+        "Qwen3-8B::The capital of France is",
+        "Qwen3.5-35B::What is 2+2?",
+      ],
+    };
+
+    const regression = summarizeCoherenceRegression(candidate, [
+      "Qwen3-8B::The capital of France is",
+    ]);
+    expect(regression).toContain("New coherence failures vs accepted baseline");
+    expect(regression).toContain("Qwen3.5-35B [What is 2+2?]");
+  });
+
+  test("coherence failure formatter renders crashes and mismatches", () => {
+    const formatted = formatCoherenceFailureList([
+      {
+        id: "Qwen3-8B::The capital of France is",
+        label: "Qwen3-8B [The capital of France is]",
+        model: "Qwen3-8B",
+        prompt: "The capital of France is",
+        outputText: "",
+        kind: "crash" as const,
+      },
+      {
+        id: "Gemma3-12B::What is 2+2?",
+        label: "Gemma3-12B [What is 2+2?]",
+        model: "Gemma3-12B",
+        prompt: "What is 2+2?",
+        outputText: "What is 5-3?",
+        kind: "mismatch" as const,
+      },
+    ]);
+
+    expect(formatted).toContain("Qwen3-8B [The capital of France is]: crashed");
+    expect(formatted).toContain('Gemma3-12B [What is 2+2?]: "What is 5-3?"');
   });
 
   test("buildAnalysisReport summarizes kept and reverted cycles", () => {
