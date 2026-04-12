@@ -30,6 +30,9 @@ void main() {
     // gelu_tanh(g) = 0.5 * g * (1.0 + tanh(sqrt(2/pi) * (g + 0.044715 * g^3)))
     float g3 = g * g * g;
     float inner = 0.7978845608 * (g + 0.044715 * g3);  // sqrt(2/pi) ≈ 0.7978845608
+    // Clamp to avoid NaN/saturation from tanh with extreme gate values
+    // (Gemma 4 produces activations up to ~100 at some layers).
+    inner = clamp(inner, -15.0, 15.0);
     float gelu_g = 0.5 * g * (1.0 + tanh(inner));
     y[idx] = gelu_g * up[idx];
 }
