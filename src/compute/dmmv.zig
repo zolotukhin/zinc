@@ -55,6 +55,8 @@ pub const DmmvDispatch = struct {
     pipeline_q5k: ?Pipeline,
     /// Q6K pipeline, or null.
     pipeline_q6k: ?Pipeline,
+    /// MXFP4 pipeline, or null.
+    pipeline_mxfp4: ?Pipeline,
     /// Q5_0 pipeline, or null.
     pipeline_q5_0: ?Pipeline,
     /// Q5_1 pipeline, or null.
@@ -75,6 +77,8 @@ pub const DmmvDispatch = struct {
     pipeline_q4k_moe: ?Pipeline,
     /// MoE Q5K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q5k_moe: ?Pipeline,
+    /// MoE MXFP4 pipeline (4 bindings: A, x, y, routing), or null.
+    pipeline_mxfp4_moe: ?Pipeline,
     /// MoE Q5_1 pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q5_1_moe: ?Pipeline,
     /// MoE Q6K pipeline (4 bindings: A, x, y, routing), or null.
@@ -151,6 +155,12 @@ pub const DmmvDispatch = struct {
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
         const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        const mxfp4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_mxfp4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_mxfp4 = pipeline_mod.createFromSpirvWithOptions(instance, mxfp4_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("MXFP4 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -233,6 +243,12 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        const mxfp4_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_mxfp4_moe.spv", .{shader_dir}) catch unreachable;
+        const pipeline_mxfp4_moe = pipeline_mod.createFromSpirvWithOptions(instance, mxfp4_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
+            log.warn("MXFP4 MoE shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         const q5_1_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1_moe.spv", .{shader_dir}) catch unreachable;
         const pipeline_q5_1_moe = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_1 MoE shader not loaded: {s}", .{@errorName(err)});
@@ -251,6 +267,7 @@ pub const DmmvDispatch = struct {
 
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
+            .pipeline_mxfp4 = pipeline_mxfp4,
             .pipeline_q5_0 = pipeline_q5_0,
             .pipeline_q5_1 = pipeline_q5_1,
             .pipeline_q5k = pipeline_q5k,
@@ -262,6 +279,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_idp = pipeline_q4k_idp,
             .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
             .pipeline_q4k_moe = pipeline_q4k_moe,
+            .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
             .pipeline_q5_1_moe = pipeline_q5_1_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
             .pipeline_q6k_moe = pipeline_q6k_moe,
@@ -278,6 +296,7 @@ pub const DmmvDispatch = struct {
     pub fn pipelineForType(self: *const DmmvDispatch, quant_type: GGMLType) ?*const Pipeline {
         return switch (quant_type) {
             .q4_k => if (self.pipeline_q4k) |*p| p else null,
+            .mxfp4 => if (self.pipeline_mxfp4) |*p| p else null,
             .q5_0 => if (self.pipeline_q5_0) |*p| p else null,
             .q5_1 => if (self.pipeline_q5_1) |*p| p else null,
             .q5_k => if (self.pipeline_q5k) |*p| p else null,
@@ -293,6 +312,7 @@ pub const DmmvDispatch = struct {
     pub fn moePipelineForType(self: *const DmmvDispatch, quant_type: GGMLType) ?*const Pipeline {
         return switch (quant_type) {
             .q4_k => if (self.pipeline_q4k_moe) |*p| p else null,
+            .mxfp4 => if (self.pipeline_mxfp4_moe) |*p| p else null,
             .q5_1 => if (self.pipeline_q5_1_moe) |*p| p else null,
             .q5_k => if (self.pipeline_q5k_moe) |*p| p else null,
             .q6_k => if (self.pipeline_q6k_moe) |*p| p else null,

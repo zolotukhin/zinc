@@ -372,6 +372,37 @@ fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLType, o
                 }
             }
         },
+        .q5_0 => {
+            // Q5_0 block: 32 elements, 22 bytes
+            //   [0..1] f16 d (scale)
+            //   [2..5] u32 qh (5th bit for each of 32 elements)
+            //   [6..21] u8 qs (lower 4 bits, packed as nibbles)
+            // Dequant: val = d * ((hi_bit << 4 | lo_nibble) - 16)
+            const bpb_q50: usize = 22;
+            const bpr_q50 = @as(usize, cols) / 32;
+            const row_off_q50 = @as(usize, row) * bpr_q50 * bpb_q50;
+
+            var out_i_q50: usize = 0;
+            for (0..bpr_q50) |b| {
+                const bb = row_off_q50 + b * bpb_q50;
+                const d_bits = std.mem.readInt(u16, raw_data[bb..][0..2], .little);
+                const d: f32 = @floatCast(@as(f16, @bitCast(d_bits)));
+                const qh: u32 = std.mem.readInt(u32, raw_data[bb + 2 ..][0..4], .little);
+
+                for (0..16) |j| {
+                    const q_byte = raw_data[bb + 6 + j];
+                    const lo: u32 = q_byte & 0x0F;
+                    const hi: u32 = q_byte >> 4;
+                    const bit_lo: u32 = (qh >> @intCast(j)) & 1;
+                    const bit_hi: u32 = (qh >> @intCast(j + 16)) & 1;
+                    const q0 = lo | (bit_lo << 4);
+                    const q1 = hi | (bit_hi << 4);
+                    output[out_i_q50 + j] = d * (@as(f32, @floatFromInt(q0)) - 16.0);
+                    output[out_i_q50 + 16 + j] = d * (@as(f32, @floatFromInt(q1)) - 16.0);
+                }
+                out_i_q50 += 32;
+            }
+        },
         else => {
             log.warn("Unsupported embedding quant type {d}, using zeros", .{@intFromEnum(quant_type)});
             @memset(output, 0);
@@ -908,26 +939,51 @@ pub const InferenceEngine = struct {
             if (mr != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
             rope_freq_buf.mapped = @ptrCast(map_ptr);
         }
-        // Compute IMROPE frequencies if sections are present.
-        // For text, all position IDs (t/h/w/e) are identical, so IMROPE reduces to
-        // standard NeoX RoPE with a single global frequency progression:
-        //   freq[k] = 1 / base^(2k / rope_dim)  for global pair index k.
-        // The section boundaries only affect which position axis is used (vision), NOT
-        // the frequency schedule — all four theta values advance by the same theta_scale.
+        // Precompute inverse RoPE frequencies.
+        // For IMROPE (Gemma 3 vision): sectioned per-pair frequencies.
+        // For Gemma 4 global attention: rope_freqs.weight factors modify base frequencies.
+        // For standard models: freq[k] = 1 / base^(2k / rope_dim).
         const has_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;
-        if (has_imrope) {
+        {
             const freq_ptr: [*]f32 = @ptrCast(@alignCast(rope_freq_buf.mapped.?));
-            const total_pairs = config.rope_sections[0] + config.rope_sections[1] +
-                config.rope_sections[2] + config.rope_sections[3];
-            const rope_full_dim: f32 = @floatFromInt(2 * total_pairs);
-            for (0..total_pairs) |k| {
-                const exponent = @as(f32, @floatFromInt(2 * k)) / rope_full_dim;
-                freq_ptr[k] = 1.0 / std.math.pow(f32, config.rope_freq_base, exponent);
+            if (has_imrope) {
+                const total_pairs = config.rope_sections[0] + config.rope_sections[1] +
+                    config.rope_sections[2] + config.rope_sections[3];
+                const rope_full_dim: f32 = @floatFromInt(2 * total_pairs);
+                for (0..total_pairs) |k| {
+                    const exponent = @as(f32, @floatFromInt(2 * k)) / rope_full_dim;
+                    freq_ptr[k] = 1.0 / std.math.pow(f32, config.rope_freq_base, exponent);
+                }
+                log.info("IMROPE: sections=[{d},{d},{d},{d}] total_pairs={d} freq[0]={d:.6} freq[11]={d:.6} freq[31]={d:.6}", .{
+                    config.rope_sections[0], config.rope_sections[1], config.rope_sections[2], config.rope_sections[3],
+                    total_pairs, freq_ptr[0], if (total_pairs > 11) freq_ptr[11] else 0.0, if (total_pairs > 31) freq_ptr[31] else 0.0,
+                });
+            } else {
+                // Standard NeoX RoPE: freq[k] = 1 / base^(2k / rope_dim)
+                const rope_full_dim_f: f32 = @floatFromInt(rope_dim_val);
+                for (0..half_rot) |k| {
+                    const exponent = @as(f32, @floatFromInt(2 * k)) / rope_full_dim_f;
+                    freq_ptr[k] = 1.0 / std.math.pow(f32, config.rope_freq_base, exponent);
+                }
+                // Apply rope_freqs.weight factors if present (Gemma 4 proportional RoPE)
+                if (model.mmap_data) |mmap| {
+                    for (model.gguf_file.tensors.items) |ti| {
+                        if (std.mem.eql(u8, ti.name, "rope_freqs.weight")) {
+                            const off = model.gguf_file.tensor_data_offset + ti.offset;
+                            const n_factors = @min(ti.numElements(), half_rot);
+                            for (0..@intCast(n_factors)) |k| {
+                                const factor_off = off + k * @sizeOf(f32);
+                                if (factor_off + @sizeOf(f32) <= mmap.len) {
+                                    const factor: f32 = @as(*const f32, @ptrCast(@alignCast(mmap.ptr + factor_off))).*;
+                                    if (factor != 0.0) freq_ptr[k] /= factor;
+                                }
+                            }
+                            log.info("RoPE freq factors loaded from rope_freqs.weight ({d} entries)", .{n_factors});
+                            break;
+                        }
+                    }
+                }
             }
-            log.info("IMROPE: sections=[{d},{d},{d},{d}] total_pairs={d} freq[0]={d:.6} freq[11]={d:.6} freq[31]={d:.6}", .{
-                config.rope_sections[0], config.rope_sections[1], config.rope_sections[2],                     config.rope_sections[3],
-                total_pairs,             freq_ptr[0],             if (total_pairs > 11) freq_ptr[11] else 0.0, if (total_pairs > 31) freq_ptr[31] else 0.0,
-            });
         }
 
         // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32))
@@ -2498,17 +2554,17 @@ pub const InferenceEngine = struct {
                 if (packed_q_gate) {
                     // Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.
                     // Project into a temporary buffer and split each head block out.
-                    const q_full_dim = q_dim * 2;
-                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_full_dim, hidden_dim);
+                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_rows, hidden_dim);
                 } else {
                     // Dense qwen35 may store Q and gate as separate tensors.
-                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, q_dim, hidden_dim);
+                    // Use q_rows (tensor shape) not q_dim (config) — Gemma 4 mixed head_dim.
+                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, q_rows, hidden_dim);
                     if (attn_gate_tensor) |gate_tensor| {
-                        try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, q_dim, hidden_dim);
+                        try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, q_rows, hidden_dim);
                     }
                 }
-                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, kv_dim, hidden_dim);
-                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, kv_dim, hidden_dim);
+                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, k_rows, hidden_dim);
+                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, v_rows, hidden_dim);
                 if (packed_q_gate) {
                     // Wait for all DMMV outputs (Q+gate, K, V) before deinterleave
                     self.decode_cmd.computeBarrier();
@@ -2605,9 +2661,14 @@ pub const InferenceEngine = struct {
                 // Bug fix #5+#6: IMRoPE — only rotate rope_dim of head_dim dimensions
                 // IMROPE: use precomputed per-pair frequencies when sections are present
                 const use_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;
-                const rope_freq: f32 = if (use_imrope) 0.0 else config.rope_freq_base;
-                // rope_dim is replaced by layer_rope_dim (derived per-layer from tensor shapes)
-                const freq_buf_handle = if (use_imrope) self.rope_freq_buf.handle else null;
+                // Gemma 4 SWA layers use a different RoPE frequency base than global layers.
+                // Global layers use precomputed frequencies (with rope_freqs.weight factors).
+                const use_swa_rope = config.architecture == .gemma and config.rope_freq_base_swa > 0 and layer_head_dim < config.head_dim;
+                // Use precomputed frequency buffer for global layers (includes rope_freqs.weight)
+                // or IMROPE; SWA layers compute inline with swa freq base.
+                const use_precomputed_freq = use_imrope or (proportional_rope and !use_swa_rope);
+                const rope_freq: f32 = if (use_precomputed_freq) 0.0 else if (use_swa_rope) config.rope_freq_base_swa else config.rope_freq_base;
+                const freq_buf_handle = if (use_precomputed_freq) self.rope_freq_buf.handle else null;
 
                 // Fused norm+rope: when both norm and rope are needed, combine them into
                 // a single dispatch per head set, eliminating 1 barrier + 2 dispatches.
@@ -2927,11 +2988,14 @@ pub const InferenceEngine = struct {
                 if (!has_post_attn_norm and !self.validation_diagnostics_enabled) {
                     // Fused: O-proj DMMV accumulates directly into hidden_buf,
                     // eliminating separate scale_acc dispatch + barrier
-                    try self.dispatchDmmvAcc(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.hidden_buf, hidden_dim, q_dim);
+                    // Use o_cols (from O weight tensor shape) — matches actual attention output dim.
+                    // Gemma 4 has mixed head_dim (256 SWA vs 512 global); o_cols is always correct
+                    // while q_dim (from config) uses the max head_dim.
+                    try self.dispatchDmmvAcc(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.hidden_buf, hidden_dim, o_cols);
                     self.decode_cmd.computeBarrier();
                 } else {
                     // Unfused path: needed when post-attn norm exists (Gemma) or diagnostics enabled
-                    try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, q_dim);
+                    try self.dispatchDmmv(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.o_proj_buf, hidden_dim, o_cols);
                     self.decode_cmd.computeBarrier();
 
                     // Gemma post-attention norm: RMS norm on o_proj output before residual add

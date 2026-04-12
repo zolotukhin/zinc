@@ -1,0 +1,97 @@
+#version 460
+// ZINC — MXFP4 MoE DMMV: batched expert dispatch via workgroup Y dimension.
+// All selected experts run in parallel — gl_WorkGroupID.y selects the expert slot.
+// Expert IDs are read from GPU routing buffer written by softmax_topk.comp.
+//
+// MXFP4 block layout (32 elements, 17 bytes):
+//   [0]      E8M0 shared exponent (uint8)
+//   [1..16]  packed 4-bit E2M1 values (16 bytes = 32 nibbles)
+//
+// Dispatch: ((M+63)/64, n_experts_used, 1) — Y workgroups = experts in parallel
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 1) const uint SPEC_K = 4096;
+
+layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
+layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint expert_stride;    // bytes per expert in stacked weight tensor
+    uint x_expert_stride;  // elements between experts' inputs (0=shared, K=per-expert)
+    uint x_offset;
+    uint y_offset;
+};
+
+const uint MXFP4_BLOCK_SIZE = 32;
+const uint MXFP4_BYTES      = 17;
+
+// E2M1 FP4 lookup table: maps 4-bit value to float
+const float kvalues_mxfp4[16] = float[16](
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
+);
+
+// E8M0 to float: 2^(e - 127)
+float e8m0_to_fp32(uint e) {
+    uint bits;
+    if (e == 0u) {
+        bits = 0x00400000u; // 2^(-127) denormal
+    } else {
+        bits = e << 23;     // 2^(e - 127)
+    }
+    return uintBitsToFloat(bits);
+}
+
+shared float s_x[SPEC_K];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint expert_slot = gl_WorkGroupID.y;
+
+    // Read expert_id from GPU routing buffer — no CPU readback needed
+    uint expert_id = routing_data[expert_slot];
+    uint a_offset = expert_id * expert_stride;
+
+    // Load input vector into shared memory
+    uint x_global_base = x_offset / 4u + expert_slot * x_expert_stride;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x[x_global_base + i];
+    }
+    barrier();
+
+    uint row = gl_WorkGroupID.x * 64u + tid;
+    if (row >= M) return;
+
+    uint blocks_per_row = K / MXFP4_BLOCK_SIZE;
+    float sum = 0.0;
+
+    for (uint blk = 0u; blk < blocks_per_row; blk++) {
+        uint byte_off = a_offset + row * blocks_per_row * MXFP4_BYTES + blk * MXFP4_BYTES;
+        uint x_base = blk * MXFP4_BLOCK_SIZE;
+
+        float d = e8m0_to_fp32(uint(w[byte_off]));
+        uint qs_off = byte_off + 1u;
+
+        float block_sum = 0.0;
+        for (uint j = 0u; j < 16u; j++) {
+            uint q_byte = uint(w[qs_off + j]);
+            float v_lo = kvalues_mxfp4[q_byte & 0x0Fu];
+            float v_hi = kvalues_mxfp4[q_byte >> 4];
+            block_sum += d * v_lo * s_x[x_base + j]
+                       + d * v_hi * s_x[x_base + 16u + j];
+        }
+        sum += block_sum;
+    }
+
+    // Output at expert_slot * M offset
+    uint y_base = y_offset / 4u + expert_slot * M;
+    y[y_base + row] = sum;
+}
