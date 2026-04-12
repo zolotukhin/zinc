@@ -132,6 +132,7 @@ pub const ElementwiseDispatch = struct {
     pipeline_vadd: ?Pipeline,
     /// SCALE ACC pipeline, or null.
     pipeline_scale_acc: ?Pipeline,
+    pipeline_scale_in_place: ?Pipeline,
     /// SSM CONV1D pipeline, or null.
     pipeline_ssm_conv1d: ?Pipeline,
     /// SSM DELTA NET pipeline, or null.
@@ -254,6 +255,13 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // scale_in_place: 1 read-write binding (Gemma 4 per-layer output scaling)
+        const sip_path = std.fmt.bufPrint(&path_buf, "{s}/scale_in_place.spv", .{shader_dir}) catch unreachable;
+        const pipeline_scale_in_place = pipeline_mod.createFromSpirvWithOptions(instance, sip_path, 1, @sizeOf(ScaleAccPush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("scale_in_place shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // SSM conv1d + SiLU: 4 bindings (input, kernel, state, output)
         const conv1d_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_conv1d.spv", .{shader_dir}) catch unreachable;
         const pipeline_ssm_conv1d = pipeline_mod.createFromSpirvWithOptions(instance, conv1d_path, 4, @sizeOf(SsmConv1dPush), &.{}, push_options, allocator) catch |err| blk: {
@@ -327,6 +335,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_sigmoid_mul = pipeline_sigmoid_mul,
             .pipeline_vadd = pipeline_vadd,
             .pipeline_scale_acc = pipeline_scale_acc,
+            .pipeline_scale_in_place = pipeline_scale_in_place,
             .pipeline_ssm_conv1d = pipeline_ssm_conv1d,
             .pipeline_ssm_delta_net = pipeline_ssm_delta_net,
             .pipeline_ssm_gated_norm = pipeline_ssm_gated_norm,
@@ -508,6 +517,19 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
+    pub fn recordScaleInPlace(
+        self: *const ElementwiseDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+        scale: f32,
+    ) !void {
+        const pip = if (self.pipeline_scale_in_place) |*p| p else return error.ShaderNotLoaded;
+        const push = ScaleAccPush{ .N = n_elements, .scale_bits = @bitCast(scale) };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
     /// Record SSM conv1d + SiLU dispatch.
     pub fn recordSsmConv1d(
         self: *const ElementwiseDispatch,
@@ -621,6 +643,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_sigmoid_mul) |*p| p.deinit();
         if (self.pipeline_vadd) |*p| p.deinit();
         if (self.pipeline_scale_acc) |*p| p.deinit();
+        if (self.pipeline_scale_in_place) |*p| p.deinit();
         if (self.pipeline_ssm_conv1d) |*p| p.deinit();
         if (self.pipeline_ssm_delta_net) |*p| p.deinit();
         if (self.pipeline_ssm_gated_norm) |*p| p.deinit();

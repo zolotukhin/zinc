@@ -1,0 +1,20 @@
+#version 460
+// In-place scalar multiplication: buf[i] *= scale
+// One dispatch, no transfer operations, no sync issues.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer Data { float data[]; };
+
+layout(push_constant) uniform PC {
+    uint N;
+    uint scale_bits; // float reinterpreted as uint
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < N) {
+        float scale = uintBitsToFloat(scale_bits);
+        data[i] *= scale;
+    }
+}

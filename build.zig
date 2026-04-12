@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) void {
         "vadd",
         "scale_accumulate",
         "scale_acc_sigmoid",
+        "scale_in_place",
         "sigmoid_scale_acc",
         "argmax",
         "embed_dequant_q4k",

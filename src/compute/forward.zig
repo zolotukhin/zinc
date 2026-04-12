@@ -1661,6 +1661,32 @@ pub const InferenceEngine = struct {
     // Descriptor set helpers
     // -----------------------------------------------------------------------
 
+    fn writeDescSet1(
+        self: *InferenceEngine,
+        ds: vk.c.VkDescriptorSet,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+    ) void {
+        var info = vk.c.VkDescriptorBufferInfo{ .buffer = buf0, .offset = 0, .range = size0 };
+        const write = vk.c.VkWriteDescriptorSet{
+            .sType = vk.c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = ds,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pImageInfo = null,
+            .pBufferInfo = &info,
+            .pTexelBufferView = null,
+        };
+        vk.c.vkUpdateDescriptorSets(self.instance.device, 1, &write, 0, null);
+        if (self.profile_enabled) {
+            self.profile_token_counters.descriptor_write_calls += 1;
+            self.profile_token_counters.descriptor_bindings += 1;
+        }
+    }
+
     fn writeDescSet2(
         self: *InferenceEngine,
         ds: vk.c.VkDescriptorSet,
@@ -1825,6 +1851,30 @@ pub const InferenceEngine = struct {
             self.profile_token_counters.descriptor_write_calls += 1;
             self.profile_token_counters.descriptor_bindings += 7;
         }
+    }
+
+    fn pushDispatch1(
+        self: *InferenceEngine,
+        pip: *const Pipeline,
+        push_data: []const u8,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        wg_x: u32,
+        wg_y: u32,
+        wg_z: u32,
+    ) void {
+        const infos = [1]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+        };
+        self.decode_cmd.pushDescAndDispatch(
+            pip,
+            self.instance.push_descriptor_fn,
+            infos[0..],
+            push_data,
+            wg_x,
+            wg_y,
+            wg_z,
+        );
     }
 
     fn pushDispatch2(
@@ -2138,6 +2188,24 @@ pub const InferenceEngine = struct {
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet3(ds, gate_buf, gate_size, up_buf, up_size, output_buf, output_size);
         try self.elementwise.recordSwiglu(&self.decode_cmd, ds, n_elements);
+    }
+
+    fn dispatchScaleInPlace(
+        self: *InferenceEngine,
+        buf: vk.c.VkBuffer,
+        buf_size: vk.c.VkDeviceSize,
+        n_elements: u32,
+        scale: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_scale_in_place orelse return error.ShaderNotLoaded);
+        if (pip.uses_push_descriptors) {
+            const push = ScaleAccPush{ .N = n_elements, .scale_bits = @bitCast(scale) };
+            self.pushDispatch1(pip, std.mem.asBytes(&push), buf, buf_size, (n_elements + 63) / 64, 1, 1);
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet1(ds, buf, buf_size);
+        try self.elementwise.recordScaleInPlace(&self.decode_cmd, ds, n_elements, scale);
     }
 
     fn dispatchScaleAcc(
@@ -3804,23 +3872,14 @@ pub const InferenceEngine = struct {
                 }
             }
 
-            // Per-layer output scaling (Gemma 4 proportional):
-            // hidden_buf *= scale  →  copy to residual_buf, zero hidden_buf, then scale_acc
+            // Per-layer output scaling (Gemma 4 proportional): hidden_buf *= scale
             const layer_output_scale = self.layer_output_scales[layer];
             if (layer_output_scale != 1.0) {
                 if (!gpu_moe_barriers_cover_hidden) {
                     self.decode_cmd.computeBarrier();
                 }
-                // Copy hidden → residual, then hidden = 0 + residual * scale
-                const copy_rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
-                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.residual_buf.handle, 1, &copy_rgn);
-                self.decode_cmd.transferToComputeBarrier();
-                vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.hidden_buf.handle, 0, hidden_size, 0);
-                self.decode_cmd.transferToComputeBarrier();
-                try self.dispatchScaleAcc(
+                try self.dispatchScaleInPlace(
                     self.hidden_buf.handle,
-                    hidden_size,
-                    self.residual_buf.handle,
                     hidden_size,
                     hidden_dim,
                     layer_output_scale,
