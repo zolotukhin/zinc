@@ -3245,7 +3245,27 @@ pub const InferenceEngine = struct {
                 // --- MoE: router DMMV → top-k → expert dispatch ---
                 const router_tensor = lt.ffn_gate_inp orelse return error.TensorNotFound;
                 const moe_router_phase = self.beginProfilePhase();
-                try self.dispatchDmmv(router_tensor, self.ffn_norm_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
+
+                // Gemma MoE uses plain RMS-normalized hidden (unit weights) for the router input,
+                // while the FFN experts read the learned-weight ffn_norm output. Mirrors Metal
+                // forward_metal.zig:4636-4639.
+                const router_input_buf = if (config.architecture == .gemma) blk: {
+                    try self.dispatchRmsNorm(
+                        self.hidden_buf.handle,
+                        hidden_size,
+                        self.unit_norm_weights.handle,
+                        self.unit_norm_weights.size,
+                        self.residual_buf.handle,
+                        hidden_size,
+                        hidden_dim,
+                        1,
+                        rms_norm_eps,
+                    );
+                    self.decode_cmd.computeBarrier();
+                    break :blk self.residual_buf;
+                } else self.ffn_norm_buf;
+
+                try self.dispatchDmmv(router_tensor, router_input_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
                 self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
                 self.endProfilePhase(.moe_router, moe_router_phase);
 
