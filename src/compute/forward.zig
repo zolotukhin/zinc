@@ -620,6 +620,8 @@ pub const InferenceEngine = struct {
     tensor_map: std.StringHashMap(*const LoadedTensor),
     // Pre-resolved per-layer tensor pointers (O(1) indexed access, no hash/format per token)
     layer_tensors: []LayerTensors,
+    // Per-layer output scaling (Gemma 4 proportional RoPE; 1.0 = no scaling)
+    layer_output_scales: []f32,
     /// Vulkan instance.
     instance: *const Instance,
     /// Allocator for owned resources.
@@ -1142,6 +1144,31 @@ pub const InferenceEngine = struct {
             layer_tensors[li] = lt;
         }
 
+        // Load per-layer output scales (Gemma 4 proportional scaling)
+        const layer_output_scales = try allocator.alloc(f32, config.n_layers);
+        errdefer allocator.free(layer_output_scales);
+        for (0..config.n_layers) |li| {
+            const l: u32 = @intCast(li);
+            var los_buf: [128]u8 = undefined;
+            const los_key = std.fmt.bufPrint(&los_buf, "blk.{d}.layer_output_scale.weight", .{l}) catch unreachable;
+            if (tensor_map.get(los_key)) |los_tensor| {
+                // Read scalar f32 from GGUF mmap data (before GPU upload)
+                if (model.mmap_data) |mmap| {
+                    const off = model.gguf_file.tensor_data_offset + los_tensor.info.offset;
+                    if (off + @sizeOf(f32) <= mmap.len) {
+                        const ptr: *const f32 = @ptrCast(@alignCast(mmap.ptr + off));
+                        layer_output_scales[li] = ptr.*;
+                    } else {
+                        layer_output_scales[li] = 1.0;
+                    }
+                } else {
+                    layer_output_scales[li] = 1.0;
+                }
+            } else {
+                layer_output_scales[li] = 1.0;
+            }
+        }
+
         log.debug("Inference engine ready — {d} graph nodes, hidden_dim={d}, vocab={d}, tensor_map={d}", .{
             decode_graph.nodeCount(), config.hidden_dim, config.vocab_size, tensor_map.count(),
         });
@@ -1198,6 +1225,7 @@ pub const InferenceEngine = struct {
             .shared_pool = shared_pool,
             .tensor_map = tensor_map,
             .layer_tensors = layer_tensors,
+            .layer_output_scales = layer_output_scales,
             .instance = instance,
             .allocator = allocator,
             .max_context_tokens = max_ctx,
@@ -2440,7 +2468,13 @@ pub const InferenceEngine = struct {
                 const layer_kv_dim: u32 = k_rows;
                 const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else config.n_kv_heads;
                 const layer_kv_vec_size = @as(vk.c.VkDeviceSize, layer_kv_dim) * @sizeOf(f32);
-                const layer_rope_dim: u32 = @min(if (config.rope_dim > 0) config.rope_dim else layer_head_dim, layer_head_dim);
+                // Gemma 4 proportional RoPE: global attention layers (use_k_as_v) rotate
+                // the full head_dim using precomputed rope_freqs.weight frequencies.
+                const proportional_rope = config.architecture == .gemma and use_k_as_v;
+                const layer_rope_dim: u32 = if (proportional_rope)
+                    layer_head_dim
+                else
+                    @min(if (config.rope_dim > 0) config.rope_dim else layer_head_dim, layer_head_dim);
 
                 const packed_q_gate = q_rows == q_dim * 2;
                 const separate_attn_gate = q_rows == q_dim and attn_gate_tensor != null;
@@ -3203,12 +3237,21 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_down, moe_down_phase);
 
-                    // Weighted accumulation: sum ALL experts at once, accumulate directly into hidden_buf
-                    // hidden_buf[i] += sum_j(weight_j * down_buf[j * hidden_dim + i])
+                    // Weighted accumulation: sum ALL experts at once.
+                    // If post_ffw_norm is present, accumulate into moe_out_buf for normalization
+                    // before residual add; otherwise accumulate directly into hidden_buf.
+                    const has_post_ffw_norm = lt.post_ffw_norm != null;
+                    const moe_acc_target = if (has_post_ffw_norm) self.moe_out_buf.handle else self.hidden_buf.handle;
+                    const moe_acc_target_size = if (has_post_ffw_norm) self.moe_out_buf.size else hidden_size;
+                    if (has_post_ffw_norm) {
+                        // Zero moe_out_buf before weighted accumulation
+                        vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.moe_out_buf.handle, 0, hidden_size, 0);
+                        self.decode_cmd.transferToComputeBarrier();
+                    }
                     const moe_acc_phase = self.beginProfilePhase();
                     try self.dispatchMoeWeightedAcc(
-                        self.hidden_buf.handle,
-                        hidden_size,
+                        moe_acc_target,
+                        moe_acc_target_size,
                         self.down_buf.handle,
                         self.down_buf.size,
                         self.router_output_buf.handle,
@@ -3234,6 +3277,33 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_weighted_acc, moe_acc_phase);
 
+                    // Post-FFN norm + residual for MoE expert accumulation (Gemma 4)
+                    if (has_post_ffw_norm) {
+                        if (lt.post_ffw_norm) |pfn_tensor| {
+                            try self.dispatchRmsNorm(
+                                self.moe_out_buf.handle,
+                                hidden_size,
+                                pfn_tensor.gpu_buffer.handle,
+                                pfn_tensor.gpu_buffer.size,
+                                self.moe_out_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1,
+                                rms_norm_eps,
+                            );
+                            self.decode_cmd.computeBarrier();
+                        }
+                        try self.dispatchScaleAcc(
+                            self.hidden_buf.handle,
+                            hidden_size,
+                            self.moe_out_buf.handle,
+                            hidden_size,
+                            hidden_dim,
+                            1.0,
+                        );
+                        self.decode_cmd.computeBarrier();
+                    }
+
                     // Remaining shared expert steps (sequential — buffer reuse prevents further overlap)
                     if (has_shared_expert) {
                         // Shared down DMMV: swiglu_buf → down_buf
@@ -3241,6 +3311,22 @@ pub const InferenceEngine = struct {
                         try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
                         self.decode_cmd.computeBarrier();
                         self.endProfilePhase(.shared_down, shared_down_phase);
+
+                        // Post-FFN norm on shared expert down projection (Gemma 4)
+                        if (lt.post_ffw_norm) |pfn_tensor| {
+                            try self.dispatchRmsNorm(
+                                self.down_buf.handle,
+                                hidden_size,
+                                pfn_tensor.gpu_buffer.handle,
+                                pfn_tensor.gpu_buffer.size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1,
+                                rms_norm_eps,
+                            );
+                            self.decode_cmd.computeBarrier();
+                        }
 
                         // Shared expert accumulation into hidden_buf
                         const shared_gate_phase = self.beginProfilePhase();
@@ -3381,6 +3467,24 @@ pub const InferenceEngine = struct {
                 }
                 self.endProfilePhase(.moe_routed, moe_phase);
 
+                // CPU MoE fallback: apply post_ffw_norm to expert accumulation before shared expert
+                if (!use_gpu_moe and lt.post_ffw_norm != null) {
+                    if (lt.post_ffw_norm) |pfn_tensor| {
+                        try self.dispatchRmsNorm(
+                            self.moe_out_buf.handle,
+                            hidden_size,
+                            pfn_tensor.gpu_buffer.handle,
+                            pfn_tensor.gpu_buffer.size,
+                            self.moe_out_buf.handle,
+                            hidden_size,
+                            hidden_dim,
+                            1,
+                            rms_norm_eps,
+                        );
+                        self.decode_cmd.computeBarrier();
+                    }
+                }
+
                 // Shared expert for CPU MoE fallback only (GPU MoE handles shared expert inline above)
                 if (!use_gpu_moe) {
                     const cpu_gate_shexp = lt.ffn_gate_shexp;
@@ -3410,6 +3514,22 @@ pub const InferenceEngine = struct {
 
                         try self.dispatchDmmv(cpu_down_shexp.?, self.swiglu_buf, cpu_shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
                         self.decode_cmd.computeBarrier();
+
+                        // Post-FFN norm on shared expert down projection (Gemma 4)
+                        if (lt.post_ffw_norm) |pfn_tensor| {
+                            try self.dispatchRmsNorm(
+                                self.down_buf.handle,
+                                hidden_size,
+                                pfn_tensor.gpu_buffer.handle,
+                                pfn_tensor.gpu_buffer.size,
+                                self.down_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1,
+                                rms_norm_eps,
+                            );
+                            self.decode_cmd.computeBarrier();
+                        }
 
                         const shexp_acc_buf = self.moe_out_buf.handle;
                         if (cpu_shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
@@ -3588,6 +3708,30 @@ pub const InferenceEngine = struct {
                         1.0,
                     );
                 }
+            }
+
+            // Per-layer output scaling (Gemma 4 proportional):
+            // hidden_buf *= scale  →  copy to residual_buf, zero hidden_buf, then scale_acc
+            const layer_output_scale = self.layer_output_scales[layer];
+            if (layer_output_scale != 1.0) {
+                if (!gpu_moe_barriers_cover_hidden) {
+                    self.decode_cmd.computeBarrier();
+                }
+                // Copy hidden → residual, then hidden = 0 + residual * scale
+                const copy_rgn = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.residual_buf.handle, 1, &copy_rgn);
+                self.decode_cmd.transferToComputeBarrier();
+                vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.hidden_buf.handle, 0, hidden_size, 0);
+                self.decode_cmd.transferToComputeBarrier();
+                try self.dispatchScaleAcc(
+                    self.hidden_buf.handle,
+                    hidden_size,
+                    self.residual_buf.handle,
+                    hidden_size,
+                    hidden_dim,
+                    layer_output_scale,
+                );
+                gpu_moe_barriers_cover_hidden = false;
             }
 
             // The next layer immediately reads hidden_buf as its input.
@@ -4516,18 +4660,23 @@ pub const InferenceEngine = struct {
         return false;
     }
 
+    fn softcapLogit(logit: f32, softcap: f32) f32 {
+        if (!(softcap > 0)) return logit;
+        return softcap * std.math.tanh(logit / softcap);
+    }
+
     fn adjustedLogit(logit: f32, token: u32, history: []const u32, repetition_penalty: f32) f32 {
         if (repetition_penalty <= 1.0001 or !tokenSeen(history, token)) return logit;
         if (logit >= 0) return logit / repetition_penalty;
         return logit * repetition_penalty;
     }
 
-    fn argmaxFromLogits(logits: []const f32, history: []const u32, repetition_penalty: f32) u32 {
+    fn argmaxFromLogits(logits: []const f32, history: []const u32, repetition_penalty: f32, final_logit_softcapping: f32) u32 {
         if (logits.len == 0) return 0;
         var best_idx: u32 = 0;
-        var best_val = adjustedLogit(logits[0], 0, history, repetition_penalty);
+        var best_val = adjustedLogit(softcapLogit(logits[0], final_logit_softcapping), 0, history, repetition_penalty);
         for (logits[1..], 1..) |raw_val, i| {
-            const val = adjustedLogit(raw_val, @intCast(i), history, repetition_penalty);
+            const val = adjustedLogit(softcapLogit(raw_val, final_logit_softcapping), @intCast(i), history, repetition_penalty);
             if (val > best_val) {
                 best_val = val;
                 best_idx = @intCast(i);
@@ -4536,11 +4685,11 @@ pub const InferenceEngine = struct {
         return best_idx;
     }
 
-    fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random) u32 {
+    fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingParams, random: std.Random, final_logit_softcapping: f32) u32 {
         if (logits.len == 0) return 0;
-        if (!params.requiresLogitsReadback()) return argmaxFromLogits(logits, history, 1.0);
+        if (!params.requiresLogitsReadback()) return argmaxFromLogits(logits, history, 1.0, final_logit_softcapping);
         if (params.temperature <= 0.0001) {
-            return argmaxFromLogits(logits, history, params.repetition_penalty);
+            return argmaxFromLogits(logits, history, params.repetition_penalty, final_logit_softcapping);
         }
 
         const max_candidates = 128;
@@ -4555,7 +4704,7 @@ pub const InferenceEngine = struct {
         for (logits, 0..) |raw_val, i| {
             if (!std.math.isFinite(raw_val)) continue;
             const token_id: u32 = @intCast(i);
-            const val = adjustedLogit(raw_val, token_id, history, params.repetition_penalty);
+            const val = adjustedLogit(softcapLogit(raw_val, final_logit_softcapping), token_id, history, params.repetition_penalty);
 
             var insert_at = candidate_count;
             while (insert_at > 0 and val > candidate_logits[insert_at - 1]) : (insert_at -= 1) {}
@@ -4641,7 +4790,7 @@ pub const InferenceEngine = struct {
         const vocab_size = self.model.config.vocab_size;
         const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
         const logits = logits_ptr[0..vocab_size];
-        return sampleFromLogits(logits, state.generated_tokens.items, params, random);
+        return sampleFromLogits(logits, state.generated_tokens.items, params, random, self.model.config.final_logit_softcapping);
     }
 
     // -----------------------------------------------------------------------
@@ -5129,6 +5278,7 @@ pub const InferenceEngine = struct {
         vk.c.vkDestroyDescriptorPool(self.instance.device, self.shared_pool, null);
         self.tensor_map.deinit();
         self.allocator.free(self.layer_tensors);
+        self.allocator.free(self.layer_output_scales);
         // SSM state
         for (self.ssm_conv_states) |s| if (s.len > 0) self.allocator.free(s);
         for (self.ssm_states) |s| if (s.len > 0) self.allocator.free(s);
@@ -5486,7 +5636,7 @@ test "SamplingParams requires logits readback for non-greedy decoding" {
 test "sampleFromLogits greedy path returns argmax" {
     const logits = [_]f32{ 0.5, 2.0, 1.25 };
     var prng = std.Random.DefaultPrng.init(1234);
-    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{}, prng.random());
+    const token = InferenceEngine.sampleFromLogits(&logits, &.{}, .{}, prng.random(), 0);
     try std.testing.expectEqual(@as(u32, 1), token);
 }
 
@@ -5497,7 +5647,7 @@ test "sampleFromLogits repetition penalty can break a simple loop" {
     const token = InferenceEngine.sampleFromLogits(&logits, &history, .{
         .temperature = 0.0,
         .repetition_penalty = 2.0,
-    }, prng.random());
+    }, prng.random(), 0);
     try std.testing.expectEqual(@as(u32, 1), token);
 }
 
@@ -5508,7 +5658,7 @@ test "sampleFromLogits top_p keeps only the highest-probability token when thres
         .temperature = 0.8,
         .top_p = 0.5,
         .top_k = 8,
-    }, prng.random());
+    }, prng.random(), 0);
     try std.testing.expectEqual(@as(u32, 0), token);
 }
 

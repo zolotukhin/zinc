@@ -1,0 +1,106 @@
+#version 460
+// ZINC — Q5_1 MoE DMMV: batched expert dispatch via workgroup Y dimension.
+// All selected experts run in parallel — gl_WorkGroupID.y selects the expert slot.
+// Expert IDs are read from GPU routing buffer written by softmax_topk.comp.
+//
+// Q5_1 block layout (32 elements, 24 bytes):
+//   [0..1]   f16 d    — block scale
+//   [2..3]   f16 m    — block minimum (bias)
+//   [4..7]   u32 qh   — 5th bit for each of 32 elements
+//   [8..23]  u8  qs   — lower 4 bits, packed as nibbles
+//
+// Dequantize: val = d * quant_unsigned + m
+// Factored dot: d * sum(q*x) + m * sum(x)
+//
+// Dispatch: ((M+63)/64, n_experts_used, 1) — Y workgroups = experts in parallel
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 1) const uint SPEC_K = 4096;
+
+layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
+layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint expert_stride;    // bytes per expert in stacked weight tensor
+    uint x_expert_stride;  // elements between experts' inputs (0=shared, K=per-expert)
+    uint x_offset;
+    uint y_offset;
+};
+
+const uint Q5_1_BLOCK_SIZE = 32;
+const uint Q5_1_BYTES      = 24;
+
+shared float s_x[SPEC_K];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint expert_slot = gl_WorkGroupID.y;
+
+    // Read expert_id from GPU routing buffer — no CPU readback needed
+    uint expert_id = routing_data[expert_slot];
+    uint a_offset = expert_id * expert_stride;
+
+    // Load input vector into shared memory
+    uint x_global_base = x_offset / 4u + expert_slot * x_expert_stride;
+    for (uint i = tid; i < K; i += 64u) {
+        s_x[i] = x[x_global_base + i];
+    }
+    barrier();
+
+    uint row = gl_WorkGroupID.x * 64u + tid;
+    if (row >= M) return;
+
+    uint blocks_per_row = K / Q5_1_BLOCK_SIZE;
+    float sum = 0.0;
+
+    for (uint blk = 0u; blk < blocks_per_row; blk++) {
+        uint byte_off = a_offset + row * blocks_per_row * Q5_1_BYTES + blk * Q5_1_BYTES;
+        uint x_base = blk * Q5_1_BLOCK_SIZE;
+
+        // Read f16 scale and f16 min
+        uint d_bits = uint(w[byte_off]) | (uint(w[byte_off + 1u]) << 8);
+        float d = unpackHalf2x16(d_bits).x;
+        uint m_bits = uint(w[byte_off + 2u]) | (uint(w[byte_off + 3u]) << 8);
+        float m = unpackHalf2x16(m_bits).x;
+
+        // Read qh (5th bit mask)
+        uint qh = uint(w[byte_off + 4u])
+                 | (uint(w[byte_off + 5u]) << 8)
+                 | (uint(w[byte_off + 6u]) << 16)
+                 | (uint(w[byte_off + 7u]) << 24);
+
+        float sum_qx = 0.0;
+        float sum_x = 0.0;
+
+        for (uint j = 0u; j < 16u; j++) {
+            uint q_byte = uint(w[byte_off + 8u + j]);
+            uint lo = q_byte & 0x0Fu;
+            uint hi = q_byte >> 4;
+            uint bit_lo = (qh >> j) & 1u;
+            uint bit_hi = (qh >> (j + 16u)) & 1u;
+
+            uint q0 = lo | (bit_lo << 4);
+            uint q1 = hi | (bit_hi << 4);
+
+            float x0 = s_x[x_base + j];
+            float x1 = s_x[x_base + 16u + j];
+
+            sum_qx += float(q0) * x0 + float(q1) * x1;
+            sum_x  += x0 + x1;
+        }
+
+        sum += d * sum_qx + m * sum_x;
+    }
+
+    // Output at expert_slot * M offset
+    uint y_base = y_offset / 4u + expert_slot * M;
+    y[y_base + row] = sum;
+}
