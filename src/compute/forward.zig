@@ -626,6 +626,7 @@ pub const InferenceEngine = struct {
     router_logits_buf: Buffer, // MoE router: n_experts f32
     router_staging: Buffer, // host-visible router readback
     rope_freq_buf: Buffer, // IMROPE precomputed inverse frequencies (rope_dim/2 f32)
+    unit_norm_weights: Buffer, // all-1.0 weights for plain RMS normalization (Gemma 4 V norm)
     // KV cache (per-layer, for attention layers)
     kv_k_cache: []Buffer, // [n_layers] K cache buffers
     kv_v_cache: []Buffer, // [n_layers] V cache buffers
@@ -986,6 +987,24 @@ pub const InferenceEngine = struct {
             }
         }
 
+        // Unit-weights RMS norm buffer: hidden_dim entries all 1.0 (Gemma 4 V plain RMS norm)
+        const unit_norm_size = @as(vk.c.VkDeviceSize, config.hidden_dim) * @sizeOf(f32);
+        var unit_norm_weights = try Buffer.init(
+            instance,
+            unit_norm_size,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        errdefer unit_norm_weights.deinit();
+        {
+            var map_ptr: ?*anyopaque = null;
+            const mr = vk.c.vkMapMemory(instance.device, unit_norm_weights.memory, 0, unit_norm_size, 0, &map_ptr);
+            if (mr != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
+            unit_norm_weights.mapped = @ptrCast(map_ptr);
+            const ptr: [*]f32 = @ptrCast(@alignCast(map_ptr.?));
+            for (0..config.hidden_dim) |i| ptr[i] = 1.0;
+        }
+
         // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32))
         const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
         const kv_k_cache = try allocator.alloc(Buffer, config.n_layers);
@@ -1264,6 +1283,7 @@ pub const InferenceEngine = struct {
             .router_logits_buf = router_logits_buf,
             .router_staging = router_staging,
             .rope_freq_buf = rope_freq_buf,
+            .unit_norm_weights = unit_norm_weights,
             .kv_k_cache = kv_k_cache,
             .kv_v_cache = kv_v_cache,
             .page_table_buf = page_table_buf,
@@ -2715,6 +2735,16 @@ pub const InferenceEngine = struct {
                             layer_head_dim, layer_n_kv_heads, rms_norm_eps,
                         );
                     }
+                }
+                // Gemma 4 applies plain RMS norm (unit weights) to V per-head.
+                // Mirrors Metal forward_metal.zig:3460-3462.
+                if (config.architecture == .gemma and config.rope_freq_base_swa > 0) {
+                    try self.dispatchRmsNorm(
+                        self.v_buf.handle, self.v_buf.size,
+                        self.unit_norm_weights.handle, self.unit_norm_weights.size,
+                        self.v_buf.handle, self.v_buf.size,
+                        layer_head_dim, layer_n_kv_heads, rms_norm_eps,
+                    );
                 }
                 self.decode_cmd.computeBarrier();
 
@@ -5368,6 +5398,7 @@ pub const InferenceEngine = struct {
         self.router_staging.deinit();
         self.router_logits_buf.deinit();
         self.rope_freq_buf.deinit();
+        self.unit_norm_weights.deinit();
         self.moe_out_buf.deinit();
         self.down_buf.deinit();
         self.swiglu_buf.deinit();
