@@ -3897,7 +3897,7 @@ pub const InferenceEngine = struct {
             // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
 
             // --- Debug: per-layer hidden_buf diagnostics (BOS token only, gated behind validation diagnostics) ---
-            if (state.position == 0 and self.validation_diagnostics_enabled) {
+            if (state.position == 0 and (self.validation_diagnostics_enabled or std.posix.getenv("ZINC_LAYER_DIAG") != null)) {
                 // Flush current batched cmd buffer for diagnostic readback
                 try self.decode_cmd.end();
                 try self.decode_cmd.submitAndWait(self.instance.compute_queue);
