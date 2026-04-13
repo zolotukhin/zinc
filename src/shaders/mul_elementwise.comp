@@ -1,0 +1,19 @@
+#version 460
+// Element-wise multiplication: a[i] *= b[i]
+// Used by Gemma 4 MoE for ffn_gate_inp.scale (scales router input).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer A { float a[]; };
+layout(set = 0, binding = 1) readonly buffer B { float b[]; };
+
+layout(push_constant) uniform PC {
+    uint N;
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < N) {
+        a[i] *= b[i];
+    }
+}

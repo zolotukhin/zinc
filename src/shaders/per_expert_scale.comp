@@ -1,0 +1,25 @@
+#version 460
+// Per-expert scalar multiply: down[slot*N + i] *= scales[routing[slot]]
+// Used by Gemma 4 MoE for ffn_down_exps.scale — scales each expert's down output
+// by a per-expert scalar indexed by the expert_id from the routing buffer.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer Down { float down[]; };
+layout(set = 0, binding = 1) readonly buffer Scales { float scales[]; };
+layout(set = 0, binding = 2) readonly buffer Routing { uint routing_data[]; };
+
+layout(push_constant) uniform PC {
+    uint hidden_dim;
+    uint n_used;
+};
+
+void main() {
+    uint slot = gl_WorkGroupID.y;
+    if (slot >= n_used) return;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= hidden_dim) return;
+    uint expert_id = routing_data[slot];
+    float s = scales[expert_id];
+    down[slot * hidden_dim + idx] *= s;
+}

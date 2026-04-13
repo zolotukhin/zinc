@@ -560,6 +560,10 @@ const LayerTensors = struct {
     post_ffw_norm_2: ?*const LoadedTensor = null,
     // Gemma 4 MoE: norm applied to shared expert output BEFORE combining with MoE experts
     post_ffw_norm_1: ?*const LoadedTensor = null,
+    // Gemma 4 MoE: elementwise scale applied to router input before router DMMV
+    ffn_gate_inp_scale: ?*const LoadedTensor = null,
+    // Gemma 4 MoE: per-expert scalar applied to each expert's down output
+    ffn_down_exps_scale: ?*const LoadedTensor = null,
     // MoE
     ffn_gate_inp: ?*const LoadedTensor = null,
     ffn_gate_exps: ?*const LoadedTensor = null,
@@ -1203,6 +1207,8 @@ pub const InferenceEngine = struct {
             lt.pre_ffw_norm_2 = resolve(tensor_map, l, "pre_ffw_norm_2.weight");
             lt.post_ffw_norm_2 = resolve(tensor_map, l, "post_ffw_norm_2.weight");
             lt.post_ffw_norm_1 = resolve(tensor_map, l, "post_ffw_norm_1.weight");
+            lt.ffn_gate_inp_scale = resolve(tensor_map, l, "ffn_gate_inp.scale");
+            lt.ffn_down_exps_scale = resolve(tensor_map, l, "ffn_down_exps.scale");
             lt.ffn_gate_inp = resolve(tensor_map, l, "ffn_gate_inp.weight");
             lt.ffn_gate_exps = resolve(tensor_map, l, "ffn_gate_exps.weight");
             lt.ffn_up_exps = resolve(tensor_map, l, "ffn_up_exps.weight");
@@ -2215,6 +2221,53 @@ pub const InferenceEngine = struct {
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet1(ds, buf, buf_size);
         try self.elementwise.recordScaleInPlace(&self.decode_cmd, ds, n_elements, scale);
+    }
+
+    // Element-wise multiply: a[i] *= b[i]. For Gemma 4 ffn_gate_inp.scale on router input.
+    fn dispatchMulElementwise(
+        self: *InferenceEngine,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        b_buf: vk.c.VkBuffer,
+        b_size: vk.c.VkDeviceSize,
+        n_elements: u32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_mul_elementwise orelse return error.ShaderNotLoaded);
+        const MulPush = extern struct { N: u32 };
+        const push = MulPush{ .N = n_elements };
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch2(pip, std.mem.asBytes(&push), a_buf, a_size, b_buf, b_size, (n_elements + 63) / 64, 1, 1);
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet2(ds, a_buf, a_size, b_buf, b_size);
+        self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), (n_elements + 63) / 64, 1, 1);
+    }
+
+    // Per-expert scalar multiply for ffn_down_exps.scale (Gemma 4).
+    // down[slot*hidden_dim + i] *= scales[routing[slot]] for slot in 0..n_used, i in 0..hidden_dim.
+    fn dispatchPerExpertScale(
+        self: *InferenceEngine,
+        down_buf: vk.c.VkBuffer,
+        down_size: vk.c.VkDeviceSize,
+        scales_buf: vk.c.VkBuffer,
+        scales_size: vk.c.VkDeviceSize,
+        routing_buf: vk.c.VkBuffer,
+        routing_size: vk.c.VkDeviceSize,
+        hidden_dim: u32,
+        n_used: u32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_per_expert_scale orelse return error.ShaderNotLoaded);
+        const PerExpertPush = extern struct { hidden_dim: u32, n_used: u32 };
+        const push = PerExpertPush{ .hidden_dim = hidden_dim, .n_used = n_used };
+        const wg_x = (hidden_dim + 63) / 64;
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch3(pip, std.mem.asBytes(&push), down_buf, down_size, scales_buf, scales_size, routing_buf, routing_size, wg_x, n_used, 1);
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet3(ds, down_buf, down_size, scales_buf, scales_size, routing_buf, routing_size);
+        self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), wg_x, n_used, 1);
     }
 
     fn dispatchScaleAcc(
@@ -3271,6 +3324,18 @@ pub const InferenceEngine = struct {
                         rms_norm_eps,
                     );
                     self.decode_cmd.computeBarrier();
+                    // Gemma 4 MoE: apply ffn_gate_inp.scale elementwise to router input
+                    // before the router DMMV (matches Metal forward_metal.zig:4126-4129).
+                    if (lt.ffn_gate_inp_scale) |scale_t| {
+                        try self.dispatchMulElementwise(
+                            self.residual_buf.handle,
+                            hidden_size,
+                            scale_t.gpu_buffer.handle,
+                            scale_t.gpu_buffer.size,
+                            hidden_dim,
+                        );
+                        self.decode_cmd.computeBarrier();
+                    }
                     break :blk self.residual_buf;
                 } else self.ffn_norm_buf;
 
@@ -3459,6 +3524,23 @@ pub const InferenceEngine = struct {
                     }
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_down, moe_down_phase);
+
+                    // Gemma 4 MoE: per-expert scalar on down expert output before weighted_acc.
+                    // down[slot*hidden_dim + i] *= ffn_down_exps_scale[expert_id[slot]].
+                    // Matches Metal forward_metal.zig:4357-4360.
+                    if (lt.ffn_down_exps_scale) |scale_t| {
+                        try self.dispatchPerExpertScale(
+                            self.down_buf.handle,
+                            self.down_buf.size,
+                            scale_t.gpu_buffer.handle,
+                            scale_t.gpu_buffer.size,
+                            self.router_output_buf.handle,
+                            self.router_output_buf.size,
+                            hidden_dim,
+                            n_used,
+                        );
+                        self.decode_cmd.computeBarrier();
+                    }
 
                     // Weighted accumulation: sum ALL experts at once.
                     // If post_ffw_norm is present, accumulate into moe_out_buf for normalization

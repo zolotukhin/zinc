@@ -133,6 +133,8 @@ pub const ElementwiseDispatch = struct {
     /// SCALE ACC pipeline, or null.
     pipeline_scale_acc: ?Pipeline,
     pipeline_scale_in_place: ?Pipeline,
+    pipeline_mul_elementwise: ?Pipeline,
+    pipeline_per_expert_scale: ?Pipeline,
     /// SSM CONV1D pipeline, or null.
     pipeline_ssm_conv1d: ?Pipeline,
     /// SSM DELTA NET pipeline, or null.
@@ -262,6 +264,22 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // mul_elementwise: 2 bindings (a *= b) — for ffn_gate_inp.scale
+        const MulElemPush = extern struct { N: u32 };
+        const mul_path = std.fmt.bufPrint(&path_buf, "{s}/mul_elementwise.spv", .{shader_dir}) catch unreachable;
+        const pipeline_mul_elementwise = pipeline_mod.createFromSpirvWithOptions(instance, mul_path, 2, @sizeOf(MulElemPush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("mul_elementwise shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // per_expert_scale: 3 bindings (down, scales, routing) — for ffn_down_exps.scale
+        const PerExpertPush = extern struct { hidden_dim: u32, n_used: u32 };
+        const pes_path = std.fmt.bufPrint(&path_buf, "{s}/per_expert_scale.spv", .{shader_dir}) catch unreachable;
+        const pipeline_per_expert_scale = pipeline_mod.createFromSpirvWithOptions(instance, pes_path, 3, @sizeOf(PerExpertPush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("per_expert_scale shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // SSM conv1d + SiLU: 4 bindings (input, kernel, state, output)
         const conv1d_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_conv1d.spv", .{shader_dir}) catch unreachable;
         const pipeline_ssm_conv1d = pipeline_mod.createFromSpirvWithOptions(instance, conv1d_path, 4, @sizeOf(SsmConv1dPush), &.{}, push_options, allocator) catch |err| blk: {
@@ -336,6 +354,8 @@ pub const ElementwiseDispatch = struct {
             .pipeline_vadd = pipeline_vadd,
             .pipeline_scale_acc = pipeline_scale_acc,
             .pipeline_scale_in_place = pipeline_scale_in_place,
+            .pipeline_mul_elementwise = pipeline_mul_elementwise,
+            .pipeline_per_expert_scale = pipeline_per_expert_scale,
             .pipeline_ssm_conv1d = pipeline_ssm_conv1d,
             .pipeline_ssm_delta_net = pipeline_ssm_delta_net,
             .pipeline_ssm_gated_norm = pipeline_ssm_gated_norm,
@@ -644,6 +664,8 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_vadd) |*p| p.deinit();
         if (self.pipeline_scale_acc) |*p| p.deinit();
         if (self.pipeline_scale_in_place) |*p| p.deinit();
+        if (self.pipeline_mul_elementwise) |*p| p.deinit();
+        if (self.pipeline_per_expert_scale) |*p| p.deinit();
         if (self.pipeline_ssm_conv1d) |*p| p.deinit();
         if (self.pipeline_ssm_delta_net) |*p| p.deinit();
         if (self.pipeline_ssm_gated_norm) |*p| p.deinit();

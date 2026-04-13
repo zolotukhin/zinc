@@ -63,6 +63,8 @@ pub fn build(b: *std.Build) void {
         "scale_accumulate",
         "scale_acc_sigmoid",
         "scale_in_place",
+        "mul_elementwise",
+        "per_expert_scale",
         "sigmoid_scale_acc",
         "argmax",
         "embed_dequant_q4k",
