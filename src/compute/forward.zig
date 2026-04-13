@@ -554,6 +554,8 @@ const LayerTensors = struct {
     ffn_up: ?*const LoadedTensor = null,
     ffn_down: ?*const LoadedTensor = null,
     post_ffw_norm: ?*const LoadedTensor = null,
+    // Gemma 4 MoE: alternate pre-FFN norm for expert input (separate from ffn_norm which is used for router)
+    pre_ffw_norm_2: ?*const LoadedTensor = null,
     // MoE
     ffn_gate_inp: ?*const LoadedTensor = null,
     ffn_gate_exps: ?*const LoadedTensor = null,
@@ -1194,6 +1196,7 @@ pub const InferenceEngine = struct {
             lt.ffn_up = resolve(tensor_map, l, "ffn_up.weight");
             lt.ffn_down = resolve(tensor_map, l, "ffn_down.weight");
             lt.post_ffw_norm = resolve(tensor_map, l, "post_ffw_norm.weight");
+            lt.pre_ffw_norm_2 = resolve(tensor_map, l, "pre_ffw_norm_2.weight");
             lt.ffn_gate_inp = resolve(tensor_map, l, "ffn_gate_inp.weight");
             lt.ffn_gate_exps = resolve(tensor_map, l, "ffn_gate_exps.weight");
             lt.ffn_up_exps = resolve(tensor_map, l, "ffn_up_exps.weight");
@@ -3269,6 +3272,25 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
                 self.endProfilePhase(.moe_router, moe_router_phase);
 
+                // Gemma 4 MoE uses pre_ffw_norm_2.weight to normalize the MoE EXPERT input.
+                // ffn_norm_buf remains for the SHARED expert (matches Metal norm_buf usage).
+                // Matches Metal forward_metal.zig:4157-4173.
+                const expert_input_buf = if (lt.pre_ffw_norm_2) |pre_norm_t| blk: {
+                    try self.dispatchRmsNorm(
+                        self.hidden_buf.handle,
+                        hidden_size,
+                        pre_norm_t.gpu_buffer.handle,
+                        pre_norm_t.gpu_buffer.size,
+                        self.residual_buf.handle,
+                        hidden_size,
+                        hidden_dim,
+                        1,
+                        rms_norm_eps,
+                    );
+                    self.decode_cmd.computeBarrier();
+                    break :blk self.residual_buf;
+                } else self.ffn_norm_buf;
+
                 const n_used = config.n_experts_used;
 
                 // Dispatch each selected expert — handle both separate and fused gate+up layouts.
@@ -3326,8 +3348,8 @@ pub const InferenceEngine = struct {
                     self.endProfilePhase(.moe_topk, moe_topk_phase);
 
                     // gate DMMV: ALL experts at once (Y=n_used workgroups)
-                    // gate_exps[expert] × ffn_norm_buf → gate_buf[expert*inter_dim..]
-                    // x_expert_stride=0: all experts read same input (ffn_norm_buf)
+                    // gate_exps[expert] × expert_input_buf → gate_buf[expert*inter_dim..]
+                    // expert_input_buf is pre_ffw_norm_2 output for Gemma 4, otherwise ffn_norm_buf.
                     const moe_gate_up_phase = self.beginProfilePhase();
                     {
                         const qt = gate_exps.info.type_;
@@ -3335,10 +3357,10 @@ pub const InferenceEngine = struct {
                         if (pip.uses_push_descriptors) {
                             const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
                             const wg_x: u32 = switch (qt) { .q8_0, .f16 => (inter_dim + 1) / 2, else => (inter_dim + 63) / 64 };
-                            self.pushDispatch4(pip, std.mem.asBytes(&push), gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
+                            self.pushDispatch4(pip, std.mem.asBytes(&push), gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
                         } else {
                             const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet4(ds, gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                            self.writeDescSet4(ds, gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
                             try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
                         }
                     }
@@ -3349,10 +3371,10 @@ pub const InferenceEngine = struct {
                         if (pip.uses_push_descriptors) {
                             const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
                             const wg_x: u32 = switch (qt) { .q8_0, .f16 => (inter_dim + 1) / 2, else => (inter_dim + 63) / 64 };
-                            self.pushDispatch4(pip, std.mem.asBytes(&push), up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
+                            self.pushDispatch4(pip, std.mem.asBytes(&push), up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
                         } else {
                             const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet4(ds, up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, self.ffn_norm_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                            self.writeDescSet4(ds, up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
                             try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
                         }
                     }
