@@ -3459,8 +3459,47 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                     self.endProfilePhase(.moe_weighted_acc, moe_acc_phase);
 
-                    // Post-FFN norm + residual for MoE expert accumulation (Gemma 4)
+                    // Shared expert down projection (run BEFORE post_ffw_norm for Gemma 4
+                    // so that MoE + shared expert outputs are accumulated in moe_out_buf
+                    // and normed together. Matches Metal forward_metal.zig:5110-5128.)
+                    if (has_shared_expert) {
+                        const shared_down_phase = self.beginProfilePhase();
+                        try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
+                        self.decode_cmd.computeBarrier();
+                        self.endProfilePhase(.shared_down, shared_down_phase);
+                    }
+
+                    // Post-FFN norm + residual for MoE expert accumulation (Gemma 4).
+                    // When post_ffw_norm is present, first accumulate shared expert into
+                    // moe_out_buf (with sigmoid gate or unity weight), THEN apply the norm
+                    // to the combined result, then add to hidden_buf.
                     if (has_post_ffw_norm) {
+                        if (has_shared_expert) {
+                            // Accumulate shared expert down_buf into moe_out_buf (pre-norm)
+                            const shared_gate_phase = self.beginProfilePhase();
+                            if (shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
+                                try self.dispatchSigmoidScaleAcc(
+                                    self.moe_out_buf.handle,
+                                    hidden_size,
+                                    self.down_buf.handle,
+                                    hidden_size,
+                                    self.router_logits_buf.handle,
+                                    @sizeOf(f32),
+                                    hidden_dim,
+                                );
+                            } else {
+                                try self.dispatchScaleAcc(
+                                    self.moe_out_buf.handle,
+                                    hidden_size,
+                                    self.down_buf.handle,
+                                    hidden_size,
+                                    hidden_dim,
+                                    1.0,
+                                );
+                            }
+                            self.decode_cmd.computeBarrier();
+                            self.endProfilePhase(.shared_gate_acc, shared_gate_phase);
+                        }
                         if (lt.post_ffw_norm) |pfn_tensor| {
                             try self.dispatchRmsNorm(
                                 self.moe_out_buf.handle,
@@ -3486,15 +3525,10 @@ pub const InferenceEngine = struct {
                         self.decode_cmd.computeBarrier();
                     }
 
-                    // Remaining shared expert steps (sequential — buffer reuse prevents further overlap)
-                    if (has_shared_expert) {
-                        // Shared down DMMV: swiglu_buf → down_buf
-                        const shared_down_phase = self.beginProfilePhase();
-                        try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
-                        self.decode_cmd.computeBarrier();
-                        self.endProfilePhase(.shared_down, shared_down_phase);
-
-                        // Post-FFN norm on shared expert down projection (Gemma 4)
+                    // Non-Gemma-4 path: shared expert still needs residual into hidden_buf
+                    // separately (no post_ffw_norm to share).
+                    if (has_shared_expert and !has_post_ffw_norm) {
+                        // Post-FFN norm on shared expert down projection (Gemma 4 non-post_ffw — unreachable in practice)
                         if (lt.post_ffw_norm) |pfn_tensor| {
                             try self.dispatchRmsNorm(
                                 self.down_buf.handle,
