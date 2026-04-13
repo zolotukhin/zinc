@@ -556,6 +556,10 @@ const LayerTensors = struct {
     post_ffw_norm: ?*const LoadedTensor = null,
     // Gemma 4 MoE: alternate pre-FFN norm for expert input (separate from ffn_norm which is used for router)
     pre_ffw_norm_2: ?*const LoadedTensor = null,
+    // Gemma 4 MoE: norm applied to MoE expert accumulation BEFORE adding shared expert
+    post_ffw_norm_2: ?*const LoadedTensor = null,
+    // Gemma 4 MoE: norm applied to shared expert output BEFORE combining with MoE experts
+    post_ffw_norm_1: ?*const LoadedTensor = null,
     // MoE
     ffn_gate_inp: ?*const LoadedTensor = null,
     ffn_gate_exps: ?*const LoadedTensor = null,
@@ -1197,6 +1201,8 @@ pub const InferenceEngine = struct {
             lt.ffn_down = resolve(tensor_map, l, "ffn_down.weight");
             lt.post_ffw_norm = resolve(tensor_map, l, "post_ffw_norm.weight");
             lt.pre_ffw_norm_2 = resolve(tensor_map, l, "pre_ffw_norm_2.weight");
+            lt.post_ffw_norm_2 = resolve(tensor_map, l, "post_ffw_norm_2.weight");
+            lt.post_ffw_norm_1 = resolve(tensor_map, l, "post_ffw_norm_1.weight");
             lt.ffn_gate_inp = resolve(tensor_map, l, "ffn_gate_inp.weight");
             lt.ffn_gate_exps = resolve(tensor_map, l, "ffn_gate_exps.weight");
             lt.ffn_up_exps = resolve(tensor_map, l, "ffn_up_exps.weight");
@@ -3270,6 +3276,19 @@ pub const InferenceEngine = struct {
 
                 try self.dispatchDmmv(router_tensor, router_input_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
                 self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
+
+                // Gemma 4 MoE: scale router logits by 1/sqrt(hidden_dim) before softmax.
+                // Matches Metal forward_metal.zig:4134-4137.
+                if (config.architecture == .gemma) {
+                    const router_scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(hidden_dim)));
+                    try self.dispatchScaleInPlace(
+                        self.router_logits_buf.handle,
+                        self.router_logits_buf.size,
+                        config.n_experts,
+                        router_scale,
+                    );
+                    self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
+                }
                 self.endProfilePhase(.moe_router, moe_router_phase);
 
                 // Gemma 4 MoE uses pre_ffw_norm_2.weight to normalize the MoE EXPERT input.
@@ -3496,8 +3515,40 @@ pub const InferenceEngine = struct {
                     // moe_out_buf (with sigmoid gate or unity weight), THEN apply the norm
                     // to the combined result, then add to hidden_buf.
                     if (has_post_ffw_norm) {
+                        // Gemma 4 MoE: apply post_ffw_norm_2 to MoE expert accumulation BEFORE
+                        // shared expert is combined. Matches Metal forward_metal.zig:4309-4312.
+                        if (lt.post_ffw_norm_2) |pfn2_tensor| {
+                            try self.dispatchRmsNorm(
+                                self.moe_out_buf.handle,
+                                hidden_size,
+                                pfn2_tensor.gpu_buffer.handle,
+                                pfn2_tensor.gpu_buffer.size,
+                                self.moe_out_buf.handle,
+                                hidden_size,
+                                hidden_dim,
+                                1,
+                                rms_norm_eps,
+                            );
+                            self.decode_cmd.computeBarrier();
+                        }
                         if (has_shared_expert) {
-                            // Accumulate shared expert down_buf into moe_out_buf (pre-norm)
+                            // Gemma 4 MoE: apply post_ffw_norm_1 to shared expert output
+                            // before combining. Matches Metal forward_metal.zig:4314-4317.
+                            if (lt.post_ffw_norm_1) |pfn1_tensor| {
+                                try self.dispatchRmsNorm(
+                                    self.down_buf.handle,
+                                    hidden_size,
+                                    pfn1_tensor.gpu_buffer.handle,
+                                    pfn1_tensor.gpu_buffer.size,
+                                    self.down_buf.handle,
+                                    hidden_size,
+                                    hidden_dim,
+                                    1,
+                                    rms_norm_eps,
+                                );
+                                self.decode_cmd.computeBarrier();
+                            }
+                            // Accumulate shared expert down_buf into moe_out_buf (pre-final-norm)
                             const shared_gate_phase = self.beginProfilePhase();
                             if (shexp_gate != null and self.elementwise.pipeline_sigmoid_scale_acc != null) {
                                 try self.dispatchSigmoidScaleAcc(
