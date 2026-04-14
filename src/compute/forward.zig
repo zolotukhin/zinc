@@ -3356,24 +3356,6 @@ pub const InferenceEngine = struct {
                 }
                 self.endProfilePhase(.moe_router, moe_router_phase);
 
-                // Gemma 4 MoE uses pre_ffw_norm_2.weight to normalize the MoE EXPERT input.
-                // ffn_norm_buf remains for the SHARED expert (matches Metal norm_buf usage).
-                // Matches Metal forward_metal.zig:4157-4173.
-                const expert_input_buf = if (lt.pre_ffw_norm_2) |pre_norm_t| blk: {
-                    try self.dispatchRmsNorm(
-                        self.hidden_buf.handle,
-                        hidden_size,
-                        pre_norm_t.gpu_buffer.handle,
-                        pre_norm_t.gpu_buffer.size,
-                        self.residual_buf.handle,
-                        hidden_size,
-                        hidden_dim,
-                        1,
-                        rms_norm_eps,
-                    );
-                    self.decode_cmd.computeBarrier();
-                    break :blk self.residual_buf;
-                } else self.ffn_norm_buf;
 
                 const n_used = config.n_experts_used;
 
@@ -3394,8 +3376,31 @@ pub const InferenceEngine = struct {
                 // Down projection: each expert has hidden_dim rows of K=inter_dim
                 const expert_down_row_bytes = expertSliceBytes(down_quant, hidden_dim, inter_dim);
 
-                // Check if full GPU MoE path is available (MoE DMMV + softmax_topk + weighted_acc)
-                const use_gpu_moe = self.dmmv.moePipelineForType(gate_quant) != null and
+                // Gemma 4 MoE uses pre_ffw_norm_2 for MoE expert input (vs ffn_norm_buf for shared).
+                // Available to both GPU-routed and CPU-routed MoE paths.
+                const expert_input_buf = if (lt.pre_ffw_norm_2) |pre_norm_t| blk: {
+                    try self.dispatchRmsNorm(
+                        self.hidden_buf.handle,
+                        hidden_size,
+                        pre_norm_t.gpu_buffer.handle,
+                        pre_norm_t.gpu_buffer.size,
+                        self.residual_buf.handle,
+                        hidden_size,
+                        hidden_dim,
+                        1,
+                        rms_norm_eps,
+                    );
+                    self.decode_cmd.computeBarrier();
+                    break :blk self.residual_buf;
+                } else self.ffn_norm_buf;
+
+                // Check if full GPU MoE path is available (MoE DMMV + softmax_topk + weighted_acc).
+                // Gemma architecture is excluded because its MoE uses architecture-specific extras
+                // (pre_ffw_norm_2, ffn_gate_inp.scale, ffn_down_exps.scale, post_ffw_norm_1/2, etc.)
+                // that are simpler/safer to execute via CPU-routed sequential expert dispatch.
+                // Matches Metal's canUseGpuRoutedBatchedMoe (forward_metal.zig:4068-4070).
+                const use_gpu_moe = config.architecture != .gemma and
+                    self.dmmv.moePipelineForType(gate_quant) != null and
                     self.dmmv.moePipelineForType(down_quant) != null and
                     self.elementwise.pipeline_softmax_topk != null and
                     self.elementwise.pipeline_moe_weighted_acc != null;
@@ -3802,13 +3807,14 @@ pub const InferenceEngine = struct {
 
                     for (0..n_used) |ei| {
                         const eid = expert_ids[ei];
-                        const weight = expert_weights[ei];
+                        var weight = expert_weights[ei];
                         const gate_offset = eid * expert_gate_row_bytes;
                         const up_offset = eid * expert_gate_row_bytes + up_base_offset;
                         const down_offset = eid * expert_down_row_bytes;
 
-                        try self.dispatchDmmvWithOffset(gate_exps, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim, gate_offset);
-                        try self.dispatchDmmvWithOffset(up_exps, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, up_offset);
+                        // Expert gate/up reads pre_ffw_norm_2 output (Gemma 4) or ffn_norm_buf
+                        try self.dispatchDmmvWithOffset(gate_exps, expert_input_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim, gate_offset);
+                        try self.dispatchDmmvWithOffset(up_exps, expert_input_buf, hidden_size, self.up_buf, inter_dim, hidden_dim, up_offset);
                         self.decode_cmd.computeBarrier();
 
                         try self.dispatchFfnActivation(
@@ -3825,6 +3831,19 @@ pub const InferenceEngine = struct {
                         try self.dispatchDmmvWithOffset(down_exps, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim, down_offset);
                         self.decode_cmd.computeBarrier();
 
+                        // Gemma 4 MoE: fold per-expert ffn_down_exps.scale into the accumulation weight.
+                        // down[i] *= scales[eid] then weight*down == (weight*scales[eid]) * down.
+                        if (lt.ffn_down_exps_scale) |scale_t| {
+                            // Read the scalar for this expert from CPU-mapped mmap if available.
+                            if (self.model.mmap_data) |mmap| {
+                                const off = self.model.gguf_file.tensor_data_offset + scale_t.info.offset + @as(u64, eid) * @sizeOf(f32);
+                                if (off + @sizeOf(f32) <= mmap.len) {
+                                    const s_ptr: *const f32 = @ptrCast(@alignCast(mmap.ptr + off));
+                                    weight *= s_ptr.*;
+                                }
+                            }
+                        }
+
                         try self.dispatchScaleAcc(
                             self.moe_out_buf.handle,
                             hidden_size,
@@ -3838,14 +3857,14 @@ pub const InferenceEngine = struct {
                 }
                 self.endProfilePhase(.moe_routed, moe_phase);
 
-                // CPU MoE fallback: apply post_ffw_norm to expert accumulation before shared expert
-                if (!use_gpu_moe and lt.post_ffw_norm != null) {
-                    if (lt.post_ffw_norm) |pfn_tensor| {
+                // Gemma 4 MoE CPU path: post_ffw_norm_2 on MoE accumulation before shared expert
+                if (!use_gpu_moe and lt.post_ffw_norm_2 != null) {
+                    if (lt.post_ffw_norm_2) |pfn2_t| {
                         try self.dispatchRmsNorm(
                             self.moe_out_buf.handle,
                             hidden_size,
-                            pfn_tensor.gpu_buffer.handle,
-                            pfn_tensor.gpu_buffer.size,
+                            pfn2_t.gpu_buffer.handle,
+                            pfn2_t.gpu_buffer.size,
                             self.moe_out_buf.handle,
                             hidden_size,
                             hidden_dim,
@@ -3886,13 +3905,14 @@ pub const InferenceEngine = struct {
                         try self.dispatchDmmv(cpu_down_shexp.?, self.swiglu_buf, cpu_shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
                         self.decode_cmd.computeBarrier();
 
-                        // Post-FFN norm on shared expert down projection (Gemma 4)
-                        if (lt.post_ffw_norm) |pfn_tensor| {
+                        // Gemma 4 MoE: post_ffw_norm_1 on shared expert output BEFORE combining.
+                        // Matches Metal forward_metal.zig:4314-4317.
+                        if (lt.post_ffw_norm_1) |pfn1_t| {
                             try self.dispatchRmsNorm(
                                 self.down_buf.handle,
                                 hidden_size,
-                                pfn_tensor.gpu_buffer.handle,
-                                pfn_tensor.gpu_buffer.size,
+                                pfn1_t.gpu_buffer.handle,
+                                pfn1_t.gpu_buffer.size,
                                 self.down_buf.handle,
                                 hidden_size,
                                 hidden_dim,
@@ -3957,6 +3977,23 @@ pub const InferenceEngine = struct {
 
                 // FFN residual: only needed for CPU MoE fallback (GPU MoE accumulated directly into hidden_buf)
                 if (!use_gpu_moe) {
+                    // Gemma 4 MoE: apply final post_ffw_norm on combined (MoE + shared) result
+                    // BEFORE residual add. This is the final MoE post-norm.
+                    // Matches Metal forward_metal.zig:4322-4325.
+                    if (lt.post_ffw_norm) |pfn_t| {
+                        try self.dispatchRmsNorm(
+                            self.moe_out_buf.handle,
+                            hidden_size,
+                            pfn_t.gpu_buffer.handle,
+                            pfn_t.gpu_buffer.size,
+                            self.moe_out_buf.handle,
+                            hidden_size,
+                            hidden_dim,
+                            1,
+                            rms_norm_eps,
+                        );
+                        self.decode_cmd.computeBarrier();
+                    }
                     try self.dispatchScaleAcc(
                         self.hidden_buf.handle,
                         hidden_size,
