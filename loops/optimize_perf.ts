@@ -55,10 +55,66 @@ const ZINC_PORT = Number(process.env.ZINC_PORT ?? ENV.ZINC_PORT ?? "22");
 const ZINC_USER = process.env.ZINC_USER ?? ENV.ZINC_USER ?? "root";
 const REMOTE_DIR = "/root/zinc";
 
-const MODELS: Record<string, string> = {
-  qwen35b: "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
-  gemma3: "/root/models/gemma-3-12b-it-Q4_K_M.gguf",
+type PromptMode = "raw" | "chat";
+
+type ModelTarget = {
+  key: string;
+  name: string;
+  path: string;
+  promptMode: PromptMode;
+  envVar: string;
 };
+
+function envOrDefault(name: string, fallback: string): string {
+  return process.env[name] ?? ENV[name] ?? fallback;
+}
+
+const MODELS: Record<string, ModelTarget> = {
+  qwen35b: {
+    key: "qwen35b",
+    name: "Qwen3.5-35B",
+    path: envOrDefault("ZINC_RDNA_QWEN35_35B_MODEL", "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"),
+    promptMode: "raw",
+    envVar: "ZINC_RDNA_QWEN35_35B_MODEL",
+  },
+  qwen8b: {
+    key: "qwen8b",
+    name: "Qwen3-8B",
+    path: envOrDefault("ZINC_RDNA_QWEN3_8B_MODEL", "/root/models/Qwen3-8B-Q4_K_M.gguf"),
+    promptMode: "raw",
+    envVar: "ZINC_RDNA_QWEN3_8B_MODEL",
+  },
+  gemma3: {
+    key: "gemma3",
+    name: "Gemma3-12B",
+    path: envOrDefault("ZINC_RDNA_GEMMA3_12B_MODEL", "/root/models/gemma-3-12b-it-Q4_K_M.gguf"),
+    promptMode: "chat",
+    envVar: "ZINC_RDNA_GEMMA3_12B_MODEL",
+  },
+  gemma431b: {
+    key: "gemma431b",
+    name: "Gemma4-31B",
+    path: envOrDefault("ZINC_RDNA_GEMMA4_31B_MODEL", "/root/models/gemma-4-31B-it-Q4_K_M.gguf"),
+    promptMode: "chat",
+    envVar: "ZINC_RDNA_GEMMA4_31B_MODEL",
+  },
+  gemma412b: {
+    key: "gemma412b",
+    name: "Gemma4-12B",
+    path: envOrDefault("ZINC_RDNA_GEMMA4_12B_MODEL", "/root/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"),
+    promptMode: "chat",
+    envVar: "ZINC_RDNA_GEMMA4_12B_MODEL",
+  },
+  gptoss20b: {
+    key: "gptoss20b",
+    name: "GPT-OSS-20B",
+    path: envOrDefault("ZINC_RDNA_GPT_OSS_20B_MODEL", "/root/models/openai_gpt-oss-20b-Q4_K_M.gguf"),
+    promptMode: "chat",
+    envVar: "ZINC_RDNA_GPT_OSS_20B_MODEL",
+  },
+};
+
+const MODEL_KEYS = Object.keys(MODELS).join(", ");
 
 const REMOTE_ZINC_ENV = "RADV_PERFTEST=coop_matrix";
 const LONG_CONTEXT_BENCH_SENTENCE =
@@ -157,18 +213,39 @@ const MAX_CHANGED_FILES_IN_PROMPT = 10;
 // - Short factual: catches total corruption
 // - Arithmetic: catches subtle numeric drift (wrong MoE routing, bad dequant)
 // - Listing: catches mid-sequence divergence (broken RoPE, bad KV cache)
-const COHERENCE_CHECKS: { prompt: string; expect: string[] }[] = [
-  { prompt: "The capital of France is", expect: ["Paris"] },
-  { prompt: "What is 2+2?", expect: ["4"] },
-  { prompt: "List the first 4 planets: Mercury,", expect: ["Venus", "Earth", "Mars"] },
+type CoherenceCheck = {
+  rawPrompt: string;
+  chatPrompt: string;
+  expect: string[];
+};
+
+const COHERENCE_CHECKS: CoherenceCheck[] = [
+  {
+    rawPrompt: "The capital of France is",
+    chatPrompt: "What is the capital of France? Answer in one word.",
+    expect: ["Paris"],
+  },
+  {
+    rawPrompt: "2+2 =",
+    chatPrompt: "What is 2+2? Answer using one number.",
+    expect: ["4"],
+  },
+  {
+    rawPrompt: "Name the first four planets in order:",
+    chatPrompt: "Name the first four planets in order. Answer with only the names separated by commas.",
+    expect: ["Mercury", "Venus", "Earth", "Mars"],
+  },
 ];
 
 // All models that must produce coherent output after every change.
 // The primary model (--model flag) is benchmarked; these are correctness-only.
-const COHERENCE_MODELS: { name: string; path: string }[] = [
-  { name: "Qwen3.5-35B", path: "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf" },
-  { name: "Qwen3-8B", path: "/root/models/Qwen3-8B-Q4_K_M.gguf" },
-  { name: "Gemma3-12B", path: "/root/models/gemma-3-12b-it-Q4_K_M.gguf" },
+const COHERENCE_MODELS: ModelTarget[] = [
+  MODELS.qwen35b,
+  MODELS.qwen8b,
+  MODELS.gemma3,
+  MODELS.gemma431b,
+  MODELS.gemma412b,
+  MODELS.gptoss20b,
 ];
 
 type CoherenceFailure = {
@@ -231,7 +308,7 @@ function parseArgs() {
     console.error("Options:");
     console.error(`  --effort <${effortKeys}>         Optimization to run (required)`);
     console.error("  --cycles N               Max cycles (default: 20)");
-    console.error("  --model NAME             Model: qwen35b, gemma3 (default: qwen35b)");
+    console.error(`  --model NAME             Model: ${MODEL_KEYS} (default: qwen35b)`);
     console.error("  --agent claude|codex     AI agent to use (default: claude)");
     console.error("  --resume                 Resume from previous run (read history from log)");
     console.error("  --analyze                Print controller analysis from saved run state");
@@ -245,6 +322,10 @@ function parseArgs() {
   }
   if (agent !== "claude" && agent !== "codex") {
     console.error(`Unknown agent: ${agent}. Use 'claude' or 'codex'.`);
+    process.exit(1);
+  }
+  if (!(model in MODELS)) {
+    console.error(`Unknown model: ${model}. Use one of: ${MODEL_KEYS}.`);
     process.exit(1);
   }
   return { effort, cycles, dryRun, model, resume, agent, analyze };
@@ -689,7 +770,8 @@ export function buildAgentPrompt(
   context: PromptContext | null = null,
   options: { primaryMetricLabel?: string; benchmarkMethod?: string } = {},
 ): string {
-  const modelPath = MODELS[model] ?? MODELS.qwen35b;
+  const modelTarget = MODELS[model] ?? MODELS.qwen35b;
+  const sanityCheckPrompt = coherencePromptForMode(COHERENCE_CHECKS[0], modelTarget.promptMode);
   const primaryMetricLabel = options.primaryMetricLabel ?? "decode tok/s";
   const benchmarkMethod = options.benchmarkMethod ?? "200-token decode benchmark on the primary model";
   const historySummary = tailHistory(history);
@@ -723,7 +805,7 @@ ${plan}
 ## Current Checked-Out Code (build on this code)
 - primary metric (${primaryMetricLabel}): ${summarizeBenchMetric(currentBest.tokPerSec, currentBest.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(currentBest.bandwidthUtil, currentBest.bandwidthSamples, "%", 1)}
-- output: "${currentBest.outputText}" (coherence tested with 3 prompts on 3 models after every change)
+- output: "${currentBest.outputText}" (coherence tested with 3 prompts on 6 models after every change)
 - This is the performance of the code currently checked out in the worktree.
 
 ## Best Accepted Performance Checkpoint
@@ -789,7 +871,7 @@ Before editing any file, re-read the exact current contents from disk. Do not re
 
 5. **Test on remote node:**
    rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
-   ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build -Doptimize=ReleaseFast && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc -m ${modelPath} --prompt ${shellQuote(COHERENCE_CHECKS[0].prompt)} -n 16"
+   ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build -Doptimize=ReleaseFast && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc ${zincCliArgs(modelTarget, sanityCheckPrompt, 16)}"
 
 6. **Shader compilation:** glslc --target-env=vulkan1.3 -fshader-stage=compute file.comp -o file.spv
 
@@ -814,11 +896,20 @@ function metricParserForSpec(spec: EffortSpec): (output: string) => number | nul
   return spec.metricMode === "prefill" ? parsePrefillTokPerSec : parseTokPerSec;
 }
 
-function zincRemoteCommand(modelPath: string, prompt: string, maxTokens: number): string {
-  return `cd ${REMOTE_DIR} && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc -m ${shellQuote(modelPath)} --prompt ${shellQuote(prompt)} -n ${maxTokens} 2>&1`;
+function coherencePromptForMode(check: CoherenceCheck, promptMode: PromptMode): string {
+  return promptMode === "chat" ? check.chatPrompt : check.rawPrompt;
 }
 
-async function buildAndBench(modelPath: string, effortSpec: EffortSpec): Promise<BenchResult> {
+function zincCliArgs(modelTarget: ModelTarget, prompt: string, maxTokens: number): string {
+  const chatFlag = modelTarget.promptMode === "chat" ? " --chat" : "";
+  return `-m ${shellQuote(modelTarget.path)}${chatFlag} --prompt ${shellQuote(prompt)} -n ${maxTokens}`;
+}
+
+function zincRemoteCommand(modelTarget: ModelTarget, prompt: string, maxTokens: number): string {
+  return `cd ${REMOTE_DIR} && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc ${zincCliArgs(modelTarget, prompt, maxTokens)} 2>&1`;
+}
+
+async function buildAndBench(modelTarget: ModelTarget, effortSpec: EffortSpec): Promise<BenchResult> {
   console.log(c("2", "  Compiling shaders..."));
   try {
     await ssh(`cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute $f -o \${f%.comp}.spv 2>&1; done`, 60_000);
@@ -871,8 +962,9 @@ async function buildAndBench(modelPath: string, effortSpec: EffortSpec): Promise
   console.log(c("2", "  Running correctness test..."));
   let correctnessOutput: string;
   const firstCheck = COHERENCE_CHECKS[0];
+  const correctnessPrompt = coherencePromptForMode(firstCheck, modelTarget.promptMode);
   try {
-    correctnessOutput = await ssh(zincRemoteCommand(modelPath, firstCheck.prompt, 20), 180_000);
+    correctnessOutput = await ssh(zincRemoteCommand(modelTarget, correctnessPrompt, 20), 180_000);
   } catch (e) {
     return {
       buildOk: true,
@@ -916,7 +1008,7 @@ async function buildAndBench(modelPath: string, effortSpec: EffortSpec): Promise
     let benchOutput: string;
     try {
       benchOutput = await ssh(
-        zincRemoteCommand(modelPath, effortSpec.benchmarkPrompt, effortSpec.benchmarkMaxTokens),
+        zincRemoteCommand(modelTarget, effortSpec.benchmarkPrompt, effortSpec.benchmarkMaxTokens),
         300_000,
       );
     } catch (e) {
@@ -992,12 +1084,13 @@ export function summarizeCoherenceRegression(
 
 async function runCoherenceSweep(): Promise<CoherenceSweep> {
   const failures: CoherenceFailure[] = [];
-  for (const { name, path } of COHERENCE_MODELS) {
+  for (const modelTarget of COHERENCE_MODELS) {
     for (const check of COHERENCE_CHECKS) {
-      const label = coherenceCaseLabel(name, check.prompt);
+      const prompt = coherencePromptForMode(check, modelTarget.promptMode);
+      const label = coherenceCaseLabel(modelTarget.name, prompt);
       try {
         const out = await ssh(
-          zincRemoteCommand(path, check.prompt, 30),
+          zincRemoteCommand(modelTarget, prompt, 30),
           120_000,
         );
         const textMatch = out.match(/Output text:\s*(.+)/i);
@@ -1005,27 +1098,27 @@ async function runCoherenceSweep(): Promise<CoherenceSweep> {
         const pass = check.expect.every(e => outputText.toLowerCase().includes(e.toLowerCase()));
         if (!pass) {
           failures.push({
-            id: coherenceCaseId(name, check.prompt),
+            id: coherenceCaseId(modelTarget.name, prompt),
             label,
-            model: name,
-            prompt: check.prompt,
+            model: modelTarget.name,
+            prompt,
             outputText,
             kind: "mismatch",
           });
         }
       } catch (e) {
         failures.push({
-          id: coherenceCaseId(name, check.prompt),
+          id: coherenceCaseId(modelTarget.name, prompt),
           label,
-          model: name,
-          prompt: check.prompt,
+          model: modelTarget.name,
+          prompt,
           outputText: "",
           kind: "crash",
         });
       }
     }
-    if (!failures.some((failure) => failure.model === name)) {
-      console.log(c("2", `    ${name}: all ${COHERENCE_CHECKS.length} prompts OK`));
+    if (!failures.some((failure) => failure.model === modelTarget.name)) {
+      console.log(c("2", `    ${modelTarget.name}: all ${COHERENCE_CHECKS.length} prompts OK`));
     }
   }
   return {
@@ -1524,7 +1617,7 @@ async function revertAgentChanges(): Promise<void> {
 
 async function main() {
   const { effort, cycles, dryRun, model, resume, agent, analyze } = parseArgs();
-  const modelPath = MODELS[model] ?? MODELS.qwen35b;
+  const modelTarget = MODELS[model] ?? MODELS.qwen35b;
   const effortSpec = getEffortSpec(effort);
   if (!effortSpec) {
     throw new Error(`Unknown effort: ${effort}`);
@@ -1556,7 +1649,7 @@ async function main() {
   // Step 1: Sync and get baseline
   console.log(c("1;33", "\u2500\u2500 Baseline " + "\u2500".repeat(54)));
   await rsyncToRemote();
-  const originalBaseline = await buildAndBench(modelPath, effortSpec);
+  const originalBaseline = await buildAndBench(modelTarget, effortSpec);
 
   if (!originalBaseline.buildOk) {
     console.error(c("1;31", "Baseline build failed! Fix build errors first."));
@@ -1720,7 +1813,7 @@ async function main() {
     // Sync and benchmark — with up to 2 fix-up retries if build fails
     console.log(c("2", "  Syncing changes..."));
     await rsyncToRemote();
-    let result = await buildAndBench(modelPath, effortSpec);
+    let result = await buildAndBench(modelTarget, effortSpec);
 
     const MAX_FIX_RETRIES = 2;
     for (let fix = 0; fix < MAX_FIX_RETRIES && !result.buildOk; fix++) {
@@ -1763,7 +1856,7 @@ ${result.buildOutput.slice(-2000)}
 
       console.log(c("2", "  Re-syncing after fix..."));
       await rsyncToRemote();
-      result = await buildAndBench(modelPath, effortSpec);
+      result = await buildAndBench(modelTarget, effortSpec);
     }
 
     changedFiles = await listChangedFiles();

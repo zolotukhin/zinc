@@ -708,20 +708,29 @@ describe("config", () => {
     expect(src).toContain("ZINC_HOST");
     expect(src).toContain("ZINC_PORT");
     expect(src).toContain("ZINC_USER");
+    expect(src).toContain("ZINC_RDNA_QWEN35_35B_MODEL");
+    expect(src).toContain("ZINC_RDNA_QWEN3_8B_MODEL");
+    expect(src).toContain("ZINC_RDNA_GEMMA3_12B_MODEL");
+    expect(src).toContain("ZINC_RDNA_GEMMA4_31B_MODEL");
+    expect(src).toContain("ZINC_RDNA_GEMMA4_12B_MODEL");
+    expect(src).toContain("ZINC_RDNA_GPT_OSS_20B_MODEL");
   });
 
   test("coherence checks include multiple prompts", async () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("capital of France");
     expect(src).toContain("2+2");
-    expect(src).toContain("Mercury");
+    expect(src).toContain("first four planets");
   });
 
-  test("all three models are listed for coherence", async () => {
+  test("all six models are listed for coherence", async () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("Qwen3.5-35B");
     expect(src).toContain("Qwen3-8B");
     expect(src).toContain("Gemma3-12B");
+    expect(src).toContain("Gemma4-31B");
+    expect(src).toContain("Gemma4-12B");
+    expect(src).toContain("GPT-OSS-20B");
   });
 
   test("codex uses exec with sandbox bypass and json", async () => {
