@@ -25,7 +25,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 // ── Color & display ──────────────────────────────────────────────────
 
@@ -44,7 +44,8 @@ const SEP = "─".repeat(64);
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const RESULTS_DIR = resolve(REPO_ROOT, ".metal_optimize");
-const MODEL_PATH = process.env.ZINC_MODEL ?? "/Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf";
+const MODEL_ID = process.env.ZINC_MODEL_ID ?? "qwen35-35b-a3b-q4k-xl";
+const MODEL_PATH = process.env.ZINC_MODEL ?? null;
 const TEST_PROMPT = "The capital of France is";
 const MAX_TOKENS = 64; // Enough tokens for stable decode throughput measurement
 const REFERENCE_TEXT = "Paris"; // Expected in correct output
@@ -63,6 +64,14 @@ const BLOCKED_GIT_OPS = [
 ];
 
 type AgentKind = "claude" | "codex";
+
+function zincModelArgs(): string[] {
+  return MODEL_PATH ? ["-m", MODEL_PATH] : ["--model-id", MODEL_ID];
+}
+
+function displayModelLabel(): string {
+  return MODEL_PATH ? basename(MODEL_PATH) : MODEL_ID;
+}
 
 // ── Phase detection ──────────────────────────────────────────────────
 
@@ -466,7 +475,7 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
   }
   console.log(clr("1;32", "  ✅ Tests OK"));
 
-  if (!existsSync(MODEL_PATH)) {
+  if (MODEL_PATH && !existsSync(MODEL_PATH)) {
     console.log(clr("1;33", "  ⚠ Model not found, skipping inference run"));
     return {
       buildExitCode: 0,
@@ -497,7 +506,7 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
   for (let sample = 0; sample < BENCHMARK_RUNS; sample++) {
     const run = await runCommand(
       "./zig-out/bin/zinc",
-      ["-m", MODEL_PATH, "--prompt", TEST_PROMPT, "-n", String(maxTokens)],
+      [...zincModelArgs(), "--prompt", TEST_PROMPT, "-n", String(maxTokens)],
       { timeout: 300_000 },
     );
     lastRun = run;
@@ -1222,7 +1231,7 @@ async function runProfileBenchmark(): Promise<string> {
   console.log(clr("1;33", "  📊 Profiling run (--profile)..."));
   const run = await runCommand(
     "./zig-out/bin/zinc",
-    ["-m", MODEL_PATH, "--prompt", TEST_PROMPT, "-n", "32", "--profile"],
+    [...zincModelArgs(), "--prompt", TEST_PROMPT, "-n", "32", "--profile"],
     { timeout: 300_000 },
   );
   const combined = (run.stderr + run.stdout).slice(-4000);
@@ -1432,7 +1441,7 @@ async function main() {
     startCycle = state.cycles.length + 1;
     console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
     console.log(clr("1;36", "║  ZINC Metal Optimization Loop — RESUMING                     ║"));
-    console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${MODEL_PATH.split("/").pop()?.slice(0, 35)}  ║`));
+    console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${displayModelLabel().slice(0, 35)}  ║`));
     console.log(clr("1;36", `║  Run: ${runId}  |  Resuming from cycle ${startCycle}            ║`));
     console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
     console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
@@ -1460,7 +1469,7 @@ async function main() {
     };
     console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
     console.log(clr("1;36", "║  ZINC Metal Optimization Loop                                ║"));
-    console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${MODEL_PATH.split("/").pop()?.slice(0, 35)}  ║`));
+    console.log(clr("1;36", `║  Target: ≥${TARGET_TOK_PER_SEC} tok/s  |  Model: ${displayModelLabel().slice(0, 35)}  ║`));
     console.log(clr("1;36", `║  Run: ${runId}  |  Max cycles: ${maxCycles}               ║`));
     console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
     console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);

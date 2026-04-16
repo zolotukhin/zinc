@@ -733,6 +733,20 @@ describe("config", () => {
     expect(src).toContain("GPT-OSS-20B");
   });
 
+  test("GPT-OSS coherence sweep gets extra token budget", async () => {
+    const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
+    expect(src).toContain("coherenceMaxTokens: 96");
+    expect(src).toContain("coherenceMaxTokensForModel");
+    expect(src).toContain("zincRemoteCommand(modelTarget, prompt, maxTokens, promptMode)");
+  });
+
+  test("Qwen coherence sweep uses chat prompts without changing benchmark mode", async () => {
+    const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
+    expect(src).toContain('promptMode: "raw"');
+    expect(src).toContain('coherencePromptMode: "chat"');
+    expect(src).toContain("coherencePromptModeForModel");
+  });
+
   test("codex uses exec with sandbox bypass and json", async () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain('"exec"');

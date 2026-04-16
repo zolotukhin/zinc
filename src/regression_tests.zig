@@ -38,8 +38,11 @@ test "decode loop applies packed attention gate after flash attention" {
 
 test "decode loop keeps compute-to-transfer barrier before KV cache writes" {
     const src = @embedFile("compute/forward.zig");
-    try expectContainsNear(src, "self.decode_cmd.computeAndTransferBarrier();", "vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle", 500);
-    try expectContains(src, "self.decode_cmd.transferToComputeBarrier();");
+    const marker = std.mem.indexOf(u8, src, "Transfer fallback: Q RoPE before barrier (original order preserved)") orelse return error.TestExpectedEqual;
+    const fallback_src = src[marker..@min(marker + 1600, src.len)];
+    try expectContains(fallback_src, "self.decode_cmd.computeAndTransferBarrier();");
+    try expectContains(fallback_src, "vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle");
+    try expectContains(fallback_src, "self.decode_cmd.transferToComputeBarrier();");
 }
 
 test "decode loop keeps layer-boundary compute barrier after FFN residual" {
@@ -114,6 +117,12 @@ test "Q5_K MoE shader keeps GGML contiguous half ordering" {
     try expectContains(src, "x[x_grp + e]");
     try expectContains(src, "x[x_grp + 32u + e]");
     try expectNotContains(src, "2u * e");
+}
+
+test "Q5_0 and Q5_1 DMMV launch with 2 rows per workgroup" {
+    const src = @embedFile("compute/dmmv.zig");
+    try expectContains(src, ".q5_0, .q5_1, .mxfp4, .q8_0, .f16 => (M + 1) / 2");
+    try expectContains(src, ".q4_k, .q5_0, .q5_1, .q6_k => (M + 1) / 2");
 }
 
 test "IMROPE frequency uses global pair index, not per-section reset" {

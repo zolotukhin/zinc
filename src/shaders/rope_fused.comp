@@ -21,6 +21,7 @@ layout(push_constant) uniform PushConstants {
     uint  n_heads;        // total number of heads
     uint  position;       // token position in the sequence
     uint  freq_base_bits; // RoPE base frequency as uint bits (0 = use freq buffer)
+    uint  attn_scale_bits;
 };
 
 void main() {
@@ -31,6 +32,7 @@ void main() {
     uint half_rot = rope_dim / 2;
 
     float freq_base = uintBitsToFloat(freq_base_bits);
+    float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;
     bool use_freq_buf = (freq_base_bits == 0u);
 
     // Rotate the first rope_dim elements in pairs
@@ -47,8 +49,8 @@ void main() {
         }
         float theta = float(position) * freq_i;
 
-        float cos_t = cos(theta);
-        float sin_t = sin(theta);
+        float cos_t = cos(theta) * attn_scale;
+        float sin_t = sin(theta) * attn_scale;
 
         y[base_idx + i]            = x_i * cos_t - x_ihd * sin_t;
         y[base_idx + i + half_rot] = x_i * sin_t + x_ihd * cos_t;

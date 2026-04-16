@@ -1,0 +1,23 @@
+#version 460
+// In-place bias add: out[i] += bias[src_offset + i]
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer Output {
+    float out_data[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Bias {
+    float bias_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint src_offset;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= N) return;
+    out_data[idx] += bias_data[src_offset + idx];
+}

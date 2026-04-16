@@ -101,6 +101,7 @@ export function parseArgs(argv) {
     rdnaSync: false,
     rdnaBuild: false,
     rdnaStartLlama: false,
+    metalPullMissing: false,
     localModelRoot: DEFAULT_LOCAL_MODEL_ROOT,
     rdnaModelRoot: DEFAULT_RDNA_MODEL_ROOT,
     rdnaWorkdir: DEFAULT_RDNA_WORKDIR,
@@ -165,6 +166,9 @@ export function parseArgs(argv) {
       case "--rdna-start-llama":
         args.rdnaStartLlama = true;
         break;
+      case "--metal-pull-missing":
+        args.metalPullMissing = true;
+        break;
       case "--local-model-root":
         args.localModelRoot = argv[++i] ?? args.localModelRoot;
         break;
@@ -205,6 +209,7 @@ function usage() {
   --llama-cli <path>          Optional local llama-cli path for Metal comparisons
   --llama-server <path>       Optional local llama-server path for Metal OpenAI baselines
   --skip-local-build          Skip local ReleaseFast build before Metal benchmarks
+  --metal-pull-missing        Pull missing managed Metal models into the default local cache before running
   --rdna-sync                 Rsync current repo to the RDNA node before running
   --rdna-build                Build ReleaseFast on the RDNA node before running
   --rdna-start-llama          Start llama-server on the RDNA node before baseline runs
@@ -500,10 +505,28 @@ async function runShell(command, { cwd = ROOT, env = process.env, timeoutMs = DE
   });
 }
 
-function localZincCommand(caseDef) {
+function shouldUseManagedModelId(caseDef) {
+  if (!caseDef.model_id) return false;
+  if (!caseDef.model_path) return true;
+  const normalizedRoot = path.normalize(DEFAULT_LOCAL_MODEL_ROOT + path.sep);
+  const normalizedPath = path.normalize(caseDef.model_path);
+  return normalizedPath.startsWith(normalizedRoot);
+}
+
+function managedModelPullCommand(modelId) {
+  return `./zig-out/bin/zinc model pull ${shellQuote(modelId)}`;
+}
+
+export function localZincCommand(caseDef) {
   const parts = ["./zig-out/bin/zinc"];
   if (caseDef.prompt_mode === "chat") parts.push("--chat");
-  parts.push("-n", String(caseDef.max_tokens), "-m", shellQuote(caseDef.model_path), "--prompt", shellQuote(caseDef.prompt));
+  parts.push("-n", String(caseDef.max_tokens));
+  if (shouldUseManagedModelId(caseDef)) {
+    parts.push("--model-id", caseDef.model_id);
+  } else {
+    parts.push("-m", shellQuote(caseDef.model_path));
+  }
+  parts.push("--prompt", shellQuote(caseDef.prompt));
   return parts.join(" ");
 }
 
@@ -936,10 +959,11 @@ async function detectMetalMachine() {
   }
 }
 
-function defaultMetalCases(modelRoot) {
+export function defaultMetalCases(modelRoot) {
   return [
     {
       id: "gpt-oss-20b-q4k-m",
+      model_id: "gpt-oss-20b-q4k-m",
       label: "OpenAI GPT-OSS 20B Q4_K_M",
       family: "GPT-OSS",
       quant: "Q4_K_M",
@@ -951,6 +975,7 @@ function defaultMetalCases(modelRoot) {
     },
     {
       id: "gemma3-12b-q4k-m",
+      model_id: "gemma3-12b-q4k-m",
       label: "Gemma 3 12B Q4_K_M",
       family: "Gemma 3",
       quant: "Q4_K_M",
@@ -962,6 +987,7 @@ function defaultMetalCases(modelRoot) {
     },
     {
       id: "gemma4-12b-q4k-m",
+      model_id: "gemma4-12b-q4k-m",
       label: "Gemma 4 12B Q4_K_M",
       family: "Gemma 4",
       quant: "Q4_K_M",
@@ -973,6 +999,7 @@ function defaultMetalCases(modelRoot) {
     },
     {
       id: "gemma4-31b-q4k-m",
+      model_id: "gemma4-31b-q4k-m",
       label: "Gemma 4 31B Q4_K_M",
       family: "Gemma 4",
       quant: "Q4_K_M",
@@ -984,6 +1011,7 @@ function defaultMetalCases(modelRoot) {
     },
     {
       id: "qwen3-8b-q4k-m",
+      model_id: "qwen3-8b-q4k-m",
       label: "Qwen 3 8B Q4_K_M",
       family: "Qwen 3",
       quant: "Q4_K_M",
@@ -992,6 +1020,18 @@ function defaultMetalCases(modelRoot) {
       prompt: "The capital of France is",
       max_tokens: defaultMaxTokensForModelId("qwen3-8b-q4k-m"),
       notes: ["Raw decode path to avoid visible think blocks in CLI output"],
+    },
+    {
+      id: "qwen35-35b-a3b-q4k-xl",
+      model_id: "qwen35-35b-a3b-q4k-xl",
+      label: "Qwen 3.5 35B A3B UD Q4_K_XL",
+      family: "Qwen 3.5",
+      quant: "Q4_K_XL",
+      model_path: modelPath(modelRoot, "qwen35-35b-a3b-q4k-xl"),
+      prompt_mode: "raw",
+      prompt: defaultPromptForModelId("qwen35-35b-a3b-q4k-xl"),
+      max_tokens: defaultMaxTokensForModelId("qwen35-35b-a3b-q4k-xl"),
+      notes: ["Managed-cache local Qwen 3.5 case on Apple Silicon"],
     },
   ];
 }
@@ -1168,6 +1208,7 @@ async function discoverMetalCases(modelRoot) {
     const chatPrompt = prefersChatPrompt(id);
     discovered.push({
       id,
+      model_id: id,
       label: titleFromId(id),
       family: guessFamily(id),
       quant: guessQuant(id),
@@ -1233,6 +1274,20 @@ async function prepareLocalBuild(args) {
   console.log("Preparing local ReleaseFast build...");
   const buildCmd = `env ZIG_GLOBAL_CACHE_DIR=${shellQuote(args.localCacheDir)} zig build -Doptimize=ReleaseFast`;
   await runShell(buildCmd, { cwd: ROOT, timeoutMs: 30 * 60 * 1000 });
+}
+
+async function ensureManagedMetalModels(args, cases) {
+  if (!args.metalPullMissing) return;
+  for (const entry of cases) {
+    if (args.models && !args.models.has(entry.id)) continue;
+    if (!entry.model_id) continue;
+    if (await pathExists(entry.model_path)) continue;
+    console.log(`[metal] pulling missing managed model ${entry.model_id} into ${DEFAULT_LOCAL_MODEL_ROOT}...`);
+    await runShell(managedModelPullCommand(entry.model_id), {
+      cwd: ROOT,
+      timeoutMs: 6 * 60 * 60 * 1000,
+    });
+  }
 }
 
 async function prepareRdna(args, creds) {
@@ -1317,11 +1372,20 @@ async function runMetalTarget(args) {
     mergedCases.set(entry.id, entry);
   }
   const cases = [...mergedCases.values()];
+  await ensureManagedMetalModels(args, cases);
   const filtered = [];
   for (const entry of cases) {
     if (args.models && !args.models.has(entry.id)) continue;
     if (!shouldIncludeInPublishedBenchmarks(entry.id, args.models)) continue;
-    if (await pathExists(entry.model_path)) filtered.push(entry);
+    if (await pathExists(entry.model_path)) {
+      filtered.push(entry);
+      continue;
+    }
+    if (entry.model_id) {
+      console.log(
+        `[metal] skipping ${entry.id}: missing from managed cache (${entry.model_path}). Install with ${managedModelPullCommand(entry.model_id)}`,
+      );
+    }
   }
 
   const llamaCli = args.llamaCli || whichLocalBinary("llama-cli");
@@ -1459,6 +1523,8 @@ async function runMetalTarget(args) {
         "ZINC is measured from the local ReleaseFast build in the current workspace.",
         "Each model runs a scenario matrix: core prompt, medium context, long context, and extended decode.",
         "Gemma and GPT-OSS cases use chat-template mode; Qwen cases use raw completion mode to avoid visible thinking scaffolds in CLI output.",
+        "Default Metal reference cases resolve from the managed model cache in ~/Library/Caches/zinc/models/models.",
+        "Use --metal-pull-missing to install missing managed models through `zinc model pull` before the suite runs.",
         "When available, llama.cpp is measured from one local llama-server launch per model so the same loaded model can serve the whole scenario matrix.",
         "If llama-server is unavailable, the suite falls back to local llama-cli for same-model CLI comparison.",
       ],

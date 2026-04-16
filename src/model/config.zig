@@ -45,6 +45,7 @@ pub const ModelConfig = struct {
     attn_scale: f32 = 0.0,
     sliding_window_size: u32 = 0,
     rope_scaling_factor: f32 = 0.0,
+    rope_attn_factor: f32 = 1.0,
     rope_original_context: u32 = 0,
     rope_sections: [4]u32 = .{ 0, 0, 0, 0 },
 };

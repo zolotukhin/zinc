@@ -126,10 +126,13 @@ pub const Tokenizer = struct {
         const bos_id = gf.getU32("tokenizer.ggml.bos_token_id");
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
+        const architecture = gf.getString("general.architecture") orelse "";
         const prepend_bos = gf.getBool("tokenizer.ggml.add_bos_token") orelse blk: {
             // Default: prepend BOS when a BOS token ID is defined.
             // Llama 3 uses GPT2 tokenizer format but requires BOS (128000).
             // Qwen3/3.5 explicitly omit BOS metadata — do NOT prepend.
+            // GPT-OSS defines a BOS token but llama.cpp does not prepend it for prompts.
+            if (std.mem.eql(u8, architecture, "gpt-oss")) break :blk false;
             break :blk bos_id != null;
         };
         const add_eos_token = gf.getBool("tokenizer.ggml.add_eos_token") orelse false;
@@ -1042,6 +1045,36 @@ test "initFromGGUF omits BOS for qwen35 family (no BOS in GGUF)" {
     defer tok.deinit();
 
     // Qwen3.5 GGUFs omit BOS metadata — should NOT prepend BOS
+    try std.testing.expect(!tok.shouldPrependBos());
+}
+
+test "initFromGGUF omits BOS for gpt-oss prompts by default" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    const tokens = try allocator.alloc(gguf.MetadataValue, 3);
+    tokens[0] = .{ .string = try allocator.dupe(u8, "a") };
+    tokens[1] = .{ .string = try allocator.dupe(u8, "b") };
+    tokens[2] = .{ .string = try allocator.dupe(u8, "c") };
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.tokens"), .{ .array = tokens });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.model"), .{ .string = try allocator.dupe(u8, "gpt2") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "gpt-oss") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.bos_token_id"), .{ .uint32 = 199998 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.eos_token_id"), .{ .uint32 = 200002 });
+
+    var tok = try Tokenizer.initFromGGUF(&gf, allocator);
+    defer tok.deinit();
+
     try std.testing.expect(!tok.shouldPrependBos());
 }
 

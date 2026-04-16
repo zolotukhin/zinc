@@ -10,6 +10,7 @@ zig build -Doptimize=ReleaseFast
 
 # Run inference
 ZINC_DEBUG=1 ./zig-out/bin/zinc -m model.gguf --prompt "Hello" [-d device_id] [--kv-quant 3] [--debug]
+./zig-out/bin/zinc --model-id qwen3-8b-q4k-m --prompt "Hello" [--chat]
 
 # Run unit tests
 zig build test
@@ -17,6 +18,53 @@ zig build test
 # Compile shaders manually (requires glslc / shaderc)
 glslc --target-env=vulkan1.3 -O -o out.spv src/shaders/name.comp
 ```
+
+### Agent harness scripts (`loops/`)
+
+Run-to-completion and autonomous harnesses that spawn `claude` or `codex` subagents. See file headers for full flags.
+
+```bash
+# One-shot: run a single prompt to completion with pre/post benchmarks,
+# auto-retry on regressions (up to 3x) before reverting.
+bun loops/guided_change.ts --prompt "..."          # inline prompt
+bun loops/guided_change.ts --prompt-file plan.md   # from file
+echo "..." | bun loops/guided_change.ts            # from stdin
+
+# Autonomous multi-cycle loops (run until killed):
+bun loops/optimize_zinc.ts          # rsync → build → run → agent → keep/revert on RDNA4 test node
+bun loops/optimize_llm_tps.ts --agent claude "..."  # iterate on llama.cpp throughput
+bun loops/optimize_perf.ts --effort N               # execute MULTI_HOUR_EFFORT_N.md
+bun loops/implement_metal.ts        # iteratively build out the Metal backend
+```
+
+### Managed models and cache
+
+For local Apple Silicon work, always prefer ZINC's managed model cache over ad hoc GGUF paths.
+
+```bash
+# Inspect the managed catalog for the current GPU profile
+./zig-out/bin/zinc model list
+./zig-out/bin/zinc model list --all
+
+# Pull a managed model into the default local cache
+./zig-out/bin/zinc model pull qwen3-8b-q4k-m
+
+# Run via the managed model id instead of a handwritten GGUF path
+./zig-out/bin/zinc --model-id qwen3-8b-q4k-m --prompt "What is the capital of France?" --chat
+```
+
+Default local managed cache layout:
+
+```text
+~/Library/Caches/zinc/models/models/<model-id>/model.gguf
+```
+
+Agent policy:
+- On local Metal, use `./zig-out/bin/zinc model pull <id>` to fetch catalog models.
+- On local Metal, prefer `--model-id <id>` or the default managed cache path over arbitrary `/Users/.../*.gguf` paths.
+- Do not copy large GGUFs into one-off local locations when a catalog id exists.
+- If a needed local model is missing, install it into the managed cache or explicitly explain why that is not possible.
+- RDNA node runs are the exception: the benchmark node still uses the canonical `/root/models/...` GGUF paths unless the repo explicitly migrates that workflow too.
 
 ## Tech Stack
 

@@ -1,0 +1,34 @@
+#version 460
+// GPT-OSS OAI SwiGLU
+// y = (min(gate, 7.0) / (1.0 + exp(1.702 * -gate))) * (clamp(up, -7.0, 7.0) + 1.0)
+// Same binding layout as swiglu.comp so the runtime can switch pipelines by model.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Gate {
+    float gate[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Up {
+    float up[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Y {
+    float y[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= N) return;
+
+    const float alpha = 1.702;
+    const float limit = 7.0;
+    float g = min(gate[idx], limit);
+    float u = clamp(up[idx], -limit, limit);
+    float glu = g / (1.0 + exp(alpha * (-g)));
+    y[idx] = glu * (u + 1.0);
+}

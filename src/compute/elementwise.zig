@@ -46,6 +46,12 @@ pub const ScaleAccPush = extern struct {
     scale_bits: u32, // float reinterpreted as u32
 };
 
+/// Push constants for bias add shader.
+pub const BiasAddPush = extern struct {
+    N: u32,
+    src_offset: u32,
+};
+
 /// Push constants for RoPE shader (with partial rotation / IMRoPE support).
 pub const RopePush = extern struct {
     stride: u32, // full head dimension (distance between heads in memory)
@@ -53,6 +59,7 @@ pub const RopePush = extern struct {
     n_heads: u32,
     position: u32,
     freq_base_bits: u32, // float bits reinterpreted as u32
+    attn_scale_bits: u32, // YaRN magnitude scale (1.0 for plain RoPE)
 };
 
 /// Push constants for SSM conv1d + SiLU shader.
@@ -111,6 +118,7 @@ pub const NormRopePush = extern struct {
     n_heads: u32,
     position: u32,
     freq_base_bits: u32,
+    attn_scale_bits: u32,
     eps_bits: u32,
 };
 
@@ -120,6 +128,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_rms_norm: ?Pipeline,
     /// SWIGLU pipeline, or null.
     pipeline_swiglu: ?Pipeline,
+    /// OAI SWIGLU pipeline (gpt-oss), or null.
+    pipeline_swiglu_oai: ?Pipeline,
     /// GEGLU pipeline (GELU-gated, used by Gemma), or null.
     pipeline_geglu: ?Pipeline,
     /// ROPE pipeline, or null.
@@ -132,6 +142,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_vadd: ?Pipeline,
     /// SCALE ACC pipeline, or null.
     pipeline_scale_acc: ?Pipeline,
+    /// BIAS ADD pipeline, or null.
+    pipeline_bias_add: ?Pipeline,
     pipeline_scale_in_place: ?Pipeline,
     pipeline_mul_elementwise: ?Pipeline,
     pipeline_per_expert_scale: ?Pipeline,
@@ -215,6 +227,13 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // GPT-OSS OAI SwiGLU: same bindings as SwiGLU, different activation.
+        const swiglu_oai_path = std.fmt.bufPrint(&path_buf, "{s}/swiglu_oai.spv", .{shader_dir}) catch unreachable;
+        const pipeline_swiglu_oai = pipeline_mod.createFromSpirvWithOptions(instance, swiglu_oai_path, 3, @sizeOf(SwigluPush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("swiglu_oai shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // GEGLU: 2 inputs (gate, up) + 1 output = 3 bindings (same layout as SwiGLU)
         const geglu_path = std.fmt.bufPrint(&path_buf, "{s}/geglu.spv", .{shader_dir}) catch unreachable;
         const pipeline_geglu = pipeline_mod.createFromSpirvWithOptions(instance, geglu_path, 3, @sizeOf(SwigluPush), &.{}, push_options, allocator) catch |err| blk: {
@@ -254,6 +273,13 @@ pub const ElementwiseDispatch = struct {
         const sacc_path = std.fmt.bufPrint(&path_buf, "{s}/scale_accumulate.spv", .{shader_dir}) catch unreachable;
         const pipeline_scale_acc = pipeline_mod.createFromSpirvWithOptions(instance, sacc_path, 2, @sizeOf(ScaleAccPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("scale_accumulate shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // bias_add: out[i] += bias[src_offset + i], 2 bindings (output, bias)
+        const bias_add_path = std.fmt.bufPrint(&path_buf, "{s}/bias_add.spv", .{shader_dir}) catch unreachable;
+        const pipeline_bias_add = pipeline_mod.createFromSpirvWithOptions(instance, bias_add_path, 2, @sizeOf(BiasAddPush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("bias_add shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -347,12 +373,14 @@ pub const ElementwiseDispatch = struct {
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
+            .pipeline_swiglu_oai = pipeline_swiglu_oai,
             .pipeline_geglu = pipeline_geglu,
             .pipeline_rope = pipeline_rope,
             .pipeline_deinterleave = pipeline_deinterleave,
             .pipeline_sigmoid_mul = pipeline_sigmoid_mul,
             .pipeline_vadd = pipeline_vadd,
             .pipeline_scale_acc = pipeline_scale_acc,
+            .pipeline_bias_add = pipeline_bias_add,
             .pipeline_scale_in_place = pipeline_scale_in_place,
             .pipeline_mul_elementwise = pipeline_mul_elementwise,
             .pipeline_per_expert_scale = pipeline_per_expert_scale,
@@ -421,6 +449,36 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
+    /// Record a GPT-OSS OAI SwiGLU activation dispatch.
+    pub fn recordSwigluOai(
+        self: *const ElementwiseDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+    ) !void {
+        const pip = if (self.pipeline_swiglu_oai) |*p| p else return error.ShaderNotLoaded;
+        const push = SwigluPush{ .N = n_elements };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
+    /// Record an in-place bias add dispatch.
+    pub fn recordBiasAdd(
+        self: *const ElementwiseDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        n_elements: u32,
+        src_offset: u32,
+    ) !void {
+        const pip = if (self.pipeline_bias_add) |*p| p else return error.ShaderNotLoaded;
+        const push = BiasAddPush{
+            .N = n_elements,
+            .src_offset = src_offset,
+        };
+        const workgroups = (n_elements + 63) / 64;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
+    }
+
     /// Record a GEGLU activation dispatch (GELU-gated, used by Gemma).
     /// Same buffer layout as SwiGLU: gate, up → output.
     pub fn recordGeglu(
@@ -464,6 +522,7 @@ pub const ElementwiseDispatch = struct {
         /// Current token position.
         position: u32,
         freq_base: f32,
+        attn_scale: f32,
     ) !void {
         const pip = if (self.pipeline_rope) |*p| p else return error.ShaderNotLoaded;
         const push = RopePush{
@@ -472,6 +531,7 @@ pub const ElementwiseDispatch = struct {
             .n_heads = n_heads,
             .position = position,
             .freq_base_bits = @bitCast(freq_base),
+            .attn_scale_bits = @bitCast(attn_scale),
         };
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
     }
@@ -657,12 +717,14 @@ pub const ElementwiseDispatch = struct {
     pub fn deinit(self: *ElementwiseDispatch) void {
         if (self.pipeline_rms_norm) |*p| p.deinit();
         if (self.pipeline_swiglu) |*p| p.deinit();
+        if (self.pipeline_swiglu_oai) |*p| p.deinit();
         if (self.pipeline_geglu) |*p| p.deinit();
         if (self.pipeline_rope) |*p| p.deinit();
         if (self.pipeline_deinterleave) |*p| p.deinit();
         if (self.pipeline_sigmoid_mul) |*p| p.deinit();
         if (self.pipeline_vadd) |*p| p.deinit();
         if (self.pipeline_scale_acc) |*p| p.deinit();
+        if (self.pipeline_bias_add) |*p| p.deinit();
         if (self.pipeline_scale_in_place) |*p| p.deinit();
         if (self.pipeline_mul_elementwise) |*p| p.deinit();
         if (self.pipeline_per_expert_scale) |*p| p.deinit();

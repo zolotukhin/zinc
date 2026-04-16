@@ -4,6 +4,7 @@ zig-out/
 .zig-cache/
 .zig-cache-local/
 .zig-global-cache-local/
+.zig-global-cache/
 .zig-api-cache/
 src/.zig-api-cache/
 .tmp_gguf_inspect.zig

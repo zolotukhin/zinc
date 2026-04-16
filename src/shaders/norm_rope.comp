@@ -18,6 +18,7 @@ layout(push_constant) uniform PushConstants {
     uint  n_heads;
     uint  position;
     uint  freq_base_bits; // 0 = use freq buffer
+    uint  attn_scale_bits;
     uint  eps_bits;
 };
 
@@ -57,6 +58,7 @@ void main() {
 
     // --- Pass 2: normalize + RoPE ---
     float freq_base = uintBitsToFloat(freq_base_bits);
+    float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;
     bool use_freq_buf = (freq_base_bits == 0u);
     uint half_rot = rope_dim / 2;
 
@@ -73,8 +75,8 @@ void main() {
             freq_i = 1.0 / pow(freq_base, exponent);
         }
         float theta = float(position) * freq_i;
-        float cos_t = cos(theta);
-        float sin_t = sin(theta);
+        float cos_t = cos(theta) * attn_scale;
+        float sin_t = sin(theta) * attn_scale;
 
         data[base + i]            = x_lo * cos_t - x_hi * sin_t;
         data[base + i + half_rot] = x_lo * sin_t + x_hi * cos_t;

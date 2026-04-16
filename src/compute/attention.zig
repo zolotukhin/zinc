@@ -44,7 +44,7 @@ pub const AttentionDispatch = struct {
     ) !AttentionDispatch {
         const pool_size = vk.c.VkDescriptorPoolSize{
             .type = vk.c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 5 * 2, // 5 bindings, 2 sets
+            .descriptorCount = 6 * 2, // 6 bindings, 2 sets
         };
         const pool_info = vk.c.VkDescriptorPoolCreateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -67,9 +67,9 @@ pub const AttentionDispatch = struct {
             .push_descriptors = instance.push_descriptor_fn != null,
         };
 
-        // Flash attention: 5 bindings (Q, K cache, V cache, page table, output)
+        // Flash attention: 6 bindings (Q, K cache, V cache, page table, output, per-head sinks)
         const attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
-        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, attn_path, 5, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, attn_path, 6, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
             log.warn("flash_attn shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

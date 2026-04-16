@@ -4,9 +4,11 @@ import {
   buildArtifact,
   buildComparison,
   buildMeasurementPhases,
+  defaultMetalCases,
   defaultMaxTokensForModelId,
   defaultPromptForModelId,
   defaultScenarioDefsForModel,
+  localZincCommand,
   mergeArtifacts,
   parseArgs,
   parseDotEnv,
@@ -49,6 +51,11 @@ test("parseArgs enables discovery mode", () => {
   expect(args.discoverModels).toBe(true);
 });
 
+test("parseArgs enables managed Metal pulls", () => {
+  const args = parseArgs(["--target", "metal", "--metal-pull-missing"]);
+  expect(args.metalPullMissing).toBe(true);
+});
+
 test("resolveLocalLlamaServer prefers explicit path, then PATH, then docker fallback", () => {
   expect(resolveLocalLlamaServer({ llamaServer: "/tmp/explicit" }, "/tmp/path", "/tmp/docker")).toBe("/tmp/explicit");
   expect(resolveLocalLlamaServer({ llamaServer: null }, "/tmp/path", "/tmp/docker")).toBe("/tmp/path");
@@ -62,6 +69,25 @@ test("GPT-OSS uses the chat prompt path in the performance suite", () => {
   expect(prefersChatPrompt("qwen3-8b-q4k-m")).toBe(false);
   expect(defaultPromptForModelId("qwen3-8b-q4k-m")).toBe("The capital of France is");
   expect(defaultMaxTokensForModelId("qwen3-8b-q4k-m")).toBe(8);
+});
+
+test("default Metal cases use managed cache ids and include Qwen 3.5", () => {
+  const cases = defaultMetalCases("/tmp/models");
+  const qwen35 = cases.find((entry) => entry.id === "qwen35-35b-a3b-q4k-xl");
+  expect(qwen35?.model_id).toBe("qwen35-35b-a3b-q4k-xl");
+  expect(qwen35?.model_path).toBe("/tmp/models/qwen35-35b-a3b-q4k-xl/model.gguf");
+});
+
+test("local ZINC command prefers managed model ids when using the default cache", () => {
+  const cmd = localZincCommand({
+    model_id: "qwen3-8b-q4k-m",
+    model_path: "/Users/zolotukhin/Library/Caches/zinc/models/models/qwen3-8b-q4k-m/model.gguf",
+    prompt_mode: "raw",
+    prompt: "The capital of France is",
+    max_tokens: 8,
+  });
+  expect(cmd).toContain("--model-id qwen3-8b-q4k-m");
+  expect(cmd).not.toContain(" -m ");
 });
 
 test("benchmark suite uses a multi-scenario matrix instead of a single prompt", () => {

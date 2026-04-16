@@ -1,17 +1,12 @@
 #version 460
-// ZINC — Q5_K DMMV, K-parallel (llama.cpp-style)
-// 16 threads per Q5_K superblock, 4 blocks processed in parallel.
-// Wave64 subgroupAdd reduction. Zero shared memory.
-//
-// Q5_K block (256 elements, 176 bytes):
-//   [0..1]    d (f16)
-//   [2..3]    dmin (f16)
-//   [4..15]   scales (12 bytes, 8 x 6-bit scales + 8 x 6-bit mins)
-//   [16..47]  qh (32 bytes, high bits)
-//   [48..175] qs (128 bytes, low 4 bits)
+// ZINC — Q5_K DMMV, row-parallel reference path.
+// Matches the Metal implementation exactly: one invocation computes one row.
+// Preserve GGML contiguous half ordering:
+// low nibble uses x[x_grp + e]
+// high nibble uses x[x_grp + 32u + e]
+// Legacy K-parallel slicing processed slice * 8u through e_start + 8u.
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
-#extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
 
@@ -28,94 +23,79 @@ layout(push_constant) uniform PC {
     uint acc_mode;
 };
 
-const uint NUM_ROWS = 2u;
-
-float fp16_to_fp32(uint h) {
-    return unpackHalf2x16(h).x;
+float fp16_to_fp32(uint bits) {
+    return unpackHalf2x16(bits).x;
 }
 
 void main() {
-    uint tid = gl_LocalInvocationID.x;
-    uint wg_id = gl_WorkGroupID.x;
-    uint x_base = x_offset / 4u;
-    uint y_base = y_offset / 4u;
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= M) return;
+
     uint blocks_per_row = K / 256u;
+    uint row_offset = a_offset + row * blocks_per_row * 176u;
+    uint x_base = x_offset / 4u;
+    uint y_index = y_offset / 4u + row;
+    float sum = 0.0;
 
-    uint itid = tid % 16u;
-    uint ix = tid / 16u;
+    for (uint b = 0u; b < blocks_per_row; b++) {
+        uint bb = row_offset + b * 176u;
+        float d = fp16_to_fp32(uint(w[bb]) | (uint(w[bb + 1u]) << 8));
+        float dmin = fp16_to_fp32(uint(w[bb + 2u]) | (uint(w[bb + 3u]) << 8));
+        uint block_x_base = x_base + b * 256u;
 
-    for (uint r = 0u; r < NUM_ROWS; r++) {
-        uint row = wg_id * NUM_ROWS + r;
-        if (row >= M) break;
+        for (uint group = 0u; group < 4u; group++) {
+            uint sb_lo = group * 2u;
+            uint sb_hi = sb_lo + 1u;
 
-        uint row_offset = a_offset + row * blocks_per_row * 176u;
-        float sum = 0.0;
-
-        // Each of 16 threads handles 32 elements per block (4 groups x 8 elements)
-        // itid/4 = which group pair, itid%4 = which 8-element slice
-        uint group_pair = itid / 4u;  // 0..3
-        uint slice = itid % 4u;       // 0..3
-        uint e_start = slice * 8u;    // 0, 8, 16, 24 within the 32-element sub-block
-
-        // Each group pair covers 2 sub-blocks (low nibble + high nibble)
-        uint sb_lo = group_pair * 2u;
-        uint sb_hi = group_pair * 2u + 1u;
-
-        for (uint b = ix; b < blocks_per_row; b += 4u) {
-            uint bb = row_offset + b * 176u;
-            uint xi = b * 256u;
-
-            uint d_bits = uint(w[bb]) | (uint(w[bb + 1u]) << 8);
-            float d = fp16_to_fp32(d_bits);
-            uint dm_bits = uint(w[bb + 2u]) | (uint(w[bb + 3u]) << 8);
-            float dmin = fp16_to_fp32(dm_bits);
-
-            // Decode scales for our sub-blocks
-            uint sc_lo, m_lo, sc_hi, m_hi;
+            uint sc_lo;
+            uint m_lo;
             if (sb_lo < 4u) {
-                sc_lo = uint(w[bb + 4u + sb_lo]) & 63u;
-                m_lo  = uint(w[bb + 4u + sb_lo + 4u]) & 63u;
+                uint off = bb + 4u + sb_lo;
+                sc_lo = uint(w[off]) & 63u;
+                m_lo = uint(w[off + 4u]) & 63u;
             } else {
-                sc_lo = (uint(w[bb + 4u + sb_lo + 4u]) & 0xFu) | ((uint(w[bb + 4u + sb_lo - 4u]) >> 6) << 4);
-                m_lo  = (uint(w[bb + 4u + sb_lo + 4u]) >> 4) | ((uint(w[bb + 4u + sb_lo]) >> 6) << 4);
+                uint off = bb + 4u + sb_lo;
+                uint scale_min = uint(w[off + 4u]);
+                sc_lo = (scale_min & 15u) | ((uint(w[off - 4u]) >> 6) << 4);
+                m_lo = (scale_min >> 4) | ((uint(w[off]) >> 6) << 4);
             }
+
+            uint sc_hi;
+            uint m_hi;
             if (sb_hi < 4u) {
-                sc_hi = uint(w[bb + 4u + sb_hi]) & 63u;
-                m_hi  = uint(w[bb + 4u + sb_hi + 4u]) & 63u;
+                uint off = bb + 4u + sb_hi;
+                sc_hi = uint(w[off]) & 63u;
+                m_hi = uint(w[off + 4u]) & 63u;
             } else {
-                sc_hi = (uint(w[bb + 4u + sb_hi + 4u]) & 0xFu) | ((uint(w[bb + 4u + sb_hi - 4u]) >> 6) << 4);
-                m_hi  = (uint(w[bb + 4u + sb_hi + 4u]) >> 4) | ((uint(w[bb + 4u + sb_hi]) >> 6) << 4);
+                uint off = bb + 4u + sb_hi;
+                uint scale_min = uint(w[off + 4u]);
+                sc_hi = (scale_min & 15u) | ((uint(w[off - 4u]) >> 6) << 4);
+                m_hi = (scale_min >> 4) | ((uint(w[off]) >> 6) << 4);
             }
 
             float factor_lo = d * float(sc_lo);
-            float bias_lo   = dmin * float(m_lo);
+            float bias_lo = dmin * float(m_lo);
             float factor_hi = d * float(sc_hi);
-            float bias_hi   = dmin * float(m_hi);
+            float bias_hi = dmin * float(m_hi);
 
-            uint qs_base = bb + 48u + group_pair * 32u;
-            uint qh_bit_lo = sb_lo;
-            uint qh_bit_hi = sb_hi;
-            uint x_grp = xi + group_pair * 64u;
+            uint qs_base = bb + 48u + group * 32u;
+            uint group_x_base = block_x_base + group * 64u;
 
-            for (uint e = e_start; e < e_start + 8u; e++) {
-                uint byte_val = uint(w[qs_base + e]);
-                uint q_lo = byte_val & 0xFu;
-                uint q_hi = byte_val >> 4;
+            for (uint e = 0u; e < 32u; e++) {
+                uint q_byte = uint(w[qs_base + e]);
                 uint qh_val = uint(w[bb + 16u + e]);
-                uint hb_lo = (qh_val >> qh_bit_lo) & 1u;
-                uint hb_hi = (qh_val >> qh_bit_hi) & 1u;
+                uint q_lo = (q_byte & 15u) | (((qh_val >> sb_lo) & 1u) << 4);
+                uint q_hi = (q_byte >> 4) | (((qh_val >> sb_hi) & 1u) << 4);
 
-                sum += (factor_lo * float(q_lo | (hb_lo << 4)) - bias_lo) * x[x_base + x_grp + e];
-                sum += (factor_hi * float(q_hi | (hb_hi << 4)) - bias_hi) * x[x_base + x_grp + 32u + e];
+                sum += (factor_lo * float(q_lo) - bias_lo) * x[group_x_base + e];
+                sum += (factor_hi * float(q_hi) - bias_hi) * x[group_x_base + 32u + e];
             }
         }
+    }
 
-        sum = subgroupAdd(sum);
-        if (tid == 0u) {
-            if (acc_mode != 0u)
-                y[y_base + row] += sum;
-            else
-                y[y_base + row] = sum;
-        }
+    if (acc_mode != 0u) {
+        y[y_index] += sum;
+    } else {
+        y[y_index] = sum;
     }
 }

@@ -62,7 +62,9 @@ type ModelTarget = {
   name: string;
   path: string;
   promptMode: PromptMode;
+  coherencePromptMode?: PromptMode;
   envVar: string;
+  coherenceMaxTokens?: number;
 };
 
 function envOrDefault(name: string, fallback: string): string {
@@ -75,6 +77,9 @@ const MODELS: Record<string, ModelTarget> = {
     name: "Qwen3.5-35B",
     path: envOrDefault("ZINC_RDNA_QWEN35_35B_MODEL", "/root/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"),
     promptMode: "raw",
+    // Keep throughput benchmarking on the raw decode path, but run coherence
+    // prompts through ChatML so Qwen gets the expected closed-think scaffold.
+    coherencePromptMode: "chat",
     envVar: "ZINC_RDNA_QWEN35_35B_MODEL",
   },
   qwen8b: {
@@ -111,6 +116,8 @@ const MODELS: Record<string, ModelTarget> = {
     path: envOrDefault("ZINC_RDNA_GPT_OSS_20B_MODEL", "/root/models/openai_gpt-oss-20b-Q4_K_M.gguf"),
     promptMode: "chat",
     envVar: "ZINC_RDNA_GPT_OSS_20B_MODEL",
+    // GPT-OSS emits analysis/final channel scaffolding before the concise answer.
+    coherenceMaxTokens: 96,
   },
 };
 
@@ -771,7 +778,10 @@ export function buildAgentPrompt(
   options: { primaryMetricLabel?: string; benchmarkMethod?: string } = {},
 ): string {
   const modelTarget = MODELS[model] ?? MODELS.qwen35b;
-  const sanityCheckPrompt = coherencePromptForMode(COHERENCE_CHECKS[0], modelTarget.promptMode);
+  const sanityCheckPrompt = coherencePromptForMode(
+    COHERENCE_CHECKS[0],
+    coherencePromptModeForModel(modelTarget),
+  );
   const primaryMetricLabel = options.primaryMetricLabel ?? "decode tok/s";
   const benchmarkMethod = options.benchmarkMethod ?? "200-token decode benchmark on the primary model";
   const historySummary = tailHistory(history);
@@ -900,13 +910,21 @@ function coherencePromptForMode(check: CoherenceCheck, promptMode: PromptMode): 
   return promptMode === "chat" ? check.chatPrompt : check.rawPrompt;
 }
 
-function zincCliArgs(modelTarget: ModelTarget, prompt: string, maxTokens: number): string {
-  const chatFlag = modelTarget.promptMode === "chat" ? " --chat" : "";
+function coherencePromptModeForModel(modelTarget: ModelTarget): PromptMode {
+  return modelTarget.coherencePromptMode ?? modelTarget.promptMode;
+}
+
+function coherenceMaxTokensForModel(modelTarget: ModelTarget): number {
+  return modelTarget.coherenceMaxTokens ?? 30;
+}
+
+function zincCliArgs(modelTarget: ModelTarget, prompt: string, maxTokens: number, promptMode = modelTarget.promptMode): string {
+  const chatFlag = promptMode === "chat" ? " --chat" : "";
   return `-m ${shellQuote(modelTarget.path)}${chatFlag} --prompt ${shellQuote(prompt)} -n ${maxTokens}`;
 }
 
-function zincRemoteCommand(modelTarget: ModelTarget, prompt: string, maxTokens: number): string {
-  return `cd ${REMOTE_DIR} && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc ${zincCliArgs(modelTarget, prompt, maxTokens)} 2>&1`;
+function zincRemoteCommand(modelTarget: ModelTarget, prompt: string, maxTokens: number, promptMode = modelTarget.promptMode): string {
+  return `cd ${REMOTE_DIR} && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc ${zincCliArgs(modelTarget, prompt, maxTokens, promptMode)} 2>&1`;
 }
 
 async function buildAndBench(modelTarget: ModelTarget, effortSpec: EffortSpec): Promise<BenchResult> {
@@ -962,9 +980,14 @@ async function buildAndBench(modelTarget: ModelTarget, effortSpec: EffortSpec): 
   console.log(c("2", "  Running correctness test..."));
   let correctnessOutput: string;
   const firstCheck = COHERENCE_CHECKS[0];
-  const correctnessPrompt = coherencePromptForMode(firstCheck, modelTarget.promptMode);
+  const correctnessPromptMode = coherencePromptModeForModel(modelTarget);
+  const correctnessPrompt = coherencePromptForMode(firstCheck, correctnessPromptMode);
+  const correctnessMaxTokens = coherenceMaxTokensForModel(modelTarget);
   try {
-    correctnessOutput = await ssh(zincRemoteCommand(modelTarget, correctnessPrompt, 20), 180_000);
+    correctnessOutput = await ssh(
+      zincRemoteCommand(modelTarget, correctnessPrompt, correctnessMaxTokens, correctnessPromptMode),
+      180_000,
+    );
   } catch (e) {
     return {
       buildOk: true,
@@ -1085,12 +1108,14 @@ export function summarizeCoherenceRegression(
 async function runCoherenceSweep(): Promise<CoherenceSweep> {
   const failures: CoherenceFailure[] = [];
   for (const modelTarget of COHERENCE_MODELS) {
+    const promptMode = coherencePromptModeForModel(modelTarget);
+    const maxTokens = coherenceMaxTokensForModel(modelTarget);
     for (const check of COHERENCE_CHECKS) {
-      const prompt = coherencePromptForMode(check, modelTarget.promptMode);
+      const prompt = coherencePromptForMode(check, promptMode);
       const label = coherenceCaseLabel(modelTarget.name, prompt);
       try {
         const out = await ssh(
-          zincRemoteCommand(modelTarget, prompt, 30),
+          zincRemoteCommand(modelTarget, prompt, maxTokens, promptMode),
           120_000,
         );
         const textMatch = out.match(/Output text:\s*(.+)/i);

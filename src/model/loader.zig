@@ -316,6 +316,10 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
             const rsk = std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.factor", .{prefix}) catch break :blk @as(f32, 0.0);
             break :blk gf.getF32(rsk) orelse 0.0;
         },
+        .rope_attn_factor = blk: {
+            const atk = std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.attn_factor", .{prefix}) catch break :blk @as(f32, 1.0);
+            break :blk gf.getF32(atk) orelse 1.0;
+        },
         .rope_original_context = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.rope.scaling.original_context_length", .{prefix}) catch "") orelse 0,
         .rope_sections = blk: {
             var sections = [_]u32{ 0, 0, 0, 0 };

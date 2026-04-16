@@ -660,7 +660,9 @@ fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u
         // Respect that instead of forcing the explicit thinking branch.
         try tokenizer.applyChatTemplate(&roles, &contents, chat_buf)
     else if (tokenizer.supportsThinkingToggle())
-        try tokenizer.applyChatTemplateWithOptions(&roles, &contents, .{ .skip_thinking_template = true }, chat_buf)
+        // Qwen-style ChatML models answer much more directly when the chat
+        // template emits an explicit closed think block for generation.
+        try tokenizer.applyChatTemplate(&roles, &contents, chat_buf)
     else
         try tokenizer.applyChatTemplate(&roles, &contents, chat_buf);
     return .{
@@ -1748,6 +1750,9 @@ pub fn main() !void {
         }
         if (config.debug) {
             engine.enableLogitsReadback();
+            if (config.profile) {
+                engine.enableValidationDiagnostics();
+            }
         }
 
         // Initialize native BPE tokenizer from GGUF metadata
@@ -1768,7 +1773,7 @@ pub fn main() !void {
         const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
         defer allocator.free(prompt_tokens);
 
-        log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 15)] });
+        log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 30)] });
         // Decode prompt tokens for verification
         {
             var pt_buf: std.ArrayList(u8) = .{};
@@ -2123,6 +2128,26 @@ test "prepareCliPrompt returns full owned chat buffer" {
     try std.testing.expect(prepared.text.ptr == prepared.owned_buf.?.ptr);
     try std.testing.expect(prepared.owned_buf.?.len >= prepared.text.len);
     try std.testing.expectEqualStrings("<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n", prepared.text);
+}
+
+test "prepareCliPrompt uses closed think scaffold for qwen chatml templates" {
+    var tok = makeTestTokenizer(
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+    );
+    defer tok.token_to_id.deinit();
+
+    var prepared = try prepareCliPrompt(&tok, "Hello", true, std.testing.allocator);
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, prepared.text, "<|im_start|>user\nHello<|im_end|>\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, prepared.text, "<|im_start|>assistant\n<think>\n\n</think>\n\n"));
 }
 
 test "prepareCliPrompt uses gemma4 default closed-thought prompt in chat mode" {

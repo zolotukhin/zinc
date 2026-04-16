@@ -349,7 +349,7 @@ pub const DmmvDispatch = struct {
         };
 
         const workgroups_x = switch (quant_type) {
-            .q8_0, .f16 => (M + 1) / 2,
+            .mxfp4, .q8_0, .f16 => (M + 1) / 2,
             else => (M + 63) / 64,
         };
 
@@ -400,11 +400,11 @@ pub const DmmvDispatch = struct {
         // better memory access patterns for large fan-out.
         const use_kparallel = switch (quant_type) {
             .q4_k => M <= 65536,
-            .q5_k, .q6_k => true,
+            .q6_k => true,
             else => false,
         };
         const workgroups_x = if (use_kparallel) switch (quant_type) {
-            .q4_k, .q5_k, .q6_k => (M + 1) / 2,
+            .q4_k, .q6_k => (M + 1) / 2,
             else => unreachable,
         } else switch (quant_type) {
             .q4_k => blk: {
@@ -423,7 +423,7 @@ pub const DmmvDispatch = struct {
                 }
                 break :blk (M + 1) / 2; // fallback to K-parallel
             },
-            .q8_0, .f16 => (M + 1) / 2,
+            .q5_0, .q5_1, .mxfp4, .q8_0, .f16 => (M + 1) / 2,
             .f32 => M, // K-parallel: 64 threads per row via subgroupAdd
             else => (M + 63) / 64,
         };
@@ -483,8 +483,8 @@ pub const DmmvDispatch = struct {
                     .y_offset = y_offset + col_u32 * M * @sizeOf(f32),
                 };
                 const workgroups_x_single = switch (quant_type) {
-                    .q4_k, .q5_k, .q6_k => (M + 1) / 2,
-                    .q8_0, .f16 => (M + 1) / 2,
+                    .q4_k, .q5_0, .q5_1, .q6_k => (M + 1) / 2,
+                    .mxfp4, .q8_0, .f16 => (M + 1) / 2,
                     else => (M + 63) / 64,
                 };
                 cmd.dispatchWithPush(single_pip, descriptor_set, std.mem.asBytes(&push), workgroups_x_single, 1, 1);
