@@ -125,6 +125,22 @@ test "Q5_0 and Q5_1 DMMV launch with 2 rows per workgroup" {
     try expectContains(src, ".q4_k, .q5_0, .q5_1, .q6_k => (M + 1) / 2");
 }
 
+test "GPT-OSS routing keeps SOFTMAX_WEIGHT expert selection path" {
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "GPT-OSS uses this SOFTMAX_WEIGHT routing rule instead of softmax-over-all-experts.");
+    try expectContains(src, "if (config.architecture == .gpt_oss) {\n                        topKSoftmaxWeight(router_logits, n_used, expert_ids[0..n_used], expert_weights[0..n_used]);\n                    } else {");
+}
+
+test "GPT-OSS FFN keeps OAI SwiGLU and bias-add dispatches" {
+    const forward_src = @embedFile("compute/forward.zig");
+    const elementwise_src = @embedFile("compute/elementwise.zig");
+    try expectContainsNear(forward_src, "if (self.model.config.architecture == .gpt_oss) {", "return self.dispatchSwigluOai(gate_buf, gate_size, up_buf, up_size, output_buf, output_size, n_elements);", 200);
+    try expectContains(forward_src, "try self.dispatchBiasAddSlice(self.gate_buf.handle, self.gate_buf.size, bias, eid * inter_dim, inter_dim);");
+    try expectContains(forward_src, "try self.dispatchBiasAddSlice(self.down_buf.handle, hidden_size, bias, eid * hidden_dim, hidden_dim);");
+    try expectContains(elementwise_src, "pub fn recordSwigluOai(");
+    try expectContains(elementwise_src, "pub fn recordBiasAdd(");
+}
+
 test "IMROPE frequency uses global pair index, not per-section reset" {
     // Regression: IMROPE precomputation used per-section independent exponents,
     // resetting to 0 at each section boundary. For text IMROPE (all position IDs
@@ -238,6 +254,27 @@ test "RoPE shader supports freq buffer path for IMROPE" {
     const src = @embedFile("shaders/rope_fused.comp");
     try expectContains(src, "freq_base_bits == 0u");
     try expectContains(src, "inv_freq[i]");
+}
+
+test "YaRN RoPE attention scale stays wired through Vulkan RoPE dispatch" {
+    const forward_src = @embedFile("compute/forward.zig");
+    const rope_src = @embedFile("shaders/rope_fused.comp");
+    const norm_rope_src = @embedFile("shaders/norm_rope.comp");
+    try expectContains(forward_src, "const rope_attn_scale = if (use_yarn_rope) effectiveRopeAttnScale(config) else 1.0;");
+    try expectContains(forward_src, "const push = RopePush{\n                .stride = stride,\n                .rope_dim = rope_dim,\n                .n_heads = n_heads,\n                .position = position,\n                .freq_base_bits = @bitCast(freq_base),\n                .attn_scale_bits = @bitCast(attn_scale),");
+    try expectContains(forward_src, "const push = NormRopePush{\n            .head_dim = head_dim,\n            .rope_dim = rope_dim,\n            .n_heads = n_heads,\n            .position = position,\n            .freq_base_bits = @bitCast(freq_base),\n            .attn_scale_bits = @bitCast(attn_scale),");
+    try expectContains(rope_src, "float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;");
+    try expectContains(rope_src, "float cos_t = cos(theta) * attn_scale;");
+    try expectContains(norm_rope_src, "float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;");
+    try expectContains(norm_rope_src, "float cos_t = cos(theta) * attn_scale;");
+}
+
+test "flash attention sink buffer stays in final normalization" {
+    const src = @embedFile("shaders/flash_attn.comp");
+    try expectContains(src, "layout(set = 0, binding = 5) readonly  buffer Sinks");
+    try expectContains(src, "float sink_val = sink_data[head];");
+    try expectContains(src, "final_sum = s_sum_old * rescale + exp(sink_val - sink_max);");
+    try expectContains(src, "o_data[o_base + d] = s_out[d] * rescale * inv_sum;");
 }
 
 test "F32 DMMV uses K-parallel reduction via subgroupAdd" {

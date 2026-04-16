@@ -7470,6 +7470,31 @@ pub fn generate(
 // Tests
 // ---------------------------------------------------------------------------
 
+fn makeTestModelConfig() ModelConfig {
+    return .{
+        .architecture = .unknown,
+        .n_layers = 0,
+        .n_heads = 0,
+        .n_kv_heads = 0,
+        .head_dim = 0,
+        .hidden_dim = 0,
+        .intermediate_dim = 0,
+        .vocab_size = 0,
+        .context_length = 0,
+        .rope_freq_base = 0,
+        .n_experts = 0,
+        .n_experts_used = 0,
+        .rope_dim = 0,
+        .ssm_d_conv = 0,
+        .ssm_d_inner = 0,
+        .ssm_d_state = 0,
+        .ssm_dt_rank = 0,
+        .ssm_n_group = 0,
+        .full_attn_interval = 0,
+        .shared_expert_intermediate_dim = 0,
+    };
+}
+
 test "topKSoftmax selects correct top-k with renormalization" {
     const logits = [_]f32{ 1.0, 3.0, 0.5, 2.0, 4.0, 1.5, 0.1, 0.2 };
     var ids: [3]u32 = undefined;
@@ -7754,6 +7779,61 @@ test "topKSoftmax with large logit spread avoids overflow" {
     try std.testing.expect(weights[0] > 0.99);
     const wsum = weights[0] + weights[1];
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), wsum, 0.001);
+}
+
+test "topKSoftmaxWeight matches selected-only renormalized softmax" {
+    const logits = [_]f32{ -3.0, 1.5, 0.25, 4.0, -0.5, 3.0, 2.5, -1.0 };
+    const k = 4;
+    var ids: [k]u32 = undefined;
+    var weights: [k]f32 = undefined;
+    topKSoftmaxWeight(&logits, k, &ids, &weights);
+
+    var max_logit: f32 = -std.math.inf(f32);
+    for (0..k) |i| {
+        max_logit = @max(max_logit, logits[ids[i]]);
+    }
+
+    var expected: [k]f32 = undefined;
+    var sum: f32 = 0.0;
+    for (0..k) |i| {
+        const w = @exp(logits[ids[i]] - max_logit);
+        expected[i] = w;
+        sum += w;
+    }
+    for (0..k) |i| {
+        expected[i] /= sum;
+        try std.testing.expectApproxEqAbs(expected[i], weights[i], 1e-6);
+    }
+}
+
+test "topKSoftmaxWeight k=1 picks argmax with weight 1.0" {
+    const logits = [_]f32{ -9.0, -2.0, -5.0 };
+    var ids: [1]u32 = undefined;
+    var weights: [1]f32 = undefined;
+    topKSoftmaxWeight(&logits, 1, &ids, &weights);
+    try std.testing.expectEqual(@as(u32, 1), ids[0]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), weights[0], 0.001);
+}
+
+test "effectiveRopeAttnScale is neutral without YaRN metadata" {
+    var cfg = makeTestModelConfig();
+    cfg.architecture = .gpt_oss;
+    cfg.rope_scaling_factor = 1.0;
+    cfg.rope_attn_factor = 1.75;
+    cfg.rope_original_context = 4096;
+
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), effectiveRopeAttnScale(&cfg), 1e-6);
+}
+
+test "effectiveRopeAttnScale uses GGUF attention factor for YaRN" {
+    var cfg = makeTestModelConfig();
+    cfg.architecture = .gpt_oss;
+    cfg.rope_scaling_factor = 32.0;
+    cfg.rope_attn_factor = 1.75;
+    cfg.rope_original_context = 4096;
+
+    const expected = cfg.rope_attn_factor * (1.0 + 0.1 * @log(cfg.rope_scaling_factor));
+    try std.testing.expectApproxEqAbs(expected, effectiveRopeAttnScale(&cfg), 1e-6);
 }
 
 // ---------------------------------------------------------------------------

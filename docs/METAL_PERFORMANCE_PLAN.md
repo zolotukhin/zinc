@@ -32,7 +32,7 @@ New command:
 
 ```bash
 zig build bench-metal-shapes -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+  --model-id qwen35-35b-a3b-q4k-xl
 ```
 
 This benchmarks the real local hot q8 shapes directly from the GGUF model:
@@ -66,7 +66,7 @@ The single-shape q8 benchmark now has a real dual-SSM case:
 
 ```bash
 zig build bench-metal-shapes -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --case ssm_dual --pipeline both
 ```
 
@@ -99,7 +99,7 @@ Local end-to-end rerun on April 3, 2026:
 
 ```bash
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 1 --runs 2 -n 128
 ```
 
@@ -118,7 +118,7 @@ Clean local rerun on April 3, 2026 in the current worktree:
 
 ```bash
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 1 --runs 3 -n 128
 ```
 
@@ -141,7 +141,7 @@ But the whole-model validation did not improve over the current baseline:
 
 ```bash
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 1 --runs 3 -n 128 \
   --q8-tg 512 --q8-dual-tg 1024
 ```
@@ -169,7 +169,7 @@ New benchmark capability:
 
 ```bash
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --profile
 ```
 
@@ -183,11 +183,11 @@ Clean local A/B on April 3, 2026 with `1` warmup run and `3` measured runs:
 
 ```bash
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 1 --runs 3 -n 128 --kv-f32
 
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 1 --runs 3 -n 128 --kv-q8
 ```
 
@@ -207,7 +207,7 @@ Profiled benchmark on April 3, 2026:
 
 ```bash
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 0 --runs 1 -n 32 --kv-f32 --profile
 ```
 
@@ -246,7 +246,7 @@ But the real `128`-token validation did not hold up:
 
 ```bash
 zig build bench-metal -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 1 --runs 3 -n 128 --kv-f32 --q8-dual-tg 1024
 ```
 
@@ -263,7 +263,7 @@ Measured on April 2, 2026 on the local M4 Max with:
 
 ```bash
 zig build bench-metal -Doptimize=ReleaseFast -- \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --warmup 1 --runs 2 -n 128
 ```
 
@@ -279,7 +279,7 @@ Profiled local run on the same date:
 ```bash
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zinc \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --prompt "The capital of France is" \
   -n 64 \
   --profile
@@ -325,7 +325,7 @@ local Docker-provided `llama-server` binary:
 
 ```bash
 /Users/zolotukhin/.docker/bin/inference/llama-server \
-  -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+  --model-id qwen35-35b-a3b-q4k-xl \
   --host 127.0.0.1 \
   --port 8089 \
   --alias q \

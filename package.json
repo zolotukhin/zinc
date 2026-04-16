@@ -9,5 +9,8 @@
     "test": "bun test",
     "test:api": "bun tests/test_openai_sdk.ts",
     "test:qwen-smoke": "bun tests/test_qwen_smoke.ts"
+  },
+  "dependencies": {
+    "openai": "^6.34.0"
   }
 }

@@ -566,3 +566,34 @@ test "extractConfig uses max gemma4 head_count_kv array entry" {
     const cfg = extractConfigWithLogging(&gf, false);
     try std.testing.expectEqual(@as(u32, 8), cfg.n_kv_heads);
 }
+
+test "extractConfig reads rope attention factor for gpt-oss YaRN models" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "gpt-oss") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.block_count"), .{ .uint32 = 24 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.attention.head_count"), .{ .uint32 = 64 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.attention.head_count_kv"), .{ .uint32 = 8 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.embedding_length"), .{ .uint32 = 2880 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.attention.key_length"), .{ .uint32 = 512 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.vocab_size"), .{ .uint32 = 201088 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.context_length"), .{ .uint32 = 131072 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.rope.scaling.factor"), .{ .float32 = 32.0 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.rope.scaling.attn_factor"), .{ .float32 = 1.75 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "gpt-oss.rope.scaling.original_context_length"), .{ .uint32 = 4096 });
+
+    const cfg = extractConfigWithLogging(&gf, false);
+    try std.testing.expectEqual(@as(f32, 32.0), cfg.rope_scaling_factor);
+    try std.testing.expectEqual(@as(f32, 1.75), cfg.rope_attn_factor);
+    try std.testing.expectEqual(@as(u32, 4096), cfg.rope_original_context);
+}

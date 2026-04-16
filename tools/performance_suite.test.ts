@@ -4,6 +4,7 @@ import {
   buildArtifact,
   buildComparison,
   buildMeasurementPhases,
+  DEFAULT_LOCAL_MODEL_ROOT,
   defaultMetalCases,
   defaultMaxTokensForModelId,
   defaultPromptForModelId,
@@ -81,7 +82,7 @@ test("default Metal cases use managed cache ids and include Qwen 3.5", () => {
 test("local ZINC command prefers managed model ids when using the default cache", () => {
   const cmd = localZincCommand({
     model_id: "qwen3-8b-q4k-m",
-    model_path: "/Users/zolotukhin/Library/Caches/zinc/models/models/qwen3-8b-q4k-m/model.gguf",
+    model_path: `${DEFAULT_LOCAL_MODEL_ROOT}/qwen3-8b-q4k-m/model.gguf`,
     prompt_mode: "raw",
     prompt: "The capital of France is",
     max_tokens: 8,
