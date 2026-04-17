@@ -223,7 +223,8 @@ function usage() {
 
 export function parseZincCliOutput(text) {
   const promptTokens = text.match(/Prompt tokens \((\d+)\):/);
-  const prefill = text.match(/Prefill:\s+(\d+)\s+tokens\s+in\s+([\d.]+)\s+ms\s+\(([\d.]+)\s+tok\/s\)/);
+  const prefill = text.match(/Prefill(?:\s+complete)?\s*:\s*(\d+)\s+tokens\s+in\s+([\d.]+)\s*(ms|s)\s*\(([\d.]+)\s+tok\/s\)/i);
+  const prefillTimingOnly = text.match(/Prefill(?:\s+complete)?\s*:\s*(\d+)\s+tokens\s+in\s+([\d.]+)\s*(ms|s)/i);
   const generated = text.match(/Generated\s+(\d+)\s+tokens\s+in\s+([\d.]+)\s+ms\s+[—-]\s+([\d.]+)\s+tok\/s\s+\(([\d.]+)\s+ms\/tok\)/);
   const output = text.match(/Output \((\d+) tokens\):\s*(.+)$/m);
   const outputText = text.match(/info\(zinc\): Output text:\s*([\s\S]*?)(?:\ninfo\(zinc\): Output tokens|\s*$)/);
@@ -234,9 +235,19 @@ export function parseZincCliOutput(text) {
 
   return {
     promptTokens: promptTokens ? Number(promptTokens[1]) : null,
-    prefillTokens: prefill ? Number(prefill[1]) : (promptTokens ? Number(promptTokens[1]) : null),
-    prefillMs: prefill ? Number(prefill[2]) : null,
-    prefillTps: prefill ? Number(prefill[3]) : null,
+    prefillTokens: prefill ? Number(prefill[1]) : (prefillTimingOnly ? Number(prefillTimingOnly[1]) : (promptTokens ? Number(promptTokens[1]) : null)),
+    prefillMs: prefill
+      ? (prefill[3] === "s" ? Number(prefill[2]) * 1000 : Number(prefill[2]))
+      : (prefillTimingOnly ? (prefillTimingOnly[3] === "s" ? Number(prefillTimingOnly[2]) * 1000 : Number(prefillTimingOnly[2])) : null),
+    prefillTps: prefill
+      ? Number(prefill[4])
+      : (prefillTimingOnly
+        ? (() => {
+            const tokens = Number(prefillTimingOnly[1]);
+            const seconds = prefillTimingOnly[3] === "s" ? Number(prefillTimingOnly[2]) : Number(prefillTimingOnly[2]) / 1000;
+            return seconds > 0 ? tokens / seconds : null;
+          })()
+        : null),
     generatedTokens: Number(generated[1]),
     decodeMs: Number(generated[2]),
     decodeTps: Number(generated[3]),
@@ -842,7 +853,7 @@ function rdnaSshTransport(creds) {
   return parts.join(" ");
 }
 
-function rdnaZincCommand(caseDef, creds) {
+export function rdnaZincCommand(caseDef, creds) {
   const parts = [
     `cd ${shellQuote(creds.workdir)}`,
     "&&",
@@ -852,9 +863,9 @@ function rdnaZincCommand(caseDef, creds) {
     String(caseDef.max_tokens),
     "-m",
     shellQuote(caseDef.model_path),
-    "--prompt",
-    shellQuote(caseDef.prompt),
   ];
+  if (caseDef.prompt_mode === "chat") parts.push("--chat");
+  parts.push("--prompt", shellQuote(caseDef.prompt));
   return rdnaRemoteCommand(parts.join(" "), creds);
 }
 

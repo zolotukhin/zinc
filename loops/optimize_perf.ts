@@ -16,6 +16,7 @@
  *   bun loops/optimize_perf.ts --effort 1                        # Push descriptors
  *   bun loops/optimize_perf.ts --effort 2 --model qwen35b       # Fused gate+up on Qwen 35B
  *   bun loops/optimize_perf.ts --effort 3 --agent codex         # Batch prefill with Codex
+ *   bun loops/optimize_perf.ts --effort 6 --model qwen35b       # RDNA prefill recovery on Qwen 35B
  *   bun loops/optimize_perf.ts --effort 1 --resume               # Resume previous run
  *   bun loops/optimize_perf.ts --effort 1 --cycles 10 --dry-run  # Baseline only
  */
@@ -195,6 +196,15 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
     benchmarkPrompt: PREFILL_BENCHMARK_PROMPT,
     benchmarkMaxTokens: 8,
     benchmarkMethod: "long-context prefill benchmark aligned with the site report",
+  },
+  6: {
+    doc: "MULTI_HOUR_EFFORT_6_RDNA_QWEN35_PREFILL.md",
+    summary: "RDNA Qwen35 prefill recovery (restore flagship TTFT and prefill telemetry)",
+    metricMode: "prefill",
+    primaryMetricLabel: "prefill tok/s",
+    benchmarkPrompt: PREFILL_BENCHMARK_PROMPT,
+    benchmarkMaxTokens: 8,
+    benchmarkMethod: "long-context prefill benchmark on RDNA for the Qwen3.5-35B flagship workload",
   },
 };
 

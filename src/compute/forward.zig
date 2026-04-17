@@ -7301,7 +7301,7 @@ pub fn generate(
     else
         0.0;
 
-    log.debug("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
+    log.info("Prefill: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
         prompt_tokens.len, @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0, prefill_tok_per_sec,
     });
     // Decode profiling should describe only generated tokens, not the prompt prefill steps.

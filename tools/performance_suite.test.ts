@@ -17,6 +17,7 @@ import {
   parseOpenAiCompletionOutput,
   parseZincCliOutput,
   prefersChatPrompt,
+  rdnaZincCommand,
   resolveLocalLlamaServer,
   summarizeValues,
 } from "./performance_suite.mjs";
@@ -91,6 +92,24 @@ test("local ZINC command prefers managed model ids when using the default cache"
   expect(cmd).not.toContain(" -m ");
 });
 
+test("RDNA ZINC command preserves chat prompt mode", () => {
+  const cmd = rdnaZincCommand({
+    model_path: "/root/models/gpt.gguf",
+    prompt_mode: "chat",
+    prompt: "What is the capital of France?",
+    max_tokens: 48,
+  }, {
+    host: "bench.local",
+    user: "root",
+    port: "2222",
+    workdir: "/root/zinc",
+  });
+
+  expect(cmd).toContain("./zig-out/bin/zinc");
+  expect(cmd).toContain("--chat");
+  expect(cmd).toContain("--prompt");
+});
+
 test("benchmark suite uses a multi-scenario matrix instead of a single prompt", () => {
   const qwen = defaultScenarioDefsForModel("qwen3-8b-q4k-m", "raw", "The capital of France is");
   expect(qwen.map((scenario) => scenario.id)).toEqual(["core", "context-medium", "context-long", "decode-extended"]);
@@ -142,6 +161,21 @@ info(zinc): Output (1 tokens): Paris
   expect(parsed.decodeTps).toBe(0.79);
   expect(parsed.msPerToken).toBe(1269.5);
   expect(parsed.outputPreview).toBe("Paris");
+});
+
+test("parseZincCliOutput accepts Vulkan-style prefill complete lines", () => {
+  const parsed = parseZincCliOutput(`
+info(zinc): Prompt tokens (10): { 1, 2, 3 }
+info(forward): Prefill complete: 10 tokens in 1.3 ms (7459.27 tok/s)
+info(forward): Generated 8 tokens in 61.4 ms — 130.32 tok/s (7.7 ms/tok)
+info(zinc): Output text: Paris.
+`);
+
+  expect(parsed.promptTokens).toBe(10);
+  expect(parsed.prefillMs).toBe(1.3);
+  expect(parsed.prefillTps).toBeCloseTo(7459.27, 2);
+  expect(parsed.decodeTps).toBe(130.32);
+  expect(parsed.outputPreview).toContain("Paris.");
 });
 
 test("parseZincCliOutput tolerates missing prefill lines and parses output text", () => {

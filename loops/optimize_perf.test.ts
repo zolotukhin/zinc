@@ -330,6 +330,15 @@ describe("controller helpers", () => {
     expect(prompt).toContain("long-context prefill benchmark");
   });
 
+  test("RDNA Qwen35 prefill effort is registered with the flagship benchmark contract", () => {
+    const spec = getEffortSpec(6);
+    expect(spec).not.toBeNull();
+    expect(spec?.doc).toBe("MULTI_HOUR_EFFORT_6_RDNA_QWEN35_PREFILL.md");
+    expect(spec?.primaryMetricLabel).toBe("prefill tok/s");
+    expect(spec?.summary).toContain("RDNA Qwen35 prefill");
+    expect(spec?.benchmarkMethod).toContain("Qwen3.5-35B flagship workload");
+  });
+
   test("resume compatibility rejects state from older benchmark regimes", () => {
     const spec = getEffortSpec(3);
     expect(spec).not.toBeNull();

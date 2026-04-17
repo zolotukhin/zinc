@@ -56,6 +56,10 @@ function metricValue(summary: any) {
   return summary?.median ?? summary?.avg ?? null;
 }
 
+function hasValue(value: number | null | undefined) {
+  return value != null && !Number.isNaN(value);
+}
+
 function formatNumber(value: number | null | undefined, digits = 1) {
   if (value == null || Number.isNaN(value)) return 'n/a';
   return value.toFixed(digits);
@@ -508,6 +512,10 @@ const jsonLd = {
                     </thead>
                     <tbody>
                       {rows.map((row) => {
+                        const zincPrompt = promptValue(row.scenario);
+                        const baselinePrompt = baselinePromptValue(row.scenario);
+                        const zincDecode = decodeValue(row.scenario);
+                        const baselineDecode = baselineDecodeValue(row.scenario);
                         const promptRatio = promptRatioValue(row.scenario);
                         const decodeRatio = decodeRatioValue(row.scenario);
                         const status = scenarioStatus(row.scenario);
@@ -529,48 +537,80 @@ const jsonLd = {
                               </div>
                             </td>
                             <td>
-                              <div class="compare-stack">
-                                <div class="backend-line">
-                                  <span class="backend-pill zinc">ZINC</span>
-                                  <div>
-                                    <strong>{formatMetric(promptValue(row.scenario), 'tok/s')}</strong>
-                                    <small>{formatMetric(prefillMsValue(row.scenario), 'ms')}</small>
+                              {hasValue(zincPrompt) || hasValue(baselinePrompt) ? (
+                                <div class="compare-stack">
+                                  <div class="backend-line">
+                                    <span class="backend-pill zinc">ZINC</span>
+                                    <div>
+                                      <strong>{formatMetric(zincPrompt, 'tok/s')}</strong>
+                                      <small>{formatMetric(prefillMsValue(row.scenario), 'ms')}</small>
+                                    </div>
                                   </div>
-                                </div>
-                                <div class="backend-line baseline">
-                                  <span class="backend-pill baseline">llama.cpp</span>
-                                  <div>
-                                    <strong>{formatMetric(baselinePromptValue(row.scenario), 'tok/s')}</strong>
-                                    <small>{formatMetric(metricValue(row.scenario?.baseline?.prefill_ms), 'ms')}</small>
+                                  <div class="backend-line baseline">
+                                    <span class="backend-pill baseline">llama.cpp</span>
+                                    <div>
+                                      <strong>{formatMetric(baselinePrompt, 'tok/s')}</strong>
+                                      <small>{formatMetric(metricValue(row.scenario?.baseline?.prefill_ms), 'ms')}</small>
+                                    </div>
                                   </div>
+                                  {hasValue(promptRatio) ? (
+                                    <>
+                                      <strong class:list={['ratio-pill', ratioTone(promptRatio)]}>{formatPercent(promptRatio)}</strong>
+                                      <div class="meter-track">
+                                        <div class:list={['meter-fill', ratioTone(promptRatio)]} style={`width:${meterWidth(promptRatio)}%`}></div>
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <div class="metric-missing">
+                                      <strong>Telemetry pending</strong>
+                                      <small>Prompt throughput was not published for one side of this comparison.</small>
+                                    </div>
+                                  )}
                                 </div>
-                                <strong class:list={['ratio-pill', ratioTone(promptRatio)]}>{formatPercent(promptRatio)}</strong>
-                                <div class="meter-track">
-                                  <div class:list={['meter-fill', ratioTone(promptRatio)]} style={`width:${meterWidth(promptRatio)}%`}></div>
+                              ) : (
+                                <div class="metric-missing">
+                                  <strong>Telemetry pending</strong>
+                                  <small>Prefill throughput was not published for this run.</small>
                                 </div>
-                              </div>
+                              )}
                             </td>
                             <td>
-                              <div class="compare-stack">
-                                <div class="backend-line">
-                                  <span class="backend-pill zinc">ZINC</span>
-                                  <div>
-                                    <strong>{formatMetric(decodeValue(row.scenario), 'tok/s')}</strong>
-                                    <small>{formatMetric(metricValue(row.scenario?.zinc?.ms_per_token), 'ms/tok')}</small>
+                              {hasValue(zincDecode) || hasValue(baselineDecode) ? (
+                                <div class="compare-stack">
+                                  <div class="backend-line">
+                                    <span class="backend-pill zinc">ZINC</span>
+                                    <div>
+                                      <strong>{formatMetric(zincDecode, 'tok/s')}</strong>
+                                      <small>{formatMetric(metricValue(row.scenario?.zinc?.ms_per_token), 'ms/tok')}</small>
+                                    </div>
                                   </div>
-                                </div>
-                                <div class="backend-line baseline">
-                                  <span class="backend-pill baseline">llama.cpp</span>
-                                  <div>
-                                    <strong>{formatMetric(baselineDecodeValue(row.scenario), 'tok/s')}</strong>
-                                    <small>{formatMetric(metricValue(row.scenario?.baseline?.ms_per_token), 'ms/tok')}</small>
+                                  <div class="backend-line baseline">
+                                    <span class="backend-pill baseline">llama.cpp</span>
+                                    <div>
+                                      <strong>{formatMetric(baselineDecode, 'tok/s')}</strong>
+                                      <small>{formatMetric(metricValue(row.scenario?.baseline?.ms_per_token), 'ms/tok')}</small>
+                                    </div>
                                   </div>
+                                  {hasValue(decodeRatio) ? (
+                                    <>
+                                      <strong class:list={['ratio-pill', ratioTone(decodeRatio)]}>{formatPercent(decodeRatio)}</strong>
+                                      <div class="meter-track">
+                                        <div class:list={['meter-fill', ratioTone(decodeRatio)]} style={`width:${meterWidth(decodeRatio)}%`}></div>
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <div class="metric-missing">
+                                      <strong>Comparison pending</strong>
+                                      <small>A same-machine decode ratio is not available for this row yet.</small>
+                                    </div>
+                                  )}
                                 </div>
-                                <strong class:list={['ratio-pill', ratioTone(decodeRatio)]}>{formatPercent(decodeRatio)}</strong>
-                                <div class="meter-track">
-                                  <div class:list={['meter-fill', ratioTone(decodeRatio)]} style={`width:${meterWidth(decodeRatio)}%`}></div>
+                              ) : (
+                                <div class="metric-missing">
+                                  <strong>Run missing</strong>
+                                  <small>No decode result was published for this row.</small>
                                 </div>
-                              </div>
+                              )}
                             </td>
                             <td class="status-cell">
                               <strong class:list={['status-pill', status.tone]}>{status.label}</strong>
@@ -1193,6 +1233,27 @@ const jsonLd = {
   .ratio-pill.neutral {
     background: color-mix(in srgb, #64748b 18%, transparent);
     color: #64748b;
+  }
+
+  .metric-missing {
+    display: grid;
+    gap: 0.2rem;
+    min-width: 170px;
+    padding: 0.75rem 0.85rem;
+    border-radius: 14px;
+    border: 1px dashed color-mix(in srgb, var(--color-border) 82%, #d97706 18%);
+    background: color-mix(in srgb, var(--bench-surface-soft) 86%, var(--color-bg) 14%);
+  }
+
+  .metric-missing strong {
+    display: block;
+    margin: 0;
+    font-size: 0.86rem;
+  }
+
+  .metric-missing small {
+    color: var(--color-text-muted);
+    line-height: 1.35;
   }
 
   .meter-track {
