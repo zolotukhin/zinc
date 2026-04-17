@@ -4,11 +4,14 @@ import {
   buildArtifact,
   buildComparison,
   buildMeasurementPhases,
+  canonicalModelIdFromPath,
+  detectRdnaServerStartupFailure,
   DEFAULT_LOCAL_MODEL_ROOT,
   defaultMetalCases,
   defaultMaxTokensForModelId,
   defaultPromptForModelId,
   defaultScenarioDefsForModel,
+  guessFamily,
   localZincCommand,
   mergeArtifacts,
   parseArgs,
@@ -73,11 +76,21 @@ test("GPT-OSS uses the chat prompt path in the performance suite", () => {
   expect(defaultMaxTokensForModelId("qwen3-8b-q4k-m")).toBe(8);
 });
 
-test("default Metal cases use managed cache ids and include Qwen 3.5", () => {
+test("default Metal cases use managed cache ids and include Qwen 3.5 and Qwen 3.6", () => {
   const cases = defaultMetalCases("/tmp/models");
   const qwen35 = cases.find((entry) => entry.id === "qwen35-35b-a3b-q4k-xl");
   expect(qwen35?.model_id).toBe("qwen35-35b-a3b-q4k-xl");
   expect(qwen35?.model_path).toBe("/tmp/models/qwen35-35b-a3b-q4k-xl/model.gguf");
+
+  const qwen36 = cases.find((entry) => entry.id === "qwen36-35b-a3b-q4k-xl");
+  expect(qwen36?.model_id).toBe("qwen36-35b-a3b-q4k-xl");
+  expect(qwen36?.model_path).toBe("/tmp/models/qwen36-35b-a3b-q4k-xl/model.gguf");
+});
+
+test("performance suite canonicalizes and labels Qwen 3.6 GGUFs", () => {
+  expect(canonicalModelIdFromPath("/tmp/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")).toBe("qwen36-35b-a3b-q4k-xl");
+  expect(canonicalModelIdFromPath("/tmp/models/qwen36-35b-a3b-q4k-xl/model.gguf")).toBe("qwen36-35b-a3b-q4k-xl");
+  expect(guessFamily("qwen36-35b-a3b-q4k-xl")).toBe("Qwen 3.6");
 });
 
 test("local ZINC command prefers managed model ids when using the default cache", () => {
@@ -108,6 +121,17 @@ test("RDNA ZINC command preserves chat prompt mode", () => {
   expect(cmd).toContain("./zig-out/bin/zinc");
   expect(cmd).toContain("--chat");
   expect(cmd).toContain("--prompt");
+});
+
+test("RDNA startup failure detection spots unsupported model architecture logs", () => {
+  const failure = detectRdnaServerStartupFailure(`
+llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'gemma4'
+srv load_model: failed to load model
+main: exiting due to model loading error
+`);
+
+  expect(failure).toBe("unknown model architecture: 'gemma4'");
+  expect(detectRdnaServerStartupFailure("server ready")).toBeNull();
 });
 
 test("benchmark suite uses a multi-scenario matrix instead of a single prompt", () => {

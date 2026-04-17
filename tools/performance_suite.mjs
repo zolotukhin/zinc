@@ -700,8 +700,38 @@ async function launchLocalLlamaServer(caseDef, serverPath, timeoutMs) {
   };
 }
 
-async function waitForHealthyRdnaServer(creds, port, timeoutMs) {
+export function detectRdnaServerStartupFailure(logText) {
+  if (!logText) return null;
+
+  const patterns = [
+    /unknown model architecture:\s*'[^']+'/i,
+    /error loading model architecture:/i,
+    /srv load_model:\s*failed to load model/i,
+    /main:\s*exiting due to model loading error/i,
+    /error loading model:/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = logText.match(pattern);
+    if (match) return match[0];
+  }
+
+  return null;
+}
+
+async function tailRdnaLog(creds, logPath, lines = 80) {
+  if (!logPath) return "";
+  const command = rdnaRemoteCommand(
+    `tail -n ${Math.max(1, lines)} ${shellQuote(logPath)} 2>/dev/null || true`,
+    creds,
+  );
+  const result = await runShell(command, { cwd: ROOT, timeoutMs: 10000 });
+  return result.stdout.trim();
+}
+
+async function waitForHealthyRdnaServer(creds, port, logPath, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  let lastLogTail = "";
   while (Date.now() < deadline) {
     try {
       await runShell(
@@ -710,11 +740,17 @@ async function waitForHealthyRdnaServer(creds, port, timeoutMs) {
       );
       return;
     } catch {
-      // Remote server still starting.
+      // Remote server may still be starting, or it may already have failed.
+      lastLogTail = await tailRdnaLog(creds, logPath);
+      const startupFailure = detectRdnaServerStartupFailure(lastLogTail);
+      if (startupFailure) {
+        throw new Error(`Remote llama-server failed to start: ${startupFailure}`);
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`Remote server on port ${port} did not become healthy within ${timeoutMs} ms`);
+  const detail = lastLogTail ? `\n${lastLogTail}` : "";
+  throw new Error(`Remote server on port ${port} did not become healthy within ${timeoutMs} ms${detail}`);
 }
 
 async function stopRdnaLlamaServer(creds, port) {
@@ -761,7 +797,7 @@ async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs) {
   await runShell(rdnaRemoteCommand(remote, creds), { cwd: ROOT, timeoutMs: 120000 });
 
   try {
-    await waitForHealthyRdnaServer(creds, port, Math.min(timeoutMs, 300000));
+    await waitForHealthyRdnaServer(creds, port, logPath, Math.min(timeoutMs, 300000));
   } catch (error) {
     await stopRdnaLlamaServer(creds, port);
     throw error;
@@ -1044,6 +1080,18 @@ export function defaultMetalCases(modelRoot) {
       max_tokens: defaultMaxTokensForModelId("qwen35-35b-a3b-q4k-xl"),
       notes: ["Managed-cache local Qwen 3.5 case on Apple Silicon"],
     },
+    {
+      id: "qwen36-35b-a3b-q4k-xl",
+      model_id: "qwen36-35b-a3b-q4k-xl",
+      label: "Qwen 3.6 35B A3B UD Q4_K_XL",
+      family: "Qwen 3.6",
+      quant: "Q4_K_XL",
+      model_path: modelPath(modelRoot, "qwen36-35b-a3b-q4k-xl"),
+      prompt_mode: "raw",
+      prompt: defaultPromptForModelId("qwen36-35b-a3b-q4k-xl"),
+      max_tokens: defaultMaxTokensForModelId("qwen36-35b-a3b-q4k-xl"),
+      notes: ["Managed-cache local Qwen 3.6 case on Apple Silicon"],
+    },
   ];
 }
 
@@ -1054,7 +1102,7 @@ function titleFromId(id) {
     .join(" ");
 }
 
-function canonicalModelIdFromPath(modelFile) {
+export function canonicalModelIdFromPath(modelFile) {
   const base = path.basename(modelFile);
   if (base === "model.gguf") {
     const parent = path.basename(path.dirname(modelFile));
@@ -1067,6 +1115,8 @@ function canonicalModelIdFromPath(modelFile) {
     .replace(/^bartowski[_-]/, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
+    .replace(/^qwen3-6-/, "qwen36-")
+    .replace(/^qwen-3-6-/, "qwen36-")
     .replace(/^qwen3-5-/, "qwen35-")
     .replace(/^qwen-3-5-/, "qwen35-")
     .replace(/^qwen-3-/, "qwen3-")
@@ -1075,11 +1125,12 @@ function canonicalModelIdFromPath(modelFile) {
     .replace(/-q([0-9])-k$/g, "-q$1k");
 }
 
-function guessFamily(id) {
+export function guessFamily(id) {
   if (id.startsWith("gemma4")) return "Gemma 4";
   if (id.startsWith("gemma3")) return "Gemma 3";
   if (id.startsWith("gemma")) return "Gemma";
   if (id.startsWith("gpt-oss")) return "GPT-OSS";
+  if (id.startsWith("qwen36")) return "Qwen 3.6";
   if (id.startsWith("qwen35")) return "Qwen 3.5";
   if (id.startsWith("qwen3")) return "Qwen 3";
   if (id.startsWith("qwen")) return "Qwen";
@@ -1589,6 +1640,7 @@ async function runRdnaTarget(args) {
     const baselineByScenario = new Map();
     let launchedServer = null;
     let triedLaunchingServer = false;
+    let serverLaunchFailure = null;
     try {
       for (const phase of phases) {
         const scenarioDef = phase.scenarioDef;
@@ -1620,8 +1672,9 @@ async function runRdnaTarget(args) {
           triedLaunchingServer = true;
           try {
             launchedServer = await launchRdnaLlamaServer(entry, creds, rdnaLlamaServer, args.timeoutMs);
-          } catch {
+          } catch (error) {
             launchedServer = null;
+            serverLaunchFailure = error;
           }
         }
 
@@ -1644,6 +1697,11 @@ async function runRdnaTarget(args) {
               unavailable_reason: `RDNA baseline failed: ${error.message.split("\n")[0]}`,
             };
           }
+        } else if (entry.baseline_enabled !== false && serverLaunchFailure) {
+          baseline = {
+            name: "llama.cpp",
+            unavailable_reason: `RDNA baseline failed: ${serverLaunchFailure.message.split("\n")[0]}`,
+          };
         } else if (entry.baseline_enabled !== false && rdnaLlamaCli) {
           try {
             const baselineRows = await runSeries({
