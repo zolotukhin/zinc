@@ -4,6 +4,7 @@ import {
   parseTokensGenerated,
   parseBandwidthUtil,
   parseEffectiveBW,
+  parsePrefillPhaseBudget,
   detectPhase,
   isGarbageOutput,
   isCoherentText,
@@ -235,5 +236,41 @@ describe("no hardcoded private info", () => {
     expect(src).toContain("ZINC_HOST");
     expect(src).toContain("ZINC_PORT");
     expect(src).toContain("ZINC_USER");
+  });
+});
+
+describe("parsePrefillPhaseBudget", () => {
+  const sample = [
+    "info(forward): Prefill: 154 tokens in 6000.0 ms (25.67 tok/s)",
+    "info(forward): Prefill profile: samples=154 avg embed=0.001 ms record=1.50 ms submit+wait=35.00 ms | totals embed=0.1 ms record=231.0 ms submit+wait=5390.0 ms",
+    "info(forward): Prefill GPU phases: per-tok attn=4.50 ms moe=10.40 ms shared=0.50 ms ssm=11.80 ms tail=0.90 ms embed=0.002 ms | totals attn=693.0 moe=1601.6 shared=77.0 ssm=1817.2 tail=138.6 embed=0.3",
+    "info(forward): Prefill MoE subphases totals: router=301.0 topk=120.0 gate_up=480.0 swiglu=80.0 down=540.0 weighted_acc=80.6 ms",
+    "info(forward): Prefill SSM subphases totals: proj=1300.0 conv=150.0 delta=210.0 gnorm=90.0 out=67.2 ms",
+  ].join("\n");
+
+  test("parses per-token averages, totals, MoE and SSM sub-buckets", () => {
+    const budget = parsePrefillPhaseBudget(sample);
+    expect(budget).not.toBeNull();
+    expect(budget!.perTokenMs.attn).toBeCloseTo(4.5, 2);
+    expect(budget!.perTokenMs.ssm).toBeCloseTo(11.8, 2);
+    expect(budget!.totalsMs.moe).toBeCloseTo(1601.6, 1);
+    expect(budget!.totalsMs.ssm).toBeCloseTo(1817.2, 1);
+    expect(budget!.moeTotalsMs.gate_up).toBeCloseTo(480.0, 1);
+    expect(budget!.ssmTotalsMs.proj).toBeCloseTo(1300.0, 1);
+  });
+
+  test("biggestBucket picks the largest non-embed total", () => {
+    const budget = parsePrefillPhaseBudget(sample)!;
+    expect(budget.biggestBucket?.name).toBe("ssm");
+    expect(budget.biggestBucket?.totalMs).toBeCloseTo(1817.2, 1);
+  });
+
+  test("returns null when the Prefill GPU phases line is missing", () => {
+    expect(parsePrefillPhaseBudget("no phase data here")).toBeNull();
+  });
+
+  test("tolerates ANSI color codes around the log line", () => {
+    const colored = `\x1b[2m${sample}\x1b[0m`;
+    expect(parsePrefillPhaseBudget(colored)).not.toBeNull();
   });
 });

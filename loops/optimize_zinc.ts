@@ -164,6 +164,70 @@ export function parseTokPerSec(output: string): number | null {
   return null;
 }
 
+/**
+ * Parse the per-phase prefill GPU profile. Only populated when the process
+ * ran with ZINC_PREFILL_PROFILE=1. Returns null if the line is absent.
+ *
+ * The format we parse is emitted by forward.zig:
+ *   Prefill GPU phases: per-tok attn=... ms moe=... ms shared=... ms ssm=... ms tail=... ms embed=... ms | totals attn=... moe=... shared=... ssm=... tail=... embed=...
+ *   Prefill MoE subphases totals: router=... topk=... gate_up=... swiglu=... down=... weighted_acc=... ms
+ *   Prefill SSM subphases totals: proj=... conv=... delta=... gnorm=... out=... ms
+ */
+export type PrefillPhaseBudget = {
+  // Per-token averages in milliseconds (one sample = one prompt token).
+  perTokenMs: Record<string, number>;
+  // Totals in milliseconds across the whole prompt.
+  totalsMs: Record<string, number>;
+  // MoE sub-bucket totals in milliseconds.
+  moeTotalsMs: Record<string, number>;
+  // SSM sub-bucket totals in milliseconds.
+  ssmTotalsMs: Record<string, number>;
+  // Cached "biggest top-level bucket" name for quick prompt inclusion.
+  biggestBucket: { name: string; totalMs: number } | null;
+};
+
+export function parsePrefillPhaseBudget(output: string): PrefillPhaseBudget | null {
+  // Strip ANSI escape codes so colorized logs still parse.
+  const cleaned = output.replace(/\x1b\[[0-9;]*m/g, "");
+  const phaseLine = cleaned.match(/Prefill GPU phases:\s*per-tok\s+([^\n|]+?)\s*\|\s*totals\s+([^\n]+)/i);
+  if (!phaseLine) return null;
+  const perTokenMs: Record<string, number> = {};
+  const totalsMs: Record<string, number> = {};
+  for (const [, name, value] of phaseLine[1].matchAll(/([a-z_]+)\s*=\s*(\d+\.?\d*)\s*ms/gi)) {
+    perTokenMs[name.toLowerCase()] = parseFloat(value);
+  }
+  for (const [, name, value] of phaseLine[2].matchAll(/([a-z_]+)\s*=\s*(\d+\.?\d*)/gi)) {
+    totalsMs[name.toLowerCase()] = parseFloat(value);
+  }
+
+  const moeLine = cleaned.match(/Prefill MoE subphases totals:\s*([^\n]+)/i);
+  const moeTotalsMs: Record<string, number> = {};
+  if (moeLine) {
+    for (const [, name, value] of moeLine[1].matchAll(/([a-z_]+)\s*=\s*(\d+\.?\d*)/gi)) {
+      moeTotalsMs[name.toLowerCase()] = parseFloat(value);
+    }
+  }
+
+  const ssmLine = cleaned.match(/Prefill SSM subphases totals:\s*([^\n]+)/i);
+  const ssmTotalsMs: Record<string, number> = {};
+  if (ssmLine) {
+    for (const [, name, value] of ssmLine[1].matchAll(/([a-z_]+)\s*=\s*(\d+\.?\d*)/gi)) {
+      ssmTotalsMs[name.toLowerCase()] = parseFloat(value);
+    }
+  }
+
+  let biggestBucket: { name: string; totalMs: number } | null = null;
+  for (const [name, value] of Object.entries(totalsMs)) {
+    // "embed" is tiny and not a real optimization target; skip.
+    if (name === "embed") continue;
+    if (!biggestBucket || value > biggestBucket.totalMs) {
+      biggestBucket = { name, totalMs: value };
+    }
+  }
+
+  return { perTokenMs, totalsMs, moeTotalsMs, ssmTotalsMs, biggestBucket };
+}
+
 /** Parse number of tokens generated from ZINC output. */
 export function parseTokensGenerated(output: string): number {
   const m = output.match(/Generated\s+(\d+)\s+tokens/i);

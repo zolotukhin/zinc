@@ -29,6 +29,8 @@ import {
   parseTokPerSec,
   parsePrefillTokPerSec,
   parseBandwidthUtil,
+  parsePrefillPhaseBudget,
+  type PrefillPhaseBudget,
 } from "./optimize_zinc";
 import { formatElapsed } from "./optimize_llm_tps";
 
@@ -162,6 +164,26 @@ type EffortSpec = {
   benchmarkPrompt: string;
   benchmarkMaxTokens: number;
   benchmarkMethod: string;
+  // Optional per-effort controller hints. These are rendered into the agent
+  // prompt so the loop can encode knowledge the base plan document doesn't
+  // (or shouldn't) encode itself.
+  //
+  // knownFlatCategories: descriptions of change patterns that have been
+  // empirically shown not to move the number on the target hardware. The
+  // agent is told not to re-attempt these without new supporting evidence.
+  //
+  // structuralSwingIdeas: concrete, scoped ideas the agent should pick from
+  // when the controller is in a stall-break mode (stalled >= threshold, or
+  // one foundation keep has already been banked). These are meant to be
+  // real engineering steps, not idea-bank candy — each one should be
+  // actionable in a single cycle and should compose with future cycles.
+  knownFlatCategories?: string[];
+  structuralSwingIdeas?: string[];
+  // Reference implementations the agent can read on disk. Only surfaced in
+  // the prompt once the loop has stalled — before that, the guidance is to
+  // work from the plan document and the in-tree code. The agent is free to
+  // ignore these; they are presented as options, not obligations.
+  referenceImplementations?: Array<{ path: string; focus: string }>;
 };
 
 const EFFORT_SPECS: Record<number, EffortSpec> = {
@@ -209,6 +231,31 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
     benchmarkPrompt: PREFILL_BENCHMARK_PROMPT,
     benchmarkMaxTokens: 8,
     benchmarkMethod: "long-context prefill benchmark on RDNA for the Qwen3.5-35B flagship workload",
+    knownFlatCategories: [
+      "Narrowing a single compute→compute barrier between successive dispatches to a buffer-scoped or multi-buffer barrier. Tried 7 times on RDNA4 (cycles 9, 17, 18, 19, 21, 22, 24 of the first run); cumulative movement below 0.25 tok/s. Do not re-attempt unless the barrier is structurally removed (not just narrowed) or a micro-benchmark shows a specific RADV path responds differently.",
+      "Adding phase/dispatch profiling without a downstream structural change in the same cycle. The ZINC_PREFILL_PROFILE=1 output already covers per-phase and MoE/SSM sub-bucket timing; the loop runs with that flag on baseline and after every accepted change, so the phase budget is always fresh in the prompt.",
+      "Re-layering prefill embedding dequant (CPU f32 cache / staging-only / interleaved). Cycles 14, 15, 23 of the first run explored these; the current upfront bulk dequant into host-mapped staging is the accepted equilibrium.",
+      "Pair-dispatch via recordBatchDispatch(num_cols=2) through the existing dmmv_q8_0_batch / dmmv_q4k_batch shaders. Cycle 8 of the second run measured -0.12 tok/s with flag on; cycle 9 rewrote the shader with proper wave64 parallelism (2 rows/WG × 64 threads + subgroupAdd, matching single-col) and STILL measured -0.8 tok/s with flag on. Root cause: the per-layer 'stage norm col0+col1, split 4 outputs' barrier-and-copy chain costs more than the weight-read amortization saves. The right fix is not num_cols=2 — it is llama.cpp's pattern of compile-time specialized DMMV variants at each of num_cols=1..8 AND switching to a proper matmul kernel (mul_mm) when N > 8.",
+      "Extending the prefill CB pipeline from 2-deep to 3-deep (cycle 2 of the second run): flat. Submit/wait is already saturated at 2-deep on the 154-token workload; the record+submit+wait gap is not the dominant cost.",
+    ],
+    structuralSwingIdeas: [
+      "Port llama.cpp's compile-time specialized DMMV design: pre-compile 8 variants of the Q8_0 DMMV shader (one per num_cols value 1..8) with num_cols baked in as a GLSL specialization constant so the inner loop unrolls. See /Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp line 267 (`mul_mat_vec_max_cols = 8`) and vulkan-shaders/mul_mat_vec_base.glsl for the NUM_COLS specialization pattern. This is the actual fix cycles 8/9 discovered is needed.",
+      "Switch to a proper multi-token matmul (mul_mm-style) for prefill when N > some threshold (llama.cpp uses 8). The SSM proj and MoE router DMMVs at 154-token prefill are M=~2048 × N=154 × K=2048 — that is a dense matmul, not a DMMV stack. Use the cooperative matrix path (src/shaders/coop_matmul.comp already exists in the tree). Reference: /Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp and mul_mm_cm2.comp.",
+      "Port llama.cpp's mul_mmq / Q8_1 input quantization pattern for prefill matmul: quantize the f32 input activations to Q8_1 once before the matmul, then the per-dispatch memory bandwidth drops by ~4×. See /Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp and mul_mmq.comp.",
+      "Step 5b: build per-chunk routing arrays — for a chunk of N prompt tokens, compute the N×top_k routing vector and invert it into per-expert token lists plus a permutation. Pure bookkeeping; no new kernels. Reference vllm's expert routing: /Users/zolotukhin/Workplace/vllm/vllm/model_executor/layers/fused_moe/.",
+      "Step 5c: run per-expert gate/up/down over the gathered token block once Step 5b lands. One larger matmul per active expert instead of N tiny per-token matvecs, then scatter outputs back via the permutation. This depends on Step 5b and the matmul kernel from idea #2.",
+      "Revert the dormant flag-gated pair-batch wiring (effort-6 run-2 cycles 1/3/5/7/9 now proven dead-end by cycles 8/9). Keep only `recordBatchDispatchPush` (cycle 1) if it has a cleaner design than the original and can be repurposed for the 8-way specialized shader in idea #1; otherwise revert that too. Cleaning dead code is real progress — the commit log currently advertises five foundation steps that do not pay.",
+    ],
+    referenceImplementations: [
+      {
+        path: "/Users/zolotukhin/Workplace/llama.cpp",
+        focus: "Vulkan backend at ggml/src/ggml-vulkan/. Specifically ggml-vulkan.cpp for pipeline selection (mul_mat_vec_max_cols = 8; routing to mul_mm when N > 8), vulkan-shaders/mul_mat_vec_base.glsl for the NUM_COLS specialization pattern, vulkan-shaders/mul_mm.comp and mul_mm_cm2.comp for dense matmul, vulkan-shaders/mul_mmq.comp and quantize_q8_1.comp for quantized-input matmul, vulkan-shaders/topk_moe.comp and count_experts.comp for MoE routing.",
+      },
+      {
+        path: "/Users/zolotukhin/Workplace/vllm",
+        focus: "Expert routing and fused MoE: vllm/model_executor/layers/fused_moe/. Continuous batching: vllm/core/scheduler.py. Attention backends: vllm/attention/backends/. Useful for understanding how production systems structure prefill vs decode separation and how experts are grouped by token.",
+      },
+    ],
   },
 };
 
@@ -227,8 +274,21 @@ const REVIEW_SUMMARY_LIMIT = 6;
 const SELF_REVIEW_EVERY = 10;
 const STALL_WARNING_THRESHOLD = 4;
 const FOUNDATION_KEEP_MAX_DROP_TPS = 0.25;
-const MAX_FOUNDATION_KEEPS_IN_A_ROW = 2;
+// After one foundation keep, the next cycle must either swing for a real win
+// or pick a different hotspot. We saw cycles 21/22/24 compound into a chain
+// of neutral barrier-narrowings that just filled the commit log with noise.
+const MAX_FOUNDATION_KEEPS_IN_A_ROW = 1;
 const MAX_CHANGED_FILES_IN_PROMPT = 10;
+// Every Nth cycle, if the loop is stalled, run a pivot prompt instead of a
+// normal cycle. The pivot prompt reviews recent committed foundations,
+// identifies dead-end dormant infra, and proposes 3 radically different
+// directions. The agent picks one and must measure it in-cycle.
+const PIVOT_CYCLE_EVERY = 10;
+const PIVOT_STALL_THRESHOLD = 3;
+// When stalled this long, inject an explicit pointer to reference
+// implementations on disk (llama.cpp, vllm) so the agent can steal
+// known-good patterns instead of guessing.
+const REFERENCE_IMPLS_STALL_THRESHOLD = 4;
 
 // Multiple prompts to catch different failure modes:
 // - Short factual: catches total corruption
@@ -516,7 +576,191 @@ export type LoopState = {
   failedApproaches: string[];
   ideas: string[];
   reviewSummaries: string[];
+  // Per-phase prefill GPU profile captured at baseline and refreshed after
+  // every accepted keep. Only populated when the effort's metricMode is
+  // "prefill" and the runtime was invoked with ZINC_PREFILL_PROFILE=1.
+  phaseBudget?: PrefillPhaseBudget | null;
+  phaseBudgetCycle?: number | null;
+  // Aggregated loop-health metrics recomputed on every save. Cheap to
+  // recompute from `cycles` but materialized here so a reader can read the
+  // health of a run without knowing the full per-cycle schema.
+  runMetrics?: RunMetrics;
 };
+
+// ── Metrics ────────────────────────────────────────────────────────────────
+//
+// These are deliberately not tracked per cycle inline; they are re-derived
+// from `cycles[]` + `bestTokPerSec` on every save. That lets a loop change
+// (new heuristics, new classifiers) retroactively re-score old runs without
+// a migration. The per-cycle fields we compute here are:
+//
+//   durationMs       — time between the previous cycle's timestamp and this
+//                      one's. First cycle is measured from runStartedAt.
+//   introducedFlag   — true if this cycle's description/self-analysis added
+//                      a ZINC_* env flag (see introducesRuntimeFlag).
+//   measuredFlagOn   — true if the self-analysis cites a flag-on tok/s
+//                      number in the same cycle.
+//   citedReference   — true if the self-analysis references one of the
+//                      paths in the effort's referenceImplementations list.
+//   attackedBucket   — a rough classification of which top-level phase
+//                      bucket the cycle was targeting (attn/moe/ssm/...).
+//
+// Aggregate metrics roll up from these and answer the "is this loop
+// actually improving" question quickly.
+export type CycleMetrics = {
+  cycle: number;
+  durationMs: number;
+  introducedFlag: boolean;
+  measuredFlagOn: boolean;
+  citedReference: boolean;
+  attackedBucket: string | null;
+  // Information-value score the agent can see in the analyze report:
+  //   perf_keep       — moved the primary metric.
+  //   measured_dead   — flag-on measurement proved a hypothesis wrong.
+  //                     This IS progress even though tok/s didn't move.
+  //   dormant_keep    — foundation commit without in-cycle flag-on
+  //                     measurement. Suspicious; may turn into dead weight.
+  //   broken          — candidate build/coherence broke.
+  //   no_op           — no source changes.
+  //   revert          — not kept; may or may not have produced a finding.
+  informationValue:
+    | "perf_keep"
+    | "measured_dead"
+    | "dormant_keep"
+    | "broken"
+    | "no_op"
+    | "revert";
+};
+
+export type RunMetrics = {
+  totalCycles: number;
+  perfKeeps: number;
+  foundationKeeps: number;
+  reverts: number;
+  brokenCycles: number;
+  noOpCycles: number;
+  // Time accounting.
+  totalCycleMs: number;
+  averageCycleMs: number;
+  // tok/s per hour of agent time. Positive is forward progress; zero means
+  // we are burning agent time without moving the number.
+  tpsGainPerHour: number;
+  absoluteTpsGain: number;
+  // Dormant vs real foundation ratio. Dormant = foundation keep without an
+  // in-cycle flag-on measurement. A high dormant count is the specific
+  // failure mode we want to catch early (effort-6 run 2 cycles 1/3/5/7/9).
+  dormantFoundations: number;
+  measuredFoundations: number;
+  // Phase-bucket coverage: how many cycles attacked each top-level bucket.
+  bucketCoverage: Record<string, number>;
+  // External references used: by stall-tier cycles, did the agent cite
+  // llama.cpp / vllm when the references were surfaced in the prompt?
+  cyclesCitingReferences: number;
+  // Diagnostic breakdown: how many cycles produced a measured finding
+  // (useful information) vs just churn.
+  cyclesProducingInformation: number;
+};
+
+export function classifyCycleMetrics(
+  cycle: CycleRecord,
+  previousTimestamp: string,
+  referencePaths: string[],
+): CycleMetrics {
+  const prev = new Date(previousTimestamp).getTime();
+  const now = new Date(cycle.timestamp).getTime();
+  const durationMs = Number.isFinite(prev) && Number.isFinite(now) && now > prev ? now - prev : 0;
+
+  const pseudoReport: AgentReport = {
+    description: cycle.description ?? "",
+    selfAnalysis: cycle.selfAnalysis ?? "",
+    nextIdeas: cycle.nextIdeas ?? [],
+    stepKind: cycle.stepKind ?? "unknown",
+    rawText: `${cycle.description}\n${cycle.selfAnalysis}`,
+  };
+  const introducedFlag = introducesRuntimeFlag(pseudoReport, cycle.changedFiles ?? []);
+  const measuredFlagOn = hasFlagOnMeasurementEvidence(pseudoReport);
+
+  const haystack = (cycle.description + "\n" + (cycle.selfAnalysis ?? "")).toLowerCase();
+  const citedReference = referencePaths.some((p) => haystack.includes(p.toLowerCase()))
+    || /llama\.cpp|vllm/i.test(haystack);
+
+  let attackedBucket: string | null = null;
+  if (/ssm[_ ]?proj|ssm_|\bssm\b/.test(haystack)) attackedBucket = "ssm";
+  else if (/\bmoe\b|router|expert|gate_up|gate\/up|swiglu|routed/.test(haystack)) attackedBucket = "moe";
+  else if (/\battn|attention|flash[_ ]?attn|\bq[_ ]?proj|\bk[_ ]?proj|\bv[_ ]?proj|rope/.test(haystack)) attackedBucket = "attn";
+  else if (/shared[_ ]expert|shared[_ ]proj/.test(haystack)) attackedBucket = "shared";
+  else if (/\btail\b|final[_ ]norm|lm[_ ]head|output[_ ]layer/.test(haystack)) attackedBucket = "tail";
+  else if (/barrier|submit|command[_ ]buffer/.test(haystack)) attackedBucket = "sync";
+  else if (/embed|dequant/.test(haystack)) attackedBucket = "embed";
+
+  let informationValue: CycleMetrics["informationValue"] = "revert";
+  if (cycle.broken) informationValue = "broken";
+  else if (cycle.improved) informationValue = "perf_keep";
+  else if (cycle.foundationKeep) informationValue = measuredFlagOn ? "dormant_keep" : "dormant_keep";
+  else if ((cycle.changedFiles?.length ?? 0) === 0) informationValue = "no_op";
+  else if (measuredFlagOn) informationValue = "measured_dead";
+
+  if (cycle.foundationKeep && measuredFlagOn) {
+    // Foundation keep that actually measured flag-on is more valuable than a
+    // pure dormant commit.
+    informationValue = "measured_dead";
+  }
+
+  return { cycle: cycle.cycle, durationMs, introducedFlag, measuredFlagOn, citedReference, attackedBucket, informationValue };
+}
+
+export function computeRunMetrics(state: LoopState, referencePaths: string[] = []): RunMetrics {
+  const metrics: CycleMetrics[] = [];
+  let prevTs = state.runStartedAt;
+  for (const c of state.cycles) {
+    metrics.push(classifyCycleMetrics(c, prevTs, referencePaths));
+    prevTs = c.timestamp;
+  }
+
+  const totalCycleMs = metrics.reduce((s, m) => s + m.durationMs, 0);
+  const perfKeeps = state.cycles.filter((c) => c.improved).length;
+  const foundationKeeps = state.cycles.filter((c) => c.foundationKeep).length;
+  const reverts = state.cycles.filter((c) => !c.kept && !c.broken && (c.changedFiles?.length ?? 0) > 0).length;
+  const brokenCycles = state.cycles.filter((c) => c.broken).length;
+  const noOpCycles = state.cycles.filter((c) => (c.changedFiles?.length ?? 0) === 0).length;
+
+  const dormantFoundations = state.cycles.filter((c, i) => c.foundationKeep && !metrics[i].measuredFlagOn).length;
+  const measuredFoundations = foundationKeeps - dormantFoundations;
+
+  const bucketCoverage: Record<string, number> = {};
+  for (const m of metrics) {
+    if (!m.attackedBucket) continue;
+    bucketCoverage[m.attackedBucket] = (bucketCoverage[m.attackedBucket] ?? 0) + 1;
+  }
+
+  const cyclesCitingReferences = metrics.filter((m) => m.citedReference).length;
+  const cyclesProducingInformation = metrics.filter((m) =>
+    m.informationValue === "perf_keep" || m.informationValue === "measured_dead"
+  ).length;
+
+  const baselineTps = state.cycles[0]?.tokPerSec ?? state.bestResult?.tokPerSec ?? state.bestTokPerSec;
+  const absoluteTpsGain = state.bestTokPerSec - (state.bestResult?.cycle === 0 ? state.bestResult.tokPerSec ?? 0 : baselineTps ?? 0);
+  const hoursElapsed = totalCycleMs / 1000 / 60 / 60;
+  const tpsGainPerHour = hoursElapsed > 0 ? absoluteTpsGain / hoursElapsed : 0;
+
+  return {
+    totalCycles: state.cycles.length,
+    perfKeeps,
+    foundationKeeps,
+    reverts,
+    brokenCycles,
+    noOpCycles,
+    totalCycleMs,
+    averageCycleMs: state.cycles.length > 0 ? totalCycleMs / state.cycles.length : 0,
+    tpsGainPerHour,
+    absoluteTpsGain,
+    dormantFoundations,
+    measuredFoundations,
+    bucketCoverage,
+    cyclesCitingReferences,
+    cyclesProducingInformation,
+  };
+}
 
 export type PromptContext = {
   cycles: CycleRecord[];
@@ -526,6 +770,10 @@ export type PromptContext = {
   consecutiveFoundationKeeps: number;
   reviewSummary: string | null;
   bestPerf: BenchCheckpoint | null;
+  // Latest parsed per-phase prefill profile. Null when unavailable (decode
+  // efforts, or when the baseline profile run did not emit phase data).
+  phaseBudget?: PrefillPhaseBudget | null;
+  phaseBudgetCycle?: number | null;
 };
 
 function canonicalizeMemoryEntry(text: string): string {
@@ -599,6 +847,40 @@ function formatSampleList(samples: number[], digits = 2): string {
 function summarizeBenchMetric(value: number | null, samples: number[], unit: string, digits = 2): string {
   if (value == null) return "unknown";
   return `${value.toFixed(digits)} ${unit}${formatSampleList(samples, digits)}`;
+}
+
+export function formatPhaseBudget(
+  budget: PrefillPhaseBudget | null | undefined,
+  capturedAtCycle: number | null | undefined,
+): string {
+  if (!budget) {
+    return "- (no phase profile captured yet; baseline will collect one)";
+  }
+  const ordered = Object.entries(budget.totalsMs)
+    .filter(([name]) => name !== "embed")
+    .sort((a, b) => b[1] - a[1]);
+  const lines: string[] = [];
+  const age = capturedAtCycle != null ? ` (captured at cycle ${capturedAtCycle})` : "";
+  lines.push(`- Top-level totals (ms)${age}:`);
+  for (const [name, value] of ordered) {
+    const perTok = budget.perTokenMs[name];
+    const perTokStr = perTok != null ? `, ${perTok.toFixed(2)} ms/tok avg` : "";
+    lines.push(`  ${name}: ${value.toFixed(1)} ms${perTokStr}`);
+  }
+  if (Object.keys(budget.moeTotalsMs).length > 0) {
+    const moe = Object.entries(budget.moeTotalsMs).sort((a, b) => b[1] - a[1]);
+    lines.push(`- MoE sub-buckets (ms): ${moe.map(([n, v]) => `${n}=${v.toFixed(1)}`).join(", ")}`);
+  }
+  if (Object.keys(budget.ssmTotalsMs).length > 0) {
+    const ssm = Object.entries(budget.ssmTotalsMs).sort((a, b) => b[1] - a[1]);
+    lines.push(`- SSM sub-buckets (ms): ${ssm.map(([n, v]) => `${n}=${v.toFixed(1)}`).join(", ")}`);
+  }
+  if (budget.biggestBucket) {
+    lines.push(
+      `- Biggest top-level bucket: ${budget.biggestBucket.name} (${budget.biggestBucket.totalMs.toFixed(1)} ms). Target this unless a more specific sub-bucket is clearly larger.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 function tailHistory(history: string, maxLines = HISTORY_LINES_IN_PROMPT): string {
@@ -746,11 +1028,32 @@ export function buildAnalysisReport(state: LoopState): string {
   const review = state.reviewSummaries.at(-1) ?? buildSelfReview(state);
   const metricLabel = getEffortSpec(state.effort)?.primaryMetricLabel ?? "tok/s";
 
+  const spec = getEffortSpec(state.effort);
+  const refPaths = spec?.referenceImplementations?.map((r) => r.path) ?? [];
+  const runMetrics = state.runMetrics ?? computeRunMetrics(state, refPaths);
+  const bucketLines = Object.entries(runMetrics.bucketCoverage)
+    .sort((a, b) => b[1] - a[1])
+    .map(([bucket, count]) => `  - ${bucket}: ${count}`);
+  const hours = runMetrics.totalCycleMs / 1000 / 60 / 60;
+  const dormantShare = runMetrics.foundationKeeps > 0
+    ? Math.round((runMetrics.dormantFoundations / runMetrics.foundationKeeps) * 100)
+    : 0;
+
   return [
     `Run started: ${state.runStartedAt}`,
     `Cycles: ${total} total, ${improved} perf keeps, ${foundation} foundation keeps, ${reverted} reverted, ${broken} broken`,
     `Best checkpoint (${metricLabel}): ${state.bestTokPerSec.toFixed(2)} tok/s (cycle ${state.bestCycle ?? "?"}${state.bestCommitHash ? `, ${state.bestCommitHash.slice(0, 8)}` : ""})`,
     `Current stall count: ${state.stalledCycles}`,
+    "",
+    "Loop health:",
+    `  Agent time spent: ${hours.toFixed(2)} h (avg ${(runMetrics.averageCycleMs / 1000 / 60).toFixed(1)} min/cycle)`,
+    `  tok/s gain per hour of agent time: ${runMetrics.tpsGainPerHour.toFixed(3)}`,
+    `  Cycles producing information (perf_keep + measured_dead): ${runMetrics.cyclesProducingInformation}/${runMetrics.totalCycles}`,
+    `  Dormant foundations (flag-gated, no in-cycle flag-on measurement): ${runMetrics.dormantFoundations}/${runMetrics.foundationKeeps} (${dormantShare}%)`,
+    `  Cycles citing reference implementations: ${runMetrics.cyclesCitingReferences}`,
+    "",
+    "Phase bucket coverage:",
+    bucketLines.length > 0 ? bucketLines.join("\n") : "  (none yet)",
     "",
     "Recent review:",
     review || "No review yet.",
@@ -774,6 +1077,23 @@ export function improvementThreshold(currentTokPerSec: number | null): number {
   return Math.max(MIN_IMPROVEMENT_ABS_TPS, currentTokPerSec * MIN_IMPROVEMENT_PCT);
 }
 
+/**
+ * Pivot cycles fire every PIVOT_CYCLE_EVERY cycles when the loop has been
+ * stalled for at least PIVOT_STALL_THRESHOLD cycles. The goal is to force
+ * a review of committed foundations and a deliberate pivot instead of
+ * another speculative optimization on top of a pile of dormant wiring.
+ *
+ * Returns true when cycle N > 0, (N % PIVOT_CYCLE_EVERY) === 0, and the
+ * controller is stalled. If the controller is actively making progress
+ * (stalled below threshold) we skip the pivot — no need to second-guess
+ * a working direction.
+ */
+export function shouldRunPivotCycle(cycleNum: number, context: PromptContext | null): boolean {
+  if (cycleNum <= 0 || cycleNum % PIVOT_CYCLE_EVERY !== 0) return false;
+  if (!context) return false;
+  return context.stalledCycles >= PIVOT_STALL_THRESHOLD;
+}
+
 export function isMaterialImprovement(candidate: BenchResult, currentBest: BenchResult): boolean {
   if (candidate.tokPerSec == null) return false;
   const threshold = improvementThreshold(currentBest.tokPerSec);
@@ -789,8 +1109,18 @@ export function buildAgentPrompt(
   history: string,
   model: string,
   context: PromptContext | null = null,
-  options: { primaryMetricLabel?: string; benchmarkMethod?: string } = {},
+  options: {
+    primaryMetricLabel?: string;
+    benchmarkMethod?: string;
+    knownFlatCategories?: string[];
+    structuralSwingIdeas?: string[];
+    referenceImplementations?: Array<{ path: string; focus: string }>;
+    mode?: "normal" | "pivot";
+  } = {},
 ): string {
+  if (options.mode === "pivot") {
+    return buildPivotPrompt(plan, originalBaseline, currentBest, cycleNum, model, context, options);
+  }
   const modelTarget = MODELS[model] ?? MODELS.qwen35b;
   const sanityCheckPrompt = coherencePromptForMode(
     COHERENCE_CHECKS[0],
@@ -816,6 +1146,42 @@ export function buildAgentPrompt(
     : context && context.consecutiveFoundationKeeps > 0
       ? "HARVEST"
       : "ADVANCE";
+
+  const phaseBudgetBlock = options.primaryMetricLabel === "prefill tok/s"
+    ? formatPhaseBudget(context?.phaseBudget ?? null, context?.phaseBudgetCycle ?? null)
+    : null;
+
+  const knownFlatBlock = options.knownFlatCategories?.length
+    ? options.knownFlatCategories.map((entry, i) => `${i + 1}. ${entry}`).join("\n")
+    : null;
+
+  const swingIdeasBlock = options.structuralSwingIdeas?.length
+    ? options.structuralSwingIdeas.map((entry, i) => `${i + 1}. ${entry}`).join("\n")
+    : null;
+
+  const stalled = context && context.stalledCycles >= STALL_WARNING_THRESHOLD;
+  const hasBankedFoundation = context && context.consecutiveFoundationKeeps > 0;
+  const mustSwing = stalled || hasBankedFoundation;
+
+  // Reference implementations only surface once we're stalled. Before that,
+  // the agent should work from the plan and the in-tree code; surfacing
+  // external references earlier creates prompt noise and encourages
+  // reflexive "look at llama.cpp" cycles when the local plan is still
+  // doing its job.
+  const showReferences =
+    options.referenceImplementations?.length &&
+    context &&
+    context.stalledCycles >= REFERENCE_IMPLS_STALL_THRESHOLD;
+  const referencesBlock = showReferences
+    ? options.referenceImplementations!
+        .map((r, i) => `${i + 1}. ${r.path} — ${r.focus}`)
+        .join("\n")
+    : null;
+
+  const taskDirective = mustSwing && swingIdeasBlock
+    ? `STRUCTURAL SWING REQUIRED. The controller is in ${controllerMode} mode (stall=${context?.stalledCycles ?? 0}, banked foundations=${context?.consecutiveFoundationKeeps ?? 0}). You MUST pick ONE idea from the Structural Swing Ideas block below (or an equally-concrete alternative that attacks a named top-level bucket from the Phase Budget above), not another cosmetic micro-optimization. Cycles that come back with another barrier-narrowing / cosmetic variation will be rejected as a repeat dead end.`
+    : "Implement ONE concrete step from the optimization plan above. Pick the next unfinished step.";
+
   return `You are implementing a performance optimization for the ZINC Vulkan inference engine.
 
 ## Optimization Plan
@@ -843,11 +1209,12 @@ ${currentVsBestNote}
 - primary metric (${primaryMetricLabel}): ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}
 - output: "${originalBaseline.outputText}"
-
+${phaseBudgetBlock ? `\n## Current Prefill Phase Budget (ZINC_PREFILL_PROFILE=1)\n${phaseBudgetBlock}\nUse this budget to pick the biggest remaining bucket. Do not propose batching/kernel work for a bucket whose total is clearly smaller than another untried bucket.\n` : ""}${knownFlatBlock ? `\n## Known Flat Territory on This Target (do not re-attempt without new evidence)\n${knownFlatBlock}\n` : ""}${swingIdeasBlock ? `\n## Structural Swing Ideas (pick one when controller wants a swing)\n${swingIdeasBlock}\n` : ""}${referencesBlock ? `\n## Reference Implementations on Disk (read when stuck)\n${referencesBlock}\n\nThese are full checkouts of production inference engines. Skim the specific files named above; do not copy wholesale, but steal the architectural patterns (pipeline specialization constants, kernel selection thresholds, MoE routing shapes). If a reference makes an idea obvious, say so in your self-analysis so the next cycle knows the pattern came from a proven codebase.\n` : ""}
 ## Controller State
 - mode: ${controllerMode}
 - stalled cycles without a new best checkpoint: ${context?.stalledCycles ?? 0}
 - consecutive neutral foundation keeps: ${context?.consecutiveFoundationKeeps ?? 0}
+- structural swing required this cycle: ${mustSwing ? "YES" : "no"}
 
 ## Recent Cycle Ledger
 ${recentCyclesBlock}
@@ -865,10 +1232,13 @@ ${failedBlock}
 ${ideasBlock}
 
 ## Your Task (Cycle ${cycleNum})
-Implement ONE concrete step from the optimization plan above. Pick the next unfinished step.
+${taskDirective}
 Your change must beat the best accepted performance checkpoint above, not the original run baseline.
-If controller mode is STEP_BACK, do not repeat the same hotspot as the last rejected cycles. Either choose a smaller prerequisite, finish a kept enablement step, or switch to a different bottleneck category.
-If you intentionally do a plumbing/enabling step that may be performance-neutral this cycle, mark it as enablement and explain exactly which next step it unlocks.
+If controller mode is STEP_BACK, do not repeat the same hotspot as the last rejected cycles. Either choose a smaller prerequisite, finish a kept enablement step, or switch to a different bottleneck category — but it MUST still be a concrete structural step, not a cosmetic variation of a known-flat pattern.
+If you intentionally do a plumbing/enabling step that may be performance-neutral this cycle, mark it as enablement and explain exactly which next step it unlocks and which top-level phase bucket it will eventually attack.
+
+**Flag-gated changes must be measured in the same cycle.** If your change introduces a new runtime env flag (ZINC_*), you MUST run the benchmark both with the flag OFF and with it ON, cite both tok/s numbers in your SELF_ANALYSIS, and make an explicit keep/revert decision. Dormant flag-gated infrastructure that is only validated in a later cycle has cost us ~5 committed foundation cycles; the loop now rejects flag-gated foundation keeps that lack a flag-on measurement.
+
 Do not use sub-agents, delegation, spawn_agent, or wait_agent. Work directly in this repo.
 Before editing any file, re-read the exact current contents from disk. Do not rely on stale context, guessed line numbers, or cached snippets.
 
@@ -916,6 +1286,118 @@ After making your change, print these lines:
 @@@NEXT_IDEAS: <semicolon-separated follow-up ideas>`;
 }
 
+/**
+ * Pivot cycle prompt. Fires every PIVOT_CYCLE_EVERY cycles when the loop has
+ * been stalled for PIVOT_STALL_THRESHOLD+ cycles. Goals:
+ *   1. Force the agent to review committed foundations and identify dead-end
+ *      dormant infrastructure.
+ *   2. Allow and encourage reverting dormant commits that have been disproved
+ *      by later measurement cycles.
+ *   3. Push the agent to propose 3 radically different directions (drawing
+ *      from reference implementations if available) and pick one that can
+ *      be MEASURED IN THIS SAME CYCLE, not deferred.
+ */
+export function buildPivotPrompt(
+  plan: string,
+  originalBaseline: BenchResult,
+  currentBest: BenchResult,
+  cycleNum: number,
+  model: string,
+  context: PromptContext | null,
+  options: {
+    primaryMetricLabel?: string;
+    benchmarkMethod?: string;
+    knownFlatCategories?: string[];
+    structuralSwingIdeas?: string[];
+    referenceImplementations?: Array<{ path: string; focus: string }>;
+  },
+): string {
+  const modelTarget = MODELS[model] ?? MODELS.qwen35b;
+  const sanityCheckPrompt = coherencePromptForMode(
+    COHERENCE_CHECKS[0],
+    coherencePromptModeForModel(modelTarget),
+  );
+  const primaryMetricLabel = options.primaryMetricLabel ?? "decode tok/s";
+  const benchmarkMethod = options.benchmarkMethod ?? "primary benchmark";
+  const recentCyclesBlock = context ? buildRecentCycleBlock(context.cycles) : "  (state unavailable)";
+  const committedFoundations = context
+    ? context.cycles
+        .filter((c) => c.kept && (c.foundationKeep || c.improved))
+        .slice(-10)
+        .map((c) => {
+          const hash = c.commitHash ? c.commitHash.slice(0, 8) : "?";
+          const kind = c.improved ? "PERF" : "FOUND";
+          return `  - cycle ${c.cycle} [${kind} ${hash}] ${trunc(c.description, 110)}`;
+        })
+        .join("\n") || "  (none)"
+    : "  (state unavailable)";
+  const phaseBudgetBlock = primaryMetricLabel === "prefill tok/s"
+    ? formatPhaseBudget(context?.phaseBudget ?? null, context?.phaseBudgetCycle ?? null)
+    : null;
+  const knownFlatBlock = options.knownFlatCategories?.length
+    ? options.knownFlatCategories.map((entry, i) => `${i + 1}. ${entry}`).join("\n")
+    : null;
+  const swingIdeasBlock = options.structuralSwingIdeas?.length
+    ? options.structuralSwingIdeas.map((entry, i) => `${i + 1}. ${entry}`).join("\n")
+    : null;
+  const referencesBlock = options.referenceImplementations?.length
+    ? options.referenceImplementations
+        .map((r, i) => `${i + 1}. ${r.path} — ${r.focus}`)
+        .join("\n")
+    : null;
+
+  return `You are in a PIVOT cycle for the ZINC Vulkan inference engine. The loop has been stalled — recent cycles are not moving the primary metric. Before another speculative change, stop and review.
+
+## Optimization Plan
+${plan}
+
+## Benchmark Focus
+- primary metric: ${primaryMetricLabel}
+- benchmark method: ${benchmarkMethod}
+
+## Current Best Checkpoint
+- ${summarizeBenchMetric(currentBest.tokPerSec, currentBest.tokPerSecSamples, "tok/s")}
+- stalled for ${context?.stalledCycles ?? 0} cycles
+- consecutive neutral foundation keeps: ${context?.consecutiveFoundationKeeps ?? 0}
+${phaseBudgetBlock ? `\n## Current Prefill Phase Budget\n${phaseBudgetBlock}\n` : ""}
+## Committed Foundations From Recent Cycles
+${committedFoundations}
+
+## Recent Cycle Ledger
+${recentCyclesBlock}
+${knownFlatBlock ? `\n## Known Flat Territory (do not re-attempt without new evidence)\n${knownFlatBlock}\n` : ""}${swingIdeasBlock ? `\n## Candidate Directions\n${swingIdeasBlock}\n` : ""}${referencesBlock ? `\n## Reference Implementations on Disk\n${referencesBlock}\n` : ""}
+## Your Task (Pivot Cycle ${cycleNum})
+This cycle is different from a normal optimization cycle. Do exactly the following in order:
+
+1. **Dead-end audit.** Read the Committed Foundations list above. For each entry, decide: (a) is this wiring actually being used, (b) has a later cycle measured it as net-negative or non-useful, (c) should it be reverted to clean up tech debt? If you identify dead-end commits, prepare a revert of the dead code. Reverting confirmed dead-end foundations IS valid progress for this cycle.
+
+2. **Pivot proposal.** Propose THREE radically different directions the loop has not meaningfully attempted. Each must:
+   - Attack a specific named top-level phase bucket from the budget above.
+   - Not be a variation of anything in the Known Flat list.
+   - Cite either a plan-document step or a specific pattern from a reference implementation when applicable.
+   - Have a concrete measurement strategy that fits in ONE cycle.
+
+3. **Pick one and execute.** Choose the most promising of your three proposals. Implement it. Measure. If it regresses, revert in this same cycle and record the finding. If it is flag-gated, measure both flag-off and flag-on in this cycle (dormant wiring is not acceptable). Produce a concrete tok/s number, not a hand-wave.
+
+Your output must still end with @@@DESCRIPTION / @@@STEP_KIND / @@@SELF_ANALYSIS / @@@NEXT_IDEAS. Valid STEP_KIND values for a pivot cycle include:
+- rollback (if you reverted dead-end foundations)
+- analysis (if the pivot is measurement/diagnosis only and produced a concrete finding)
+- optimization (if your pivot produced a real tok/s improvement)
+- enablement (only if you measured flag-on in this same cycle)
+
+## Test on Remote Node
+rsync -avz --checksum --delete -e "ssh -p ${ZINC_PORT} -o StrictHostKeyChecking=no" --exclude .zig-cache --exclude zig-out --exclude node_modules --exclude .git --exclude .perf_optimize --exclude .zinc_optimize --exclude site --exclude .DS_Store ${REPO_ROOT}/ ${ZINC_USER}@${ZINC_HOST}:${REMOTE_DIR}/
+ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR} && zig build -Doptimize=ReleaseFast && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc ${zincCliArgs(modelTarget, sanityCheckPrompt, 16)}"
+
+Files you may edit: same as a normal cycle (src/compute/*.zig, src/vulkan/*.zig, src/model/*.zig, src/server/*.zig, src/server/chat.html, src/shaders/*.comp, src/main.zig). You may also remove files that a revert would remove.
+
+## Output Format
+@@@DESCRIPTION: <one-line summary of the pivot action you took>
+@@@STEP_KIND: <rollback|analysis|optimization|enablement>
+@@@SELF_ANALYSIS: <the three pivot proposals, which you picked and why, and the measured outcome>
+@@@NEXT_IDEAS: <semicolon-separated follow-up ideas seeded by what you learned>`;
+}
+
 function metricParserForSpec(spec: EffortSpec): (output: string) => number | null {
   return spec.metricMode === "prefill" ? parsePrefillTokPerSec : parseTokPerSec;
 }
@@ -939,6 +1421,29 @@ function zincCliArgs(modelTarget: ModelTarget, prompt: string, maxTokens: number
 
 function zincRemoteCommand(modelTarget: ModelTarget, prompt: string, maxTokens: number, promptMode = modelTarget.promptMode): string {
   return `cd ${REMOTE_DIR} && ${REMOTE_ZINC_ENV} ./zig-out/bin/zinc ${zincCliArgs(modelTarget, prompt, maxTokens, promptMode)} 2>&1`;
+}
+
+function zincRemoteCommandProfiled(modelTarget: ModelTarget, prompt: string, maxTokens: number, promptMode = modelTarget.promptMode): string {
+  return `cd ${REMOTE_DIR} && ${REMOTE_ZINC_ENV} ZINC_PREFILL_PROFILE=1 ./zig-out/bin/zinc ${zincCliArgs(modelTarget, prompt, maxTokens, promptMode)} 2>&1`;
+}
+
+/**
+ * Run one ZINC_PREFILL_PROFILE=1 sample and return the parsed phase budget.
+ * Only call this after buildAndBench has already confirmed the build is green
+ * and the output is correct. Profiling adds per-token timestamp overhead
+ * (~3%) so we don't include it in the main median calculation.
+ */
+async function collectPhaseBudget(modelTarget: ModelTarget, effortSpec: EffortSpec): Promise<PrefillPhaseBudget | null> {
+  if (effortSpec.metricMode !== "prefill") return null;
+  try {
+    const output = await ssh(
+      zincRemoteCommandProfiled(modelTarget, effortSpec.benchmarkPrompt, effortSpec.benchmarkMaxTokens),
+      300_000,
+    );
+    return parsePrefillPhaseBudget(output);
+  } catch {
+    return null;
+  }
 }
 
 async function buildAndBench(modelTarget: ModelTarget, effortSpec: EffortSpec): Promise<BenchResult> {
@@ -1414,10 +1919,18 @@ async function spawnAgent(
   context: PromptContext | null = null,
   effortSpec: EffortSpec | null = null,
 ): Promise<RunResult> {
+  const isPivot = shouldRunPivotCycle(cycleNum, context);
   const prompt = buildAgentPrompt(plan, originalBaseline, currentBest, cycleNum, history, model, context, {
     primaryMetricLabel: effortSpec?.primaryMetricLabel,
     benchmarkMethod: effortSpec?.benchmarkMethod,
+    knownFlatCategories: effortSpec?.knownFlatCategories,
+    structuralSwingIdeas: effortSpec?.structuralSwingIdeas,
+    referenceImplementations: effortSpec?.referenceImplementations,
+    mode: isPivot ? "pivot" : "normal",
   });
+  if (isPivot) {
+    console.log(c("1;35", `  \uD83D\uDD04 PIVOT cycle — stalled ${context?.stalledCycles ?? 0}, reviewing foundations and picking a radically different direction`));
+  }
 
   console.log(c("1;34", SEP));
   console.log(c("1;34", `  \uD83E\uDDE0 Agent cycle ${cycleNum} (${agent})`));
@@ -1551,6 +2064,9 @@ async function loadLoopState(effort: number): Promise<LoopState | null> {
 
 async function saveLoopState(state: LoopState): Promise<void> {
   state.lastUpdatedAt = new Date().toISOString();
+  const spec = getEffortSpec(state.effort);
+  const refPaths = spec?.referenceImplementations?.map((r) => r.path) ?? [];
+  state.runMetrics = computeRunMetrics(state, refPaths);
   await writeFile(statePathForEffort(state.effort), JSON.stringify(state, null, 2));
 }
 
@@ -1597,6 +2113,36 @@ function createInitialState(
   };
 }
 
+/**
+ * Heuristic: does the change introduce a new runtime env flag? If so,
+ * foundation-keep requires evidence that the flag-ON path was measured in
+ * the same cycle. Otherwise we accumulate dormant wiring that isn't
+ * disproved until a much later cycle (see effort-6 cycles 1/3/5/7 shipping
+ * flag-gated pair-batch infra that cycles 8/9 measured as net-negative).
+ */
+export function introducesRuntimeFlag(report: AgentReport, changedFiles: string[]): boolean {
+  const haystack = `${report.description}\n${report.selfAnalysis}\n${report.rawText}`;
+  if (/ZINC_[A-Z0-9_]+\s*=\s*1|ZINC_[A-Z0-9_]+\b.*flag|flag[-_]?gated|behind .*flag|default(?:s)?\s+off|default(?:s)?\s+on/i.test(haystack)) {
+    return true;
+  }
+  // Scan the change diff text indirectly via changedFiles + typical env patterns.
+  return /std\.posix\.getenv/i.test(haystack) || /getenv\("ZINC_/.test(haystack);
+}
+
+/**
+ * When the cycle introduces a runtime flag, require that the self-analysis
+ * records a measurement of the flag-ON path. The exact wording varies but
+ * the self-analysis must cite a concrete tok/s number AND reference the
+ * flag-on state. If this evidence is missing, the change is dormant
+ * infrastructure that hasn't been validated; don't commit it.
+ */
+export function hasFlagOnMeasurementEvidence(report: AgentReport): boolean {
+  const haystack = `${report.description}\n${report.selfAnalysis}\n${report.rawText}`;
+  const citesFlagOn = /flag[- ]?on|flag\s+(?:=\s*)?1|ZINC_[A-Z0-9_]+=1|with\s+flag\s+set|enabled\s+path|flag\s+enabled|flag\s+ON|when\s+enabled/i.test(haystack);
+  const citesFlagOnNumber = /\b\d+\.\d+\s*tok\/s\b/.test(haystack);
+  return citesFlagOn && citesFlagOnNumber;
+}
+
 export function shouldKeepFoundationStep(
   candidate: BenchResult,
   bestPerf: BenchResult,
@@ -1613,6 +2159,14 @@ export function shouldKeepFoundationStep(
   const bestTokPerSec = bestPerf.tokPerSec ?? 0;
   if (candidate.tokPerSec > bestTokPerSec + improvementThreshold(bestTokPerSec)) return false;
   if (candidate.tokPerSec < bestTokPerSec - FOUNDATION_KEEP_MAX_DROP_TPS) return false;
+
+  // Flag-gated foundation without flag-on measurement is dormant wiring.
+  // The dormant-commit trap: it passes flag-off because the flag-off path is
+  // untouched, but the flag-on path may regress (effort-6 cycles 8/9 proved
+  // this on pair-dispatch). Require the same cycle to cite a flag-on number.
+  if (introducesRuntimeFlag(report, changedFiles) && !hasFlagOnMeasurementEvidence(report)) {
+    return false;
+  }
 
   return stalledCycles >= 2 || report.stepKind === "enablement";
 }
@@ -1741,6 +2295,17 @@ async function main() {
   console.log(c("1;32", `  Baseline (${effortSpec.primaryMetricLabel}): ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}, BW: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}`));
   console.log(c("1;32", `  Output: "${originalBaseline.outputText.slice(0, 80)}"`));
 
+  let baselinePhaseBudget: PrefillPhaseBudget | null = null;
+  if (effortSpec.metricMode === "prefill") {
+    console.log(c("2", "  Capturing baseline prefill phase budget (ZINC_PREFILL_PROFILE=1)..."));
+    baselinePhaseBudget = await collectPhaseBudget(modelTarget, effortSpec);
+    if (baselinePhaseBudget?.biggestBucket) {
+      console.log(c("1;36", `  Biggest prefill bucket at baseline: ${baselinePhaseBudget.biggestBucket.name} (${baselinePhaseBudget.biggestBucket.totalMs.toFixed(1)} ms)`));
+    } else {
+      console.log(c("1;33", "  Phase budget collection did not emit parseable phase data; prompt will note this."));
+    }
+  }
+
   const benchmarkSignature = benchmarkSignatureForSpec(effortSpec);
   let currentCode = originalBaseline;
   let bestPerf = originalBaseline;
@@ -1748,6 +2313,8 @@ async function main() {
   let startCycle = 1;
   const headCommit = (await runCommand("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout.trim() || null;
   let state = createInitialState(effort, effortFile, originalBaseline, headCommit, benchmarkSignature);
+  state.phaseBudget = baselinePhaseBudget;
+  state.phaseBudgetCycle = baselinePhaseBudget ? 0 : null;
 
   if (resume) {
     const saved = await loadLoopState(effort);
@@ -1810,6 +2377,8 @@ async function main() {
       consecutiveFoundationKeeps: state.consecutiveFoundationKeeps,
       reviewSummary: state.reviewSummaries.at(-1) ?? null,
       bestPerf: state.bestResult ?? benchResultToCheckpoint(bestPerf, 0, state.bestCommitHash),
+      phaseBudget: state.phaseBudget ?? null,
+      phaseBudgetCycle: state.phaseBudgetCycle ?? null,
     };
 
     const agentRun = await spawnAgent(effortFile, plan, originalBaseline, currentCode, cycle, history, model, agent, promptContext, effortSpec);
@@ -2011,6 +2580,22 @@ ${result.buildOutput.slice(-2000)}
       state.bestCommitHash = commitHash;
       state.bestResult = benchResultToCheckpoint(result, cycle, commitHash);
       console.log(c("2", "  Committed."));
+
+      // Refresh the per-phase budget so the next cycle's prompt reflects the
+      // new shape of prefill after this structural change landed. Flat
+      // keeps (foundation) do not refresh — they don't move phase totals
+      // by enough to justify the extra profile run.
+      if (effortSpec.metricMode === "prefill") {
+        console.log(c("2", "  Refreshing prefill phase budget after keep..."));
+        const refreshed = await collectPhaseBudget(modelTarget, effortSpec);
+        if (refreshed) {
+          state.phaseBudget = refreshed;
+          state.phaseBudgetCycle = cycle;
+          if (refreshed.biggestBucket) {
+            console.log(c("1;36", `  New biggest prefill bucket: ${refreshed.biggestBucket.name} (${refreshed.biggestBucket.totalMs.toFixed(1)} ms)`));
+          }
+        }
+      }
     } else if (foundationCandidate) {
       kept = true;
       foundationKeep = true;

@@ -5,16 +5,21 @@ import {
   buildAnalysisReport,
   buildAgentPrompt,
   buildSelfReview,
+  classifyCycleMetrics,
+  computeRunMetrics,
   cleanupPreviousRunArtifacts,
   classifyApproachTags,
   codexExecArgs,
   effortArtifactPaths,
   formatCodexStreamLine,
   formatCoherenceFailureList,
+  formatPhaseBudget,
   formatToolInput,
   formatClaudeStreamLine,
   getEffortSpec,
+  hasFlagOnMeasurementEvidence,
   improvementThreshold,
+  introducesRuntimeFlag,
   isResumeStateCompatible,
   isMaterialImprovement,
   loadPreviousRun,
@@ -22,6 +27,7 @@ import {
   median,
   parseAgentReport,
   shouldKeepFoundationStep,
+  shouldRunPivotCycle,
   summarizeCoherenceRegression,
   type ClaudeStreamState,
 } from "./optimize_perf";
@@ -814,5 +820,613 @@ describe("config", () => {
   test("startup banner shows cycles for the current run", async () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("Cycles this run:");
+  });
+});
+
+describe("formatPhaseBudget", () => {
+  test("renders a placeholder when no budget has been captured", () => {
+    expect(formatPhaseBudget(null, null)).toContain("no phase profile captured");
+  });
+
+  test("lists totals sorted descending and names the biggest bucket", () => {
+    const out = formatPhaseBudget({
+      perTokenMs: { attn: 4.5, moe: 10.4, ssm: 11.8, tail: 0.9 },
+      totalsMs: { attn: 693.0, moe: 1601.6, ssm: 1817.2, tail: 138.6, embed: 0.3 },
+      moeTotalsMs: { router: 301, topk: 120, gate_up: 480, swiglu: 80, down: 540, weighted_acc: 80 },
+      ssmTotalsMs: { proj: 1300, conv: 150, delta: 210, gnorm: 90, out: 67 },
+      biggestBucket: { name: "ssm", totalMs: 1817.2 },
+    }, 0);
+    expect(out).toContain("Top-level totals");
+    // Ordering: ssm > moe > attn > tail; embed is skipped.
+    const ssmIdx = out.indexOf("ssm:");
+    const moeIdx = out.indexOf("moe:");
+    const attnIdx = out.indexOf("attn:");
+    expect(ssmIdx).toBeGreaterThan(-1);
+    expect(moeIdx).toBeGreaterThan(ssmIdx);
+    expect(attnIdx).toBeGreaterThan(moeIdx);
+    expect(out).not.toContain("embed:");
+    expect(out).toContain("Biggest top-level bucket: ssm");
+    expect(out).toContain("MoE sub-buckets");
+    expect(out).toContain("SSM sub-buckets");
+  });
+});
+
+describe("buildAgentPrompt — effort-6 controller hints", () => {
+  const baseline = {
+    buildOk: true,
+    buildOutput: "",
+    tokPerSec: 25.67,
+    tokPerSecSamples: [25.64, 25.67, 25.67],
+    correct: true,
+    outputText: "Paris.",
+    bandwidthUtil: null,
+    bandwidthSamples: [],
+    error: null,
+  };
+
+  test("renders phase budget, known-flat, and swing ideas for prefill efforts", () => {
+    const prompt = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      25,
+      "",
+      "qwen35b",
+      {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 0,
+        consecutiveFoundationKeeps: 0,
+        reviewSummary: null,
+        bestPerf: null,
+        phaseBudget: {
+          perTokenMs: { attn: 4.5, moe: 10.4, ssm: 11.8, tail: 0.9 },
+          totalsMs: { attn: 693, moe: 1601.6, ssm: 1817.2, tail: 138.6 },
+          moeTotalsMs: {},
+          ssmTotalsMs: { proj: 1300 },
+          biggestBucket: { name: "ssm", totalMs: 1817.2 },
+        },
+        phaseBudgetCycle: 20,
+      },
+      {
+        primaryMetricLabel: "prefill tok/s",
+        benchmarkMethod: "long-context prefill on RDNA",
+        knownFlatCategories: ["narrowing compute→compute barriers is flat on RDNA4"],
+        structuralSwingIdeas: ["wire recordBatchDispatch into SSM proj with num_cols=2"],
+      },
+    );
+    expect(prompt).toContain("Current Prefill Phase Budget");
+    expect(prompt).toContain("Biggest top-level bucket: ssm");
+    expect(prompt).toContain("Known Flat Territory");
+    expect(prompt).toContain("narrowing compute→compute barriers is flat on RDNA4");
+    expect(prompt).toContain("Structural Swing Ideas");
+    expect(prompt).toContain("wire recordBatchDispatch into SSM proj with num_cols=2");
+    expect(prompt).toContain("structural swing required this cycle: no");
+  });
+
+  test("STEP_BACK stall triggers the structural-swing-required banner", () => {
+    const prompt = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      26,
+      "",
+      "qwen35b",
+      {
+        cycles: [],
+        failedApproaches: ["micro barrier narrowing again"],
+        ideas: [],
+        stalledCycles: 5,
+        consecutiveFoundationKeeps: 1,
+        reviewSummary: "Repeated dead ends: barrier(4).",
+        bestPerf: null,
+        phaseBudget: null,
+        phaseBudgetCycle: null,
+      },
+      {
+        primaryMetricLabel: "prefill tok/s",
+        benchmarkMethod: "long-context prefill on RDNA",
+        knownFlatCategories: ["narrowing compute→compute barriers is flat on RDNA4"],
+        structuralSwingIdeas: ["wire recordBatchDispatch into SSM proj with num_cols=2"],
+      },
+    );
+    expect(prompt).toContain("STRUCTURAL SWING REQUIRED");
+    expect(prompt).toContain("structural swing required this cycle: YES");
+    expect(prompt).toContain("known-flat pattern");
+  });
+
+  test("a freshly-banked foundation keep still demands a swing next cycle", () => {
+    const prompt = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      27,
+      "",
+      "qwen35b",
+      {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 2,
+        consecutiveFoundationKeeps: 1,
+        reviewSummary: null,
+        bestPerf: null,
+        phaseBudget: null,
+        phaseBudgetCycle: null,
+      },
+      {
+        primaryMetricLabel: "prefill tok/s",
+        benchmarkMethod: "long-context prefill on RDNA",
+        structuralSwingIdeas: ["wire recordBatchDispatch into SSM proj with num_cols=2"],
+      },
+    );
+    expect(prompt).toContain("STRUCTURAL SWING REQUIRED");
+  });
+
+  test("decode efforts do not render the prefill phase budget block", () => {
+    const prompt = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      1,
+      "",
+      "qwen35b",
+      null,
+      {
+        primaryMetricLabel: "decode tok/s",
+        benchmarkMethod: "200-token decode",
+      },
+    );
+    expect(prompt).not.toContain("Current Prefill Phase Budget");
+  });
+
+  test("references block stays hidden until stall >= threshold", () => {
+    const unstalled = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      5,
+      "",
+      "qwen35b",
+      {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 2,
+        consecutiveFoundationKeeps: 0,
+        reviewSummary: null,
+        bestPerf: null,
+      },
+      {
+        primaryMetricLabel: "prefill tok/s",
+        benchmarkMethod: "long-context prefill on RDNA",
+        referenceImplementations: [
+          { path: "/Users/zolotukhin/Workplace/llama.cpp", focus: "Vulkan backend" },
+        ],
+      },
+    );
+    expect(unstalled).not.toContain("Reference Implementations on Disk");
+
+    const stalled = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      6,
+      "",
+      "qwen35b",
+      {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 5,
+        consecutiveFoundationKeeps: 0,
+        reviewSummary: null,
+        bestPerf: null,
+      },
+      {
+        primaryMetricLabel: "prefill tok/s",
+        benchmarkMethod: "long-context prefill on RDNA",
+        referenceImplementations: [
+          { path: "/Users/zolotukhin/Workplace/llama.cpp", focus: "Vulkan backend" },
+        ],
+      },
+    );
+    expect(stalled).toContain("Reference Implementations on Disk");
+    expect(stalled).toContain("/Users/zolotukhin/Workplace/llama.cpp");
+  });
+
+  test("flag-on measurement rule is surfaced in the task block", () => {
+    const prompt = buildAgentPrompt(
+      "Step 1",
+      baseline,
+      baseline,
+      5,
+      "",
+      "qwen35b",
+      null,
+      {
+        primaryMetricLabel: "prefill tok/s",
+        benchmarkMethod: "long-context prefill on RDNA",
+      },
+    );
+    expect(prompt).toContain("Flag-gated changes must be measured in the same cycle");
+    expect(prompt).toContain("ZINC_*");
+  });
+});
+
+describe("introducesRuntimeFlag / hasFlagOnMeasurementEvidence", () => {
+  function report(description: string, analysis: string): {
+    description: string;
+    selfAnalysis: string;
+    nextIdeas: string[];
+    stepKind: "enablement";
+    rawText: string;
+  } {
+    return {
+      description,
+      selfAnalysis: analysis,
+      nextIdeas: [],
+      stepKind: "enablement",
+      rawText: `${description}\n${analysis}`,
+    };
+  }
+
+  test("introducesRuntimeFlag detects ZINC_ env flag mentions", () => {
+    expect(
+      introducesRuntimeFlag(
+        report("wire behind ZINC_PREFILL_BATCH=1 flag", "flag defaults off"),
+        ["src/compute/forward.zig"],
+      ),
+    ).toBe(true);
+  });
+
+  test("introducesRuntimeFlag returns false for a plain code change", () => {
+    expect(
+      introducesRuntimeFlag(
+        report("rewrite SSM proj dispatch ordering", "no env vars, no flags, just reorder"),
+        ["src/compute/forward.zig"],
+      ),
+    ).toBe(false);
+  });
+
+  test("hasFlagOnMeasurementEvidence requires both a flag-on phrase and a tok/s number", () => {
+    expect(
+      hasFlagOnMeasurementEvidence(report("wire X", "flag defaults off")),
+    ).toBe(false);
+    expect(
+      hasFlagOnMeasurementEvidence(report("wire X", "measured with flag ON: no tok/s cited")),
+    ).toBe(false);
+    expect(
+      hasFlagOnMeasurementEvidence(report("wire X", "flag-on path at 25.40 tok/s vs best 25.67")),
+    ).toBe(true);
+  });
+
+  test("shouldKeepFoundationStep rejects a flag-gated foundation that did not measure flag-on", () => {
+    const bestPerf = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 25.67,
+      tokPerSecSamples: [25.64, 25.67, 25.67],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: null,
+    };
+    const candidate = { ...bestPerf, tokPerSec: 25.65, tokPerSecSamples: [25.62, 25.65, 25.66] };
+    const keep = shouldKeepFoundationStep(
+      candidate,
+      bestPerf,
+      3,
+      0,
+      report(
+        "Wire behind ZINC_PREFILL_BATCH=1 flag (off by default)",
+        "Plumbing only; defaults off. Next cycle will measure flag-on.",
+      ),
+      ["src/compute/forward.zig"],
+    );
+    expect(keep).toBe(false);
+  });
+
+  test("shouldKeepFoundationStep accepts a flag-gated foundation that measured flag-on in-cycle", () => {
+    const bestPerf = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 25.67,
+      tokPerSecSamples: [25.64, 25.67, 25.67],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: null,
+    };
+    const candidate = { ...bestPerf, tokPerSec: 25.65, tokPerSecSamples: [25.62, 25.65, 25.66] };
+    const keep = shouldKeepFoundationStep(
+      candidate,
+      bestPerf,
+      3,
+      0,
+      report(
+        "Wire behind ZINC_PREFILL_BATCH=1 flag",
+        "Plumbing; measured flag-on at 25.40 tok/s vs 25.65 flag-off, acceptable for a foundation step that unlocks cycle N+1.",
+      ),
+      ["src/compute/forward.zig"],
+    );
+    expect(keep).toBe(true);
+  });
+});
+
+describe("shouldRunPivotCycle", () => {
+  test("fires at cycle 10 when stalled >= threshold", () => {
+    expect(
+      shouldRunPivotCycle(10, {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 5,
+        consecutiveFoundationKeeps: 0,
+        reviewSummary: null,
+        bestPerf: null,
+      }),
+    ).toBe(true);
+  });
+
+  test("does not fire at cycle 10 when actively making progress", () => {
+    expect(
+      shouldRunPivotCycle(10, {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 0,
+        consecutiveFoundationKeeps: 0,
+        reviewSummary: null,
+        bestPerf: null,
+      }),
+    ).toBe(false);
+  });
+
+  test("does not fire at cycle 7 even when stalled", () => {
+    expect(
+      shouldRunPivotCycle(7, {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 7,
+        consecutiveFoundationKeeps: 0,
+        reviewSummary: null,
+        bestPerf: null,
+      }),
+    ).toBe(false);
+  });
+
+  test("fires again at cycle 20 if still stalled", () => {
+    expect(
+      shouldRunPivotCycle(20, {
+        cycles: [],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 4,
+        consecutiveFoundationKeeps: 0,
+        reviewSummary: null,
+        bestPerf: null,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("classifyCycleMetrics", () => {
+  const baseCycle = {
+    cycle: 1,
+    timestamp: new Date("2026-04-18T16:00:00Z").toISOString(),
+    description: "",
+    selfAnalysis: "",
+    nextIdeas: [],
+    stepKind: "enablement" as const,
+    changedFiles: ["src/compute/forward.zig"],
+    categoryTags: ["dmmv"],
+    tokPerSec: 25.65,
+    tokPerSecSamples: [25.65, 25.66, 25.64],
+    bandwidthUtil: null,
+    bandwidthSamples: [],
+    correct: true,
+    improved: false,
+    broken: false,
+    kept: true,
+    foundationKeep: true,
+    decisionReason: "",
+    outputText: "Paris.",
+    commitHash: "deadbeef",
+  };
+
+  test("flags a dormant foundation when self-analysis has no flag-on number", () => {
+    const m = classifyCycleMetrics(
+      { ...baseCycle, description: "wire behind ZINC_PREFILL_BATCH=1 flag", selfAnalysis: "defaults off, next cycle will measure" },
+      new Date("2026-04-18T15:40:00Z").toISOString(),
+      [],
+    );
+    expect(m.introducedFlag).toBe(true);
+    expect(m.measuredFlagOn).toBe(false);
+    expect(m.informationValue).toBe("dormant_keep");
+    expect(m.durationMs).toBe(20 * 60 * 1000);
+  });
+
+  test("recognizes measured dead-end findings as valuable information", () => {
+    const m = classifyCycleMetrics(
+      {
+        ...baseCycle,
+        foundationKeep: true,
+        description: "measure flag-on",
+        selfAnalysis: "flag-on path at 24.86 tok/s vs 25.65 flag-off — confirmed net-negative",
+      },
+      baseCycle.timestamp,
+      [],
+    );
+    expect(m.measuredFlagOn).toBe(true);
+    expect(m.informationValue).toBe("measured_dead");
+  });
+
+  test("classifies attack buckets from the self-analysis", () => {
+    const ssm = classifyCycleMetrics(
+      { ...baseCycle, description: "wire SSM proj pair-dispatch", selfAnalysis: "" },
+      baseCycle.timestamp,
+      [],
+    );
+    expect(ssm.attackedBucket).toBe("ssm");
+    const moe = classifyCycleMetrics(
+      { ...baseCycle, description: "batch MoE router across tokens", selfAnalysis: "" },
+      baseCycle.timestamp,
+      [],
+    );
+    expect(moe.attackedBucket).toBe("moe");
+  });
+
+  test("detects citation of reference implementations", () => {
+    const m = classifyCycleMetrics(
+      { ...baseCycle, description: "port llama.cpp mul_mat_vec_max_cols=8 specialization", selfAnalysis: "" },
+      baseCycle.timestamp,
+      ["/Users/zolotukhin/Workplace/llama.cpp"],
+    );
+    expect(m.citedReference).toBe(true);
+  });
+});
+
+describe("computeRunMetrics", () => {
+  test("produces a run-health summary from cycle history", () => {
+    const now = (min: number) => new Date(Date.UTC(2026, 3, 18, 15, 30 + min)).toISOString();
+    const mkCycle = (n: number, overrides: Record<string, unknown>) => ({
+      cycle: n,
+      timestamp: now(n * 20),
+      description: "",
+      selfAnalysis: "",
+      nextIdeas: [],
+      stepKind: "enablement" as const,
+      changedFiles: ["src/compute/forward.zig"],
+      categoryTags: ["dmmv"],
+      tokPerSec: 25.65,
+      tokPerSecSamples: [25.65],
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      correct: true,
+      improved: false,
+      broken: false,
+      kept: false,
+      foundationKeep: false,
+      decisionReason: "",
+      outputText: "Paris.",
+      commitHash: null,
+      ...overrides,
+    });
+    const state = {
+      effort: 6,
+      planDoc: "",
+      runStartedAt: now(0),
+      lastUpdatedAt: now(160),
+      lastCycle: 8,
+      bestTokPerSec: 25.65,
+      bestCycle: 0,
+      bestCommitHash: null,
+      bestResult: null,
+      stalledCycles: 8,
+      consecutiveFoundationKeeps: 0,
+      cycles: [
+        mkCycle(1, { kept: true, foundationKeep: true, description: "wire helper", selfAnalysis: "" }),
+        mkCycle(2, { description: "3-deep pipeline", selfAnalysis: "" }),
+        mkCycle(3, {
+          kept: true,
+          foundationKeep: true,
+          description: "wire SSM proj pair behind ZINC_PREFILL_BATCH=1",
+          selfAnalysis: "defaults off, next cycle will measure",
+        }),
+        mkCycle(8, {
+          description: "flag on measurement",
+          selfAnalysis: "flag-on path 24.86 tok/s vs 25.65 baseline — net-negative, reverting",
+        }),
+      ],
+      failedApproaches: [],
+      ideas: [],
+      reviewSummaries: [],
+    };
+    const rm = computeRunMetrics(state as any, []);
+    expect(rm.totalCycles).toBe(4);
+    expect(rm.foundationKeeps).toBe(2);
+    expect(rm.dormantFoundations).toBeGreaterThanOrEqual(1);
+    expect(rm.bucketCoverage.ssm).toBeGreaterThanOrEqual(1);
+    expect(rm.cyclesProducingInformation).toBeGreaterThanOrEqual(1);
+    expect(rm.totalCycleMs).toBeGreaterThan(0);
+  });
+});
+
+describe("buildAgentPrompt pivot mode", () => {
+  const baseline = {
+    buildOk: true,
+    buildOutput: "",
+    tokPerSec: 25.65,
+    tokPerSecSamples: [25.62, 25.65, 25.67],
+    correct: true,
+    outputText: "Paris.",
+    bandwidthUtil: null,
+    bandwidthSamples: [],
+    error: null,
+  };
+
+  test("renders pivot instructions and lists committed foundations", () => {
+    const prompt = buildAgentPrompt(
+      "Plan body",
+      baseline,
+      baseline,
+      10,
+      "",
+      "qwen35b",
+      {
+        cycles: [
+          {
+            cycle: 1,
+            timestamp: "t",
+            description: "add helper",
+            selfAnalysis: "",
+            nextIdeas: [],
+            stepKind: "enablement",
+            changedFiles: ["src/compute/dmmv.zig"],
+            categoryTags: ["dmmv"],
+            tokPerSec: 25.65,
+            tokPerSecSamples: [25.64, 25.65, 25.66],
+            bandwidthUtil: null,
+            bandwidthSamples: [],
+            correct: true,
+            improved: false,
+            broken: false,
+            kept: true,
+            foundationKeep: true,
+            decisionReason: "",
+            outputText: "Paris.",
+            commitHash: "20c0ea8f6fb563a1fce2fc48824412ad8d08bd05",
+          },
+        ],
+        failedApproaches: [],
+        ideas: [],
+        stalledCycles: 6,
+        consecutiveFoundationKeeps: 1,
+        reviewSummary: null,
+        bestPerf: null,
+      },
+      {
+        primaryMetricLabel: "prefill tok/s",
+        benchmarkMethod: "long-context prefill on RDNA",
+        knownFlatCategories: ["barrier narrowing is flat"],
+        structuralSwingIdeas: ["port llama.cpp 8-variant DMMV"],
+        referenceImplementations: [
+          { path: "/Users/zolotukhin/Workplace/llama.cpp", focus: "Vulkan matmul" },
+        ],
+        mode: "pivot",
+      },
+    );
+    expect(prompt).toContain("PIVOT cycle");
+    expect(prompt).toContain("Dead-end audit");
+    expect(prompt).toContain("Pivot proposal");
+    expect(prompt).toContain("Committed Foundations");
+    expect(prompt).toContain("20c0ea8f");
+    expect(prompt).toContain("llama.cpp");
+    expect(prompt).toContain("barrier narrowing is flat");
   });
 });
