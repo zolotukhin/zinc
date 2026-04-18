@@ -3310,6 +3310,15 @@ pub const InferenceEngine = struct {
                 // Q/gate projection → Q/K norm → K/V proj → RoPE → KV cache → flash attention
                 // → sigmoid gate → output projection → residual
 
+                // Prefill last-layer dead-tail detector: for non-terminal prompt tokens
+                // on the final layer, only the KV cache write survives into the next
+                // token's forward pass. Q/gate/flash_attn/sigmoid_mul/O-proj/residual
+                // all feed hidden_buf, which the next prompt token overwrites via its
+                // layer-0 embed copy. Guard the Q path and the post-KV tail with this
+                // flag; K/V projection + K norm/RoPE + KV write still run so the next
+                // token's attention sees coherent KV state.
+                const is_dead_attn_tail = self.prefill_active and !collect_output and layer + 1 == config.n_layers;
+
                 const q_tensor = lt.attn_q orelse return error.TensorNotFound;
                 const k_tensor = lt.attn_k orelse return error.TensorNotFound;
                 // Gemma 4 global attention layers share K as V (no separate attn_v tensor).
@@ -3363,13 +3372,22 @@ pub const InferenceEngine = struct {
                 if (packed_q_gate) {
                     // Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.
                     // Project into a temporary buffer and split each head block out.
-                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_rows, hidden_dim);
+                    // Skip when the dead-tail guard is set: attn_out_buf is only read by
+                    // the subsequent deinterleave + flash_attn chain, all of which is
+                    // gated below.
+                    if (!is_dead_attn_tail) {
+                        try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.attn_out_buf, q_rows, hidden_dim);
+                    }
                 } else {
                     // Dense qwen35 may store Q and gate as separate tensors.
                     // Use q_rows (tensor shape) not q_dim (config) — Gemma 4 mixed head_dim.
-                    try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, q_rows, hidden_dim);
-                    if (attn_gate_tensor) |gate_tensor| {
-                        try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, q_rows, hidden_dim);
+                    // Skip Q and gate DMMVs when the dead-tail guard is set: q_buf and
+                    // gate_buf only feed flash_attn / sigmoid_mul, which also get skipped.
+                    if (!is_dead_attn_tail) {
+                        try self.dispatchDmmv(q_tensor, self.norm_buf, hidden_size, self.q_buf, q_rows, hidden_dim);
+                        if (attn_gate_tensor) |gate_tensor| {
+                            try self.dispatchDmmv(gate_tensor, self.norm_buf, hidden_size, self.gate_buf, q_rows, hidden_dim);
+                        }
                     }
                 }
                 try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, k_rows, hidden_dim);
@@ -3416,7 +3434,11 @@ pub const InferenceEngine = struct {
 
                 if (lt.attn_q_bias != null or lt.attn_k_bias != null or lt.attn_v_bias != null) {
                     if (lt.attn_q_bias) |bias| {
-                        try self.dispatchBiasAdd(self.q_buf.handle, self.q_buf.size, bias, q_dim);
+                        // Skip Q bias for dead-tail tokens: Q only feeds flash_attn
+                        // which is also skipped.
+                        if (!is_dead_attn_tail) {
+                            try self.dispatchBiasAdd(self.q_buf.handle, self.q_buf.size, bias, q_dim);
+                        }
                     }
                     if (lt.attn_k_bias) |bias| {
                         try self.dispatchBiasAdd(self.k_buf.handle, self.k_buf.size, bias, kv_dim);
@@ -3508,7 +3530,12 @@ pub const InferenceEngine = struct {
                 var k_rope_done = false;
 
                 if (q_norm_tensor) |qn| {
-                    if (use_fused_norm_rope) {
+                    // Skip Q norm/RoPE for dead-tail tokens: q_buf only feeds flash_attn.
+                    // Still mark q_rope_done=true so the fallback-path Q RoPE below is
+                    // also skipped (avoids reading stale q_buf).
+                    if (is_dead_attn_tail) {
+                        q_rope_done = true;
+                    } else if (use_fused_norm_rope) {
                         // Fused Q norm + Q RoPE in a single dispatch
                         self.dispatchNormRopeInPlace(
                             self.q_buf.handle,
@@ -3676,6 +3703,18 @@ pub const InferenceEngine = struct {
                         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
                         self.decode_cmd.transferToComputeBarrier();
                     }
+                }
+
+                // Prefill last-layer shortcut: at the final layer of a non-terminal prefill
+                // token, flash_attn + sigmoid_gate + O-proj + residual only feed into
+                // hidden_buf, which the next prompt token overwrites via its layer-0 embed
+                // copy. KV cache has already been committed just above, so next token's
+                // attention still sees coherent state. Extends cycle 4's FFN/MoE-body skip
+                // deeper into the attention block itself. Saves ~1 full-attn pass per
+                // non-terminal prompt token.
+                if (self.prefill_active and !collect_output and layer + 1 == config.n_layers) {
+                    self.endProfilePhase(.attention, attention_phase);
+                    continue;
                 }
 
                 // Flash attention
