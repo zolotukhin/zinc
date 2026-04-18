@@ -1455,13 +1455,18 @@ pub const InferenceEngine = struct {
             prefill_l0_stash_beta_buf = try Buffer.initDeviceLocal(instance, stash_ab_bytes, storage_xfer);
         }
 
-        // Parse ZINC_PREFILL_BATCH env flag. Default off — the pair-batched
-        // prefill path is wired but dormant until a future cycle stages real
-        // next-token data into the second column.
+        // Parse ZINC_PREFILL_BATCH env flag. Default off — cycle 9 measured
+        // flag-on at -0.8 tok/s on the flagship long-context bench even after
+        // rewriting dmmv_q8_0_batch.comp with wave64 parallelism (2 rows per
+        // WG + subgroup reduce). The pair ssm_proj path hits a CB-overhead /
+        // dupe-col wall that the shader rewrite alone can't overcome; a future
+        // cycle that plumbs REAL next-token data into col 1 across all SSM
+        // layers (not just layer-0 peek) or restructures the per-layer
+        // barrier/copy chain is what this enablement unblocks.
         const prefill_batch_env = std.posix.getenv("ZINC_PREFILL_BATCH");
         const prefill_batch_enabled = prefill_batch_env != null and prefill_batch_env.?.len > 0 and !std.mem.eql(u8, prefill_batch_env.?, "0");
         if (prefill_batch_enabled and has_ssm) {
-            log.info("ZINC_PREFILL_BATCH=1 — SSM proj (wqkv+z+alpha+beta) prefill uses recordBatchDispatchPush(num_cols=2); layer-0 uses peek-ahead pair with REAL cross-token data (cycle 7), layers 1+ use dupe-col pair (cycle 5)", .{});
+            log.info("ZINC_PREFILL_BATCH=1 — SSM proj (wqkv+z+alpha+beta) prefill uses recordBatchDispatchPush(num_cols=2); layer-0 uses peek-ahead pair with REAL cross-token data (cycle 7), layers 1+ use dupe-col pair (cycle 5); Q8_0 batch shader is wave64-parallel (cycle 9)", .{});
         }
 
         // GPU router output buffer stays device-local on the fast path because the

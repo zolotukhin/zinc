@@ -479,7 +479,13 @@ pub const DmmvDispatch = struct {
                 .y_offset = y_offset,
                 .num_cols = num_cols,
             };
-            const workgroups_x = (M + 63) / 64;
+            // Q8_0 batch shader now matches the single-column 2-rows-per-WG
+            // layout (wave64 stride + subgroup reduce); Q4_K batch shader is
+            // still the per-thread-per-row design and wants 64-wide workgroups.
+            const workgroups_x = switch (quant_type) {
+                .q8_0 => (M + 1) / 2,
+                else => (M + 63) / 64,
+            };
             cmd.dispatchWithPush(p, descriptor_set, std.mem.asBytes(&push), workgroups_x, 1, 1);
         } else {
             // Fallback: dispatch N single-column DMMVs
@@ -543,7 +549,13 @@ pub const DmmvDispatch = struct {
             .{ .buffer = x_buf, .offset = 0, .range = x_size },
             .{ .buffer = y_buf, .offset = 0, .range = y_size },
         };
-        const workgroups_x = (M + 63) / 64;
+        // See recordBatchDispatch above: Q8_0 batch shader is wave64-parallel
+        // with 2 rows per workgroup; Q4_K batch shader still uses 64 rows per
+        // workgroup.
+        const workgroups_x = switch (quant_type) {
+            .q8_0 => (M + 1) / 2,
+            else => (M + 63) / 64,
+        };
         cmd.pushDescAndDispatch(
             pip,
             push_desc_fn,

@@ -1,27 +1,40 @@
 #version 460
-// ZINC — Q8_0 batch DMMV for prefill (multi-column)
-// Reads each weight row ONCE, computes dot products with up to MAX_COLS input vectors.
-// Gives ~Nx less memory bandwidth vs N separate DMMV dispatches.
+// ZINC — Q8_0 batch DMMV for prefill (multi-column), wave64-parallel.
 //
-// Layout: X[K, num_cols] (column-major), Y[M, num_cols] (column-major)
-// Each thread: one output row, all columns.
+// Same weight matrix, multiplied against `num_cols` input vectors that are laid
+// out column-major in X (X[K, num_cols]) and Y (Y[M, num_cols]). The weight row
+// is read ONCE per block and applied to every column, cutting weight-bandwidth
+// by a factor of num_cols relative to firing N single-column DMMVs.
+//
+// Parallelism mirrors dmmv_q8_0.comp (the single-column path) so the new
+// "batch with proper RDNA occupancy" pattern replaces the earlier per-thread-
+// per-row layout that bottlenecked pair prefill on RDNA4:
+//   • workgroup_size = 64 (wave64)
+//   • 2 output rows per workgroup (NUM_ROWS)
+//   • each thread strides blocks by 64 and accumulates a partial sum per
+//     (row, col)
+//   • subgroupAdd reduces partial sums across the wave; shared memory covers
+//     the cross-subgroup case when the device uses wave32.
+//
+// Dispatch shape: ((M + 1) / 2, 1, 1) — matches single-column Q8_0.
 //
 // Q8_0 block (32 elements, 34 bytes):
 //   bytes 0..1  : f16 scale d
 //   bytes 2..33 : 32 signed int8 qs values
-// Dequantize: val = d * qs[i].
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_shader_16bit_storage : require
 
 layout(local_size_x = 64) in;
 
-// Max batch size — compile-time constant for register allocation
-const uint MAX_COLS = 32u;
+// Register-array upper bound for the per-(row, col) partial sums.
+const uint MAX_COLS = 4u;
 
 layout(push_constant) uniform PushConstants {
     uint M;           // output rows
-    uint K;           // input elements per vector
+    uint K;           // input elements per vector (multiple of 32)
     uint a_offset;    // weight matrix byte offset
     uint x_offset;    // input matrix byte offset (bytes into f32 array)
     uint y_offset;    // output matrix byte offset (bytes into f32 array)
@@ -35,40 +48,128 @@ layout(set = 0, binding = 2) writeonly buffer MatrixY { float y_data[];  };
 const uint Q8_0_BLOCK_SIZE = 32u;
 const uint Q8_0_BYTES      = 34u;
 
+// Cross-subgroup reduction scratch for wave32 (max 2 subgroups per workgroup=64).
+shared float s_sum[2u * MAX_COLS * 2u];
+
+uint s_idx(uint r, uint c, uint sg) {
+    return r * (MAX_COLS * 2u) + c * 2u + sg;
+}
+
 void main() {
-    uint row = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
-    if (row >= M) return;
+    const uint wg_id = gl_WorkGroupID.x;
+    const uint row0  = wg_id * 2u;
+    const uint row1  = row0 + 1u;
+    const uint tid   = gl_LocalInvocationID.x;
 
     const uint blocks_per_row = K / Q8_0_BLOCK_SIZE;
-    uint x_base = x_offset / 4u;
-    uint y_base = y_offset / 4u;
+    const uint x_base = x_offset / 4u;
 
-    // Per-column accumulators (register array)
-    float sums[MAX_COLS];
-    for (uint c = 0u; c < num_cols; c++) sums[c] = 0.0;
+    // Per-(row, col) accumulators — MAX_COLS is a compile-time cap so the
+    // array lives in registers on both RADV and desktop drivers.
+    float sums[2u * MAX_COLS];
+    for (uint idx = 0u; idx < 2u * MAX_COLS; idx++) sums[idx] = 0.0;
 
-    // Process weight blocks — weight data read ONCE, reused across all columns
-    for (uint blk = 0u; blk < blocks_per_row; blk++) {
-        uint byte_off = a_offset + row * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+    // Each thread strides blocks by 64 (wave64). Weight loads dominate memory
+    // bandwidth; the num_cols loop inside amortizes one weight load across all
+    // input columns, which is the entire point of the batch shader.
+    for (uint blk = tid; blk < blocks_per_row; blk += 64u) {
+        const uint x_blk_start = blk * Q8_0_BLOCK_SIZE;
 
-        // f16 block scale
-        uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
-        float d_val = unpackHalf2x16(d_bits).x;
+        // --- Row 0 ---
+        if (row0 < M) {
+            const uint byte_off = a_offset + row0 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            const uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
+            const float d0 = unpackHalf2x16(d_bits).x;
+            const uint qs_off = byte_off + 2u;
 
-        uint qs_off = byte_off + 2u;
-        uint x_blk_start = blk * Q8_0_BLOCK_SIZE;
+            for (uint i = 0u; i < 8u; i++) {
+                const uint q_off = qs_off + i * 4u;
+                const uint x_off = x_blk_start + i * 4u;
+                const ivec4 qv = ivec4(
+                    int(int8_t(a_data[q_off + 0u])),
+                    int(int8_t(a_data[q_off + 1u])),
+                    int(int8_t(a_data[q_off + 2u])),
+                    int(int8_t(a_data[q_off + 3u]))
+                );
+                const vec4 qvf = d0 * vec4(qv);
 
-        // Dequantize 32 int8 values and apply to each column
-        for (uint e = 0u; e < Q8_0_BLOCK_SIZE; e++) {
-            float w = d_val * float(int(int8_t(a_data[qs_off + e])));
-            for (uint c = 0u; c < num_cols; c++) {
-                sums[c] += w * x_data[x_base + c * K + x_blk_start + e];
+                for (uint c = 0u; c < num_cols; c++) {
+                    const uint x_off_c = x_base + c * K + x_off;
+                    const vec4 xv = vec4(
+                        x_data[x_off_c + 0u],
+                        x_data[x_off_c + 1u],
+                        x_data[x_off_c + 2u],
+                        x_data[x_off_c + 3u]
+                    );
+                    sums[0u * MAX_COLS + c] += dot(qvf, xv);
+                }
+            }
+        }
+
+        // --- Row 1 ---
+        if (row1 < M) {
+            const uint byte_off = a_offset + row1 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            const uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
+            const float d1 = unpackHalf2x16(d_bits).x;
+            const uint qs_off = byte_off + 2u;
+
+            for (uint i = 0u; i < 8u; i++) {
+                const uint q_off = qs_off + i * 4u;
+                const uint x_off = x_blk_start + i * 4u;
+                const ivec4 qv = ivec4(
+                    int(int8_t(a_data[q_off + 0u])),
+                    int(int8_t(a_data[q_off + 1u])),
+                    int(int8_t(a_data[q_off + 2u])),
+                    int(int8_t(a_data[q_off + 3u]))
+                );
+                const vec4 qvf = d1 * vec4(qv);
+
+                for (uint c = 0u; c < num_cols; c++) {
+                    const uint x_off_c = x_base + c * K + x_off;
+                    const vec4 xv = vec4(
+                        x_data[x_off_c + 0u],
+                        x_data[x_off_c + 1u],
+                        x_data[x_off_c + 2u],
+                        x_data[x_off_c + 3u]
+                    );
+                    sums[1u * MAX_COLS + c] += dot(qvf, xv);
+                }
             }
         }
     }
 
-    // Write all column results
-    for (uint c = 0u; c < num_cols; c++) {
-        y_data[y_base + c * M + row] = sums[c];
+    // Reduce within the subgroup for each (row, col) pair. On wave64 this
+    // collapses the entire workgroup in one op per pair.
+    for (uint r = 0u; r < 2u; r++) {
+        for (uint c = 0u; c < num_cols; c++) {
+            sums[r * MAX_COLS + c] = subgroupAdd(sums[r * MAX_COLS + c]);
+        }
+    }
+
+    // Cross-subgroup reduction for wave32 (two subgroups of 32 threads each).
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect()) {
+            for (uint r = 0u; r < 2u; r++) {
+                for (uint c = 0u; c < num_cols; c++) {
+                    s_sum[s_idx(r, c, gl_SubgroupID)] = sums[r * MAX_COLS + c];
+                }
+            }
+        }
+        barrier();
+        if (tid == 0u) {
+            for (uint r = 0u; r < 2u; r++) {
+                for (uint c = 0u; c < num_cols; c++) {
+                    sums[r * MAX_COLS + c] = s_sum[s_idx(r, c, 0u)] + s_sum[s_idx(r, c, 1u)];
+                }
+            }
+        }
+    }
+
+    if (tid == 0u) {
+        const uint y_base = y_offset / 4u;
+        for (uint c = 0u; c < num_cols; c++) {
+            if (row0 < M) y_data[y_base + c * M + row0] = sums[0u * MAX_COLS + c];
+            if (row1 < M) y_data[y_base + c * M + row1] = sums[1u * MAX_COLS + c];
+        }
     }
 }
