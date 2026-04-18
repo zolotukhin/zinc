@@ -368,6 +368,55 @@ pub const CommandBuffer = struct {
         );
     }
 
+    /// A buffer + range pair to scope a multi-buffer compute barrier.
+    pub const BufferRange = struct {
+        buffer: vk.c.VkBuffer,
+        size: vk.c.VkDeviceSize,
+    };
+
+    /// Insert a multi-buffer compute barrier covering several specific buffer ranges
+    /// in one vkCmdPipelineBarrier call. Lets the driver flush only the named buffer
+    /// caches instead of a global memory barrier — when downstream ops only depend on
+    /// a known subset of pending writes, unrelated in-flight writes can keep flowing.
+    /// Up to 8 ranges supported in the inline buffer; larger calls fall back to global.
+    pub fn computeBuffersBarrier(self: *const CommandBuffer, ranges: []const BufferRange) void {
+        if (ranges.len == 0) return;
+        if (ranges.len == 1) {
+            self.computeBufferBarrier(ranges[0].buffer, ranges[0].size);
+            return;
+        }
+        if (ranges.len > 8) {
+            self.computeBarrier();
+            return;
+        }
+        var barriers: [8]vk.c.VkBufferMemoryBarrier = undefined;
+        for (ranges, 0..) |r, i| {
+            barriers[i] = .{
+                .sType = vk.c.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                .pNext = null,
+                .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT,
+                .srcQueueFamilyIndex = vk.c.VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = vk.c.VK_QUEUE_FAMILY_IGNORED,
+                .buffer = r.buffer,
+                .offset = 0,
+                .size = r.size,
+            };
+        }
+        vk.c.vkCmdPipelineBarrier(
+            self.handle,
+            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0,
+            null,
+            @intCast(ranges.len),
+            &barriers[0],
+            0,
+            null,
+        );
+    }
+
     /// Insert a compute-to-compute pipeline barrier (shader write → shader read).
     /// @param self Command buffer currently being recorded.
     /// @note Uses a coarse global memory barrier; prefer buffer barriers for fine-grained sync.

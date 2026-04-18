@@ -6527,7 +6527,17 @@ pub const InferenceEngine = struct {
                 try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16);
             }
         }
-        self.decode_cmd.computeBarrier();
+        // Narrow: delta_net only reads swiglu_buf (conv1d output), router_logits_buf (alpha,
+        // from ssm_proj), and down_buf (beta, from ssm_proj). gate_buf is consumed later by
+        // gnorm and that path has its own barrier. gpu_ssm_conv_states is only read by the
+        // NEXT token's conv1d in a different command buffer (cross-CB sync via submission
+        // ordering + cycle 5 pipeline waitForCompletion).
+        const conv_to_delta_ranges = [_]CommandBuffer.BufferRange{
+            .{ .buffer = self.swiglu_buf.handle, .size = qkv_bytes },
+            .{ .buffer = self.router_logits_buf.handle, .size = ab_bytes },
+            .{ .buffer = self.down_buf.handle, .size = ab_bytes },
+        };
+        self.decode_cmd.computeBuffersBarrier(&conv_to_delta_ranges);
         self.endProfilePhase(.ssm_conv, ssm_conv_phase);
 
         // --- GPU SSM diagnostic: readback conv1d output at layer 0 for comparison with CPU SSM_DBG ---
