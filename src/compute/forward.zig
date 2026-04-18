@@ -4230,6 +4230,15 @@ pub const InferenceEngine = struct {
                 self.endProfilePhase(.ssm, ssm_phase);
             }
 
+            // Prefill last-layer shortcut: at the final layer of a non-terminal prefill
+            // token, the FFN/MoE + residual only feed into final_norm + LM_head, which
+            // we also skip below. KV cache and SSM state have already been committed
+            // inside the attention/SSM block, so the next token still sees correct
+            // state. Saves one full MoE pass per non-terminal prompt token.
+            if (self.prefill_active and !collect_output and layer + 1 == config.n_layers) {
+                continue;
+            }
+
             // --- FFN norm: prefer ffn_norm.weight, fall back to post_attention_norm for models
             // that use a single norm between attention and FFN (e.g. Qwen3.5).
             const ffn_norm_tensor = lt.ffn_norm orelse
@@ -5675,47 +5684,50 @@ pub const InferenceEngine = struct {
 
         // === Final norm + LM head (after all layers) ===
         // Stay in the same command buffer so decode uses a single queue submit.
-
-        const final_tail_phase = self.beginProfilePhase();
-
-        // Final RMS norm: hidden_buf → norm_buf
-        const final_norm_tensor = self.tensor_map.get("output_norm.weight") orelse return error.TensorNotFound;
-        try self.dispatchRmsNorm(
-            self.hidden_buf.handle,
-            hidden_size,
-            final_norm_tensor.gpu_buffer.handle,
-            final_norm_tensor.gpu_buffer.size,
-            self.norm_buf.handle,
-            hidden_size,
-            hidden_dim,
-            1,
-            rms_norm_eps,
-        );
-        self.decode_cmd.computeBarrier();
-
-        // LM head: output.weight × norm_buf → logits_buf
-        const lm_tensor = self.tensor_map.get("output.weight") orelse
-            self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
-        try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
-
-        const use_gpu_argmax = collect_output and self.argmax.pipeline != null and self.argmax_descriptor_set != null;
-        if (use_gpu_argmax) {
-            self.decode_cmd.computeBarrier();
-            try self.argmax.record(
-                &self.decode_cmd,
-                self.argmax_descriptor_set.?,
-                self.model.config.vocab_size,
-                self.argmax_phase0_workgroups,
-            );
-        }
-
-        // Read back the 4-byte token id result every token, and full logits only when debugging
-        // or when GPU argmax is unavailable and we must fall back to CPU greedy sampling.
-        const need_logits_readback = collect_output and (self.logits_readback_enabled or self.validation_diagnostics_enabled or !use_gpu_argmax);
-        if (self.profile_enabled and collect_output and !use_gpu_argmax) {
-            self.profile_token_counters.cpu_argmax_fallbacks += 1;
-        }
+        // Skipped for non-terminal prefill tokens because nothing reads logits_buf
+        // or norm_buf for those — the next prefill token overwrites hidden_buf via
+        // embedding upload before needing any derived state.
+        const have_gpu_argmax = self.argmax.pipeline != null and self.argmax_descriptor_set != null;
+        const need_logits_readback = collect_output and (self.logits_readback_enabled or self.validation_diagnostics_enabled or !have_gpu_argmax);
         if (collect_output) {
+            const final_tail_phase = self.beginProfilePhase();
+
+            // Final RMS norm: hidden_buf → norm_buf
+            const final_norm_tensor = self.tensor_map.get("output_norm.weight") orelse return error.TensorNotFound;
+            try self.dispatchRmsNorm(
+                self.hidden_buf.handle,
+                hidden_size,
+                final_norm_tensor.gpu_buffer.handle,
+                final_norm_tensor.gpu_buffer.size,
+                self.norm_buf.handle,
+                hidden_size,
+                hidden_dim,
+                1,
+                rms_norm_eps,
+            );
+            self.decode_cmd.computeBarrier();
+
+            // LM head: output.weight × norm_buf → logits_buf
+            const lm_tensor = self.tensor_map.get("output.weight") orelse
+                self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
+            try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
+
+            const use_gpu_argmax = have_gpu_argmax;
+            if (use_gpu_argmax) {
+                self.decode_cmd.computeBarrier();
+                try self.argmax.record(
+                    &self.decode_cmd,
+                    self.argmax_descriptor_set.?,
+                    self.model.config.vocab_size,
+                    self.argmax_phase0_workgroups,
+                );
+            }
+
+            // Read back the 4-byte token id result every token, and full logits only when debugging
+            // or when GPU argmax is unavailable and we must fall back to CPU greedy sampling.
+            if (self.profile_enabled and !use_gpu_argmax) {
+                self.profile_token_counters.cpu_argmax_fallbacks += 1;
+            }
             const barrier = vk.c.VkMemoryBarrier{
                 .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .pNext = null,
@@ -5736,8 +5748,8 @@ pub const InferenceEngine = struct {
                 const hidden_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.hidden_buf.handle, self.embed_staging.handle, 1, &hidden_region);
             }
+            self.endProfilePhase(.final_tail, final_tail_phase);
         }
-        self.endProfilePhase(.final_tail, final_tail_phase);
         _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         try self.decode_cmd.end();
@@ -5770,6 +5782,9 @@ pub const InferenceEngine = struct {
             const vocab_size = self.model.config.vocab_size;
             const gpu_logits = logits_ptr[0..vocab_size];
             const mmap = self.model.mmap_data orelse return error.NoMmapData;
+            const final_norm_tensor = self.tensor_map.get("output_norm.weight") orelse return error.TensorNotFound;
+            const lm_tensor = self.tensor_map.get("output.weight") orelse
+                self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
             const norm_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + final_norm_tensor.info.offset);
             const lm_off: usize = @intCast(self.model.gguf_file.tensor_data_offset + lm_tensor.info.offset);
 
