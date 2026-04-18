@@ -881,6 +881,16 @@ pub const InferenceEngine = struct {
     prefill_embed_big_hidden: u32 = 0,
     prefill_embed_big_token_count: u32 = 0,
     prefill_current_token_idx: u32 = 0,
+    // Effort-6 Step 2.5 enablement: pair-column staging for SSM proj DMMVs so
+    // recordBatchDispatchPush(num_cols=2) has somewhere to read and write. The
+    // norm staging holds two adjacent tokens' norm_buf contents column-major,
+    // and the wqkv output staging holds the batched 2-column result. These are
+    // allocated only when the model has SSM layers.
+    ssm_pair_norm_buf: ?Buffer = null,
+    ssm_pair_wqkv_out_buf: ?Buffer = null,
+    // Flag parsed from ZINC_PREFILL_BATCH — default off so the loop bench runs
+    // the current path until a future cycle turns pair-batching on for real.
+    prefill_batch_enabled: bool = false,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -1368,6 +1378,31 @@ pub const InferenceEngine = struct {
             }
         }
 
+        // Effort-6 Step 2.5 enablement: device-local two-column staging for SSM
+        // proj DMMVs. Sized for the largest per-layer wqkv configuration and
+        // allocated once so the later pair-batched path doesn't need to grow
+        // buffers mid-prefill. Only allocated for hybrid/SSM models.
+        var ssm_pair_norm_buf: ?Buffer = null;
+        errdefer if (ssm_pair_norm_buf) |*b| b.deinit();
+        var ssm_pair_wqkv_out_buf: ?Buffer = null;
+        errdefer if (ssm_pair_wqkv_out_buf) |*b| b.deinit();
+        if (has_ssm) {
+            const pair_hidden_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, config.hidden_dim) * @sizeOf(f32);
+            const pair_conv_ch_local = config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
+            const pair_wqkv_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, pair_conv_ch_local) * @sizeOf(f32);
+            ssm_pair_norm_buf = try Buffer.initDeviceLocal(instance, pair_hidden_bytes, storage_xfer);
+            ssm_pair_wqkv_out_buf = try Buffer.initDeviceLocal(instance, pair_wqkv_bytes, storage_xfer);
+        }
+
+        // Parse ZINC_PREFILL_BATCH env flag. Default off — the pair-batched
+        // prefill path is wired but dormant until a future cycle stages real
+        // next-token data into the second column.
+        const prefill_batch_env = std.posix.getenv("ZINC_PREFILL_BATCH");
+        const prefill_batch_enabled = prefill_batch_env != null and prefill_batch_env.?.len > 0 and !std.mem.eql(u8, prefill_batch_env.?, "0");
+        if (prefill_batch_enabled and has_ssm) {
+            log.info("ZINC_PREFILL_BATCH=1 — SSM wqkv prefill will use recordBatchDispatchPush(num_cols=2)", .{});
+        }
+
         // GPU router output buffer stays device-local on the fast path because the
         // following MoE kernels consume it directly on-GPU every decode step.
         const n_used_experts = if (config.n_experts_used > 0) config.n_experts_used else 8;
@@ -1581,6 +1616,9 @@ pub const InferenceEngine = struct {
             .ssm_hidden_staging = ssm_hidden_staging,
             .gpu_ssm_conv_states = gpu_ssm_conv_states,
             .gpu_ssm_states = gpu_ssm_states,
+            .ssm_pair_norm_buf = ssm_pair_norm_buf,
+            .ssm_pair_wqkv_out_buf = ssm_pair_wqkv_out_buf,
+            .prefill_batch_enabled = prefill_batch_enabled,
             .router_output_buf = router_output_buf,
             .shared_pool = shared_pool,
             .tensor_map = tensor_map,
@@ -6489,13 +6527,63 @@ pub const InferenceEngine = struct {
             });
         }
         const ssm_proj_phase = self.beginProfilePhase();
-        try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+        // Flag-gated pair-batched wqkv path (effort-6 Step 2.5 enablement).
+        // When ZINC_PREFILL_BATCH=1 is set AND the wqkv quant supports the batch
+        // shader AND the pair staging buffers exist, route wqkv through
+        // recordBatchDispatchPush(num_cols=2). Both columns currently carry the
+        // same norm_buf — a future cycle will stage the adjacent prompt token's
+        // norm into column 1 so the batch actually amortizes the weight read.
+        // Col 0 of the batched output is the real wqkv result and gets copied
+        // into attn_out_buf; col 1 is discarded. This exists so the code path
+        // (descriptors, push constants, workgroup sizing, barriers) is shaken
+        // out before the cross-token restructure lands.
+        const pair_wqkv_quant_ok = wqkv_tensor.info.type_ == .q8_0 or wqkv_tensor.info.type_ == .q4_k;
+        const use_pair_wqkv = self.prefill_batch_enabled and self.prefill_active and pair_wqkv_quant_ok and self.ssm_pair_norm_buf != null and self.ssm_pair_wqkv_out_buf != null;
+        if (use_pair_wqkv) {
+            const pair_norm = self.ssm_pair_norm_buf.?;
+            const pair_out = self.ssm_pair_wqkv_out_buf.?;
+            // Stage current token's norm into both pair columns. A compute→transfer
+            // barrier is needed because the preceding rms_norm's output is a
+            // compute write and our copies are transfer reads.
+            self.decode_cmd.computeToTransferBarrier();
+            const norm_copy_col0 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.norm_buf.handle, pair_norm.handle, 1, &norm_copy_col0);
+            const norm_copy_col1 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = hidden_size, .size = hidden_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.norm_buf.handle, pair_norm.handle, 1, &norm_copy_col1);
+            self.decode_cmd.transferToComputeBarrier();
+            try self.dmmv.recordBatchDispatchPush(
+                &self.decode_cmd,
+                wqkv_tensor.info.type_,
+                self.instance.push_descriptor_fn,
+                wqkv_tensor.gpu_buffer.handle,
+                wqkv_tensor.gpu_buffer.size,
+                pair_norm.handle,
+                pair_norm.size,
+                pair_out.handle,
+                pair_out.size,
+                @intCast(conv_channels),
+                hidden_dim,
+                0,
+                0,
+                0,
+                2,
+            );
+            self.decode_cmd.computeToTransferBarrier();
+            const out_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_out.handle, self.attn_out_buf.handle, 1, &out_copy);
+            self.decode_cmd.transferToComputeBarrier();
+        } else {
+            try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+        }
         try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
         try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
         try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
         // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
         // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
         // subsequent global computeBarrier() before delta-net consumes them.
+        // When the pair path ran, attn_out_buf was already sync'd via
+        // transferToComputeBarrier; this extra compute-scope barrier is
+        // harmless in that case.
         self.decode_cmd.computeBufferBarrier(self.attn_out_buf.handle, qkv_bytes);
         self.endProfilePhase(.ssm_proj, ssm_proj_phase);
 
@@ -7513,6 +7601,8 @@ pub const InferenceEngine = struct {
         for (self.gpu_ssm_states) |*b| if (b.handle != null) b.deinit();
         self.allocator.free(self.gpu_ssm_conv_states);
         self.allocator.free(self.gpu_ssm_states);
+        if (self.ssm_pair_norm_buf) |*b| b.deinit();
+        if (self.ssm_pair_wqkv_out_buf) |*b| b.deinit();
         self.router_output_buf.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
