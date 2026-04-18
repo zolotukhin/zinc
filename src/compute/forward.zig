@@ -881,41 +881,6 @@ pub const InferenceEngine = struct {
     prefill_embed_big_hidden: u32 = 0,
     prefill_embed_big_token_count: u32 = 0,
     prefill_current_token_idx: u32 = 0,
-    // Effort-6 Step 2.5 enablement: pair-column staging for SSM proj DMMVs so
-    // recordBatchDispatchPush(num_cols=2) has somewhere to read and write. The
-    // norm staging holds two adjacent tokens' norm_buf contents column-major,
-    // and each *_out_buf holds the batched 2-column result for that projection.
-    // Cycle 5 extends the pair plumbing from wqkv only to all four ssm_proj
-    // DMMVs (wqkv, z, alpha, beta) so the whole 1310ms ssm_proj sub-bucket can
-    // be driven by a future pair-aware prefill driver without re-plumbing here.
-    // All buffers allocated only when the model has SSM layers.
-    ssm_pair_norm_buf: ?Buffer = null,
-    ssm_pair_wqkv_out_buf: ?Buffer = null,
-    ssm_pair_z_out_buf: ?Buffer = null,
-    ssm_pair_alpha_out_buf: ?Buffer = null,
-    ssm_pair_beta_out_buf: ?Buffer = null,
-    // Effort-6 cycle 7 enablement: layer-0 peek-ahead pair batching. At layer-0
-    // SSM proj during prefill, token N's hidden_buf still carries its raw
-    // embedding (not residual-updated yet). Token N+1's embedding is already
-    // sitting in prefill_embed_big from the upfront bulk dequant. We stage both
-    // into prefill_l0_pair_hidden_buf (2-col), run rms_norm with n_tokens=2
-    // into the existing ssm_pair_norm_buf, then the existing pair ssm_proj
-    // dispatches produce REAL per-token wqkv/z/alpha/beta for both columns.
-    // Col 0 feeds the current token's SSM path as usual; col 1 is copied into
-    // these four stash buffers so the following odd-index token can SKIP its
-    // four layer-0 DMMVs and copy the stashed values directly into
-    // attn_out_buf/gate_buf/router_logits_buf/down_buf. This is the first
-    // cycle where pair ssm_proj carries cross-token data — cycles 3/5 were
-    // plumbing foundations with col 1 = col 0.
-    prefill_l0_pair_hidden_buf: ?Buffer = null,
-    prefill_l0_stash_wqkv_buf: ?Buffer = null,
-    prefill_l0_stash_z_buf: ?Buffer = null,
-    prefill_l0_stash_alpha_buf: ?Buffer = null,
-    prefill_l0_stash_beta_buf: ?Buffer = null,
-    prefill_l0_stash_valid: bool = false,
-    // Flag parsed from ZINC_PREFILL_BATCH — default off so the loop bench runs
-    // the current path until a future cycle turns pair-batching on for real.
-    prefill_batch_enabled: bool = false,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -1403,72 +1368,6 @@ pub const InferenceEngine = struct {
             }
         }
 
-        // Effort-6 Step 2.5 enablement: device-local two-column staging for SSM
-        // proj DMMVs. One shared pair_norm staging feeds all 4 projections;
-        // each projection gets its own pair output buffer so the 4 pair
-        // dispatches can run without inter-dispatch barriers (they each write
-        // to a distinct buffer). Allocated once so the later pair-batched path
-        // doesn't need to grow buffers mid-prefill. Only allocated for hybrid
-        // SSM models.
-        var ssm_pair_norm_buf: ?Buffer = null;
-        errdefer if (ssm_pair_norm_buf) |*b| b.deinit();
-        var ssm_pair_wqkv_out_buf: ?Buffer = null;
-        errdefer if (ssm_pair_wqkv_out_buf) |*b| b.deinit();
-        var ssm_pair_z_out_buf: ?Buffer = null;
-        errdefer if (ssm_pair_z_out_buf) |*b| b.deinit();
-        var ssm_pair_alpha_out_buf: ?Buffer = null;
-        errdefer if (ssm_pair_alpha_out_buf) |*b| b.deinit();
-        var ssm_pair_beta_out_buf: ?Buffer = null;
-        errdefer if (ssm_pair_beta_out_buf) |*b| b.deinit();
-        var prefill_l0_pair_hidden_buf: ?Buffer = null;
-        errdefer if (prefill_l0_pair_hidden_buf) |*b| b.deinit();
-        var prefill_l0_stash_wqkv_buf: ?Buffer = null;
-        errdefer if (prefill_l0_stash_wqkv_buf) |*b| b.deinit();
-        var prefill_l0_stash_z_buf: ?Buffer = null;
-        errdefer if (prefill_l0_stash_z_buf) |*b| b.deinit();
-        var prefill_l0_stash_alpha_buf: ?Buffer = null;
-        errdefer if (prefill_l0_stash_alpha_buf) |*b| b.deinit();
-        var prefill_l0_stash_beta_buf: ?Buffer = null;
-        errdefer if (prefill_l0_stash_beta_buf) |*b| b.deinit();
-        if (has_ssm) {
-            const pair_hidden_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, config.hidden_dim) * @sizeOf(f32);
-            const pair_conv_ch_local = config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
-            const pair_wqkv_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, pair_conv_ch_local) * @sizeOf(f32);
-            const pair_z_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, config.ssm_d_inner) * @sizeOf(f32);
-            const pair_ab_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, config.ssm_dt_rank) * @sizeOf(f32);
-            ssm_pair_norm_buf = try Buffer.initDeviceLocal(instance, pair_hidden_bytes, storage_xfer);
-            ssm_pair_wqkv_out_buf = try Buffer.initDeviceLocal(instance, pair_wqkv_bytes, storage_xfer);
-            ssm_pair_z_out_buf = try Buffer.initDeviceLocal(instance, pair_z_bytes, storage_xfer);
-            ssm_pair_alpha_out_buf = try Buffer.initDeviceLocal(instance, pair_ab_bytes, storage_xfer);
-            ssm_pair_beta_out_buf = try Buffer.initDeviceLocal(instance, pair_ab_bytes, storage_xfer);
-            // Cycle 7: per-token stash for layer-0 peek-ahead. pair_hidden is
-            // 2-col so rms_norm(n_tokens=2) can stage both tokens' embeddings.
-            // Each stash_* buffer is single-col sized — holds col 1 of the
-            // pair ssm_proj output until the next odd-index token reads it.
-            prefill_l0_pair_hidden_buf = try Buffer.initDeviceLocal(instance, pair_hidden_bytes, storage_xfer);
-            const stash_wqkv_bytes = @as(vk.c.VkDeviceSize, pair_conv_ch_local) * @sizeOf(f32);
-            const stash_z_bytes = @as(vk.c.VkDeviceSize, config.ssm_d_inner) * @sizeOf(f32);
-            const stash_ab_bytes = @as(vk.c.VkDeviceSize, config.ssm_dt_rank) * @sizeOf(f32);
-            prefill_l0_stash_wqkv_buf = try Buffer.initDeviceLocal(instance, stash_wqkv_bytes, storage_xfer);
-            prefill_l0_stash_z_buf = try Buffer.initDeviceLocal(instance, stash_z_bytes, storage_xfer);
-            prefill_l0_stash_alpha_buf = try Buffer.initDeviceLocal(instance, stash_ab_bytes, storage_xfer);
-            prefill_l0_stash_beta_buf = try Buffer.initDeviceLocal(instance, stash_ab_bytes, storage_xfer);
-        }
-
-        // Parse ZINC_PREFILL_BATCH env flag. Default off — cycle 9 measured
-        // flag-on at -0.8 tok/s on the flagship long-context bench even after
-        // rewriting dmmv_q8_0_batch.comp with wave64 parallelism (2 rows per
-        // WG + subgroup reduce). The pair ssm_proj path hits a CB-overhead /
-        // dupe-col wall that the shader rewrite alone can't overcome; a future
-        // cycle that plumbs REAL next-token data into col 1 across all SSM
-        // layers (not just layer-0 peek) or restructures the per-layer
-        // barrier/copy chain is what this enablement unblocks.
-        const prefill_batch_env = std.posix.getenv("ZINC_PREFILL_BATCH");
-        const prefill_batch_enabled = prefill_batch_env != null and prefill_batch_env.?.len > 0 and !std.mem.eql(u8, prefill_batch_env.?, "0");
-        if (prefill_batch_enabled and has_ssm) {
-            log.info("ZINC_PREFILL_BATCH=1 — SSM proj (wqkv+z+alpha+beta) prefill uses recordBatchDispatchPush(num_cols=2); layer-0 uses peek-ahead pair with REAL cross-token data (cycle 7), layers 1+ use dupe-col pair (cycle 5); Q8_0 batch shader is wave64-parallel (cycle 9)", .{});
-        }
-
         // GPU router output buffer stays device-local on the fast path because the
         // following MoE kernels consume it directly on-GPU every decode step.
         const n_used_experts = if (config.n_experts_used > 0) config.n_experts_used else 8;
@@ -1682,17 +1581,6 @@ pub const InferenceEngine = struct {
             .ssm_hidden_staging = ssm_hidden_staging,
             .gpu_ssm_conv_states = gpu_ssm_conv_states,
             .gpu_ssm_states = gpu_ssm_states,
-            .ssm_pair_norm_buf = ssm_pair_norm_buf,
-            .ssm_pair_wqkv_out_buf = ssm_pair_wqkv_out_buf,
-            .ssm_pair_z_out_buf = ssm_pair_z_out_buf,
-            .ssm_pair_alpha_out_buf = ssm_pair_alpha_out_buf,
-            .ssm_pair_beta_out_buf = ssm_pair_beta_out_buf,
-            .prefill_l0_pair_hidden_buf = prefill_l0_pair_hidden_buf,
-            .prefill_l0_stash_wqkv_buf = prefill_l0_stash_wqkv_buf,
-            .prefill_l0_stash_z_buf = prefill_l0_stash_z_buf,
-            .prefill_l0_stash_alpha_buf = prefill_l0_stash_alpha_buf,
-            .prefill_l0_stash_beta_buf = prefill_l0_stash_beta_buf,
-            .prefill_batch_enabled = prefill_batch_enabled,
             .router_output_buf = router_output_buf,
             .shared_pool = shared_pool,
             .tensor_map = tensor_map,
@@ -6162,9 +6050,6 @@ pub const InferenceEngine = struct {
 
         if (pip.uses_push_descriptors) {
             // For Q4K large M (LM head), use batch shader for better parallelism.
-            // Routed through recordBatchDispatchPush so Step 2.5 cross-token batching
-            // (num_cols >= 2) can reuse the same entry point without duplicating the
-            // push-descriptor + batch-push construction inline here.
             if (qt == .q4_k and M > 65536 and self.dmmv.pipeline_q4k_batch != null) {
                 try self.dmmv.recordBatchDispatchPush(
                     &self.decode_cmd,
@@ -6615,361 +6500,19 @@ pub const InferenceEngine = struct {
             });
         }
         const ssm_proj_phase = self.beginProfilePhase();
-        // Flag-gated pair-batched ssm_proj path (effort-6 Step 2.5 enablement).
-        // When ZINC_PREFILL_BATCH=1 is set AND every ssm_proj tensor uses a
-        // batch-capable quant AND the pair staging buffers exist, route ALL
-        // four projections (wqkv, z, alpha, beta) through
-        // recordBatchDispatchPush(num_cols=2). Both columns currently carry
-        // the same norm_buf — a future cycle will stage the adjacent prompt
-        // token's norm into column 1 so the batch actually amortizes the
-        // weight read across two tokens. Col 0 of each batched output is the
-        // real per-token result and is copied back to the single-col
-        // destination; col 1 is discarded. This pair-wires the entire ssm_proj
-        // sub-bucket (1310ms in the current phase budget) so the pair-aware
-        // prefill driver only needs to stage cross-token norm data — it does
-        // NOT need to add or re-plumb any pair dispatches.
-        //
-        // All four pair dispatches write to distinct pair_*_out_buf buffers,
-        // so no inter-dispatch barriers are required between them. The shared
-        // pair_norm staging is written once per layer and read by all four
-        // dispatches.
-        const all_pair_quant_ok = (wqkv_tensor.info.type_ == .q8_0 or wqkv_tensor.info.type_ == .q4_k) and
-            (z_tensor.info.type_ == .q8_0 or z_tensor.info.type_ == .q4_k) and
-            (alpha_tensor.info.type_ == .q8_0 or alpha_tensor.info.type_ == .q4_k) and
-            (beta_tensor.info.type_ == .q8_0 or beta_tensor.info.type_ == .q4_k);
-
-        // Cycle 7: layer-0 peek-ahead pair batching. The first transformer layer
-        // in the Qwen3.5 hybrid is an SSM layer, and its SSM-proj input is the
-        // raw embedding — independent of prior-layer state. Both the current
-        // and next prompt tokens' embeddings are already sitting in
-        // prefill_embed_big from the upfront bulk dequant, so we can stage
-        // BOTH into prefill_l0_pair_hidden_buf (2-col), run rms_norm with
-        // n_tokens=2 into the existing ssm_pair_norm_buf, and fire the 4 pair
-        // ssm_proj dispatches with REAL cross-token data in col 1 instead of
-        // cycle 5's dupe-col pattern. Col 0 feeds the current token normally;
-        // col 1 is stashed so the next (odd-index) token's layer-0 SSM proj
-        // can SKIP its 4 DMMVs and copy the stashed values straight into
-        // attn_out_buf/gate_buf/router_logits_buf/down_buf.
-        //
-        // The path is still flag-gated by prefill_batch_enabled so the loop
-        // bench default (flag off) runs the existing single-col path. When the
-        // flag is on, layer 0 routes through this peek-ahead variant and
-        // layers 1+ continue using cycle 5's dupe-col pair path.
-        const l0_peek_buffers_ready = self.prefill_l0_pair_hidden_buf != null and
-            self.prefill_l0_stash_wqkv_buf != null and
-            self.prefill_l0_stash_z_buf != null and
-            self.prefill_l0_stash_alpha_buf != null and
-            self.prefill_l0_stash_beta_buf != null;
-        const l0_peek_core_ready = layer == 0 and self.prefill_batch_enabled and self.prefill_active and
-            all_pair_quant_ok and
-            self.ssm_pair_norm_buf != null and
-            self.ssm_pair_wqkv_out_buf != null and
-            self.ssm_pair_z_out_buf != null and
-            self.ssm_pair_alpha_out_buf != null and
-            self.ssm_pair_beta_out_buf != null and
-            l0_peek_buffers_ready and
-            self.prefill_embed_big != null and
-            self.prefill_embed_big_hidden == hidden_dim and
-            self.prefill_current_token_idx < self.prefill_embed_big_token_count;
-        const is_even_prompt_token = (self.prefill_current_token_idx & 1) == 0;
-        const has_next_prompt_token = self.prefill_current_token_idx + 1 < self.prefill_embed_big_token_count;
-        const use_l0_peek = l0_peek_core_ready and is_even_prompt_token and has_next_prompt_token;
-        const use_l0_stash = l0_peek_core_ready and !is_even_prompt_token and self.prefill_l0_stash_valid;
-
-        // The existing dupe-col pair path (cycle 5) still runs on all non-layer-0
-        // SSM layers and on layer-0 edge cases (terminal odd token without a
-        // valid stash, or last single token of an odd-count prompt). Gate it
-        // off when the peek/stash paths are active so we don't double-dispatch.
-        const use_pair_ssm_proj = !use_l0_peek and !use_l0_stash and
-            self.prefill_batch_enabled and self.prefill_active and all_pair_quant_ok and
-            self.ssm_pair_norm_buf != null and
-            self.ssm_pair_wqkv_out_buf != null and
-            self.ssm_pair_z_out_buf != null and
-            self.ssm_pair_alpha_out_buf != null and
-            self.ssm_pair_beta_out_buf != null;
-        if (use_l0_peek) {
-            const pair_hidden = self.prefill_l0_pair_hidden_buf.?;
-            const pair_norm = self.ssm_pair_norm_buf.?;
-            const pair_wqkv_out = self.ssm_pair_wqkv_out_buf.?;
-            const pair_z_out = self.ssm_pair_z_out_buf.?;
-            const pair_alpha_out = self.ssm_pair_alpha_out_buf.?;
-            const pair_beta_out = self.ssm_pair_beta_out_buf.?;
-            const stash_wqkv = self.prefill_l0_stash_wqkv_buf.?;
-            const stash_z = self.prefill_l0_stash_z_buf.?;
-            const stash_alpha = self.prefill_l0_stash_alpha_buf.?;
-            const stash_beta = self.prefill_l0_stash_beta_buf.?;
-            const embed_big = self.prefill_embed_big.?;
-            const attn_norm = lt.attn_norm orelse return error.TensorNotFound;
-            const cur_idx = self.prefill_current_token_idx;
-            const next_idx = cur_idx + 1;
-            const cur_src_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, cur_idx) * hidden_size;
-            const next_src_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, next_idx) * hidden_size;
-
-            // Stage current + next tokens' embeddings into pair_hidden (2-col).
-            // prefill_embed_big is host-coherent staging; no inbound GPU barrier
-            // needed because the CPU writes (bulk dequant) completed before
-            // prefillBatch's main loop started and host-coherent writes are
-            // automatically visible to the device.
-            const cur_copy = vk.c.VkBufferCopy{ .srcOffset = cur_src_off, .dstOffset = 0, .size = hidden_size };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, embed_big.handle, pair_hidden.handle, 1, &cur_copy);
-            const next_copy = vk.c.VkBufferCopy{ .srcOffset = next_src_off, .dstOffset = hidden_size, .size = hidden_size };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, embed_big.handle, pair_hidden.handle, 1, &next_copy);
-            self.decode_cmd.transferToComputeBarrier();
-
-            // Pair rms_norm: two workgroups, one per column. Reuses the
-            // existing rms_norm shader (n_tokens>=1 is already supported).
-            try self.dispatchRmsNorm(
-                pair_hidden.handle,
-                pair_hidden.size,
-                attn_norm.gpu_buffer.handle,
-                attn_norm.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                hidden_dim,
-                2,
-                self.model.config.rms_norm_eps,
-            );
-            self.decode_cmd.computeBarrier();
-
-            // Four pair ssm_proj dispatches with REAL 2-token input.
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                wqkv_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                wqkv_tensor.gpu_buffer.handle,
-                wqkv_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_wqkv_out.handle,
-                pair_wqkv_out.size,
-                @intCast(conv_channels),
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                z_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                z_tensor.gpu_buffer.handle,
-                z_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_z_out.handle,
-                pair_z_out.size,
-                @intCast(d_inner),
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                alpha_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                alpha_tensor.gpu_buffer.handle,
-                alpha_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_alpha_out.handle,
-                pair_alpha_out.size,
-                dt_rank,
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                beta_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                beta_tensor.gpu_buffer.handle,
-                beta_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_beta_out.handle,
-                pair_beta_out.size,
-                dt_rank,
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-
-            // Split: col 0 → single-col buffers (current token), col 1 → stash
-            // buffers (next odd-index token). One compute→transfer barrier
-            // covers all four pair dispatches (distinct output buffers).
-            self.decode_cmd.computeToTransferBarrier();
-            const wqkv_c0 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_wqkv_out.handle, self.attn_out_buf.handle, 1, &wqkv_c0);
-            const wqkv_c1 = vk.c.VkBufferCopy{ .srcOffset = qkv_bytes, .dstOffset = 0, .size = qkv_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_wqkv_out.handle, stash_wqkv.handle, 1, &wqkv_c1);
-            const z_c0 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = z_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_z_out.handle, self.gate_buf.handle, 1, &z_c0);
-            const z_c1 = vk.c.VkBufferCopy{ .srcOffset = z_bytes, .dstOffset = 0, .size = z_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_z_out.handle, stash_z.handle, 1, &z_c1);
-            const alpha_c0 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_alpha_out.handle, self.router_logits_buf.handle, 1, &alpha_c0);
-            const alpha_c1 = vk.c.VkBufferCopy{ .srcOffset = ab_bytes, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_alpha_out.handle, stash_alpha.handle, 1, &alpha_c1);
-            const beta_c0 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_beta_out.handle, self.down_buf.handle, 1, &beta_c0);
-            const beta_c1 = vk.c.VkBufferCopy{ .srcOffset = ab_bytes, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_beta_out.handle, stash_beta.handle, 1, &beta_c1);
-            self.decode_cmd.transferToComputeBarrier();
-            self.prefill_l0_stash_valid = true;
-        } else if (use_l0_stash) {
-            // Stash-read path: skip rms_norm + 4 DMMVs entirely. Copy cached
-            // pair col 1 outputs directly into the single-col destination
-            // buffers that the following ssm_conv1d + delta-net read from.
-            //
-            // Cross-CB memory visibility: the stash writes happened in the
-            // previous (even) prompt token's decode_cmd (which may be
-            // prefill_cmd_alt in pipelined mode). Same-queue submission order
-            // provides execution ordering; transferToTransferBarrier adds the
-            // strict-spec memory dependency so the prior TRANSFER_WRITE is
-            // visible to this TRANSFER_READ.
-            const stash_wqkv = self.prefill_l0_stash_wqkv_buf.?;
-            const stash_z = self.prefill_l0_stash_z_buf.?;
-            const stash_alpha = self.prefill_l0_stash_alpha_buf.?;
-            const stash_beta = self.prefill_l0_stash_beta_buf.?;
-            self.decode_cmd.transferToTransferBarrier();
-            const wqkv_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, stash_wqkv.handle, self.attn_out_buf.handle, 1, &wqkv_copy);
-            const z_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = z_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, stash_z.handle, self.gate_buf.handle, 1, &z_copy);
-            const alpha_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, stash_alpha.handle, self.router_logits_buf.handle, 1, &alpha_copy);
-            const beta_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, stash_beta.handle, self.down_buf.handle, 1, &beta_copy);
-            self.decode_cmd.transferToComputeBarrier();
-            self.prefill_l0_stash_valid = false;
-        } else if (use_pair_ssm_proj) {
-            const pair_norm = self.ssm_pair_norm_buf.?;
-            const pair_wqkv_out = self.ssm_pair_wqkv_out_buf.?;
-            const pair_z_out = self.ssm_pair_z_out_buf.?;
-            const pair_alpha_out = self.ssm_pair_alpha_out_buf.?;
-            const pair_beta_out = self.ssm_pair_beta_out_buf.?;
-
-            // Stage current token's norm into both pair columns. A compute→transfer
-            // barrier is needed because the preceding rms_norm's output is a
-            // compute write and our copies are transfer reads. This setup is
-            // shared across all four pair dispatches below.
-            self.decode_cmd.computeToTransferBarrier();
-            const norm_copy_col0 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.norm_buf.handle, pair_norm.handle, 1, &norm_copy_col0);
-            const norm_copy_col1 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = hidden_size, .size = hidden_size };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.norm_buf.handle, pair_norm.handle, 1, &norm_copy_col1);
-            self.decode_cmd.transferToComputeBarrier();
-
-            // Four pair dispatches — different weight tensors, different output
-            // buffers, same shared pair_norm input. No inter-dispatch barriers
-            // because each writes to its own pair_*_out_buf.
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                wqkv_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                wqkv_tensor.gpu_buffer.handle,
-                wqkv_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_wqkv_out.handle,
-                pair_wqkv_out.size,
-                @intCast(conv_channels),
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                z_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                z_tensor.gpu_buffer.handle,
-                z_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_z_out.handle,
-                pair_z_out.size,
-                @intCast(d_inner),
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                alpha_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                alpha_tensor.gpu_buffer.handle,
-                alpha_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_alpha_out.handle,
-                pair_alpha_out.size,
-                dt_rank,
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                beta_tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                beta_tensor.gpu_buffer.handle,
-                beta_tensor.gpu_buffer.size,
-                pair_norm.handle,
-                pair_norm.size,
-                pair_beta_out.handle,
-                pair_beta_out.size,
-                dt_rank,
-                hidden_dim,
-                0,
-                0,
-                0,
-                2,
-            );
-
-            // Copy col 0 of each pair output back to the corresponding single-col
-            // destination buffer that downstream SSM ops read from. One
-            // compute→transfer barrier covers all four pair dispatches (they
-            // all ran in the compute stage to distinct output buffers), and one
-            // transfer→compute barrier lets the following ssm_conv1d compute
-            // consume attn_out_buf.
-            self.decode_cmd.computeToTransferBarrier();
-            const wqkv_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_wqkv_out.handle, self.attn_out_buf.handle, 1, &wqkv_copy);
-            const z_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = z_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_z_out.handle, self.gate_buf.handle, 1, &z_copy);
-            const alpha_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_alpha_out.handle, self.router_logits_buf.handle, 1, &alpha_copy);
-            const beta_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_beta_out.handle, self.down_buf.handle, 1, &beta_copy);
-            self.decode_cmd.transferToComputeBarrier();
-        } else {
-            try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
-            // Skip z (gate) DMMV in dead-tail: gate_buf is only consumed by
-            // gated_norm, which is also skipped below. wqkv/alpha/beta still
-            // run because conv1d/delta_net update SSM state for future tokens.
-            if (!is_dead_tail) {
-                try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
-            }
-            try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
-            try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
-            // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
-            // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
-            // subsequent global computeBarrier() before delta-net consumes them.
-            self.decode_cmd.computeBufferBarrier(self.attn_out_buf.handle, qkv_bytes);
+        try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+        // Skip z (gate) DMMV in dead-tail: gate_buf is only consumed by
+        // gated_norm, which is also skipped below. wqkv/alpha/beta still
+        // run because conv1d/delta_net update SSM state for future tokens.
+        if (!is_dead_tail) {
+            try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
         }
+        try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
+        try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
+        // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
+        // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
+        // subsequent global computeBarrier() before delta-net consumes them.
+        self.decode_cmd.computeBufferBarrier(self.attn_out_buf.handle, qkv_bytes);
         self.endProfilePhase(.ssm_proj, ssm_proj_phase);
 
         // --- GPU: conv1d + SiLU ---
@@ -7200,12 +6743,6 @@ pub const InferenceEngine = struct {
         self.prefill_gpu_total_ns = 0;
         self.prefill_active = true;
         defer self.prefill_active = false;
-        // Cycle 7 invariant: layer-0 stash starts empty at the top of every
-        // prefill. A stale `true` from a previous prefill would make the very
-        // first (even-index) prompt token take the stash-read path instead of
-        // seeding the stash with its own pair dispatch.
-        self.prefill_l0_stash_valid = false;
-        defer self.prefill_l0_stash_valid = false;
 
         // Dequantize every prompt-token embedding row upfront into a single
         // host-mapped Vulkan staging buffer. decodeStep's layer-0 copy reads
@@ -8000,16 +7537,6 @@ pub const InferenceEngine = struct {
         for (self.gpu_ssm_states) |*b| if (b.handle != null) b.deinit();
         self.allocator.free(self.gpu_ssm_conv_states);
         self.allocator.free(self.gpu_ssm_states);
-        if (self.ssm_pair_norm_buf) |*b| b.deinit();
-        if (self.ssm_pair_wqkv_out_buf) |*b| b.deinit();
-        if (self.ssm_pair_z_out_buf) |*b| b.deinit();
-        if (self.ssm_pair_alpha_out_buf) |*b| b.deinit();
-        if (self.ssm_pair_beta_out_buf) |*b| b.deinit();
-        if (self.prefill_l0_pair_hidden_buf) |*b| b.deinit();
-        if (self.prefill_l0_stash_wqkv_buf) |*b| b.deinit();
-        if (self.prefill_l0_stash_z_buf) |*b| b.deinit();
-        if (self.prefill_l0_stash_alpha_buf) |*b| b.deinit();
-        if (self.prefill_l0_stash_beta_buf) |*b| b.deinit();
         self.router_output_buf.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
