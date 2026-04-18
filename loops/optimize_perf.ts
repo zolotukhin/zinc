@@ -366,7 +366,7 @@ function boxLine(text: string): string {
 
 // -- Command runner with streaming -------------------------------------------
 
-type RunResult = { exitCode: number; stdout: string; stderr: string };
+type RunResult = { exitCode: number; signal: NodeJS.Signals | null; stdout: string; stderr: string };
 
 async function runCommand(
   cmd: string,
@@ -408,12 +408,12 @@ async function runCommand(
       if (streamOutput) process.stderr.write(text);
     });
     child.on("error", rej);
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (streamOutput && opts.stdoutLineFormatter && lineBuffer.trim()) {
         const f = opts.stdoutLineFormatter(lineBuffer);
         if (f !== null) process.stdout.write(f);
       }
-      res({ exitCode: code ?? 1, stdout, stderr });
+      res({ exitCode: code ?? 1, signal, stdout, stderr });
     });
   });
 }
@@ -1436,7 +1436,7 @@ async function spawnAgent(
     // Codex: uses `codex exec` with bypass sandbox (needs SSH/rsync to RDNA node)
     result = await runCommand("codex", codexExecArgs(prompt), {
       cwd: REPO_ROOT,
-      timeout: 1_800_000,
+      timeout: 7_200_000,
       streamOutput: true,
       stdoutLineFormatter: (line) => formatCodexStreamLine(line),
     });
@@ -1461,7 +1461,7 @@ async function spawnAgent(
       prompt,
     ], {
       cwd: REPO_ROOT,
-      timeout: 1_800_000,
+      timeout: 7_200_000,
       streamOutput: true,
       stdoutLineFormatter: (line) => formatClaudeStreamLine(line, claudeState),
     });
@@ -1472,8 +1472,13 @@ async function spawnAgent(
   console.log(c("1;32", `  \u2705 Agent done in ${formatElapsed(startedAt)}`));
   console.log(c("1;36", SEP));
 
-  if (result.exitCode !== 0) {
-    console.log(c("1;31", `  Agent exited with code ${result.exitCode}`));
+  if (result.exitCode !== 0 || result.signal) {
+    const how = result.signal ? `killed by ${result.signal}` : `exited with code ${result.exitCode}`;
+    console.log(c("1;31", `  Agent ${how}`));
+    const tailStderr = result.stderr.slice(-2000).trimEnd();
+    const tailStdout = result.stdout.slice(-2000).trimEnd();
+    if (tailStderr) console.log(c("1;31", `  stderr tail:\n${tailStderr}`));
+    if (tailStdout) console.log(c("2", `  stdout tail:\n${tailStdout}`));
   }
 
   return result;

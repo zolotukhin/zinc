@@ -6,6 +6,10 @@ interface Props {
   canonicalUrl?: string;
   ogType?: string;
   ogImage?: string;
+  ogImageAlt?: string;
+  ogImageType?: string;
+  ogImageWidth?: number;
+  ogImageHeight?: number;
   publishedDate?: string;
   tags?: string[];
   jsonLd?: Record<string, unknown>;
@@ -18,6 +22,10 @@ const {
   canonicalUrl = Astro.url.href,
   ogType = 'website',
   ogImage = '/og-image-v2.png',
+  ogImageAlt,
+  ogImageType,
+  ogImageWidth,
+  ogImageHeight,
   publishedDate,
   tags,
   jsonLd,
@@ -28,6 +36,16 @@ const fullTitle = title === 'Stepan Zolotukhin'
   : title.includes('zolotukhin') ? title : `${title} — zolotukhin.ai`;
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const ogImageUrl = ogImage.startsWith('http') ? ogImage : `${siteUrl}${ogImage}`;
+const defaultOgImagePath = '/og-image-v2.png';
+const usingDefaultOgImage = ogImage === defaultOgImagePath || ogImageUrl === `${siteUrl}${defaultOgImagePath}`;
+const resolvedOgImageAlt = ogImageAlt ?? `${title} — zolotukhin.ai preview image`;
+const resolvedOgImageType = ogImageType
+  ?? (ogImageUrl.endsWith('.png') ? 'image/png'
+    : (ogImageUrl.endsWith('.jpg') || ogImageUrl.endsWith('.jpeg')) ? 'image/jpeg'
+    : ogImageUrl.endsWith('.webp') ? 'image/webp'
+    : undefined);
+const resolvedOgImageWidth = ogImageWidth ?? (usingDefaultOgImage ? 768 : undefined);
+const resolvedOgImageHeight = ogImageHeight ?? (usingDefaultOgImage ? 442 : undefined);
 ---
 
 <title>{fullTitle}</title>
@@ -41,15 +59,23 @@ const ogImageUrl = ogImage.startsWith('http') ? ogImage : `${siteUrl}${ogImage}`
 <meta property="og:url" content={canonicalUrl} />
 <meta property="og:type" content={ogType} />
 <meta property="og:image" content={ogImageUrl} />
+<meta property="og:image:secure_url" content={ogImageUrl} />
+{resolvedOgImageType && <meta property="og:image:type" content={resolvedOgImageType} />}
+{resolvedOgImageWidth && <meta property="og:image:width" content={String(resolvedOgImageWidth)} />}
+{resolvedOgImageHeight && <meta property="og:image:height" content={String(resolvedOgImageHeight)} />}
+<meta property="og:image:alt" content={resolvedOgImageAlt} />
 <meta property="og:site_name" content="zolotukhin.ai" />
 
 <!-- Twitter / X -->
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:site" content="@zolotukhin_ai" />
 <meta name="twitter:creator" content="@zolotukhin_ai" />
+<meta name="twitter:url" content={canonicalUrl} />
 <meta name="twitter:title" content={title} />
 <meta name="twitter:description" content={description} />
 <meta name="twitter:image" content={ogImageUrl} />
+<meta name="twitter:image:src" content={ogImageUrl} />
+<meta name="twitter:image:alt" content={resolvedOgImageAlt} />
 
 {publishedDate && <meta property="article:published_time" content={publishedDate} />}
 {tags && tags.map(tag => <meta property="article:tag" content={tag} />)}

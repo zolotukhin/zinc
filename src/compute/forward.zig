@@ -847,6 +847,14 @@ pub const InferenceEngine = struct {
     profile_phase_ranges: [max_profile_phase_ranges]ProfilePhaseRange = undefined,
     profile_phase_range_count: u32 = 0,
     profile_logged_cpu_moe_fallback: bool = false,
+    // Always-on lightweight prefill timing (CPU-side, no GPU queries).
+    // Populated by decodeStep() when prefill_active is set by prefillBatch(),
+    // so effort-6 can see where prefill time goes without needing --profile.
+    prefill_active: bool = false,
+    prefill_token_samples: u32 = 0,
+    prefill_cpu_embed_ns: u64 = 0,
+    prefill_cpu_record_ns: u64 = 0,
+    prefill_submit_wait_ns: u64 = 0,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -3139,7 +3147,8 @@ pub const InferenceEngine = struct {
         }
 
         // 1. CPU: dequantize embedding
-        const cpu_embed_start = if (self.profile_enabled) std.time.nanoTimestamp() else 0;
+        const track_decode_timing = self.profile_enabled or self.prefill_active;
+        const cpu_embed_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
         try self.embedToken(token_id);
         if (collect_output and state.generated_tokens.items.len == 0 and config.architecture == .gpt_oss) {
             const embd = self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
@@ -3154,16 +3163,19 @@ pub const InferenceEngine = struct {
                 staging_f32[3],
             });
         }
-        if (self.profile_enabled) {
+        var prefill_embed_elapsed_ns: u64 = 0;
+        if (track_decode_timing) {
             const cpu_embed_end = std.time.nanoTimestamp();
-            self.profile_token_counters.cpu_embed_ns += @intCast(cpu_embed_end - cpu_embed_start);
+            const elapsed: u64 = @intCast(cpu_embed_end - cpu_embed_start);
+            if (self.profile_enabled) self.profile_token_counters.cpu_embed_ns += elapsed;
+            prefill_embed_elapsed_ns = elapsed;
         }
 
         // Per-layer logit5 tracking for BOS diagnostic summary
         var diag_logit5 = [_]f32{0} ** 64;
         var diag_rms_arr = [_]f32{0} ** 64;
 
-        const cpu_record_start = if (self.profile_enabled) std.time.nanoTimestamp() else 0;
+        const cpu_record_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
 
         // Begin single command buffer for all layers (Phase 3c batching)
         if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
@@ -5710,15 +5722,27 @@ pub const InferenceEngine = struct {
         _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         try self.decode_cmd.end();
-        if (self.profile_enabled) {
+        var prefill_record_elapsed_ns: u64 = 0;
+        if (track_decode_timing) {
             const cpu_record_end = std.time.nanoTimestamp();
-            self.profile_token_counters.cpu_record_ns += @intCast(cpu_record_end - cpu_record_start);
+            const elapsed: u64 = @intCast(cpu_record_end - cpu_record_start);
+            if (self.profile_enabled) self.profile_token_counters.cpu_record_ns += elapsed;
+            prefill_record_elapsed_ns = elapsed;
         }
-        const submit_wait_start = if (self.profile_enabled) std.time.nanoTimestamp() else 0;
+        const submit_wait_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
-        if (self.profile_enabled) {
+        var prefill_submit_wait_elapsed_ns: u64 = 0;
+        if (track_decode_timing) {
             const submit_wait_end = std.time.nanoTimestamp();
-            self.profile_token_counters.submit_wait_ns += @intCast(submit_wait_end - submit_wait_start);
+            const elapsed: u64 = @intCast(submit_wait_end - submit_wait_start);
+            if (self.profile_enabled) self.profile_token_counters.submit_wait_ns += elapsed;
+            prefill_submit_wait_elapsed_ns = elapsed;
+        }
+        if (self.prefill_active) {
+            self.prefill_cpu_embed_ns += prefill_embed_elapsed_ns;
+            self.prefill_cpu_record_ns += prefill_record_elapsed_ns;
+            self.prefill_submit_wait_ns += prefill_submit_wait_elapsed_ns;
+            self.prefill_token_samples += 1;
         }
 
         if (self.validation_diagnostics_enabled and collect_output and hidden_dim <= 8192 and need_logits_readback) {
@@ -6516,6 +6540,14 @@ pub const InferenceEngine = struct {
             try self.ensureKvPagesForContext(target_context_tokens);
         }
 
+        // Reset lightweight prefill timing so the caller can log per-prefill stats.
+        self.prefill_token_samples = 0;
+        self.prefill_cpu_embed_ns = 0;
+        self.prefill_cpu_record_ns = 0;
+        self.prefill_submit_wait_ns = 0;
+        self.prefill_active = true;
+        defer self.prefill_active = false;
+
         // Run each prompt token through the full transformer (same as decodeStep)
         // This populates KV cache and SSM state so the first decode token has context.
         for (prompt_tokens, 0..) |token_id, i| {
@@ -7306,6 +7338,27 @@ pub fn generate(
     log.info("Prefill: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{
         prompt_tokens.len, @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0, prefill_tok_per_sec,
     });
+    if (engine.prefill_token_samples > 0) {
+        const samples_f = @as(f64, @floatFromInt(engine.prefill_token_samples));
+        const avg_embed_ms = @as(f64, @floatFromInt(engine.prefill_cpu_embed_ns)) / samples_f / 1_000_000.0;
+        const avg_record_ms = @as(f64, @floatFromInt(engine.prefill_cpu_record_ns)) / samples_f / 1_000_000.0;
+        const avg_submit_wait_ms = @as(f64, @floatFromInt(engine.prefill_submit_wait_ns)) / samples_f / 1_000_000.0;
+        const total_embed_ms = @as(f64, @floatFromInt(engine.prefill_cpu_embed_ns)) / 1_000_000.0;
+        const total_record_ms = @as(f64, @floatFromInt(engine.prefill_cpu_record_ns)) / 1_000_000.0;
+        const total_submit_wait_ms = @as(f64, @floatFromInt(engine.prefill_submit_wait_ns)) / 1_000_000.0;
+        log.info(
+            "Prefill profile: samples={d} avg embed={d:.3} ms record={d:.2} ms submit+wait={d:.2} ms | totals embed={d:.1} ms record={d:.1} ms submit+wait={d:.1} ms",
+            .{
+                engine.prefill_token_samples,
+                avg_embed_ms,
+                avg_record_ms,
+                avg_submit_wait_ms,
+                total_embed_ms,
+                total_record_ms,
+                total_submit_wait_ms,
+            },
+        );
+    }
     // Decode profiling should describe only generated tokens, not the prompt prefill steps.
     engine.resetProfilingSamples();
 

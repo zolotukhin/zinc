@@ -20,8 +20,13 @@ pub const CommandEncoderMode = metal_command.CommandEncoderMode;
 const shim = @import("../metal/c.zig").shim;
 
 const log = std.log.scoped(.forward);
-/// Hard cap used by the current Metal runtime for context planning and KV allocation.
-pub const runtime_context_cap: u32 = 4096;
+/// Upper bound on the Metal KV-cache allocation: we still honour the model's
+/// architectural context length and the unified-memory budget, but we refuse
+/// to allocate more tokens than this in one block to keep allocation latency
+/// and staging buffers sane. Callers that already right-sized `cfg.context_length`
+/// from the device budget (see `memory_plan.autoContextTokensForDeviceBudget`)
+/// see this as a soft safety net rather than the primary limit.
+pub const runtime_context_cap: u32 = 262144;
 
 /// Runtime state for the decode loop.
 pub const DecodeState = struct {
