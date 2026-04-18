@@ -81,7 +81,7 @@ pub const entries = [_]CatalogEntry{
         .default_context_length = 4096,
         .recommended_for_chat = true,
         .thinking_stable = true,
-        .status = .experimental,
+        .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,
@@ -338,6 +338,7 @@ test "find returns known qwen3.6 entry" {
     try std.testing.expectEqualStrings("qwen3.6", entry.family);
     try std.testing.expect(entry.recommended_for_chat);
     try std.testing.expect(entry.thinking_stable);
+    try std.testing.expect(entry.status == .supported);
 }
 
 test "qwen3.6 family reuses qwen35 gguf architecture mapping" {

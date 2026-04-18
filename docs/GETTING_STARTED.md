@@ -27,6 +27,7 @@ This list is intentionally narrow. It shows the exact GGUFs that have been valid
 | **OpenAI GPT-OSS 20B** | [openai_gpt-oss-20b-Q4_K_M.gguf](https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF) | 16+ GB unified (Apple Silicon) |
 | **Qwen3 8B** | [Qwen3-8B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | 16+ GB VRAM or unified |
 | **Qwen3.5 35B-A3B UD** | [Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) | 24+ GB VRAM or unified |
+| **Qwen3.6 35B-A3B UD** | [Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | 24+ GB VRAM or unified |
 
 ## Install dependencies
 

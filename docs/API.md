@@ -429,4 +429,4 @@ ZINC loads models in GGUF format with the following quantization types:
 | F16 | Yes | For KV cache and small tensors |
 | F32 | Yes | Baseline, no quantization overhead |
 
-Supported architectures: LLaMA, Mistral, Qwen2, Qwen2-MoE (including Qwen3.5 hybrid SSM+attention), Mamba, Jamba.
+Supported architectures: LLaMA, Mistral, Qwen2, Qwen2-MoE (including Qwen3.5 and Qwen3.6 hybrid SSM+attention), Mamba, Jamba.

@@ -154,6 +154,7 @@ Detected GPU profile: apple-silicon
 ID                             Released     Status      Fit    Installed   Active   Notes
 gpt-oss-20b-q4k-m              2025-06-25   supported   yes    yes         no       tested + exact fit
 qwen3-8b-q4k-m                 2025-04-29   supported   yes    yes         yes      tested + exact fit
+qwen36-35b-a3b-q4k-xl          2026-04-15   supported   yes    no          no       tested + exact fit
 gemma4-31b-q4k-m               2026-04-02   supported   yes    no          no       tested + catalog fit
 ```
 
