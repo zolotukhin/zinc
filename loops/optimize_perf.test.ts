@@ -821,6 +821,19 @@ describe("config", () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("Cycles this run:");
   });
+
+  test("claude invocations pin the 1M-context Opus model and max effort", async () => {
+    const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
+    // Default must be the 1M variant.
+    expect(src).toContain(`"claude-opus-4-7[1m]"`);
+    // Must be overridable via env so a future run can drop to Sonnet/Haiku.
+    expect(src).toContain("ZINC_CLAUDE_MODEL");
+    // Both the main agent call and the fix-up retry must pass --model.
+    const modelFlagCount = (src.match(/"--model", CLAUDE_MODEL,/g) ?? []).length;
+    expect(modelFlagCount).toBeGreaterThanOrEqual(2);
+    // Effort must stay at max.
+    expect(src).toContain(`const CLAUDE_EFFORT = "max"`);
+  });
 });
 
 describe("formatPhaseBudget", () => {

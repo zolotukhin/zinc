@@ -39,6 +39,13 @@ import { formatElapsed } from "./optimize_llm_tps";
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const RESULTS_DIR = resolve(REPO_ROOT, ".perf_optimize");
 const CLAUDE_EFFORT = "max";
+// Pin to the 1M-context Opus variant. Cycle prompts run 8-12KB on their own
+// (plan + phase budget + swing ideas + known-flat + cycle ledger + failed
+// approaches + idea bank) and the agent frequently reads forward.zig
+// (8.5K lines) plus shaders and reference-implementation sources, so the
+// 1M-context variant is the right default for these cycles. Overridable
+// via ZINC_CLAUDE_MODEL in case a future run needs Sonnet / Haiku.
+const CLAUDE_MODEL = process.env.ZINC_CLAUDE_MODEL ?? "claude-opus-4-7[1m]";
 const CODEX_REASONING_EFFORT = "xhigh";
 
 function loadEnv(): Record<string, string> {
@@ -1970,6 +1977,7 @@ async function spawnAgent(
       "--include-partial-messages",
       `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
       "--permission-mode", "bypassPermissions",
+      "--model", CLAUDE_MODEL,
       "--effort", CLAUDE_EFFORT,
       prompt,
     ], {
@@ -2266,7 +2274,7 @@ async function main() {
   console.log(c("1;37", boxLine(`ZINC Performance Optimization Loop — Effort ${effort}`)));
   console.log(c("1;37", boxLine(effortFile)));
   console.log(c("1;37", boxLine(`Model: ${model}`)));
-  console.log(c("1;37", boxLine(`Agent: ${agent}`)));
+  console.log(c("1;37", boxLine(`Agent: ${agent}${agent === "claude" ? ` (${CLAUDE_MODEL} effort=${CLAUDE_EFFORT})` : ""}`)));
   console.log(c("1;37", boxLine(`Cycles this run: ${cycles}`)));
   if (resume) console.log(c("1;37", boxLine("Resuming from previous run")));
   console.log(c("1;37", `\u255A${"═".repeat(BOX_INNER_WIDTH)}\u255D\n`));
@@ -2495,6 +2503,7 @@ ${result.buildOutput.slice(-2000)}
           "-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages",
           `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
           "--permission-mode", "bypassPermissions",
+          "--model", CLAUDE_MODEL,
           "--effort", CLAUDE_EFFORT,
           fixPrompt,
         ], {
