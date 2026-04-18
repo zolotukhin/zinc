@@ -251,7 +251,7 @@ Major categories:
 |-------|--------|----------|
 | Qwen3.5-35B | "The capital of France is" | "Paris." |
 | Qwen3-8B | "The capital of France is" | "Paris." |
-| Gemma3-12B | "The capital of France is" | "Paris." |
+| Gemma4-31B | "The capital of France is" | "Paris." |
 
 ## Risk
 

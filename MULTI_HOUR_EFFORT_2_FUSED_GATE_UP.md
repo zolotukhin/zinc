@@ -5,7 +5,7 @@
 - **Qwen3.5-35B-A3B**: 62.4 tok/s (16.0 ms/tok) on RX 9070 RDNA4
 - **MoE gate+up**: 1.56 ms (40 layers, Q4_K, M=512, K=2048, 8 experts)
 - **Shared expert proj**: 0.93 ms (40 layers, Q8_0, gate+up+gate_scalar)
-- **Dense FFN gate+up**: used by Gemma3 (Q4_K, M=12288, K=3072)
+- **Dense FFN gate+up**: used by Gemma4-31B (Q4_K, M=12288, K=3072)
 - **Target**: Eliminate 40-80 barrier+dispatch pairs per token
 
 ## Why
@@ -236,7 +236,7 @@ Same pattern: replace two `dispatchDmmv` calls with one fused dispatch.
 
 **File: `src/compute/forward.zig`** — in the dense FFN section (~line 2339)
 
-For non-MoE layers (Gemma3, Qwen3-8B), replace the two dense dispatches.
+For non-MoE layers (Gemma4-31B, Qwen3-8B), replace the two dense dispatches.
 
 ### Step 7: (Optional) Fused gate+up+SwiGLU
 
@@ -271,7 +271,7 @@ After each step, run:
 ./zig-out/bin/zinc -m /root/models/Qwen3-8B-Q4_K_M.gguf --prompt 'The capital of France is' -n 20
 # → Must output "Paris."
 
-./zig-out/bin/zinc -m /root/models/gemma-3-12b-it-Q4_K_M.gguf --prompt 'The capital of France is' -n 20
+./zig-out/bin/zinc -m /root/models/gemma-4-31B-it-Q4_K_M.gguf --prompt 'The capital of France is' -n 20
 # → Must output "Paris."
 ```
 

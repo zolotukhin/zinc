@@ -63,9 +63,9 @@ float global_best = -1.0 / 0.0;
 
 With 256 fine-grained experts (each with only 512 intermediate dimensions), router logits were routinely below -1.0. The model silently routed every token to expert 0, regardless of the router's actual prediction.
 
-### Bug 4: Gemma3 Metal Backend
+### Bug 4: Gemma Metal Backend
 
-Five separate issues prevented Gemma3 from working on Apple Silicon:
+Five separate issues prevented the Gemma family from working on Apple Silicon:
 - Missing embedding scaling by `√hidden_dim` (~62x magnitude error)
 - FFN norm weight loading order reversed (used post-attention norm instead of FFN norm)
 - Missing post-attention and post-FFN RMS norms (Gemma-specific architecture requirement)
