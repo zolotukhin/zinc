@@ -6451,7 +6451,10 @@ pub const InferenceEngine = struct {
         try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
         try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
         try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
-        self.decode_cmd.computeBarrier();
+        // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
+        // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
+        // subsequent global computeBarrier() before delta-net consumes them.
+        self.decode_cmd.computeBufferBarrier(self.attn_out_buf.handle, qkv_bytes);
         self.endProfilePhase(.ssm_proj, ssm_proj_phase);
 
         // --- GPU: conv1d + SiLU ---
