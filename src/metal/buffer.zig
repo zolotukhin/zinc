@@ -3,9 +3,11 @@
 //! The Metal backend allocates shared-storage buffers so CPU code, the model
 //! loader, and GPU kernels can all see the same memory without an explicit
 //! staging copy. This module owns that wrapper and its mmap integration.
+//! @section Metal Runtime
 const std = @import("std");
 const shim = @import("c.zig").shim;
 
+/// Metal buffer handle plus CPU visibility metadata used throughout the backend.
 pub const MetalBuffer = struct {
     handle: ?*shim.MetalBuf,
     size: usize,
@@ -16,16 +18,18 @@ pub const MetalBuffer = struct {
     /// True if this buffer holds Q8_0 data in the SIMD-coalesced repacked layout.
     is_repacked_q8: bool = false,
 
+    /// Return the raw CPU-visible pointer for shared-mode buffers.
     pub fn contents(self: *const MetalBuffer) ?[*]u8 {
         return self.cpu_ptr;
     }
 
-    /// Mapped pointer alias (compatibility with Vulkan buffer interface pattern).
+    /// Mapped pointer alias kept for compatibility with the Vulkan buffer interface pattern.
     pub fn mapped(self: *const MetalBuffer) ?[*]u8 {
         return self.cpu_ptr;
     }
 };
 
+/// Allocate a shared-storage Metal buffer that is visible to both CPU and GPU code.
 pub fn createBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
     var cpu_ptr: ?*anyopaque = null;
     const handle = shim.mtl_create_buffer(ctx, size, &cpu_ptr);
@@ -38,6 +42,7 @@ pub fn createBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
     };
 }
 
+/// Allocate a GPU-private Metal buffer without a CPU mapping.
 pub fn createPrivateBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
     const handle = shim.mtl_create_private_buffer(ctx, size);
     if (handle == null) return error.MetalBufferAllocFailed;
@@ -49,6 +54,7 @@ pub fn createPrivateBuffer(ctx: ?*shim.MetalCtx, size: usize) !MetalBuffer {
     };
 }
 
+/// Wrap an existing mmap region as a Metal buffer without copying its contents.
 pub fn wrapMmap(ctx: ?*shim.MetalCtx, ptr: [*]u8, size: usize) !MetalBuffer {
     const handle = shim.mtl_wrap_mmap(ctx, ptr, size);
     if (handle == null) return error.MetalMmapWrapFailed;
@@ -60,6 +66,7 @@ pub fn wrapMmap(ctx: ?*shim.MetalCtx, ptr: [*]u8, size: usize) !MetalBuffer {
     };
 }
 
+/// Free a Metal buffer handle and clear it from the wrapper.
 pub fn freeBuffer(buf: *MetalBuffer) void {
     if (buf.handle) |h| {
         shim.mtl_free_buffer(h);

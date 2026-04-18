@@ -3,6 +3,7 @@
 //! It compiles or loads Metal kernels, exposes the threadgroup capabilities
 //! that dispatch code needs for tuning, and keeps pipeline lifecycle handling
 //! out of the higher-level runtime and benchmark paths.
+//! @section Metal Runtime
 const std = @import("std");
 const shim = @import("c.zig").shim;
 

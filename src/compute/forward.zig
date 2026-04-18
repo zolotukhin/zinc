@@ -81,12 +81,14 @@ pub const DecodeState = struct {
     }
 };
 
+/// Token sampling controls shared by the decode loop and HTTP server.
 pub const SamplingParams = struct {
     temperature: f32 = 0.0,
     top_p: f32 = 1.0,
     repetition_penalty: f32 = 1.0,
     top_k: u32 = 64,
 
+    /// Return whether the current sampling settings require CPU-visible logits.
     pub fn requiresLogitsReadback(self: @This()) bool {
         return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
     }
@@ -1105,7 +1107,7 @@ pub const InferenceEngine = struct {
             rope_freq_buf.mapped = @ptrCast(map_ptr);
         }
         // Precompute inverse RoPE frequencies.
-        // For IMROPE (Gemma 3 vision): sectioned per-pair frequencies.
+        // For IMROPE: sectioned per-pair frequencies.
         // For Gemma 4 global attention: rope_freqs.weight factors modify base frequencies.
         // For standard models: freq[k] = 1 / base^(2k / rope_dim).
         const has_imrope = config.rope_sections[0] > 0 or config.rope_sections[1] > 0;

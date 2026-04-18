@@ -4,5 +4,6 @@
 //! Keeping the `@cImport` in one place avoids duplicate opaque C types across
 //! Zig compilation units, which is critical for safely passing shim handles
 //! between the Metal device, buffer, pipeline, and command helpers.
+//! @section Metal Runtime
 /// Raw Metal shim C bindings imported from the Objective-C bridge header.
 pub const shim = @cImport(@cInclude("shim.h"));

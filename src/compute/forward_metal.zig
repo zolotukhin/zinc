@@ -1,4 +1,5 @@
 //! Metal inference engine — decode loop for Apple Silicon.
+//! @section Inference Runtime
 //! This is the Metal equivalent of forward.zig (Vulkan).
 //! Uses MSL compute shaders dispatched via the Metal shim.
 const std = @import("std");
@@ -14,10 +15,12 @@ const metal_pipeline = @import("../metal/pipeline.zig");
 const MetalPipeline = metal_pipeline.MetalPipeline;
 const metal_command = @import("../metal/command.zig");
 const MetalCommand = metal_command.MetalCommand;
+/// Command-encoder mode re-export used by runtime init options.
 pub const CommandEncoderMode = metal_command.CommandEncoderMode;
 const shim = @import("../metal/c.zig").shim;
 
 const log = std.log.scoped(.forward);
+/// Hard cap used by the current Metal runtime for context planning and KV allocation.
 pub const runtime_context_cap: u32 = 4096;
 
 /// Runtime state for the decode loop.
@@ -27,6 +30,7 @@ pub const DecodeState = struct {
     requested_context_tokens: u32,
     allocator: std.mem.Allocator,
 
+    /// Initialize decode state for a fresh Metal generation request.
     pub fn init(allocator: std.mem.Allocator) DecodeState {
         return .{
             .position = 0,
@@ -36,6 +40,7 @@ pub const DecodeState = struct {
         };
     }
 
+    /// Release the generated-token buffer owned by this decode state.
     pub fn deinit(self: *DecodeState) void {
         self.generated_tokens.deinit(self.allocator);
         self.* = undefined;
@@ -59,6 +64,7 @@ pub const GenerateResult = struct {
     output_tokens: []u32,
     metrics: GenerateMetrics,
 
+    /// Free the generated token slice returned by `generateWithMetrics`.
     pub fn deinit(self: *GenerateResult, allocator: std.mem.Allocator) void {
         allocator.free(self.output_tokens);
         self.* = undefined;
@@ -72,6 +78,7 @@ pub const SamplingParams = struct {
     repetition_penalty: f32 = 1.0,
     top_k: u32 = 64,
 
+    /// Return whether sampling settings require CPU-visible logits instead of greedy argmax.
     pub fn requiresLogitsReadback(self: @This()) bool {
         return self.temperature > 0.0001 or self.top_p < 0.9999 or self.repetition_penalty > 1.0001;
     }
@@ -2013,6 +2020,7 @@ pub const InferenceEngine = struct {
         }
     }
 
+    /// Run prompt prefill by replaying the decode path for each prompt token.
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         if (prompt_tokens.len == 0) return;
 
@@ -2038,6 +2046,7 @@ pub const InferenceEngine = struct {
         state.position = self.position;
     }
 
+    /// Advance one autoregressive decode step from the given input token.
     pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32) !void {
         if (state.position >= self.max_context_tokens) return error.ContextLengthExceeded;
         if (state.position != self.position) return error.KvStateNotAvailable;
@@ -2051,11 +2060,13 @@ pub const InferenceEngine = struct {
         state.position = self.position;
     }
 
+    /// Enable request-level profiling counters for subsequent decode work.
     pub fn enableProfiling(self: *InferenceEngine) !void {
         self.profile_enabled = true;
         self.request_profile.reset();
     }
 
+    /// Log the collected Metal profiling summary for the current request.
     pub fn logRequestProfileSummary(self: *const InferenceEngine, label: []const u8, prompt_tokens: usize, completion_tokens: u32) void {
         if (!self.profile_enabled) return;
 

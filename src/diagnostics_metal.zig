@@ -3,6 +3,7 @@
 //! The Metal diagnostics path inspects the default device, reports unified
 //! memory and feature support, and optionally projects how a selected GGUF or
 //! managed model fits once runtime allocations and KV reservation are included.
+//! @section Hardware Detection
 const std = @import("std");
 const builtin = @import("builtin");
 const metal_c = @import("metal/c.zig").shim;

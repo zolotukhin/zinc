@@ -77,7 +77,7 @@ Agent policy:
 
 ### Supported Architectures
 - **Qwen3 / Qwen3.5** — dense and MoE variants
-- **Gemma 3** — with GeGLU activation and Gemma-specific normalization
+- **Gemma 4** — with GeGLU activation and Gemma-specific normalization
 - **OpenAI GPT-OSS** — MoE with OAI SwiGLU, MXFP4 experts, attention sinks, ISWA, YaRN RoPE
 
 ## Project Structure

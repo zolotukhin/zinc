@@ -1,5 +1,6 @@
 //! Backend-specific server runtime aliases and wrappers.
 //! Keeps the HTTP/routes layer shared across Vulkan and Metal backends.
+//! @section API Server
 const std = @import("std");
 const gpu = @import("../gpu/interface.zig");
 

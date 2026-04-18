@@ -597,6 +597,7 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
+    /// Record an in-place scale dispatch: data[i] *= scale.
     pub fn recordScaleInPlace(
         self: *const ElementwiseDispatch,
         cmd: *CommandBuffer,

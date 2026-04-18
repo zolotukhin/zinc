@@ -200,7 +200,7 @@ Hot-swapping models is supported, but swaps are serialized with generation becau
 The current runtime is designed around the model families ZINC is actively validating:
 
 - **Qwen3 / Qwen3.5 / Qwen3.6**
-- **Gemma 3 / Gemma 4**
+- **Gemma 4**
 - **OpenAI GPT-OSS**
 
 At the execution-model level, that means ZINC handles:

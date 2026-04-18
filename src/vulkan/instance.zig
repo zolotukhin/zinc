@@ -7,6 +7,7 @@ const vk = @import("vk.zig");
 
 const log = std.log.scoped(.vulkan);
 
+/// Function pointer type for `vkCmdPushDescriptorSetKHR` when the extension is enabled.
 pub const PushDescriptorFn = *const fn (
     vk.c.VkCommandBuffer,
     vk.c.VkPipelineBindPoint,

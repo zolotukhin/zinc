@@ -225,7 +225,7 @@ The deploy script includes a retry health check (30 attempts, 1s apart) to handl
 Before making changes to these areas, understand the existing design:
 
 - **Compute graph IR** — the decode graph is built from GGUF metadata, not hand-coded
-- **Model architectures** — Qwen3, Qwen3.5, Gemma 3/4, and GPT-OSS (dense transformer, MoE, and SSM hybrid)
+- **Model architectures** — Qwen3, Qwen3.5, Gemma 4, and GPT-OSS (dense transformer, MoE, and SSM hybrid)
 - **GGUF parsing** — zero-copy mmap with DMA to GPU VRAM
 - **Vulkan init** — single-device, single-queue, push-constant dispatch
 - **Metal init** — default system device, zero-copy `newBufferWithBytesNoCopy`

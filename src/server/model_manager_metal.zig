@@ -3,6 +3,7 @@
 //! The server uses this manager to load one Metal model at a time, track the
 //! tokenizer and runtime allocations that belong to it, and project fit/status
 //! information back into the OpenAI-compatible model-management endpoints.
+//! @section API Server
 const std = @import("std");
 const catalog_mod = @import("../model/catalog.zig");
 const config_mod = @import("../model/config.zig");
@@ -49,6 +50,7 @@ pub const ModelCatalogView = struct {
     profile: []const u8,
     data: []ModelSummary,
 
+    /// Free the owned catalog summary slice.
     pub fn deinit(self: *ModelCatalogView, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
         self.* = undefined;
@@ -109,15 +111,18 @@ pub const ModelManager = struct {
         device_local_bytes: u64,
         device_local_budget_bytes: u64,
 
+        /// Clamp an active-request token count to the loaded model's capacity.
         pub fn activeContextTokens(self: @This(), requested_tokens: u32) u32 {
             return @min(requested_tokens, self.context_capacity_tokens);
         }
 
+        /// Return the bytes consumed by the clamped active context token count.
         pub fn activeContextBytes(self: @This(), requested_tokens: u32) u64 {
             return @as(u64, self.activeContextTokens(requested_tokens)) * self.context_bytes_per_token;
         }
     };
 
+    /// Create a manager and eagerly load the requested Metal model.
     pub fn init(
         spec: LoadSpec,
         device: *const MetalDevice,
@@ -139,6 +144,7 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Create an idle manager with no model currently loaded.
     pub fn initEmpty(
         device: *const MetalDevice,
         requested_context_length: ?u32,
@@ -154,6 +160,7 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Tear down the active model, if any, and release the GPU process lock.
     pub fn deinit(self: *ModelManager) void {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
@@ -164,20 +171,24 @@ pub const ModelManager = struct {
         self.gpu_process_lock.deinit();
     }
 
+    /// Return the currently loaded resource bundle, or null when idle.
     pub fn currentResources(self: *ModelManager) ?*LoadedResources {
         return self.current;
     }
 
+    /// Return the active model display name, or `"none"` when no model is loaded.
     pub fn activeDisplayName(self: *ModelManager) []const u8 {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
         return if (self.current) |current| current.display_name else "none";
     }
 
+    /// Return the catalog profile string used for the active Metal device.
     pub fn catalogProfile(self: *const ModelManager) []const u8 {
         return self.profile;
     }
 
+    /// Snapshot memory usage for the active model, or zeroes when idle.
     pub fn currentMemoryUsage(self: *ModelManager) MemoryUsage {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
@@ -203,6 +214,7 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Build a catalog view annotated with install, fit, and active-model status.
     pub fn collectCatalogView(self: *ModelManager, allocator: std.mem.Allocator, include_all: bool) !ModelCatalogView {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
@@ -283,6 +295,7 @@ pub const ModelManager = struct {
         };
     }
 
+    /// Return whether a managed catalog entry is supported and fits on the active device.
     pub fn supportsManagedEntry(self: *ModelManager, entry: catalog_mod.CatalogEntry, allocator: std.mem.Allocator) bool {
         const fit = managed_mod.describeFit(entry, self.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
             .required_vram_bytes = entry.required_vram_bytes,

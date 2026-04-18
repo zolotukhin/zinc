@@ -709,6 +709,7 @@ fn printResults(results: []const BenchResult) void {
     }
 }
 
+/// Run the hot-decode microbenchmark suite against the selected model and kernels.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {

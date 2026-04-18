@@ -1692,11 +1692,12 @@ fn handleChatCompletions(
     if (parsed.stream) {
         // Decode loop with buffered stop detection.
         // Tokens are buffered and only sent once we confirm they're not part of <|im_end|>.
-        const eos = tokenizer.eosId();
-        // Additional EOG tokens (Gemma 4 uses <eos>=1 and </s>=212 alongside <turn|>=106)
+        // Tokenizer decides which IDs terminate a turn (e.g. Gemma 4 treats <eos>=1
+        // and </s>=212 as EOG alongside <turn|>=106, while Qwen's token 1 is a
+        // normal `"` character).
         const isEog = struct {
-            fn check(token: u32, primary_eos: u32) bool {
-                return token == primary_eos or token == 1 or token == 212;
+            fn check(tok: *const tokenizer_mod.Tokenizer, token: u32) bool {
+                return tok.isEndOfGeneration(token);
             }
         }.check;
         const stop_strs = chat_stop_strs[0..];
@@ -1714,7 +1715,7 @@ fn handleChatCompletions(
             var prev_token = runtime.sample(engine, &state, sampling, random);
             var generated: u32 = 0;
 
-            while (generated < max_tokens and !isEog(prev_token, eos) and !stopped) {
+            while (generated < max_tokens and !isEog(tokenizer, prev_token) and !stopped) {
                 if (conn.isPeerClosed()) return;
 
                 // Accumulate this token's decoded text
@@ -1851,7 +1852,7 @@ fn handleChatCompletions(
                 } else break;
             }
 
-            if (!stopped and !isEog(prev_token, eos) and generated >= max_tokens) {
+            if (!stopped and !isEog(tokenizer, prev_token) and generated >= max_tokens) {
                 finish_reason = .length;
             }
 
@@ -1894,16 +1895,15 @@ fn handleChatCompletions(
         var text_buf: std.ArrayList(u8) = .{};
         defer text_buf.deinit(allocator);
         var ns_gen: u32 = 0;
-        const ns_eos = tokenizer.eosId();
         const nsIsEog = struct {
-            fn check(token: u32, primary_eos: u32) bool {
-                return token == primary_eos or token == 1 or token == 212;
+            fn check(tok: *const tokenizer_mod.Tokenizer, token: u32) bool {
+                return tok.isEndOfGeneration(token);
             }
         }.check;
         var finish_reason: FinishReason = if (max_tokens == 0 and parsed.max_tokens > 0) .length else .stop;
         if (max_tokens > 0) {
             var prev = runtime.sample(engine, &state, sampling, random);
-            while (ns_gen < max_tokens and !nsIsEog(prev, ns_eos)) {
+            while (ns_gen < max_tokens and !nsIsEog(tokenizer, prev)) {
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
@@ -1926,7 +1926,7 @@ fn handleChatCompletions(
                 server_state.setActiveContextTokens(state.position);
                 prev = runtime.sample(engine, &state, sampling, random);
             }
-            if (!nsIsEog(prev, ns_eos) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items) == null) {
+            if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items) == null) {
                 finish_reason = .length;
             }
         }

@@ -1,5 +1,6 @@
 //! Metal-specific model loading — zero-copy via mmap + newBufferWithBytesNoCopy.
 //! This replaces the Vulkan loader's staging-buffer DMA with direct mmap wrapping.
+//! @section Model Format & Loading
 const std = @import("std");
 const gguf = @import("gguf.zig");
 const config_mod = @import("config.zig");

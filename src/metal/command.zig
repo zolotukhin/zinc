@@ -3,11 +3,13 @@
 //! This module is the low-level bridge between ZINC's compute dispatchers and
 //! the Objective-C Metal shim. It records compute work, barriers, and timing
 //! mode so higher-level inference code can stay backend-agnostic.
+//! @section Metal Runtime
 const std = @import("std");
 const shim = @import("c.zig").shim;
 const MetalBuffer = @import("buffer.zig").MetalBuffer;
 const MetalPipeline = @import("pipeline.zig").MetalPipeline;
 
+/// Encoder policy used when opening a Metal compute command buffer.
 pub const CommandEncoderMode = enum(u8) {
     concurrent = 0,
     serial = 1,
@@ -162,6 +164,7 @@ pub fn beginCommand(ctx: ?*shim.MetalCtx) !MetalCommand {
     return beginCommandWithMode(ctx, .concurrent);
 }
 
+/// Allocate a command buffer using the requested encoder/barrier policy.
 pub fn beginCommandWithMode(ctx: ?*shim.MetalCtx, mode: CommandEncoderMode) !MetalCommand {
     const handle = shim.mtl_begin_command_mode(ctx, @intFromEnum(mode));
     if (handle == null) return error.MetalCommandBufferFailed;

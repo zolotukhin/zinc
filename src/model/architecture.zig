@@ -812,7 +812,7 @@ fn buildGemmaDecodeGraph(config: *const ModelConfig, allocator: std.mem.Allocato
         ));
         g.addDependency(v_proj, input_norm);
 
-        // Q/K RMS norms (Gemma 3+ applies per-head norm before RoPE)
+        // Q/K RMS norms (Gemma applies per-head norm before RoPE)
         const q_norm = try addAnnotatedNode(&g, layer, .rms_norm_mul, "q_norm", rmsNormMetrics(
             config.head_dim,
             config.n_heads,

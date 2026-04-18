@@ -140,11 +140,19 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     },
   ],
   [
+    'sampling',
+    {
+      title: 'Sampling',
+      description: 'Logit post-processing, argmax helpers, and token-selection controls layered on top of the decode runtime.',
+      order: 5,
+    },
+  ],
+  [
     'shader-dispatch',
     {
       title: 'Shader Dispatch',
       description: 'Typed wrappers around the compute shaders that prepare push constants, descriptor layouts, and per-op dispatch dimensions.',
-      order: 5,
+      order: 6,
     },
   ],
   [
@@ -152,7 +160,7 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     {
       title: 'Hardware Detection',
       description: 'Vendor and architecture heuristics that translate raw Vulkan properties into tuning defaults for AMD, NVIDIA, and Intel GPUs.',
-      order: 6,
+      order: 7,
     },
   ],
   [
@@ -160,7 +168,23 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     {
       title: 'Vulkan Runtime',
       description: 'Low-level Vulkan setup, memory allocation, buffers, pipelines, and command submission primitives used throughout the engine.',
-      order: 7,
+      order: 8,
+    },
+  ],
+  [
+    'metal-runtime',
+    {
+      title: 'Metal Runtime',
+      description: 'Low-level Metal device discovery, buffers, pipelines, and command submission primitives used by the Apple Silicon backend.',
+      order: 9,
+    },
+  ],
+  [
+    'managed-models',
+    {
+      title: 'Managed Models',
+      description: 'Catalog metadata, cache management, model downloads, and active-selection helpers used by the CLI and server.',
+      order: 10,
     },
   ],
   [
@@ -168,7 +192,7 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     {
       title: 'Scheduler',
       description: 'Continuous batching scheduler, paged KV cache management, and request lifecycle tracking for concurrent inference serving.',
-      order: 8,
+      order: 11,
     },
   ],
   [
@@ -176,7 +200,7 @@ const SECTION_META = new Map<string, { title: string; description: string; order
     {
       title: 'API Server',
       description: 'OpenAI-compatible HTTP server, route dispatch, SSE streaming, and session management for serving inference over the network.',
-      order: 9,
+      order: 12,
     },
   ],
 ]);

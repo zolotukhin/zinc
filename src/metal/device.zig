@@ -1,8 +1,12 @@
 //! Metal device wrapper — macOS Apple Silicon GPU backend.
-//! Stub implementation: T005 will fill in the full MetalDevice.
+//!
+//! This module owns Metal device initialization and capability queries used by
+//! the loader, diagnostics, and Metal inference runtime.
+//! @section Metal Runtime
 const std = @import("std");
 const shim = @import("c.zig").shim;
 
+/// Public Apple GPU family buckets exposed by the Metal shim.
 pub const GpuFamily = enum(u32) {
     apple7 = 7,
     apple8 = 8,
@@ -10,6 +14,7 @@ pub const GpuFamily = enum(u32) {
     apple10 = 10,
     unknown = 0,
 
+    /// Return whether the device is Apple9-class or newer.
     pub fn isApple9OrNewer(self: @This()) bool {
         return switch (self) {
             .apple9, .apple10 => true,
@@ -17,11 +22,13 @@ pub const GpuFamily = enum(u32) {
         };
     }
 
+    /// Return whether the device should be treated as M5-class for tuning.
     pub fn isM5Class(self: @This()) bool {
         return self == .apple10;
     }
 };
 
+/// Capability snapshot queried once from the active Metal device.
 pub const MetalCapabilities = struct {
     supports_apple7: bool,
     supports_apple8: bool,
@@ -34,6 +41,7 @@ pub const MetalCapabilities = struct {
     max_threadgroup_memory_length: u64,
 };
 
+/// Active Metal device wrapper plus capability metadata used by the backend.
 pub const MetalDevice = struct {
     ctx: ?*shim.MetalCtx,
     chip: GpuFamily,
@@ -41,6 +49,7 @@ pub const MetalDevice = struct {
     selected_device_index: u32,
     allocator: std.mem.Allocator,
 
+    /// Initialize the system-default Metal device and query its public capabilities.
     pub fn init(allocator: std.mem.Allocator, _: u32) !MetalDevice {
         const ctx = shim.mtl_init();
         if (ctx == null) {
@@ -70,6 +79,7 @@ pub const MetalDevice = struct {
         };
     }
 
+    /// Destroy the active Metal device context.
     pub fn deinit(self: *MetalDevice) void {
         if (self.ctx) |ctx| {
             shim.mtl_destroy(ctx);
@@ -77,28 +87,34 @@ pub const MetalDevice = struct {
         }
     }
 
+    /// Return the largest single Metal buffer size reported by the driver.
     pub fn maxBufferSize(self: *const MetalDevice) u64 {
         if (self.ctx) |ctx| return shim.mtl_max_buffer_size(ctx);
         return 0;
     }
 
+    /// Return the total unified memory size reported for the active device.
     pub fn totalMemory(self: *const MetalDevice) u64 {
         if (self.ctx) |ctx| return shim.mtl_total_memory(ctx);
         return 0;
     }
 
+    /// Return the recommended working-set cap reported by Metal.
     pub fn recommendedMaxWorkingSetSize(self: *const MetalDevice) u64 {
         return self.caps.recommended_max_working_set_size;
     }
 
+    /// Return the per-threadgroup shared-memory limit reported by Metal.
     pub fn maxThreadgroupMemoryLength(self: *const MetalDevice) u64 {
         return self.caps.max_threadgroup_memory_length;
     }
 
+    /// Return whether the active device exposes unified CPU/GPU memory.
     pub fn hasUnifiedMemory(self: *const MetalDevice) bool {
         return self.caps.has_unified_memory;
     }
 
+    /// Return whether the active device reports public raytracing support.
     pub fn supportsRaytracing(self: *const MetalDevice) bool {
         return self.caps.supports_raytracing;
     }

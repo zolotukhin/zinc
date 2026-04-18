@@ -408,6 +408,7 @@ pub const Tokenizer = struct {
         pos.* = i;
         return text[start..i];
     }
+    /// Encode UTF-8 text into token IDs using the tokenizer's pretokenizer and merges.
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
         if (self.pretokenizer == .gemma4_bpe) {
@@ -694,6 +695,20 @@ pub const Tokenizer = struct {
     /// @returns The EOS token ID loaded from GGUF metadata or the default fallback.
     pub fn eosId(self: *const Tokenizer) u32 {
         return self.eos_id;
+    }
+
+    /// Whether a sampled token ends the current generation turn.
+    ///
+    /// Always terminates on the configured EOS. Gemma 4 additionally uses
+    /// `<eos>=1` and `</s>=212` alongside the primary `<turn|>=106` EOS — we
+    /// treat those as EOG too when the chat template is Gemma, but not for
+    /// other tokenizers (Qwen token 1 is a plain `"` character).
+    pub fn isEndOfGeneration(self: *const Tokenizer, token: u32) bool {
+        if (token == self.eos_id) return true;
+        const tmpl = self.chat_template orelse return false;
+        const is_gemma4 = std.mem.indexOf(u8, tmpl, "<|turn>") != null;
+        if (is_gemma4 and (token == 1 or token == 212)) return true;
+        return false;
     }
 
     /// Return the model's configured beginning-of-sequence token ID.

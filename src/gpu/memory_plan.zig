@@ -3,6 +3,7 @@
 //! The helpers in this module turn model dimensions plus backend-specific
 //! runtime characteristics into a comparable memory budget so diagnostics,
 //! server load policy, and inference engines size context and KV consistently.
+//! @section Inference Runtime
 const std = @import("std");
 const config_mod = @import("../model/config.zig");
 
@@ -23,34 +24,42 @@ pub const RuntimeMemoryProfile = struct {
     /// GPU SSM state bytes included in `fixed_device_local_bytes`.
     gpu_ssm_bytes: u64,
 
+    /// Return device-local bytes consumed by context-scaled runtime state.
     pub fn deviceLocalContextBytes(self: @This(), context_tokens: u32) u64 {
         return @as(u64, context_tokens) * self.device_local_bytes_per_token;
     }
 
+    /// Return host-visible bytes consumed by context-scaled runtime state.
     pub fn hostVisibleContextBytes(self: @This(), context_tokens: u32) u64 {
         return @as(u64, context_tokens) * self.host_visible_bytes_per_token;
     }
 
+    /// Return total device-local runtime bytes for the requested context length.
     pub fn runtimeDeviceLocalBytes(self: @This(), context_tokens: u32) u64 {
         return self.fixed_device_local_bytes + self.deviceLocalContextBytes(context_tokens);
     }
 
+    /// Return total host-visible runtime bytes for the requested context length.
     pub fn runtimeHostVisibleBytes(self: @This(), context_tokens: u32) u64 {
         return self.fixed_host_visible_bytes + self.hostVisibleContextBytes(context_tokens);
     }
 
+    /// Return total unified-memory runtime bytes for the requested context length.
     pub fn runtimeUnifiedBytes(self: @This(), context_tokens: u32) u64 {
         return self.runtimeDeviceLocalBytes(context_tokens) + self.runtimeHostVisibleBytes(context_tokens);
     }
 
+    /// Return weights plus device-local runtime bytes for the requested context length.
     pub fn totalDeviceLocalBytes(self: @This(), weights_bytes: u64, context_tokens: u32) u64 {
         return weights_bytes + self.runtimeDeviceLocalBytes(context_tokens);
     }
 
+    /// Return weights plus unified runtime bytes for the requested context length.
     pub fn totalUnifiedBytes(self: @This(), weights_bytes: u64, context_tokens: u32) u64 {
         return weights_bytes + self.runtimeUnifiedBytes(context_tokens);
     }
 
+    /// Return the largest context that fits within a device-local memory budget.
     pub fn maxContextTokensForDeviceLocalBudget(
         self: @This(),
         weights_bytes: u64,
@@ -66,6 +75,7 @@ pub const RuntimeMemoryProfile = struct {
         );
     }
 
+    /// Return the largest context that fits within a unified-memory budget.
     pub fn maxContextTokensForUnifiedBudget(
         self: @This(),
         weights_bytes: u64,
@@ -82,22 +92,27 @@ pub const RuntimeMemoryProfile = struct {
     }
 };
 
+/// Clamp the requested context length against the model's declared context limit.
 pub fn effectiveContextCeiling(config: ModelConfig, requested_context_length: ?u32) u32 {
     return @min(config.context_length, requested_context_length orelse config.context_length);
 }
 
+/// Apply the requested context cap directly to a mutable model config.
 pub fn applyRequestedContextLimit(config: *ModelConfig, requested_context_length: ?u32) void {
     config.context_length = effectiveContextCeiling(config.*, requested_context_length);
 }
 
+/// Return the runtime context target after applying both model and backend caps.
 pub fn requestedContextTokens(config: ModelConfig, requested_context_length: ?u32, backend_cap: u32) u32 {
     return @min(effectiveContextCeiling(config, requested_context_length), backend_cap);
 }
 
+/// Return how many context slots remain available for a request.
 pub fn remainingContextTokens(used_context_tokens: u32, context_capacity_tokens: u32) u32 {
     return context_capacity_tokens -| used_context_tokens;
 }
 
+/// Clamp requested completion tokens against the remaining context budget.
 pub fn clampedCompletionTokens(
     used_context_tokens: u32,
     requested_completion_tokens: u32,
@@ -106,6 +121,7 @@ pub fn clampedCompletionTokens(
     return @min(requested_completion_tokens, remainingContextTokens(used_context_tokens, context_capacity_tokens));
 }
 
+/// Return the total context target needed for prompt plus completion work.
 pub fn requestContextTarget(
     used_context_tokens: u32,
     requested_completion_tokens: u32,
@@ -117,11 +133,13 @@ pub fn requestContextTarget(
     );
 }
 
+/// Completion-token budget and resulting context target for one request.
 pub const RequestBudget = struct {
     completion_tokens: u32,
     target_context_tokens: u32,
 };
 
+/// Compute the clamped completion budget and resulting context target for one request.
 pub fn requestBudget(
     used_context_tokens: u32,
     requested_completion_tokens: u32,
@@ -142,6 +160,7 @@ pub fn requestBudget(
     };
 }
 
+/// Build the backend-agnostic runtime memory profile for a normalized model config.
 pub fn profile(config: ModelConfig) RuntimeMemoryProfile {
     const hidden_size = @as(u64, config.hidden_dim) * @sizeOf(f32);
     const logits_size = @as(u64, config.vocab_size) * @sizeOf(f32);

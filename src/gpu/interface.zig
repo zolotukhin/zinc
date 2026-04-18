@@ -1,5 +1,6 @@
 //! GPU backend abstraction — comptime-resolved, zero runtime overhead.
 //! On macOS → Metal backend. On Linux → Vulkan backend.
+//! @section Inference Runtime
 const builtin = @import("builtin");
 
 /// True when compiling for macOS (Metal backend).
