@@ -5,6 +5,7 @@
 const std = @import("std");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
+const PushDescriptorFn = @import("../vulkan/instance.zig").PushDescriptorFn;
 const Pipeline = @import("../vulkan/pipeline.zig").Pipeline;
 const pipeline_mod = @import("../vulkan/pipeline.zig");
 const CommandBuffer = @import("../vulkan/command.zig").CommandBuffer;
@@ -500,6 +501,58 @@ pub const DmmvDispatch = struct {
                 cmd.dispatchWithPush(single_pip, descriptor_set, std.mem.asBytes(&push), workgroups_x_single, 1, 1);
             }
         }
+    }
+
+    /// Push-descriptor variant of recordBatchDispatch for prefill hot path.
+    /// Bindings order: 0 = A (weight), 1 = X_batch (K × num_cols, column-major),
+    /// 2 = Y_batch (M × num_cols, column-major).
+    /// Returns error.UnsupportedQuantType if the batch shader isn't loaded for this quant type.
+    pub fn recordBatchDispatchPush(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        quant_type: GGMLType,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        x_buf: vk.c.VkBuffer,
+        x_size: vk.c.VkDeviceSize,
+        y_buf: vk.c.VkBuffer,
+        y_size: vk.c.VkDeviceSize,
+        M: u32,
+        K: u32,
+        a_offset: u32,
+        x_offset: u32,
+        y_offset: u32,
+        num_cols: u32,
+    ) !void {
+        const pip = switch (quant_type) {
+            .q4_k => if (self.pipeline_q4k_batch) |*p| p else return error.UnsupportedQuantType,
+            .q8_0 => if (self.pipeline_q8_0_batch) |*p| p else return error.UnsupportedQuantType,
+            else => return error.UnsupportedQuantType,
+        };
+        const push = BatchDmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = a_offset,
+            .x_offset = x_offset,
+            .y_offset = y_offset,
+            .num_cols = num_cols,
+        };
+        const infos = [3]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = x_buf, .offset = 0, .range = x_size },
+            .{ .buffer = y_buf, .offset = 0, .range = y_size },
+        };
+        const workgroups_x = (M + 63) / 64;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            workgroups_x,
+            1,
+            1,
+        );
     }
 
     /// Destroy the loaded pipelines and descriptor pool.

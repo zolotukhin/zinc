@@ -20,7 +20,6 @@ const Graph = @import("graph.zig").Graph;
 const dmmv_mod = @import("dmmv.zig");
 const DmmvDispatch = dmmv_mod.DmmvDispatch;
 const DmmvPushConstants = dmmv_mod.DmmvPushConstants;
-const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
 const MoeDmmvPushConstants = dmmv_mod.MoeDmmvPushConstants;
 const elementwise_mod = @import("elementwise.zig");
 const ElementwiseDispatch = elementwise_mod.ElementwiseDispatch;
@@ -3526,7 +3525,14 @@ pub const InferenceEngine = struct {
                 // Fused norm+rope: when both norm and rope are needed, combine them into
                 // a single dispatch per head set, eliminating 1 barrier + 2 dispatches.
                 const use_fused_norm_rope = self.elementwise.pipeline_norm_rope != null;
-                var q_rope_done = false;
+                // q_rope_done starts true for dead-tail tokens so the standalone Q RoPE
+                // dispatches below (both push-descriptor and transfer-fallback branches)
+                // are suppressed — q_buf only feeds flash_attn / sigmoid_mul / O_proj,
+                // all of which are also skipped by the dead-tail guard further down.
+                // Cycle 20 only handled the q_norm_tensor branch; models without a
+                // separate attn_q_norm tensor (e.g. Qwen3.5 mamba-hybrid) still ran
+                // Q RoPE for every non-terminal prompt token at the last full-attn layer.
+                var q_rope_done = is_dead_attn_tail;
                 var k_rope_done = false;
 
                 if (q_norm_tensor) |qn| {
@@ -6029,32 +6035,29 @@ pub const InferenceEngine = struct {
         };
 
         if (pip.uses_push_descriptors) {
-            // For Q4K large M (LM head), use batch shader for better parallelism
-            if (qt == .q4_k and M > 65536) {
-                if (self.dmmv.pipeline_q4k_batch) |*batch_pip| {
-                    const batch_push = BatchDmmvPushConstants{
-                        .M = M,
-                        .K = K,
-                        .a_offset = a_offset,
-                        .x_offset = x_offset,
-                        .y_offset = y_offset,
-                        .num_cols = 1,
-                    };
-                    self.pushDispatch3(
-                        batch_pip,
-                        std.mem.asBytes(&batch_push),
-                        tensor.gpu_buffer.handle,
-                        tensor.gpu_buffer.size,
-                        input_buf.handle,
-                        input_size,
-                        output_buf.handle,
-                        output_buf.size,
-                        (M + 63) / 64,
-                        1,
-                        1,
-                    );
-                    return;
-                }
+            // For Q4K large M (LM head), use batch shader for better parallelism.
+            // Routed through recordBatchDispatchPush so Step 2.5 cross-token batching
+            // (num_cols >= 2) can reuse the same entry point without duplicating the
+            // push-descriptor + batch-push construction inline here.
+            if (qt == .q4_k and M > 65536 and self.dmmv.pipeline_q4k_batch != null) {
+                try self.dmmv.recordBatchDispatchPush(
+                    &self.decode_cmd,
+                    qt,
+                    self.instance.push_descriptor_fn,
+                    tensor.gpu_buffer.handle,
+                    tensor.gpu_buffer.size,
+                    input_buf.handle,
+                    input_size,
+                    output_buf.handle,
+                    output_buf.size,
+                    M,
+                    K,
+                    a_offset,
+                    x_offset,
+                    y_offset,
+                    1,
+                );
+                return;
             }
 
             const push = DmmvPushConstants{
