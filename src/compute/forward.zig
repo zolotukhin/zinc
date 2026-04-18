@@ -869,13 +869,19 @@ pub const InferenceEngine = struct {
     // prefillBatch() owns the host-side waits between pipelined iterations and
     // forces the terminal token back onto the sync path.
     prefill_pipeline_mode: bool = false,
-    // Pre-dequantized embedding rows for the current prefillBatch. When set,
-    // embedToken() skips the Q4_K/Q8_0/f16 dequant and does a memcpy from
-    // cache[idx*hidden_dim..] into embed_staging. prefillBatch() owns this
-    // allocation and the idx counter; embedToken() just consumes it.
-    prefill_embed_cache: ?[]f32 = null,
-    prefill_embed_cache_idx: u32 = 0,
-    prefill_embed_cache_hidden: u32 = 0,
+    // Host-mapped staging buffer holding every prompt-token embedding for the
+    // current prefillBatch. decodeStep's layer-0 vkCmdCopyBuffer reads from
+    // here with srcOffset = prefill_current_token_idx * hidden_size, and
+    // embedToken becomes a no-op during prefill because prefillBatch()
+    // dequantized the rows directly into this buffer. This replaces cycle
+    // 14's intermediate CPU f32 cache + per-token memcpy(cache →
+    // embed_staging) with a single bulk dequant pass, and prepares the
+    // callsite for a device-local upgrade in a later cycle.
+    prefill_embed_big: ?Buffer = null,
+    prefill_embed_big_capacity_bytes: u64 = 0,
+    prefill_embed_big_hidden: u32 = 0,
+    prefill_embed_big_token_count: u32 = 0,
+    prefill_current_token_idx: u32 = 0,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -3129,24 +3135,21 @@ pub const InferenceEngine = struct {
     /// The GPU copy (staging → hidden_buf) is recorded in the decode command buffer.
     fn embedToken(self: *InferenceEngine, token_id: u32) !void {
         const hidden_dim = self.model.config.hidden_dim;
-        const staging_f32: [*]f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
 
-        // Prefill fast path: the whole prompt was dequantized upfront in
-        // prefillBatch(). Pull the next row out of the cache with a memcpy
-        // instead of paying a Q4_K/Q8_0/f16 dequant on every hot-loop token.
-        if (self.prefill_embed_cache) |cache| {
-            if (self.prefill_embed_cache_hidden == hidden_dim) {
-                const idx = self.prefill_embed_cache_idx;
-                const total = cache.len / hidden_dim;
-                if (@as(usize, idx) < total) {
-                    const base = @as(usize, idx) * @as(usize, hidden_dim);
-                    @memcpy(staging_f32[0..hidden_dim], cache[base .. base + hidden_dim]);
-                    self.prefill_embed_cache_idx = idx + 1;
-                    return;
-                }
-            }
+        // Prefill fast path: prefillBatch() dequantized the whole prompt
+        // directly into prefill_embed_big. decodeStep's layer-0 copy reads
+        // from that buffer with srcOffset = prefill_current_token_idx *
+        // hidden_size, so there is nothing to do here — the CPU record path
+        // skips a per-token memcpy entirely.
+        if (self.prefill_active and
+            self.prefill_embed_big != null and
+            self.prefill_embed_big_hidden == hidden_dim and
+            self.prefill_current_token_idx < self.prefill_embed_big_token_count)
+        {
+            return;
         }
 
+        const staging_f32: [*]f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
         const safe_id = @min(token_id, self.model.config.vocab_size -| 1);
 
         const embd = self.tensor_map.get("token_embd.weight") orelse {
@@ -3258,8 +3261,24 @@ pub const InferenceEngine = struct {
             // --- Upload embedding (only first layer) ---
             if (layer == 0) {
                 const embed_phase = self.beginProfilePhase();
-                const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
-                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.embed_staging.handle, self.hidden_buf.handle, 1, &region);
+                // During prefill, prefillBatch pre-dequantized every prompt
+                // embedding row into prefill_embed_big. Read from there with
+                // a per-token srcOffset so embedToken's per-token memcpy into
+                // embed_staging is redundant and can be skipped. For decode
+                // and any path where prefill_embed_big is not populated the
+                // copy still comes from embed_staging as before.
+                if (self.prefill_active and
+                    self.prefill_embed_big != null and
+                    self.prefill_embed_big_hidden == hidden_dim and
+                    self.prefill_current_token_idx < self.prefill_embed_big_token_count)
+                {
+                    const src_offset: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, self.prefill_current_token_idx) * hidden_size;
+                    const region = vk.c.VkBufferCopy{ .srcOffset = src_offset, .dstOffset = 0, .size = hidden_size };
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.prefill_embed_big.?.handle, self.hidden_buf.handle, 1, &region);
+                } else {
+                    const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.embed_staging.handle, self.hidden_buf.handle, 1, &region);
+                }
                 self.decode_cmd.transferToComputeBarrier();
                 self.endProfilePhase(.embed_upload, embed_phase);
             }
@@ -6636,20 +6655,25 @@ pub const InferenceEngine = struct {
         self.prefill_active = true;
         defer self.prefill_active = false;
 
-        // Pre-dequantize every prompt embedding row upfront so the per-token
-        // embedToken() call in the hot loop collapses to a cheap memcpy
-        // instead of a full Q4_K/Q8_0/f16 dequant on the CPU record critical
-        // path. The dequant itself is unchanged — we just move it outside the
-        // drain/record/submit ping-pong so it stops serializing with GPU work.
+        // Dequantize every prompt-token embedding row upfront into a single
+        // host-mapped Vulkan staging buffer. decodeStep's layer-0 copy reads
+        // from here with srcOffset = idx * hidden_size, and embedToken()
+        // becomes a no-op during prefill — one bulk dequant pass replaces
+        // 154 per-token CPU memcpy(cache → embed_staging) calls. The buffer
+        // is grown on demand and reused across prefills.
         const hidden_dim = self.model.config.hidden_dim;
-        const cache_elems: usize = @as(usize, hidden_dim) * prompt_tokens.len;
-        const embed_cache = try self.allocator.alloc(f32, cache_elems);
-        defer {
-            self.allocator.free(embed_cache);
-            self.prefill_embed_cache = null;
-            self.prefill_embed_cache_idx = 0;
-            self.prefill_embed_cache_hidden = 0;
+        const total_embed_bytes: u64 = @as(u64, hidden_dim) * @as(u64, prompt_tokens.len) * @sizeOf(f32);
+        if (self.prefill_embed_big == null or self.prefill_embed_big_capacity_bytes < total_embed_bytes) {
+            if (self.prefill_embed_big) |*b| b.deinit();
+            self.prefill_embed_big = try Buffer.initStaging(self.instance, total_embed_bytes);
+            self.prefill_embed_big_capacity_bytes = total_embed_bytes;
         }
+        defer {
+            self.prefill_embed_big_token_count = 0;
+            self.prefill_embed_big_hidden = 0;
+            self.prefill_current_token_idx = 0;
+        }
+        const big_f32: [*]f32 = @ptrCast(@alignCast(self.prefill_embed_big.?.mapped.?));
         {
             const embd = self.tensor_map.get("token_embd.weight") orelse {
                 log.err("token_embd.weight not found", .{});
@@ -6665,16 +6689,16 @@ pub const InferenceEngine = struct {
                 1.0;
             for (prompt_tokens, 0..) |tok, i| {
                 const safe_id = @min(tok, vocab_last);
-                const dst = embed_cache[i * hidden_dim ..][0..hidden_dim];
+                const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
                 if (is_gemma) {
                     for (dst) |*v| v.* *= gemma_scale;
                 }
             }
         }
-        self.prefill_embed_cache = embed_cache;
-        self.prefill_embed_cache_idx = 0;
-        self.prefill_embed_cache_hidden = hidden_dim;
+        self.prefill_embed_big_hidden = hidden_dim;
+        self.prefill_embed_big_token_count = @intCast(prompt_tokens.len);
+        self.prefill_current_token_idx = 0;
 
         // Per-phase GPU timing during prefill costs ~3% throughput (thousands of
         // vkCmdWriteTimestamp calls + a blocking query readback per token) on
@@ -6715,6 +6739,10 @@ pub const InferenceEngine = struct {
         for (prompt_tokens, 0..) |token_id, i| {
             const collect_output = i + 1 == prompt_tokens.len;
             const pipeline_this = can_pipeline and !collect_output;
+            // decodeStep's layer-0 copy reads prefill_embed_big at offset
+            // idx * hidden_size; set the index here so embedToken and that
+            // copy both observe the same value for this prompt token.
+            self.prefill_current_token_idx = @intCast(i);
 
             if (pipeline_this) {
                 // Swap so self.decode_cmd / self.embed_staging now point at the
@@ -7465,6 +7493,7 @@ pub const InferenceEngine = struct {
         self.decode_cmd.deinit(&self.cmd_pool);
         self.prefill_cmd_alt.deinit(&self.cmd_pool);
         self.prefill_embed_alt.deinit();
+        if (self.prefill_embed_big) |*b| b.deinit();
         self.cmd_pool.deinit();
         self.* = undefined;
     }
