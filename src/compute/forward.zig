@@ -6618,7 +6618,17 @@ pub const InferenceEngine = struct {
                 try self.elementwise.recordSsmDeltaNet(&self.decode_cmd, ds, push);
             }
         }
-        self.decode_cmd.computeBarrier();
+        // Narrow: gated_norm only reads attn_out_buf (delta_net output, z_bytes) and
+        // gate_buf (z_tensor DMMV from ssm_proj, z_bytes — synced here for the first
+        // time since cycle 17 dropped it from the ssm_proj end-barrier). gpu_ssm_states
+        // (delta_net RMW) is only read by the NEXT token's delta_net in a different
+        // command buffer (cross-CB sync via submission ordering + cycle 5 pipelined
+        // waitForCompletion). Follows cycle 21's multi-buffer pattern.
+        const delta_to_gnorm_ranges = [_]CommandBuffer.BufferRange{
+            .{ .buffer = self.attn_out_buf.handle, .size = z_bytes },
+            .{ .buffer = self.gate_buf.handle, .size = z_bytes },
+        };
+        self.decode_cmd.computeBuffersBarrier(&delta_to_gnorm_ranges);
         self.endProfilePhase(.ssm_delta, ssm_delta_phase);
 
         // --- GPU: gated norm ---
