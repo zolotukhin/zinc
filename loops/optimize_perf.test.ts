@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, writeFile } from "node:fs/promises";
 import {
   benchmarkSignatureForSpec,
   buildAnalysisReport,
   buildAgentPrompt,
   buildSelfReview,
+  cleanupPreviousRunArtifacts,
   classifyApproachTags,
+  codexExecArgs,
+  effortArtifactPaths,
   formatCodexStreamLine,
   formatCoherenceFailureList,
   formatToolInput,
@@ -184,6 +188,44 @@ describe("loadPreviousRun", () => {
     expect(result.lastCycle).toBe(0);
     expect(result.bestCycle).toBeNull();
     expect(result.bestCommitHash).toBeNull();
+  });
+});
+
+describe("run artifact cleanup", () => {
+  test("cleanupPreviousRunArtifacts removes only the requested effort files", async () => {
+    const targetEffort = 98761;
+    const otherEffort = 98762;
+    const targetPaths = effortArtifactPaths(targetEffort);
+    const otherPaths = effortArtifactPaths(otherEffort);
+
+    await mkdir(".perf_optimize", { recursive: true });
+    await Promise.all(targetPaths.map((path, index) => writeFile(path, `target-${index}`)));
+    await Promise.all(otherPaths.map((path, index) => writeFile(path, `other-${index}`)));
+
+    const removedPaths = await cleanupPreviousRunArtifacts(targetEffort);
+
+    expect(removedPaths.sort()).toEqual([...targetPaths].sort());
+    for (const path of targetPaths) {
+      expect(Bun.file(path).exists()).resolves.toBe(false);
+    }
+    for (const path of otherPaths) {
+      expect(Bun.file(path).exists()).resolves.toBe(true);
+    }
+
+    await cleanupPreviousRunArtifacts(otherEffort);
+  });
+});
+
+describe("codexExecArgs", () => {
+  test("pins the configured reasoning effort", () => {
+    expect(codexExecArgs("optimize")).toEqual([
+      "exec",
+      "-c",
+      'model_reasoning_effort="xhigh"',
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--json",
+      "optimize",
+    ]);
   });
 });
 
@@ -556,9 +598,9 @@ describe("controller memory helpers", () => {
           kind: "crash" as const,
         },
         {
-          id: "Gemma3-12B::What is 2+2?",
-          label: "Gemma3-12B [What is 2+2?]",
-          model: "Gemma3-12B",
+          id: "Gemma4-12B::What is 2+2?",
+          label: "Gemma4-12B [What is 2+2?]",
+          model: "Gemma4-12B",
           prompt: "What is 2+2?",
           outputText: "What is 5-3?",
           kind: "mismatch" as const,
@@ -566,7 +608,7 @@ describe("controller memory helpers", () => {
       ],
       failureIds: [
         "Qwen3-8B::The capital of France is",
-        "Gemma3-12B::What is 2+2?",
+        "Gemma4-12B::What is 2+2?",
       ],
     };
 
@@ -617,9 +659,9 @@ describe("controller memory helpers", () => {
         kind: "crash" as const,
       },
       {
-        id: "Gemma3-12B::What is 2+2?",
-        label: "Gemma3-12B [What is 2+2?]",
-        model: "Gemma3-12B",
+        id: "Gemma4-12B::What is 2+2?",
+        label: "Gemma4-12B [What is 2+2?]",
+        model: "Gemma4-12B",
         prompt: "What is 2+2?",
         outputText: "What is 5-3?",
         kind: "mismatch" as const,
@@ -627,7 +669,7 @@ describe("controller memory helpers", () => {
     ]);
 
     expect(formatted).toContain("Qwen3-8B [The capital of France is]: crashed");
-    expect(formatted).toContain('Gemma3-12B [What is 2+2?]: "What is 5-3?"');
+    expect(formatted).toContain('Gemma4-12B [What is 2+2?]: "What is 5-3?"');
   });
 
   test("buildAnalysisReport summarizes kept and reverted cycles", () => {
@@ -718,8 +760,8 @@ describe("config", () => {
     expect(src).toContain("ZINC_PORT");
     expect(src).toContain("ZINC_USER");
     expect(src).toContain("ZINC_RDNA_QWEN35_35B_MODEL");
+    expect(src).toContain("ZINC_RDNA_QWEN36_35B_MODEL");
     expect(src).toContain("ZINC_RDNA_QWEN3_8B_MODEL");
-    expect(src).toContain("ZINC_RDNA_GEMMA3_12B_MODEL");
     expect(src).toContain("ZINC_RDNA_GEMMA4_31B_MODEL");
     expect(src).toContain("ZINC_RDNA_GEMMA4_12B_MODEL");
     expect(src).toContain("ZINC_RDNA_GPT_OSS_20B_MODEL");
@@ -735,8 +777,8 @@ describe("config", () => {
   test("all six models are listed for coherence", async () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("Qwen3.5-35B");
+    expect(src).toContain("Qwen3.6-35B");
     expect(src).toContain("Qwen3-8B");
-    expect(src).toContain("Gemma3-12B");
     expect(src).toContain("Gemma4-31B");
     expect(src).toContain("Gemma4-12B");
     expect(src).toContain("GPT-OSS-20B");

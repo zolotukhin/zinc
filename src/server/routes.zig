@@ -840,6 +840,12 @@ fn buildChatTranscriptPrompt(tokenizer: *const tokenizer_mod.Tokenizer, roles: [
     }, buf);
 }
 
+fn shouldForceDisableThinking(managed_id: ?[]const u8, model_path: []const u8, display_name: []const u8) bool {
+    if (comptime !runtime.supports_model_management) return false;
+    const entry = catalog_mod.findForLoadedModel(managed_id, model_path, display_name) orelse return false;
+    return !entry.thinking_stable;
+}
+
 fn warmChatReuseCache(
     server_state: *ServerState,
     resources: *const model_manager_mod.LoadedResources,
@@ -1409,6 +1415,12 @@ fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8 {
                 while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
                 continue;
             }
+            if (out_len == 0) {
+                const fallback = sanitizeAnswerTail(text[after_open..]);
+                if (fallback.len > buf.len) return error.BufferTooSmall;
+                @memcpy(buf[0..fallback.len], fallback);
+                out_len = fallback.len;
+            }
             break;
         }
 
@@ -1416,7 +1428,22 @@ fn stripThinkingForDisabledResponse(text: []const u8, buf: []u8) ![]const u8 {
         while (cursor < text.len and std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
     }
 
-    return std.mem.trim(u8, buf[0..out_len], " \t\r\n");
+    const stripped = std.mem.trim(u8, buf[0..out_len], " \t\r\n");
+    if (stripped.len > 0) return stripped;
+
+    const trimmed = std.mem.trimLeft(u8, text, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, thinking_open_tag)) return stripped;
+
+    const after_open = thinking_open_tag.len;
+    const close = std.mem.indexOfPos(u8, trimmed, after_open, thinking_close_tag) orelse return stripped;
+    const answer = std.mem.trim(u8, sanitizeAnswerTail(trimmed[close + thinking_close_tag.len ..]), " \t\r\n");
+    if (answer.len > 0) return stripped;
+
+    const reasoning = std.mem.trim(u8, sanitizeAnswerTail(trimmed[after_open..close]), " \t\r\n");
+    if (reasoning.len == 0) return stripped;
+    if (reasoning.len > buf.len) return error.BufferTooSmall;
+    @memcpy(buf[0..reasoning.len], reasoning);
+    return buf[0..reasoning.len];
 }
 
 fn hasDanglingTrailingQuote(text: []const u8) bool {
@@ -1492,10 +1519,7 @@ fn handleChatCompletions(
 
     // If the catalog marks this model's thinking as unstable, force-disable thinking
     // and skip the thinking template entirely (no empty <think></think> block).
-    const skip_thinking_template = if (resources.managed_id) |mid|
-        if (catalog_mod.find(mid)) |cat_entry| !cat_entry.thinking_stable else false
-    else
-        false;
+    const skip_thinking_template = shouldForceDisableThinking(resources.managed_id, resources.model_path, resources.display_name);
     if (skip_thinking_template) {
         parsed.enable_thinking = null;
     }
@@ -1876,7 +1900,6 @@ fn handleChatCompletions(
                 return token == primary_eos or token == 1 or token == 212;
             }
         }.check;
-        const ns_stops = chat_stop_strs[0..];
         var finish_reason: FinishReason = if (max_tokens == 0 and parsed.max_tokens > 0) .length else .stop;
         if (max_tokens > 0) {
             var prev = runtime.sample(engine, &state, sampling, random);
@@ -1892,7 +1915,7 @@ fn handleChatCompletions(
                 }
                 text_buf.appendSlice(allocator, tok_utf8) catch break;
                 ns_gen += 1;
-                const hit = if (findFirstStop(text_buf.items, ns_stops)) |pos| blk: {
+                const hit = if (findStreamingStopStart(text_buf.items)) |pos| blk: {
                     text_buf.shrinkRetainingCapacity(pos);
                     break :blk true;
                 } else false;
@@ -1903,7 +1926,7 @@ fn handleChatCompletions(
                 server_state.setActiveContextTokens(state.position);
                 prev = runtime.sample(engine, &state, sampling, random);
             }
-            if (!nsIsEog(prev, ns_eos) and ns_gen >= max_tokens and findFirstStop(text_buf.items, ns_stops) == null) {
+            if (!nsIsEog(prev, ns_eos) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items) == null) {
                 finish_reason = .length;
             }
         }
@@ -2532,6 +2555,19 @@ test "parseJsonFields extracts enable_thinking flag" {
     try std.testing.expectEqual(@as(?bool, false), disabled.enable_thinking);
 }
 
+test "shouldForceDisableThinking keeps qwen thinking enabled" {
+    try std.testing.expect(!shouldForceDisableThinking(
+        null,
+        "/Users/test/Library/Caches/zinc/models/models/qwen36-35b-a3b-q4k-xl/model.gguf",
+        "Qwen3.6-35B-A3B-UD-Q4_K_XL",
+    ));
+    try std.testing.expect(!shouldForceDisableThinking(
+        "qwen3-8b-q4k-m",
+        "/Users/test/Library/Caches/zinc/models/models/qwen3-8b-q4k-m/model.gguf",
+        "Qwen3-8B-Q4_K_M",
+    ));
+}
+
 test "parseJsonFields extracts content with spaces" {
     const body = "{\"model\":\"q\",\"messages\":[{\"role\":\"user\",\"content\": \"hello world\"}],\"stream\": true}";
     const parsed = try parseJsonFields(body);
@@ -2978,6 +3014,12 @@ test "stripThinkingForDisabledResponse removes complete think block and keeps an
     try std.testing.expectEqualStrings("408", stripped);
 }
 
+test "stripThinkingForDisabledResponse promotes think-only answer when no final answer arrived" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("<think>\nZig is a systems programming language focused on explicit control.\n</think>\n", &buf);
+    try std.testing.expectEqualStrings("Zig is a systems programming language focused on explicit control.", stripped);
+}
+
 test "stripThinkingForDisabledResponse truncates partial think block after visible answer" {
     var buf: [256]u8 = undefined;
     const stripped = try stripThinkingForDisabledResponse("Hello! How can I help you today?\"\n\n<think>\nThinking Process:\n", &buf);
@@ -2989,6 +3031,12 @@ test "stripThinkingForDisabledResponse preserves text outside think tags" {
     var buf: [256]u8 = undefined;
     const stripped = try stripThinkingForDisabledResponse("Visible text\n<think>\nhidden\n</think>\n\nMore text", &buf);
     try std.testing.expectEqualStrings("Visible text\nMore text", stripped);
+}
+
+test "stripThinkingForDisabledResponse falls back to partial thinking body when no answer arrived yet" {
+    var buf: [256]u8 = undefined;
+    const stripped = try stripThinkingForDisabledResponse("<think>\nZig is a systems programming language focused on explicit control.", &buf);
+    try std.testing.expectEqualStrings("Zig is a systems programming language focused on explicit control.", stripped);
 }
 
 test "hasDanglingTrailingQuote treats standalone trailing quote as dangling" {

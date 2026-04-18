@@ -66,6 +66,28 @@ pub const entries = [_]CatalogEntry{
         },
     },
     .{
+        .id = "qwen36-35b-a3b-q4k-xl",
+        .display_name = "Qwen3.6 35B-A3B UD Q4_K_XL",
+        .release_date = "2026-04-15",
+        .family = "qwen3.6",
+        .format = "gguf",
+        .quantization = "UD-Q4_K_XL",
+        .file_name = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+        .homepage_url = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF",
+        .download_url = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf?download=true",
+        .sha256 = "",
+        .size_bytes = 22_360_456_160,
+        .required_vram_bytes = 23_106_019_926,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .experimental,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
+    .{
         .id = "gpt-oss-20b-q4k-m",
         .display_name = "OpenAI GPT-OSS 20B Q4_K_M",
         .release_date = "2025-06-25",
@@ -102,28 +124,6 @@ pub const entries = [_]CatalogEntry{
         .default_context_length = 4096,
         .recommended_for_chat = true,
         .thinking_stable = true,
-        .status = .supported,
-        .tested_profiles = &.{
-            "amd-rdna4-32gb",
-            apple_silicon_profile,
-        },
-    },
-    .{
-        .id = "gemma3-12b-q4k-m",
-        .display_name = "Gemma 3 12B Q4_K_M",
-        .release_date = "2025-03-12",
-        .family = "gemma3",
-        .format = "gguf",
-        .quantization = "Q4_K_M",
-        .file_name = "gemma-3-12b-it-Q4_K_M.gguf",
-        .homepage_url = "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF",
-        .download_url = "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf?download=true",
-        .sha256 = "",
-        .size_bytes = 7_330_000_000,
-        .required_vram_bytes = 9 * 1024 * 1024 * 1024,
-        .default_context_length = 4096,
-        .recommended_for_chat = true,
-        .thinking_stable = false,
         .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
@@ -184,6 +184,53 @@ pub fn find(id: []const u8) ?*const CatalogEntry {
     return null;
 }
 
+fn eqlCompactAsciiCaseInsensitive(a: []const u8, b: []const u8) bool {
+    var ia: usize = 0;
+    var ib: usize = 0;
+
+    while (true) {
+        while (ia < a.len and !std.ascii.isAlphanumeric(a[ia])) ia += 1;
+        while (ib < b.len and !std.ascii.isAlphanumeric(b[ib])) ib += 1;
+
+        const done_a = ia >= a.len;
+        const done_b = ib >= b.len;
+        if (done_a or done_b) return done_a and done_b;
+
+        if (std.ascii.toLower(a[ia]) != std.ascii.toLower(b[ib])) return false;
+        ia += 1;
+        ib += 1;
+    }
+}
+
+/// Match a loaded model back to a catalog entry, even when it was opened from a
+/// raw path instead of a managed model id.
+pub fn findForLoadedModel(managed_id: ?[]const u8, model_path: []const u8, display_name: []const u8) ?*const CatalogEntry {
+    if (managed_id) |id| {
+        if (find(id)) |entry| return entry;
+    }
+
+    const base_name = std.fs.path.basename(model_path);
+    if (std.mem.eql(u8, base_name, "model.gguf")) {
+        if (std.fs.path.dirname(model_path)) |parent_path| {
+            const parent_name = std.fs.path.basename(parent_path);
+            if (find(parent_name)) |entry| return entry;
+        }
+    }
+
+    for (&entries) |*entry| {
+        if (std.mem.eql(u8, base_name, entry.file_name) or eqlCompactAsciiCaseInsensitive(base_name, entry.file_name)) {
+            return entry;
+        }
+        if (eqlCompactAsciiCaseInsensitive(display_name, entry.display_name) or
+            eqlCompactAsciiCaseInsensitive(display_name, entry.file_name))
+        {
+            return entry;
+        }
+    }
+
+    return null;
+}
+
 /// Map a detected Vulkan GPU configuration to its catalog profile string.
 pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
     return switch (config.vendor) {
@@ -225,13 +272,13 @@ pub fn supportedOnCurrentGpu(entry: CatalogEntry, profile: []const u8, vram_budg
 /// treat that as an error (a catalog entry with no known architecture mapping).
 pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
     const families = .{
+        .{ "qwen3.6", "qwen35" },
         .{ "qwen3.5", "qwen35" },
         .{ "qwen3", "qwen3" },
         .{ "qwen2.5", "qwen2" },
         .{ "qwen2", "qwen2" },
         .{ "mistral", "mistral" },
         .{ "gemma4", "gemma4" },
-        .{ "gemma3", "gemma3" },
         .{ "gemma2", "gemma2" },
         .{ "gemma", "gemma" },
         .{ "mamba", "mamba" },
@@ -284,6 +331,37 @@ test "find returns known entry" {
     try std.testing.expectEqualStrings("2025-04-29", entry.release_date);
 }
 
+test "find returns known qwen3.6 entry" {
+    const entry = find("qwen36-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("Qwen3.6 35B-A3B UD Q4_K_XL", entry.display_name);
+    try std.testing.expectEqualStrings("2026-04-15", entry.release_date);
+    try std.testing.expectEqualStrings("qwen3.6", entry.family);
+    try std.testing.expect(entry.recommended_for_chat);
+    try std.testing.expect(entry.thinking_stable);
+}
+
+test "qwen3.6 family reuses qwen35 gguf architecture mapping" {
+    try std.testing.expectEqualStrings("qwen35", ggufArchForFamily("qwen3.6") orelse return error.TestExpectedEqual);
+}
+
+test "findForLoadedModel matches managed-cache qwen36 path" {
+    const entry = findForLoadedModel(
+        null,
+        "/Users/test/Library/Caches/zinc/models/models/qwen36-35b-a3b-q4k-xl/model.gguf",
+        "Qwen3.6-35B-A3B-UD-Q4_K_XL",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("qwen36-35b-a3b-q4k-xl", entry.id);
+}
+
+test "findForLoadedModel matches raw filename and loose display name" {
+    const entry = findForLoadedModel(
+        null,
+        "/tmp/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+        "Qwen3.6 35B A3B UD Q4 K XL",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("qwen36-35b-a3b-q4k-xl", entry.id);
+}
+
 test "profileForGpu maps RDNA4 32 GB boards" {
     const config = gpu_detect.GpuConfig{
         .vendor = .amd_rdna4,
@@ -323,11 +401,14 @@ test "supportedOnCurrentGpu requires both tested profile and fit" {
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 20 * 1024 * 1024 * 1024));
 }
 
-test "qwen3 8B remains the recommended small chat model" {
+test "qwen thinking stability flags track validated chat behavior" {
     const qwen3 = find("qwen3-8b-q4k-m") orelse return error.TestExpectedEqual;
     try std.testing.expect(qwen3.recommended_for_chat);
     try std.testing.expect(qwen3.thinking_stable);
 
-    const large = find("qwen35-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
-    try std.testing.expect(large.thinking_stable);
+    const qwen35 = find("qwen35-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
+    try std.testing.expect(qwen35.thinking_stable);
+
+    const qwen36 = find("qwen36-35b-a3b-q4k-xl") orelse return error.TestExpectedEqual;
+    try std.testing.expect(qwen36.thinking_stable);
 }

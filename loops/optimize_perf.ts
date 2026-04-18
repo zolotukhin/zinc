@@ -23,7 +23,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   parseTokPerSec,
@@ -36,6 +36,8 @@ import { formatElapsed } from "./optimize_llm_tps";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const RESULTS_DIR = resolve(REPO_ROOT, ".perf_optimize");
+const CLAUDE_EFFORT = "max";
+const CODEX_REASONING_EFFORT = "xhigh";
 
 function loadEnv(): Record<string, string> {
   const envPath = join(REPO_ROOT, ".env");
@@ -83,19 +85,21 @@ const MODELS: Record<string, ModelTarget> = {
     coherencePromptMode: "chat",
     envVar: "ZINC_RDNA_QWEN35_35B_MODEL",
   },
+  qwen36b: {
+    key: "qwen36b",
+    name: "Qwen3.6-35B",
+    path: envOrDefault("ZINC_RDNA_QWEN36_35B_MODEL", "/root/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"),
+    promptMode: "raw",
+    // Qwen3.6 inherits the same closed-think chat prompt behavior as Qwen3.5.
+    coherencePromptMode: "chat",
+    envVar: "ZINC_RDNA_QWEN36_35B_MODEL",
+  },
   qwen8b: {
     key: "qwen8b",
     name: "Qwen3-8B",
     path: envOrDefault("ZINC_RDNA_QWEN3_8B_MODEL", "/root/models/Qwen3-8B-Q4_K_M.gguf"),
     promptMode: "raw",
     envVar: "ZINC_RDNA_QWEN3_8B_MODEL",
-  },
-  gemma3: {
-    key: "gemma3",
-    name: "Gemma3-12B",
-    path: envOrDefault("ZINC_RDNA_GEMMA3_12B_MODEL", "/root/models/gemma-3-12b-it-Q4_K_M.gguf"),
-    promptMode: "chat",
-    envVar: "ZINC_RDNA_GEMMA3_12B_MODEL",
   },
   gemma431b: {
     key: "gemma431b",
@@ -258,8 +262,8 @@ const COHERENCE_CHECKS: CoherenceCheck[] = [
 // The primary model (--model flag) is benchmarked; these are correctness-only.
 const COHERENCE_MODELS: ModelTarget[] = [
   MODELS.qwen35b,
+  MODELS.qwen36b,
   MODELS.qwen8b,
-  MODELS.gemma3,
   MODELS.gemma431b,
   MODELS.gemma412b,
   MODELS.gptoss20b,
@@ -825,7 +829,7 @@ ${plan}
 ## Current Checked-Out Code (build on this code)
 - primary metric (${primaryMetricLabel}): ${summarizeBenchMetric(currentBest.tokPerSec, currentBest.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(currentBest.bandwidthUtil, currentBest.bandwidthSamples, "%", 1)}
-- output: "${currentBest.outputText}" (coherence tested with 3 prompts on 6 models after every change)
+- output: "${currentBest.outputText}" (coherence tested with 3 prompts on 7 models after every change)
 - This is the performance of the code currently checked out in the worktree.
 
 ## Best Accepted Performance Checkpoint
@@ -1430,12 +1434,7 @@ async function spawnAgent(
 
   if (agent === "codex") {
     // Codex: uses `codex exec` with bypass sandbox (needs SSH/rsync to RDNA node)
-    result = await runCommand("codex", [
-      "exec",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "--json",
-      prompt,
-    ], {
+    result = await runCommand("codex", codexExecArgs(prompt), {
       cwd: REPO_ROOT,
       timeout: 1_800_000,
       streamOutput: true,
@@ -1458,7 +1457,7 @@ async function spawnAgent(
       "--include-partial-messages",
       `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
       "--permission-mode", "bypassPermissions",
-      "--effort", "high",
+      "--effort", CLAUDE_EFFORT,
       prompt,
     ], {
       cwd: REPO_ROOT,
@@ -1503,8 +1502,40 @@ type LogEntry = {
   timestamp: string;
 };
 
+export function codexExecArgs(prompt: string): string[] {
+  return [
+    "exec",
+    "-c",
+    `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`,
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--json",
+    prompt,
+  ];
+}
+
 function statePathForEffort(effort: number): string {
   return join(RESULTS_DIR, `effort_${effort}_state.json`);
+}
+
+function logPathForEffort(effort: number): string {
+  return join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
+}
+
+export function effortArtifactPaths(effort: number): string[] {
+  return [
+    statePathForEffort(effort),
+    logPathForEffort(effort),
+  ];
+}
+
+export async function cleanupPreviousRunArtifacts(effort: number): Promise<string[]> {
+  const removed: string[] = [];
+  for (const path of effortArtifactPaths(effort)) {
+    if (!existsSync(path)) continue;
+    await rm(path, { force: true });
+    removed.push(path);
+  }
+  return removed;
 }
 
 async function loadLoopState(effort: number): Promise<LoopState | null> {
@@ -1599,7 +1630,7 @@ export async function loadPreviousRun(effort: number): Promise<{
     };
   }
 
-  const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
+  const logPath = logPathForEffort(effort);
   let history = "";
   let bestTokPerSec = 0;
   let lastCycle = 0;
@@ -1680,6 +1711,13 @@ async function main() {
   console.log(c("1;37", boxLine(`Cycles this run: ${cycles}`)));
   if (resume) console.log(c("1;37", boxLine("Resuming from previous run")));
   console.log(c("1;37", `\u255A${"═".repeat(BOX_INNER_WIDTH)}\u255D\n`));
+
+  if (!resume) {
+    const removedArtifacts = await cleanupPreviousRunArtifacts(effort);
+    if (removedArtifacts.length > 0) {
+      console.log(c("2", `  Cleaned ${removedArtifacts.length} saved artifact(s) from previous effort-${effort} runs.`));
+    }
+  }
 
   // Step 1: Sync and get baseline
   console.log(c("1;33", "\u2500\u2500 Baseline " + "\u2500".repeat(54)));
@@ -1839,7 +1877,7 @@ async function main() {
         commitHash: null,
         timestamp: new Date().toISOString(),
       };
-      const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
+      const logPath = logPathForEffort(effort);
       await writeFile(logPath, JSON.stringify(logEntry) + "\n", { flag: "a" });
       console.log(c("2", `  stall=${state.stalledCycles} best=${bestTokPerSec.toFixed(2)} current=${currentCode.tokPerSec?.toFixed(2) ?? "?"}`));
       continue;
@@ -1870,7 +1908,7 @@ ${result.buildOutput.slice(-2000)}
 - Shader compilation: ssh -p ${ZINC_PORT} ${ZINC_USER}@${ZINC_HOST} "cd ${REMOTE_DIR}/src/shaders && for f in *.comp; do glslc --target-env=vulkan1.3 -fshader-stage=compute \\$f -o \\$\{f%.comp}.spv 2>&1; done"`;
 
       if (agent === "codex") {
-        await runCommand("codex", ["exec", "--dangerously-bypass-approvals-and-sandbox", "--json", fixPrompt], {
+        await runCommand("codex", codexExecArgs(fixPrompt), {
           cwd: REPO_ROOT, timeout: 600_000, streamOutput: true,
           stdoutLineFormatter: (line) => formatCodexStreamLine(line),
         });
@@ -1882,7 +1920,9 @@ ${result.buildOutput.slice(-2000)}
         await runCommand("claude", [
           "-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages",
           `--disallowed-tools=${[...BLOCKED_GIT_OPS, ...BLOCKED_FILE_OPS].join(",")}`,
-          "--permission-mode", "bypassPermissions", fixPrompt,
+          "--permission-mode", "bypassPermissions",
+          "--effort", CLAUDE_EFFORT,
+          fixPrompt,
         ], {
           cwd: REPO_ROOT, timeout: 600_000, streamOutput: true,
           stdoutLineFormatter: (line) => formatClaudeStreamLine(line, fixState),
@@ -2052,7 +2092,7 @@ ${result.buildOutput.slice(-2000)}
       commitHash,
       timestamp: new Date().toISOString(),
     };
-    const logPath = join(RESULTS_DIR, `effort_${effort}_log.jsonl`);
+    const logPath = logPathForEffort(effort);
     await writeFile(logPath, JSON.stringify(logEntry) + "\n", { flag: "a" });
     console.log(c("2", `  stall=${state.stalledCycles} best=${bestTokPerSec.toFixed(2)} current=${currentCode.tokPerSec?.toFixed(2) ?? "?"}`));
   }

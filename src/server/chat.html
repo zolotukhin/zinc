@@ -402,6 +402,7 @@ function scheduleHealthRefresh(delay){
 function modelHrefForName(name){
   const n=(name||'').toLowerCase();
   if(n.includes('qwen3-8b')) return 'https://huggingface.co/unsloth/Qwen3-8B-GGUF';
+  if(n.includes('qwen3.6-35b')||n.includes('qwen3.6-35b-a3b')) return 'https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF';
   if(n.includes('qwen3.5-35b')||n.includes('qwen3.5-35b-a3b')) return 'https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF';
   if(n.includes('qwen3-30b-a3b')) return 'https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF';
   if(n.includes('qwen2.5-32b')||n.includes('qwen2-32b')) return 'https://huggingface.co/unsloth/Qwen2.5-32B-Instruct-GGUF';

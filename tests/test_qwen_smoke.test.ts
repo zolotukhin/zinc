@@ -9,20 +9,28 @@ import { runSuite } from "./test_openai_sdk";
 const MANAGED_MODEL_ROOT = join(homedir(), "Library", "Caches", "zinc", "models", "models");
 const SERVER_MODEL_IDS = [
   "qwen3-8b-q4k-m",
-  "gemma3-12b-q4k-m",
   "gemma4-12b-q4k-m",
   "gpt-oss-20b-q4k-m",
+];
+const QWEN_CHAT_MODEL_IDS = [
+  "qwen35-35b-a3b-q4k-xl",
+  "qwen36-35b-a3b-q4k-xl",
 ];
 
 const binary = process.env.ZINC_CLI_BIN ?? "./zig-out/bin/zinc";
 const requireFull = process.env.ZINC_REQUIRE_FULL_TESTS === "1";
 const prompt = "The capital of France is";
+const thinkingPrompt = "tell me about zig";
 
 function firstInstalledManagedModel(): string | null {
   for (const id of SERVER_MODEL_IDS) {
     if (existsSync(join(MANAGED_MODEL_ROOT, id, "model.gguf"))) return id;
   }
   return null;
+}
+
+function hasManagedModel(id: string): boolean {
+  return existsSync(join(MANAGED_MODEL_ROOT, id, "model.gguf"));
 }
 
 async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<void> {
@@ -57,6 +65,90 @@ async function pickOpenPort(): Promise<number> {
       reject(error);
     }
   });
+}
+
+async function launchManagedServer(modelId: string): Promise<{ process: Bun.Subprocess; baseUrl: string }> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const port = await pickOpenPort();
+    const candidateBase = `http://127.0.0.1:${port}/v1`;
+    const child = Bun.spawn({
+      cmd: [binary, "--model-id", modelId, "--port", String(port)],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env,
+    });
+    try {
+      await waitForHealth(candidateBase, 60_000);
+      return { process: child, baseUrl: candidateBase };
+    } catch (error) {
+      child.kill();
+      await child.exited.catch(() => {});
+      const exited = await Promise.race([child.exited, Promise.resolve(null)]);
+      if (exited === null) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+  throw new Error(`Local server could not acquire GPU for ${modelId} within 120s`);
+}
+
+async function stopManagedServer(process: Bun.Subprocess | null): Promise<void> {
+  if (!process) return;
+  process.kill();
+  await process.exited.catch(() => {});
+}
+
+async function postJson(baseUrl: string, path: string, body: unknown): Promise<any> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${path}: ${text.slice(0, 400)}`);
+  }
+  return JSON.parse(text);
+}
+
+async function getJson(url: string): Promise<any> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${url}: ${text.slice(0, 400)}`);
+  }
+  return JSON.parse(text);
+}
+
+function assistantContent(body: any): string {
+  return String(body?.choices?.[0]?.message?.content ?? "").trim();
+}
+
+function assistantMessageDebug(body: any): string {
+  try {
+    return JSON.stringify(body?.choices?.[0]?.message ?? body, null, 2);
+  } catch {
+    return String(body);
+  }
+}
+
+function assertUsefulZigAnswer(label: string, text: string): void {
+  const lower = text.toLowerCase();
+  if (!text) throw new Error(`${label} returned an empty answer`);
+  if (!lower.includes("zig")) {
+    throw new Error(`${label} did not mention Zig:\n${text}`);
+  }
+  for (const marker of [
+    "here's a thinking process",
+    "thinking process:",
+    "analyze the request",
+    "user says:",
+  ]) {
+    if (lower.includes(marker)) {
+      throw new Error(`${label} leaked meta-planning instead of answering:\n${text}`);
+    }
+  }
 }
 
 for (const entry of QWEN_SMOKE_CASES) {
@@ -143,3 +235,56 @@ describe("OpenAI API smoke", () => {
     await runSuite(baseUrl);
   }, 300_000);
 });
+
+for (const modelId of QWEN_CHAT_MODEL_IDS) {
+  if (!hasManagedModel(modelId)) {
+    if (requireFull) {
+      test(`${modelId} chat thinking smoke`, () => {
+        throw new Error(`Missing managed model ${modelId}`);
+      });
+    } else {
+      test.skip(`${modelId} chat thinking smoke requires managed model ${modelId}`, () => {});
+    }
+    continue;
+  }
+
+  test(`${modelId} chat thinking smoke`, async () => {
+    const { process, baseUrl } = await launchManagedServer(modelId);
+    try {
+      const disabled = await postJson(baseUrl, "/chat/completions", {
+        model: modelId,
+        messages: [{ role: "user", content: thinkingPrompt }],
+        max_tokens: 256,
+        stream: false,
+        enable_thinking: false,
+      });
+      const disabledText = assistantContent(disabled);
+      if (!disabledText) {
+        throw new Error(`${modelId} thinking disabled returned empty content\n${assistantMessageDebug(disabled)}`);
+      }
+      assertUsefulZigAnswer(`${modelId} thinking disabled`, disabledText);
+
+      const enabled = await postJson(baseUrl, "/chat/completions", {
+        model: modelId,
+        messages: [{ role: "user", content: thinkingPrompt }],
+        max_tokens: 256,
+        stream: false,
+        enable_thinking: true,
+      });
+      const enabledText = assistantContent(enabled);
+      if (!enabledText) {
+        throw new Error(`${modelId} thinking enabled returned empty content\n${assistantMessageDebug(enabled)}`);
+      }
+      assertUsefulZigAnswer(`${modelId} thinking enabled`, enabledText);
+
+      const models = await getJson(`${baseUrl.replace(/\/v1\/?$/, "")}/v1/models`);
+      const active = models?.data?.find((entry: any) => entry?.id === modelId);
+      if (!active) throw new Error(`Active model ${modelId} missing from /v1/models`);
+      if (active.supports_thinking_toggle !== true) {
+        throw new Error(`${modelId} should expose a thinking toggle once chat thinking is wired correctly`);
+      }
+    } finally {
+      await stopManagedServer(process);
+    }
+  }, 300_000);
+}

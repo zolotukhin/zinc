@@ -63,7 +63,6 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "jamba")) return .jamba;
     if (std.mem.eql(u8, arch_str, "gemma")) return .gemma;
     if (std.mem.eql(u8, arch_str, "gemma2")) return .gemma;
-    if (std.mem.eql(u8, arch_str, "gemma3")) return .gemma;
     if (std.mem.eql(u8, arch_str, "gemma4")) return .gemma;
     if (std.mem.eql(u8, arch_str, "gpt-oss")) return .gpt_oss;
     if (std.mem.eql(u8, arch_str, "gpt_oss")) return .gpt_oss;
@@ -81,7 +80,6 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma2"));
-    try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma3"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma4"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }

@@ -227,7 +227,11 @@ pub const ModelManager = struct {
         defer self.state_mutex.unlock();
 
         const profile = self.catalogProfile();
-        const active_managed_id = if (self.current) |current| current.managed_id else null;
+        const active_catalog_entry = if (self.current) |current|
+            catalog_mod.findForLoadedModel(current.managed_id, current.model_path, current.display_name)
+        else
+            null;
+        const active_catalog_id = if (active_catalog_entry) |entry| entry.id else null;
         const active_display_name = if (self.current) |current| current.display_name else "none";
         const active_supports_thinking_toggle = if (self.current) |current| current.tokenizer.supportsThinkingToggle() else false;
 
@@ -261,7 +265,7 @@ pub const ModelManager = struct {
                 .family = entry.family,
                 .quantization = entry.quantization,
                 .installed = installed,
-                .active = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id),
+                .active = active_catalog_id != null and std.mem.eql(u8, active_catalog_id.?, entry.id),
                 .managed = true,
                 .supported_on_current_gpu = supported_now,
                 .fits_current_gpu = fit.fits_current_gpu,
@@ -269,11 +273,11 @@ pub const ModelManager = struct {
                 .size_bytes = entry.size_bytes,
                 .exact_fit = fit.exact,
                 .status_label = status_label,
-                .supports_thinking_toggle = active_managed_id != null and std.mem.eql(u8, active_managed_id.?, entry.id) and active_supports_thinking_toggle and entry.thinking_stable,
+                .supports_thinking_toggle = active_catalog_id != null and std.mem.eql(u8, active_catalog_id.?, entry.id) and active_supports_thinking_toggle and entry.thinking_stable,
             });
         }
 
-        if (self.current != null and active_managed_id == null) {
+        if (self.current != null and active_catalog_id == null) {
             try list.append(allocator, .{
                 .id = active_display_name,
                 .display_name = active_display_name,
@@ -526,8 +530,8 @@ test "collectCatalogView marks active managed model" {
         },
         .engine = undefined,
         .model_path = try std.testing.allocator.dupe(u8, "/tmp/test.gguf"),
-        .managed_id = try std.testing.allocator.dupe(u8, "qwen35-35b-a3b-q4k-xl"),
-        .display_name = try std.testing.allocator.dupe(u8, "Qwen3.5 35B-A3B UD Q4_K_XL"),
+        .managed_id = try std.testing.allocator.dupe(u8, "qwen3-8b-q4k-m"),
+        .display_name = try std.testing.allocator.dupe(u8, "Qwen3 8B Q4_K_M"),
         .weights_bytes = 20 * 1024 * 1024 * 1024,
         .runtime_device_local_bytes = 1024 * 1024 * 1024,
         .context_reserved_bytes = 768 * 1024 * 1024,
@@ -552,14 +556,98 @@ test "collectCatalogView marks active managed model" {
     try std.testing.expect(view.data.len >= 1);
     var saw_active = false;
     for (view.data) |entry| {
-        if (std.mem.eql(u8, entry.id, "qwen35-35b-a3b-q4k-xl")) {
+        if (std.mem.eql(u8, entry.id, "qwen3-8b-q4k-m")) {
             saw_active = true;
             try std.testing.expect(entry.active);
             try std.testing.expect(entry.supports_thinking_toggle);
-            try std.testing.expectEqualStrings("2026-02-16", entry.release_date);
+            try std.testing.expectEqualStrings("2025-04-29", entry.release_date);
         }
     }
     try std.testing.expect(saw_active);
+}
+
+test "collectCatalogView preserves qwen36 thinking toggle for raw matched path" {
+    var fake = ModelManager{
+        .allocator = std.testing.allocator,
+        .instance = undefined,
+        .gpu_config = .{
+            .vendor = .amd_rdna4,
+            .device_name = undefined,
+            .device_name_len = 0,
+            .vram_mb = 32624,
+            .bandwidth_gbps = 576,
+            .compute_units = 64,
+            .wave_size = 64,
+            .coopmat_support = true,
+            .l1_cache_kb = 32,
+            .l2_cache_mb = 6,
+            .max_workgroup_size = 1024,
+            .dmmv_workgroup_size = 64,
+            .dmmv_rows_per_workgroup = 2,
+            .matmul_tile_m = 16,
+            .matmul_tile_n = 16,
+            .flash_attn_block_size = 256,
+        },
+        .vram_budget_bytes = 32 * 1024 * 1024 * 1024,
+        .shader_dir = "zig-out/share/zinc/shaders",
+        .current = undefined,
+    };
+    var current = LoadedResources{
+        .model = undefined,
+        .tokenizer = .{
+            .vocab = &.{},
+            .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+            .merges = &.{},
+            .scores = null,
+            .bos_id = 1,
+            .eos_id = 2,
+            .prepend_bos = true,
+            .chat_template =
+            \\{%- if add_generation_prompt %}
+            \\  {{- '<|im_start|>assistant\n' }}
+            \\  {%- if enable_thinking is defined and enable_thinking is true %}
+            \\    {{- '<think>\n' }}
+            \\  {%- else %}
+            \\    {{- '<think>\n\n</think>\n\n' }}
+            \\  {%- endif %}
+            \\{%- endif %}
+            ,
+            .allocator = std.testing.allocator,
+        },
+        .engine = undefined,
+        .model_path = try std.testing.allocator.dupe(u8, "/tmp/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"),
+        .managed_id = null,
+        .display_name = try std.testing.allocator.dupe(u8, "Qwen3.6-35B-A3B-UD-Q4_K_XL"),
+        .weights_bytes = 20 * 1024 * 1024 * 1024,
+        .runtime_device_local_bytes = 1024 * 1024 * 1024,
+        .context_reserved_bytes = 768 * 1024 * 1024 * 1024,
+        .context_capacity_tokens = 4096,
+        .context_bytes_per_token = 192 * 1024,
+        .device_local_bytes = 21 * 1024 * 1024 * 1024,
+        .device_local_budget_bytes = 32 * 1024 * 1024 * 1024,
+    };
+    fake.current = &current;
+    defer {
+        if (fake.current) |loaded| {
+            loaded.tokenizer.token_to_id.deinit();
+            std.testing.allocator.free(loaded.model_path);
+            std.testing.allocator.free(loaded.display_name);
+        }
+    }
+
+    var view = try fake.collectCatalogView(std.testing.allocator, false);
+    defer view.deinit(std.testing.allocator);
+
+    var qwen36_active = false;
+    for (view.data) |entry| {
+        if (std.mem.eql(u8, entry.id, "qwen36-35b-a3b-q4k-xl")) {
+            qwen36_active = true;
+            try std.testing.expect(entry.active);
+            try std.testing.expect(entry.supports_thinking_toggle);
+        }
+        try std.testing.expect(!std.mem.eql(u8, entry.id, "Qwen3.6-35B-A3B-UD-Q4_K_XL"));
+    }
+    try std.testing.expect(qwen36_active);
 }
 
 test "currentMemoryUsage reports empty state when no model is loaded" {

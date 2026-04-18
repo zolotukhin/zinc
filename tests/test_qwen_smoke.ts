@@ -55,6 +55,13 @@ export const QWEN_SMOKE_CASES: Array<{
     expectedFirstToken: 11751,
     expectedTextSubstrings: ["Paris"],
   },
+  {
+    label: "Qwen3.6 35B smoke",
+    envName: "ZINC_QWEN36_35B_MODEL",
+    managedId: "qwen36-35b-a3b-q4k-xl",
+    expectedFirstToken: 11751,
+    expectedTextSubstrings: ["Paris"],
+  },
 ];
 
 export function smokeTimeoutMs(): number {

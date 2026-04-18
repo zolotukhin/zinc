@@ -173,7 +173,7 @@ test "Metal FFN norm prefers ffn_norm over post_attention_norm" {
 
 test "Metal supports Gemma post-attention and post-FFN norms" {
     // Regression: Metal was missing post_attention_norm and post_ffw_norm dispatches,
-    // which Gemma3 requires for correctness.
+    // which Gemma requires for correctness.
     const src = @embedFile("compute/forward_metal.zig");
     try expectContains(src, "post_attn_norm_bufs");
     try expectContains(src, "post_ffw_norm_bufs");
@@ -230,13 +230,13 @@ test "Vulkan Gemma embedding scaling matches Metal" {
 }
 
 test "Vulkan post-attention norm applied before attn residual" {
-    // Gemma3 requires RMS norm on o_proj output before residual add.
+    // Gemma requires RMS norm on o_proj output before residual add.
     const src = @embedFile("compute/forward.zig");
     try expectContains(src, "Gemma post-attention norm: RMS norm on o_proj output before residual add");
 }
 
 test "Vulkan post-FFN norm applied before FFN residual" {
-    // Gemma3 requires RMS norm on down_proj output before residual add.
+    // Gemma requires RMS norm on down_proj output before residual add.
     const src = @embedFile("compute/forward.zig");
     try expectContains(src, "Gemma post-FFN norm: RMS norm on down_proj output before residual add");
 }

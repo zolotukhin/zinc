@@ -1021,18 +1021,6 @@ export function defaultMetalCases(modelRoot) {
       notes: ["Harmony chat-template path on local Metal", "Uses a larger decode budget so the final answer channel is reached"],
     },
     {
-      id: "gemma3-12b-q4k-m",
-      model_id: "gemma3-12b-q4k-m",
-      label: "Gemma 3 12B Q4_K_M",
-      family: "Gemma 3",
-      quant: "Q4_K_M",
-      model_path: modelPath(modelRoot, "gemma3-12b-q4k-m"),
-      prompt_mode: "chat",
-      prompt: "What is the capital of France? Answer in one word.",
-      max_tokens: defaultMaxTokensForModelId("gemma3-12b-q4k-m"),
-      notes: ["Chat-template path on local Metal"],
-    },
-    {
       id: "gemma4-12b-q4k-m",
       model_id: "gemma4-12b-q4k-m",
       label: "Gemma 4 12B Q4_K_M",
@@ -1127,7 +1115,6 @@ export function canonicalModelIdFromPath(modelFile) {
 
 export function guessFamily(id) {
   if (id.startsWith("gemma4")) return "Gemma 4";
-  if (id.startsWith("gemma3")) return "Gemma 3";
   if (id.startsWith("gemma")) return "Gemma";
   if (id.startsWith("gpt-oss")) return "GPT-OSS";
   if (id.startsWith("qwen36")) return "Qwen 3.6";
