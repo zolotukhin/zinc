@@ -869,6 +869,13 @@ pub const InferenceEngine = struct {
     // prefillBatch() owns the host-side waits between pipelined iterations and
     // forces the terminal token back onto the sync path.
     prefill_pipeline_mode: bool = false,
+    // Pre-dequantized embedding rows for the current prefillBatch. When set,
+    // embedToken() skips the Q4_K/Q8_0/f16 dequant and does a memcpy from
+    // cache[idx*hidden_dim..] into embed_staging. prefillBatch() owns this
+    // allocation and the idx counter; embedToken() just consumes it.
+    prefill_embed_cache: ?[]f32 = null,
+    prefill_embed_cache_idx: u32 = 0,
+    prefill_embed_cache_hidden: u32 = 0,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -3122,6 +3129,24 @@ pub const InferenceEngine = struct {
     /// The GPU copy (staging → hidden_buf) is recorded in the decode command buffer.
     fn embedToken(self: *InferenceEngine, token_id: u32) !void {
         const hidden_dim = self.model.config.hidden_dim;
+        const staging_f32: [*]f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
+
+        // Prefill fast path: the whole prompt was dequantized upfront in
+        // prefillBatch(). Pull the next row out of the cache with a memcpy
+        // instead of paying a Q4_K/Q8_0/f16 dequant on every hot-loop token.
+        if (self.prefill_embed_cache) |cache| {
+            if (self.prefill_embed_cache_hidden == hidden_dim) {
+                const idx = self.prefill_embed_cache_idx;
+                const total = cache.len / hidden_dim;
+                if (@as(usize, idx) < total) {
+                    const base = @as(usize, idx) * @as(usize, hidden_dim);
+                    @memcpy(staging_f32[0..hidden_dim], cache[base .. base + hidden_dim]);
+                    self.prefill_embed_cache_idx = idx + 1;
+                    return;
+                }
+            }
+        }
+
         const safe_id = @min(token_id, self.model.config.vocab_size -| 1);
 
         const embd = self.tensor_map.get("token_embd.weight") orelse {
@@ -3133,7 +3158,6 @@ pub const InferenceEngine = struct {
         const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
 
         // Dequantize directly into pre-allocated staging buffer (zero alloc)
-        const staging_f32: [*]f32 = @ptrCast(@alignCast(self.embed_staging.mapped.?));
         dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, staging_f32[0..hidden_dim]);
 
         // Gemma models scale embeddings by sqrt(hidden_dim).
@@ -6611,6 +6635,46 @@ pub const InferenceEngine = struct {
         self.prefill_gpu_total_ns = 0;
         self.prefill_active = true;
         defer self.prefill_active = false;
+
+        // Pre-dequantize every prompt embedding row upfront so the per-token
+        // embedToken() call in the hot loop collapses to a cheap memcpy
+        // instead of a full Q4_K/Q8_0/f16 dequant on the CPU record critical
+        // path. The dequant itself is unchanged — we just move it outside the
+        // drain/record/submit ping-pong so it stops serializing with GPU work.
+        const hidden_dim = self.model.config.hidden_dim;
+        const cache_elems: usize = @as(usize, hidden_dim) * prompt_tokens.len;
+        const embed_cache = try self.allocator.alloc(f32, cache_elems);
+        defer {
+            self.allocator.free(embed_cache);
+            self.prefill_embed_cache = null;
+            self.prefill_embed_cache_idx = 0;
+            self.prefill_embed_cache_hidden = 0;
+        }
+        {
+            const embd = self.tensor_map.get("token_embd.weight") orelse {
+                log.err("token_embd.weight not found", .{});
+                return error.TensorNotFound;
+            };
+            const mmap = self.model.mmap_data orelse return error.NoMmapData;
+            const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
+            const vocab_last = self.model.config.vocab_size -| 1;
+            const is_gemma = self.model.config.architecture == .gemma;
+            const gemma_scale: f32 = if (is_gemma)
+                @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))))
+            else
+                1.0;
+            for (prompt_tokens, 0..) |tok, i| {
+                const safe_id = @min(tok, vocab_last);
+                const dst = embed_cache[i * hidden_dim ..][0..hidden_dim];
+                dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
+                if (is_gemma) {
+                    for (dst) |*v| v.* *= gemma_scale;
+                }
+            }
+        }
+        self.prefill_embed_cache = embed_cache;
+        self.prefill_embed_cache_idx = 0;
+        self.prefill_embed_cache_hidden = hidden_dim;
 
         // Per-phase GPU timing during prefill costs ~3% throughput (thousands of
         // vkCmdWriteTimestamp calls + a blocking query readback per token) on
