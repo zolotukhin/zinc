@@ -884,10 +884,16 @@ pub const InferenceEngine = struct {
     // Effort-6 Step 2.5 enablement: pair-column staging for SSM proj DMMVs so
     // recordBatchDispatchPush(num_cols=2) has somewhere to read and write. The
     // norm staging holds two adjacent tokens' norm_buf contents column-major,
-    // and the wqkv output staging holds the batched 2-column result. These are
-    // allocated only when the model has SSM layers.
+    // and each *_out_buf holds the batched 2-column result for that projection.
+    // Cycle 5 extends the pair plumbing from wqkv only to all four ssm_proj
+    // DMMVs (wqkv, z, alpha, beta) so the whole 1310ms ssm_proj sub-bucket can
+    // be driven by a future pair-aware prefill driver without re-plumbing here.
+    // All buffers allocated only when the model has SSM layers.
     ssm_pair_norm_buf: ?Buffer = null,
     ssm_pair_wqkv_out_buf: ?Buffer = null,
+    ssm_pair_z_out_buf: ?Buffer = null,
+    ssm_pair_alpha_out_buf: ?Buffer = null,
+    ssm_pair_beta_out_buf: ?Buffer = null,
     // Flag parsed from ZINC_PREFILL_BATCH — default off so the loop bench runs
     // the current path until a future cycle turns pair-batching on for real.
     prefill_batch_enabled: bool = false,
@@ -1379,19 +1385,33 @@ pub const InferenceEngine = struct {
         }
 
         // Effort-6 Step 2.5 enablement: device-local two-column staging for SSM
-        // proj DMMVs. Sized for the largest per-layer wqkv configuration and
-        // allocated once so the later pair-batched path doesn't need to grow
-        // buffers mid-prefill. Only allocated for hybrid/SSM models.
+        // proj DMMVs. One shared pair_norm staging feeds all 4 projections;
+        // each projection gets its own pair output buffer so the 4 pair
+        // dispatches can run without inter-dispatch barriers (they each write
+        // to a distinct buffer). Allocated once so the later pair-batched path
+        // doesn't need to grow buffers mid-prefill. Only allocated for hybrid
+        // SSM models.
         var ssm_pair_norm_buf: ?Buffer = null;
         errdefer if (ssm_pair_norm_buf) |*b| b.deinit();
         var ssm_pair_wqkv_out_buf: ?Buffer = null;
         errdefer if (ssm_pair_wqkv_out_buf) |*b| b.deinit();
+        var ssm_pair_z_out_buf: ?Buffer = null;
+        errdefer if (ssm_pair_z_out_buf) |*b| b.deinit();
+        var ssm_pair_alpha_out_buf: ?Buffer = null;
+        errdefer if (ssm_pair_alpha_out_buf) |*b| b.deinit();
+        var ssm_pair_beta_out_buf: ?Buffer = null;
+        errdefer if (ssm_pair_beta_out_buf) |*b| b.deinit();
         if (has_ssm) {
             const pair_hidden_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, config.hidden_dim) * @sizeOf(f32);
             const pair_conv_ch_local = config.ssm_d_inner + 2 * config.ssm_n_group * config.ssm_d_state;
             const pair_wqkv_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, pair_conv_ch_local) * @sizeOf(f32);
+            const pair_z_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, config.ssm_d_inner) * @sizeOf(f32);
+            const pair_ab_bytes = @as(vk.c.VkDeviceSize, 2) * @as(vk.c.VkDeviceSize, config.ssm_dt_rank) * @sizeOf(f32);
             ssm_pair_norm_buf = try Buffer.initDeviceLocal(instance, pair_hidden_bytes, storage_xfer);
             ssm_pair_wqkv_out_buf = try Buffer.initDeviceLocal(instance, pair_wqkv_bytes, storage_xfer);
+            ssm_pair_z_out_buf = try Buffer.initDeviceLocal(instance, pair_z_bytes, storage_xfer);
+            ssm_pair_alpha_out_buf = try Buffer.initDeviceLocal(instance, pair_ab_bytes, storage_xfer);
+            ssm_pair_beta_out_buf = try Buffer.initDeviceLocal(instance, pair_ab_bytes, storage_xfer);
         }
 
         // Parse ZINC_PREFILL_BATCH env flag. Default off — the pair-batched
@@ -1400,7 +1420,7 @@ pub const InferenceEngine = struct {
         const prefill_batch_env = std.posix.getenv("ZINC_PREFILL_BATCH");
         const prefill_batch_enabled = prefill_batch_env != null and prefill_batch_env.?.len > 0 and !std.mem.eql(u8, prefill_batch_env.?, "0");
         if (prefill_batch_enabled and has_ssm) {
-            log.info("ZINC_PREFILL_BATCH=1 — SSM wqkv prefill will use recordBatchDispatchPush(num_cols=2)", .{});
+            log.info("ZINC_PREFILL_BATCH=1 — SSM proj (wqkv+z+alpha+beta) prefill will use recordBatchDispatchPush(num_cols=2)", .{});
         }
 
         // GPU router output buffer stays device-local on the fast path because the
@@ -1618,6 +1638,9 @@ pub const InferenceEngine = struct {
             .gpu_ssm_states = gpu_ssm_states,
             .ssm_pair_norm_buf = ssm_pair_norm_buf,
             .ssm_pair_wqkv_out_buf = ssm_pair_wqkv_out_buf,
+            .ssm_pair_z_out_buf = ssm_pair_z_out_buf,
+            .ssm_pair_alpha_out_buf = ssm_pair_alpha_out_buf,
+            .ssm_pair_beta_out_buf = ssm_pair_beta_out_buf,
             .prefill_batch_enabled = prefill_batch_enabled,
             .router_output_buf = router_output_buf,
             .shared_pool = shared_pool,
@@ -6527,30 +6550,55 @@ pub const InferenceEngine = struct {
             });
         }
         const ssm_proj_phase = self.beginProfilePhase();
-        // Flag-gated pair-batched wqkv path (effort-6 Step 2.5 enablement).
-        // When ZINC_PREFILL_BATCH=1 is set AND the wqkv quant supports the batch
-        // shader AND the pair staging buffers exist, route wqkv through
-        // recordBatchDispatchPush(num_cols=2). Both columns currently carry the
-        // same norm_buf — a future cycle will stage the adjacent prompt token's
-        // norm into column 1 so the batch actually amortizes the weight read.
-        // Col 0 of the batched output is the real wqkv result and gets copied
-        // into attn_out_buf; col 1 is discarded. This exists so the code path
-        // (descriptors, push constants, workgroup sizing, barriers) is shaken
-        // out before the cross-token restructure lands.
-        const pair_wqkv_quant_ok = wqkv_tensor.info.type_ == .q8_0 or wqkv_tensor.info.type_ == .q4_k;
-        const use_pair_wqkv = self.prefill_batch_enabled and self.prefill_active and pair_wqkv_quant_ok and self.ssm_pair_norm_buf != null and self.ssm_pair_wqkv_out_buf != null;
-        if (use_pair_wqkv) {
+        // Flag-gated pair-batched ssm_proj path (effort-6 Step 2.5 enablement).
+        // When ZINC_PREFILL_BATCH=1 is set AND every ssm_proj tensor uses a
+        // batch-capable quant AND the pair staging buffers exist, route ALL
+        // four projections (wqkv, z, alpha, beta) through
+        // recordBatchDispatchPush(num_cols=2). Both columns currently carry
+        // the same norm_buf — a future cycle will stage the adjacent prompt
+        // token's norm into column 1 so the batch actually amortizes the
+        // weight read across two tokens. Col 0 of each batched output is the
+        // real per-token result and is copied back to the single-col
+        // destination; col 1 is discarded. This pair-wires the entire ssm_proj
+        // sub-bucket (1310ms in the current phase budget) so the pair-aware
+        // prefill driver only needs to stage cross-token norm data — it does
+        // NOT need to add or re-plumb any pair dispatches.
+        //
+        // All four pair dispatches write to distinct pair_*_out_buf buffers,
+        // so no inter-dispatch barriers are required between them. The shared
+        // pair_norm staging is written once per layer and read by all four
+        // dispatches.
+        const all_pair_quant_ok = (wqkv_tensor.info.type_ == .q8_0 or wqkv_tensor.info.type_ == .q4_k) and
+            (z_tensor.info.type_ == .q8_0 or z_tensor.info.type_ == .q4_k) and
+            (alpha_tensor.info.type_ == .q8_0 or alpha_tensor.info.type_ == .q4_k) and
+            (beta_tensor.info.type_ == .q8_0 or beta_tensor.info.type_ == .q4_k);
+        const use_pair_ssm_proj = self.prefill_batch_enabled and self.prefill_active and all_pair_quant_ok and
+            self.ssm_pair_norm_buf != null and
+            self.ssm_pair_wqkv_out_buf != null and
+            self.ssm_pair_z_out_buf != null and
+            self.ssm_pair_alpha_out_buf != null and
+            self.ssm_pair_beta_out_buf != null;
+        if (use_pair_ssm_proj) {
             const pair_norm = self.ssm_pair_norm_buf.?;
-            const pair_out = self.ssm_pair_wqkv_out_buf.?;
+            const pair_wqkv_out = self.ssm_pair_wqkv_out_buf.?;
+            const pair_z_out = self.ssm_pair_z_out_buf.?;
+            const pair_alpha_out = self.ssm_pair_alpha_out_buf.?;
+            const pair_beta_out = self.ssm_pair_beta_out_buf.?;
+
             // Stage current token's norm into both pair columns. A compute→transfer
             // barrier is needed because the preceding rms_norm's output is a
-            // compute write and our copies are transfer reads.
+            // compute write and our copies are transfer reads. This setup is
+            // shared across all four pair dispatches below.
             self.decode_cmd.computeToTransferBarrier();
             const norm_copy_col0 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.norm_buf.handle, pair_norm.handle, 1, &norm_copy_col0);
             const norm_copy_col1 = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = hidden_size, .size = hidden_size };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.norm_buf.handle, pair_norm.handle, 1, &norm_copy_col1);
             self.decode_cmd.transferToComputeBarrier();
+
+            // Four pair dispatches — different weight tensors, different output
+            // buffers, same shared pair_norm input. No inter-dispatch barriers
+            // because each writes to its own pair_*_out_buf.
             try self.dmmv.recordBatchDispatchPush(
                 &self.decode_cmd,
                 wqkv_tensor.info.type_,
@@ -6559,8 +6607,8 @@ pub const InferenceEngine = struct {
                 wqkv_tensor.gpu_buffer.size,
                 pair_norm.handle,
                 pair_norm.size,
-                pair_out.handle,
-                pair_out.size,
+                pair_wqkv_out.handle,
+                pair_wqkv_out.size,
                 @intCast(conv_channels),
                 hidden_dim,
                 0,
@@ -6568,23 +6616,84 @@ pub const InferenceEngine = struct {
                 0,
                 2,
             );
+            try self.dmmv.recordBatchDispatchPush(
+                &self.decode_cmd,
+                z_tensor.info.type_,
+                self.instance.push_descriptor_fn,
+                z_tensor.gpu_buffer.handle,
+                z_tensor.gpu_buffer.size,
+                pair_norm.handle,
+                pair_norm.size,
+                pair_z_out.handle,
+                pair_z_out.size,
+                @intCast(d_inner),
+                hidden_dim,
+                0,
+                0,
+                0,
+                2,
+            );
+            try self.dmmv.recordBatchDispatchPush(
+                &self.decode_cmd,
+                alpha_tensor.info.type_,
+                self.instance.push_descriptor_fn,
+                alpha_tensor.gpu_buffer.handle,
+                alpha_tensor.gpu_buffer.size,
+                pair_norm.handle,
+                pair_norm.size,
+                pair_alpha_out.handle,
+                pair_alpha_out.size,
+                dt_rank,
+                hidden_dim,
+                0,
+                0,
+                0,
+                2,
+            );
+            try self.dmmv.recordBatchDispatchPush(
+                &self.decode_cmd,
+                beta_tensor.info.type_,
+                self.instance.push_descriptor_fn,
+                beta_tensor.gpu_buffer.handle,
+                beta_tensor.gpu_buffer.size,
+                pair_norm.handle,
+                pair_norm.size,
+                pair_beta_out.handle,
+                pair_beta_out.size,
+                dt_rank,
+                hidden_dim,
+                0,
+                0,
+                0,
+                2,
+            );
+
+            // Copy col 0 of each pair output back to the corresponding single-col
+            // destination buffer that downstream SSM ops read from. One
+            // compute→transfer barrier covers all four pair dispatches (they
+            // all ran in the compute stage to distinct output buffers), and one
+            // transfer→compute barrier lets the following ssm_conv1d compute
+            // consume attn_out_buf.
             self.decode_cmd.computeToTransferBarrier();
-            const out_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
-            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_out.handle, self.attn_out_buf.handle, 1, &out_copy);
+            const wqkv_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = qkv_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_wqkv_out.handle, self.attn_out_buf.handle, 1, &wqkv_copy);
+            const z_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = z_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_z_out.handle, self.gate_buf.handle, 1, &z_copy);
+            const alpha_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_alpha_out.handle, self.router_logits_buf.handle, 1, &alpha_copy);
+            const beta_copy = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = ab_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, pair_beta_out.handle, self.down_buf.handle, 1, &beta_copy);
             self.decode_cmd.transferToComputeBarrier();
         } else {
             try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+            try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+            try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
+            try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
+            // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
+            // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
+            // subsequent global computeBarrier() before delta-net consumes them.
+            self.decode_cmd.computeBufferBarrier(self.attn_out_buf.handle, qkv_bytes);
         }
-        try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
-        try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
-        try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
-        // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
-        // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
-        // subsequent global computeBarrier() before delta-net consumes them.
-        // When the pair path ran, attn_out_buf was already sync'd via
-        // transferToComputeBarrier; this extra compute-scope barrier is
-        // harmless in that case.
-        self.decode_cmd.computeBufferBarrier(self.attn_out_buf.handle, qkv_bytes);
         self.endProfilePhase(.ssm_proj, ssm_proj_phase);
 
         // --- GPU: conv1d + SiLU ---
@@ -7603,6 +7712,9 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.gpu_ssm_states);
         if (self.ssm_pair_norm_buf) |*b| b.deinit();
         if (self.ssm_pair_wqkv_out_buf) |*b| b.deinit();
+        if (self.ssm_pair_z_out_buf) |*b| b.deinit();
+        if (self.ssm_pair_alpha_out_buf) |*b| b.deinit();
+        if (self.ssm_pair_beta_out_buf) |*b| b.deinit();
         self.router_output_buf.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
