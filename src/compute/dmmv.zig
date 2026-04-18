@@ -69,6 +69,8 @@ pub const DmmvDispatch = struct {
     pipeline_f32: ?Pipeline,
     /// Batch Q4K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
     pipeline_q4k_batch: ?Pipeline,
+    /// Batch Q8_0 pipeline for prefill (3 bindings: A, X_batch, Y_batch).
+    pipeline_q8_0_batch: ?Pipeline,
     /// Q4K integer dot product pipeline (3 bindings: A_q4k, B_q8_1, Y).
     pipeline_q4k_idp: ?Pipeline,
     /// Q8_1 quantization pipeline (2 bindings: X_f32, Q8_1_out).
@@ -208,6 +210,12 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        const q8_0_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_batch.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q8_0_batch = pipeline_mod.createFromSpirvWithOptions(instance, q8_0_batch_path, 3, batch_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q8_0 batch shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // Integer dot product (IDP) DMMV: Q4_K × Q8_1 with dotPacked4x8EXT
         const IdpPush = extern struct { M: u32, K: u32, a_offset: u32, b_offset: u32, y_offset: u32 };
         const q4k_idp_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_idp.spv", .{shader_dir}) catch unreachable;
@@ -276,6 +284,7 @@ pub const DmmvDispatch = struct {
             .pipeline_f16 = pipeline_f16,
             .pipeline_f32 = pipeline_f32,
             .pipeline_q4k_batch = pipeline_q4k_batch,
+            .pipeline_q8_0_batch = pipeline_q8_0_batch,
             .pipeline_q4k_idp = pipeline_q4k_idp,
             .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
             .pipeline_q4k_moe = pipeline_q4k_moe,
@@ -453,11 +462,12 @@ pub const DmmvDispatch = struct {
         y_offset: u32,
         num_cols: u32,
     ) !void {
-        // Currently only Q4_K has a batch shader; fall back to sequential for others
-        const pip = if (quant_type == .q4_k)
-            (if (self.pipeline_q4k_batch) |*p| p else null)
-        else
-            null;
+        // Q4_K and Q8_0 have dedicated batch shaders; fall back to sequential for others.
+        const pip = switch (quant_type) {
+            .q4_k => if (self.pipeline_q4k_batch) |*p| p else null,
+            .q8_0 => if (self.pipeline_q8_0_batch) |*p| p else null,
+            else => null,
+        };
 
         if (pip) |p| {
             const push = BatchDmmvPushConstants{
@@ -503,6 +513,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_f16) |*p| p.deinit();
         if (self.pipeline_f32) |*p| p.deinit();
         if (self.pipeline_q4k_batch) |*p| p.deinit();
+        if (self.pipeline_q8_0_batch) |*p| p.deinit();
         if (self.pipeline_q4k_idp) |*p| p.deinit();
         if (self.pipeline_quantize_q8_1) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();

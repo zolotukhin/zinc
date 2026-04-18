@@ -1,0 +1,74 @@
+#version 460
+// ZINC — Q8_0 batch DMMV for prefill (multi-column)
+// Reads each weight row ONCE, computes dot products with up to MAX_COLS input vectors.
+// Gives ~Nx less memory bandwidth vs N separate DMMV dispatches.
+//
+// Layout: X[K, num_cols] (column-major), Y[M, num_cols] (column-major)
+// Each thread: one output row, all columns.
+//
+// Q8_0 block (32 elements, 34 bytes):
+//   bytes 0..1  : f16 scale d
+//   bytes 2..33 : 32 signed int8 qs values
+// Dequantize: val = d * qs[i].
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+// Max batch size — compile-time constant for register allocation
+const uint MAX_COLS = 32u;
+
+layout(push_constant) uniform PushConstants {
+    uint M;           // output rows
+    uint K;           // input elements per vector
+    uint a_offset;    // weight matrix byte offset
+    uint x_offset;    // input matrix byte offset (bytes into f32 array)
+    uint y_offset;    // output matrix byte offset (bytes into f32 array)
+    uint num_cols;    // actual batch size (<= MAX_COLS)
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixX { float x_data[];   };
+layout(set = 0, binding = 2) writeonly buffer MatrixY { float y_data[];  };
+
+const uint Q8_0_BLOCK_SIZE = 32u;
+const uint Q8_0_BYTES      = 34u;
+
+void main() {
+    uint row = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    if (row >= M) return;
+
+    const uint blocks_per_row = K / Q8_0_BLOCK_SIZE;
+    uint x_base = x_offset / 4u;
+    uint y_base = y_offset / 4u;
+
+    // Per-column accumulators (register array)
+    float sums[MAX_COLS];
+    for (uint c = 0u; c < num_cols; c++) sums[c] = 0.0;
+
+    // Process weight blocks — weight data read ONCE, reused across all columns
+    for (uint blk = 0u; blk < blocks_per_row; blk++) {
+        uint byte_off = a_offset + row * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+
+        // f16 block scale
+        uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
+        float d_val = unpackHalf2x16(d_bits).x;
+
+        uint qs_off = byte_off + 2u;
+        uint x_blk_start = blk * Q8_0_BLOCK_SIZE;
+
+        // Dequantize 32 int8 values and apply to each column
+        for (uint e = 0u; e < Q8_0_BLOCK_SIZE; e++) {
+            float w = d_val * float(int(int8_t(a_data[qs_off + e])));
+            for (uint c = 0u; c < num_cols; c++) {
+                sums[c] += w * x_data[x_base + c * K + x_blk_start + e];
+            }
+        }
+    }
+
+    // Write all column results
+    for (uint c = 0u; c < num_cols; c++) {
+        y_data[y_base + c * M + row] = sums[c];
+    }
+}
