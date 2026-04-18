@@ -403,7 +403,17 @@ fn loadResourcesInto(
 
     resources.model = try loader_mod.load(spec.model_path, device.ctx, allocator);
     errdefer resources.model.deinit();
-    memory_plan.applyRequestedContextLimit(&resources.model.config, spec.requested_context_length);
+
+    // When the caller doesn't pin a context length, derive one from the
+    // unified-memory budget (vLLM-style) instead of truncating to 4096.
+    // Honours the GGUF-declared architectural ceiling.
+    const effective_requested = spec.requested_context_length orelse memory_plan.autoContextTokensForDeviceBudget(
+        memory_plan.profile(resources.model.config),
+        tensorBytes(&resources.model),
+        memoryBudget(device),
+        resources.model.config.context_length,
+    );
+    memory_plan.applyRequestedContextLimit(&resources.model.config, effective_requested);
 
     resources.tokenizer = try tokenizer_mod.Tokenizer.initFromGGUF(&resources.model.gguf_file, allocator);
     errdefer resources.tokenizer.deinit();

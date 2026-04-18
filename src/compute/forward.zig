@@ -4442,9 +4442,23 @@ pub const InferenceEngine = struct {
                         self.elementwise.pipeline_ssm_conv1d != null,
                     });
                 }
+                // Dead-tail SSM skip: at the final layer of a non-terminal
+                // prefill token in an SSM-last hybrid model, the gate-z DMMV
+                // / gated_norm / ssm_out only feed hidden_buf, which the next
+                // token's layer-0 embed copy overwrites. Conv1d + delta_net
+                // still run because they commit SSM state for future tokens.
+                //
+                // Active condition depends on full_attn_interval — for Qwen3.5
+                // qwen35moe (full_attn_interval=4, n_layers=40), the LAST layer
+                // is attention so this branch is never reached and cycle 20's
+                // attention dead-tail skip handles the equivalent work. For
+                // architectures with SSM as the LAST layer (e.g. larger
+                // full_attn_interval values, pure mamba), this skip mirrors
+                // cycle 20's pattern automatically.
+                const ssm_dead_tail = self.prefill_active and !collect_output and layer + 1 == config.n_layers;
                 const ssm_phase = self.beginProfilePhase();
                 if (use_gpu_ssm) {
-                    try self.runSsmLayerGpu(state, layer, layer_idx);
+                    try self.runSsmLayerGpu(state, layer, layer_idx, ssm_dead_tail);
                 } else {
                     if (self.profile_enabled) self.profile_token_counters.cpu_ssm_fallbacks += 1;
                     try self.runSsmLayerCpu(state, layer, layer_idx);
@@ -6564,7 +6578,7 @@ pub const InferenceEngine = struct {
     /// Run one SSM layer entirely on GPU via compute shaders (Phase 3c).
     /// Replaces runSsmLayerCpu — no readback, no CPU computation, no submitAndWait.
     /// Command buffer remains open after this function returns.
-    fn runSsmLayerGpu(self: *InferenceEngine, state: *DecodeState, layer: u32, layer_idx: usize) !void {
+    fn runSsmLayerGpu(self: *InferenceEngine, state: *DecodeState, layer: u32, layer_idx: usize, is_dead_tail: bool) !void {
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
@@ -6943,7 +6957,12 @@ pub const InferenceEngine = struct {
             self.decode_cmd.transferToComputeBarrier();
         } else {
             try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
-            try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+            // Skip z (gate) DMMV in dead-tail: gate_buf is only consumed by
+            // gated_norm, which is also skipped below. wqkv/alpha/beta still
+            // run because conv1d/delta_net update SSM state for future tokens.
+            if (!is_dead_tail) {
+                try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+            }
             try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
             try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
             // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
@@ -7081,12 +7100,20 @@ pub const InferenceEngine = struct {
         // (delta_net RMW) is only read by the NEXT token's delta_net in a different
         // command buffer (cross-CB sync via submission ordering + cycle 5 pipelined
         // waitForCompletion). Follows cycle 21's multi-buffer pattern.
-        const delta_to_gnorm_ranges = [_]CommandBuffer.BufferRange{
-            .{ .buffer = self.attn_out_buf.handle, .size = z_bytes },
-            .{ .buffer = self.gate_buf.handle, .size = z_bytes },
-        };
-        self.decode_cmd.computeBuffersBarrier(&delta_to_gnorm_ranges);
+        if (!is_dead_tail) {
+            const delta_to_gnorm_ranges = [_]CommandBuffer.BufferRange{
+                .{ .buffer = self.attn_out_buf.handle, .size = z_bytes },
+                .{ .buffer = self.gate_buf.handle, .size = z_bytes },
+            };
+            self.decode_cmd.computeBuffersBarrier(&delta_to_gnorm_ranges);
+        }
         self.endProfilePhase(.ssm_delta, ssm_delta_phase);
+
+        // Dead-tail SSM exits here: gated_norm and ssm_out only feed
+        // swiglu_buf and hidden_buf, both overwritten by the next token's
+        // pass. Cross-CB visibility for conv/SSM state writes from above is
+        // provided by queue submission ordering at the end of decodeStep.
+        if (is_dead_tail) return;
 
         // --- GPU: gated norm ---
         // Input: delta_net output (attn_out_buf), z gate (gate_buf), norm weights from tensor

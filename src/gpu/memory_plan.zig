@@ -232,6 +232,55 @@ fn maxContextTokensForBudget(
     return @intCast(capped);
 }
 
+/// vLLM-style floor for auto-sized context: never fall below this even if
+/// the memory math suggests less — the server would otherwise become unusable.
+pub const auto_context_floor_tokens: u32 = 4096;
+
+/// Fraction of the device budget we're willing to spend on KV + runtime.
+/// vLLM uses 0.9; we pick 0.85 to leave headroom for attention workspace
+/// and per-request scratch buffers that `profile()` doesn't account for.
+const auto_context_utilization_num: u64 = 85;
+const auto_context_utilization_den: u64 = 100;
+
+/// Round auto-sized context down to a friendly multiple so KV allocations
+/// stay aligned and diagnostics report clean numbers.
+const auto_context_alignment_tokens: u32 = 512;
+
+fn alignDown(value: u32, alignment: u32) u32 {
+    if (alignment <= 1) return value;
+    return (value / alignment) * alignment;
+}
+
+/// Derive a context length from an available device-memory budget.
+///
+/// Analogous to vLLM's `determine_available_memory` → `get_num_blocks` flow,
+/// adapted for a contiguous (non-paged) KV cache:
+///   1. Reserve a utilization fraction of the device budget.
+///   2. Subtract model weights and fixed runtime overhead.
+///   3. Divide the leftover by the per-token KV cost.
+///   4. Clamp to the architectural ceiling from GGUF and floor at 4096 so
+///      tiny or very-tight budgets still produce a usable server.
+pub fn autoContextTokensForDeviceBudget(
+    profile_value: RuntimeMemoryProfile,
+    weights_bytes: u64,
+    device_budget_bytes: u64,
+    architectural_ceiling: u32,
+) u32 {
+    if (architectural_ceiling == 0) return 0;
+    const usable_budget: u64 = @divTrunc(
+        device_budget_bytes * auto_context_utilization_num,
+        auto_context_utilization_den,
+    );
+    const memory_derived = profile_value.maxContextTokensForDeviceLocalBudget(
+        weights_bytes,
+        usable_budget,
+        architectural_ceiling,
+    );
+    const aligned = alignDown(memory_derived, auto_context_alignment_tokens);
+    const floored = @max(aligned, @min(auto_context_floor_tokens, architectural_ceiling));
+    return @min(floored, architectural_ceiling);
+}
+
 test "profile reports context-scaled and fixed bytes" {
     const cfg = ModelConfig{
         .architecture = .qwen2_moe,

@@ -418,7 +418,17 @@ fn loadResourcesInto(
     resources.* = undefined;
     resources.model = try loader_mod.load(spec.model_path, instance, &cmd_pool, allocator);
     errdefer resources.model.deinit(instance);
-    memory_plan.applyRequestedContextLimit(&resources.model.config, spec.requested_context_length);
+
+    // Derive a context length from the Vulkan device's VRAM budget when the
+    // caller doesn't pin one. Matches the Metal path — see
+    // `memory_plan.autoContextTokensForDeviceBudget` for the vLLM-inspired math.
+    const effective_requested = spec.requested_context_length orelse memory_plan.autoContextTokensForDeviceBudget(
+        memory_plan.profile(resources.model.config),
+        tensorBytes(&resources.model),
+        instance.vramBytes(),
+        resources.model.config.context_length,
+    );
+    memory_plan.applyRequestedContextLimit(&resources.model.config, effective_requested);
 
     resources.tokenizer = try tokenizer_mod.Tokenizer.initFromGGUF(&resources.model.gguf_file, allocator);
     errdefer resources.tokenizer.deinit();
