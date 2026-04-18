@@ -855,6 +855,11 @@ pub const InferenceEngine = struct {
     prefill_cpu_embed_ns: u64 = 0,
     prefill_cpu_record_ns: u64 = 0,
     prefill_submit_wait_ns: u64 = 0,
+    // Always-on per-phase GPU timing captured during prefillBatch(). Populated
+    // by decodeStep() via the standard profile_phase_ranges / recordProfilingSample
+    // path after prefillBatch temporarily flips profile_enabled on.
+    prefill_gpu_phase_ns: [profile_phase_count]u64 = [_]u64{0} ** profile_phase_count,
+    prefill_gpu_total_ns: u64 = 0,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -1475,6 +1480,30 @@ pub const InferenceEngine = struct {
             decode_graph.nodeCount(), config.hidden_dim, config.vocab_size, tensor_map.count(),
         });
 
+        // Always create the timestamp query pool so prefill GPU phase timing is
+        // available without requiring --profile. Without it, effort-6 has no way
+        // to see which GPU phase (attention/MoE/tail/...) owns prefill time.
+        var timestamp_pool: vk.c.VkQueryPool = null;
+        var timestamp_period_ns: f64 = 1.0;
+        {
+            const max_timestamps: u32 = 2048;
+            const ts_pool_info = vk.c.VkQueryPoolCreateInfo{
+                .sType = vk.c.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .queryType = vk.c.VK_QUERY_TYPE_TIMESTAMP,
+                .queryCount = max_timestamps,
+                .pipelineStatistics = 0,
+            };
+            const create_result = vk.c.vkCreateQueryPool(instance.device, &ts_pool_info, null, &timestamp_pool);
+            if (create_result == vk.c.VK_SUCCESS) {
+                timestamp_period_ns = @as(f64, instance.device_props.limits.timestampPeriod);
+            } else {
+                timestamp_pool = null;
+                log.warn("Failed to create timestamp query pool ({d}); prefill GPU phase timing disabled", .{create_result});
+            }
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
@@ -1534,6 +1563,8 @@ pub const InferenceEngine = struct {
             .allocator = allocator,
             .max_context_tokens = max_ctx,
             .modeled_decode_bytes_per_token = modeled_decode_bytes_per_token,
+            .timestamp_query_pool = timestamp_pool,
+            .timestamp_period_ns = timestamp_period_ns,
         };
     }
 
@@ -1541,24 +1572,12 @@ pub const InferenceEngine = struct {
     // Profiling
     // -----------------------------------------------------------------------
 
-    /// Enable GPU timestamp profiling. Creates a Vulkan query pool for timestamp queries.
+    /// Enable full GPU + CPU profiling. The timestamp query pool is created in `init`,
+    /// so this just flips the runtime flag. Returns an error if pool creation failed.
     pub fn enableProfiling(self: *InferenceEngine) !void {
-        const max_timestamps: u32 = 2048; // enough for ~1000 dispatches per token
-        const pool_info = vk.c.VkQueryPoolCreateInfo{
-            .sType = vk.c.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-            .pNext = null,
-            .flags = 0,
-            .queryType = vk.c.VK_QUERY_TYPE_TIMESTAMP,
-            .queryCount = max_timestamps,
-            .pipelineStatistics = 0,
-        };
-        var pool: vk.c.VkQueryPool = null;
-        const result = vk.c.vkCreateQueryPool(self.instance.device, &pool_info, null, &pool);
-        if (result != vk.c.VK_SUCCESS) return error.QueryPoolCreateFailed;
-        self.timestamp_query_pool = pool;
-        self.timestamp_period_ns = @as(f64, self.instance.device_props.limits.timestampPeriod);
+        if (self.timestamp_query_pool == null) return error.QueryPoolCreateFailed;
         self.profile_enabled = true;
-        log.debug("Profiling enabled: {d} timestamp queries, period={d:.2}ns", .{ max_timestamps, self.timestamp_period_ns });
+        log.debug("Profiling enabled: timestamp period={d:.2}ns", .{self.timestamp_period_ns});
     }
 
     /// Enable the expensive CPU-vs-GPU validation readbacks used for debugging kernel correctness.
@@ -6545,14 +6564,41 @@ pub const InferenceEngine = struct {
         self.prefill_cpu_embed_ns = 0;
         self.prefill_cpu_record_ns = 0;
         self.prefill_submit_wait_ns = 0;
+        self.prefill_gpu_phase_ns = [_]u64{0} ** profile_phase_count;
+        self.prefill_gpu_total_ns = 0;
         self.prefill_active = true;
         defer self.prefill_active = false;
+
+        // Per-phase GPU timing during prefill costs ~3% throughput (thousands of
+        // vkCmdWriteTimestamp calls + a blocking query readback per token) on
+        // RDNA for the 35B flagship, so it is gated behind `ZINC_PREFILL_PROFILE=1`.
+        // The CPU-side prefill profile line (embed/record/submit+wait) stays always
+        // on — it has zero GPU cost. When the flag is set, the caller also gets
+        // a per-phase breakdown (attn/moe/shared/ssm/tail) plus MoE and SSM
+        // sub-phase drill-downs, which is exactly what effort-6 Step 2 needs.
+        const profile_env = std.posix.getenv("ZINC_PREFILL_PROFILE");
+        const want_gpu_phases = profile_env != null and profile_env.?.len > 0 and !std.mem.eql(u8, profile_env.?, "0");
+        const had_profile_pool = self.timestamp_query_pool != null;
+        const profile_was_enabled = self.profile_enabled;
+        const enable_gpu_phase_timing = had_profile_pool and want_gpu_phases;
+        if (enable_gpu_phase_timing) self.profile_enabled = true;
 
         // Run each prompt token through the full transformer (same as decodeStep)
         // This populates KV cache and SSM state so the first decode token has context.
         for (prompt_tokens, 0..) |token_id, i| {
             const collect_output = i + 1 == prompt_tokens.len;
             try self.decodeStep(state, token_id, collect_output);
+        }
+
+        if (enable_gpu_phase_timing) {
+            // Snapshot accumulated per-phase GPU time into prefill-scoped fields
+            // before wiping the decode-oriented sample state.
+            for (0..profile_phase_count) |p| {
+                self.prefill_gpu_phase_ns[p] = self.profile_total_counters.gpu_phase_ns[p];
+            }
+            self.prefill_gpu_total_ns = @intFromFloat(@max(self.profile_total_gpu_ms * 1_000_000.0, 0.0));
+            self.resetProfilingSamples();
+            self.profile_enabled = profile_was_enabled;
         }
 
         // Upload last token's embedding
@@ -7358,6 +7404,97 @@ pub fn generate(
                 total_submit_wait_ms,
             },
         );
+        // Per-phase GPU breakdown — only present if timestamp pool was available.
+        var any_phase_ns: u64 = 0;
+        for (engine.prefill_gpu_phase_ns) |v| any_phase_ns += v;
+        if (any_phase_ns > 0) {
+            // Aggregate related MoE and shared-expert phases into top-level buckets
+            // so the summary line stays scannable across cycles.
+            var attn_ns: u64 = 0;
+            var moe_ns: u64 = 0;
+            var shared_ns: u64 = 0;
+            var ssm_ns: u64 = 0;
+            var tail_ns: u64 = 0;
+            var embed_ns: u64 = 0;
+            // `.ssm` wraps all ssm_* sub-phases and `.moe_routed` wraps all moe_*
+            // sub-phases, so summing every enum value double-counts. Bucket with
+            // the wrappers only; shared_* and tail/attn/embed have no wrapper.
+            inline for (@typeInfo(ProfilePhase).@"enum".fields) |f| {
+                const phase_val: ProfilePhase = @enumFromInt(f.value);
+                const v = engine.prefill_gpu_phase_ns[f.value];
+                switch (phase_val) {
+                    .attention => attn_ns += v,
+                    .moe_routed => moe_ns += v,
+                    .shared_expert, .shared_proj, .shared_swiglu, .shared_down, .shared_gate_acc => shared_ns += v,
+                    .ssm => ssm_ns += v,
+                    .final_tail => tail_ns += v,
+                    .embed_upload => embed_ns += v,
+                    else => {},
+                }
+            }
+            const to_ms = struct {
+                fn f(v: u64) f64 {
+                    return @as(f64, @floatFromInt(v)) / 1_000_000.0;
+                }
+            }.f;
+            const attn_avg = to_ms(attn_ns) / samples_f;
+            const moe_avg = to_ms(moe_ns) / samples_f;
+            const shared_avg = to_ms(shared_ns) / samples_f;
+            const ssm_avg = to_ms(ssm_ns) / samples_f;
+            const tail_avg = to_ms(tail_ns) / samples_f;
+            const embed_avg = to_ms(embed_ns) / samples_f;
+            log.info(
+                "Prefill GPU phases: per-tok attn={d:.2} ms moe={d:.2} ms shared={d:.2} ms ssm={d:.2} ms tail={d:.2} ms embed={d:.3} ms | totals attn={d:.1} moe={d:.1} shared={d:.1} ssm={d:.1} tail={d:.1} embed={d:.1}",
+                .{
+                    attn_avg,
+                    moe_avg,
+                    shared_avg,
+                    ssm_avg,
+                    tail_avg,
+                    embed_avg,
+                    to_ms(attn_ns),
+                    to_ms(moe_ns),
+                    to_ms(shared_ns),
+                    to_ms(ssm_ns),
+                    to_ms(tail_ns),
+                    to_ms(embed_ns),
+                },
+            );
+            // Drill-down inside the two biggest composite buckets so the next
+            // cycle can target the largest MoE sub-phase directly.
+            const router_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.moe_router)];
+            const topk_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.moe_topk)];
+            const gate_up_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.moe_gate_up)];
+            const swiglu_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.moe_swiglu)];
+            const down_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.moe_down)];
+            const weighted_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.moe_weighted_acc)];
+            log.info(
+                "Prefill MoE subphases totals: router={d:.1} topk={d:.1} gate_up={d:.1} swiglu={d:.1} down={d:.1} weighted_acc={d:.1} ms",
+                .{
+                    to_ms(router_ns),
+                    to_ms(topk_ns),
+                    to_ms(gate_up_ns),
+                    to_ms(swiglu_ns),
+                    to_ms(down_ns),
+                    to_ms(weighted_ns),
+                },
+            );
+            const ssm_proj_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.ssm_proj)];
+            const ssm_conv_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.ssm_conv)];
+            const ssm_delta_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.ssm_delta)];
+            const ssm_gnorm_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.ssm_gated_norm)];
+            const ssm_out_ns = engine.prefill_gpu_phase_ns[@intFromEnum(ProfilePhase.ssm_out)];
+            log.info(
+                "Prefill SSM subphases totals: proj={d:.1} conv={d:.1} delta={d:.1} gnorm={d:.1} out={d:.1} ms",
+                .{
+                    to_ms(ssm_proj_ns),
+                    to_ms(ssm_conv_ns),
+                    to_ms(ssm_delta_ns),
+                    to_ms(ssm_gnorm_ns),
+                    to_ms(ssm_out_ns),
+                },
+            );
+        }
     }
     // Decode profiling should describe only generated tokens, not the prompt prefill steps.
     engine.resetProfilingSamples();
