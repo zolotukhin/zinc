@@ -860,6 +860,15 @@ pub const InferenceEngine = struct {
     // path after prefillBatch temporarily flips profile_enabled on.
     prefill_gpu_phase_ns: [profile_phase_count]u64 = [_]u64{0} ** profile_phase_count,
     prefill_gpu_total_ns: u64 = 0,
+    // Pipelined prefill: second command buffer + embedding staging so the CPU
+    // can prepare and submit the next prompt token while the GPU is still
+    // executing the previous one. See prefillBatch() for the ping-pong logic.
+    prefill_cmd_alt: CommandBuffer,
+    prefill_embed_alt: Buffer,
+    // When set, decodeStep() submits without blocking (submit vs submitAndWait).
+    // prefillBatch() owns the host-side waits between pipelined iterations and
+    // forces the terminal token back onto the sync path.
+    prefill_pipeline_mode: bool = false,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -892,6 +901,8 @@ pub const InferenceEngine = struct {
 
         var decode_cmd = try CommandBuffer.init(instance, &cmd_pool);
         errdefer decode_cmd.deinit(&cmd_pool);
+        var prefill_cmd_alt = try CommandBuffer.init(instance, &cmd_pool);
+        errdefer prefill_cmd_alt.deinit(&cmd_pool);
 
         // max_k: largest K (input dimension) used in any Q4_K DMMV dispatch.
         // Needed to size the Q4_K shared memory array s_x[SPEC_K].
@@ -1032,6 +1043,8 @@ pub const InferenceEngine = struct {
         // Pre-allocate upload staging for embeddings (avoids per-token vkAllocateMemory)
         var embed_staging = try Buffer.initStaging(instance, hidden_size);
         errdefer embed_staging.deinit();
+        var prefill_embed_alt = try Buffer.initStaging(instance, hidden_size);
+        errdefer prefill_embed_alt.deinit();
 
         // Transformer layer intermediate buffers
         const q_dim = @as(u32, config.n_heads) * config.head_dim;
@@ -1513,6 +1526,8 @@ pub const InferenceEngine = struct {
             .argmax = argmax,
             .cmd_pool = cmd_pool,
             .decode_cmd = decode_cmd,
+            .prefill_cmd_alt = prefill_cmd_alt,
+            .prefill_embed_alt = prefill_embed_alt,
             .decode_graph = decode_graph,
             .hidden_buf = hidden_buf,
             .residual_buf = residual_buf,
@@ -3200,6 +3215,13 @@ pub const InferenceEngine = struct {
         if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
         try self.decode_cmd.reset();
         try self.decode_cmd.beginOneTime();
+
+        // Pipelined prefill: the previous prompt token was submitted without a
+        // host fence wait, so its compute writes to shared device state (KV
+        // cache, GPU SSM state) are not guaranteed to be visible to this CB's
+        // dispatches. Queue submission order enforces execution order, but not
+        // memory visibility — add an explicit compute→compute barrier.
+        if (self.prefill_pipeline_mode) self.decode_cmd.computeBarrier();
 
         // Reset profiling timestamps for this token
         self.resetTimestamps();
@@ -5761,7 +5783,13 @@ pub const InferenceEngine = struct {
             prefill_record_elapsed_ns = elapsed;
         }
         const submit_wait_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
-        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        if (self.prefill_pipeline_mode) {
+            // Pipelined prefill: fire-and-forget. prefillBatch() waits for the
+            // corresponding fence before the next reuse of this slot.
+            try self.decode_cmd.submit(self.instance.compute_queue);
+        } else {
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        }
         var prefill_submit_wait_elapsed_ns: u64 = 0;
         if (track_decode_timing) {
             const submit_wait_end = std.time.nanoTimestamp();
@@ -6598,11 +6626,79 @@ pub const InferenceEngine = struct {
         const enable_gpu_phase_timing = had_profile_pool and want_gpu_phases;
         if (enable_gpu_phase_timing) self.profile_enabled = true;
 
+        // Pipelined prefill: two-deep ping-pong between decode_cmd and
+        // prefill_cmd_alt (plus their paired embed staging buffers). While the
+        // GPU executes prompt token N, the CPU dequantizes and records prompt
+        // token N+1 into the alt slot and fires another submit. We only
+        // waitForCompletion() on a slot when its prior submit must drain before
+        // the CPU reuses it.
+        //
+        // Gated off when:
+        //   - profiling is on (needs synchronous timestamp readback per token)
+        //   - push descriptors are unavailable (shared_pool reset would race
+        //     with in-flight descriptor sets from the alt CB)
+        //   - prompt is a single token (nothing to pipeline)
+        //   - validation diagnostics are on (terminal token reads back the
+        //     hidden state into embed_staging — mixing that with alt staging
+        //     adds failure modes not worth the complexity)
+        const can_pipeline = !enable_gpu_phase_timing and self.instance.push_descriptor_fn != null and prompt_tokens.len >= 2 and !self.validation_diagnostics_enabled;
+
+        var primary_pending: bool = false;
+        var alt_pending: bool = false;
+
         // Run each prompt token through the full transformer (same as decodeStep)
         // This populates KV cache and SSM state so the first decode token has context.
         for (prompt_tokens, 0..) |token_id, i| {
             const collect_output = i + 1 == prompt_tokens.len;
+            const pipeline_this = can_pipeline and !collect_output;
+
+            if (pipeline_this) {
+                // Swap so self.decode_cmd / self.embed_staging now point at the
+                // alt slot. Bring the pending-fence flags along with them.
+                std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
+                std.mem.swap(Buffer, &self.embed_staging, &self.prefill_embed_alt);
+                std.mem.swap(bool, &primary_pending, &alt_pending);
+                // The slot we just swapped into may have a pending submit from
+                // two iterations back. Drain it before reusing the CB + staging.
+                if (primary_pending) {
+                    try self.decode_cmd.waitForCompletion();
+                    primary_pending = false;
+                }
+                self.prefill_pipeline_mode = true;
+            } else {
+                // Terminal token (or non-pipelined fallback): drain any
+                // pending submits so the terminal CB sees a quiesced queue and
+                // so the alt slot's KV/SSM writes are visible to the GPU's
+                // subsequent work.
+                if (alt_pending) {
+                    try self.prefill_cmd_alt.waitForCompletion();
+                    alt_pending = false;
+                }
+                if (primary_pending) {
+                    try self.decode_cmd.waitForCompletion();
+                    primary_pending = false;
+                }
+                self.prefill_pipeline_mode = false;
+            }
+
             try self.decodeStep(state, token_id, collect_output);
+
+            if (pipeline_this) {
+                // decodeStep submitted self.decode_cmd without waiting.
+                primary_pending = true;
+            }
+        }
+        self.prefill_pipeline_mode = false;
+
+        // Safety net: if any slot is still pending (shouldn't happen because
+        // the terminal token always drains), wait on it here.
+        if (alt_pending) {
+            try self.prefill_cmd_alt.waitForCompletion();
+            alt_pending = false;
+        }
+        if (primary_pending) {
+            try self.decode_cmd.waitForCompletion();
+            primary_pending = false;
         }
 
         if (enable_gpu_phase_timing) {
@@ -7303,6 +7399,8 @@ pub const InferenceEngine = struct {
         self.elementwise.deinit();
         self.dmmv.deinit();
         self.decode_cmd.deinit(&self.cmd_pool);
+        self.prefill_cmd_alt.deinit(&self.cmd_pool);
+        self.prefill_embed_alt.deinit();
         self.cmd_pool.deinit();
         self.* = undefined;
     }
