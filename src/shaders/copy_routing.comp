@@ -1,0 +1,33 @@
+#version 460
+// ZINC — Tiny u32-dword copy, used to snapshot the per-token MoE router output
+// (expert_ids[k] u32 + expert_weights[k] floatBits-packed) into a per-slot
+// offset in a larger prefill log buffer. Enables Step 5b bookkeeping: after
+// every softmax_topk dispatch during prefill, this shader mirrors router_output
+// into (token_idx, layer_idx) slot of prefill_routing_log_buf so CPU can
+// invert the routing into per-expert token lists at end of prefill.
+//
+// Runs in compute stage so no new barrier kinds are needed — the existing
+// post-topk computeBufferBarrier already orders router_output writes before
+// this read, and no subsequent dispatch reads from the log buffer, so there
+// is no outgoing barrier.
+//
+// Workgroup size 64 covers up to 64 dwords (e.g. top_k=32 → 64 dwords) in a
+// single wave on RDNA. Real models use top_k ≤ 8, so only 16 threads are live.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer SrcBuf { uint src_data[]; };
+layout(set = 0, binding = 1) writeonly buffer DstBuf { uint dst_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint src_offset_dwords;
+    uint dst_offset_dwords;
+    uint num_dwords;
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid < num_dwords) {
+        dst_data[dst_offset_dwords + tid] = src_data[src_offset_dwords + tid];
+    }
+}
