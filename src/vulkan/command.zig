@@ -445,6 +445,22 @@ pub const CommandBuffer = struct {
         self.recordMemoryBarrier(computeToComputeAndTransferBarrierSpec());
     }
 
+    /// Insert a transfer→transfer pipeline barrier (copy write → copy read).
+    /// @param self Command buffer currently being recorded.
+    /// @note Needed when a vkCmdCopyBuffer writes a buffer whose contents are read
+    /// by another vkCmdCopyBuffer in the same or a subsequent command buffer, and
+    /// the caller wants strict-spec memory visibility without relying on implicit
+    /// same-queue ordering semantics. This is the cross-CB safety net for
+    /// effort-6 cycle 7's layer-0 stash buffers.
+    pub fn transferToTransferBarrier(self: *const CommandBuffer) void {
+        self.recordMemoryBarrier(.{
+            .src_stage = vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            .dst_stage = vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            .src_access = vk.c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dst_access = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+        });
+    }
+
     /// Finalize command recording so the buffer can be submitted.
     /// @param self Command buffer to finalize.
     /// @returns `error.EndCommandBufferFailed` when Vulkan rejects the recorded command stream.
