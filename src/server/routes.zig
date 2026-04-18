@@ -968,7 +968,12 @@ fn parseChatRequest(allocator: std.mem.Allocator, body: []const u8) !ParsedChatR
         }
     }
 
-    if (!has_guiding_message) {
+    // The default "Answer directly. Never output self-referential planning"
+    // system prompt fights a thinking turn — the <think> block is exactly
+    // meta-planning, and Qwen loops forever trying to satisfy both sides.
+    // Skip it when thinking is enabled and the caller hasn't supplied their own.
+    const thinking_on = parsed.value.enable_thinking orelse false;
+    if (!has_guiding_message and !thinking_on) {
         roles[count] = "system";
         contents[count] = default_chat_system_prompt;
         count += 1;

@@ -133,11 +133,21 @@ function assistantMessageDebug(body: any): string {
   }
 }
 
+function extractVisibleAnswer(text: string): string {
+  const closeIdx = text.lastIndexOf("</think>");
+  if (closeIdx === -1) return text;
+  return text.slice(closeIdx + "</think>".length).trim();
+}
+
 function assertUsefulZigAnswer(label: string, text: string): void {
-  const lower = text.toLowerCase();
   if (!text) throw new Error(`${label} returned an empty answer`);
+  const answer = extractVisibleAnswer(text);
+  if (!answer) {
+    throw new Error(`${label} returned reasoning but no post-</think> answer:\n${text}`);
+  }
+  const lower = answer.toLowerCase();
   if (!lower.includes("zig")) {
-    throw new Error(`${label} did not mention Zig:\n${text}`);
+    throw new Error(`${label} did not mention Zig:\n${answer}`);
   }
   for (const marker of [
     "here's a thinking process",
@@ -146,7 +156,7 @@ function assertUsefulZigAnswer(label: string, text: string): void {
     "user says:",
   ]) {
     if (lower.includes(marker)) {
-      throw new Error(`${label} leaked meta-planning instead of answering:\n${text}`);
+      throw new Error(`${label} leaked meta-planning instead of answering:\n${answer}`);
     }
   }
 }
@@ -267,7 +277,7 @@ for (const modelId of QWEN_CHAT_MODEL_IDS) {
       const enabled = await postJson(baseUrl, "/chat/completions", {
         model: modelId,
         messages: [{ role: "user", content: thinkingPrompt }],
-        max_tokens: 256,
+        max_tokens: 2048,
         stream: false,
         enable_thinking: true,
       });
