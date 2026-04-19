@@ -703,9 +703,19 @@ export function classifyCycleMetrics(
   let informationValue: CycleMetrics["informationValue"] = "revert";
   if (cycle.broken) informationValue = "broken";
   else if (cycle.improved) informationValue = "perf_keep";
-  else if (cycle.foundationKeep) informationValue = measuredFlagOn ? "dormant_keep" : "dormant_keep";
-  else if ((cycle.changedFiles?.length ?? 0) === 0) informationValue = "no_op";
-  else if (measuredFlagOn) informationValue = "measured_dead";
+  else if (cycle.foundationKeep) informationValue = "dormant_keep";
+  else if ((cycle.changedFiles?.length ?? 0) === 0) {
+    // Zero changed files after the agent exits is either a true no-op or
+    // a revert-after-measurement. The latter produced information and is
+    // valuable; the former is churn. The main loop records stepKind =
+    // "rollback" (and decisionReason = "measured-dead…") when it detects
+    // the valuable case, so we trust those fields here.
+    if (pseudoReport.stepKind === "rollback" || /measured[- ]dead/i.test(cycle.decisionReason ?? "")) {
+      informationValue = "measured_dead";
+    } else {
+      informationValue = "no_op";
+    }
+  } else if (measuredFlagOn) informationValue = "measured_dead";
 
   if (cycle.foundationKeep && measuredFlagOn) {
     // Foundation keep that actually measured flag-on is more valuable than a
@@ -2151,6 +2161,33 @@ export function hasFlagOnMeasurementEvidence(report: AgentReport): boolean {
   return citesFlagOn && citesFlagOnNumber;
 }
 
+/**
+ * A cycle with zero final changed files is a "no-op" only when the agent
+ * genuinely did nothing. When the agent explored a hypothesis, measured
+ * it, found it net-negative, and cleaned up (reverted the code) — that
+ * produces real information: the hypothesis is now disproved and future
+ * cycles should not repeat it. Distinguishing the two matters because
+ * treating revert-after-measurement as a stall penalizes the exact
+ * behavior the pivot prompt asks for.
+ *
+ * Heuristic: stepKind=rollback, OR the description/analysis describes
+ * the cycle as a revert/rollback after a measurement (with a tok/s
+ * number present to prove the measurement happened).
+ */
+export function isMeasuredDeadRevert(report: AgentReport): boolean {
+  if (report.stepKind === "rollback") return true;
+  const haystack = `${report.description}\n${report.selfAnalysis}`;
+  const mentionsRevert = /\b(reverted|rolled back|cleaned up|undid|removed the)\b/i.test(haystack);
+  const mentionsDead = /\b(net[- ]negative|flat|dead[- ]end|no improvement|within noise|no measurable|did not pay|didn'?t help|unchanged\b|within.*noise)\b/i.test(haystack);
+  // Accept any evidence of a concrete measurement: a tok/s number, a
+  // millisecond number, or a comparison pattern (e.g. "25.63 vs 25.66").
+  // Agents phrase measurements differently and the pattern we want to
+  // recognize is "did the cycle cite a real number", not a specific unit.
+  const citesNumber = /\b\d+\.\d+\s*(?:tok\/s|ms|µs|us)\b/i.test(haystack)
+    || /\b\d+\.\d+\s*(?:vs|->|→|versus)\s*\d+\.\d+\b/i.test(haystack);
+  return mentionsRevert && mentionsDead && citesNumber;
+}
+
 export function shouldKeepFoundationStep(
   candidate: BenchResult,
   bestPerf: BenchResult,
@@ -2394,8 +2431,16 @@ async function main() {
 
     let changedFiles = await listChangedFiles();
     if (changedFiles.length === 0) {
-      const decisionReason = "no source changes; skipped sync and benchmark";
-      console.log(c("1;33", `  \u26A0 NO-OP: ${decisionReason}`));
+      const measuredDead = isMeasuredDeadRevert(agentReport);
+      const decisionReason = measuredDead
+        ? "measured-dead: agent explored, measured, and reverted after finding the path non-positive"
+        : "no source changes; skipped sync and benchmark";
+      if (measuredDead) {
+        console.log(c("1;36", `  \uD83D\uDD0E MEASURED DEAD: ${decisionReason}`));
+        console.log(c("2", `     ${trunc(agentReport.description, 120)}`));
+      } else {
+        console.log(c("1;33", `  \u26A0 NO-OP: ${decisionReason}`));
+      }
 
       state.failedApproaches = mergeUniqueEntries(
         state.failedApproaches,
@@ -2403,7 +2448,11 @@ async function main() {
         FAILED_APPROACH_LIMIT,
       );
       state.ideas = mergeUniqueEntries(state.ideas, agentReport.nextIdeas, IDEA_LIMIT);
-      state.stalledCycles++;
+      // Revert-after-measurement cycles produce information (they disprove
+      // a hypothesis). They should not count as a stall because that was
+      // the exact behavior the pivot prompt asked for. Only bump stall
+      // for genuine no-ops where the agent produced no measurement.
+      if (!measuredDead) state.stalledCycles++;
       state.consecutiveFoundationKeeps = 0;
       state.lastCycle = cycle;
 
@@ -2413,14 +2462,14 @@ async function main() {
         description: agentReport.description,
         selfAnalysis: agentReport.selfAnalysis,
         nextIdeas: agentReport.nextIdeas,
-        stepKind: agentReport.stepKind,
+        stepKind: measuredDead ? "rollback" : agentReport.stepKind,
         changedFiles: [],
         categoryTags: classifyApproachTags(agentReport.description, []),
         tokPerSec: null,
         tokPerSecSamples: [],
         bandwidthUtil: null,
         bandwidthSamples: [],
-        correct: false,
+        correct: measuredDead,
         improved: false,
         broken: false,
         kept: false,

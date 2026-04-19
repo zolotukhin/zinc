@@ -20,6 +20,7 @@ import {
   hasFlagOnMeasurementEvidence,
   improvementThreshold,
   introducesRuntimeFlag,
+  isMeasuredDeadRevert,
   isResumeStateCompatible,
   isMaterialImprovement,
   loadPreviousRun,
@@ -1170,6 +1171,49 @@ describe("introducesRuntimeFlag / hasFlagOnMeasurementEvidence", () => {
   });
 });
 
+describe("isMeasuredDeadRevert", () => {
+  function rep(description: string, analysis: string, stepKind: "rollback" | "enablement" | "optimization" | "fix" | "analysis" | "unknown" = "unknown") {
+    return {
+      description,
+      selfAnalysis: analysis,
+      nextIdeas: [],
+      stepKind,
+      rawText: `${description}\n${analysis}`,
+    };
+  }
+
+  test("recognizes stepKind=rollback as measured-dead", () => {
+    expect(isMeasuredDeadRevert(rep("tried X", "", "rollback"))).toBe(true);
+  });
+
+  test("recognizes revert-after-measurement prose with a tok/s number", () => {
+    expect(
+      isMeasuredDeadRevert(rep(
+        "Tested 4-way fused SSM proj dispatch; measured flat (25.63 vs 25.66) and reverted",
+        "Reverted all code. Path is flat on RDNA4.",
+      )),
+    ).toBe(true);
+  });
+
+  test("does not flag a generic no-op as measured-dead", () => {
+    expect(
+      isMeasuredDeadRevert(rep(
+        "Agent did some exploration but made no concrete change",
+        "Needs another cycle to decide direction.",
+      )),
+    ).toBe(false);
+  });
+
+  test("requires a tok/s number — revert prose alone is not evidence", () => {
+    expect(
+      isMeasuredDeadRevert(rep(
+        "Reverted the pair-dispatch code because it seemed flat",
+        "Reverted, no measurement number provided",
+      )),
+    ).toBe(false);
+  });
+});
+
 describe("shouldRunPivotCycle", () => {
   test("fires at cycle 10 when stalled >= threshold", () => {
     expect(
@@ -1292,6 +1336,42 @@ describe("classifyCycleMetrics", () => {
       [],
     );
     expect(moe.attackedBucket).toBe("moe");
+  });
+
+  test("zero-changed-files with stepKind=rollback maps to measured_dead, not no_op", () => {
+    const m = classifyCycleMetrics(
+      {
+        ...baseCycle,
+        stepKind: "rollback",
+        kept: false,
+        foundationKeep: false,
+        changedFiles: [],
+        description: "tested fused SSM proj dispatch, measured flat, reverted",
+        selfAnalysis: "25.63 vs 25.66 flat, reverted",
+        decisionReason: "measured-dead: agent explored, measured, and reverted",
+      },
+      baseCycle.timestamp,
+      [],
+    );
+    expect(m.informationValue).toBe("measured_dead");
+  });
+
+  test("genuine no-op (no rollback, no changes) still classifies as no_op", () => {
+    const m = classifyCycleMetrics(
+      {
+        ...baseCycle,
+        stepKind: "unknown",
+        kept: false,
+        foundationKeep: false,
+        changedFiles: [],
+        description: "agent produced no changes",
+        selfAnalysis: "",
+        decisionReason: "no source changes",
+      },
+      baseCycle.timestamp,
+      [],
+    );
+    expect(m.informationValue).toBe("no_op");
   });
 
   test("detects citation of reference implementations", () => {
