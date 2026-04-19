@@ -271,8 +271,30 @@ export function getEffortSpec(effort: number): EffortSpec | null {
 }
 
 const BENCHMARK_SAMPLES = 3;
-const MIN_IMPROVEMENT_ABS_TPS = 0.5;
+// Absolute floor on a "material improvement" in tok/s. Previously 0.5,
+// which rejected three effort-6 cycles (13/16/21) that produced gains of
+// 0.29-0.45 tok/s with sample noise well below the gap. Lowered to 0.2 so
+// the relative 1% threshold takes over above ~20 tok/s, which is where
+// the loop actually operates.
+const MIN_IMPROVEMENT_ABS_TPS = 0.2;
 const MIN_IMPROVEMENT_PCT = 0.01;
+// Noise-aware override: even when the gain is below the normal threshold,
+// accept it if it is large relative to the candidate's sample stdev AND
+// above this absolute minimum. Cycle 16 produced samples [28.06, 28.06,
+// 28.05] — stdev 0.005, gap 0.30 tok/s = 60× noise, an unambiguous win
+// that the old threshold rejected.
+const NOISE_OVERRIDE_ABS_MIN_TPS = 0.15;
+const NOISE_OVERRIDE_STDEV_MULTIPLIER = 3;
+// How often to refresh the prefill phase budget even without a perf keep.
+// Previously we only refreshed after perf keeps; a stalled run would stare
+// at a budget from the last perf keep which could be many cycles old.
+const PHASE_BUDGET_REFRESH_STALL_THRESHOLD = 3;
+// Echo-chamber warning: if the last N cycles overwhelmingly target a
+// single phase bucket AND no perf keep has come from that bucket in the
+// same window, surface a warning in the prompt so the agent considers a
+// different bucket.
+const ECHO_CHAMBER_WINDOW = 8;
+const ECHO_CHAMBER_RATIO = 0.7;
 const HISTORY_LINES_IN_PROMPT = 20;
 const RECENT_CYCLES_IN_PROMPT = 12;
 const FAILED_APPROACH_LIMIT = 30;
@@ -1094,6 +1116,92 @@ export function improvementThreshold(currentTokPerSec: number | null): number {
   return Math.max(MIN_IMPROVEMENT_ABS_TPS, currentTokPerSec * MIN_IMPROVEMENT_PCT);
 }
 
+export function sampleStdev(samples: number[]): number {
+  if (samples.length < 2) return 0;
+  const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+  const variance = samples.reduce((a, b) => a + (b - mean) ** 2, 0) / samples.length;
+  return Math.sqrt(variance);
+}
+
+/**
+ * Noise-aware override: when a candidate's sample dispersion is tight and
+ * the gain vs best is a multiple of that noise, the measurement is
+ * statistically unambiguous. Accept even when the normal threshold says no.
+ *
+ * The guard `gain > NOISE_OVERRIDE_ABS_MIN_TPS` prevents this path from
+ * accepting micro-jitters when the samples happen to cluster tightly.
+ */
+export type EchoChamberWarning = {
+  bucket: string;
+  count: number;
+  window: number;
+  perfKeepsInBucketWindow: number;
+  perfKeepsFromOtherBuckets: number;
+};
+
+/**
+ * Detect "echo chamber" bucket attacks: a long run of cycles attacking the
+ * same phase bucket with no perf keeps from that bucket. Effort-6 run 3
+ * had 22/25 cycles targeting SSM even though both perf keeps came from
+ * MoE — the agent was drawn to SSM by the stale phase budget and by
+ * Sunday-driver momentum. Surfacing this as a prompt warning should
+ * nudge diversification when the pattern is obvious.
+ *
+ * Returns a warning only when the dominant bucket exceeds
+ * ECHO_CHAMBER_RATIO of the window AND there is at least one perf keep
+ * in the window from a *different* bucket — that is the signal that
+ * the loop's wins are coming from elsewhere.
+ */
+export function detectEchoChamber(cycles: CycleRecord[], referencePaths: string[] = []): EchoChamberWarning | null {
+  if (cycles.length < ECHO_CHAMBER_WINDOW) return null;
+  const recent = cycles.slice(-ECHO_CHAMBER_WINDOW);
+  const counts = new Map<string, number>();
+  const perfKeepsByBucket = new Map<string, number>();
+  let prevTimestamp = recent[0].timestamp;
+  for (const cycle of recent) {
+    const m = classifyCycleMetrics(cycle, prevTimestamp, referencePaths);
+    prevTimestamp = cycle.timestamp;
+    if (!m.attackedBucket) continue;
+    counts.set(m.attackedBucket, (counts.get(m.attackedBucket) ?? 0) + 1);
+    if (cycle.improved) {
+      perfKeepsByBucket.set(m.attackedBucket, (perfKeepsByBucket.get(m.attackedBucket) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) return null;
+  const [topBucket, topCount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (topCount / recent.length < ECHO_CHAMBER_RATIO) return null;
+  const perfKeepsInBucket = perfKeepsByBucket.get(topBucket) ?? 0;
+  const totalPerfKeeps = [...perfKeepsByBucket.values()].reduce((a, b) => a + b, 0);
+  const perfKeepsFromOtherBuckets = totalPerfKeeps - perfKeepsInBucket;
+  if (perfKeepsInBucket > 0) return null; // the bucket is actually paying off; not an echo chamber.
+  return {
+    bucket: topBucket,
+    count: topCount,
+    window: recent.length,
+    perfKeepsInBucketWindow: perfKeepsInBucket,
+    perfKeepsFromOtherBuckets,
+  };
+}
+
+export function formatEchoChamberWarning(warning: EchoChamberWarning): string {
+  const other = warning.perfKeepsFromOtherBuckets > 0
+    ? ` ${warning.perfKeepsFromOtherBuckets} perf keep(s) in this window came from a *different* bucket.`
+    : "";
+  return `Echo chamber detected: ${warning.count}/${warning.window} recent cycles have attacked the "${warning.bucket}" bucket with zero perf keeps from it.${other} Pick a different top-level bucket this cycle unless you have new evidence that the "${warning.bucket}" bucket just became approachable.`;
+}
+
+export function passesNoiseAwareOverride(candidate: BenchResult, currentBest: BenchResult): boolean {
+  if (candidate.tokPerSec == null || currentBest.tokPerSec == null) return false;
+  const gain = candidate.tokPerSec - currentBest.tokPerSec;
+  if (gain <= NOISE_OVERRIDE_ABS_MIN_TPS) return false;
+  const stdev = sampleStdev(candidate.tokPerSecSamples);
+  if (stdev === 0) {
+    // All samples identical — if the gain is above the minimum, accept.
+    return true;
+  }
+  return gain >= NOISE_OVERRIDE_STDEV_MULTIPLIER * stdev;
+}
+
 /**
  * Pivot cycles fire every PIVOT_CYCLE_EVERY cycles when the loop has been
  * stalled for at least PIVOT_STALL_THRESHOLD cycles. The goal is to force
@@ -1115,7 +1223,10 @@ export function isMaterialImprovement(candidate: BenchResult, currentBest: Bench
   if (candidate.tokPerSec == null) return false;
   const threshold = improvementThreshold(currentBest.tokPerSec);
   const current = currentBest.tokPerSec ?? 0;
-  return candidate.tokPerSec > current + threshold;
+  if (candidate.tokPerSec > current + threshold) return true;
+  // Below the normal threshold — fall back to the noise-aware override so
+  // tight-variance gains aren't thrown away.
+  return passesNoiseAwareOverride(candidate, currentBest);
 }
 
 export function buildAgentPrompt(
@@ -1167,6 +1278,11 @@ export function buildAgentPrompt(
   const phaseBudgetBlock = options.primaryMetricLabel === "prefill tok/s"
     ? formatPhaseBudget(context?.phaseBudget ?? null, context?.phaseBudgetCycle ?? null)
     : null;
+
+  const echoWarning = context
+    ? detectEchoChamber(context.cycles, options.referenceImplementations?.map((r) => r.path) ?? [])
+    : null;
+  const echoBlock = echoWarning ? formatEchoChamberWarning(echoWarning) : null;
 
   const knownFlatBlock = options.knownFlatCategories?.length
     ? options.knownFlatCategories.map((entry, i) => `${i + 1}. ${entry}`).join("\n")
@@ -1226,7 +1342,7 @@ ${currentVsBestNote}
 - primary metric (${primaryMetricLabel}): ${summarizeBenchMetric(originalBaseline.tokPerSec, originalBaseline.tokPerSecSamples, "tok/s")}
 - bandwidth utilization: ${summarizeBenchMetric(originalBaseline.bandwidthUtil, originalBaseline.bandwidthSamples, "%", 1)}
 - output: "${originalBaseline.outputText}"
-${phaseBudgetBlock ? `\n## Current Prefill Phase Budget (ZINC_PREFILL_PROFILE=1)\n${phaseBudgetBlock}\nUse this budget to pick the biggest remaining bucket. Do not propose batching/kernel work for a bucket whose total is clearly smaller than another untried bucket.\n` : ""}${knownFlatBlock ? `\n## Known Flat Territory on This Target (do not re-attempt without new evidence)\n${knownFlatBlock}\n` : ""}${swingIdeasBlock ? `\n## Structural Swing Ideas (pick one when controller wants a swing)\n${swingIdeasBlock}\n` : ""}${referencesBlock ? `\n## Reference Implementations on Disk (read when stuck)\n${referencesBlock}\n\nThese are full checkouts of production inference engines. Skim the specific files named above; do not copy wholesale, but steal the architectural patterns (pipeline specialization constants, kernel selection thresholds, MoE routing shapes). If a reference makes an idea obvious, say so in your self-analysis so the next cycle knows the pattern came from a proven codebase.\n` : ""}
+${phaseBudgetBlock ? `\n## Current Prefill Phase Budget (ZINC_PREFILL_PROFILE=1)\n${phaseBudgetBlock}\nUse this budget to pick the biggest remaining bucket. Do not propose batching/kernel work for a bucket whose total is clearly smaller than another untried bucket.\n` : ""}${echoBlock ? `\n## ⚠ Echo Chamber Warning\n${echoBlock}\n` : ""}${knownFlatBlock ? `\n## Known Flat Territory on This Target (do not re-attempt without new evidence)\n${knownFlatBlock}\n` : ""}${swingIdeasBlock ? `\n## Structural Swing Ideas (pick one when controller wants a swing)\n${swingIdeasBlock}\n` : ""}${referencesBlock ? `\n## Reference Implementations on Disk (read when stuck)\n${referencesBlock}\n\nThese are full checkouts of production inference engines. Skim the specific files named above; do not copy wholesale, but steal the architectural patterns (pipeline specialization constants, kernel selection thresholds, MoE routing shapes). If a reference makes an idea obvious, say so in your self-analysis so the next cycle knows the pattern came from a proven codebase.\n` : ""}
 ## Controller State
 - mode: ${controllerMode}
 - stalled cycles without a new best checkpoint: ${context?.stalledCycles ?? 0}
@@ -2713,6 +2829,29 @@ ${result.buildOutput.slice(-2000)}
         state.reviewSummaries = [...state.reviewSummaries.slice(-(REVIEW_SUMMARY_LIMIT - 1)), review];
         console.log(c("1;35", `  \uD83D\uDD0D Self-review (${state.cycles.length} cycles)`));
         console.log(c("2", review));
+      }
+    }
+
+    // Stall-triggered phase budget refresh. Without a perf keep, the budget
+    // stays frozen at the cycle that produced the last keep. Over a long
+    // stall, accepted changes accumulate (foundation keeps, reverts that
+    // produced information) and the agent's view of the budget grows
+    // increasingly wrong. Refresh every Nth cycle while stalled so the
+    // next cycle's prompt has a current view of bucket totals.
+    if (
+      effortSpec.metricMode === "prefill"
+      && state.stalledCycles >= PHASE_BUDGET_REFRESH_STALL_THRESHOLD
+      && state.phaseBudgetCycle !== cycle
+      && (cycle - (state.phaseBudgetCycle ?? 0)) >= PHASE_BUDGET_REFRESH_STALL_THRESHOLD
+    ) {
+      console.log(c("2", `  Refreshing prefill phase budget (stall=${state.stalledCycles}, last refresh at cycle ${state.phaseBudgetCycle ?? "baseline"})...`));
+      const refreshed = await collectPhaseBudget(modelTarget, effortSpec);
+      if (refreshed) {
+        state.phaseBudget = refreshed;
+        state.phaseBudgetCycle = cycle;
+        if (refreshed.biggestBucket) {
+          console.log(c("1;36", `  Refreshed biggest prefill bucket: ${refreshed.biggestBucket.name} (${refreshed.biggestBucket.totalMs.toFixed(1)} ms)`));
+        }
       }
     }
 

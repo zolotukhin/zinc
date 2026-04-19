@@ -17,10 +17,14 @@ import {
   formatToolInput,
   formatClaudeStreamLine,
   getEffortSpec,
+  detectEchoChamber,
+  formatEchoChamberWarning,
   hasFlagOnMeasurementEvidence,
   improvementThreshold,
   introducesRuntimeFlag,
   isMeasuredDeadRevert,
+  passesNoiseAwareOverride,
+  sampleStdev,
   isResumeStateCompatible,
   isMaterialImprovement,
   loadPreviousRun,
@@ -243,11 +247,19 @@ describe("controller helpers", () => {
     expect(median([37.4, 38.5, 37.2])).toBe(37.4);
   });
 
-  test("improvement threshold uses absolute floor", () => {
-    expect(improvementThreshold(37.2)).toBe(0.5);
+  test("improvement threshold uses absolute floor below the 1%-relative crossover", () => {
+    // At 15 tok/s, 1% relative (0.15) is below the absolute floor, so the
+    // floor dominates.
+    expect(improvementThreshold(15.0)).toBe(0.2);
   });
 
-  test("material improvement rejects noisy outlier-sized deltas below threshold", () => {
+  test("improvement threshold uses 1%-relative above the crossover", () => {
+    // At 37.2 tok/s, 1% relative (0.372) is above the absolute floor, so
+    // the relative bound dominates.
+    expect(improvementThreshold(37.2)).toBeCloseTo(0.372, 5);
+  });
+
+  test("material improvement rejects noisy deltas when gain < 3x stdev", () => {
     const currentBest = {
       buildOk: true,
       buildOutput: "",
@@ -259,12 +271,60 @@ describe("controller helpers", () => {
       bandwidthSamples: [21.6, 21.7, 21.8],
       error: null,
     };
+    // Sample stdev is large (~0.3 tok/s), gap is 0.34 — well under the
+    // 3x stdev noise-aware bar, and below the 0.372 relative threshold.
     const candidate = {
       ...currentBest,
       tokPerSec: 37.62,
-      tokPerSecSamples: [37.5, 37.6, 37.7],
+      tokPerSecSamples: [37.0, 37.9, 38.0],
     };
     expect(isMaterialImprovement(candidate, currentBest)).toBe(false);
+  });
+
+  test("material improvement accepts a tight-variance gain that clears the noise floor", () => {
+    const currentBest = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 27.76,
+      tokPerSecSamples: [27.75, 27.76, 27.77],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: null,
+    };
+    // Reproduces effort-6 cycle 16: samples [28.06, 28.06, 28.05], gap 0.30.
+    // Normal threshold at 27.76 is 0.278 → gain 0.30 > 0.278 → accepts via
+    // the normal path. Kept as a regression guard on the combined behavior.
+    const candidate = {
+      ...currentBest,
+      tokPerSec: 28.06,
+      tokPerSecSamples: [28.06, 28.06, 28.05],
+    };
+    expect(isMaterialImprovement(candidate, currentBest)).toBe(true);
+  });
+
+  test("material improvement accepts via noise-aware override when gain < relative threshold but stdev is tight", () => {
+    const currentBest = {
+      buildOk: true,
+      buildOutput: "",
+      tokPerSec: 50.0,
+      tokPerSecSamples: [49.98, 50.0, 50.02],
+      correct: true,
+      outputText: "Paris.",
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      error: null,
+    };
+    // Normal relative threshold at 50 is 0.5; candidate gain is 0.2 — below
+    // the normal threshold. But the candidate stdev is 0.005 and the gain
+    // is 40x noise, above the 3x bar. Accept via noise override.
+    const candidate = {
+      ...currentBest,
+      tokPerSec: 50.2,
+      tokPerSecSamples: [50.195, 50.200, 50.205],
+    };
+    expect(isMaterialImprovement(candidate, currentBest)).toBe(true);
   });
 
   test("material improvement accepts clear gains over the current accepted baseline", () => {
@@ -1168,6 +1228,129 @@ describe("introducesRuntimeFlag / hasFlagOnMeasurementEvidence", () => {
       ["src/compute/forward.zig"],
     );
     expect(keep).toBe(true);
+  });
+});
+
+describe("sampleStdev + passesNoiseAwareOverride", () => {
+  test("sampleStdev returns 0 for a single sample", () => {
+    expect(sampleStdev([42])).toBe(0);
+  });
+
+  test("sampleStdev on cycle-16-like samples is near zero", () => {
+    expect(sampleStdev([28.06, 28.06, 28.05])).toBeCloseTo(0.005, 2);
+  });
+
+  test("noise override accepts cycle-16-shape gains (60x stdev)", () => {
+    const best = {
+      buildOk: true, buildOutput: "", tokPerSec: 27.76,
+      tokPerSecSamples: [27.75, 27.76, 27.77],
+      correct: true, outputText: "Paris.", bandwidthUtil: null, bandwidthSamples: [], error: null,
+    };
+    const cand = { ...best, tokPerSec: 28.06, tokPerSecSamples: [28.06, 28.06, 28.05] };
+    expect(passesNoiseAwareOverride(cand, best)).toBe(true);
+  });
+
+  test("noise override rejects cycle-19-shape gains (gap < stdev)", () => {
+    const best = {
+      buildOk: true, buildOutput: "", tokPerSec: 27.76,
+      tokPerSecSamples: [27.75, 27.76, 27.77],
+      correct: true, outputText: "Paris.", bandwidthUtil: null, bandwidthSamples: [], error: null,
+    };
+    // Samples [28.06, 27.78, 27.77] — median 27.78, gap only 0.02, noise large.
+    const cand = { ...best, tokPerSec: 27.78, tokPerSecSamples: [28.06, 27.78, 27.77] };
+    expect(passesNoiseAwareOverride(cand, best)).toBe(false);
+  });
+
+  test("noise override respects the 0.15 absolute floor", () => {
+    const best = {
+      buildOk: true, buildOutput: "", tokPerSec: 27.76,
+      tokPerSecSamples: [27.76, 27.76, 27.76],
+      correct: true, outputText: "Paris.", bandwidthUtil: null, bandwidthSamples: [], error: null,
+    };
+    // Tiny gain 0.05 — below the 0.15 abs floor, override should not trigger
+    // even if stdev is zero.
+    const cand = { ...best, tokPerSec: 27.81, tokPerSecSamples: [27.81, 27.81, 27.81] };
+    expect(passesNoiseAwareOverride(cand, best)).toBe(false);
+  });
+});
+
+describe("detectEchoChamber", () => {
+  function mkCycle(n: number, desc: string, improved = false): any {
+    return {
+      cycle: n,
+      timestamp: new Date(Date.UTC(2026, 3, 19, 0, n)).toISOString(),
+      description: desc,
+      selfAnalysis: "",
+      nextIdeas: [],
+      stepKind: "enablement",
+      changedFiles: ["src/compute/forward.zig"],
+      categoryTags: [],
+      tokPerSec: improved ? 28.0 : 27.0,
+      tokPerSecSamples: [improved ? 28.0 : 27.0],
+      bandwidthUtil: null,
+      bandwidthSamples: [],
+      correct: true,
+      improved,
+      broken: false,
+      kept: improved,
+      foundationKeep: false,
+      decisionReason: "",
+      outputText: "Paris.",
+      commitHash: null,
+    };
+  }
+
+  test("flags an 8-cycle SSM dominance window with zero SSM perf keeps", () => {
+    const cycles = [
+      mkCycle(1, "MoE gate/up/down kparallel", true),
+      mkCycle(2, "ssm proj fusion"),
+      mkCycle(3, "ssm delta_net register array"),
+      mkCycle(4, "ssm Q8_0 kpar"),
+      mkCycle(5, "ssm alpha+beta fusion"),
+      mkCycle(6, "ssm out DMMV fusion"),
+      mkCycle(7, "ssm proj pair dispatch"),
+      mkCycle(8, "ssm proj uint16 packing"),
+    ];
+    const warn = detectEchoChamber(cycles, []);
+    expect(warn).not.toBeNull();
+    expect(warn!.bucket).toBe("ssm");
+    expect(warn!.count).toBe(7);
+    expect(warn!.perfKeepsInBucketWindow).toBe(0);
+  });
+
+  test("does not flag a window where the dominant bucket is actually paying off", () => {
+    const cycles = [
+      mkCycle(1, "ssm proj", true),
+      mkCycle(2, "ssm delta"),
+      mkCycle(3, "ssm out"),
+      mkCycle(4, "ssm kpar"),
+      mkCycle(5, "ssm uint16"),
+      mkCycle(6, "ssm proj hoist"),
+      mkCycle(7, "ssm fusion"),
+      mkCycle(8, "ssm reorder"),
+    ];
+    const warn = detectEchoChamber(cycles, []);
+    // The perf keep in the window is in the same bucket → not an echo chamber.
+    expect(warn).toBeNull();
+  });
+
+  test("does not flag until the window size is reached", () => {
+    const cycles = [mkCycle(1, "ssm x"), mkCycle(2, "ssm y"), mkCycle(3, "ssm z")];
+    expect(detectEchoChamber(cycles, [])).toBeNull();
+  });
+
+  test("format mentions the bucket and any other-bucket wins", () => {
+    const warn = {
+      bucket: "ssm",
+      count: 7,
+      window: 8,
+      perfKeepsInBucketWindow: 0,
+      perfKeepsFromOtherBuckets: 1,
+    };
+    const text = formatEchoChamberWarning(warn);
+    expect(text).toContain("ssm");
+    expect(text).toContain("7/8");
+    expect(text).toContain("different");
   });
 });
 
