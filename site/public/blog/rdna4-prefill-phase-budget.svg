@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Where RDNA4 prefill time goes on Qwen3.5-35B</title>
+  <desc id="desc">A horizontal bar chart showing the per-phase time budget for a 154-token prefill on AMD RDNA4. SSM projections dominate at 1.3 seconds, followed by the rest of the SSM block, MoE expert work, attention, CPU submit-and-wait gap, shared expert, and the final norm and LM head tail.</desc>
+  <defs>
+    <linearGradient id="bg-prefill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-prefill" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .p-title { font: 700 32px Georgia, serif; fill: #10233c; }
+      .p-sub { font: 500 17px Arial, sans-serif; fill: #53657b; }
+      .p-label { font: 600 16px Arial, sans-serif; fill: #10233c; }
+      .p-value { font: 700 15px Arial, sans-serif; fill: #ffffff; }
+      .p-value-out { font: 700 15px Arial, sans-serif; fill: #10233c; }
+      .p-axis { font: 400 13px Arial, sans-serif; fill: #53657b; }
+      .p-note { font: 400 14px Arial, sans-serif; fill: #445567; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" fill="url(#bg-prefill)"/>
+
+  <g transform="translate(72 50)">
+    <text class="p-title">Where RDNA4 prefill time goes on Qwen3.5-35B</text>
+    <text class="p-sub" x="0" y="30">Per-phase budget for a 154-token long-context prompt, RX 9070, ZINC Vulkan path. SSM projections alone eat more than attention and MoE combined.</text>
+  </g>
+
+  <!-- scale: 1.0 s = 240 px, bars start at x=300, axis from 0 to ~2.0s -->
+  <g transform="translate(0 120)" filter="url(#shadow-prefill)">
+    <!-- axis ticks -->
+    <g>
+      <line x1="300" y1="340" x2="1060" y2="340" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="300" y1="340" x2="300" y2="346" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="420" y1="340" x2="420" y2="346" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="540" y1="340" x2="540" y2="346" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="660" y1="340" x2="660" y2="346" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="780" y1="340" x2="780" y2="346" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="900" y1="340" x2="900" y2="346" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="1020" y1="340" x2="1020" y2="346" stroke="#9fb0c0" stroke-width="1.5"/>
+      <text class="p-axis" x="300" y="362" text-anchor="middle">0.0 s</text>
+      <text class="p-axis" x="420" y="362" text-anchor="middle">0.3 s</text>
+      <text class="p-axis" x="540" y="362" text-anchor="middle">0.6 s</text>
+      <text class="p-axis" x="660" y="362" text-anchor="middle">0.9 s</text>
+      <text class="p-axis" x="780" y="362" text-anchor="middle">1.2 s</text>
+      <text class="p-axis" x="900" y="362" text-anchor="middle">1.5 s</text>
+      <text class="p-axis" x="1020" y="362" text-anchor="middle">1.8 s</text>
+    </g>
+
+    <!-- SSM proj: 1.3s -->
+    <g>
+      <text class="p-label" x="290" y="40" text-anchor="end">SSM projections</text>
+      <rect x="300" y="20" width="520" height="30" fill="#19324a" rx="4"/>
+      <text class="p-value" x="810" y="40" text-anchor="end">1.30 s</text>
+    </g>
+
+    <!-- Rest of SSM block: 0.5s (1.8 total - 1.3 proj) -->
+    <g>
+      <text class="p-label" x="290" y="85" text-anchor="end">Rest of SSM block</text>
+      <rect x="300" y="65" width="200" height="30" fill="#244560" rx="4"/>
+      <text class="p-value" x="490" y="85" text-anchor="end">0.50 s</text>
+    </g>
+
+    <!-- MoE: 1.6s -->
+    <g>
+      <text class="p-label" x="290" y="130" text-anchor="end">MoE (router + experts + acc)</text>
+      <rect x="300" y="110" width="640" height="30" fill="#2f5877" rx="4"/>
+      <text class="p-value" x="930" y="130" text-anchor="end">1.60 s</text>
+    </g>
+
+    <!-- Attention: 0.7s -->
+    <g>
+      <text class="p-label" x="290" y="175" text-anchor="end">Attention (flash_attn + RoPE)</text>
+      <rect x="300" y="155" width="280" height="30" fill="#3b6d8d" rx="4"/>
+      <text class="p-value" x="570" y="175" text-anchor="end">0.70 s</text>
+    </g>
+
+    <!-- CPU gap: 0.6s -->
+    <g>
+      <text class="p-label" x="290" y="220" text-anchor="end">CPU + submit/wait gap</text>
+      <rect x="300" y="200" width="240" height="30" fill="#4b86a7" rx="4"/>
+      <text class="p-value" x="530" y="220" text-anchor="end">~0.60 s</text>
+    </g>
+
+    <!-- Shared expert: 0.08s -->
+    <g>
+      <text class="p-label" x="290" y="265" text-anchor="end">Shared expert</text>
+      <rect x="300" y="245" width="32" height="30" fill="#5ea0c9" rx="4"/>
+      <text class="p-value-out" x="342" y="265">0.08 s</text>
+    </g>
+
+    <!-- Final tail: 0.1s -->
+    <g>
+      <text class="p-label" x="290" y="310" text-anchor="end">Final norm + LM head</text>
+      <rect x="300" y="290" width="40" height="30" fill="#78bf7a" rx="4"/>
+      <text class="p-value-out" x="350" y="310">0.10 s (cycle 4 already skips)</text>
+    </g>
+  </g>
+
+  <text class="p-note" x="72" y="530">Source: ZINC_PREFILL_PROFILE=1 snapshot, flagship long-context workload. Totals exceed 13 s because phases run serially across 154 prefill tokens.</text>
+</svg>
