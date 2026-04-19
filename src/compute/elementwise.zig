@@ -111,13 +111,6 @@ pub const KvCacheWritePush = extern struct {
     dst_offset: u32,
 };
 
-/// Push constants for copy_routing shader (Step 5b MoE routing log).
-pub const CopyRoutingPush = extern struct {
-    src_offset_dwords: u32,
-    dst_offset_dwords: u32,
-    num_dwords: u32,
-};
-
 /// Push constants for fused RMS norm + RoPE shader.
 pub const NormRopePush = extern struct {
     head_dim: u32,
@@ -172,9 +165,6 @@ pub const ElementwiseDispatch = struct {
     pipeline_kv_cache_write: ?Pipeline,
     /// NORM ROPE pipeline: fused RMS norm + RoPE per head, 3 bindings (data, weight, freq).
     pipeline_norm_rope: ?Pipeline,
-    /// COPY ROUTING pipeline: u32-dword copy, 2 bindings (src, dst). Used by
-    /// Step 5b to snapshot router_output_buf per (token, layer) slot.
-    pipeline_copy_routing: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -380,13 +370,6 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
-        // copy_routing: 2 bindings (src, dst) — tiny u32 dword copy for Step 5b.
-        const copy_routing_path = std.fmt.bufPrint(&path_buf, "{s}/copy_routing.spv", .{shader_dir}) catch unreachable;
-        const pipeline_copy_routing = pipeline_mod.createFromSpirvWithOptions(instance, copy_routing_path, 2, @sizeOf(CopyRoutingPush), &.{}, push_options, allocator) catch |err| blk: {
-            log.warn("copy_routing shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -409,7 +392,6 @@ pub const ElementwiseDispatch = struct {
             .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
             .pipeline_softcap = pipeline_softcap,
             .pipeline_kv_cache_write = pipeline_kv_cache_write,
-            .pipeline_copy_routing = pipeline_copy_routing,
             .pipeline_norm_rope = pipeline_norm_rope,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
@@ -671,18 +653,6 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), push.dt_rank, 1, 1);
     }
 
-    /// Record a tiny u32-dword copy from src to dst (Step 5b routing log).
-    /// Single workgroup of 64 threads; caller must pass `num_dwords ≤ 64`.
-    pub fn recordCopyRouting(
-        self: *const ElementwiseDispatch,
-        cmd: *CommandBuffer,
-        descriptor_set: vk.c.VkDescriptorSet,
-        push: CopyRoutingPush,
-    ) !void {
-        const pip = if (self.pipeline_copy_routing) |*p| p else return error.ShaderNotLoaded;
-        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), 1, 1, 1);
-    }
-
     /// Record softmax + top-k MoE router dispatch.
     pub fn recordSoftmaxTopk(
         self: *const ElementwiseDispatch,
@@ -763,7 +733,6 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_ssm_delta_net) |*p| p.deinit();
         if (self.pipeline_ssm_gated_norm) |*p| p.deinit();
         if (self.pipeline_softmax_topk) |*p| p.deinit();
-        if (self.pipeline_copy_routing) |*p| p.deinit();
         if (self.pipeline_sigmoid_scale_acc) |*p| p.deinit();
         if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
         if (self.pipeline_softcap) |*p| p.deinit();

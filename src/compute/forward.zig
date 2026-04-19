@@ -37,7 +37,6 @@ const SsmGatedNormPush = elementwise_mod.SsmGatedNormPush;
 const DeinterleavePush = elementwise_mod.DeinterleavePush;
 const KvCacheWritePush = elementwise_mod.KvCacheWritePush;
 const NormRopePush = elementwise_mod.NormRopePush;
-const CopyRoutingPush = elementwise_mod.CopyRoutingPush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
@@ -886,38 +885,6 @@ pub const InferenceEngine = struct {
     prefill_embed_big_hidden: u32 = 0,
     prefill_embed_big_token_count: u32 = 0,
     prefill_current_token_idx: u32 = 0,
-    // Step 5b: per-prefill MoE routing log. When enabled (ZINC_PREFILL_ROUTE_CAPTURE=1),
-    // a tiny copy_routing dispatch after each softmax_topk mirrors router_output_buf
-    // into a (token_idx, moe_layer_idx) slot of prefill_routing_log_buf (device local).
-    // At end of prefillBatch, a one-shot vkCmdCopyBuffer drains log → staging, then
-    // CPU reads staging and builds per-expert token lists (prefill_expert_token_slots
-    // / prefill_expert_weights / prefill_expert_counts) for Step 5c to consume. The
-    // capture path is dormant without the env flag, so no cost is paid in the
-    // baseline hot path.
-    prefill_route_capture_enabled: bool = false,
-    prefill_routing_log_buf: ?Buffer = null,
-    prefill_routing_log_staging: ?Buffer = null,
-    prefill_routing_log_capacity_dwords: u64 = 0,
-    // Shape: dwords_per_slot = 2 * n_used (ids + weights). Slots are laid out as
-    // [token_idx * n_moe_layers + moe_layer_idx] × dwords_per_slot.
-    prefill_routing_dwords_per_slot: u32 = 0,
-    prefill_routing_n_moe_layers: u32 = 0,
-    prefill_routing_n_tokens: u32 = 0,
-    prefill_routing_n_used: u32 = 0,
-    prefill_routing_n_experts: u32 = 0,
-    // CPU-side inverted routing arrays. Flat layout per MoE-layer-index:
-    //   prefill_expert_counts[layer_idx * n_experts + expert_id] = token count
-    //   prefill_expert_token_slots[layer_idx * n_experts + expert_id][..] = packed
-    //     (token_idx << 8 | k_slot), one per routing assignment. Weights mirror.
-    // Allocated only when capture is enabled; released after readback if consumer
-    // is not wired yet (to avoid dormant memory).
-    prefill_expert_counts: ?[]u32 = null,
-    prefill_expert_token_slots: ?[]u32 = null,
-    prefill_expert_weights: ?[]f32 = null,
-    prefill_expert_layer_stride: u32 = 0,
-    // True after a prefillBatch with capture built the arrays; cleared at the
-    // start of each prefillBatch so Step 5c can check freshness.
-    prefill_routing_log_valid: bool = false,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -3100,41 +3067,6 @@ pub const InferenceEngine = struct {
         try self.elementwise.recordSoftmaxTopk(&self.decode_cmd, ds, n_experts, k);
     }
 
-    fn dispatchCopyRouting(
-        self: *InferenceEngine,
-        src_buf: vk.c.VkBuffer,
-        src_size: vk.c.VkDeviceSize,
-        dst_buf: vk.c.VkBuffer,
-        dst_size: vk.c.VkDeviceSize,
-        src_offset_dwords: u32,
-        dst_offset_dwords: u32,
-        num_dwords: u32,
-    ) !void {
-        const pip = &(self.elementwise.pipeline_copy_routing orelse return error.ShaderNotLoaded);
-        const push = CopyRoutingPush{
-            .src_offset_dwords = src_offset_dwords,
-            .dst_offset_dwords = dst_offset_dwords,
-            .num_dwords = num_dwords,
-        };
-        if (pip.uses_push_descriptors) {
-            self.pushDispatch2(
-                pip,
-                std.mem.asBytes(&push),
-                src_buf,
-                src_size,
-                dst_buf,
-                dst_size,
-                1,
-                1,
-                1,
-            );
-            return;
-        }
-        const ds = try self.allocDescSet(pip.descriptor_set_layout);
-        self.writeDescSet2(ds, src_buf, src_size, dst_buf, dst_size);
-        try self.elementwise.recordCopyRouting(&self.decode_cmd, ds, push);
-    }
-
     fn dispatchMoeWeightedAcc(
         self: *InferenceEngine,
         accum_buf: vk.c.VkBuffer,
@@ -4662,30 +4594,6 @@ pub const InferenceEngine = struct {
                         n_used,
                     );
                     self.decode_cmd.computeBufferBarrier(self.router_output_buf.handle, self.router_output_buf.size);
-                    // Step 5b: mirror per-token routing to prefill_routing_log_buf so
-                    // CPU can invert into per-expert token lists at end of prefillBatch.
-                    // No barrier needed after this copy — nothing else in the current
-                    // MoE path reads the log buffer; the in-flight gate/up/down dispatches
-                    // all read router_output_buf (already barrier-synced above).
-                    if (self.prefill_active and
-                        self.prefill_route_capture_enabled and
-                        self.prefill_routing_log_buf != null and
-                        self.prefill_routing_dwords_per_slot > 0)
-                    {
-                        const dwords_per_slot = self.prefill_routing_dwords_per_slot;
-                        const n_moe_layers_cap = self.prefill_routing_n_moe_layers;
-                        const slot_idx: u32 = self.prefill_current_token_idx * n_moe_layers_cap + layer;
-                        const dst_off_dwords: u32 = slot_idx * dwords_per_slot;
-                        try self.dispatchCopyRouting(
-                            self.router_output_buf.handle,
-                            self.router_output_buf.size,
-                            self.prefill_routing_log_buf.?.handle,
-                            self.prefill_routing_log_buf.?.size,
-                            0,
-                            dst_off_dwords,
-                            dwords_per_slot,
-                        );
-                    }
                     self.endProfilePhase(.moe_topk, moe_topk_phase);
 
                     // gate DMMV: ALL experts at once (Y=n_used workgroups)
@@ -6857,18 +6765,6 @@ pub const InferenceEngine = struct {
         self.prefill_active = true;
         defer self.prefill_active = false;
 
-        // Step 5b: MoE routing capture. Gated off by default so baseline hot path
-        // is unaffected. Flip via ZINC_PREFILL_ROUTE_CAPTURE=1 when building/
-        // testing Step 5c consumers. This is *enablement only* — Step 5c will
-        // read prefill_expert_counts / prefill_expert_token_slots / prefill_expert_weights
-        // to drive per-expert grouped matmul. Until then, the arrays are written
-        // but not read.
-        self.prefill_routing_log_valid = false;
-        const route_env = std.posix.getenv("ZINC_PREFILL_ROUTE_CAPTURE");
-        self.prefill_route_capture_enabled = route_env != null and route_env.?.len > 0 and !std.mem.eql(u8, route_env.?, "0") and
-            self.model.config.n_experts > 0 and
-            self.elementwise.pipeline_copy_routing != null;
-
         // Dequantize every prompt-token embedding row upfront into a single
         // host-mapped Vulkan staging buffer. decodeStep's layer-0 copy reads
         // from here with srcOffset = idx * hidden_size, and embedToken()
@@ -6913,65 +6809,6 @@ pub const InferenceEngine = struct {
         self.prefill_embed_big_hidden = hidden_dim;
         self.prefill_embed_big_token_count = @intCast(prompt_tokens.len);
         self.prefill_current_token_idx = 0;
-
-        // Step 5b: allocate / grow the routing log buffer if capture is enabled.
-        // Shape: dwords_per_slot = 2 * n_used (ids + weights packed as u32). Slots
-        // are [token_idx * n_layers + layer] × dwords_per_slot. We over-size by
-        // using n_layers as the per-token stride even though only MoE layers write
-        // their slot — the unused slots are cheap (sub-MB). This keeps the shader
-        // offset computation trivial and matches how Step 5c will index.
-        if (self.prefill_route_capture_enabled) {
-            const n_used: u32 = self.model.config.n_experts_used;
-            const n_experts: u32 = self.model.config.n_experts;
-            const n_layers: u32 = self.model.config.n_layers;
-            const n_tokens: u32 = @intCast(prompt_tokens.len);
-            const dwords_per_slot: u32 = 2 * n_used;
-            if (dwords_per_slot > 64) {
-                // copy_routing.comp uses a single wg of 64 threads; n_used > 32
-                // would overflow. Falls back to capture-off for robustness.
-                log.warn("prefill_route_capture disabled: n_used={d} exceeds 32 (slot > 64 dwords)", .{n_used});
-                self.prefill_route_capture_enabled = false;
-            } else {
-                const total_dwords: u64 = @as(u64, n_tokens) * @as(u64, n_layers) * @as(u64, dwords_per_slot);
-                const total_bytes: u64 = total_dwords * @sizeOf(u32);
-                if (self.prefill_routing_log_buf == null or self.prefill_routing_log_capacity_dwords < total_dwords) {
-                    if (self.prefill_routing_log_buf) |*b| b.deinit();
-                    if (self.prefill_routing_log_staging) |*b| b.deinit();
-                    // Device-local storage target for the copy_routing shader. The
-                    // one-shot vkCmdCopyBuffer at end of prefill moves it to staging.
-                    self.prefill_routing_log_buf = try Buffer.initDeviceLocal(
-                        self.instance,
-                        total_bytes,
-                        vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                    );
-                    // Host-visible staging for CPU readback.
-                    var staging = try Buffer.init(
-                        self.instance,
-                        total_bytes,
-                        vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                        vk.c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    );
-                    var ptr: ?*anyopaque = null;
-                    const r = vk.c.vkMapMemory(self.instance.device, staging.memory, 0, total_bytes, 0, &ptr);
-                    if (r != vk.c.VK_SUCCESS) {
-                        staging.deinit();
-                        return error.MapMemoryFailed;
-                    }
-                    staging.mapped = @ptrCast(ptr);
-                    self.prefill_routing_log_staging = staging;
-                    self.prefill_routing_log_capacity_dwords = total_dwords;
-                }
-                // Zero the staging region so unused slots (non-MoE layers, CPU fallback)
-                // read as 0 when CPU scans downstream. The buildPrefillExpertLists
-                // readback overwrites this from the log buffer.
-                @memset(self.prefill_routing_log_staging.?.mapped.?[0..total_bytes], 0);
-                self.prefill_routing_dwords_per_slot = dwords_per_slot;
-                self.prefill_routing_n_moe_layers = n_layers;
-                self.prefill_routing_n_tokens = n_tokens;
-                self.prefill_routing_n_used = n_used;
-                self.prefill_routing_n_experts = n_experts;
-            }
-        }
 
         // Per-phase GPU timing during prefill costs ~3% throughput (thousands of
         // vkCmdWriteTimestamp calls + a blocking query readback per token) on
@@ -7077,151 +6914,6 @@ pub const InferenceEngine = struct {
             self.profile_enabled = profile_was_enabled;
         }
 
-        // Step 5b: at this point the GPU has drained, so the device-local log
-        // buffer holds every token's routing. Copy it into host-visible staging
-        // then invert into per-expert token lists. This is pure CPU bookkeeping
-        // — Step 5c will consume the arrays to batch per-expert matmuls. Kept
-        // behind the capture flag so the baseline hot path pays zero CPU for it.
-        if (self.prefill_route_capture_enabled and self.prefill_routing_log_buf != null and self.prefill_routing_log_staging != null) {
-            const total_bytes: u64 = @as(u64, self.prefill_routing_n_tokens) *
-                @as(u64, self.prefill_routing_n_moe_layers) *
-                @as(u64, self.prefill_routing_dwords_per_slot) * @sizeOf(u32);
-            try buffer_mod.copyBuffer(
-                self.instance,
-                self.cmd_pool.handle,
-                &self.prefill_routing_log_buf.?,
-                &self.prefill_routing_log_staging.?,
-                total_bytes,
-            );
-            try self.buildPrefillExpertLists();
-        }
-    }
-
-    /// Step 5b helper: read the per-(token, layer) routing log that was mirrored
-    /// from router_output_buf during prefill and invert it into per-expert
-    /// token lists. Consumed by Step 5c once wired; in this cycle the arrays are
-    /// produced but not read, matching the foundation-enablement contract.
-    fn buildPrefillExpertLists(self: *InferenceEngine) !void {
-        const n_tokens = self.prefill_routing_n_tokens;
-        const n_layers = self.prefill_routing_n_moe_layers;
-        const n_experts = self.prefill_routing_n_experts;
-        const n_used = self.prefill_routing_n_used;
-        const dwords_per_slot = self.prefill_routing_dwords_per_slot;
-        if (n_tokens == 0 or n_layers == 0 or n_experts == 0 or n_used == 0) return;
-
-        const layer_stride: u32 = n_experts;
-        const total_counts: usize = @as(usize, n_layers) * @as(usize, n_experts);
-        const total_assignments: usize = @as(usize, n_tokens) * @as(usize, n_layers) * @as(usize, n_used);
-
-        // Grow allocations on demand; reuse across prefills of similar size.
-        const need_counts = self.prefill_expert_counts == null or
-            self.prefill_expert_counts.?.len < total_counts or
-            self.prefill_expert_layer_stride != layer_stride;
-        if (need_counts) {
-            if (self.prefill_expert_counts) |arr| self.allocator.free(arr);
-            self.prefill_expert_counts = try self.allocator.alloc(u32, total_counts);
-        }
-        if (self.prefill_expert_token_slots == null or self.prefill_expert_token_slots.?.len < total_assignments) {
-            if (self.prefill_expert_token_slots) |arr| self.allocator.free(arr);
-            self.prefill_expert_token_slots = try self.allocator.alloc(u32, total_assignments);
-        }
-        if (self.prefill_expert_weights == null or self.prefill_expert_weights.?.len < total_assignments) {
-            if (self.prefill_expert_weights) |arr| self.allocator.free(arr);
-            self.prefill_expert_weights = try self.allocator.alloc(f32, total_assignments);
-        }
-        self.prefill_expert_layer_stride = layer_stride;
-
-        const counts = self.prefill_expert_counts.?[0..total_counts];
-        const slots = self.prefill_expert_token_slots.?[0..total_assignments];
-        const weights = self.prefill_expert_weights.?[0..total_assignments];
-        @memset(counts, 0);
-
-        // The log is filled in per-token order. Invert into per-(layer, expert)
-        // bucket offsets via a two-pass scan: first count, then scatter.
-        const log_ptr: [*]const u32 = @ptrCast(@alignCast(self.prefill_routing_log_staging.?.mapped.?));
-        const slot_dwords = dwords_per_slot;
-
-        // Pass 1: count occurrences per (layer, expert). Slots that were never
-        // written by the GPU (non-MoE layers, CPU fallback) read as zeros from
-        // the pre-cleared staging buffer; their nominal expert 0 contribution
-        // has zero weight so Step 5c will filter them out downstream.
-        var bad_expert_ids: u32 = 0;
-        for (0..n_tokens) |t_idx| {
-            const t: u32 = @intCast(t_idx);
-            for (0..n_layers) |l_idx| {
-                const l: u32 = @intCast(l_idx);
-                const slot_base: u64 = (@as(u64, t) * @as(u64, n_layers) + @as(u64, l)) * @as(u64, slot_dwords);
-                var k_i: u32 = 0;
-                while (k_i < n_used) : (k_i += 1) {
-                    const id_dword = log_ptr[@intCast(slot_base + @as(u64, k_i))];
-                    if (id_dword >= n_experts) {
-                        bad_expert_ids += 1;
-                        continue;
-                    }
-                    counts[@as(usize, l) * @as(usize, n_experts) + @as(usize, id_dword)] += 1;
-                }
-            }
-        }
-
-        // Pass 2: build per-(layer, expert) bucket offsets into a scratch
-        // cursor array and scatter (token_idx << 8 | k_slot, weight) into slots.
-        const cursor = try self.allocator.alloc(u32, total_counts);
-        defer self.allocator.free(cursor);
-        // Cumulative bucket starts: cursor[i] = sum(counts[0..i]).
-        var running: u32 = 0;
-        for (0..total_counts) |i| {
-            cursor[i] = running;
-            running += counts[i];
-        }
-
-        for (0..n_tokens) |t_idx| {
-            const t: u32 = @intCast(t_idx);
-            for (0..n_layers) |l_idx| {
-                const l: u32 = @intCast(l_idx);
-                const slot_base: u64 = (@as(u64, t) * @as(u64, n_layers) + @as(u64, l)) * @as(u64, slot_dwords);
-                var k_i: u32 = 0;
-                while (k_i < n_used) : (k_i += 1) {
-                    const id_dword = log_ptr[@intCast(slot_base + @as(u64, k_i))];
-                    if (id_dword >= n_experts) continue;
-                    const w_bits = log_ptr[@intCast(slot_base + @as(u64, n_used) + @as(u64, k_i))];
-                    const bucket_idx = @as(usize, l) * @as(usize, n_experts) + @as(usize, id_dword);
-                    const dst = cursor[bucket_idx];
-                    cursor[bucket_idx] = dst + 1;
-                    slots[dst] = (t << 8) | k_i;
-                    weights[dst] = @bitCast(w_bits);
-                }
-            }
-        }
-
-        self.prefill_routing_log_valid = true;
-
-        // Keep the log summary lightweight — print once per prefill only if
-        // explicitly requested. Useful when validating Step 5c wiring.
-        const debug_env = std.posix.getenv("ZINC_PREFILL_ROUTE_DEBUG");
-        if (debug_env != null and debug_env.?.len > 0 and !std.mem.eql(u8, debug_env.?, "0")) {
-            var layer0_min: u32 = std.math.maxInt(u32);
-            var layer0_max: u32 = 0;
-            var layer0_sum: u64 = 0;
-            var layer0_active: u32 = 0;
-            for (0..n_experts) |e| {
-                const c = counts[e];
-                if (c > 0) layer0_active += 1;
-                if (c < layer0_min) layer0_min = c;
-                if (c > layer0_max) layer0_max = c;
-                layer0_sum += c;
-            }
-            log.info("Prefill routing capture: n_tokens={d} n_layers={d} n_experts={d} n_used={d} bad_ids={d} | layer0 active_experts={d} per_expert_min={d} max={d} avg={d:.2}", .{
-                n_tokens,
-                n_layers,
-                n_experts,
-                n_used,
-                bad_expert_ids,
-                layer0_active,
-                if (layer0_min == std.math.maxInt(u32)) 0 else layer0_min,
-                layer0_max,
-                if (layer0_active > 0) @as(f64, @floatFromInt(layer0_sum)) / @as(f64, @floatFromInt(n_experts)) else 0.0,
-            });
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -7911,11 +7603,6 @@ pub const InferenceEngine = struct {
         self.prefill_cmd_alt.deinit(&self.cmd_pool);
         self.prefill_embed_alt.deinit();
         if (self.prefill_embed_big) |*b| b.deinit();
-        if (self.prefill_routing_log_buf) |*b| b.deinit();
-        if (self.prefill_routing_log_staging) |*b| b.deinit();
-        if (self.prefill_expert_counts) |arr| self.allocator.free(arr);
-        if (self.prefill_expert_token_slots) |arr| self.allocator.free(arr);
-        if (self.prefill_expert_weights) |arr| self.allocator.free(arr);
         self.cmd_pool.deinit();
         self.* = undefined;
     }
