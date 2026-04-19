@@ -849,9 +849,16 @@ function buildClaudeArgs(prompt: string, model?: string): string[] {
   return args;
 }
 
+// Match the reasoning-effort knob `loops/optimize_perf.ts` uses for Codex.
+// `xhigh` is the top tier; override via ZINC_CODEX_REASONING_EFFORT if a cycle
+// needs something cheaper.
+const CODEX_REASONING_EFFORT = process.env.ZINC_CODEX_REASONING_EFFORT ?? "xhigh";
+
 function buildCodexArgs(prompt: string, model?: string): string[] {
   const args = [
     "exec",
+    "-c",
+    `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`,
     "--skip-git-repo-check",
     "--json",
     "--color", "never",
