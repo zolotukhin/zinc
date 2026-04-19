@@ -1021,6 +1021,29 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
   const sections: string[] = [
     `# ZINC Metal ${phaseLabel} Task`,
     "",
+  ];
+
+  // When the loop is driven by a `--effort N` doc, inline its full text near
+  // the top of the prompt. This gives the agent the analysis, benchmark
+  // contract, and step ordering from the plan — the loop still owns cycle
+  // history, diagnostics, and the build/test/run gate.
+  if (state.effortPlan && state.effortPlan.trim().length > 0) {
+    sections.push(
+      `## Current Effort Plan (${state.effortFile ?? `effort ${state.effortId}`})`,
+      "",
+      "You are executing the multi-hour plan below. Pick the next",
+      "unfinished step from the plan's Execution Order, implement ONE",
+      "focused change for that step, and let the loop measure the",
+      "result. Do not redo steps already completed in Cycle History.",
+      "",
+      "```markdown",
+      state.effortPlan.trim(),
+      "```",
+      "",
+    );
+  }
+
+  sections.push(
     ...diagnosis,
     "",
     "## Hardware",
@@ -1035,7 +1058,7 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
     "- Active parameters per token: ~3B (due to MoE sparsity)",
     "- Effective working set per decode step: ~1.7 GB at Q4_K",
     "",
-  ];
+  );
 
   if (isOptimize) {
     // Optimization-specific sections
@@ -1215,12 +1238,38 @@ export type RunState = {
   lastProfileOutput: string | null;
   lastProfileCycle: number | null;
   reviewSummaries: string[];
+  /// Optional multi-hour effort doc (raw markdown) spliced into every agent
+  /// prompt. Loaded via `--effort N`, which finds `MULTI_HOUR_EFFORT_N_*.md`
+  /// at the repo root. Null means run in the stock FIX/IMPLEMENT/OPTIMIZE mode.
+  effortPlan?: string | null;
+  effortId?: number | null;
+  effortFile?: string | null;
 };
 
 async function loadState(runDir: string): Promise<RunState | null> {
   const p = join(runDir, "state.json");
   if (!existsSync(p)) return null;
   return JSON.parse(await readFile(p, "utf8")) as RunState;
+}
+
+/**
+ * Resolve `--effort N` to a `MULTI_HOUR_EFFORT_N_*.md` filename at the repo
+ * root. Returns `{ file, plan }` on success, null if no matching doc exists.
+ */
+async function loadEffortPlan(effort: number): Promise<{ file: string; plan: string } | null> {
+  const prefix = `MULTI_HOUR_EFFORT_${effort}_`;
+  const matches = readdirSync(REPO_ROOT).filter(
+    (name) => name.startsWith(prefix) && name.endsWith(".md"),
+  );
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    console.error(
+      clr("1;33", `  ⚠ Multiple effort docs match ${prefix}*.md: ${matches.join(", ")}. Using ${matches[0]}.`),
+    );
+  }
+  const file = matches[0];
+  const plan = await readFile(join(REPO_ROOT, file), "utf8");
+  return { file, plan };
 }
 
 async function saveState(runDir: string, state: RunState): Promise<void> {
@@ -1371,6 +1420,7 @@ async function main() {
   let agent: AgentKind = "claude";
   let model: string | undefined;
   let resume = false;
+  let effort: number | null = null;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -1395,6 +1445,15 @@ async function main() {
       case "--resume":
         resume = true;
         break;
+      case "--effort": {
+        const parsed = parseInt(args[++i] ?? "", 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          console.error("Invalid --effort value; expected a positive integer.");
+          process.exit(1);
+        }
+        effort = parsed;
+        break;
+      }
       case "--help":
         console.log([
           "Usage: bun loops/implement_metal.ts [options]",
@@ -1405,9 +1464,32 @@ async function main() {
           "  --cycles N              Max cycles (default: 999)",
           "  --dry-run               Build+run only, no agent",
           "  --resume                Resume the most recent run",
+          "  --effort N              Load MULTI_HOUR_EFFORT_N_*.md from repo root",
+          "                          and splice it into every agent prompt",
         ].join("\n"));
         process.exit(0);
     }
+  }
+
+  // Resolve the effort plan once so missing-file errors surface before the
+  // build loop starts. Kept null in resume mode when no --effort is passed so
+  // the saved state's effortPlan wins.
+  let effortBundle: { file: string; plan: string } | null = null;
+  if (effort != null) {
+    effortBundle = await loadEffortPlan(effort);
+    if (!effortBundle) {
+      console.error(
+        clr(
+          "1;31",
+          `No MULTI_HOUR_EFFORT_${effort}_*.md found at ${REPO_ROOT}. ` +
+            "Create one or drop the --effort flag.",
+        ),
+      );
+      process.exit(1);
+    }
+    console.log(
+      clr("1;36", `  Effort ${effort}: loaded ${effortBundle.file} (${effortBundle.plan.length} chars)`),
+    );
   }
 
   const agentLabel = agent === "codex" ? "Codex" : "Claude";
@@ -1436,6 +1518,22 @@ async function main() {
     state.bestTokPerSec ??= 0;
     state.lastProfileOutput ??= null;
     state.lastProfileCycle ??= null;
+    state.effortPlan ??= null;
+    state.effortId ??= null;
+    state.effortFile ??= null;
+    // Re-read the effort doc from disk every resume so an edited plan
+    // reaches the next agent invocation without losing saved history.
+    if (effortBundle) {
+      state.effortPlan = effortBundle.plan;
+      state.effortId = effort;
+      state.effortFile = effortBundle.file;
+    } else if (state.effortId != null) {
+      const refreshed = await loadEffortPlan(state.effortId);
+      if (refreshed) {
+        state.effortPlan = refreshed.plan;
+        state.effortFile = refreshed.file;
+      }
+    }
     runId = state.runId;
     runDir = latestDir;
     startCycle = state.cycles.length + 1;
@@ -1447,6 +1545,9 @@ async function main() {
     console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
     console.log(`  Previous cycles: ${state.cycles.length}, best: ${state.bestTokPerSec.toFixed(2)} tok/s`);
     console.log(`  Results: ${clr("2", runDir)}`);
+    if (state.effortFile) {
+      console.log(`  Effort: ${clr("1;36", `#${state.effortId}`)} → ${state.effortFile}`);
+    }
   } else {
     // Fresh start — clean up old data
     cleanupOldRuns();
@@ -1466,6 +1567,9 @@ async function main() {
       lastProfileOutput: null,
       lastProfileCycle: null,
       reviewSummaries: [],
+      effortPlan: effortBundle?.plan ?? null,
+      effortId: effort,
+      effortFile: effortBundle?.file ?? null,
     };
     console.log(clr("1;36", "╔══════════════════════════════════════════════════════════════╗"));
     console.log(clr("1;36", "║  ZINC Metal Optimization Loop                                ║"));
@@ -1474,6 +1578,9 @@ async function main() {
     console.log(clr("1;36", "╚══════════════════════════════════════════════════════════════╝"));
     console.log(`  Agent: ${clr("1", agentLabel)}${model ? ` (${model})` : ""}`);
     console.log(`  Results: ${clr("2", runDir)}`);
+    if (state.effortFile) {
+      console.log(`  Effort: ${clr("1;36", `#${state.effortId}`)} → ${state.effortFile}`);
+    }
   }
 
   for (let cycle = startCycle; cycle <= maxCycles; cycle++) {
