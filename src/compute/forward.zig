@@ -833,6 +833,10 @@ pub const InferenceEngine = struct {
     // is available, the MoE gate/up/down DMMVs for Q4_K expert weights use the
     // K-parallel subgroupAdd variant instead of the serial per-row shader.
     use_moe_kpar: bool = false,
+    // Default-on. Subgroup-parallel softmax_topk_v2 (subgroupMax/Min/Shuffle).
+    // Disable with ZINC_TOPK_V1=1 to fall back to the v1 shader (single-thread
+    // serial scan in shared memory).
+    use_softmax_topk_v2: bool = true,
     timestamp_query_pool: vk.c.VkQueryPool = null,
     timestamp_period_ns: f64 = 1.0, // nanoseconds per timestamp tick
     timestamp_count: u32 = 0, // number of timestamps written this token
@@ -1546,11 +1550,24 @@ pub const InferenceEngine = struct {
             log.info("MoE Q4_K kpar variant DISABLED via ZINC_MOE_KPAR=0", .{});
         }
 
+        // softmax_topk v2 (subgroup-parallel): default ON when the pipeline is
+        // loaded, disable via ZINC_TOPK_V1=1 to fall back to the v1 shared-mem
+        // single-thread scan shader.
+        const topk_v1_env = std.posix.getenv("ZINC_TOPK_V1");
+        const topk_v1_forced = topk_v1_env != null and std.mem.eql(u8, topk_v1_env.?, "1");
+        const topk_v2_enabled = !topk_v1_forced and elementwise.pipeline_softmax_topk_v2 != null;
+        if (topk_v2_enabled) {
+            log.info("softmax_topk v2 (subgroup-parallel) ENABLED (default, set ZINC_TOPK_V1=1 to revert)", .{});
+        } else if (topk_v1_forced) {
+            log.info("softmax_topk v2 DISABLED via ZINC_TOPK_V1=1; using v1 shared-mem scan", .{});
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
             .dmmv = dmmv,
             .use_moe_kpar = moe_kpar_enabled,
+            .use_softmax_topk_v2 = topk_v2_enabled,
             .elementwise = elementwise,
             .attention = attention,
             .argmax = argmax,
@@ -3042,7 +3059,10 @@ pub const InferenceEngine = struct {
         n_experts: u32,
         k: u32,
     ) !void {
-        const pip = &(self.elementwise.pipeline_softmax_topk orelse return error.ShaderNotLoaded);
+        const pip = if (self.use_softmax_topk_v2 and self.elementwise.pipeline_softmax_topk_v2 != null)
+            &self.elementwise.pipeline_softmax_topk_v2.?
+        else
+            &(self.elementwise.pipeline_softmax_topk orelse return error.ShaderNotLoaded);
         if (pip.uses_push_descriptors) {
             const push = SoftmaxTopkPush{
                 .n_experts = n_experts,

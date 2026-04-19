@@ -1,0 +1,117 @@
+#version 460
+// ZINC — Fused top-k + renormalized softmax for MoE expert routing (v2).
+// Subgroup-parallel reduction: replaces per-iteration shared-memory scan
+// (single-threaded thread-0 sweep of 64 entries) with subgroupMax + subgroupMin
+// + subgroupShuffle. Avoids subgroupBallot/subgroupBroadcast which previously
+// crashed on RDNA4 (see v1 shader comment).
+//
+// Algorithm per workgroup (one MoE token's logits → top-k expert ids+weights):
+//   1. Each of 64 threads loads up to 4 logits into registers (n_experts ≤ 256).
+//   2. For each of k rounds:
+//      - Find local max across this thread's 4 values.
+//      - subgroupMax → global max value.
+//      - subgroupMin(eligible_tid_or_INF) → first thread holding the global max.
+//      - subgroupShuffle(my_global_idx, winner_tid) → broadcast winning expert id.
+//      - Winning thread invalidates its own slot (-inf) for next rounds.
+//      - Thread 0 writes (id, max_logit) to output.
+//   3. Thread 0 renormalizes via softmax over the k selected logits.
+//
+// Wave64, 1 workgroup per dispatch. Output layout matches v1:
+//   output_data[0..k]   = expert_ids (uint)
+//   output_data[k..2k]  = expert_weights (floatBitsToUint)
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits {
+    float logits[];
+};
+
+layout(set = 0, binding = 1) buffer RouterOutput {
+    uint output_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint n_experts;
+    uint k;
+};
+
+const uint MAX_PER_THREAD = 4u;  // covers n_experts up to 64 * 4 = 256
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint sg_tid = gl_SubgroupInvocationID;
+
+    // --- Step 1: Load logits into registers (strided for coalescing) ---
+    float vals[MAX_PER_THREAD];
+    uint  idxs[MAX_PER_THREAD];
+    for (uint i = 0u; i < MAX_PER_THREAD; i++) {
+        uint elem_idx = tid + i * 64u;
+        if (elem_idx < n_experts) {
+            vals[i] = logits[elem_idx];
+            idxs[i] = elem_idx;
+        } else {
+            vals[i] = -1.0 / 0.0;  // -inf marks slot as ineligible
+            idxs[i] = 0u;
+        }
+    }
+
+    // --- Step 2: Top-k selection via subgroup-parallel reduction ---
+    for (uint ki = 0u; ki < k; ki++) {
+        // Find this thread's best (val, local index) across its slots.
+        float best_val = vals[0];
+        uint  best_local = 0u;
+        for (uint i = 1u; i < MAX_PER_THREAD; i++) {
+            if (vals[i] > best_val) {
+                best_val = vals[i];
+                best_local = i;
+            }
+        }
+
+        // Subgroup max collapses 64 thread-local maxima → global max value.
+        float global_max = subgroupMax(best_val);
+
+        // Lowest-numbered thread holding the global max wins ties.
+        // Encode: tid if my best_val matches, sentinel otherwise; subgroupMin picks winner.
+        uint code = (best_val == global_max) ? sg_tid : 0xFFFFFFFFu;
+        uint winner_tid = subgroupMin(code);
+
+        // Broadcast winner's chosen global expert index.
+        uint my_global_idx = idxs[best_local];
+        uint winner_global_idx = subgroupShuffle(my_global_idx, winner_tid);
+
+        // Winner invalidates its own slot so the next round skips it.
+        if (sg_tid == winner_tid) {
+            vals[best_local] = -1.0 / 0.0;
+        }
+
+        if (tid == 0u) {
+            output_data[ki] = winner_global_idx;
+            output_data[k + ki] = floatBitsToUint(global_max);
+        }
+    }
+
+    // --- Step 3: Convert k selected logits to renormalized routing weights ---
+    if (tid == 0u) {
+        float max_logit = -1.0 / 0.0;
+        for (uint i = 0u; i < k; i++) {
+            max_logit = max(max_logit, uintBitsToFloat(output_data[k + i]));
+        }
+
+        float wsum = 0.0;
+        for (uint i = 0u; i < k; i++) {
+            float w = exp(uintBitsToFloat(output_data[k + i]) - max_logit);
+            output_data[k + i] = floatBitsToUint(w);
+            wsum += w;
+        }
+
+        float inv_wsum = (wsum > 0.0) ? (1.0 / wsum) : 0.0;
+        for (uint i = 0u; i < k; i++) {
+            float w = uintBitsToFloat(output_data[k + i]) * inv_wsum;
+            output_data[k + i] = floatBitsToUint(w);
+        }
+    }
+}

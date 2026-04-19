@@ -155,6 +155,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_ssm_gated_norm: ?Pipeline,
     /// SOFTMAX TOPK pipeline, or null.
     pipeline_softmax_topk: ?Pipeline,
+    /// SOFTMAX TOPK v2 (subgroup-parallel reduction), or null.
+    pipeline_softmax_topk_v2: ?Pipeline,
     /// SIGMOID SCALE ACC pipeline: a[i] += sigmoid(c[0]) * b[i], 3 bindings.
     pipeline_sigmoid_scale_acc: ?Pipeline,
     /// MOE WEIGHTED ACC pipeline: a[i] += routing_weight * b[i], 3 bindings (accum, src, routing).
@@ -333,6 +335,12 @@ pub const ElementwiseDispatch = struct {
             log.warn("softmax_topk shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+        // Softmax + top-k v2: subgroup-parallel reduction (subgroupMax/Min/Shuffle).
+        const topk_v2_path = std.fmt.bufPrint(&path_buf, "{s}/softmax_topk_v2.spv", .{shader_dir}) catch unreachable;
+        const pipeline_softmax_topk_v2 = pipeline_mod.createFromSpirvWithOptions(instance, topk_v2_path, 2, @sizeOf(SoftmaxTopkPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("softmax_topk_v2 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
 
         // sigmoid_scale_acc: a[i] += sigmoid(c[0]) * b[i], 3 bindings (accum, src, gate)
         const ssa_path = std.fmt.bufPrint(&path_buf, "{s}/sigmoid_scale_acc.spv", .{shader_dir}) catch unreachable;
@@ -388,6 +396,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_ssm_delta_net = pipeline_ssm_delta_net,
             .pipeline_ssm_gated_norm = pipeline_ssm_gated_norm,
             .pipeline_softmax_topk = pipeline_softmax_topk,
+            .pipeline_softmax_topk_v2 = pipeline_softmax_topk_v2,
             .pipeline_sigmoid_scale_acc = pipeline_sigmoid_scale_acc,
             .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
             .pipeline_softcap = pipeline_softcap,
@@ -733,6 +742,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_ssm_delta_net) |*p| p.deinit();
         if (self.pipeline_ssm_gated_norm) |*p| p.deinit();
         if (self.pipeline_softmax_topk) |*p| p.deinit();
+        if (self.pipeline_softmax_topk_v2) |*p| p.deinit();
         if (self.pipeline_sigmoid_scale_acc) |*p| p.deinit();
         if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
         if (self.pipeline_softcap) |*p| p.deinit();
