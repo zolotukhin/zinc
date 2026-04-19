@@ -6194,7 +6194,7 @@ pub const InferenceEngine = struct {
             };
             // Workgroup calculation (mirrors dmmv.recordDispatch)
             const wg_x: u32 = switch (qt) {
-                .q4_k, .q5_0, .q5_1, .q6_k => (M + 1) / 2,
+                .q4_k, .q5_0, .q5_1, .q5_k, .q6_k => (M + 1) / 2,
                 .mxfp4, .q8_0, .f16 => (M + 1) / 2,
                 .f32 => M,
                 else => (M + 63) / 64,

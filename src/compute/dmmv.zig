@@ -182,7 +182,9 @@ pub const DmmvDispatch = struct {
         };
 
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        // Q5_K K-parallel shader uses subgroupAdd over a 64-thread WG; require wave64
+        // so the reduction is correct on devices that would otherwise pick wave32.
+        const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -421,11 +423,11 @@ pub const DmmvDispatch = struct {
         // better memory access patterns for large fan-out.
         const use_kparallel = switch (quant_type) {
             .q4_k => M <= 65536,
-            .q6_k => true,
+            .q5_k, .q6_k => true,
             else => false,
         };
         const workgroups_x = if (use_kparallel) switch (quant_type) {
-            .q4_k, .q6_k => (M + 1) / 2,
+            .q4_k, .q5_k, .q6_k => (M + 1) / 2,
             else => unreachable,
         } else switch (quant_type) {
             .q4_k => blk: {
