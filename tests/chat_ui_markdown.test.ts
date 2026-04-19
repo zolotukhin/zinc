@@ -456,11 +456,11 @@ test("historyTransportContent compacts long assistant history", () => {
   expect(transport.length).toBeLessThan(longAnswer.length);
 });
 
-test("chatMaxTokens gives longer budget to non-thinking replies", () => {
+test("chatMaxTokens gives thinking enough room to finish", () => {
   const { chatMaxTokens } = loadChatUiApi();
 
-  expect(chatMaxTokens(false)).toBe(128);
-  expect(chatMaxTokens(true)).toBe(256);
+  expect(chatMaxTokens(false)).toBe(1024);
+  expect(chatMaxTokens(true)).toBe(4096);
 });
 
 test("reasoningIsLowSignal flags trivial meta reasoning", () => {
