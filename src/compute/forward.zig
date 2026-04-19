@@ -889,6 +889,15 @@ pub const InferenceEngine = struct {
     prefill_embed_big_hidden: u32 = 0,
     prefill_embed_big_token_count: u32 = 0,
     prefill_current_token_idx: u32 = 0,
+    // Step 5b foundation: per-(token, layer) MoE routing capture for prefill.
+    // Layout: [token_idx * n_layers + layer] * layer_stride bytes (layer_stride
+    // == router_output_buf.size = n_used * (sizeof(u32)+sizeof(f32))). Populated
+    // after softmax_topk in each MoE layer during prefill so a future Step 5c
+    // per-expert grouped matmul has the full prompt routing array available
+    // without rerunning the router. Non-MoE layer slots are unused.
+    prefill_routing_capture: ?Buffer = null,
+    prefill_routing_capture_capacity_bytes: u64 = 0,
+    prefill_routing_layer_stride: u32 = 0,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -4613,7 +4622,46 @@ pub const InferenceEngine = struct {
                         config.n_experts,
                         n_used,
                     );
-                    self.decode_cmd.computeBufferBarrier(self.router_output_buf.handle, self.router_output_buf.size);
+                    // Step 5b foundation: during prefill, capture per-(token, layer)
+                    // routing into the prefill_routing_capture buffer for future
+                    // Step 5c per-expert grouped matmul. Combined barrier covers both
+                    // the existing compute READ (gate DMMV) and the new transfer READ
+                    // (vkCmdCopyBuffer). Decode path keeps the original narrow barrier.
+                    if (self.prefill_active and self.prefill_routing_capture != null and self.prefill_routing_layer_stride == @as(u32, @intCast(self.router_output_buf.size))) {
+                        const router_barrier = vk.c.VkBufferMemoryBarrier{
+                            .sType = vk.c.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                            .pNext = null,
+                            .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+                            .dstAccessMask = vk.c.VK_ACCESS_SHADER_READ_BIT | vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+                            .srcQueueFamilyIndex = vk.c.VK_QUEUE_FAMILY_IGNORED,
+                            .dstQueueFamilyIndex = vk.c.VK_QUEUE_FAMILY_IGNORED,
+                            .buffer = self.router_output_buf.handle,
+                            .offset = 0,
+                            .size = self.router_output_buf.size,
+                        };
+                        vk.c.vkCmdPipelineBarrier(
+                            self.decode_cmd.handle,
+                            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0,
+                            0,
+                            null,
+                            1,
+                            &router_barrier,
+                            0,
+                            null,
+                        );
+                        const stride: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, self.prefill_routing_layer_stride);
+                        const capture_offset: vk.c.VkDeviceSize = (@as(vk.c.VkDeviceSize, self.prefill_current_token_idx) * @as(vk.c.VkDeviceSize, config.n_layers) + @as(vk.c.VkDeviceSize, layer)) * stride;
+                        const r = vk.c.VkBufferCopy{
+                            .srcOffset = 0,
+                            .dstOffset = capture_offset,
+                            .size = self.router_output_buf.size,
+                        };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_output_buf.handle, self.prefill_routing_capture.?.handle, 1, &r);
+                    } else {
+                        self.decode_cmd.computeBufferBarrier(self.router_output_buf.handle, self.router_output_buf.size);
+                    }
                     self.endProfilePhase(.moe_topk, moe_topk_phase);
 
                     // gate DMMV: ALL experts at once (Y=n_used workgroups)
@@ -6798,6 +6846,24 @@ pub const InferenceEngine = struct {
             self.prefill_embed_big = try Buffer.initStaging(self.instance, total_embed_bytes);
             self.prefill_embed_big_capacity_bytes = total_embed_bytes;
         }
+
+        // Step 5b foundation: device-local routing capture sized for the full
+        // prompt × all layers. n_used can vary by architecture; default to 8
+        // when unset (matches init() default).
+        const cfg = &self.model.config;
+        const n_used_routing: u32 = if (cfg.n_experts_used > 0) cfg.n_experts_used else 8;
+        const routing_layer_stride: u32 = n_used_routing * (@sizeOf(u32) + @sizeOf(f32));
+        const total_routing_bytes: u64 = @as(u64, prompt_tokens.len) * @as(u64, cfg.n_layers) * @as(u64, routing_layer_stride);
+        if (self.prefill_routing_capture == null or self.prefill_routing_capture_capacity_bytes < total_routing_bytes) {
+            if (self.prefill_routing_capture) |*b| b.deinit();
+            self.prefill_routing_capture = try Buffer.initDeviceLocal(
+                self.instance,
+                total_routing_bytes,
+                vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            );
+            self.prefill_routing_capture_capacity_bytes = total_routing_bytes;
+        }
+        self.prefill_routing_layer_stride = routing_layer_stride;
         defer {
             self.prefill_embed_big_token_count = 0;
             self.prefill_embed_big_hidden = 0;
@@ -7623,6 +7689,7 @@ pub const InferenceEngine = struct {
         self.prefill_cmd_alt.deinit(&self.cmd_pool);
         self.prefill_embed_alt.deinit();
         if (self.prefill_embed_big) |*b| b.deinit();
+        if (self.prefill_routing_capture) |*b| b.deinit();
         self.cmd_pool.deinit();
         self.* = undefined;
     }

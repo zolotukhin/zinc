@@ -426,61 +426,7 @@ pub const DmmvDispatch = struct {
         );
     }
 
-    /// Record a batch DMMV dispatch for prefill (multiple input columns).
-    /// Weight matrix read once, multiplied against num_cols input vectors.
-    /// Input/output are column-major: X[K, num_cols], Y[M, num_cols].
-    pub fn recordBatchDispatch(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        quant_type: GGMLType,
-        descriptor_set: vk.c.VkDescriptorSet,
-        M: u32,
-        K: u32,
-        a_offset: u32,
-        x_offset: u32,
-        y_offset: u32,
-        num_cols: u32,
-    ) !void {
-        // Q4_K has a dedicated batch shader; fall back to sequential for others.
-        const pip = switch (quant_type) {
-            .q4_k => if (self.pipeline_q4k_batch) |*p| p else null,
-            else => null,
-        };
-
-        if (pip) |p| {
-            const push = BatchDmmvPushConstants{
-                .M = M,
-                .K = K,
-                .a_offset = a_offset,
-                .x_offset = x_offset,
-                .y_offset = y_offset,
-                .num_cols = num_cols,
-            };
-            const workgroups_x = (M + 63) / 64;
-            cmd.dispatchWithPush(p, descriptor_set, std.mem.asBytes(&push), workgroups_x, 1, 1);
-        } else {
-            // Fallback: dispatch N single-column DMMVs
-            const single_pip = self.pipelineForType(quant_type) orelse return error.UnsupportedQuantType;
-            for (0..num_cols) |col| {
-                const col_u32: u32 = @intCast(col);
-                const push = DmmvPushConstants{
-                    .M = M,
-                    .K = K,
-                    .a_offset = a_offset,
-                    .x_offset = x_offset + col_u32 * K * @sizeOf(f32),
-                    .y_offset = y_offset + col_u32 * M * @sizeOf(f32),
-                };
-                const workgroups_x_single = switch (quant_type) {
-                    .q4_k, .q5_0, .q5_1, .q6_k => (M + 1) / 2,
-                    .mxfp4, .q8_0, .f16 => (M + 1) / 2,
-                    else => (M + 63) / 64,
-                };
-                cmd.dispatchWithPush(single_pip, descriptor_set, std.mem.asBytes(&push), workgroups_x_single, 1, 1);
-            }
-        }
-    }
-
-    /// Push-descriptor variant of recordBatchDispatch for prefill hot path.
+    /// Push-descriptor batch DMMV dispatch.
     /// Bindings order: 0 = A (weight), 1 = X_batch (K × num_cols, column-major),
     /// 2 = Y_batch (M × num_cols, column-major).
     /// Returns error.UnsupportedQuantType if the batch shader isn't loaded for this quant type.
