@@ -830,6 +830,10 @@ pub const InferenceEngine = struct {
     profile_enabled: bool = false,
     logits_readback_enabled: bool = false,
     validation_diagnostics_enabled: bool = false,
+    // Gated by ZINC_MOE_KPAR=1. When set and the Q4_K MoE kpar shader pipeline
+    // is available, the MoE gate/up/down DMMVs for Q4_K expert weights use the
+    // K-parallel subgroupAdd variant instead of the serial per-row shader.
+    use_moe_kpar: bool = false,
     timestamp_query_pool: vk.c.VkQueryPool = null,
     timestamp_period_ns: f64 = 1.0, // nanoseconds per timestamp tick
     timestamp_count: u32 = 0, // number of timestamps written this token
@@ -1562,10 +1566,24 @@ pub const InferenceEngine = struct {
             }
         }
 
+        // Q4_K MoE K-parallel shader: default ON when the pipeline is loaded,
+        // disabled by setting ZINC_MOE_KPAR=0. Measured on RDNA4 for the
+        // Qwen3.5-35B flagship: gate_up 855.6 → 695.4 ms (−18.7%), prefill
+        // tok/s 23.16 → 23.72 (+2.4%) with identical output tokens.
+        const moe_kpar_env = std.posix.getenv("ZINC_MOE_KPAR");
+        const moe_kpar_explicitly_off = moe_kpar_env != null and std.mem.eql(u8, moe_kpar_env.?, "0");
+        const moe_kpar_enabled = !moe_kpar_explicitly_off and dmmv.pipeline_q4k_moe_kpar != null;
+        if (moe_kpar_enabled) {
+            log.info("MoE Q4_K kpar variant ENABLED (default, set ZINC_MOE_KPAR=0 to disable)", .{});
+        } else if (moe_kpar_explicitly_off) {
+            log.info("MoE Q4_K kpar variant DISABLED via ZINC_MOE_KPAR=0", .{});
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
             .dmmv = dmmv,
+            .use_moe_kpar = moe_kpar_enabled,
             .elementwise = elementwise,
             .attention = attention,
             .argmax = argmax,
@@ -4676,10 +4694,11 @@ pub const InferenceEngine = struct {
                     const moe_gate_up_phase = self.beginProfilePhase();
                     {
                         const qt = gate_exps.info.type_;
-                        const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
+                        const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
+                        const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
                         if (pip.uses_push_descriptors) {
                             const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
-                            const wg_x: u32 = switch (qt) {
+                            const wg_x: u32 = if (use_kpar) (inter_dim + 1) / 2 else switch (qt) {
                                 .mxfp4, .q8_0, .f16 => (inter_dim + 1) / 2,
                                 else => (inter_dim + 63) / 64,
                             };
@@ -4693,10 +4712,11 @@ pub const InferenceEngine = struct {
                     // up DMMV: ALL experts at once
                     {
                         const qt = up_exps.info.type_;
-                        const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
+                        const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
+                        const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
                         if (pip.uses_push_descriptors) {
                             const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
-                            const wg_x: u32 = switch (qt) {
+                            const wg_x: u32 = if (use_kpar) (inter_dim + 1) / 2 else switch (qt) {
                                 .mxfp4, .q8_0, .f16 => (inter_dim + 1) / 2,
                                 else => (inter_dim + 63) / 64,
                             };
@@ -4746,10 +4766,11 @@ pub const InferenceEngine = struct {
                     const moe_down_phase = self.beginProfilePhase();
                     {
                         const qt = down_exps.info.type_;
-                        const pip = self.dmmv.moePipelineForType(qt) orelse unreachable;
+                        const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
+                        const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
                         if (pip.uses_push_descriptors) {
                             const push = MoeDmmvPushConstants{ .M = hidden_dim, .K = inter_dim, .expert_stride = expert_down_row_bytes, .x_expert_stride = inter_dim, .x_offset = 0, .y_offset = 0 };
-                            const wg_x: u32 = switch (qt) {
+                            const wg_x: u32 = if (use_kpar) (hidden_dim + 1) / 2 else switch (qt) {
                                 .mxfp4, .q8_0, .f16 => (hidden_dim + 1) / 2,
                                 else => (hidden_dim + 63) / 64,
                             };

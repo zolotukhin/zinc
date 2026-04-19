@@ -78,6 +78,8 @@ pub const DmmvDispatch = struct {
     pipeline_quantize_q8_1: ?Pipeline,
     /// MoE Q4K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q4k_moe: ?Pipeline,
+    /// Experimental K-parallel Q4K MoE pipeline (same 4 bindings, wave64 subgroupAdd).
+    pipeline_q4k_moe_kpar: ?Pipeline,
     /// MoE Q5K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q5k_moe: ?Pipeline,
     /// MoE MXFP4 pipeline (4 bindings: A, x, y, routing), or null.
@@ -246,6 +248,14 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // K-parallel Q4_K MoE variant: wave64 subgroupAdd reduction, no shared s_x array.
+        // Experimental — enabled only when ZINC_MOE_KPAR=1 in forward.zig.
+        const q4k_moe_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_kpar.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_kpar_path, 4, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K MoE kpar shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         const q5k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe.spv", .{shader_dir}) catch unreachable;
         const pipeline_q5k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_K MoE shader not loaded: {s}", .{@errorName(err)});
@@ -289,6 +299,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_idp = pipeline_q4k_idp,
             .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
             .pipeline_q4k_moe = pipeline_q4k_moe,
+            .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
             .pipeline_q5_1_moe = pipeline_q5_1_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
@@ -582,6 +593,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_idp) |*p| p.deinit();
         if (self.pipeline_quantize_q8_1) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
+        if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
