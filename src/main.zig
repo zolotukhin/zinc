@@ -140,8 +140,8 @@ pub const Config = struct {
     port: u16 = 8080,
     /// Vulkan device index.
     device_index: u32 = 0,
-    /// Max sequence length.
-    context_length: u32 = 4096,
+    /// Max sequence length. `null` means auto-size from GPU memory at load.
+    context_length: ?u32 = null,
     /// Max concurrent requests.
     max_parallel: u32 = 4,
     /// CLI prompt text.
@@ -416,7 +416,7 @@ const banner =
     \\  --chat                   Apply the model chat template to --prompt
     \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
     \\  -d, --device <id>        Vulkan device index (default: 0)
-    \\  -c, --context <size>     Context length (default: 4096)
+    \\  -c, --context <size>     Context length (default: auto — sized to GPU memory; pass 0 to force auto)
     \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0)
     \\
     \\Server options:
@@ -458,7 +458,7 @@ const banner_full =
     \\  --chat                   Apply the model chat template to --prompt
     \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
     \\  -d, --device <id>        Vulkan device index (default: 0)
-    \\  -c, --context <size>     Context length (default: 4096)
+    \\  -c, --context <size>     Context length (default: auto — sized to GPU memory; pass 0 to force auto)
     \\  --kv-quant <bits>        TurboQuant KV cache bits: 0/2/3/4 (default: 0)
     \\
     \\Server options:
@@ -564,7 +564,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
         } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--context")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
-            config.context_length = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidContext;
+            const parsed_ctx = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidContext;
+            config.context_length = if (parsed_ctx == 0) null else parsed_ctx;
         } else if (std.mem.eql(u8, arg, "--parallel")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -1900,7 +1901,7 @@ test "parseArgs: defaults" {
     const args = [_][:0]const u8{"zinc"};
     const config = try parseArgs(&args);
     try std.testing.expectEqual(@as(u16, 8080), config.port);
-    try std.testing.expectEqual(@as(u32, 4096), config.context_length);
+    try std.testing.expect(config.context_length == null);
     try std.testing.expectEqual(@as(u8, 0), config.kv_quant);
     try std.testing.expect(config.model_path == null);
     try std.testing.expect(config.model_id == null);
@@ -1922,7 +1923,7 @@ test "parseArgs: full args" {
     try std.testing.expectEqualStrings("qwen3-8b-q4k-m", config.model_id.?);
     try std.testing.expectEqual(@as(u16, 9090), config.port);
     try std.testing.expectEqual(@as(u32, 1), config.device_index);
-    try std.testing.expectEqual(@as(u32, 8192), config.context_length);
+    try std.testing.expectEqual(@as(?u32, 8192), config.context_length);
     try std.testing.expectEqual(@as(u32, 8), config.max_parallel);
     try std.testing.expectEqualStrings("hello", config.prompt.?);
     try std.testing.expectEqual(@as(u32, 32), config.max_tokens);
@@ -1935,7 +1936,13 @@ test "parseArgs: full args" {
 test "parseArgs: allows large context requests" {
     const args = [_][:0]const u8{ "zinc", "-c", "65536" };
     const config = try parseArgs(&args);
-    try std.testing.expectEqual(@as(u32, 65536), config.context_length);
+    try std.testing.expectEqual(@as(?u32, 65536), config.context_length);
+}
+
+test "parseArgs: -c 0 requests auto-sizing" {
+    const args = [_][:0]const u8{ "zinc", "-c", "0" };
+    const config = try parseArgs(&args);
+    try std.testing.expect(config.context_length == null);
 }
 
 test "parseArgs: help flag" {

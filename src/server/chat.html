@@ -460,7 +460,7 @@ function historyTransportContent(answer,raw,enableThinking,supportsThinking){
 }
 
 function chatMaxTokens(enableThinking){
-  return enableThinking?256:128;
+  return enableThinking?4096:1024;
 }
 
 function assistantHtmlFromRaw(raw,isThinking){
