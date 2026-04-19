@@ -24,6 +24,7 @@ layout(push_constant) uniform PushConstants {
     uint seq_len;       // current sequence length (number of cached KV tokens)
     uint page_size;     // tokens per page (16)
     uint attn_scale_bits; // float attention scale (reinterpreted as uint, 0 = use 1/sqrt(head_dim))
+    uint sink_offset;     // starting index into sink_data for this layer (layer_idx * n_heads)
 };
 
 // Buffer bindings
@@ -203,7 +204,7 @@ void main() {
     // --- Phase 5: Normalize output by total softmax sum ---
     float final_sum = s_sum_old;
     float rescale = 1.0;
-    float sink_val = sink_data[head];
+    float sink_val = sink_data[sink_offset + head];
     if (!isnan(sink_val)) {
         float sink_max = max(s_max_old, sink_val);
         rescale = s_sum_old > 0.0 ? exp(s_max_old - sink_max) : 0.0;

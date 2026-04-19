@@ -19,6 +19,7 @@ pub const FlashAttnPush = extern struct {
     seq_len: u32,
     page_size: u32,
     attn_scale_bits: u32, // float scale bits (0 = use 1/sqrt(head_dim))
+    sink_offset: u32, // layer_idx * n_heads — starting index into sink_data for this layer
 };
 
 /// Manages flash attention pipeline and dispatch.
@@ -109,6 +110,8 @@ pub const AttentionDispatch = struct {
         page_size: u32,
         /// Attention scale (0 = use 1/sqrt(head_dim)).
         attn_scale: f32,
+        /// Offset into the per-model sink buffer for this layer (layer_idx * n_heads).
+        sink_offset: u32,
     ) !void {
         const pip = if (self.pipeline) |*p| p else return error.ShaderNotLoaded;
 
@@ -119,6 +122,7 @@ pub const AttentionDispatch = struct {
             .seq_len = seq_len,
             .page_size = page_size,
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
+            .sink_offset = sink_offset,
         };
 
         // One workgroup per query head

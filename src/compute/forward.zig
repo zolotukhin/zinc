@@ -571,20 +571,6 @@ fn addBiasFromTensorSlice(
     }
 }
 
-fn loadAttentionSinks(
-    engine: *const InferenceEngine,
-    tensor_opt: ?*const LoadedTensor,
-    output: []f32,
-) void {
-    @memset(output, std.math.nan(f32));
-    const tensor = tensor_opt orelse return;
-    const mmap = engine.model.mmap_data orelse return;
-    const sink_count = @min(output.len, @as(usize, @intCast(tensor.info.numElements())));
-    if (sink_count == 0) return;
-    const base_off: usize = @intCast(engine.model.gguf_file.tensor_data_offset + tensor.info.offset);
-    readMmapFloats(mmap, base_off, tensor.info.type_, output[0..sink_count]);
-}
-
 fn cpuSwiGLUOai(gate: []const f32, up: []const f32, output: []f32) void {
     const alpha: f32 = 1.702;
     const limit: f32 = 7.0;
@@ -1239,7 +1225,12 @@ pub const InferenceEngine = struct {
             for (0..config.hidden_dim) |i| ptr[i] = 1.0;
         }
 
-        const attn_sinks_size = @max(@as(vk.c.VkDeviceSize, config.n_heads) * @sizeOf(f32), 4);
+        // Pre-populated per-layer attention sinks: size = n_layers × n_heads × f32.
+        // Populated once after layer_tensors is resolved (see below); flash_attn reads
+        // with sink_offset = layer_idx * n_heads. Eliminates per-token CPU memset+read
+        // that previously ran for every attention-layer dispatch (cycle 8).
+        const attn_sinks_total_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_layers) * @as(vk.c.VkDeviceSize, config.n_heads);
+        const attn_sinks_size = @max(attn_sinks_total_floats * @sizeOf(f32), 4);
         var attn_sinks_buf = try Buffer.init(
             instance,
             attn_sinks_size,
@@ -1253,7 +1244,7 @@ pub const InferenceEngine = struct {
             if (mr != vk.c.VK_SUCCESS) return error.MapMemoryFailed;
             attn_sinks_buf.mapped = @ptrCast(map_ptr);
             const ptr: [*]f32 = @ptrCast(@alignCast(map_ptr.?));
-            for (0..config.n_heads) |i| ptr[i] = std.math.nan(f32);
+            for (0..@intCast(attn_sinks_total_floats)) |i| ptr[i] = std.math.nan(f32);
         }
 
         // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32))
@@ -1482,6 +1473,22 @@ pub const InferenceEngine = struct {
             lt.ssm_a = resolve(tensor_map, l, "ssm_a");
             lt.ssm_norm = resolve(tensor_map, l, "ssm_norm.weight");
             layer_tensors[li] = lt;
+        }
+
+        // Pre-populate per-layer attn_sinks into attn_sinks_buf (cycle 8):
+        // each layer's slot of n_heads floats is either NaN (no sinks tensor) or the
+        // learned sinks read from mmap. flash_attn reads with sink_offset = layer * n_heads.
+        // Replaces the old per-token loadAttentionSinks memset+readMmap path.
+        if (model.mmap_data) |mmap| {
+            const sink_all_ptr: [*]f32 = @ptrCast(@alignCast(attn_sinks_buf.mapped.?));
+            for (layer_tensors, 0..) |lt, li| {
+                const sinks_tensor = lt.attn_sinks orelse continue;
+                const slot = sink_all_ptr[li * @as(usize, config.n_heads) ..][0..@as(usize, config.n_heads)];
+                const sink_count = @min(slot.len, @as(usize, @intCast(sinks_tensor.info.numElements())));
+                if (sink_count == 0) continue;
+                const base_off: usize = @intCast(model.gguf_file.tensor_data_offset + sinks_tensor.info.offset);
+                readMmapFloats(mmap, base_off, sinks_tensor.info.type_, slot[0..sink_count]);
+            }
         }
 
         // Load per-layer output scales (Gemma 4 proportional scaling)
@@ -3761,11 +3768,11 @@ pub const InferenceEngine = struct {
                     continue;
                 }
 
-                // Flash attention
+                // Flash attention. Sinks are pre-populated at init into a per-layer
+                // slot of attn_sinks_buf (cycle 8); flash_attn reads via sink_offset.
                 if (self.attention.pipeline) |*pip| {
-                    const sink_ptr: [*]f32 = @ptrCast(@alignCast(self.attn_sinks_buf.mapped.?));
-                    loadAttentionSinks(self, lt.attn_sinks, sink_ptr[0..config.n_heads]);
                     const sink_buf = self.attn_sinks_buf;
+                    const sink_offset: u32 = layer * config.n_heads;
                     if (pip.uses_push_descriptors) {
                         const push = FlashAttnPush{
                             .head_dim = layer_head_dim,
@@ -3774,6 +3781,7 @@ pub const InferenceEngine = struct {
                             .seq_len = state.position + 1,
                             .page_size = kv_page_size_tokens,
                             .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
+                            .sink_offset = sink_offset,
                         };
                         self.pushDispatch6(
                             pip,
@@ -3811,7 +3819,7 @@ pub const InferenceEngine = struct {
                             sink_buf.handle,
                             sink_buf.size,
                         );
-                        try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale);
+                        try self.attention.recordFlashAttn(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale, sink_offset);
                     }
                 }
                 self.decode_cmd.computeBarrier();
@@ -3863,7 +3871,7 @@ pub const InferenceEngine = struct {
                     const v_vals = dbg_ptr[@intCast(v_off / @sizeOf(f32))..][0..attn_kv_dim_dbg];
                     const attn_vals = dbg_ptr[@intCast(attn_off / @sizeOf(f32))..][0..attn_q_dim_dbg];
                     const sink_ptr: [*]const f32 = @ptrCast(@alignCast(self.attn_sinks_buf.mapped.?));
-                    const sink_vals = sink_ptr[0..config.n_heads];
+                    const sink_vals = sink_ptr[layer * config.n_heads ..][0..config.n_heads];
                     const scale = if (config.attn_scale != 0) config.attn_scale else 1.0 / @sqrt(@as(f32, @floatFromInt(layer_head_dim)));
                     const q_per_kv = @max(config.n_heads / @max(layer_n_kv_heads, 1), 1);
 
@@ -3963,7 +3971,7 @@ pub const InferenceEngine = struct {
                     const v_vals = dbg_ptr[@intCast(v_off / @sizeOf(f32))..][0 .. seq_len_dbg * attn_kv_dim_dbg];
                     const attn_vals = dbg_ptr[@intCast(attn_off / @sizeOf(f32))..][0..attn_q_dim_dbg];
                     const sink_ptr: [*]const f32 = @ptrCast(@alignCast(self.attn_sinks_buf.mapped.?));
-                    const sink_vals = sink_ptr[0..config.n_heads];
+                    const sink_vals = sink_ptr[layer * config.n_heads ..][0..config.n_heads];
 
                     const seq_len_usize: usize = @intCast(seq_len_dbg);
                     const q_dim_usize: usize = @intCast(attn_q_dim_dbg);
