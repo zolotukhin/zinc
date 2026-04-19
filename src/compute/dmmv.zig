@@ -48,6 +48,14 @@ pub const MoeDmmvPushConstants = extern struct {
     y_offset: u32,
 };
 
+/// Push constants for the cooperative-matrix matmul shader (must match GLSL).
+/// Shape: C[M×N] = A[M×K] * B[K×N], both A and B are f16 row-major, C is f32.
+pub const CoopMatmulPushConstants = extern struct {
+    M: u32,
+    N: u32,
+    K: u32,
+};
+
 /// Manages DMMV pipelines for different quantization types.
 pub const DmmvDispatch = struct {
     /// Q4K pipeline, or null.
@@ -82,6 +90,9 @@ pub const DmmvDispatch = struct {
     pipeline_q5_1_moe: ?Pipeline,
     /// MoE Q6K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q6k_moe: ?Pipeline,
+    /// Cooperative-matrix matmul pipeline for prefill (f16 × f16 → f32, 3 bindings), or null.
+    /// Cycle 26 enablement — loaded for future mul_mm prefill wiring (Structural Swing Idea #2).
+    pipeline_coop_matmul: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -254,6 +265,19 @@ pub const DmmvDispatch = struct {
             log.info("MoE DMMV pipelines loaded — GPU expert dispatch enabled (no readback)", .{});
         }
 
+        // Cooperative-matrix matmul pipeline (f16 × f16 → f32, 3 bindings, 12-byte push).
+        // Cycle 26 enablement: loads only when the device exposes VK_KHR_cooperative_matrix.
+        // Silent-null fallback on failure so non-coop-matrix devices keep working.
+        const coop_push_size = @sizeOf(CoopMatmulPushConstants);
+        const coop_matmul_path = std.fmt.bufPrint(&path_buf, "{s}/coop_matmul.spv", .{shader_dir}) catch unreachable;
+        const pipeline_coop_matmul = pipeline_mod.createFromSpirvWithOptions(instance, coop_matmul_path, 3, coop_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("coop_matmul shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_coop_matmul != null) {
+            log.info("coop_matmul pipeline loaded (enablement for mul_mm prefill — Structural Swing Idea #2)", .{});
+        }
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_mxfp4 = pipeline_mxfp4,
@@ -271,6 +295,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q5_1_moe = pipeline_q5_1_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
             .pipeline_q6k_moe = pipeline_q6k_moe,
+            .pipeline_coop_matmul = pipeline_coop_matmul,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -477,6 +502,44 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Push-descriptor cooperative-matrix matmul dispatch (f16 × f16 → f32).
+    /// Bindings: 0 = A (M×K, f16, row-major), 1 = B (K×N, f16, row-major), 2 = C (M×N, f32, row-major).
+    /// Returns error.PipelineNotLoaded when coop_matmul is unavailable on this device.
+    /// Workgroup grid: (ceil(N/16), ceil(M/16), 1). Each workgroup produces one 16×16 output tile.
+    pub fn recordCoopMatmul(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        b_buf: vk.c.VkBuffer,
+        b_size: vk.c.VkDeviceSize,
+        c_buf: vk.c.VkBuffer,
+        c_size: vk.c.VkDeviceSize,
+        M: u32,
+        N: u32,
+        K: u32,
+    ) !void {
+        const pip = if (self.pipeline_coop_matmul) |*p| p else return error.PipelineNotLoaded;
+        const push = CoopMatmulPushConstants{ .M = M, .N = N, .K = K };
+        const infos = [3]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = b_buf, .offset = 0, .range = b_size },
+            .{ .buffer = c_buf, .offset = 0, .range = c_size },
+        };
+        const wg_x = (N + 15) / 16;
+        const wg_y = (M + 15) / 16;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            wg_x,
+            wg_y,
+            1,
+        );
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -492,6 +555,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
+        if (self.pipeline_coop_matmul) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
