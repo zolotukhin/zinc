@@ -1008,6 +1008,14 @@ pub const InferenceEngine = struct {
     zero_f32_pipe: MetalPipeline,
     argmax_pipe: MetalPipeline,
 
+    // Batched GEMM pipelines for prefill (process N tokens per dispatch).
+    // Only loaded when the model has Q4_K / Q6_K weights; other quants stay
+    // on the DMMV path until GEMM kernels are ported.
+    gemm_q4k_pipe: MetalPipeline,
+    gemm_q6k_pipe: MetalPipeline,
+    // Batched flash attention for prefill — handles N queries with causal masking.
+    flash_attn_batched_pipe: MetalPipeline,
+
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
     attn_q_norm_bufs: []MetalBuffer,
@@ -1317,6 +1325,9 @@ pub const InferenceEngine = struct {
         self.copy_f32_pipe = try loadShaderPipeline(ctx, "copy_f32");
         self.zero_f32_pipe = try loadShaderPipeline(ctx, "zero_f32");
         self.argmax_pipe = try loadShaderPipeline(ctx, "argmax");
+        self.gemm_q4k_pipe = try loadShaderPipeline(ctx, "gemm_q4k");
+        self.gemm_q6k_pipe = try loadShaderPipeline(ctx, "gemm_q6k");
+        self.flash_attn_batched_pipe = try loadShaderPipeline(ctx, "flash_attn_batched");
         const q8_simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
         const q8_dual_simd_width = if (self.dmmv_q8_0_dual_pipe.thread_execution_width > 0) self.dmmv_q8_0_dual_pipe.thread_execution_width else @as(u32, 32);
         self.q8_tg_override = options.q8_tg_override orelse
@@ -1877,6 +1888,9 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.copy_f32_pipe);
         metal_pipeline.freePipeline(&self.zero_f32_pipe);
         metal_pipeline.freePipeline(&self.argmax_pipe);
+        metal_pipeline.freePipeline(&self.gemm_q4k_pipe);
+        metal_pipeline.freePipeline(&self.gemm_q6k_pipe);
+        metal_pipeline.freePipeline(&self.flash_attn_batched_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
