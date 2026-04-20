@@ -38,6 +38,13 @@ struct block_q4_K {
 #define QK_K  256
 #define QK_NL 16    // number of dequant sub-blocks per Q4_K block
 
+// Match llama.cpp's kernel_mul_mm_q4_K_f32 pragma style: forces the compiler
+// to fully unroll the constant-bound inner loops over the 16-element A-tile
+// store and the NK/8 simdgroup-multiply iterations. Unrolling these removes
+// branch overhead in the hot path and lets the scheduler interleave the
+// simdgroup_load / simdgroup_multiply_accumulate instructions more densely.
+#define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
+
 static inline uchar2 get_scale_min_k4_just2(int j, int k, device const uchar * q) {
     return j < 4 ? uchar2{uchar(q[j+0+k] & 63), uchar(q[j+4+k] & 63)}
                  : uchar2{uchar((q[j+4+k] & 0xF) | ((q[j-4+k] & 0xc0) >> 2)),
@@ -118,7 +125,7 @@ kernel void main0(
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (short i = 0; i < 16; i++) {
+        FOR_UNROLL (short i = 0; i < 16; i++) {
             const short sx = 2 * il0 + i / 8;
             const short sy = (tiitg / NL0) / 8;
             const short lx = (tiitg / NL0) % 8;
@@ -150,22 +157,22 @@ kernel void main0(
         threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
         threadgroup const half * lsmb = (sb + 2 * 64 * (sgitg / 2));
 
-        for (short ik = 0; ik < NK / 8; ik++) {
+        FOR_UNROLL (short ik = 0; ik < NK / 8; ik++) {
             simdgroup_barrier(mem_flags::mem_none);
 
-            for (short i = 0; i < 4; i++) {
+            FOR_UNROLL (short i = 0; i < 4; i++) {
                 simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
             }
 
             simdgroup_barrier(mem_flags::mem_none);
 
-            for (short i = 0; i < 2; i++) {
+            FOR_UNROLL (short i = 0; i < 2; i++) {
                 simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
             }
 
             simdgroup_barrier(mem_flags::mem_none);
 
-            for (short i = 0; i < 8; i++) {
+            FOR_UNROLL (short i = 0; i < 8; i++) {
                 simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
             }
 
@@ -181,7 +188,7 @@ kernel void main0(
             (r0 + 32 * (sgitg & 1)) +
             (r1 + 16 * (sgitg >> 1)) * args.ne0;
 
-        for (short i = 0; i < 8; i++) {
+        FOR_UNROLL (short i = 0; i < 8; i++) {
             simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * args.ne0 * (i / 4), args.ne0, 0, false);
         }
     } else {

@@ -33,6 +33,7 @@ struct block_q6_K {
 
 #define QK_K  256
 #define QK_NL 16
+#define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
 
 static void dequantize_q6_K(device const block_q6_K * xb, short il, thread half4x4 & reg) {
     const half d_all = xb->d;
@@ -119,7 +120,7 @@ kernel void main0(
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (short i = 0; i < 16; i++) {
+        FOR_UNROLL (short i = 0; i < 16; i++) {
             const short sx = 2 * il0 + i / 8;
             const short sy = (tiitg / NL0) / 8;
             const short lx = (tiitg / NL0) % 8;
@@ -146,17 +147,17 @@ kernel void main0(
         threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
         threadgroup const half * lsmb = (sb + 2 * 64 * (sgitg / 2));
 
-        for (short ik = 0; ik < NK / 8; ik++) {
+        FOR_UNROLL (short ik = 0; ik < NK / 8; ik++) {
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 4; i++) {
+            FOR_UNROLL (short i = 0; i < 4; i++) {
                 simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 2; i++) {
+            FOR_UNROLL (short i = 0; i < 2; i++) {
                 simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 8; i++) {
+            FOR_UNROLL (short i = 0; i < 8; i++) {
                 simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
             }
             lsma += 8 * 64;
