@@ -250,6 +250,35 @@ pub fn build(b: *std.Build) void {
 
         const bench_metal_shapes_step = b.step("bench-metal-shapes", "Run exact-shape Metal q8 hot benchmarks (ReleaseFast)");
         bench_metal_shapes_step.dependOn(&bench_shapes_run.step);
+
+        const bench_gemm_q4k_mod = b.createModule(.{
+            .root_source_file = b.path("benchmarks/metal_gemm_q4k.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        });
+        bench_gemm_q4k_mod.addImport("zinc_bench_support", bench_support_mod);
+        bench_gemm_q4k_mod.addCSourceFile(.{
+            .file = b.path("src/metal/shim.m"),
+            .flags = &.{ "-fobjc-arc", "-fmodules" },
+        });
+        bench_gemm_q4k_mod.addIncludePath(b.path("src/metal"));
+        bench_gemm_q4k_mod.linkFramework("Metal", .{});
+        bench_gemm_q4k_mod.linkFramework("Foundation", .{});
+
+        const bench_gemm_q4k_exe = b.addExecutable(.{
+            .name = "zinc-bench-metal-gemm-q4k",
+            .root_module = bench_gemm_q4k_mod,
+        });
+        b.installArtifact(bench_gemm_q4k_exe);
+
+        const bench_gemm_q4k_run = b.addRunArtifact(bench_gemm_q4k_exe);
+        if (b.args) |args| {
+            bench_gemm_q4k_run.addArgs(args);
+        }
+
+        const bench_gemm_q4k_step = b.step("bench-metal-gemm-q4k", "Run gemm_q4k microbenchmark (ReleaseFast)");
+        bench_gemm_q4k_step.dependOn(&bench_gemm_q4k_run.step);
     }
 
     // --- Unit tests ---
