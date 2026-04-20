@@ -1015,6 +1015,8 @@ pub const InferenceEngine = struct {
     gemm_q6k_pipe: MetalPipeline,
     // Batched flash attention for prefill — handles N queries with causal masking.
     flash_attn_batched_pipe: MetalPipeline,
+    // Batched rotary position embedding — rotates N tokens at consecutive positions in one dispatch.
+    rope_batched_pipe: MetalPipeline,
 
     // Preloaded norm weight buffers (f32, GPU-accessible via UMA)
     attn_norm_bufs: []MetalBuffer,
@@ -1328,6 +1330,7 @@ pub const InferenceEngine = struct {
         self.gemm_q4k_pipe = try loadShaderPipeline(ctx, "gemm_q4k");
         self.gemm_q6k_pipe = try loadShaderPipeline(ctx, "gemm_q6k");
         self.flash_attn_batched_pipe = try loadShaderPipeline(ctx, "flash_attn_batched");
+        self.rope_batched_pipe = try loadShaderPipeline(ctx, "rope_batched");
         const q8_simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
         const q8_dual_simd_width = if (self.dmmv_q8_0_dual_pipe.thread_execution_width > 0) self.dmmv_q8_0_dual_pipe.thread_execution_width else @as(u32, 32);
         self.q8_tg_override = options.q8_tg_override orelse
@@ -1891,6 +1894,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.gemm_q4k_pipe);
         metal_pipeline.freePipeline(&self.gemm_q6k_pipe);
         metal_pipeline.freePipeline(&self.flash_attn_batched_pipe);
+        metal_pipeline.freePipeline(&self.rope_batched_pipe);
 
         for (0..self.config.n_layers) |i| {
             metal_buffer.freeBuffer(&self.attn_norm_bufs[i]);
