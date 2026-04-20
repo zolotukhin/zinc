@@ -78,6 +78,12 @@ pub const DmmvDispatch = struct {
     pipeline_f32: ?Pipeline,
     /// Batch Q4K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
     pipeline_q4k_batch: ?Pipeline,
+    /// K-parallel + SPEC_NUM_COLS=1 variant of the Q4K batch pipeline.
+    /// Foundation for Step 9b (SSM proj pair-batch): replaces the
+    /// 1-thread-per-row kernel with the llama.cpp-style wave64 K-parallel
+    /// pattern (16 threads/block, subgroupAdd reduction) so NUM_COLS=2..8
+    /// specializations in a future cycle stand on a non-starved dot product.
+    pipeline_q4k_kpar_batch_c1: ?Pipeline,
     /// MoE Q4K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q4k_moe: ?Pipeline,
     /// Experimental K-parallel Q4K MoE pipeline (same 4 bindings, wave64 subgroupAdd).
@@ -220,6 +226,19 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // Step 9a foundation: K-parallel + SPEC_NUM_COLS=1 variant. This
+        // replaces the 1-thread-per-row kernel on the LM head call site. Wave64
+        // is required so the single subgroupAdd at the end covers all 64 threads.
+        const q4k_kpar_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_kpar_batch.spv", .{shader_dir}) catch unreachable;
+        const kpar_batch_spec_c1 = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = 1 }};
+        const pipeline_q4k_kpar_batch_c1 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_kpar_batch_path, 3, batch_push_size, &kpar_batch_spec_c1, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K kpar batch (NUM_COLS=1) shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_q4k_kpar_batch_c1 != null) {
+            log.info("Q4_K kpar batch NUM_COLS=1 pipeline loaded (Step 9a foundation)", .{});
+        }
+
         // MoE DMMV pipelines: 4 bindings (A, x, y, routing), different push constants
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
 
@@ -289,6 +308,7 @@ pub const DmmvDispatch = struct {
             .pipeline_f16 = pipeline_f16,
             .pipeline_f32 = pipeline_f32,
             .pipeline_q4k_batch = pipeline_q4k_batch,
+            .pipeline_q4k_kpar_batch_c1 = pipeline_q4k_kpar_batch_c1,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
@@ -451,6 +471,54 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Push-descriptor K-parallel batch DMMV dispatch (Step 9a foundation).
+    /// Uses the wave64 subgroupAdd kernel with SPEC_NUM_COLS=1. Workgroup grid
+    /// matches the single-column K-parallel shaders ((M+1)/2 WGs), which gives
+    /// large M (e.g. the LM head) significantly more parallelism than the
+    /// 1-thread-per-row `dmmv_q4k_batch` kernel it replaces on that call site.
+    /// Returns error.PipelineNotLoaded when the kpar variant is unavailable.
+    pub fn recordKparBatchDispatchC1Push(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        x_buf: vk.c.VkBuffer,
+        x_size: vk.c.VkDeviceSize,
+        y_buf: vk.c.VkBuffer,
+        y_size: vk.c.VkDeviceSize,
+        M: u32,
+        K: u32,
+        a_offset: u32,
+        x_offset: u32,
+        y_offset: u32,
+    ) !void {
+        const pip = if (self.pipeline_q4k_kpar_batch_c1) |*p| p else return error.PipelineNotLoaded;
+        const push = BatchDmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = a_offset,
+            .x_offset = x_offset,
+            .y_offset = y_offset,
+            .num_cols = 1,
+        };
+        const infos = [3]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = x_buf, .offset = 0, .range = x_size },
+            .{ .buffer = y_buf, .offset = 0, .range = y_size },
+        };
+        const workgroups_x = (M + 1) / 2;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            workgroups_x,
+            1,
+            1,
+        );
+    }
+
     /// Push-descriptor batch DMMV dispatch.
     /// Bindings order: 0 = A (weight), 1 = X_batch (K × num_cols, column-major),
     /// 2 = Y_batch (M × num_cols, column-major).
@@ -551,6 +619,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_f16) |*p| p.deinit();
         if (self.pipeline_f32) |*p| p.deinit();
         if (self.pipeline_q4k_batch) |*p| p.deinit();
+        if (self.pipeline_q4k_kpar_batch_c1) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();

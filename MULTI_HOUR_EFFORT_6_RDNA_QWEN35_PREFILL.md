@@ -1,6 +1,6 @@
 # Optimization 6: RDNA Prefill Recovery for Qwen3.5-35B
 
-## Current State (2026-04-16)
+## Current State (2026-04-19)
 
 Target device: RDNA4 benchmark node.
 
@@ -73,63 +73,66 @@ Supporting measurements that should accompany stalled cycles:
 - hot-kernel or per-layer timing for the prompt path
 - llama.cpp reference re-check when a milestone lands
 
-## Evidence So Far (cycles 1–24)
+## Lessons from Prior Runs
 
-This section is not history for its own sake. It is the set of facts the next cycle must start from so we stop relitigating settled questions.
+This section is not history for its own sake. It is the set of facts the next cycle must start from so we stop relitigating settled questions. The cycle counter is being reset to 1 for the next run; references below are written in terms of *what changed* rather than which numbered cycle did it, because the prior numbering is no longer authoritative.
 
 ### What has actually moved the number
 
-Only three cycles out of 24 produced a real best-checkpoint improvement. All three share the same shape: restructure *when* work happens, not *how* a single dispatch is tuned.
+Only a handful of changes produced a real best-checkpoint improvement. All share the same shape: restructure *when* work happens, not *how* a single dispatch is tuned.
 
-- Cycle 4 (+~3%): skip `final_norm` + `LM_head` and the last-layer FFN/MoE body for non-terminal prefill tokens. Dead work elimination.
-- Cycle 5 (+~7%): double-buffered prefill command buffer + embedding staging. The CPU records token N+1 while the GPU runs token N. Overlap, not per-dispatch tuning.
-- Cycle 20 (+~2%): extend cycle 4's skip into the full last-layer attention block (Q/gate DMMV, Q-norm, Q-RoPE, flash_attn, sigmoid, O-proj, residual) for non-terminal prefill tokens on hybrid Qwen3.5-35B. More dead work elimination.
+- **Dead-tail skip (+~3%):** skip `final_norm` + `LM_head` and the last-layer FFN/MoE body for non-terminal prefill tokens. Dead work elimination.
+- **Double-buffered prefill pipeline (+~7%):** ping-pong between two command buffers + paired embedding staging. The CPU records token N+1 while the GPU runs token N. Overlap, not per-dispatch tuning.
+- **Last-layer attention dead-tail extension (+~2%):** extend the dead-tail skip into the full last-layer attention block (Q/gate DMMV, Q-norm, Q-RoPE, flash_attn, sigmoid, O-proj, residual) for non-terminal prefill tokens.
+- **K-parallel non-MoE Q5_K shader (+~3%):** wave64 inner-loop parallelism on a single shader; cumulative direction for Step 8 below.
 
-Best checkpoint as of cycle 24: `25.67 tok/s` prefill. Target: `150 tok/s` (Phase 2), `300 tok/s` (Phase 3). We are roughly one sixth of the way to Phase 2.
+Best checkpoint reached: **`28.07 tok/s`** prefill. Target: `150 tok/s` (Phase 2), `300 tok/s` (Phase 3). Roughly one fifth of the way to Phase 2 — with the flat region we have been in for many cycles, the remaining gap is structural, not incremental.
 
 ### What has been proven flat on RDNA4 — do not try again without new evidence
 
-The following category has been tried seven times (cycles 9, 17, 18, 19, 21, 22, 24 of the first run) with cumulative movement below 0.25 tok/s. On RDNA4 + RADV, narrowing a single back-to-back `computeBarrier` to a buffer-scoped barrier does not unlock a measurable win. Two of these cycles foundation-kept flat, the rest reverted flat.
+The following category has been attempted many times (cumulative movement below 0.25 tok/s). On RDNA4 + RADV, narrowing a single back-to-back `computeBarrier` to a buffer-scoped barrier does not unlock a measurable win.
 
 - Single-buffer or multi-buffer `computeBarrier` narrowings between successive compute dispatches.
 
-Stop proposing cosmetic variations of this pattern. If a future cycle attacks barriers, it must either (a) remove a barrier outright by restructuring what reads what, or (b) come with a micro-benchmark showing that a specific RADV path responds differently than cycles 9/17/18/19/21/22/24 did.
+Stop proposing cosmetic variations of this pattern. If a future cycle attacks barriers, it must either (a) remove a barrier outright by restructuring what reads what, or (b) come with a micro-benchmark showing that a specific RADV path responds differently.
 
-### Second-run finding: pair-dispatch (num_cols=2) via the existing batch shaders is net-negative on RDNA4
+### NUM_COLS=1 LM-head specialization — also flat
 
-Cycles 1, 3, 5, 7, 9 of the second run landed flag-gated pair-batch infrastructure across SSM proj + MoE router + layer-0 peek-ahead. Cycle 8 and cycle 9 measured the flag-ON path and found:
+A prior attempt added a compile-time `NUM_COLS=1` specialized variant of `dmmv_q4k_batch.comp` (`SPEC_NUM_COLS` GLSL specialization constant) and routed only the LM head (M > 65536) through it. Net effect: zero. The LM head fires **once per prefill** (and is already skipped for non-terminal prompt tokens by the dead-tail change), so any speedup on that single dispatch is far below the 154-token denominator.
 
-- Cycle 8 (duplicate col 0 == col 1): −0.12 tok/s, SSM proj +23 ms.
-- Cycle 9 (rewrote `dmmv_q8_0_batch.comp` with proper wave64 parallelism, 2 rows/WG × 64 threads + subgroupAdd): still −0.8 tok/s with flag on.
+The lesson: **NUM_COLS specialization only matters for dispatches that fire many times per prefill** — i.e. the SSM proj and MoE gate/up/down sites. Routing the LM head through a specialized variant proves nothing.
 
-Root cause, as the agent diagnosed: even with the shader parallelism fixed, the per-layer "stage norm into col0/col1, split 4 outputs back, barrier between" chain costs more than the weight-read amortization saves. Back-to-back single-column DMMVs win via the L2 weight cache.
+### Pair-dispatch (num_cols=2) via the existing batch shaders is net-negative on RDNA4
 
-**Do not propose another num_cols=2 variant on top of the existing `dmmv_q8_0_batch` / `dmmv_q4k_batch` shaders.** The fix is architectural, not incremental:
+Earlier attempts landed flag-gated pair-batch infrastructure across SSM proj + MoE router + layer-0 peek-ahead. Two measurements were taken:
 
-- Port llama.cpp's compile-time specialized DMMV design: pre-compile 8 variants of the DMMV shader with `NUM_COLS` baked in as a GLSL specialization constant (values 1..8), so each variant has its inner loop unrolled and the register allocator sees a static column count. See `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp` line 267 (`mul_mat_vec_max_cols = 8`) and `vulkan-shaders/mul_mat_vec_base.glsl`.
-- Route to a proper matmul kernel (mul_mm-style, preferably cooperative-matrix via the existing `src/shaders/coop_matmul.comp`) when N exceeds the DMMV sweet spot. Llama.cpp uses N > 8.
-- Quantize activations to Q8_1 once per prefill chunk, then use the `mul_mmq` pattern for the largest prefill DMMVs. Reference: `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp` and `mul_mmq.comp`.
+- Pair-batch with col 0 duplicated to col 1: −0.12 tok/s, SSM proj +23 ms.
+- Pair-batch after rewriting `dmmv_q8_0_batch.comp` with wave64 parallelism (2 rows/WG × 64 threads + subgroupAdd) for the cross-token case: still −0.8 tok/s with flag on.
 
-### Second-run finding: 3-deep prefill pipeline is flat
+Root cause: even with the shader parallelism partially fixed, the per-layer "stage norm into col0/col1, split 4 outputs back, barrier between" chain costs more than the weight-read amortization saves. Back-to-back single-column DMMVs win via the L2 weight cache for the small-N regime.
 
-Cycle 2 extended the double-buffered prefill pipeline from 2-deep to 3-deep and measured no change. Submit/wait is already saturated at 2-deep on the 154-token workload; the record+submit+wait gap is not the dominant cost. Do not re-attempt 4-deep without first proving that the CPU record time has materially grown (e.g. from expert-grouping bookkeeping in Step 5b/5c).
+**Do not propose another num_cols=2 variant on top of the existing `dmmv_q8_0_batch` / `dmmv_q4k_batch` shaders.** The fix is architectural, not incremental.
 
-### Dormant infrastructure currently in the tree from the second run
+The deeper reason our pair-batch attempts lost: the existing `dmmv_q4k_batch.comp` uses **one wave64 thread per output row** (`local_size_x=64`, but the row dot product runs serially inside that single thread, not as a 64-thread reduction). llama.cpp's `mul_mat_vec_base.glsl` does the opposite — `K_PER_ITER=8` quantized elements per thread, multiple threads per row, `subgroupAdd()` reduction across the wave to compute the dot product. Until our DMMV does the same, multi-column batching just multiplies an already-bandwidth-starved single-threaded dot product.
 
-These commits are in HEAD and they are net-negative or dormant per the findings above. A pivot cycle should decide whether to revert them or reuse parts of them:
+The architectural fixes in priority order — see Steps 8/9/10/11/13 below for concrete plans:
 
-- Cycle 1 (`20c0ea8f`): `recordBatchDispatchPush` helper. Probably reusable — a specialized 8-variant DMMV would still want a push-descriptor dispatch helper.
-- Cycle 3 (`74f9ff47`): SSM wqkv pair-dispatch wiring. Dead-end as shaped; revert unless a follow-up cycle repurposes it for a specialized variant.
-- Cycle 5 (`b035b168`): extended the pair-dispatch wiring to all 4 SSM projections. Same status as cycle 3.
-- Cycle 7 (`b22ce68e`): layer-0 peek-ahead with real cross-token data. Clever but unsuccessful — the barrier-and-copy chain still costs more than the amortization saves.
-- Cycle 9 (`d3a968d`): wave64-parallel rewrite of `dmmv_q8_0_batch.comp`. Useful as a reference for what the parallelism should look like, but the multi-column variant is still slow. A per-num_cols-specialized shader would subsume it.
+- Step 8: convert single-column DMMV to wave64 K-parallel (subgroupAdd reduction). Precondition for everything else.
+- Step 9: NUM_COLS=2..8 compile-time specialized DMMV family on top of Step 8.
+- Step 10: mul_mmq Q8_1 activation quantization (2-4× over FP32 dot path on RDNA).
+- Step 11: vllm-style grouped MoE GEMM (token permutation + per-expert grouped matmul).
+- Step 13: cooperative-matrix mul_mm for prefill projections that exceed DMMV's sweet spot.
+
+### 3-deep prefill pipeline is flat
+
+A prior attempt extended the double-buffered prefill pipeline from 2-deep to 3-deep and measured no change. Submit/wait is already saturated at 2-deep on the 154-token workload; the record+submit+wait gap is not the dominant cost. Do not re-attempt 4-deep without first proving that the CPU record time has materially grown (e.g. from expert-grouping bookkeeping in Step 11).
 
 ### What has been repeatedly attempted and rejected as pointless in isolation
 
-- "Add more phase profiling" without a downstream change in the same cycle. Cycles 12 and 16 added phase/dispatch counters and were reverted because they did not touch tok/s. The profile line *already* exists behind `ZINC_PREFILL_PROFILE=1`; a cycle should turn that flag on, read the output, then act.
-- "Restructure where prompt embedding dequant happens." Cycles 14, 15, 23 explored CPU / staging / interleaved variants of the same idea. The current checked-in design (upfront bulk dequant into host-mapped staging, cycles 14+15) is the accepted equilibrium. Do not resubmit interleaving or async-thread variants without a new bottleneck proof.
+- **"Add more phase profiling" without a downstream change in the same cycle.** Earlier attempts added phase/dispatch counters and were reverted because they did not touch tok/s. The profile line *already* exists behind `ZINC_PREFILL_PROFILE=1`; a cycle should turn that flag on, read the output, then act.
+- **"Restructure where prompt embedding dequant happens."** Several attempts explored CPU / staging / interleaved variants of the same idea. The current checked-in design (upfront bulk dequant into host-mapped staging) is the accepted equilibrium. Do not resubmit interleaving or async-thread variants without a new bottleneck proof.
 
-### Current phase budget snapshot (from cycle 3 measurement, refresh before acting)
+### Current phase budget snapshot (refresh before acting)
 
 Numbers below are for the flagship long-context benchmark. They are a snapshot; the loop should re-run with `ZINC_PREFILL_PROFILE=1` before starting a new structural attack so the agent targets the real largest bucket instead of a stale one.
 
@@ -138,7 +141,7 @@ Numbers below are for the flagship long-context benchmark. They are a snapshot; 
 - shared expert: small, typically <0.1 s
 - SSM (proj + conv + delta + gnorm + out): ~1.8 s — **largest single bucket**
   - ssm_proj alone: ~1.3 s — the single largest sub-bucket
-- final tail (norm + LM head): ~0.1 s (cycle 4 already skips this for non-terminal tokens)
+- final tail (norm + LM head): ~0.1 s (the dead-tail skip already drops this for non-terminal tokens)
 - CPU + submit/wait gap after GPU phases sum: ~0.5–0.8 s
 
 The fact that SSM proj is the single largest bucket and has never been batched across prompt tokens is the loudest unexploited signal in the effort.
@@ -147,11 +150,46 @@ The fact that SSM proj is the single largest bucket and has never been batched a
 
 These code paths were added in earlier cycles and compile into the binary, but have **zero callers in the prefill hot path**. Wiring them in is lower risk than inventing new infrastructure, and every cycle that tries a fresh micro-optimization without wiring them first is leaving free throughput on the floor.
 
-- `DmmvDispatch.recordBatchDispatch` in `src/compute/dmmv.zig` — multi-column DMMV entry point supporting `num_cols > 1`. Zero callers anywhere in the codebase.
-- `DmmvDispatch.pipeline_q4k_batch` / `pipeline_q8_0_batch` — loaded pipelines that are only invoked today with `num_cols = 1` (and only for the large LM head in `forward.zig`). The multi-column shader path exists but has never been exercised against prompt tokens.
-- `CommandBuffer.computeBuffersBarrier` (cycle 21) — multi-buffer barrier helper. Useful when a cycle structurally removes a global barrier (not when it cosmetically narrows one).
+- `DmmvDispatch.recordBatchDispatch` / `recordBatchDispatchPush` in `src/compute/dmmv.zig` — multi-column DMMV entry point supporting `num_cols > 1`. **Exactly one caller** (the LM head fallback at `forward.zig:6103`) and only with `num_cols=1`. The multi-column path has never been exercised against prompt tokens.
+- `DmmvDispatch.pipeline_q4k_batch` / `pipeline_q8_0_batch` — loaded pipelines that are only invoked today with `num_cols = 1` and only for the large LM head. Prior pair-batch attempts (see Lessons section above) showed that wiring this with `num_cols=2` on top of the current 1-thread-per-row shader is net-negative; it only becomes useful after Step 8 lands wave64 K-parallel inner loops.
+- `DmmvDispatch.recordCoopMatmul` + `pipeline_coop_matmul` (helper at `dmmv.zig:509`) — F16×F16→F32 cooperative-matrix matmul, 16×16 tiles, wave64. **Zero callers anywhere.** Important caveat: as written this consumes only **F16 weights**, but every prefill projection in Qwen3.5-35B is Q4_K/Q5_K/Q6_K/Q8_0. Wiring requires either an upfront f16 dequant pass into a scratch buffer (acceptable only when the dequant cost amortizes across many prompt tokens, e.g. SSM proj × 154) **or** porting llama.cpp's `mul_mm.comp` pattern that dequants quantized tiles into shared memory inside the matmul loop (Step 13).
+- `CommandBuffer.computeBuffersBarrier` — multi-buffer barrier helper. Useful when a cycle structurally removes a global barrier (not when it cosmetically narrows one).
 
-Any cycle whose self-analysis proposes "batch X across prompt tokens" and does not reference the existing `recordBatchDispatch` helper is proposing unnecessary new infrastructure. Check for the existing helper first.
+What is **not** in the tree, despite being mentioned in earlier commits or docs:
+
+- A "device-side per-(token, layer) MoE routing capture" buffer (referenced in earlier commit messages) is not present in the working tree (no matches for `prefill_routing`, `moe_routing_buf`, `routing_capture`). Treat any plan that depends on it as needing the foundation work first.
+- No `quantize_q8_1.comp` shader, no Q8_1 buffer plumbing, no `mul_mmq` pipeline. Step 10 has to add all three.
+
+Any cycle whose self-analysis proposes "batch X across prompt tokens" and does not reference the existing `recordBatchDispatch` / `recordCoopMatmul` helpers is proposing unnecessary new infrastructure. Check for the existing helper first.
+
+## Big Bets — the path to 2× and beyond
+
+The existing Steps 1–7 covered telemetry, dormant infrastructure wiring, and incremental batching. The plateau they reached is **`28.07 tok/s`** prefill on the flagship — roughly one fifth of Phase 2 (`150 tok/s`) and one tenth of Phase 3 (`300 tok/s`). To close that gap and surpass llama.cpp on this workload, the remaining wins are not micro-optimizations of the current shader family — they are **algorithmic ports from llama.cpp / vllm**. Each of the bets below is a multi-cycle investment with a concrete shape, a measured reference implementation, and an estimated upside derived from the reference codebase.
+
+| Bet | Step | Reference | Est. upside on flagship 154-tok prefill | Risk |
+|-----|------|-----------|----------------------------------------|------|
+| Wave64 K-parallel single-column DMMV | 8 | llama.cpp `mul_mat_vec_base.glsl` | +30–60% directly; precondition for Steps 9/10 | Low (per-shader local change, easy A/B) |
+| NUM_COLS=2..8 specialized DMMV family on top of Step 8 | 9 | llama.cpp `mul_mat_vec_max_cols=8` | +40–80% on prompt-loop DMMVs | Low after Step 8 |
+| `quantize_q8_1` + `mul_mmq` integer dot product path | 10 | llama.cpp `mul_mmq.comp` + `quantize_q8_1.comp` | 2–4× on the largest Q4_K/Q5_K prefill DMMVs | Medium (new shader family, new buffer plumbing) |
+| Grouped-MoE GEMM (token permute → per-expert grouped matmul → unpermute) | 11 | vllm `fused_moe` + llama.cpp `mul_mat_id` | 5–10× on the MoE phase; biggest single MoE win available | Medium (correctness gates required) |
+| RDNA shared-memory occupancy limiter on flash_attn + heavy DMMV | 12 | llama.cpp `ggml-vulkan.cpp:2990` | +5–15% on attention; cleans up RDNA cache-thrash | Low (LDS allocation tweak) |
+| Coop-matrix `mul_mm` for projections where N >> 8 | 13 | llama.cpp `mul_mm.comp` + `mul_mm_funcs.glsl` | 2–3× on large prefill projections | Medium-high (largest new shader) |
+
+### How these bets compose
+
+These are not parallel bets. They have a deliberate dependency order:
+
+1. **Step 8 is the foundation.** Today's `dmmv_q4k_batch.comp` is single-threaded per row, which is why pair-batching and NUM_COLS=1 specialization both showed flat. Without 64-thread-per-row reductions, every column we add multiplies a starved dot product. Step 8 fixes this on the single-column path first, validates it on flagship coherence, then steps 9/10 stack on top.
+2. **Step 9 is a small generalization of Step 8.** Once the inner loop is wave64-parallel, baking `NUM_COLS` into a specialization constant + unrolling the column loop costs ~50 lines of GLSL per variant. Then we wire SSM proj, MoE router, and MoE gate/up/down to call NUM_COLS=2..8 across multiple prompt tokens (this **re-exercises the existing `recordBatchDispatch` plumbing**, not a new helper).
+3. **Step 10 is the highest-leverage independent bet.** mul_mmq does not depend on Step 8/9 — it can ship in parallel. The hard part is building the `quantize_q8_1` activation step and a Q8_1-input variant of each weight-quant DMMV/matmul. llama.cpp uses a single Q8_1 quant pass per prefill chunk and reuses the result across every projection in that layer.
+4. **Step 11 (grouped MoE) is independent of Steps 8–10.** It restructures the per-prompt-token MoE loop into a per-expert grouped GEMM. Today `forward.zig:4608+` already runs all routed experts in parallel within a single token (`Y=n_used` workgroups). Step 11 inverts this: gather all 154 prompt tokens' routing decisions, group tokens by expert, run **one larger GEMM per active expert** covering its cohort of tokens. With 128 experts and top-8 routing, the average expert receives `154 × 8 / 128 ≈ 9.6` tokens — perfect arithmetic-intensity bump.
+5. **Steps 12 and 13 are layered wins.** The RDNA occupancy limiter is a 5-line change (allocate dummy LDS) backed by llama.cpp commit history. Coop-matrix mul_mm is the largest port and should be attacked last when DMMV-side wins are exhausted.
+
+### What we are explicitly NOT going to do under these bets
+
+- **Do not ship NUM_COLS≥2 with the current 1-thread-per-row shader.** Earlier pair-batch attempts have already proved this loses. NUM_COLS specialization waits for Step 8.
+- **Do not wire `recordCoopMatmul` against quantized weights without a dequant strategy.** F16-only consumption means Step 13 has to land a dequant-into-shared-memory tile loop *or* an upfront f16 scratch buffer (and amortize the dequant cost across many prompt tokens to be net-positive).
+- **Do not build the grouped-MoE permute on the CPU.** llama.cpp's `mul_mat_id` does the gather inside the matmul kernel via `data_ids[]`; vllm does it on the GPU via a permute kernel. CPU permute will be drowned by submit/wait cost on a 128-expert × 154-token workload.
 
 ## Working Hypotheses
 
@@ -207,16 +245,9 @@ What is left here:
 - the loop runs with `ZINC_PREFILL_PROFILE=1` on baseline and after every accepted change so the agent prompt always carries a current phase budget. The loop already does this; do not re-add telemetry code.
 - if the baseline for a new run does not produce a parseable `Prefill GPU phases` line, fix the parser or the log line, do not change the runtime.
 
-### Step 2.5: Wire up the dormant batch DMMV infrastructure before inventing new paths
+### Step 2.5: SUPERSEDED — see Step 8/9
 
-This is the highest-leverage remaining work that is structurally easier than it looks, because the shader, pipeline, and Zig entry point already exist:
-
-- `recordBatchDispatch` in `src/compute/dmmv.zig` accepts `num_cols` and supports Q4_K and Q8_0 via dedicated batch shaders (and falls back to per-column DMMV for other quant types). Zero production callers.
-- The simplest wiring: pick one prefill DMMV on the hot path (start with SSM proj because it is the biggest single bucket), accumulate two adjacent prompt tokens' inputs into an adjacent-column staging layout, call `recordBatchDispatch` with `num_cols = 2`, and split the output into the two per-token paths that downstream dispatches expect.
-- Correctness gating: keep the single-column path as a fallback, flag-gate the new path with a runtime env like `ZINC_PREFILL_BATCH=1` until the coherence sweep is green, then remove the flag once it sticks.
-- Do not open this step by writing a new shader. The existing `dmmv_q8_0_batch.comp` and `dmmv_q4k_batch.comp` already handle `num_cols` correctly.
-
-Success criterion: a cycle lands that wires `recordBatchDispatch` into at least one prefill DMMV call site with `num_cols ≥ 2` and a flagship coherence sweep stays green. Even if the first wiring is flat on tok/s, it is a foundation step that unblocks Steps 4/5.
+This step previously proposed wiring `recordBatchDispatch(num_cols=2)` directly into the SSM proj hot path on top of the existing batch shader. Prior attempts proved this is net-negative on RDNA4 because the existing batch shader uses one wave64 thread per output row (see Lessons section). The replacement plan is in Step 8 (wave64 K-parallel inner loop, the precondition) and Step 9 (compile-time NUM_COLS specialization on top of Step 8).
 
 ### Step 3: Prove which parts of prefill are still token-serial
 
@@ -245,8 +276,8 @@ Allowed targets (each must either change the number of dispatches or the number 
 
 - batched embedding upload or staging reuse where a single dispatch would replace multiple
 - batched RMS norm and elementwise passes that already understand `n_tokens`
-- projection paths where one weight read can serve multiple prompt columns (hook into Step 2.5)
-- fewer per-token command submissions, ideally with the double-buffered pipeline-prefill path extended to 3+ deep
+- projection paths where one weight read can serve multiple prompt columns (hook into Step 9 once Step 8 has landed)
+- fewer per-token command submissions, ideally with the double-buffered pipeline-prefill path extended to 3+ deep (only after proving the CPU record cost has materially grown — earlier 3-deep attempts were flat)
 - fewer redundant barriers across prompt tokens — only accept if the barrier is actually *removed*, not just narrowed in scope
 
 Acceptance rule:
@@ -256,27 +287,9 @@ Acceptance rule:
 
 If these steps do not move the number, that is evidence. Use it to justify deeper MoE work, not as a reason to keep random churn.
 
-### Step 5: Attack Qwen35 MoE prefill directly
+### Step 5: SUPERSEDED — see Step 11
 
-Primary files:
-
-- `src/compute/forward.zig`
-- `src/compute/dmmv.zig`
-- `src/shaders/*.comp`
-
-Qwen3.5-35B A3B is MoE-heavy. Prefill will stay capped if expert work is still scheduled like decode. Break this into three concrete microsteps so the loop can pick one per cycle without having to invent the whole plan.
-
-- **Step 5a: Batch router projection across prompt tokens.** The router is a single Q4_K DMMV per token of shape `M=num_experts, K=hidden`. Two adjacent tokens can share the same weight read by issuing one `recordBatchDispatch` with `num_cols = 2`. This is the smallest MoE batching step and keeps all downstream routing/topk logic per-token. Enable via the same `ZINC_PREFILL_BATCH` flag from Step 2.5.
-- **Step 5b: Collect per-token top-k routing for a prompt chunk and group tokens by expert.** For a chunk of N prompt tokens, compute the N×top_k routing vector, invert it into per-expert token lists, and pad. This is pure CPU/GPU bookkeeping; no new kernels.
-- **Step 5c: Run per-expert gate/up/down over the gathered token block.** For each active expert, run one larger matmul over its gathered token inputs instead of N tiny per-token matvecs. Scatter the accumulated expert outputs back into original token order using the inverse of the permutation from 5b. The gather/scatter can be on the GPU (elementwise kernel) or CPU-side initially for validation.
-
-Guidance:
-
-- Start with Step 5a. It is the smallest MoE change that exercises the shared-weight code path, and it composes with Step 5b/5c when they land.
-- Step 5b can ship as a foundation step even if Step 5c is not yet wired; the routing arrays are inputs that no one reads yet.
-- Keep correctness checks tight. Expert misrouting can look fast and silently poison outputs. Run the full coherence sweep, not just the one-prompt sanity check.
-
-Start with the simplest grouping design that is easy to validate. A mediocre but correct grouped path is worth more than an ambitious schedule that breaks coherence.
+This step previously proposed three microsteps (5a/5b/5c) for batching MoE work across prompt tokens, starting with NUM_COLS=2 on the router DMMV. The router-batching microstep is now folded into Step 9d (NUM_COLS specialized on top of K-parallel base). The grouping microsteps (5b/5c) are now the full plan in Step 11 (vllm-style permute → per-expert grouped matmul → unpermute), with explicit correctness gates and the foundation routing-capture buffer broken out as Step 11a.
 
 ### Step 6: Revisit prompt-time attention and KV behavior
 
@@ -308,6 +321,172 @@ After each accepted change:
 
 If the artifact loses `prefill_tps` again, treat that as a regression and stop. A fast path that the loop cannot observe is not a stable optimization program.
 
+### Step 8: Wave64 K-parallel single-column DMMV (the precondition)
+
+Primary files:
+
+- `src/shaders/dmmv_q4k.comp`, `dmmv_q4k_batch.comp`
+- `src/shaders/dmmv_q5k.comp`, `dmmv_q6k.comp`, `dmmv_q8_0.comp`
+- `src/compute/dmmv.zig` (workgroup math)
+
+Reference:
+
+- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl` (`K_PER_ITER`, subgroupAdd reduction)
+- `mul_mat_vec.comp` (per-quant-type inner loop)
+
+Why this is the precondition:
+
+The current ZINC DMMV kernels assign **one wave64 thread per output row** and serially scan the K dimension inside that single thread. That leaves a 63× per-row parallelism gap. Multi-column batching, NUM_COLS specialization, and even Q8_1 mmq cannot recover this gap — they all multiply a starved dot product. llama.cpp's design instead has ~16 threads per row (or whatever divides cleanly into wave64 × NUM_ROWS), each thread processes `K_PER_ITER=8` quantized elements per iteration, and the row sum is computed with `subgroupAdd()` (or shared-memory fallback when `USE_SUBGROUP_ADD` isn't set).
+
+Concrete microsteps:
+
+- **Step 8a:** Rewrite `dmmv_q4k.comp` (single-column, no batch) to (rows-per-wg=2, threads-per-row=32) with `subgroupAdd()` reduction. Compare against the existing kernel on the LM head (single-dispatch sanity), then on the SSM proj loop (multi-dispatch reality). Foundation step — accept even if flat, because Step 9 cannot win without it.
+- **Step 8b:** Repeat for `dmmv_q5k.comp`, `dmmv_q6k.comp`, `dmmv_q8_0.comp`. These are mechanical ports of 8a with different dequant snippets.
+- **Step 8c:** Verify wave64 vs wave32 detection at pipeline-load time (RDNA4 is wave64 by default with `RADV_PERFTEST=coop_matrix`; older RDNA can be wave32). Pick a (rows, threads-per-row) tuple that divides evenly into both.
+
+Done when:
+
+- The flagship prefill benchmark moves by **≥ 8% on Q4_K-heavy projections** (signal: SSM proj phase from `ZINC_PREFILL_PROFILE=1` drops materially).
+- Coherence sweep is green across all required RDNA models.
+- Numerical sanity: row sums match the old kernel within reasonable f32 rounding tolerance.
+
+### Step 9: NUM_COLS=2..8 specialized DMMV family (after Step 8)
+
+Primary files:
+
+- `src/shaders/dmmv_q4k_batch.comp`, `dmmv_q8_0_batch.comp`, plus a new `dmmv_q5k_batch.comp` if needed
+- `src/compute/dmmv.zig` (`pipeline_q4k_batch_ncolN` array, dispatcher)
+- `src/compute/forward.zig` (route SSM proj wqkv/z/alpha/beta and MoE router across multiple prompt tokens)
+
+Reference:
+
+- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:267` (`mul_mat_vec_max_cols = 8`)
+- `mul_mat_vec_base.glsl` (NUM_COLS column-loop unroll)
+
+Concrete microsteps:
+
+- **Step 9a:** Re-introduce a `SPEC_NUM_COLS` GLSL specialization constant on top of Step 8's K-parallel kernel. (A prior LM-head-only attempt reverted because it didn't move the number; this time apply it to the multi-dispatch hot path.) Pre-compile NUM_COLS ∈ {1, 2, 4, 8} variants at startup. Skip 3/5/6/7 to keep the variant count manageable.
+- **Step 9b:** Wire SSM proj (4 DMMVs per layer per token at `forward.zig:6552-6560`) to gather two adjacent prompt tokens' `norm_buf` columns into `attn_out_buf` (column-major), call `recordBatchDispatchPush(num_cols=2)`, then split outputs back to per-token paths. Flag-gate via `ZINC_PREFILL_BATCH=1` until coherence is green.
+- **Step 9c:** Promote NUM_COLS=2 → NUM_COLS=4 → NUM_COLS=8 once 2 ships green. Each step doubles the cohort of prompt tokens that share one weight read.
+- **Step 9d:** Apply the same pattern to MoE router DMMV (single Q4_K matvec of shape `M=n_experts, K=hidden`), which is identical in shape to SSM proj from the kernel's perspective.
+- **Step 9e:** Apply to MoE gate/up/down. This requires more bookkeeping because each token's routed experts may differ — only tokens routed to the same expert can share that expert's weight read. This overlaps with Step 11 (grouped MoE); decide at Step 9d-completion time whether to proceed with Step 9e or pivot to Step 11.
+
+Done when:
+
+- Flagship prefill ≥ **+25%** vs Step 7 baseline.
+- Coherence sweep green.
+
+### Step 10: mul_mmq Q8_1 activation quantization path
+
+Primary files (all new):
+
+- `src/shaders/quantize_q8_1.comp` — fused per-block quantization of the prefill activation tensor into Q8_1 (32-element blocks: int8 values + f16 scale + f16 sum).
+- `src/shaders/dmmv_q4k_q8_1.comp` (or `mul_mmq_q4k.comp`) — Q4_K weight × Q8_1 activation integer dot product. The integer dot product is the win: 2–4× faster than f32 dot on RDNA's int8 path.
+- `src/shaders/dmmv_q5k_q8_1.comp`, `dmmv_q6k_q8_1.comp`, `dmmv_q8_0_q8_1.comp` — same pattern per weight quant.
+- `src/compute/dmmv.zig` — new `pipeline_*_mmq` fields, new `recordMmqDispatch` helper, dispatch heuristic that picks mmq when `device.integer_dot_product` is supported and the dimensions divide cleanly.
+- `src/compute/forward.zig` — quantize prefill input once per layer (or once per prefill chunk) into a scratch Q8_1 buffer; reuse it for every projection (attn QKV, SSM proj, MoE router, MoE gate/up/down).
+
+Reference:
+
+- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp`
+- `mul_mmq.comp` + `mul_mmq_funcs.glsl`
+- `ggml-vulkan.cpp:7856` (`should_use_mmvq` heuristic) and `:7975` (`ggml_vk_quantize_q8_1` call site)
+
+Concrete microsteps:
+
+- **Step 10a:** Add `quantize_q8_1.comp` plus a Zig wrapper that quantizes a `(K floats)` activation into a `(K/32 Q8_1 blocks)` device buffer. Validate by dequantizing back and comparing rounded values.
+- **Step 10b:** Add `dmmv_q4k_q8_1.comp` (single-column, K-parallel, integer dot product using `iadd` accumulation then a final f32 rescale by `weight_scale × activation_scale`). Wire only the LM head as a sanity dispatch first.
+- **Step 10c:** Wire SSM proj and MoE router through the mmq path. This is where the win shows up — both fire many times per prefill.
+- **Step 10d:** Repeat for Q5_K, Q6_K, Q8_0 weights.
+
+Done when:
+
+- Flagship prefill ≥ **+40%** vs Step 9 baseline.
+- Numerical sanity: per-token logits match the FP32 path within `1e-2` f32 RMS (acceptable Q8_1 quantization noise).
+- Coherence sweep green across all required RDNA models, including the 7B/12B siblings (different N_HEADS, GQA group sizes — exercise the activation-quant path).
+
+Risk note: If `device.integer_dot_product` is not enabled on the RDNA4 RADV stack we ship to, this step's payoff drops. Probe the device before sinking the full microstep budget — `ggml-vulkan.cpp` only enables mmq when the extension is present.
+
+### Step 11: Grouped MoE GEMM (vllm-style permute → per-expert grouped matmul → unpermute)
+
+Primary files:
+
+- `src/compute/forward.zig` (the MoE block at `runDecodeStep` ~ `forward.zig:4608+` — replace the inner per-token-routed `pushDispatch4(..., Y=n_used, ...)` with a per-expert outer loop)
+- New `src/shaders/moe_permute.comp` — scatter each (token, expert) pair into per-expert lanes
+- New `src/shaders/moe_unpermute.comp` — gather per-expert outputs back into per-token order
+- `src/shaders/dmmv_q4k_moe.comp` — modify (or add a `_grouped` variant) so each workgroup processes one expert's full token cohort instead of one token
+
+Reference:
+
+- `/Users/zolotukhin/Workplace/vllm/vllm/model_executor/layers/fused_moe/fused_moe.py` (`fused_experts_impl`, `invoke_fused_moe_kernel`)
+- `/Users/zolotukhin/Workplace/vllm/vllm/model_executor/layers/fused_moe/moe_permute_unpermute.py`
+- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp` (the `MUL_MAT_ID` row-gather path)
+
+Why this is the largest remaining MoE win:
+
+Today's GPU MoE path runs **one outer iteration per prompt token**, and inside each iteration all 8 routed experts run in parallel (Y workgroups in a single dispatch). The MoE weights (`gate_exps`, `up_exps`, `down_exps`) get re-read **once per prompt token** for every routed expert — and the L2 cache is only ~4 MB, far too small to hold a 35B model's expert weights across 154 tokens. A grouped GEMM amortizes one weight read across all tokens routed to that expert (~9.6 tokens on average for top-8 / 128 experts), which means **~10× lower DRAM bandwidth pressure** on the MoE phase. Per the current phase budget snapshot, MoE is ~1.6 s of the ~5 s prefill — so a 5× MoE speedup alone would buy roughly 0.8 s of latency back, which translates to ~+20–30% prefill tok/s.
+
+Concrete microsteps:
+
+- **Step 11a:** Build the per-(token, layer) routing capture buffer (referenced in earlier commits but not present in the working tree). Capture topk_ids[n_tokens, top_k] and topk_weights[n_tokens, top_k] into a device-side buffer that survives the per-token loop. Foundation step — accept even if flat.
+- **Step 11b:** Implement `moe_permute.comp` (CPU permute is fine for the validation sanity pass; promote to GPU if CPU dispatch cost shows up in profile). Output: `permuted_inputs[total_routings, hidden_dim]`, `expert_first_token_offset[n_experts+1]`, `inverse_permutation[total_routings]`.
+- **Step 11c:** Add `dmmv_q4k_moe_grouped.comp` — one workgroup per expert, processes all tokens routed to that expert. Reuses the K-parallel inner loop from Step 8.
+- **Step 11d:** Wire MoE gate/up/down to use the grouped path. Skip experts with zero token count (cheap test).
+- **Step 11e:** Implement `moe_unpermute.comp` — apply `inverse_permutation` and the topk weights to scatter expert outputs back into per-token positions, accumulate into `moe_out_buf`.
+
+Done when:
+
+- Flagship prefill ≥ **+35%** vs Step 10 baseline (or ≥ +25% standalone if Step 10 has not landed yet).
+- Coherence sweep green; specifically, run the gpt-oss model that uses SOFTMAX_WEIGHT routing and Gemma 4 MoE that uses the per-expert scale tensor (ensure routing semantics survive the permute path).
+
+Risk note: Grouped MoE has the highest correctness blast radius of any bet here. Misrouting a single token can pass the loop's coherence check but fail subtle outputs. Add a flag-gated CPU reference path that runs alongside on a single prompt and asserts per-token output L2 difference is below a tight threshold (`< 1e-4`) for the first few cycles after wiring.
+
+### Step 12: RDNA shared-memory occupancy limiter
+
+Primary files:
+
+- `src/shaders/flash_attn.comp` (and any `dmmv_*.comp` that benefits)
+- Pipeline creation in `src/compute/attention.zig` and `src/compute/dmmv.zig`
+
+Reference:
+
+- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:2990-2994` — RDNA-specific dummy LDS allocation (26–30 KB) on flash attention to force 4-subgroup-per-SIMD occupancy and avoid cache thrashing.
+
+Concrete microstep:
+
+- Add an unused `shared float dummy[ DUMMY_LDS_BYTES / 4 ];` declaration (or a specialization-constant-sized scratch array) to `flash_attn.comp` and to the K-parallel DMMV from Step 8, sized 26–30 KB on RDNA4. Validate that RADV reports 4 waves per SIMD via `RADV_DEBUG=preoptir,nir` or vendor profiler output (acceptable alternative: measure end-to-end and accept if positive).
+
+Done when:
+
+- Flash attention or DMMV phase from `ZINC_PREFILL_PROFILE=1` shows a measurable drop on RDNA4 (and no regression on the smaller RDNA models). Vendor-gate the LDS allocation if it harms non-AMD or non-RDNA4 paths.
+
+### Step 13: Cooperative-matrix `mul_mm` for prefill projections
+
+Primary files:
+
+- `src/shaders/coop_matmul.comp` (extend tile size + dequant tiling)
+- New `src/shaders/mul_mm_q4k.comp`, `mul_mm_q5k.comp`, etc. — quantized-weight tile loaders
+- `src/compute/dmmv.zig` (`recordCoopMatmul` extension, dispatch heuristic that picks mul_mm when N > 8)
+- `src/compute/forward.zig` (route projections that exceed DMMV's sweet spot — primarily once we batch ≥ 8 prompt tokens per dispatch)
+
+Reference:
+
+- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
+- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl` (per-quant-type tile loaders)
+
+Concrete microsteps:
+
+- **Step 13a:** Extend `coop_matmul.comp` from 16×16 tiles to BM=64, BN=32–64, BK=32 (matching llama.cpp's mul_mm). Validate on F16×F16→F32 first.
+- **Step 13b:** Add `mul_mm_q4k.comp` — same coop-matrix outer loop, but the A-tile (weights) is loaded by a per-quant-type dequant function into shared memory rather than direct f16 load. Reference: `mul_mm_funcs.glsl:dequantFuncQ4K`.
+- **Step 13c:** Wire the dispatch heuristic: when `num_cols ≥ 8` (i.e. prompt batch is large enough), pick mul_mm over the DMMV NUM_COLS=8 specialization. llama.cpp's threshold is `N > 8`.
+
+Done when:
+
+- Flagship prefill ≥ **+30%** vs Step 11 baseline (the gap narrows here because Steps 8/9/10 have already harvested a large fraction of the available win — coop matrix mainly helps when batched columns exceed ~8 tokens).
+- Coherence sweep green.
+
+Skip this step if Steps 8–11 already push us past Phase 3 (300 tok/s). It is the largest engineering investment per unit of throughput at that point in the curve.
+
 ## Success Criteria
 
 This effort is succeeding when all of these are true:
@@ -326,7 +505,10 @@ This effort is succeeding when all of these are true:
 - Do not chase broad architectural rewrites before telemetry proves where the RDNA prompt path is losing time.
 - Do not keep cosmetic barrier-scope narrowings that are within the noise band on RDNA4. See "Known flat" above.
 - Do not add more phase profiling without a downstream structural change in the same cycle; the profile output already exists.
-- Do not re-implement prefill embedding dequant layouts that were already tested and rejected (cycles 14/15/23).
+- Do not re-implement prefill embedding dequant layouts that were already tested and rejected (CPU / staging / interleaved variants — see Lessons section).
+- Do not ship NUM_COLS=2..8 specialization on top of the current 1-thread-per-row DMMV shader. Step 8 (wave64 K-parallel inner loop) is a hard precondition.
+- Do not wire `recordCoopMatmul` against quantized weights without either (a) an upfront f16 dequant scratch buffer that amortizes across many prompt tokens, or (b) a per-tile dequant-into-shared-memory loader (the `mul_mm_funcs.glsl` pattern from Step 13).
+- Do not implement grouped MoE without a flag-gated CPU reference path running alongside for the first cycles (correctness blast radius is high).
 
 ## Likely Files
 
