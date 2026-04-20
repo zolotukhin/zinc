@@ -90,6 +90,8 @@ pub const DmmvDispatch = struct {
     pipeline_q4k_moe_kpar: ?Pipeline,
     /// MoE Q5K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q5k_moe: ?Pipeline,
+    /// Experimental K-parallel Q5K MoE pipeline (same 4 bindings, wave64 subgroupAdd).
+    pipeline_q5k_moe_kpar: ?Pipeline,
     /// MoE MXFP4 pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_mxfp4_moe: ?Pipeline,
     /// MoE Q5_1 pipeline (4 bindings: A, x, y, routing), or null.
@@ -262,6 +264,14 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // K-parallel Q5_K MoE variant: wave64 subgroupAdd reduction (targets the
+        // ~713 ms MoE down bucket in the Qwen3.5-35B flagship prefill).
+        const q5k_moe_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe_kpar.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q5k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_kpar_path, 4, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q5_K MoE kpar shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         const mxfp4_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_mxfp4_moe.spv", .{shader_dir}) catch unreachable;
         const pipeline_mxfp4_moe = pipeline_mod.createFromSpirvWithOptions(instance, mxfp4_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("MXFP4 MoE shader not loaded: {s}", .{@errorName(err)});
@@ -314,6 +324,7 @@ pub const DmmvDispatch = struct {
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
             .pipeline_q5_1_moe = pipeline_q5_1_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
+            .pipeline_q5k_moe_kpar = pipeline_q5k_moe_kpar,
             .pipeline_q6k_moe = pipeline_q6k_moe,
             .pipeline_coop_matmul = pipeline_coop_matmul,
             .descriptor_pool = descriptor_pool,
@@ -623,6 +634,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
+        if (self.pipeline_q5k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
         if (self.pipeline_coop_matmul) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);

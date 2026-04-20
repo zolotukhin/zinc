@@ -1,0 +1,185 @@
+#version 460
+// ZINC — Q5_K MoE DMMV with K-parallel subgroupAdd reduction.
+// Mirrors dmmv_q4k_moe_kpar.comp pattern (16 threads/block + 4 blocks per
+// iteration + wave64 subgroupAdd reduction) with Q5_K qh-bit promotion
+// borrowed from dmmv_q5k.comp.
+//
+// Current (serial) MoE shader: 1 row per thread, each thread walks K serially.
+// This variant: 2 rows per WG, 64 threads cooperate on K per row, single
+// subgroupAdd at the end. Matches the proven Q4_K MoE K-parallel pattern.
+//
+// Dispatch: ((M+1)/2, n_experts_used, 1) — more WGs but each is K-parallel.
+// gl_WorkGroupID.y selects the expert slot via routing buffer.
+//
+// Q5_K block (256 elements, 176 bytes = 44 uint32):
+//   [0..3]    d(f16) + dmin(f16)        — u32[0]
+//   [4..15]   scales (12 bytes)         — u32[1..3]
+//   [16..47]  qh (32 bytes, hi-bit/elt) — u32[4..11]
+//   [48..175] qs (128 bytes, lo nibble) — u32[12..43]
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;                // output rows (per expert)
+    uint K;                // input columns
+    uint expert_stride;    // bytes per expert in stacked weight tensor
+    uint x_expert_stride;  // elements between experts' inputs (0=shared, K=per-expert)
+    uint x_offset;         // byte offset for input vector (first expert)
+    uint y_offset;         // byte offset for output vector (first expert)
+};
+
+// Weight data as uint32 for packed reads
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+// B vector as vec4 for coalesced reads
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
+// Output
+layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[]; };
+// Expert routing buffer (expert_ids[] at the start)
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+const uint NUM_ROWS = 2u;
+const uint Q5K_BLOCK_U32 = 44u;  // 176 bytes / 4
+
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
+}
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
+}
+
+// Extract one bit from each of the 4 bytes packed in qh_u32 at bit position `sb`.
+// Returns vec4 already multiplied by 16.0 (the 5-bit promote weight).
+vec4 unpack_qh_bits(uint qh_u32, uint sb) {
+    return vec4(
+        float((qh_u32 >> sb) & 1u) * 16.0,
+        float((qh_u32 >> (sb + 8u)) & 1u) * 16.0,
+        float((qh_u32 >> (sb + 16u)) & 1u) * 16.0,
+        float((qh_u32 >> (sb + 24u)) & 1u) * 16.0
+    );
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id_x = gl_WorkGroupID.x;
+    uint expert_slot = gl_WorkGroupID.y;
+
+    // Expert id from routing buffer
+    uint expert_id = routing_data[expert_slot];
+    uint a_offset_bytes = expert_id * expert_stride;
+
+    // 16 threads per block, 4 blocks per iteration (matches dmmv_q5k.comp)
+    const uint THREADS_PER_BLOCK = 16u;
+    const uint it_size = 64u / THREADS_PER_BLOCK;  // = 4
+    uint itid = tid % THREADS_PER_BLOCK;  // 0..15 within a block
+    uint ix = tid / THREADS_PER_BLOCK;    // 0..3 which block in parallel
+
+    // Thread's position within the 256-element Q5_K superblock.
+    uint il = itid / 4u;
+    uint ir = itid % 4u;
+    uint v_im = il / 2u;     // 0 or 1: which 128-element half
+    uint v_in = il % 2u;     // 0 or 1: which 64-element sub-half
+    uint l0 = 4u * (2u * ir + v_in);  // element offset within half: 0,4,8,...,28
+    uint q_offset_in_half = 32u * v_im + l0;
+    uint y_offset_local = 64u * v_im + l0;
+
+    // Per-expert input base: x_expert_stride is in elements, divide by 4 for vec4 index
+    uint x_global_base_v4 = (x_offset / 16u) + (expert_slot * x_expert_stride) / 4u;
+
+    uint a_base_u32 = a_offset_bytes / 4u;
+    uint blocks_per_row = K / 256u;
+
+    // Output base (per-expert)
+    uint y_base = y_offset / 4u + expert_slot * M;
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id_x * NUM_ROWS + r;
+        if (row >= M) break;
+
+        uint row_u32 = a_base_u32 + row * blocks_per_row * Q5K_BLOCK_U32;
+        float sum = 0.0;
+
+        for (uint i = ix; i < blocks_per_row; i += it_size) {
+            uint blk_u32 = row_u32 + i * Q5K_BLOCK_U32;
+
+            // d, dmin
+            uint d_dmin = a_u32[blk_u32];
+            float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+            // Scales
+            uint sc0 = a_u32[blk_u32 + 1u];
+            uint sc1 = a_u32[blk_u32 + 2u];
+            uint sc2 = a_u32[blk_u32 + 3u];
+
+            // qh: u32 covering bytes [l0, l0+1, l0+2, l0+3] within qh region.
+            // qh starts at u32[4]. l0 in {0,4,8,12,16,20,24,28} -> l0/4 in {0..7}.
+            uint qh_u32 = a_u32[blk_u32 + 4u + l0 / 4u];
+
+            // qs: starts at u32[12]. Two reads at first/second 64-byte halves.
+            uint qs_u32_0 = a_u32[blk_u32 + 12u + q_offset_in_half / 4u];
+            uint qs_u32_1 = a_u32[blk_u32 + 12u + q_offset_in_half / 4u + 16u];
+
+            vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
+            vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
+            vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
+            vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
+
+            uint sb_a = 2u * v_im;       // sub-block for first half low nibble
+            uint sb_b = 2u * v_im + 1u;  // sub-block for first half high nibble
+            uint sb_c = 2u * v_im + 4u;  // sub-block for second half low nibble
+            uint sb_d = 2u * v_im + 5u;  // sub-block for second half high nibble
+
+            // Promote 4-bit qs nibbles to 5-bit values via qh bits.
+            q0_lo += unpack_qh_bits(qh_u32, sb_a);
+            q0_hi += unpack_qh_bits(qh_u32, sb_b);
+            q1_lo += unpack_qh_bits(qh_u32, sb_c);
+            q1_hi += unpack_qh_bits(qh_u32, sb_d);
+
+            // B vector loads (from this expert's input column)
+            uint b_idx = (i * 256u + y_offset_local) / 4u;
+            vec4 by0 = x_v4[x_global_base_v4 + b_idx];
+            vec4 by1 = x_v4[x_global_base_v4 + b_idx + 8u];
+            uint b_idx2 = (i * 256u + y_offset_local + 128u) / 4u;
+            vec4 by2 = x_v4[x_global_base_v4 + b_idx2];
+            vec4 by3 = x_v4[x_global_base_v4 + b_idx2 + 8u];
+
+            // Decode 6-bit scales / mins from packed bytes
+            uint bytes[12];
+            bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
+            bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
+            bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
+
+            float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
+            if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a+4u] & 63u); }
+            else { sc_a = float((bytes[sb_a+4u]&0xFu)|((bytes[sb_a-4u]>>6)<<4)); mn_a = float(((bytes[sb_a+4u]>>4)&0xFu)|((bytes[sb_a]>>6)<<4)); }
+            if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b+4u] & 63u); }
+            else { sc_b = float((bytes[sb_b+4u]&0xFu)|((bytes[sb_b-4u]>>6)<<4)); mn_b = float(((bytes[sb_b+4u]>>4)&0xFu)|((bytes[sb_b]>>6)<<4)); }
+            if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c+4u] & 63u); }
+            else { sc_c = float((bytes[sb_c+4u]&0xFu)|((bytes[sb_c-4u]>>6)<<4)); mn_c = float(((bytes[sb_c+4u]>>4)&0xFu)|((bytes[sb_c]>>6)<<4)); }
+            if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d+4u] & 63u); }
+            else { sc_d = float((bytes[sb_d+4u]&0xFu)|((bytes[sb_d-4u]>>6)<<4)); mn_d = float(((bytes[sb_d+4u]>>4)&0xFu)|((bytes[sb_d]>>6)<<4)); }
+
+            float factor0 = d_val * sc_a; float bias0 = dmin_val * mn_a;
+            float factor1 = d_val * sc_b; float bias1 = dmin_val * mn_b;
+            float factor2 = d_val * sc_c; float bias2 = dmin_val * mn_c;
+            float factor3 = d_val * sc_d; float bias3 = dmin_val * mn_d;
+
+            sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+            sum += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+            sum += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+            sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+        }
+
+        // Wave64 subgroup reduction (single subgroupAdd covers all 64 threads).
+        sum = subgroupAdd(sum);
+        if (tid == 0u) {
+            y_data[y_base + row] = sum;
+        }
+    }
+}

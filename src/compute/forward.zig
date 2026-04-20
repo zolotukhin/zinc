@@ -819,6 +819,11 @@ pub const InferenceEngine = struct {
     // is available, the MoE gate/up/down DMMVs for Q4_K expert weights use the
     // K-parallel subgroupAdd variant instead of the serial per-row shader.
     use_moe_kpar: bool = false,
+    // Gated by ZINC_MOE_Q5K_KPAR. When set (default-on) and the Q5_K MoE kpar
+    // shader pipeline is available, the MoE down DMMV for Q5_K expert weights
+    // uses the K-parallel subgroupAdd variant — targets the ~713 ms MoE down
+    // bucket in the Qwen3.5-35B flagship prefill.
+    use_moe_q5k_kpar: bool = false,
     // Default-on. Subgroup-parallel softmax_topk_v2 (subgroupMax/Min/Shuffle).
     // Disable with ZINC_TOPK_V1=1 to fall back to the v1 shader (single-thread
     // serial scan in shared memory).
@@ -1557,6 +1562,19 @@ pub const InferenceEngine = struct {
             log.info("MoE Q4_K kpar variant DISABLED via ZINC_MOE_KPAR=0", .{});
         }
 
+        // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
+        // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
+        // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
+        // Q4_K kpar pattern (16 threads per Q5_K superblock + wave64 subgroupAdd).
+        const moe_q5k_kpar_env = std.posix.getenv("ZINC_MOE_Q5K_KPAR");
+        const moe_q5k_kpar_explicitly_off = moe_q5k_kpar_env != null and std.mem.eql(u8, moe_q5k_kpar_env.?, "0");
+        const moe_q5k_kpar_enabled = !moe_q5k_kpar_explicitly_off and dmmv.pipeline_q5k_moe_kpar != null;
+        if (moe_q5k_kpar_enabled) {
+            log.info("MoE Q5_K kpar variant ENABLED (default, set ZINC_MOE_Q5K_KPAR=0 to disable)", .{});
+        } else if (moe_q5k_kpar_explicitly_off) {
+            log.info("MoE Q5_K kpar variant DISABLED via ZINC_MOE_Q5K_KPAR=0", .{});
+        }
+
         // softmax_topk v2 (subgroup-parallel): default ON when the pipeline is
         // loaded, disable via ZINC_TOPK_V1=1 to fall back to the v1 shared-mem
         // single-thread scan shader.
@@ -1574,6 +1592,7 @@ pub const InferenceEngine = struct {
             .gpu_config = gpu_config,
             .dmmv = dmmv,
             .use_moe_kpar = moe_kpar_enabled,
+            .use_moe_q5k_kpar = moe_q5k_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .elementwise = elementwise,
             .attention = attention,
@@ -4702,8 +4721,10 @@ pub const InferenceEngine = struct {
                     const moe_down_phase = self.beginProfilePhase();
                     {
                         const qt = down_exps.info.type_;
-                        const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
-                        const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
+                        const use_q4k_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
+                        const use_q5k_kpar = self.use_moe_q5k_kpar and qt == .q5_k and self.dmmv.pipeline_q5k_moe_kpar != null;
+                        const use_kpar = use_q4k_kpar or use_q5k_kpar;
+                        const pip = if (use_q4k_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else if (use_q5k_kpar) &self.dmmv.pipeline_q5k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
                         if (pip.uses_push_descriptors) {
                             const push = MoeDmmvPushConstants{ .M = hidden_dim, .K = inter_dim, .expert_stride = expert_down_row_bytes, .x_expert_stride = inter_dim, .x_offset = 0, .y_offset = 0 };
                             const wg_x: u32 = if (use_kpar) (hidden_dim + 1) / 2 else switch (qt) {
