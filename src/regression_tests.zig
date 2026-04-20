@@ -61,6 +61,28 @@ test "Metal prefill preserves cached prefixes instead of resetting unconditional
     try expectContainsNear(src, "pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "return error.KvStateNotAvailable;", 1400);
 }
 
+test "Metal prefillBatched gates on env flag and supported architecture" {
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContains(src, "ZINC_BATCHED_PREFILL");
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "batchedPrefillMode()", 600);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "canUseBatchedPrefill(self)", 600);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "return self.prefillBatch(state, prompt_tokens);", 1200);
+}
+
+test "Metal prefillBatched validate path diffs last-token logits within 1e-3" {
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "if (mode == .validate)", 12000);
+    try expectContainsNear(src, "if (mode == .validate)", "const tol: f32 = 1e-3;", 1500);
+    try expectContainsNear(src, "if (mode == .validate)", "try self.prefillBatch(state, prompt_tokens);", 1500);
+}
+
+test "Metal prefillBatched uses gemm/rope batched dispatch helpers" {
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "dispatchGemmBatchedOnCmd", 12000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "dispatchRopeBatchedOnCmd", 12000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "dispatchFlashAttnBatchedOnCmd", 12000);
+}
+
 test "softmax_topk shader keeps RADV-safe shared-memory winner scan" {
     const src = @embedFile("shaders/softmax_topk.comp");
     try expectContains(src, "shared float s_local_val[64];");

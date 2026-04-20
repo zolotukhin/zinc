@@ -565,6 +565,17 @@ const RopeBatchedPush = extern struct {
     attn_scale_bits: u32,
 };
 
+/// Push constants for flash_attn_batched — mirrors BatchedFlashAttnPush in
+/// src/shaders/metal/flash_attn_batched.metal.
+const BatchedFlashAttnPush = extern struct {
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    kv_len: u32,
+    n_queries: u32,
+    kv_pos_offset: u32,
+};
+
 /// Push constants for batched Q4_K MoE DMMV.
 /// Expert IDs are provided via a small CPU-written Metal buffer.
 const MoeDmmvPush = extern struct {
@@ -933,6 +944,195 @@ fn resolveMoeGateUpLayout(lt: LayerTensors, inter_dim: u32, hidden_dim: u32) !Mo
         };
     }
     return error.MissingTensor;
+}
+
+/// Three-state opt-in for the experimental batched prefill path:
+///   - off:      `ZINC_BATCHED_PREFILL` unset / 0 — keep per-token `prefillBatch`.
+///   - on:       `ZINC_BATCHED_PREFILL=1` — run only the batched path.
+///   - validate: `ZINC_BATCHED_PREFILL=validate` — run the batched path, then
+///               re-run the per-token path on a fresh state and compare last-
+///               token logits. Logs the max abs diff and warns if it exceeds
+///               1e-3. Doubles prefill time; only useful for correctness
+///               checks against a real model.
+const BatchedPrefillMode = enum { off, on, validate };
+
+fn batchedPrefillMode() BatchedPrefillMode {
+    const raw = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse return .off;
+    if (std.mem.eql(u8, raw, "1")) return .on;
+    if (std.mem.eql(u8, raw, "validate")) return .validate;
+    return .off;
+}
+
+/// Returns true when the model + engine state match the narrow slice that
+/// `prefillBatched` currently knows how to run: LLaMA-style dense attention
+/// + dense FFN, Q4_K/Q6_K weights, no Q/K norms, no biases, no attention
+/// gate, no post-attn/post-ffn norms, no sliding window, no per-layer output
+/// scale, no attention sinks, f32 KV cache, shared-mode decode buffers.
+/// Every unsupported case falls back to the per-token path.
+fn canUseBatchedPrefill(engine: *const InferenceEngine) bool {
+    const cfg = engine.config;
+    if (cfg.n_experts > 0) return false;
+    if (cfg.ssm_d_inner > 0) return false;
+    if (cfg.architecture == .gemma or cfg.architecture == .gpt_oss) return false;
+    if (engine.private_decode_buffers) return false;
+    if (engine.kv_cache_q8) return false;
+    if (fullAttentionInterval(cfg) != 1) return false;
+    if (cfg.sliding_window_size != 0) return false;
+    if (engine.attn_sink_values != null) return false;
+
+    const supported = [_]GGMLType{ .q4_k, .q6_k };
+    const isSupported = struct {
+        fn f(t: GGMLType) bool {
+            for (supported) |s| if (t == s) return true;
+            return false;
+        }
+    }.f;
+
+    if (!isSupported(engine.lm_head.info.type_)) return false;
+
+    for (0..cfg.n_layers) |i| {
+        if (engine.post_attn_norm_present[i]) return false;
+        if (engine.post_ffn_norm_present[i]) return false;
+        if (engine.layer_output_scales[i] != 1.0) return false;
+
+        const lt = engine.layer_tensors[i];
+        if (lt.attn_gate != null) return false;
+        if (lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+
+        const q = lt.attn_q orelse return false;
+        const k = lt.attn_k orelse return false;
+        const v = lt.attn_v orelse return false;
+        const o = lt.attn_output orelse return false;
+        const gate = lt.ffn_gate orelse return false;
+        const up = lt.ffn_up orelse return false;
+        const down = lt.ffn_down orelse return false;
+        for ([_]*const metal_loader.LoadedTensor{ q, k, v, o, gate, up, down }) |t| {
+            if (!isSupported(t.info.type_)) return false;
+        }
+
+        // Reject packed Q+gate (Qwen3Next): attn_q row count == 2*q_dim.
+        const hidden_dim = cfg.hidden_dim;
+        const q_rows: u32 = @intCast(q.info.numElements() / hidden_dim);
+        if (q_rows >= cfg.n_heads * (cfg.head_dim) * 2) return false;
+    }
+    return true;
+}
+
+/// Scratch GPU buffers needed by `prefillBatched` for a batch of `n_tokens`.
+/// All buffers are shared-mode so CPU code can dequantize embeddings directly
+/// into `hidden` and read the last-token slice back out at the end.
+const BatchedPrefillScratch = struct {
+    n_tokens: u32,
+    hidden: MetalBuffer,
+    norm: MetalBuffer,
+    q: MetalBuffer,
+    k: MetalBuffer,
+    v: MetalBuffer,
+    attn_out: MetalBuffer,
+    gate: MetalBuffer,
+    up: MetalBuffer,
+    swiglu: MetalBuffer,
+    down: MetalBuffer,
+
+    fn init(engine: *InferenceEngine, n_tokens: u32, q_dim: u32, kv_dim: u32, inter_dim: u32) !BatchedPrefillScratch {
+        const ctx = engine.device.ctx;
+        const hidden_dim = engine.config.hidden_dim;
+        const f32_sz: usize = @sizeOf(f32);
+        const n: usize = n_tokens;
+        const h = try metal_buffer.createBuffer(ctx, n * hidden_dim * f32_sz);
+        errdefer {
+            var mut = h;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const nm = try metal_buffer.createBuffer(ctx, n * hidden_dim * f32_sz);
+        errdefer {
+            var mut = nm;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const qb = try metal_buffer.createBuffer(ctx, n * q_dim * f32_sz);
+        errdefer {
+            var mut = qb;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const kb = try metal_buffer.createBuffer(ctx, n * kv_dim * f32_sz);
+        errdefer {
+            var mut = kb;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const vb = try metal_buffer.createBuffer(ctx, n * kv_dim * f32_sz);
+        errdefer {
+            var mut = vb;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const ao = try metal_buffer.createBuffer(ctx, n * q_dim * f32_sz);
+        errdefer {
+            var mut = ao;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const gb = try metal_buffer.createBuffer(ctx, n * inter_dim * f32_sz);
+        errdefer {
+            var mut = gb;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const ub = try metal_buffer.createBuffer(ctx, n * inter_dim * f32_sz);
+        errdefer {
+            var mut = ub;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const sw = try metal_buffer.createBuffer(ctx, n * inter_dim * f32_sz);
+        errdefer {
+            var mut = sw;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const db = try metal_buffer.createBuffer(ctx, n * hidden_dim * f32_sz);
+        return .{
+            .n_tokens = n_tokens,
+            .hidden = h,
+            .norm = nm,
+            .q = qb,
+            .k = kb,
+            .v = vb,
+            .attn_out = ao,
+            .gate = gb,
+            .up = ub,
+            .swiglu = sw,
+            .down = db,
+        };
+    }
+
+    fn deinit(self: *BatchedPrefillScratch) void {
+        metal_buffer.freeBuffer(&self.hidden);
+        metal_buffer.freeBuffer(&self.norm);
+        metal_buffer.freeBuffer(&self.q);
+        metal_buffer.freeBuffer(&self.k);
+        metal_buffer.freeBuffer(&self.v);
+        metal_buffer.freeBuffer(&self.attn_out);
+        metal_buffer.freeBuffer(&self.gate);
+        metal_buffer.freeBuffer(&self.up);
+        metal_buffer.freeBuffer(&self.swiglu);
+        metal_buffer.freeBuffer(&self.down);
+    }
+};
+
+/// Dispatch a weight × matrix batched matmul using the appropriate GEMM kernel
+/// for the tensor's quant type. Only Q4_K and Q6_K are supported here — callers
+/// must have verified the type via `canUseBatchedPrefill`.
+fn dispatchGemmBatchedOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    weight: *const metal_loader.LoadedTensor,
+    input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    N: u32,
+) void {
+    switch (weight.info.type_) {
+        .q4_k => dispatchGemmQ4KOnCmd(engine, cmd, weight, input, output, M, K, N),
+        .q6_k => dispatchGemmQ6KOnCmd(engine, cmd, weight, input, output, M, K, N),
+        else => unreachable,
+    }
 }
 
 /// Metal inference engine — owns GPU buffers, pipelines, and KV cache.
@@ -2096,6 +2296,227 @@ pub const InferenceEngine = struct {
         state.position = self.position;
     }
 
+    /// Experimental batched prompt prefill gated by `ZINC_BATCHED_PREFILL`.
+    ///
+    /// Processes all prompt tokens in a single batched forward pass using the
+    /// gemm_q4k / gemm_q6k / rope_batched / flash_attn_batched shaders — the
+    /// weight matrix for each projection is read once for the whole prompt.
+    /// Falls back to the per-token `prefillBatch` when the env flag is off,
+    /// when the model architecture is outside the supported slice (see
+    /// `canUseBatchedPrefill`), or when a previously cached prefix is being
+    /// extended (state.position > 0). With `ZINC_BATCHED_PREFILL=validate`
+    /// the batched path runs first, then the per-token path is replayed on
+    /// a fresh state and the last-token logits are diffed; max abs diff is
+    /// logged and a warning is emitted if it exceeds 1e-3.
+    pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        if (prompt_tokens.len == 0) return;
+        const mode = batchedPrefillMode();
+        if (mode == .off or !canUseBatchedPrefill(self)) {
+            return self.prefillBatch(state, prompt_tokens);
+        }
+        if (state.position != 0 or state.generated_tokens.items.len != 0) {
+            // Prefix re-use path is not implemented yet — defer to per-token prefill.
+            return self.prefillBatch(state, prompt_tokens);
+        }
+
+        const n_tokens: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+        const target_context_tokens = if (state.requested_context_tokens > 0)
+            @max(state.requested_context_tokens, n_tokens)
+        else
+            n_tokens;
+        if (target_context_tokens > self.max_context_tokens) return error.ContextLengthExceeded;
+
+        const cfg = self.config;
+        const hidden_dim = cfg.hidden_dim;
+        const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
+        const attn = try resolveLayerAttentionParams(cfg, self.layer_tensors[0], hidden_dim, self.kv_cache_q8);
+
+        try self.resetRequestState(target_context_tokens);
+        state.position = 0;
+        state.generated_tokens.clearRetainingCapacity();
+
+        var scratch = try BatchedPrefillScratch.init(self, n_tokens, attn.q_dim, attn.kv_dim, inter_dim);
+        defer scratch.deinit();
+
+        // Pre-dequantize embeddings for the whole prompt into scratch.hidden.
+        {
+            const mmap = self.model.mmap_data orelse return error.NoMmapData;
+            const embed_offset = self.model.gguf_file.tensor_data_offset + self.token_embed.info.offset;
+            const embed_raw = mmap[embed_offset..];
+            const hidden_ptr: [*]f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
+            for (prompt_tokens, 0..) |token_id, t| {
+                const out_slice = hidden_ptr[t * hidden_dim .. (t + 1) * hidden_dim];
+                dequantRow(embed_raw, token_id, hidden_dim, self.token_embed.info.type_, out_slice);
+            }
+        }
+
+        var cmd = try metal_command.beginCommand(self.device.ctx);
+
+        for (0..cfg.n_layers) |layer_idx| {
+            const lt = self.layer_tensors[layer_idx];
+            const q_t = lt.attn_q.?;
+            const k_t = lt.attn_k.?;
+            const v_t = lt.attn_v.?;
+            const o_t = lt.attn_output.?;
+            const gate_t = lt.ffn_gate.?;
+            const up_t = lt.ffn_up.?;
+            const down_t = lt.ffn_down.?;
+
+            // === Attention block ===
+            dispatchRmsNormOnCmd(self, &cmd, &scratch.hidden, &scratch.norm, &self.attn_norm_bufs[layer_idx], hidden_dim, n_tokens);
+            cmd.barrier();
+
+            dispatchGemmBatchedOnCmd(self, &cmd, q_t, &scratch.norm, &scratch.q, attn.q_dim, hidden_dim, n_tokens);
+            dispatchGemmBatchedOnCmd(self, &cmd, k_t, &scratch.norm, &scratch.k, attn.kv_dim, hidden_dim, n_tokens);
+            dispatchGemmBatchedOnCmd(self, &cmd, v_t, &scratch.norm, &scratch.v, attn.kv_dim, hidden_dim, n_tokens);
+            cmd.barrier();
+
+            // Per-head Q/K RMSNorms (Qwen3 and similar). Each head-slice of a token
+            // is one workgroup; batching is just n_tokens × n_heads workgroups.
+            if (self.attn_q_norm_present[layer_idx]) {
+                dispatchRmsNormOnCmd(self, &cmd, &scratch.q, &scratch.q, &self.attn_q_norm_bufs[layer_idx], attn.head_dim, cfg.n_heads * n_tokens);
+            }
+            if (self.attn_k_norm_present[layer_idx]) {
+                dispatchRmsNormOnCmd(self, &cmd, &scratch.k, &scratch.k, &self.attn_k_norm_bufs[layer_idx], attn.head_dim, attn.n_kv_heads * n_tokens);
+            }
+            if (self.attn_q_norm_present[layer_idx] or self.attn_k_norm_present[layer_idx]) {
+                cmd.barrier();
+            }
+
+            const rope_freq_buf = selectRopeFreqBuffer(self, attn.rope_dim, attn.rope_freq_base, attn.use_rope_freq_factors);
+            dispatchRopeBatchedOnCmd(self, &cmd, &scratch.q, &scratch.q, rope_freq_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, 0, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
+            dispatchRopeBatchedOnCmd(self, &cmd, &scratch.k, &scratch.k, rope_freq_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, 0, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
+            cmd.barrier();
+
+            dispatchKvCacheWriteBatchedOnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, 0, n_tokens * attn.kv_dim);
+            cmd.barrier();
+
+            dispatchFlashAttnBatchedOnCmd(
+                self,
+                &cmd,
+                &scratch.q,
+                &self.kv_k_cache[layer_idx],
+                &self.kv_v_cache[layer_idx],
+                &scratch.attn_out,
+                attn.head_dim,
+                cfg.n_heads,
+                attn.n_kv_heads,
+                n_tokens,
+                n_tokens,
+                0,
+            );
+            cmd.barrier();
+
+            dispatchGemmBatchedOnCmd(self, &cmd, o_t, &scratch.attn_out, &scratch.down, hidden_dim, attn.q_dim, n_tokens);
+            cmd.barrier();
+
+            // Fused residual-add + FFN-norm over all N tokens: eliminates
+            // separate scale_acc → barrier → rms_norm dispatches per layer.
+            {
+                const push = ResidualRmsNormPush{ .n = hidden_dim, .eps = cfg.rms_norm_eps, .scale = 1.0 };
+                const bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down, &scratch.norm, &self.ffn_norm_bufs[layer_idx] };
+                cmd.dispatchV2(&self.residual_rms_norm_pipe, .{ n_tokens, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ResidualRmsNormPush), 0);
+            }
+            cmd.barrier();
+
+            dispatchGemmBatchedOnCmd(self, &cmd, gate_t, &scratch.norm, &scratch.gate, inter_dim, hidden_dim, n_tokens);
+            dispatchGemmBatchedOnCmd(self, &cmd, up_t, &scratch.norm, &scratch.up, inter_dim, hidden_dim, n_tokens);
+            cmd.barrier();
+
+            // Batched SwiGLU: grid.x covers inter_dim, grid.y is the token index.
+            {
+                const push = SwiGLUPush{ .n = inter_dim };
+                const bufs = [_]*const MetalBuffer{ &scratch.gate, &scratch.swiglu, &scratch.up };
+                cmd.dispatchV2(&self.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, n_tokens, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+            }
+            cmd.barrier();
+
+            dispatchGemmBatchedOnCmd(self, &cmd, down_t, &scratch.swiglu, &scratch.down, hidden_dim, inter_dim, n_tokens);
+            cmd.barrier();
+
+            {
+                const total = n_tokens * hidden_dim;
+                const push = ScaleAccPush{ .n = total, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                const bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down };
+                cmd.dispatchV2(&self.scale_acc_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 0);
+            }
+            cmd.barrier();
+        }
+
+        // Final RMSNorm over all N tokens into scratch.norm. The last token is
+        // what feeds the LM head.
+        dispatchRmsNormOnCmd(self, &cmd, &scratch.hidden, &scratch.norm, &self.final_norm_gpu, hidden_dim, n_tokens);
+        cmd.barrier();
+
+        // LM head on the last token via DmmvPush.x_offset (bytes into scratch.norm).
+        if (shouldCpuLmHeadFallback(self)) {
+            // Rare quant path (Gemma Q8). Fall back to the CPU LM head.
+            cmd.commitAndWait();
+            const src_base = @as(usize, n_tokens - 1) * hidden_dim;
+            const src_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
+            const dst_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
+            @memcpy(dst_ptr[0..hidden_dim], src_ptr[src_base .. src_base + hidden_dim]);
+            var final_cmd = try metal_command.beginCommand(self.device.ctx);
+            dispatchRmsNormOnCmd(self, &final_cmd, &self.hidden_buf, &self.norm_buf, &self.final_norm_gpu, hidden_dim, 1);
+            final_cmd.commitAndWait();
+            const mmap = self.model.mmap_data orelse return error.NoMmapData;
+            const tdo = self.model.gguf_file.tensor_data_offset;
+            const in_ptr: [*]const f32 = @ptrCast(@alignCast(self.norm_buf.cpu_ptr.?));
+            const out_ptr: [*]f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
+            try cpuDmmvFallback(mmap, self.lm_head, tdo, in_ptr, out_ptr, cfg.vocab_size, hidden_dim, 0, self.allocator);
+            var argmax_cmd = try metal_command.beginCommand(self.device.ctx);
+            dispatchArgmaxOnCmd(self, &argmax_cmd, &self.logits_buf, &self.argmax_buf, cfg.vocab_size);
+            argmax_cmd.commitAndWait();
+        } else {
+            const x_offset_bytes: u32 = (n_tokens - 1) * hidden_dim * @sizeOf(f32);
+            dispatchLmHeadWithInputOffset(self, &cmd, &scratch.norm, &self.logits_buf, hidden_dim, cfg.vocab_size, x_offset_bytes);
+            cmd.barrier();
+            dispatchArgmaxOnCmd(self, &cmd, &self.logits_buf, &self.argmax_buf, cfg.vocab_size);
+            cmd.commitAndWait();
+            // Keep engine.hidden_buf consistent with the advancing position so
+            // any subsequent single-token decodeStep sees the right residual.
+            const src_base = @as(usize, n_tokens - 1) * hidden_dim;
+            const src_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
+            const dst_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
+            @memcpy(dst_ptr[0..hidden_dim], src_ptr[src_base .. src_base + hidden_dim]);
+        }
+
+        self.position = n_tokens;
+        state.position = n_tokens;
+
+        if (mode == .validate) {
+            // Snapshot batched-path logits, then re-run the per-token path on
+            // a fresh state and diff. The per-token result becomes authoritative
+            // so any subsequent decode steps continue from the trusted state.
+            const vocab = cfg.vocab_size;
+            const batched_snapshot = try self.allocator.alloc(f32, vocab);
+            defer self.allocator.free(batched_snapshot);
+            const batched_logits: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
+            @memcpy(batched_snapshot, batched_logits[0..vocab]);
+
+            self.position = 0;
+            state.position = 0;
+            state.generated_tokens.clearRetainingCapacity();
+            try self.prefillBatch(state, prompt_tokens);
+
+            const ref_logits: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
+            var max_abs: f32 = 0;
+            var max_idx: usize = 0;
+            for (0..vocab) |i| {
+                const diff = @abs(ref_logits[i] - batched_snapshot[i]);
+                if (diff > max_abs) {
+                    max_abs = diff;
+                    max_idx = i;
+                }
+            }
+            const tol: f32 = 1e-3;
+            const level: enum { ok, exceeded } = if (max_abs > tol) .exceeded else .ok;
+            log.warn("prefillBatched validate[{s}]: last-token logits max_abs_diff={d:.6} at idx={d} (ref={d:.4} batched={d:.4}) tol={d:.6} n_tokens={d}", .{
+                @tagName(level), max_abs, max_idx, ref_logits[max_idx], batched_snapshot[max_idx], tol, n_tokens,
+            });
+        }
+    }
+
     /// Advance one autoregressive decode step from the given input token.
     pub fn decodeStep(self: *InferenceEngine, state: *DecodeState, token_id: u32) !void {
         if (state.position >= self.max_context_tokens) return error.ContextLengthExceeded;
@@ -2866,6 +3287,44 @@ fn dispatchLmHeadOnCmd(
     dispatchDmmvOnCmd(engine, cmd, engine.lm_head, input_buf, output_buf, vocab_size, hidden_dim, 0);
 }
 
+/// Variant of `dispatchLmHeadOnCmd` that accepts a byte offset into `input_buf`.
+/// Used by `prefillBatched` to point at the last token's slice inside the
+/// contiguous [N × hidden_dim] normalized hidden buffer without a CPU memcpy.
+fn dispatchLmHeadWithInputOffset(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    hidden_dim: u32,
+    vocab_size: u32,
+    x_offset_bytes: u32,
+) void {
+    const tensor = engine.lm_head;
+    const weight_buf: *const MetalBuffer = if (engine.lm_head_private_buf.handle != null)
+        &engine.lm_head_private_buf
+    else
+        &tensor.gpu_buffer;
+    const weight_offset: u32 = if (engine.lm_head_private_buf.handle != null)
+        0
+    else
+        tensorPageOffset(engine.model, tensor);
+
+    const pip = engine.dmmvPipelineForType(tensor, vocab_size, hidden_dim) orelse {
+        log.err("No DMMV pipeline for LM head quant type {d}", .{@intFromEnum(tensor.info.type_)});
+        return;
+    };
+    const push = DmmvPush{
+        .M = vocab_size,
+        .K = hidden_dim,
+        .a_offset = weight_offset,
+        .x_offset = x_offset_bytes,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
+    const wgs = (vocab_size + pip.rows_per_wg - 1) / pip.rows_per_wg;
+    cmd.dispatchV2(pip.pipe, .{ wgs, 1, 1 }, .{ pip.block_size, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), pip.push_idx);
+}
+
 fn shouldCpuLmHeadFallbackForType(arch: config_mod.Architecture, quant_type: GGMLType) bool {
     return arch == .gemma and quant_type == .q8_0;
 }
@@ -3232,6 +3691,59 @@ fn dispatchRopeBatchedOnCmd(
     const bufs = [_]*const MetalBuffer{ in_buf, out_buf, freq_buf };
     const grid = [_]u32{ n_heads, n_tokens, 1 };
     cmd.dispatchV2(&engine.rope_batched_pipe, grid, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeBatchedPush), 0);
+}
+
+/// Dispatch batched causal flash attention for N query tokens sharing a KV cache.
+/// flash_attn_batched.metal: buffer(0)=push, buffer(1)=q, buffer(2)=k_cache, buffer(3)=v_cache, buffer(4)=out.
+fn dispatchFlashAttnBatchedOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    q_buf: *const MetalBuffer,
+    k_cache: *const MetalBuffer,
+    v_cache: *const MetalBuffer,
+    out_buf: *const MetalBuffer,
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    kv_len: u32,
+    n_queries: u32,
+    kv_pos_offset: u32,
+) void {
+    const push = BatchedFlashAttnPush{
+        .head_dim = head_dim,
+        .n_heads = n_heads,
+        .n_kv_heads = n_kv_heads,
+        .kv_len = kv_len,
+        .n_queries = n_queries,
+        .kv_pos_offset = kv_pos_offset,
+    };
+    const bufs = [_]*const MetalBuffer{ q_buf, k_cache, v_cache, out_buf };
+    cmd.dispatchV2(&engine.flash_attn_batched_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnPush), 0);
+}
+
+/// Dispatch a batched KV-cache write: copy N_tokens × kv_dim contiguous f32s
+/// from `src_k`/`src_v` to the layer's cache starting at `dst_offset_elements`.
+fn dispatchKvCacheWriteBatchedOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    layer_idx: usize,
+    src_k: *const MetalBuffer,
+    src_v: *const MetalBuffer,
+    dst_offset_elements: u32,
+    n_elements: u32,
+) void {
+    const push = KvCacheWritePush{
+        .n = n_elements,
+        .dst_offset = dst_offset_elements,
+        .dst_offset_bytes = 0,
+    };
+    const bufs = [_]*const MetalBuffer{
+        src_k,
+        src_v,
+        &engine.kv_k_cache[layer_idx],
+        &engine.kv_v_cache[layer_idx],
+    };
+    cmd.dispatchV2(&engine.kv_cache_write_pipe, .{ (n_elements + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
 }
 
 fn dispatchDeinterleaveOnCmd(
@@ -6443,7 +6955,7 @@ pub fn generateWithMetrics(
     // Prefill: process each prompt token through all layers
     const prefill_start = std.time.nanoTimestamp();
     if (prompt_tokens.len > 0) {
-        try engine.prefillBatch(&state, prompt_tokens);
+        try engine.prefillBatched(&state, prompt_tokens);
     } else {
         try engine.resetRequestState(state.requested_context_tokens);
     }
