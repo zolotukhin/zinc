@@ -1,0 +1,108 @@
+#version 460
+// ZINC — Quantize F32 activation into Q8_1 blocks.
+//
+// Foundation step for the mul_mmq path (effort-6 Step 10a). Produces per-32-element
+// blocks of int8 values with an f16 scale `d` and an f16 precomputed sum-of-quants*d
+// (the "s" term llama.cpp stores in `ds.y` so the downstream integer matmul does not
+// have to recompute it).
+//
+// One prefill activation quantization pass feeds all four SSM proj matvecs
+// (wqkv / z / alpha / beta), every MoE gate/up/down per expert, and the router.
+// The win is bandwidth: 32 f32 (128 B) -> 36 B block, and the consumer dot is INT8.
+//
+// Output layout (std430), 36 bytes per block:
+//   uint qs[8];  // 32 int8 values packed 4-per-uint (little-endian)
+//   uint ds;     // packed f16vec2: low 16 bits = d, high 16 bits = d * sum(quants)
+//
+// Mirrors llama.cpp's block_q8_1_packed32 (non-x4 variant) so a future
+// dmmv_q*_q8_1 shader can use the same struct.
+
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// 32 threads per workgroup, 8 threads per block => 4 blocks per workgroup.
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint ne;         // number of f32 input elements (must be a multiple of 32)
+    uint num_blocks; // ne / 32
+} p;
+
+layout(set = 0, binding = 0) readonly  buffer A { vec4 data_a[]; };
+layout(set = 0, binding = 1) writeonly buffer D {
+    uint data_b[];   // raw u32 stream; per block = 9 u32 = 36 B
+};
+
+shared float shmem[32];
+
+void quantize_block(uint wgid, uint tid) {
+    const uint block_in_wg = tid / 8u;   // 0..3
+    const uint iqs         = tid & 7u;   // 0..7
+
+    const uint ib = wgid * 4u + block_in_wg; // global block index
+    if (ib >= p.num_blocks) return;
+
+    // Load 4 f32 values this thread is responsible for.
+    const uint a_idx = ib * 8u + iqs;         // vec4 index into data_a
+    vec4 vals = data_a[a_idx];
+
+    // --- Step 1: block-wide absolute max via shared-memory reduction ---
+    const vec4 abs_vals = abs(vals);
+    float thread_max = max(max(abs_vals.x, abs_vals.y), max(abs_vals.z, abs_vals.w));
+    shmem[tid] = thread_max;
+    barrier();
+    [[unroll]] for (uint s = 4u; s > 0u; s >>= 1u) {
+        if (iqs < s) shmem[tid] = max(shmem[tid], shmem[tid + s]);
+        barrier();
+    }
+    const float amax = shmem[block_in_wg * 8u];
+
+    // --- Step 2: quantize ---
+    const float d     = amax / 127.0;
+    const float d_inv = (d != 0.0) ? (1.0 / d) : 0.0;
+    vals = round(vals * d_inv);
+
+    // Pack 4 int8 values into one u32 (little-endian, matching llama.cpp pack32(i8vec4)).
+    i8vec4 q = i8vec4(vals);
+    uint packed = (uint(uint8_t(q.x)))
+                | (uint(uint8_t(q.y)) << 8)
+                | (uint(uint8_t(q.z)) << 16)
+                | (uint(uint8_t(q.w)) << 24);
+
+    // Write this thread's 4 quantized bytes into qs[iqs].
+    // Block base offset (in u32 units): ib * 9
+    const uint block_base_u32 = ib * 9u;
+    data_b[block_base_u32 + iqs] = packed;
+
+    // --- Step 3: sum of quantized values (per block), reduced in shared mem ---
+    barrier();
+    float thread_sum = vals.x + vals.y + vals.z + vals.w;
+    shmem[tid] = thread_sum;
+    barrier();
+    [[unroll]] for (uint s = 4u; s > 0u; s >>= 1u) {
+        if (iqs < s) shmem[tid] += shmem[tid + s];
+        barrier();
+    }
+
+    // --- Step 4: thread 0 of each block writes ds (f16vec2) ---
+    if (iqs == 0u) {
+        const float sum = shmem[tid];
+        // llama.cpp layout: ds.x = d, ds.y = d * sum
+        f16vec2 ds = f16vec2(float16_t(d), float16_t(d * sum));
+        uint ds_bits = packFloat2x16(ds);
+        data_b[block_base_u32 + 8u] = ds_bits;
+    }
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    uint wgid = gl_WorkGroupID.x;
+    const uint total_wgs = (p.num_blocks + 3u) / 4u;
+    while (wgid < total_wgs) {
+        quantize_block(wgid, tid);
+        wgid += gl_NumWorkGroups.x;
+        barrier(); // shmem reuse across loop iterations
+    }
+}

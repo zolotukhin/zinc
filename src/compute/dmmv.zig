@@ -48,6 +48,17 @@ pub const MoeDmmvPushConstants = extern struct {
     y_offset: u32,
 };
 
+/// Push constants for the quantize_q8_1 shader.
+/// `ne` = number of f32 input elements (must be a multiple of 32).
+/// `num_blocks` = ne / 32. Pass explicitly so the shader does not have to divide.
+pub const QuantizeQ8_1Push = extern struct {
+    ne: u32,
+    num_blocks: u32,
+};
+
+/// Size in bytes of a single Q8_1 output block (32 int8 values + f16 d + f16 d*sum).
+pub const Q8_1_BLOCK_BYTES: u32 = 36;
+
 /// Manages DMMV pipelines for different quantization types.
 pub const DmmvDispatch = struct {
     /// Q4K pipeline, or null.
@@ -84,6 +95,9 @@ pub const DmmvDispatch = struct {
     pipeline_q5_1_moe: ?Pipeline,
     /// MoE Q6K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q6k_moe: ?Pipeline,
+    /// Foundation for mul_mmq: quantize an F32 activation into Q8_1 blocks.
+    /// 2 bindings (A f32 vec4 in, D u32 stream out), push constants {ne, num_blocks}.
+    pipeline_quantize_q8_1: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -264,6 +278,18 @@ pub const DmmvDispatch = struct {
             log.info("MoE DMMV pipelines loaded — GPU expert dispatch enabled (no readback)", .{});
         }
 
+        // Foundation for mul_mmq: quantize F32 activations into Q8_1 blocks.
+        // 2 bindings (A, D), push = QuantizeQ8_1Push {ne, num_blocks}.
+        const q81_push_size = @sizeOf(QuantizeQ8_1Push);
+        const q81_path = std.fmt.bufPrint(&path_buf, "{s}/quantize_q8_1.spv", .{shader_dir}) catch unreachable;
+        const pipeline_quantize_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q81_path, 2, q81_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("quantize_q8_1 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_quantize_q8_1 != null) {
+            log.info("quantize_q8_1 pipeline loaded (mul_mmq foundation)", .{});
+        }
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_mxfp4 = pipeline_mxfp4,
@@ -282,6 +308,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q5k_moe = pipeline_q5k_moe,
             .pipeline_q5k_moe_kpar = pipeline_q5k_moe_kpar,
             .pipeline_q6k_moe = pipeline_q6k_moe,
+            .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -488,6 +515,42 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Record a dispatch that quantizes `ne` f32 elements from `a_buf` into
+    /// Q8_1 blocks (36 bytes each) in `d_buf`. Foundation for mul_mmq — no
+    /// production callers yet. Requires `ne` to be a multiple of 32.
+    /// Returns `error.PipelineNotLoaded` when the shader is unavailable,
+    /// `error.InvalidArgument` when ne is not a multiple of 32.
+    pub fn recordQuantizeQ8_1(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        d_buf: vk.c.VkBuffer,
+        d_size: vk.c.VkDeviceSize,
+        ne: u32,
+    ) !void {
+        const pip = if (self.pipeline_quantize_q8_1) |*p| p else return error.PipelineNotLoaded;
+        if (ne == 0 or (ne & 31) != 0) return error.InvalidArgument;
+        const num_blocks = ne >> 5;
+        const push = QuantizeQ8_1Push{ .ne = ne, .num_blocks = num_blocks };
+        const infos = [2]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = d_buf, .offset = 0, .range = d_size },
+        };
+        // 4 blocks per workgroup.
+        const wg_x = (num_blocks + 3) / 4;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            wg_x,
+            1,
+            1,
+        );
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -504,6 +567,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
+        if (self.pipeline_quantize_q8_1) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
