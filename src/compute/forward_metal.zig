@@ -538,6 +538,33 @@ const MoeAccPush = extern struct {
     w_sh: f32,
 };
 
+/// Push constants for the gemm_q4k / gemm_q6k batched matmul kernels.
+/// Layout mirrors GemmPush in src/shaders/metal/gemm_q4k.metal.
+const GemmPush = extern struct {
+    ne00: i32,
+    ne02: i32,
+    nb01: u64,
+    nb02: u64,
+    ne12: i32,
+    _pad0: u32 = 0,
+    nb10: u64,
+    nb11: u64,
+    nb12: u64,
+    ne0: i32,
+    ne1: i32,
+    src0_off: u32,
+};
+
+/// Push constants for rope_batched.
+const RopeBatchedPush = extern struct {
+    stride: u32,
+    rope_dim: u32,
+    n_heads: u32,
+    position_base: u32,
+    freq_base_bits: u32,
+    attn_scale_bits: u32,
+};
+
 /// Push constants for batched Q4_K MoE DMMV.
 /// Expert IDs are provided via a small CPU-written Metal buffer.
 const MoeDmmvPush = extern struct {
@@ -3109,6 +3136,102 @@ fn dispatchResidualRmsNormOnCmd(
     const push = ResidualRmsNormPush{ .n = n, .eps = engine.config.rms_norm_eps, .scale = scale };
     const bufs = [_]*const MetalBuffer{ hidden, residual, norm_out, weights };
     cmd.dispatchV2(&engine.residual_rms_norm_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ResidualRmsNormPush), 0);
+}
+
+/// Dispatch a Q4_K × f32 batched matmul.
+///
+/// Computes `output[N×M] = weight[M×K] × input[N×K]` where weight rows are
+/// stored in Q4_K blocks (144 bytes / 256 elements). Use for prefill when
+/// N ≥ ~16 — below that DMMV is faster.
+/// gemm_q4k.metal: buffer(0)=push, buffer(1)=weights, buffer(2)=input, buffer(3)=output.
+fn dispatchGemmQ4KOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    weight: *const metal_loader.LoadedTensor,
+    input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    N: u32,
+) void {
+    std.debug.assert(K % 256 == 0);
+    const push = GemmPush{
+        .ne00 = @intCast(K),
+        .ne02 = 1,
+        .nb01 = @as(u64, K / 256) * 144,
+        .nb02 = 0,
+        .ne12 = 1,
+        .nb10 = 4,
+        .nb11 = @as(u64, K) * 4,
+        .nb12 = 0,
+        .ne0 = @intCast(M),
+        .ne1 = @intCast(N),
+        .src0_off = tensorPageOffset(engine.model, weight),
+    };
+    const bufs = [_]*const MetalBuffer{ &weight.gpu_buffer, input, output };
+    const grid = [_]u32{ (N + 31) / 32, (M + 63) / 64, 1 };
+    cmd.dispatchV2WithTgMem(&engine.gemm_q4k_pipe, grid, .{ 128, 1, 1 }, &bufs, &push, @sizeOf(GemmPush), 0, 8192);
+}
+
+/// Dispatch a Q6_K × f32 batched matmul. Same tile layout as gemm_q4k.
+/// Q6_K blocks are 210 bytes / 256 elements.
+fn dispatchGemmQ6KOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    weight: *const metal_loader.LoadedTensor,
+    input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    N: u32,
+) void {
+    std.debug.assert(K % 256 == 0);
+    const push = GemmPush{
+        .ne00 = @intCast(K),
+        .ne02 = 1,
+        .nb01 = @as(u64, K / 256) * 210,
+        .nb02 = 0,
+        .ne12 = 1,
+        .nb10 = 4,
+        .nb11 = @as(u64, K) * 4,
+        .nb12 = 0,
+        .ne0 = @intCast(M),
+        .ne1 = @intCast(N),
+        .src0_off = tensorPageOffset(engine.model, weight),
+    };
+    const bufs = [_]*const MetalBuffer{ &weight.gpu_buffer, input, output };
+    const grid = [_]u32{ (N + 31) / 32, (M + 63) / 64, 1 };
+    cmd.dispatchV2WithTgMem(&engine.gemm_q6k_pipe, grid, .{ 128, 1, 1 }, &bufs, &push, @sizeOf(GemmPush), 0, 8192);
+}
+
+/// Dispatch batched RoPE for N tokens at consecutive positions.
+/// rope_batched.metal: buffer(0)=push, buffer(1)=in, buffer(2)=out, buffer(3)=inv_freq.
+fn dispatchRopeBatchedOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    in_buf: *const MetalBuffer,
+    out_buf: *const MetalBuffer,
+    freq_buf: *const MetalBuffer,
+    head_dim: u32,
+    rope_dim: u32,
+    n_heads: u32,
+    position_base: u32,
+    n_tokens: u32,
+    freq_base: f32,
+    use_freq_buffer: bool,
+    attn_scale: f32,
+) void {
+    const push = RopeBatchedPush{
+        .stride = head_dim,
+        .rope_dim = rope_dim,
+        .n_heads = n_heads,
+        .position_base = position_base,
+        .freq_base_bits = if (use_freq_buffer) 0 else @bitCast(freq_base),
+        .attn_scale_bits = if (attn_scale == 1.0) 0 else @bitCast(attn_scale),
+    };
+    const bufs = [_]*const MetalBuffer{ in_buf, out_buf, freq_buf };
+    const grid = [_]u32{ n_heads, n_tokens, 1 };
+    cmd.dispatchV2(&engine.rope_batched_pipe, grid, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeBatchedPush), 0);
 }
 
 fn dispatchDeinterleaveOnCmd(
