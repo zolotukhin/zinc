@@ -51,10 +51,10 @@ If you want the wider ZINC context first, read [Every design decision behind ZIN
 ## TL;DR
 
 - New `prefillBatched` entry point in `src/compute/forward_metal.zig`, gated behind `ZINC_BATCHED_PREFILL=1`.
-- One single-pass forward over N prompt tokens using batched Q4_K/Q6_K GEMM, batched RoPE, batched flash attention, batched RMS norm, batched SwiGLU, and batched residual-rms-norm.
-- 7.9 tok/s → 298 tok/s on Qwen3 8B Q4_K_M, 103-token prompt, Apple M1 Pro. **38x**.
-- ZINC batched matches llama.cpp's output **token for token** on the same prompt. Per-token DMMV produces a different but numerically valid completion. The two paths differ by ~9e-3 in last-token logits at 106 tokens.
-- Still 15% behind llama.cpp's raw prefill throughput. The bottleneck is the Q4_K GEMM kernel itself, not the orchestration around it.
+- One single-pass forward over N prompt tokens using batched Q4_K/Q6_K GEMM, batched RoPE, batched flash attention (f32 or Q8 KV cache), batched RMS norm, batched SwiGLU, and batched residual-rms-norm.
+- 7.9 tok/s → 323 tok/s on Qwen3 8B Q4_K_M, 103-token prompt, Apple M1 Pro. **41x speedup** over per-token, **91% of llama.cpp**'s throughput.
+- ZINC batched matches llama.cpp's output **token for token** on the same prompt. Per-token DMMV produces a different but numerically valid completion. The two paths differ by ~9e-3 in last-token logits at 106 tokens (f32 KV) or ~0.12 (Q8 KV).
+- Remaining 9% gap is in the Q4_K GEMM kernel, not the orchestration around it. Closed 6 percentage points of the original 15% with `FOR_UNROLL` hints in a follow-up commit.
 
 ## The numbers
 
@@ -62,11 +62,21 @@ All runs on Apple M1 Pro, 16 GB unified memory, macOS 15, Metal default working 
 
 ### Prefill throughput across prompt lengths
 
+After the same-day follow-ups (Q8 KV support + FOR_UNROLL hints in the GEMM kernel):
+
 | Prompt length | llama.cpp prefill | ZINC batched prefill | ZINC / llama.cpp | ZINC per-token prefill | Batched speedup over per-token |
 |---:|---:|---:|---:|---:|---:|
-| 19 tokens | 160 tok/s | 138 tok/s | 86% | ~6 tok/s | 23x |
-| 103 tokens | 352 tok/s | 298 tok/s | 85% | 7.9 tok/s | 38x |
-| 183 tokens | 436 tok/s | 347 tok/s | 80% | ~8 tok/s | 43x |
+| 19 tokens | 167 tok/s | 145 tok/s | 87% | ~6 tok/s | 24x |
+| 103 tokens | 353 tok/s | 323 tok/s | 91% | 7.9 tok/s | 41x |
+| 183 tokens | 440 tok/s | 378 tok/s | 86% | ~8 tok/s | 47x |
+
+Original numbers before the follow-up commits:
+
+| Prompt length | ZINC batched prefill (initial) | ZINC / llama.cpp (initial) |
+|---:|---:|---:|
+| 19 tokens | 138 tok/s | 86% |
+| 103 tokens | 298 tok/s | 85% |
+| 183 tokens | 347 tok/s | 80% |
 
 Raw timings on the 103-token prompt:
 
@@ -358,7 +368,9 @@ ZINC_BATCHED_PREFILL=validate \
 ~/Workspace/llama.cpp/build-metal/bin/llama-simple -m $MODEL -n 1 -ngl 99 "..."
 ```
 
-**Update 2026-04-20 (same day):** An extra commit ported `flash_attn_batched_q8` and removed the `ZINC_METAL_KV_Q8=0` requirement. `prefillBatched` now routes through `flash_attn_batched_q8` + `kv_cache_write_q8_batched` when the engine is configured with the default Q8 KV cache, and through the f32 path when it is not. Measured throughput on Qwen3 8B Q4_K_M with default Q8 KV: 294 tok/s (vs 301 tok/s f32 KV, 353 tok/s llama.cpp F16 KV). Q8 quantization amplifies the GEMM-vs-DMMV logit drift from 9e-3 to 0.12 at 106 tokens against the per-token reference, so the validate mode warns more loudly, but output remains coherent and still matches llama.cpp token-for-token.
+**Update 2026-04-20 (same day, commit 1):** Ported `flash_attn_batched_q8` and removed the `ZINC_METAL_KV_Q8=0` requirement. `prefillBatched` now routes through `flash_attn_batched_q8` + `kv_cache_write_q8_batched` when the engine is configured with the default Q8 KV cache, and through the f32 path when it is not. Q8 quantization amplifies the GEMM-vs-DMMV logit drift from 9e-3 to 0.12 at 106 tokens against the per-token reference, so the validate mode warns more loudly, but output remains coherent and still matches llama.cpp token-for-token.
+
+**Update 2026-04-20 (same day, commit 2):** Added `FOR_UNROLL(x)` macro — Metal's `_Pragma("clang loop unroll(full)")` — to the A-tile store, `simdgroup_load`, and `simdgroup_multiply_accumulate` loops in `gemm_q4k.metal` and `gemm_q6k.metal`, matching llama.cpp's `kernel_mul_mm_q4_K_f32` pattern. The loops were already constant-bound, but the explicit hint lets the scheduler interleave more aggressively. GEMM microbench showed +5% to +7% GFLOP/s across shapes (peak 6776 → 7228 GFLOP/s at N=512 for `attn_q`). End-to-end prefill on the 103-token prompt moved from 85% to **91% of llama.cpp** throughput (298 → 323 tok/s). On the 183-token prompt, from 80% to 86% (347 → 378 tok/s).
 
 ## What's next
 
