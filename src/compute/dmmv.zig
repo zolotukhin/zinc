@@ -48,14 +48,6 @@ pub const MoeDmmvPushConstants = extern struct {
     y_offset: u32,
 };
 
-/// Push constants for the cooperative-matrix matmul shader (must match GLSL).
-/// Shape: C[M×N] = A[M×K] * B[K×N], both A and B are f16 row-major, C is f32.
-pub const CoopMatmulPushConstants = extern struct {
-    M: u32,
-    N: u32,
-    K: u32,
-};
-
 /// Manages DMMV pipelines for different quantization types.
 pub const DmmvDispatch = struct {
     /// Q4K pipeline, or null.
@@ -78,12 +70,6 @@ pub const DmmvDispatch = struct {
     pipeline_f32: ?Pipeline,
     /// Batch Q4K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
     pipeline_q4k_batch: ?Pipeline,
-    /// K-parallel + SPEC_NUM_COLS=1 variant of the Q4K batch pipeline.
-    /// Foundation for Step 9b (SSM proj pair-batch): replaces the
-    /// 1-thread-per-row kernel with the llama.cpp-style wave64 K-parallel
-    /// pattern (16 threads/block, subgroupAdd reduction) so NUM_COLS=2..8
-    /// specializations in a future cycle stand on a non-starved dot product.
-    pipeline_q4k_kpar_batch_c1: ?Pipeline,
     /// MoE Q4K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q4k_moe: ?Pipeline,
     /// Experimental K-parallel Q4K MoE pipeline (same 4 bindings, wave64 subgroupAdd).
@@ -98,9 +84,6 @@ pub const DmmvDispatch = struct {
     pipeline_q5_1_moe: ?Pipeline,
     /// MoE Q6K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q6k_moe: ?Pipeline,
-    /// Cooperative-matrix matmul pipeline for prefill (f16 × f16 → f32, 3 bindings), or null.
-    /// Cycle 26 enablement — loaded for future mul_mm prefill wiring (Structural Swing Idea #2).
-    pipeline_coop_matmul: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -228,19 +211,6 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
-        // Step 9a foundation: K-parallel + SPEC_NUM_COLS=1 variant. This
-        // replaces the 1-thread-per-row kernel on the LM head call site. Wave64
-        // is required so the single subgroupAdd at the end covers all 64 threads.
-        const q4k_kpar_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_kpar_batch.spv", .{shader_dir}) catch unreachable;
-        const kpar_batch_spec_c1 = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = 1 }};
-        const pipeline_q4k_kpar_batch_c1 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_kpar_batch_path, 3, batch_push_size, &kpar_batch_spec_c1, push_desc_wave64_options, allocator) catch |err| blk: {
-            log.warn("Q4_K kpar batch (NUM_COLS=1) shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        if (pipeline_q4k_kpar_batch_c1 != null) {
-            log.info("Q4_K kpar batch NUM_COLS=1 pipeline loaded (Step 9a foundation)", .{});
-        }
-
         // MoE DMMV pipelines: 4 bindings (A, x, y, routing), different push constants
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
 
@@ -294,19 +264,6 @@ pub const DmmvDispatch = struct {
             log.info("MoE DMMV pipelines loaded — GPU expert dispatch enabled (no readback)", .{});
         }
 
-        // Cooperative-matrix matmul pipeline (f16 × f16 → f32, 3 bindings, 12-byte push).
-        // Cycle 26 enablement: loads only when the device exposes VK_KHR_cooperative_matrix.
-        // Silent-null fallback on failure so non-coop-matrix devices keep working.
-        const coop_push_size = @sizeOf(CoopMatmulPushConstants);
-        const coop_matmul_path = std.fmt.bufPrint(&path_buf, "{s}/coop_matmul.spv", .{shader_dir}) catch unreachable;
-        const pipeline_coop_matmul = pipeline_mod.createFromSpirvWithOptions(instance, coop_matmul_path, 3, coop_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
-            log.warn("coop_matmul shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        if (pipeline_coop_matmul != null) {
-            log.info("coop_matmul pipeline loaded (enablement for mul_mm prefill — Structural Swing Idea #2)", .{});
-        }
-
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_mxfp4 = pipeline_mxfp4,
@@ -318,7 +275,6 @@ pub const DmmvDispatch = struct {
             .pipeline_f16 = pipeline_f16,
             .pipeline_f32 = pipeline_f32,
             .pipeline_q4k_batch = pipeline_q4k_batch,
-            .pipeline_q4k_kpar_batch_c1 = pipeline_q4k_kpar_batch_c1,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
@@ -326,7 +282,6 @@ pub const DmmvDispatch = struct {
             .pipeline_q5k_moe = pipeline_q5k_moe,
             .pipeline_q5k_moe_kpar = pipeline_q5k_moe_kpar,
             .pipeline_q6k_moe = pipeline_q6k_moe,
-            .pipeline_coop_matmul = pipeline_coop_matmul,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -482,54 +437,6 @@ pub const DmmvDispatch = struct {
         );
     }
 
-    /// Push-descriptor K-parallel batch DMMV dispatch (Step 9a foundation).
-    /// Uses the wave64 subgroupAdd kernel with SPEC_NUM_COLS=1. Workgroup grid
-    /// matches the single-column K-parallel shaders ((M+1)/2 WGs), which gives
-    /// large M (e.g. the LM head) significantly more parallelism than the
-    /// 1-thread-per-row `dmmv_q4k_batch` kernel it replaces on that call site.
-    /// Returns error.PipelineNotLoaded when the kpar variant is unavailable.
-    pub fn recordKparBatchDispatchC1Push(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        push_desc_fn: ?PushDescriptorFn,
-        a_buf: vk.c.VkBuffer,
-        a_size: vk.c.VkDeviceSize,
-        x_buf: vk.c.VkBuffer,
-        x_size: vk.c.VkDeviceSize,
-        y_buf: vk.c.VkBuffer,
-        y_size: vk.c.VkDeviceSize,
-        M: u32,
-        K: u32,
-        a_offset: u32,
-        x_offset: u32,
-        y_offset: u32,
-    ) !void {
-        const pip = if (self.pipeline_q4k_kpar_batch_c1) |*p| p else return error.PipelineNotLoaded;
-        const push = BatchDmmvPushConstants{
-            .M = M,
-            .K = K,
-            .a_offset = a_offset,
-            .x_offset = x_offset,
-            .y_offset = y_offset,
-            .num_cols = 1,
-        };
-        const infos = [3]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = a_buf, .offset = 0, .range = a_size },
-            .{ .buffer = x_buf, .offset = 0, .range = x_size },
-            .{ .buffer = y_buf, .offset = 0, .range = y_size },
-        };
-        const workgroups_x = (M + 1) / 2;
-        cmd.pushDescAndDispatch(
-            pip,
-            push_desc_fn,
-            infos[0..],
-            std.mem.asBytes(&push),
-            workgroups_x,
-            1,
-            1,
-        );
-    }
-
     /// Push-descriptor batch DMMV dispatch.
     /// Bindings order: 0 = A (weight), 1 = X_batch (K × num_cols, column-major),
     /// 2 = Y_batch (M × num_cols, column-major).
@@ -581,44 +488,6 @@ pub const DmmvDispatch = struct {
         );
     }
 
-    /// Push-descriptor cooperative-matrix matmul dispatch (f16 × f16 → f32).
-    /// Bindings: 0 = A (M×K, f16, row-major), 1 = B (K×N, f16, row-major), 2 = C (M×N, f32, row-major).
-    /// Returns error.PipelineNotLoaded when coop_matmul is unavailable on this device.
-    /// Workgroup grid: (ceil(N/16), ceil(M/16), 1). Each workgroup produces one 16×16 output tile.
-    pub fn recordCoopMatmul(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        push_desc_fn: ?PushDescriptorFn,
-        a_buf: vk.c.VkBuffer,
-        a_size: vk.c.VkDeviceSize,
-        b_buf: vk.c.VkBuffer,
-        b_size: vk.c.VkDeviceSize,
-        c_buf: vk.c.VkBuffer,
-        c_size: vk.c.VkDeviceSize,
-        M: u32,
-        N: u32,
-        K: u32,
-    ) !void {
-        const pip = if (self.pipeline_coop_matmul) |*p| p else return error.PipelineNotLoaded;
-        const push = CoopMatmulPushConstants{ .M = M, .N = N, .K = K };
-        const infos = [3]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = a_buf, .offset = 0, .range = a_size },
-            .{ .buffer = b_buf, .offset = 0, .range = b_size },
-            .{ .buffer = c_buf, .offset = 0, .range = c_size },
-        };
-        const wg_x = (N + 15) / 16;
-        const wg_y = (M + 15) / 16;
-        cmd.pushDescAndDispatch(
-            pip,
-            push_desc_fn,
-            infos[0..],
-            std.mem.asBytes(&push),
-            wg_x,
-            wg_y,
-            1,
-        );
-    }
-
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -630,13 +499,11 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_f16) |*p| p.deinit();
         if (self.pipeline_f32) |*p| p.deinit();
         if (self.pipeline_q4k_batch) |*p| p.deinit();
-        if (self.pipeline_q4k_kpar_batch_c1) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
-        if (self.pipeline_coop_matmul) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

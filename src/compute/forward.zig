@@ -6120,13 +6120,6 @@ pub const InferenceEngine = struct {
 
         if (pip.uses_push_descriptors) {
             // For Q4K large M (LM head), use batch shader for better parallelism.
-            // Step 9a foundation (kpar batch NUM_COLS=1) is loaded but NOT wired
-            // here: a measurement on the LM head showed -0.26 tok/s vs the
-            // 1-thread-per-row kernel because LM head's M=152K creates 76K
-            // workgroups under K-parallel (vs 2390 WGs under 1-thread-per-row).
-            // The kpar shader source is retained as the precondition for Step 9b
-            // (SSM proj pair-batch with NUM_COLS=2), which fires many times per
-            // prefill and amortizes weight reads across prompt token columns.
             if (qt == .q4_k and M > 65536 and self.dmmv.pipeline_q4k_batch != null) {
                 try self.dmmv.recordBatchDispatchPush(
                     &self.decode_cmd,
