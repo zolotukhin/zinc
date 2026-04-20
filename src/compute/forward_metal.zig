@@ -2319,29 +2319,37 @@ pub const InferenceEngine = struct {
     /// Processes all prompt tokens in a single batched forward pass using the
     /// gemm_q4k / gemm_q6k / rope_batched / flash_attn_batched shaders — the
     /// weight matrix for each projection is read once for the whole prompt.
-    /// Falls back to the per-token `prefillBatch` when the env flag is off,
+    /// Falls back to the per-token `prefillBatch` when the env flag is off or
     /// when the model architecture is outside the supported slice (see
-    /// `canUseBatchedPrefill`), or when a previously cached prefix is being
-    /// extended (state.position > 0). With `ZINC_BATCHED_PREFILL=validate`
-    /// the batched path runs first, then the per-token path is replayed on
-    /// a fresh state and the last-token logits are diffed; max abs diff is
-    /// logged and a warning is emitted if it exceeds 1e-3.
+    /// `canUseBatchedPrefill`). Supports both fresh prefill (state.position==0)
+    /// and prefix reuse (state.position>0) — in the latter case, the batched
+    /// pass extends the KV cache at offset `state.position` and flash attention
+    /// causal masking is computed relative to that offset. With
+    /// `ZINC_BATCHED_PREFILL=validate` the batched path runs first, then the
+    /// per-token path is replayed on a fresh state and the last-token logits
+    /// are diffed; max abs diff is logged and a warning is emitted if it
+    /// exceeds 1e-3.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         if (prompt_tokens.len == 0) return;
         const mode = batchedPrefillMode();
         if (mode == .off or !canUseBatchedPrefill(self)) {
             return self.prefillBatch(state, prompt_tokens);
         }
-        if (state.position != 0 or state.generated_tokens.items.len != 0) {
-            // Prefix re-use path is not implemented yet — defer to per-token prefill.
+        if (state.position != 0 and state.position != self.position) {
+            return error.KvStateNotAvailable;
+        }
+        // validate mode requires a fresh state so we can replay the per-token
+        // path against the batched snapshot — delegate extension calls.
+        if (mode == .validate and state.position != 0) {
             return self.prefillBatch(state, prompt_tokens);
         }
 
         const n_tokens: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+        const position_base: u32 = state.position;
         const target_context_tokens = if (state.requested_context_tokens > 0)
-            @max(state.requested_context_tokens, n_tokens)
+            @max(state.requested_context_tokens, position_base +| n_tokens)
         else
-            n_tokens;
+            position_base +| n_tokens;
         if (target_context_tokens > self.max_context_tokens) return error.ContextLengthExceeded;
 
         const cfg = self.config;
@@ -2349,9 +2357,11 @@ pub const InferenceEngine = struct {
         const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
         const attn = try resolveLayerAttentionParams(cfg, self.layer_tensors[0], hidden_dim, self.kv_cache_q8);
 
-        try self.resetRequestState(target_context_tokens);
-        state.position = 0;
-        state.generated_tokens.clearRetainingCapacity();
+        if (position_base == 0 and state.generated_tokens.items.len == 0) {
+            try self.resetRequestState(target_context_tokens);
+            state.position = 0;
+            state.generated_tokens.clearRetainingCapacity();
+        }
 
         var scratch = try BatchedPrefillScratch.init(self, n_tokens, attn.q_dim, attn.kv_dim, inter_dim);
         defer scratch.deinit();
@@ -2402,15 +2412,18 @@ pub const InferenceEngine = struct {
             }
 
             const rope_freq_buf = selectRopeFreqBuffer(self, attn.rope_dim, attn.rope_freq_base, attn.use_rope_freq_factors);
-            dispatchRopeBatchedOnCmd(self, &cmd, &scratch.q, &scratch.q, rope_freq_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, 0, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
-            dispatchRopeBatchedOnCmd(self, &cmd, &scratch.k, &scratch.k, rope_freq_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, 0, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
+            dispatchRopeBatchedOnCmd(self, &cmd, &scratch.q, &scratch.q, rope_freq_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, position_base, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
+            dispatchRopeBatchedOnCmd(self, &cmd, &scratch.k, &scratch.k, rope_freq_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, position_base, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
             cmd.barrier();
 
+            const kv_len = position_base + n_tokens;
             if (self.kv_cache_q8) {
                 const n_blocks = n_tokens * (attn.kv_dim / 32);
-                dispatchKvCacheWriteBatchedQ8OnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, 0, n_blocks);
+                const dst_bytes = position_base * attn.kv_cache_bytes_per_token;
+                dispatchKvCacheWriteBatchedQ8OnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, dst_bytes, n_blocks);
             } else {
-                dispatchKvCacheWriteBatchedOnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, 0, n_tokens * attn.kv_dim);
+                const dst_elements = position_base * attn.kv_dim;
+                dispatchKvCacheWriteBatchedOnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, dst_elements, n_tokens * attn.kv_dim);
             }
             cmd.barrier();
 
@@ -2425,9 +2438,9 @@ pub const InferenceEngine = struct {
                     attn.head_dim,
                     cfg.n_heads,
                     attn.n_kv_heads,
+                    kv_len,
                     n_tokens,
-                    n_tokens,
-                    0,
+                    position_base,
                     attn.kv_cache_head_stride_bytes,
                     attn.kv_cache_bytes_per_token,
                 );
@@ -2442,9 +2455,9 @@ pub const InferenceEngine = struct {
                     attn.head_dim,
                     cfg.n_heads,
                     attn.n_kv_heads,
+                    kv_len,
                     n_tokens,
-                    n_tokens,
-                    0,
+                    position_base,
                 );
             }
             cmd.barrier();
@@ -2523,8 +2536,8 @@ pub const InferenceEngine = struct {
             @memcpy(dst_ptr[0..hidden_dim], src_ptr[src_base .. src_base + hidden_dim]);
         }
 
-        self.position = n_tokens;
-        state.position = n_tokens;
+        self.position = position_base + n_tokens;
+        state.position = self.position;
 
         if (mode == .validate) {
             // Snapshot batched-path logits, then re-run the per-token path on
