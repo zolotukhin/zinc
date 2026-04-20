@@ -706,7 +706,10 @@ test "estimateUnifiedFit includes weights, runtime buffers, and kv cache" {
     };
 
     const fit = estimateUnifiedFit(inspection, 48 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024, null);
-    try std.testing.expectEqual(@as(u32, 4096), fit.max_ctx);
+    // When the caller passes no requested override, max_ctx settles to the
+    // model's configured context_length clamped by the runtime backend cap.
+    // For this config, context_length=32768 < runtime_context_cap(262144).
+    try std.testing.expectEqual(config.context_length, fit.max_ctx);
     try std.testing.expect(fit.budget_max_ctx >= fit.max_ctx);
     try std.testing.expect(fit.weights_bytes == inspection.tensor_bytes);
     try std.testing.expect(fit.kv_cache_bytes > 0);
@@ -750,6 +753,9 @@ test "estimateUnifiedFit respects requested context ceiling on Metal" {
     const requested_small = estimateUnifiedFit(inspection, 48 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024, 2048);
     try std.testing.expectEqual(@as(u32, 2048), requested_small.max_ctx);
 
+    // Requested values below the model's context_length (32768) and below the
+    // backend cap (runtime_context_cap=262144) are returned verbatim — the
+    // estimator treats the requested value as an upper bound, not a floor.
     const requested_large = estimateUnifiedFit(inspection, 48 * 1024 * 1024 * 1024, 64 * 1024 * 1024 * 1024, 8192);
-    try std.testing.expectEqual(@as(u32, forward_metal.runtime_context_cap), requested_large.max_ctx);
+    try std.testing.expectEqual(@as(u32, 8192), requested_large.max_ctx);
 }

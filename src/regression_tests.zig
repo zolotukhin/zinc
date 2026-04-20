@@ -129,24 +129,32 @@ test "ssm_delta_net shader keeps multi-subgroup fallback" {
     try expectMultiSubgroupFallback(src, "s_reduce_scalar");
 }
 
-test "Q5_K shader keeps GGML contiguous half ordering" {
+test "Q5_K shader keeps separate low/high nibble unpack helpers" {
+    // The k-parallel rewrite dropped the explicit `x_grp` indexing in favor of
+    // two small unpack functions. The correctness invariant is the same: the
+    // lo-nibble bytes and hi-nibble bytes of each qs uint32 are expanded
+    // independently before being paired with qh-bit promotion, not multiplied
+    // together in a single mis-shifted path. Guard the two unpack functions
+    // and verify both end up in the hot loop.
     const src = @embedFile("shaders/dmmv_q5k.comp");
-    try expectContains(src, "low nibble");
-    try expectContains(src, "high nibble");
-    try expectContains(src, "x_grp + e]");
-    try expectContains(src, "x_grp + 32u + e]");
-    try expectNotContains(src, "2u * e");
+    try expectContains(src, "vec4 unpack_nibbles_lo(uint v)");
+    try expectContains(src, "vec4 unpack_nibbles_hi(uint v)");
+    try expectContains(src, "(v & 0xFu)");
+    try expectContains(src, "(v >> 4) & 0xFu");
+    try expectContains(src, "unpack_qh_bits");
 }
 
-test "Q5_K shader processes all 32 qs bytes per group_pair (not 16)" {
-    // Regression: Q5_K DMMV previously used slice*4 and loop of 4, processing
-    // only 16 of 32 qs bytes per group_pair. This silently dropped half the
-    // dot-product terms, producing wrong results for Q5_K tensors (Qwen3.5 SSM).
+test "Q5_K shader uses wave64 K-parallel layout with 2 rows per workgroup" {
+    // Regression guard for the K-parallel shape: 64-thread workgroups, each
+    // covering 2 output rows, with the super-block sized at 44 uint32 (176
+    // bytes / 4). The previous non-k-parallel path used slice*4 loops and
+    // silently dropped half the qs bytes; the new path sweeps the full block.
     const src = @embedFile("shaders/dmmv_q5k.comp");
-    try expectContains(src, "slice * 8u");
-    try expectContains(src, "e_start + 8u");
+    try expectContains(src, "layout(local_size_x = 64) in;");
+    try expectContains(src, "const uint NUM_ROWS = 2u;");
+    try expectContains(src, "const uint Q5K_BLOCK_U32 = 44u;");
+    try expectContains(src, "subgroupAdd");
     try expectNotContains(src, "slice * 4u");
-    try expectNotContains(src, "e_start + 4u");
 }
 
 test "Q5_K MoE shader keeps GGML contiguous half ordering" {
@@ -158,8 +166,13 @@ test "Q5_K MoE shader keeps GGML contiguous half ordering" {
 
 test "Q5_0 and Q5_1 DMMV launch with 2 rows per workgroup" {
     const src = @embedFile("compute/dmmv.zig");
+    // The single-column (non-batch, non-k-parallel) DMMV path must keep
+    // Q5_0, Q5_1, MXFP4, Q8_0, and F16 on the 2-rows-per-workgroup layout
+    // (M+1)/2 workgroups, each covering 2 output rows via simdgroup reduce.
     try expectContains(src, ".q5_0, .q5_1, .mxfp4, .q8_0, .f16 => (M + 1) / 2");
-    try expectContains(src, ".q4_k, .q5_0, .q5_1, .q6_k => (M + 1) / 2");
+    // K-parallel branch is taken for Q4_K / Q5_K / Q6_K and also uses 2 rows
+    // per workgroup, so the same (M+1)/2 shape applies.
+    try expectContains(src, ".q4_k, .q5_k, .q6_k => (M + 1) / 2");
 }
 
 test "GPT-OSS routing keeps SOFTMAX_WEIGHT expert selection path" {
@@ -309,7 +322,9 @@ test "YaRN RoPE attention scale stays wired through Vulkan RoPE dispatch" {
 test "flash attention sink buffer stays in final normalization" {
     const src = @embedFile("shaders/flash_attn.comp");
     try expectContains(src, "layout(set = 0, binding = 5) readonly  buffer Sinks");
-    try expectContains(src, "float sink_val = sink_data[head];");
+    // Sink indexing grew a per-layer offset when the multi-layer sink buffer
+    // pattern landed; the invariant is that sink_val still feeds final_sum.
+    try expectContains(src, "float sink_val = sink_data[sink_offset + head];");
     try expectContains(src, "final_sum = s_sum_old * rescale + exp(sink_val - sink_max);");
     try expectContains(src, "o_data[o_base + d] = s_out[d] * rescale * inv_sum;");
 }
