@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">FP32 dot product vs Q8_1 integer dot product for Qwen3.5 prefill on RDNA4</title>
+  <desc id="desc">A two-lane flow diagram comparing the current FP32 dequantized matrix-vector path against the proposed Q8_1 integer dot product path for RDNA4 prefill in ZINC. The top lane shows Q4_K weights, FP32 activations, an online dequant step, a float multiply-accumulate dot product, and an FP32 partial sum. The bottom lane shows the same Q4_K weights, a single upfront Q8_1 activation quantization pass, fused integer dot product lanes, and an FP32 accumulator.</desc>
+  <defs>
+    <linearGradient id="bg-mmq" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-mmq" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrow-mmq" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#53657b"/>
+    </marker>
+    <style>
+      .m-title { font: 700 30px Georgia, serif; fill: #10233c; }
+      .m-sub { font: 500 16px Arial, sans-serif; fill: #53657b; }
+      .m-label { font: 600 15px Arial, sans-serif; fill: #10233c; }
+      .m-node { font: 600 14px Arial, sans-serif; fill: #ffffff; }
+      .m-node-out { font: 600 14px Arial, sans-serif; fill: #10233c; }
+      .m-caption { font: 400 13px Arial, sans-serif; fill: #445567; }
+      .m-section { font: 700 14px Arial, sans-serif; fill: #2c3e54; }
+      .m-tag { font: 700 12px Arial, sans-serif; fill: #ffffff; }
+      .m-delta { font: 700 18px Arial, sans-serif; fill: #1d4a35; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="620" fill="url(#bg-mmq)"/>
+
+  <g transform="translate(72 44)">
+    <text class="m-title">FP32 dot product vs Q8_1 integer dot product</text>
+    <text class="m-sub" x="0" y="28">The top lane is today's RDNA4 DMMV prefill path. The bottom lane is mul_mmq. Weights are the same. What changes is what the GPU multiplies.</text>
+  </g>
+
+  <!-- Top lane: current FP32 path -->
+  <g transform="translate(0 130)" filter="url(#shadow-mmq)">
+    <text class="m-section" x="72" y="0">Today: dequantize then multiply in floats</text>
+
+    <!-- Nodes -->
+    <g>
+      <rect x="72" y="20" width="170" height="64" rx="6" fill="#3a5a88"/>
+      <text class="m-node" x="157" y="48" text-anchor="middle">Q4_K weights</text>
+      <text class="m-node" x="157" y="68" text-anchor="middle">(stored on disk)</text>
+    </g>
+    <g>
+      <rect x="272" y="20" width="170" height="64" rx="6" fill="#3a5a88"/>
+      <text class="m-node" x="357" y="48" text-anchor="middle">FP32 activations</text>
+      <text class="m-node" x="357" y="68" text-anchor="middle">(one per prompt token)</text>
+    </g>
+    <g>
+      <rect x="472" y="20" width="170" height="64" rx="6" fill="#a3724a"/>
+      <text class="m-node" x="557" y="48" text-anchor="middle">Online dequant</text>
+      <text class="m-node" x="557" y="68" text-anchor="middle">Q4_K -&gt; FP16</text>
+    </g>
+    <g>
+      <rect x="672" y="20" width="170" height="64" rx="6" fill="#7a3b3b"/>
+      <text class="m-node" x="757" y="48" text-anchor="middle">FP multiply-add</text>
+      <text class="m-node" x="757" y="68" text-anchor="middle">serial, 1 thread / row</text>
+    </g>
+    <g>
+      <rect x="872" y="20" width="170" height="64" rx="6" fill="#1d4a35"/>
+      <text class="m-node" x="957" y="48" text-anchor="middle">FP32 partial sum</text>
+      <text class="m-node" x="957" y="68" text-anchor="middle">(accumulator)</text>
+    </g>
+
+    <!-- Arrows -->
+    <line x1="242" y1="52" x2="272" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+    <line x1="442" y1="52" x2="472" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+    <line x1="642" y1="52" x2="672" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+    <line x1="842" y1="52" x2="872" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+
+    <text class="m-caption" x="72" y="108">Activations stay in FP32. Weights are decoded into FP16 tiles every dispatch. The dot product is a float multiply-add chain, one row per wave64 thread.</text>
+  </g>
+
+  <!-- Divider -->
+  <line x1="72" y1="310" x2="1128" y2="310" stroke="#cdd6df" stroke-width="1" stroke-dasharray="4 4"/>
+
+  <!-- Bottom lane: Q8_1 integer path -->
+  <g transform="translate(0 340)" filter="url(#shadow-mmq)">
+    <text class="m-section" x="72" y="0">mul_mmq: quantize the activations once, use integer math</text>
+
+    <!-- Nodes -->
+    <g>
+      <rect x="72" y="20" width="170" height="64" rx="6" fill="#3a5a88"/>
+      <text class="m-node" x="157" y="48" text-anchor="middle">Q4_K weights</text>
+      <text class="m-node" x="157" y="68" text-anchor="middle">(unchanged)</text>
+    </g>
+    <g>
+      <rect x="272" y="20" width="170" height="64" rx="6" fill="#a3724a"/>
+      <text class="m-node" x="357" y="48" text-anchor="middle">Upfront pass</text>
+      <text class="m-node" x="357" y="68" text-anchor="middle">FP32 -&gt; Q8_1</text>
+    </g>
+    <g>
+      <rect x="472" y="20" width="170" height="64" rx="6" fill="#3a5a88"/>
+      <text class="m-node" x="557" y="48" text-anchor="middle">Q8_1 activations</text>
+      <text class="m-node" x="557" y="68" text-anchor="middle">(reused every layer)</text>
+    </g>
+    <g>
+      <rect x="672" y="20" width="190" height="64" rx="6" fill="#205b87"/>
+      <text class="m-node" x="767" y="48" text-anchor="middle">Integer dot, 64 lanes</text>
+      <text class="m-node" x="767" y="68" text-anchor="middle">subgroup reduction</text>
+    </g>
+    <g>
+      <rect x="892" y="20" width="170" height="64" rx="6" fill="#1d4a35"/>
+      <text class="m-node" x="977" y="48" text-anchor="middle">FP32 partial sum</text>
+      <text class="m-node" x="977" y="68" text-anchor="middle">(accumulator)</text>
+    </g>
+
+    <!-- Arrows -->
+    <line x1="242" y1="52" x2="272" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+    <line x1="442" y1="52" x2="472" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+    <line x1="642" y1="52" x2="672" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+    <line x1="862" y1="52" x2="892" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
+
+    <!-- Tags -->
+    <g transform="translate(272 94)">
+      <rect x="0" y="0" width="132" height="22" rx="3" fill="#a3724a"/>
+      <text class="m-tag" x="66" y="15" text-anchor="middle">once per prompt chunk</text>
+    </g>
+    <g transform="translate(472 94)">
+      <rect x="0" y="0" width="150" height="22" rx="3" fill="#3a5a88"/>
+      <text class="m-tag" x="75" y="15" text-anchor="middle">read once, used 7x per layer</text>
+    </g>
+    <g transform="translate(672 94)">
+      <rect x="0" y="0" width="190" height="22" rx="3" fill="#205b87"/>
+      <text class="m-tag" x="95" y="15" text-anchor="middle">packed int8, 4 lanes per mul-add</text>
+    </g>
+
+    <text class="m-caption" x="72" y="150">Activations are quantized once per prompt chunk, then every SSM, MoE, and projection dispatch in that layer reads the same Q8_1 buffer. The dot product becomes a packed integer mul-add reduced across a subgroup.</text>
+    <text class="m-caption" x="72" y="172">The accumulator stays FP32. Only the inner reduction changes shape.</text>
+  </g>
+
+  <!-- Delta callout -->
+  <g transform="translate(72 580)">
+    <text class="m-delta">Projected upside on the largest prefill DMMVs: 2x to 4x, per llama.cpp's own Q8_1 numbers.</text>
+  </g>
+</svg>

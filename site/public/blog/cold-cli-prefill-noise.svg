@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Cold-CLI prefill noise vs warm decode on Qwen3.5-35B Metal</title>
+  <desc id="desc">A horizontal bar chart of six back-to-back zinc CLI prefill measurements on Qwen3.5-35B-A3B on an M4 Max Mac Studio. Three -c 4096 runs report 2.4, 2.8, and 3.0 tokens per second. Three -c 131072 runs report 3.5, 2.6, and 2.5 tokens per second. The same machine produces a stable decode median of about 47 tokens per second, drawn for scale at the bottom.</desc>
+  <defs>
+    <linearGradient id="bg-cold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-cold" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .c-title { font: 700 30px Georgia, serif; fill: #10233c; }
+      .c-sub { font: 500 16px Arial, sans-serif; fill: #53657b; }
+      .c-label { font: 600 15px Arial, sans-serif; fill: #10233c; }
+      .c-value { font: 700 14px Arial, sans-serif; fill: #ffffff; }
+      .c-value-out { font: 700 14px Arial, sans-serif; fill: #10233c; }
+      .c-axis { font: 400 12px Arial, sans-serif; fill: #53657b; }
+      .c-note { font: 400 13px Arial, sans-serif; fill: #445567; }
+      .c-section { font: 700 14px Arial, sans-serif; fill: #2c3e54; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" fill="url(#bg-cold)"/>
+
+  <g transform="translate(72 44)">
+    <text class="c-title">Cold-CLI prefill is not a stable measurement</text>
+    <text class="c-sub" x="0" y="28">Six back-to-back zinc CLI runs on Qwen3.5-35B-A3B, M4 Max Mac Studio, 12-token prompt. The same engine, same model, same machine. The prefill number jitters by 40 percent because each cold process pays a different fraction of the mmap fault-in tax.</text>
+  </g>
+
+  <!-- scale: 1 tok/s = 18 px, bars start at x=320, axis from 0 to ~50 tok/s -->
+  <g transform="translate(0 120)" filter="url(#shadow-cold)">
+    <!-- axis ticks -->
+    <g>
+      <line x1="320" y1="430" x2="1100" y2="430" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="320" y1="430" x2="320" y2="436" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="500" y1="430" x2="500" y2="436" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="680" y1="430" x2="680" y2="436" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="860" y1="430" x2="860" y2="436" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="1040" y1="430" x2="1040" y2="436" stroke="#9fb0c0" stroke-width="1.5"/>
+      <text class="c-axis" x="320" y="452" text-anchor="middle">0 tok/s</text>
+      <text class="c-axis" x="500" y="452" text-anchor="middle">10</text>
+      <text class="c-axis" x="680" y="452" text-anchor="middle">20</text>
+      <text class="c-axis" x="860" y="452" text-anchor="middle">30</text>
+      <text class="c-axis" x="1040" y="452" text-anchor="middle">40 tok/s</text>
+    </g>
+
+    <!-- Section heading: cold CLI runs at -c 4096 -->
+    <text class="c-section" x="72" y="20">Cold CLI runs, -c 4096 context</text>
+
+    <!-- Run 1: 2.4 tok/s -->
+    <g>
+      <text class="c-label" x="310" y="50" text-anchor="end">Run 1</text>
+      <rect x="320" y="32" width="43" height="22" fill="#7a3b3b" rx="3"/>
+      <text class="c-value-out" x="372" y="50">2.4 tok/s</text>
+    </g>
+    <!-- Run 2: 2.8 -->
+    <g>
+      <text class="c-label" x="310" y="80" text-anchor="end">Run 2</text>
+      <rect x="320" y="62" width="50" height="22" fill="#7a3b3b" rx="3"/>
+      <text class="c-value-out" x="380" y="80">2.8 tok/s</text>
+    </g>
+    <!-- Run 3: 3.0 -->
+    <g>
+      <text class="c-label" x="310" y="110" text-anchor="end">Run 3</text>
+      <rect x="320" y="92" width="54" height="22" fill="#7a3b3b" rx="3"/>
+      <text class="c-value-out" x="384" y="110">3.0 tok/s</text>
+    </g>
+
+    <!-- Section heading: cold CLI runs at -c 131072 -->
+    <text class="c-section" x="72" y="148">Cold CLI runs, -c 131072 context</text>
+
+    <!-- Run 1: 3.5 -->
+    <g>
+      <text class="c-label" x="310" y="178" text-anchor="end">Run 1</text>
+      <rect x="320" y="160" width="63" height="22" fill="#a3724a" rx="3"/>
+      <text class="c-value-out" x="393" y="178">3.5 tok/s</text>
+    </g>
+    <!-- Run 2: 2.6 -->
+    <g>
+      <text class="c-label" x="310" y="208" text-anchor="end">Run 2</text>
+      <rect x="320" y="190" width="47" height="22" fill="#a3724a" rx="3"/>
+      <text class="c-value-out" x="377" y="208">2.6 tok/s</text>
+    </g>
+    <!-- Run 3: 2.5 -->
+    <g>
+      <text class="c-label" x="310" y="238" text-anchor="end">Run 3</text>
+      <rect x="320" y="220" width="45" height="22" fill="#a3724a" rx="3"/>
+      <text class="c-value-out" x="375" y="238">2.5 tok/s</text>
+    </g>
+
+    <!-- Spacer line -->
+    <line x1="72" y1="270" x2="1100" y2="270" stroke="#cdd6df" stroke-width="1" stroke-dasharray="4 4"/>
+
+    <!-- Decode for scale -->
+    <text class="c-section" x="72" y="298">Same machine, same model, decode (warm)</text>
+    <g>
+      <text class="c-label" x="310" y="338" text-anchor="end">Decode median</text>
+      <rect x="320" y="320" width="846" height="28" fill="#1d4a35" rx="3"/>
+      <text class="c-value" x="1156" y="338" text-anchor="end">~47 tok/s</text>
+    </g>
+
+    <!-- Cold-load callout -->
+    <text class="c-note" x="72" y="396">First-run cold prefill on a 12-token prompt has been measured at 4.7 s, 10.6 s, 3.4 s, and 4.7 s in different process launches.</text>
+    <text class="c-note" x="72" y="414">The variance is the cold-process first-GPU-touch cost, not a per-token compute change. Decode is stable because the pages are already faulted by the time it starts.</text>
+  </g>
+
+  <text class="c-note" x="72" y="530">Source: ZINC Effort 7 measurement notes, M4 Max Mac Studio, Qwen3.5-35B-A3B-UD-Q4_K_XL, 12-token prompt, three back-to-back cold CLI launches per scenario.</text>
+</svg>
