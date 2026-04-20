@@ -36,9 +36,9 @@ faqs:
   - question: "Why did per-token and batched paths produce different output text?"
     answer: "They use different arithmetic. The per-token path accumulates dot products through the DMMV kernel in f32. The batched path accumulates through simdgroup half tiles in gemm_q4k. Both are valid IEEE 754 answers, they differ by about 9e-3 in the logits at 106 tokens, and on close-margin tokens the top-1 ranking flips. Batched matches llama.cpp's output exactly, because llama.cpp also uses simdgroup matmul for prefill."
   - question: "Which architectures does prefillBatched engage on?"
-    answer: "LLaMA-style dense attention plus dense FFN with Q4_K or Q6_K weights, no biases, no attention gate, no post-norms, no sliding window, and a flash attention KV cache kept in f32. Q and K per-head RMS norms are supported. MoE, SSM, Gemma, gpt-oss, and packed Q plus gate architectures all fall back to the per-token path. Qwen3 8B qualifies when `ZINC_METAL_KV_Q8=0`."
+    answer: "LLaMA-style dense attention plus dense FFN with Q4_K or Q6_K weights, no biases, no attention gate, no post-norms, no sliding window. Q and K per-head RMS norms are supported. Both f32 and Q8_0 KV caches are supported — prefillBatched routes through flash_attn_batched or flash_attn_batched_q8 as needed. MoE, SSM, Gemma, gpt-oss, and packed Q plus gate architectures all fall back to the per-token path. Qwen3 8B qualifies with default settings."
   - question: "How do I turn it on?"
-    answer: "`ZINC_BATCHED_PREFILL=1` engages the batched path when the model qualifies, otherwise prefillBatched transparently falls back to prefillBatch. `ZINC_BATCHED_PREFILL=validate` runs both paths on the same prompt and logs the max absolute logit diff of the last token against a 1e-3 tolerance."
+    answer: "`ZINC_BATCHED_PREFILL=1` engages the batched path when the model qualifies, otherwise prefillBatched transparently falls back to prefillBatch. No other flags required — Q8 KV cache is supported natively. `ZINC_BATCHED_PREFILL=validate` runs both paths on the same prompt and logs the max absolute logit diff of the last token against a 1e-3 tolerance."
 excerpt: "Metal prefill in ZINC went from 7.9 tok/s to 298 tok/s on Qwen3 8B with a single gated code path. The batched path also revealed that ZINC's per-token DMMV prefill had been producing subtly different output than llama.cpp all along. Both answers are numerically valid, and matching llama.cpp's answer turned out to require changing the arithmetic, not fixing a bug."
 ---
 
@@ -338,14 +338,18 @@ MODEL=/path/to/Qwen3-8B-Q4_K_M.gguf
 ./zig-out/bin/zinc-bench-metal -m $MODEL \
   --prompt "..." -n 1 --runs 3 --warmup 1
 
-# Batched path, F32 KV cache
+# Batched path, default settings (Q8 KV cache works natively)
+ZINC_BATCHED_PREFILL=1 \
+  ./zig-out/bin/zinc-bench-metal -m $MODEL \
+  --prompt "..." -n 1 --runs 3 --warmup 1
+
+# Batched path, f32 KV cache (slightly lower drift vs per-token)
 ZINC_METAL_KV_Q8=0 \
 ZINC_BATCHED_PREFILL=1 \
   ./zig-out/bin/zinc-bench-metal -m $MODEL \
   --prompt "..." -n 1 --runs 3 --warmup 1
 
 # Validate: run both, diff last-token logits, log within/exceeded 1e-3
-ZINC_METAL_KV_Q8=0 \
 ZINC_BATCHED_PREFILL=validate \
   ./zig-out/bin/zinc-bench-metal -m $MODEL \
   --prompt "..." -n 1 --runs 1 --warmup 0
@@ -354,20 +358,20 @@ ZINC_BATCHED_PREFILL=validate \
 ~/Workspace/llama.cpp/build-metal/bin/llama-simple -m $MODEL -n 1 -ngl 99 "..."
 ```
 
-The env var `ZINC_METAL_KV_Q8=0` is currently required because `canUseBatchedPrefill` rejects the Q8 KV cache path. Removing that requirement is gated on porting a `flash_attn_batched_q8` shader variant.
+**Update 2026-04-20 (same day):** An extra commit ported `flash_attn_batched_q8` and removed the `ZINC_METAL_KV_Q8=0` requirement. `prefillBatched` now routes through `flash_attn_batched_q8` + `kv_cache_write_q8_batched` when the engine is configured with the default Q8 KV cache, and through the f32 path when it is not. Measured throughput on Qwen3 8B Q4_K_M with default Q8 KV: 294 tok/s (vs 301 tok/s f32 KV, 353 tok/s llama.cpp F16 KV). Q8 quantization amplifies the GEMM-vs-DMMV logit drift from 9e-3 to 0.12 at 106 tokens against the per-token reference, so the validate mode warns more loudly, but output remains coherent and still matches llama.cpp token-for-token.
 
 ## What's next
 
 The concrete unlocks in priority order:
 
-1. **Port `flash_attn_batched_q8`**. Removes the `ZINC_METAL_KV_Q8=0` requirement, lets Qwen3 8B and larger models use batched prefill with the default 4x-smaller KV cache.
-2. **Tune the Q4_K GEMM kernel**. Close the 15% gap to llama.cpp through better K-dim blocking or a larger tile.
-3. **Fuse gate + up GEMM**. The two projections share their input. A single GEMM that writes two tiles would halve the weight-read traffic for that layer phase.
+1. ~~**Port `flash_attn_batched_q8`**. Removes the `ZINC_METAL_KV_Q8=0` requirement.~~ **Done** (2026-04-20, same day). Both f32 and Q8 KV caches route through the batched path now.
+2. **Tune the Q4_K GEMM kernel**. Close the 15% gap to llama.cpp through better K-dim blocking, explicit unroll hints like llama.cpp's `FOR_UNROLL`, or a larger tile. The per-tile arithmetic intensity is already at 6.7 TFLOPS / ~10 TFLOPS theoretical half matmul peak, so the last 30% of peak is what separates us from llama.cpp.
+3. **Fuse gate + up GEMM**. The two projections share their input. A single GEMM that writes two tiles would halve the input-read traffic for that layer phase. Small win (~0.3 ms total) but easy.
 4. **Q8_0 GEMM variant**. SSM projections in Qwen3.5 use Q8_0. Batching them would fix the 35B MoE prefill path described in [our RDNA4 post](/blog/2026-04-18-why-rdna4-prefill-for-qwen-3-5-is-stuck-at-25-tok-s), because the same SSM bottleneck exists on Metal.
 5. **Batched MoE expert dispatch**. For Qwen3.5-35B MoE and similar models, route experts' gate/up/down through a batched MoE GEMM. The single-token MoE path today reads ~400 MB of expert weights per prompt token.
 6. **Prefix cache reuse**. The current gate rejects `state.position > 0`. Extending the batched path to handle "append M tokens at offset P" is a straightforward change to the KV cache write offset and the flash attention kv_pos_offset.
 
-Each one unlocks a model class. (1) + (2) gets Qwen3 8B to parity with llama.cpp at default settings. (3) + (4) is LLaMA 3.1 8B and Mistral. (5) is Qwen3.5-35B. (6) is the prefix-cache reuse that production inference needs.
+Each one unlocks a model class. (2) gets Qwen3 8B to parity with llama.cpp at default settings. (3) + (4) is LLaMA 3.1 8B and Mistral. (5) is Qwen3.5-35B. (6) is the prefix-cache reuse that production inference needs.
 
 ## The lesson that does not fit in a bullet
 
