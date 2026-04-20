@@ -161,8 +161,6 @@ pub const ElementwiseDispatch = struct {
     pipeline_sigmoid_scale_acc: ?Pipeline,
     /// MOE WEIGHTED ACC pipeline: a[i] += routing_weight * b[i], 3 bindings (accum, src, routing).
     pipeline_moe_weighted_acc: ?Pipeline,
-    /// SOFTCAP pipeline: in-place logit softcapping, 1 binding (logits buffer).
-    pipeline_softcap: ?Pipeline,
     /// KV CACHE WRITE pipeline: compute-based KV cache copy, 4 bindings (k_src, k_dst, v_src, v_dst).
     pipeline_kv_cache_write: ?Pipeline,
     /// NORM ROPE pipeline: fused RMS norm + RoPE per head, 3 bindings (data, weight, freq).
@@ -356,14 +354,6 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
-        // softcap: in-place logit softcapping, 1 binding (logits buffer)
-        const SoftcapPush = extern struct { N: u32, softcap_bits: u32 };
-        const softcap_path = std.fmt.bufPrint(&path_buf, "{s}/softcap.spv", .{shader_dir}) catch unreachable;
-        const pipeline_softcap = pipeline_mod.createFromSpirvWithOptions(instance, softcap_path, 1, @sizeOf(SoftcapPush), &.{}, push_options, allocator) catch |err| blk: {
-            log.warn("softcap shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-
         // kv_cache_write: 4 bindings (k_src, k_dst, v_src, v_dst)
         const kvcw_path = std.fmt.bufPrint(&path_buf, "{s}/kv_cache_write.spv", .{shader_dir}) catch unreachable;
         const pipeline_kv_cache_write = pipeline_mod.createFromSpirvWithOptions(instance, kvcw_path, 4, @sizeOf(KvCacheWritePush), &.{}, push_options, allocator) catch |err| blk: {
@@ -399,7 +389,6 @@ pub const ElementwiseDispatch = struct {
             .pipeline_softmax_topk_v2 = pipeline_softmax_topk_v2,
             .pipeline_sigmoid_scale_acc = pipeline_sigmoid_scale_acc,
             .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
-            .pipeline_softcap = pipeline_softcap,
             .pipeline_kv_cache_write = pipeline_kv_cache_write,
             .pipeline_norm_rope = pipeline_norm_rope,
             .descriptor_pool = descriptor_pool,
@@ -707,21 +696,6 @@ pub const ElementwiseDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 
-    /// Record in-place logit softcapping: logits[i] = cap * tanh(logits[i] / cap).
-    pub fn recordSoftcap(
-        self: *const ElementwiseDispatch,
-        cmd: *CommandBuffer,
-        descriptor_set: vk.c.VkDescriptorSet,
-        n_elements: u32,
-        softcap: f32,
-    ) !void {
-        const pip = if (self.pipeline_softcap) |*p| p else return error.ShaderNotLoaded;
-        const SoftcapPush = extern struct { N: u32, softcap_bits: u32 };
-        const push = SoftcapPush{ .N = n_elements, .softcap_bits = @bitCast(softcap) };
-        const workgroups = (n_elements + 63) / 64;
-        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
-    }
-
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *ElementwiseDispatch) void {
@@ -745,7 +719,6 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_softmax_topk_v2) |*p| p.deinit();
         if (self.pipeline_sigmoid_scale_acc) |*p| p.deinit();
         if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
-        if (self.pipeline_softcap) |*p| p.deinit();
         if (self.pipeline_kv_cache_write) |*p| p.deinit();
         if (self.pipeline_norm_rope) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);

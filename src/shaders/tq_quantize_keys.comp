@@ -1,5 +1,0 @@
-#version 460
-// Placeholder — TurboQuant key compression
-// TODO: implement
-layout(local_size_x = 64) in;
-void main() {}
