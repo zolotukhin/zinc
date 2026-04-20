@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) void {
         "kv_cache_write",
         "norm_rope",
         "quantize_q8_1",
+        "dmmv_q8_0_q8_1",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

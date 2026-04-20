@@ -98,6 +98,11 @@ pub const DmmvDispatch = struct {
     /// Foundation for mul_mmq: quantize an F32 activation into Q8_1 blocks.
     /// 2 bindings (A f32 vec4 in, D u32 stream out), push constants {ne, num_blocks}.
     pipeline_quantize_q8_1: ?Pipeline,
+    /// mul_mmq variant: Q8_0 weight × Q8_1 activation -> f32. Same 3-binding
+    /// shape as pipeline_q8_0 but the second binding is a Q8_1 block stream
+    /// produced by pipeline_quantize_q8_1. Enables integer dot product on the
+    /// SSM proj hot path when ZINC_MMQ_SSM=1.
+    pipeline_q8_0_q8_1: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -290,6 +295,17 @@ pub const DmmvDispatch = struct {
             log.info("quantize_q8_1 pipeline loaded (mul_mmq foundation)", .{});
         }
 
+        // mul_mmq consumer: Q8_0 weight × Q8_1 activation -> f32.
+        // Reuses DmmvPushConstants (M, K, a_offset, x_offset, y_offset, acc_mode).
+        const q8q81_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_q8_1.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q8_0_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q8q81_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("dmmv_q8_0_q8_1 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_q8_0_q8_1 != null) {
+            log.info("dmmv_q8_0_q8_1 pipeline loaded (mul_mmq consumer)", .{});
+        }
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_mxfp4 = pipeline_mxfp4,
@@ -309,6 +325,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q5k_moe_kpar = pipeline_q5k_moe_kpar,
             .pipeline_q6k_moe = pipeline_q6k_moe,
             .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
+            .pipeline_q8_0_q8_1 = pipeline_q8_0_q8_1,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -551,6 +568,55 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Record a push-descriptor Q8_0 × Q8_1 integer-dot matvec dispatch.
+    /// The activation buffer `x_buf` must be Q8_1-encoded output from
+    /// `recordQuantizeQ8_1`, and `x_offset` must be 4-byte aligned. Same push
+    /// layout as DmmvPushConstants (M, K, a_offset, x_offset, y_offset,
+    /// acc_mode). Dispatch grid: (M+1)/2 workgroups (2 rows per WG, 64 threads).
+    pub fn recordMmqQ8_0_Q8_1(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        x_buf: vk.c.VkBuffer,
+        x_size: vk.c.VkDeviceSize,
+        y_buf: vk.c.VkBuffer,
+        y_size: vk.c.VkDeviceSize,
+        M: u32,
+        K: u32,
+        a_offset: u32,
+        x_offset: u32,
+        y_offset: u32,
+        acc_mode: u32,
+    ) !void {
+        const pip = if (self.pipeline_q8_0_q8_1) |*p| p else return error.PipelineNotLoaded;
+        if (K == 0 or (K & 31) != 0) return error.InvalidArgument;
+        const push = DmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = a_offset,
+            .x_offset = x_offset,
+            .y_offset = y_offset,
+            .acc_mode = acc_mode,
+        };
+        const infos = [3]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = x_buf, .offset = 0, .range = x_size },
+            .{ .buffer = y_buf, .offset = 0, .range = y_size },
+        };
+        const wg_x = (M + 1) / 2;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            wg_x,
+            1,
+            1,
+        );
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -568,6 +634,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q5k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
         if (self.pipeline_quantize_q8_1) |*p| p.deinit();
+        if (self.pipeline_q8_0_q8_1) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
