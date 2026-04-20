@@ -797,6 +797,14 @@ pub const InferenceEngine = struct {
     gpu_ssm_states: []Buffer, // [n_layers] device-local recurrent state: num_heads * head_v_dim^2 * f32
     // GPU-side MoE router output (for Phase 3c GPU router)
     router_output_buf: Buffer, // GPU-side expert_ids[k] u32 + expert_weights[k] f32 for fast MoE routing
+    // Step 11a foundation (ZINC_CAPTURE_ROUTING=1): per-(token, layer) capture of
+    // softmax_topk output. Enabled only when the flag is set; otherwise handle==null
+    // and the hot path skips the copy entirely. Slot layout:
+    //   slot(token, layer) = (token * n_layers + layer) * slot_bytes
+    // where slot_bytes = 2 * n_experts_used * 4 (u32 ids followed by f32 weights).
+    routing_capture_buf: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
+    routing_capture_slot_bytes: u32 = 0,
+    routing_capture_max_tokens: u32 = 0,
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
     // Pre-built tensor name → pointer map (O(1) lookup, replaces O(n) linear scan)
@@ -835,6 +843,11 @@ pub const InferenceEngine = struct {
     // int8*f32 dot for int8*int8. Effective only when all four tensors are
     // Q8_0.
     use_mmq_ssm: bool = false,
+    // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
+    // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
+    // slot(position, layer). Unused downstream this cycle — the buffer is the
+    // prerequisite for Step 11b (token-permute) and 11c (grouped MoE GEMM).
+    use_capture_routing: bool = false,
     // Q8_1 scratch pair (primary / alt). Swapped alongside decode_cmd during
     // the double-buffered prefill pipeline so the two in-flight CBs don't
     // race on the same scratch region. Size = (hidden_dim/32)*36 bytes.
@@ -1391,7 +1404,7 @@ pub const InferenceEngine = struct {
         var router_output_buf = try Buffer.initDeviceLocal(
             instance,
             router_out_size,
-            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         );
         errdefer router_output_buf.deinit();
 
@@ -1627,6 +1640,34 @@ pub const InferenceEngine = struct {
             log.info("ZINC_MMQ_SSM=1 requested but prerequisites missing (q8_1 pipelines or push descriptors); using f32 SSM proj", .{});
         }
 
+        // Step 11a foundation: per-(token, layer) routing capture buffer.
+        // Enabled by ZINC_CAPTURE_ROUTING=1. Dormant downstream — this cycle only
+        // verifies the copy path is correct and measures the flag-on overhead so
+        // Step 11b can wire token-permute on top without re-proving the plumbing.
+        const capture_env = std.posix.getenv("ZINC_CAPTURE_ROUTING");
+        const capture_flag = capture_env != null and std.mem.eql(u8, capture_env.?, "1");
+        var routing_capture_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
+        var routing_capture_slot_bytes: u32 = 0;
+        var routing_capture_max_tokens: u32 = 0;
+        if (capture_flag and n_used_experts > 0 and config.n_layers > 0) {
+            const MAX_CAPTURE_TOKENS: u32 = 2048;
+            const slot_bytes: u32 = @as(u32, 2) * n_used_experts * @sizeOf(u32);
+            const total_bytes = @as(vk.c.VkDeviceSize, MAX_CAPTURE_TOKENS) *
+                @as(vk.c.VkDeviceSize, config.n_layers) *
+                @as(vk.c.VkDeviceSize, slot_bytes);
+            routing_capture_buf = try Buffer.initDeviceLocal(
+                instance,
+                total_bytes,
+                vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            );
+            errdefer routing_capture_buf.deinit();
+            routing_capture_slot_bytes = slot_bytes;
+            routing_capture_max_tokens = MAX_CAPTURE_TOKENS;
+            log.info("ZINC_CAPTURE_ROUTING=1: routing capture buffer {d} B (tokens={d} layers={d} slot={d}B)", .{
+                total_bytes, MAX_CAPTURE_TOKENS, config.n_layers, slot_bytes,
+            });
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
@@ -1635,6 +1676,10 @@ pub const InferenceEngine = struct {
             .use_moe_q5k_kpar = moe_q5k_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
+            .use_capture_routing = capture_flag and routing_capture_buf.handle != null,
+            .routing_capture_buf = routing_capture_buf,
+            .routing_capture_slot_bytes = routing_capture_slot_bytes,
+            .routing_capture_max_tokens = routing_capture_max_tokens,
             .ssm_mmq_scratch = ssm_mmq_scratch,
             .ssm_mmq_scratch_alt = ssm_mmq_scratch_alt,
             .elementwise = elementwise,
@@ -4683,7 +4728,39 @@ pub const InferenceEngine = struct {
                         config.n_experts,
                         n_used,
                     );
-                    self.decode_cmd.computeBufferBarrier(self.router_output_buf.handle, self.router_output_buf.size);
+                    if (self.use_capture_routing and state.position < self.routing_capture_max_tokens) {
+                        // Step 11a: fan out the topk output to the per-(token, layer) capture
+                        // slot. Broader compute→compute+transfer barrier replaces the narrow
+                        // compute→compute one so the upcoming vkCmdCopyBuffer can read the
+                        // router_output_buf under visibility guarantees. Downstream compute
+                        // dispatches still see the same write visibility.
+                        self.decode_cmd.computeAndTransferBarrier();
+                        const slot_bytes: vk.c.VkDeviceSize = @intCast(self.routing_capture_slot_bytes);
+                        const slot_off: vk.c.VkDeviceSize =
+                            (@as(vk.c.VkDeviceSize, state.position) *
+                                @as(vk.c.VkDeviceSize, config.n_layers) +
+                                @as(vk.c.VkDeviceSize, layer)) * slot_bytes;
+                        const copy_size: vk.c.VkDeviceSize = @min(
+                            slot_bytes,
+                            @as(vk.c.VkDeviceSize, self.router_output_buf.size),
+                        );
+                        if (slot_off + copy_size <= self.routing_capture_buf.size) {
+                            const region = vk.c.VkBufferCopy{
+                                .srcOffset = 0,
+                                .dstOffset = slot_off,
+                                .size = copy_size,
+                            };
+                            vk.c.vkCmdCopyBuffer(
+                                self.decode_cmd.handle,
+                                self.router_output_buf.handle,
+                                self.routing_capture_buf.handle,
+                                1,
+                                &region,
+                            );
+                        }
+                    } else {
+                        self.decode_cmd.computeBufferBarrier(self.router_output_buf.handle, self.router_output_buf.size);
+                    }
                     self.endProfilePhase(.moe_topk, moe_topk_phase);
 
                     // gate DMMV: ALL experts at once (Y=n_used workgroups)
@@ -7742,6 +7819,7 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.gpu_ssm_conv_states);
         self.allocator.free(self.gpu_ssm_states);
         self.router_output_buf.deinit();
+        if (self.routing_capture_buf.handle != null) self.routing_capture_buf.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
         self.kv_page_pool.deinit();
