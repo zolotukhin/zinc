@@ -83,6 +83,13 @@ test "Metal prefillBatched uses gemm/rope batched dispatch helpers" {
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "dispatchFlashAttnBatchedOnCmd", 12000);
 }
 
+test "Metal prefillBatched routes Q8 KV cache through flash_attn_batched_q8" {
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "if (self.kv_cache_q8)", 12000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "dispatchFlashAttnBatchedQ8OnCmd", 12000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "dispatchKvCacheWriteBatchedQ8OnCmd", 12000);
+}
+
 test "softmax_topk shader keeps RADV-safe shared-memory winner scan" {
     const src = @embedFile("shaders/softmax_topk.comp");
     try expectContains(src, "shared float s_local_val[64];");

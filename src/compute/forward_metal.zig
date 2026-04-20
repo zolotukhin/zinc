@@ -576,6 +576,19 @@ const BatchedFlashAttnPush = extern struct {
     kv_pos_offset: u32,
 };
 
+/// Push constants for flash_attn_batched_q8 — adds byte strides for the Q8
+/// cache layout. Mirrors BatchedFlashAttnQ8Push in the shader header.
+const BatchedFlashAttnQ8Push = extern struct {
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    kv_len: u32,
+    n_queries: u32,
+    kv_pos_offset: u32,
+    kv_head_stride_bytes: u32,
+    kv_token_stride_bytes: u32,
+};
+
 /// Push constants for batched Q4_K MoE DMMV.
 /// Expert IDs are provided via a small CPU-written Metal buffer.
 const MoeDmmvPush = extern struct {
@@ -975,7 +988,8 @@ fn canUseBatchedPrefill(engine: *const InferenceEngine) bool {
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gemma or cfg.architecture == .gpt_oss) return false;
     if (engine.private_decode_buffers) return false;
-    if (engine.kv_cache_q8) return false;
+    // Both f32 and Q8 KV caches are supported — we dispatch the matching
+    // flash_attn_batched / kv_cache_write variant below.
     if (fullAttentionInterval(cfg) != 1) return false;
     if (cfg.sliding_window_size != 0) return false;
     if (engine.attn_sink_values != null) return false;
@@ -1241,7 +1255,9 @@ pub const InferenceEngine = struct {
     gemm_q4k_pipe: MetalPipeline,
     gemm_q6k_pipe: MetalPipeline,
     // Batched flash attention for prefill — handles N queries with causal masking.
+    // `_q8` variant reads K/V from a Q8_0-quantized cache; default reads f32.
     flash_attn_batched_pipe: MetalPipeline,
+    flash_attn_batched_q8_pipe: MetalPipeline,
     // Batched rotary position embedding — rotates N tokens at consecutive positions in one dispatch.
     rope_batched_pipe: MetalPipeline,
 
@@ -1557,6 +1573,7 @@ pub const InferenceEngine = struct {
         self.gemm_q4k_pipe = try loadShaderPipeline(ctx, "gemm_q4k");
         self.gemm_q6k_pipe = try loadShaderPipeline(ctx, "gemm_q6k");
         self.flash_attn_batched_pipe = try loadShaderPipeline(ctx, "flash_attn_batched");
+        self.flash_attn_batched_q8_pipe = try loadShaderPipeline(ctx, "flash_attn_batched_q8");
         self.rope_batched_pipe = try loadShaderPipeline(ctx, "rope_batched");
         const q8_simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
         const q8_dual_simd_width = if (self.dmmv_q8_0_dual_pipe.thread_execution_width > 0) self.dmmv_q8_0_dual_pipe.thread_execution_width else @as(u32, 32);
@@ -2121,6 +2138,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.gemm_q4k_pipe);
         metal_pipeline.freePipeline(&self.gemm_q6k_pipe);
         metal_pipeline.freePipeline(&self.flash_attn_batched_pipe);
+        metal_pipeline.freePipeline(&self.flash_attn_batched_q8_pipe);
         metal_pipeline.freePipeline(&self.rope_batched_pipe);
 
         for (0..self.config.n_layers) |i| {
@@ -2388,23 +2406,47 @@ pub const InferenceEngine = struct {
             dispatchRopeBatchedOnCmd(self, &cmd, &scratch.k, &scratch.k, rope_freq_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, 0, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
             cmd.barrier();
 
-            dispatchKvCacheWriteBatchedOnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, 0, n_tokens * attn.kv_dim);
+            if (self.kv_cache_q8) {
+                const n_blocks = n_tokens * (attn.kv_dim / 32);
+                dispatchKvCacheWriteBatchedQ8OnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, 0, n_blocks);
+            } else {
+                dispatchKvCacheWriteBatchedOnCmd(self, &cmd, layer_idx, &scratch.k, &scratch.v, 0, n_tokens * attn.kv_dim);
+            }
             cmd.barrier();
 
-            dispatchFlashAttnBatchedOnCmd(
-                self,
-                &cmd,
-                &scratch.q,
-                &self.kv_k_cache[layer_idx],
-                &self.kv_v_cache[layer_idx],
-                &scratch.attn_out,
-                attn.head_dim,
-                cfg.n_heads,
-                attn.n_kv_heads,
-                n_tokens,
-                n_tokens,
-                0,
-            );
+            if (self.kv_cache_q8) {
+                dispatchFlashAttnBatchedQ8OnCmd(
+                    self,
+                    &cmd,
+                    &scratch.q,
+                    &self.kv_k_cache[layer_idx],
+                    &self.kv_v_cache[layer_idx],
+                    &scratch.attn_out,
+                    attn.head_dim,
+                    cfg.n_heads,
+                    attn.n_kv_heads,
+                    n_tokens,
+                    n_tokens,
+                    0,
+                    attn.kv_cache_head_stride_bytes,
+                    attn.kv_cache_bytes_per_token,
+                );
+            } else {
+                dispatchFlashAttnBatchedOnCmd(
+                    self,
+                    &cmd,
+                    &scratch.q,
+                    &self.kv_k_cache[layer_idx],
+                    &self.kv_v_cache[layer_idx],
+                    &scratch.attn_out,
+                    attn.head_dim,
+                    cfg.n_heads,
+                    attn.n_kv_heads,
+                    n_tokens,
+                    n_tokens,
+                    0,
+                );
+            }
             cmd.barrier();
 
             dispatchGemmBatchedOnCmd(self, &cmd, o_t, &scratch.attn_out, &scratch.down, hidden_dim, attn.q_dim, n_tokens);
@@ -3721,6 +3763,38 @@ fn dispatchFlashAttnBatchedOnCmd(
     cmd.dispatchV2(&engine.flash_attn_batched_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnPush), 0);
 }
 
+/// Q8_0 variant of `dispatchFlashAttnBatchedOnCmd`. KV cache is stored as
+/// 34-byte Q8_0 blocks (2-byte half scale + 32 i8 quants).
+fn dispatchFlashAttnBatchedQ8OnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    q_buf: *const MetalBuffer,
+    k_cache: *const MetalBuffer,
+    v_cache: *const MetalBuffer,
+    out_buf: *const MetalBuffer,
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    kv_len: u32,
+    n_queries: u32,
+    kv_pos_offset: u32,
+    kv_head_stride_bytes: u32,
+    kv_token_stride_bytes: u32,
+) void {
+    const push = BatchedFlashAttnQ8Push{
+        .head_dim = head_dim,
+        .n_heads = n_heads,
+        .n_kv_heads = n_kv_heads,
+        .kv_len = kv_len,
+        .n_queries = n_queries,
+        .kv_pos_offset = kv_pos_offset,
+        .kv_head_stride_bytes = kv_head_stride_bytes,
+        .kv_token_stride_bytes = kv_token_stride_bytes,
+    };
+    const bufs = [_]*const MetalBuffer{ q_buf, k_cache, v_cache, out_buf };
+    cmd.dispatchV2(&engine.flash_attn_batched_q8_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnQ8Push), 0);
+}
+
 /// Dispatch a batched KV-cache write: copy N_tokens × kv_dim contiguous f32s
 /// from `src_k`/`src_v` to the layer's cache starting at `dst_offset_elements`.
 fn dispatchKvCacheWriteBatchedOnCmd(
@@ -3744,6 +3818,33 @@ fn dispatchKvCacheWriteBatchedOnCmd(
         &engine.kv_v_cache[layer_idx],
     };
     cmd.dispatchV2(&engine.kv_cache_write_pipe, .{ (n_elements + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
+}
+
+/// Batched KV-cache write into a Q8_0-quantized cache. `n_blocks` is the
+/// total number of 32-element blocks to write across all tokens (typically
+/// `n_tokens * kv_dim / 32`). `dst_offset_bytes` points at the byte where
+/// the first block for the first token starts.
+fn dispatchKvCacheWriteBatchedQ8OnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    layer_idx: usize,
+    src_k: *const MetalBuffer,
+    src_v: *const MetalBuffer,
+    dst_offset_bytes: u32,
+    n_blocks: u32,
+) void {
+    const push = KvCacheWritePush{
+        .n = n_blocks,
+        .dst_offset = 0,
+        .dst_offset_bytes = dst_offset_bytes,
+    };
+    const bufs = [_]*const MetalBuffer{
+        src_k,
+        src_v,
+        &engine.kv_k_cache[layer_idx],
+        &engine.kv_v_cache[layer_idx],
+    };
+    cmd.dispatchV2(&engine.kv_cache_write_q8_pipe, .{ n_blocks, 1, 1 }, .{ 32, 1, 1 }, &bufs, &push, @sizeOf(KvCacheWritePush), 0);
 }
 
 fn dispatchDeinterleaveOnCmd(
