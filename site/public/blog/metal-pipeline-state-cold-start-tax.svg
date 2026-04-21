@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Where the first second of a cold Metal LLM launch actually goes</title>
+  <desc id="desc">A two-lane timeline. The top lane shows the first prompt after a fresh Metal LLM launch, with bars for mmap setup (trivial), first-layer weight page faults (long), Metal pipeline state compilation (long), and the actual first kernel dispatch (short). The bottom lane shows the second prompt in the same process, with a short dispatch bar and steady compute, and no pipeline compilation or page fault work.</desc>
+  <defs>
+    <linearGradient id="bg-pso" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-pso" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .p-title { font: 700 30px Georgia, serif; fill: #10233c; }
+      .p-sub { font: 500 16px Arial, sans-serif; fill: #53657b; }
+      .p-section { font: 700 14px Arial, sans-serif; fill: #2c3e54; }
+      .p-label { font: 600 14px Arial, sans-serif; fill: #10233c; }
+      .p-value { font: 700 13px Arial, sans-serif; fill: #ffffff; }
+      .p-value-out { font: 700 13px Arial, sans-serif; fill: #10233c; }
+      .p-axis { font: 400 12px Arial, sans-serif; fill: #53657b; }
+      .p-note { font: 400 13px Arial, sans-serif; fill: #445567; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" fill="url(#bg-pso)"/>
+
+  <g transform="translate(72 44)">
+    <text class="p-title">Two lanes of a cold-start Metal LLM</text>
+    <text class="p-sub" x="0" y="28">The first prompt pays three independent taxes. The second prompt in the same process pays only the last one. Time axis runs left to right in milliseconds on an Apple M-series GPU, rough order of magnitude.</text>
+  </g>
+
+  <!-- axis: 0 to 1300ms across x=320..1140, so 1 ms = 0.63 px -->
+  <g transform="translate(0 120)" filter="url(#shadow-pso)">
+
+    <!-- axis ticks -->
+    <g>
+      <line x1="320" y1="410" x2="1140" y2="410" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="320" y1="410" x2="320" y2="416" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="510" y1="410" x2="510" y2="416" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="700" y1="410" x2="700" y2="416" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="890" y1="410" x2="890" y2="416" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="1080" y1="410" x2="1080" y2="416" stroke="#9fb0c0" stroke-width="1.5"/>
+      <text class="p-axis" x="320" y="432" text-anchor="middle">0 ms</text>
+      <text class="p-axis" x="510" y="432" text-anchor="middle">300</text>
+      <text class="p-axis" x="700" y="432" text-anchor="middle">600</text>
+      <text class="p-axis" x="890" y="432" text-anchor="middle">900</text>
+      <text class="p-axis" x="1080" y="432" text-anchor="middle">1200 ms</text>
+    </g>
+
+    <!-- Lane A: cold first prompt -->
+    <text class="p-section" x="72" y="24">First prompt after a fresh binary launch</text>
+
+    <!-- mmap setup: 0..20ms -->
+    <rect x="320" y="44" width="13" height="42" rx="4" fill="#2563eb"/>
+    <text class="p-value-out" x="340" y="70">mmap setup (~20 ms)</text>
+
+    <!-- first weight page faults: 20..420ms = 400ms wide = 253 px -->
+    <rect x="333" y="100" width="253" height="42" rx="4" fill="#0f766e"/>
+    <text class="p-value" x="460" y="127" text-anchor="middle">First-layer weight page faults (~400 ms)</text>
+
+    <!-- Metal pipeline state compilation: 420..1150ms = 730ms wide = 461 px -->
+    <rect x="586" y="156" width="461" height="42" rx="4" fill="#b45309"/>
+    <text class="p-value" x="816" y="183" text-anchor="middle">Metal pipeline state compilation, roughly 40-60 unique kernels (~730 ms)</text>
+
+    <!-- First kernel dispatch: 1150..1220ms = 70ms -->
+    <rect x="1047" y="212" width="44" height="42" rx="4" fill="#10233c"/>
+    <text class="p-value-out" x="1098" y="238">first dispatch (~70 ms)</text>
+
+    <text class="p-note" x="72" y="270">Each color is a different source of latency. Only the black bar contains useful arithmetic.</text>
+
+    <!-- Lane B: warm second prompt -->
+    <text class="p-section" x="72" y="320">Second prompt in the same process</text>
+
+    <!-- Reused pipeline states, warm page cache, dispatch: 0..70ms = 44 px -->
+    <rect x="320" y="340" width="44" height="42" rx="4" fill="#10233c"/>
+    <text class="p-value-out" x="375" y="368">steady dispatch (~70 ms)</text>
+
+    <text class="p-note" x="72" y="395">No pipeline compile. No faults. The two taxes are paid once per process, not once per prompt.</text>
+  </g>
+</svg>

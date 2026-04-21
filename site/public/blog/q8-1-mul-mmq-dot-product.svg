@@ -113,21 +113,24 @@
     <line x1="862" y1="52" x2="892" y2="52" stroke="#53657b" stroke-width="2" marker-end="url(#arrow-mmq)"/>
 
     <!-- Tags -->
-    <g transform="translate(272 94)">
+    <g transform="translate(291 96)">
       <rect x="0" y="0" width="132" height="22" rx="3" fill="#a3724a"/>
       <text class="m-tag" x="66" y="15" text-anchor="middle">once per prompt chunk</text>
     </g>
-    <g transform="translate(472 94)">
-      <rect x="0" y="0" width="150" height="22" rx="3" fill="#3a5a88"/>
-      <text class="m-tag" x="75" y="15" text-anchor="middle">read once, used 7x per layer</text>
+    <g transform="translate(469 96)">
+      <rect x="0" y="0" width="176" height="22" rx="3" fill="#3a5a88"/>
+      <text class="m-tag" x="88" y="15" text-anchor="middle">read once, used 7x per layer</text>
     </g>
-    <g transform="translate(672 94)">
-      <rect x="0" y="0" width="190" height="22" rx="3" fill="#205b87"/>
-      <text class="m-tag" x="95" y="15" text-anchor="middle">packed int8, 4 lanes per mul-add</text>
+    <g transform="translate(662 96)">
+      <rect x="0" y="0" width="210" height="22" rx="3" fill="#205b87"/>
+      <text class="m-tag" x="105" y="15" text-anchor="middle">packed int8, 4 lanes per mul-add</text>
     </g>
 
-    <text class="m-caption" x="72" y="150">Activations are quantized once per prompt chunk, then every SSM, MoE, and projection dispatch in that layer reads the same Q8_1 buffer. The dot product becomes a packed integer mul-add reduced across a subgroup.</text>
-    <text class="m-caption" x="72" y="172">The accumulator stays FP32. Only the inner reduction changes shape.</text>
+    <text class="m-caption" x="72" y="152">
+      <tspan x="72" dy="0">Activations are quantized once per prompt chunk, then every SSM, MoE, and projection dispatch in that</tspan>
+      <tspan x="72" dy="18">layer reads the same Q8_1 buffer. The dot product becomes a packed integer mul-add reduced across a subgroup.</tspan>
+      <tspan x="72" dy="18">The accumulator stays FP32. Only the inner reduction changes shape.</tspan>
+    </text>
   </g>
 
   <!-- Delta callout -->

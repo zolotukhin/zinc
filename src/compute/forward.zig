@@ -40,6 +40,7 @@ const NormRopePush = elementwise_mod.NormRopePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
+const FlashAttnBatchedPush = attn_mod.FlashAttnBatchedPush;
 const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 const memory_plan = @import("../gpu/memory_plan.zig");
@@ -853,6 +854,13 @@ pub const InferenceEngine = struct {
     // race on the same scratch region. Size = (hidden_dim/32)*36 bytes.
     ssm_mmq_scratch: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
     ssm_mmq_scratch_alt: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
+    // Opt-in via ZINC_BATCH_ATTN=1. Foundation for prefill-path attention
+    // batching (effort-6 Step 6 A). When set and flash_attn_batched is
+    // loaded, the attention call site routes through the batched shader with
+    // n_queries=1 and seq_start=state.position — correctness-identical to
+    // the decode-shape shader, proves the plumbing. The n_queries>1 speedup
+    // cycle piggybacks on the same pipeline and helper.
+    use_batch_attn: bool = false,
     timestamp_query_pool: vk.c.VkQueryPool = null,
     timestamp_period_ns: f64 = 1.0, // nanoseconds per timestamp tick
     timestamp_count: u32 = 0, // number of timestamps written this token
@@ -1612,6 +1620,19 @@ pub const InferenceEngine = struct {
             log.info("softmax_topk v2 DISABLED via ZINC_TOPK_V1=1; using v1 shared-mem scan", .{});
         }
 
+        // Batched flash-attention foundation (opt-in). When ZINC_BATCH_ATTN=1 and
+        // the flash_attn_batched pipeline is loaded, the attention call site
+        // routes through the batched shader. Foundation step calls with
+        // n_queries=1 for correctness parity with the decode-shape shader.
+        const batch_attn_env = std.posix.getenv("ZINC_BATCH_ATTN");
+        const batch_attn_flag = batch_attn_env != null and std.mem.eql(u8, batch_attn_env.?, "1");
+        const batch_attn_enabled = batch_attn_flag and attention.pipeline_batched != null;
+        if (batch_attn_enabled) {
+            log.info("Flash-attn batched path ENABLED (ZINC_BATCH_ATTN=1); n_queries=1 foundation", .{});
+        } else if (batch_attn_flag) {
+            log.info("ZINC_BATCH_ATTN=1 requested but flash_attn_batched pipeline absent; using decode-shape shader", .{});
+        }
+
         // SSM mmq path (opt-in). Effective only when (a) flag is on, (b) both
         // quantize_q8_1 and dmmv_q8_0_q8_1 pipelines loaded, (c) push
         // descriptors available (same gate as the rest of the mmq-adjacent
@@ -1676,6 +1697,7 @@ pub const InferenceEngine = struct {
             .use_moe_q5k_kpar = moe_q5k_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
+            .use_batch_attn = batch_attn_enabled,
             .use_capture_routing = capture_flag and routing_capture_buf.handle != null,
             .routing_capture_buf = routing_capture_buf,
             .routing_capture_slot_bytes = routing_capture_slot_bytes,
@@ -3877,7 +3899,66 @@ pub const InferenceEngine = struct {
 
                 // Flash attention. Sinks are pre-populated at init into a per-layer
                 // slot of attn_sinks_buf (cycle 8); flash_attn reads via sink_offset.
-                if (self.attention.pipeline) |*pip| {
+                //
+                // Batched-path foundation (ZINC_BATCH_ATTN=1): route through
+                // the flash_attn_batched pipeline with n_queries=1 and
+                // seq_start=state.position. Output is bit-equivalent to the
+                // decode shader for n_queries=1. Speed cycle enables n>1 later.
+                const use_batched = self.use_batch_attn and self.attention.pipeline_batched != null;
+                if (use_batched) {
+                    const pip = &self.attention.pipeline_batched.?;
+                    const sink_buf = self.attn_sinks_buf;
+                    const sink_offset: u32 = layer * config.n_heads;
+                    if (pip.uses_push_descriptors) {
+                        const push = FlashAttnBatchedPush{
+                            .head_dim = layer_head_dim,
+                            .n_heads = config.n_heads,
+                            .n_kv_heads = layer_n_kv_heads,
+                            .seq_start = state.position,
+                            .n_queries = 1,
+                            .page_size = kv_page_size_tokens,
+                            .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
+                            .sink_offset = sink_offset,
+                        };
+                        self.pushDispatch6(
+                            pip,
+                            std.mem.asBytes(&push),
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            self.kv_k_cache[layer_idx].handle,
+                            self.kv_k_cache[layer_idx].size,
+                            self.kv_v_cache[layer_idx].handle,
+                            self.kv_v_cache[layer_idx].size,
+                            self.page_table_buf.handle,
+                            self.page_table_buf.size,
+                            self.attn_out_buf.handle,
+                            self.attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                            config.n_heads,
+                            1,
+                            1,
+                        );
+                    } else {
+                        const attn_ds = try self.allocDescSet(pip.descriptor_set_layout);
+                        self.writeDescSet6(
+                            attn_ds,
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            self.kv_k_cache[layer_idx].handle,
+                            self.kv_k_cache[layer_idx].size,
+                            self.kv_v_cache[layer_idx].handle,
+                            self.kv_v_cache[layer_idx].size,
+                            self.page_table_buf.handle,
+                            self.page_table_buf.size,
+                            self.attn_out_buf.handle,
+                            self.attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                        );
+                        try self.attention.recordFlashAttnBatched(&self.decode_cmd, attn_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position, 1, kv_page_size_tokens, config.attn_scale, sink_offset);
+                    }
+                } else if (self.attention.pipeline) |*pip| {
                     const sink_buf = self.attn_sinks_buf;
                     const sink_offset: u32 = layer * config.n_heads;
                     if (pip.uses_push_descriptors) {
