@@ -65,6 +65,9 @@ pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "qwen35")) return .qwen35;
     if (std.mem.eql(u8, arch_str, "mamba")) return .mamba;
     if (std.mem.eql(u8, arch_str, "jamba")) return .jamba;
+    // Gemma-3 is intentionally omitted — it is not a supported architecture
+    // in ZINC. Only the Gemma-4 family (and legacy "gemma" / "gemma2"
+    // fallbacks where the arch string still appears) is mapped here.
     if (std.mem.eql(u8, arch_str, "gemma")) return .gemma;
     if (std.mem.eql(u8, arch_str, "gemma2")) return .gemma;
     if (std.mem.eql(u8, arch_str, "gemma4")) return .gemma;
@@ -84,6 +87,7 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.mamba, parseArchitecture("mamba"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma2"));
+    try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gemma3"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma4"));
     try std.testing.expectEqual(Architecture.mistral, parseArchitecture("mistral"));
     try std.testing.expectEqual(Architecture.mistral, parseArchitecture("llama"));
