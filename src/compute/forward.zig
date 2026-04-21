@@ -6892,6 +6892,27 @@ pub const InferenceEngine = struct {
         }
     }
 
+    /// Experimental batched prompt prefill for the RDNA/Vulkan backend.
+    /// Gated by `ZINC_BATCHED_PREFILL=1`. This is the Vulkan analogue of
+    /// `forward_metal.InferenceEngine.prefillBatched`.
+    ///
+    /// Foundation committed: the `rope_batched` and `flash_attn_batched` SPIR-V
+    /// shaders and their pipeline wrappers (`elementwise.pipeline_rope_batched`,
+    /// `attention.pipeline_batched`, plus matching push structs and dispatchers)
+    /// are loaded at engine init. The orchestration that ties them together with
+    /// `dmmv_q4k_batch` (weight-read-once GEMM) for projections is the next step
+    /// — until it lands, this entry point transparently delegates to
+    /// `prefillBatch`. Exists so downstream callers can migrate to the new name
+    /// ahead of time, the same way `generateWithMetrics` already does on Metal.
+    pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        // TODO(batched-prefill-rdna): replace with a single batched forward
+        // using `dmmv_q4k_batch` (chunked at MAX_COLS=32 tokens/dispatch),
+        // `rope_batched`, `flash_attn_batched`, and batched residual/RMS ops,
+        // matching the Metal prefillBatched structure. Gate with
+        // `std.posix.getenv("ZINC_BATCHED_PREFILL")` when the path is ready.
+        return self.prefillBatch(state, prompt_tokens);
+    }
+
     /// Process all prompt tokens through the full transformer to populate
     /// KV cache and SSM state. Each token runs through all 40 layers.
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {

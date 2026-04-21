@@ -22,10 +22,26 @@ pub const FlashAttnPush = extern struct {
     sink_offset: u32, // layer_idx * n_heads — starting index into sink_data for this layer
 };
 
+/// Push constants for flash_attn_batched — matches the shader header in
+/// src/shaders/flash_attn_batched.comp. Used by the Vulkan batched prefill
+/// path to process N queries (with per-query causal masking) in one dispatch.
+pub const BatchedFlashAttnPush = extern struct {
+    head_dim: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    kv_len: u32,
+    page_size: u32,
+    attn_scale_bits: u32,
+    n_queries: u32,
+    kv_pos_offset: u32,
+};
+
 /// Manages flash attention pipeline and dispatch.
 pub const AttentionDispatch = struct {
     /// Vulkan compute pipeline, or null if unavailable.
     pipeline: ?Pipeline,
+    /// Batched variant — processes N queries per dispatch with causal mask.
+    pipeline_batched: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -75,8 +91,19 @@ pub const AttentionDispatch = struct {
             break :blk null;
         };
 
+        // Batched flash attention: 5 bindings (Q, K cache, V cache, page table, output).
+        // Keeps the paged layout from flash_attn.comp but accepts n_queries and
+        // kv_pos_offset push constants so a single dispatch handles all prompt
+        // tokens with per-query causal masking. Foundation for prefillBatched.
+        const attn_batched_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_batched.spv", .{shader_dir}) catch unreachable;
+        const pipeline_batched = pipeline_mod.createFromSpirvWithOptions(instance, attn_batched_path, 5, @sizeOf(BatchedFlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+            log.warn("flash_attn_batched shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return AttentionDispatch{
             .pipeline = pipeline,
+            .pipeline_batched = pipeline_batched,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -129,10 +156,42 @@ pub const AttentionDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
     }
 
+    /// Record a batched flash-attention dispatch for prefill.
+    /// Grid is (n_heads, n_queries, 1); each (head, query) workgroup streams
+    /// over the paged KV cache with causal_len = kv_pos_offset + query + 1.
+    /// @returns `error.ShaderNotLoaded` when the batched pipeline is unavailable.
+    pub fn recordFlashAttnBatched(
+        self: *const AttentionDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        head_dim: u32,
+        n_heads: u32,
+        n_kv_heads: u32,
+        kv_len: u32,
+        page_size: u32,
+        attn_scale: f32,
+        n_queries: u32,
+        kv_pos_offset: u32,
+    ) !void {
+        const pip = if (self.pipeline_batched) |*p| p else return error.ShaderNotLoaded;
+        const push = BatchedFlashAttnPush{
+            .head_dim = head_dim,
+            .n_heads = n_heads,
+            .n_kv_heads = n_kv_heads,
+            .kv_len = kv_len,
+            .page_size = page_size,
+            .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
+            .n_queries = n_queries,
+            .kv_pos_offset = kv_pos_offset,
+        };
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, n_queries, 1);
+    }
+
     /// Destroy the loaded pipeline and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *AttentionDispatch) void {
         if (self.pipeline) |*p| p.deinit();
+        if (self.pipeline_batched) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

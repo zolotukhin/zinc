@@ -62,6 +62,17 @@ pub const RopePush = extern struct {
     attn_scale_bits: u32, // YaRN magnitude scale (1.0 for plain RoPE)
 };
 
+/// Push constants for rope_batched (multi-token prefill variant).
+/// Layout mirrors src/shaders/rope_batched.comp.
+pub const RopeBatchedPush = extern struct {
+    stride: u32,
+    rope_dim: u32,
+    n_heads: u32,
+    position_base: u32,
+    freq_base_bits: u32,
+    attn_scale_bits: u32,
+};
+
 /// Push constants for SSM conv1d + SiLU shader.
 pub const SsmConv1dPush = extern struct {
     conv_channels: u32,
@@ -134,6 +145,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_geglu: ?Pipeline,
     /// ROPE pipeline, or null.
     pipeline_rope: ?Pipeline,
+    /// Batched RoPE pipeline used by the RDNA prefillBatched path, or null.
+    pipeline_rope_batched: ?Pipeline,
     /// DEINTERLEAVE pipeline, or null.
     pipeline_deinterleave: ?Pipeline,
     /// SIGMOID MUL pipeline, or null.
@@ -245,6 +258,13 @@ pub const ElementwiseDispatch = struct {
         const rope_path = std.fmt.bufPrint(&path_buf, "{s}/rope_fused.spv", .{shader_dir}) catch unreachable;
         const pipeline_rope = pipeline_mod.createFromSpirvWithOptions(instance, rope_path, 3, @sizeOf(RopePush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("rope_fused shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // RoPE batched: same 3 bindings, processes N tokens per dispatch via grid.y.
+        const rope_batched_path = std.fmt.bufPrint(&path_buf, "{s}/rope_batched.spv", .{shader_dir}) catch unreachable;
+        const pipeline_rope_batched = pipeline_mod.createFromSpirvWithOptions(instance, rope_batched_path, 3, @sizeOf(RopeBatchedPush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("rope_batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -374,6 +394,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_swiglu_oai = pipeline_swiglu_oai,
             .pipeline_geglu = pipeline_geglu,
             .pipeline_rope = pipeline_rope,
+            .pipeline_rope_batched = pipeline_rope_batched,
             .pipeline_deinterleave = pipeline_deinterleave,
             .pipeline_sigmoid_mul = pipeline_sigmoid_mul,
             .pipeline_vadd = pipeline_vadd,
@@ -532,6 +553,34 @@ pub const ElementwiseDispatch = struct {
             .attn_scale_bits = @bitCast(attn_scale),
         };
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
+    }
+
+    /// Record a batched RoPE dispatch that rotates N tokens at consecutive
+    /// positions [position_base, position_base + n_tokens) in a single call.
+    /// Grid is (n_heads, n_tokens, 1); each (head, token) workgroup rotates
+    /// `rope_dim` elements of the token's head slice.
+    pub fn recordRoPEBatched(
+        self: *const ElementwiseDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        stride: u32,
+        rope_dim: u32,
+        n_heads: u32,
+        position_base: u32,
+        n_tokens: u32,
+        freq_base: f32,
+        attn_scale: f32,
+    ) !void {
+        const pip = if (self.pipeline_rope_batched) |*p| p else return error.ShaderNotLoaded;
+        const push = RopeBatchedPush{
+            .stride = stride,
+            .rope_dim = rope_dim,
+            .n_heads = n_heads,
+            .position_base = position_base,
+            .freq_base_bits = @bitCast(freq_base),
+            .attn_scale_bits = @bitCast(attn_scale),
+        };
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, n_tokens, 1);
     }
 
     /// Record a deinterleave dispatch: split element-interleaved Q+gate into separate buffers.
@@ -704,6 +753,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_swiglu_oai) |*p| p.deinit();
         if (self.pipeline_geglu) |*p| p.deinit();
         if (self.pipeline_rope) |*p| p.deinit();
+        if (self.pipeline_rope_batched) |*p| p.deinit();
         if (self.pipeline_deinterleave) |*p| p.deinit();
         if (self.pipeline_sigmoid_mul) |*p| p.deinit();
         if (self.pipeline_vadd) |*p| p.deinit();

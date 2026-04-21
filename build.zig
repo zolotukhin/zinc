@@ -87,6 +87,10 @@ pub fn build(b: *std.Build) void {
         "norm_rope",
         "quantize_q8_1",
         "dmmv_q8_0_q8_1",
+        // Batched prefill shaders — ported from the Metal backend so the
+        // Vulkan/RDNA side can share the prefillBatched orchestration.
+        "rope_batched",
+        "flash_attn_batched",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

@@ -1,0 +1,175 @@
+#version 460
+// ZINC — batched causal flash attention for prefill (Vulkan/RDNA port).
+//
+// Mirrors src/shaders/metal/flash_attn_batched.metal but uses the same
+// paged KV-cache layout as flash_attn.comp. Processes N_queries query
+// tokens in one dispatch, each with its own causal mask so query t sees
+// KV positions 0..(kv_pos_offset + t) inclusive.
+//
+// Dispatch: grid.x = n_heads, grid.y = n_queries, local_size_x = 64.
+// Q layout: q_data[(query_idx * n_heads + head) * head_dim + dim]
+// KV cache: paged, 16 tokens/page, each token slot holds n_kv_heads * head_dim f32.
+// Output layout matches Q.
+//
+// Intended for use from a prefillBatched orchestration that:
+//   (1) projects Q/K/V for all N tokens via batched DMMV/GEMM
+//   (2) writes K/V to the paged cache for positions [kv_pos_offset, kv_pos_offset+N)
+//   (3) dispatches this shader to attention-batch all N queries at once
+//   (4) projects O back to hidden via batched DMMV/GEMM
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;
+    uint n_heads;
+    uint n_kv_heads;
+    uint kv_len;          // total KV entries in cache (= kv_pos_offset + n_queries for fresh prefill)
+    uint page_size;       // tokens per page
+    uint attn_scale_bits; // 0 => rsqrt(head_dim)
+    uint n_queries;
+    uint kv_pos_offset;   // position of the first query in the KV cache
+};
+
+layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];   };
+layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];   };
+layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];   };
+layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[]; };
+layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];   };
+
+const uint BLOCK_SIZE = 256u;
+shared float s_scores[BLOCK_SIZE];
+shared float s_out[512];  // supports head_dim up to 512
+shared float s_max_old;
+shared float s_sum_old;
+shared float s_reduce[64];
+shared float s_reduce_scalar;
+
+void main() {
+    const uint head      = gl_WorkGroupID.x;
+    const uint query_idx = gl_WorkGroupID.y;
+    const uint tid       = gl_LocalInvocationID.x;
+
+    const uint q_per_kv = max(n_heads / max(n_kv_heads, 1u), 1u);
+    const uint kv_head  = head / q_per_kv;
+
+    // Q base and output base: (query_idx * n_heads + head) * head_dim
+    const uint q_base   = (query_idx * n_heads + head) * head_dim;
+    const uint out_base = q_base;
+
+    // Causal mask: query at position (kv_pos_offset + query_idx) can attend
+    // to KV entries [0 .. kv_pos_offset + query_idx] inclusive.
+    const uint causal_len = kv_pos_offset + query_idx + 1u;
+
+    // Initialize per-query running state.
+    for (uint d = tid; d < head_dim; d += 64u) {
+        s_out[d] = 0.0;
+    }
+    if (tid == 0u) {
+        s_max_old = -1.0e30;
+        s_sum_old = 0.0;
+    }
+    barrier();
+
+    const float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
+
+    for (uint block_start = 0u; block_start < causal_len; block_start += BLOCK_SIZE) {
+        const uint block_end = min(block_start + BLOCK_SIZE, causal_len);
+        const uint block_len = block_end - block_start;
+
+        // Phase 1: compute attention scores for this block.
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint seq_pos = block_start + i;
+            const uint page_idx = seq_pos / page_size;
+            const uint page_off = seq_pos % page_size;
+            const uint page_id  = page_ids[page_idx];
+
+            const uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
+                              + kv_head * head_dim;
+
+            float dot = 0.0;
+            for (uint d = 0u; d < head_dim; d++) {
+                dot += q_data[q_base + d] * k_data[k_base + d];
+            }
+            s_scores[i] = dot * scale;
+        }
+        barrier();
+
+        // Phase 2: block max (numerical stability).
+        float local_max = -1.0e30;
+        for (uint i = tid; i < block_len; i += 64u) {
+            local_max = max(local_max, s_scores[i]);
+        }
+        float block_max = subgroupMax(local_max);
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) s_reduce[gl_SubgroupID] = block_max;
+            barrier();
+            if (tid == 0u) {
+                float merged = -1.0e30;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged = max(merged, s_reduce[sg]);
+                s_reduce_scalar = merged;
+            }
+            barrier();
+            block_max = s_reduce_scalar;
+        }
+
+        const float new_max = max(s_max_old, block_max);
+
+        // Phase 3: exp(score - new_max) + block sum.
+        float local_sum = 0.0;
+        for (uint i = tid; i < block_len; i += 64u) {
+            const float e = exp(s_scores[i] - new_max);
+            s_scores[i] = e;
+            local_sum += e;
+        }
+        float block_sum = subgroupAdd(local_sum);
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) s_reduce[gl_SubgroupID] = block_sum;
+            barrier();
+            if (tid == 0u) {
+                float merged = 0.0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_reduce[sg];
+                s_reduce_scalar = merged;
+            }
+            barrier();
+            block_sum = s_reduce_scalar;
+        }
+
+        // Phase 4: rescale previous accum and add this block's contribution.
+        const float rescale = exp(s_max_old - new_max);
+
+        for (uint d = tid; d < head_dim; d += 64u) {
+            s_out[d] = s_out[d] * rescale;
+        }
+        barrier();
+
+        for (uint d = tid; d < head_dim; d += 64u) {
+            float acc = 0.0;
+            for (uint i = 0u; i < block_len; i++) {
+                const uint seq_pos = block_start + i;
+                const uint page_idx = seq_pos / page_size;
+                const uint page_off = seq_pos % page_size;
+                const uint page_id  = page_ids[page_idx];
+                const uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
+                                  + kv_head * head_dim;
+                acc += s_scores[i] * v_data[v_base + d];
+            }
+            s_out[d] += acc;
+        }
+        barrier();
+
+        if (tid == 0u) {
+            s_sum_old = s_sum_old * rescale + block_sum;
+            s_max_old = new_max;
+        }
+        barrier();
+    }
+
+    // Phase 5: normalize and write output.
+    const float inv_sum = s_sum_old > 0.0 ? 1.0 / s_sum_old : 0.0;
+    for (uint d = tid; d < head_dim; d += 64u) {
+        o_data[out_base + d] = s_out[d] * inv_sum;
+    }
+}
