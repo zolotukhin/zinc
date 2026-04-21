@@ -381,6 +381,30 @@ ZINC_BATCHED_PREFILL=validate \
 
 Per-token and batched paths produce identical output on LLaMA (the divergence we saw on Qwen3 was specific to per-head Q/K norms amplifying half-tile GEMM vs DMMV drift — LLaMA has no Q/K norms, so both accumulation orderings land on the same argmax). The long-standing "LLaMA output incoherent on Metal" tracker note turns out to be a tokenizer-level BOS-token difference between `llama-simple` and ZINC's tokenizer, not a forward-pass issue. Orthogonal to this work.
 
+## RDNA4 port: foundation shipped, orchestration queued
+
+The "invention" is the orchestration pattern, not the Metal shaders themselves. All four primitives are now available on the Vulkan/RDNA backend too:
+
+| Primitive | Metal | Vulkan/RDNA |
+|---|---|---|
+| Batched Q4_K GEMM | `gemm_q4k.metal` (simdgroup 8×8 tiles) | `dmmv_q4k_batch.comp` (existing, `num_cols ≤ 32`) |
+| Batched RoPE | `rope_batched.metal` | `rope_batched.comp` **(new)** |
+| Batched causal flash attention | `flash_attn_batched.metal` / `_q8.metal` | `flash_attn_batched.comp` **(new)**, paged KV layout |
+| Pipeline wrappers & dispatch helpers | `forward_metal.zig` | `elementwise.pipeline_rope_batched` + `attention.pipeline_batched` + `recordRoPEBatched` + `recordFlashAttnBatched` **(new)** |
+| Entry point | `pub fn prefillBatched` on `forward_metal.InferenceEngine` | `pub fn prefillBatched` on `forward.InferenceEngine` (delegating to `prefillBatch` until orchestration lands) |
+
+All compile cleanly under `glslc` on the R9700 test node; both new pipelines load without any `"shader not loaded"` warnings. The shaders are now in `zig-out/share/zinc/shaders/` on RDNA4.
+
+**Baseline captured on RDNA4 (AMD Radeon AI PRO R9700, RADV GFX1201), Qwen3-8B Q4_K_M, 103-token prompt:**
+
+| Path | Throughput | vs llama.cpp |
+|---|---:|---:|
+| llama.cpp (Vulkan) | 662 tok/s | 100% |
+| ZINC per-token | 59 tok/s | 9% (11x slower) |
+| ZINC batched (queued) | — | expected follow-up |
+
+This is the same shape of gap the Metal side closed from 8 tok/s → 323 tok/s (40x) with the same invention. The remaining work on Vulkan is a single batched forward in `prefillBatched`: chunked `dmmv_q4k_batch` (MAX_COLS=32) for projections, `recordRoPEBatched`, batched KV write at `position_base * kv_dim`, `recordFlashAttnBatched`, batched RMS norm / SwiGLU / residual (all existing shaders already handle batching via `gl_WorkGroupID.x = token`). The foundational dispatchers are there — what's left is the orchestration body.
+
 ## What's next
 
 The concrete unlocks in priority order:
