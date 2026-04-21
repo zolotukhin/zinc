@@ -4,18 +4,17 @@
 // Mirrors src/shaders/metal/flash_attn_batched.metal but uses the same
 // paged KV-cache layout as flash_attn.comp. Processes N_queries query
 // tokens in one dispatch, each with its own causal mask so query t sees
-// KV positions 0..(kv_pos_offset + t) inclusive.
+// KV positions 0..(seq_start + t) inclusive.
 //
 // Dispatch: grid.x = n_heads, grid.y = n_queries, local_size_x = 64.
 // Q layout: q_data[(query_idx * n_heads + head) * head_dim + dim]
 // KV cache: paged, 16 tokens/page, each token slot holds n_kv_heads * head_dim f32.
 // Output layout matches Q.
+// Sinks: sink_data[sink_offset + head] — NaN-gated (inactive unless gpt-oss).
 //
-// Intended for use from a prefillBatched orchestration that:
-//   (1) projects Q/K/V for all N tokens via batched DMMV/GEMM
-//   (2) writes K/V to the paged cache for positions [kv_pos_offset, kv_pos_offset+N)
-//   (3) dispatches this shader to attention-batch all N queries at once
-//   (4) projects O back to hidden via batched DMMV/GEMM
+// Two callers share this shader via FlashAttnBatchedPush (see attention.zig):
+//   1. Prefill batched path (N>1, seq_start=position_base).
+//   2. ZINC_BATCH_ATTN=1 decode-shape foundation (N=1, seq_start=state.position).
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -26,11 +25,11 @@ layout(push_constant) uniform PushConstants {
     uint head_dim;
     uint n_heads;
     uint n_kv_heads;
-    uint kv_len;          // total KV entries in cache (= kv_pos_offset + n_queries for fresh prefill)
+    uint seq_start;       // position of the first query in the KV cache
+    uint n_queries;
     uint page_size;       // tokens per page
     uint attn_scale_bits; // 0 => rsqrt(head_dim)
-    uint n_queries;
-    uint kv_pos_offset;   // position of the first query in the KV cache
+    uint sink_offset;     // layer_idx * n_heads — index into sink_data
 };
 
 layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];   };
@@ -38,6 +37,7 @@ layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];   };
 layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];   };
 layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[]; };
 layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];   };
+layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
 
 const uint BLOCK_SIZE = 256u;
 shared float s_scores[BLOCK_SIZE];
@@ -59,9 +59,9 @@ void main() {
     const uint q_base   = (query_idx * n_heads + head) * head_dim;
     const uint out_base = q_base;
 
-    // Causal mask: query at position (kv_pos_offset + query_idx) can attend
-    // to KV entries [0 .. kv_pos_offset + query_idx] inclusive.
-    const uint causal_len = kv_pos_offset + query_idx + 1u;
+    // Causal mask: query at position (seq_start + query_idx) can attend
+    // to KV entries [0 .. seq_start + query_idx] inclusive.
+    const uint causal_len = seq_start + query_idx + 1u;
 
     // Initialize per-query running state.
     for (uint d = tid; d < head_dim; d += 64u) {
@@ -167,9 +167,21 @@ void main() {
         barrier();
     }
 
-    // Phase 5: normalize and write output.
-    const float inv_sum = s_sum_old > 0.0 ? 1.0 / s_sum_old : 0.0;
+    // Phase 5: sink + normalize + write output.
+    // sink_data[sink_offset + head] is NaN for layers without sinks — those
+    // layers pass through unchanged; gpt-oss layers add one synthetic virtual
+    // token to the softmax without a V contribution.
+    float final_sum = s_sum_old;
+    float rescale = 1.0;
+    float sink_val = sink_data[sink_offset + head];
+    if (!isnan(sink_val)) {
+        float sink_max = max(s_max_old, sink_val);
+        rescale = exp(s_max_old - sink_max);
+        final_sum = s_sum_old * rescale + exp(sink_val - sink_max);
+    }
+
+    const float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
     for (uint d = tid; d < head_dim; d += 64u) {
-        o_data[out_base + d] = s_out[d] * inv_sum;
+        o_data[out_base + d] = s_out[d] * rescale * inv_sum;
     }
 }

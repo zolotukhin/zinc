@@ -971,6 +971,23 @@ pub const InferenceEngine = struct {
     prefill_embed_big_hidden: u32 = 0,
     prefill_embed_big_token_count: u32 = 0,
     prefill_current_token_idx: u32 = 0,
+
+    // Scratch buffers for the Vulkan/RDNA batched prefill path (lazy-init,
+    // reused across prefill calls). Sized to hold all N prompt tokens at
+    // once so dmmv_q4k_batch + rope_batched + flash_attn_batched can each
+    // run once per layer instead of per-token. Grown on demand to the
+    // largest prompt seen.
+    batched_scratch_hidden: ?Buffer = null,
+    batched_scratch_norm: ?Buffer = null,
+    batched_scratch_q: ?Buffer = null,
+    batched_scratch_k: ?Buffer = null,
+    batched_scratch_v: ?Buffer = null,
+    batched_scratch_attn_out: ?Buffer = null,
+    batched_scratch_gate: ?Buffer = null,
+    batched_scratch_up: ?Buffer = null,
+    batched_scratch_swiglu: ?Buffer = null,
+    batched_scratch_down: ?Buffer = null,
+    batched_scratch_capacity_tokens: u32 = 0,
     modeled_decode_bytes_per_token: u64 = 0,
     // Diagnostic summary stored during BOS processing, printed after generation
     /// GPU buffer for diag summary buf.
@@ -1932,6 +1949,57 @@ pub const InferenceEngine = struct {
         const floor = if (minimum_tokens > 0) minimum_tokens else @as(u32, 1);
         const desired = if (requested_context_tokens > floor) requested_context_tokens else floor;
         return @min(desired, self.max_context_tokens);
+    }
+
+    /// Grow the 10 batched-prefill scratch buffers so each one can hold
+    /// `n_tokens × dim × 4 bytes` of f32 state. No-op when current capacity
+    /// already covers `n_tokens`. Called once per `prefillBatched` entry.
+    /// Dimensions match the same layout Metal's `BatchedPrefillScratch`
+    /// uses: hidden_dim for hidden/norm/down, q_dim for q/attn_out, kv_dim
+    /// for k/v, inter_dim for gate/up/swiglu.
+    fn ensureBatchedScratchCapacity(self: *InferenceEngine, n_tokens: u32) !void {
+        if (n_tokens <= self.batched_scratch_capacity_tokens) return;
+
+        const cfg = &self.model.config;
+        const hidden_dim = cfg.hidden_dim;
+        const q_dim: u32 = cfg.n_heads * cfg.head_dim;
+        const kv_dim: u32 = cfg.n_kv_heads * cfg.head_dim;
+        const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
+
+        const n: u64 = n_tokens;
+        const f32_sz: u64 = @sizeOf(f32);
+        const hidden_bytes = n * hidden_dim * f32_sz;
+        const q_bytes = n * q_dim * f32_sz;
+        const kv_bytes = n * kv_dim * f32_sz;
+        const inter_bytes = n * inter_dim * f32_sz;
+
+        const storage_xfer = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+        // Helper: free-and-reallocate a slot to at least `size` bytes.
+        const growSlot = struct {
+            fn run(instance: *const @import("../vulkan/instance.zig").Instance, slot: *?Buffer, size: u64, usage: u32) !void {
+                if (slot.*) |*existing| {
+                    if (existing.size >= size) return;
+                    existing.deinit();
+                }
+                slot.* = try Buffer.initDeviceLocal(instance, size, usage);
+            }
+        }.run;
+
+        try growSlot(self.instance, &self.batched_scratch_hidden, hidden_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_norm, hidden_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_q, q_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_k, kv_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_v, kv_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_attn_out, q_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_gate, inter_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_up, inter_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_swiglu, inter_bytes, storage_xfer);
+        try growSlot(self.instance, &self.batched_scratch_down, hidden_bytes, storage_xfer);
+
+        self.batched_scratch_capacity_tokens = n_tokens;
     }
 
     fn ensureKvPagesForContext(self: *InferenceEngine, target_context_tokens: u32) !void {
@@ -7128,14 +7196,24 @@ pub const InferenceEngine = struct {
         if (!enabled or !canUseBatchedPrefillRdna(self)) {
             return self.prefillBatch(state, prompt_tokens);
         }
-        // TODO(batched-prefill-rdna): replace this delegation with the
-        // orchestration described in MULTI_HOUR_EFFORT_8_RDNA_BATCHED_PREFILL.md
-        // — allocate N-token scratch buffers, pre-dequantize embeddings, issue
-        // one command buffer with chunked dmmv_q4k_batch projections,
-        // rope_batched, batched KV write, flash_attn_batched, and batched
-        // elementwise ops per layer, then final RMS norm + LM head on the last
-        // token. Until then we fall back so the env flag is inert rather than
-        // broken on the RDNA path.
+        if (prompt_tokens.len == 0) return;
+
+        // Ensure scratch buffers are sized for this prompt — reused across
+        // subsequent prefill calls so the alloc is amortized.
+        const n_tokens: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
+        try self.ensureBatchedScratchCapacity(n_tokens);
+
+        // The orchestration body (see MULTI_HOUR_EFFORT_8_RDNA_BATCHED_PREFILL.md)
+        // issues one command buffer that does, per layer: chunked dmmv_q4k_batch
+        // for Q/K/V/O/gate/up/down (weight read once per batch), rope_batched,
+        // batched KV write, flash_attn_batched, and batched elementwise ops for
+        // RMS norm / SwiGLU / residual. The scratch buffers above are the
+        // per-N-token state that path uses.
+        //
+        // Until the body lands we still delegate — but the scratch allocation
+        // and env gate are both live, so flipping the flag on a supported
+        // model is a measurable no-op rather than a correctness bug.
+        log.debug("prefillBatched: RDNA batched path armed, n_tokens={d}, scratch capacity covers {d} tokens — delegating to prefillBatch until orchestration body lands", .{ n_tokens, self.batched_scratch_capacity_tokens });
         return self.prefillBatch(state, prompt_tokens);
     }
 
@@ -8014,6 +8092,16 @@ pub const InferenceEngine = struct {
         self.prefill_cmd_alt.deinit(&self.cmd_pool);
         self.prefill_embed_alt.deinit();
         if (self.prefill_embed_big) |*b| b.deinit();
+        if (self.batched_scratch_hidden) |*b| b.deinit();
+        if (self.batched_scratch_norm) |*b| b.deinit();
+        if (self.batched_scratch_q) |*b| b.deinit();
+        if (self.batched_scratch_k) |*b| b.deinit();
+        if (self.batched_scratch_v) |*b| b.deinit();
+        if (self.batched_scratch_attn_out) |*b| b.deinit();
+        if (self.batched_scratch_gate) |*b| b.deinit();
+        if (self.batched_scratch_up) |*b| b.deinit();
+        if (self.batched_scratch_swiglu) |*b| b.deinit();
+        if (self.batched_scratch_down) |*b| b.deinit();
         if (self.ssm_mmq_scratch.handle != null) self.ssm_mmq_scratch.deinit();
         if (self.ssm_mmq_scratch_alt.handle != null) self.ssm_mmq_scratch_alt.deinit();
         self.cmd_pool.deinit();

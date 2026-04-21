@@ -22,18 +22,22 @@ pub const FlashAttnPush = extern struct {
     sink_offset: u32, // layer_idx * n_heads — starting index into sink_data for this layer
 };
 
-/// Push constants for flash_attn_batched — matches the shader header in
-/// src/shaders/flash_attn_batched.comp. Used by the Vulkan batched prefill
-/// path to process N queries (with per-query causal masking) in one dispatch.
-pub const BatchedFlashAttnPush = extern struct {
+/// Push constants for flash_attn_batched. Shared by two callers:
+///  - prefill batched path: processes N queries sharing a KV cache,
+///    seq_start is the position of the first query (0 on fresh prefill).
+///  - decode-shape foundation (ZINC_BATCH_ATTN=1): n_queries=1 with
+///    seq_start=state.position, bit-equivalent to the non-batched shader.
+/// sink_offset is the per-layer offset into the per-head sinks buffer
+/// (layer_idx * n_heads) — honoured by gpt-oss, NaN-gated otherwise.
+pub const FlashAttnBatchedPush = extern struct {
     head_dim: u32,
     n_heads: u32,
     n_kv_heads: u32,
-    kv_len: u32,
+    seq_start: u32,
+    n_queries: u32,
     page_size: u32,
     attn_scale_bits: u32,
-    n_queries: u32,
-    kv_pos_offset: u32,
+    sink_offset: u32,
 };
 
 /// Manages flash attention pipeline and dispatch.
@@ -91,12 +95,14 @@ pub const AttentionDispatch = struct {
             break :blk null;
         };
 
-        // Batched flash attention: 5 bindings (Q, K cache, V cache, page table, output).
-        // Keeps the paged layout from flash_attn.comp but accepts n_queries and
-        // kv_pos_offset push constants so a single dispatch handles all prompt
-        // tokens with per-query causal masking. Foundation for prefillBatched.
+        // Batched flash attention: 6 bindings (Q, K cache, V cache, page table,
+        // output, sinks). Keeps the paged layout from flash_attn.comp and
+        // accepts n_queries + seq_start push constants so a single dispatch
+        // handles all prompt tokens with per-query causal masking. Used by
+        // both the prefill batched path (n_queries=N) and the decode-shape
+        // foundation gated by ZINC_BATCH_ATTN=1 (n_queries=1).
         const attn_batched_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_batched.spv", .{shader_dir}) catch unreachable;
-        const pipeline_batched = pipeline_mod.createFromSpirvWithOptions(instance, attn_batched_path, 5, @sizeOf(BatchedFlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+        const pipeline_batched = pipeline_mod.createFromSpirvWithOptions(instance, attn_batched_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
             log.warn("flash_attn_batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -156,9 +162,10 @@ pub const AttentionDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
     }
 
-    /// Record a batched flash-attention dispatch for prefill.
+    /// Record a batched flash-attention dispatch.
     /// Grid is (n_heads, n_queries, 1); each (head, query) workgroup streams
-    /// over the paged KV cache with causal_len = kv_pos_offset + query + 1.
+    /// over the paged KV cache with causal_len = seq_start + query + 1.
+    /// `sink_offset` is layer_idx * n_heads into the per-layer sinks buffer.
     /// @returns `error.ShaderNotLoaded` when the batched pipeline is unavailable.
     pub fn recordFlashAttnBatched(
         self: *const AttentionDispatch,
@@ -167,22 +174,22 @@ pub const AttentionDispatch = struct {
         head_dim: u32,
         n_heads: u32,
         n_kv_heads: u32,
-        kv_len: u32,
+        seq_start: u32,
+        n_queries: u32,
         page_size: u32,
         attn_scale: f32,
-        n_queries: u32,
-        kv_pos_offset: u32,
+        sink_offset: u32,
     ) !void {
         const pip = if (self.pipeline_batched) |*p| p else return error.ShaderNotLoaded;
-        const push = BatchedFlashAttnPush{
+        const push = FlashAttnBatchedPush{
             .head_dim = head_dim,
             .n_heads = n_heads,
             .n_kv_heads = n_kv_heads,
-            .kv_len = kv_len,
+            .seq_start = seq_start,
+            .n_queries = n_queries,
             .page_size = page_size,
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
-            .n_queries = n_queries,
-            .kv_pos_offset = kv_pos_offset,
+            .sink_offset = sink_offset,
         };
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, n_queries, 1);
     }
