@@ -53,6 +53,10 @@ pub const ModelConfig = struct {
 /// Parse architecture string from GGUF metadata.
 pub fn parseArchitecture(arch_str: []const u8) Architecture {
     if (std.mem.eql(u8, arch_str, "mistral")) return .mistral;
+    // LLaMA 2/3.x are architecturally identical to Mistral: dense attention,
+    // dense FFN, no Q/K norms, GQA, RoPE. Map both to the same enum so the
+    // existing Mistral forward path handles them.
+    if (std.mem.eql(u8, arch_str, "llama")) return .mistral;
     if (std.mem.eql(u8, arch_str, "qwen2")) return .qwen2;
     if (std.mem.eql(u8, arch_str, "qwen3")) return .qwen2;
     if (std.mem.eql(u8, arch_str, "qwen2moe")) return .qwen2_moe;
