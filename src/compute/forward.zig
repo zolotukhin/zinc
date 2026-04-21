@@ -726,6 +726,64 @@ const LayerTensors = struct {
     ssm_norm: ?*const LoadedTensor = null,
 };
 
+/// Gate for the Vulkan/RDNA batched-prefill path. Mirrors the narrow slice
+/// the Metal `canUseBatchedPrefill` accepts: dense attention on every layer,
+/// dense FFN, Q4_K (or Q6_K) weights for the seven per-layer projections and
+/// the LM head, no biases, no attn gate, no post-attn / post-ffn norms, no
+/// sliding window, not MoE, not SSM, not Gemma, not gpt-oss. Q and K
+/// per-head RMS norms are supported.
+///
+/// Used by `prefillBatched` to decide whether to attempt the batched forward
+/// or fall back to `prefillBatch`. Until the batched body lands this just
+/// guards the env flag so enabling it on an unsupported model is a no-op.
+fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
+    const cfg = engine.model.config;
+    if (cfg.n_experts > 0) return false;
+    if (cfg.ssm_d_inner > 0) return false;
+    if (cfg.architecture == .gemma or cfg.architecture == .gpt_oss) return false;
+    const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+    if (full_attn_interval != 1) return false;
+    if (cfg.sliding_window_size != 0) return false;
+
+    const supported = [_]GGMLType{ .q4_k, .q6_k };
+    const isSupported = struct {
+        fn f(t: GGMLType) bool {
+            for (supported) |s| if (t == s) return true;
+            return false;
+        }
+    }.f;
+
+    // LM head tensor type must be something the Vulkan DMMV path handles for
+    // the eventual last-token projection — Q4_K / Q6_K cover it today.
+    const lm_head = engine.tensor_map.get("output.weight") orelse engine.tensor_map.get("token_embd.weight") orelse return false;
+    if (!isSupported(lm_head.info.type_)) return false;
+
+    for (0..cfg.n_layers) |i| {
+        const lt = engine.layer_tensors[i];
+        if (lt.attn_gate != null) return false;
+        if (lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+
+        const q = lt.attn_q orelse return false;
+        const k = lt.attn_k orelse return false;
+        const v = lt.attn_v orelse return false;
+        const o = lt.attn_output orelse return false;
+        const gate = lt.ffn_gate orelse return false;
+        const up = lt.ffn_up orelse return false;
+        const down = lt.ffn_down orelse return false;
+        for ([_]*const LoadedTensor{ q, k, v, o, gate, up, down }) |t| {
+            if (!isSupported(t.info.type_)) return false;
+        }
+
+        // Reject packed Q+gate (Qwen3Next): attn_q row count == 2 * q_dim.
+        const hidden_dim = cfg.hidden_dim;
+        const q_rows: u32 = @intCast(q.info.numElements() / hidden_dim);
+        const q_dim: u32 = cfg.n_heads * cfg.head_dim;
+        if (q_rows == q_dim * 2) return false;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Inference engine
 // ---------------------------------------------------------------------------
@@ -7058,16 +7116,26 @@ pub const InferenceEngine = struct {
     /// shaders and their pipeline wrappers (`elementwise.pipeline_rope_batched`,
     /// `attention.pipeline_batched`, plus matching push structs and dispatchers)
     /// are loaded at engine init. The orchestration that ties them together with
-    /// `dmmv_q4k_batch` (weight-read-once GEMM) for projections is the next step
-    /// — until it lands, this entry point transparently delegates to
-    /// `prefillBatch`. Exists so downstream callers can migrate to the new name
-    /// ahead of time, the same way `generateWithMetrics` already does on Metal.
+    /// `dmmv_q4k_batch` (weight-read-once GEMM) for projections is tracked in
+    /// `MULTI_HOUR_EFFORT_8_RDNA_BATCHED_PREFILL.md`. Until that orchestration
+    /// lands this entry point transparently delegates to `prefillBatch`, but the
+    /// env gate and the `canUseBatchedPrefillRdna` check are already wired so
+    /// callers can migrate to the new name ahead of time — matching the Metal
+    /// path where `generateWithMetrics` already routes through `prefillBatched`.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
-        // TODO(batched-prefill-rdna): replace with a single batched forward
-        // using `dmmv_q4k_batch` (chunked at MAX_COLS=32 tokens/dispatch),
-        // `rope_batched`, `flash_attn_batched`, and batched residual/RMS ops,
-        // matching the Metal prefillBatched structure. Gate with
-        // `std.posix.getenv("ZINC_BATCHED_PREFILL")` when the path is ready.
+        const mode = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse "";
+        const enabled = std.mem.eql(u8, mode, "1");
+        if (!enabled or !canUseBatchedPrefillRdna(self)) {
+            return self.prefillBatch(state, prompt_tokens);
+        }
+        // TODO(batched-prefill-rdna): replace this delegation with the
+        // orchestration described in MULTI_HOUR_EFFORT_8_RDNA_BATCHED_PREFILL.md
+        // — allocate N-token scratch buffers, pre-dequantize embeddings, issue
+        // one command buffer with chunked dmmv_q4k_batch projections,
+        // rope_batched, batched KV write, flash_attn_batched, and batched
+        // elementwise ops per layer, then final RMS norm + LM head on the last
+        // token. Until then we fall back so the env flag is inert rather than
+        // broken on the RDNA path.
         return self.prefillBatch(state, prompt_tokens);
     }
 
