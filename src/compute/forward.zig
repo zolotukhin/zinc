@@ -6395,6 +6395,49 @@ pub const InferenceEngine = struct {
         return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 0);
     }
 
+    /// Batched projection: weight × [N_tokens columns of x] → [N_tokens columns of y].
+    /// Weight is read once per chunk of up to MAX_COLS tokens instead of once per
+    /// token — the core bandwidth win for the prefillBatched path. The underlying
+    /// dmmv_q4k_batch shader caps num_cols at 32, so prompts > 32 tokens are split
+    /// into ceil(N/32) dispatches advancing x_offset and y_offset in lock-step.
+    /// Column layout: x is [N × K] contiguous, y is [N × M] contiguous, both f32.
+    fn dispatchProjectionBatched(
+        self: *InferenceEngine,
+        tensor: *const LoadedTensor,
+        x_buf: Buffer,
+        y_buf: Buffer,
+        M: u32,
+        K: u32,
+        n_tokens: u32,
+    ) !void {
+        const MAX_COLS: u32 = 32;
+        const f32_bytes: u32 = @sizeOf(f32);
+        var chunk_start: u32 = 0;
+        while (chunk_start < n_tokens) {
+            const chunk: u32 = @min(MAX_COLS, n_tokens - chunk_start);
+            const x_offset: u32 = chunk_start * K * f32_bytes;
+            const y_offset: u32 = chunk_start * M * f32_bytes;
+            try self.dmmv.recordBatchDispatchPush(
+                &self.decode_cmd,
+                tensor.info.type_,
+                self.instance.push_descriptor_fn,
+                tensor.gpu_buffer.handle,
+                tensor.gpu_buffer.size,
+                x_buf.handle,
+                x_buf.size,
+                y_buf.handle,
+                y_buf.size,
+                M,
+                K,
+                0,
+                x_offset,
+                y_offset,
+                chunk,
+            );
+            chunk_start += chunk;
+        }
+    }
+
     /// Dispatch a DMMV with accumulation: output_buf += weight × input_buf.
     fn dispatchDmmvAcc(
         self: *InferenceEngine,
