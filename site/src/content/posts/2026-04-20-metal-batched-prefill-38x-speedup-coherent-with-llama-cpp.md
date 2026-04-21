@@ -372,6 +372,15 @@ ZINC_BATCHED_PREFILL=validate \
 
 **Update 2026-04-20 (same day, commit 2):** Added `FOR_UNROLL(x)` macro — Metal's `_Pragma("clang loop unroll(full)")` — to the A-tile store, `simdgroup_load`, and `simdgroup_multiply_accumulate` loops in `gemm_q4k.metal` and `gemm_q6k.metal`, matching llama.cpp's `kernel_mul_mm_q4_K_f32` pattern. The loops were already constant-bound, but the explicit hint lets the scheduler interleave more aggressively. GEMM microbench showed +5% to +7% GFLOP/s across shapes (peak 6776 → 7228 GFLOP/s at N=512 for `attn_q`). End-to-end prefill on the 103-token prompt moved from 85% to **91% of llama.cpp** throughput (298 → 323 tok/s). On the 183-token prompt, from 80% to 86% (347 → 378 tok/s).
 
+**Update 2026-04-20 (same day, commit 3):** `parseArchitecture` now maps `"llama"` to the Mistral enum — the shapes are identical and LLaMA 3.x GGUFs had been rejected at load. With that one-line change, Meta-Llama-3.1-8B-Instruct-Q4_K_M runs through `prefillBatched` unchanged. Measured:
+
+| Prompt | llama.cpp | ZINC batched | ZINC / llama.cpp |
+|---:|---:|---:|---:|
+| 19 tokens | 182 tok/s | 162 tok/s | 89% |
+| 102 tokens | 351 tok/s | 324 tok/s | **92%** |
+
+Per-token and batched paths produce identical output on LLaMA (the divergence we saw on Qwen3 was specific to per-head Q/K norms amplifying half-tile GEMM vs DMMV drift — LLaMA has no Q/K norms, so both accumulation orderings land on the same argmax). The long-standing "LLaMA output incoherent on Metal" tracker note turns out to be a tokenizer-level BOS-token difference between `llama-simple` and ZINC's tokenizer, not a forward-pass issue. Orthogonal to this work.
+
 ## What's next
 
 The concrete unlocks in priority order:

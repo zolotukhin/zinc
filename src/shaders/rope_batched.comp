@@ -1,0 +1,65 @@
+#version 460
+// ZINC — batched Rotary Position Embedding for prefill.
+//
+// Ported from src/shaders/metal/rope_batched.metal. Rotates rope_dim
+// elements per head, for n_tokens tokens at positions
+// [position_base, position_base + n_tokens). This is the Vulkan/GLSL
+// equivalent of the Metal batched RoPE kernel used by prefillBatched.
+//
+// Grid: (n_heads, n_tokens, 1), workgroup: 64 threads.
+// Buffer layout: x/y are [n_tokens * n_heads * stride] f32 contiguous, so
+// dim d of token t head h is at [(t * n_heads + h) * stride + d].
+// inv_freq is optional — when freq_base_bits != 0 the shader computes the
+// frequency on the fly from freq_base; otherwise it reads from the buffer.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer InputQK  { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer OutputQK { float y[]; };
+layout(set = 0, binding = 2) readonly buffer FreqBuf   { float inv_freq[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint stride;           // full head dimension
+    uint rope_dim;         // dims to rotate (<= stride, even)
+    uint n_heads;
+    uint position_base;    // position of the first token in the batch
+    uint freq_base_bits;   // 0 => use inv_freq buffer
+    uint attn_scale_bits;  // 0 => scale 1.0
+};
+
+void main() {
+    const uint tid  = gl_LocalInvocationID.x;
+    const uint head = gl_WorkGroupID.x;
+    const uint tok  = gl_WorkGroupID.y;
+    const uint position = position_base + tok;
+
+    const uint base_idx = (tok * n_heads + head) * stride;
+    const uint half_rot = rope_dim / 2;
+
+    const float freq_base  = uintBitsToFloat(freq_base_bits);
+    const float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;
+    const bool use_freq_buf = (freq_base_bits == 0u);
+
+    for (uint i = tid; i < half_rot; i += 64) {
+        const float x_i   = x[base_idx + i];
+        const float x_ihd = x[base_idx + i + half_rot];
+
+        float freq_i;
+        if (use_freq_buf) {
+            freq_i = inv_freq[i];
+        } else {
+            const float exponent = float(2u * i) / float(rope_dim);
+            freq_i = 1.0 / pow(freq_base, exponent);
+        }
+        const float theta = float(position) * freq_i;
+        const float cos_t = cos(theta) * attn_scale;
+        const float sin_t = sin(theta) * attn_scale;
+
+        y[base_idx + i]            = x_i * cos_t - x_ihd * sin_t;
+        y[base_idx + i + half_rot] = x_i * sin_t + x_ihd * cos_t;
+    }
+
+    for (uint i = rope_dim + tid; i < stride; i += 64) {
+        y[base_idx + i] = x[base_idx + i];
+    }
+}

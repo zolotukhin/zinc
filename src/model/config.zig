@@ -85,5 +85,8 @@ test "parseArchitecture" {
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma2"));
     try std.testing.expectEqual(Architecture.gemma, parseArchitecture("gemma4"));
+    try std.testing.expectEqual(Architecture.mistral, parseArchitecture("mistral"));
+    try std.testing.expectEqual(Architecture.mistral, parseArchitecture("llama"));
+    try std.testing.expectEqual(Architecture.gpt_oss, parseArchitecture("gpt-oss"));
     try std.testing.expectEqual(Architecture.unknown, parseArchitecture("gpt2"));
 }
