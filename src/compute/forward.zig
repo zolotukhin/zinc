@@ -29,6 +29,7 @@ const SigmoidMulPush = elementwise_mod.SigmoidMulPush;
 const ScaleAccPush = elementwise_mod.ScaleAccPush;
 const BiasAddPush = elementwise_mod.BiasAddPush;
 const RopePush = elementwise_mod.RopePush;
+const RopeBatchedPush = elementwise_mod.RopeBatchedPush;
 const SoftmaxTopkPush = elementwise_mod.SoftmaxTopkPush;
 const MoeWeightedAccPush = elementwise_mod.MoeWeightedAccPush;
 const SsmConv1dPush = elementwise_mod.SsmConv1dPush;
@@ -6393,6 +6394,122 @@ pub const InferenceEngine = struct {
         K: u32,
     ) !void {
         return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 0);
+    }
+
+    /// Batched RoPE wrapper — rotates `n_tokens × n_heads × stride` contiguous
+    /// f32s in one dispatch. Grid is (n_heads, n_tokens, 1). Positions are
+    /// [position_base, position_base + n_tokens). Used by prefillBatched so Q
+    /// and K for the whole prompt rotate in a single kernel launch each.
+    fn dispatchRopeBatched(
+        self: *InferenceEngine,
+        in_buf: vk.c.VkBuffer,
+        in_size: vk.c.VkDeviceSize,
+        out_buf: vk.c.VkBuffer,
+        out_size: vk.c.VkDeviceSize,
+        freq_buf: vk.c.VkBuffer,
+        freq_size: vk.c.VkDeviceSize,
+        stride: u32,
+        rope_dim: u32,
+        n_heads: u32,
+        position_base: u32,
+        n_tokens: u32,
+        freq_base: f32,
+        attn_scale: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_rope_batched orelse return error.ShaderNotLoaded);
+        const push = RopeBatchedPush{
+            .stride = stride,
+            .rope_dim = rope_dim,
+            .n_heads = n_heads,
+            .position_base = position_base,
+            .freq_base_bits = @bitCast(freq_base),
+            .attn_scale_bits = @bitCast(attn_scale),
+        };
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch3(
+                pip,
+                std.mem.asBytes(&push),
+                in_buf,
+                in_size,
+                out_buf,
+                out_size,
+                freq_buf,
+                freq_size,
+                n_heads,
+                n_tokens,
+                1,
+            );
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet3(ds, in_buf, in_size, out_buf, out_size, freq_buf, freq_size);
+        try self.elementwise.recordRoPEBatched(&self.decode_cmd, ds, stride, rope_dim, n_heads, position_base, n_tokens, freq_base, attn_scale);
+    }
+
+    /// Batched causal flash attention wrapper — processes N queries against
+    /// the paged KV cache in one dispatch. `seq_start` is the position of
+    /// query 0; each query q attends to KV positions [0, seq_start + q].
+    /// `sink_offset` is `layer_idx * n_heads` into the per-layer sinks
+    /// buffer (NaN-gated for layers without sinks).
+    fn dispatchFlashAttnBatched(
+        self: *InferenceEngine,
+        q_buf: vk.c.VkBuffer,
+        q_size: vk.c.VkDeviceSize,
+        k_cache: vk.c.VkBuffer,
+        k_cache_size: vk.c.VkDeviceSize,
+        v_cache: vk.c.VkBuffer,
+        v_cache_size: vk.c.VkDeviceSize,
+        page_table: vk.c.VkBuffer,
+        page_table_size: vk.c.VkDeviceSize,
+        out_buf: vk.c.VkBuffer,
+        out_size: vk.c.VkDeviceSize,
+        sinks: vk.c.VkBuffer,
+        sinks_size: vk.c.VkDeviceSize,
+        head_dim: u32,
+        n_heads: u32,
+        n_kv_heads: u32,
+        seq_start: u32,
+        n_queries: u32,
+        page_size: u32,
+        attn_scale: f32,
+        sink_offset: u32,
+    ) !void {
+        const pip = &(self.attention.pipeline_batched orelse return error.ShaderNotLoaded);
+        const push = FlashAttnBatchedPush{
+            .head_dim = head_dim,
+            .n_heads = n_heads,
+            .n_kv_heads = n_kv_heads,
+            .seq_start = seq_start,
+            .n_queries = n_queries,
+            .page_size = page_size,
+            .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
+            .sink_offset = sink_offset,
+        };
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch6(
+                pip,
+                std.mem.asBytes(&push),
+                q_buf,
+                q_size,
+                k_cache,
+                k_cache_size,
+                v_cache,
+                v_cache_size,
+                page_table,
+                page_table_size,
+                out_buf,
+                out_size,
+                sinks,
+                sinks_size,
+                n_heads,
+                n_queries,
+                1,
+            );
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet6(ds, q_buf, q_size, k_cache, k_cache_size, v_cache, v_cache_size, page_table, page_table_size, out_buf, out_size, sinks, sinks_size);
+        try self.attention.recordFlashAttnBatched(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
     }
 
     /// Batched projection: weight × [N_tokens columns of x] → [N_tokens columns of y].
