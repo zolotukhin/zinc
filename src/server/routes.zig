@@ -1591,9 +1591,10 @@ fn handleChatCompletions(
         resources.context_capacity_tokens,
     );
     const max_tokens = request_budget.completion_tokens;
-    const req_id = "chatcmpl-zinc0001"; // TODO: T013 unique IDs
-    const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
     const seed_ns: i128 = std.time.nanoTimestamp();
+    var req_id_buf: [32]u8 = undefined;
+    const req_id = std.fmt.bufPrint(&req_id_buf, "chatcmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "chatcmpl-0";
+    const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
     const seed_bits: u128 = @bitCast(seed_ns);
     var prng = std.Random.DefaultPrng.init(@truncate(seed_bits));
     const random = prng.random();
@@ -2038,7 +2039,9 @@ fn handleCompletions(
     }
 
     const ts = @divTrunc(std.time.timestamp(), 1);
-    const req_id = "cmpl-zinc0001";
+    const seed_ns: i128 = std.time.nanoTimestamp();
+    var req_id_buf: [32]u8 = undefined;
+    const req_id = std.fmt.bufPrint(&req_id_buf, "cmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "cmpl-0";
 
     const output_tokens = forward_mod.generate(engine, prompt_tokens, max_tokens, tokenizer.eosId(), allocator) catch {
         try conn.sendError(500, "internal_error", "Generation failed");
