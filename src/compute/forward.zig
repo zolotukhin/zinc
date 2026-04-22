@@ -7465,12 +7465,14 @@ pub const InferenceEngine = struct {
         }
         if (prompt_tokens.len == 0) return;
 
-        // V1 constraint: fresh prefill only. Prefix re-use (state.position > 0)
-        // would need us to thread seq_start through rope_batched and
-        // flash_attn_batched like the Metal path does, plus match the KV page
-        // layout of the resumed request. Keep it simple while the body is
-        // being validated end-to-end.
-        if (state.position != 0 or state.generated_tokens.items.len != 0) {
+        // Extension: supports prefix reuse (state.position > 0) as long as
+        // the caller's view of position matches the engine and the KV pages
+        // from the prior call are still live. If those invariants fail we
+        // defer to prefillBatch which returns the canonical error.
+        if (state.position != self.position) {
+            return self.prefillBatch(state, prompt_tokens);
+        }
+        if (state.position > 0 and self.active_kv_page_ids == null) {
             return self.prefillBatch(state, prompt_tokens);
         }
 
@@ -7510,12 +7512,19 @@ pub const InferenceEngine = struct {
             self.prefill_embed_big_token_count = n_tokens;
         }
 
-        // Reset request state and allocate KV pages for all N prompt tokens.
+        // Reset request state for a fresh prefill, or grow the KV page pool
+        // if we are extending an existing conversation. Mirror the shape of
+        // prefillBatch so pipelined prefill / decodeStep invariants hold.
+        const base_token: u32 = state.position;
         const target_context_tokens = if (state.requested_context_tokens > 0)
-            @max(state.requested_context_tokens, n_tokens)
+            @max(state.requested_context_tokens, base_token +| n_tokens)
         else
-            n_tokens;
-        try self.resetRequestState(target_context_tokens);
+            base_token +| n_tokens;
+        if (base_token == 0 and state.generated_tokens.items.len == 0) {
+            try self.resetRequestState(target_context_tokens);
+        } else {
+            try self.ensureKvPagesForContext(target_context_tokens);
+        }
 
         const scratch_hidden = self.batched_scratch_hidden.?;
         const scratch_norm = self.batched_scratch_norm.?;
@@ -7580,14 +7589,16 @@ pub const InferenceEngine = struct {
             }
             if (lt.attn_q_norm != null or lt.attn_k_norm != null) self.decode_cmd.computeBarrier();
 
-            // Batched RoPE for Q and K. position_base = 0 (fresh prefill only in v1).
-            try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_heads, 0, n_tokens, cfg.rope_freq_base, 1.0);
-            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_kv_heads, 0, n_tokens, cfg.rope_freq_base, 1.0);
+            // Batched RoPE for Q and K. position_base = state.position so a
+            // prefix-reuse call rotates the newly-added tokens at the correct
+            // sequence positions (base_token, base_token+1, ..., base_token+N-1).
+            try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
+            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_kv_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
             self.decode_cmd.computeBarrier();
 
             // Batched KV cache write: one compute dispatch writes all N tokens'
             // K/V into their paged cache slots via the page_table_buf lookup.
-            // Replaces 2 × N vkCmdCopyBuffer + transfer barrier round trip.
+            // base_token places the write after the existing prefix.
             try self.dispatchKvCacheWriteBatched(
                 scratch_k.handle, scratch_k.size,
                 self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
@@ -7597,13 +7608,15 @@ pub const InferenceEngine = struct {
                 kv_dim,
                 n_tokens,
                 kv_page_size_tokens,
-                0, // base_token — fresh prefill only in v1
+                base_token,
             );
             self.decode_cmd.computeBarrier();
 
-            // Batched causal flash attention: N queries over the just-written KV cache.
+            // Batched causal flash attention: N queries over the KV cache.
+            // seq_start = base_token so each query attends to prefix + own
+            // position within the batch (causal_len = base_token + query + 1).
             const sink_offset = layer * cfg.n_heads;
-            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, head_dim, cfg.n_heads, cfg.n_kv_heads, 0, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
+            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, head_dim, cfg.n_heads, cfg.n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
             self.decode_cmd.computeBarrier();
 
             // O projection → FUSED residual+FFN norm (hidden += down;
@@ -7650,8 +7663,8 @@ pub const InferenceEngine = struct {
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
-        self.position = n_tokens;
-        state.position = n_tokens;
+        self.position = base_token + n_tokens;
+        state.position = self.position;
     }
 
     /// Process all prompt tokens through the full transformer to populate
