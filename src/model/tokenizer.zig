@@ -1086,6 +1086,45 @@ test "shouldPrependBos is false when BOS metadata is absent" {
     try std.testing.expectEqual(@as(u32, 2), tok.bosId());
 }
 
+test "initFromGGUF populates merge_ranks cache when merges are present" {
+    // Regression guard for the BPE merge-rank cache. If initFromGGUF ever
+    // stops populating merge_ranks, every applyMerges call will hit the
+    // fallback path and rebuild a 151k-entry hashmap per chat chunk —
+    // which made each chat request after the first take tens of minutes.
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    const tokens = try allocator.alloc(gguf.MetadataValue, 4);
+    tokens[0] = .{ .string = try allocator.dupe(u8, "a") };
+    tokens[1] = .{ .string = try allocator.dupe(u8, "b") };
+    tokens[2] = .{ .string = try allocator.dupe(u8, "ab") };
+    tokens[3] = .{ .string = try allocator.dupe(u8, "c") };
+
+    const merges = try allocator.alloc(gguf.MetadataValue, 1);
+    merges[0] = .{ .string = try allocator.dupe(u8, "a b") };
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.tokens"), .{ .array = tokens });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.merges"), .{ .array = merges });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.model"), .{ .string = try allocator.dupe(u8, "gpt2") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "qwen35") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "tokenizer.ggml.eos_token_id"), .{ .uint32 = 3 });
+
+    var tok = try Tokenizer.initFromGGUF(&gf, allocator);
+    defer tok.deinit();
+
+    try std.testing.expect(tok.merge_ranks_ready);
+    try std.testing.expectEqual(@as(u32, 0), tok.merge_ranks.get("a b").?);
+}
+
 test "initFromGGUF omits BOS for qwen35 family (no BOS in GGUF)" {
     const allocator = std.testing.allocator;
 
