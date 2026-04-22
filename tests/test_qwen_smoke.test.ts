@@ -111,7 +111,11 @@ async function postJson(baseUrl: string, path: string, body: unknown): Promise<a
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
+    // 35B models with enable_thinking=true can emit up to max_tokens=2048
+    // tokens at ~10 tok/s on Apple Silicon decode, so a single POST can
+    // run past 3 minutes. Plus cold-start PSO compile on the first
+    // inference request. 5 minutes leaves headroom.
+    signal: AbortSignal.timeout(300_000),
   });
   const text = await response.text();
   if (!response.ok) {
@@ -304,5 +308,9 @@ for (const modelId of QWEN_CHAT_MODEL_IDS) {
     } finally {
       await stopManagedServer(process);
     }
-  }, 300_000);
+    // 35B-class models: 80s load + ~100s first-chat PSO compile + a
+    // 2048-token enabled-thinking generation that can run several
+    // minutes on laptop-class Apple Silicon. 300s was not enough;
+    // 10 minutes is comfortable with room for slow cold runs.
+  }, 600_000);
 }

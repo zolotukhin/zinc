@@ -7,9 +7,18 @@
  * Optional: bun add openai
  */
 
+// The first inference request after server startup triggers pipeline-state
+// compilation for every Metal / Vulkan shader the decode graph touches.
+// On Apple Silicon / RADV that cold-start can take 90–120s before the
+// first token emerges (measured: 101s for a 2-token chat on Qwen3-8B
+// Q4_K_M on M1 Pro cold-cache), so timeouts on inference endpoints have
+// to be generous enough to swallow it on laptop-class hardware.
+// Metadata endpoints (/health, /models, error paths) stay at 5s.
+const INFERENCE_TIMEOUT_MS = 180_000;
+
 type ModelsResponse = {
   object: string;
-  data: Array<{ id: string }>;
+  data: Array<{ id: string; active?: boolean }>;
 };
 
 type HealthResponse = {
@@ -128,9 +137,14 @@ async function testModels(base: string): Promise<string> {
   const data = (await parseJson(response)) as ModelsResponse;
   assert(data.object === "list", `Expected list, got: ${data.object}`);
   assert(data.data.length > 0, "No models returned");
-  const model = data.data[0]!;
+  // /v1/models returns the whole catalog (installed + available). Pick the
+  // entry with active=true — it is the one currently loaded in VRAM. The
+  // old behavior (data[0]) picked whatever happened to sort first, which
+  // on this catalog is gpt-oss-20b — triggering a multi-GB model switch
+  // on every chat request and timing out before first token.
+  const model = data.data.find((m) => m.active === true) ?? data.data[0]!;
   assert(typeof model.id === "string" && model.id.length > 0, "Model missing id");
-  console.log(`  PASS: /v1/models → ${model.id}`);
+  console.log(`  PASS: /v1/models → ${model.id}${model.active ? " (active)" : " (first listed)"}`);
   return model.id;
 }
 
@@ -144,7 +158,7 @@ async function testChatCompletionNonStreaming(base: string, modelId: string): Pr
       max_tokens: 16,
       temperature: 0,
     }),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
   });
   const body = await parseJson(response);
   assert(response.status === 200, `Chat failed: ${response.status} ${JSON.stringify(body).slice(0, 200)}`);
@@ -173,7 +187,7 @@ async function streamChat(
       max_tokens: options.maxTokens ?? 32,
       temperature: 0,
     }),
-    signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+    signal: AbortSignal.timeout(options.timeoutMs ?? INFERENCE_TIMEOUT_MS),
   });
   assert(response.status === 200, `Stream failed: ${response.status}`);
   assert(response.headers.get("content-type")?.includes("text/event-stream"), "Not SSE");
@@ -306,7 +320,7 @@ async function testCompletion(base: string, modelId: string): Promise<void> {
       max_tokens: 8,
       temperature: 0,
     }),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
   });
   assert(response.status === 200, `Completion failed: ${response.status}`);
   const data = await parseJson(response);
