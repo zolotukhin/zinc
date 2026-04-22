@@ -98,6 +98,47 @@ test "Metal prefillBatched supports prefix reuse by extending KV at state.positi
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "self.position = position_base + n_tokens;", 12000);
 }
 
+test "Vulkan prefillBatched gates on env flag + canUseBatchedPrefillRdna" {
+    const src = @embedFile("compute/forward.zig");
+    try expectContains(src, "ZINC_BATCHED_PREFILL");
+    try expectContains(src, "fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {");
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "canUseBatchedPrefillRdna(self)", 2000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "ensureBatchedScratchCapacity", 2000);
+}
+
+test "Vulkan prefillBatched uses all batched primitives in the per-layer loop" {
+    const src = @embedFile("compute/forward.zig");
+    const fn_marker = "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {";
+    try expectContainsNear(src, fn_marker, "dispatchProjectionBatched", 16000);
+    try expectContainsNear(src, fn_marker, "dispatchRopeBatched", 16000);
+    try expectContainsNear(src, fn_marker, "dispatchKvCacheWriteBatched", 16000);
+    try expectContainsNear(src, fn_marker, "dispatchFlashAttnBatched", 16000);
+    try expectContainsNear(src, fn_marker, "dispatchResidualRmsNorm", 16000);
+    try expectContainsNear(src, fn_marker, "dispatchFfnActivation", 16000);
+    try expectContainsNear(src, fn_marker, "dispatchDmmvInner", 16000);
+}
+
+test "Vulkan prefillBatched threads base_token through RoPE, KV write, flash attn" {
+    const src = @embedFile("compute/forward.zig");
+    const fn_marker = "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {";
+    try expectContainsNear(src, fn_marker, "const base_token: u32 = state.position;", 4000);
+    try expectContainsNear(src, fn_marker, "self.position = base_token + n_tokens;", 16000);
+}
+
+test "Vulkan batched KV write shader uses page_table with base_token offset" {
+    const src = @embedFile("shaders/kv_cache_write_batched.comp");
+    try expectContains(src, "uint base_token;");
+    try expectContains(src, "uint logical_token = base_token + tok;");
+    try expectContains(src, "page_ids[page_idx]");
+}
+
+test "Vulkan residual_rms_norm shader matches Metal's fused semantics" {
+    const src = @embedFile("shaders/residual_rms_norm.comp");
+    try expectContains(src, "hidden[base + i] = h");
+    try expectContains(src, "subgroupAdd");
+    try expectContains(src, "norm_out[base + i] = weights[i] * hidden[base + i] * rms_inv;");
+}
+
 test "softmax_topk shader keeps RADV-safe shared-memory winner scan" {
     const src = @embedFile("shaders/softmax_topk.comp");
     try expectContains(src, "shared float s_local_val[64];");

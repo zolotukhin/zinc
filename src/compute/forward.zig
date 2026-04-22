@@ -7631,7 +7631,13 @@ pub const InferenceEngine = struct {
             try self.dispatchProjectionBatched(gate_t, scratch_norm, scratch_gate, inter_dim, hidden_dim, n_tokens);
             try self.dispatchProjectionBatched(up_t, scratch_norm, scratch_up, inter_dim, hidden_dim, n_tokens);
             self.decode_cmd.computeBarrier();
-            try self.dispatchSwiglu(scratch_gate.handle, scratch_gate.size, scratch_up.handle, scratch_up.size, scratch_swiglu.handle, scratch_swiglu.size, n_tokens * inter_dim);
+            // dispatchFfnActivation picks SwiGLU / GEGLU / SwiGLU-OAI based on
+            // cfg.architecture. canUseBatchedPrefillRdna rejects Gemma and
+            // gpt-oss, so in practice this routes through SwiGLU — but we
+            // stay aligned with the project-wide invariant that FFN
+            // activations go through this dispatcher rather than calling
+            // dispatchSwiglu directly.
+            try self.dispatchFfnActivation(scratch_gate.handle, scratch_gate.size, scratch_up.handle, scratch_up.size, scratch_swiglu.handle, scratch_swiglu.size, n_tokens * inter_dim);
             self.decode_cmd.computeBarrier();
             try self.dispatchProjectionBatched(down_t, scratch_swiglu, scratch_down, hidden_dim, inter_dim, n_tokens);
             self.decode_cmd.computeBarrier();
