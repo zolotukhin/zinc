@@ -1,0 +1,43 @@
+#version 460
+// ZINC — batched KV cache write for prefillBatched.
+// Writes N tokens' K and V vectors from scratch_k / scratch_v (contiguous
+// [N × kv_dim] f32) into the paged KV cache. Each grid.y workgroup
+// handles one token; grid.x tiles kv_dim across the 64-thread wave.
+//
+// Replaces 2 × N vkCmdCopyBuffer commands (one per token per {K, V}) +
+// the transfer->compute barrier that follows them, with one compute
+// dispatch that stays in the compute pipeline.
+//
+// Dispatch: ((kv_dim + 63) / 64, n_tokens, 1), local_size_x = 64.
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint kv_dim;     // floats per K/V vector (n_kv_heads * head_dim)
+    uint n_tokens;   // number of tokens being written this dispatch
+    uint page_size;  // tokens per KV cache page (typically 16)
+    uint base_token; // logical token index of the first token (0 for fresh prefill)
+};
+
+layout(set = 0, binding = 0) readonly buffer KSrc      { float k_src[];   };
+layout(set = 0, binding = 1)          buffer KDst      { float k_dst[];   };
+layout(set = 0, binding = 2) readonly buffer VSrc      { float v_src[];   };
+layout(set = 0, binding = 3)          buffer VDst      { float v_dst[];   };
+layout(set = 0, binding = 4) readonly buffer PageTable { uint  page_ids[]; };
+
+void main() {
+    uint i   = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    uint tok = gl_WorkGroupID.y;
+    if (i >= kv_dim || tok >= n_tokens) return;
+
+    uint logical_token = base_token + tok;
+    uint page_idx      = logical_token / page_size;
+    uint page_off      = logical_token % page_size;
+    uint physical_tok  = page_ids[page_idx] * page_size + page_off;
+
+    uint dst_base = physical_tok * kv_dim;
+    uint src_base = tok * kv_dim;
+
+    k_dst[dst_base + i] = k_src[src_base + i];
+    v_dst[dst_base + i] = v_src[src_base + i];
+}

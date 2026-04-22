@@ -91,6 +91,7 @@ pub fn build(b: *std.Build) void {
         // Vulkan/RDNA side can share the prefillBatched orchestration.
         "rope_batched",
         "flash_attn_batched",
+        "kv_cache_write_batched",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

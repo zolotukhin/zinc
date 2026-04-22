@@ -37,6 +37,7 @@ const SsmDeltaNetPush = elementwise_mod.SsmDeltaNetPush;
 const SsmGatedNormPush = elementwise_mod.SsmGatedNormPush;
 const DeinterleavePush = elementwise_mod.DeinterleavePush;
 const KvCacheWritePush = elementwise_mod.KvCacheWritePush;
+const KvCacheWriteBatchedPush = elementwise_mod.KvCacheWriteBatchedPush;
 const NormRopePush = elementwise_mod.NormRopePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
@@ -6396,6 +6397,61 @@ pub const InferenceEngine = struct {
         return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 0);
     }
 
+    /// Batched KV-cache write — stores N tokens' K/V into the paged cache in
+    /// one dispatch. Replaces the per-token vkCmdCopyBuffer loop that prefill-
+    /// Batched emitted in its first cut, and with it the
+    /// transferToComputeBarrier that sat between transfer and the next layer.
+    /// Grid: ((kv_dim + 63) / 64, n_tokens, 1).
+    fn dispatchKvCacheWriteBatched(
+        self: *InferenceEngine,
+        k_src: vk.c.VkBuffer,
+        k_src_size: vk.c.VkDeviceSize,
+        k_dst: vk.c.VkBuffer,
+        k_dst_size: vk.c.VkDeviceSize,
+        v_src: vk.c.VkBuffer,
+        v_src_size: vk.c.VkDeviceSize,
+        v_dst: vk.c.VkBuffer,
+        v_dst_size: vk.c.VkDeviceSize,
+        page_table: vk.c.VkBuffer,
+        page_table_size: vk.c.VkDeviceSize,
+        kv_dim: u32,
+        n_tokens: u32,
+        page_size: u32,
+        base_token: u32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_kv_cache_write_batched orelse return error.ShaderNotLoaded);
+        const push = KvCacheWriteBatchedPush{
+            .kv_dim = kv_dim,
+            .n_tokens = n_tokens,
+            .page_size = page_size,
+            .base_token = base_token,
+        };
+        const wg_x = (kv_dim + 63) / 64;
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch5(
+                pip,
+                std.mem.asBytes(&push),
+                k_src,
+                k_src_size,
+                k_dst,
+                k_dst_size,
+                v_src,
+                v_src_size,
+                v_dst,
+                v_dst_size,
+                page_table,
+                page_table_size,
+                wg_x,
+                n_tokens,
+                1,
+            );
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet5(ds, k_src, k_src_size, k_dst, k_dst_size, v_src, v_src_size, v_dst, v_dst_size, page_table, page_table_size);
+        self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), wg_x, n_tokens, 1);
+    }
+
     /// Batched RoPE wrapper — rotates `n_tokens × n_heads × stride` contiguous
     /// f32s in one dispatch. Grid is (n_heads, n_tokens, 1). Positions are
     /// [position_base, position_base + n_tokens). Used by prefillBatched so Q
@@ -7439,7 +7495,6 @@ pub const InferenceEngine = struct {
         const eps = cfg.rms_norm_eps;
         const freq_buf_handle = self.rope_freq_buf.handle;
         const freq_buf_size = self.rope_freq_buf.size;
-        const kv_bytes = @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
 
         for (0..cfg.n_layers) |layer_idx| {
             const layer: u32 = @intCast(layer_idx);
@@ -7479,19 +7534,21 @@ pub const InferenceEngine = struct {
             try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_kv_heads, 0, n_tokens, cfg.rope_freq_base, 1.0);
             self.decode_cmd.computeBarrier();
 
-            // KV cache write: one vkCmdCopyBuffer per token per {K,V}. Keeps us
-            // compatible with the paged KV layout without needing a new shader.
-            for (0..n_tokens) |t| {
-                const t32: u32 = @intCast(t);
-                const physical = try self.physicalTokenIndex(t32);
-                const src_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, t) * kv_bytes;
-                const dst_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, physical) * kv_bytes;
-                const k_region = vk.c.VkBufferCopy{ .srcOffset = src_bytes, .dstOffset = dst_bytes, .size = kv_bytes };
-                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, scratch_k.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
-                const v_region = vk.c.VkBufferCopy{ .srcOffset = src_bytes, .dstOffset = dst_bytes, .size = kv_bytes };
-                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, scratch_v.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
-            }
-            self.decode_cmd.transferToComputeBarrier();
+            // Batched KV cache write: one compute dispatch writes all N tokens'
+            // K/V into their paged cache slots via the page_table_buf lookup.
+            // Replaces 2 × N vkCmdCopyBuffer + transfer barrier round trip.
+            try self.dispatchKvCacheWriteBatched(
+                scratch_k.handle, scratch_k.size,
+                self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
+                scratch_v.handle, scratch_v.size,
+                self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
+                self.page_table_buf.handle, self.page_table_buf.size,
+                kv_dim,
+                n_tokens,
+                kv_page_size_tokens,
+                0, // base_token — fresh prefill only in v1
+            );
+            self.decode_cmd.computeBarrier();
 
             // Batched causal flash attention: N queries over the just-written KV cache.
             const sink_offset = layer * cfg.n_heads;
