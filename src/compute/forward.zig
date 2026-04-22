@@ -6633,6 +6633,7 @@ pub const InferenceEngine = struct {
         K: u32,
         n_tokens: u32,
     ) !void {
+        // Keep in sync with dmmv_q4k_batch.comp's `const uint MAX_COLS`.
         const MAX_COLS: u32 = 32;
         const f32_bytes: u32 = @sizeOf(f32);
         var chunk_start: u32 = 0;

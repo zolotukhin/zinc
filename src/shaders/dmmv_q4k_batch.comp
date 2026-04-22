@@ -11,7 +11,15 @@
 
 layout(local_size_x = 64) in;
 
-// Max batch size — compile-time constant for register allocation
+// Max batch size — compile-time constant for register allocation.
+// Keeping at 32 because raising to 64 reduces occupancy enough on
+// RDNA4 that the shared LM-head path (per-token decode uses this
+// same shader with num_cols=1) regresses from 78 → 59 tok/s on
+// Qwen3-8B. Prefill only uses num_cols > 1, but the register budget
+// is shared across all callers. A dedicated MAX_COLS=64 variant
+// with a separate pipeline would be the right fix if the chunk
+// reduction becomes worth pursuing — keep that in mind for the
+// follow-on tiled mul_mm work.
 const uint MAX_COLS = 32u;
 
 layout(push_constant) uniform PushConstants {
