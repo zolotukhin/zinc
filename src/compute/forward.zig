@@ -38,6 +38,7 @@ const SsmGatedNormPush = elementwise_mod.SsmGatedNormPush;
 const DeinterleavePush = elementwise_mod.DeinterleavePush;
 const KvCacheWritePush = elementwise_mod.KvCacheWritePush;
 const KvCacheWriteBatchedPush = elementwise_mod.KvCacheWriteBatchedPush;
+const ResidualRmsNormPush = elementwise_mod.ResidualRmsNormPush;
 const NormRopePush = elementwise_mod.NormRopePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
@@ -6397,6 +6398,55 @@ pub const InferenceEngine = struct {
         return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 0);
     }
 
+    /// Fused residual-add + RMS norm (Vulkan side).
+    /// hidden[i] += scale * residual[i]; norm_out[i] = weights[i] * hidden[i] * rsqrt(...)
+    /// One dispatch per N tokens replaces scale_acc → barrier → rms_norm_mul,
+    /// eliminating one barrier per occurrence in prefillBatched (2 × n_layers
+    /// barriers saved for a 36-layer LLaMA-style network).
+    fn dispatchResidualRmsNorm(
+        self: *InferenceEngine,
+        hidden: vk.c.VkBuffer,
+        hidden_size: vk.c.VkDeviceSize,
+        residual: vk.c.VkBuffer,
+        residual_size: vk.c.VkDeviceSize,
+        norm_out: vk.c.VkBuffer,
+        norm_out_size: vk.c.VkDeviceSize,
+        weights: vk.c.VkBuffer,
+        weights_size: vk.c.VkDeviceSize,
+        hidden_dim: u32,
+        n_tokens: u32,
+        eps: f32,
+        scale: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_residual_rms_norm orelse return error.ShaderNotLoaded);
+        const push = ResidualRmsNormPush{
+            .n = hidden_dim,
+            .eps_bits = @bitCast(eps),
+            .scale_bits = @bitCast(scale),
+        };
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch4(
+                pip,
+                std.mem.asBytes(&push),
+                hidden,
+                hidden_size,
+                residual,
+                residual_size,
+                norm_out,
+                norm_out_size,
+                weights,
+                weights_size,
+                n_tokens,
+                1,
+                1,
+            );
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet4(ds, hidden, hidden_size, residual, residual_size, norm_out, norm_out_size, weights, weights_size);
+        self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), n_tokens, 1, 1);
+    }
+
     /// Batched KV-cache write — stores N tokens' K/V into the paged cache in
     /// one dispatch. Replaces the per-token vkCmdCopyBuffer loop that prefill-
     /// Batched emitted in its first cut, and with it the
@@ -7555,15 +7605,15 @@ pub const InferenceEngine = struct {
             try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, head_dim, cfg.n_heads, cfg.n_kv_heads, 0, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
             self.decode_cmd.computeBarrier();
 
-            // O projection + residual.
+            // O projection → FUSED residual+FFN norm (hidden += down;
+            // norm = normalize(hidden) * ffn_norm_weight). Replaces
+            // scale_acc → barrier → rms_norm_mul with a single dispatch.
             try self.dispatchProjectionBatched(o_t, scratch_attn_out, scratch_down, hidden_dim, q_dim, n_tokens);
             self.decode_cmd.computeBarrier();
-            try self.dispatchScaleAcc(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, n_tokens * hidden_dim, 1.0);
+            try self.dispatchResidualRmsNorm(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, scratch_norm.handle, scratch_norm.size, ffn_norm_t.gpu_buffer.handle, ffn_norm_t.gpu_buffer.size, hidden_dim, n_tokens, eps, 1.0);
             self.decode_cmd.computeBarrier();
 
-            // FFN: norm → gate/up → SwiGLU → down → residual.
-            try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, ffn_norm_t.gpu_buffer.handle, ffn_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);
-            self.decode_cmd.computeBarrier();
+            // FFN: gate/up → SwiGLU → down → residual.
             try self.dispatchProjectionBatched(gate_t, scratch_norm, scratch_gate, inter_dim, hidden_dim, n_tokens);
             try self.dispatchProjectionBatched(up_t, scratch_norm, scratch_up, inter_dim, hidden_dim, n_tokens);
             self.decode_cmd.computeBarrier();
@@ -7575,7 +7625,7 @@ pub const InferenceEngine = struct {
             self.decode_cmd.computeBarrier();
         }
 
-        // ── Step 4: final RMS norm over all N tokens; LM head on the last one.
+        // Final RMS norm over all N tokens; LM head on the last one.
         const output_norm_t = self.tensor_map.get("output_norm.weight") orelse return error.TensorNotFound;
         const lm_head_t = self.tensor_map.get("output.weight") orelse self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
         try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, output_norm_t.gpu_buffer.handle, output_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);

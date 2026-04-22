@@ -131,6 +131,15 @@ pub const KvCacheWriteBatchedPush = extern struct {
     base_token: u32,
 };
 
+/// Push constants for fused residual-add + RMS norm
+/// (src/shaders/residual_rms_norm.comp). One dispatch per `n_tokens`
+/// workgroups replaces a scale_accumulate → barrier → rms_norm_mul chain.
+pub const ResidualRmsNormPush = extern struct {
+    n: u32,
+    eps_bits: u32,
+    scale_bits: u32,
+};
+
 /// Push constants for fused RMS norm + RoPE shader.
 pub const NormRopePush = extern struct {
     head_dim: u32,
@@ -187,6 +196,8 @@ pub const ElementwiseDispatch = struct {
     pipeline_kv_cache_write: ?Pipeline,
     /// Batched KV cache write for prefillBatched (5 bindings, page-aware).
     pipeline_kv_cache_write_batched: ?Pipeline,
+    /// Fused residual-add + RMS norm for prefillBatched (4 bindings).
+    pipeline_residual_rms_norm: ?Pipeline,
     /// NORM ROPE pipeline: fused RMS norm + RoPE per head, 3 bindings (data, weight, freq).
     pipeline_norm_rope: ?Pipeline,
     /// Descriptor pool for this dispatch.
@@ -401,6 +412,15 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // residual_rms_norm: 4 bindings (hidden, residual, norm_out, weights).
+        // Fuses scale_accumulate + rms_norm_mul so prefillBatched saves one
+        // dispatch + one barrier per residual per layer.
+        const resnorm_path = std.fmt.bufPrint(&path_buf, "{s}/residual_rms_norm.spv", .{shader_dir}) catch unreachable;
+        const pipeline_residual_rms_norm = pipeline_mod.createFromSpirvWithOptions(instance, resnorm_path, 4, @sizeOf(ResidualRmsNormPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("residual_rms_norm shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // norm_rope: fused RMS norm + RoPE, 3 bindings (data, weight, freq)
         const norm_rope_path = std.fmt.bufPrint(&path_buf, "{s}/norm_rope.spv", .{shader_dir}) catch unreachable;
         const pipeline_norm_rope = pipeline_mod.createFromSpirvWithOptions(instance, norm_rope_path, 3, @sizeOf(NormRopePush), &.{}, push_options, allocator) catch |err| blk: {
@@ -432,6 +452,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_moe_weighted_acc = pipeline_moe_weighted_acc,
             .pipeline_kv_cache_write = pipeline_kv_cache_write,
             .pipeline_kv_cache_write_batched = pipeline_kv_cache_write_batched,
+            .pipeline_residual_rms_norm = pipeline_residual_rms_norm,
             .pipeline_norm_rope = pipeline_norm_rope,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
@@ -792,6 +813,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_moe_weighted_acc) |*p| p.deinit();
         if (self.pipeline_kv_cache_write) |*p| p.deinit();
         if (self.pipeline_kv_cache_write_batched) |*p| p.deinit();
+        if (self.pipeline_residual_rms_norm) |*p| p.deinit();
         if (self.pipeline_norm_rope) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;

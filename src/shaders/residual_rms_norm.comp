@@ -1,0 +1,72 @@
+#version 460
+// ZINC — fused residual-add + RMS norm (Vulkan port of
+// src/shaders/metal/residual_rms_norm.metal).
+//
+// Semantics:
+//   hidden[i]   += scale * residual[i];   // in place
+//   norm_out[i]  = weights[i] * hidden[i] * rsqrt(mean(hidden^2) + eps);
+//
+// Replaces a scale_accumulate → barrier → rms_norm_mul sequence with a
+// single dispatch, eliminating one barrier per occurrence. Used by
+// prefillBatched after the O projection and after the FFN down projection
+// so each layer saves two dispatches + two barriers.
+//
+// Dispatch: (n_tokens, 1, 1), local_size_x = 64 (one wave per token).
+// Grid.x indexes the token; each workgroup normalizes hidden_dim elements.
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint  n;         // hidden_dim
+    float eps;
+    float scale;
+};
+
+layout(set = 0, binding = 0)          buffer Hidden    { float hidden[];   };
+layout(set = 0, binding = 1) readonly buffer Residual  { float residual[]; };
+layout(set = 0, binding = 2) writeonly buffer NormOut  { float norm_out[]; };
+layout(set = 0, binding = 3) readonly buffer Weights   { float weights[];  };
+
+shared float s_partial[64];
+
+void main() {
+    uint tid   = gl_LocalInvocationID.x;
+    uint token = gl_WorkGroupID.x;
+    uint base  = token * n;
+
+    // Pass 1: residual add (in place) + accumulate sum-of-squares.
+    float sum_sq = 0.0;
+    for (uint i = tid; i < n; i += 64u) {
+        float h = fma(scale, residual[base + i], hidden[base + i]);
+        hidden[base + i] = h;
+        sum_sq += h * h;
+    }
+
+    // Single-subgroup (wave64) reduction; falls back to shared when
+    // a device reports < 64 threads per subgroup (unusual on RDNA4).
+    float total = subgroupAdd(sum_sq);
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) s_partial[gl_SubgroupID] = total;
+        barrier();
+        if (tid == 0u) {
+            float merged = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_partial[sg];
+            s_partial[0] = merged;
+        }
+        barrier();
+        total = s_partial[0];
+    }
+
+    float rms_inv = inversesqrt((total / float(n)) + eps);
+
+    // Pass 2: normalize + scale by weights. Re-reads `hidden` because
+    // we just wrote it in pass 1 — the Metal path carries the values in
+    // registers; GLSL lacks a register array primitive of that shape, so
+    // we pay a second round of global reads in exchange for simpler
+    // control flow.
+    for (uint i = tid; i < n; i += 64u) {
+        norm_out[base + i] = weights[i] * hidden[base + i] * rms_inv;
+    }
+}
