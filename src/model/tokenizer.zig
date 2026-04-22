@@ -28,6 +28,15 @@ pub const Tokenizer = struct {
     chat_template: ?[]const u8 = null,
     /// Byte-level BPE pretokenizer style for GPT-2/Qwen-family vocabularies.
     pretokenizer: Pretokenizer = .legacy,
+    /// Precomputed "first second" → rank lookup used by applyMerges. Built
+    /// once at init so each BPE encode (many per prompt) doesn't rebuild a
+    /// 151k-entry hashmap — doing that per call cost multi-minute latency on
+    /// the second chat request because cumulative GPA allocator pressure
+    /// made each rebuild orders of magnitude slower than the first.
+    merge_ranks: std.StringHashMap(u32) = undefined,
+    /// Whether merge_ranks has been populated (false for test constructors
+    /// that don't go through initFromGGUF).
+    merge_ranks_ready: bool = false,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
 
@@ -166,10 +175,35 @@ pub const Tokenizer = struct {
         else
             .legacy;
 
+        const merges_owned = try merges_list.toOwnedSlice(allocator);
+
+        // Precompute "first second" → rank lookup. Populating this at init
+        // is O(n) once, vs O(n) every BPE encode call. With ~150k merges
+        // and ~10 BPE chunks per chat prompt, the cached path saves ~1.5M
+        // key allocations per chat — which matters because repeated per-call
+        // rebuilds made each chat after the first hang for minutes.
+        var merge_ranks = std.StringHashMap(u32).init(allocator);
+        errdefer {
+            var it_rank = merge_ranks.iterator();
+            while (it_rank.next()) |entry| allocator.free(@constCast(entry.key_ptr.*));
+            merge_ranks.deinit();
+        }
+        try merge_ranks.ensureTotalCapacity(@intCast(merges_owned.len));
+        var key_buf: std.ArrayList(u8) = .{};
+        defer key_buf.deinit(allocator);
+        for (merges_owned) |merge| {
+            key_buf.clearRetainingCapacity();
+            try key_buf.appendSlice(allocator, merge.first);
+            try key_buf.append(allocator, ' ');
+            try key_buf.appendSlice(allocator, merge.second);
+            const key_copy = try allocator.dupe(u8, key_buf.items);
+            try merge_ranks.put(key_copy, merge.rank);
+        }
+
         return Tokenizer{
             .vocab = vocab,
             .token_to_id = token_to_id,
-            .merges = try merges_list.toOwnedSlice(allocator),
+            .merges = merges_owned,
             .scores = scores,
             .bos_id = bos_id,
             .eos_id = eos_id,
@@ -177,6 +211,8 @@ pub const Tokenizer = struct {
             .add_eos_token = add_eos_token,
             .chat_template = chat_template,
             .pretokenizer = pretokenizer,
+            .merge_ranks = merge_ranks,
+            .merge_ranks_ready = true,
             .allocator = allocator,
         };
     }
@@ -574,28 +610,39 @@ pub const Tokenizer = struct {
 
     /// Apply BPE merges in priority order (GPT-2/tiktoken style).
     fn applyMerges(self: *const Tokenizer, symbols: *std.ArrayList([]const u8), owned_symbols: *std.ArrayList([]u8)) !void {
-        // Build a merge rank lookup for fast pair → rank queries
-        var merge_ranks = std.StringHashMap(u32).init(self.allocator);
-        defer merge_ranks.deinit();
+        // Rank lookup is precomputed once at init and shared across every BPE
+        // encode call — see Tokenizer.merge_ranks for the rationale.
+        const merge_ranks = if (self.merge_ranks_ready) &self.merge_ranks else blk: {
+            // Fallback for test constructors that synthesize a Tokenizer
+            // directly without calling initFromGGUF.
+            break :blk null;
+        };
+        var fallback_ranks: std.StringHashMap(u32) = undefined;
+        var fallback_owned = false;
+        defer if (fallback_owned) {
+            var it = fallback_ranks.iterator();
+            while (it.next()) |entry| self.allocator.free(@constCast(entry.key_ptr.*));
+            fallback_ranks.deinit();
+        };
+        const ranks_ptr: *const std.StringHashMap(u32) = merge_ranks orelse blk: {
+            fallback_ranks = std.StringHashMap(u32).init(self.allocator);
+            fallback_owned = true;
+            var kb: std.ArrayList(u8) = .{};
+            defer kb.deinit(self.allocator);
+            for (self.merges) |merge| {
+                kb.clearRetainingCapacity();
+                try kb.appendSlice(self.allocator, merge.first);
+                try kb.append(self.allocator, ' ');
+                try kb.appendSlice(self.allocator, merge.second);
+                const key_copy = try self.allocator.dupe(u8, kb.items);
+                try fallback_ranks.put(key_copy, merge.rank);
+            }
+            break :blk &fallback_ranks;
+        };
 
         // Pre-allocate merge key buffer
         var key_buf: std.ArrayList(u8) = .{};
         defer key_buf.deinit(self.allocator);
-
-        for (self.merges) |merge| {
-            key_buf.clearRetainingCapacity();
-            try key_buf.appendSlice(self.allocator, merge.first);
-            try key_buf.append(self.allocator, ' ');
-            try key_buf.appendSlice(self.allocator, merge.second);
-            const key_copy = try self.allocator.dupe(u8, key_buf.items);
-            try merge_ranks.put(key_copy, merge.rank);
-        }
-        defer {
-            var it = merge_ranks.iterator();
-            while (it.next()) |entry| {
-                self.allocator.free(@constCast(entry.key_ptr.*));
-            }
-        }
 
         // Repeatedly find and apply the highest-priority (lowest rank) merge
         while (symbols.items.len > 1) {
@@ -609,7 +656,7 @@ pub const Tokenizer = struct {
                 try key_buf.append(self.allocator, ' ');
                 try key_buf.appendSlice(self.allocator, symbols.items[pos + 1]);
 
-                if (merge_ranks.get(key_buf.items)) |rank| {
+                if (ranks_ptr.get(key_buf.items)) |rank| {
                     if (rank < best_rank) {
                         best_rank = rank;
                         best_pos = pos;
@@ -992,6 +1039,12 @@ pub const Tokenizer = struct {
 
     /// Release tokenizer-owned vocabulary tables, merges, and optional score arrays.
     pub fn deinit(self: *Tokenizer) void {
+        if (self.merge_ranks_ready) {
+            var it = self.merge_ranks.iterator();
+            while (it.next()) |entry| self.allocator.free(@constCast(entry.key_ptr.*));
+            self.merge_ranks.deinit();
+            self.merge_ranks_ready = false;
+        }
         if (self.scores) |s| self.allocator.free(s);
         self.allocator.free(self.merges);
         self.token_to_id.deinit();
