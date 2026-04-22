@@ -247,7 +247,12 @@ pub const ModelManager = struct {
                 .fits_current_gpu = catalog_mod.fitsGpu(entry, self.vram_budget_bytes),
                 .exact = false,
             };
-            const supported_now = tested_profile_match and fit.fits_current_gpu;
+            // Currently-active entries are kept even when the catalog's
+            // conservative required_vram_bytes exceeds the live budget —
+            // the model is demonstrably running, so hiding it from
+            // /v1/models just confuses clients that want to query by id.
+            const is_active_entry = active_catalog_id != null and std.mem.eql(u8, active_catalog_id.?, entry.id);
+            const supported_now = is_active_entry or (tested_profile_match and fit.fits_current_gpu);
             if (!include_all and !supported_now) continue;
 
             const status_label = if (supported_now)
