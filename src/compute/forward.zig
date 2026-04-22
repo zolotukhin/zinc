@@ -7372,24 +7372,16 @@ pub const InferenceEngine = struct {
         const n_tokens: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
         try self.ensureBatchedScratchCapacity(n_tokens);
 
-        // ── Step 1 of the batched orchestration: pre-dequantize all N
-        // embedding rows on the CPU into prefill_embed_big (host-staged,
-        // already sized + populated by the same logic prefillBatch uses),
-        // then DMA-copy them into batched_scratch_hidden (device-local)
-        // inside the command buffer so subsequent per-layer batched
-        // dispatches can read from one contiguous GPU-resident buffer.
-        //
-        // Step 2 (not yet in this commit): per-layer forward loop using
-        // dispatchRmsNorm, dispatchProjectionBatched, dispatchRopeBatched,
-        // dispatchFlashAttnBatched, dispatchSwiglu, dispatchScaleAcc. All
-        // primitives are in place; the loop body is ~200 lines of
-        // orchestration + barriers.
-        //
-        // Until step 2 lands we finish this call by delegating to
-        // prefillBatch so the default ZINC_BATCHED_PREFILL=1 user gets the
-        // same correctness guarantee as today while step 1 exercises the
-        // scratch-buffer path (alloc + sizing + lifecycle) in production.
-        const hidden_dim = self.model.config.hidden_dim;
+        // ── Step 1: pre-dequantize all N embedding rows on the CPU into
+        // prefill_embed_big (host-staged), then DMA-copy into
+        // batched_scratch_hidden (device-local) inside the command buffer.
+        const cfg = self.model.config;
+        const hidden_dim = cfg.hidden_dim;
+        const q_dim: u32 = cfg.n_heads * cfg.head_dim;
+        const kv_dim: u32 = cfg.n_kv_heads * cfg.head_dim;
+        const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
+        const head_dim = cfg.head_dim;
+        const rope_dim: u32 = if (cfg.rope_dim > 0) @min(cfg.rope_dim, head_dim) else head_dim;
         const total_embed_bytes: u64 = @as(u64, hidden_dim) * @as(u64, n_tokens) * @sizeOf(f32);
         if (self.prefill_embed_big == null or self.prefill_embed_big_capacity_bytes < total_embed_bytes) {
             if (self.prefill_embed_big) |*b| b.deinit();
@@ -7401,7 +7393,7 @@ pub const InferenceEngine = struct {
             const embd = self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
             const mmap = self.model.mmap_data orelse return error.NoMmapData;
             const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
-            const vocab_last = self.model.config.vocab_size -| 1;
+            const vocab_last = cfg.vocab_size -| 1;
             for (prompt_tokens, 0..) |tok, i| {
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
@@ -7411,8 +7403,147 @@ pub const InferenceEngine = struct {
             self.prefill_embed_big_token_count = n_tokens;
         }
 
-        log.debug("prefillBatched: scratch armed ({d} tokens × {d} hidden = {d} bytes embedding staging); per-layer body not yet wired — delegating to prefillBatch for correctness", .{ n_tokens, hidden_dim, total_embed_bytes });
-        return self.prefillBatch(state, prompt_tokens);
+        // Reset request state and allocate KV pages for all N prompt tokens.
+        const target_context_tokens = if (state.requested_context_tokens > 0)
+            @max(state.requested_context_tokens, n_tokens)
+        else
+            n_tokens;
+        try self.resetRequestState(target_context_tokens);
+
+        const scratch_hidden = self.batched_scratch_hidden.?;
+        const scratch_norm = self.batched_scratch_norm.?;
+        const scratch_q = self.batched_scratch_q.?;
+        const scratch_k = self.batched_scratch_k.?;
+        const scratch_v = self.batched_scratch_v.?;
+        const scratch_attn_out = self.batched_scratch_attn_out.?;
+        const scratch_gate = self.batched_scratch_gate.?;
+        const scratch_up = self.batched_scratch_up.?;
+        const scratch_swiglu = self.batched_scratch_swiglu.?;
+        const scratch_down = self.batched_scratch_down.?;
+
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+
+        // ── Step 2: DMA embeddings host-staged → device-local scratch_hidden.
+        {
+            const region = vk.c.VkBufferCopy{
+                .srcOffset = 0,
+                .dstOffset = 0,
+                .size = total_embed_bytes,
+            };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.prefill_embed_big.?.handle, scratch_hidden.handle, 1, &region);
+            self.decode_cmd.transferToComputeBarrier();
+        }
+
+        // ── Step 3: per-layer batched forward.
+        const eps = cfg.rms_norm_eps;
+        const freq_buf_handle = self.rope_freq_buf.handle;
+        const freq_buf_size = self.rope_freq_buf.size;
+        const kv_bytes = @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
+
+        for (0..cfg.n_layers) |layer_idx| {
+            const layer: u32 = @intCast(layer_idx);
+            const lt = self.layer_tensors[layer_idx];
+            const attn_norm_t = lt.attn_norm orelse return error.TensorNotFound;
+            const ffn_norm_t = lt.ffn_norm orelse return error.TensorNotFound;
+            const q_t = lt.attn_q.?;
+            const k_t = lt.attn_k.?;
+            const v_t = lt.attn_v.?;
+            const o_t = lt.attn_output.?;
+            const gate_t = lt.ffn_gate.?;
+            const up_t = lt.ffn_up.?;
+            const down_t = lt.ffn_down.?;
+
+            // attn RMS norm: hidden → norm
+            try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, attn_norm_t.gpu_buffer.handle, attn_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);
+            self.decode_cmd.computeBarrier();
+
+            // Q / K / V projections (weight read once per 32-token chunk).
+            try self.dispatchProjectionBatched(q_t, scratch_norm, scratch_q, q_dim, hidden_dim, n_tokens);
+            try self.dispatchProjectionBatched(k_t, scratch_norm, scratch_k, kv_dim, hidden_dim, n_tokens);
+            try self.dispatchProjectionBatched(v_t, scratch_norm, scratch_v, kv_dim, hidden_dim, n_tokens);
+            self.decode_cmd.computeBarrier();
+
+            // Optional per-head Q/K norms (Qwen3 style). Dispatch one workgroup per
+            // (token, head) slot — rms_norm_mul handles this via group_id * head_dim.
+            if (lt.attn_q_norm) |qn| {
+                try self.dispatchRmsNorm(scratch_q.handle, scratch_q.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, scratch_q.handle, scratch_q.size, head_dim, cfg.n_heads * n_tokens, eps);
+            }
+            if (lt.attn_k_norm) |kn| {
+                try self.dispatchRmsNorm(scratch_k.handle, scratch_k.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, scratch_k.handle, scratch_k.size, head_dim, cfg.n_kv_heads * n_tokens, eps);
+            }
+            if (lt.attn_q_norm != null or lt.attn_k_norm != null) self.decode_cmd.computeBarrier();
+
+            // Batched RoPE for Q and K. position_base = 0 (fresh prefill only in v1).
+            try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_heads, 0, n_tokens, cfg.rope_freq_base, 1.0);
+            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_kv_heads, 0, n_tokens, cfg.rope_freq_base, 1.0);
+            self.decode_cmd.computeBarrier();
+
+            // KV cache write: one vkCmdCopyBuffer per token per {K,V}. Keeps us
+            // compatible with the paged KV layout without needing a new shader.
+            for (0..n_tokens) |t| {
+                const t32: u32 = @intCast(t);
+                const physical = try self.physicalTokenIndex(t32);
+                const src_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, t) * kv_bytes;
+                const dst_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, physical) * kv_bytes;
+                const k_region = vk.c.VkBufferCopy{ .srcOffset = src_bytes, .dstOffset = dst_bytes, .size = kv_bytes };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, scratch_k.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
+                const v_region = vk.c.VkBufferCopy{ .srcOffset = src_bytes, .dstOffset = dst_bytes, .size = kv_bytes };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, scratch_v.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
+            }
+            self.decode_cmd.transferToComputeBarrier();
+
+            // Batched causal flash attention: N queries over the just-written KV cache.
+            const sink_offset = layer * cfg.n_heads;
+            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, head_dim, cfg.n_heads, cfg.n_kv_heads, 0, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
+            self.decode_cmd.computeBarrier();
+
+            // O projection + residual.
+            try self.dispatchProjectionBatched(o_t, scratch_attn_out, scratch_down, hidden_dim, q_dim, n_tokens);
+            self.decode_cmd.computeBarrier();
+            try self.dispatchScaleAcc(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, n_tokens * hidden_dim, 1.0);
+            self.decode_cmd.computeBarrier();
+
+            // FFN: norm → gate/up → SwiGLU → down → residual.
+            try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, ffn_norm_t.gpu_buffer.handle, ffn_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);
+            self.decode_cmd.computeBarrier();
+            try self.dispatchProjectionBatched(gate_t, scratch_norm, scratch_gate, inter_dim, hidden_dim, n_tokens);
+            try self.dispatchProjectionBatched(up_t, scratch_norm, scratch_up, inter_dim, hidden_dim, n_tokens);
+            self.decode_cmd.computeBarrier();
+            try self.dispatchSwiglu(scratch_gate.handle, scratch_gate.size, scratch_up.handle, scratch_up.size, scratch_swiglu.handle, scratch_swiglu.size, n_tokens * inter_dim);
+            self.decode_cmd.computeBarrier();
+            try self.dispatchProjectionBatched(down_t, scratch_swiglu, scratch_down, hidden_dim, inter_dim, n_tokens);
+            self.decode_cmd.computeBarrier();
+            try self.dispatchScaleAcc(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, n_tokens * hidden_dim, 1.0);
+            self.decode_cmd.computeBarrier();
+        }
+
+        // ── Step 4: final RMS norm over all N tokens; LM head on the last one.
+        const output_norm_t = self.tensor_map.get("output_norm.weight") orelse return error.TensorNotFound;
+        const lm_head_t = self.tensor_map.get("output.weight") orelse self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
+        try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, output_norm_t.gpu_buffer.handle, output_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);
+        self.decode_cmd.computeBarrier();
+        const x_offset_bytes: u32 = (n_tokens - 1) * hidden_dim * @sizeOf(f32);
+        try self.dispatchDmmvInner(lm_head_t, scratch_norm, scratch_norm.size, self.logits_buf, cfg.vocab_size, hidden_dim, 0, x_offset_bytes, 0, 0);
+        self.decode_cmd.computeBarrier();
+
+        // Read logits back for the sampler / argmax path.
+        const barrier = vk.c.VkMemoryBarrier{
+            .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = vk.c.VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = vk.c.VK_ACCESS_TRANSFER_READ_BIT,
+        };
+        vk.c.vkCmdPipelineBarrier(self.decode_cmd.handle, vk.c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk.c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
+        const logits_size = @as(vk.c.VkDeviceSize, cfg.vocab_size) * @sizeOf(f32);
+        const logits_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_size };
+        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &logits_region);
+
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+        self.position = n_tokens;
+        state.position = n_tokens;
     }
 
     /// Process all prompt tokens through the full transformer to populate
