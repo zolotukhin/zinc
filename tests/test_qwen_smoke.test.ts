@@ -279,11 +279,11 @@ describe("OpenAI API smoke", () => {
   test("local server", async () => {
     if (!baseUrl) throw new Error("Local server did not initialize");
     await runCoreSuite(baseUrl);
-    // runCoreSuite runs 8 sequential inference requests. The first
-    // triggers PSO compile (~101s on Apple Silicon M1 Pro cold cache),
-    // subsequent warm inferences are a few seconds each. 600s leaves
-    // comfortable headroom. Stress/concurrency scenarios live in
-    // runStressSuite and are exercised from the CLI path only.
+    // runCoreSuite runs 8 sequential inference requests. The first adds
+    // ~3s of PSO compile on M1 Pro; subsequent warm requests are fast.
+    // Qwen3-8B runs the whole core suite in ~45s. 600s leaves plenty of
+    // headroom for slower hardware. Stress/concurrency scenarios live
+    // in runStressSuite and only run via the standalone CLI entrypoint.
   }, 600_000);
 });
 

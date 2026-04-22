@@ -8,11 +8,9 @@
  */
 
 // The first inference request after server startup triggers pipeline-state
-// compilation for every Metal / Vulkan shader the decode graph touches.
-// On Apple Silicon / RADV that cold-start can take 90–120s before the
-// first token emerges (measured: 101s for a 2-token chat on Qwen3-8B
-// Q4_K_M on M1 Pro cold-cache), so timeouts on inference endpoints have
-// to be generous enough to swallow it on laptop-class hardware.
+// compilation for every Metal / Vulkan shader the decode graph touches —
+// ~3s extra on Qwen3-8B on M1 Pro. 35B-class chat-thinking tests can emit
+// up to max_tokens=2048 and take much longer, so keep the ceiling high.
 // Metadata endpoints (/health, /models, error paths) stay at 5s.
 const INFERENCE_TIMEOUT_MS = 180_000;
 
