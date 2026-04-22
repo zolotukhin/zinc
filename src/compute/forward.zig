@@ -7358,22 +7358,60 @@ pub const InferenceEngine = struct {
         }
         if (prompt_tokens.len == 0) return;
 
+        // V1 constraint: fresh prefill only. Prefix re-use (state.position > 0)
+        // would need us to thread seq_start through rope_batched and
+        // flash_attn_batched like the Metal path does, plus match the KV page
+        // layout of the resumed request. Keep it simple while the body is
+        // being validated end-to-end.
+        if (state.position != 0 or state.generated_tokens.items.len != 0) {
+            return self.prefillBatch(state, prompt_tokens);
+        }
+
         // Ensure scratch buffers are sized for this prompt — reused across
         // subsequent prefill calls so the alloc is amortized.
         const n_tokens: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
         try self.ensureBatchedScratchCapacity(n_tokens);
 
-        // The orchestration body (see MULTI_HOUR_EFFORT_8_RDNA_BATCHED_PREFILL.md)
-        // issues one command buffer that does, per layer: chunked dmmv_q4k_batch
-        // for Q/K/V/O/gate/up/down (weight read once per batch), rope_batched,
-        // batched KV write, flash_attn_batched, and batched elementwise ops for
-        // RMS norm / SwiGLU / residual. The scratch buffers above are the
-        // per-N-token state that path uses.
+        // ── Step 1 of the batched orchestration: pre-dequantize all N
+        // embedding rows on the CPU into prefill_embed_big (host-staged,
+        // already sized + populated by the same logic prefillBatch uses),
+        // then DMA-copy them into batched_scratch_hidden (device-local)
+        // inside the command buffer so subsequent per-layer batched
+        // dispatches can read from one contiguous GPU-resident buffer.
         //
-        // Until the body lands we still delegate — but the scratch allocation
-        // and env gate are both live, so flipping the flag on a supported
-        // model is a measurable no-op rather than a correctness bug.
-        log.debug("prefillBatched: RDNA batched path armed, n_tokens={d}, scratch capacity covers {d} tokens — delegating to prefillBatch until orchestration body lands", .{ n_tokens, self.batched_scratch_capacity_tokens });
+        // Step 2 (not yet in this commit): per-layer forward loop using
+        // dispatchRmsNorm, dispatchProjectionBatched, dispatchRopeBatched,
+        // dispatchFlashAttnBatched, dispatchSwiglu, dispatchScaleAcc. All
+        // primitives are in place; the loop body is ~200 lines of
+        // orchestration + barriers.
+        //
+        // Until step 2 lands we finish this call by delegating to
+        // prefillBatch so the default ZINC_BATCHED_PREFILL=1 user gets the
+        // same correctness guarantee as today while step 1 exercises the
+        // scratch-buffer path (alloc + sizing + lifecycle) in production.
+        const hidden_dim = self.model.config.hidden_dim;
+        const total_embed_bytes: u64 = @as(u64, hidden_dim) * @as(u64, n_tokens) * @sizeOf(f32);
+        if (self.prefill_embed_big == null or self.prefill_embed_big_capacity_bytes < total_embed_bytes) {
+            if (self.prefill_embed_big) |*b| b.deinit();
+            self.prefill_embed_big = try Buffer.initStaging(self.instance, total_embed_bytes);
+            self.prefill_embed_big_capacity_bytes = total_embed_bytes;
+        }
+        {
+            const big_f32: [*]f32 = @ptrCast(@alignCast(self.prefill_embed_big.?.mapped.?));
+            const embd = self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
+            const mmap = self.model.mmap_data orelse return error.NoMmapData;
+            const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
+            const vocab_last = self.model.config.vocab_size -| 1;
+            for (prompt_tokens, 0..) |tok, i| {
+                const safe_id = @min(tok, vocab_last);
+                const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
+                dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
+            }
+            self.prefill_embed_big_hidden = hidden_dim;
+            self.prefill_embed_big_token_count = n_tokens;
+        }
+
+        log.debug("prefillBatched: scratch armed ({d} tokens × {d} hidden = {d} bytes embedding staging); per-layer body not yet wired — delegating to prefillBatch for correctness", .{ n_tokens, hidden_dim, total_embed_bytes });
         return self.prefillBatch(state, prompt_tokens);
     }
 
