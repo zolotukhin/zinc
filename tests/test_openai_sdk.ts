@@ -387,7 +387,8 @@ async function testOpenAiSdk(base: string, modelId: string): Promise<void> {
   console.log(`  PASS: OpenAI SDK (streaming) → '${chunks.join("").slice(0, 40)}'`);
 }
 
-export async function runSuite(base: string): Promise<void> {
+// User-facing flows: one chat at a time. Run in CI and in bun test.
+export async function runCoreSuite(base: string): Promise<void> {
   console.log(`Testing ZINC API at ${base}\n`);
 
   await testHealth(base);
@@ -395,11 +396,24 @@ export async function runSuite(base: string): Promise<void> {
   await testChatCompletionNonStreaming(base, modelId);
   await testChatCompletionStreaming(base, modelId);
   await testChatCompletionStreamingSequential(base, modelId);
-  await testChatCompletionStreamingOverlapped(base, modelId);
-  await testHealthReflectsQueuedLoad(base, modelId);
   await testCompletion(base, modelId);
   await testErrorHandling(base);
   await testOpenAiSdk(base, modelId);
+}
+
+// Concurrent-request stress: validates mutex/queue semantics. Kept
+// separate because overlapped streams + health-under-load can race with
+// GenerationGuard in ways that manifest as multi-minute hangs in the
+// bun test runner. Run from the CLI path below, not from `bun test`.
+export async function runStressSuite(base: string): Promise<void> {
+  const modelId = await testModels(base);
+  await testChatCompletionStreamingOverlapped(base, modelId);
+  await testHealthReflectsQueuedLoad(base, modelId);
+}
+
+export async function runSuite(base: string): Promise<void> {
+  await runCoreSuite(base);
+  await runStressSuite(base);
   console.log("\nAll tests passed!");
 }
 

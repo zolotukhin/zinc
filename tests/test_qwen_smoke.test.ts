@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { QWEN_SMOKE_CASES, resolveSmokeModel, runSmokeCase, smokeTimeoutMs } from "./test_qwen_smoke";
-import { runSuite } from "./test_openai_sdk";
+import { runCoreSuite } from "./test_openai_sdk";
 
 const MANAGED_MODEL_ROOT = join(homedir(), "Library", "Caches", "zinc", "models", "models");
 const SERVER_MODEL_IDS = [
@@ -82,8 +82,12 @@ async function launchManagedServer(modelId: string): Promise<{ process: Bun.Subp
     const candidateBase = `http://127.0.0.1:${port}/v1`;
     const child = Bun.spawn({
       cmd: [binary, "--model-id", modelId, "--port", String(port)],
-      stdout: "pipe",
-      stderr: "pipe",
+      // "ignore" (not "pipe") because nothing drains the subprocess stdout/stderr,
+      // and zinc logs ~10 lines per chat — a 64KB pipe buffer fills after ~20
+      // chats and the server blocks on its next write mid-generation, which
+      // surfaces to the test as ECONNRESET partway through the suite.
+      stdout: "ignore",
+      stderr: "ignore",
       env: process.env,
     });
     try {
@@ -103,7 +107,14 @@ async function launchManagedServer(modelId: string): Promise<{ process: Bun.Subp
 async function stopManagedServer(process: Bun.Subprocess | null): Promise<void> {
   if (!process) return;
   process.kill();
-  await process.exited.catch(() => {});
+  const reaped = await Promise.race([
+    process.exited.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 5_000)),
+  ]);
+  if (!reaped) {
+    process.kill("SIGKILL");
+    await process.exited.catch(() => {});
+  }
 }
 
 async function postJson(baseUrl: string, path: string, body: unknown): Promise<any> {
@@ -205,7 +216,7 @@ let baseUrl: string | null = externalBase ?? null;
 describe("OpenAI API smoke", () => {
   if (externalBase) {
     test("external server", async () => {
-      await runSuite(externalBase);
+      await runCoreSuite(externalBase);
     }, 300_000);
     return;
   }
@@ -228,8 +239,9 @@ describe("OpenAI API smoke", () => {
       baseUrl = `http://127.0.0.1:${port}/v1`;
       managedProcess = Bun.spawn({
         cmd: [binary, "--model-id", managedModelId!, "--port", String(port)],
-        stdout: "pipe",
-        stderr: "pipe",
+        // See launchManagedServer — "ignore" avoids pipe-buffer fill hangs.
+        stdout: "ignore",
+        stderr: "ignore",
         env: process.env,
       });
       try {
@@ -247,15 +259,32 @@ describe("OpenAI API smoke", () => {
   afterAll(async () => {
     if (managedProcess) {
       managedProcess.kill();
-      await managedProcess.exited;
+      // If SIGTERM doesn't reap within 3s (e.g. because the server is
+      // stuck in a GPU driver call), escalate to SIGKILL so afterAll
+      // doesn't hang the whole test run. Bun's default afterAll
+      // timeout is 5s, so a 3s SIGTERM wait + SIGKILL reap fits inside
+      // the 30s explicit timeout we set below with headroom to spare.
+      const reaped = await Promise.race([
+        managedProcess.exited.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 3_000)),
+      ]);
+      if (!reaped) {
+        managedProcess.kill("SIGKILL");
+        await managedProcess.exited.catch(() => {});
+      }
       managedProcess = null;
     }
-  });
+  }, 30_000);
 
   test("local server", async () => {
     if (!baseUrl) throw new Error("Local server did not initialize");
-    await runSuite(baseUrl);
-  }, 300_000);
+    await runCoreSuite(baseUrl);
+    // runCoreSuite runs 8 sequential inference requests. The first
+    // triggers PSO compile (~101s on Apple Silicon M1 Pro cold cache),
+    // subsequent warm inferences are a few seconds each. 600s leaves
+    // comfortable headroom. Stress/concurrency scenarios live in
+    // runStressSuite and are exercised from the CLI path only.
+  }, 600_000);
 });
 
 for (const modelId of QWEN_CHAT_MODEL_IDS) {
