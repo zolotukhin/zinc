@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { QWEN_SMOKE_CASES, resolveSmokeModel, runSmokeCase, smokeTimeoutMs } from "./test_qwen_smoke";
-import { runCoreSuite } from "./test_openai_sdk";
+import { runSuite } from "./test_openai_sdk";
 
 const MANAGED_MODEL_ROOT = join(homedir(), "Library", "Caches", "zinc", "models", "models");
 const SERVER_MODEL_IDS = [
@@ -216,7 +216,7 @@ let baseUrl: string | null = externalBase ?? null;
 describe("OpenAI API smoke", () => {
   if (externalBase) {
     test("external server", async () => {
-      await runCoreSuite(externalBase);
+      await runSuite(externalBase);
     }, 300_000);
     return;
   }
@@ -278,12 +278,11 @@ describe("OpenAI API smoke", () => {
 
   test("local server", async () => {
     if (!baseUrl) throw new Error("Local server did not initialize");
-    await runCoreSuite(baseUrl);
-    // runCoreSuite runs 8 sequential inference requests. The first adds
-    // ~3s of PSO compile on M1 Pro; subsequent warm requests are fast.
-    // Qwen3-8B runs the whole core suite in ~45s. 600s leaves plenty of
-    // headroom for slower hardware. Stress/concurrency scenarios live
-    // in runStressSuite and only run via the standalone CLI entrypoint.
+    await runSuite(baseUrl);
+    // runSuite runs ~10 inference requests including overlapped streams
+    // and the queued-health scenario. First request adds ~3s of PSO
+    // compile on M1 Pro; the whole suite finishes in ~60s on Qwen3-8B.
+    // 600s leaves plenty of headroom for slower hardware.
   }, 600_000);
 });
 
