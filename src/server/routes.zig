@@ -2048,8 +2048,12 @@ fn handleCompletions(
 
     var text_buf: std.ArrayList(u8) = .{};
     defer text_buf.deinit(allocator);
+    var decode_buf: [512]u8 = undefined;
     for (output_tokens) |tid| {
-        const t = if (tid < tokenizer.vocab.len) tokenizer.vocab[tid] else "<?>";
+        // decodeToken reverses the GPT-2 byte-level remapping (e.g. `Ġ` → ' ').
+        // Appending the raw vocab string directly leaked those marker characters
+        // into /v1/completions responses.
+        const t = tokenizer.decodeToken(tid, &decode_buf);
         text_buf.appendSlice(allocator, t) catch break;
     }
 
