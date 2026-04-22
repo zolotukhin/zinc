@@ -118,7 +118,6 @@ comptime {
     _ = @import("regression_tests.zig");
     _ = @import("server/http.zig");
     _ = @import("server/runtime.zig");
-    _ = @import("server/session.zig");
     _ = @import("scheduler/request.zig");
     _ = @import("scheduler/scheduler.zig");
     _ = @import("scheduler/kv_cache.zig");
