@@ -67,8 +67,16 @@ async function pickOpenPort(): Promise<number> {
   });
 }
 
+// Large models (35B-class) take ~80s to load on Apple M1/M2 Pro because
+// the entire 21 GB Q4_K_XL GGUF has to be mmap-paged into the unified
+// memory budget plus the KV cache allocated. Give each attempt 180s
+// before killing + retrying, and the outer deadline 240s so a single
+// slow cold-start does not fail the whole test.
+const HEALTH_WAIT_MS = 180_000;
+const SERVER_ACQUIRE_MS = 240_000;
+
 async function launchManagedServer(modelId: string): Promise<{ process: Bun.Subprocess; baseUrl: string }> {
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + SERVER_ACQUIRE_MS;
   while (Date.now() < deadline) {
     const port = await pickOpenPort();
     const candidateBase = `http://127.0.0.1:${port}/v1`;
@@ -79,7 +87,7 @@ async function launchManagedServer(modelId: string): Promise<{ process: Bun.Subp
       env: process.env,
     });
     try {
-      await waitForHealth(candidateBase, 60_000);
+      await waitForHealth(candidateBase, HEALTH_WAIT_MS);
       return { process: child, baseUrl: candidateBase };
     } catch (error) {
       child.kill();
@@ -89,7 +97,7 @@ async function launchManagedServer(modelId: string): Promise<{ process: Bun.Subp
       await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
   }
-  throw new Error(`Local server could not acquire GPU for ${modelId} within 120s`);
+  throw new Error(`Local server could not acquire GPU for ${modelId} within ${SERVER_ACQUIRE_MS / 1000}s`);
 }
 
 async function stopManagedServer(process: Bun.Subprocess | null): Promise<void> {
@@ -210,7 +218,7 @@ describe("OpenAI API smoke", () => {
   }
 
   beforeAll(async () => {
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + SERVER_ACQUIRE_MS;
     while (Date.now() < deadline) {
       const port = await pickOpenPort();
       baseUrl = `http://127.0.0.1:${port}/v1`;
@@ -221,7 +229,7 @@ describe("OpenAI API smoke", () => {
         env: process.env,
       });
       try {
-        await waitForHealth(baseUrl, 60_000);
+        await waitForHealth(baseUrl, HEALTH_WAIT_MS);
         return;
       } catch (error) {
         const exited = await Promise.race([managedProcess.exited, Promise.resolve(null)]);
@@ -229,8 +237,8 @@ describe("OpenAI API smoke", () => {
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
     }
-    throw new Error("Local server could not acquire GPU within 120s");
-  }, 180_000);
+    throw new Error(`Local server could not acquire GPU within ${SERVER_ACQUIRE_MS / 1000}s`);
+  }, 300_000);
 
   afterAll(async () => {
     if (managedProcess) {
