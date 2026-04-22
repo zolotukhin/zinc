@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 440" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">How Metal resolves a compute pipeline state with and without a binary archive</title>
+  <desc id="desc">A flow diagram. The pipeline descriptor on the left splits into two lanes. The upper lane shows the default path where Metal compiles AIR into machine code every launch. The lower lane shows the MTLBinaryArchive path where Metal searches the array of archives first, skips compilation on a hit, and compiles plus optionally captures on a miss.</desc>
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .box { fill: #fff; stroke: #1f2937; stroke-width: 1.5; rx: 8; }
+      .accent { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.5; }
+      .good { fill: #ecfdf5; stroke: #047857; stroke-width: 1.5; }
+      .bad { fill: #fef2f2; stroke: #b91c1c; stroke-width: 1.5; }
+      .label { font-size: 14px; fill: #1f2937; }
+      .small { font-size: 12px; fill: #374151; }
+      .caption { font-size: 13px; fill: #4b5563; font-style: italic; }
+      .head { font-size: 13px; font-weight: 600; fill: #6b7280; letter-spacing: 0.04em; text-transform: uppercase; }
+      .line { fill: none; stroke: #1f2937; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="880" height="440" fill="#fafafa"/>
+
+  <!-- Shared descriptor -->
+  <rect class="box" x="20" y="180" width="170" height="72"/>
+  <text class="label" x="105" y="212" text-anchor="middle">MTLComputePipeline</text>
+  <text class="label" x="105" y="230" text-anchor="middle">Descriptor + function</text>
+
+  <!-- Upper lane: default, no archive -->
+  <text class="head" x="220" y="60">Default path, no archive</text>
+  <rect class="bad" x="220" y="80" width="190" height="60"/>
+  <text class="label" x="315" y="108" text-anchor="middle">AIR in .metallib</text>
+  <text class="small" x="315" y="126" text-anchor="middle">inside the process binary</text>
+
+  <rect class="bad" x="440" y="80" width="220" height="60"/>
+  <text class="label" x="550" y="108" text-anchor="middle">Compile AIR → GPU ISA</text>
+  <text class="small" x="550" y="126" text-anchor="middle">tens of ms per kernel, every launch</text>
+
+  <rect class="box" x="690" y="80" width="170" height="60"/>
+  <text class="label" x="775" y="108" text-anchor="middle">Ready PSO</text>
+  <text class="small" x="775" y="126" text-anchor="middle">kept in RAM for process</text>
+
+  <path class="line" d="M190,200 C 210,200 205,110 220,110" marker-end="url(#arr)"/>
+  <path class="line" d="M410,110 L440,110" marker-end="url(#arr)"/>
+  <path class="line" d="M660,110 L690,110" marker-end="url(#arr)"/>
+
+  <!-- Lower lane: archive path -->
+  <text class="head" x="220" y="290">With MTLBinaryArchive</text>
+  <rect class="accent" x="220" y="310" width="190" height="60"/>
+  <text class="label" x="315" y="338" text-anchor="middle">Search archives[]</text>
+  <text class="small" x="315" y="356" text-anchor="middle">on-disk, keyed by device + driver</text>
+
+  <rect class="good" x="440" y="260" width="220" height="60"/>
+  <text class="label" x="550" y="288" text-anchor="middle">Archive hit</text>
+  <text class="small" x="550" y="306" text-anchor="middle">skip compile, load compiled ISA</text>
+
+  <rect class="bad" x="440" y="340" width="220" height="60"/>
+  <text class="label" x="550" y="368" text-anchor="middle">Archive miss</text>
+  <text class="small" x="550" y="386" text-anchor="middle">compile + optionally capture back</text>
+
+  <rect class="box" x="690" y="310" width="170" height="60"/>
+  <text class="label" x="775" y="338" text-anchor="middle">Ready PSO</text>
+  <text class="small" x="775" y="356" text-anchor="middle">cached next launch too</text>
+
+  <path class="line" d="M190,232 C 210,232 205,340 220,340" marker-end="url(#arr)"/>
+  <path class="line" d="M410,340 C 420,340 430,290 440,290" marker-end="url(#arr)"/>
+  <path class="line" d="M410,340 C 420,340 430,370 440,370" marker-end="url(#arr)"/>
+  <path class="line" d="M660,290 C 670,290 680,340 690,340" marker-end="url(#arr)"/>
+  <path class="line" d="M660,370 C 670,370 680,340 690,340" marker-end="url(#arr)"/>
+</svg>
