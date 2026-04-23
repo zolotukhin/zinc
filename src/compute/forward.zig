@@ -1679,16 +1679,20 @@ pub const InferenceEngine = struct {
             log.info("MoE Q4_K kpar variant DISABLED via ZINC_MOE_KPAR=0", .{});
         }
 
-        // MoE fused gate+up (Q4_K): default ON when the kpar path is on and
-        // the fused pipeline loaded. Disable with ZINC_MOE_FUSED_GATE_UP=0.
+        // MoE fused gate+up (Q4_K): default OFF. Enable with
+        // ZINC_MOE_FUSED_GATE_UP=1. Measured on Qwen3.6-35B-A3B (expert M=512,
+        // K=2048) on RDNA4 R9700: 26.33 tok/s prefill vs 26.51 unfused
+        // (median of 5, 0.7% regression). Register pressure from the dual
+        // output (two running sums, two nibble-vec4 sets) outweighs the
+        // halved dispatch count for this small shape. Kept opt-in because
+        // larger expert intermediates (>= 1024) haven't been measured and
+        // the shader is otherwise a proven drop-in for kpar.
         const moe_fused_gate_up_env = std.posix.getenv("ZINC_MOE_FUSED_GATE_UP");
-        const moe_fused_gate_up_explicitly_off = moe_fused_gate_up_env != null and std.mem.eql(u8, moe_fused_gate_up_env.?, "0");
-        const moe_fused_gate_up_enabled = !moe_fused_gate_up_explicitly_off and
+        const moe_fused_gate_up_forced_on = moe_fused_gate_up_env != null and std.mem.eql(u8, moe_fused_gate_up_env.?, "1");
+        const moe_fused_gate_up_enabled = moe_fused_gate_up_forced_on and
             moe_kpar_enabled and dmmv.pipeline_q4k_fused_gate_up_moe != null;
         if (moe_fused_gate_up_enabled) {
-            log.info("MoE Q4_K fused gate+up ENABLED (default, set ZINC_MOE_FUSED_GATE_UP=0 to disable)", .{});
-        } else if (moe_fused_gate_up_explicitly_off) {
-            log.info("MoE Q4_K fused gate+up DISABLED via ZINC_MOE_FUSED_GATE_UP=0", .{});
+            log.info("MoE Q4_K fused gate+up ENABLED via ZINC_MOE_FUSED_GATE_UP=1", .{});
         }
 
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
