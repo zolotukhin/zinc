@@ -29,11 +29,12 @@
 layout(local_size_x = 64) in;
 
 // MAX_COLS trades off register pressure vs number of prefill chunks.
-// Measured on Qwen3-8B Q4_K_M on R9700: 32 → 173 tok/s, 64 drops
-// to 153 (VGPR spill / occupancy loss). Trying 16 next — fewer
-// register-array slots should lift occupancy enough to offset the
-// extra chunk passes over 105 tokens (7 chunks vs 4).
-const uint MAX_COLS = 16u;
+// Measured on Qwen3-8B Q4_K_M on R9700 (105-token prefill median of 5):
+//   MAX_COLS=16 → 155 tok/s   (7 chunks — extra weight-read passes dominate)
+//   MAX_COLS=32 → 173 tok/s   (4 chunks — sweet spot)
+//   MAX_COLS=64 → 153 tok/s   (2 chunks but VGPR spill / occupancy loss)
+// Keep at 32.
+const uint MAX_COLS = 32u;
 const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
 const uint Q4K_BLOCK_SIZE = 256u;
 

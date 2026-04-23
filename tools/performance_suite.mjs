@@ -279,6 +279,23 @@ export function parseLlamaCliOutput(text) {
   };
 }
 
+export function parseLlamaCppVersionOutput(text) {
+  const versionLine = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /^version:/i.test(line));
+
+  if (!versionLine) return null;
+
+  const match = versionLine.match(/^version:\s*([^\s]+)\s+\(([0-9a-f]+)\)/i);
+  if (!match) return null;
+
+  return {
+    version: match[1],
+    commit: match[2],
+  };
+}
+
 export function parseOpenAiCompletionOutput(text) {
   const body = JSON.parse(text);
   const content = body.choices?.[0]?.text ?? body.choices?.[0]?.message?.content ?? "";
@@ -516,6 +533,106 @@ async function runShell(command, { cwd = ROOT, env = process.env, timeoutMs = DE
   });
 }
 
+function llamaBinaryEnv(binaryPath) {
+  const libDir = path.join(path.dirname(path.dirname(binaryPath)), "lib");
+  return {
+    ...process.env,
+    DYLD_LIBRARY_PATH: process.env.DYLD_LIBRARY_PATH ? `${libDir}:${process.env.DYLD_LIBRARY_PATH}` : libDir,
+  };
+}
+
+async function captureGitProvenance(cwd = ROOT, timeoutMs = 10_000) {
+  try {
+    const version = await runShell("git describe --tags --always --dirty --abbrev=12", { cwd, timeoutMs });
+    const commit = await runShell("git rev-parse HEAD", { cwd, timeoutMs });
+    return {
+      version: version.stdout.trim() || null,
+      commit: commit.stdout.trim() || null,
+    };
+  } catch {
+    return {
+      version: null,
+      commit: null,
+    };
+  }
+}
+
+async function captureRemoteGitProvenance(creds, timeoutMs = 120_000) {
+  try {
+    const command = rdnaRemoteCommand(
+      `cd ${shellQuote(creds.workdir)} && git describe --tags --always --dirty --abbrev=12 && git rev-parse HEAD`,
+      creds,
+    );
+    const result = await runShell(command, { cwd: ROOT, timeoutMs });
+    const [version = null, commit = null] = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return {
+      version,
+      commit,
+    };
+  } catch {
+    return {
+      version: null,
+      commit: null,
+    };
+  }
+}
+
+async function captureLlamaCppProvenance(binaryPath, { cwd = ROOT, env = process.env, timeoutMs = 10_000 } = {}) {
+  if (!binaryPath) {
+    return {
+      binary: null,
+      version: null,
+      commit: null,
+    };
+  }
+
+  try {
+    const result = await runShell(`${shellQuote(binaryPath)} --version`, { cwd, env, timeoutMs });
+    const parsed = parseLlamaCppVersionOutput(result.combined);
+    return {
+      binary: path.basename(binaryPath),
+      version: parsed?.version ?? null,
+      commit: parsed?.commit ?? null,
+    };
+  } catch {
+    return {
+      binary: path.basename(binaryPath),
+      version: null,
+      commit: null,
+    };
+  }
+}
+
+async function captureRemoteLlamaCppProvenance(binaryPath, creds, timeoutMs = 120_000) {
+  if (!binaryPath) {
+    return {
+      binary: null,
+      version: null,
+      commit: null,
+    };
+  }
+
+  try {
+    const command = rdnaRemoteCommand(`${shellQuote(binaryPath)} --version`, creds);
+    const result = await runShell(command, { cwd: ROOT, timeoutMs });
+    const parsed = parseLlamaCppVersionOutput(result.combined);
+    return {
+      binary: path.basename(binaryPath),
+      version: parsed?.version ?? null,
+      commit: parsed?.commit ?? null,
+    };
+  } catch {
+    return {
+      binary: path.basename(binaryPath),
+      version: null,
+      commit: null,
+    };
+  }
+}
+
 function shouldUseManagedModelId(caseDef) {
   if (!caseDef.model_id) return false;
   if (!caseDef.model_path) return true;
@@ -646,11 +763,7 @@ function detectLocalLlamaServer(args) {
 async function launchLocalLlamaServer(caseDef, serverPath, timeoutMs) {
   const port = await pickOpenPort();
   const baseUrl = `http://127.0.0.1:${port}/v1`;
-  const libDir = path.join(path.dirname(path.dirname(serverPath)), "lib");
-  const serverEnv = {
-    ...process.env,
-    DYLD_LIBRARY_PATH: process.env.DYLD_LIBRARY_PATH ? `${libDir}:${process.env.DYLD_LIBRARY_PATH}` : libDir,
-  };
+  const serverEnv = llamaBinaryEnv(serverPath);
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
