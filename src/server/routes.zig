@@ -1667,7 +1667,7 @@ fn handleChatCompletions(
     if (reused_prefix_len > 0) {
         state.position = @intCast(reused_prefix_len);
         if (reused_prefix_len < prompt_tokens.len) {
-            engine.prefillBatch(&state, prompt_tokens[reused_prefix_len..]) catch {
+            engine.prefillBatched(&state, prompt_tokens[reused_prefix_len..]) catch {
                 server_state.clearChatReuseSession(parsed.session_id);
                 if (parsed.stream) {
                     conn.writeSseDone() catch {};
@@ -1684,7 +1684,7 @@ fn handleChatCompletions(
         });
     } else {
         if (parsed.session_id.len > 0) server_state.clearChatReuseSession(parsed.session_id);
-        engine.prefillBatch(&state, prompt_tokens) catch {
+        engine.prefillBatched(&state, prompt_tokens) catch {
             if (parsed.stream) {
                 conn.writeSseDone() catch {};
             } else {
