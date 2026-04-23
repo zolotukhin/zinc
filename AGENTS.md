@@ -33,7 +33,7 @@ echo "..." | bun loops/guided_change.ts            # from stdin
 # Autonomous multi-cycle loops (run until killed):
 bun loops/optimize_zinc.ts          # rsync → build → run → agent → keep/revert on RDNA4 test node
 bun loops/optimize_llm_tps.ts --agent claude "..."  # iterate on llama.cpp throughput
-bun loops/optimize_perf.ts --effort N               # execute MULTI_HOUR_EFFORT_N.md
+bun loops/optimize_perf.ts --effort N               # execute loops/efforts/MULTI_HOUR_EFFORT_N.md
 bun loops/implement_metal.ts        # iteratively build out the Metal backend
 ```
 

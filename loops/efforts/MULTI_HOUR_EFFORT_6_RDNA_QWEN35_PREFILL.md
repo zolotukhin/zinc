@@ -512,7 +512,7 @@ This effort is succeeding when all of these are true:
 
 ## Likely Files
 
-- `MULTI_HOUR_EFFORT_6_RDNA_QWEN35_PREFILL.md`
+- `loops/efforts/MULTI_HOUR_EFFORT_6_RDNA_QWEN35_PREFILL.md`
 - `loops/optimize_perf.ts`
 - `tools/performance_suite.mjs`
 - `tools/print_test_summary.ts`

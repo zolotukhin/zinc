@@ -2,7 +2,7 @@
 /**
  * ZINC Performance Optimization Loop
  *
- * Implements multi-hour optimization efforts defined in MULTI_HOUR_EFFORT_*.md
+ * Implements multi-hour optimization efforts defined in loops/efforts/MULTI_HOUR_EFFORT_*.md
  * documents. Each cycle:
  *   1. Read the optimization plan document
  *   2. Build & benchmark baseline on remote RDNA4 node
@@ -37,6 +37,7 @@ import { formatElapsed } from "./optimize_llm_tps";
 // -- Config ------------------------------------------------------------------
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
+const EFFORTS_DIR = resolve(REPO_ROOT, "loops", "efforts");
 const RESULTS_DIR = resolve(REPO_ROOT, ".perf_optimize");
 const CLAUDE_EFFORT = "max";
 // Pin to the 1M-context Opus variant. Cycle prompts run 8-12KB on their own
@@ -376,7 +377,7 @@ const BLOCKED_FILE_OPS = [
   "Edit(loops/*)", "Write(loops/*)", "Edit(site/*)", "Write(site/*)",
   "Edit(docs/*)", "Write(docs/*)", "Edit(.env)", "Write(.env)",
   "Edit(AGENTS.md)", "Write(AGENTS.md)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)",
-  "Edit(MULTI_HOUR_EFFORT_*)", "Write(MULTI_HOUR_EFFORT_*)",
+  "Edit(loops/efforts/MULTI_HOUR_EFFORT_*)", "Write(loops/efforts/MULTI_HOUR_EFFORT_*)",
 ];
 
 const BLOCKED_GIT_OPS = [
@@ -2409,7 +2410,7 @@ async function main() {
     throw new Error(`Unknown effort: ${effort}`);
   }
   const effortFile = effortSpec.doc;
-  const plan = await readFile(join(REPO_ROOT, effortFile), "utf8");
+  const plan = await readFile(join(EFFORTS_DIR, effortFile), "utf8");
 
   await mkdir(RESULTS_DIR, { recursive: true });
 

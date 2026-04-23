@@ -43,6 +43,7 @@ const SEP = "─".repeat(64);
 // ── Constants ────────────────────────────────────────────────────────
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
+const EFFORTS_DIR = resolve(REPO_ROOT, "loops", "efforts");
 const RESULTS_DIR = resolve(REPO_ROOT, ".metal_optimize");
 const MODEL_ID = process.env.ZINC_MODEL_ID ?? "qwen35-35b-a3b-q4k-xl";
 const MODEL_PATH = process.env.ZINC_MODEL ?? null;
@@ -1247,7 +1248,7 @@ export type RunState = {
   reviewSummaries: string[];
   /// Optional multi-hour effort doc (raw markdown) spliced into every agent
   /// prompt. Loaded via `--effort N`, which finds `MULTI_HOUR_EFFORT_N_*.md`
-  /// at the repo root. Null means run in the stock FIX/IMPLEMENT/OPTIMIZE mode.
+  /// in `loops/efforts`. Null means run in the stock FIX/IMPLEMENT/OPTIMIZE mode.
   effortPlan?: string | null;
   effortId?: number | null;
   effortFile?: string | null;
@@ -1260,12 +1261,14 @@ async function loadState(runDir: string): Promise<RunState | null> {
 }
 
 /**
- * Resolve `--effort N` to a `MULTI_HOUR_EFFORT_N_*.md` filename at the repo
- * root. Returns `{ file, plan }` on success, null if no matching doc exists.
+ * Resolve `--effort N` to a `MULTI_HOUR_EFFORT_N_*.md` filename in
+ * `loops/efforts`. Returns `{ file, plan }` on success, null if no matching
+ * doc exists.
  */
 async function loadEffortPlan(effort: number): Promise<{ file: string; plan: string } | null> {
   const prefix = `MULTI_HOUR_EFFORT_${effort}_`;
-  const matches = readdirSync(REPO_ROOT).filter(
+  if (!existsSync(EFFORTS_DIR)) return null;
+  const matches = readdirSync(EFFORTS_DIR).filter(
     (name) => name.startsWith(prefix) && name.endsWith(".md"),
   );
   if (matches.length === 0) return null;
@@ -1275,7 +1278,7 @@ async function loadEffortPlan(effort: number): Promise<{ file: string; plan: str
     );
   }
   const file = matches[0];
-  const plan = await readFile(join(REPO_ROOT, file), "utf8");
+  const plan = await readFile(join(EFFORTS_DIR, file), "utf8");
   return { file, plan };
 }
 
@@ -1471,7 +1474,7 @@ async function main() {
           "  --cycles N              Max cycles (default: 999)",
           "  --dry-run               Build+run only, no agent",
           "  --resume                Resume the most recent run",
-          "  --effort N              Load MULTI_HOUR_EFFORT_N_*.md from repo root",
+          "  --effort N              Load MULTI_HOUR_EFFORT_N_*.md from loops/efforts",
           "                          and splice it into every agent prompt",
         ].join("\n"));
         process.exit(0);
@@ -1488,7 +1491,7 @@ async function main() {
       console.error(
         clr(
           "1;31",
-          `No MULTI_HOUR_EFFORT_${effort}_*.md found at ${REPO_ROOT}. ` +
+          `No MULTI_HOUR_EFFORT_${effort}_*.md found in ${EFFORTS_DIR}. ` +
             "Create one or drop the --effort flag.",
         ),
       );
