@@ -8692,9 +8692,12 @@ pub fn generate(
         prompt_tokens.len, effective_max_tokens,
     });
 
-    // Prefill: batch all prompt tokens in a single GPU submission
+    // Prefill: batch all prompt tokens in a single GPU submission.
+    // prefillBatched honors ZINC_BATCHED_PREFILL and falls through to
+    // prefillBatch (per-token) when the env gate is off or the model
+    // isn't on canUseBatchedPrefillRdna's supported slice.
     const prefill_start = std.time.nanoTimestamp();
-    try engine.prefillBatch(&state, prompt_tokens);
+    try engine.prefillBatched(&state, prompt_tokens);
     const prefill_end = std.time.nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
     const prefill_tok_per_sec = if (prefill_ns > 0 and prompt_tokens.len > 0)
