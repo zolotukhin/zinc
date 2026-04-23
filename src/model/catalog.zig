@@ -63,6 +63,7 @@ pub const entries = [_]CatalogEntry{
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,
+            "intel-arc",
         },
     },
     .{
@@ -85,6 +86,7 @@ pub const entries = [_]CatalogEntry{
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,
+            "intel-arc",
         },
     },
     .{
@@ -106,6 +108,7 @@ pub const entries = [_]CatalogEntry{
         .status = .supported,
         .tested_profiles = &.{
             apple_silicon_profile,
+            "intel-arc",
         },
     },
     .{
@@ -128,6 +131,7 @@ pub const entries = [_]CatalogEntry{
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,
+            "intel-arc",
         },
     },
     .{
@@ -150,6 +154,7 @@ pub const entries = [_]CatalogEntry{
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,
+            "intel-arc",
         },
     },
     .{
@@ -172,6 +177,7 @@ pub const entries = [_]CatalogEntry{
         .tested_profiles = &.{
             "amd-rdna4-32gb",
             apple_silicon_profile,
+            "intel-arc",
         },
     },
 };

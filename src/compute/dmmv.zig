@@ -143,7 +143,7 @@ pub const DmmvDispatch = struct {
         /// Allocator for owned resources.
         allocator: std.mem.Allocator,
     ) !DmmvDispatch {
-        _ = gpu_config;
+        const use_wave64 = gpu_config.wave_size == 64;
 
         // Create descriptor pool
         const pool_size = vk.c.VkDescriptorPoolSize{
@@ -181,6 +181,14 @@ pub const DmmvDispatch = struct {
             .require_full_subgroups = true,
             .push_descriptors = has_push_desc,
         };
+        // On non-wave64 GPUs (e.g. Intel Xe2 with SIMD16), requesting
+        // required_subgroup_size=64 is outside the supported range and silently
+        // dropped by the driver. Use plain push_desc_options instead; the shader
+        // multi-subgroup merge path handles the cross-subgroup reduction.
+        const effective_wave64_options: pipeline_mod.PipelineOptions = if (use_wave64)
+            push_desc_wave64_options
+        else
+            push_desc_options;
 
         var path_buf: [512]u8 = undefined;
 
@@ -191,25 +199,25 @@ pub const DmmvDispatch = struct {
         };
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const mxfp4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_mxfp4.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mxfp4 = pipeline_mod.createFromSpirvWithOptions(instance, mxfp4_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mxfp4 = pipeline_mod.createFromSpirvWithOptions(instance, mxfp4_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("MXFP4 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5_0_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_0 = pipeline_mod.createFromSpirvWithOptions(instance, q5_0_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5_0 = pipeline_mod.createFromSpirvWithOptions(instance, q5_0_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5_1_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_1 = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5_1 = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_1 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -217,7 +225,7 @@ pub const DmmvDispatch = struct {
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
         // Q5_K K-parallel shader uses subgroupAdd over a 64-thread WG; require wave64
         // so the reduction is correct on devices that would otherwise pick wave32.
-        const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -229,7 +237,7 @@ pub const DmmvDispatch = struct {
         };
 
         const f16_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f16.spv", .{shader_dir}) catch unreachable;
-        const pipeline_f16 = pipeline_mod.createFromSpirvWithOptions(instance, f16_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_f16 = pipeline_mod.createFromSpirvWithOptions(instance, f16_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("F16 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -278,7 +286,7 @@ pub const DmmvDispatch = struct {
         // K-parallel Q4_K MoE variant: wave64 subgroupAdd reduction, no shared s_x array.
         // Experimental — enabled only when ZINC_MOE_KPAR=1 in forward.zig.
         const q4k_moe_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_kpar.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_kpar_path, 4, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_kpar_path, 4, moe_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE kpar shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -301,7 +309,7 @@ pub const DmmvDispatch = struct {
         // K-parallel Q5_K MoE variant: wave64 subgroupAdd reduction (targets the
         // ~713 ms MoE down bucket in the Qwen3.5-35B flagship prefill).
         const q5k_moe_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe_kpar.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_kpar_path, 4, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_kpar_path, 4, moe_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_K MoE kpar shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

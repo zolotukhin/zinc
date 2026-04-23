@@ -169,10 +169,16 @@ pub fn detect(instance: *const Instance) GpuConfig {
         config.wave_size = 32;
         config.bandwidth_gbps = 512;
     } else if (props.vendorID == 0x8086) {
-        // Intel
-        config.vendor = .intel_arc;
-        config.wave_size = 32;
-        config.bandwidth_gbps = 256;
+        config.vendor = classifyIntel(props.deviceID, name_slice);
+        // Intel Xe2 (Battlemage, Arc B-series): native SIMD16 subgroup.
+        // Arc B770 Pro: 32 Xe2-HPG cores, 256-bit GDDR6 @ 20 Gbps ≈ 640 GB/s.
+        // Adjust if classifyIntel adds finer-grained tiers in future.
+        config.wave_size = 16; // Xe2 native subgroup width
+        config.bandwidth_gbps = 640;
+        config.compute_units = 32;
+        config.l1_cache_kb = 64; // Xe2 L1 per Xe2-core
+        config.l2_cache_mb = 8;
+        config.flash_attn_block_size = 256;
     }
 
     // Derive DMMV parameters from wave size
@@ -227,6 +233,15 @@ fn classifyAmd(device_id: u32, name: []const u8) GpuVendor {
     return .amd_other;
 }
 
+/// Classify Intel GPU architecture from device ID and name.
+fn classifyIntel(device_id: u32, name: []const u8) GpuVendor {
+    _ = device_id;
+    // Arc B-series = Xe2 (Battlemage); A-series = Xe-HPG (Alchemist).
+    // Both map to intel_arc for now — this function is a hook for future sub-tiers.
+    _ = name;
+    return .intel_arc;
+}
+
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;
     var i: usize = 0;
@@ -266,6 +281,10 @@ test "classifyAmd — Strix Halo RDNA4 iGPU" {
 
 test "classifyAmd — RDNA3" {
     try std.testing.expectEqual(GpuVendor.amd_rdna3, classifyAmd(0x744C, "AMD Radeon RX 7900 XTX (RADV GFX1100)"));
+}
+
+test "classifyIntel — Arc B770" {
+    try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc B770 Pro"));
 }
 
 test "GpuConfig name" {
