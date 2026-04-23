@@ -748,18 +748,25 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (full_attn_interval != 1) return false;
     if (cfg.sliding_window_size != 0) return false;
 
-    const supported = [_]GGMLType{ .q4_k, .q6_k };
-    const isSupported = struct {
+    // Per-layer projections go through dispatchProjectionBatched →
+    // recordBatchDispatchPush, which currently only has a Q4_K batched
+    // shader (dmmv_q4k_batch). Q6_K would trigger UnsupportedQuantType
+    // at dispatch time — tightening the gate keeps the fallback to
+    // per-token prefillBatch for any model with a Q6_K projection.
+    const lmHeadSupported = struct {
         fn f(t: GGMLType) bool {
-            for (supported) |s| if (t == s) return true;
-            return false;
+            return t == .q4_k or t == .q6_k;
+        }
+    }.f;
+    const projSupported = struct {
+        fn f(t: GGMLType) bool {
+            return t == .q4_k;
         }
     }.f;
 
-    // LM head tensor type must be something the Vulkan DMMV path handles for
-    // the eventual last-token projection — Q4_K / Q6_K cover it today.
+    // LM head goes through dispatchDmmvInner which accepts Q4_K / Q6_K.
     const lm_head = engine.tensor_map.get("output.weight") orelse engine.tensor_map.get("token_embd.weight") orelse return false;
-    if (!isSupported(lm_head.info.type_)) return false;
+    if (!lmHeadSupported(lm_head.info.type_)) return false;
 
     for (0..cfg.n_layers) |i| {
         const lt = engine.layer_tensors[i];
@@ -775,7 +782,7 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
         const up = lt.ffn_up orelse return false;
         const down = lt.ffn_down orelse return false;
         for ([_]*const LoadedTensor{ q, k, v, o, gate, up, down }) |t| {
-            if (!isSupported(t.info.type_)) return false;
+            if (!projSupported(t.info.type_)) return false;
         }
 
         // Reject packed Q+gate (Qwen3Next): attn_q row count == 2 * q_dim.
