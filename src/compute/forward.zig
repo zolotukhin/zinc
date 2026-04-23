@@ -6713,7 +6713,7 @@ pub const InferenceEngine = struct {
         n_tokens: u32,
     ) !void {
         // Keep in sync with dmmv_q{4,6}k_batch_kpar.comp's `const uint MAX_COLS`.
-        const MAX_COLS: u32 = 44;
+        const MAX_COLS: u32 = 40;
         const f32_bytes: u32 = @sizeOf(f32);
         var chunk_start: u32 = 0;
         const kpar_pipeline: ?*const Pipeline = blk: {

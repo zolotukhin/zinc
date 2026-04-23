@@ -1,4 +1,4 @@
-# 2.4× RDNA4 prefill on ZINC: a correctness bug, two K-parallel shaders, and a 72→173 tok/s story
+# 2.6× RDNA4 prefill on ZINC: a correctness bug, two K-parallel shaders, and a 72→187 tok/s story
 
 *Session raw material, 2026-04-23. Measured on AMD Radeon AI PRO R9700
 (RADV gfx1201, 32 GB, 576 GB/s HBM). Model: Qwen3-8B Q4_K_M, dense
@@ -15,12 +15,13 @@ architecture, 36 layers, 32 Q-heads / 8 KV-heads, hidden_dim=4096.*
   `ZINC_BATCHED_PREFILL=1` is a **2.4× speedup**: 173 tok/s on the same
   prompt, same model, same GPU. Default path for supported models.
 
-| path | prefill (3-run median) |
+| path | prefill (median) |
 |---|---:|
-| per-token `prefillBatch`                              |  72.3 tok/s |
-| batched, serial-over-K (original shader)              |  61.5 tok/s |
-| batched, Q4_K kpar + Q6_K serial                      | 143.1 tok/s |
-| **batched, Q4_K kpar + Q6_K kpar (shipped default)**  | **172.9 tok/s** |
+| per-token `prefillBatch`                                  |  72.3 tok/s |
+| batched, serial-over-K (original shader)                  |  61.5 tok/s |
+| batched, Q4_K kpar + Q6_K serial, MAX_COLS=32             | 143.1 tok/s |
+| batched, Q4_K + Q6_K kpar, MAX_COLS=32                    | 172.9 tok/s |
+| **batched, Q4_K + Q6_K kpar, MAX_COLS=40 (shipped)**      | **187.1 tok/s** |
 
 Same 105-token prompt, `ReleaseFast`, no profile overhead, no other
 environment tweaks. Output text in every row: *"The capital of France
@@ -366,10 +367,27 @@ checkpoint. 105-token prompt. 3-run medians unless noted.
 
 | path | tok/s |
 |---|---:|
-| per-token (ZINC_BATCHED_PREFILL unset)                    |  72.3 |
-| batched, serial-over-K (kpar OFF)                          |  61.5 |
-| batched, Q4_K kpar only (Q6_K still serial)                | 143.1 |
-| **batched, Q4_K kpar + Q6_K kpar (new default)**           | **172.9** |
+| per-token (ZINC_BATCHED_PREFILL unset)                         |  72.3 |
+| batched, serial-over-K (kpar OFF)                               |  61.5 |
+| batched, Q4_K kpar only, MAX_COLS=32 (Q6_K still serial)        | 143.1 |
+| batched, Q4_K + Q6_K kpar, MAX_COLS=32                          | 172.9 |
+| **batched, Q4_K + Q6_K kpar, MAX_COLS=40 (shipped default)**    | **187.1** |
+
+### MAX_COLS sweep on Qwen3-8B Q4_K_M, 105-token prompt (median of 5)
+
+| MAX_COLS | chunks for 105 | tok/s |
+|---:|:---|---:|
+| 16 | 7 (16×6 + 9)    | 155 |
+| 32 | 4 (32×3 + 9)    | 173 |
+| 35 | 3 (35×3)        | 176 |
+| 40 | 3 (40+40+25)    | **187** |
+| 44 | 3 (44+44+17)    | 179 |
+| 48 | 3 (48+48+9)     | 165 |
+| 64 | 2 (64+41)       | 153 |
+
+The valley shape maps cleanly to "fewer chunks is better up until the
+register array spills scratch". 40 is the largest MAX_COLS that
+keeps `sums[MAX_COLS]` in VGPRs on gfx1201 wave64.
 
 ### End-to-end wall time, 105 prompt tokens + 8 generated
 

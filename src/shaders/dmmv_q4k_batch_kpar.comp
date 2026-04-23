@@ -35,11 +35,12 @@ layout(local_size_x = 64) in;
 //   MAX_COLS=32 → 173   (4 chunks — prior default)
 //   MAX_COLS=35 → 176   (3 chunks, balanced 35+35+35)
 //   MAX_COLS=40 → 187   (3 chunks, 40+40+25 — peak)
+//   MAX_COLS=44 → 179   (3 chunks, 44+44+17)
 //   MAX_COLS=48 → 165   (3 chunks, 48+48+9 — VGPR pressure bites)
 //   MAX_COLS=64 → 153   (2 chunks but scratch spill)
 // 40 is the chip's sweet spot: fewest chunks the inner register file
 // still tolerates. Keep in sync with dmmv_q6k_batch_kpar.comp.
-const uint MAX_COLS = 44u;
+const uint MAX_COLS = 40u;
 const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
 const uint Q4K_BLOCK_SIZE = 256u;
 
