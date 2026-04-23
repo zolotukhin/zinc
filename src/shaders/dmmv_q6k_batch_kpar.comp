@@ -28,7 +28,7 @@
 layout(local_size_x = 64) in;
 
 // Matches dmmv_q4k_batch_kpar.comp MAX_COLS (measured sweet spot on gfx1201).
-const uint MAX_COLS = 40u;
+const uint MAX_COLS = 48u;
 const uint Q6K_BYTES = 210u;
 const uint Q6K_BLOCK_SIZE = 256u;
 
