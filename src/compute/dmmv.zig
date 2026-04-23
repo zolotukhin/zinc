@@ -90,6 +90,11 @@ pub const DmmvDispatch = struct {
     /// ffn_down tensors are Q6_K in that layout, so the all-Q4_K gate
     /// was previously rejecting every real catalog model.
     pipeline_q6k_batch: ?Pipeline,
+    /// Batch Q6K pipeline, K-parallel wave64 variant. Same binding shape
+    /// as pipeline_q6k_batch. Enabled by default alongside the Q4_K
+    /// kpar variant so Q4_K_M models (with Q6_K on attn_v / ffn_down)
+    /// don't regress to the serial shader for those projections.
+    pipeline_q6k_batch_kpar: ?Pipeline,
     /// MoE Q4K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q4k_moe: ?Pipeline,
     /// Experimental K-parallel Q4K MoE pipeline (same 4 bindings, wave64 subgroupAdd).
@@ -255,6 +260,12 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        const q6k_batch_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_batch_kpar.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_batch_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q6k_batch_kpar_path, 3, batch_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q6_K batch kpar shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // MoE DMMV pipelines: 4 bindings (A, x, y, routing), different push constants
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
 
@@ -353,6 +364,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_batch = pipeline_q4k_batch,
             .pipeline_q4k_batch_kpar = pipeline_q4k_batch_kpar,
             .pipeline_q6k_batch = pipeline_q6k_batch,
+            .pipeline_q6k_batch_kpar = pipeline_q6k_batch_kpar,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
@@ -668,6 +680,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_batch) |*p| p.deinit();
         if (self.pipeline_q4k_batch_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_batch) |*p| p.deinit();
+        if (self.pipeline_q6k_batch_kpar) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_moe) |*p| p.deinit();

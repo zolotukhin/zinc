@@ -6716,16 +6716,20 @@ pub const InferenceEngine = struct {
         const MAX_COLS: u32 = 32;
         const f32_bytes: u32 = @sizeOf(f32);
         var chunk_start: u32 = 0;
-        const use_kpar = self.use_q4k_batch_kpar and
-            tensor.info.type_ == .q4_k and
-            self.dmmv.pipeline_q4k_batch_kpar != null;
+        const kpar_pipeline: ?*const Pipeline = blk: {
+            if (!self.use_q4k_batch_kpar) break :blk null;
+            switch (tensor.info.type_) {
+                .q4_k => break :blk if (self.dmmv.pipeline_q4k_batch_kpar) |*p| p else null,
+                .q6_k => break :blk if (self.dmmv.pipeline_q6k_batch_kpar) |*p| p else null,
+                else => break :blk null,
+            }
+        };
         while (chunk_start < n_tokens) {
             const chunk: u32 = @min(MAX_COLS, n_tokens - chunk_start);
             const x_offset: u32 = chunk_start * K * f32_bytes;
             const y_offset: u32 = chunk_start * M * f32_bytes;
-            if (use_kpar) {
+            if (kpar_pipeline) |pip| {
                 // One workgroup per output row — 64 threads cooperate on K.
-                const pip = &self.dmmv.pipeline_q4k_batch_kpar.?;
                 const push = BatchDmmvPushConstants{
                     .M = M,
                     .K = K,

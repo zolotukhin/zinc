@@ -1,0 +1,128 @@
+#version 460
+// ZINC — Q6_K batched DMMV, K-parallel wave64 reduction.
+//
+// Same idea as dmmv_q4k_batch_kpar.comp: one workgroup per output row,
+// 64 threads cooperate on K (16 threads per Q6_K super-block, 4 blocks
+// in parallel), per-column register accumulators, single subgroupAdd
+// per column at the end.
+//
+// Mirrors the decode layout in dmmv_q6k.comp so the per-block bit
+// walk is identical to the proven per-token kernel. The only delta is
+// that instead of one scalar `sum` per row we carry `sums[MAX_COLS]`
+// and loop the column-dimension against vec4 X reads.
+//
+// Q6_K block (256 elements, 210 bytes):
+//   [  0..127] ql   (128 bytes — low 4 bits of every element)
+//   [128..191] qh   ( 64 bytes — high 2 bits, 4 elements per byte)
+//   [192..207] scales (16 signed int8)
+//   [208..209] d    (f16)
+//
+// Dispatch: (M, 1, 1). Binding layout matches dmmv_q6k_batch.comp
+// (A, X_batch, Y_batch) so recordBatchDispatchPush can select either
+// pipeline at runtime.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+const uint MAX_COLS = 32u;
+const uint Q6K_BYTES = 210u;
+const uint Q6K_BLOCK_SIZE = 256u;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint num_cols;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixX { float x_data[]; };
+layout(set = 0, binding = 2) writeonly buffer MatrixY { float y_data[]; };
+
+int signed_i8(uint b) {
+    return int(b) - (b >= 128u ? 256 : 0);
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.x;
+    if (row >= M) return;
+
+    uint blocks_per_row = K / Q6K_BLOCK_SIZE;
+    uint x_base = x_offset / 4u;
+    uint y_base = y_offset / 4u;
+    uint x_col_stride = K;  // in floats, per input column
+
+    // 16 threads per block, 4 blocks per outer iteration — same split as
+    // dmmv_q6k.comp.
+    uint itid = tid % 16u;
+    uint ix   = tid / 16u;
+    uint half_id = itid / 8u;   // 0 or 1: which 128-element half
+    uint local_id = itid % 8u;  // 0..7 within half
+    uint e_start = local_id * 4u;
+
+    float sums[MAX_COLS];
+    for (uint c = 0u; c < num_cols; c++) sums[c] = 0.0;
+
+    for (uint b = ix; b < blocks_per_row; b += 4u) {
+        uint row_offset = a_offset + row * blocks_per_row * Q6K_BYTES;
+        uint bb = row_offset + b * Q6K_BYTES;
+
+        uint d_bits = uint(a_data[bb + 208u]) | (uint(a_data[bb + 209u]) << 8);
+        float d = unpackHalf2x16(d_bits).x;
+
+        uint ql_base = bb + half_id * 64u;
+        uint qh_base = bb + 128u + half_id * 32u;
+        uint sc_base = bb + 192u + half_id * 8u;
+        uint x_blk = b * Q6K_BLOCK_SIZE + half_id * 128u;
+
+        // Each iteration of l handles 4 elements spread across 4 sub-blocks
+        // (offsets 0/32/64/96 within the half), exactly like dmmv_q6k.comp.
+        for (uint l = e_start; l < e_start + 4u; l++) {
+            uint is = l / 16u;
+            uint ql_lo = uint(a_data[ql_base + l]);
+            uint ql_hi = uint(a_data[ql_base + l + 32u]);
+            uint qh_v  = uint(a_data[qh_base + l]);
+
+            int q1 = int((ql_lo & 0xFu) | (((qh_v >> 0) & 3u) << 4)) - 32;
+            int q2 = int((ql_hi & 0xFu) | (((qh_v >> 2) & 3u) << 4)) - 32;
+            int q3 = int((ql_lo >> 4)    | (((qh_v >> 4) & 3u) << 4)) - 32;
+            int q4 = int((ql_hi >> 4)    | (((qh_v >> 6) & 3u) << 4)) - 32;
+
+            float s0 = d * float(signed_i8(uint(a_data[sc_base + is])));
+            float s2 = d * float(signed_i8(uint(a_data[sc_base + is + 2u])));
+            float s4 = d * float(signed_i8(uint(a_data[sc_base + is + 4u])));
+            float s6 = d * float(signed_i8(uint(a_data[sc_base + is + 6u])));
+
+            float w1 = s0 * float(q1);
+            float w2 = s2 * float(q2);
+            float w3 = s4 * float(q3);
+            float w4 = s6 * float(q4);
+
+            uint e0 = x_blk + l;
+            uint e1 = e0 + 32u;
+            uint e2 = e0 + 64u;
+            uint e3 = e0 + 96u;
+
+            for (uint c = 0u; c < num_cols; c++) {
+                uint col_base = x_base + c * x_col_stride;
+                sums[c] += w1 * x_data[col_base + e0]
+                         + w2 * x_data[col_base + e1]
+                         + w3 * x_data[col_base + e2]
+                         + w4 * x_data[col_base + e3];
+            }
+        }
+    }
+
+    for (uint c = 0u; c < num_cols; c++) {
+        float reduced = subgroupAdd(sums[c]);
+        if (tid == 0u) {
+            y_data[y_base + c * M + row] = reduced;
+        }
+    }
+}

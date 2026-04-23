@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_q4k_batch",
         "dmmv_q4k_batch_kpar",
         "dmmv_q6k_batch",
+        "dmmv_q6k_batch_kpar",
         "kv_cache_write",
         "norm_rope",
         "quantize_q8_1",
