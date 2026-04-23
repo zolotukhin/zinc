@@ -1,4 +1,4 @@
-# 2.6× RDNA4 prefill on ZINC: a correctness bug, two K-parallel shaders, and a 72→187 tok/s story
+# 3-5× RDNA4 prefill on ZINC: a correctness bug, two K-parallel shaders, and a 42→208 tok/s story
 
 *Session raw material, 2026-04-23. Measured on AMD Radeon AI PRO R9700
 (RADV gfx1201, 32 GB, 576 GB/s HBM). Model: Qwen3-8B Q4_K_M, dense
@@ -15,6 +15,7 @@ architecture, 36 layers, 32 Q-heads / 8 KV-heads, hidden_dim=4096.*
   `ZINC_BATCHED_PREFILL=1` is a **2.4× speedup**: 173 tok/s on the same
   prompt, same model, same GPU. Default path for supported models.
 
+105-token prompt:
 | path | prefill (median) |
 |---|---:|
 | per-token `prefillBatch`                                  |  72.3 tok/s |
@@ -22,6 +23,17 @@ architecture, 36 layers, 32 Q-heads / 8 KV-heads, hidden_dim=4096.*
 | batched, Q4_K kpar + Q6_K serial, MAX_COLS=32             | 143.1 tok/s |
 | batched, Q4_K + Q6_K kpar, MAX_COLS=32                    | 172.9 tok/s |
 | **batched, Q4_K + Q6_K kpar, MAX_COLS=40 (shipped)**      | **187.1 tok/s** |
+
+658-token prompt (tight amortization regime):
+| path | prefill (median) |
+|---|---:|
+| per-token `prefillBatch`                                  |  42.9 tok/s |
+| **batched, Q4_K + Q6_K kpar, MAX_COLS=40 (shipped)**      | **207.9 tok/s** |
+
+That's a **4.85× speedup** at realistic chat-session prompt sizes.
+The per-token path degrades with length (state management cost
+per token adds up); the batched path scales cleanly because the
+weight-read amortization keeps improving.
 
 Same 105-token prompt, `ReleaseFast`, no profile overhead, no other
 environment tweaks. Output text in every row: *"The capital of France
@@ -363,7 +375,7 @@ still well inside gfx1201's VGPR budget, so occupancy stays healthy.
 All runs on the R9700, `ReleaseFast` build, `qwen3-8b-q4k-m` Q4_K_M
 checkpoint. 105-token prompt. 3-run medians unless noted.
 
-### Prefill throughput
+### Prefill throughput, 105-token prompt
 
 | path | tok/s |
 |---|---:|
@@ -372,6 +384,25 @@ checkpoint. 105-token prompt. 3-run medians unless noted.
 | batched, Q4_K kpar only, MAX_COLS=32 (Q6_K still serial)        | 143.1 |
 | batched, Q4_K + Q6_K kpar, MAX_COLS=32                          | 172.9 |
 | **batched, Q4_K + Q6_K kpar, MAX_COLS=40 (shipped default)**    | **187.1** |
+
+### Prefill throughput scaling with prompt size
+
+(shipped default configuration — MAX_COLS=40, Q4_K+Q6_K kpar,
+ZINC_BATCHED_PREFILL=1)
+
+| n_prompt_tokens | chunks | per-token | batched | speedup |
+|---:|---:|---:|---:|---:|
+|  105 | 3 |  72.3 | 187.1 | 2.59× |
+|  314 | 8 |     — | 213.3 |     — |
+|  338 | 9 |     — | 214.1 |     — |
+| **658** | **17** | **42.9** | **207.9** | **4.85×** |
+
+The batched path crosses 200 tok/s around the 300-token mark and
+stays there through at least 658. The per-token path degrades
+with length — on a 658-token prompt it drops to 43 tok/s because
+each per-token decodeStep drags a fixed amount of state bookkeeping,
+and 658 of them add up. The batched orchestration doesn't have that
+cost, so the gap widens with prompt size.
 
 ### MAX_COLS sweep on Qwen3-8B Q4_K_M, 105-token prompt (median of 5)
 
