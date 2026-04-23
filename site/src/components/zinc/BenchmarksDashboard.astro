@@ -86,6 +86,11 @@ function formatDate(iso: string | null | undefined) {
   }).format(new Date(iso));
 }
 
+function formatCommit(value: string | null | undefined, digits = 12) {
+  if (!value) return 'n/a';
+  return value.length > digits ? value.slice(0, digits) : value;
+}
+
 function mean(values: Array<number | null>) {
   const xs = values.filter((value): value is number => value != null && !Number.isNaN(value));
   if (!xs.length) return null;
@@ -452,6 +457,9 @@ const jsonLd = {
   {targets.map((target, index) => {
     const scenarioIds = scenarioIdsForTarget(target);
     const defaultScenario = scenarioIds[0] ?? 'core';
+    const provenance = target.provenance ?? {};
+    const zincProvenance = provenance.zinc ?? {};
+    const llamaCppProvenance = provenance.llama_cpp ?? {};
 
     return (
       <section
@@ -493,6 +501,26 @@ const jsonLd = {
             <div>
               <dt>Runner</dt>
               <dd>{target.methodology?.runner ?? 'n/a'}</dd>
+            </div>
+            <div>
+              <dt>ZINC version</dt>
+              <dd>{zincProvenance.version ?? 'n/a'}</dd>
+            </div>
+            <div>
+              <dt>ZINC commit</dt>
+              <dd title={zincProvenance.commit ?? 'n/a'}>{formatCommit(zincProvenance.commit)}</dd>
+            </div>
+            <div>
+              <dt>llama.cpp binary</dt>
+              <dd>{llamaCppProvenance.binary ?? 'n/a'}</dd>
+            </div>
+            <div>
+              <dt>llama.cpp version</dt>
+              <dd>{llamaCppProvenance.version ?? 'n/a'}</dd>
+            </div>
+            <div>
+              <dt>llama.cpp commit</dt>
+              <dd title={llamaCppProvenance.commit ?? 'n/a'}>{formatCommit(llamaCppProvenance.commit)}</dd>
             </div>
           </dl>
         </header>
@@ -1120,6 +1148,7 @@ const jsonLd = {
     margin-top: 0.12rem;
     font-size: 0.92rem;
     line-height: 1.35;
+    overflow-wrap: anywhere;
   }
 
   .scenario-banner {

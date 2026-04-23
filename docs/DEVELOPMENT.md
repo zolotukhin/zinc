@@ -187,6 +187,15 @@ bun tools/benchmark_api.mjs --base http://localhost:8080 --mode chat
 bun tools/benchmark_api.mjs --base http://localhost:8080 --mode raw
 ```
 
+### Public performance output
+
+```bash
+# Generate the benchmark artifact that powers /zinc/performance
+bun tools/performance_suite.mjs --target both --output /tmp/zinc-performance.json
+```
+
+The generated target entries include the exact ZINC git version/commit for the machine that produced each target and the llama.cpp binary version/commit used for the baseline on that target. The public performance page renders the same provenance so benchmark rows are tied to a concrete source tree and baseline build.
+
 ### Hot decode kernel microbenchmarks
 
 ```bash

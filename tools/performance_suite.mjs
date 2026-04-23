@@ -1553,6 +1553,12 @@ async function runMetalTarget(args) {
   const llamaCli = args.llamaCli || whichLocalBinary("llama-cli");
   const resolvedLlamaServer = detectLocalLlamaServer(args);
   const llamaServer = resolvedLlamaServer && await pathExists(resolvedLlamaServer) ? resolvedLlamaServer : null;
+  const baselineBinary = llamaServer || llamaCli;
+  const zincProvenance = await captureGitProvenance(ROOT);
+  const llamaCppProvenance = await captureLlamaCppProvenance(baselineBinary, {
+    cwd: ROOT,
+    env: baselineBinary ? llamaBinaryEnv(baselineBinary) : process.env,
+  });
   const models = [];
 
   for (const entry of filtered) {
@@ -1678,6 +1684,10 @@ async function runMetalTarget(args) {
     generated_at: new Date().toISOString(),
     source: "tools/performance_suite.mjs",
     machine,
+    provenance: {
+      zinc: zincProvenance,
+      llama_cpp: llamaCppProvenance,
+    },
     methodology: {
       runner: "zinc cli + local llama.cpp baseline",
       benchmark_style: "multi-scenario repeated CLI runs with same-model local llama.cpp comparison",
@@ -1719,6 +1729,9 @@ async function runRdnaTarget(args) {
   await prepareRdna(args, creds);
   const rdnaLlamaCli = await detectRdnaLlamaCliPath(creds);
   const rdnaLlamaServer = await detectRdnaLlamaServerPath(creds);
+  const baselineBinary = rdnaLlamaServer || rdnaLlamaCli;
+  const zincProvenance = await captureRemoteGitProvenance(creds);
+  const llamaCppProvenance = await captureRemoteLlamaCppProvenance(baselineBinary, creds);
 
   const knownCases = defaultRdnaCases(args.rdnaModelRoot);
   const discoveredCases = args.discoverModels ? await discoverRdnaCases(args.rdnaModelRoot, creds) : [];
@@ -1865,6 +1878,10 @@ async function runRdnaTarget(args) {
       memory: "32 GB VRAM · 576 GB/s",
       gpu: "Radeon AI PRO R9700",
       os: "Ubuntu Linux",
+    },
+    provenance: {
+      zinc: zincProvenance,
+      llama_cpp: llamaCppProvenance,
     },
     methodology: {
       runner: "zinc cli + remote llama.cpp baseline",

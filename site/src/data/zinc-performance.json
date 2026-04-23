@@ -16,6 +16,17 @@
         "gpu": "Radeon AI PRO R9700",
         "os": "Ubuntu Linux"
       },
+      "provenance": {
+        "zinc": {
+          "version": "df340e77c238",
+          "commit": "df340e77c238bcde67ef3ec189765a555c5b7ed7"
+        },
+        "llama_cpp": {
+          "binary": "llama-server",
+          "version": "50",
+          "commit": "3306dba"
+        }
+      },
       "methodology": {
         "runner": "zinc cli + remote llama.cpp baseline",
         "benchmark_style": "remote repeated multi-scenario runs over SSH with per-model same-machine llama.cpp baselines",
@@ -4019,6 +4030,17 @@
         "memory": "64 GB",
         "gpu": "Apple M4 Max GPU",
         "os": "Darwin 24.6.0"
+      },
+      "provenance": {
+        "zinc": {
+          "version": "783108084462",
+          "commit": "7831080844621555d8b382ee3feb017c5bea300a"
+        },
+        "llama_cpp": {
+          "binary": "llama-server",
+          "version": "8610",
+          "commit": "2b86e5cae"
+        }
       },
       "methodology": {
         "runner": "zinc cli + local llama.cpp baseline",

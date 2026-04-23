@@ -17,6 +17,7 @@ import {
   parseArgs,
   parseDotEnv,
   parseLlamaCliOutput,
+  parseLlamaCppVersionOutput,
   parseOpenAiCompletionOutput,
   parseZincCliOutput,
   prefersChatPrompt,
@@ -232,6 +233,17 @@ llama_print_timings:        eval time =   474.72 ms /    15 runs   (   31.65 ms 
   expect(parsed.msPerToken).toBeCloseTo(31.648, 3);
 });
 
+test("parseLlamaCppVersionOutput extracts version and commit from llama.cpp --version output", () => {
+  const parsed = parseLlamaCppVersionOutput(`
+load_backend: loaded BLAS backend from /opt/homebrew/Cellar/ggml/0.9.11/libexec/libggml-blas.so
+version: 8610 (2b86e5cae)
+built with AppleClang 17.0.0.17000604 for Darwin arm64
+`);
+
+  expect(parsed?.version).toBe("8610");
+  expect(parsed?.commit).toBe("2b86e5cae");
+});
+
 test("parseOpenAiCompletionOutput extracts throughput from server JSON", () => {
   const parsed = parseOpenAiCompletionOutput(JSON.stringify({
     usage: {
@@ -294,18 +306,47 @@ test("mergeArtifacts replaces matching targets and preserves others", () => {
       schema_version: 1,
       generated_at: "old",
       targets: [
-        { id: "rdna", label: "RDNA" },
-        { id: "metal", label: "Metal old" },
+        {
+          id: "rdna",
+          label: "RDNA",
+          provenance: {
+            zinc: { version: "old-rdna", commit: "old-rdna-commit" },
+            llama_cpp: { binary: "llama-server", version: "10", commit: "abc" },
+          },
+        },
+        {
+          id: "metal",
+          label: "Metal old",
+          provenance: {
+            zinc: { version: "old-metal", commit: "old-metal-commit" },
+            llama_cpp: { binary: "llama-cli", version: "20", commit: "def" },
+          },
+        },
       ],
     },
-    [{ id: "metal", label: "Metal new" }],
+    [{
+      id: "metal",
+      label: "Metal new",
+      provenance: {
+        zinc: { version: "new-metal", commit: "new-metal-commit" },
+        llama_cpp: { binary: "llama-server", version: "30", commit: "ghi" },
+      },
+    }],
   );
 
   expect(merged.targets[0]?.id).toBe("rdna");
   expect(merged.targets[0]?.label).toBe("RDNA");
+  expect(merged.targets[0]?.provenance).toEqual({
+    zinc: { version: "old-rdna", commit: "old-rdna-commit" },
+    llama_cpp: { binary: "llama-server", version: "10", commit: "abc" },
+  });
   expect(merged.targets[0]?.summary.fastest_model_id).toBeNull();
   expect(merged.targets[1].id).toBe("metal");
   expect(merged.targets[1].label).toBe("Metal new");
+  expect(merged.targets[1].provenance).toEqual({
+    zinc: { version: "new-metal", commit: "new-metal-commit" },
+    llama_cpp: { binary: "llama-server", version: "30", commit: "ghi" },
+  });
   expect(merged.targets[1].models).toEqual([]);
   expect(merged.targets[1].summary.fastest_model_id).toBeNull();
 });
@@ -331,6 +372,10 @@ test("mergeArtifacts replaces an existing target to avoid stale model rows", () 
       {
         id: "metal",
         label: "Metal",
+        provenance: {
+          zinc: { version: "zinc", commit: "zinc-commit" },
+          llama_cpp: { binary: "llama-server", version: "42", commit: "xyz" },
+        },
         models: [
           { id: "b", label: "B", zinc: { decode_tps: { median: 30, avg: 30 } } },
           { id: "c", label: "C", zinc: { decode_tps: { median: 40, avg: 40 } } },
@@ -343,13 +388,29 @@ test("mergeArtifacts replaces an existing target to avoid stale model rows", () 
   const metal = merged.targets.find((target) => target.id === "metal");
   expect(metal?.models.map((model) => model.id)).toEqual(["b", "c"]);
   expect(metal?.summary.fastest_model_id).toBe("c");
+  expect(metal?.provenance).toEqual({
+    zinc: { version: "zinc", commit: "zinc-commit" },
+    llama_cpp: { binary: "llama-server", version: "42", commit: "xyz" },
+  });
 });
 
 test("buildArtifact writes only the incoming targets", () => {
   const artifact = buildArtifact([
-    { id: "metal", label: "Metal", models: [{ id: "m", label: "Model M", zinc: { decode_tps: { median: 12, avg: 12 } } }] },
+    {
+      id: "metal",
+      label: "Metal",
+      provenance: {
+        zinc: { version: "zinc", commit: "zinc-commit" },
+        llama_cpp: { binary: "llama-server", version: "42", commit: "xyz" },
+      },
+      models: [{ id: "m", label: "Model M", zinc: { decode_tps: { median: 12, avg: 12 } } }],
+    },
   ]);
 
   expect(artifact.targets.map((target) => target.id)).toEqual(["metal"]);
   expect(artifact.targets[0]?.summary.fastest_model_id).toBe("m");
+  expect(artifact.targets[0]?.provenance).toEqual({
+    zinc: { version: "zinc", commit: "zinc-commit" },
+    llama_cpp: { binary: "llama-server", version: "42", commit: "xyz" },
+  });
 });
