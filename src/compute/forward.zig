@@ -7523,11 +7523,18 @@ pub const InferenceEngine = struct {
     /// path where `generateWithMetrics` already routes through `prefillBatched`.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         const mode = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse "";
-        const enabled = std.mem.eql(u8, mode, "1");
-        if (!enabled or !canUseBatchedPrefillRdna(self)) {
+        const batched_on = std.mem.eql(u8, mode, "1");
+        const validate_mode = std.mem.eql(u8, mode, "validate");
+        if ((!batched_on and !validate_mode) or !canUseBatchedPrefillRdna(self)) {
             return self.prefillBatch(state, prompt_tokens);
         }
         if (prompt_tokens.len == 0) return;
+
+        // Validate mode requires a fresh state so we can replay the per-token
+        // path on a clean slate after the batched run and diff the logits.
+        if (validate_mode and state.position != 0) {
+            return self.prefillBatch(state, prompt_tokens);
+        }
 
         // Extension: supports prefix reuse (state.position > 0) as long as
         // the KV pages from the prior call are still live. Unlike the Metal
@@ -7731,6 +7738,36 @@ pub const InferenceEngine = struct {
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
         state.position = base_token + n_tokens;
+
+        if (validate_mode) {
+            // Snapshot batched logits, reset to a fresh request, replay the
+            // per-token prefill, then diff the last-token logits.
+            const vocab = cfg.vocab_size;
+            const batched_snapshot = try self.instance.allocator.alloc(f32, vocab);
+            defer self.instance.allocator.free(batched_snapshot);
+            const batched_logits: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            @memcpy(batched_snapshot, batched_logits[0..vocab]);
+
+            state.position = 0;
+            state.generated_tokens.clearRetainingCapacity();
+            try self.prefillBatch(state, prompt_tokens);
+
+            const ref_logits: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            var max_abs: f32 = 0;
+            var max_idx: usize = 0;
+            for (0..vocab) |i| {
+                const diff = @abs(ref_logits[i] - batched_snapshot[i]);
+                if (diff > max_abs) {
+                    max_abs = diff;
+                    max_idx = i;
+                }
+            }
+            const tol: f32 = 1e-3;
+            const level: enum { ok, exceeded } = if (max_abs > tol) .exceeded else .ok;
+            log.warn("prefillBatched validate[{s}]: last-token logits max_abs_diff={d:.6} at idx={d} (ref={d:.4} batched={d:.4}) tol={d:.6} n_tokens={d}", .{
+                @tagName(level), max_abs, max_idx, ref_logits[max_idx], batched_snapshot[max_idx], tol, n_tokens,
+            });
+        }
     }
 
     /// Process all prompt tokens through the full transformer to populate
