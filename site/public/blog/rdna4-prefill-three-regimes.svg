@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
   <title id="title">Three kernel regimes for a 103-token Qwen3-8B prefill on RDNA4</title>
   <desc id="desc">A two-panel bar chart. The top panel shows weight bytes re-read from VRAM for the same 103-token prefill under three regimes: per-token DMMV at 755 GiB, 32-column batched DMMV at 30 GiB, and tiled GEMM at 7.4 GiB. The bottom panel shows GPU dispatch count for the same three regimes: per-token at roughly 59,000 dispatches, 32-column batched at roughly 2,500, and tiled GEMM at roughly 1,500.</desc>
   <defs>
@@ -21,7 +21,7 @@
     </style>
   </defs>
 
-  <rect width="1200" height="640" fill="url(#bg-regimes)"/>
+  <rect width="1200" height="720" fill="url(#bg-regimes)"/>
 
   <g transform="translate(72 38)">
     <text class="title">Where a 103-token Qwen3-8B prefill actually spends VRAM and launches</text>
@@ -61,11 +61,15 @@
       <text class="axis" x="1120" y="200" text-anchor="middle">760 GiB</text>
     </g>
 
-    <text class="note" x="96" y="228">The per-token bar is the full weight tensor set read 103 times. The 32-column bar reads the same weights with four chunked passes. The GEMM bar reads each weight exactly once per prompt.</text>
+    <text class="note" x="96" y="228">
+      <tspan x="96" dy="0">The per-token bar is the full weight tensor set read 103 times. The 32-column bar</tspan>
+      <tspan x="96" dy="1.4em">reads the same weights with four chunked passes. The GEMM bar reads each weight</tspan>
+      <tspan x="96" dy="1.4em">exactly once per prompt.</tspan>
+    </text>
   </g>
 
   <!-- Panel B: dispatches -->
-  <g transform="translate(0 388)" filter="url(#shadow-regimes)">
+  <g transform="translate(0 432)" filter="url(#shadow-regimes)">
     <text class="panel" x="96" y="0">GPU dispatches per prompt</text>
 
     <!-- axis baseline -->
@@ -96,8 +100,12 @@
       <text class="axis" x="1120" y="200" text-anchor="middle">60,000</text>
     </g>
 
-    <text class="note" x="96" y="228">Dispatch count collapses twice. The big collapse is from per-token to a 32-column batched kernel. The second collapse, to a tiled GEMM, is smaller in absolute terms than its register-allocation cost suggests.</text>
+    <text class="note" x="96" y="228">
+      <tspan x="96" dy="0">Dispatch count collapses twice. The big collapse is from per-token to a 32-column</tspan>
+      <tspan x="96" dy="1.4em">batched kernel. The second collapse, to a tiled GEMM, is smaller in absolute terms</tspan>
+      <tspan x="96" dy="1.4em">than its register-allocation cost suggests.</tspan>
+    </text>
   </g>
 
-  <text class="foot" x="72" y="624">Sources: ZINC effort log for Qwen3-8B Q4_K_M prefill on RX 9070, and the `dmmv_q4k_batch.comp` + `mul_mm.comp` kernel shapes in the llama.cpp Vulkan backend.</text>
+  <text class="foot" x="72" y="704">Sources: ZINC effort log for Qwen3-8B Q4_K_M prefill on RX 9070, and the `dmmv_q4k_batch.comp` + `mul_mm.comp` kernel shapes in the llama.cpp Vulkan backend.</text>
 </svg>
