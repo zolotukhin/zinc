@@ -6712,8 +6712,11 @@ pub const InferenceEngine = struct {
         K: u32,
         n_tokens: u32,
     ) !void {
-        // Keep in sync with dmmv_q4k_batch.comp's `const uint MAX_COLS`.
-        const MAX_COLS: u32 = 32;
+        // Keep in sync with dmmv_q{4,6}k_batch_kpar.comp's `const uint MAX_COLS`.
+        // The serial dmmv_q{4,6}k_batch.comp still use 32; the kpar path picks up
+        // the larger chunk below and loops in smaller steps when it falls back
+        // to the serial pipeline (dispatchProjectionBatched handles that).
+        const MAX_COLS: u32 = 64;
         const f32_bytes: u32 = @sizeOf(f32);
         var chunk_start: u32 = 0;
         const kpar_pipeline: ?*const Pipeline = blk: {

@@ -28,7 +28,13 @@
 
 layout(local_size_x = 64) in;
 
-const uint MAX_COLS = 32u;
+// MAX_COLS trades off register pressure vs number of prefill chunks.
+// MAX_COLS=64 halves the chunk count on prompts longer than 32 tokens
+// (fewer full weight-matrix re-reads) while staying inside gfx1201's
+// wave64 VGPR budget — each thread carries sums[MAX_COLS] floats plus
+// the decode locals, and measurement on Qwen3-8B Q4_K_M showed no
+// occupancy drop going from 32 → 64.
+const uint MAX_COLS = 64u;
 const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
 const uint Q4K_BLOCK_SIZE = 256u;
 

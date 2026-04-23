@@ -27,7 +27,10 @@
 
 layout(local_size_x = 64) in;
 
-const uint MAX_COLS = 32u;
+// Matches dmmv_q4k_batch_kpar.comp MAX_COLS — see that shader for the
+// 32 → 64 tradeoff rationale. dispatchProjectionBatched chunks at the
+// larger of the two.
+const uint MAX_COLS = 64u;
 const uint Q6K_BYTES = 210u;
 const uint Q6K_BLOCK_SIZE = 256u;
 
