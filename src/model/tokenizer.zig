@@ -547,15 +547,15 @@ pub const Tokenizer = struct {
                 // Try to match a special token starting at `start`.
                 // Checks <|...|> (GPT-2/Llama) first, then <...> (Gemma).
                 var special_end: usize = 0;
-                var special_candidate: []const u8 = "";
+                var special_id: u32 = 0;
                 var found_special = false;
                 // Try <|...|> (GPT-2/Llama style)
                 if (start + 2 < text.len and text[start + 1] == '|') {
                     if (std.mem.indexOfPos(u8, text, start + 2, "|>")) |pipe_end| {
                         const candidate = text[start .. pipe_end + 2];
-                        if (self.token_to_id.get(candidate) != null) {
+                        if (self.token_to_id.get(candidate)) |id| {
                             special_end = pipe_end + 2;
-                            special_candidate = candidate;
+                            special_id = id;
                             found_special = true;
                         }
                     }
@@ -564,29 +564,24 @@ pub const Tokenizer = struct {
                 if (!found_special) {
                     if (std.mem.indexOfPos(u8, text, start + 1, ">")) |gt_pos| {
                         const candidate = text[start .. gt_pos + 1];
-                        if (self.token_to_id.get(candidate) != null) {
+                        if (self.token_to_id.get(candidate)) |id| {
                             special_end = gt_pos + 1;
-                            special_candidate = candidate;
+                            special_id = id;
                             found_special = true;
                         }
                     }
                 }
 
                 if (found_special) {
-                    const end = special_end;
-                    const candidate = special_candidate;
-
-                    if (self.token_to_id.get(candidate)) |special_id| {
-                        // BPE-encode any text before this special token.
-                        if (start > pos) {
-                            const bpe = try self.encode(text[pos..start]);
-                            defer self.freeEncoded(bpe);
-                            try tokens.appendSlice(allocator, bpe);
-                        }
-                        try tokens.append(allocator, special_id);
-                        pos = end;
-                        continue;
+                    // BPE-encode any text before this special token.
+                    if (start > pos) {
+                        const bpe = try self.encode(text[pos..start]);
+                        defer self.freeEncoded(bpe);
+                        try tokens.appendSlice(allocator, bpe);
                     }
+                    try tokens.append(allocator, special_id);
+                    pos = special_end;
+                    continue;
                 }
                 // The `<...>` pattern was not a known special token.
                 // BPE-encode everything up to and including `<` so the outer
