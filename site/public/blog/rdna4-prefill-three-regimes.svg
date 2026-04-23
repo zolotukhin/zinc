@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">Three kernel regimes for a 103-token Qwen3-8B prefill on RDNA4</title>
+  <desc id="desc">A two-panel bar chart. The top panel shows weight bytes re-read from VRAM for the same 103-token prefill under three regimes: per-token DMMV at 755 GiB, 32-column batched DMMV at 30 GiB, and tiled GEMM at 7.4 GiB. The bottom panel shows GPU dispatch count for the same three regimes: per-token at roughly 59,000 dispatches, 32-column batched at roughly 2,500, and tiled GEMM at roughly 1,500.</desc>
+  <defs>
+    <linearGradient id="bg-regimes" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-regimes" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .title { font: 700 28px Georgia, serif; fill: #10233c; }
+      .sub { font: 500 15px Arial, sans-serif; fill: #53657b; }
+      .panel { font: 700 14px Arial, sans-serif; fill: #2c3e54; letter-spacing: 0.03em; text-transform: uppercase; }
+      .bar-label { font: 600 14px Arial, sans-serif; fill: #10233c; }
+      .bar-value { font: 700 14px Arial, sans-serif; fill: #10233c; }
+      .axis { font: 400 12px Arial, sans-serif; fill: #53657b; }
+      .note { font: 400 13px Arial, sans-serif; fill: #445567; }
+      .foot { font: 400 11px Arial, sans-serif; fill: #6b7a8b; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="640" fill="url(#bg-regimes)"/>
+
+  <g transform="translate(72 38)">
+    <text class="title">Where a 103-token Qwen3-8B prefill actually spends VRAM and launches</text>
+    <text class="sub" x="0" y="24">RX 9070, Q4_K_M weights, three kernel regimes compared against the same prompt. Lower is better. Bars are not to scale across panels.</text>
+  </g>
+
+  <!-- Panel A: weight re-reads -->
+  <g transform="translate(0 104)" filter="url(#shadow-regimes)">
+    <text class="panel" x="96" y="0">Weight bytes re-read per prompt</text>
+
+    <!-- axis baseline -->
+    <line x1="360" y1="180" x2="1120" y2="180" stroke="#9fb0c0" stroke-width="1.5"/>
+
+    <!-- per-token bar: 755 GiB, scale full width 760 px to 760 GiB -->
+    <!-- width = 755/760 * 760 = 755 px -->
+    <rect x="360" y="32" width="755" height="36" rx="4" fill="#b45309"/>
+    <text class="bar-label" x="96" y="56">Per-token DMMV (today)</text>
+    <text class="bar-value" x="1125" y="56">755 GiB</text>
+
+    <!-- 32-col DMMV: 30 GiB = 30 px -->
+    <rect x="360" y="84" width="30" height="36" rx="4" fill="#0f766e"/>
+    <text class="bar-label" x="96" y="108">32-col batched DMMV</text>
+    <text class="bar-value" x="400" y="108">30 GiB</text>
+
+    <!-- tiled GEMM: 7.4 GiB = 7.4 px -->
+    <rect x="360" y="136" width="8" height="36" rx="4" fill="#10233c"/>
+    <text class="bar-label" x="96" y="160">Tiled GEMM (llama.cpp)</text>
+    <text class="bar-value" x="380" y="160">7.4 GiB</text>
+
+    <!-- axis ticks -->
+    <g>
+      <line x1="360" y1="180" x2="360" y2="186" stroke="#9fb0c0"/>
+      <line x1="740" y1="180" x2="740" y2="186" stroke="#9fb0c0"/>
+      <line x1="1120" y1="180" x2="1120" y2="186" stroke="#9fb0c0"/>
+      <text class="axis" x="360" y="200" text-anchor="middle">0</text>
+      <text class="axis" x="740" y="200" text-anchor="middle">380 GiB</text>
+      <text class="axis" x="1120" y="200" text-anchor="middle">760 GiB</text>
+    </g>
+
+    <text class="note" x="96" y="228">The per-token bar is the full weight tensor set read 103 times. The 32-column bar reads the same weights with four chunked passes. The GEMM bar reads each weight exactly once per prompt.</text>
+  </g>
+
+  <!-- Panel B: dispatches -->
+  <g transform="translate(0 388)" filter="url(#shadow-regimes)">
+    <text class="panel" x="96" y="0">GPU dispatches per prompt</text>
+
+    <!-- axis baseline -->
+    <line x1="360" y1="180" x2="1120" y2="180" stroke="#9fb0c0" stroke-width="1.5"/>
+
+    <!-- per-token: 59,000, scale full 760 px to 60,000 -->
+    <!-- width = 59000/60000 * 760 = 747 -->
+    <rect x="360" y="32" width="747" height="36" rx="4" fill="#b45309"/>
+    <text class="bar-label" x="96" y="56">Per-token DMMV (today)</text>
+    <text class="bar-value" x="1117" y="56">~59,000</text>
+
+    <!-- 32-col DMMV: 2,500 = 2500/60000 * 760 = 31.67 -->
+    <rect x="360" y="84" width="32" height="36" rx="4" fill="#0f766e"/>
+    <text class="bar-label" x="96" y="108">32-col batched DMMV</text>
+    <text class="bar-value" x="402" y="108">~2,500</text>
+
+    <!-- tiled GEMM: 1,500 = 1500/60000 * 760 = 19 -->
+    <rect x="360" y="136" width="19" height="36" rx="4" fill="#10233c"/>
+    <text class="bar-label" x="96" y="160">Tiled GEMM (llama.cpp)</text>
+    <text class="bar-value" x="390" y="160">~1,500</text>
+
+    <g>
+      <line x1="360" y1="180" x2="360" y2="186" stroke="#9fb0c0"/>
+      <line x1="740" y1="180" x2="740" y2="186" stroke="#9fb0c0"/>
+      <line x1="1120" y1="180" x2="1120" y2="186" stroke="#9fb0c0"/>
+      <text class="axis" x="360" y="200" text-anchor="middle">0</text>
+      <text class="axis" x="740" y="200" text-anchor="middle">30,000</text>
+      <text class="axis" x="1120" y="200" text-anchor="middle">60,000</text>
+    </g>
+
+    <text class="note" x="96" y="228">Dispatch count collapses twice. The big collapse is from per-token to a 32-column batched kernel. The second collapse, to a tiled GEMM, is smaller in absolute terms than its register-allocation cost suggests.</text>
+  </g>
+
+  <text class="foot" x="72" y="624">Sources: ZINC effort log for Qwen3-8B Q4_K_M prefill on RX 9070, and the `dmmv_q4k_batch.comp` + `mul_mm.comp` kernel shapes in the llama.cpp Vulkan backend.</text>
+</svg>
