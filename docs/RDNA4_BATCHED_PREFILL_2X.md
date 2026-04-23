@@ -1,4 +1,4 @@
-# Doubling RDNA4 prefill on ZINC: a correctness bug, a K-parallel shader, and a 72→143 tok/s story
+# 2.4× RDNA4 prefill on ZINC: a correctness bug, two K-parallel shaders, and a 72→173 tok/s story
 
 *Session raw material, 2026-04-23. Measured on AMD Radeon AI PRO R9700
 (RADV gfx1201, 32 GB, 576 GB/s HBM). Model: Qwen3-8B Q4_K_M, dense
@@ -11,15 +11,16 @@ architecture, 36 layers, 32 Q-heads / 8 KV-heads, hidden_dim=4096.*
 - Turning the gate on naively produced output gibberish —
   `![](https://upload.wikimedia.org/wikipedia/commons/...)` instead of
   "Paris."
-- After two real fixes (one sampler bug, one shader shape change)
-  `ZINC_BATCHED_PREFILL=1` is a **2× speedup**: 143 tok/s on the same
+- After three real fixes (one sampler bug, two shader shape changes)
+  `ZINC_BATCHED_PREFILL=1` is a **2.4× speedup**: 173 tok/s on the same
   prompt, same model, same GPU. Default path for supported models.
 
 | path | prefill (3-run median) |
 |---|---:|
-| per-token `prefillBatch`                    |  72.3 tok/s |
-| batched, serial-over-K (original shader)    |  61.5 tok/s |
-| **batched, K-parallel wave64 (this work)**  | **143.1 tok/s** |
+| per-token `prefillBatch`                              |  72.3 tok/s |
+| batched, serial-over-K (original shader)              |  61.5 tok/s |
+| batched, Q4_K kpar + Q6_K serial                      | 143.1 tok/s |
+| **batched, Q4_K kpar + Q6_K kpar (shipped default)**  | **172.9 tok/s** |
 
 Same 105-token prompt, `ReleaseFast`, no profile overhead, no other
 environment tweaks. Output text in every row: *"The capital of France
@@ -365,9 +366,10 @@ checkpoint. 105-token prompt. 3-run medians unless noted.
 
 | path | tok/s |
 |---|---:|
-| per-token (ZINC_BATCHED_PREFILL unset) |  72.3 |
-| batched, serial-over-K (kpar OFF)       |  61.5 |
-| **batched + kpar (new default)**        | **143.1** |
+| per-token (ZINC_BATCHED_PREFILL unset)                    |  72.3 |
+| batched, serial-over-K (kpar OFF)                          |  61.5 |
+| batched, Q4_K kpar only (Q6_K still serial)                | 143.1 |
+| **batched, Q4_K kpar + Q6_K kpar (new default)**           | **172.9** |
 
 ### End-to-end wall time, 105 prompt tokens + 8 generated
 
@@ -508,10 +510,12 @@ per-token:
 - gpt-oss-20B: gated out by `architecture == .gpt_oss`. Has attention
   sinks that need special handling in the batched flash-attn path.
 
-A Q6_K kpar variant would also be worth benchmarking — the current
-implementation has Q6_K projections going through the serial shader,
-and those still account for ~30% of Qwen3-8B's projections. Flipping
-those to kpar could push past 143 tok/s.
+**Update:** `dmmv_q6k_batch_kpar.comp` landed in `b12b511` and does
+exactly this. 3-run median went from 143.1 → **172.9 tok/s** — the
+residual 30% of Qwen3-8B projections (attn_v and ffn_down are Q6_K
+in the Q4_K_M layout) had been running the serial shader, and
+flipping them to kpar removed the remaining per-token regression
+relative to the fully-Q4_K row. 2.4× vs per-token.
 
 The infrastructure that landed in this session — the argmax fix, the
 validate mode, the K-parallel shader shape — is the foundation each
