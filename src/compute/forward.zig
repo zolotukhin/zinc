@@ -7722,7 +7722,22 @@ pub const InferenceEngine = struct {
         try self.dispatchDmmvInner(lm_head_t, scratch_norm, scratch_norm.size, self.logits_buf, cfg.vocab_size, hidden_dim, 0, x_offset_bytes, 0, 0);
         self.decode_cmd.computeBarrier();
 
-        // Read logits back for the sampler / argmax path.
+        // GPU argmax path — sampleGreedy reads argmax_result_staging
+        // unconditionally when the pipeline is loaded. prefillBatched
+        // previously skipped this step, so the first post-prefill decode
+        // sampled from a stale buffer and emitted garbage even though the
+        // logits matched the per-token path bit-for-bit.
+        const have_gpu_argmax = self.argmax.pipeline != null and self.argmax_descriptor_set != null;
+        if (have_gpu_argmax) {
+            try self.argmax.record(
+                &self.decode_cmd,
+                self.argmax_descriptor_set.?,
+                cfg.vocab_size,
+                self.argmax_phase0_workgroups,
+            );
+        }
+
+        // Read logits and argmax result back for the sampler.
         const barrier = vk.c.VkMemoryBarrier{
             .sType = vk.c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = null,
@@ -7733,6 +7748,10 @@ pub const InferenceEngine = struct {
         const logits_size = @as(vk.c.VkDeviceSize, cfg.vocab_size) * @sizeOf(f32);
         const logits_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = logits_size };
         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.logits_buf.handle, self.logits_staging.handle, 1, &logits_region);
+        if (have_gpu_argmax) {
+            const token_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(u32) };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.argmax_result_buf.handle, self.argmax_result_staging.handle, 1, &token_region);
+        }
 
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
