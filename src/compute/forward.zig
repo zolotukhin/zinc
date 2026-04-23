@@ -7519,12 +7519,9 @@ pub const InferenceEngine = struct {
         if (prompt_tokens.len == 0) return;
 
         // Extension: supports prefix reuse (state.position > 0) as long as
-        // the caller's view of position matches the engine and the KV pages
-        // from the prior call are still live. If those invariants fail we
-        // defer to prefillBatch which returns the canonical error.
-        if (state.position != self.position) {
-            return self.prefillBatch(state, prompt_tokens);
-        }
+        // the KV pages from the prior call are still live. Unlike the Metal
+        // path there is no engine-side position cursor to cross-check against
+        // — state.position is authoritative on Vulkan.
         if (state.position > 0 and self.active_kv_page_ids == null) {
             return self.prefillBatch(state, prompt_tokens);
         }
@@ -7722,8 +7719,7 @@ pub const InferenceEngine = struct {
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
-        self.position = base_token + n_tokens;
-        state.position = self.position;
+        state.position = base_token + n_tokens;
     }
 
     /// Process all prompt tokens through the full transformer to populate

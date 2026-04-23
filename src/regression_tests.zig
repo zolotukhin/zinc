@@ -122,7 +122,7 @@ test "Vulkan prefillBatched threads base_token through RoPE, KV write, flash att
     const src = @embedFile("compute/forward.zig");
     const fn_marker = "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {";
     try expectContainsNear(src, fn_marker, "const base_token: u32 = state.position;", 4000);
-    try expectContainsNear(src, fn_marker, "self.position = base_token + n_tokens;", 16000);
+    try expectContainsNear(src, fn_marker, "state.position = base_token + n_tokens;", 16000);
 }
 
 test "Vulkan batched KV write shader uses page_table with base_token offset" {
