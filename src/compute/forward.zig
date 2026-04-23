@@ -894,6 +894,12 @@ pub const InferenceEngine = struct {
     // uses the K-parallel subgroupAdd variant — targets the ~713 ms MoE down
     // bucket in the Qwen3.5-35B flagship prefill.
     use_moe_q5k_kpar: bool = false,
+    // Default-on when the kpar path is also on. Fuses the MoE gate + up DMMVs
+    // into a single 6-binding dispatch that reads expert_input_buf once per
+    // block and writes both gate_buf and up_buf. Disable with
+    // ZINC_MOE_FUSED_GATE_UP=0 to fall back to the two-dispatch path for
+    // A/B testing.
+    use_moe_fused_gate_up: bool = false,
     // Default-on. Subgroup-parallel softmax_topk_v2 (subgroupMax/Min/Shuffle).
     // Disable with ZINC_TOPK_V1=1 to fall back to the v1 shader (single-thread
     // serial scan in shared memory).
@@ -1673,6 +1679,18 @@ pub const InferenceEngine = struct {
             log.info("MoE Q4_K kpar variant DISABLED via ZINC_MOE_KPAR=0", .{});
         }
 
+        // MoE fused gate+up (Q4_K): default ON when the kpar path is on and
+        // the fused pipeline loaded. Disable with ZINC_MOE_FUSED_GATE_UP=0.
+        const moe_fused_gate_up_env = std.posix.getenv("ZINC_MOE_FUSED_GATE_UP");
+        const moe_fused_gate_up_explicitly_off = moe_fused_gate_up_env != null and std.mem.eql(u8, moe_fused_gate_up_env.?, "0");
+        const moe_fused_gate_up_enabled = !moe_fused_gate_up_explicitly_off and
+            moe_kpar_enabled and dmmv.pipeline_q4k_fused_gate_up_moe != null;
+        if (moe_fused_gate_up_enabled) {
+            log.info("MoE Q4_K fused gate+up ENABLED (default, set ZINC_MOE_FUSED_GATE_UP=0 to disable)", .{});
+        } else if (moe_fused_gate_up_explicitly_off) {
+            log.info("MoE Q4_K fused gate+up DISABLED via ZINC_MOE_FUSED_GATE_UP=0", .{});
+        }
+
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -1773,6 +1791,7 @@ pub const InferenceEngine = struct {
             .dmmv = dmmv,
             .use_moe_kpar = moe_kpar_enabled,
             .use_moe_q5k_kpar = moe_q5k_kpar_enabled,
+            .use_moe_fused_gate_up = moe_fused_gate_up_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
             .use_batch_attn = batch_attn_enabled,
@@ -4986,6 +5005,7 @@ pub const InferenceEngine = struct {
                     const up_qt = up_exps.info.type_;
                     const fused_ready = gate_qt == .q4_k and up_qt == .q4_k and
                         self.use_moe_kpar and
+                        self.use_moe_fused_gate_up and
                         self.dmmv.pipeline_q4k_fused_gate_up_moe != null and
                         gate_exps.info.numElements() == up_exps.info.numElements();
                     if (fused_ready) {
