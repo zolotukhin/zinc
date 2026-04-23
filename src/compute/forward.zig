@@ -750,28 +750,21 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (cfg.sliding_window_size != 0) return false;
 
     // Per-layer projections go through dispatchProjectionBatched →
-    // recordBatchDispatchPush. Both Q4_K and Q6_K batched shaders are
-    // loaded, but exercising the Q4_K_M mixed layout (Q6_K on attn_v /
-    // ffn_down) against Qwen3-8B exposed wrong output from the batched
-    // orchestration — the model generated garbage unrelated to the
-    // prompt. Until that correctness regression is root-caused, keep
-    // the gate at Q4_K-only for projections so no catalog model reaches
-    // the batched path. The Q6_K batched shader stays available via
-    // recordBatchDispatchPush for future dense-Q6_K experiments.
-    const lmHeadSupported = struct {
+    // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
+    // The earlier "garbage output" regression on Q4_K_M checkpoints was
+    // a sampler bug fixed in 419e929 (prefillBatched now dispatches GPU
+    // argmax so sampleGreedy doesn't read a stale buffer), not a
+    // forward-pass issue — the batched logits matched per-token at
+    // max_abs_diff=0.000000.
+    const isSupported = struct {
         fn f(t: GGMLType) bool {
             return t == .q4_k or t == .q6_k;
-        }
-    }.f;
-    const projSupported = struct {
-        fn f(t: GGMLType) bool {
-            return t == .q4_k;
         }
     }.f;
 
     // LM head goes through dispatchDmmvInner which accepts Q4_K / Q6_K.
     const lm_head = engine.tensor_map.get("output.weight") orelse engine.tensor_map.get("token_embd.weight") orelse return false;
-    if (!lmHeadSupported(lm_head.info.type_)) return false;
+    if (!isSupported(lm_head.info.type_)) return false;
 
     for (0..cfg.n_layers) |i| {
         const lt = engine.layer_tensors[i];
@@ -787,7 +780,7 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
         const up = lt.ffn_up orelse return false;
         const down = lt.ffn_down orelse return false;
         for ([_]*const LoadedTensor{ q, k, v, o, gate, up, down }) |t| {
-            if (!projSupported(t.info.type_)) return false;
+            if (!isSupported(t.info.type_)) return false;
         }
 
         // Reject packed Q+gate (Qwen3Next): attn_q row count == 2 * q_dim.
@@ -1698,13 +1691,17 @@ pub const InferenceEngine = struct {
             log.info("MoE Q4_K kpar variant DISABLED via ZINC_MOE_KPAR=0", .{});
         }
 
-        // Q4_K batched projection, K-parallel wave64 variant. Opt-in via
-        // ZINC_Q4K_BATCH_KPAR=1.
+        // Q4_K batched projection, K-parallel wave64 variant. Default ON when
+        // the pipeline is loaded — measured 2× speedup vs the serial variant
+        // on Qwen3-8B Q4_K_M (143 tok/s vs 62 tok/s on a 105-token prompt,
+        // R9700). Disable via ZINC_Q4K_BATCH_KPAR=0 to run the serial shader.
         const q4k_batch_kpar_env = std.posix.getenv("ZINC_Q4K_BATCH_KPAR");
-        const q4k_batch_kpar_forced_on = q4k_batch_kpar_env != null and std.mem.eql(u8, q4k_batch_kpar_env.?, "1");
-        const q4k_batch_kpar_enabled = q4k_batch_kpar_forced_on and dmmv.pipeline_q4k_batch_kpar != null;
+        const q4k_batch_kpar_explicitly_off = q4k_batch_kpar_env != null and std.mem.eql(u8, q4k_batch_kpar_env.?, "0");
+        const q4k_batch_kpar_enabled = !q4k_batch_kpar_explicitly_off and dmmv.pipeline_q4k_batch_kpar != null;
         if (q4k_batch_kpar_enabled) {
-            log.info("Q4_K batched projection kpar variant ENABLED via ZINC_Q4K_BATCH_KPAR=1", .{});
+            log.info("Q4_K batched projection kpar variant ENABLED (default, set ZINC_Q4K_BATCH_KPAR=0 to disable)", .{});
+        } else if (q4k_batch_kpar_explicitly_off) {
+            log.info("Q4_K batched projection kpar variant DISABLED via ZINC_Q4K_BATCH_KPAR=0", .{});
         }
 
         // MoE fused gate+up (Q4_K): default OFF. Enable with
@@ -7563,7 +7560,7 @@ pub const InferenceEngine = struct {
     /// `attention.pipeline_batched`, plus matching push structs and dispatchers)
     /// are loaded at engine init. The orchestration that ties them together with
     /// `dmmv_q4k_batch` (weight-read-once GEMM) for projections is tracked in
-    /// `MULTI_HOUR_EFFORT_8_RDNA_BATCHED_PREFILL.md`. Until that orchestration
+    /// `loops/efforts/MULTI_HOUR_EFFORT_8_RDNA_BATCHED_PREFILL.md`. Until that orchestration
     /// lands this entry point transparently delegates to `prefillBatch`, but the
     /// env gate and the `canUseBatchedPrefillRdna` check are already wired so
     /// callers can migrate to the new name ahead of time — matching the Metal
