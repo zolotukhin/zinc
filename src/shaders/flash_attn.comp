@@ -27,16 +27,10 @@ layout(push_constant) uniform PushConstants {
     uint sink_offset;     // starting index into sink_data for this layer (layer_idx * n_heads)
 };
 
-// Buffer bindings. Q/K/V are exposed as both scalar and vec4 views so the
-// hot Q·K and V·score loops can issue vec4 loads — one transaction instead
-// of four scalar loads per dim chunk. Critical for Gemma 4's head_dim=512
-// where the scalar path was serialized on memory for ~60ms/tok on R9700.
-layout(set = 0, binding = 0) readonly  buffer Query    { float q_data[];    };
-layout(set = 0, binding = 0) readonly  buffer QueryV4  { vec4  q_data_v4[]; };
-layout(set = 0, binding = 1) readonly  buffer KCache   { float k_data[];    };
-layout(set = 0, binding = 1) readonly  buffer KCacheV4 { vec4  k_data_v4[]; };
-layout(set = 0, binding = 2) readonly  buffer VCache   { float v_data[];    };
-layout(set = 0, binding = 2) readonly  buffer VCacheV4 { vec4  v_data_v4[]; };
+// Buffer bindings
+layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];     };
+layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];     };
+layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];     };
 layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];   };
 layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];     };
 layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[];  };
@@ -106,21 +100,13 @@ void main() {
             uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
                           + kv_head * head_dim;
 
-            // Dot product q · k via vec4 loads when head_dim % 4 == 0 (always
-            // true for the models this shader runs on today — 128, 256, 512).
-            // The q_base/k_base offsets are multiples of head_dim, which in
-            // turn is a multiple of 4, so vec4 alignment holds.
-            float dot_acc = 0.0;
-            uint q_base4 = q_base >> 2;
-            uint k_base4 = k_base >> 2;
-            uint head_dim4 = head_dim >> 2;
-            for (uint d4 = 0u; d4 < head_dim4; d4++) {
-                vec4 q4 = q_data_v4[q_base4 + d4];
-                vec4 k4 = k_data_v4[k_base4 + d4];
-                dot_acc += dot(q4, k4);
+            // Dot product q . k
+            float dot = 0.0;
+            for (uint d = 0u; d < head_dim; d++) {
+                dot += q_data[q_base + d] * k_data[k_base + d];
             }
 
-            s_scores[i] = dot_acc * scale;
+            s_scores[i] = dot * scale;
         }
 
         barrier();
