@@ -81,6 +81,11 @@ pub const DmmvDispatch = struct {
     pipeline_f32: ?Pipeline,
     /// Batch Q4K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
     pipeline_q4k_batch: ?Pipeline,
+    /// Batch Q6K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
+    /// Unlocks batched prefill for Q4_K_M checkpoints — the attn_v and
+    /// ffn_down tensors are Q6_K in that layout, so the all-Q4_K gate
+    /// was previously rejecting every real catalog model.
+    pipeline_q6k_batch: ?Pipeline,
     /// MoE Q4K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q4k_moe: ?Pipeline,
     /// Experimental K-parallel Q4K MoE pipeline (same 4 bindings, wave64 subgroupAdd).
@@ -234,6 +239,12 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        const q6k_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_batch.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_batch = pipeline_mod.createFromSpirvWithOptions(instance, q6k_batch_path, 3, batch_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q6_K batch shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // MoE DMMV pipelines: 4 bindings (A, x, y, routing), different push constants
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
 
@@ -330,6 +341,7 @@ pub const DmmvDispatch = struct {
             .pipeline_f16 = pipeline_f16,
             .pipeline_f32 = pipeline_f32,
             .pipeline_q4k_batch = pipeline_q4k_batch,
+            .pipeline_q6k_batch = pipeline_q6k_batch,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
@@ -519,6 +531,7 @@ pub const DmmvDispatch = struct {
     ) !void {
         const pip = switch (quant_type) {
             .q4_k => if (self.pipeline_q4k_batch) |*p| p else return error.UnsupportedQuantType,
+            .q6_k => if (self.pipeline_q6k_batch) |*p| p else return error.UnsupportedQuantType,
             else => return error.UnsupportedQuantType,
         };
         const push = BatchDmmvPushConstants{
@@ -642,6 +655,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_f16) |*p| p.deinit();
         if (self.pipeline_f32) |*p| p.deinit();
         if (self.pipeline_q4k_batch) |*p| p.deinit();
+        if (self.pipeline_q6k_batch) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_moe) |*p| p.deinit();

@@ -1,0 +1,120 @@
+#version 460
+// ZINC — Q6_K batch DMMV for prefill (multi-column).
+// Mirrors dmmv_q4k_batch.comp: reads each weight row ONCE and computes
+// dot products against up to MAX_COLS input vectors, letting prefill amortize
+// the weight-read cost across the whole prompt in a single dispatch.
+//
+// Layout: X[K, num_cols] column-major, Y[M, num_cols] column-major.
+// Dispatch: (M/64, 1, 1). Each workgroup covers 64 output rows, each thread
+// owns one row and walks its K serially while accumulating `num_cols`
+// column sums in registers.
+//
+// Q6_K block (256 elements, 210 bytes):
+//   [  0..127] ql   (128 bytes — low 4 bits for every element)
+//   [128..191] qh   ( 64 bytes — high 2 bits; 4 elements share each byte)
+//   [192..207] scales (16 signed int8 per super-block)
+//   [208..209] d    (f16)
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+// Same MAX_COLS rationale as dmmv_q4k_batch.comp — see that shader for the
+// occupancy vs chunk-count tradeoff. Keep the two in sync.
+const uint MAX_COLS = 32u;
+
+layout(push_constant) uniform PushConstants {
+    uint M;           // output rows
+    uint K;           // input elements per vector
+    uint a_offset;    // weight matrix byte offset
+    uint x_offset;    // input matrix byte offset
+    uint y_offset;    // output matrix byte offset
+    uint num_cols;    // actual batch size (<= MAX_COLS)
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixX { float x_data[];   };
+layout(set = 0, binding = 2) writeonly buffer MatrixY { float y_data[];  };
+
+const uint Q6K_BLOCK_SIZE = 256;
+const uint Q6K_BYTES      = 210;
+
+int signed_i8(uint b) {
+    return int(b) - (b >= 128u ? 256 : 0);
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    if (row >= M) return;
+
+    const uint blocks_per_row = K / Q6K_BLOCK_SIZE;
+    uint x_base = x_offset / 4u;
+    uint y_base = y_offset / 4u;
+
+    float sums[MAX_COLS];
+    for (uint c = 0u; c < num_cols; c++) sums[c] = 0.0;
+
+    // Process weight blocks — weight data read ONCE, reused across all columns.
+    for (uint blk = 0u; blk < blocks_per_row; blk++) {
+        uint byte_off = a_offset + row * blocks_per_row * Q6K_BYTES + blk * Q6K_BYTES;
+
+        uint d_bits = uint(a_data[byte_off + 208u]) | (uint(a_data[byte_off + 209u]) << 8);
+        float d_val = unpackHalf2x16(d_bits).x;
+
+        uint ql_off = byte_off;
+        uint qh_off = byte_off + 128u;
+        uint sc_off = byte_off + 192u;
+        uint x_blk_start = blk * Q6K_BLOCK_SIZE;
+
+        // 16 sub-blocks of 16 elements each. Each qh byte covers 4 elements
+        // across 4 of those sub-blocks; walk by the 32-element stride that
+        // llama.cpp's reference Q6_K kernel uses (two ql halves × two qh
+        // nibble-halves per 64-element chunk).
+        for (uint j = 0u; j < 2u; j++) {
+            uint ql_base = ql_off + j * 64u;
+            uint qh_base = qh_off + j * 32u;
+            uint sc_base = sc_off + j * 8u;
+            uint x_chunk_base = x_blk_start + j * 128u;
+
+            for (uint l = 0u; l < 32u; l++) {
+                uint ql_lo = uint(a_data[ql_base + l]);
+                uint ql_hi = uint(a_data[ql_base + l + 32u]);
+                uint qh_v  = uint(a_data[qh_base + l]);
+
+                int q1 = int((ql_lo & 0xFu) | (((qh_v >> 0) & 3u) << 4)) - 32;
+                int q2 = int((ql_hi & 0xFu) | (((qh_v >> 2) & 3u) << 4)) - 32;
+                int q3 = int((ql_lo >> 4)    | (((qh_v >> 4) & 3u) << 4)) - 32;
+                int q4 = int((ql_hi >> 4)    | (((qh_v >> 6) & 3u) << 4)) - 32;
+
+                uint is = l / 16u;
+                float s0 = d_val * float(signed_i8(uint(a_data[sc_base + is])));
+                float s2 = d_val * float(signed_i8(uint(a_data[sc_base + is + 2u])));
+                float s4 = d_val * float(signed_i8(uint(a_data[sc_base + is + 4u])));
+                float s6 = d_val * float(signed_i8(uint(a_data[sc_base + is + 6u])));
+
+                float w1 = s0 * float(q1);
+                float w2 = s2 * float(q2);
+                float w3 = s4 * float(q3);
+                float w4 = s6 * float(q4);
+
+                uint e0 = x_chunk_base + l;
+                uint e1 = e0 + 32u;
+                uint e2 = e0 + 64u;
+                uint e3 = e0 + 96u;
+
+                for (uint c = 0u; c < num_cols; c++) {
+                    uint col_base = x_base + c * K;
+                    sums[c] += w1 * x_data[col_base + e0]
+                             + w2 * x_data[col_base + e1]
+                             + w3 * x_data[col_base + e2]
+                             + w4 * x_data[col_base + e3];
+                }
+            }
+        }
+    }
+
+    for (uint c = 0u; c < num_cols; c++) {
+        y_data[y_base + c * M + row] = sums[c];
+    }
+}

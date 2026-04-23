@@ -749,24 +749,19 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (cfg.sliding_window_size != 0) return false;
 
     // Per-layer projections go through dispatchProjectionBatched →
-    // recordBatchDispatchPush, which currently only has a Q4_K batched
-    // shader (dmmv_q4k_batch). Q6_K would trigger UnsupportedQuantType
-    // at dispatch time — tightening the gate keeps the fallback to
-    // per-token prefillBatch for any model with a Q6_K projection.
-    const lmHeadSupported = struct {
+    // recordBatchDispatchPush, which currently has Q4_K and Q6_K batched
+    // shaders. That covers the common Q4_K_M layout (Q4_K on most rows,
+    // Q6_K on attn_v / ffn_down). Any other quant type at dispatch time
+    // triggers UnsupportedQuantType, so keep the gate tight.
+    const isSupported = struct {
         fn f(t: GGMLType) bool {
             return t == .q4_k or t == .q6_k;
-        }
-    }.f;
-    const projSupported = struct {
-        fn f(t: GGMLType) bool {
-            return t == .q4_k;
         }
     }.f;
 
     // LM head goes through dispatchDmmvInner which accepts Q4_K / Q6_K.
     const lm_head = engine.tensor_map.get("output.weight") orelse engine.tensor_map.get("token_embd.weight") orelse return false;
-    if (!lmHeadSupported(lm_head.info.type_)) return false;
+    if (!isSupported(lm_head.info.type_)) return false;
 
     for (0..cfg.n_layers) |i| {
         const lt = engine.layer_tensors[i];
@@ -782,7 +777,7 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
         const up = lt.ffn_up orelse return false;
         const down = lt.ffn_down orelse return false;
         for ([_]*const LoadedTensor{ q, k, v, o, gate, up, down }) |t| {
-            if (!projSupported(t.info.type_)) return false;
+            if (!isSupported(t.info.type_)) return false;
         }
 
         // Reject packed Q+gate (Qwen3Next): attn_q row count == 2 * q_dim.
