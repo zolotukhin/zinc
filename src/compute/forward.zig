@@ -4973,43 +4973,72 @@ pub const InferenceEngine = struct {
                     }
                     self.endProfilePhase(.moe_topk, moe_topk_phase);
 
-                    // gate DMMV: ALL experts at once (Y=n_used workgroups)
+                    // gate+up DMMV: ALL experts at once (Y=n_used workgroups).
                     // gate_exps[expert] × expert_input_buf → gate_buf[expert*inter_dim..]
+                    // up_exps  [expert] × expert_input_buf → up_buf  [expert*inter_dim..]
                     // expert_input_buf is pre_ffw_norm_2 output for Gemma 4, otherwise ffn_norm_buf.
+                    // For matching Q4_K gate and up tensors we dispatch the fused
+                    // shader once — it reads expert_input_buf a single time and
+                    // writes both outputs, halving the dispatch count for this
+                    // phase. Otherwise we fall back to two separate dispatches.
                     const moe_gate_up_phase = self.beginProfilePhase();
-                    {
-                        const qt = gate_exps.info.type_;
-                        const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
-                        const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
-                        if (pip.uses_push_descriptors) {
-                            const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
-                            const wg_x: u32 = if (use_kpar) (inter_dim + 1) / 2 else switch (qt) {
-                                .mxfp4, .q8_0, .f16 => (inter_dim + 1) / 2,
-                                else => (inter_dim + 63) / 64,
-                            };
-                            self.pushDispatch4(pip, std.mem.asBytes(&push), gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
-                        } else {
-                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet4(ds, gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
-                            try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                    const gate_qt = gate_exps.info.type_;
+                    const up_qt = up_exps.info.type_;
+                    const fused_ready = gate_qt == .q4_k and up_qt == .q4_k and
+                        self.use_moe_kpar and
+                        self.dmmv.pipeline_q4k_fused_gate_up_moe != null and
+                        gate_exps.info.numElements() == up_exps.info.numElements();
+                    if (fused_ready) {
+                        const pip = &self.dmmv.pipeline_q4k_fused_gate_up_moe.?;
+                        const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
+                        const wg_x: u32 = (inter_dim + 1) / 2;
+                        self.pushDispatch6(
+                            pip,
+                            std.mem.asBytes(&push),
+                            gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size,
+                            up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size,
+                            expert_input_buf.handle, hidden_size,
+                            self.gate_buf.handle, self.gate_buf.size,
+                            self.up_buf.handle, self.up_buf.size,
+                            self.router_output_buf.handle, self.router_output_buf.size,
+                            wg_x,
+                            n_used,
+                            1,
+                        );
+                    } else {
+                        {
+                            const qt = gate_qt;
+                            const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
+                            const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
+                            if (pip.uses_push_descriptors) {
+                                const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
+                                const wg_x: u32 = if (use_kpar) (inter_dim + 1) / 2 else switch (qt) {
+                                    .mxfp4, .q8_0, .f16 => (inter_dim + 1) / 2,
+                                    else => (inter_dim + 63) / 64,
+                                };
+                                self.pushDispatch4(pip, std.mem.asBytes(&push), gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
+                            } else {
+                                const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                                self.writeDescSet4(ds, gate_exps.gpu_buffer.handle, gate_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.gate_buf.handle, self.gate_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                                try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                            }
                         }
-                    }
-                    // up DMMV: ALL experts at once
-                    {
-                        const qt = up_exps.info.type_;
-                        const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
-                        const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
-                        if (pip.uses_push_descriptors) {
-                            const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
-                            const wg_x: u32 = if (use_kpar) (inter_dim + 1) / 2 else switch (qt) {
-                                .mxfp4, .q8_0, .f16 => (inter_dim + 1) / 2,
-                                else => (inter_dim + 63) / 64,
-                            };
-                            self.pushDispatch4(pip, std.mem.asBytes(&push), up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
-                        } else {
-                            const ds = try self.allocDescSet(pip.descriptor_set_layout);
-                            self.writeDescSet4(ds, up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
-                            try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                        {
+                            const qt = up_qt;
+                            const use_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
+                            const pip = if (use_kpar) &self.dmmv.pipeline_q4k_moe_kpar.? else (self.dmmv.moePipelineForType(qt) orelse unreachable);
+                            if (pip.uses_push_descriptors) {
+                                const push = MoeDmmvPushConstants{ .M = inter_dim, .K = hidden_dim, .expert_stride = expert_gate_row_bytes, .x_expert_stride = 0, .x_offset = 0, .y_offset = 0 };
+                                const wg_x: u32 = if (use_kpar) (inter_dim + 1) / 2 else switch (qt) {
+                                    .mxfp4, .q8_0, .f16 => (inter_dim + 1) / 2,
+                                    else => (inter_dim + 63) / 64,
+                                };
+                                self.pushDispatch4(pip, std.mem.asBytes(&push), up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size, wg_x, n_used, 1);
+                            } else {
+                                const ds = try self.allocDescSet(pip.descriptor_set_layout);
+                                self.writeDescSet4(ds, up_exps.gpu_buffer.handle, up_exps.gpu_buffer.size, expert_input_buf.handle, hidden_size, self.up_buf.handle, self.up_buf.size, self.router_output_buf.handle, self.router_output_buf.size);
+                                try self.dmmv.recordMoeDispatch(&self.decode_cmd, qt, ds, inter_dim, hidden_dim, expert_gate_row_bytes, n_used, 0, 0, 0);
+                            }
                         }
                     }
                     self.decode_cmd.computeBarrier();

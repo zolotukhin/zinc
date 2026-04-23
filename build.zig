@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_q5_1",
         "dmmv_q4k_moe",
         "dmmv_q4k_moe_kpar",
+        "dmmv_q4k_fused_gate_up_moe",
         "dmmv_mxfp4_moe",
         "dmmv_q5_1_moe",
         "dmmv_q5k_moe",
