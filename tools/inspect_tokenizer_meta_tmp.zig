@@ -1,5 +1,5 @@
 const std = @import("std");
-const gguf = @import("src/model/gguf.zig");
+const gguf = @import("../src/model/gguf.zig");
 
 fn printKey(gf: *const gguf.GGUFFile, key: []const u8) void {
     std.debug.print("{s}=", .{key});

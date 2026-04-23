@@ -21,6 +21,7 @@ const dmmv_mod = @import("dmmv.zig");
 const DmmvDispatch = dmmv_mod.DmmvDispatch;
 const DmmvPushConstants = dmmv_mod.DmmvPushConstants;
 const MoeDmmvPushConstants = dmmv_mod.MoeDmmvPushConstants;
+const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
 const elementwise_mod = @import("elementwise.zig");
 const ElementwiseDispatch = elementwise_mod.ElementwiseDispatch;
 const RmsNormPush = elementwise_mod.RmsNormPush;
@@ -905,6 +906,13 @@ pub const InferenceEngine = struct {
     // uses the K-parallel subgroupAdd variant — targets the ~713 ms MoE down
     // bucket in the Qwen3.5-35B flagship prefill.
     use_moe_q5k_kpar: bool = false,
+    // Opt-in via ZINC_Q4K_BATCH_KPAR=1. When set and the pipeline is loaded,
+    // dispatchProjectionBatched uses pipeline_q4k_batch_kpar — one WG per row
+    // with wave64 K-parallel subgroupAdd, instead of the serial-over-K
+    // dmmv_q4k_batch layout. Fixes the "batched prefill is slower than
+    // per-token" regression on gfx1201 by matching the per-token kpar
+    // shader's parallelism envelope.
+    use_q4k_batch_kpar: bool = false,
     // Default-on when the kpar path is also on. Fuses the MoE gate + up DMMVs
     // into a single 6-binding dispatch that reads expert_input_buf once per
     // block and writes both gate_buf and up_buf. Disable with
@@ -1690,6 +1698,15 @@ pub const InferenceEngine = struct {
             log.info("MoE Q4_K kpar variant DISABLED via ZINC_MOE_KPAR=0", .{});
         }
 
+        // Q4_K batched projection, K-parallel wave64 variant. Opt-in via
+        // ZINC_Q4K_BATCH_KPAR=1.
+        const q4k_batch_kpar_env = std.posix.getenv("ZINC_Q4K_BATCH_KPAR");
+        const q4k_batch_kpar_forced_on = q4k_batch_kpar_env != null and std.mem.eql(u8, q4k_batch_kpar_env.?, "1");
+        const q4k_batch_kpar_enabled = q4k_batch_kpar_forced_on and dmmv.pipeline_q4k_batch_kpar != null;
+        if (q4k_batch_kpar_enabled) {
+            log.info("Q4_K batched projection kpar variant ENABLED via ZINC_Q4K_BATCH_KPAR=1", .{});
+        }
+
         // MoE fused gate+up (Q4_K): default OFF. Enable with
         // ZINC_MOE_FUSED_GATE_UP=1. Measured on Qwen3.6-35B-A3B (expert M=512,
         // K=2048) on RDNA4 R9700: 26.33 tok/s prefill vs 26.51 unfused
@@ -1807,6 +1824,7 @@ pub const InferenceEngine = struct {
             .use_moe_kpar = moe_kpar_enabled,
             .use_moe_q5k_kpar = moe_q5k_kpar_enabled,
             .use_moe_fused_gate_up = moe_fused_gate_up_enabled,
+            .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
             .use_batch_attn = batch_attn_enabled,
@@ -6701,27 +6719,56 @@ pub const InferenceEngine = struct {
         const MAX_COLS: u32 = 32;
         const f32_bytes: u32 = @sizeOf(f32);
         var chunk_start: u32 = 0;
+        const use_kpar = self.use_q4k_batch_kpar and
+            tensor.info.type_ == .q4_k and
+            self.dmmv.pipeline_q4k_batch_kpar != null;
         while (chunk_start < n_tokens) {
             const chunk: u32 = @min(MAX_COLS, n_tokens - chunk_start);
             const x_offset: u32 = chunk_start * K * f32_bytes;
             const y_offset: u32 = chunk_start * M * f32_bytes;
-            try self.dmmv.recordBatchDispatchPush(
-                &self.decode_cmd,
-                tensor.info.type_,
-                self.instance.push_descriptor_fn,
-                tensor.gpu_buffer.handle,
-                tensor.gpu_buffer.size,
-                x_buf.handle,
-                x_buf.size,
-                y_buf.handle,
-                y_buf.size,
-                M,
-                K,
-                0,
-                x_offset,
-                y_offset,
-                chunk,
-            );
+            if (use_kpar) {
+                // One workgroup per output row — 64 threads cooperate on K.
+                const pip = &self.dmmv.pipeline_q4k_batch_kpar.?;
+                const push = BatchDmmvPushConstants{
+                    .M = M,
+                    .K = K,
+                    .a_offset = 0,
+                    .x_offset = x_offset,
+                    .y_offset = y_offset,
+                    .num_cols = chunk,
+                };
+                self.pushDispatch3(
+                    pip,
+                    std.mem.asBytes(&push),
+                    tensor.gpu_buffer.handle,
+                    tensor.gpu_buffer.size,
+                    x_buf.handle,
+                    x_buf.size,
+                    y_buf.handle,
+                    y_buf.size,
+                    M,
+                    1,
+                    1,
+                );
+            } else {
+                try self.dmmv.recordBatchDispatchPush(
+                    &self.decode_cmd,
+                    tensor.info.type_,
+                    self.instance.push_descriptor_fn,
+                    tensor.gpu_buffer.handle,
+                    tensor.gpu_buffer.size,
+                    x_buf.handle,
+                    x_buf.size,
+                    y_buf.handle,
+                    y_buf.size,
+                    M,
+                    K,
+                    0,
+                    x_offset,
+                    y_offset,
+                    chunk,
+                );
+            }
             chunk_start += chunk;
         }
     }

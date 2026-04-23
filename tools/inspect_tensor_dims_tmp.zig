@@ -1,5 +1,5 @@
 const std = @import("std");
-const gguf = @import("src/model/gguf.zig");
+const gguf = @import("../src/model/gguf.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

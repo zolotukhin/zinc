@@ -81,6 +81,10 @@ pub const DmmvDispatch = struct {
     pipeline_f32: ?Pipeline,
     /// Batch Q4K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
     pipeline_q4k_batch: ?Pipeline,
+    /// Batch Q4K pipeline, K-parallel wave64 variant (3 bindings). Enabled
+    /// via ZINC_Q4K_BATCH_KPAR=1. One WG per row with 64-way K parallelism;
+    /// same binding shape as pipeline_q4k_batch.
+    pipeline_q4k_batch_kpar: ?Pipeline,
     /// Batch Q6K pipeline for prefill (3 bindings: A, X_batch, Y_batch).
     /// Unlocks batched prefill for Q4_K_M checkpoints — the attn_v and
     /// ffn_down tensors are Q6_K in that layout, so the all-Q4_K gate
@@ -245,6 +249,12 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        const q4k_batch_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_batch_kpar.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_batch_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q4k_batch_kpar_path, 3, batch_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K batch kpar shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // MoE DMMV pipelines: 4 bindings (A, x, y, routing), different push constants
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
 
@@ -341,6 +351,7 @@ pub const DmmvDispatch = struct {
             .pipeline_f16 = pipeline_f16,
             .pipeline_f32 = pipeline_f32,
             .pipeline_q4k_batch = pipeline_q4k_batch,
+            .pipeline_q4k_batch_kpar = pipeline_q4k_batch_kpar,
             .pipeline_q6k_batch = pipeline_q6k_batch,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
@@ -655,6 +666,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_f16) |*p| p.deinit();
         if (self.pipeline_f32) |*p| p.deinit();
         if (self.pipeline_q4k_batch) |*p| p.deinit();
+        if (self.pipeline_q4k_batch_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_batch) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
