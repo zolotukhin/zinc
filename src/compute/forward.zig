@@ -7619,10 +7619,20 @@ pub const InferenceEngine = struct {
             const mmap = self.model.mmap_data orelse return error.NoMmapData;
             const data_start: usize = @intCast(self.model.gguf_file.tensor_data_offset + embd.info.offset);
             const vocab_last = cfg.vocab_size -| 1;
+            // Gemma pre-scales embeddings by sqrt(hidden_dim) before the
+            // first layer. Matches the per-token loadTokenEmbedding path.
+            const is_gemma = cfg.architecture == .gemma;
+            const gemma_scale: f32 = if (is_gemma)
+                @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))))
+            else
+                1.0;
             for (prompt_tokens, 0..) |tok, i| {
                 const safe_id = @min(tok, vocab_last);
                 const dst = big_f32[i * hidden_dim ..][0..hidden_dim];
                 dequantRow(mmap[data_start..], safe_id, hidden_dim, embd.info.type_, dst);
+                if (is_gemma) {
+                    for (dst) |*v| v.* *= gemma_scale;
+                }
             }
             self.prefill_embed_big_hidden = hidden_dim;
             self.prefill_embed_big_token_count = n_tokens;
