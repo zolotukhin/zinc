@@ -20,6 +20,9 @@ pub const GpuVendor = enum {
     amd_rdna4_apu,
     amd_other,
     nvidia,
+    /// Intel Arc Xe2 (Battlemage, B-series): SIMD16 subgroup.
+    intel_arc_xe2,
+    /// Intel Arc Xe-HPG (Alchemist, A-series): SIMD32 subgroup.
     intel_arc,
     unknown,
 };
@@ -170,14 +173,23 @@ pub fn detect(instance: *const Instance) GpuConfig {
         config.bandwidth_gbps = 512;
     } else if (props.vendorID == 0x8086) {
         config.vendor = classifyIntel(props.deviceID, name_slice);
-        // Intel Xe2 (Battlemage, Arc B-series): native SIMD16 subgroup.
-        // Arc B770 Pro: 32 Xe2-HPG cores, 256-bit GDDR6 @ 20 Gbps ≈ 640 GB/s.
-        // Adjust if classifyIntel adds finer-grained tiers in future.
-        config.wave_size = 16; // Xe2 native subgroup width
-        config.bandwidth_gbps = 640;
-        config.compute_units = 32;
-        config.l1_cache_kb = 64; // Xe2 L1 per Xe2-core
-        config.l2_cache_mb = 8;
+        if (config.vendor == .intel_arc_xe2) {
+            // Xe2 (Battlemage, Arc B-series): SIMD16 subgroup.
+            // B770 Pro: 32 Xe2-HPG cores, 256-bit GDDR6 @ 20 Gbps ≈ 640 GB/s.
+            config.wave_size = 16;
+            config.bandwidth_gbps = 640;
+            config.compute_units = 32;
+            config.l1_cache_kb = 64;
+            config.l2_cache_mb = 8;
+        } else {
+            // Xe-HPG (Alchemist, Arc A-series): SIMD32 subgroup.
+            // A770: 512 GB/s, 32 Xe-cores.
+            config.wave_size = 32;
+            config.bandwidth_gbps = 512;
+            config.compute_units = 32;
+            config.l1_cache_kb = 64;
+            config.l2_cache_mb = 8;
+        }
         config.flash_attn_block_size = 256;
     }
 
@@ -236,9 +248,16 @@ fn classifyAmd(device_id: u32, name: []const u8) GpuVendor {
 /// Classify Intel GPU architecture from device ID and name.
 fn classifyIntel(device_id: u32, name: []const u8) GpuVendor {
     _ = device_id;
-    // Arc B-series = Xe2 (Battlemage); A-series = Xe-HPG (Alchemist).
-    // Both map to intel_arc for now — this function is a hook for future sub-tiers.
-    _ = name;
+    // Xe2 = Battlemage (Arc B-series): device names contain " B" followed by digits,
+    // or contain "Xe2" or "Battlemage".
+    // Xe-HPG = Alchemist (Arc A-series): default for other Intel Arc GPUs.
+    if (containsIgnoreCase(name, "xe2") or
+        containsIgnoreCase(name, "battlemage") or
+        containsIgnoreCase(name, " b5") or
+        containsIgnoreCase(name, " b7"))
+    {
+        return .intel_arc_xe2;
+    }
     return .intel_arc;
 }
 
@@ -283,8 +302,14 @@ test "classifyAmd — RDNA3" {
     try std.testing.expectEqual(GpuVendor.amd_rdna3, classifyAmd(0x744C, "AMD Radeon RX 7900 XTX (RADV GFX1100)"));
 }
 
-test "classifyIntel — Arc B770" {
-    try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc B770 Pro"));
+test "classifyIntel — Arc B-series (Xe2)" {
+    try std.testing.expectEqual(GpuVendor.intel_arc_xe2, classifyIntel(0x0000, "Intel Arc B770 Pro"));
+    try std.testing.expectEqual(GpuVendor.intel_arc_xe2, classifyIntel(0x0000, "Intel Arc B580"));
+}
+
+test "classifyIntel — Arc A-series (Xe-HPG)" {
+    try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc A770"));
+    try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc A380"));
 }
 
 test "GpuConfig name" {

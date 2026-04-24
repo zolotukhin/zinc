@@ -36,8 +36,8 @@ layout(set = 0, binding = 1) readonly buffer VectorX { float x_data[];     };
 layout(set = 0, binding = 2) buffer VectorY { float y_data[];    };
 
 // Shared memory for cross-subgroup reduction (needed when subgroup size < 64)
-shared float s_sum0[2];  // max 2 subgroups for workgroup size 64
-shared float s_sum1[2];
+shared float s_sum0[4];  // max 4 subgroups for workgroup size 64 (SIMD16)
+shared float s_sum1[4];
 
 void main() {
     // Each workgroup processes 2 rows
@@ -76,7 +76,7 @@ void main() {
     sum1 = subgroupAdd(sum1);
 
     // Cross-subgroup reduction via shared memory
-    // Handles both wave32 (2 subgroups) and wave64 (1 subgroup) correctly.
+    // Handles wave64 (1 sg), wave32 (2 sgs), and SIMD16 (4 sgs) correctly.
     if (gl_NumSubgroups > 1u) {
         if (subgroupElect()) {
             s_sum0[gl_SubgroupID] = sum0;
@@ -84,8 +84,12 @@ void main() {
         }
         barrier();
         if (tid == 0u) {
-            sum0 = s_sum0[0] + s_sum0[1];
-            sum1 = s_sum1[0] + s_sum1[1];
+            sum0 = s_sum0[0];
+            sum1 = s_sum1[0];
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) {
+                sum0 += s_sum0[sg];
+                sum1 += s_sum1[sg];
+            }
         }
     }
 

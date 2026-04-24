@@ -245,6 +245,7 @@ pub fn profileForGpu(config: gpu_detect.GpuConfig) []const u8 {
         .amd_rdna3 => if (config.vram_mb >= 14 * 1024) "amd-rdna3-16gb" else "amd-rdna3-small",
         .amd_other => "amd-other",
         .nvidia => "nvidia",
+        .intel_arc_xe2 => "intel-arc",
         .intel_arc => "intel-arc",
         .unknown => "unknown",
     };

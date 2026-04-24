@@ -223,8 +223,8 @@ pub const DmmvDispatch = struct {
         };
 
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
-        // Q5_K K-parallel shader uses subgroupAdd over a 64-thread WG; require wave64
-        // so the reduction is correct on devices that would otherwise pick wave32.
+        // Q5_K K-parallel shader: cross-subgroup shared-memory reduction handles
+        // wave64 (1 subgroup), wave32 (2 subgroups), and SIMD16 (4 subgroups).
         const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
