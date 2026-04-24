@@ -6069,10 +6069,27 @@ pub const InferenceEngine = struct {
                 );
                 self.decode_cmd.computeBarrier();
 
+                // Fast path: fuse down proj + post_ffw_norm + residual add into
+                // two dispatches when the Gemma tail is active and the fused
+                // rms_norm_add pipeline is loaded. Saves one dispatch + one
+                // barrier per Gemma decode layer (60 on gemma4-31b).
+                const use_fused_pfn_decode = lt.post_ffw_norm != null and
+                    self.elementwise.pipeline_rms_norm_add != null and
+                    !self.validation_diagnostics_enabled;
                 if (lt.post_ffw_norm == null and !self.validation_diagnostics_enabled) {
                     // Fused: down DMMV accumulates directly into hidden_buf,
                     // eliminating separate scale_acc dispatch + barrier
                     try self.dispatchDmmvAcc(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.hidden_buf, hidden_dim, inter_dim);
+                } else if (use_fused_pfn_decode) {
+                    try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
+                    self.decode_cmd.computeBarrier();
+                    const pfn_tensor = lt.post_ffw_norm.?;
+                    try self.dispatchRmsNormAdd(
+                        self.hidden_buf.handle, hidden_size,
+                        self.down_buf.handle, hidden_size,
+                        pfn_tensor.gpu_buffer.handle, pfn_tensor.gpu_buffer.size,
+                        hidden_dim, 1, rms_norm_eps,
+                    );
                 } else {
                     // Unfused path: needed for Gemma post-FFN norm or diagnostics
                     try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
@@ -6152,14 +6169,16 @@ pub const InferenceEngine = struct {
                     }
 
                     // FFN residual: hidden_buf += down_buf
-                    try self.dispatchScaleAcc(
-                        self.hidden_buf.handle,
-                        hidden_size,
-                        self.down_buf.handle,
-                        hidden_size,
-                        hidden_dim,
-                        1.0,
-                    );
+                    if (!use_fused_pfn_decode) {
+                        try self.dispatchScaleAcc(
+                            self.hidden_buf.handle,
+                            hidden_size,
+                            self.down_buf.handle,
+                            hidden_size,
+                            hidden_dim,
+                            1.0,
+                        );
+                    }
                 }
             }
 
@@ -6879,6 +6898,38 @@ pub const InferenceEngine = struct {
         };
 
         if (pip.uses_push_descriptors) {
+            // Wide-vocab LM-head fast path: NUM_ROWS=8 variant (pipeline_q4k_wide)
+            // for tall Q4_K matrices like Gemma 4 31B (M=262144). Same binding
+            // layout as pipeline_q4k, only the shader constant differs. 4× fewer
+            // workgroups, 4× more hidden-vector reuse per workgroup, which
+            // turns the decode tail from ~45 ms into a small fraction.
+            if (qt == .q4_k and M >= 100_000 and acc_mode == 0 and self.dmmv.pipeline_q4k_wide != null) {
+                const wide_pip = &self.dmmv.pipeline_q4k_wide.?;
+                const push_wide = DmmvPushConstants{
+                    .M = M,
+                    .K = K,
+                    .a_offset = a_offset,
+                    .x_offset = x_offset,
+                    .y_offset = y_offset,
+                    .acc_mode = acc_mode,
+                };
+                // NUM_ROWS=8 → one workgroup per 8 rows.
+                self.pushDispatch3(
+                    wide_pip,
+                    std.mem.asBytes(&push_wide),
+                    tensor.gpu_buffer.handle,
+                    tensor.gpu_buffer.size,
+                    input_buf.handle,
+                    input_size,
+                    output_buf.handle,
+                    output_buf.size,
+                    (M + 7) / 8,
+                    1,
+                    1,
+                );
+                return;
+            }
+
             // For Q4K large M (LM head), use batch shader for better parallelism.
             if (qt == .q4_k and M > 65536 and self.dmmv.pipeline_q4k_batch != null) {
                 try self.dmmv.recordBatchDispatchPush(

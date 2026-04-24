@@ -1,0 +1,149 @@
+#version 460
+// ZINC — Q4_K DMMV for tall matrices (wide-vocab LM heads).
+// Identical algorithm to dmmv_q4k.comp but with NUM_ROWS=8 instead of 2.
+//
+// Gemma 4 31B LM head (M=262144, K=5376) was running at ~17 GB/s with
+// NUM_ROWS=2 — 131072 workgroups × tiny per-workgroup work, each reading
+// the same 5376-float hidden vector. Raising NUM_ROWS to 8 cuts workgroup
+// count 4× (to 32768) and amortizes the hidden-vector cache traffic
+// across 8 output rows, which turns the LM head from the per-token
+// decode bottleneck into a small fraction of it.
+//
+// Safe to use for any tall weight matrix where M / NUM_ROWS is still
+// large enough to saturate the device (≥ ~4096 workgroups on R9700 = M
+// ≥ 32768). The caller in forward.zig gates on M ≥ 100_000.
+//
+// Q4_K block (256 elements, 144 bytes = 36 uint32):
+//   [0..3]    d(f16) + dmin(f16)      — u32[0]
+//   [4..15]   k_scales (12 bytes)     — u32[1..3]
+//   [16..143] qs (128 bytes)          — u32[4..35]
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint acc_mode; // 0 = overwrite, 1 = accumulate (y += result)
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
+
+const uint NUM_ROWS = 8u;
+const uint Q4K_BLOCK_U32 = 36u;
+
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
+}
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    const uint THREADS_PER_BLOCK = 16u;
+    const uint it_size = 64u / THREADS_PER_BLOCK;  // = 4
+    uint itid = tid % THREADS_PER_BLOCK;
+    uint ix = tid / THREADS_PER_BLOCK;
+
+    uint il = itid / 4u;
+    uint ir = itid % 4u;
+    uint v_im = il / 2u;
+    uint v_in = il % 2u;
+    uint l0 = 4u * (2u * ir + v_in);
+    uint q_offset = 32u * v_im + l0;
+    uint y_offset_local = 64u * v_im + l0;
+
+    uint x_base = x_offset / 16u;
+    uint y_base = y_offset / 4u;
+    uint blocks_per_row = K / 256u;
+    uint a_base = a_offset / 4u;
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
+
+        uint row_u32 = a_base + row * blocks_per_row * Q4K_BLOCK_U32;
+        float sum = 0.0;
+
+        for (uint i = ix; i < blocks_per_row; i += it_size) {
+            uint blk_u32 = row_u32 + i * Q4K_BLOCK_U32;
+
+            uint d_dmin = a_u32[blk_u32];
+            float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+            uint sc0 = a_u32[blk_u32 + 1u];
+            uint sc1 = a_u32[blk_u32 + 2u];
+            uint sc2 = a_u32[blk_u32 + 3u];
+
+            uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset / 4u];
+            uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u];
+
+            vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
+            vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
+            vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
+            vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
+
+            uint b_idx = (i * 256u + y_offset_local) / 4u;
+            vec4 by0 = x_v4[x_base + b_idx];
+            vec4 by1 = x_v4[x_base + b_idx + 8u];
+            uint b_idx2 = (i * 256u + y_offset_local + 128u) / 4u;
+            vec4 by2 = x_v4[x_base + b_idx2];
+            vec4 by3 = x_v4[x_base + b_idx2 + 8u];
+
+            float factor0, bias0, factor1, bias1, factor2, bias2, factor3, bias3;
+            {
+                uint sb_a = 2u * v_im;
+                uint sb_b = 2u * v_im + 1u;
+                uint sb_c = 2u * v_im + 4u;
+                uint sb_d = 2u * v_im + 5u;
+
+                uint bytes[12];
+                bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
+                bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
+                bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
+
+                float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
+                if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a+4u] & 63u); }
+                else { sc_a = float((bytes[sb_a+4u]&0xFu)|((bytes[sb_a-4u]>>6)<<4)); mn_a = float(((bytes[sb_a+4u]>>4)&0xFu)|((bytes[sb_a]>>6)<<4)); }
+                if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b+4u] & 63u); }
+                else { sc_b = float((bytes[sb_b+4u]&0xFu)|((bytes[sb_b-4u]>>6)<<4)); mn_b = float(((bytes[sb_b+4u]>>4)&0xFu)|((bytes[sb_b]>>6)<<4)); }
+                if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c+4u] & 63u); }
+                else { sc_c = float((bytes[sb_c+4u]&0xFu)|((bytes[sb_c-4u]>>6)<<4)); mn_c = float(((bytes[sb_c+4u]>>4)&0xFu)|((bytes[sb_c]>>6)<<4)); }
+                if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d+4u] & 63u); }
+                else { sc_d = float((bytes[sb_d+4u]&0xFu)|((bytes[sb_d-4u]>>6)<<4)); mn_d = float(((bytes[sb_d+4u]>>4)&0xFu)|((bytes[sb_d]>>6)<<4)); }
+
+                factor0 = d_val * sc_a; bias0 = dmin_val * mn_a;
+                factor1 = d_val * sc_b; bias1 = dmin_val * mn_b;
+                factor2 = d_val * sc_c; bias2 = dmin_val * mn_c;
+                factor3 = d_val * sc_d; bias3 = dmin_val * mn_d;
+            }
+
+            sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+            sum += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+            sum += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+            sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+        }
+
+        sum = subgroupAdd(sum);
+        if (tid == 0u) {
+            if (acc_mode != 0u)
+                y_data[y_base + row] += sum;
+            else
+                y_data[y_base + row] = sum;
+        }
+    }
+}

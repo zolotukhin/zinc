@@ -98,6 +98,7 @@ pub fn build(b: *std.Build) void {
         "kv_cache_write_batched",
         "residual_rms_norm",
         "rms_norm_add",
+        "dmmv_q4k_wide",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

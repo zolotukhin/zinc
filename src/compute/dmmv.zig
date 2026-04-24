@@ -63,6 +63,11 @@ pub const Q8_1_BLOCK_BYTES: u32 = 36;
 pub const DmmvDispatch = struct {
     /// Q4K pipeline, or null.
     pipeline_q4k: ?Pipeline,
+    /// Q4K wide-vocab variant (NUM_ROWS=8) for tall matrices like the Gemma
+    /// 4 31B LM head (M=262144). Same binding layout as pipeline_q4k — swap
+    /// in at the call site when M is large enough to benefit from 4× fewer
+    /// workgroups with 4× more hidden-vector reuse per workgroup.
+    pipeline_q4k_wide: ?Pipeline,
     /// Q5K pipeline, or null.
     pipeline_q5k: ?Pipeline,
     /// Q6K pipeline, or null.
@@ -187,6 +192,16 @@ pub const DmmvDispatch = struct {
         const q4k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k = pipeline_mod.createFromSpirvWithOptions(instance, q4k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Wide-vocab Q4_K variant (NUM_ROWS=8). Same binding layout — used by
+        // the LM-head dispatch on models with vocab ≥ 100_000 where the
+        // default NUM_ROWS=2 would spawn hundreds of thousands of workgroups
+        // and thrash the L1 cache with redundant hidden-vector reads.
+        const q4k_wide_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_wide.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_wide = pipeline_mod.createFromSpirvWithOptions(instance, q4k_wide_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q4_K wide shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -353,6 +368,7 @@ pub const DmmvDispatch = struct {
 
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
+            .pipeline_q4k_wide = pipeline_q4k_wide,
             .pipeline_mxfp4 = pipeline_mxfp4,
             .pipeline_q5_0 = pipeline_q5_0,
             .pipeline_q5_1 = pipeline_q5_1,
@@ -671,6 +687,7 @@ pub const DmmvDispatch = struct {
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
+        if (self.pipeline_q4k_wide) |*p| p.deinit();
         if (self.pipeline_q5_1) |*p| p.deinit();
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();
