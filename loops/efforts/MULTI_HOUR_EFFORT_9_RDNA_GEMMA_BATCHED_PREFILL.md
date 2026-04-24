@@ -15,6 +15,33 @@
 
 The only lever that moves this is batched prefill: read each weight row once per prompt instead of once per token. That's a ≥10× prefill speedup ceiling, equivalent to what Qwen3-8B already sees (72 → 187 tok/s, 2.6×; Qwen3-8B's ratio is smaller because its weights are smaller relative to attention cost).
 
+## Status update after the first gate-open attempt
+
+Steps 1–5 below landed as orchestration-only changes (dead code behind
+the gate until step 6). When step 6 flipped the gate, validate mode
+exposed a sixth delta the original plan undersold:
+
+**6. Asymmetric GQA (full-attn layers)**
+
+Gemma 4 31B's 10 full-attention layers use different head dimensions
+for Q and KV: `q_head_dim=512` (attn_q: `[hidden, 32*512]`),
+`kv_head_dim=128` (attn_k: `[hidden, 16*128]`). The 50 SWA layers stay
+symmetric at 256. The shipped `flash_attn_batched.comp` has one
+`head_dim` push constant that parameterizes both Q indexing (`q_base = head * head_dim`)
+and KV indexing (`kv_base = ... * n_kv_heads * head_dim + kv_head * head_dim`),
+so a single value can't be right on both sides for Gemma's full-attn
+layers.
+
+Real fix: split `head_dim` into `q_head_dim` and `kv_head_dim` push
+constants on `flash_attn_batched.comp`, update all KV-base arithmetic
+in the shader, thread both through `dispatchFlashAttnBatched`. Adds
+~15 lines of shader, ~3 fields on the dispatch call. Once that lands,
+re-open the gate, re-run validate, and ship.
+
+Gate is currently closed to `.gemma` at `d179253` until that split
+lands. Orchestration changes from Effort 9 steps 1-5 stay in the tree
+as dead code behind the gate — ready to light up.
+
 ## The five deltas
 
 ### 1. Per-layer `head_dim` variance
