@@ -7913,6 +7913,29 @@ pub const InferenceEngine = struct {
 
         state.position = base_token + n_tokens;
 
+        // Backstop the GPU argmax result with a CPU scan over logits_staging.
+        // Validate mode confirmed batched logits are bit-identical to
+        // per-token on Gemma (max_abs_diff=0), but the GPU argmax shader
+        // returns a different index — working theory is that the 262144-
+        // wide vocab + non-power-of-two partials reduction has a subtle
+        // race against a racy barrier. Recomputing on the CPU before
+        // sampleGreedy reads argmax_result_staging costs ~1 ms and
+        // guarantees the first decode token matches the per-token path.
+        if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
+            const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+            const logits = logits_ptr[0..cfg.vocab_size];
+            var best_val = logits[0];
+            var best_idx: u32 = 0;
+            for (logits[1..], 1..) |v, i| {
+                if (v > best_val) {
+                    best_val = v;
+                    best_idx = @intCast(i);
+                }
+            }
+            const staging_ptr: [*]u32 = @ptrCast(@alignCast(self.argmax_result_staging.mapped.?));
+            staging_ptr[0] = best_idx;
+        }
+
         if (validate_mode) {
             // Snapshot batched logits, reset to a fresh request, replay the
             // per-token prefill, then diff the last-token logits.
