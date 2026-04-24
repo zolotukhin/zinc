@@ -7581,10 +7581,15 @@ pub const InferenceEngine = struct {
     /// callers can migrate to the new name ahead of time — matching the Metal
     /// path where `generateWithMetrics` already routes through `prefillBatched`.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        // Default ON for models that pass `canUseBatchedPrefillRdna` — the gate
+        // already rejects anything the batched body doesn't handle. Set
+        // `ZINC_BATCHED_PREFILL=0` to force the per-token fallback (escape
+        // hatch for debugging / numerical-sensitivity testing); `=validate`
+        // runs both paths and diffs the last-token logits.
         const mode = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse "";
-        const batched_on = std.mem.eql(u8, mode, "1");
+        const batched_disabled = std.mem.eql(u8, mode, "0");
         const validate_mode = std.mem.eql(u8, mode, "validate");
-        if ((!batched_on and !validate_mode) or !canUseBatchedPrefillRdna(self)) {
+        if ((batched_disabled and !validate_mode) or !canUseBatchedPrefillRdna(self)) {
             return self.prefillBatch(state, prompt_tokens);
         }
         if (prompt_tokens.len == 0) return;
