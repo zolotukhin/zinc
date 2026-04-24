@@ -15,6 +15,61 @@
 
 The only lever that moves this is batched prefill: read each weight row once per prompt instead of once per token. That's a ≥10× prefill speedup ceiling, equivalent to what Qwen3-8B already sees (72 → 187 tok/s, 2.6×; Qwen3-8B's ratio is smaller because its weights are smaller relative to attention cost).
 
+## Latest validate reading
+
+With validate mode fixed (it was comparing `logits_staging` to itself
+because `prefillBatch` skips the readback copy when GPU argmax is on),
+and all the orchestration changes from steps 1–6 below active, the
+batched-vs-per-token last-token logit diff on Gemma 4 31B
+(18-token prompt, R9700) is:
+
+```
+prefillBatched validate[exceeded]: last-token logits
+    max_abs_diff=60.169582 at idx=569
+    (ref=-51.5062 batched=8.6634) tol=0.001000 n_tokens=18
+```
+
+**60 absolute-diff, same index, opposite sign** — this is not
+floating-point noise. The orchestration has a real numerical bug
+somewhere in the per-layer batched forward. Candidate sources, in
+rough order of likelihood:
+
+1. **`use_k_as_v` handling** — the Gemma 4 full-attention layers
+   (indices 5, 11, 17, …, 59) omit `attn_v` and expect K to double as V.
+   The batched body feeds `scratch_k` to `dispatchKvCacheWriteBatched`
+   as the V source, but the flash-attn dispatch still reads from
+   `self.kv_v_cache[layer_idx]` which was freshly written with the K
+   bytes. That's correct if the KV cache layout for K and V is
+   identical, which it is in the shipped code — but worth double-checking
+   that the K-norm tensor doesn't get applied differently to values
+   destined for K vs V. The per-token path's `use_k_as_v` branch
+   doesn't run the K norm on the V slice for instance, and if batched
+   is applying it uniformly that explains big-magnitude divergence.
+
+2. **`post_attention_norm` / `post_ffw_norm` placement** — step 2
+   inserts these between the O projection and the residual add, which
+   matches the per-token `runDecodeStep` ordering. But the per-token
+   path might be applying them to a different tensor (the residual
+   stream vs the projection output) — worth binary-searching this by
+   disabling the post-norms and running validate again.
+
+3. **`layer_output_scale`** — per-token applies `scale_in_place` to
+   `hidden_buf` at end of layer. Batched applies it to `scratch_hidden`
+   at the same point. If all `layer_output_scales[i]` are 1.0 for
+   Gemma 4 31B (likely), this branch is a no-op and not the culprit.
+
+4. **Per-layer RoPE freq source** — the full-attn layers are supposed
+   to use precomputed `rope_freq_buf`, SWA layers use
+   `rope_freq_base_swa` on-the-fly. If the batched body is passing the
+   wrong source for one class of layer, positional embedding goes
+   wrong for 1/6 (full-attn) or 5/6 (SWA) of the model. Big diff.
+
+The right next step is a layer-by-layer validate sweep: run
+`prefillBatched` for the first N layers + `prefillBatch` for the rest,
+diff the final logits, increment N. The layer where the diff first
+exceeds tolerance is the culprit. Needs adding a debug env flag that
+caps the batched-layer count.
+
 ## Status update after the first gate-open attempt
 
 Steps 1–5 below landed as orchestration-only changes (dead code behind
