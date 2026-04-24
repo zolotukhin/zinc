@@ -4544,8 +4544,15 @@ pub const InferenceEngine = struct {
                         try self.decode_cmd.begin();
                     }
 
-                    // Gemma post-attention norm: RMS norm on o_proj output before residual add
-                    if (apply_post_attn_norm) {
+                    // Gemma post-attention norm: RMS norm on o_proj output before residual add.
+                    // When the fused rms_norm_add pipeline is loaded and we're not in a
+                    // diagnostics path, skip the separate norm dispatch and let the
+                    // residual-add branch below fuse both into one pass.
+                    const use_fused_pan_decode = apply_post_attn_norm and
+                        self.elementwise.pipeline_rms_norm_add != null and
+                        !diag_attn_residual and
+                        config.architecture != .gpt_oss;
+                    if (apply_post_attn_norm and !use_fused_pan_decode) {
                         const pan_tensor = lt.post_attention_norm.?;
                         try self.dispatchRmsNorm(
                             self.o_proj_buf.handle,
@@ -4588,6 +4595,17 @@ pub const InferenceEngine = struct {
                             .size = hidden_size,
                         });
                         self.decode_cmd.transferToComputeBarrier();
+                    } else if (use_fused_pan_decode) {
+                        // Fused Gemma post_attention_norm + residual add in one
+                        // dispatch: hidden += pan_weight * rmsnorm(o_proj_buf).
+                        const pan_tensor = lt.post_attention_norm.?;
+                        try self.dispatchRmsNormAdd(
+                            self.hidden_buf.handle, hidden_size,
+                            self.o_proj_buf.handle, hidden_size,
+                            pan_tensor.gpu_buffer.handle, pan_tensor.gpu_buffer.size,
+                            hidden_dim, 1, rms_norm_eps,
+                        );
+                        self.decode_cmd.computeBarrier();
                     } else {
                         // Attention residual: hidden_buf += o_proj_buf
                         try self.dispatchScaleAcc(
