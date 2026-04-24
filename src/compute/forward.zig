@@ -745,19 +745,20 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gpt_oss) return false;
-    // Gemma 4 is the only architecture with sliding_window_size > 0 and
-    // full_attn_interval != 1 that the batched body now handles (via
-    // per-layer head_dim + post-norms + per-layer RoPE freq + per-layer
-    // output scale). SWA behaves as full-causal attention for prompts
-    // ≤ sliding_window_size; longer prompts need a window_size push
-    // constant on flash_attn_batched (Effort 9 step 5 — not yet landed).
-    // Gate it explicitly so non-Gemma architectures that happen to set
-    // one of those fields still bail.
-    if (cfg.architecture != .gemma) {
-        const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
-        if (full_attn_interval != 1) return false;
-        if (cfg.sliding_window_size != 0) return false;
-    }
+    // Gemma 4 is still gated out — on top of the five deltas the
+    // Effort 9 plan enumerated, Gemma's full-attention layers ship
+    // asymmetric GQA where Q and KV use different head_dim (full-attn:
+    // q_head_dim=512 / kv_head_dim=128, SWA: both 256). The shipped
+    // flash_attn_batched shader assumes q_head_dim == kv_head_dim, so
+    // opening the gate produces numerically wrong output on the 10
+    // full-attn layers. Closing this needs a q_head_dim vs kv_head_dim
+    // split in flash_attn_batched push constants + per-layer threading
+    // through dispatchFlashAttnBatched — a real shader change, not just
+    // orchestration. Captured as an amendment to the Effort 9 plan.
+    if (cfg.architecture == .gemma) return false;
+    const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+    if (full_attn_interval != 1) return false;
+    if (cfg.sliding_window_size != 0) return false;
 
     // Per-layer projections go through dispatchProjectionBatched →
     // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
