@@ -7745,28 +7745,50 @@ pub const InferenceEngine = struct {
             try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, head_dim, cfg.n_heads, cfg.n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
             self.decode_cmd.computeBarrier();
 
-            // O projection → FUSED residual+FFN norm (hidden += down;
-            // norm = normalize(hidden) * ffn_norm_weight). Replaces
-            // scale_acc → barrier → rms_norm_mul with a single dispatch.
+            // O projection, then optional Gemma post-attention norm, then
+            // FUSED residual+FFN norm (hidden += down; norm = normalize(hidden)
+            // * ffn_norm_weight). For non-Gemma this replaces
+            // scale_acc → barrier → rms_norm_mul with a single dispatch; for
+            // Gemma we first RMS-normalize the attn output in place before
+            // the residual add.
             try self.dispatchProjectionBatched(o_t, scratch_attn_out, scratch_down, hidden_dim, q_dim, n_tokens);
             self.decode_cmd.computeBarrier();
+            if (cfg.architecture == .gemma) {
+                if (lt.post_attention_norm) |pan_t| {
+                    try self.dispatchRmsNorm(
+                        scratch_down.handle, scratch_down.size,
+                        pan_t.gpu_buffer.handle, pan_t.gpu_buffer.size,
+                        scratch_down.handle, scratch_down.size,
+                        hidden_dim, n_tokens, eps,
+                    );
+                    self.decode_cmd.computeBarrier();
+                }
+            }
             try self.dispatchResidualRmsNorm(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, scratch_norm.handle, scratch_norm.size, ffn_norm_t.gpu_buffer.handle, ffn_norm_t.gpu_buffer.size, hidden_dim, n_tokens, eps, 1.0);
             self.decode_cmd.computeBarrier();
 
-            // FFN: gate/up → SwiGLU → down → residual.
+            // FFN: gate/up → SwiGLU/GEGLU → down → optional post-ffn norm
+            // (Gemma) → residual.
             try self.dispatchProjectionBatched(gate_t, scratch_norm, scratch_gate, inter_dim, hidden_dim, n_tokens);
             try self.dispatchProjectionBatched(up_t, scratch_norm, scratch_up, inter_dim, hidden_dim, n_tokens);
             self.decode_cmd.computeBarrier();
-            // dispatchFfnActivation picks SwiGLU / GEGLU / SwiGLU-OAI based on
-            // cfg.architecture. canUseBatchedPrefillRdna rejects Gemma and
-            // gpt-oss, so in practice this routes through SwiGLU — but we
-            // stay aligned with the project-wide invariant that FFN
-            // activations go through this dispatcher rather than calling
-            // dispatchSwiglu directly.
+            // dispatchFfnActivation picks SwiGLU / GEGLU / SwiGLU-OAI based
+            // on cfg.architecture. For Gemma this dispatches GEGLU.
             try self.dispatchFfnActivation(scratch_gate.handle, scratch_gate.size, scratch_up.handle, scratch_up.size, scratch_swiglu.handle, scratch_swiglu.size, n_tokens * inter_dim);
             self.decode_cmd.computeBarrier();
             try self.dispatchProjectionBatched(down_t, scratch_swiglu, scratch_down, hidden_dim, inter_dim, n_tokens);
             self.decode_cmd.computeBarrier();
+            if (cfg.architecture == .gemma) {
+                if (lt.post_ffw_norm) |pfn_t| {
+                    try self.dispatchRmsNorm(
+                        scratch_down.handle, scratch_down.size,
+                        pfn_t.gpu_buffer.handle, pfn_t.gpu_buffer.size,
+                        scratch_down.handle, scratch_down.size,
+                        hidden_dim, n_tokens, eps,
+                    );
+                    self.decode_cmd.computeBarrier();
+                }
+            }
             try self.dispatchScaleAcc(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, n_tokens * hidden_dim, 1.0);
             self.decode_cmd.computeBarrier();
         }
