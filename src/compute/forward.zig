@@ -742,6 +742,10 @@ const LayerTensors = struct {
 /// or fall back to `prefillBatch`. Until the batched body lands this just
 /// guards the env flag so enabling it on an unsupported model is a no-op.
 fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
+    // Batched prefill is validated on RDNA3/4 only. Intel Xe2 and other
+    // non-AMD vendors fall back to per-token prefill.
+    const vendor = engine.gpu_config.vendor;
+    if (vendor != .amd_rdna3 and vendor != .amd_rdna4 and vendor != .amd_rdna4_apu) return false;
     const cfg = engine.model.config;
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
