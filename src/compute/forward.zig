@@ -780,13 +780,20 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
 
         const q = lt.attn_q orelse return false;
         const k = lt.attn_k orelse return false;
-        const v = lt.attn_v orelse return false;
+        // Gemma 4's 10 full-attention layers omit attn_v and use K as V;
+        // other architectures always have it.
+        const v_opt = lt.attn_v;
+        if (v_opt == null and cfg.architecture != .gemma) return false;
         const o = lt.attn_output orelse return false;
         const gate = lt.ffn_gate orelse return false;
         const up = lt.ffn_up orelse return false;
         const down = lt.ffn_down orelse return false;
-        for ([_]*const LoadedTensor{ q, k, v, o, gate, up, down }) |t| {
+        const required: [6]*const LoadedTensor = .{ q, k, o, gate, up, down };
+        for (required) |t| {
             if (!isSupported(t.info.type_)) return false;
+        }
+        if (v_opt) |v_tensor| {
+            if (!isSupported(v_tensor.info.type_)) return false;
         }
 
         // Reject packed Q+gate (Qwen3Next): attn_q row count == 2 * q_dim.
@@ -7694,7 +7701,11 @@ pub const InferenceEngine = struct {
             const ffn_norm_t = lt.ffn_norm orelse return error.TensorNotFound;
             const q_t = lt.attn_q.?;
             const k_t = lt.attn_k.?;
-            const v_t = lt.attn_v.?;
+            // Gemma 4 full-attention layers omit attn_v and use K as V.
+            // For those layers, skip the V projection and feed scratch_k
+            // into the KV cache write and flash attention in place of V.
+            const use_k_as_v = lt.attn_v == null and cfg.architecture == .gemma;
+            const v_t_opt = lt.attn_v;
             const o_t = lt.attn_output.?;
             const gate_t = lt.ffn_gate.?;
             const up_t = lt.ffn_up.?;
@@ -7729,9 +7740,13 @@ pub const InferenceEngine = struct {
             self.decode_cmd.computeBarrier();
 
             // Q / K / V projections (weight read once per 32-token chunk).
+            // Gemma's use_k_as_v layers omit the V projection — K doubles
+            // as V for both KV-cache write and flash attention.
             try self.dispatchProjectionBatched(q_t, scratch_norm, scratch_q, layer_q_dim, hidden_dim, n_tokens);
             try self.dispatchProjectionBatched(k_t, scratch_norm, scratch_k, layer_kv_dim, hidden_dim, n_tokens);
-            try self.dispatchProjectionBatched(v_t, scratch_norm, scratch_v, layer_kv_dim, hidden_dim, n_tokens);
+            if (v_t_opt) |v_t| {
+                try self.dispatchProjectionBatched(v_t, scratch_norm, scratch_v, layer_kv_dim, hidden_dim, n_tokens);
+            }
             self.decode_cmd.computeBarrier();
 
             // Optional per-head Q/K norms (Qwen3 style). Dispatch one workgroup per
@@ -7772,10 +7787,14 @@ pub const InferenceEngine = struct {
             // Batched KV cache write: one compute dispatch writes all N tokens'
             // K/V into their paged cache slots via the page_table_buf lookup.
             // base_token places the write after the existing prefix.
+            // For use_k_as_v layers (Gemma full-attn), feed scratch_k as
+            // both K source (normal) and V source (K doubles as V).
+            const v_src_handle = if (use_k_as_v) scratch_k.handle else scratch_v.handle;
+            const v_src_size = if (use_k_as_v) scratch_k.size else scratch_v.size;
             try self.dispatchKvCacheWriteBatched(
                 scratch_k.handle, scratch_k.size,
                 self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
-                scratch_v.handle, scratch_v.size,
+                v_src_handle, v_src_size,
                 self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
                 self.page_table_buf.handle, self.page_table_buf.size,
                 layer_kv_dim,
