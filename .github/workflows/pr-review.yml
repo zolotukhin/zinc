@@ -7,7 +7,6 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-  id-token: write
 
 jobs:
   review:
@@ -22,10 +21,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
-          persist-credentials: false
+          # claude-code-action fetches refs before it sets up its own auth.
+          persist-credentials: true
 
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ github.token }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           prompt: |
             REPO: ${{ github.repository }}

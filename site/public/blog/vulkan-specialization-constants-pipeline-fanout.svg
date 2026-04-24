@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">One SPIR-V, five pipelines, no shared-register compromise</title>
+  <desc id="desc">A two-panel diagram. The left panel shows a single SPIR-V binary fanning out into five Vulkan compute pipelines, each created with a different VkSpecializationInfo value for NUM_COLS (1, 8, 16, 32, 64), with a note that each pipeline gets its own register budget. The right panel shows a horizontal bar chart comparing Qwen3-8B decode throughput under three shader strategies: shared MAX_COLS=32 at 78 tok/s, shared MAX_COLS=64 at 59 tok/s, and specialized NUM_COLS variants at 78 tok/s with no regression.</desc>
+  <defs>
+    <linearGradient id="bg-spec" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-spec" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow-spec" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#53657b"/>
+    </marker>
+    <style>
+      .s-title { font: 700 28px Georgia, serif; fill: #10233c; }
+      .s-sub { font: 500 15px Arial, sans-serif; fill: #53657b; }
+      .s-panel { font: 700 14px Arial, sans-serif; fill: #2c3e54; letter-spacing: 0.03em; text-transform: uppercase; }
+      .s-node { font: 700 14px Arial, sans-serif; fill: #10233c; }
+      .s-node-sm { font: 600 12px Arial, sans-serif; fill: #10233c; }
+      .s-bar-label { font: 600 13px Arial, sans-serif; fill: #10233c; }
+      .s-bar-value { font: 700 13px Arial, sans-serif; fill: #10233c; }
+      .s-axis { font: 400 12px Arial, sans-serif; fill: #53657b; }
+      .s-note { font: 400 13px Arial, sans-serif; fill: #445567; }
+      .s-foot { font: 400 11px Arial, sans-serif; fill: #6b7a8b; }
+      .s-caption { font: 600 12px Arial, sans-serif; fill: #53657b; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="720" fill="url(#bg-spec)"/>
+
+  <g transform="translate(60 38)">
+    <text class="s-title">One SPIR-V, five pipelines, zero shared-register compromise</text>
+    <text class="s-sub" x="0" y="24">How Vulkan specialization constants let the RDNA4 DMMV shader ship per-NUM_COLS variants without the decode regression yesterday's MAX_COLS=32 ceiling was hiding.</text>
+  </g>
+
+  <!-- Panel A: Pipeline fanout diagram -->
+  <g transform="translate(60 120)" filter="url(#shadow-spec)">
+    <rect x="0" y="0" width="620" height="540" rx="12" fill="#ffffff" stroke="#d9e1eb" stroke-width="1"/>
+    <text class="s-panel" x="24" y="34">Pipeline fanout at build time</text>
+
+    <!-- SPIR-V source -->
+    <rect x="220" y="62" width="180" height="52" rx="8" fill="#10233c"/>
+    <text class="s-node" x="310" y="86" text-anchor="middle" fill="#ffffff">dmmv_q4k_batch.spv</text>
+    <text class="s-node-sm" x="310" y="104" text-anchor="middle" fill="#cbd5e1">one SPIR-V module</text>
+
+    <!-- five arrows fan out -->
+    <line x1="310" y1="114" x2="90" y2="190" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="310" y1="114" x2="205" y2="190" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="310" y1="114" x2="310" y2="190" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="310" y1="114" x2="415" y2="190" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="310" y1="114" x2="530" y2="190" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+
+    <!-- five specialization values -->
+    <g>
+      <rect x="40" y="198" width="100" height="40" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+      <text class="s-node-sm" x="90" y="222" text-anchor="middle">NUM_COLS = 1</text>
+      <rect x="155" y="198" width="100" height="40" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+      <text class="s-node-sm" x="205" y="222" text-anchor="middle">NUM_COLS = 8</text>
+      <rect x="260" y="198" width="100" height="40" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+      <text class="s-node-sm" x="310" y="222" text-anchor="middle">NUM_COLS = 16</text>
+      <rect x="365" y="198" width="100" height="40" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+      <text class="s-node-sm" x="415" y="222" text-anchor="middle">NUM_COLS = 32</text>
+      <rect x="480" y="198" width="100" height="40" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+      <text class="s-node-sm" x="530" y="222" text-anchor="middle">NUM_COLS = 64</text>
+    </g>
+    <text class="s-caption" x="310" y="260" text-anchor="middle">VkSpecializationInfo, set once at pipeline creation</text>
+
+    <!-- five pipelines -->
+    <line x1="90" y1="268" x2="90" y2="296" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="205" y1="268" x2="205" y2="296" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="310" y1="268" x2="310" y2="296" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="415" y1="268" x2="415" y2="296" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="530" y1="268" x2="530" y2="296" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+
+    <g>
+      <rect x="40" y="302" width="100" height="56" rx="6" fill="#0f766e"/>
+      <text class="s-node-sm" x="90" y="322" text-anchor="middle" fill="#ffffff">Pipeline 1</text>
+      <text class="s-node-sm" x="90" y="340" text-anchor="middle" fill="#d1fae5">28 VGPRs</text>
+      <rect x="155" y="302" width="100" height="56" rx="6" fill="#0f766e"/>
+      <text class="s-node-sm" x="205" y="322" text-anchor="middle" fill="#ffffff">Pipeline 2</text>
+      <text class="s-node-sm" x="205" y="340" text-anchor="middle" fill="#d1fae5">44 VGPRs</text>
+      <rect x="260" y="302" width="100" height="56" rx="6" fill="#0f766e"/>
+      <text class="s-node-sm" x="310" y="322" text-anchor="middle" fill="#ffffff">Pipeline 3</text>
+      <text class="s-node-sm" x="310" y="340" text-anchor="middle" fill="#d1fae5">60 VGPRs</text>
+      <rect x="365" y="302" width="100" height="56" rx="6" fill="#0f766e"/>
+      <text class="s-node-sm" x="415" y="322" text-anchor="middle" fill="#ffffff">Pipeline 4</text>
+      <text class="s-node-sm" x="415" y="340" text-anchor="middle" fill="#d1fae5">92 VGPRs</text>
+      <rect x="480" y="302" width="100" height="56" rx="6" fill="#b45309"/>
+      <text class="s-node-sm" x="530" y="322" text-anchor="middle" fill="#ffffff">Pipeline 5</text>
+      <text class="s-node-sm" x="530" y="340" text-anchor="middle" fill="#fed7aa">156 VGPRs</text>
+    </g>
+    <text class="s-caption" x="310" y="378" text-anchor="middle">Register allocator sees a static loop bound per variant</text>
+
+    <!-- call sites -->
+    <line x1="90" y1="388" x2="90" y2="416" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="310" y1="388" x2="310" y2="416" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+    <line x1="530" y1="388" x2="530" y2="416" stroke="#53657b" stroke-width="1.5" marker-end="url(#arrow-spec)"/>
+
+    <g>
+      <rect x="20" y="422" width="140" height="40" rx="6" fill="#e2e8f0" stroke="#64748b" stroke-width="1"/>
+      <text class="s-node-sm" x="90" y="446" text-anchor="middle">Decode path</text>
+      <rect x="200" y="422" width="220" height="40" rx="6" fill="#e2e8f0" stroke="#64748b" stroke-width="1"/>
+      <text class="s-node-sm" x="310" y="446" text-anchor="middle">Prefill chunk ≤ 32 cols</text>
+      <rect x="460" y="422" width="140" height="40" rx="6" fill="#e2e8f0" stroke="#64748b" stroke-width="1"/>
+      <text class="s-node-sm" x="530" y="446" text-anchor="middle">Prefill ≥ 64 cols</text>
+    </g>
+
+    <text class="s-note" x="24" y="494">Each call site binds the pipeline whose register budget matches its chunk size.</text>
+    <text class="s-note" x="24" y="512">No caller pays for registers it does not use. No caller sees another caller's ceiling.</text>
+  </g>
+
+  <!-- Panel B: Qwen3-8B decode impact -->
+  <g transform="translate(700 120)" filter="url(#shadow-spec)">
+    <rect x="0" y="0" width="440" height="540" rx="12" fill="#ffffff" stroke="#d9e1eb" stroke-width="1"/>
+    <text class="s-panel" x="24" y="34">Qwen3-8B decode, RX 9070 AI PRO</text>
+    <text class="s-caption" x="24" y="54">token generation throughput, higher is better</text>
+
+    <!-- axis -->
+    <line x1="180" y1="440" x2="400" y2="440" stroke="#9fb0c0" stroke-width="1.5"/>
+    <line x1="180" y1="440" x2="180" y2="446" stroke="#9fb0c0"/>
+    <line x1="290" y1="440" x2="290" y2="446" stroke="#9fb0c0"/>
+    <line x1="400" y1="440" x2="400" y2="446" stroke="#9fb0c0"/>
+    <text class="s-axis" x="180" y="460" text-anchor="middle">0</text>
+    <text class="s-axis" x="290" y="460" text-anchor="middle">40</text>
+    <text class="s-axis" x="400" y="460" text-anchor="middle">80 tok/s</text>
+
+    <!-- Shared MAX_COLS=32, 78 tok/s = 78/80 * 220 = 214.5 px -->
+    <rect x="180" y="96" width="215" height="52" rx="4" fill="#0f766e"/>
+    <text class="s-bar-label" x="24" y="114">Shared MAX_COLS = 32</text>
+    <text class="s-bar-label" x="24" y="134" fill="#53657b">(today's shipped shader)</text>
+    <text class="s-bar-value" x="402" y="127" fill="#10233c">78 tok/s</text>
+
+    <!-- Shared MAX_COLS=64, 59 tok/s = 59/80 * 220 = 162 px -->
+    <rect x="180" y="172" width="162" height="52" rx="4" fill="#b45309"/>
+    <text class="s-bar-label" x="24" y="190">Shared MAX_COLS = 64</text>
+    <text class="s-bar-label" x="24" y="210" fill="#53657b">(prefill-biased tempt)</text>
+    <text class="s-bar-value" x="349" y="203" fill="#10233c">59 tok/s</text>
+
+    <!-- Specialized per-NUM_COLS, 78 tok/s -->
+    <rect x="180" y="248" width="215" height="52" rx="4" fill="#0f766e"/>
+    <text class="s-bar-label" x="24" y="266">Specialized NUM_COLS</text>
+    <text class="s-bar-label" x="24" y="286" fill="#53657b">(per-variant pipelines)</text>
+    <text class="s-bar-value" x="402" y="279" fill="#10233c">78 tok/s</text>
+
+    <!-- annotation -->
+    <line x1="180" y1="320" x2="395" y2="320" stroke="#cbd5e1" stroke-dasharray="4 4"/>
+    <text class="s-caption" x="180" y="340" fill="#6b7a8b">Measured on the same wave64 call site</text>
+    <text class="s-caption" x="180" y="358" fill="#6b7a8b">with num_cols = 1 in all three configs.</text>
+
+    <text class="s-note" x="24" y="396">Sharing one pipeline forces every caller to</text>
+    <text class="s-note" x="24" y="414">reserve the largest register footprint any</text>
+    <text class="s-note" x="24" y="432">caller needs. Specialization unwinds that.</text>
+
+    <text class="s-note" x="24" y="486" fill="#10233c" font-weight="600">The 19 tok/s decode gap between the top and</text>
+    <text class="s-note" x="24" y="504" fill="#10233c" font-weight="600">middle bar is the hidden cost of the MAX_COLS</text>
+    <text class="s-note" x="24" y="522" fill="#10233c" font-weight="600">ceiling that ships in ZINC today.</text>
+  </g>
+
+  <text class="s-foot" x="60" y="700">Decode numbers from ZINC's internal benchmark log on Qwen3-8B Q4_K_M, RX 9070 AI PRO, Radeon 25.Q1 driver. VGPR counts are representative RGA register estimates, not a specific compile.</text>
+</svg>
