@@ -16,6 +16,11 @@ kernel void main0(
     const uint idx = gid.y * p.n + gid.x;
     const float g = gate[idx];
     const float g3 = g * g * g;
-    const float inner = 0.7978845608f * (g + 0.044715f * g3);
-    out[idx] = (0.5f * g * (1.0f + tanh(inner))) * up[idx];
+    // Clamp + precise::tanh mirror the non-batched geglu.metal, which prevents
+    // the fast tanh from producing NaN on M4 when |inner| is large enough that
+    // exp overflows f32 (tanh saturates to ±1 well before |x|=15).
+    float inner = 0.7978845608f * (g + 0.044715f * g3);
+    inner = clamp(inner, -15.0f, 15.0f);
+    const float gelu_g = 0.5f * g * (1.0f + precise::tanh(inner));
+    out[idx] = gelu_g * up[idx];
 }

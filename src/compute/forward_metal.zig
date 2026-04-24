@@ -1233,6 +1233,7 @@ pub const InferenceEngine = struct {
     rope_native_pipe: MetalPipeline,
     sigmoid_mul_pipe: MetalPipeline,
     geglu_pipe: MetalPipeline,
+    geglu_batched_pipe: MetalPipeline,
     swiglu_pipe: MetalPipeline,
     swiglu_batched_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
@@ -1555,6 +1556,7 @@ pub const InferenceEngine = struct {
         self.rope_native_pipe = try loadShaderPipeline(ctx, "rope_native");
         self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.geglu_pipe = try loadShaderPipeline(ctx, "geglu");
+        self.geglu_batched_pipe = try loadShaderPipeline(ctx, "geglu_batched");
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
@@ -2120,6 +2122,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.rope_native_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.geglu_pipe);
+        metal_pipeline.freePipeline(&self.geglu_batched_pipe);
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
@@ -3399,13 +3402,31 @@ fn dispatchDmmvOnCmd(
     K: u32,
     extra_byte_offset: u32,
 ) void {
+    dispatchDmmvOnCmdWithInputOffset(engine, cmd, tensor, input_buf, output_buf, M, K, extra_byte_offset, 0);
+}
+
+/// DMMV with an additional byte offset into the input vector. Used by the
+/// Gemma batched MoE path to read a single expert's activation slice out of a
+/// batched [n_experts_used × K] swiglu buffer without copying.
+fn dispatchDmmvOnCmdWithInputOffset(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+    x_byte_offset: u32,
+) void {
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         // CPU fallback for unsupported quant types. Re-open a command buffer
         // afterwards so later kernels in the same logical sequence still record.
         cmd.commitAndWait();
         const mmap = engine.model.mmap_data orelse return;
         const tdo = engine.model.gguf_file.tensor_data_offset;
-        const in_ptr: [*]const f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+        const in_ptr_base: [*]const f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+        const in_ptr: [*]const f32 = @ptrFromInt(@intFromPtr(in_ptr_base) + x_byte_offset);
         const out_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
         cpuDmmvFallback(mmap, tensor, tdo, in_ptr, out_ptr, M, K, extra_byte_offset, engine.allocator) catch return;
         cmd.* = metal_command.beginCommand(engine.device.ctx) catch .{
@@ -3421,7 +3442,7 @@ fn dispatchDmmvOnCmd(
         .M = M,
         .K = K,
         .a_offset = page_off + extra_byte_offset,
-        .x_offset = 0,
+        .x_offset = x_byte_offset,
         .y_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf };
@@ -4923,7 +4944,30 @@ fn runGemmaExplicitMoeFallback(
     topKSoftmax(@as([*]const f32, router_ptr)[0..cfg.n_experts], cfg.n_experts_used, expert_ids[0..cfg.n_experts_used], expert_weights[0..cfg.n_experts_used]);
     if (profile) |p| p.router_cpu_ns += profileElapsedNs(router_start);
 
-    const adjusted_expert_weights: [16]f32 = expert_weights;
+    var adjusted_expert_weights: [16]f32 = expert_weights;
+    // Fold ffn_down_exps_scale into the per-token expert weights so the
+    // accumulate kernel absorbs it in one fused multiply. Lets us drop the
+    // CPU roundtrip that used to multiply each expert's down output by
+    // scales[expert_ids[ei]] before the accumulate commitAndWait.
+    if (lt.ffn_down_exps_scale) |scale_t| {
+        const scales = try tensorF32Slice(engine, scale_t, cfg.n_experts);
+        for (0..cfg.n_experts_used) |ei| {
+            adjusted_expert_weights[ei] *= scales[expert_ids[ei]];
+        }
+    }
+
+    // Gemma 4's router is CPU-computed (see topKSoftmax above); the batched
+    // MoE DMMV shaders read expert IDs from router_output_buf. Marshal the
+    // CPU IDs into the device-side buffer here so the GPU path can see them.
+    // Weights slot goes unused by the DMMV (the weighted accumulate takes
+    // `adjusted_expert_weights` as push constants), so leave it alone.
+    const use_batched_moe_dispatch =
+        gate_exps.info.type_ == .q4_k and
+        up_exps.info.type_ == .q4_k;
+    if (use_batched_moe_dispatch) {
+        const router_out: [*]u32 = @ptrCast(@alignCast(engine.router_output_buf.cpu_ptr.?));
+        for (0..cfg.n_experts_used) |ei| router_out[ei] = expert_ids[ei];
+    }
 
     var shexp_gate_weight: f32 = 1.0;
     if (lt.ffn_gate_inp_shexp != null) {
@@ -4950,10 +4994,43 @@ fn runGemmaExplicitMoeFallback(
     const moe_record_start = profileStart(profile != null);
     var cmd = try beginProfiledCommand(engine, profile);
 
-    for (0..cfg.n_experts_used) |ei| {
-        const eid = expert_ids[ei];
-        dispatchDmmvOnCmd(engine, &cmd, gate_exps, expert_input_buf, &engine.expert_gate_bufs[ei], inter_dim, hidden_dim, gate_up_layout.gateOffset(eid));
-        dispatchDmmvOnCmd(engine, &cmd, up_exps, expert_input_buf, &engine.expert_up_bufs[ei], inter_dim, hidden_dim, gate_up_layout.upOffset(eid));
+    if (use_batched_moe_dispatch) {
+        // Batched Q4_K gate+up through the fused ffn_gate_up_exps tensor.
+        // gate_expert_stride spans each expert's full 2*inter_dim slice; the
+        // gate/up base offsets pick the gate half (0) vs the up half
+        // (gate_half_bytes). Collapses 16 per-expert dispatches into 2.
+        try dispatchDmmvMoeOnCmd(
+            engine,
+            &cmd,
+            gate_exps,
+            expert_input_buf,
+            &engine.expert_gate_batch_buf,
+            &engine.router_output_buf,
+            inter_dim,
+            hidden_dim,
+            gate_up_layout.gate_expert_stride,
+            0,
+            gate_up_layout.gate_base_offset,
+        );
+        try dispatchDmmvMoeOnCmd(
+            engine,
+            &cmd,
+            up_exps,
+            expert_input_buf,
+            &engine.expert_up_batch_buf,
+            &engine.router_output_buf,
+            inter_dim,
+            hidden_dim,
+            gate_up_layout.up_expert_stride,
+            0,
+            gate_up_layout.up_base_offset,
+        );
+    } else {
+        for (0..cfg.n_experts_used) |ei| {
+            const eid = expert_ids[ei];
+            dispatchDmmvOnCmd(engine, &cmd, gate_exps, expert_input_buf, &engine.expert_gate_bufs[ei], inter_dim, hidden_dim, gate_up_layout.gateOffset(eid));
+            dispatchDmmvOnCmd(engine, &cmd, up_exps, expert_input_buf, &engine.expert_up_bufs[ei], inter_dim, hidden_dim, gate_up_layout.upOffset(eid));
+        }
     }
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, &cmd, gate_shexp.?, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
@@ -4961,8 +5038,15 @@ fn runGemmaExplicitMoeFallback(
     }
     profileBarrier(&cmd, profile, .fallback_moe);
 
-    for (0..cfg.n_experts_used) |ei| {
-        dispatchFfnActivationOnCmd(engine, &cmd, &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei], inter_dim);
+    if (use_batched_moe_dispatch) {
+        // Batched GeGLU across all n_experts_used experts in one dispatch.
+        const push = SwiGLUPush{ .n = inter_dim };
+        const bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
+        cmd.dispatchV2(&engine.geglu_batched_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+    } else {
+        for (0..cfg.n_experts_used) |ei| {
+            dispatchFfnActivationOnCmd(engine, &cmd, &engine.expert_gate_bufs[ei], &engine.expert_swiglu_bufs[ei], &engine.expert_up_bufs[ei], inter_dim);
+        }
     }
     if (has_shexp) {
         dispatchFfnActivationOnCmd(engine, &cmd, &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf, shexp_inter_dim);
@@ -4971,15 +5055,48 @@ fn runGemmaExplicitMoeFallback(
 
     const down_supported = engine.dmmvPipelineForType(down_exps, hidden_dim, inter_dim) != null;
     if (down_supported) {
+        // Q5_1 (Gemma 4 down) lacks a batched MoE variant, so we still fan out
+        // 8 DMMVs — but in the batched path each reads its per-expert swiglu
+        // slice directly from the batched buffer via x_byte_offset, with no
+        // CPU roundtrip.
+        const input_stride_bytes: u32 = inter_dim * @sizeOf(f32);
         for (0..cfg.n_experts_used) |ei| {
             const eid = expert_ids[ei];
-            dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_bufs[ei], &engine.expert_down_bufs[ei], hidden_dim, inter_dim, eid * expert_down_bytes);
+            if (use_batched_moe_dispatch) {
+                const x_off_bytes: u32 = @as(u32, @intCast(ei)) * input_stride_bytes;
+                dispatchDmmvOnCmdWithInputOffset(
+                    engine,
+                    &cmd,
+                    down_exps,
+                    &engine.expert_swiglu_batch_buf,
+                    &engine.expert_down_bufs[ei],
+                    hidden_dim,
+                    inter_dim,
+                    eid * expert_down_bytes,
+                    x_off_bytes,
+                );
+            } else {
+                dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_bufs[ei], &engine.expert_down_bufs[ei], hidden_dim, inter_dim, eid * expert_down_bytes);
+            }
         }
     }
     if (has_shexp) {
         dispatchDmmvOnCmd(engine, &cmd, down_shexp.?, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
     }
-    commitAndWaitProfiled(&cmd, profile);
+    // The interior commit used to sync here was needed for:
+    //  (a) the validation-only block below to read expert_{gate,up,swiglu}_bufs
+    //  (b) the CPU down fallback when !down_supported
+    //  (c) CPU per-expert bias add when ffn_down_exps_bias is present
+    // In the steady-state Gemma 4 path none of those fire, so we leave cmd
+    // open and let the weighted-accumulate dispatch below join the same CB.
+    // This halves the per-layer commit-and-wait count (from 2 to 1), which
+    // is the dominant cost on Metal for Gemma's MoE path.
+    const needs_mid_commit = engine.debug_validation_enabled or
+        !down_supported or
+        lt.ffn_down_exps_bias != null;
+    if (needs_mid_commit) {
+        commitAndWaitProfiled(&cmd, profile);
+    }
 
     if (engine.debug_validation_enabled and engine.position == 0 and layer_idx == 0 and cfg.n_experts_used > 0) {
         const debug_eid = expert_ids[0];
@@ -5042,15 +5159,17 @@ fn runGemmaExplicitMoeFallback(
             addBiasFromTensorSlice(engine, @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?)), b, expert_ids[ei], hidden_dim);
         }
     }
-    if (lt.ffn_down_exps_scale) |scale_t| {
-        const scales = try tensorF32Slice(engine, scale_t, cfg.n_experts);
-        for (0..cfg.n_experts_used) |ei| {
-            const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.expert_down_bufs[ei].cpu_ptr.?));
-            cpuMulScalarInPlace(out_ptr, scales[expert_ids[ei]], hidden_dim);
-        }
-    }
+    // ffn_down_exps_scale is now folded into adjusted_expert_weights above,
+    // so the accumulate kernel absorbs it via its per-expert weight multiply
+    // and we can skip the CPU rescale that used to live here.
 
-    cmd = try beginProfiledCommand(engine, profile);
+    // Reopen the command buffer only if we committed it above; otherwise we
+    // keep appending dispatches to the same CB for a single commit per layer.
+    if (needs_mid_commit) {
+        cmd = try beginProfiledCommand(engine, profile);
+    } else {
+        profileBarrier(&cmd, profile, .fallback_moe);
+    }
     dispatchZeroF32OnCmd(engine, &cmd, &engine.moe_out_buf, hidden_dim);
     profileBarrier(&cmd, profile, .fallback_moe);
     if (cfg.n_experts_used == 8) {
