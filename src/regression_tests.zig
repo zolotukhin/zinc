@@ -109,20 +109,20 @@ test "Vulkan prefillBatched gates on env flag + canUseBatchedPrefillRdna" {
 test "Vulkan prefillBatched uses all batched primitives in the per-layer loop" {
     const src = @embedFile("compute/forward.zig");
     const fn_marker = "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {";
-    try expectContainsNear(src, fn_marker, "dispatchProjectionBatched", 16000);
-    try expectContainsNear(src, fn_marker, "dispatchRopeBatched", 16000);
-    try expectContainsNear(src, fn_marker, "dispatchKvCacheWriteBatched", 16000);
-    try expectContainsNear(src, fn_marker, "dispatchFlashAttnBatched", 16000);
-    try expectContainsNear(src, fn_marker, "dispatchResidualRmsNorm", 16000);
-    try expectContainsNear(src, fn_marker, "dispatchFfnActivation", 16000);
-    try expectContainsNear(src, fn_marker, "dispatchDmmvInner", 16000);
+    try expectContainsNear(src, fn_marker, "dispatchProjectionBatched", 24000);
+    try expectContainsNear(src, fn_marker, "dispatchRopeBatched", 24000);
+    try expectContainsNear(src, fn_marker, "dispatchKvCacheWriteBatched", 24000);
+    try expectContainsNear(src, fn_marker, "dispatchFlashAttnBatched", 24000);
+    try expectContainsNear(src, fn_marker, "dispatchResidualRmsNorm", 24000);
+    try expectContainsNear(src, fn_marker, "dispatchFfnActivation", 24000);
+    try expectContainsNear(src, fn_marker, "dispatchDmmvInner", 24000);
 }
 
 test "Vulkan prefillBatched threads base_token through RoPE, KV write, flash attn" {
     const src = @embedFile("compute/forward.zig");
     const fn_marker = "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {";
-    try expectContainsNear(src, fn_marker, "const base_token: u32 = state.position;", 4000);
-    try expectContainsNear(src, fn_marker, "state.position = base_token + n_tokens;", 16000);
+    try expectContainsNear(src, fn_marker, "const base_token: u32 = state.position;", 6000);
+    try expectContainsNear(src, fn_marker, "state.position = base_token + n_tokens;", 24000);
 }
 
 test "Vulkan batched KV write shader uses page_table with base_token offset" {
