@@ -7737,32 +7737,38 @@ pub const InferenceEngine = struct {
             try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, attn_norm_t.gpu_buffer.handle, attn_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);
             self.decode_cmd.computeBarrier();
 
-            // Q / K / V projections (weight read once per 32-token chunk).
-            // Gemma's use_k_as_v layers omit the V projection, but V must still
-            // be the raw K projection (before K norm + K RoPE mutate scratch_k).
-            // Mirrors per-token: `dispatchDmmv(v_tensor, …)` with v_tensor=k_tensor.
+            // Q / K / V projections (weight read once per chunk). On Gemma's
+            // use_k_as_v layers V is the RAW K projection (pre-norm, pre-rope),
+            // unit-normed per head. Instead of a second K projection we fuse
+            // the copy with the unit-norm: dispatchRmsNorm reads scratch_k and
+            // writes scratch_v. For non-use_k_as_v Gemma layers V has its own
+            // projection; unit-norm is in place.
             try self.dispatchProjectionBatched(q_t, scratch_norm, scratch_q, layer_q_dim, hidden_dim, n_tokens);
             try self.dispatchProjectionBatched(k_t, scratch_norm, scratch_k, layer_kv_dim, hidden_dim, n_tokens);
             if (v_t_opt) |v_t| {
                 try self.dispatchProjectionBatched(v_t, scratch_norm, scratch_v, layer_kv_dim, hidden_dim, n_tokens);
-            } else if (use_k_as_v) {
-                try self.dispatchProjectionBatched(k_t, scratch_norm, scratch_v, layer_kv_dim, hidden_dim, n_tokens);
             }
             self.decode_cmd.computeBarrier();
 
             // Optional per-head Q/K norms (Qwen3 style). Dispatch one workgroup per
             // (token, head) slot — rms_norm_mul handles this via group_id * head_dim.
             // Gemma 4 also applies a plain (unit-weight) RMS norm to V per head —
-            // matches per-token runDecodeStep and forward_metal.zig.
+            // matches per-token runDecodeStep and forward_metal.zig. For use_k_as_v
+            // the unit-norm reads from scratch_k (raw K proj) → scratch_v, doing
+            // the K→V copy and the norm in one pass — but it must finish before
+            // K norm overwrites scratch_k, so place it AHEAD of K norm with a
+            // compute barrier between them.
+            const apply_v_unit_norm = cfg.architecture == .gemma and cfg.rope_freq_base_swa > 0;
+            if (apply_v_unit_norm) {
+                const v_src_for_norm = if (use_k_as_v) scratch_k else scratch_v;
+                try self.dispatchRmsNorm(v_src_for_norm.handle, v_src_for_norm.size, self.unit_norm_weights.handle, self.unit_norm_weights.size, scratch_v.handle, scratch_v.size, layer_head_dim, layer_n_kv_heads * n_tokens, eps);
+                if (use_k_as_v) self.decode_cmd.computeBarrier();
+            }
             if (lt.attn_q_norm) |qn| {
                 try self.dispatchRmsNorm(scratch_q.handle, scratch_q.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, scratch_q.handle, scratch_q.size, layer_head_dim, cfg.n_heads * n_tokens, eps);
             }
             if (lt.attn_k_norm) |kn| {
                 try self.dispatchRmsNorm(scratch_k.handle, scratch_k.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, scratch_k.handle, scratch_k.size, layer_head_dim, layer_n_kv_heads * n_tokens, eps);
-            }
-            const apply_v_unit_norm = cfg.architecture == .gemma and cfg.rope_freq_base_swa > 0;
-            if (apply_v_unit_norm) {
-                try self.dispatchRmsNorm(scratch_v.handle, scratch_v.size, self.unit_norm_weights.handle, self.unit_norm_weights.size, scratch_v.handle, scratch_v.size, layer_head_dim, layer_n_kv_heads * n_tokens, eps);
             }
             if (lt.attn_q_norm != null or lt.attn_k_norm != null or apply_v_unit_norm) self.decode_cmd.computeBarrier();
 

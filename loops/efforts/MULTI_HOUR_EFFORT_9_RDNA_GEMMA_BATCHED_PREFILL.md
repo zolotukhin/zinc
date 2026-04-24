@@ -2,7 +2,32 @@
 
 ## Status
 
-**Blocked.** `canUseBatchedPrefillRdna` rejects Gemma on `cfg.architecture == .gemma` and on `cfg.sliding_window_size != 0`. Opening those gates alone produces structurally wrong output because the `prefillBatched` body assumes LLaMA-shaped layers; Gemma has five architectural deltas from what the body handles today.
+**Shipped at commit `5f5a779`.** Gate re-opened for Gemma (and for
+`sliding_window_size != 0`). The last-token logits match per-token at
+`max_abs_diff=0.000075` on gemma4-31b-q4k-m, R9700 — pure float noise.
+
+Root cause of the 60+ absolute-diff validate divergence was twofold:
+
+1. **Missing V RMS norm.** Per-token applies a plain unit-weight RMS norm
+   to V on every Gemma 4 layer (matches forward_metal.zig and llama.cpp's
+   gemma3 graph). Batched was skipping this entirely.
+2. **V aliased to scratch_k on full-attn layers.** Gemma 4's full-attention
+   layers omit `attn_v` and expect V to equal the raw K projection. Batched
+   was feeding scratch_k directly into the KV cache write and flash-attn as
+   V — but scratch_k had already been K-normed (learned weights) and
+   RoPE'd. V should be the K projection *before* those steps. Per-token
+   handles this by dispatching a second DMMV of `k_tensor` into a separate
+   `v_buf` so K norm/rope mutate only `k_buf`; the batched fix mirrors this
+   by dispatching a second projection of `k_t` into `scratch_v`.
+
+Measured prefill on R9700 with batched on:
+
+| prompt size | baseline (per-token) | batched | speedup |
+|---|---:|---:|---:|
+| 21 tokens   | 4.96 tok/s | 33.32 tok/s | 6.7× |
+| 369 tokens  | 4.97 tok/s | 43.62 tok/s | 8.8× |
+
+Output coherence verified on all 6 RDNA catalog models.
 
 ## Measured baseline (`main` @ `a41c185`, AMD R9700 RDNA4 gfx1201)
 
