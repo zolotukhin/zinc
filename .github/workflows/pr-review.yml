@@ -26,6 +26,7 @@ jobs:
           python3 <<'PY'
           import json
           import os
+          import re
           import sys
           import urllib.error
           import urllib.request
@@ -82,7 +83,9 @@ jobs:
               "Return concise markdown.\n"
               "Prioritize bugs, security issues, regressions, performance problems, and missing tests.\n"
               "List concrete findings first, with severity and file/line references when possible.\n"
-              "If there are no actionable issues, reply exactly: No issues found."
+              "If there are no actionable issues, reply exactly: No issues found.\n"
+              "At the end, include `Verdict: BLOCK` if any finding is High or Critical.\n"
+              "Otherwise include `Verdict: PASS`."
           )
 
           user_prompt = "Review the following pull request diff.\n\n"
@@ -115,7 +118,14 @@ jobs:
           if not content:
               raise SystemExit("GLM returned an empty review body")
 
-          body = f"{marker}\n\n## GLM Review\n\n{content}\n"
+          verdict_match = re.search(r"(?im)^Verdict:\s*(BLOCK|PASS)\s*$", content)
+          if verdict_match:
+              verdict = verdict_match.group(1).upper()
+              content = re.sub(r"(?im)\n?^Verdict:\s*(BLOCK|PASS)\s*$", "", content).rstrip()
+          else:
+              verdict = "BLOCK" if re.search(r"(?i)\bcritical\b|\bhigh severity\b", content) else "PASS"
+
+          body = f"{marker}\n\n## GLM Review\n\n{content}\n\n**Verdict:** {verdict}\n"
           comments_url = f"{github_api}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
           comments = request_json(
               comments_url,
@@ -145,4 +155,7 @@ jobs:
           else:
               request_json(existing["url"], method="PATCH", headers=write_headers, payload={"body": body})
               print("Updated existing GLM review comment.")
+
+          if verdict == "BLOCK":
+              raise SystemExit("GLM review flagged High or Critical findings")
           PY

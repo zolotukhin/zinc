@@ -3754,7 +3754,14 @@ pub const InferenceEngine = struct {
                     }
                 }
                 try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, k_rows, hidden_dim);
-                try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, v_rows, hidden_dim);
+                // Gemma full-attn layers (use_k_as_v) have v_tensor == k_tensor; the
+                // V projection would be a second DMMV reading the same Q4_K weights
+                // from DRAM. Skip it and let the Gemma V unit-norm below read from
+                // k_buf (raw K projection) and write into v_buf, fusing the K→V
+                // copy with the norm. Saves one DMMV per full-attn layer.
+                if (!use_k_as_v) {
+                    try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, v_rows, hidden_dim);
+                }
                 if (packed_q_gate) {
                     // Wait for all DMMV outputs (Q+gate, K, V) before deinterleave
                     self.decode_cmd.computeBarrier();
@@ -3899,6 +3906,30 @@ pub const InferenceEngine = struct {
                 var q_rope_done = is_dead_attn_tail;
                 var k_rope_done = false;
 
+                // Gemma use_k_as_v optimization: V unit-norm reads the RAW K
+                // projection from k_buf and writes to v_buf. Must run BEFORE
+                // K norm (which overwrites k_buf with the learned-weight norm
+                // and/or rope). Barrier after ensures v_buf visibility and
+                // that K norm sees raw k_buf. Non-use_k_as_v path keeps the
+                // original V unit-norm ordering below.
+                const apply_v_unit_norm_early = use_k_as_v and
+                    config.architecture == .gemma and
+                    config.rope_freq_base_swa > 0;
+                if (apply_v_unit_norm_early) {
+                    try self.dispatchRmsNorm(
+                        self.k_buf.handle,
+                        self.k_buf.size,
+                        self.unit_norm_weights.handle,
+                        self.unit_norm_weights.size,
+                        self.v_buf.handle,
+                        self.v_buf.size,
+                        layer_head_dim,
+                        layer_n_kv_heads,
+                        rms_norm_eps,
+                    );
+                    self.decode_cmd.computeBarrier();
+                }
+
                 if (q_norm_tensor) |qn| {
                     // Skip Q norm/RoPE for dead-tail tokens: q_buf only feeds flash_attn.
                     // Still mark q_rope_done=true so the fallback-path Q RoPE below is
@@ -3971,8 +4002,9 @@ pub const InferenceEngine = struct {
                     }
                 }
                 // Gemma 4 applies plain RMS norm (unit weights) to V per-head.
-                // Mirrors Metal forward_metal.zig:3460-3462.
-                if (config.architecture == .gemma and config.rope_freq_base_swa > 0) {
+                // Mirrors Metal forward_metal.zig:3460-3462. For use_k_as_v
+                // layers this already ran ahead of Q/K norms above — skip here.
+                if (config.architecture == .gemma and config.rope_freq_base_swa > 0 and !apply_v_unit_norm_early) {
                     try self.dispatchRmsNorm(
                         self.v_buf.handle,
                         self.v_buf.size,
@@ -4544,8 +4576,15 @@ pub const InferenceEngine = struct {
                         try self.decode_cmd.begin();
                     }
 
-                    // Gemma post-attention norm: RMS norm on o_proj output before residual add
-                    if (apply_post_attn_norm) {
+                    // Gemma post-attention norm: RMS norm on o_proj output before residual add.
+                    // When the fused rms_norm_add pipeline is loaded and we're not in a
+                    // diagnostics path, skip the separate norm dispatch and let the
+                    // residual-add branch below fuse both into one pass.
+                    const use_fused_pan_decode = apply_post_attn_norm and
+                        self.elementwise.pipeline_rms_norm_add != null and
+                        !diag_attn_residual and
+                        config.architecture != .gpt_oss;
+                    if (apply_post_attn_norm and !use_fused_pan_decode) {
                         const pan_tensor = lt.post_attention_norm.?;
                         try self.dispatchRmsNorm(
                             self.o_proj_buf.handle,
@@ -4588,6 +4627,17 @@ pub const InferenceEngine = struct {
                             .size = hidden_size,
                         });
                         self.decode_cmd.transferToComputeBarrier();
+                    } else if (use_fused_pan_decode) {
+                        // Fused Gemma post_attention_norm + residual add in one
+                        // dispatch: hidden += pan_weight * rmsnorm(o_proj_buf).
+                        const pan_tensor = lt.post_attention_norm.?;
+                        try self.dispatchRmsNormAdd(
+                            self.hidden_buf.handle, hidden_size,
+                            self.o_proj_buf.handle, hidden_size,
+                            pan_tensor.gpu_buffer.handle, pan_tensor.gpu_buffer.size,
+                            hidden_dim, 1, rms_norm_eps,
+                        );
+                        self.decode_cmd.computeBarrier();
                     } else {
                         // Attention residual: hidden_buf += o_proj_buf
                         try self.dispatchScaleAcc(
@@ -6069,10 +6119,27 @@ pub const InferenceEngine = struct {
                 );
                 self.decode_cmd.computeBarrier();
 
+                // Fast path: fuse down proj + post_ffw_norm + residual add into
+                // two dispatches when the Gemma tail is active and the fused
+                // rms_norm_add pipeline is loaded. Saves one dispatch + one
+                // barrier per Gemma decode layer (60 on gemma4-31b).
+                const use_fused_pfn_decode = lt.post_ffw_norm != null and
+                    self.elementwise.pipeline_rms_norm_add != null and
+                    !self.validation_diagnostics_enabled;
                 if (lt.post_ffw_norm == null and !self.validation_diagnostics_enabled) {
                     // Fused: down DMMV accumulates directly into hidden_buf,
                     // eliminating separate scale_acc dispatch + barrier
                     try self.dispatchDmmvAcc(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.hidden_buf, hidden_dim, inter_dim);
+                } else if (use_fused_pfn_decode) {
+                    try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
+                    self.decode_cmd.computeBarrier();
+                    const pfn_tensor = lt.post_ffw_norm.?;
+                    try self.dispatchRmsNormAdd(
+                        self.hidden_buf.handle, hidden_size,
+                        self.down_buf.handle, hidden_size,
+                        pfn_tensor.gpu_buffer.handle, pfn_tensor.gpu_buffer.size,
+                        hidden_dim, 1, rms_norm_eps,
+                    );
                 } else {
                     // Unfused path: needed for Gemma post-FFN norm or diagnostics
                     try self.dispatchDmmv(down_tensor, self.swiglu_buf, self.swiglu_buf.size, self.down_buf, hidden_dim, inter_dim);
@@ -6152,14 +6219,16 @@ pub const InferenceEngine = struct {
                     }
 
                     // FFN residual: hidden_buf += down_buf
-                    try self.dispatchScaleAcc(
-                        self.hidden_buf.handle,
-                        hidden_size,
-                        self.down_buf.handle,
-                        hidden_size,
-                        hidden_dim,
-                        1.0,
-                    );
+                    if (!use_fused_pfn_decode) {
+                        try self.dispatchScaleAcc(
+                            self.hidden_buf.handle,
+                            hidden_size,
+                            self.down_buf.handle,
+                            hidden_size,
+                            hidden_dim,
+                            1.0,
+                        );
+                    }
                 }
             }
 
@@ -6879,6 +6948,38 @@ pub const InferenceEngine = struct {
         };
 
         if (pip.uses_push_descriptors) {
+            // Wide-vocab LM-head fast path: NUM_ROWS=8 variant (pipeline_q4k_wide)
+            // for tall Q4_K matrices like Gemma 4 31B (M=262144). Same binding
+            // layout as pipeline_q4k, only the shader constant differs. 4× fewer
+            // workgroups, 4× more hidden-vector reuse per workgroup, which
+            // turns the decode tail from ~45 ms into a small fraction.
+            if (qt == .q4_k and M >= 100_000 and acc_mode == 0 and self.dmmv.pipeline_q4k_wide != null) {
+                const wide_pip = &self.dmmv.pipeline_q4k_wide.?;
+                const push_wide = DmmvPushConstants{
+                    .M = M,
+                    .K = K,
+                    .a_offset = a_offset,
+                    .x_offset = x_offset,
+                    .y_offset = y_offset,
+                    .acc_mode = acc_mode,
+                };
+                // NUM_ROWS=8 → one workgroup per 8 rows.
+                self.pushDispatch3(
+                    wide_pip,
+                    std.mem.asBytes(&push_wide),
+                    tensor.gpu_buffer.handle,
+                    tensor.gpu_buffer.size,
+                    input_buf.handle,
+                    input_size,
+                    output_buf.handle,
+                    output_buf.size,
+                    (M + 7) / 8,
+                    1,
+                    1,
+                );
+                return;
+            }
+
             // For Q4K large M (LM head), use batch shader for better parallelism.
             if (qt == .q4_k and M > 65536 and self.dmmv.pipeline_q4k_batch != null) {
                 try self.dmmv.recordBatchDispatchPush(
