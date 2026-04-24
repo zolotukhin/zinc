@@ -1217,6 +1217,7 @@ pub const InferenceEngine = struct {
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
+    dmmv_q5_1_moe_pipe: MetalPipeline,
     dmmv_q5k_moe_pipe: MetalPipeline,
     dmmv_q5k_moe_k2048_pipe: MetalPipeline,
     dmmv_q6k_moe_pipe: MetalPipeline,
@@ -1540,6 +1541,7 @@ pub const InferenceEngine = struct {
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
+        self.dmmv_q5_1_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe");
         self.dmmv_q5k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
         self.dmmv_q5k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe_k2048");
         self.dmmv_q6k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_moe");
@@ -2108,6 +2110,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q5_1_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_moe_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_moe_pipe);
@@ -3557,6 +3560,40 @@ fn dispatchDmmvMoeQ5kOnCmd(
     cmd.dispatchV2(pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
 }
 
+fn dispatchDmmvMoeQ5_1OnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    routing_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    x_expert_stride: u32,
+    extra_byte_offset: u32,
+) void {
+    if (tensor.info.type_ != .q5_1) {
+        log.err("Batched Q5_1 MoE DMMV called with wrong type (tensor {s})", .{tensor.info.name});
+        return;
+    }
+    const push = MoeDmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+        .expert_stride = expert_stride,
+        .x_expert_stride = x_expert_stride,
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
+    // 2 rows per workgroup (matches dmmv_q5_1.metal: 2 simdgroups × 32 threads).
+    const rows_per_wg: u32 = 2;
+    const block_size: u32 = 64;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    cmd.dispatchV2(&engine.dmmv_q5_1_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+}
+
 fn dispatchDmmvMoeQ6kOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -3612,6 +3649,7 @@ fn dispatchDmmvMoeOnCmd(
 
     switch (tensor.info.type_) {
         .q4_k => dispatchDmmvMoeQ4kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
+        .q5_1 => dispatchDmmvMoeQ5_1OnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
         .q5_k => dispatchDmmvMoeQ5kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
         .q6_k => dispatchDmmvMoeQ6kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
         else => return error.UnsupportedQuantType,
@@ -5054,11 +5092,13 @@ fn runGemmaExplicitMoeFallback(
     profileBarrier(&cmd, profile, .fallback_moe);
 
     const down_supported = engine.dmmvPipelineForType(down_exps, hidden_dim, inter_dim) != null;
+    // Per-expert down path. Benchmarking on M4 showed the batched Q5_1 MoE
+    // dispatch was slightly slower than 8 per-expert dispatches (3057 vs 3000
+    // ms/tok, profile kept commits=1472 in both cases). Kept the Q5_1 MoE
+    // shader in the tree for future reuse but don't enable it here.
+    const use_batched_down = false;
+    _ = use_batched_down;
     if (down_supported) {
-        // Q5_1 (Gemma 4 down) lacks a batched MoE variant, so we still fan out
-        // 8 DMMVs — but in the batched path each reads its per-expert swiglu
-        // slice directly from the batched buffer via x_byte_offset, with no
-        // CPU roundtrip.
         const input_stride_bytes: u32 = inter_dim * @sizeOf(f32);
         for (0..cfg.n_experts_used) |ei| {
             const eid = expert_ids[ei];
