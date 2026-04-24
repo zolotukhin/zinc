@@ -7602,11 +7602,10 @@ pub const InferenceEngine = struct {
         // batched_scratch_hidden (device-local) inside the command buffer.
         const cfg = self.model.config;
         const hidden_dim = cfg.hidden_dim;
-        const q_dim: u32 = cfg.n_heads * cfg.head_dim;
-        const kv_dim: u32 = cfg.n_kv_heads * cfg.head_dim;
         const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
-        const head_dim = cfg.head_dim;
-        const rope_dim: u32 = if (cfg.rope_dim > 0) @min(cfg.rope_dim, head_dim) else head_dim;
+        // Per-layer head_dim / q_dim / kv_dim / rope_dim are derived inside
+        // the layer loop (Gemma-aware). cfg.head_dim is only used as the
+        // scratch-buffer sizing ceiling via ensureBatchedScratchCapacity.
         const total_embed_bytes: u64 = @as(u64, hidden_dim) * @as(u64, n_tokens) * @sizeOf(f32);
         if (self.prefill_embed_big == null or self.prefill_embed_big_capacity_bytes < total_embed_bytes) {
             if (self.prefill_embed_big) |*b| b.deinit();
@@ -7695,31 +7694,53 @@ pub const InferenceEngine = struct {
             const up_t = lt.ffn_up.?;
             const down_t = lt.ffn_down.?;
 
+            // Per-layer attention dims. Gemma 4 mixes head_dim=512 on
+            // full-attention layers with head_dim=256 on SWA layers, so
+            // head_dim / q_dim / kv_dim can't be global. Derive from the
+            // per-head Q norm tensor when present (same pattern as the
+            // per-token decode path at runDecodeStep), otherwise fall back
+            // to cfg.head_dim which applies to every layer on LLaMA /
+            // Qwen-style architectures.
+            const layer_head_dim: u32 = if (lt.attn_q_norm) |qn|
+                @intCast(qn.info.numElements())
+            else
+                cfg.head_dim;
+            const layer_q_dim: u32 = cfg.n_heads * layer_head_dim;
+            const layer_kv_dim: u32 = cfg.n_kv_heads * layer_head_dim;
+            const layer_rope_dim: u32 = if (cfg.rope_dim > 0)
+                @min(cfg.rope_dim, layer_head_dim)
+            else
+                layer_head_dim;
+            // The O projection's input dimension is whatever the weight row
+            // count says — for Gemma this is layer_q_dim and matches, for
+            // architectures without attn_q_norm it falls through to q_dim.
+            const o_input_cols: u32 = @intCast(o_t.info.numElements() / hidden_dim);
+
             // attn RMS norm: hidden → norm
             try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, attn_norm_t.gpu_buffer.handle, attn_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);
             self.decode_cmd.computeBarrier();
 
             // Q / K / V projections (weight read once per 32-token chunk).
-            try self.dispatchProjectionBatched(q_t, scratch_norm, scratch_q, q_dim, hidden_dim, n_tokens);
-            try self.dispatchProjectionBatched(k_t, scratch_norm, scratch_k, kv_dim, hidden_dim, n_tokens);
-            try self.dispatchProjectionBatched(v_t, scratch_norm, scratch_v, kv_dim, hidden_dim, n_tokens);
+            try self.dispatchProjectionBatched(q_t, scratch_norm, scratch_q, layer_q_dim, hidden_dim, n_tokens);
+            try self.dispatchProjectionBatched(k_t, scratch_norm, scratch_k, layer_kv_dim, hidden_dim, n_tokens);
+            try self.dispatchProjectionBatched(v_t, scratch_norm, scratch_v, layer_kv_dim, hidden_dim, n_tokens);
             self.decode_cmd.computeBarrier();
 
             // Optional per-head Q/K norms (Qwen3 style). Dispatch one workgroup per
             // (token, head) slot — rms_norm_mul handles this via group_id * head_dim.
             if (lt.attn_q_norm) |qn| {
-                try self.dispatchRmsNorm(scratch_q.handle, scratch_q.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, scratch_q.handle, scratch_q.size, head_dim, cfg.n_heads * n_tokens, eps);
+                try self.dispatchRmsNorm(scratch_q.handle, scratch_q.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, scratch_q.handle, scratch_q.size, layer_head_dim, cfg.n_heads * n_tokens, eps);
             }
             if (lt.attn_k_norm) |kn| {
-                try self.dispatchRmsNorm(scratch_k.handle, scratch_k.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, scratch_k.handle, scratch_k.size, head_dim, cfg.n_kv_heads * n_tokens, eps);
+                try self.dispatchRmsNorm(scratch_k.handle, scratch_k.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, scratch_k.handle, scratch_k.size, layer_head_dim, cfg.n_kv_heads * n_tokens, eps);
             }
             if (lt.attn_q_norm != null or lt.attn_k_norm != null) self.decode_cmd.computeBarrier();
 
             // Batched RoPE for Q and K. position_base = state.position so a
             // prefix-reuse call rotates the newly-added tokens at the correct
             // sequence positions (base_token, base_token+1, ..., base_token+N-1).
-            try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
-            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, head_dim, rope_dim, cfg.n_kv_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
+            try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
+            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_kv_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
             self.decode_cmd.computeBarrier();
 
             // Batched KV cache write: one compute dispatch writes all N tokens'
@@ -7731,7 +7752,7 @@ pub const InferenceEngine = struct {
                 scratch_v.handle, scratch_v.size,
                 self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
                 self.page_table_buf.handle, self.page_table_buf.size,
-                kv_dim,
+                layer_kv_dim,
                 n_tokens,
                 kv_page_size_tokens,
                 base_token,
@@ -7742,7 +7763,7 @@ pub const InferenceEngine = struct {
             // seq_start = base_token so each query attends to prefix + own
             // position within the batch (causal_len = base_token + query + 1).
             const sink_offset = layer * cfg.n_heads;
-            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, head_dim, cfg.n_heads, cfg.n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
+            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, layer_head_dim, cfg.n_heads, cfg.n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
             self.decode_cmd.computeBarrier();
 
             // O projection, then optional Gemma post-attention norm, then
@@ -7751,7 +7772,7 @@ pub const InferenceEngine = struct {
             // scale_acc → barrier → rms_norm_mul with a single dispatch; for
             // Gemma we first RMS-normalize the attn output in place before
             // the residual add.
-            try self.dispatchProjectionBatched(o_t, scratch_attn_out, scratch_down, hidden_dim, q_dim, n_tokens);
+            try self.dispatchProjectionBatched(o_t, scratch_attn_out, scratch_down, hidden_dim, o_input_cols, n_tokens);
             self.decode_cmd.computeBarrier();
             if (cfg.architecture == .gemma) {
                 if (lt.post_attention_norm) |pan_t| {
