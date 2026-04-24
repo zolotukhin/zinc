@@ -96,6 +96,7 @@ jobs:
                   {"role": "system", "content": system_prompt},
                   {"role": "user", "content": user_prompt},
               ],
+              "thinking": {"type": "disabled"},
               "max_tokens": 2048,
               "temperature": 0.2,
           }
@@ -107,7 +108,12 @@ jobs:
           }
           review_url = f"{zai_base}/chat/completions"
           review_data = request_json(review_url, method="POST", headers=review_headers, payload=review_request)
-          content = review_data["choices"][0]["message"]["content"].strip()
+          message = review_data["choices"][0]["message"]
+          content = (message.get("content") or "").strip()
+          if not content:
+              content = (message.get("reasoning_content") or "").strip()
+          if not content:
+              raise SystemExit("GLM returned an empty review body")
 
           body = f"{marker}\n\n## GLM Review\n\n{content}\n"
           comments_url = f"{github_api}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
