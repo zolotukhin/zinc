@@ -151,6 +151,14 @@ pub const NormRopePush = extern struct {
     eps_bits: u32,
 };
 
+/// Push constants for fused rmsnorm(src) + hidden accumulate shader
+/// (src/shaders/rms_norm_add.comp). Used by Gemma prefillBatched to fold
+/// post_ffw_norm + residual add into one dispatch.
+pub const RmsNormAddPush = extern struct {
+    n: u32,
+    eps: f32,
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -198,6 +206,9 @@ pub const ElementwiseDispatch = struct {
     pipeline_kv_cache_write_batched: ?Pipeline,
     /// Fused residual-add + RMS norm for prefillBatched (4 bindings).
     pipeline_residual_rms_norm: ?Pipeline,
+    /// Fused RMS norm + residual-accumulate (hidden += weight * rmsnorm(src)),
+    /// 3 bindings (hidden, src, weights). Used by Gemma's post_ffw_norm tail.
+    pipeline_rms_norm_add: ?Pipeline,
     /// NORM ROPE pipeline: fused RMS norm + RoPE per head, 3 bindings (data, weight, freq).
     pipeline_norm_rope: ?Pipeline,
     /// Descriptor pool for this dispatch.
@@ -428,6 +439,15 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // rms_norm_add: fused rmsnorm(src) + hidden accumulate, 3 bindings
+        // (hidden, src, weights). Used by Gemma's post_ffw_norm + residual tail
+        // to save one dispatch + one barrier per layer.
+        const rms_norm_add_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_add.spv", .{shader_dir}) catch unreachable;
+        const pipeline_rms_norm_add = pipeline_mod.createFromSpirvWithOptions(instance, rms_norm_add_path, 3, @sizeOf(RmsNormAddPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("rms_norm_add shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -453,6 +473,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_kv_cache_write = pipeline_kv_cache_write,
             .pipeline_kv_cache_write_batched = pipeline_kv_cache_write_batched,
             .pipeline_residual_rms_norm = pipeline_residual_rms_norm,
+            .pipeline_rms_norm_add = pipeline_rms_norm_add,
             .pipeline_norm_rope = pipeline_norm_rope,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
@@ -814,6 +835,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_kv_cache_write) |*p| p.deinit();
         if (self.pipeline_kv_cache_write_batched) |*p| p.deinit();
         if (self.pipeline_residual_rms_norm) |*p| p.deinit();
+        if (self.pipeline_rms_norm_add) |*p| p.deinit();
         if (self.pipeline_norm_rope) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;

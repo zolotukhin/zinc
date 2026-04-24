@@ -1,0 +1,59 @@
+#version 460
+// ZINC — fused RMS norm + residual accumulate.
+//
+// Semantics (per token):
+//   rms_inv = rsqrt(mean(src[]^2) + eps)
+//   hidden[i] += weights[i] * src[i] * rms_inv
+//
+// Used by the Gemma prefillBatched tail to fold post_ffw_norm (formerly
+// an in-place rms_norm_mul on scratch_down) and the subsequent residual
+// add (scale_accumulate hidden += scratch_down) into a single dispatch,
+// eliminating one barrier per Gemma layer (60 barriers on gemma4-31b).
+//
+// Dispatch: (n_tokens, 1, 1), local_size_x = 64 (one wave per token).
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint  n;     // hidden_dim
+    float eps;
+};
+
+layout(set = 0, binding = 0)          buffer Hidden   { float hidden[];  };
+layout(set = 0, binding = 1) readonly buffer Src      { float src[];     };
+layout(set = 0, binding = 2) readonly buffer Weights  { float weights[]; };
+
+shared float s_partial[64];
+
+void main() {
+    uint tid   = gl_LocalInvocationID.x;
+    uint token = gl_WorkGroupID.x;
+    uint base  = token * n;
+
+    float sum_sq = 0.0;
+    for (uint i = tid; i < n; i += 64u) {
+        float s = src[base + i];
+        sum_sq += s * s;
+    }
+
+    float total = subgroupAdd(sum_sq);
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) s_partial[gl_SubgroupID] = total;
+        barrier();
+        if (tid == 0u) {
+            float merged = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_partial[sg];
+            s_partial[0] = merged;
+        }
+        barrier();
+        total = s_partial[0];
+    }
+
+    float rms_inv = inversesqrt((total / float(n)) + eps);
+
+    for (uint i = tid; i < n; i += 64u) {
+        hidden[base + i] += weights[i] * src[base + i] * rms_inv;
+    }
+}

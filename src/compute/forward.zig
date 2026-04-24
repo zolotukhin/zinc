@@ -40,6 +40,7 @@ const DeinterleavePush = elementwise_mod.DeinterleavePush;
 const KvCacheWritePush = elementwise_mod.KvCacheWritePush;
 const KvCacheWriteBatchedPush = elementwise_mod.KvCacheWriteBatchedPush;
 const ResidualRmsNormPush = elementwise_mod.ResidualRmsNormPush;
+const RmsNormAddPush = elementwise_mod.RmsNormAddPush;
 const NormRopePush = elementwise_mod.NormRopePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
@@ -6493,6 +6494,48 @@ pub const InferenceEngine = struct {
     /// One dispatch per N tokens replaces scale_acc → barrier → rms_norm_mul,
     /// eliminating one barrier per occurrence in prefillBatched (2 × n_layers
     /// barriers saved for a 36-layer LLaMA-style network).
+    /// Fused rmsnorm(src) + hidden accumulate.
+    ///   rms_inv = rsqrt(mean(src^2) + eps)
+    ///   hidden[i] += weights[i] * src[i] * rms_inv
+    ///
+    /// Used by Gemma's post_ffw_norm tail. Replaces a separate rms_norm_mul
+    /// (in place on scratch_down) + scale_accumulate (hidden += scratch_down)
+    /// pair with a single dispatch.
+    fn dispatchRmsNormAdd(
+        self: *InferenceEngine,
+        hidden: vk.c.VkBuffer,
+        hidden_size: vk.c.VkDeviceSize,
+        src: vk.c.VkBuffer,
+        src_size: vk.c.VkDeviceSize,
+        weights: vk.c.VkBuffer,
+        weights_size: vk.c.VkDeviceSize,
+        hidden_dim: u32,
+        n_tokens: u32,
+        eps: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_rms_norm_add orelse return error.ShaderNotLoaded);
+        const push = RmsNormAddPush{ .n = hidden_dim, .eps = eps };
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch3(
+                pip,
+                std.mem.asBytes(&push),
+                hidden,
+                hidden_size,
+                src,
+                src_size,
+                weights,
+                weights_size,
+                n_tokens,
+                1,
+                1,
+            );
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet3(ds, hidden, hidden_size, src, src_size, weights, weights_size);
+        self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), n_tokens, 1, 1);
+    }
+
     fn dispatchResidualRmsNorm(
         self: *InferenceEngine,
         hidden: vk.c.VkBuffer,
@@ -7860,18 +7903,35 @@ pub const InferenceEngine = struct {
             self.decode_cmd.computeBarrier();
             try self.dispatchProjectionBatched(down_t, scratch_swiglu, scratch_down, hidden_dim, inter_dim, n_tokens);
             self.decode_cmd.computeBarrier();
-            if (cfg.architecture == .gemma) {
-                if (lt.post_ffw_norm) |pfn_t| {
-                    try self.dispatchRmsNorm(
-                        scratch_down.handle, scratch_down.size,
-                        pfn_t.gpu_buffer.handle, pfn_t.gpu_buffer.size,
-                        scratch_down.handle, scratch_down.size,
-                        hidden_dim, n_tokens, eps,
-                    );
-                    self.decode_cmd.computeBarrier();
+            // Fused post_ffw_norm + residual add for Gemma: one dispatch
+            // instead of (rms_norm_mul in place) + barrier + (scale_accumulate).
+            // Falls back to the separate ops for non-Gemma or when the fused
+            // pipeline failed to load.
+            const use_fused_pfn = cfg.architecture == .gemma and
+                lt.post_ffw_norm != null and
+                self.elementwise.pipeline_rms_norm_add != null;
+            if (use_fused_pfn) {
+                const pfn_t = lt.post_ffw_norm.?;
+                try self.dispatchRmsNormAdd(
+                    scratch_hidden.handle, scratch_hidden.size,
+                    scratch_down.handle, scratch_down.size,
+                    pfn_t.gpu_buffer.handle, pfn_t.gpu_buffer.size,
+                    hidden_dim, n_tokens, eps,
+                );
+            } else {
+                if (cfg.architecture == .gemma) {
+                    if (lt.post_ffw_norm) |pfn_t| {
+                        try self.dispatchRmsNorm(
+                            scratch_down.handle, scratch_down.size,
+                            pfn_t.gpu_buffer.handle, pfn_t.gpu_buffer.size,
+                            scratch_down.handle, scratch_down.size,
+                            hidden_dim, n_tokens, eps,
+                        );
+                        self.decode_cmd.computeBarrier();
+                    }
                 }
+                try self.dispatchScaleAcc(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, n_tokens * hidden_dim, 1.0);
             }
-            try self.dispatchScaleAcc(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, n_tokens * hidden_dim, 1.0);
             self.decode_cmd.computeBarrier();
 
             // Gemma 4 per-layer output scale: hidden *= scale (applied to the
