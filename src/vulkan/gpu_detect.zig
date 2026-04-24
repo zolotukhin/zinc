@@ -248,10 +248,12 @@ fn classifyAmd(device_id: u32, name: []const u8) GpuVendor {
 /// Classify Intel GPU architecture from device ID and name.
 fn classifyIntel(device_id: u32, name: []const u8) GpuVendor {
     _ = device_id;
-    // Xe2 = Battlemage (Arc B-series): device names contain " B" followed by digits,
-    // or contain "Xe2" or "Battlemage".
+    // Xe2 = Battlemage (Arc B-series): Mesa ANV reports these as
+    // "Intel(R) Graphics (BMG Gxx)" where BMG is the Battlemage codename.
+    // Retail names like "Arc B580" / "Arc B770" may also appear.
     // Xe-HPG = Alchemist (Arc A-series): default for other Intel Arc GPUs.
-    if (containsIgnoreCase(name, "xe2") or
+    if (containsIgnoreCase(name, "bmg") or
+        containsIgnoreCase(name, "xe2") or
         containsIgnoreCase(name, "battlemage") or
         containsIgnoreCase(name, " b5") or
         containsIgnoreCase(name, " b7"))
@@ -305,6 +307,8 @@ test "classifyAmd — RDNA3" {
 test "classifyIntel — Arc B-series (Xe2)" {
     try std.testing.expectEqual(GpuVendor.intel_arc_xe2, classifyIntel(0x0000, "Intel Arc B770 Pro"));
     try std.testing.expectEqual(GpuVendor.intel_arc_xe2, classifyIntel(0x0000, "Intel Arc B580"));
+    // Real Mesa ANV device name on Arc B70 (BMG G31)
+    try std.testing.expectEqual(GpuVendor.intel_arc_xe2, classifyIntel(0x0000, "Intel(R) Graphics (BMG G31)"));
 }
 
 test "classifyIntel — Arc A-series (Xe-HPG)" {
