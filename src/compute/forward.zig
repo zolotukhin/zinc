@@ -745,15 +745,18 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gpt_oss) return false;
-    // Gemma 4 handled via per-layer head_dim / n_kv_heads threading in
-    // the batched body. Prompts ≤ sliding_window_size degenerate SWA
-    // to full-causal attention so the shipped flash_attn_batched works
-    // without a window_size push constant for typical chat turns.
-    if (cfg.architecture != .gemma) {
-        const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
-        if (full_attn_interval != 1) return false;
-        if (cfg.sliding_window_size != 0) return false;
-    }
+    // Gemma re-closed: validate mode had a bug (compared logits_staging
+    // to itself because prefillBatch skips the readback copy when GPU
+    // argmax is available), so the "max_abs_diff=0" reading was a lie.
+    // Actual batched-vs-per-token first-token output diverges (236772
+    // vs 50429). All the orchestration changes from steps 1-5 stay in
+    // the tree as dead code behind this gate — once validate mode is
+    // fixed to force readback (next commit), we'll see the real diff
+    // and have a concrete target to chase.
+    if (cfg.architecture == .gemma) return false;
+    const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+    if (full_attn_interval != 1) return false;
+    if (cfg.sliding_window_size != 0) return false;
 
     // Per-layer projections go through dispatchProjectionBatched →
     // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
@@ -7913,32 +7916,13 @@ pub const InferenceEngine = struct {
 
         state.position = base_token + n_tokens;
 
-        // Backstop the GPU argmax result with a CPU scan over logits_staging.
-        // Validate mode confirmed batched logits are bit-identical to
-        // per-token on Gemma (max_abs_diff=0), but the GPU argmax shader
-        // returns a different index — working theory is that the 262144-
-        // wide vocab + non-power-of-two partials reduction has a subtle
-        // race against a racy barrier. Recomputing on the CPU before
-        // sampleGreedy reads argmax_result_staging costs ~1 ms and
-        // guarantees the first decode token matches the per-token path.
-        if (self.argmax.pipeline != null and self.argmax_descriptor_set != null) {
-            const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
-            const logits = logits_ptr[0..cfg.vocab_size];
-            var best_val = logits[0];
-            var best_idx: u32 = 0;
-            for (logits[1..], 1..) |v, i| {
-                if (v > best_val) {
-                    best_val = v;
-                    best_idx = @intCast(i);
-                }
-            }
-            const staging_ptr: [*]u32 = @ptrCast(@alignCast(self.argmax_result_staging.mapped.?));
-            staging_ptr[0] = best_idx;
-        }
-
         if (validate_mode) {
             // Snapshot batched logits, reset to a fresh request, replay the
             // per-token prefill, then diff the last-token logits.
+            // prefillBatch skips the logits_buf → logits_staging copy when
+            // GPU argmax is available (need_logits_readback gate), so force
+            // the readback for the reference run by flipping the engine's
+            // logits_readback flag around the prefillBatch call.
             const vocab = cfg.vocab_size;
             const batched_snapshot = try self.instance.allocator.alloc(f32, vocab);
             defer self.instance.allocator.free(batched_snapshot);
@@ -7947,6 +7931,9 @@ pub const InferenceEngine = struct {
 
             state.position = 0;
             state.generated_tokens.clearRetainingCapacity();
+            const prev_readback = self.logits_readback_enabled;
+            self.logits_readback_enabled = true;
+            defer self.logits_readback_enabled = prev_readback;
             try self.prefillBatch(state, prompt_tokens);
 
             const ref_logits: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
