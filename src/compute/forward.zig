@@ -745,18 +745,13 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gpt_oss) return false;
-    // Gemma re-closed: validate mode had a bug (compared logits_staging
-    // to itself because prefillBatch skips the readback copy when GPU
-    // argmax is available), so the "max_abs_diff=0" reading was a lie.
-    // Actual batched-vs-per-token first-token output diverges (236772
-    // vs 50429). All the orchestration changes from steps 1-5 stay in
-    // the tree as dead code behind this gate — once validate mode is
-    // fixed to force readback (next commit), we'll see the real diff
-    // and have a concrete target to chase.
-    if (cfg.architecture == .gemma) return false;
+    // Gemma gate re-opened now that batched populates V independently of K
+    // and applies Gemma 4's plain (unit-weight) V RMS norm. The prior gate
+    // rejected .gemma because batched was reusing scratch_k (post-norm + post-
+    // rope) as V on the full-attn layers, and skipped the V unit-norm entirely.
     const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
-    if (full_attn_interval != 1) return false;
-    if (cfg.sliding_window_size != 0) return false;
+    if (cfg.architecture != .gemma and full_attn_interval != 1) return false;
+    if (cfg.architecture != .gemma and cfg.sliding_window_size != 0) return false;
 
     // Per-layer projections go through dispatchProjectionBatched →
     // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
@@ -7742,9 +7737,12 @@ pub const InferenceEngine = struct {
             try self.dispatchRmsNorm(scratch_hidden.handle, scratch_hidden.size, attn_norm_t.gpu_buffer.handle, attn_norm_t.gpu_buffer.size, scratch_norm.handle, scratch_norm.size, hidden_dim, n_tokens, eps);
             self.decode_cmd.computeBarrier();
 
-            // Q / K / V projections (weight read once per 32-token chunk).
-            // Gemma's use_k_as_v layers omit the V projection — K doubles
-            // as V for both KV-cache write and flash attention.
+            // Q / K / V projections (weight read once per chunk). On Gemma's
+            // use_k_as_v layers V is the RAW K projection (pre-norm, pre-rope),
+            // unit-normed per head. Instead of a second K projection we fuse
+            // the copy with the unit-norm: dispatchRmsNorm reads scratch_k and
+            // writes scratch_v. For non-use_k_as_v Gemma layers V has its own
+            // projection; unit-norm is in place.
             try self.dispatchProjectionBatched(q_t, scratch_norm, scratch_q, layer_q_dim, hidden_dim, n_tokens);
             try self.dispatchProjectionBatched(k_t, scratch_norm, scratch_k, layer_kv_dim, hidden_dim, n_tokens);
             if (v_t_opt) |v_t| {
@@ -7754,13 +7752,25 @@ pub const InferenceEngine = struct {
 
             // Optional per-head Q/K norms (Qwen3 style). Dispatch one workgroup per
             // (token, head) slot — rms_norm_mul handles this via group_id * head_dim.
+            // Gemma 4 also applies a plain (unit-weight) RMS norm to V per head —
+            // matches per-token runDecodeStep and forward_metal.zig. For use_k_as_v
+            // the unit-norm reads from scratch_k (raw K proj) → scratch_v, doing
+            // the K→V copy and the norm in one pass — but it must finish before
+            // K norm overwrites scratch_k, so place it AHEAD of K norm with a
+            // compute barrier between them.
+            const apply_v_unit_norm = cfg.architecture == .gemma and cfg.rope_freq_base_swa > 0;
+            if (apply_v_unit_norm) {
+                const v_src_for_norm = if (use_k_as_v) scratch_k else scratch_v;
+                try self.dispatchRmsNorm(v_src_for_norm.handle, v_src_for_norm.size, self.unit_norm_weights.handle, self.unit_norm_weights.size, scratch_v.handle, scratch_v.size, layer_head_dim, layer_n_kv_heads * n_tokens, eps);
+                if (use_k_as_v) self.decode_cmd.computeBarrier();
+            }
             if (lt.attn_q_norm) |qn| {
                 try self.dispatchRmsNorm(scratch_q.handle, scratch_q.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, scratch_q.handle, scratch_q.size, layer_head_dim, cfg.n_heads * n_tokens, eps);
             }
             if (lt.attn_k_norm) |kn| {
                 try self.dispatchRmsNorm(scratch_k.handle, scratch_k.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, scratch_k.handle, scratch_k.size, layer_head_dim, layer_n_kv_heads * n_tokens, eps);
             }
-            if (lt.attn_q_norm != null or lt.attn_k_norm != null) self.decode_cmd.computeBarrier();
+            if (lt.attn_q_norm != null or lt.attn_k_norm != null or apply_v_unit_norm) self.decode_cmd.computeBarrier();
 
             // Batched RoPE for Q and K. position_base = state.position so a
             // prefix-reuse call rotates the newly-added tokens at the correct
@@ -7789,15 +7799,13 @@ pub const InferenceEngine = struct {
 
             // Batched KV cache write: one compute dispatch writes all N tokens'
             // K/V into their paged cache slots via the page_table_buf lookup.
-            // base_token places the write after the existing prefix.
-            // For use_k_as_v layers (Gemma full-attn), feed scratch_k as
-            // both K source (normal) and V source (K doubles as V).
-            const v_src_handle = if (use_k_as_v) scratch_k.handle else scratch_v.handle;
-            const v_src_size = if (use_k_as_v) scratch_k.size else scratch_v.size;
+            // base_token places the write after the existing prefix. V was
+            // populated from its own projection (or from a duplicate K projection
+            // when use_k_as_v) and, for Gemma 4, unit-normed — always use scratch_v.
             try self.dispatchKvCacheWriteBatched(
                 scratch_k.handle, scratch_k.size,
                 self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size,
-                v_src_handle, v_src_size,
+                scratch_v.handle, scratch_v.size,
                 self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size,
                 self.page_table_buf.handle, self.page_table_buf.size,
                 layer_kv_dim,
