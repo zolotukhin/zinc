@@ -467,10 +467,16 @@ On R9700:
 
 | prompt | baseline | batched | speedup |
 |---|---:|---:|---:|
-| 21 tokens  | 4.96 tok/s | 33.32 tok/s | 6.7× |
-| 369 tokens | 4.97 tok/s | 44.64 tok/s | 9.0× |
+| 18 tokens   | 4.96 tok/s | 31.23 tok/s | 6.3× |
+| 43 tokens   | 4.96 tok/s | 35.46 tok/s | 7.1× |
+| 113 tokens  | 4.96 tok/s | 42.98 tok/s | 8.7× |
+| 313 tokens  | 4.96 tok/s | 44.50 tok/s | 9.0× |
+| **613 tokens** | **4.96 tok/s** | **57.58 tok/s** | **11.6×** |
 
-Validate delta: `max_abs_diff=0.000064` — float noise.
+Validate delta: `max_abs_diff=0.000064` — float noise. Gemma keeps
+amortizing the big FFN weights better as the prompt grows; at 613
+tokens the per-layer re-read amortization matches what Qwen3-8B sees
+at shorter prompts.
 
 ## How the debugging actually went, in rough order
 
