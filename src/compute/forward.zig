@@ -744,10 +744,20 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     const cfg = engine.model.config;
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
-    if (cfg.architecture == .gemma or cfg.architecture == .gpt_oss) return false;
-    const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
-    if (full_attn_interval != 1) return false;
-    if (cfg.sliding_window_size != 0) return false;
+    if (cfg.architecture == .gpt_oss) return false;
+    // Gemma 4 is the only architecture with sliding_window_size > 0 and
+    // full_attn_interval != 1 that the batched body now handles (via
+    // per-layer head_dim + post-norms + per-layer RoPE freq + per-layer
+    // output scale). SWA behaves as full-causal attention for prompts
+    // ≤ sliding_window_size; longer prompts need a window_size push
+    // constant on flash_attn_batched (Effort 9 step 5 — not yet landed).
+    // Gate it explicitly so non-Gemma architectures that happen to set
+    // one of those fields still bail.
+    if (cfg.architecture != .gemma) {
+        const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+        if (full_attn_interval != 1) return false;
+        if (cfg.sliding_window_size != 0) return false;
+    }
 
     // Per-layer projections go through dispatchProjectionBatched →
     // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
@@ -7830,6 +7840,15 @@ pub const InferenceEngine = struct {
             }
             try self.dispatchScaleAcc(scratch_hidden.handle, scratch_hidden.size, scratch_down.handle, scratch_down.size, n_tokens * hidden_dim, 1.0);
             self.decode_cmd.computeBarrier();
+
+            // Gemma 4 per-layer output scale: hidden *= scale (applied to the
+            // residual stream at the end of each layer). Skipped when the
+            // scale is 1.0 — the common case and every non-Gemma layer.
+            const layer_output_scale = self.layer_output_scales[layer_idx];
+            if (layer_output_scale != 1.0) {
+                try self.dispatchScaleInPlace(scratch_hidden.handle, scratch_hidden.size, n_tokens * hidden_dim, layer_output_scale);
+                self.decode_cmd.computeBarrier();
+            }
         }
 
         // Final RMS norm over all N tokens; LM head on the last one.
