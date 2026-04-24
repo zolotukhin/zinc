@@ -448,10 +448,29 @@ and pointed at the sampler.
 | qwen35-35b-a3b-q4k-xl   | no (MoE+SSM gate)   | falls back to per-token, same output  |
 | qwen36-35b-a3b-q4k-xl   | no (MoE+SSM gate)   | falls back to per-token, same output  |
 | gpt-oss-20b-q4k-m       | no (architecture gate) | falls back, `<\|channel\|>analysis...`  |
-| gemma4-31b-q4k-m        | no (architecture gate) | falls back, `Paris<turn\|>`            |
-| gemma4-12b-q4k-m        | no (architecture gate) | falls back, correct                   |
+| gemma4-31b-q4k-m        | yes, batched path      | "The capital of France is **Paris**."  |
+| gemma4-12b-q4k-m        | no (MoE gate)          | falls back, correct                   |
 
 All 6 still coherent, no regressions.
+
+**Gemma-4 31B dense update:** the architecture gate came off in `0cc4c3c`
+after two Gemma-specific bugs landed. (1) Gemma 4 applies a plain
+unit-weight RMS norm to V on every attention layer — per-token and Metal
+both did it; batched had skipped it. (2) On full-attention layers Gemma
+omits `attn_v` and expects V to be the raw K projection; the batched body
+was feeding `scratch_k` after K norm + K RoPE as V, which is wrong. Fix
+mirrored per-token: project Q and K, then feed `scratch_k` through the V
+unit-norm dispatch (writing to `scratch_v`) before K norm touches
+`scratch_k`. One extra RMS-norm dispatch per layer, zero extra DMMVs.
+
+On R9700:
+
+| prompt | baseline | batched | speedup |
+|---|---:|---:|---:|
+| 21 tokens  | 4.96 tok/s | 33.32 tok/s | 6.7× |
+| 369 tokens | 4.97 tok/s | 44.64 tok/s | 9.0× |
+
+Validate delta: `max_abs_diff=0.000064` — float noise.
 
 ## How the debugging actually went, in rough order
 
@@ -552,9 +571,9 @@ per-token:
 
 - Qwen3.5/3.6 35B-A3B: MoE+SSM hybrid. Needs batched MoE router +
   batched per-expert GEMM + batched SSM — distinct, substantial ports.
-- Gemma-4 31B dense: gated out by `architecture == .gemma`. Probably
-  a one-line gate relaxation plus a validate run; the per-token
-  decode path already handles Gemma normalization quirks.
+- ~~Gemma-4 31B dense~~: **shipped in `0cc4c3c`**. See the update above —
+  took more than a one-line gate relaxation, because V had to be projected
+  independently of K on the use_k_as_v layers and unit-normed per head.
 - Gemma-4 12B MoE: same MoE situation as Qwen.
 - gpt-oss-20B: gated out by `architecture == .gpt_oss`. Has attention
   sinks that need special handling in the batched flash-attn path.
