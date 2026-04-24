@@ -1,4 +1,4 @@
-name: Claude Auto Review
+name: GLM Code Review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -13,43 +13,130 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     env:
-      API_TIMEOUT_MS: 3000000
-      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-      # GLM Coding Plan documented defaults for Claude Code.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: glm-4.5-air
-      ANTHROPIC_DEFAULT_SONNET_MODEL: glm-4.7
-      ANTHROPIC_DEFAULT_OPUS_MODEL: glm-4.7
+      GITHUB_API_URL: ${{ github.api_url }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY || secrets.ANTHROPIC_AUTH_TOKEN }}
+      ZAI_BASE_URL: https://api.z.ai/api/coding/paas/v4
+      ZAI_MODEL: glm-5.1
     steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 1
-          # claude-code-action fetches refs before it sets up its own auth.
-          persist-credentials: true
+      - name: Review PR with GLM-5.1
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
 
-      - uses: anthropics/claude-code-action@v1
-        with:
-          github_token: ${{ github.token }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+          marker = "<!-- glm-code-review -->"
 
-            Please review this pull request with a focus on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Security implications
-            - Performance considerations
+          def request_json(url, method="GET", headers=None, payload=None):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=300) as resp:
+                      raw = resp.read().decode("utf-8", "replace")
+                      return json.loads(raw) if raw else None
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", "replace")
+                  print(f"HTTP {exc.code} for {method} {url}\n{detail}", file=sys.stderr)
+                  raise
 
-            The checked out workspace is the trusted base branch, not the PR branch.
-            Review the pull request via GitHub APIs and `gh pr diff` / `gh pr view`.
-            Do not checkout the PR branch.
-            Do not execute repository code from the PR.
+          def request_text(url, headers=None):
+              req = urllib.request.Request(url, headers=headers or {}, method="GET")
+              try:
+                  with urllib.request.urlopen(req, timeout=300) as resp:
+                      return resp.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", "replace")
+                  print(f"HTTP {exc.code} for GET {url}\n{detail}", file=sys.stderr)
+                  raise
 
-            Use `gh pr comment` for top-level feedback.
-            Use `mcp__github_inline_comment__create_inline_comment` to highlight specific code issues.
-            Only post GitHub comments - don't submit review text as messages.
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pr_number = os.environ["PR_NUMBER"]
+          github_token = os.environ["GITHUB_TOKEN"]
+          zai_key = os.environ["ZAI_API_KEY"].strip()
+          if not zai_key:
+              raise SystemExit("Missing ZAI_API_KEY or ANTHROPIC_AUTH_TOKEN secret")
 
-          claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+          github_api = os.environ["GITHUB_API_URL"].rstrip("/")
+          zai_base = os.environ["ZAI_BASE_URL"].rstrip("/")
+          model = os.environ["ZAI_MODEL"]
+
+          diff_url = f"{github_api}/repos/{repo}/pulls/{pr_number}"
+          diff_headers = {
+              "Accept": "application/vnd.github.v3.diff",
+              "Authorization": f"Bearer {github_token}",
+              "User-Agent": "zinc-glm-review",
+          }
+          diff = request_text(diff_url, diff_headers)
+          diff_limit = 120000
+          truncated = len(diff) > diff_limit
+          if truncated:
+              diff = diff[:diff_limit]
+
+          system_prompt = (
+              "You are a senior engineer reviewing a GitHub pull request.\n"
+              "Return concise markdown.\n"
+              "Prioritize bugs, security issues, regressions, performance problems, and missing tests.\n"
+              "List concrete findings first, with severity and file/line references when possible.\n"
+              "If there are no actionable issues, reply exactly: No issues found."
+          )
+
+          user_prompt = "Review the following pull request diff.\n\n"
+          if truncated:
+              user_prompt += f"(Diff truncated to {diff_limit} characters for context limits.)\n\n"
+          user_prompt += diff
+
+          review_request = {
+              "model": model,
+              "messages": [
+                  {"role": "system", "content": system_prompt},
+                  {"role": "user", "content": user_prompt},
+              ],
+              "max_tokens": 2048,
+              "temperature": 0.2,
+          }
+          review_headers = {
+              "Authorization": f"Bearer {zai_key}",
+              "Content-Type": "application/json",
+              "Accept-Language": "en-US,en",
+              "User-Agent": "zinc-glm-review",
+          }
+          review_url = f"{zai_base}/chat/completions"
+          review_data = request_json(review_url, method="POST", headers=review_headers, payload=review_request)
+          content = review_data["choices"][0]["message"]["content"].strip()
+
+          body = f"{marker}\n\n## GLM Review\n\n{content}\n"
+          comments_url = f"{github_api}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
+          comments = request_json(
+              comments_url,
+              headers={
+                  "Authorization": f"Bearer {github_token}",
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "zinc-glm-review",
+              },
+          )
+
+          existing = None
+          for comment in comments:
+              if marker in comment.get("body", "") and comment.get("user", {}).get("login") == "github-actions[bot]":
+                  existing = comment
+                  break
+
+          write_headers = {
+              "Authorization": f"Bearer {github_token}",
+              "Accept": "application/vnd.github+json",
+              "Content-Type": "application/json",
+              "User-Agent": "zinc-glm-review",
+          }
+
+          if existing is None:
+              request_json(comments_url.rsplit("?", 1)[0], method="POST", headers=write_headers, payload={"body": body})
+              print("Posted GLM review comment.")
+          else:
+              request_json(existing["url"], method="PATCH", headers=write_headers, payload={"body": body})
+              print("Updated existing GLM review comment.")
+          PY
