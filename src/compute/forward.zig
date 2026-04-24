@@ -7739,8 +7739,26 @@ pub const InferenceEngine = struct {
             // Batched RoPE for Q and K. position_base = state.position so a
             // prefix-reuse call rotates the newly-added tokens at the correct
             // sequence positions (base_token, base_token+1, ..., base_token+N-1).
-            try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
-            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_kv_heads, base_token, n_tokens, cfg.rope_freq_base, 1.0);
+            // Gemma 4 picks the RoPE frequency source per layer:
+            //   - Global (full-attn) layers use precomputed rope_freq_buf
+            //     with rope_freqs.weight factors pre-baked. Signal buffer
+            //     use by passing freq_base=0 (shader reads inv_freq[]).
+            //   - SWA layers use a DIFFERENT base (rope_freq_base_swa) and
+            //     compute the frequency on the fly.
+            // For non-Gemma architectures the existing behavior stands:
+            // cfg.rope_freq_base with the shipped rope_freq_buf.
+            const layer_is_swa_rope = cfg.architecture == .gemma and
+                cfg.rope_freq_base_swa > 0 and
+                layer_head_dim < cfg.head_dim;
+            const layer_use_precomp_freq = cfg.architecture == .gemma and !layer_is_swa_rope;
+            const layer_rope_freq_base: f32 = if (layer_use_precomp_freq)
+                0.0
+            else if (layer_is_swa_rope)
+                cfg.rope_freq_base_swa
+            else
+                cfg.rope_freq_base;
+            try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_heads, base_token, n_tokens, layer_rope_freq_base, 1.0);
+            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_kv_heads, base_token, n_tokens, layer_rope_freq_base, 1.0);
             self.decode_cmd.computeBarrier();
 
             // Batched KV cache write: one compute dispatch writes all N tokens'
