@@ -745,20 +745,15 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gpt_oss) return false;
-    // Gemma 4 is still gated out — on top of the five deltas the
-    // Effort 9 plan enumerated, Gemma's full-attention layers ship
-    // asymmetric GQA where Q and KV use different head_dim (full-attn:
-    // q_head_dim=512 / kv_head_dim=128, SWA: both 256). The shipped
-    // flash_attn_batched shader assumes q_head_dim == kv_head_dim, so
-    // opening the gate produces numerically wrong output on the 10
-    // full-attn layers. Closing this needs a q_head_dim vs kv_head_dim
-    // split in flash_attn_batched push constants + per-layer threading
-    // through dispatchFlashAttnBatched — a real shader change, not just
-    // orchestration. Captured as an amendment to the Effort 9 plan.
-    if (cfg.architecture == .gemma) return false;
-    const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
-    if (full_attn_interval != 1) return false;
-    if (cfg.sliding_window_size != 0) return false;
+    // Gemma 4 handled via per-layer head_dim / n_kv_heads threading in
+    // the batched body. Prompts ≤ sliding_window_size degenerate SWA
+    // to full-causal attention so the shipped flash_attn_batched works
+    // without a window_size push constant for typical chat turns.
+    if (cfg.architecture != .gemma) {
+        const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+        if (full_attn_interval != 1) return false;
+        if (cfg.sliding_window_size != 0) return false;
+    }
 
     // Per-layer projections go through dispatchProjectionBatched →
     // recordBatchDispatchPush, which loads Q4_K and Q6_K batched shaders.
@@ -7705,26 +7700,28 @@ pub const InferenceEngine = struct {
             const up_t = lt.ffn_up.?;
             const down_t = lt.ffn_down.?;
 
-            // Per-layer attention dims. Gemma 4 mixes head_dim=512 on
-            // full-attention layers with head_dim=256 on SWA layers, so
-            // head_dim / q_dim / kv_dim can't be global. Derive from the
-            // per-head Q norm tensor when present (same pattern as the
-            // per-token decode path at runDecodeStep), otherwise fall back
-            // to cfg.head_dim which applies to every layer on LLaMA /
-            // Qwen-style architectures.
+            // Per-layer attention dims. Gemma 4 varies both head_dim AND
+            // n_kv_heads per layer: full-attn layers use head_dim=512 with
+            // 4 kv_heads (32:4 GQA), SWA layers use head_dim=256 with 16
+            // kv_heads (32:16 GQA). Q and KV share the same head_dim on
+            // every layer — derive it from the Q norm tensor (same pattern
+            // as the per-token runDecodeStep path) and derive kv_dim and
+            // q_dim directly from weight-tensor element counts so the
+            // per-layer GQA ratio falls out automatically.
             const layer_head_dim: u32 = if (lt.attn_q_norm) |qn|
                 @intCast(qn.info.numElements())
             else
                 cfg.head_dim;
-            const layer_q_dim: u32 = cfg.n_heads * layer_head_dim;
-            const layer_kv_dim: u32 = cfg.n_kv_heads * layer_head_dim;
+            const layer_q_dim: u32 = @intCast(q_t.info.numElements() / hidden_dim);
+            const layer_kv_dim: u32 = @intCast(k_t.info.numElements() / hidden_dim);
+            const layer_n_kv_heads: u32 = if (layer_head_dim > 0) layer_kv_dim / layer_head_dim else cfg.n_kv_heads;
             const layer_rope_dim: u32 = if (cfg.rope_dim > 0)
                 @min(cfg.rope_dim, layer_head_dim)
             else
                 layer_head_dim;
             // The O projection's input dimension is whatever the weight row
-            // count says — for Gemma this is layer_q_dim and matches, for
-            // architectures without attn_q_norm it falls through to q_dim.
+            // count says — matches layer_q_dim for Gemma, falls through to
+            // q_dim for architectures without attn_q_norm.
             const o_input_cols: u32 = @intCast(o_t.info.numElements() / hidden_dim);
 
             // attn RMS norm: hidden → norm
@@ -7743,7 +7740,7 @@ pub const InferenceEngine = struct {
                 try self.dispatchRmsNorm(scratch_q.handle, scratch_q.size, qn.gpu_buffer.handle, qn.gpu_buffer.size, scratch_q.handle, scratch_q.size, layer_head_dim, cfg.n_heads * n_tokens, eps);
             }
             if (lt.attn_k_norm) |kn| {
-                try self.dispatchRmsNorm(scratch_k.handle, scratch_k.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, scratch_k.handle, scratch_k.size, layer_head_dim, cfg.n_kv_heads * n_tokens, eps);
+                try self.dispatchRmsNorm(scratch_k.handle, scratch_k.size, kn.gpu_buffer.handle, kn.gpu_buffer.size, scratch_k.handle, scratch_k.size, layer_head_dim, layer_n_kv_heads * n_tokens, eps);
             }
             if (lt.attn_q_norm != null or lt.attn_k_norm != null) self.decode_cmd.computeBarrier();
 
@@ -7769,7 +7766,7 @@ pub const InferenceEngine = struct {
             else
                 cfg.rope_freq_base;
             try self.dispatchRopeBatched(scratch_q.handle, scratch_q.size, scratch_q.handle, scratch_q.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_heads, base_token, n_tokens, layer_rope_freq_base, 1.0);
-            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, cfg.n_kv_heads, base_token, n_tokens, layer_rope_freq_base, 1.0);
+            try self.dispatchRopeBatched(scratch_k.handle, scratch_k.size, scratch_k.handle, scratch_k.size, freq_buf_handle, freq_buf_size, layer_head_dim, layer_rope_dim, layer_n_kv_heads, base_token, n_tokens, layer_rope_freq_base, 1.0);
             self.decode_cmd.computeBarrier();
 
             // Batched KV cache write: one compute dispatch writes all N tokens'
@@ -7792,7 +7789,7 @@ pub const InferenceEngine = struct {
             // seq_start = base_token so each query attends to prefix + own
             // position within the batch (causal_len = base_token + query + 1).
             const sink_offset = layer * cfg.n_heads;
-            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, layer_head_dim, cfg.n_heads, cfg.n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
+            try self.dispatchFlashAttnBatched(scratch_q.handle, scratch_q.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size, self.page_table_buf.handle, self.page_table_buf.size, scratch_attn_out.handle, scratch_attn_out.size, self.attn_sinks_buf.handle, self.attn_sinks_buf.size, layer_head_dim, cfg.n_heads, layer_n_kv_heads, base_token, n_tokens, kv_page_size_tokens, cfg.attn_scale, sink_offset);
             self.decode_cmd.computeBarrier();
 
             // O projection, then optional Gemma post-attention norm, then
