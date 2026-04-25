@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 460" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#475569"/>
+    </marker>
+    <style>
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 8; }
+      .panel-title { font-size: 15px; font-weight: 700; fill: #0f172a; }
+      .panel-sub { font-size: 11.5px; fill: #475569; }
+      .block { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.2; }
+      .block-q { fill: #fef3c7; stroke: #f59e0b; }
+      .block-k { fill: #dbeafe; stroke: #3b82f6; }
+      .block-v { fill: #dcfce7; stroke: #22c55e; }
+      .label { font-size: 12px; fill: #0f172a; font-weight: 600; }
+      .dim { font-size: 11px; fill: #334155; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .pc { fill: #fee2e2; stroke: #ef4444; stroke-width: 1.5; }
+      .pc-label { font-size: 12.5px; fill: #991b1b; font-weight: 700; }
+      .ok { fill: #dcfce7; stroke: #16a34a; stroke-width: 1.5; }
+      .ok-label { font-size: 12.5px; fill: #166534; font-weight: 700; }
+      .conn { stroke: #475569; stroke-width: 1.4; fill: none; }
+      .note { font-size: 11px; fill: #64748b; font-style: italic; }
+      .head { font-size: 16px; font-weight: 700; fill: #0f172a; }
+    </style>
+  </defs>
+
+  <text x="460" y="26" text-anchor="middle" class="head">Gemma 4 31B: one push constant cannot describe both layer types</text>
+
+  <!-- LEFT: SWA layer (symmetric) -->
+  <rect class="panel" x="20" y="50" width="420" height="280" rx="8"/>
+  <text x="36" y="78" class="panel-title">SWA layer (50 of 60)</text>
+  <text x="36" y="96" class="panel-sub">Symmetric GQA, head_dim = 256, sliding window = 1024</text>
+
+  <!-- Hidden -->
+  <rect class="block" x="36" y="120" width="100" height="40" rx="4"/>
+  <text x="86" y="145" text-anchor="middle" class="label">x[hidden]</text>
+
+  <!-- Q -->
+  <rect class="block-q" x="180" y="110" width="240" height="32" rx="4"/>
+  <text x="186" y="129" class="label">Q proj</text>
+  <text x="412" y="129" text-anchor="end" class="dim">[hidden, n_heads*256]</text>
+
+  <!-- K -->
+  <rect class="block-k" x="180" y="156" width="240" height="32" rx="4"/>
+  <text x="186" y="175" class="label">K proj</text>
+  <text x="412" y="175" text-anchor="end" class="dim">[hidden, n_kv*256]</text>
+
+  <!-- V -->
+  <rect class="block-v" x="180" y="202" width="240" height="32" rx="4"/>
+  <text x="186" y="221" class="label">V proj</text>
+  <text x="412" y="221" text-anchor="end" class="dim">[hidden, n_kv*256]</text>
+
+  <!-- One push constant -->
+  <rect class="ok" x="120" y="260" width="220" height="42" rx="4"/>
+  <text x="230" y="278" text-anchor="middle" class="ok-label">push: head_dim = 256</text>
+  <text x="230" y="294" text-anchor="middle" class="note">Q_base = h*256 OK, KV_base = kv_h*256 OK</text>
+
+  <!-- RIGHT: Full-attn layer (asymmetric) -->
+  <rect class="panel" x="480" y="50" width="420" height="280" rx="8"/>
+  <text x="496" y="78" class="panel-title">Full-attn layer (10 of 60)</text>
+  <text x="496" y="96" class="panel-sub">Asymmetric GQA, q_head_dim = 512, kv_head_dim = 128</text>
+
+  <rect class="block" x="496" y="120" width="100" height="40" rx="4"/>
+  <text x="546" y="145" text-anchor="middle" class="label">x[hidden]</text>
+
+  <rect class="block-q" x="640" y="110" width="240" height="32" rx="4"/>
+  <text x="646" y="129" class="label">Q proj</text>
+  <text x="872" y="129" text-anchor="end" class="dim">[hidden, 32*512] = 16384</text>
+
+  <rect class="block-k" x="640" y="156" width="240" height="32" rx="4"/>
+  <text x="646" y="175" class="label">K proj</text>
+  <text x="872" y="175" text-anchor="end" class="dim">[hidden, 16*128] = 2048</text>
+
+  <rect class="block-v" x="640" y="202" width="240" height="32" rx="4"/>
+  <text x="646" y="221" class="label">V proj</text>
+  <text x="872" y="221" text-anchor="end" class="dim">[hidden, 16*128] = 2048</text>
+
+  <!-- One push constant cannot satisfy both -->
+  <rect class="pc" x="540" y="260" width="320" height="60" rx="4"/>
+  <text x="700" y="280" text-anchor="middle" class="pc-label">push: head_dim = ?</text>
+  <text x="700" y="298" text-anchor="middle" class="note">Q_base = h*head_dim wants 512.</text>
+  <text x="700" y="314" text-anchor="middle" class="note">KV_base = kv_h*head_dim wants 128. One value, two truths.</text>
+
+  <!-- The fix bar -->
+  <rect class="ok" x="120" y="360" width="680" height="60" rx="6"/>
+  <text x="460" y="382" text-anchor="middle" class="ok-label">The fix: split head_dim into q_head_dim and kv_head_dim push constants on flash_attn_batched.comp</text>
+  <text x="460" y="402" text-anchor="middle" class="note">~15 lines of shader, 3 fields on dispatchFlashAttnBatched. Validate-mode max_abs_diff drops to 0.</text>
+
+  <text x="460" y="446" text-anchor="middle" class="note">Same shape, different math. Q indexing and KV indexing live in the same kernel but answer to different dimensions.</text>
+</svg>
