@@ -1497,9 +1497,21 @@ async function prepareRdna(args, creds) {
   }
 
   if (args.rdnaStartLlama) {
-    console.log("Ensuring llama-server is running on RDNA node...");
-    const remote = "systemctl start llama-server && sleep 10";
-    await runShell(rdnaRemoteCommand(remote, creds), { cwd: ROOT, timeoutMs: 120000 });
+    // Pre-flight cleanup: stop any pre-existing llama-server processes
+    // (systemd unit + leftover dynamic-port servers from prior crashed
+    // runs). The per-case launchRdnaLlamaServer handles fresh launches
+    // with the right flags + DPM lock; a co-resident systemd server
+    // running an unrelated model just steals VRAM and tanks everything.
+    // The historical regression on Qwen 3.6 35B (108 → 29 tok/s) was
+    // partly caused by this co-residency.
+    console.log("Stopping pre-existing llama-server processes on RDNA node...");
+    const remote = [
+      "systemctl stop llama-server 2>/dev/null || true",
+      "pkill -9 -f llama-server 2>/dev/null || true",
+      "sleep 2",
+      "echo 'cleared'",
+    ].join(" && ");
+    await runShell(rdnaRemoteCommand(remote, creds), { cwd: ROOT, timeoutMs: 60000 });
   }
 }
 
