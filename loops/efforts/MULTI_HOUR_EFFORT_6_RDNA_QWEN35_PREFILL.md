@@ -1,4 +1,83 @@
-# Optimization 6: RDNA Prefill Recovery for Qwen3.5-35B
+# Optimization 6: RDNA Prefill Recovery for Qwen3.5/3.6-35B-A3B
+
+## Current state update (2026-04-25, post-reboot, latest llama.cpp 9725a313b)
+
+Re-measured against a healthy baseline (DPM locked high, no co-resident
+systemd llama-server, llama.cpp built from master HEAD — which now has
+Gemma 4 architecture support added in fcc750875).
+
+Long-context prefill (154-token prompt, the workload this effort
+targets):
+
+| model                       | ZINC P  | llama P  | ZINC %  |
+|-----------------------------|--------:|---------:|--------:|
+| Qwen 3.5 35B A3B Q4_K_XL    |    77.8 |    196.8 |     40% |
+| Qwen 3.6 35B A3B Q4_K_XL    |    78.5 |    189.5 |     41% |
+| Gemma 4 26B A4B (MoE)       |    40.7 |    161.1 |     25% |
+| GPT-OSS 20B                 |    94.8 |    120.3 |     79% |
+
+Both Qwen 35B variants stuck at 40% of llama.cpp on long-context prefill.
+Gemma 4 26B MoE worse at 25%. GPT-OSS 20B closer at 79% (smaller MoE).
+Decode side is in better shape (60-80% of llama.cpp) — the asymmetry
+reflects ZINC's MoE FFN running per-token in prefill while llama.cpp
+batches across N tokens with grouped expert dispatch.
+
+## Cross-token batched MoE infrastructure (already shipped)
+
+Commit `c36bd23` lands `dmmv_q4k_moe_batched.comp` — Q4_K weights × N
+prompt tokens, dispatch grid `((M+1)/2, n_experts_used, n_tokens)`,
+routing buffer flattened to `[n_tokens × n_experts_used]`. Helper:
+`DmmvDispatch.recordMoeBatchedDispatch`. Pipeline loads at startup
+(`dmmv_q4k_moe_batched pipeline loaded (cross-token MoE; not yet
+wired)`) but no call site uses it yet.
+
+The shader is the GEMV equivalent of llama.cpp's grouped-expert mmq
+dispatch. With it in place, the wire-in is what's missing to close
+the prefill gap.
+
+## Wire-in plan (the actual remaining work)
+
+1. **Build per-layer routing buffer for all N prompt tokens.** Existing
+   `routing_capture_buf` (gated on `ZINC_CAPTURE_ROUTING=1`,
+   forward.zig:885) already has the right shape:
+   `[max_tokens × n_layers × (2 × n_experts_used × u32)]` storing
+   per-(token, slot) {expert_id, expert_weight_bits}. The capture
+   currently runs during per-token MoE; for prefillBatched, we need
+   the router DMMV to run on N tokens at once first, then softmax-topk
+   per token, then write the routing into the capture buffer.
+
+2. **Allocate output scratch.** `[N × n_experts_used × inter_dim]` of
+   f32. For Qwen 3.5/3.6 35B-A3B with N=154 prompt, n_experts_used=8,
+   inter=1408: 154 × 8 × 1408 × 4 = 6.7 MiB per-layer scratch. Reusable
+   across layers.
+
+3. **Dispatch batched gate / up / down** via
+   `recordMoeBatchedDispatch`. The shader handles all (token,
+   expert_slot) pairs in one kernel.
+
+4. **Per-token weighted accumulation.** New shader: `moe_weighted_acc_batched.comp`
+   (or extend the existing `moe_weighted_acc.comp` to take a batch
+   dimension). For each token, sum n_experts_used expert outputs
+   weighted by routing probs from the routing buffer, into the per-
+   token slice of `scratch_hidden`.
+
+5. **Relax the gate.** `canUseBatchedPrefillRdna` currently returns
+   `false` for `n_experts > 0` (line 747). Open it conditionally on
+   `pipeline_q4k_moe_batched != null` and the new `moe_weighted_acc_batched`
+   pipeline being loaded.
+
+6. **Coexist with SSM layers.** qwen35moe has SSM on 30 of 40 layers.
+   Two options: (a) fall back to per-token for SSM layers within an
+   otherwise-batched prefillBatched body, or (b) defer wire-in until
+   parallel-scan SSM also lands. Option (a) is far simpler and gets
+   us the MoE-FFN savings on every layer while accepting the SSM
+   layer cost stays as-is.
+
+Validate via `ZINC_BATCHED_PREFILL=validate` — the existing per-token
+path is the reference, so if last-token logits match within ~1e-3 the
+wire-in is correct.
+
+## Original plan (preserved below)
 
 ## Current State (2026-04-19)
 
