@@ -26,8 +26,40 @@ Measured prefill on R9700 with batched on:
 |---|---:|---:|---:|
 | 21 tokens   | 4.96 tok/s | 33.32 tok/s | 6.7× |
 | 369 tokens  | 4.97 tok/s | 43.62 tok/s | 8.8× |
+| 613 tokens  | 4.96 tok/s | 57.58 tok/s | 11.6× |
 
 Output coherence verified on all 6 RDNA catalog models.
+
+## Follow-on: decode LM-head (commit `ed0c9d9`)
+
+Profiling the decode path on gemma4-31b-q4k-m surfaced a second pathology
+unrelated to the batched prefill path. With `--profile`:
+
+```
+avg GPU decode token=250.28 ms over 5 sampled decode steps
+avg GPU phases embed=0.01 ms attention=62.53 ms tail=44.89 ms
+```
+
+The **tail** phase is the final `output_norm` + LM-head DMMV. 44.9 ms on
+a 0.79 GB Q4_K matrix (262 144 vocab × 5376 hidden) is 30× the bandwidth
+ceiling on R9700 (1.4 ms at 576 GB/s). The cause was the default
+`dmmv_q4k` shader's `NUM_ROWS = 2u` spawning 131 072 workgroups for that
+tall vocab and thrashing the L1 cache with redundant hidden-vector reads
+— even though each row's compute is tiny (21 Q4_K blocks).
+
+Fix: a `dmmv_q4k_wide` shader variant with `NUM_ROWS = 8u`, identical
+everywhere else. One workgroup handles 8 output rows instead of 2;
+hidden reads amortize 4× and workgroup count drops to 32 768. Gated on
+`M ≥ 100 000` in `dispatchDmmvInner` so only the LM-head path picks it
+up.
+
+```
+Before: tail=44.89 ms, total=250.28 ms/tok,  3.87 tok/s
+After:  tail= 1.64 ms, total=207.54 ms/tok,  5.62 tok/s  (+45%)
+```
+
+Other catalog models with large vocabs also picked up small decode wins
+(Qwen3-8B vocab 152k, gpt-oss 201k).
 
 ## Measured baseline (`main` @ `a41c185`, AMD R9700 RDNA4 gfx1201)
 

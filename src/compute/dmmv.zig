@@ -68,6 +68,11 @@ pub const DmmvDispatch = struct {
     /// in at the call site when M is large enough to benefit from 4× fewer
     /// workgroups with 4× more hidden-vector reuse per workgroup.
     pipeline_q4k_wide: ?Pipeline,
+    /// Dense fused Q4_K gate+up DMMV. Reads the input tile once, runs both
+    /// W_gate and W_up dequant + dot product in the same workgroup. Dense
+    /// analogue of pipeline_q4k_fused_gate_up_moe (5 bindings: W_gate, W_up,
+    /// X, Y_gate, Y_up). Enabled when both gate and up weights are Q4_K.
+    pipeline_q4k_fused_gate_up: ?Pipeline,
     /// Q5K pipeline, or null.
     pipeline_q5k: ?Pipeline,
     /// Q6K pipeline, or null.
@@ -210,6 +215,16 @@ pub const DmmvDispatch = struct {
         const q4k_wide_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_wide.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k_wide = pipeline_mod.createFromSpirvWithOptions(instance, q4k_wide_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K wide shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Dense fused gate+up Q4_K DMMV — same push layout as dmmv_q4k plus
+        // a second weight binding and a second output binding. 5 bindings
+        // total (W_gate, W_up, X, Y_gate, Y_up). Used by decode FFN on
+        // Gemma dense layers to halve the dispatch count.
+        const q4k_fgu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_fused_gate_up = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fgu_path, 5, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q4_K dense fused gate+up shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -377,6 +392,7 @@ pub const DmmvDispatch = struct {
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
+            .pipeline_q4k_fused_gate_up = pipeline_q4k_fused_gate_up,
             .pipeline_mxfp4 = pipeline_mxfp4,
             .pipeline_q5_0 = pipeline_q5_0,
             .pipeline_q5_1 = pipeline_q5_1,
@@ -696,6 +712,7 @@ pub const DmmvDispatch = struct {
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
         if (self.pipeline_q4k_wide) |*p| p.deinit();
+        if (self.pipeline_q4k_fused_gate_up) |*p| p.deinit();
         if (self.pipeline_q5_1) |*p| p.deinit();
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();

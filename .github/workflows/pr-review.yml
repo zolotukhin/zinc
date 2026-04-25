@@ -80,9 +80,17 @@ jobs:
 
           system_prompt = (
               "You are a senior engineer reviewing a GitHub pull request.\n"
-              "Return concise markdown.\n"
+              "Return concise, well-formatted markdown.\n"
               "Prioritize bugs, security issues, regressions, performance problems, and missing tests.\n"
-              "List concrete findings first, with severity and file/line references when possible.\n"
+              "Use emoji severity labels in headings: 🔴 Critical, 🟠 High, 🟡 Medium, 🟢 Low.\n"
+              "Structure findings as:\n"
+              "## Findings\n"
+              "### <short title> — <emoji severity>\n"
+              "- File: <path>\n"
+              "- Impact: <one sentence>\n"
+              "- Fix: <one sentence>\n"
+              "Keep each finding tight and actionable.\n"
+              "Do not include self-corrections, meta commentary, or chain-of-thought.\n"
               "If there are no actionable issues, reply exactly: No issues found.\n"
               "At the end, include `Verdict: BLOCK` if any finding is High or Critical.\n"
               "Otherwise include `Verdict: PASS`."
@@ -123,7 +131,7 @@ jobs:
               verdict = verdict_match.group(1).upper()
               content = re.sub(r"(?im)\n?^Verdict:\s*(BLOCK|PASS)\s*$", "", content).rstrip()
           else:
-              verdict = "BLOCK" if re.search(r"(?i)\bcritical\b|\bhigh severity\b", content) else "PASS"
+              verdict = "BLOCK" if re.search(r"(?i)\bcritical\b|\bhigh severity\b|🔴|🟠", content) else "PASS"
 
           body = f"{marker}\n\n## GLM Review\n\n{content}\n\n**Verdict:** {verdict}\n"
           comments_url = f"{github_api}/repos/{repo}/issues/{pr_number}/comments?per_page=100"

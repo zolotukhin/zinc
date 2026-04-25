@@ -6103,7 +6103,14 @@ pub const InferenceEngine = struct {
                     }
                 }
             } else {
-                // Dense FFN: gate → up → SwiGLU → down → residual
+                // Dense FFN: gate → up → SwiGLU → down → residual.
+                // Note: a fused Q4_K dense gate+up shader exists
+                // (dmmv_q4k_fused_gate_up.comp, mirrors the MoE variant) but
+                // measured +11% decode regression on gemma4-31b (inter_dim=
+                // 25600) from the doubled per-workgroup register pressure.
+                // It's a small win on Qwen3-8B (inter_dim=11008) and a loss
+                // on Gemma's wider FFN, so stay with two separate DMMVs until
+                // we have a size-gated selector that's a net win.
                 const gate_tensor = lt.ffn_gate orelse return error.TensorNotFound;
                 const up_tensor = lt.ffn_up orelse return error.TensorNotFound;
                 const down_tensor = lt.ffn_down orelse return error.TensorNotFound;
@@ -6932,6 +6939,50 @@ pub const InferenceEngine = struct {
     }
 
     /// Inner dispatch for DMMV — push-descriptor or pool-allocated path.
+    /// Fused dense gate+up Q4_K DMMV. Reads one shared input, dispatches
+    /// both W_gate and W_up in a single workgroup per row-pair. Returns
+    /// error.ShaderNotLoaded if the pipeline is absent so callers can fall
+    /// back to two separate DMMVs.
+    fn dispatchDmmvFusedGateUp(
+        self: *InferenceEngine,
+        w_gate: *const LoadedTensor,
+        w_up: *const LoadedTensor,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
+        y_gate_buf: Buffer,
+        y_up_buf: Buffer,
+        M: u32,
+        K: u32,
+    ) !void {
+        const pip = &(self.dmmv.pipeline_q4k_fused_gate_up orelse return error.ShaderNotLoaded);
+        if (!pip.uses_push_descriptors) return error.ShaderNotLoaded;
+        const push = DmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = 0,
+            .x_offset = 0,
+            .y_offset = 0,
+            .acc_mode = 0,
+        };
+        self.pushDispatch5(
+            pip,
+            std.mem.asBytes(&push),
+            w_gate.gpu_buffer.handle,
+            w_gate.gpu_buffer.size,
+            w_up.gpu_buffer.handle,
+            w_up.gpu_buffer.size,
+            input_buf.handle,
+            input_size,
+            y_gate_buf.handle,
+            y_gate_buf.size,
+            y_up_buf.handle,
+            y_up_buf.size,
+            (M + 1) / 2,
+            1,
+            1,
+        );
+    }
+
     fn dispatchDmmvInner(
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
@@ -7507,6 +7558,11 @@ pub const InferenceEngine = struct {
             }
             try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
             try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
+            // Note: tried fusing alpha+beta into one fused-gate-up dispatch
+            // (commit considered but reverted) — no measurable change because
+            // the four SSM proj DMMVs already overlap on RDNA4. See
+            // loops/efforts/MULTI_HOUR_EFFORT_10_QWEN36_DECODE.md for the
+            // bigger Qwen 3.6 levers (Q4_K × Q8_1 mmq, batched MoE prefill).
         }
         // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
         // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
