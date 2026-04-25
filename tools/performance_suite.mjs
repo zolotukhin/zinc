@@ -881,6 +881,28 @@ async function stopRdnaLlamaServer(creds, port) {
 async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs) {
   const port = await pickOpenPort();
   const logPath = `/tmp/zinc-rdna-llama-${port}.log`;
+  // Force the discrete RDNA4 GPU's DPM state to "high" before launch.
+  // Without this, an idle llama-server holds the GPU but doesn't pin
+  // memclk to a high level — the DPM heuristic sees "barely active"
+  // and clocks down to level 0 (96 MHz mclk on gfx1201), which makes
+  // every subsequent benchmark run at ~15% of peak memory bandwidth.
+  // Empirically reproduced on this node: idle llama-server pinned
+  // tg128 at 28-30 tok/s on Qwen 3.6 35B-A3B vs 108 tok/s right after
+  // reboot; locking DPM to high recovers ~92 tok/s (level 4 of 5).
+  // Card discovery: the discrete GPU is whichever card1/card2 has
+  // amdgpu driver + a 6-level pp_dpm_mclk; we just try both.
+  const dpmLockScript = [
+    "for c in /sys/class/drm/card*/device; do",
+    "  if [ -f \"$c/pp_dpm_mclk\" ] && grep -q amdgpu \"$c/uevent\" 2>/dev/null; then",
+    "    levels=$(wc -l < \"$c/pp_dpm_mclk\")",
+    "    if [ \"$levels\" -ge 5 ]; then",
+    "      echo high > \"$c/power_dpm_force_performance_level\" 2>/dev/null || true",
+    "    fi",
+    "  fi",
+    "done",
+  ].join(" ");
+  await runShell(rdnaRemoteCommand(dpmLockScript, creds), { cwd: ROOT, timeoutMs: 30000 }).catch(() => {});
+
   const cmd = [
     serverPath,
     "--host", "127.0.0.1",
@@ -891,8 +913,11 @@ async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs) {
     "--metrics",
     "--ctx-size", "4096",
     "--parallel", "1",
-    "-ctk", "q8_0",
-    "-ctv", "q8_0",
+    // Default f16 KV cache. The previous -ctk q8_0 / -ctv q8_0 added
+    // dequant-per-attention-read overhead that artificially lowered
+    // llama.cpp's decode tok/s vs ZINC (which uses f32 KV) — apples-to-
+    // not-apples. Drop to defaults so the published baseline reflects
+    // peak llama.cpp throughput on this model + hardware.
     "-b", "4096",
     "-ub", "1024",
     "--flash-attn", "on",
@@ -1036,10 +1061,6 @@ function rdnaLlamaCommand(caseDef, creds, llamaCliPath) {
     "Vulkan0",
     "--flash-attn",
     "on",
-    "-ctk",
-    "q8_0",
-    "-ctv",
-    "q8_0",
     "-b",
     "4096",
     "-ub",
