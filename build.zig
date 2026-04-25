@@ -101,6 +101,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_q4k_wide",
         "dmmv_q4k_fused_gate_up",
         "dmmv_q4k_q8_1",
+        "dmmv_q4k_moe_batched",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

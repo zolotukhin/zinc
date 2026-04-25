@@ -48,6 +48,19 @@ pub const MoeDmmvPushConstants = extern struct {
     y_offset: u32,
 };
 
+/// Push constants for the cross-token batched MoE DMMV
+/// (src/shaders/dmmv_q4k_moe_batched.comp). Each WG handles one
+/// (row_pair, expert_slot, token_idx) triple; the routing buffer is
+/// flattened [n_tokens × n_experts_used] of expert IDs.
+pub const MoeBatchedDmmvPushConstants = extern struct {
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    n_experts_used: u32,
+    x_token_stride: u32,
+    y_token_stride: u32,
+};
+
 /// Push constants for the quantize_q8_1 shader.
 /// `ne` = number of f32 input elements (must be a multiple of 32).
 /// `num_blocks` = ne / 32. Pass explicitly so the shader does not have to divide.
@@ -73,6 +86,14 @@ pub const DmmvDispatch = struct {
     /// analogue of pipeline_q4k_fused_gate_up_moe (5 bindings: W_gate, W_up,
     /// X, Y_gate, Y_up). Enabled when both gate and up weights are Q4_K.
     pipeline_q4k_fused_gate_up: ?Pipeline,
+    /// Cross-token batched MoE DMMV. Same Q4_K weight layout as
+    /// pipeline_q4k_moe_kpar but the dispatch grid adds a token_idx
+    /// dimension (grid.z) so one dispatch covers all N prompt tokens'
+    /// MoE FFN work for a given (gate, up, or down) projection. Routing
+    /// buffer is flattened to [n_tokens × n_experts_used]. Foundation for
+    /// batched MoE prefill on qwen35moe / qwen36moe — pipeline registered,
+    /// dispatch helper available, but not yet wired into prefillBatched.
+    pipeline_q4k_moe_batched: ?Pipeline,
     /// Q5K pipeline, or null.
     pipeline_q5k: ?Pipeline,
     /// Q6K pipeline, or null.
@@ -321,6 +342,20 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // Cross-token batched MoE Q4_K DMMV. Same 4-binding shape as kpar
+        // (A, X, Y, routing) but with the larger MoeBatchedDmmvPushConstants
+        // struct that adds n_experts_used / x_token_stride / y_token_stride.
+        // Dispatch grid is (M+1)/2, n_experts_used, n_tokens.
+        const moe_batched_push_size = @sizeOf(MoeBatchedDmmvPushConstants);
+        const q4k_moe_batched_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_batched.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_moe_batched = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_batched_path, 4, moe_batched_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K MoE batched shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_q4k_moe_batched != null) {
+            log.info("dmmv_q4k_moe_batched pipeline loaded (cross-token MoE; not yet wired)", .{});
+        }
+
         // Fused gate+up Q4_K MoE: reads expert_input_buf once per block and
         // writes to both gate_buf and up_buf. 6 bindings (W_gate, W_up, X,
         // Y_gate, Y_up, routing). Same MoeDmmvPushConstants as kpar.
@@ -423,6 +458,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q6k_batch_kpar = pipeline_q6k_batch_kpar,
             .pipeline_q4k_moe = pipeline_q4k_moe,
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
+            .pipeline_q4k_moe_batched = pipeline_q4k_moe_batched,
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
             .pipeline_q5_1_moe = pipeline_q5_1_moe,
@@ -503,6 +539,59 @@ pub const DmmvDispatch = struct {
         };
 
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups_x, n_experts_y, 1);
+    }
+
+    /// Record a cross-token batched MoE DMMV dispatch. Reads N tokens'
+    /// inputs from `X_batch[N × K]`, dispatches one WG per (row_pair,
+    /// expert_slot, token_idx), routes via flattened
+    /// `routing[N × n_experts_used]`, writes to
+    /// `Y_batch[N × n_experts_used × M]`. Q4_K only for now.
+    pub fn recordMoeBatchedDispatch(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        x_buf: vk.c.VkBuffer,
+        x_size: vk.c.VkDeviceSize,
+        y_buf: vk.c.VkBuffer,
+        y_size: vk.c.VkDeviceSize,
+        routing_buf: vk.c.VkBuffer,
+        routing_size: vk.c.VkDeviceSize,
+        M: u32,
+        K: u32,
+        expert_stride: u32,
+        n_experts_used: u32,
+        n_tokens: u32,
+        x_token_stride: u32,
+        y_token_stride: u32,
+    ) !void {
+        const pip = if (self.pipeline_q4k_moe_batched) |*p| p else return error.PipelineNotLoaded;
+        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
+        const push = MoeBatchedDmmvPushConstants{
+            .M = M,
+            .K = K,
+            .expert_stride = expert_stride,
+            .n_experts_used = n_experts_used,
+            .x_token_stride = x_token_stride,
+            .y_token_stride = y_token_stride,
+        };
+        const infos = [4]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = x_buf, .offset = 0, .range = x_size },
+            .{ .buffer = y_buf, .offset = 0, .range = y_size },
+            .{ .buffer = routing_buf, .offset = 0, .range = routing_size },
+        };
+        const wg_x = (M + 1) / 2;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            wg_x,
+            n_experts_used,
+            n_tokens,
+        );
     }
 
     /// Record a decode-time matrix-vector multiply dispatch.
@@ -789,6 +878,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q6k_batch_kpar) |*p| p.deinit();
         if (self.pipeline_q4k_moe) |*p| p.deinit();
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
+        if (self.pipeline_q4k_moe_batched) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe_kpar) |*p| p.deinit();
