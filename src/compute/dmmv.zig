@@ -83,6 +83,27 @@ pub const QuantizeQ8_1Push = extern struct {
     num_blocks: u32,
 };
 
+/// Push constants for `count_experts.comp` (effort-6 Step 3 helper). Mirrors
+/// llama.cpp's count_experts push so the shader is structurally identical
+/// to the upstream version. All strides are in u32 units (not bytes).
+///
+/// For the prefill routing capture buffer with layout
+///   slot(token, layer) = (token * n_layers + layer) * (2 * n_experts_used)
+/// where the first n_experts_used u32s are expert IDs and the second
+/// n_experts_used u32s are f32 weights, configure as:
+///   ne00 = n_experts_used                (cells per token row)
+///   ne01 = n_tokens                      (number of token rows)
+///   nb00 = 1                             (consecutive within slot)
+///   nb01 = 2 * n_experts_used * n_layers (skip n_layers slots per row step)
+///   a_offset = layer * 2 * n_experts_used (jump to layer's slot in token 0)
+pub const CountExpertsPush = extern struct {
+    ne00: u32,
+    ne01: u32,
+    nb00: u32,
+    nb01: u32,
+    a_offset: u32,
+};
+
 /// Size in bytes of a single Q8_1 output block (32 int8 values + f16 d + f16 d*sum).
 pub const Q8_1_BLOCK_BYTES: u32 = 36;
 
@@ -185,6 +206,13 @@ pub const DmmvDispatch = struct {
     /// numerical validation pass against the f32 dmmv_q4k path before it can
     /// replace any production DMMV.
     pipeline_q4k_q8_1: ?Pipeline,
+    /// Effort-6 Step 3 foundation for the MUL_MAT_ID tiled GEMM port.
+    /// Counts how many tokens were routed to each expert. Output is a
+    /// `[n_experts]` u32 buffer that the future MUL_MAT_ID GEMM uses for the
+    /// per-expert early-exit. Pipeline loads at startup; no production
+    /// callers until the tiled GEMM (Steps 1+2) lands. 2 bindings (A routing
+    /// in, D counts out), push = CountExpertsPush.
+    pipeline_count_experts: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -493,6 +521,19 @@ pub const DmmvDispatch = struct {
             log.info("dmmv_q4k_q8_1 pipeline loaded (Q4_K mmq consumer; not yet wired)", .{});
         }
 
+        // Effort 6 Step 3: foundation helper for MUL_MAT_ID GEMM port.
+        // Counts tokens-per-expert from a per-(token, layer) routing buffer.
+        // 2 bindings (A routing in, D counts out), push = CountExpertsPush.
+        const count_experts_push_size = @sizeOf(CountExpertsPush);
+        const count_experts_path = std.fmt.bufPrint(&path_buf, "{s}/count_experts.spv", .{shader_dir}) catch unreachable;
+        const pipeline_count_experts = pipeline_mod.createFromSpirvWithOptions(instance, count_experts_path, 2, count_experts_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("count_experts shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_count_experts != null) {
+            log.info("count_experts pipeline loaded (MUL_MAT_ID GEMM foundation; not yet wired)", .{});
+        }
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
@@ -523,6 +564,7 @@ pub const DmmvDispatch = struct {
             .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
             .pipeline_q8_0_q8_1 = pipeline_q8_0_q8_1,
             .pipeline_q4k_q8_1 = pipeline_q4k_q8_1,
+            .pipeline_count_experts = pipeline_count_experts,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -915,6 +957,65 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Effort 6 Step 3: dispatch the count_experts shader. For one layer,
+    /// scan a routing buffer that stores per-(token, layer) topk expert IDs
+    /// and produce a `[n_experts]` u32 count buffer.
+    ///
+    /// Layout assumed for `routing_buf`:
+    ///   slot(token, layer) starts at byte offset
+    ///       (token * n_layers + layer) * (2 * n_experts_used) * 4
+    ///   the first n_experts_used u32s are expert IDs, the next n_experts_used
+    ///   u32s are f32 weights (mirrors router_output_buf packing in
+    ///   forward.zig:5316+).
+    ///
+    /// `counts_buf` must be sized for at least `n_experts * sizeof(u32)`.
+    /// Caller is responsible for clearing or overwriting it (the shader
+    /// writes one element per expert, indexed by gl_WorkGroupID.x).
+    ///
+    /// Returns `error.PipelineNotLoaded` if the count_experts shader is
+    /// unavailable, `error.InvalidArgument` for zero token counts.
+    pub fn recordCountExperts(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        routing_buf: vk.c.VkBuffer,
+        routing_size: vk.c.VkDeviceSize,
+        counts_buf: vk.c.VkBuffer,
+        counts_size: vk.c.VkDeviceSize,
+        n_tokens: u32,
+        n_layers: u32,
+        layer: u32,
+        n_experts_used: u32,
+        n_experts: u32,
+    ) !void {
+        const pip = if (self.pipeline_count_experts) |*p| p else return error.PipelineNotLoaded;
+        if (n_tokens == 0 or n_experts == 0 or n_experts_used == 0 or n_layers == 0) {
+            return error.InvalidArgument;
+        }
+        if (layer >= n_layers) return error.InvalidArgument;
+        const slot_stride_u32: u32 = 2 * n_experts_used;
+        const push = CountExpertsPush{
+            .ne00 = n_experts_used,
+            .ne01 = n_tokens,
+            .nb00 = 1,
+            .nb01 = slot_stride_u32 * n_layers,
+            .a_offset = layer * slot_stride_u32,
+        };
+        const infos = [2]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = routing_buf, .offset = 0, .range = routing_size },
+            .{ .buffer = counts_buf, .offset = 0, .range = counts_size },
+        };
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            n_experts,
+            1,
+            1,
+        );
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -943,6 +1044,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_quantize_q8_1) |*p| p.deinit();
         if (self.pipeline_q8_0_q8_1) |*p| p.deinit();
         if (self.pipeline_q4k_q8_1) |*p| p.deinit();
+        if (self.pipeline_count_experts) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

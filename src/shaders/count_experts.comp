@@ -1,0 +1,83 @@
+#version 460
+// ZINC — Count tokens routed to each expert.
+//
+// Effort 6 Step 3-of-5: foundation helper for the MUL_MAT_ID tiled GEMM port.
+// The MUL_MAT_ID GEMM (still to be ported, Step 1+2) uses a per-expert
+// early-exit `if (ic*BN >= data_expert_count[expert_idx]) return;` to skip
+// workgroups whose expert has zero routed tokens. This shader produces that
+// `data_expert_count` buffer.
+//
+// Direct port of llama.cpp's count_experts.comp — same shader interface, same
+// reduction pattern (256-thread atomic-free shared-memory sum). Structurally
+// identical so a future Q4_K mul_mm_id port can drop in unchanged.
+//
+// Bindings:
+//   binding 0: A — readonly u32 array of expert IDs (the routing buffer).
+//                  Indexed as `data_a[a_offset + i01*nb01 + i00*nb00]`.
+//                  Strides are in u32 units (NOT bytes).
+//   binding 1: D — writeonly u32[n_experts] count buffer. The dispatch
+//                  launches one WG per expert; `data_d[expert_id] = count`.
+//
+// For ZINC's prefill routing capture (gated by ZINC_CAPTURE_ROUTING=1) the
+// caller picks one layer and sets the strides so the WG iterates over
+// (token, slot) cells at that layer:
+//   ne00 = n_experts_used   (cells per token row)
+//   ne01 = n_tokens         (number of token rows to scan)
+//   nb00 = 1                (consecutive expert-ID u32s within a slot)
+//   nb01 = 2 * n_experts_used * n_layers   (jump from one token's slot at
+//                                            this layer to the next token's
+//                                            slot at the same layer; the 2×
+//                                            accounts for the f32 weights
+//                                            half of each slot)
+//   a_offset = layer * 2 * n_experts_used  (offset into the buffer where
+//                                            layer's slot starts in token 0)
+//
+// Dispatch: launch n_experts workgroups in X. Each workgroup handles one
+// expert ID via `gl_WorkGroupID.x`.
+
+#extension GL_EXT_control_flow_attributes : enable
+
+layout (push_constant) uniform parameter
+{
+    uint ne00;
+    uint ne01;
+    uint nb00;
+    uint nb01;
+    uint a_offset;
+} p;
+
+#define BLOCK_SIZE 256
+
+layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly  buffer A { uint data_a[]; };
+layout (binding = 1) writeonly buffer D { uint data_d[]; };
+
+shared uint vals[BLOCK_SIZE];
+
+void main() {
+    const uint expert_id   = gl_WorkGroupID.x;
+    const uint num_elements = p.ne00 * p.ne01;
+    const uint tid         = gl_LocalInvocationID.x;
+
+    uint count = 0u;
+    for (uint idx = tid; idx < num_elements; idx += BLOCK_SIZE) {
+        const uint i01 = idx / p.ne00;
+        const uint i00 = idx % p.ne00;
+        const uint a   = data_a[p.a_offset + i01 * p.nb01 + i00 * p.nb00];
+        count += uint(a == expert_id);
+    }
+
+    vals[tid] = count;
+    barrier();
+    [[unroll]] for (uint s = BLOCK_SIZE / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            vals[tid] += vals[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        data_d[expert_id] = vals[0];
+    }
+}
