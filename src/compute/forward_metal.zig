@@ -4947,6 +4947,7 @@ fn runGemmaExplicitMoeFallback(
     const down_shexp = lt.ffn_down_shexp orelse lt.ffn_down;
     const has_shexp = gate_shexp != null and up_shexp != null and down_shexp != null;
     const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
+    const folded_layer_output_scale: f32 = if (engine.debug_validation_enabled) 1.0 else engine.layer_output_scales[layer_idx];
 
     const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
     const norm_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
@@ -5267,7 +5268,11 @@ fn runGemmaExplicitMoeFallback(
     }
     {
         const hidden_out: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-        for (0..hidden_dim) |i| hidden_out[i] += expert_accum_ptr[i];
+        if (folded_layer_output_scale != 1.0) {
+            for (0..hidden_dim) |i| hidden_out[i] = (hidden_out[i] + expert_accum_ptr[i]) * folded_layer_output_scale;
+        } else {
+            for (0..hidden_dim) |i| hidden_out[i] += expert_accum_ptr[i];
+        }
     }
     if (hidden_before_snapshot) |hidden_before| {
         const expected_expert = try engine.allocator.alloc(f32, hidden_dim);
@@ -5511,6 +5516,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         const lt = engine.layer_tensors[layer_idx];
         const is_full_attn = ((layer + 1) % full_attn_interval == 0);
         const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
+        const skip_pre_ffn_router = is_moe and !use_gpu_routed_moe and hasExplicitGemmaMoeTensors(cfg, lt);
         const layer_output_scale = engine.layer_output_scales[layer_idx];
 
         if (is_full_attn) {
@@ -5571,7 +5577,7 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             if (!is_moe) {
                 // dense FFN: norm_buf is ready (no barrier needed between fused dispatch and FFN)
             }
-            if (is_moe) {
+            if (is_moe and !skip_pre_ffn_router) {
                 profileBarrier(cmd, profile, .router); // norm_buf visible before router DMMV
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 const router_in_buf: *const MetalBuffer = blk: {
@@ -5766,8 +5772,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
             // Eliminates one barrier vs separate scale_acc + barrier + rms_norm.
             dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
-            profileBarrier(cmd, profile, .router);
-            if (is_moe) {
+            if (is_moe and !skip_pre_ffn_router) {
+                profileBarrier(cmd, profile, .router);
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 const router_in_buf: *const MetalBuffer = blk: {
                     if (cfg.architecture == .gemma) {
@@ -6120,7 +6126,8 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
             }
         }
 
-        if (layer_output_scale != 1.0) {
+        const layer_output_scale_folded = skip_pre_ffn_router and !engine.debug_validation_enabled;
+        if (layer_output_scale != 1.0 and !layer_output_scale_folded) {
             const scale_barrier_class: BarrierClass = if (is_moe)
                 (if (use_gpu_routed_moe) .gpu_routed_moe else .fallback_moe)
             else

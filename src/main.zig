@@ -149,6 +149,8 @@ pub const Config = struct {
     max_tokens: u32 = 256,
     /// Wrap CLI prompt in the model's chat template before tokenization.
     chat: bool = false,
+    /// Keep CLI prompt as a raw completion even for chat-first templates.
+    raw_prompt: bool = false,
     kv_quant: u8 = 0, // 0=disabled, 2/3/4=TurboQuant bits
     /// Graph JSON report path.
     graph_report_path: ?[]const u8 = null,
@@ -413,6 +415,7 @@ const banner =
     \\  --model-id <id>          Managed model id from the local catalog/cache
     \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
     \\  --chat                   Apply the model chat template to --prompt
+    \\  --raw                    Do not auto-apply chat templates to --prompt
     \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
     \\  -d, --device <id>        Vulkan device index (default: 0)
     \\  -c, --context <size>     Context length (default: auto — sized to GPU memory; pass 0 to force auto)
@@ -455,6 +458,7 @@ const banner_full =
     \\  --model-id <id>          Managed model id from the local catalog/cache
     \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
     \\  --chat                   Apply the model chat template to --prompt
+    \\  --raw                    Do not auto-apply chat templates to --prompt
     \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
     \\  -d, --device <id>        Vulkan device index (default: 0)
     \\  -c, --context <size>     Context length (default: auto — sized to GPU memory; pass 0 to force auto)
@@ -579,6 +583,8 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             config.max_tokens = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidMaxTokens;
         } else if (std.mem.eql(u8, arg, "--chat")) {
             config.chat = true;
+        } else if (std.mem.eql(u8, arg, "--raw")) {
+            config.raw_prompt = true;
         } else if (std.mem.eql(u8, arg, "--kv-quant")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -618,8 +624,18 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
     if (config.command == .chat and config.prompt != null) {
         return error.ChatCommandDoesNotTakePrompt;
     }
+    if (config.chat and config.raw_prompt) {
+        return error.ConflictingPromptModes;
+    }
 
     return config;
+}
+
+fn shouldAutoChatCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8) bool {
+    const tmpl = tokenizer.chat_template orelse return false;
+    if (std.mem.indexOf(u8, tmpl, "<|turn>") == null) return false;
+    if (std.mem.indexOf(u8, prompt, "<|turn>") != null) return false;
+    return true;
 }
 
 fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8, chat: bool, allocator: std.mem.Allocator) !PreparedPrompt {
@@ -671,10 +687,38 @@ fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u
     };
 }
 
+const cli_harmony_final_prefix = "<|channel|>final<|message|>";
+const cli_harmony_stop_strs = [_][]const u8{
+    "<|end|>",
+    "<|return|>",
+    "<|start|>",
+    "<|channel|>",
+};
+const cli_chat_stop_strs = [_][]const u8{
+    "<|im_end|>",
+    "<|endoftext|>",
+    "<|return|>",
+};
+
+fn findFirstCliStop(text: []const u8, needles: []const []const u8) ?usize {
+    var first: ?usize = null;
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, text, needle)) |idx| {
+            if (first == null or idx < first.?) first = idx;
+        }
+    }
+    return first;
+}
+
 fn trimCliOutputText(text: []const u8, chat: bool) []const u8 {
     if (!chat) return text;
-    if (std.mem.indexOf(u8, text, "<|im_end|>")) |stop_pos| {
-        return text[0..stop_pos];
+    if (std.mem.indexOf(u8, text, cli_harmony_final_prefix)) |final_start| {
+        const body = text[final_start + cli_harmony_final_prefix.len ..];
+        const stop_pos = findFirstCliStop(body, cli_harmony_stop_strs[0..]) orelse body.len;
+        return std.mem.trim(u8, body[0..stop_pos], " \t\r\n");
+    }
+    if (findFirstCliStop(text, cli_chat_stop_strs[0..])) |stop_pos| {
+        return std.mem.trimRight(u8, text[0..stop_pos], " \t\r\n");
     }
     return text;
 }
@@ -1592,10 +1636,15 @@ pub fn main() !void {
             };
             defer tokenizer.deinit();
 
-            var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, config.chat, allocator);
+            const auto_chat = !config.chat and !config.raw_prompt and shouldAutoChatCliPrompt(&tokenizer, prompt);
+            const use_chat_prompt = config.chat or auto_chat;
+            var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, allocator);
             defer prepared_prompt.deinit(allocator);
-            if (config.chat) {
-                log.info("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
+            if (use_chat_prompt) {
+                log.info("Prompt mode: {s}chat template ({d} chars)", .{
+                    if (auto_chat) "auto " else "",
+                    prepared_prompt.text.len,
+                });
             }
 
             const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
@@ -1675,7 +1724,7 @@ pub fn main() !void {
                         try text_buf.appendSlice(allocator, "<?>");
                     }
                 }
-                const output_text = trimCliOutputText(text_buf.items, config.chat);
+                const output_text = trimCliOutputText(text_buf.items, use_chat_prompt);
                 log.info("Output ({d} tokens): {s}", .{ output_tokens.len, output_text });
             }
         } else {
@@ -1762,10 +1811,15 @@ pub fn main() !void {
         };
         defer tokenizer.deinit();
 
-        var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, config.chat, allocator);
+        const auto_chat = !config.chat and !config.raw_prompt and shouldAutoChatCliPrompt(&tokenizer, prompt);
+        const use_chat_prompt = config.chat or auto_chat;
+        var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, allocator);
         defer prepared_prompt.deinit(allocator);
-        if (config.chat) {
-            log.debug("Prompt mode: chat template ({d} chars)", .{prepared_prompt.text.len});
+        if (use_chat_prompt) {
+            log.debug("Prompt mode: {s}chat template ({d} chars)", .{
+                if (auto_chat) "auto " else "",
+                prepared_prompt.text.len,
+            });
         }
 
         // Tokenize prompt into caller-owned storage. This keeps CLI and server
@@ -1870,7 +1924,7 @@ pub fn main() !void {
                     try text_buf.appendSlice(allocator, "<?>");
                 }
             }
-            const output_text = trimCliOutputText(text_buf.items, config.chat);
+            const output_text = trimCliOutputText(text_buf.items, use_chat_prompt);
             log.info("Output text: {s}", .{output_text});
             // Also log raw token IDs for debugging
             log.info("Output tokens ({d}): first20={any}", .{
@@ -1906,6 +1960,7 @@ test "parseArgs: defaults" {
     try std.testing.expect(config.model_id == null);
     try std.testing.expect(config.prompt == null);
     try std.testing.expect(!config.chat);
+    try std.testing.expect(!config.raw_prompt);
     try std.testing.expectEqual(Command.run, config.command);
 }
 
@@ -1927,6 +1982,7 @@ test "parseArgs: full args" {
     try std.testing.expectEqualStrings("hello", config.prompt.?);
     try std.testing.expectEqual(@as(u32, 32), config.max_tokens);
     try std.testing.expect(config.chat);
+    try std.testing.expect(!config.raw_prompt);
     try std.testing.expectEqual(@as(u8, 3), config.kv_quant);
     try std.testing.expectEqualStrings("graph.json", config.graph_report_path.?);
     try std.testing.expectEqualStrings("graph.dot", config.graph_dot_path.?);
@@ -1992,6 +2048,19 @@ test "parseArgs: chat flag" {
     const config = try parseArgs(&args);
     try std.testing.expect(config.chat);
     try std.testing.expectEqualStrings("hi", config.prompt.?);
+}
+
+test "parseArgs: raw flag" {
+    const args = [_][:0]const u8{ "zinc", "--prompt", "hi", "--raw" };
+    const config = try parseArgs(&args);
+    try std.testing.expect(config.raw_prompt);
+    try std.testing.expect(!config.chat);
+    try std.testing.expectEqualStrings("hi", config.prompt.?);
+}
+
+test "parseArgs: raw and chat conflict" {
+    const args = [_][:0]const u8{ "zinc", "--prompt", "hi", "--chat", "--raw" };
+    try std.testing.expectError(error.ConflictingPromptModes, parseArgs(&args));
 }
 
 test "helpText: short help hides developer-only flags" {
@@ -2171,8 +2240,34 @@ test "prepareCliPrompt uses gemma4 default closed-thought prompt in chat mode" {
     try std.testing.expect(std.mem.indexOf(u8, prepared.text, "<bos><|turn>user\nHello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>") != null);
 }
 
+test "shouldAutoChatCliPrompt enables gemma4 turn templates" {
+    var tok = makeTestTokenizer(
+        "{%- if add_generation_prompt -%}<|turn>model\n<|channel>thought\n<channel|>{%- endif -%}",
+    );
+    defer tok.token_to_id.deinit();
+
+    try std.testing.expect(shouldAutoChatCliPrompt(&tok, "Hello"));
+    try std.testing.expect(!shouldAutoChatCliPrompt(&tok, "<|turn>user\nHello<turn|>"));
+}
+
+test "shouldAutoChatCliPrompt leaves non-gemma templates raw" {
+    var tok = makeTestTokenizer("<|im_start|>assistant\n");
+    defer tok.token_to_id.deinit();
+
+    try std.testing.expect(!shouldAutoChatCliPrompt(&tok, "Hello"));
+}
+
 test "trimCliOutputText strips chat terminator only in chat mode" {
     try std.testing.expectEqualStrings("Paris", trimCliOutputText("Paris<|im_end|>", true));
     try std.testing.expectEqualStrings("Paris<|im_end|>", trimCliOutputText("Paris<|im_end|>", false));
     try std.testing.expectEqualStrings("Paris", trimCliOutputText("Paris", true));
+}
+
+test "trimCliOutputText extracts GPT-OSS Harmony final channel" {
+    const raw =
+        "<|channel|>analysis<|message|>Need answer.<|end|>" ++
+        "<|start|>assistant<|channel|>final<|message|> Paris <|return|>";
+
+    try std.testing.expectEqualStrings("Paris", trimCliOutputText(raw, true));
+    try std.testing.expectEqualStrings(raw, trimCliOutputText(raw, false));
 }
