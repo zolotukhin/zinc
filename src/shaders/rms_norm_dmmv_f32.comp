@@ -1,0 +1,107 @@
+#version 460
+// ZINC — Fused RMS norm + f32 router DMMV.
+//
+// Replaces the (rms_norm_mul + dispatchDmmv) pair used by the MoE
+// router on non-Gemma architectures (Qwen 3.5/3.6 MoE etc) where
+// router weights are f32. Saves one vkCmdDispatch + one pipeline
+// barrier per MoE layer (30 on Qwen3.6 35B-A3B, ~1.5 ms / decode).
+//
+// Each workgroup is 64 threads = 1 wave64 on RDNA4. NUM_ROWS=2
+// router output rows per workgroup, dispatched as ((M+1)/2, 1, 1).
+//
+// Algorithm:
+//   1. All WGs independently compute the same RMS norm scale via
+//      subgroupAdd over hidden[] (deterministic across WGs because
+//      every thread reads the same hidden[] in the same order).
+//   2. WG 0 ALSO writes ffn_norm_buf[] = w[i]*(hidden[i]*rms_inv)
+//      so downstream MoE gate/up + shared-expert dispatches see the
+//      normalized vector. Other WGs skip the writeback (single-writer
+//      avoids the multi-WG race that Vulkan disallows).
+//   3. Each WG dot-products its assigned router rows against the
+//      (recomputed-per-iteration) normalized hidden, hitting L1 for
+//      hidden + ffn_norm_weights re-reads.
+//
+// Output values are bit-for-bit identical to the standalone
+// rms_norm_mul.spv since both shaders use the same subgroupAdd
+// reduction inside one wave64 and the same multiplication order
+// `weight * (x * rms_inv)`.
+//
+// Bindings:
+//   0  hidden            (f32, K=hidden_dim)
+//   1  ffn_norm_weights  (f32, K)
+//   2  router_weights    (f32, M*K row-major)
+//   3  ffn_norm_buf      (f32, K — written by WG 0 only)
+//   4  router_logits_buf (f32, M)
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;        // router output rows = n_experts
+    uint K;        // hidden_dim
+    uint eps_bits; // RMS norm epsilon (f32 bits)
+};
+
+layout(set = 0, binding = 0) readonly  buffer Hidden          { float hidden_data[]; };
+layout(set = 0, binding = 1) readonly  buffer FfnNormWeights  { float ffn_norm_w[];  };
+layout(set = 0, binding = 2) readonly  buffer RouterWeights   { float router_w[];    };
+layout(set = 0, binding = 3) writeonly buffer FfnNormBuf      { float ffn_norm_out[];};
+layout(set = 0, binding = 4) writeonly buffer RouterLogits    { float router_out[];  };
+
+const uint NUM_ROWS = 2u;
+
+shared float s_rms_inv;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+    float eps = uintBitsToFloat(eps_bits);
+
+    // --- Pass 1: sum of squares for RMS ---
+    float sum_sq = 0.0;
+    for (uint i = tid; i < K; i += 64u) {
+        float v = hidden_data[i];
+        sum_sq += v * v;
+    }
+    sum_sq = subgroupAdd(sum_sq);
+
+    if (tid == 0u) {
+        s_rms_inv = inversesqrt(sum_sq / float(K) + eps);
+    }
+    barrier();
+    float rms_inv = s_rms_inv;
+
+    // --- WG 0: also write ffn_norm_buf for downstream MoE consumers ---
+    // Single-writer (only WG 0) so no inter-WG race. The dispatch barrier
+    // makes the writes visible to subsequent compute dispatches that read
+    // ffn_norm_buf (gate/up/down expert DMMVs, shared-expert DMMVs).
+    // Multiplication order matches rms_norm_mul.comp:
+    //   y[i] = weight[i] * (x[i] * rms_inv)
+    if (wg_id == 0u) {
+        for (uint i = tid; i < K; i += 64u) {
+            ffn_norm_out[i] = ffn_norm_w[i] * (hidden_data[i] * rms_inv);
+        }
+    }
+
+    // --- Pass 2: matvec for router (NUM_ROWS rows per WG) ---
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
+
+        float sum = 0.0;
+        uint w_base = row * K;
+        for (uint k = tid; k < K; k += 64u) {
+            // Recompute normalized value from cached hidden/weights.
+            // Same expression as the WG-0 writeback above so router_out
+            // matches what an unfused (rms_norm + dmmv f32) sequence would
+            // have produced.
+            float nv = ffn_norm_w[k] * (hidden_data[k] * rms_inv);
+            sum += nv * router_w[w_base + k];
+        }
+        sum = subgroupAdd(sum);
+        if (tid == 0u) {
+            router_out[row] = sum;
+        }
+    }
+}

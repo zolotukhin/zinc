@@ -61,6 +61,20 @@ pub const MoeBatchedDmmvPushConstants = extern struct {
     y_token_stride: u32,
 };
 
+/// Push constants for the fused MoE down + weighted_acc shader
+/// (src/shaders/dmmv_q4k_moe_fused_down_acc.comp). Same layout as
+/// MoeDmmvPushConstants plus n_used (the expert loop is internal to
+/// the shader so the dispatch grid drops the Y=n_experts_used dim).
+pub const MoeFusedDownAccPushConstants = extern struct {
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    x_expert_stride: u32,
+    x_offset: u32,
+    y_offset: u32,
+    n_used: u32,
+};
+
 /// Push constants for the quantize_q8_1 shader.
 /// `ne` = number of f32 input elements (must be a multiple of 32).
 /// `num_blocks` = ne / 32. Pass explicitly so the shader does not have to divide.
@@ -134,6 +148,17 @@ pub const DmmvDispatch = struct {
     /// Y_up, routing). Halves the dispatch count for the MoE gate+up phase
     /// and reads the shared input once per block.
     pipeline_q4k_fused_gate_up_moe: ?Pipeline,
+    /// Fused Q4_K MoE down + weighted_acc pipeline (4 bindings: A, X,
+    /// Y=hidden_buf, routing). Each WG owns NUM_ROWS=2 hidden rows and
+    /// loops over n_used experts internally, eliminating the separate
+    /// moe_weighted_acc dispatch on call sites where Y can be hidden_buf
+    /// directly (no post_ffw_norm, no ffn_down_exps_scale).
+    pipeline_q4k_moe_fused_down_acc: ?Pipeline,
+    /// Q5_K analogue of pipeline_q4k_moe_fused_down_acc. Same 4-binding
+    /// shape and MoeFusedDownAccPushConstants layout. Targets Q4_K_M / XL
+    /// packs where the down projection ships as Q5_K (e.g.
+    /// Qwen3.6-35B-A3B-UD-Q4_K_XL) so the fused path can engage there too.
+    pipeline_q5k_moe_fused_down_acc: ?Pipeline,
     /// MoE Q5K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q5k_moe: ?Pipeline,
     /// Experimental K-parallel Q5K MoE pipeline (same 4 bindings, wave64 subgroupAdd).
@@ -365,6 +390,26 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // Fused Q4_K MoE down + weighted_acc: each WG accumulates over
+        // n_used experts and writes hidden_buf[row] += sum (NUM_ROWS=2).
+        // 4 bindings (A, X=swiglu_buf, Y=hidden_buf, routing). Push struct
+        // adds n_used (the expert loop is internal to the shader so the
+        // dispatch grid drops the Y dim used by kpar).
+        const fused_down_acc_push_size = @sizeOf(MoeFusedDownAccPushConstants);
+        const q4k_fused_down_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_fused_down_acc.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K MoE fused down+acc shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Q5_K analogue of the fused down+acc shader. Targets Q4_K_M / XL
+        // packs whose down projection is Q5_K (Qwen3.6-35B-A3B-UD-Q4_K_XL).
+        const q5k_fused_down_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe_fused_down_acc.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q5k_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(instance, q5k_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q5_K MoE fused down+acc shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         const q5k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe.spv", .{shader_dir}) catch unreachable;
         const pipeline_q5k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_K MoE shader not loaded: {s}", .{@errorName(err)});
@@ -460,6 +505,8 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_q4k_moe_batched = pipeline_q4k_moe_batched,
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
+            .pipeline_q4k_moe_fused_down_acc = pipeline_q4k_moe_fused_down_acc,
+            .pipeline_q5k_moe_fused_down_acc = pipeline_q5k_moe_fused_down_acc,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
             .pipeline_q5_1_moe = pipeline_q5_1_moe,
             .pipeline_q5k_moe = pipeline_q5k_moe,
@@ -880,6 +927,8 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q4k_moe_batched) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_moe) |*p| p.deinit();
+        if (self.pipeline_q4k_moe_fused_down_acc) |*p| p.deinit();
+        if (self.pipeline_q5k_moe_fused_down_acc) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();
         if (self.pipeline_q5k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();

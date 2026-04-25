@@ -21,6 +21,7 @@ const dmmv_mod = @import("dmmv.zig");
 const DmmvDispatch = dmmv_mod.DmmvDispatch;
 const DmmvPushConstants = dmmv_mod.DmmvPushConstants;
 const MoeDmmvPushConstants = dmmv_mod.MoeDmmvPushConstants;
+const MoeFusedDownAccPushConstants = dmmv_mod.MoeFusedDownAccPushConstants;
 const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
 const elementwise_mod = @import("elementwise.zig");
 const ElementwiseDispatch = elementwise_mod.ElementwiseDispatch;
@@ -924,6 +925,21 @@ pub const InferenceEngine = struct {
     // ZINC_MOE_FUSED_GATE_UP=0 to fall back to the two-dispatch path for
     // A/B testing.
     use_moe_fused_gate_up: bool = false,
+    // Opt-in via ZINC_FUSE_MOE_DOWN_ACC=1. When set and the
+    // dmmv_q4k_moe_fused_down_acc pipeline is loaded, the MoE down DMMV +
+    // moe_weighted_acc pair are merged into a single dispatch that
+    // accumulates n_used expert outputs directly into hidden_buf. Falls
+    // back automatically when the call site needs ffn_down_exps_scale or
+    // post_ffw_norm or shared expert overlap.
+    use_moe_fused_down_acc: bool = false,
+    // Default-on when the rms_norm_dmmv_f32 pipeline is loaded. Folds
+    // the per-MoE-layer (rms_norm_mul → router DMMV) pair into a
+    // single dispatch on architectures whose router (`ffn_gate_inp`)
+    // weights are f32 (Qwen 3.5/3.6 etc). Falls back automatically
+    // when the architecture is Gemma (different norm flow), the
+    // router has a bias, or the ffn_norm tensor isn't f32. Disable
+    // with ZINC_FUSED_RMS_ROUTER=0.
+    use_fused_rms_router: bool = false,
     // Default-on. Subgroup-parallel softmax_topk_v2 (subgroupMax/Min/Shuffle).
     // Disable with ZINC_TOPK_V1=1 to fall back to the v1 shader (single-thread
     // serial scan in shared memory).
@@ -1732,6 +1748,44 @@ pub const InferenceEngine = struct {
             log.info("MoE Q4_K fused gate+up ENABLED via ZINC_MOE_FUSED_GATE_UP=1", .{});
         }
 
+        // Fused MoE down + weighted_acc (Q4_K + Q5_K). Default ON when
+        // either pipeline is loaded, disabled by setting
+        // ZINC_FUSE_MOE_DOWN_ACC=0. Targets the 0.52 ms moe_weighted_acc
+        // dispatch in the Qwen 3.6 35B-A3B decode breakdown (~1.3% of
+        // total decode budget). The Qwen 3.6 XL pack ships down weights
+        // as Q5_K so we accept either pipeline being present here;
+        // fused_pip_for_qt at the call site selects the right one and
+        // falls back when neither is loaded for the current quant.
+        const moe_fused_down_acc_env = std.posix.getenv("ZINC_FUSE_MOE_DOWN_ACC");
+        const moe_fused_down_acc_explicitly_off = moe_fused_down_acc_env != null and std.mem.eql(u8, moe_fused_down_acc_env.?, "0");
+        const moe_fused_down_acc_enabled = !moe_fused_down_acc_explicitly_off and
+            (dmmv.pipeline_q4k_moe_fused_down_acc != null or dmmv.pipeline_q5k_moe_fused_down_acc != null);
+        if (moe_fused_down_acc_enabled) {
+            log.info("MoE fused down+acc ENABLED (default, set ZINC_FUSE_MOE_DOWN_ACC=0 to disable; q4_k_pipe={} q5k_pipe={})", .{
+                dmmv.pipeline_q4k_moe_fused_down_acc != null,
+                dmmv.pipeline_q5k_moe_fused_down_acc != null,
+            });
+        } else if (moe_fused_down_acc_explicitly_off) {
+            log.info("MoE fused down+acc DISABLED via ZINC_FUSE_MOE_DOWN_ACC=0", .{});
+        }
+
+        // Fused FFN-RMS-norm + f32 router DMMV: default ON when the
+        // rms_norm_dmmv_f32 pipeline is loaded. Folds the standalone
+        // ffn-norm dispatch into the MoE router DMMV, saving one
+        // dispatch + one barrier per MoE layer (~30 layers on Qwen 3.6
+        // 35B-A3B). Disabled by setting ZINC_FUSED_RMS_ROUTER=0. Per-call
+        // gates (architecture, weight type, etc.) are evaluated in the
+        // forward path so models that don't fit silently fall back.
+        const fused_rms_router_env = std.posix.getenv("ZINC_FUSED_RMS_ROUTER");
+        const fused_rms_router_explicitly_off = fused_rms_router_env != null and std.mem.eql(u8, fused_rms_router_env.?, "0");
+        const fused_rms_router_enabled = !fused_rms_router_explicitly_off and
+            elementwise.pipeline_rms_norm_dmmv_f32 != null;
+        if (fused_rms_router_enabled) {
+            log.info("Fused FFN-norm + router DMMV ENABLED (default, set ZINC_FUSED_RMS_ROUTER=0 to disable)", .{});
+        } else if (fused_rms_router_explicitly_off) {
+            log.info("Fused FFN-norm + router DMMV DISABLED via ZINC_FUSED_RMS_ROUTER=0", .{});
+        }
+
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -1833,6 +1887,8 @@ pub const InferenceEngine = struct {
             .use_moe_kpar = moe_kpar_enabled,
             .use_moe_q5k_kpar = moe_q5k_kpar_enabled,
             .use_moe_fused_gate_up = moe_fused_gate_up_enabled,
+            .use_moe_fused_down_acc = moe_fused_down_acc_enabled,
+            .use_fused_rms_router = fused_rms_router_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -2867,6 +2923,60 @@ pub const InferenceEngine = struct {
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet3(ds, input_buf, input_size, weight_buf, weight_size, output_buf, output_size);
         try self.elementwise.recordRmsNorm(&self.decode_cmd, ds, hidden_dim, n_tokens, eps);
+    }
+
+    /// Fused RMS norm + f32 router DMMV. Reads `hidden_buf`, normalizes
+    /// it once with `ffn_norm_w`, writes the normalized vector to
+    /// `ffn_norm_buf` (so downstream MoE expert dispatches can consume
+    /// it), and produces the router DMMV output (M=n_experts) in
+    /// `router_logits_buf` — all in a single dispatch. Replaces the
+    /// (rms_norm_mul → router DMMV) pair on the per-MoE-layer hot path.
+    fn dispatchRmsNormDmmvF32(
+        self: *InferenceEngine,
+        hidden_buf: vk.c.VkBuffer,
+        hidden_size: vk.c.VkDeviceSize,
+        ffn_norm_w_buf: vk.c.VkBuffer,
+        ffn_norm_w_size: vk.c.VkDeviceSize,
+        router_w_buf: vk.c.VkBuffer,
+        router_w_size: vk.c.VkDeviceSize,
+        ffn_norm_out_buf: vk.c.VkBuffer,
+        ffn_norm_out_size: vk.c.VkDeviceSize,
+        router_logits_buf: vk.c.VkBuffer,
+        router_logits_size: vk.c.VkDeviceSize,
+        m: u32,
+        k: u32,
+        eps: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_rms_norm_dmmv_f32 orelse return error.ShaderNotLoaded);
+        const push = elementwise_mod.RmsNormDmmvF32Push{
+            .M = m,
+            .K = k,
+            .eps_bits = @bitCast(eps),
+        };
+        const wg_x: u32 = (m + 1) / 2;
+        if (pip.uses_push_descriptors) {
+            self.pushDispatch5(
+                pip,
+                std.mem.asBytes(&push),
+                hidden_buf, hidden_size,
+                ffn_norm_w_buf, ffn_norm_w_size,
+                router_w_buf, router_w_size,
+                ffn_norm_out_buf, ffn_norm_out_size,
+                router_logits_buf, router_logits_size,
+                wg_x, 1, 1,
+            );
+            return;
+        }
+        const ds = try self.allocDescSet(pip.descriptor_set_layout);
+        self.writeDescSet5(
+            ds,
+            hidden_buf, hidden_size,
+            ffn_norm_w_buf, ffn_norm_w_size,
+            router_w_buf, router_w_size,
+            ffn_norm_out_buf, ffn_norm_out_size,
+            router_logits_buf, router_logits_size,
+        );
+        self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), wg_x, 1, 1);
     }
 
     fn dispatchSigmoidMul(
@@ -4841,18 +4951,39 @@ pub const InferenceEngine = struct {
             // that use a single norm between attention and FFN (e.g. Qwen3.5).
             const ffn_norm_tensor = lt.ffn_norm orelse
                 lt.post_attention_norm orelse return error.TensorNotFound;
-            try self.dispatchRmsNorm(
-                self.hidden_buf.handle,
-                hidden_size,
-                ffn_norm_tensor.gpu_buffer.handle,
-                ffn_norm_tensor.gpu_buffer.size,
-                self.ffn_norm_buf.handle,
-                hidden_size,
-                hidden_dim,
-                1,
-                rms_norm_eps,
-            );
-            self.decode_cmd.computeBarrier();
+            // Decide whether the (FFN norm + MoE router DMMV) pair can be folded
+            // into a single dispatch via rms_norm_dmmv_f32. Conditions:
+            //   - opt-in flag enabled (default ON when pipeline loaded)
+            //   - this layer is an MoE layer (router exists)
+            //   - architecture isn't Gemma (different router input flow) and
+            //     isn't gpt_oss (validation diagnostic reads ffn_norm_buf
+            //     immediately after the standalone dispatch)
+            //   - ffn_norm + router weights are both f32 (shader bindings)
+            //   - router has no bias term and no Gemma-specific scale
+            const router_tensor_opt = lt.ffn_gate_inp;
+            const can_fuse_rms_router = self.use_fused_rms_router and
+                is_moe and
+                config.architecture != .gemma and
+                config.architecture != .gpt_oss and
+                ffn_norm_tensor.info.type_ == .f32 and
+                router_tensor_opt != null and
+                router_tensor_opt.?.info.type_ == .f32 and
+                lt.ffn_gate_inp_bias == null and
+                lt.ffn_gate_inp_scale == null;
+            if (!can_fuse_rms_router) {
+                try self.dispatchRmsNorm(
+                    self.hidden_buf.handle,
+                    hidden_size,
+                    ffn_norm_tensor.gpu_buffer.handle,
+                    ffn_norm_tensor.gpu_buffer.size,
+                    self.ffn_norm_buf.handle,
+                    hidden_size,
+                    hidden_dim,
+                    1,
+                    rms_norm_eps,
+                );
+                self.decode_cmd.computeBarrier();
+            }
 
             if (self.validation_diagnostics_enabled and config.architecture == .gpt_oss and collect_output and state.generated_tokens.items.len == 0 and hidden_dim <= 8192) {
                 try self.decode_cmd.end();
@@ -4953,8 +5084,36 @@ pub const InferenceEngine = struct {
                     break :blk self.residual_buf;
                 } else self.ffn_norm_buf;
 
-                try self.dispatchDmmv(router_tensor, router_input_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
-                self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
+                if (can_fuse_rms_router) {
+                    // Fused path: one dispatch produces both ffn_norm_buf
+                    // (for downstream MoE gate/up + shared-expert reads) and
+                    // router_logits_buf in a single shader invocation. The
+                    // post-dispatch barrier covers BOTH outputs so the
+                    // downstream consumers see consistent state.
+                    try self.dispatchRmsNormDmmvF32(
+                        self.hidden_buf.handle,
+                        hidden_size,
+                        ffn_norm_tensor.gpu_buffer.handle,
+                        ffn_norm_tensor.gpu_buffer.size,
+                        router_tensor.gpu_buffer.handle,
+                        router_tensor.gpu_buffer.size,
+                        self.ffn_norm_buf.handle,
+                        hidden_size,
+                        self.router_logits_buf.handle,
+                        self.router_logits_buf.size,
+                        config.n_experts,
+                        hidden_dim,
+                        rms_norm_eps,
+                    );
+                    const fused_ranges = [_]CommandBuffer.BufferRange{
+                        .{ .buffer = self.ffn_norm_buf.handle, .size = hidden_size },
+                        .{ .buffer = self.router_logits_buf.handle, .size = self.router_logits_buf.size },
+                    };
+                    self.decode_cmd.computeBuffersBarrier(&fused_ranges);
+                } else {
+                    try self.dispatchDmmv(router_tensor, router_input_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
+                    self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
+                }
 
                 // Gemma 4 MoE: scale router logits by 1/sqrt(hidden_dim) before softmax.
                 // Matches Metal forward_metal.zig:4134-4137.
@@ -5187,11 +5346,56 @@ pub const InferenceEngine = struct {
                         });
                     }
 
+                    // Decide between the fused down+weighted_acc path and the
+                    // legacy two-step down → weighted_acc path. The fused
+                    // shader writes hidden_buf[row] += sum_e(weight_e * dot)
+                    // in a single dispatch, eliminating the moe_weighted_acc
+                    // dispatch (~0.52 ms / decode on Qwen 3.6 35B-A3B).
+                    // Restricted to Q4_K / Q5_K experts with no post_ffw_norm
+                    // and no per-expert down scale (Gemma 4 specific).
+                    const down_qt = down_exps.info.type_;
+                    const has_post_ffw_norm = lt.post_ffw_norm != null;
+                    const has_per_expert_scale = lt.ffn_down_exps_scale != null;
+                    const fused_pip_for_qt: ?*const Pipeline = blk: {
+                        switch (down_qt) {
+                            .q4_k => break :blk if (self.dmmv.pipeline_q4k_moe_fused_down_acc) |*p| p else null,
+                            .q5_k => break :blk if (self.dmmv.pipeline_q5k_moe_fused_down_acc) |*p| p else null,
+                            else => break :blk null,
+                        }
+                    };
+                    const can_fuse_down_acc = self.use_moe_fused_down_acc and
+                        !has_post_ffw_norm and
+                        !has_per_expert_scale and
+                        fused_pip_for_qt != null;
+
                     // down DMMV: ALL experts at once
                     // x_expert_stride=inter_dim: each expert reads from its own swiglu section
                     const moe_down_phase = self.beginProfilePhase();
-                    {
-                        const qt = down_exps.info.type_;
+                    if (can_fuse_down_acc) {
+                        // Fused path: single dispatch produces weighted accumulation
+                        // straight into hidden_buf. No down_buf intermediate needed.
+                        const pip = fused_pip_for_qt.?;
+                        const push = MoeFusedDownAccPushConstants{
+                            .M = hidden_dim,
+                            .K = inter_dim,
+                            .expert_stride = expert_down_row_bytes,
+                            .x_expert_stride = inter_dim,
+                            .x_offset = 0,
+                            .y_offset = 0,
+                            .n_used = n_used,
+                        };
+                        const wg_x: u32 = (hidden_dim + 1) / 2;
+                        self.pushDispatch4(
+                            pip,
+                            std.mem.asBytes(&push),
+                            down_exps.gpu_buffer.handle, down_exps.gpu_buffer.size,
+                            self.swiglu_buf.handle, self.swiglu_buf.size,
+                            self.hidden_buf.handle, hidden_size,
+                            self.router_output_buf.handle, self.router_output_buf.size,
+                            wg_x, 1, 1,
+                        );
+                    } else {
+                        const qt = down_qt;
                         const use_q4k_kpar = self.use_moe_kpar and qt == .q4_k and self.dmmv.pipeline_q4k_moe_kpar != null;
                         const use_q5k_kpar = self.use_moe_q5k_kpar and qt == .q5_k and self.dmmv.pipeline_q5k_moe_kpar != null;
                         const use_kpar = use_q4k_kpar or use_q5k_kpar;
@@ -5210,8 +5414,9 @@ pub const InferenceEngine = struct {
                         }
                     }
                     // Overlap: dispatch shared expert gate/up alongside MoE down.
-                    // No buffer conflicts: MoE down reads swiglu_buf/writes down_buf;
-                    // shared gate/up read ffn_norm_buf/write gate_buf,up_buf,router_logits_buf.
+                    // No buffer conflicts: MoE down reads swiglu_buf/writes down_buf
+                    // (or fused: writes hidden_buf); shared gate/up read
+                    // ffn_norm_buf/write gate_buf,up_buf,router_logits_buf.
                     if (has_shared_expert) {
                         try self.dispatchDmmv(gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
                         try self.dispatchDmmv(up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, shexp_inter_dim, hidden_dim);
@@ -5225,7 +5430,8 @@ pub const InferenceEngine = struct {
                     // Gemma 4 MoE: per-expert scalar on down expert output before weighted_acc.
                     // down[slot*hidden_dim + i] *= ffn_down_exps_scale[expert_id[slot]].
                     // Matches Metal forward_metal.zig:4357-4360.
-                    if (lt.ffn_down_exps_scale) |scale_t| {
+                    if (!can_fuse_down_acc and lt.ffn_down_exps_scale != null) {
+                        const scale_t = lt.ffn_down_exps_scale.?;
                         try self.dispatchPerExpertScale(
                             self.down_buf.handle,
                             self.down_buf.size,
@@ -5242,26 +5448,29 @@ pub const InferenceEngine = struct {
                     // Weighted accumulation: sum ALL experts at once.
                     // If post_ffw_norm is present, accumulate into moe_out_buf for normalization
                     // before residual add; otherwise accumulate directly into hidden_buf.
-                    const has_post_ffw_norm = lt.post_ffw_norm != null;
-                    const moe_acc_target = if (has_post_ffw_norm) self.moe_out_buf.handle else self.hidden_buf.handle;
-                    const moe_acc_target_size = if (has_post_ffw_norm) self.moe_out_buf.size else hidden_size;
-                    if (has_post_ffw_norm) {
-                        // Zero moe_out_buf before weighted accumulation
-                        vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.moe_out_buf.handle, 0, hidden_size, 0);
-                        self.decode_cmd.transferToComputeBarrier();
-                    }
+                    // (Skipped in the fused path — the fused down kernel already
+                    // wrote hidden_buf += weighted accumulation.)
                     const moe_acc_phase = self.beginProfilePhase();
-                    try self.dispatchMoeWeightedAcc(
-                        moe_acc_target,
-                        moe_acc_target_size,
-                        self.down_buf.handle,
-                        self.down_buf.size,
-                        self.router_output_buf.handle,
-                        self.router_output_buf.size,
-                        hidden_dim,
-                        n_used,
-                        hidden_dim,
-                    );
+                    if (!can_fuse_down_acc) {
+                        const moe_acc_target = if (has_post_ffw_norm) self.moe_out_buf.handle else self.hidden_buf.handle;
+                        const moe_acc_target_size = if (has_post_ffw_norm) self.moe_out_buf.size else hidden_size;
+                        if (has_post_ffw_norm) {
+                            // Zero moe_out_buf before weighted accumulation
+                            vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.moe_out_buf.handle, 0, hidden_size, 0);
+                            self.decode_cmd.transferToComputeBarrier();
+                        }
+                        try self.dispatchMoeWeightedAcc(
+                            moe_acc_target,
+                            moe_acc_target_size,
+                            self.down_buf.handle,
+                            self.down_buf.size,
+                            self.router_output_buf.handle,
+                            self.router_output_buf.size,
+                            hidden_dim,
+                            n_used,
+                            hidden_dim,
+                        );
+                    }
                     // Overlap: dispatch shared expert SwiGLU alongside weighted_acc.
                     // No buffer conflicts: weighted_acc reads down_buf+router_output_buf/writes hidden_buf;
                     // SwiGLU reads gate_buf+up_buf/writes swiglu_buf.
@@ -5276,7 +5485,9 @@ pub const InferenceEngine = struct {
                             shexp_inter_dim,
                         );
                     }
-                    self.decode_cmd.computeBarrier();
+                    if (!can_fuse_down_acc or has_shared_expert) {
+                        self.decode_cmd.computeBarrier();
+                    }
                     self.endProfilePhase(.moe_weighted_acc, moe_acc_phase);
 
                     // Shared expert down projection (run BEFORE post_ffw_norm for Gemma 4

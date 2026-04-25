@@ -1,0 +1,169 @@
+#version 460
+// ZINC — Fused Q5_K MoE down DMMV + weighted_acc.
+// Q5_K analogue of dmmv_q4k_moe_fused_down_acc.comp. Eliminates the
+// separate moe_weighted_acc dispatch by computing each expert's down
+// output and weighted-accumulating into hidden_buf in one kernel.
+//
+// Each WG handles NUM_ROWS=2 rows of hidden_buf. Within the WG, the
+// outer loop iterates over n_used experts, multiplying each expert's
+// dot product by its routing weight and summing into the row-local
+// accumulator. Final write: hidden[row] += row_acc — race-free since
+// each row is owned by exactly one WG.
+//
+// Dispatch: ((M+1)/2, 1, 1).
+// Bindings (4 total):
+//   0: A — Q5_K stacked expert down weights
+//   1: X — swiglu output, n_used contiguous slabs of inter_dim each
+//   2: Y — hidden_buf, += accumulated
+//   3: MoeRouting — [expert_ids[k]][floatBitsToUint(weight[k])]
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint expert_stride;
+    uint x_expert_stride;
+    uint x_offset;
+    uint y_offset;
+    uint n_used;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
+layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
+
+const uint NUM_ROWS = 2u;
+const uint Q5K_BLOCK_U32 = 44u;
+
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
+}
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
+}
+vec4 unpack_qh_bits(uint qh_u32, uint sb) {
+    return vec4(
+        float((qh_u32 >> sb) & 1u) * 16.0,
+        float((qh_u32 >> (sb + 8u)) & 1u) * 16.0,
+        float((qh_u32 >> (sb + 16u)) & 1u) * 16.0,
+        float((qh_u32 >> (sb + 24u)) & 1u) * 16.0
+    );
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id_x = gl_WorkGroupID.x;
+
+    const uint THREADS_PER_BLOCK = 16u;
+    const uint it_size = 64u / THREADS_PER_BLOCK;
+    uint itid = tid % THREADS_PER_BLOCK;
+    uint ix = tid / THREADS_PER_BLOCK;
+
+    uint il = itid / 4u;
+    uint ir = itid % 4u;
+    uint v_im = il / 2u;
+    uint v_in = il % 2u;
+    uint l0 = 4u * (2u * ir + v_in);
+    uint q_offset_in_half = 32u * v_im + l0;
+    uint y_offset_local = 64u * v_im + l0;
+
+    uint blocks_per_row = K / 256u;
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id_x * NUM_ROWS + r;
+        if (row >= M) break;
+
+        float row_acc = 0.0;
+
+        for (uint e = 0u; e < n_used; e++) {
+            uint expert_id = routing_data[e];
+            float w = uintBitsToFloat(routing_data[n_used + e]);
+
+            uint a_offset_bytes = expert_id * expert_stride;
+            uint a_base_u32 = a_offset_bytes / 4u;
+            uint x_global_base_v4 = (x_offset / 16u) + (e * x_expert_stride) / 4u;
+
+            uint row_u32 = a_base_u32 + row * blocks_per_row * Q5K_BLOCK_U32;
+            float sum = 0.0;
+
+            for (uint i = ix; i < blocks_per_row; i += it_size) {
+                uint blk_u32 = row_u32 + i * Q5K_BLOCK_U32;
+
+                uint d_dmin = a_u32[blk_u32];
+                float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+                float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+                uint sc0 = a_u32[blk_u32 + 1u];
+                uint sc1 = a_u32[blk_u32 + 2u];
+                uint sc2 = a_u32[blk_u32 + 3u];
+
+                uint qh_u32 = a_u32[blk_u32 + 4u + l0 / 4u];
+
+                uint qs_u32_0 = a_u32[blk_u32 + 12u + q_offset_in_half / 4u];
+                uint qs_u32_1 = a_u32[blk_u32 + 12u + q_offset_in_half / 4u + 16u];
+
+                vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
+                vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
+                vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
+                vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
+
+                uint sb_a = 2u * v_im;
+                uint sb_b = 2u * v_im + 1u;
+                uint sb_c = 2u * v_im + 4u;
+                uint sb_d = 2u * v_im + 5u;
+
+                q0_lo += unpack_qh_bits(qh_u32, sb_a);
+                q0_hi += unpack_qh_bits(qh_u32, sb_b);
+                q1_lo += unpack_qh_bits(qh_u32, sb_c);
+                q1_hi += unpack_qh_bits(qh_u32, sb_d);
+
+                uint b_idx = (i * 256u + y_offset_local) / 4u;
+                vec4 by0 = x_v4[x_global_base_v4 + b_idx];
+                vec4 by1 = x_v4[x_global_base_v4 + b_idx + 8u];
+                uint b_idx2 = (i * 256u + y_offset_local + 128u) / 4u;
+                vec4 by2 = x_v4[x_global_base_v4 + b_idx2];
+                vec4 by3 = x_v4[x_global_base_v4 + b_idx2 + 8u];
+
+                uint bytes[12];
+                bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
+                bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
+                bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
+
+                float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
+                if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a+4u] & 63u); }
+                else { sc_a = float((bytes[sb_a+4u]&0xFu)|((bytes[sb_a-4u]>>6)<<4)); mn_a = float(((bytes[sb_a+4u]>>4)&0xFu)|((bytes[sb_a]>>6)<<4)); }
+                if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b+4u] & 63u); }
+                else { sc_b = float((bytes[sb_b+4u]&0xFu)|((bytes[sb_b-4u]>>6)<<4)); mn_b = float(((bytes[sb_b+4u]>>4)&0xFu)|((bytes[sb_b]>>6)<<4)); }
+                if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c+4u] & 63u); }
+                else { sc_c = float((bytes[sb_c+4u]&0xFu)|((bytes[sb_c-4u]>>6)<<4)); mn_c = float(((bytes[sb_c+4u]>>4)&0xFu)|((bytes[sb_c]>>6)<<4)); }
+                if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d+4u] & 63u); }
+                else { sc_d = float((bytes[sb_d+4u]&0xFu)|((bytes[sb_d-4u]>>6)<<4)); mn_d = float(((bytes[sb_d+4u]>>4)&0xFu)|((bytes[sb_d]>>6)<<4)); }
+
+                float factor0 = d_val * sc_a; float bias0 = dmin_val * mn_a;
+                float factor1 = d_val * sc_b; float bias1 = dmin_val * mn_b;
+                float factor2 = d_val * sc_c; float bias2 = dmin_val * mn_c;
+                float factor3 = d_val * sc_d; float bias3 = dmin_val * mn_d;
+
+                sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+                sum += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+                sum += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+                sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+            }
+
+            sum = subgroupAdd(sum);
+            row_acc += w * sum;
+        }
+
+        if (tid == 0u) {
+            y_data[(y_offset / 4u) + row] += row_acc;
+        }
+    }
+}

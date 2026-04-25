@@ -159,6 +159,16 @@ pub const RmsNormAddPush = extern struct {
     eps: f32,
 };
 
+/// Push constants for fused RMS norm + f32 router DMMV shader
+/// (src/shaders/rms_norm_dmmv_f32.comp). Folds the per-MoE-layer
+/// rms_norm_mul → router DMMV pair into a single dispatch on
+/// architectures whose router weights are f32 (Qwen 3.5/3.6 etc).
+pub const RmsNormDmmvF32Push = extern struct {
+    M: u32,        // router output rows (= n_experts)
+    K: u32,        // hidden_dim
+    eps_bits: u32, // RMS norm epsilon (f32 bits)
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -211,6 +221,12 @@ pub const ElementwiseDispatch = struct {
     pipeline_rms_norm_add: ?Pipeline,
     /// NORM ROPE pipeline: fused RMS norm + RoPE per head, 3 bindings (data, weight, freq).
     pipeline_norm_rope: ?Pipeline,
+    /// Fused RMS norm + f32 router DMMV pipeline (5 bindings: hidden,
+    /// ffn_norm_weights, router_weights, ffn_norm_buf, router_logits_buf).
+    /// Replaces (rms_norm_mul → router DMMV) for Qwen-style MoE layers
+    /// whose router uses f32 weights. Saves 1 dispatch + 1 barrier per
+    /// MoE layer (~30 layers on Qwen 3.6 35B-A3B).
+    pipeline_rms_norm_dmmv_f32: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -448,6 +464,16 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // rms_norm_dmmv_f32: fused RMS norm + f32 router DMMV, 5 bindings
+        // (hidden, ffn_norm_w, router_w, ffn_norm_buf, router_logits_buf).
+        // Targets the per-MoE-layer (rms_norm_mul → router DMMV) pair on
+        // architectures whose router weights are f32 (Qwen 3.5/3.6 etc).
+        const rms_norm_dmmv_f32_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_dmmv_f32.spv", .{shader_dir}) catch unreachable;
+        const pipeline_rms_norm_dmmv_f32 = pipeline_mod.createFromSpirvWithOptions(instance, rms_norm_dmmv_f32_path, 5, @sizeOf(RmsNormDmmvF32Push), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("rms_norm_dmmv_f32 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -475,6 +501,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_residual_rms_norm = pipeline_residual_rms_norm,
             .pipeline_rms_norm_add = pipeline_rms_norm_add,
             .pipeline_norm_rope = pipeline_norm_rope,
+            .pipeline_rms_norm_dmmv_f32 = pipeline_rms_norm_dmmv_f32,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -837,6 +864,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_residual_rms_norm) |*p| p.deinit();
         if (self.pipeline_rms_norm_add) |*p| p.deinit();
         if (self.pipeline_norm_rope) |*p| p.deinit();
+        if (self.pipeline_rms_norm_dmmv_f32) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
