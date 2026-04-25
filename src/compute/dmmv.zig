@@ -131,6 +131,14 @@ pub const DmmvDispatch = struct {
     /// produced by pipeline_quantize_q8_1. Enables integer dot product on the
     /// SSM proj hot path when ZINC_MMQ_SSM=1.
     pipeline_q8_0_q8_1: ?Pipeline,
+    /// mul_mmq variant: Q4_K weight × Q8_1 activation -> f32. Mirrors the
+    /// Q8_0 mmq pipeline binding shape (3 bindings: A weights, X Q8_1 stream,
+    /// Y f32 output) but supports the Q4_K super-block layout used by
+    /// Q4_K_M / Q4_K_XL packs. Activation comes from pipeline_quantize_q8_1.
+    /// Pipeline registered but not wired into call sites yet — needs a
+    /// numerical validation pass against the f32 dmmv_q4k path before it can
+    /// replace any production DMMV.
+    pipeline_q4k_q8_1: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -381,6 +389,22 @@ pub const DmmvDispatch = struct {
             log.info("dmmv_q8_0_q8_1 pipeline loaded (mul_mmq consumer)", .{});
         }
 
+        // mul_mmq Q4_K variant: Q4_K weight × Q8_1 activation -> f32.
+        // Same 3-binding shape and DmmvPushConstants layout as the Q8_0
+        // counterpart. Pipeline loads at startup; not yet swapped into any
+        // call site until the numerical validation against the f32 dmmv_q4k
+        // path lands. Enables integer-dot mmq for Q4_K_M / Q4_K_XL packs
+        // — biggest target is the SSM proj on qwen35moe / qwen36moe and the
+        // MoE FFN gate/up/down on the same models.
+        const q4k_q81_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_q8_1.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_q81_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("dmmv_q4k_q8_1 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_q4k_q8_1 != null) {
+            log.info("dmmv_q4k_q8_1 pipeline loaded (Q4_K mmq consumer; not yet wired)", .{});
+        }
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
@@ -407,6 +431,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q6k_moe = pipeline_q6k_moe,
             .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
             .pipeline_q8_0_q8_1 = pipeline_q8_0_q8_1,
+            .pipeline_q4k_q8_1 = pipeline_q4k_q8_1,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -699,6 +724,53 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Q4_K weight × Q8_1 activation mmq dispatch. Mirrors the Q8_0 variant
+    /// but the weight side decodes Q4_K super-blocks (256 elements / 144
+    /// bytes). K must be a multiple of 256 (the Q4_K super-block size).
+    pub fn recordMmqQ4_K_Q8_1(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        x_buf: vk.c.VkBuffer,
+        x_size: vk.c.VkDeviceSize,
+        y_buf: vk.c.VkBuffer,
+        y_size: vk.c.VkDeviceSize,
+        M: u32,
+        K: u32,
+        a_offset: u32,
+        x_offset: u32,
+        y_offset: u32,
+        acc_mode: u32,
+    ) !void {
+        const pip = if (self.pipeline_q4k_q8_1) |*p| p else return error.PipelineNotLoaded;
+        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
+        const push = DmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = a_offset,
+            .x_offset = x_offset,
+            .y_offset = y_offset,
+            .acc_mode = acc_mode,
+        };
+        const infos = [3]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = x_buf, .offset = 0, .range = x_size },
+            .{ .buffer = y_buf, .offset = 0, .range = y_size },
+        };
+        const wg_x = (M + 1) / 2;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            wg_x,
+            1,
+            1,
+        );
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -723,6 +795,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q6k_moe) |*p| p.deinit();
         if (self.pipeline_quantize_q8_1) |*p| p.deinit();
         if (self.pipeline_q8_0_q8_1) |*p| p.deinit();
+        if (self.pipeline_q4k_q8_1) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

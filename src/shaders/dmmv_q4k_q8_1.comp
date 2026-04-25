@@ -1,0 +1,187 @@
+#version 460
+// ZINC — Q4_K weights × Q8_1 activation integer-dot matvec (mmq).
+//
+// Companion to dmmv_q8_0_q8_1.comp but for Q4_K weight blocks. Unlocks
+// the integer-dot path for every Q4_K dispatch in the codebase: SSM
+// proj on qwen35moe / qwen36moe, MoE FFN on those models, dense FFN
+// on Gemma, attention projections on every Q4_K_M / Q4_K_XL pack. The
+// activation is pre-quantized once per (token, layer) by quantize_q8_1.comp.
+//
+// Q4_K super-block (256 elements, 144 bytes = 36 uint32):
+//   [u32 0]    f16 d, f16 dmin            — super-block scale + min
+//   [u32 1..3] 12 bytes packed scales/mins (8 sub-blocks × 6 bits each)
+//   [u32 4..35] 128 bytes qs              — 256 4-bit nibbles
+//
+// Q8_1 block (32 elements, 36 bytes = 9 uint32, matches quantize_q8_1):
+//   [u32 0..7] 32 packed int8 quants (4 i8 per uint32, little-endian)
+//   [u32 8]    packFloat2x16(f16 d, f16 d*sum)  — sub-block scale + bias
+//
+// Per-element math:
+//   q_real      = d * sc_sb * q4 - dmin * mn_sb        (Q4_K dequant)
+//   x_real      = d_q81 * q8                           (Q8_1 dequant)
+//   q_real*x_real = d * sc_sb * d_q81 * q4 * q8
+//                 - dmin * mn_sb * d_q81 * q8
+//
+// Sum over a 32-element sub-block:
+//   sum_sb = d * sc_sb * d_q81 * isum  -  dmin * mn_sb * s_q81
+//   isum  = sum_i (q4_i * q8_i)         — pure integer
+//   s_q81 = d_q81 * sum_i (q8_i)        — precomputed by quantize_q8_1
+//
+// Threading mirrors dmmv_q4k.comp exactly so the bit-positional reads
+// are byte-for-byte the same as the proven f32 path: 16 threads per
+// super-block, 4 super-blocks in parallel, NUM_ROWS=2 per workgroup.
+// Wave64 subgroupAdd reduction.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;            // must be a multiple of 256 (Q4_K super-block size)
+    uint a_offset;     // byte offset into MatrixA (Q4_K weights)
+    uint x_offset;     // byte offset into VectorX (Q8_1 packed activation, must be 4-byte aligned)
+    uint y_offset;     // byte offset into VectorY (f32 output)
+    uint acc_mode;     // 0 = overwrite, 1 = accumulate
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { uint x_u32[]; };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
+
+const uint NUM_ROWS = 2u;
+const uint Q4K_BLOCK_U32 = 36u;
+const uint Q81_BLOCK_U32 = 9u;
+
+// Sign-extend the i'th byte of a uint32 into int.
+int extract_i8(uint word, uint i) {
+    return int(int8_t(uint8_t((word >> (i * 8u)) & 0xFFu)));
+}
+
+// Integer dot of 4 unsigned 4-bit weights (0..15 in low nibbles of each byte
+// of `q4_packed`) with 4 signed 8-bit inputs packed in `x8_packed`.
+int dot_u4_i8(uint q4_packed, uint x8_packed) {
+    int s = 0;
+    s += int((q4_packed       ) & 0xFu) * extract_i8(x8_packed, 0u);
+    s += int((q4_packed >>  8u) & 0xFu) * extract_i8(x8_packed, 1u);
+    s += int((q4_packed >> 16u) & 0xFu) * extract_i8(x8_packed, 2u);
+    s += int((q4_packed >> 24u) & 0xFu) * extract_i8(x8_packed, 3u);
+    return s;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    const uint THREADS_PER_BLOCK = 16u;
+    const uint it_size = 64u / THREADS_PER_BLOCK;  // = 4
+    uint itid = tid % THREADS_PER_BLOCK;
+    uint ix = tid / THREADS_PER_BLOCK;
+
+    uint il = itid / 4u;
+    uint ir = itid % 4u;
+    uint v_im = il / 2u;
+    uint v_in = il % 2u;
+    uint l0 = 4u * (2u * ir + v_in);  // 0,4,8,...,28
+    uint q_offset_in_half = 32u * v_im + l0;
+
+    uint blocks_per_row = K / 256u;
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
+
+        uint row_u32 = a_offset / 4u + row * blocks_per_row * Q4K_BLOCK_U32;
+        float sum = 0.0;
+
+        for (uint i = ix; i < blocks_per_row; i += it_size) {
+            uint blk_u32 = row_u32 + i * Q4K_BLOCK_U32;
+
+            // Q4_K super-block scales.
+            uint d_dmin = a_u32[blk_u32];
+            float d_val    = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+            uint sc0 = a_u32[blk_u32 + 1u];
+            uint sc1 = a_u32[blk_u32 + 2u];
+            uint sc2 = a_u32[blk_u32 + 3u];
+
+            // Q4_K nibble u32s touched by this thread (same indices as dmmv_q4k.comp).
+            uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset_in_half / 4u];
+            uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset_in_half / 4u + 16u];
+
+            uint sb_a = 2u * v_im;
+            uint sb_b = 2u * v_im + 1u;
+            uint sb_c = 2u * v_im + 4u;
+            uint sb_d = 2u * v_im + 5u;
+
+            uint q_a_packed = qs_u32_0 & 0x0F0F0F0Fu;
+            uint q_b_packed = (qs_u32_0 >> 4) & 0x0F0F0F0Fu;
+            uint q_c_packed = qs_u32_1 & 0x0F0F0F0Fu;
+            uint q_d_packed = (qs_u32_1 >> 4) & 0x0F0F0F0Fu;
+
+            // Q8_1 input for the 4 sub-blocks at element positions [l0..l0+3].
+            uint x_super_base = x_offset / 4u + i * 8u * Q81_BLOCK_U32;
+            uint l0_word = l0 / 4u;  // 0..7
+
+            uint x_a = x_u32[x_super_base + sb_a * Q81_BLOCK_U32 + l0_word];
+            uint x_b = x_u32[x_super_base + sb_b * Q81_BLOCK_U32 + l0_word];
+            uint x_c = x_u32[x_super_base + sb_c * Q81_BLOCK_U32 + l0_word];
+            uint x_d = x_u32[x_super_base + sb_d * Q81_BLOCK_U32 + l0_word];
+
+            int isum_a = dot_u4_i8(q_a_packed, x_a);
+            int isum_b = dot_u4_i8(q_b_packed, x_b);
+            int isum_c = dot_u4_i8(q_c_packed, x_c);
+            int isum_d = dot_u4_i8(q_d_packed, x_d);
+
+            // Q8_1 ds for each sub-block (last u32 of the 9).
+            uint ds_a = x_u32[x_super_base + sb_a * Q81_BLOCK_U32 + 8u];
+            uint ds_b = x_u32[x_super_base + sb_b * Q81_BLOCK_U32 + 8u];
+            uint ds_c = x_u32[x_super_base + sb_c * Q81_BLOCK_U32 + 8u];
+            uint ds_d = x_u32[x_super_base + sb_d * Q81_BLOCK_U32 + 8u];
+
+            float dx_a = unpackHalf2x16(ds_a & 0xFFFFu).x;
+            float sx_a = unpackHalf2x16(ds_a >> 16).x;
+            float dx_b = unpackHalf2x16(ds_b & 0xFFFFu).x;
+            float sx_b = unpackHalf2x16(ds_b >> 16).x;
+            float dx_c = unpackHalf2x16(ds_c & 0xFFFFu).x;
+            float sx_c = unpackHalf2x16(ds_c >> 16).x;
+            float dx_d = unpackHalf2x16(ds_d & 0xFFFFu).x;
+            float sx_d = unpackHalf2x16(ds_d >> 16).x;
+
+            // Decode 6-bit packed scales/mins for sb_a..sb_d (matches dmmv_q4k.comp).
+            uint bytes[12];
+            bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
+            bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
+            bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
+
+            float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
+            if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a+4u] & 63u); }
+            else { sc_a = float((bytes[sb_a+4u]&0xFu)|((bytes[sb_a-4u]>>6)<<4)); mn_a = float(((bytes[sb_a+4u]>>4)&0xFu)|((bytes[sb_a]>>6)<<4)); }
+            if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b+4u] & 63u); }
+            else { sc_b = float((bytes[sb_b+4u]&0xFu)|((bytes[sb_b-4u]>>6)<<4)); mn_b = float(((bytes[sb_b+4u]>>4)&0xFu)|((bytes[sb_b]>>6)<<4)); }
+            if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c+4u] & 63u); }
+            else { sc_c = float((bytes[sb_c+4u]&0xFu)|((bytes[sb_c-4u]>>6)<<4)); mn_c = float(((bytes[sb_c+4u]>>4)&0xFu)|((bytes[sb_c]>>6)<<4)); }
+            if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d+4u] & 63u); }
+            else { sc_d = float((bytes[sb_d+4u]&0xFu)|((bytes[sb_d-4u]>>6)<<4)); mn_d = float(((bytes[sb_d+4u]>>4)&0xFu)|((bytes[sb_d]>>6)<<4)); }
+
+            sum += d_val * sc_a * dx_a * float(isum_a) - dmin_val * mn_a * sx_a;
+            sum += d_val * sc_b * dx_b * float(isum_b) - dmin_val * mn_b * sx_b;
+            sum += d_val * sc_c * dx_c * float(isum_c) - dmin_val * mn_c * sx_c;
+            sum += d_val * sc_d * dx_d * float(isum_d) - dmin_val * mn_d * sx_d;
+        }
+
+        sum = subgroupAdd(sum);
+        if (tid == 0u) {
+            uint y_idx = y_offset / 4u + row;
+            if (acc_mode != 0u) {
+                y_data[y_idx] += sum;
+            } else {
+                y_data[y_idx] = sum;
+            }
+        }
+    }
+}
