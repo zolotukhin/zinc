@@ -106,7 +106,6 @@ pub fn build(b: *std.Build) void {
         "dmmv_q5k_moe_fused_down_acc",
         "rms_norm_dmmv_f32",
         "rms_norm_dmmv_q4k_alpha_beta",
-        "rms_norm_dmmv_q8_0_kv",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;
