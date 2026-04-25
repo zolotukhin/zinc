@@ -957,13 +957,6 @@ pub const InferenceEngine = struct {
     // single dispatch (cycle-13 application of the cycle-8 fused_rms
     // pattern to a smaller M target). Disable with ZINC_FUSED_SSM_AB=0.
     use_fused_ssm_pre_norm: bool = false,
-    // Default-on when the rms_norm_dmmv_q8_0_kv pipeline is loaded and
-    // the layer's K and V tensors are Q8_0 (Qwen 3.5/3.6 35B-A3B
-    // Q4_K_XL pack). Folds the per-attention-layer (rms_norm_mul →
-    // K DMMV → V DMMV) trio into a single dispatch (cycle-14 application
-    // of the cycle-13 fused-rms pattern to attention K+V at moderate M).
-    // Disable with ZINC_FUSED_ATTN_KV=0.
-    use_fused_attn_kv: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
     // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
     // slot(position, layer). Unused downstream this cycle — the buffer is the
@@ -1817,24 +1810,6 @@ pub const InferenceEngine = struct {
             log.info("Fused SSM pre-norm DISABLED via ZINC_FUSED_SSM_AB=0", .{});
         }
 
-        // Fused attention pre-norm (cycle 14): merges (rms_norm_mul →
-        // K DMMV → V DMMV) into a single dispatch when K and V weights
-        // are Q8_0 (Qwen 3.5/3.6 35B-A3B Q4_K_XL ships attn_k/attn_v
-        // as Q8_0). Default-on whenever the rms_norm_dmmv_q8_0_kv
-        // pipeline is loaded; disable via ZINC_FUSED_ATTN_KV=0. Per-call
-        // gates (architecture, weight type, dimensions) are evaluated in
-        // the forward path so models that don't fit silently fall back.
-        const fused_attn_kv_env = std.posix.getenv("ZINC_FUSED_ATTN_KV");
-        const fused_attn_kv_explicitly_off = fused_attn_kv_env != null and std.mem.eql(u8, fused_attn_kv_env.?, "0");
-        const fused_attn_kv_enabled = !fused_attn_kv_explicitly_off and
-            elementwise.pipeline_rms_norm_dmmv_q8_0_kv != null and
-            instance.push_descriptor_fn != null;
-        if (fused_attn_kv_enabled) {
-            log.info("Fused attention pre-norm (rms+K+V Q8_0) ENABLED (default, set ZINC_FUSED_ATTN_KV=0 to disable)", .{});
-        } else if (fused_attn_kv_explicitly_off) {
-            log.info("Fused attention pre-norm DISABLED via ZINC_FUSED_ATTN_KV=0", .{});
-        }
-
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -1939,7 +1914,6 @@ pub const InferenceEngine = struct {
             .use_moe_fused_down_acc = moe_fused_down_acc_enabled,
             .use_fused_rms_router = fused_rms_router_enabled,
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
-            .use_fused_attn_kv = fused_attn_kv_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -3077,57 +3051,6 @@ pub const InferenceEngine = struct {
         );
     }
 
-    /// Fused RMS norm + Q8_0 attention K + V DMMVs.
-    /// Folds the per-attention-layer (rms_norm_mul → K DMMV → V DMMV)
-    /// trio into a single dispatch on qwen35moe attention layers (K and V
-    /// are Q8_0 with M=k_kv_heads*head_dim_kv = 512 on the 35B-A3B). WG 0
-    /// also writes norm_buf so the downstream Q (or packed Q+gate) DMMV
-    /// sees a pre-normalized hidden vector. Requires push_descriptors and
-    /// 7 bindings.
-    fn dispatchRmsNormDmmvQ80Kv(
-        self: *InferenceEngine,
-        hidden_buf: vk.c.VkBuffer,
-        hidden_size: vk.c.VkDeviceSize,
-        attn_norm_w_buf: vk.c.VkBuffer,
-        attn_norm_w_size: vk.c.VkDeviceSize,
-        k_w_buf: vk.c.VkBuffer,
-        k_w_size: vk.c.VkDeviceSize,
-        v_w_buf: vk.c.VkBuffer,
-        v_w_size: vk.c.VkDeviceSize,
-        norm_out_buf: vk.c.VkBuffer,
-        norm_out_size: vk.c.VkDeviceSize,
-        k_out_buf: vk.c.VkBuffer,
-        k_out_size: vk.c.VkDeviceSize,
-        v_out_buf: vk.c.VkBuffer,
-        v_out_size: vk.c.VkDeviceSize,
-        m_k: u32,
-        m_v: u32,
-        k: u32,
-        eps: f32,
-    ) !void {
-        const pip = &(self.elementwise.pipeline_rms_norm_dmmv_q8_0_kv orelse return error.ShaderNotLoaded);
-        if (!pip.uses_push_descriptors) return error.ShaderNotLoaded;
-        const push = elementwise_mod.RmsNormDmmvQ80KvPush{
-            .M_K = m_k,
-            .M_V = m_v,
-            .K = k,
-            .eps_bits = @bitCast(eps),
-        };
-        const wg_x: u32 = (m_k + m_v + 1) / 2;
-        self.pushDispatch7(
-            pip,
-            std.mem.asBytes(&push),
-            hidden_buf, hidden_size,
-            attn_norm_w_buf, attn_norm_w_size,
-            k_w_buf, k_w_size,
-            v_w_buf, v_w_size,
-            norm_out_buf, norm_out_size,
-            k_out_buf, k_out_size,
-            v_out_buf, v_out_size,
-            wg_x, 1, 1,
-        );
-    }
-
     fn dispatchSigmoidMul(
         self: *InferenceEngine,
         input_buf: vk.c.VkBuffer,
@@ -3944,37 +3867,7 @@ pub const InferenceEngine = struct {
                 break :blk true;
             };
 
-            // Fused attention pre-norm fast path (cycle 14): collapse the
-            // per-full-attention-layer (rms_norm_mul → K DMMV → V DMMV)
-            // trio into a single dispatch via rms_norm_dmmv_q8_0_kv. WG 0
-            // of the fused shader writes norm_buf so the downstream Q (or
-            // packed Q+gate) DMMV sees a pre-normalized hidden vector;
-            // K and V outputs are produced inline, amortizing the rms
-            // recompute across the K+V matvec (combined M = 2 *
-            // n_kv_heads * head_dim_kv = 1024 on Qwen 3.6 35B-A3B → 512
-            // WGs at NUM_ROWS=2). 16 KB redundant reads per WG × 512
-            // WGs = 8 MB, well below the R9700's 16 MB L2.
-            const use_fused_attn_kv_layer = blk: {
-                if (!self.use_fused_attn_kv) break :blk false;  // env-gated kill switch
-                if (!is_full_attn) break :blk false;
-                if (self.elementwise.pipeline_rms_norm_dmmv_q8_0_kv == null) break :blk false;
-                if ((hidden_dim % 32) != 0) break :blk false;  // Q8_0 block size
-                if (attn_norm.info.type_ != .f32) break :blk false;  // shader reads attn_norm as f32 vec4
-                const kt = lt.attn_k orelse break :blk false;
-                const vt = lt.attn_v orelse break :blk false;
-                // Q8_0 path: both K and V must be Q8_0 (Qwen 3.5/3.6 35B-A3B
-                // Q4_K_XL pack ships them as Q8_0). Q4_K models do not yet
-                // have a fused variant.
-                if (kt.info.type_ != .q8_0) break :blk false;
-                if (vt.info.type_ != .q8_0) break :blk false;
-                // Q8_0 block layout requires K dim be a multiple of 32; we
-                // already checked hidden_dim above. K and V tensors may be
-                // dispatched to k_buf / v_buf via the fused shader's
-                // dedicated bindings.
-                break :blk true;
-            };
-
-            if (!use_fused_ssm_pre_norm and !use_fused_attn_kv_layer) {
+            if (!use_fused_ssm_pre_norm) {
                 try self.dispatchRmsNorm(
                     self.hidden_buf.handle,
                     hidden_size,
@@ -4054,32 +3947,6 @@ pub const InferenceEngine = struct {
                     });
                 }
 
-                // Fused attention pre-norm fast path: dispatch the
-                // rms_norm + K + V combined shader BEFORE Q so that WG 0
-                // populates norm_buf in time for the downstream Q DMMV.
-                // K and V outputs are produced inline; the standalone K
-                // and V DMMVs are skipped further below.
-                if (use_fused_attn_kv_layer) {
-                    const k_out_size = @as(vk.c.VkDeviceSize, k_rows) * @sizeOf(f32);
-                    const v_out_size = @as(vk.c.VkDeviceSize, v_rows) * @sizeOf(f32);
-                    try self.dispatchRmsNormDmmvQ80Kv(
-                        self.hidden_buf.handle, hidden_size,
-                        attn_norm.gpu_buffer.handle, attn_norm.gpu_buffer.size,
-                        k_tensor.gpu_buffer.handle, k_tensor.gpu_buffer.size,
-                        v_tensor.gpu_buffer.handle, v_tensor.gpu_buffer.size,
-                        self.norm_buf.handle, hidden_size,
-                        self.k_buf.handle, k_out_size,
-                        self.v_buf.handle, v_out_size,
-                        k_rows,
-                        v_rows,
-                        hidden_dim,
-                        rms_norm_eps,
-                    );
-                    // Q DMMV needs to read norm_buf written by WG 0 of the
-                    // fused shader; needs a compute→compute barrier.
-                    self.decode_cmd.computeBarrier();
-                }
-
                 if (packed_q_gate) {
                     // Qwen3Next packs per-head [Q(head_dim), gate(head_dim)] blocks.
                     // Project into a temporary buffer and split each head block out.
@@ -4101,20 +3968,15 @@ pub const InferenceEngine = struct {
                         }
                     }
                 }
-                if (!use_fused_attn_kv_layer) {
-                    try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, k_rows, hidden_dim);
-                    // Gemma full-attn layers (use_k_as_v) have v_tensor == k_tensor; the
-                    // V projection would be a second DMMV reading the same Q4_K weights
-                    // from DRAM. Skip it and let the Gemma V unit-norm below read from
-                    // k_buf (raw K projection) and write into v_buf, fusing the K→V
-                    // copy with the norm. Saves one DMMV per full-attn layer.
-                    if (!use_k_as_v) {
-                        try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, v_rows, hidden_dim);
-                    }
+                try self.dispatchDmmv(k_tensor, self.norm_buf, hidden_size, self.k_buf, k_rows, hidden_dim);
+                // Gemma full-attn layers (use_k_as_v) have v_tensor == k_tensor; the
+                // V projection would be a second DMMV reading the same Q4_K weights
+                // from DRAM. Skip it and let the Gemma V unit-norm below read from
+                // k_buf (raw K projection) and write into v_buf, fusing the K→V
+                // copy with the norm. Saves one DMMV per full-attn layer.
+                if (!use_k_as_v) {
+                    try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, v_rows, hidden_dim);
                 }
-                // When use_fused_attn_kv_layer is set, K and V have been
-                // produced by the fused dispatch above; skip the standalone
-                // K/V DMMVs to avoid double-write.
                 if (packed_q_gate) {
                     // Wait for all DMMV outputs (Q+gate, K, V) before deinterleave
                     self.decode_cmd.computeBarrier();
