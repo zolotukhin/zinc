@@ -230,17 +230,34 @@ void main() {
     uint s_base = h * head_v_dim * head_v_dim;
     uint row_base = s_base + row * head_v_dim;
 
-    // Step 4: Decay state (strided across 4 threads)
-    for (uint col = col_thread; col < head_v_dim; col += THREADS_PER_ROW) {
-        state[row_base + col] *= g_val;
+    // Register-cached state: read each col once, hold decayed value across
+    // the sk reduction, then write back updated value at the end. Cuts the
+    // 4 separate passes (decay-write / dot-read / update-rw / readout-read)
+    // down to one read + one write per col. Bit-equivalent to the original
+    // because all multiplications and additions execute in the same order;
+    // only the storage location of the intermediate state value changes
+    // (register vs DRAM/L2).
+    //
+    // MAX_COLS_PER_THREAD = 16 covers head_v_dim ≤ 128 (Qwen 3.5/3.6
+    // mamba-2: head_v_dim = d_inner / dt_rank = 4096 / 32 = 128). Matches
+    // the existing s_q[128] / s_k[128] shared-mem upper bound; head_v_dim
+    // larger than 128 has never been a supported configuration here.
+    const uint MAX_COLS_PER_THREAD = 16u;
+    float reg_state[MAX_COLS_PER_THREAD];
+
+    // Phase 1: Decay state into register cache and accumulate sk.
+    float sk = 0.0;
+    for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
+        uint col = col_thread + i * THREADS_PER_ROW;
+        if (col >= head_v_dim) break;
+        float s = state[row_base + col] * g_val;
+        reg_state[i] = s;
+        if (col < k_len) {
+            sk += s * s_k[col];
+        }
     }
 
-    // Step 5: Compute sk = dot(state[row], k) — partial sum per thread
-    float sk = 0.0;
-    for (uint col = col_thread; col < k_len; col += THREADS_PER_ROW) {
-        sk += state[row_base + col] * s_k[col];
-    }
-    // Reduce across 8 threads per row via subgroup shuffle
+    // Reduce sk across the 8 threads owning this row.
     sk += subgroupShuffleXor(sk, 1u);
     sk += subgroupShuffleXor(sk, 2u);
     sk += subgroupShuffleXor(sk, 4u);
@@ -248,16 +265,21 @@ void main() {
     // d = beta * (v[row] - sk)
     float d_val = b_val * (v_val - sk);
 
-    // Update state: s[row][col] += k[col] * d_val (strided)
-    for (uint col = col_thread; col < k_len; col += THREADS_PER_ROW) {
-        state[row_base + col] += s_k[col] * d_val;
+    // Phase 2: Apply the rank-1 update from the cached state, write back,
+    // and accumulate the readout dot. Cols outside [0, k_len) only get the
+    // decayed value written back (no rank-1 update, no readout contribution).
+    float o_val = 0.0;
+    for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
+        uint col = col_thread + i * THREADS_PER_ROW;
+        if (col >= head_v_dim) break;
+        float s = reg_state[i];
+        if (col < k_len) {
+            s += s_k[col] * d_val;
+            o_val += s * s_q[col];
+        }
+        state[row_base + col] = s;
     }
 
-    // Step 6: Readout: output[h*head_v_dim + row] = dot(state[row], q)
-    float o_val = 0.0;
-    for (uint col = col_thread; col < k_len; col += THREADS_PER_ROW) {
-        o_val += state[row_base + col] * s_q[col];
-    }
     o_val += subgroupShuffleXor(o_val, 1u);
     o_val += subgroupShuffleXor(o_val, 2u);
     o_val += subgroupShuffleXor(o_val, 4u);
