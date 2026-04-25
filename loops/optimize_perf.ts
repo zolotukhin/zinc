@@ -231,6 +231,37 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
     benchmarkMaxTokens: 8,
     benchmarkMethod: "long-context prefill benchmark aligned with the site report",
   },
+  10: {
+    doc: "MULTI_HOUR_EFFORT_10_QWEN36_DECODE.md",
+    summary: "Qwen 3.5/3.6 35B-A3B decode + prefill speedups on RDNA4 (cross-token batched MoE, parallel-scan SSM, GEMM mmq)",
+    metricMode: "decode",
+    primaryMetricLabel: "decode tok/s",
+    benchmarkPrompt: "Write a detailed essay about the history of computing, from mechanical calculators to modern artificial intelligence.",
+    benchmarkMaxTokens: 200,
+    benchmarkMethod: "200-token decode benchmark on Qwen 3.6 35B-A3B, with --profile to track per-phase budgets",
+    knownFlatCategories: [
+      "Q4_K × Q8_1 mmq for SSM proj GEMV. Built in commit 27f0c76, wired behind ZINC_MMQ_SSM=1 in 3fef46e — measured zero speedup on Qwen 3.6 (SSM phase 15.94 ms either way). The shader is correct; the path is bandwidth-bound on the *weight* side, not on activation bandwidth or dequant compute. Don't re-attempt unless the dispatch is in a GEMM context (multi-token amortizing weight reads).",
+      "Fusing alpha+beta SSM proj DMMVs via dmmv_q4k_fused_gate_up. Reverted in commit 3fef46e (the comment in forward.zig:7557+ explains). The four SSM proj DMMVs already overlap on RDNA4 since there are no inter-DMMV barriers — fusing saves a dispatch but loses no wall time. Don't re-attempt without proving the dispatches are running serially.",
+      "Dense fused gate+up (dmmv_q4k_fused_gate_up.comp landed in 339c886). Regresses Gemma 4 31B decode by +11% from doubled per-WG register pressure on wide inter_dim=25600. Pipeline + helper available, but not wired and not a candidate for re-wire unless a NUM_ROWS=1 variant is built that fits the register budget.",
+      "Adding a NUM_ROWS=4 medium variant of dmmv_q4k for SSM out (M=2048). The SSM out projection at 3.10 ms already runs near peak occupancy with NUM_ROWS=2 → 1024 WGs on a 2048-WG-capacity device; dropping to 512 WGs (NUM_ROWS=4) underutilizes. Don't add this without measuring the SSM out is genuinely under-saturated.",
+    ],
+    structuralSwingIdeas: [
+      "Cross-token batched MoE FFN (phase 1.1). Shader dmmv_q4k_moe_batched.comp landed in c36bd23 with dispatch grid (M+1)/2, n_experts_used, n_tokens. Pipeline + DmmvDispatch.recordMoeBatchedDispatch helper available. Remaining work: (1) build per-layer routing buffer for all N prompt tokens — needs batched router (existing dmmv_q4k_batch_kpar fits) + softmax-topk loop over N or a new batched-topk shader; (2) allocate [N × n_experts_used × inter] output scratch; (3) dispatch new shader for gate / up / down (or fused gate+up); (4) per-token weighted accumulation kernel that scatters n_experts_used × inter outputs per token weighted by routing probs back into hidden; (5) relax canUseBatchedPrefillRdna for qwen35moe with explicit per-layer-type detection (attention layers batch, SSM layers fall back to per-token, MoE FFN uses the new path). Validate via ZINC_BATCHED_PREFILL=validate.",
+      "Parallel-scan SSM prefill (phase 2). The 30 SSM layers in qwen35moe / qwen36moe have token-recurrent state (delta_net updates per-token). Implement a Blelloch / Hillis-Steele parallel scan over the N-token axis so SSM layers also batch. Reference: llama.cpp's mamba2 ggml_ssm_scan op handles this. Without this, even with batched MoE shipped, prefill on Qwen 3.5/3.6 caps around 35-40 tok/s (SSM remains sequential). With both, prefill should beat llama.cpp's 54.5 tok/s baseline.",
+      "GEMM-style Q4_K mmq for the batched path (phase 3). dmmv_q4k_q8_1.comp landed in 27f0c76 is GEMV-only and showed zero gain on RDNA4 GEMV. A GEMM variant where the dispatch axis includes an N-token batch (so each weight block is read once and dotted against N pre-quantized Q8_1 activation columns) makes the integer-dot path actually pay off — arithmetic intensity goes from K to N×K. This pairs with phase 1 to give the full prefill speedup.",
+      "Wide-vocab LM-head NUM_ROWS=8 wins on Qwen 3.6 too (vocab 248320 ≥ 100k). Already shipped in ed0c9d9 — tail dropped from ~3-4 ms to 0.96 ms. Verified in the perf data. No additional work here.",
+    ],
+    referenceImplementations: [
+      {
+        path: "/Users/stepan/Workspace/llama.cpp",
+        focus: "Vulkan backend at ggml/src/ggml-vulkan/. mul_mmq.comp + mul_mmq_funcs.glsl for the GEMM-style mmq pattern (Q4_K and Q5_K stanzas at lines 303-364 of mul_mmq_funcs.glsl). vulkan-shaders/mul_mm.comp for dense matmul. mamba/mamba2 ggml_ssm_scan op in src/llama-graph.cpp + ggml/src/ggml-cuda/ssm-scan.cu (CUDA reference) for parallel-scan SSM prefill. Routing/expert grouping in vulkan-shaders/topk_moe.comp + count_experts.comp.",
+      },
+      {
+        path: "/Users/stepan/Workspace/vllm",
+        focus: "Expert routing + fused MoE: vllm/model_executor/layers/fused_moe/. Useful for understanding how production systems group tokens by expert with permutation indices.",
+      },
+    ],
+  },
   6: {
     doc: "MULTI_HOUR_EFFORT_6_RDNA_QWEN35_PREFILL.md",
     summary: "RDNA Qwen35 prefill recovery (restore flagship TTFT and prefill telemetry)",
