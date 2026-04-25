@@ -951,6 +951,12 @@ pub const InferenceEngine = struct {
     // int8*f32 dot for int8*int8. Effective only when all four tensors are
     // Q8_0.
     use_mmq_ssm: bool = false,
+    // Default-on when the rms_norm_dmmv_q4k_alpha_beta pipeline is loaded
+    // and the layer's alpha+beta SSM proj tensors are f32. Folds the
+    // per-SSM-layer (rms_norm_mul → alpha DMMV → beta DMMV) trio into a
+    // single dispatch (cycle-13 application of the cycle-8 fused_rms
+    // pattern to a smaller M target). Disable with ZINC_FUSED_SSM_AB=0.
+    use_fused_ssm_pre_norm: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
     // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
     // slot(position, layer). Unused downstream this cycle — the buffer is the
@@ -1786,6 +1792,24 @@ pub const InferenceEngine = struct {
             log.info("Fused FFN-norm + router DMMV DISABLED via ZINC_FUSED_RMS_ROUTER=0", .{});
         }
 
+        // Fused SSM pre-norm (cycle 13): merges (rms_norm_mul → alpha
+        // DMMV → beta DMMV) into a single dispatch when alpha+beta are
+        // f32 (Qwen 3.5/3.6 35B-A3B Q4_K_XL pack). Default-on whenever
+        // the rms_norm_dmmv_q4k_alpha_beta pipeline is loaded; disable
+        // via ZINC_FUSED_SSM_AB=0. Per-call gates (architecture, weight
+        // type) are evaluated in the forward path so models that don't
+        // fit silently fall back.
+        const fused_ssm_ab_env = std.posix.getenv("ZINC_FUSED_SSM_AB");
+        const fused_ssm_ab_explicitly_off = fused_ssm_ab_env != null and std.mem.eql(u8, fused_ssm_ab_env.?, "0");
+        const fused_ssm_ab_enabled = !fused_ssm_ab_explicitly_off and
+            elementwise.pipeline_rms_norm_dmmv_q4k_alpha_beta != null and
+            instance.push_descriptor_fn != null;
+        if (fused_ssm_ab_enabled) {
+            log.info("Fused SSM pre-norm (rms+alpha+beta) ENABLED (default, set ZINC_FUSED_SSM_AB=0 to disable)", .{});
+        } else if (fused_ssm_ab_explicitly_off) {
+            log.info("Fused SSM pre-norm DISABLED via ZINC_FUSED_SSM_AB=0", .{});
+        }
+
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -1889,6 +1913,7 @@ pub const InferenceEngine = struct {
             .use_moe_fused_gate_up = moe_fused_gate_up_enabled,
             .use_moe_fused_down_acc = moe_fused_down_acc_enabled,
             .use_fused_rms_router = fused_rms_router_enabled,
+            .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -2979,6 +3004,53 @@ pub const InferenceEngine = struct {
         self.decode_cmd.dispatchWithPush(pip, ds, std.mem.asBytes(&push), wg_x, 1, 1);
     }
 
+    /// Fused RMS norm + Q4_K alpha/beta SSM proj DMMV.
+    /// Folds the per-SSM-layer (rms_norm_mul → alpha DMMV → beta DMMV)
+    /// trio into a single dispatch. WG 0 also writes norm_buf so the
+    /// downstream wqkv/z DMMVs see a pre-normalized hidden vector.
+    /// Requires push_descriptors and 7 bindings.
+    fn dispatchRmsNormDmmvQ4kAlphaBeta(
+        self: *InferenceEngine,
+        hidden_buf: vk.c.VkBuffer,
+        hidden_size: vk.c.VkDeviceSize,
+        attn_norm_w_buf: vk.c.VkBuffer,
+        attn_norm_w_size: vk.c.VkDeviceSize,
+        alpha_w_buf: vk.c.VkBuffer,
+        alpha_w_size: vk.c.VkDeviceSize,
+        beta_w_buf: vk.c.VkBuffer,
+        beta_w_size: vk.c.VkDeviceSize,
+        norm_out_buf: vk.c.VkBuffer,
+        norm_out_size: vk.c.VkDeviceSize,
+        alpha_out_buf: vk.c.VkBuffer,
+        alpha_out_size: vk.c.VkDeviceSize,
+        beta_out_buf: vk.c.VkBuffer,
+        beta_out_size: vk.c.VkDeviceSize,
+        m: u32,
+        k: u32,
+        eps: f32,
+    ) !void {
+        const pip = &(self.elementwise.pipeline_rms_norm_dmmv_q4k_alpha_beta orelse return error.ShaderNotLoaded);
+        if (!pip.uses_push_descriptors) return error.ShaderNotLoaded;
+        const push = elementwise_mod.RmsNormDmmvQ4kAlphaBetaPush{
+            .M = m,
+            .K = k,
+            .eps_bits = @bitCast(eps),
+        };
+        const wg_x: u32 = (m + 1) / 2;
+        self.pushDispatch7(
+            pip,
+            std.mem.asBytes(&push),
+            hidden_buf, hidden_size,
+            attn_norm_w_buf, attn_norm_w_size,
+            alpha_w_buf, alpha_w_size,
+            beta_w_buf, beta_w_size,
+            norm_out_buf, norm_out_size,
+            alpha_out_buf, alpha_out_size,
+            beta_out_buf, beta_out_size,
+            wg_x, 1, 1,
+        );
+    }
+
     fn dispatchSigmoidMul(
         self: *InferenceEngine,
         input_buf: vk.c.VkBuffer,
@@ -3761,21 +3833,54 @@ pub const InferenceEngine = struct {
                 log.err("Layer {d}: attn_norm.weight not found", .{layer});
                 return error.TensorNotFound;
             };
-            try self.dispatchRmsNorm(
-                self.hidden_buf.handle,
-                hidden_size,
-                attn_norm.gpu_buffer.handle,
-                attn_norm.gpu_buffer.size,
-                self.norm_buf.handle,
-                hidden_size,
-                hidden_dim,
-                1,
-                rms_norm_eps,
-            );
-            self.decode_cmd.computeBarrier();
-
             const is_full_attn = ((layer + 1) % full_attn_interval == 0);
             const diag_last_prompt_token = collect_output and state.generated_tokens.items.len == 0 and config.architecture == .gpt_oss;
+
+            // Fused SSM pre-norm fast path: collapse the per-SSM-layer
+            // (rms_norm_mul → alpha DMMV → beta DMMV) trio into a single
+            // dispatch via rms_norm_dmmv_q4k_alpha_beta. WG 0 of the fused
+            // shader writes norm_buf so wqkv/z DMMVs see a pre-normalized
+            // hidden vector; alpha and beta outputs are produced inline,
+            // amortizing the rms recompute across the alpha+beta matvec
+            // (combined M=2*dt_rank, very small → trivial cache pressure).
+            const use_fused_ssm_pre_norm = blk: {
+                if (!self.use_fused_ssm_pre_norm) break :blk false;  // env-gated kill switch
+                if (is_full_attn) break :blk false;
+                if (self.use_mmq_ssm) break :blk false;  // mmq path uses its own quantize_q8_1 prelude
+                if (self.elementwise.pipeline_rms_norm_dmmv_q4k_alpha_beta == null) break :blk false;
+                if ((hidden_dim % 4) != 0) break :blk false;  // shader reads as f32 vec4
+                if (attn_norm.info.type_ != .f32) break :blk false;  // shader reads attn_norm as f32 vec4
+                const at = lt.ssm_alpha orelse break :blk false;
+                const bt = lt.ssm_beta orelse break :blk false;
+                // Qwen 3.6 35B-A3B Q4_K_XL ships these as f32 (see
+                // FASTPATH log "alpha=f32 beta=f32"). The fused shader
+                // assumes f32 row-major weights for alpha/beta. A Q4_K
+                // variant can be added later if a model ships quantized
+                // alpha/beta tensors.
+                if (at.info.type_ != .f32) break :blk false;
+                if (bt.info.type_ != .f32) break :blk false;
+                // Ensure GPU SSM path will engage (otherwise the standalone
+                // rms_norm is needed by runSsmLayerCpu, which reads norm_buf).
+                if (self.elementwise.pipeline_ssm_conv1d == null) break :blk false;
+                if (self.elementwise.pipeline_ssm_delta_net == null) break :blk false;
+                if (self.elementwise.pipeline_ssm_gated_norm == null) break :blk false;
+                break :blk true;
+            };
+
+            if (!use_fused_ssm_pre_norm) {
+                try self.dispatchRmsNorm(
+                    self.hidden_buf.handle,
+                    hidden_size,
+                    attn_norm.gpu_buffer.handle,
+                    attn_norm.gpu_buffer.size,
+                    self.norm_buf.handle,
+                    hidden_size,
+                    hidden_dim,
+                    1,
+                    rms_norm_eps,
+                );
+                self.decode_cmd.computeBarrier();
+            }
 
             if (is_full_attn) {
                 const attention_phase = self.beginProfilePhase();
@@ -4930,7 +5035,7 @@ pub const InferenceEngine = struct {
                 const ssm_dead_tail = self.prefill_active and !collect_output and layer + 1 == config.n_layers;
                 const ssm_phase = self.beginProfilePhase();
                 if (use_gpu_ssm) {
-                    try self.runSsmLayerGpu(state, layer, layer_idx, ssm_dead_tail);
+                    try self.runSsmLayerGpu(state, layer, layer_idx, ssm_dead_tail, use_fused_ssm_pre_norm);
                 } else {
                     if (self.profile_enabled) self.profile_token_counters.cpu_ssm_fallbacks += 1;
                     try self.runSsmLayerCpu(state, layer, layer_idx);
@@ -7656,7 +7761,10 @@ pub const InferenceEngine = struct {
     /// Run one SSM layer entirely on GPU via compute shaders (Phase 3c).
     /// Replaces runSsmLayerCpu — no readback, no CPU computation, no submitAndWait.
     /// Command buffer remains open after this function returns.
-    fn runSsmLayerGpu(self: *InferenceEngine, state: *DecodeState, layer: u32, layer_idx: usize, is_dead_tail: bool) !void {
+    /// When `use_fused_pre_norm` is set, the caller has skipped the standalone
+    /// rms_norm dispatch + barrier so this routine can fold them into the
+    /// alpha/beta SSM proj fused shader (rms_norm_dmmv_q4k_alpha_beta).
+    fn runSsmLayerGpu(self: *InferenceEngine, state: *DecodeState, layer: u32, layer_idx: usize, is_dead_tail: bool, use_fused_pre_norm: bool) !void {
         const config = &self.model.config;
         const hidden_dim = config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
@@ -7807,6 +7915,38 @@ pub const InferenceEngine = struct {
                     dt_rank, hidden_dim, 0, 0, 0, 0,
                 );
             }
+        } else if (use_fused_pre_norm) {
+            // Fused fast path: rms_norm + alpha DMMV + beta DMMV in one
+            // dispatch. WG 0 of the fused shader writes norm_buf so the
+            // wqkv/z DMMVs below see a pre-normalized hidden vector. The
+            // standalone rms_norm dispatch + barrier was skipped at the
+            // call site so the actual saving is +1 dispatch (alpha+beta
+            // merged) +1 dispatch (no standalone rms_norm) +1 barrier
+            // (no rms_norm → SSM proj fence) per SSM layer.
+            const attn_norm = lt.attn_norm orelse return error.TensorNotFound;
+            try self.dispatchRmsNormDmmvQ4kAlphaBeta(
+                self.hidden_buf.handle, hidden_size,
+                attn_norm.gpu_buffer.handle, attn_norm.gpu_buffer.size,
+                alpha_tensor.gpu_buffer.handle, alpha_tensor.gpu_buffer.size,
+                beta_tensor.gpu_buffer.handle, beta_tensor.gpu_buffer.size,
+                self.norm_buf.handle, hidden_size,
+                self.router_logits_buf.handle, ab_bytes,
+                self.down_buf.handle, ab_bytes,
+                dt_rank,
+                hidden_dim,
+                self.model.config.rms_norm_eps,
+            );
+            // Barrier: wqkv/z DMMVs need to read the freshly-written
+            // norm_buf. A full computeBarrier matches the entry rms_norm's
+            // original barrier strength (line 3822 path) so we don't
+            // accidentally tighten visibility for downstream readers of
+            // alpha/beta either.
+            self.decode_cmd.computeBarrier();
+            try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+            if (!is_dead_tail) {
+                try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+            }
+            // alpha + beta already produced by the fused shader.
         } else {
             try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
             // Skip z (gate) DMMV in dead-tail: gate_buf is only consumed by

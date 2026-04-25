@@ -1,0 +1,129 @@
+#version 460
+// ZINC — Fused RMS norm + f32 alpha/beta SSM proj DMMV.
+//
+// Replaces the (rms_norm_mul + 2× dispatchDmmv on alpha & beta) trio at
+// the start of every SSM layer's proj phase with a single dispatch.
+// Mirrors the cycle-8 fused_rms_router pattern: each workgroup
+// recomputes the same RMS scale via subgroupAdd over hidden[] (cheap
+// because the alpha+beta matvec is small — combined M ≈ 64 → 32 WGs
+// — so the redundant L1/L2 reads of hidden+attn_norm_w stay below the
+// L2 cache footprint).
+//
+// WG 0 also writes norm_buf so downstream wqkv/z SSM proj DMMVs see a
+// pre-normalized hidden vector. The remaining alpha+beta WGs keep the
+// implicit normalization in registers and dot-product against W_alpha
+// and W_beta rows in a single pass.
+//
+// Saves per SSM layer: 1 rms_norm_mul dispatch + 2 dispatchDmmv-f32
+// dispatches → 1 fused dispatch, plus 1 computeBarrier (rms_norm →
+// SSM proj).
+//
+// Output values are bit-equivalent to (rms_norm_mul + 2× dmmv_f32):
+//   norm_out[i]  = attn_norm_w[i] * (hidden[i] * rsqrt(mean(hidden^2)+eps))
+//   alpha_out[r] = sum_k W_alpha[r,k] · norm_out[k]
+//   beta_out[r]  = sum_k W_beta [r,k] · norm_out[k]
+// Same multiplication order, same wave64 subgroupAdd reduction.
+//
+// Note: the file is named "q4k_alpha_beta" historically; current
+// callers ship f32 alpha/beta weights (qwen35moe / qwen36moe Q4_K_XL
+// keeps these small per-head projections in f32). The shader assumes
+// W_alpha / W_beta are f32 row-major buffers. A separate Q4_K variant
+// can be added later if a model ships quantized alpha/beta tensors.
+//
+// Bindings:
+//   0  hidden        (f32 vec4, K elements)
+//   1  attn_norm_w   (f32 vec4, K elements)
+//   2  alpha_w       (f32 vec4, M*K elements row-major)
+//   3  beta_w        (f32 vec4, M*K elements row-major)
+//   4  norm_out      (f32 vec4, K elements — written by WG 0 only)
+//   5  alpha_out     (f32, M elements)
+//   6  beta_out      (f32, M elements)
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;          // alpha rows == beta rows (e.g., dt_rank=32)
+    uint K;          // hidden_dim (multiple of 4)
+    uint eps_bits;   // RMS norm epsilon (f32 bits)
+};
+
+layout(set = 0, binding = 0) readonly  buffer Hidden       { vec4  hidden_v4[]; };
+layout(set = 0, binding = 1) readonly  buffer NormW        { vec4  norm_w_v4[]; };
+layout(set = 0, binding = 2) readonly  buffer AlphaW       { vec4  alpha_w_v4[]; };
+layout(set = 0, binding = 3) readonly  buffer BetaW        { vec4  beta_w_v4[];  };
+layout(set = 0, binding = 4) writeonly buffer NormOut      { vec4  norm_out_v4[]; };
+layout(set = 0, binding = 5) writeonly buffer AlphaOut     { float alpha_out[]; };
+layout(set = 0, binding = 6) writeonly buffer BetaOut      { float beta_out[];  };
+
+const uint NUM_ROWS = 2u;
+
+shared float s_rms_inv;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+    float eps = uintBitsToFloat(eps_bits);
+
+    uint K_v4 = K / 4u;
+
+    // --- Pass 1: sum of squares for RMS norm ---
+    float sum_sq = 0.0;
+    for (uint i = tid; i < K_v4; i += 64u) {
+        vec4 v = hidden_v4[i];
+        sum_sq += dot(v, v);
+    }
+    sum_sq = subgroupAdd(sum_sq);
+
+    if (tid == 0u) {
+        s_rms_inv = inversesqrt(sum_sq / float(K) + eps);
+    }
+    barrier();
+    float rms_inv = s_rms_inv;
+
+    // --- WG 0: write norm_out for downstream wqkv/z consumers ---
+    // Single-writer (only WG 0) so the inter-WG race is avoided. The
+    // dispatch barrier makes the writes visible to subsequent compute
+    // dispatches. Multiplication order matches rms_norm_mul.comp:
+    //   y[i] = weight[i] * (x[i] * rms_inv)
+    if (wg_id == 0u) {
+        for (uint i = tid; i < K_v4; i += 64u) {
+            vec4 nv = norm_w_v4[i] * (hidden_v4[i] * rms_inv);
+            norm_out_v4[i] = nv;
+        }
+    }
+
+    // --- Pass 2: alpha+beta f32 matvec against the IMPLICITLY-NORMALIZED hidden ---
+    // Each WG owns NUM_ROWS rows. Each thread reads a stride of K_v4
+    // elements, producing partial dot products that subgroupAdd
+    // reduces at the end. The B-vector (normalized hidden) is
+    // recomputed per-thread per-iteration; the underlying
+    // hidden_v4 + norm_w_v4 reads are fully cache-resident across the
+    // ~32 alpha+beta WGs (vs. cycle-10's wqkv attempt, where 4096 WGs
+    // overran L2).
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
+
+        float sum_alpha = 0.0;
+        float sum_beta  = 0.0;
+
+        // Each thread strides over K_v4 values, dot-producting against
+        // 4 elements of the corresponding alpha_w / beta_w rows.
+        uint a_row_base_v4 = row * K_v4;
+        uint b_row_base_v4 = row * K_v4;
+        for (uint i = tid; i < K_v4; i += 64u) {
+            vec4 nv = norm_w_v4[i] * (hidden_v4[i] * rms_inv);
+            sum_alpha += dot(alpha_w_v4[a_row_base_v4 + i], nv);
+            sum_beta  += dot(beta_w_v4 [b_row_base_v4 + i], nv);
+        }
+
+        sum_alpha = subgroupAdd(sum_alpha);
+        sum_beta  = subgroupAdd(sum_beta);
+        if (tid == 0u) {
+            alpha_out[row] = sum_alpha;
+            beta_out [row] = sum_beta;
+        }
+    }
+}

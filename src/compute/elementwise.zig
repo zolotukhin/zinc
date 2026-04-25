@@ -169,6 +169,16 @@ pub const RmsNormDmmvF32Push = extern struct {
     eps_bits: u32, // RMS norm epsilon (f32 bits)
 };
 
+/// Push constants for fused RMS norm + Q4_K alpha+beta SSM proj DMMV
+/// (src/shaders/rms_norm_dmmv_q4k_alpha_beta.comp). Folds the
+/// per-SSM-layer (rms_norm_mul → alpha DMMV → beta DMMV) trio into a
+/// single dispatch on the qwen35moe / qwen36moe SSM proj fast path.
+pub const RmsNormDmmvQ4kAlphaBetaPush = extern struct {
+    M: u32,        // alpha rows == beta rows (= dt_rank)
+    K: u32,        // hidden_dim (must be multiple of 256 for Q4_K)
+    eps_bits: u32, // RMS norm epsilon (f32 bits)
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -227,6 +237,13 @@ pub const ElementwiseDispatch = struct {
     /// whose router uses f32 weights. Saves 1 dispatch + 1 barrier per
     /// MoE layer (~30 layers on Qwen 3.6 35B-A3B).
     pipeline_rms_norm_dmmv_f32: ?Pipeline,
+    /// Fused RMS norm + Q4_K alpha/beta SSM proj DMMV pipeline (7 bindings:
+    /// hidden, attn_norm_w, alpha_w, beta_w, norm_buf, alpha_out, beta_out).
+    /// Replaces (rms_norm_mul → alpha DMMV → beta DMMV) trio at the start
+    /// of each SSM layer's proj phase on qwen35moe / qwen36moe (30 SSM
+    /// layers each). WG 0 also writes norm_buf so downstream wqkv/z DMMVs
+    /// see the pre-normalized hidden vector.
+    pipeline_rms_norm_dmmv_q4k_alpha_beta: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -474,6 +491,17 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // rms_norm_dmmv_q4k_alpha_beta: fused RMS norm + Q4_K alpha/beta
+        // SSM proj DMMV, 7 bindings (hidden, attn_norm_w, alpha_w, beta_w,
+        // norm_buf, alpha_out, beta_out). Targets the per-SSM-layer
+        // (rms_norm_mul → alpha DMMV → beta DMMV) trio on qwen35moe /
+        // qwen36moe (alpha/beta have M=dt_rank, both Q4_K in Q4_K_M / XL).
+        const rms_norm_dmmv_q4k_alpha_beta_path = std.fmt.bufPrint(&path_buf, "{s}/rms_norm_dmmv_q4k_alpha_beta.spv", .{shader_dir}) catch unreachable;
+        const pipeline_rms_norm_dmmv_q4k_alpha_beta = pipeline_mod.createFromSpirvWithOptions(instance, rms_norm_dmmv_q4k_alpha_beta_path, 7, @sizeOf(RmsNormDmmvQ4kAlphaBetaPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("rms_norm_dmmv_q4k_alpha_beta shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -502,6 +530,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_rms_norm_add = pipeline_rms_norm_add,
             .pipeline_norm_rope = pipeline_norm_rope,
             .pipeline_rms_norm_dmmv_f32 = pipeline_rms_norm_dmmv_f32,
+            .pipeline_rms_norm_dmmv_q4k_alpha_beta = pipeline_rms_norm_dmmv_q4k_alpha_beta,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -865,6 +894,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_rms_norm_add) |*p| p.deinit();
         if (self.pipeline_norm_rope) |*p| p.deinit();
         if (self.pipeline_rms_norm_dmmv_f32) |*p| p.deinit();
+        if (self.pipeline_rms_norm_dmmv_q4k_alpha_beta) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
