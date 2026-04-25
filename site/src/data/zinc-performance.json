@@ -45,7 +45,7 @@
         "fastest_model_id": "qwen3-8b-q4k-m",
         "fastest_model_label": "Qwen3 8B Q4K M",
         "fastest_decode_tps": 66.01,
-        "benchmarked_models": 7,
+        "benchmarked_models": 6,
         "successful_models": 6,
         "average_decode_tps": 35.72166666666667,
         "average_prompt_tps": 46.60333333333333,
@@ -55,574 +55,6 @@
         "average_pct_of_llama": 68.7603687875
       },
       "models": [
-        {
-          "id": "gemma-3-12b-it-q4k-m",
-          "label": "Gemma 3 12B IT Q4K M",
-          "family": "Gemma",
-          "quant": "Q4K_M",
-          "prompt_mode": "chat",
-          "prompt": "What is the capital of France? Answer in one word.",
-          "max_tokens": 8,
-          "notes": [
-            "Auto-discovered on the RDNA benchmark node"
-          ],
-          "zinc": {
-            "name": "ZINC",
-            "unavailable_reason": "ZINC run failed: Command failed (1): ssh -p 2223 root@174.21.89.66 'cd '\\''/root/zinc'\\'' && RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc -n 8 -m '\\''/root/models/gemma-3-12b-it-Q4_K_M.gguf'\\'' --chat --prompt '\\''What is the capital of France? Answer in one word.'\\'''"
-          },
-          "baseline": {
-            "name": "llama.cpp",
-            "prompt_tokens": 21,
-            "generated_tokens": 2,
-            "output_preview": "Paris",
-            "prefill_ms": {
-              "min": 109.23399999999998,
-              "max": 122.05,
-              "avg": 115.35533333333332,
-              "median": 114.782,
-              "p95": 121.3232,
-              "stddev": 5.2477930175985055,
-              "samples": [
-                122.05,
-                114.782,
-                109.23399999999998
-              ]
-            },
-            "prefill_tps": {
-              "min": 172.06063088897994,
-              "max": 192.24783492319244,
-              "avg": 182.4213271617872,
-              "median": 182.95551567318918,
-              "p95": 191.31860299819212,
-              "stddev": 8.250043220251102,
-              "samples": [
-                172.06063088897994,
-                182.95551567318918,
-                192.24783492319244
-              ]
-            },
-            "decode_ms": {
-              "min": 18.701,
-              "max": 19.255,
-              "avg": 18.965333333333334,
-              "median": 18.94,
-              "p95": 19.223499999999998,
-              "stddev": 0.22687784280434978,
-              "samples": [
-                19.255,
-                18.94,
-                18.701
-              ]
-            },
-            "decode_tps": {
-              "min": 103.8691249026227,
-              "max": 106.94615261215978,
-              "avg": 105.4706328076378,
-              "median": 105.59662090813093,
-              "p95": 106.8111994417569,
-              "stddev": 1.259346294025634,
-              "samples": [
-                103.8691249026227,
-                105.59662090813093,
-                106.94615261215978
-              ]
-            },
-            "ms_per_token": {
-              "min": 9.3505,
-              "max": 9.6275,
-              "avg": 9.482666666666667,
-              "median": 9.47,
-              "p95": 9.611749999999999,
-              "stddev": 0.11343892140217489,
-              "samples": [
-                9.6275,
-                9.47,
-                9.3505
-              ]
-            },
-            "total_latency_ms": {
-              "min": 397.39237499999945,
-              "max": 442.32129200000054,
-              "avg": 427.18491699999987,
-              "median": 441.8410839999997,
-              "p95": 442.27327120000047,
-              "stddev": 21.06742064653635,
-              "samples": [
-                397.39237499999945,
-                442.32129200000054,
-                441.8410839999997
-              ]
-            },
-            "end_to_end_tps": {
-              "min": 51.99840119837589,
-              "max": 57.877305773670244,
-              "avg": 53.97687393702184,
-              "median": 52.0549148390194,
-              "p95": 57.29506668020516,
-              "stddev": 2.7581182996323172,
-              "samples": [
-                57.877305773670244,
-                51.99840119837589,
-                52.0549148390194
-              ]
-            }
-          },
-          "comparison": null,
-          "scenarios": [
-            {
-              "id": "core",
-              "label": "Core Prompt",
-              "short_label": "Core",
-              "prompt_mode": "chat",
-              "prompt": "What is the capital of France? Answer in one word.",
-              "max_tokens": 8,
-              "notes": [
-                "Single-turn reference prompt"
-              ],
-              "zinc": {
-                "name": "ZINC",
-                "unavailable_reason": "ZINC run failed: Command failed (1): ssh -p 2223 root@174.21.89.66 'cd '\\''/root/zinc'\\'' && RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc -n 8 -m '\\''/root/models/gemma-3-12b-it-Q4_K_M.gguf'\\'' --chat --prompt '\\''What is the capital of France? Answer in one word.'\\'''"
-              },
-              "baseline": {
-                "name": "llama.cpp",
-                "prompt_tokens": 21,
-                "generated_tokens": 2,
-                "output_preview": "Paris",
-                "prefill_ms": {
-                  "min": 109.23399999999998,
-                  "max": 122.05,
-                  "avg": 115.35533333333332,
-                  "median": 114.782,
-                  "p95": 121.3232,
-                  "stddev": 5.2477930175985055,
-                  "samples": [
-                    122.05,
-                    114.782,
-                    109.23399999999998
-                  ]
-                },
-                "prefill_tps": {
-                  "min": 172.06063088897994,
-                  "max": 192.24783492319244,
-                  "avg": 182.4213271617872,
-                  "median": 182.95551567318918,
-                  "p95": 191.31860299819212,
-                  "stddev": 8.250043220251102,
-                  "samples": [
-                    172.06063088897994,
-                    182.95551567318918,
-                    192.24783492319244
-                  ]
-                },
-                "decode_ms": {
-                  "min": 18.701,
-                  "max": 19.255,
-                  "avg": 18.965333333333334,
-                  "median": 18.94,
-                  "p95": 19.223499999999998,
-                  "stddev": 0.22687784280434978,
-                  "samples": [
-                    19.255,
-                    18.94,
-                    18.701
-                  ]
-                },
-                "decode_tps": {
-                  "min": 103.8691249026227,
-                  "max": 106.94615261215978,
-                  "avg": 105.4706328076378,
-                  "median": 105.59662090813093,
-                  "p95": 106.8111994417569,
-                  "stddev": 1.259346294025634,
-                  "samples": [
-                    103.8691249026227,
-                    105.59662090813093,
-                    106.94615261215978
-                  ]
-                },
-                "ms_per_token": {
-                  "min": 9.3505,
-                  "max": 9.6275,
-                  "avg": 9.482666666666667,
-                  "median": 9.47,
-                  "p95": 9.611749999999999,
-                  "stddev": 0.11343892140217489,
-                  "samples": [
-                    9.6275,
-                    9.47,
-                    9.3505
-                  ]
-                },
-                "total_latency_ms": {
-                  "min": 397.39237499999945,
-                  "max": 442.32129200000054,
-                  "avg": 427.18491699999987,
-                  "median": 441.8410839999997,
-                  "p95": 442.27327120000047,
-                  "stddev": 21.06742064653635,
-                  "samples": [
-                    397.39237499999945,
-                    442.32129200000054,
-                    441.8410839999997
-                  ]
-                },
-                "end_to_end_tps": {
-                  "min": 51.99840119837589,
-                  "max": 57.877305773670244,
-                  "avg": 53.97687393702184,
-                  "median": 52.0549148390194,
-                  "p95": 57.29506668020516,
-                  "stddev": 2.7581182996323172,
-                  "samples": [
-                    57.877305773670244,
-                    51.99840119837589,
-                    52.0549148390194
-                  ]
-                }
-              },
-              "comparison": null
-            },
-            {
-              "id": "context-medium",
-              "label": "Context Retrieval",
-              "short_label": "Context",
-              "prompt_mode": "chat",
-              "prompt": "Read the context below and answer the final question briefly.\n\nReference notes:\nParis is the capital of France.\nRome is the capital of Italy.\nMadrid is the capital of Spain.\nUse only the notes above.\n\nQuestion: What is the capital of France? Answer in one word.",
-              "max_tokens": 8,
-              "notes": [
-                "Short retrieval workload with explicit context"
-              ],
-              "zinc": {
-                "name": "ZINC",
-                "unavailable_reason": "ZINC run failed: Command failed (1): ssh -p 2223 root@174.21.89.66 'cd '\\''/root/zinc'\\'' && RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc -n 8 -m '\\''/root/models/gemma-3-12b-it-Q4_K_M.gguf'\\'' --chat --prompt '\\''Read the context below and answer the final question briefly."
-              },
-              "baseline": {
-                "name": "llama.cpp",
-                "prompt_tokens": 70,
-                "generated_tokens": 2,
-                "output_preview": "Paris",
-                "prefill_ms": {
-                  "min": 143.339,
-                  "max": 151.495,
-                  "avg": 146.362,
-                  "median": 144.252,
-                  "p95": 150.7707,
-                  "stddev": 3.6486672452645874,
-                  "samples": [
-                    151.495,
-                    144.252,
-                    143.339
-                  ]
-                },
-                "prefill_tps": {
-                  "min": 462.061454173405,
-                  "max": 488.35278605264443,
-                  "avg": 478.5587143357645,
-                  "median": 485.26190278124386,
-                  "p95": 488.0436977255044,
-                  "stddev": 11.733373612557308,
-                  "samples": [
-                    462.061454173405,
-                    485.26190278124386,
-                    488.35278605264443
-                  ]
-                },
-                "decode_ms": {
-                  "min": 17.091,
-                  "max": 17.69,
-                  "avg": 17.302666666666667,
-                  "median": 17.127,
-                  "p95": 17.6337,
-                  "stddev": 0.27428006773288477,
-                  "samples": [
-                    17.69,
-                    17.127,
-                    17.091
-                  ]
-                },
-                "decode_tps": {
-                  "min": 113.05822498586771,
-                  "max": 117.02065414545666,
-                  "avg": 115.61785412666535,
-                  "median": 116.77468324867169,
-                  "p95": 116.99605705577817,
-                  "stddev": 1.8127146170558057,
-                  "samples": [
-                    113.05822498586771,
-                    116.77468324867169,
-                    117.02065414545666
-                  ]
-                },
-                "ms_per_token": {
-                  "min": 8.5455,
-                  "max": 8.845,
-                  "avg": 8.651333333333334,
-                  "median": 8.5635,
-                  "p95": 8.81685,
-                  "stddev": 0.13714003386644238,
-                  "samples": [
-                    8.845,
-                    8.5635,
-                    8.5455
-                  ]
-                },
-                "total_latency_ms": {
-                  "min": 393.523541999999,
-                  "max": 488.3684169999997,
-                  "avg": 435.88938933333276,
-                  "median": 425.77620899999965,
-                  "p95": 482.10919619999964,
-                  "stddev": 39.3750757949097,
-                  "samples": [
-                    393.523541999999,
-                    425.77620899999965,
-                    488.3684169999997
-                  ]
-                },
-                "end_to_end_tps": {
-                  "min": 147.42968114582243,
-                  "max": 182.96237026652952,
-                  "avg": 166.49832364094064,
-                  "median": 169.10291951047003,
-                  "p95": 181.57642519092357,
-                  "stddev": 14.622606670720081,
-                  "samples": [
-                    182.96237026652952,
-                    169.10291951047003,
-                    147.42968114582243
-                  ]
-                }
-              },
-              "comparison": null
-            },
-            {
-              "id": "context-long",
-              "label": "Long Context Retrieval",
-              "short_label": "Long ctx",
-              "prompt_mode": "chat",
-              "prompt": "Read the context below and answer the final question briefly.\n\nLong reference packet for benchmark purposes only:\n\nBenchmark context only. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu. Benchmark context only. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu. Benchmark context only. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu. Benchmark context only. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu. Benchmark context only. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu. Benchmark context only. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu.\n\nImportant fact near the end: Paris is the capital of France.\n\nIgnore unrelated filler and answer from the reference packet.\n\nQuestion: What is the capital of France? Answer in one word.",
-              "max_tokens": 8,
-              "notes": [
-                "Long prompt workload with the answer embedded near the end"
-              ],
-              "zinc": {
-                "name": "ZINC",
-                "unavailable_reason": "ZINC run failed: Command failed (1): ssh -p 2223 root@174.21.89.66 'cd '\\''/root/zinc'\\'' && RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc -n 8 -m '\\''/root/models/gemma-3-12b-it-Q4_K_M.gguf'\\'' --chat --prompt '\\''Read the context below and answer the final question briefly."
-              },
-              "baseline": {
-                "name": "llama.cpp",
-                "prompt_tokens": 178,
-                "generated_tokens": 2,
-                "output_preview": "Paris",
-                "prefill_ms": {
-                  "min": 203.226,
-                  "max": 203.91699999999997,
-                  "avg": 203.47566666666663,
-                  "median": 203.28399999999996,
-                  "p95": 203.85369999999998,
-                  "stddev": 0.3129668069016572,
-                  "samples": [
-                    203.28399999999996,
-                    203.226,
-                    203.91699999999997
-                  ]
-                },
-                "prefill_tps": {
-                  "min": 872.9041717953874,
-                  "max": 875.8721817090334,
-                  "avg": 874.7995452106293,
-                  "median": 875.6222821274671,
-                  "p95": 875.8471917508768,
-                  "stddev": 1.3441088094895486,
-                  "samples": [
-                    875.6222821274671,
-                    875.8721817090334,
-                    872.9041717953874
-                  ]
-                },
-                "decode_ms": {
-                  "min": 17.072,
-                  "max": 17.117,
-                  "avg": 17.097333333333335,
-                  "median": 17.103000000000005,
-                  "p95": 17.1156,
-                  "stddev": 0.018803073034895125,
-                  "samples": [
-                    17.072,
-                    17.117,
-                    17.103000000000005
-                  ]
-                },
-                "decode_tps": {
-                  "min": 116.8429047146112,
-                  "max": 117.15089034676664,
-                  "avg": 116.9774479513291,
-                  "median": 116.93854879260947,
-                  "p95": 117.12965619135092,
-                  "stddev": 0.12870805676768277,
-                  "samples": [
-                    117.15089034676664,
-                    116.8429047146112,
-                    116.93854879260947
-                  ]
-                },
-                "ms_per_token": {
-                  "min": 8.536,
-                  "max": 8.5585,
-                  "avg": 8.548666666666668,
-                  "median": 8.5515,
-                  "p95": 8.5578,
-                  "stddev": 0.009401536517447386,
-                  "samples": [
-                    8.536,
-                    8.5585,
-                    8.5515
-                  ]
-                },
-                "total_latency_ms": {
-                  "min": 521.8845000000001,
-                  "max": 541.7014579999995,
-                  "avg": 528.6036390000003,
-                  "median": 522.224959000001,
-                  "p95": 539.7538080999997,
-                  "stddev": 9.262599527138793,
-                  "samples": [
-                    522.224959000001,
-                    521.8845000000001,
-                    541.7014579999995
-                  ]
-                },
-                "end_to_end_tps": {
-                  "min": 332.2863495043429,
-                  "max": 344.90390115054186,
-                  "avg": 340.6230984601705,
-                  "median": 344.67904472562685,
-                  "p95": 344.8814155080504,
-                  "stddev": 5.895686415639041,
-                  "samples": [
-                    344.67904472562685,
-                    344.90390115054186,
-                    332.2863495043429
-                  ]
-                }
-              },
-              "comparison": null
-            },
-            {
-              "id": "decode-extended",
-              "label": "Long Decode",
-              "short_label": "Long decode",
-              "prompt_mode": "chat",
-              "prompt": "Write six short bullet points explaining why local LLM benchmark reports should separate prefill throughput from decode throughput.",
-              "max_tokens": 32,
-              "notes": [
-                "Longer generation target instead of a short factual completion"
-              ],
-              "zinc": {
-                "name": "ZINC",
-                "unavailable_reason": "ZINC run failed: Command failed (1): ssh -p 2223 root@174.21.89.66 'cd '\\''/root/zinc'\\'' && RADV_PERFTEST=coop_matrix ./zig-out/bin/zinc -n 32 -m '\\''/root/models/gemma-3-12b-it-Q4_K_M.gguf'\\'' --chat --prompt '\\''Write six short bullet points explaining why local LLM benchmark reports should separate prefill throughput from decode throughput.'\\'''"
-              },
-              "baseline": {
-                "name": "llama.cpp",
-                "prompt_tokens": 30,
-                "generated_tokens": 32,
-                "output_preview": "Here are six short bullet points explaining why local LLM benchmark reports should separate prefill throughput from decode throughput:\n\n*   **Distinct Bottlenecks:** Pref",
-                "prefill_ms": {
-                  "min": 87.256,
-                  "max": 88.699,
-                  "avg": 87.74166666666667,
-                  "median": 87.27,
-                  "p95": 88.5561,
-                  "stddev": 0.6769610197213884,
-                  "samples": [
-                    87.27,
-                    87.256,
-                    88.699
-                  ]
-                },
-                "prefill_tps": {
-                  "min": 338.22252787517334,
-                  "max": 343.8158980471257,
-                  "avg": 341.933056148501,
-                  "median": 343.7607425232039,
-                  "p95": 343.8103824947335,
-                  "stddev": 2.623836324078107,
-                  "samples": [
-                    343.7607425232039,
-                    343.8158980471257,
-                    338.22252787517334
-                  ]
-                },
-                "decode_ms": {
-                  "min": 507.336,
-                  "max": 509.32,
-                  "avg": 508.26466666666664,
-                  "median": 508.138,
-                  "p95": 509.20180000000005,
-                  "stddev": 0.8149017664043183,
-                  "samples": [
-                    509.32,
-                    508.138,
-                    507.336
-                  ]
-                },
-                "decode_tps": {
-                  "min": 62.82886986570329,
-                  "max": 63.07456991027642,
-                  "avg": 62.959486124429965,
-                  "median": 62.97501859731018,
-                  "p95": 63.064614778979795,
-                  "stddev": 0.10090613215968262,
-                  "samples": [
-                    62.82886986570329,
-                    62.97501859731018,
-                    63.07456991027642
-                  ]
-                },
-                "ms_per_token": {
-                  "min": 15.85425,
-                  "max": 15.91625,
-                  "avg": 15.883270833333333,
-                  "median": 15.8793125,
-                  "p95": 15.912556250000002,
-                  "stddev": 0.025465680200134948,
-                  "samples": [
-                    15.91625,
-                    15.8793125,
-                    15.85425
-                  ]
-                },
-                "total_latency_ms": {
-                  "min": 836.5212920000013,
-                  "max": 946.7172910000008,
-                  "avg": 892.0952636666674,
-                  "median": 893.047208,
-                  "p95": 941.3502827000007,
-                  "stddev": 44.992363777366336,
-                  "samples": [
-                    946.7172910000008,
-                    836.5212920000013,
-                    893.047208
-                  ]
-                },
-                "end_to_end_tps": {
-                  "min": 65.48945560560163,
-                  "max": 74.11646373252135,
-                  "avg": 69.67704686192577,
-                  "median": 69.42522124765436,
-                  "p95": 73.64733948403466,
-                  "stddev": 3.52645992561824,
-                  "samples": [
-                    65.48945560560163,
-                    74.11646373252135,
-                    69.42522124765436
-                  ]
-                }
-              },
-              "comparison": null
-            }
-          ]
-        },
         {
           "id": "gemma-4-26b-a4b-it-q4k-m",
           "label": "Gemma 4 26B A4B IT Q4K M",
@@ -6362,7 +5794,7 @@
               "avg": 0.20000000000000004,
               "median": 0.2,
               "p95": 0.2,
-              "stddev": 2.7755575615628914e-17,
+              "stddev": 2.7755575615628914E-17,
               "samples": [
                 0.2,
                 0.2,
@@ -6587,7 +6019,7 @@
                   "avg": 0.20000000000000004,
                   "median": 0.2,
                   "p95": 0.2,
-                  "stddev": 2.7755575615628914e-17,
+                  "stddev": 2.7755575615628914E-17,
                   "samples": [
                     0.2,
                     0.2,
@@ -6812,7 +6244,7 @@
                   "avg": 0.20000000000000004,
                   "median": 0.2,
                   "p95": 0.2,
-                  "stddev": 2.7755575615628914e-17,
+                  "stddev": 2.7755575615628914E-17,
                   "samples": [
                     0.2,
                     0.2,
@@ -7037,7 +6469,7 @@
                   "avg": 0.20000000000000004,
                   "median": 0.2,
                   "p95": 0.2,
-                  "stddev": 2.7755575615628914e-17,
+                  "stddev": 2.7755575615628914E-17,
                   "samples": [
                     0.2,
                     0.2,
@@ -7262,7 +6694,7 @@
                   "avg": 0.20000000000000004,
                   "median": 0.2,
                   "p95": 0.2,
-                  "stddev": 2.7755575615628914e-17,
+                  "stddev": 2.7755575615628914E-17,
                   "samples": [
                     0.2,
                     0.2,
@@ -7490,7 +6922,7 @@
               "avg": 0.20000000000000004,
               "median": 0.2,
               "p95": 0.2,
-              "stddev": 2.7755575615628914e-17,
+              "stddev": 2.7755575615628914E-17,
               "samples": [
                 0.2,
                 0.2,
@@ -7715,7 +7147,7 @@
                   "avg": 0.20000000000000004,
                   "median": 0.2,
                   "p95": 0.2,
-                  "stddev": 2.7755575615628914e-17,
+                  "stddev": 2.7755575615628914E-17,
                   "samples": [
                     0.2,
                     0.2,
@@ -7940,7 +7372,7 @@
                   "avg": 0.20000000000000004,
                   "median": 0.2,
                   "p95": 0.2,
-                  "stddev": 2.7755575615628914e-17,
+                  "stddev": 2.7755575615628914E-17,
                   "samples": [
                     0.2,
                     0.2,
@@ -8278,7 +7710,7 @@
                   "avg": 0.20000000000000004,
                   "median": 0.2,
                   "p95": 0.2,
-                  "stddev": 2.7755575615628914e-17,
+                  "stddev": 2.7755575615628914E-17,
                   "samples": [
                     0.2,
                     0.2,
@@ -11477,7 +10909,7 @@
                   "avg": 22.100000000000005,
                   "median": 22.1,
                   "p95": 22.1,
-                  "stddev": 3.552713678800501e-15,
+                  "stddev": 3.552713678800501E-15,
                   "samples": [
                     22.1,
                     22.1,
@@ -11891,7 +11323,7 @@
               "avg": 3.2999999999999994,
               "median": 3.3,
               "p95": 3.3,
-              "stddev": 4.440892098500626e-16,
+              "stddev": 4.440892098500626E-16,
               "samples": [
                 3.3,
                 3.3,
@@ -12116,7 +11548,7 @@
                   "avg": 3.2999999999999994,
                   "median": 3.3,
                   "p95": 3.3,
-                  "stddev": 4.440892098500626e-16,
+                  "stddev": 4.440892098500626E-16,
                   "samples": [
                     3.3,
                     3.3,
@@ -12830,7 +12262,7 @@
                   "avg": 28.899999999999995,
                   "median": 28.9,
                   "p95": 28.9,
-                  "stddev": 3.552713678800501e-15,
+                  "stddev": 3.552713678800501E-15,
                   "samples": [
                     28.9,
                     28.9,
