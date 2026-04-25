@@ -8,6 +8,33 @@ best   (cycle 13):      25.36 tok/s decode  (BW util 63.7%)   +5.6%
 post-cleanup (c20):     25.40 tok/s decode  (BW util 63.7%)
 ```
 
+## ⚠ Baseline correction  (post-reboot, 2026-04-25)
+
+The first 20 cycles were measured against an **R9700 stuck in low-DPM
+state** after 22 days uptime + 8 days of continuous llama-server
+holding GPU resources. The reboot restored the GPU to peak clocks
+(~108 tok/s on llama-bench tg128 for Qwen 3.6 35B-A3B, matching the
+historical 107 tok/s baseline from blog posts). Implications:
+
+- ZINC's relative position vs llama.cpp is **much worse** than the
+  pre-reboot data suggested. On Qwen 3.6 35B-A3B:
+  - ZINC decode 29 tok/s vs **llama-bench tg128 = 108.7** (= **27% of
+    peak**, not the 90% the previous run inferred).
+  - ZINC prefill 26 tok/s vs **llama-server core = 54** (= **48%**) and
+    vs llama-bench pp128 = 1159 burst (= **2%**, but burst pp is not the
+    realistic comparison).
+- The +5.6% the loop banked over 20 cycles is real, but happened
+  against a degraded baseline. Reruns of the agent's wins (cycles 4, 8,
+  13) on the post-reboot baseline should reproduce the same shaders'
+  benefit; the loop should NOT discard those commits.
+- Baseline-mode comparison (server config: `--parallel 4 -ctk q8_0
+  -ctv q8_0 -b 4096 -ub 1024 --flash-attn on`) reports **30.4 tok/s
+  decode** on the post-reboot llama-server. ZINC at 29 vs 30 is 95% of
+  *that* baseline — the published comparison still looks favorable in
+  the perf JSON, but it's measuring a llama config that itself runs
+  ~28% of llama-bench's bare-metal peak. Don't take the 95% as a sign
+  the work is done.
+
 3 wins kept across 20 cycles. The pattern that delivers: **fuse RMS norm
 into the adjacent DMMV that consumes it.** Two such shaders shipped.
 Five other patterns measured-flat or measured-negative (catalogued below
