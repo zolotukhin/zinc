@@ -1928,7 +1928,10 @@ pub const InferenceEngine = struct {
                         repackQ8_0Blocks(tensor.gpu_buffer.cpu_ptr.? + tensorPageOffset(model, tensor), buf.cpu_ptr.?, t_M, t_K);
                         self.private_ssm_qkv_bufs.?[i] = buf;
                     } else if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
-                        if (!need_gpu_copy) { cmd = try metal_command.beginCommand(ctx); need_gpu_copy = true; }
+                        if (!need_gpu_copy) {
+                            cmd = try metal_command.beginCommand(ctx);
+                            need_gpu_copy = true;
+                        }
                         self.private_ssm_qkv_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
                         dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_qkv_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
                     }
@@ -1943,7 +1946,10 @@ pub const InferenceEngine = struct {
                         repackQ8_0Blocks(tensor.gpu_buffer.cpu_ptr.? + tensorPageOffset(model, tensor), buf.cpu_ptr.?, t_M, t_K);
                         self.private_ssm_gate_bufs.?[i] = buf;
                     } else if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
-                        if (!need_gpu_copy) { cmd = try metal_command.beginCommand(ctx); need_gpu_copy = true; }
+                        if (!need_gpu_copy) {
+                            cmd = try metal_command.beginCommand(ctx);
+                            need_gpu_copy = true;
+                        }
                         self.private_ssm_gate_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
                         dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_gate_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
                     }
@@ -1958,7 +1964,10 @@ pub const InferenceEngine = struct {
                         repackQ8_0Blocks(tensor.gpu_buffer.cpu_ptr.? + tensorPageOffset(model, tensor), buf.cpu_ptr.?, t_M, t_K);
                         self.private_ssm_out_bufs.?[i] = buf;
                     } else if (tensor.info.type_ == .q8_0 and size_bytes % @sizeOf(u32) == 0) {
-                        if (!need_gpu_copy) { cmd = try metal_command.beginCommand(ctx); need_gpu_copy = true; }
+                        if (!need_gpu_copy) {
+                            cmd = try metal_command.beginCommand(ctx);
+                            need_gpu_copy = true;
+                        }
                         self.private_ssm_out_bufs.?[i] = try metal_buffer.createPrivateBuffer(ctx, size_bytes);
                         dispatchCopyU32OnCmd(&self, &cmd, &tensor.gpu_buffer, &self.private_ssm_out_bufs.?[i], @intCast(size_bytes / @sizeOf(u32)), @intCast(tensorPageOffset(model, tensor) / @sizeOf(u32)), 0);
                     }
@@ -2313,9 +2322,9 @@ pub const InferenceEngine = struct {
             return error.KvStateNotAvailable;
         }
 
-        for (prompt_tokens) |token_id| {
+        for (prompt_tokens, 0..) |token_id, i| {
             try self.loadTokenEmbedding(token_id);
-            try runDecodeStep(self);
+            try runDecodeStep(self, i + 1 == prompt_tokens.len);
         }
         state.position = self.position;
     }
@@ -2588,7 +2597,7 @@ pub const InferenceEngine = struct {
             state.position + 1;
         if (next_token_target > self.max_context_tokens) return error.ContextLengthExceeded;
         try self.loadTokenEmbedding(token_id);
-        try runDecodeStep(self);
+        try runDecodeStep(self, true);
         state.position = self.position;
     }
 
@@ -5093,31 +5102,47 @@ fn runGemmaExplicitMoeFallback(
     profileBarrier(&cmd, profile, .fallback_moe);
 
     const down_supported = engine.dmmvPipelineForType(down_exps, hidden_dim, inter_dim) != null;
-    // Per-expert down path. Benchmarking on M4 showed the batched Q5_1 MoE
-    // dispatch was slightly slower than 8 per-expert dispatches (3057 vs 3000
-    // ms/tok, profile kept commits=1472 in both cases). Kept the Q5_1 MoE
-    // shader in the tree for future reuse but don't enable it here.
-    const use_batched_down = false;
-    _ = use_batched_down;
+    const use_batched_down =
+        use_batched_moe_dispatch and
+        down_supported and
+        down_exps.info.type_ == .q5_1 and
+        cfg.n_experts_used == 8 and
+        lt.ffn_down_exps_bias == null;
     if (down_supported) {
         const input_stride_bytes: u32 = inter_dim * @sizeOf(f32);
-        for (0..cfg.n_experts_used) |ei| {
-            const eid = expert_ids[ei];
-            if (use_batched_moe_dispatch) {
-                const x_off_bytes: u32 = @as(u32, @intCast(ei)) * input_stride_bytes;
-                dispatchDmmvOnCmdWithInputOffset(
-                    engine,
-                    &cmd,
-                    down_exps,
-                    &engine.expert_swiglu_batch_buf,
-                    &engine.expert_down_bufs[ei],
-                    hidden_dim,
-                    inter_dim,
-                    eid * expert_down_bytes,
-                    x_off_bytes,
-                );
-            } else {
-                dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_bufs[ei], &engine.expert_down_bufs[ei], hidden_dim, inter_dim, eid * expert_down_bytes);
+        if (use_batched_down) {
+            try dispatchDmmvMoeOnCmd(
+                engine,
+                &cmd,
+                down_exps,
+                &engine.expert_swiglu_batch_buf,
+                &engine.expert_down_batch_buf,
+                &engine.router_output_buf,
+                hidden_dim,
+                inter_dim,
+                expert_down_bytes,
+                inter_dim,
+                0,
+            );
+        } else {
+            for (0..cfg.n_experts_used) |ei| {
+                const eid = expert_ids[ei];
+                if (use_batched_moe_dispatch) {
+                    const x_off_bytes: u32 = @as(u32, @intCast(ei)) * input_stride_bytes;
+                    dispatchDmmvOnCmdWithInputOffset(
+                        engine,
+                        &cmd,
+                        down_exps,
+                        &engine.expert_swiglu_batch_buf,
+                        &engine.expert_down_bufs[ei],
+                        hidden_dim,
+                        inter_dim,
+                        eid * expert_down_bytes,
+                        x_off_bytes,
+                    );
+                } else {
+                    dispatchDmmvOnCmd(engine, &cmd, down_exps, &engine.expert_swiglu_bufs[ei], &engine.expert_down_bufs[ei], hidden_dim, inter_dim, eid * expert_down_bytes);
+                }
             }
         }
     }
@@ -5214,31 +5239,53 @@ fn runGemmaExplicitMoeFallback(
     dispatchZeroF32OnCmd(engine, &cmd, &engine.moe_out_buf, hidden_dim);
     profileBarrier(&cmd, profile, .fallback_moe);
     if (cfg.n_experts_used == 8) {
-        const moe_push = MoeAccPush{
-            .n = hidden_dim,
-            .w0 = adjusted_expert_weights[0],
-            .w1 = adjusted_expert_weights[1],
-            .w2 = adjusted_expert_weights[2],
-            .w3 = adjusted_expert_weights[3],
-            .w4 = adjusted_expert_weights[4],
-            .w5 = adjusted_expert_weights[5],
-            .w6 = adjusted_expert_weights[6],
-            .w7 = adjusted_expert_weights[7],
-            .w_sh = 0.0,
-        };
-        const moe_bufs = [_]*const MetalBuffer{
-            &engine.moe_out_buf,
-            &engine.expert_down_bufs[0],
-            &engine.expert_down_bufs[1],
-            &engine.expert_down_bufs[2],
-            &engine.expert_down_bufs[3],
-            &engine.expert_down_bufs[4],
-            &engine.expert_down_bufs[5],
-            &engine.expert_down_bufs[6],
-            &engine.expert_down_bufs[7],
-            &engine.down_buf,
-        };
-        cmd.dispatchV2(&engine.moe_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &moe_bufs, &moe_push, @sizeOf(MoeAccPush), 10);
+        if (use_batched_down) {
+            const moe_push = MoeAccBatchedPush{
+                .n = hidden_dim,
+                .expert_stride = hidden_dim,
+                .w0 = adjusted_expert_weights[0],
+                .w1 = adjusted_expert_weights[1],
+                .w2 = adjusted_expert_weights[2],
+                .w3 = adjusted_expert_weights[3],
+                .w4 = adjusted_expert_weights[4],
+                .w5 = adjusted_expert_weights[5],
+                .w6 = adjusted_expert_weights[6],
+                .w7 = adjusted_expert_weights[7],
+                .w_sh = 0.0,
+            };
+            const moe_bufs = [_]*const MetalBuffer{
+                &engine.moe_out_buf,
+                &engine.expert_down_batch_buf,
+                &engine.down_buf,
+            };
+            cmd.dispatchV2(&engine.moe_acc_batched_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &moe_bufs, &moe_push, @sizeOf(MoeAccBatchedPush), 3);
+        } else {
+            const moe_push = MoeAccPush{
+                .n = hidden_dim,
+                .w0 = adjusted_expert_weights[0],
+                .w1 = adjusted_expert_weights[1],
+                .w2 = adjusted_expert_weights[2],
+                .w3 = adjusted_expert_weights[3],
+                .w4 = adjusted_expert_weights[4],
+                .w5 = adjusted_expert_weights[5],
+                .w6 = adjusted_expert_weights[6],
+                .w7 = adjusted_expert_weights[7],
+                .w_sh = 0.0,
+            };
+            const moe_bufs = [_]*const MetalBuffer{
+                &engine.moe_out_buf,
+                &engine.expert_down_bufs[0],
+                &engine.expert_down_bufs[1],
+                &engine.expert_down_bufs[2],
+                &engine.expert_down_bufs[3],
+                &engine.expert_down_bufs[4],
+                &engine.expert_down_bufs[5],
+                &engine.expert_down_bufs[6],
+                &engine.expert_down_bufs[7],
+                &engine.down_buf,
+            };
+            cmd.dispatchV2(&engine.moe_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &moe_bufs, &moe_push, @sizeOf(MoeAccPush), 10);
+        }
     } else {
         for (0..cfg.n_experts_used) |ei| {
             const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(adjusted_expert_weights[ei])) };
@@ -5450,10 +5497,10 @@ fn commitAndWaitProfiled(cmd: *MetalCommand, profile: ?*RuntimeProfile) void {
 }
 
 // ---------------------------------------------------------------------------
-// Decode step — runs all layers + final norm + LM head
+// Decode step — runs all layers plus optional final norm + LM head.
 // ---------------------------------------------------------------------------
 
-fn runDecodeStep(engine: *InferenceEngine) !void {
+fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
     const step_start = profileStart(engine.profile_enabled);
     defer if (engine.profile_enabled) {
         engine.request_profile.total_step_ns += profileElapsedNs(step_start);
@@ -6144,6 +6191,14 @@ fn runDecodeStep(engine: *InferenceEngine) !void {
         if (engine.debug_validation_enabled and engine.position == 0) {
             logLayerDiagnostics(engine, lt, layer, is_full_attn, "post_ffn");
         }
+    }
+
+    if (!emit_logits) {
+        if (shared_cmd) |cmd| {
+            commitAndWaitProfiled(cmd, profile);
+        }
+        engine.position += 1;
+        return;
     }
 
     // ===== Final: GPU norm → LM head (batched) =====
