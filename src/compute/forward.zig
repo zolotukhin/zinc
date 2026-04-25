@@ -7488,11 +7488,26 @@ pub const InferenceEngine = struct {
         // proj matvecs as Q8_0 × Q8_1 integer-dot. Falls through to the f32
         // dispatchDmmv path whenever any tensor isn't Q8_0 or the pipelines
         // aren't loaded.
-        const mmq_ready = self.use_mmq_ssm and
+        const mmq_q8_ready = self.use_mmq_ssm and
             wqkv_tensor.info.type_ == .q8_0 and
             (is_dead_tail or z_tensor.info.type_ == .q8_0) and
             alpha_tensor.info.type_ == .q8_0 and
             beta_tensor.info.type_ == .q8_0;
+
+        // Q4_K mmq path — opt-in via ZINC_MMQ_SSM=1 once the same flag was
+        // enabled. Activates when all SSM proj tensors are Q4_K (Q4_K_M /
+        // Q4_K_XL packs) and both quantize_q8_1 + dmmv_q4k_q8_1 pipelines
+        // loaded. K must be a multiple of 256 (Q4_K super-block size).
+        const mmq_q4k_ready = self.use_mmq_ssm and
+            self.dmmv.pipeline_q4k_q8_1 != null and
+            self.dmmv.pipeline_quantize_q8_1 != null and
+            (hidden_dim % 256) == 0 and
+            wqkv_tensor.info.type_ == .q4_k and
+            (is_dead_tail or z_tensor.info.type_ == .q4_k) and
+            alpha_tensor.info.type_ == .q4_k and
+            beta_tensor.info.type_ == .q4_k;
+
+        const mmq_ready = mmq_q8_ready or mmq_q4k_ready;
 
         if (mmq_ready) {
             try self.dmmv.recordQuantizeQ8_1(
@@ -7505,45 +7520,82 @@ pub const InferenceEngine = struct {
                 hidden_dim,
             );
             // Quantize writes -> mmq matvecs read. Buffer-scoped barrier on the
-            // Q8_1 scratch (writes by quantize_q8_1 finish, then reads by
-            // dmmv_q8_0_q8_1 proceed). norm_buf itself is untouched.
+            // Q8_1 scratch (writes by quantize_q8_1 finish, then reads by the
+            // mmq dispatch proceed). norm_buf itself is untouched.
             self.decode_cmd.computeBufferBarrier(self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size);
 
-            const q8q81 = &self.dmmv; // alias for brevity
-            try q8q81.recordMmqQ8_0_Q8_1(
-                &self.decode_cmd,
-                self.instance.push_descriptor_fn,
-                wqkv_tensor.gpu_buffer.handle, wqkv_tensor.gpu_buffer.size,
-                self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                self.attn_out_buf.handle, self.attn_out_buf.size,
-                @intCast(conv_channels), hidden_dim, 0, 0, 0, 0,
-            );
-            if (!is_dead_tail) {
-                try q8q81.recordMmqQ8_0_Q8_1(
+            const mmq = &self.dmmv;
+            if (mmq_q4k_ready) {
+                try mmq.recordMmqQ4_K_Q8_1(
                     &self.decode_cmd,
                     self.instance.push_descriptor_fn,
-                    z_tensor.gpu_buffer.handle, z_tensor.gpu_buffer.size,
+                    wqkv_tensor.gpu_buffer.handle, wqkv_tensor.gpu_buffer.size,
                     self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                    self.gate_buf.handle, self.gate_buf.size,
-                    @intCast(d_inner), hidden_dim, 0, 0, 0, 0,
+                    self.attn_out_buf.handle, self.attn_out_buf.size,
+                    @intCast(conv_channels), hidden_dim, 0, 0, 0, 0,
+                );
+                if (!is_dead_tail) {
+                    try mmq.recordMmqQ4_K_Q8_1(
+                        &self.decode_cmd,
+                        self.instance.push_descriptor_fn,
+                        z_tensor.gpu_buffer.handle, z_tensor.gpu_buffer.size,
+                        self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
+                        self.gate_buf.handle, self.gate_buf.size,
+                        @intCast(d_inner), hidden_dim, 0, 0, 0, 0,
+                    );
+                }
+                try mmq.recordMmqQ4_K_Q8_1(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    alpha_tensor.gpu_buffer.handle, alpha_tensor.gpu_buffer.size,
+                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
+                    self.router_logits_buf.handle, self.router_logits_buf.size,
+                    dt_rank, hidden_dim, 0, 0, 0, 0,
+                );
+                try mmq.recordMmqQ4_K_Q8_1(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    beta_tensor.gpu_buffer.handle, beta_tensor.gpu_buffer.size,
+                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
+                    self.down_buf.handle, self.down_buf.size,
+                    dt_rank, hidden_dim, 0, 0, 0, 0,
+                );
+            } else {
+                try mmq.recordMmqQ8_0_Q8_1(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    wqkv_tensor.gpu_buffer.handle, wqkv_tensor.gpu_buffer.size,
+                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
+                    self.attn_out_buf.handle, self.attn_out_buf.size,
+                    @intCast(conv_channels), hidden_dim, 0, 0, 0, 0,
+                );
+                if (!is_dead_tail) {
+                    try mmq.recordMmqQ8_0_Q8_1(
+                        &self.decode_cmd,
+                        self.instance.push_descriptor_fn,
+                        z_tensor.gpu_buffer.handle, z_tensor.gpu_buffer.size,
+                        self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
+                        self.gate_buf.handle, self.gate_buf.size,
+                        @intCast(d_inner), hidden_dim, 0, 0, 0, 0,
+                    );
+                }
+                try mmq.recordMmqQ8_0_Q8_1(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    alpha_tensor.gpu_buffer.handle, alpha_tensor.gpu_buffer.size,
+                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
+                    self.router_logits_buf.handle, self.router_logits_buf.size,
+                    dt_rank, hidden_dim, 0, 0, 0, 0,
+                );
+                try mmq.recordMmqQ8_0_Q8_1(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    beta_tensor.gpu_buffer.handle, beta_tensor.gpu_buffer.size,
+                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
+                    self.down_buf.handle, self.down_buf.size,
+                    dt_rank, hidden_dim, 0, 0, 0, 0,
                 );
             }
-            try q8q81.recordMmqQ8_0_Q8_1(
-                &self.decode_cmd,
-                self.instance.push_descriptor_fn,
-                alpha_tensor.gpu_buffer.handle, alpha_tensor.gpu_buffer.size,
-                self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                self.router_logits_buf.handle, self.router_logits_buf.size,
-                dt_rank, hidden_dim, 0, 0, 0, 0,
-            );
-            try q8q81.recordMmqQ8_0_Q8_1(
-                &self.decode_cmd,
-                self.instance.push_descriptor_fn,
-                beta_tensor.gpu_buffer.handle, beta_tensor.gpu_buffer.size,
-                self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                self.down_buf.handle, self.down_buf.size,
-                dt_rank, hidden_dim, 0, 0, 0, 0,
-            );
         } else {
             try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
             // Skip z (gate) DMMV in dead-tail: gate_buf is only consumed by

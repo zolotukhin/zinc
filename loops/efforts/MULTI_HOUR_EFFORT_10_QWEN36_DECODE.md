@@ -35,31 +35,32 @@ ceiling.** Significant headroom.
 
 ## Big levers
 
-### A. Q4_K × Q8_1 mmq path  (huge, multi-day)
+### A. Q4_K × Q8_1 mmq path  ❌ negative result
 
-Both SSM proj (8.8 ms) and MoE gate_up/down (9.3 ms) are Q4_K dequant
-DMMVs. Together they're 48% of decode time. llama.cpp's `mul_mat_q`
-quantizes the activation to Q8_1 once per token-layer pair, then runs
-integer dot products against the Q4_K weight blocks. The integer path
-on RDNA4 is materially faster than the f32 unpack-and-multiply route.
+**Built and measured. No speedup on Qwen 3.6.** Commit `27f0c76` lands
+the `dmmv_q4k_q8_1.comp` shader (mirrors dmmv_q4k.comp's threading,
+swaps the inner f32 dot for an i32 dot against pre-quantized Q8_1
+activations) and the matching `recordMmqQ4_K_Q8_1` dispatch helper.
+Wired into the SSM proj path behind the existing `ZINC_MMQ_SSM=1`
+env flag (later commit). With and without the flag on Qwen 3.6:
 
-ZINC already has the Q8_0 × Q8_1 mmq plumbing in place
-(`pipeline_q8_0_q8_1` + `pipeline_quantize_q8_1` + `recordMmqQ8_0_Q8_1`)
-and the SSM proj path opportunistically uses it via `mmq_ready` when
-the SSM tensors happen to be Q8_0. Q4_K_XL checkpoints don't ship Q8_0
-weights anywhere, so we never enter that path on Qwen 3.6.
+```
+baseline  : SSM phase = 15.94 ms, total decode = 37.73 ms
+ZINC_MMQ_SSM=1: SSM phase = 15.94 ms, total decode = 37.74 ms
+greedy output: identical token sequence
+```
 
-A Q4_K × Q8_1 shader is the missing piece. Mirror dmmv_q4k_moe_kpar's
-weight decode path for the Q4_K block layout, but instead of
-`dot(vec4(factor) * q_lo - vec4(bias), bx)` against f32 inputs, do
-integer FMAs against the Q8_1 packed activation stream. ~300 lines of
-GLSL plus pipeline plumbing plus the call-site swap-in. Expected gain:
-2-3× on the affected DMMVs → 5-9 ms shaved off decode → 26.4 → 32-38
-tok/s decode.
+The shader is correct (greedy outputs match bit-for-bit), but the SSM
+proj DMMVs are bandwidth-bound on weight reads, not compute-bound on
+dequant. Q4_K mmq saves activation bandwidth (4× smaller than f32) and
+compute (i32 dot vs f32 unpack-and-multiply), but neither is the
+bottleneck on this path on R9700.
 
-Expected non-trivial work to validate that mmq numerics are within
-tolerance against the f32 reference at scale (Q8_1 quantization adds
-~2^-8 noise per element).
+**Lesson:** memory-bound matvecs don't benefit from mmq on RDNA4. The
+shader is still useful as a foundation for future GEMM-style mmq
+(batched / multi-token), where higher arithmetic intensity makes the
+integer-dot win actually translate. Keep the pipeline + helper in the
+tree.
 
 ### B. Batched MoE prefill  (huge, multi-day)
 
