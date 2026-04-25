@@ -7554,6 +7554,11 @@ pub const InferenceEngine = struct {
             }
             try self.dispatchDmmv(alpha_tensor, self.norm_buf, hidden_size, self.router_logits_buf, dt_rank, hidden_dim);
             try self.dispatchDmmv(beta_tensor, self.norm_buf, hidden_size, self.down_buf, dt_rank, hidden_dim);
+            // Note: tried fusing alpha+beta into one fused-gate-up dispatch
+            // (commit considered but reverted) — no measurable change because
+            // the four SSM proj DMMVs already overlap on RDNA4. See
+            // loops/efforts/MULTI_HOUR_EFFORT_10_QWEN36_DECODE.md for the
+            // bigger Qwen 3.6 levers (Q4_K × Q8_1 mmq, batched MoE prefill).
         }
         // The immediate next dispatch (ssm_conv1d) only reads attn_out_buf.
         // Writes to gate_buf/router_logits_buf/down_buf are picked up by the
