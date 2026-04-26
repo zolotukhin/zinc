@@ -175,6 +175,7 @@ const required_shader_files = [_][]const u8{
     "moe_accumulate.metal",
     "moe_accumulate_batched.metal",
     "softmax_topk.metal",
+    "softmax_topk_batched.metal",
     "sigmoid_scale_acc.metal",
     "moe_weighted_acc.metal",
     "ssm_conv1d.metal",

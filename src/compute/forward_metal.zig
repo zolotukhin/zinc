@@ -653,6 +653,15 @@ const SoftmaxTopkPush = extern struct {
     k: u32,
 };
 
+/// Push constants for batched GPU softmax + top-k routing.
+/// Outputs one packed routing row per token: [k expert ids][k f32 weights as u32].
+const SoftmaxTopkBatchedPush = extern struct {
+    n_experts: u32,
+    k: u32,
+    logits_stride: u32,
+    output_stride: u32,
+};
+
 /// Push constants for GPU-weighted batched MoE accumulation.
 const MoeWeightedAccPush = extern struct {
     n: u32,
@@ -1242,6 +1251,7 @@ pub const InferenceEngine = struct {
     moe_acc_pipe: MetalPipeline,
     moe_acc_batched_pipe: MetalPipeline,
     softmax_topk_pipe: MetalPipeline,
+    softmax_topk_batched_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
     residual_rms_norm_pipe: MetalPipeline,
@@ -1566,6 +1576,7 @@ pub const InferenceEngine = struct {
         self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
         self.moe_acc_batched_pipe = try loadShaderPipeline(ctx, "moe_accumulate_batched");
         self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
+        self.softmax_topk_batched_pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
         self.residual_rms_norm_pipe = try loadShaderPipeline(ctx, "residual_rms_norm");
@@ -2142,6 +2153,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.moe_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_batched_pipe);
         metal_pipeline.freePipeline(&self.softmax_topk_pipe);
+        metal_pipeline.freePipeline(&self.softmax_topk_batched_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
         metal_pipeline.freePipeline(&self.residual_rms_norm_pipe);
@@ -4196,6 +4208,25 @@ fn dispatchSoftmaxTopkOnCmd(
     const push = SoftmaxTopkPush{ .n_experts = n_experts, .k = k };
     const bufs = [_]*const MetalBuffer{ logits, output };
     cmd.dispatchV2(&engine.softmax_topk_pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkPush), 0);
+}
+
+fn dispatchSoftmaxTopkBatchedOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    logits: *const MetalBuffer,
+    output: *const MetalBuffer,
+    n_tokens: u32,
+    n_experts: u32,
+    k: u32,
+) void {
+    const push = SoftmaxTopkBatchedPush{
+        .n_experts = n_experts,
+        .k = k,
+        .logits_stride = n_experts,
+        .output_stride = k * 2,
+    };
+    const bufs = [_]*const MetalBuffer{ logits, output };
+    cmd.dispatchV2(&engine.softmax_topk_batched_pipe, .{ n_tokens, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkBatchedPush), 0);
 }
 
 fn dispatchSigmoidScaleAccOnCmd(
@@ -9612,6 +9643,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&lmhead_pipe_1024);
     var topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
     defer metal_pipeline.freePipeline(&topk_pipe);
+    var topk_batched_pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
+    defer metal_pipeline.freePipeline(&topk_batched_pipe);
     var sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
     defer metal_pipeline.freePipeline(&sigmoid_scale_acc_pipe);
     var moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
@@ -9634,6 +9667,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(lmhead_pipe.handle != null);
     try std.testing.expect(lmhead_pipe_1024.handle != null);
     try std.testing.expect(topk_pipe.handle != null);
+    try std.testing.expect(topk_batched_pipe.handle != null);
     try std.testing.expect(sigmoid_scale_acc_pipe.handle != null);
     try std.testing.expect(moe_weighted_acc_pipe.handle != null);
 }
@@ -9771,6 +9805,65 @@ test "softmax_topk shader selects top experts and normalized weights" {
     const w1: f32 = @bitCast(out_ptr[4]);
     const w2: f32 = @bitCast(out_ptr[5]);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), w0 + w1 + w2, 0.01);
+}
+
+test "softmax_topk_batched shader routes each token independently" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const n_tokens: u32 = 2;
+    const n_experts: u32 = 8;
+    const k: u32 = 3;
+    const output_stride: u32 = k * 2;
+
+    var logits_buf = try metal_buffer.createBuffer(ctx, n_tokens * n_experts * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&logits_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, n_tokens * output_stride * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const logits_ptr: [*]f32 = @ptrCast(@alignCast(logits_buf.cpu_ptr.?));
+    @memcpy(logits_ptr[0 .. n_tokens * n_experts], &[_]f32{
+        0.0, 1.0, 4.0, 2.0, -1.0, 3.0,  0.5, -2.0,
+        7.0, 1.0, 0.0, 6.0, 5.0,  -1.0, 2.0, 3.0,
+    });
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+
+    const push = SoftmaxTopkBatchedPush{
+        .n_experts = n_experts,
+        .k = k,
+        .logits_stride = n_experts,
+        .output_stride = output_stride,
+    };
+    const bufs = [_]*const MetalBuffer{ &logits_buf, &output_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ n_tokens, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkBatchedPush), 0);
+    cmd.commitAndWait();
+
+    const out_ptr: [*]const u32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    try std.testing.expectEqual(@as(u32, 2), out_ptr[0]);
+    try std.testing.expectEqual(@as(u32, 5), out_ptr[1]);
+    try std.testing.expectEqual(@as(u32, 3), out_ptr[2]);
+
+    const row1 = output_stride;
+    try std.testing.expectEqual(@as(u32, 0), out_ptr[row1 + 0]);
+    try std.testing.expectEqual(@as(u32, 3), out_ptr[row1 + 1]);
+    try std.testing.expectEqual(@as(u32, 4), out_ptr[row1 + 2]);
+
+    const w00: f32 = @bitCast(out_ptr[k + 0]);
+    const w01: f32 = @bitCast(out_ptr[k + 1]);
+    const w02: f32 = @bitCast(out_ptr[k + 2]);
+    const w10: f32 = @bitCast(out_ptr[row1 + k + 0]);
+    const w11: f32 = @bitCast(out_ptr[row1 + k + 1]);
+    const w12: f32 = @bitCast(out_ptr[row1 + k + 2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), w00 + w01 + w02, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), w10 + w11 + w12, 0.01);
+    try std.testing.expect(w00 > w01 and w01 > w02);
+    try std.testing.expect(w10 > w11 and w11 > w12);
 }
 
 test "kv_cache_write shader writes K and V slices at token offset" {
