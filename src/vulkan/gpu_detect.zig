@@ -41,7 +41,7 @@ pub const GpuConfig = struct {
     bandwidth_gbps: u32,
     /// Number of compute units.
     compute_units: u32,
-    /// SIMD wave width (32 or 64).
+    /// SIMD wave width (from Vulkan subgroup size: e.g. 16, 32, or 64).
     wave_size: u32,
     /// Cooperative matrix support.
     coopmat_support: bool,
@@ -98,6 +98,12 @@ pub fn detect(instance: *const Instance) GpuConfig {
     const props = instance.device_props;
     const name_slice = std.mem.sliceTo(&props.deviceName, 0);
 
+    // Use Vulkan-reported subgroup size when available, otherwise fall back to 32.
+    const subgroup_size: u32 = if (instance.caps.min_subgroup_size > 0)
+        instance.caps.min_subgroup_size
+    else
+        16;
+
     var config = GpuConfig{
         .vendor = .unknown,
         .device_name = undefined,
@@ -105,7 +111,7 @@ pub fn detect(instance: *const Instance) GpuConfig {
         .vram_mb = @intCast(instance.vramBytes() / (1024 * 1024)),
         .bandwidth_gbps = 0,
         .compute_units = 0,
-        .wave_size = 32,
+        .wave_size = subgroup_size,
         .coopmat_support = instance.caps.cooperative_matrix,
         .l1_cache_kb = 16,
         .l2_cache_mb = 2,
@@ -125,7 +131,6 @@ pub fn detect(instance: *const Instance) GpuConfig {
     if (props.vendorID == 0x1002) {
         // AMD — differentiate RDNA3 vs RDNA4 by device ID ranges
         config.vendor = classifyAmd(props.deviceID, name_slice);
-        config.wave_size = 64; // wave64 optimal on RDNA3/4
 
         switch (config.vendor) {
             .amd_rdna4 => {
@@ -169,22 +174,19 @@ pub fn detect(instance: *const Instance) GpuConfig {
     } else if (props.vendorID == 0x10de) {
         // NVIDIA
         config.vendor = .nvidia;
-        config.wave_size = 32;
         config.bandwidth_gbps = 512;
     } else if (props.vendorID == 0x8086) {
         config.vendor = classifyIntel(props.deviceID, name_slice);
         if (config.vendor == .intel_arc_xe2) {
-            // Xe2 (Battlemage, Arc B-series): SIMD16 subgroup.
+            // Xe2 (Battlemage, Arc B-series).
             // B770 Pro: 32 Xe2-HPG cores, 256-bit GDDR6 @ 20 Gbps ≈ 640 GB/s.
-            config.wave_size = 16;
             config.bandwidth_gbps = 640;
             config.compute_units = 32;
             config.l1_cache_kb = 64;
             config.l2_cache_mb = 8;
         } else {
-            // Xe-HPG (Alchemist, Arc A-series): SIMD32 subgroup.
+            // Xe-HPG (Alchemist, Arc A-series).
             // A770: 512 GB/s, 32 Xe-cores.
-            config.wave_size = 32;
             config.bandwidth_gbps = 512;
             config.compute_units = 32;
             config.l1_cache_kb = 64;
