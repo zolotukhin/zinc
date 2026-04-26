@@ -1,20 +1,24 @@
 #version 460
 // ZINC — Fused top-k + renormalized softmax for MoE expert routing (v2).
-// Subgroup-parallel reduction: replaces per-iteration shared-memory scan
-// (single-threaded thread-0 sweep of 64 entries) with subgroupMax + subgroupMin
-// + subgroupShuffle. Avoids subgroupBallot/subgroupBroadcast which previously
-// crashed on RDNA4 (see v1 shader comment).
+// Subgroup-parallel reduction with packed (val, idx) keys: a single
+// subgroupMax per top-k iteration replaces the prior 3-op chain
+// (subgroupMax + subgroupMin + subgroupShuffle).
 //
 // Algorithm per workgroup (one MoE token's logits → top-k expert ids+weights):
 //   1. Each of 64 threads loads up to 4 logits into registers (n_experts ≤ 256).
 //   2. For each of k rounds:
-//      - Find local max across this thread's 4 values.
-//      - subgroupMax → global max value.
-//      - subgroupMin(eligible_tid_or_INF) → first thread holding the global max.
-//      - subgroupShuffle(my_global_idx, winner_tid) → broadcast winning expert id.
-//      - Winning thread invalidates its own slot (-inf) for next rounds.
-//      - Thread 0 writes (id, max_logit) to output.
-//   3. Thread 0 renormalizes via softmax over the k selected logits.
+//      - Each thread finds its local best (val, idx) across its 4 slots.
+//      - Pack (sortable(val) hi24 bits, 8-bit (255 - idx)) into a uint32.
+//        sortable() maps float → uint such that subgroupMax(uint) returns
+//        the encoded max float. The "255 - idx" tiebreak in the low byte
+//        means lower expert id wins on tied vals (n_experts ≤ 256).
+//      - subgroupMax over the packed key → winner.
+//      - Decode winner_idx and winner_val (24-bit mantissa precision —
+//        relative loss ~1e-7, far below softmax noise).
+//      - Each thread invalidates any local slot whose idx matches winner.
+//      - Thread 0 stages the winner into shared memory + writes the id.
+//   3. Parallel softmax over the k stored logits using subgroupMax +
+//      subgroupAdd (replaces the prior thread-0-only sequential softmax).
 //
 // Wave64, 1 workgroup per dispatch. Output layout matches v1:
 //   output_data[0..k]   = expert_ids (uint)
@@ -22,7 +26,6 @@
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_KHR_shader_subgroup_shuffle : require
 
 layout(local_size_x = 64) in;
 
@@ -40,10 +43,28 @@ layout(push_constant) uniform PushConstants {
 };
 
 const uint MAX_PER_THREAD = 4u;  // covers n_experts up to 64 * 4 = 256
+const uint MAX_K = 16u;
+
+// Holds the topk logits (with hi24 mantissa precision) for parallel softmax.
+shared float s_topk_logits[MAX_K];
+
+// Map float → uint such that subgroupMax(uint) returns max float in
+// signed-IEEE order. Positive: flip MSB so they compare > negatives.
+// Negative: invert all bits so less-negative compares > more-negative.
+uint sortable(float f) {
+    uint ui = floatBitsToUint(f);
+    return (ui & 0x80000000u) != 0u ? ~ui : (ui ^ 0x80000000u);
+}
+
+// Recover float from sortable representation, clearing the low mantissa byte
+// (drops the 8 LSBs of mantissa — ~1e-7 relative error, fine for routing).
+float unsortable_hi(uint s) {
+    uint full = (s & 0x80000000u) != 0u ? (s ^ 0x80000000u) : ~s;
+    return uintBitsToFloat(full & 0xFFFFFF00u);
+}
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint sg_tid = gl_SubgroupInvocationID;
 
     // --- Step 1: Load logits into registers (strided for coalescing) ---
     float vals[MAX_PER_THREAD];
@@ -59,59 +80,51 @@ void main() {
         }
     }
 
-    // --- Step 2: Top-k selection via subgroup-parallel reduction ---
+    // --- Step 2: Top-k selection via single packed subgroupMax per round ---
     for (uint ki = 0u; ki < k; ki++) {
-        // Find this thread's best (val, local index) across its slots.
+        // Find this thread's best (val, global idx) across its slots.
         float best_val = vals[0];
-        uint  best_local = 0u;
+        uint  best_idx = idxs[0];
         for (uint i = 1u; i < MAX_PER_THREAD; i++) {
             if (vals[i] > best_val) {
                 best_val = vals[i];
-                best_local = i;
+                best_idx = idxs[i];
             }
         }
 
-        // Subgroup max collapses 64 thread-local maxima → global max value.
-        float global_max = subgroupMax(best_val);
+        // Pack (sortable_val_hi24, 255 - idx_8) so the unsigned uint max
+        // both selects the largest val AND breaks ties by lowest idx.
+        uint packed = (sortable(best_val) & 0xFFFFFF00u)
+                    | (255u - (best_idx & 0xFFu));
+        uint winner = subgroupMax(packed);
+        uint winner_idx = 255u - (winner & 0xFFu);
+        float winner_val = unsortable_hi(winner & 0xFFFFFF00u);
 
-        // Lowest-numbered thread holding the global max wins ties.
-        // Encode: tid if my best_val matches, sentinel otherwise; subgroupMin picks winner.
-        uint code = (best_val == global_max) ? sg_tid : 0xFFFFFFFFu;
-        uint winner_tid = subgroupMin(code);
-
-        // Broadcast winner's chosen global expert index.
-        uint my_global_idx = idxs[best_local];
-        uint winner_global_idx = subgroupShuffle(my_global_idx, winner_tid);
-
-        // Winner invalidates its own slot so the next round skips it.
-        if (sg_tid == winner_tid) {
-            vals[best_local] = -1.0 / 0.0;
+        // Each thread invalidates any local slot whose global idx matches.
+        for (uint i = 0u; i < MAX_PER_THREAD; i++) {
+            if (idxs[i] == winner_idx) {
+                vals[i] = -1.0 / 0.0;
+            }
         }
 
         if (tid == 0u) {
-            output_data[ki] = winner_global_idx;
-            output_data[k + ki] = floatBitsToUint(global_max);
+            output_data[ki] = winner_idx;
+            if (ki < MAX_K) s_topk_logits[ki] = winner_val;
         }
     }
 
-    // --- Step 3: Convert k selected logits to renormalized routing weights ---
-    if (tid == 0u) {
-        float max_logit = -1.0 / 0.0;
-        for (uint i = 0u; i < k; i++) {
-            max_logit = max(max_logit, uintBitsToFloat(output_data[k + i]));
-        }
+    // Make thread-0's shared writes visible to all threads.
+    barrier();
 
-        float wsum = 0.0;
-        for (uint i = 0u; i < k; i++) {
-            float w = exp(uintBitsToFloat(output_data[k + i]) - max_logit);
-            output_data[k + i] = floatBitsToUint(w);
-            wsum += w;
-        }
-
-        float inv_wsum = (wsum > 0.0) ? (1.0 / wsum) : 0.0;
-        for (uint i = 0u; i < k; i++) {
-            float w = uintBitsToFloat(output_data[k + i]) * inv_wsum;
-            output_data[k + i] = floatBitsToUint(w);
-        }
+    // --- Step 3: Parallel softmax over the k stored logits ---
+    // All 64 threads call the subgroup ops (uniform control flow); threads
+    // with tid >= k contribute -inf (ignored by max) / 0 (ignored by add).
+    float my_logit = (tid < k && tid < MAX_K) ? s_topk_logits[tid] : -1.0 / 0.0;
+    float max_logit = subgroupMax(my_logit);
+    float my_exp = (tid < k && tid < MAX_K) ? exp(my_logit - max_logit) : 0.0;
+    float wsum = subgroupAdd(my_exp);
+    float inv_wsum = (wsum > 0.0) ? (1.0 / wsum) : 0.0;
+    if (tid < k && tid < MAX_K) {
+        output_data[k + tid] = floatBitsToUint(my_exp * inv_wsum);
     }
 }
