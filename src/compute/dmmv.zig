@@ -139,6 +139,34 @@ pub const MulMmqQ4KPush = extern struct {
     d_offset: u32,
 };
 
+/// Push constants for `mul_mm_id_q4k.comp` (effort-6 Step 2 of 5 foundation:
+/// tiled Q4_K MUL_MAT_ID GEMM — MoE gather variant). Adds five
+/// MUL_MAT_ID-specific fields on top of `MulMmQ4KPush`'s shape:
+/// `batch_stride_a` (BYTES between consecutive experts in A),
+/// `batch_stride_d` (FLOATS per output token = n_experts_used × M),
+/// `nei0` (slots per token = top_k), `nei1` (number of token rows in
+/// data_ids), `nbi1` (u32 stride between token rows in data_ids — often
+/// = 2 × top_k × n_layers when sharing a routing-capture buffer), and
+/// `ids_offset` (u32 base offset into data_ids — non-zero when picking
+/// one layer's slice out of a shared routing-capture buffer).
+/// `a_offset` is in BYTES, `b_offset` and `d_offset` are in FLOATS,
+/// `ids_offset` is in u32 units.
+pub const MulMmIdQ4KPush = extern struct {
+    M: u32,
+    K: u32,
+    stride_b: u32,
+    stride_d: u32,
+    batch_stride_a: u32,
+    batch_stride_d: u32,
+    nei0: u32,
+    nei1: u32,
+    nbi1: u32,
+    a_offset: u32,
+    b_offset: u32,
+    d_offset: u32,
+    ids_offset: u32,
+};
+
 /// Size in bytes of a single Q8_1 output block (32 int8 values + f16 d + f16 d*sum).
 pub const Q8_1_BLOCK_BYTES: u32 = 36;
 
@@ -269,6 +297,19 @@ pub const DmmvDispatch = struct {
     /// until Step 5 wires the prefill dispatch threshold. 3 bindings
     /// (A weights, B Q8_1 stream, D f32 outputs), push = MulMmqQ4KPush.
     pipeline_mul_mmq_q4k: ?Pipeline,
+    /// Effort-6 Step 2 of 5 foundation: tiled Q4_K MUL_MAT_ID GEMM — the
+    /// MoE-gather variant of `pipeline_mul_mm_q4k`. Each WG handles one
+    /// expert (gl_WorkGroupID.z), gathers up to BN=16 routed tokens via
+    /// `data_ids` into a shared `row_ids[]` list, runs the same Q4_K ×
+    /// f32 tiled GEMM against the expert's per-expert weight slice, and
+    /// scatters outputs to the correct (token, slot, row) positions.
+    /// Pipeline loads at startup; no production callers in this cycle.
+    /// Step 5 (pipeline selection) will wire the prefill MoE FFN through
+    /// this shader once the threshold (n_tokens > 8) holds and the
+    /// routing-capture buffer is populated. 5 bindings (A weights, B f32
+    /// activations, D f32 outputs, IDS u32 routing, COUNTS u32 per-expert
+    /// counts), push = MulMmIdQ4KPush.
+    pipeline_mul_mm_id_q4k: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -623,6 +664,24 @@ pub const DmmvDispatch = struct {
             log.info("mul_mmq_q4k pipeline loaded (tiled Q4_K × Q8_1 GEMM, foundation phase 1; not yet wired)", .{});
         }
 
+        // Effort-6 Step 2 of 5 foundation: tiled Q4_K MUL_MAT_ID GEMM. Same
+        // tile shape as mul_mm_q4k (BM=32, BN=16, BK=32, WG=64) but adds
+        // per-expert dispatch (gl_WorkGroupID.z) and the row_ids gather
+        // for MoE prefill. 5 bindings (A weights, B activations, D outputs,
+        // IDS routing, COUNTS expert-count). Pipeline registers at startup;
+        // no production callers in this cycle. Step 5 wires this in once
+        // the routing-capture buffer + count_experts dispatch are sequenced
+        // per-layer.
+        const mul_mm_id_q4k_push_size = @sizeOf(MulMmIdQ4KPush);
+        const mul_mm_id_q4k_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_id_q4k.spv", .{shader_dir}) catch unreachable;
+        const pipeline_mul_mm_id_q4k = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_id_q4k_path, 5, mul_mm_id_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("mul_mm_id_q4k shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_mul_mm_id_q4k != null) {
+            log.info("mul_mm_id_q4k pipeline loaded (tiled Q4_K MUL_MAT_ID GEMM, foundation; not yet wired)", .{});
+        }
+
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
@@ -656,6 +715,7 @@ pub const DmmvDispatch = struct {
             .pipeline_count_experts = pipeline_count_experts,
             .pipeline_mul_mm_q4k = pipeline_mul_mm_q4k,
             .pipeline_mul_mmq_q4k = pipeline_mul_mmq_q4k,
+            .pipeline_mul_mm_id_q4k = pipeline_mul_mm_id_q4k,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -1241,6 +1301,100 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Effort-6 Step 2 (foundation): dispatch the tiled Q4_K MUL_MAT_ID GEMM
+    /// (`mul_mm_id_q4k.comp`). Per-expert dispatch (gl_WorkGroupID.z),
+    /// tokens routed to each expert gathered via `data_ids` into a shared
+    /// `row_ids[BN]` list inside the WG, GEMM body identical to
+    /// `recordMulMmQ4K`. Output is scattered to per-(token, slot, row)
+    /// positions: `data_d[d_offset + token_idx * batch_stride_d
+    ///                    + slot_idx * stride_d + row]`.
+    ///
+    /// Tile shape: WG = 64 threads producing a 32 × 16 output tile.
+    /// Dispatch grid: gridX = ((M+31)/32), gridY = caller-chosen worst-case
+    /// N-tile bound (typically `((max_routings_per_expert + 15) / 16)` —
+    /// for ZINC's prefill with `n_tokens × top_k` total routings, set
+    /// gridY = `((n_tokens × top_k + 15) / 16)` and rely on the
+    /// `data_expert_count[expert_idx]` early-exit), gridZ = `n_experts`.
+    ///
+    /// Constraints:
+    /// - K must be a multiple of 256 (Q4_K super-block size).
+    /// - `a_offset` is in BYTES (the shader divides by 4 to index a_u32[]).
+    /// - `b_offset` and `d_offset` are in FLOATS.
+    /// - `ids_offset` is in u32 units.
+    /// - `batch_stride_a` is in BYTES (per-expert weight slice size).
+    /// - `batch_stride_d` is in FLOATS (per-token output stride =
+    ///   n_experts_used × stride_d).
+    ///
+    /// Returns `error.PipelineNotLoaded` if `mul_mm_id_q4k.spv` is not
+    /// loaded; `error.InvalidArgument` for K-misaligned inputs.
+    pub fn recordMulMmIdQ4K(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_buf: vk.c.VkBuffer,
+        a_size: vk.c.VkDeviceSize,
+        b_buf: vk.c.VkBuffer,
+        b_size: vk.c.VkDeviceSize,
+        d_buf: vk.c.VkBuffer,
+        d_size: vk.c.VkDeviceSize,
+        ids_buf: vk.c.VkBuffer,
+        ids_size: vk.c.VkDeviceSize,
+        counts_buf: vk.c.VkBuffer,
+        counts_size: vk.c.VkDeviceSize,
+        M: u32,
+        K: u32,
+        stride_b: u32,
+        stride_d: u32,
+        batch_stride_a: u32,
+        batch_stride_d: u32,
+        nei0: u32,
+        nei1: u32,
+        nbi1: u32,
+        a_offset: u32,
+        b_offset: u32,
+        d_offset: u32,
+        ids_offset: u32,
+        n_experts: u32,
+        n_tile_y: u32,
+    ) !void {
+        const pip = if (self.pipeline_mul_mm_id_q4k) |*p| p else return error.PipelineNotLoaded;
+        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
+        if (M == 0 or n_experts == 0 or n_tile_y == 0) return error.InvalidArgument;
+        if (nei0 == 0 or nei1 == 0) return error.InvalidArgument;
+        const push = MulMmIdQ4KPush{
+            .M = M,
+            .K = K,
+            .stride_b = stride_b,
+            .stride_d = stride_d,
+            .batch_stride_a = batch_stride_a,
+            .batch_stride_d = batch_stride_d,
+            .nei0 = nei0,
+            .nei1 = nei1,
+            .nbi1 = nbi1,
+            .a_offset = a_offset,
+            .b_offset = b_offset,
+            .d_offset = d_offset,
+            .ids_offset = ids_offset,
+        };
+        const infos = [5]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_buf, .offset = 0, .range = a_size },
+            .{ .buffer = b_buf, .offset = 0, .range = b_size },
+            .{ .buffer = d_buf, .offset = 0, .range = d_size },
+            .{ .buffer = ids_buf, .offset = 0, .range = ids_size },
+            .{ .buffer = counts_buf, .offset = 0, .range = counts_size },
+        };
+        const wg_x = (M + 31) / 32;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            wg_x,
+            n_tile_y,
+            n_experts,
+        );
+    }
+
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
@@ -1272,6 +1426,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_count_experts) |*p| p.deinit();
         if (self.pipeline_mul_mm_q4k) |*p| p.deinit();
         if (self.pipeline_mul_mmq_q4k) |*p| p.deinit();
+        if (self.pipeline_mul_mm_id_q4k) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
