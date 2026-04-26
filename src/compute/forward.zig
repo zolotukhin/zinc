@@ -966,6 +966,15 @@ pub const InferenceEngine = struct {
     // slot(position, layer). Unused downstream this cycle — the buffer is the
     // prerequisite for Step 11b (token-permute) and 11c (grouped MoE GEMM).
     use_capture_routing: bool = false,
+    // Opt-in via ZINC_MUL_MM_LM_HEAD=1 (effort-6 Step 1 wire-in). When set
+    // and the mul_mm_q4k pipeline is loaded and the LM-head weight is Q4_K
+    // and hidden_dim is a multiple of 256, the final-tail LM head is
+    // dispatched through `recordMulMmQ4K` instead of `dispatchDmmv`. This
+    // is a correctness-exercise of cycle 15's tiled-GEMM foundation:
+    // the LM head fires once per prefill (dead-tail-skip), so flag-on perf
+    // impact is bounded; the win comes later when the same shader feeds
+    // the per-prompt-token MoE phase via Step 2 (MUL_MAT_ID variant).
+    use_mul_mm_lm_head: bool = false,
     // Q8_1 scratch pair (primary / alt). Swapped alongside decode_cmd during
     // the double-buffered prefill pipeline so the two in-flight CBs don't
     // race on the same scratch region. Size = (hidden_dim/32)*36 bytes.
@@ -1908,6 +1917,23 @@ pub const InferenceEngine = struct {
             });
         }
 
+        // Effort-6 Step 1 wire-in: opt-in routing of the LM-head DMMV
+        // through the tiled mul_mm_q4k pipeline. Eligible only when (a)
+        // the flag is set, (b) the pipeline loaded, (c) push descriptors
+        // are available (recordMulMmQ4K uses pushDescAndDispatch). The
+        // weight-quant + hidden_dim alignment check happens at the call
+        // site since both depend on the resolved LM head tensor.
+        const mul_mm_lm_head_env = std.posix.getenv("ZINC_MUL_MM_LM_HEAD");
+        const mul_mm_lm_head_flag = mul_mm_lm_head_env != null and std.mem.eql(u8, mul_mm_lm_head_env.?, "1");
+        const mul_mm_lm_head_enabled = mul_mm_lm_head_flag and
+            dmmv.pipeline_mul_mm_q4k != null and
+            instance.push_descriptor_fn != null;
+        if (mul_mm_lm_head_enabled) {
+            log.info("LM-head mul_mm_q4k path ENABLED (ZINC_MUL_MM_LM_HEAD=1)", .{});
+        } else if (mul_mm_lm_head_flag) {
+            log.info("ZINC_MUL_MM_LM_HEAD=1 requested but prerequisites missing (mul_mm_q4k pipeline or push descriptors); using DMMV", .{});
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
@@ -1923,6 +1949,7 @@ pub const InferenceEngine = struct {
             .use_mmq_ssm = mmq_ssm_enabled,
             .use_batch_attn = batch_attn_enabled,
             .use_capture_routing = capture_flag and routing_capture_buf.handle != null,
+            .use_mul_mm_lm_head = mul_mm_lm_head_enabled,
             .routing_capture_buf = routing_capture_buf,
             .routing_capture_slot_bytes = routing_capture_slot_bytes,
             .routing_capture_max_tokens = routing_capture_max_tokens,
@@ -6721,7 +6748,35 @@ pub const InferenceEngine = struct {
             // LM head: output.weight × norm_buf → logits_buf
             const lm_tensor = self.tensor_map.get("output.weight") orelse
                 self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
-            try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
+            // Effort-6 Step 1 wire-in (ZINC_MUL_MM_LM_HEAD=1): route the LM head
+            // through the tiled mul_mm_q4k pipeline instead of dispatchDmmv.
+            // Eligibility: flag on, weight is Q4_K, hidden_dim multiple of 256
+            // (Q4_K super-block size). Uses N=1 (LM head sees one final
+            // activation row at the dead-tail token); the BN=16 tile is
+            // mostly idle for N=1, so this exists primarily to validate
+            // shader correctness on a real Q4_K matvec — Step 2 (MUL_MAT_ID
+            // variant) reuses the same shader for the MoE phase where the
+            // tile is saturated.
+            const use_mul_mm_path = self.use_mul_mm_lm_head and
+                lm_tensor.info.type_ == .q4_k and
+                (hidden_dim % 256) == 0;
+            if (use_mul_mm_path) {
+                try self.dmmv.recordMulMmQ4K(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    lm_tensor.gpu_buffer.handle, lm_tensor.gpu_buffer.size,
+                    self.norm_buf.handle, hidden_size,
+                    self.logits_buf.handle, self.logits_buf.size,
+                    self.model.config.vocab_size, // M
+                    1, // N
+                    hidden_dim, // K
+                    hidden_dim, // stride_b: per-col floats in B (one column = K elements)
+                    self.model.config.vocab_size, // stride_d: per-col floats in D (one column = M elements)
+                    0, 0, 0,
+                );
+            } else {
+                try self.dispatchDmmv(lm_tensor, self.norm_buf, hidden_size, self.logits_buf, self.model.config.vocab_size, hidden_dim);
+            }
 
             const use_gpu_argmax = have_gpu_argmax;
             if (use_gpu_argmax) {
