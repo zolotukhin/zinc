@@ -4060,6 +4060,19 @@ pub const InferenceEngine = struct {
                 // from DRAM. Skip it and let the Gemma V unit-norm below read from
                 // k_buf (raw K projection) and write into v_buf, fusing the K→V
                 // copy with the norm. Saves one DMMV per full-attn layer.
+                //
+                // Note: cycle 35 of effort-6 measured K+V fusion via the
+                // dmmv_q4k_fused_gate_up pipeline (single dispatch, two
+                // weight reads, one shared input read) at 8+8 interleaved
+                // samples on Qwen 3.6 35B-A3B Q4_K_XL: flag-on mean 82.55
+                // / median 82.92 vs flag-off mean 82.57 / median 82.84
+                // (delta within noise band on this hybrid SSM+attention
+                // model). The full-attention layers are a small fraction
+                // of total prefill time (attention bucket ≈ 21%), the K/V
+                // dispatches already overlap on RDNA4 within that bucket,
+                // and the norm_buf re-read amortizes through L2. Avoid
+                // re-attempting K+V fusion on this model class without
+                // first changing one of those three premises.
                 if (!use_k_as_v) {
                     try self.dispatchDmmv(v_tensor, self.norm_buf, hidden_size, self.v_buf, v_rows, hidden_dim);
                 }
