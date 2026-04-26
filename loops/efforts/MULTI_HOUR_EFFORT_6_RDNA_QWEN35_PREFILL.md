@@ -1,13 +1,23 @@
 # Optimization 6: RDNA Prefill Recovery for Qwen3.5/3.6-35B-A3B
 
-## Current state update (2026-04-25, post-reboot, latest llama.cpp 9725a313b)
+## TL;DR  (2026-04-25, after 11 autonomous-loop cycles + reading llama.cpp source)
 
-Re-measured against a healthy baseline (DPM locked high, no co-resident
-systemd llama-server, llama.cpp built from master HEAD — which now has
-Gemma 4 architecture support added in fcc750875).
+**The prefill gap is real (40% of llama.cpp on Qwen 3.5/3.6, 25% on
+Gemma 4 26B MoE).** It cannot be closed with GEMV-style cross-token
+batching. **It requires porting llama.cpp's tiled GEMM with
+MUL_MAT_ID** — a multi-week project, not a multi-day one.
 
-Long-context prefill (154-token prompt, the workload this effort
-targets):
+The autonomous loop spent 11 cycles attempting wire-ins of the GEMV
+approach (commit `c36bd23` shipped `dmmv_q4k_moe_batched.comp`) and
+failed every cycle. Reading llama.cpp's source clarifies why: their
+prefill MoE dispatches **600× fewer workgroups** than my GEMV shader
+would, with each WG doing **4000× more work** in a tiled GEMM. RDNA4
+underutilizes on GEMV at this scale.
+
+Anyone picking this up next: **delete the GEMV swing-idea, port the
+tiled GEMM**. Files and references below are explicit.
+
+## Current measured gap (long-context prefill, 154-token prompt)
 
 | model                       | ZINC P  | llama P  | ZINC %  |
 |-----------------------------|--------:|---------:|--------:|
@@ -16,66 +26,170 @@ targets):
 | Gemma 4 26B A4B (MoE)       |    40.7 |    161.1 |     25% |
 | GPT-OSS 20B                 |    94.8 |    120.3 |     79% |
 
-Both Qwen 35B variants stuck at 40% of llama.cpp on long-context prefill.
-Gemma 4 26B MoE worse at 25%. GPT-OSS 20B closer at 79% (smaller MoE).
-Decode side is in better shape (60-80% of llama.cpp) — the asymmetry
-reflects ZINC's MoE FFN running per-token in prefill while llama.cpp
-batches across N tokens with grouped expert dispatch.
+ZINC at parity or better on dense models (Qwen 3 8B prefill 248% of
+llama.cpp; Gemma 4 31B dense 105%). The gap is **MoE-only** and
+proportional to MoE share.
 
-## Cross-token batched MoE infrastructure (already shipped)
+## Why GEMV cross-token batching fails  (the 11-cycle finding)
 
-Commit `c36bd23` lands `dmmv_q4k_moe_batched.comp` — Q4_K weights × N
-prompt tokens, dispatch grid `((M+1)/2, n_experts_used, n_tokens)`,
-routing buffer flattened to `[n_tokens × n_experts_used]`. Helper:
-`DmmvDispatch.recordMoeBatchedDispatch`. Pipeline loads at startup
-(`dmmv_q4k_moe_batched pipeline loaded (cross-token MoE; not yet
-wired)`) but no call site uses it yet.
+For Qwen 3.6 35B-A3B with M=1408 (inter), N=154 (prompt), n_experts=128,
+n_used=8:
 
-The shader is the GEMV equivalent of llama.cpp's grouped-expert mmq
-dispatch. With it in place, the wire-in is what's missing to close
-the prefill gap.
+| approach | total WGs | per-WG work | WG saturation on R9700 |
+|---|---:|---|---|
+| ZINC's per-token GEMV (current) | 154 × 8 × 704 = 867k | 1 dot | over-saturated, dispatch-bound |
+| `dmmv_q4k_moe_batched.comp` (GEMV cross-token) | 1408 × 8 × 154 = 1.7M | 1 dot | even worse |
+| llama.cpp's `mul_mm` MUL_MAT_ID (tiled GEMM) | 22 × 1 × 128 = **2,816** | **64×64 tile = 4096 dots** | balanced |
 
-## Wire-in plan (the actual remaining work)
+R9700 has 64 CUs × 16 WG/CU concurrent = ~1024 WGs in flight. GEMV
+dispatches 850-1700× more WGs than the device can run, so the GPU
+spends most of its time on launch/queue overhead and per-WG setup.
+Tiled GEMM matches the device's compute envelope.
 
-1. **Build per-layer routing buffer for all N prompt tokens.** Existing
-   `routing_capture_buf` (gated on `ZINC_CAPTURE_ROUTING=1`,
-   forward.zig:885) already has the right shape:
-   `[max_tokens × n_layers × (2 × n_experts_used × u32)]` storing
-   per-(token, slot) {expert_id, expert_weight_bits}. The capture
-   currently runs during per-token MoE; for prefillBatched, we need
-   the router DMMV to run on N tokens at once first, then softmax-topk
-   per token, then write the routing into the capture buffer.
+The empirical evidence from cycles 1-11: **no GEMV-side fusion or
+restructuring can close the gap.** The agent tried 9 variants of
+wire-in, fusion, NUM_ROWS tweaks, and barrier scoping — all flat or
+negative. Cycle 10 even staged a removal of the dormant GEMV
+infrastructure entirely (rejected by the loop driver because removing
+dead code didn't bank tok/s, but the agent's reasoning was right).
 
-2. **Allocate output scratch.** `[N × n_experts_used × inter_dim]` of
-   f32. For Qwen 3.5/3.6 35B-A3B with N=154 prompt, n_experts_used=8,
-   inter=1408: 154 × 8 × 1408 × 4 = 6.7 MiB per-layer scratch. Reusable
-   across layers.
+## The actual port plan (multi-week, with explicit references)
 
-3. **Dispatch batched gate / up / down** via
-   `recordMoeBatchedDispatch`. The shader handles all (token,
-   expert_slot) pairs in one kernel.
+llama.cpp's MoE prefill is a four-piece system. Port them in order:
 
-4. **Per-token weighted accumulation.** New shader: `moe_weighted_acc_batched.comp`
-   (or extend the existing `moe_weighted_acc.comp` to take a batch
-   dimension). For each token, sum n_experts_used expert outputs
-   weighted by routing probs from the routing buffer, into the per-
-   token slice of `scratch_hidden`.
+### 1. Tiled Q4_K GEMM (foundation, no MoE yet)
 
-5. **Relax the gate.** `canUseBatchedPrefillRdna` currently returns
-   `false` for `n_experts > 0` (line 747). Open it conditionally on
-   `pipeline_q4k_moe_batched != null` and the new `moe_weighted_acc_batched`
-   pipeline being loaded.
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
+  — the dispatch shape, tile loop, shared-memory cooperative loads.
+  Look at the `#ifndef COOPMAT` branch (warp-tiled MAC) since RDNA4
+  has no cooperative_matrix support.
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl`
+  — block-load + dequant helpers.
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl`
+  — Q4_K-specific block decode at lines 303-364 (can be reused; it
+  matches our existing `dmmv_q4k_moe_kpar.comp` layout exactly).
 
-6. **Coexist with SSM layers.** qwen35moe has SSM on 30 of 40 layers.
-   Two options: (a) fall back to per-token for SSM layers within an
-   otherwise-batched prefillBatched body, or (b) defer wire-in until
-   parallel-scan SSM also lands. Option (a) is far simpler and gets
-   us the MoE-FFN savings on every layer while accepting the SSM
-   layer cost stays as-is.
+**Tile params (start with these, then tune)**:
+- `BM=64, BN=64, BK=32, WM=64, WN=32, WMITER=2, WNITER=2, TM=4, TN=2`
+- `local_size_x=128` (subgroup_size=64 × NUM_WARPS=2)
+- LDS budget: `BM*(BK/2+1)*4 + BN*(BK/2+1)*4 = ~5 KiB` per WG, fits
 
-Validate via `ZINC_BATCHED_PREFILL=validate` — the existing per-token
-path is the reference, so if last-token logits match within ~1e-3 the
-wire-in is correct.
+**Output**: `src/shaders/mul_mm_q4k.comp` + pipeline registration in
+`src/compute/dmmv.zig`. Test against the existing per-token Q4_K DMMV
+on a synthetic [M, K, N] matmul before integrating with prefill.
+
+### 2. MUL_MAT_ID variant (the MoE gather)
+
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_id_funcs.glsl`
+  — the `load_row_ids` function. Each WG scans the `data_ids` buffer
+  with subgroup ballot (`subgroupBallot`, `subgroupBallotBitCount`)
+  to find tokens whose routed expert matches this WG's `expert_idx`,
+  then accumulates them into a `row_ids[BN]` shared list. **This is
+  the load-balancing mechanism.** Without it, expert-grouped tiles
+  waste cycles on padding tokens.
+
+- `mul_mm.comp` lines 144-145: `gl_WorkGroupID.z = expert_idx`,
+  early-exit `if (ic*BN >= data_expert_count[expert_idx])`.
+
+**Output**: same file as #1 with `#ifdef MUL_MAT_ID` guards added,
+plus an early-exit using `data_expert_count`. Most of the GEMM body
+is unchanged.
+
+### 3. count_experts.comp (trivial helper)
+
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/count_experts.comp`
+  — 50 lines, do not modify. Reads the per-token expert_id buffer,
+  outputs a `[n_experts]` count buffer that the GEMM uses for
+  early-exit. Port directly.
+
+**Output**: `src/shaders/count_experts.comp` + pipeline + dispatch
+helper.
+
+### 4. mul_mmq variant (Q8_1-quantized activation)
+
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq.comp`
+  — same tiled GEMM as `mul_mm` but the activation is pre-quantized to
+  Q8_1 by `quantize_q8_1.comp` (which we already have). The inner-loop
+  dot uses `dotPacked4x8EXT` (`GL_EXT_integer_dot_product`).
+  R9700 supports this — `vulkaninfo --summary | grep
+  integerDotProduct4x8BitPackedSignedAccelerated` returns true.
+- `mul_mmq_funcs.glsl` Q4_K branch (lines 303-364) is the integer-dot
+  version of the dequant + scale we already do in f32.
+
+**Output**: `src/shaders/mul_mmq_q4k.comp`. Adds another ~2× on top
+of #1-3 because activation bandwidth drops 4× (f32 → Q8_1) and the
+inner dot uses hardware integer-dot.
+
+### 5. Pipeline selection in `prefillBatched`
+
+After #1-4 land:
+- For dense FFN (Gemma 4 31B): use `mul_mm_q4k` with N=N_tokens.
+- For MoE FFN (Qwen 3.5/3.6, Gemma 4 26B, GPT-OSS): use
+  `mul_mm_id_q4k` with `data_ids` from the existing
+  `routing_capture_buf` (forward.zig:885) and `data_expert_count`
+  from #3.
+- Threshold: switch from per-token GEMV to GEMM when
+  `n_tokens > 8` (matches llama.cpp's `mul_mat_vec_max_cols = 8`
+  in `ggml-vulkan.cpp` line 267).
+
+Validate via `ZINC_BATCHED_PREFILL=validate` against the per-token
+reference. Q8_1 quantization adds ~2^-7 noise per element so the
+mmq path validates against `tol=1e-2` instead of `1e-3`; the f32
+mul_mm path should match `1e-3` cleanly.
+
+## What not to attempt  (proven dead-ends)
+
+These are the 11-cycle Effort 6 negative results. Do not re-spend
+cycles on them:
+
+- **GEMV cross-token batching** (the `dmmv_q4k_moe_batched.comp`
+  pipeline). Empirically flat or negative across 9 wire-in cycles.
+  Architecturally wrong for RDNA4 at this token-count regime.
+  Pipeline + helper stay in tree as record but should not be wired.
+- **Three-way RMS+K+V DMMV fusion** (cycle 14 of Effort 10, cycle 11
+  of Effort 6). Register pressure collapses occupancy.
+- **Wide NUM_ROWS variants on the MoE kpar shader** (cycle 12 of
+  Effort 10). Underutilizes occupancy at MoE expert M=1408.
+- **Triple-fused MoE swiglu+down+weighted-acc** (cycle 9 of Effort 6).
+  Regressed — the existing path's overlap is already good.
+- **Barrier scoping computeBarrier→computeBufferBarrier** (cycles 1,
+  16, 18 of Effort 10). RADV doesn't differentiate the access masks
+  via PipelineBarrier1; would need PipelineBarrier2 to even test
+  the hypothesis.
+
+## Existing infrastructure to reuse
+
+- `routing_capture_buf` (`forward.zig:885`, gated `ZINC_CAPTURE_ROUTING=1`).
+  Shape `[max_tokens × n_layers × (2 × n_experts_used × u32)]` storing
+  `{expert_id, weight_bits}` per (token, slot). Already populated
+  during per-token MoE; matches what `mul_mm_id_q4k` needs as
+  `data_ids` input.
+- `quantize_q8_1.comp` + `pipeline_quantize_q8_1` (commit `5103042`-ish
+  era). Activation pre-quantizer; reused as-is by step 4.
+- `dmmv_q4k_q8_1.comp` (commit `27f0c76`). Already proves the Q4_K
+  integer-dot decode path works correctly on R9700 at GEMV; the
+  per-block dequant translates directly to the GEMM inner loop.
+- `dmmv_q4k_moe_kpar.comp` Q4_K block decode (lines 100-160). Same
+  bit layout as `mul_mmq_funcs.glsl`'s Q4_K branch.
+
+## Validation
+
+Every change must pass `ZINC_BATCHED_PREFILL=validate` on every MoE
+catalog model (Qwen 3.5 35B, Qwen 3.6 35B, Gemma 4 26B, GPT-OSS 20B).
+Greedy-output check on a 50-token generation must match the per-token
+reference for the first 10 tokens minimum.
+
+## Expected outcome
+
+If steps 1-4 ship correctly, Qwen 3.6 35B-A3B prefill on R9700 should
+move from **78 → 150-200 tok/s** (closing 40% → 80-100% of
+llama.cpp). Gemma 4 26B MoE from **41 → 100-130 tok/s**. GPT-OSS
+from **95 → 100-130 tok/s** (smaller relative gain since it's
+already at 79%).
 
 ## Original plan (preserved below)
 

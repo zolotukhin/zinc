@@ -896,6 +896,18 @@ pub const InferenceEngine = struct {
     //   * sizeof(u32). Consumed by mul_mm_id_q4k's data_expert_count binding
     //   when Step 5 wires per-layer batched MoE GEMM (later cycle).
     prefill_expert_count_buf: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
+    // Effort-6 Step 5 prerequisite (cycle 36): per-(token, layer) capture of
+    // the post-FFN-norm hidden state (the actual MoE FFN input). Combined with
+    // routing_capture_buf (ids+weights) and prefill_expert_count_buf (counts),
+    // this completes the three input bindings mul_mm_id_q4k needs to replace
+    // the per-token MoE FFN dispatch with one batched dispatch per layer.
+    // Layout: slot(token, layer) starts at byte offset
+    //   (token * n_layers + layer) * hidden_dim * sizeof(f32)
+    // Enabled by ZINC_CAPTURE_FFN_INPUT=1; default-OFF to keep the prefill
+    // hot path unaffected. The flag-on path adds a vkCmdCopyBuffer of
+    // hidden_dim floats per (token, layer).
+    prefill_ffn_input_capture_buf: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
+    prefill_ffn_input_capture_max_tokens: u32 = 0,
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
     // Pre-built tensor name → pointer map (O(1) lookup, replaces O(n) linear scan)
@@ -968,6 +980,12 @@ pub const InferenceEngine = struct {
     // single dispatch (cycle-13 application of the cycle-8 fused_rms
     // pattern to a smaller M target). Disable with ZINC_FUSED_SSM_AB=0.
     use_fused_ssm_pre_norm: bool = false,
+    // Effort-6 cycle 38: opt-in via ZINC_SSM_PROJ_FUSED=1. When set and
+    // both wqkv and z weights are Q4_K, fuse them into a single dispatch
+    // via dmmv_q4k_fused_wqkv_z.comp. Saves 1 vkCmdDispatch + 1 buffer
+    // barrier per SSM layer per token. Default OFF — measured both ways
+    // in the same cycle that introduced it.
+    use_ssm_proj_fused_wqkv_z: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
     // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
     // slot(position, layer). Unused downstream this cycle — the buffer is the
@@ -983,6 +1001,14 @@ pub const InferenceEngine = struct {
     // the GEMV path). Cost: n_layers count_experts dispatches at the end of
     // prefill, each O(n_experts * 256-thread sum). Expected overhead < 2 ms.
     use_count_experts_prefill: bool = false,
+    // Effort-6 Step 5 prerequisite (cycle 36): when set, after each MoE
+    // layer's rms_norm produces ffn_norm_buf we copy hidden_dim floats into
+    // prefill_ffn_input_capture_buf at slot (state.position, layer). The
+    // captured input is the third missing binding for mul_mm_id_q4k (the
+    // first two — routes and counts — already exist behind ZINC_CAPTURE_ROUTING
+    // and ZINC_COUNT_EXPERTS_PREFILL respectively). Enabled by
+    // ZINC_CAPTURE_FFN_INPUT=1; default-OFF.
+    use_capture_ffn_input: bool = false,
     // Opt-in via ZINC_MUL_MM_LM_HEAD=1 (effort-6 Step 1 wire-in). When set
     // and the mul_mm_q4k pipeline is loaded and the LM-head weight is Q4_K
     // and hidden_dim is a multiple of 256, the final-tail LM head is
@@ -1840,6 +1866,26 @@ pub const InferenceEngine = struct {
             log.info("Fused SSM pre-norm DISABLED via ZINC_FUSED_SSM_AB=0", .{});
         }
 
+        // Effort-6 cycle 38: fuse the wqkv + z DMMVs at the end of SSM proj
+        // into a single dispatch when both weights are Q4_K. Saves one
+        // vkCmdDispatch + one computeBufferBarrier per SSM layer per token
+        // (24 × 154 ≈ 3700 saves on Qwen 3.6 35B-A3B prefill). Opt-in via
+        // ZINC_SSM_PROJ_FUSED=1 — this is a structural swing whose payoff
+        // on RDNA4 is bounded by L1/dispatch-overhead reuse, so we measure
+        // both flag states in the same cycle. Wire-in path is the
+        // `use_fused_pre_norm` branch in runSsmLayerGpu (where wqkv and z
+        // are still separate dispatches today).
+        const ssm_proj_fused_env = std.posix.getenv("ZINC_SSM_PROJ_FUSED");
+        const ssm_proj_fused_flag = ssm_proj_fused_env != null and std.mem.eql(u8, ssm_proj_fused_env.?, "1");
+        const ssm_proj_fused_enabled = ssm_proj_fused_flag and
+            dmmv.pipeline_q4k_fused_wqkv_z != null and
+            instance.push_descriptor_fn != null;
+        if (ssm_proj_fused_enabled) {
+            log.info("Fused SSM proj wqkv+z ENABLED via ZINC_SSM_PROJ_FUSED=1", .{});
+        } else if (ssm_proj_fused_flag) {
+            log.info("ZINC_SSM_PROJ_FUSED=1 requested but prerequisites missing (pipeline or push descriptors); skipping", .{});
+        }
+
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -1984,6 +2030,37 @@ pub const InferenceEngine = struct {
             log.info("ZINC_COUNT_EXPERTS_PREFILL=1 requested but prerequisites missing (capture-routing flag, count_experts pipeline, or push descriptors); skipping", .{});
         }
 
+        // Effort-6 Step 5 prerequisite (cycle 36): per-(token, layer) FFN-input
+        // capture buffer. ZINC_CAPTURE_FFN_INPUT=1 allocates a device-local
+        // buffer sized [max_tokens × n_layers × hidden_dim × f32] and the MoE
+        // hot path copies ffn_norm_buf into slot (token, layer). Combined with
+        // routing_capture_buf + prefill_expert_count_buf, this provides the
+        // three inputs mul_mm_id_q4k needs to replace per-token MoE FFN
+        // dispatches with one batched GEMM per layer. Default-OFF.
+        const ffn_input_capture_env = std.posix.getenv("ZINC_CAPTURE_FFN_INPUT");
+        const ffn_input_capture_flag = ffn_input_capture_env != null and std.mem.eql(u8, ffn_input_capture_env.?, "1");
+        var prefill_ffn_input_capture_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
+        var prefill_ffn_input_capture_max_tokens: u32 = 0;
+        if (ffn_input_capture_flag and config.n_layers > 0 and config.hidden_dim > 0) {
+            const MAX_CAPTURE_TOKENS: u32 = 2048;
+            const total_bytes = @as(vk.c.VkDeviceSize, MAX_CAPTURE_TOKENS) *
+                @as(vk.c.VkDeviceSize, config.n_layers) *
+                @as(vk.c.VkDeviceSize, config.hidden_dim) *
+                @sizeOf(f32);
+            prefill_ffn_input_capture_buf = try Buffer.initDeviceLocal(
+                instance,
+                total_bytes,
+                vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            );
+            errdefer prefill_ffn_input_capture_buf.deinit();
+            prefill_ffn_input_capture_max_tokens = MAX_CAPTURE_TOKENS;
+            log.info("ZINC_CAPTURE_FFN_INPUT=1: ffn input capture buffer {d} B (tokens={d} layers={d} hidden={d})", .{
+                total_bytes, MAX_CAPTURE_TOKENS, config.n_layers, config.hidden_dim,
+            });
+        } else if (ffn_input_capture_flag) {
+            log.info("ZINC_CAPTURE_FFN_INPUT=1 requested but prerequisites missing (n_layers or hidden_dim is 0); skipping", .{});
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
@@ -1994,6 +2071,7 @@ pub const InferenceEngine = struct {
             .use_moe_fused_down_acc = moe_fused_down_acc_enabled,
             .use_fused_rms_router = fused_rms_router_enabled,
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
+            .use_ssm_proj_fused_wqkv_z = ssm_proj_fused_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -2001,10 +2079,13 @@ pub const InferenceEngine = struct {
             .use_capture_routing = capture_flag and routing_capture_buf.handle != null,
             .use_mul_mm_lm_head = mul_mm_lm_head_enabled,
             .use_count_experts_prefill = count_experts_enabled,
+            .use_capture_ffn_input = ffn_input_capture_flag and prefill_ffn_input_capture_buf.handle != null,
             .routing_capture_buf = routing_capture_buf,
             .routing_capture_slot_bytes = routing_capture_slot_bytes,
             .routing_capture_max_tokens = routing_capture_max_tokens,
             .prefill_expert_count_buf = prefill_expert_count_buf,
+            .prefill_ffn_input_capture_buf = prefill_ffn_input_capture_buf,
+            .prefill_ffn_input_capture_max_tokens = prefill_ffn_input_capture_max_tokens,
             .ssm_mmq_scratch = ssm_mmq_scratch,
             .ssm_mmq_scratch_alt = ssm_mmq_scratch_alt,
             .elementwise = elementwise,
@@ -5309,11 +5390,49 @@ pub const InferenceEngine = struct {
                         hidden_dim,
                         rms_norm_eps,
                     );
-                    const fused_ranges = [_]CommandBuffer.BufferRange{
-                        .{ .buffer = self.ffn_norm_buf.handle, .size = hidden_size },
-                        .{ .buffer = self.router_logits_buf.handle, .size = self.router_logits_buf.size },
-                    };
-                    self.decode_cmd.computeBuffersBarrier(&fused_ranges);
+                    // Effort-6 Step 5 prerequisite (cycle 36): when the FFN
+                    // input capture flag is on AND this layer's MoE input is
+                    // ffn_norm_buf (not pre_ffw_norm_2), copy the ffn_norm
+                    // output into the per-(token, layer) capture slot.
+                    // Promote the buffer-scoped compute→compute barrier to a
+                    // global compute→compute+transfer barrier so the upcoming
+                    // vkCmdCopyBuffer reads ffn_norm_buf under visibility
+                    // guarantees. Downstream gate/up/router consumers still
+                    // see the same write visibility through the broader
+                    // memory barrier.
+                    const capture_active = self.use_capture_ffn_input and
+                        lt.pre_ffw_norm_2 == null and
+                        state.position < self.prefill_ffn_input_capture_max_tokens;
+                    if (capture_active) {
+                        self.decode_cmd.computeAndTransferBarrier();
+                        const slot_off: vk.c.VkDeviceSize =
+                            (@as(vk.c.VkDeviceSize, state.position) *
+                                @as(vk.c.VkDeviceSize, config.n_layers) +
+                                @as(vk.c.VkDeviceSize, layer)) *
+                            @as(vk.c.VkDeviceSize, hidden_dim) *
+                            @sizeOf(f32);
+                        const capture_size: vk.c.VkDeviceSize = hidden_size;
+                        if (slot_off + capture_size <= self.prefill_ffn_input_capture_buf.size) {
+                            const region = vk.c.VkBufferCopy{
+                                .srcOffset = 0,
+                                .dstOffset = slot_off,
+                                .size = capture_size,
+                            };
+                            vk.c.vkCmdCopyBuffer(
+                                self.decode_cmd.handle,
+                                self.ffn_norm_buf.handle,
+                                self.prefill_ffn_input_capture_buf.handle,
+                                1,
+                                &region,
+                            );
+                        }
+                    } else {
+                        const fused_ranges = [_]CommandBuffer.BufferRange{
+                            .{ .buffer = self.ffn_norm_buf.handle, .size = hidden_size },
+                            .{ .buffer = self.router_logits_buf.handle, .size = self.router_logits_buf.size },
+                        };
+                        self.decode_cmd.computeBuffersBarrier(&fused_ranges);
+                    }
                 } else {
                     try self.dispatchDmmv(router_tensor, router_input_buf, hidden_size, self.router_logits_buf, config.n_experts, hidden_dim);
                     self.decode_cmd.computeBufferBarrier(self.router_logits_buf.handle, self.router_logits_buf.size);
@@ -8073,9 +8192,33 @@ pub const InferenceEngine = struct {
             // and trims the global s_waitcnt that a full computeBarrier
             // would emit on RDNA4. Cycle 16 narrow.
             self.decode_cmd.computeBufferBarrier(self.norm_buf.handle, hidden_size);
-            try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
-            if (!is_dead_tail) {
-                try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+            // Cycle 38: fuse wqkv + z into a single dispatch when both are
+            // Q4_K, the pipeline is loaded, and we're not in dead_tail
+            // (which already skips z). Saves one dispatch + buffer barrier
+            // per SSM layer per token.
+            const can_fuse_wqkv_z = self.use_ssm_proj_fused_wqkv_z and
+                !is_dead_tail and
+                wqkv_tensor.info.type_ == .q4_k and
+                z_tensor.info.type_ == .q4_k and
+                self.dmmv.pipeline_q4k_fused_wqkv_z != null;
+            if (can_fuse_wqkv_z) {
+                try self.dmmv.recordSsmProjFusedWqkvZ(
+                    &self.decode_cmd,
+                    self.instance.push_descriptor_fn,
+                    wqkv_tensor.gpu_buffer.handle, wqkv_tensor.gpu_buffer.size,
+                    z_tensor.gpu_buffer.handle,    z_tensor.gpu_buffer.size,
+                    self.norm_buf.handle,          hidden_size,
+                    self.attn_out_buf.handle,      self.attn_out_buf.size,
+                    self.gate_buf.handle,          self.gate_buf.size,
+                    @intCast(conv_channels),
+                    @intCast(d_inner),
+                    hidden_dim,
+                );
+            } else {
+                try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+                if (!is_dead_tail) {
+                    try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
+                }
             }
             // alpha + beta already produced by the fused shader.
         } else {
@@ -9604,6 +9747,7 @@ pub const InferenceEngine = struct {
         self.router_output_buf.deinit();
         if (self.routing_capture_buf.handle != null) self.routing_capture_buf.deinit();
         if (self.prefill_expert_count_buf.handle != null) self.prefill_expert_count_buf.deinit();
+        if (self.prefill_ffn_input_capture_buf.handle != null) self.prefill_ffn_input_capture_buf.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
         self.kv_page_pool.deinit();

@@ -106,6 +106,14 @@ pub fn build(b: *std.Build) void {
         "dmmv_q5k_moe_fused_down_acc",
         "rms_norm_dmmv_f32",
         "rms_norm_dmmv_q4k_alpha_beta",
+        // Effort-6 GEMM port: tiled Q4_K dense GEMM (Step 1), MUL_MAT_ID
+        // gather variant (Step 2), per-expert count helper (Step 3), and
+        // Q8_1-activation variant (Step 4). See
+        // loops/efforts/MULTI_HOUR_EFFORT_6_RDNA_QWEN35_PREFILL.md.
+        "mul_mm_q4k",
+        "mul_mm_id_q4k",
+        "mul_mmq_q4k",
+        "count_experts",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

@@ -83,6 +83,23 @@ pub const QuantizeQ8_1Push = extern struct {
     num_blocks: u32,
 };
 
+/// Push constants for `dmmv_q4k_fused_wqkv_z.comp` — Q4_K dense fused
+/// matvec for two output matrices that share the same input vector but
+/// have DIFFERENT row counts. Used by the Mamba2 SSM proj path to fuse
+/// wqkv (M_a = ssm_d_inner + 2*n_group*d_state) and z (M_b = ssm_d_inner)
+/// dispatches into one. Distinct from `DmmvPushConstants` because it
+/// carries two M values and two A/Y offsets.
+pub const FusedWqkvZQ4KPush = extern struct {
+    M_a: u32,
+    M_b: u32,
+    K: u32,
+    a_offset_a: u32,
+    a_offset_b: u32,
+    x_offset: u32,
+    y_offset_a: u32,
+    y_offset_b: u32,
+};
+
 /// Push constants for `count_experts.comp` (effort-6 Step 3 helper). Mirrors
 /// llama.cpp's count_experts push so the shader is structurally identical
 /// to the upstream version. All strides are in u32 units (not bytes).
@@ -184,6 +201,13 @@ pub const DmmvDispatch = struct {
     /// analogue of pipeline_q4k_fused_gate_up_moe (5 bindings: W_gate, W_up,
     /// X, Y_gate, Y_up). Enabled when both gate and up weights are Q4_K.
     pipeline_q4k_fused_gate_up: ?Pipeline,
+    /// Mamba2 SSM proj fused wqkv+z DMMV. Same shared-input idea as
+    /// pipeline_q4k_fused_gate_up but supports DIFFERENT output row counts
+    /// for the two matrices (wqkv has M_a = ssm_d_inner + 2*n_group*d_state,
+    /// z has M_b = ssm_d_inner). 5 bindings (W_a, W_b, X, Y_a, Y_b),
+    /// FusedWqkvZQ4KPush push constants. Saves 1 dispatch + 1 barrier per
+    /// SSM layer per token when both weights are Q4_K.
+    pipeline_q4k_fused_wqkv_z: ?Pipeline,
     /// Cross-token batched MoE DMMV. Same Q4_K weight layout as
     /// pipeline_q4k_moe_kpar but the dispatch grid adds a token_idx
     /// dimension (grid.z) so one dispatch covers all N prompt tokens'
@@ -406,6 +430,19 @@ pub const DmmvDispatch = struct {
             log.warn("Q4_K dense fused gate+up shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+
+        // Mamba2 SSM proj fused wqkv+z Q4_K DMMV. Same 5 bindings as
+        // pipeline_q4k_fused_gate_up but the two outputs have different M
+        // counts (wqkv > z), so a dedicated push struct is required.
+        const fused_wqkv_z_push_size = @sizeOf(FusedWqkvZQ4KPush);
+        const q4k_fused_wqkv_z_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_wqkv_z.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_fused_wqkv_z = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_wqkv_z_path, 5, fused_wqkv_z_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K SSM proj fused wqkv+z shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        if (pipeline_q4k_fused_wqkv_z != null) {
+            log.info("ssm_proj fused wqkv+z (Q4_K) pipeline loaded; opt-in via ZINC_SSM_PROJ_FUSED=1", .{});
+        }
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
         const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
@@ -686,6 +723,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
             .pipeline_q4k_fused_gate_up = pipeline_q4k_fused_gate_up,
+            .pipeline_q4k_fused_wqkv_z = pipeline_q4k_fused_wqkv_z,
             .pipeline_mxfp4 = pipeline_mxfp4,
             .pipeline_q5_0 = pipeline_q5_0,
             .pipeline_q5_1 = pipeline_q5_1,
@@ -1240,6 +1278,67 @@ pub const DmmvDispatch = struct {
         );
     }
 
+    /// Dispatch the SSM proj fused wqkv+z DMMV
+    /// (`dmmv_q4k_fused_wqkv_z.comp`). Both weights are Q4_K, both share the
+    /// same input vector X, and they have DIFFERENT row counts M_a (wqkv)
+    /// and M_b (z). Saves 1 vkCmdDispatch + 1 computeBufferBarrier per SSM
+    /// layer per token compared to two separate `dispatchDmmv` calls.
+    ///
+    /// Dispatch grid: (ceil(max(M_a, M_b) / 2), 1, 1). Local size = 64.
+    /// NUM_ROWS=2 in the shader; keep these in sync.
+    ///
+    /// Returns `error.PipelineNotLoaded` if the pipeline isn't loaded.
+    pub fn recordSsmProjFusedWqkvZ(
+        self: *const DmmvDispatch,
+        cmd: *CommandBuffer,
+        push_desc_fn: ?PushDescriptorFn,
+        a_a_buf: vk.c.VkBuffer,
+        a_a_size: vk.c.VkDeviceSize,
+        a_b_buf: vk.c.VkBuffer,
+        a_b_size: vk.c.VkDeviceSize,
+        x_buf: vk.c.VkBuffer,
+        x_size: vk.c.VkDeviceSize,
+        y_a_buf: vk.c.VkBuffer,
+        y_a_size: vk.c.VkDeviceSize,
+        y_b_buf: vk.c.VkBuffer,
+        y_b_size: vk.c.VkDeviceSize,
+        M_a: u32,
+        M_b: u32,
+        K: u32,
+    ) !void {
+        const pip = if (self.pipeline_q4k_fused_wqkv_z) |*p| p else return error.PipelineNotLoaded;
+        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
+        if (M_a == 0 and M_b == 0) return error.InvalidArgument;
+        const push = FusedWqkvZQ4KPush{
+            .M_a = M_a,
+            .M_b = M_b,
+            .K = K,
+            .a_offset_a = 0,
+            .a_offset_b = 0,
+            .x_offset = 0,
+            .y_offset_a = 0,
+            .y_offset_b = 0,
+        };
+        const infos = [5]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = a_a_buf, .offset = 0, .range = a_a_size },
+            .{ .buffer = a_b_buf, .offset = 0, .range = a_b_size },
+            .{ .buffer = x_buf,   .offset = 0, .range = x_size   },
+            .{ .buffer = y_a_buf, .offset = 0, .range = y_a_size },
+            .{ .buffer = y_b_buf, .offset = 0, .range = y_b_size },
+        };
+        const M_max = @max(M_a, M_b);
+        const wg_x = (M_max + 1) / 2;
+        cmd.pushDescAndDispatch(
+            pip,
+            push_desc_fn,
+            infos[0..],
+            std.mem.asBytes(&push),
+            wg_x,
+            1,
+            1,
+        );
+    }
+
     /// Effort-6 Step 4 (phase 1): dispatch the tiled Q4_K × Q8_1 GEMM
     /// (`mul_mmq_q4k.comp`). Computes D[M, N] = A[M, K] (Q4_K) × B[K, N]
     /// (Q8_1 packed) — same output shape as `recordMulMmQ4K` but the B
@@ -1408,6 +1507,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k) |*p| p.deinit();
         if (self.pipeline_q4k_wide) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up) |*p| p.deinit();
+        if (self.pipeline_q4k_fused_wqkv_z) |*p| p.deinit();
         if (self.pipeline_q5_1) |*p| p.deinit();
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();
