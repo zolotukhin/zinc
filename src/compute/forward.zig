@@ -980,12 +980,6 @@ pub const InferenceEngine = struct {
     // single dispatch (cycle-13 application of the cycle-8 fused_rms
     // pattern to a smaller M target). Disable with ZINC_FUSED_SSM_AB=0.
     use_fused_ssm_pre_norm: bool = false,
-    // Effort-6 cycle 38: opt-in via ZINC_SSM_PROJ_FUSED=1. When set and
-    // both wqkv and z weights are Q4_K, fuse them into a single dispatch
-    // via dmmv_q4k_fused_wqkv_z.comp. Saves 1 vkCmdDispatch + 1 buffer
-    // barrier per SSM layer per token. Default OFF — measured both ways
-    // in the same cycle that introduced it.
-    use_ssm_proj_fused_wqkv_z: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
     // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
     // slot(position, layer). Unused downstream this cycle — the buffer is the
@@ -1866,26 +1860,6 @@ pub const InferenceEngine = struct {
             log.info("Fused SSM pre-norm DISABLED via ZINC_FUSED_SSM_AB=0", .{});
         }
 
-        // Effort-6 cycle 38: fuse the wqkv + z DMMVs at the end of SSM proj
-        // into a single dispatch when both weights are Q4_K. Saves one
-        // vkCmdDispatch + one computeBufferBarrier per SSM layer per token
-        // (24 × 154 ≈ 3700 saves on Qwen 3.6 35B-A3B prefill). Opt-in via
-        // ZINC_SSM_PROJ_FUSED=1 — this is a structural swing whose payoff
-        // on RDNA4 is bounded by L1/dispatch-overhead reuse, so we measure
-        // both flag states in the same cycle. Wire-in path is the
-        // `use_fused_pre_norm` branch in runSsmLayerGpu (where wqkv and z
-        // are still separate dispatches today).
-        const ssm_proj_fused_env = std.posix.getenv("ZINC_SSM_PROJ_FUSED");
-        const ssm_proj_fused_flag = ssm_proj_fused_env != null and std.mem.eql(u8, ssm_proj_fused_env.?, "1");
-        const ssm_proj_fused_enabled = ssm_proj_fused_flag and
-            dmmv.pipeline_q4k_fused_wqkv_z != null and
-            instance.push_descriptor_fn != null;
-        if (ssm_proj_fused_enabled) {
-            log.info("Fused SSM proj wqkv+z ENABLED via ZINC_SSM_PROJ_FUSED=1", .{});
-        } else if (ssm_proj_fused_flag) {
-            log.info("ZINC_SSM_PROJ_FUSED=1 requested but prerequisites missing (pipeline or push descriptors); skipping", .{});
-        }
-
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -2071,7 +2045,6 @@ pub const InferenceEngine = struct {
             .use_moe_fused_down_acc = moe_fused_down_acc_enabled,
             .use_fused_rms_router = fused_rms_router_enabled,
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
-            .use_ssm_proj_fused_wqkv_z = ssm_proj_fused_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -7497,50 +7470,6 @@ pub const InferenceEngine = struct {
     }
 
     /// Inner dispatch for DMMV — push-descriptor or pool-allocated path.
-    /// Fused dense gate+up Q4_K DMMV. Reads one shared input, dispatches
-    /// both W_gate and W_up in a single workgroup per row-pair. Returns
-    /// error.ShaderNotLoaded if the pipeline is absent so callers can fall
-    /// back to two separate DMMVs.
-    fn dispatchDmmvFusedGateUp(
-        self: *InferenceEngine,
-        w_gate: *const LoadedTensor,
-        w_up: *const LoadedTensor,
-        input_buf: Buffer,
-        input_size: vk.c.VkDeviceSize,
-        y_gate_buf: Buffer,
-        y_up_buf: Buffer,
-        M: u32,
-        K: u32,
-    ) !void {
-        const pip = &(self.dmmv.pipeline_q4k_fused_gate_up orelse return error.ShaderNotLoaded);
-        if (!pip.uses_push_descriptors) return error.ShaderNotLoaded;
-        const push = DmmvPushConstants{
-            .M = M,
-            .K = K,
-            .a_offset = 0,
-            .x_offset = 0,
-            .y_offset = 0,
-            .acc_mode = 0,
-        };
-        self.pushDispatch5(
-            pip,
-            std.mem.asBytes(&push),
-            w_gate.gpu_buffer.handle,
-            w_gate.gpu_buffer.size,
-            w_up.gpu_buffer.handle,
-            w_up.gpu_buffer.size,
-            input_buf.handle,
-            input_size,
-            y_gate_buf.handle,
-            y_gate_buf.size,
-            y_up_buf.handle,
-            y_up_buf.size,
-            (M + 1) / 2,
-            1,
-            1,
-        );
-    }
-
     fn dispatchDmmvInner(
         self: *InferenceEngine,
         tensor: *const LoadedTensor,
@@ -8192,33 +8121,9 @@ pub const InferenceEngine = struct {
             // and trims the global s_waitcnt that a full computeBarrier
             // would emit on RDNA4. Cycle 16 narrow.
             self.decode_cmd.computeBufferBarrier(self.norm_buf.handle, hidden_size);
-            // Cycle 38: fuse wqkv + z into a single dispatch when both are
-            // Q4_K, the pipeline is loaded, and we're not in dead_tail
-            // (which already skips z). Saves one dispatch + buffer barrier
-            // per SSM layer per token.
-            const can_fuse_wqkv_z = self.use_ssm_proj_fused_wqkv_z and
-                !is_dead_tail and
-                wqkv_tensor.info.type_ == .q4_k and
-                z_tensor.info.type_ == .q4_k and
-                self.dmmv.pipeline_q4k_fused_wqkv_z != null;
-            if (can_fuse_wqkv_z) {
-                try self.dmmv.recordSsmProjFusedWqkvZ(
-                    &self.decode_cmd,
-                    self.instance.push_descriptor_fn,
-                    wqkv_tensor.gpu_buffer.handle, wqkv_tensor.gpu_buffer.size,
-                    z_tensor.gpu_buffer.handle,    z_tensor.gpu_buffer.size,
-                    self.norm_buf.handle,          hidden_size,
-                    self.attn_out_buf.handle,      self.attn_out_buf.size,
-                    self.gate_buf.handle,          self.gate_buf.size,
-                    @intCast(conv_channels),
-                    @intCast(d_inner),
-                    hidden_dim,
-                );
-            } else {
-                try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
-                if (!is_dead_tail) {
-                    try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
-                }
+            try self.dispatchDmmv(wqkv_tensor, self.norm_buf, hidden_size, self.attn_out_buf, @intCast(conv_channels), hidden_dim);
+            if (!is_dead_tail) {
+                try self.dispatchDmmv(z_tensor, self.norm_buf, hidden_size, self.gate_buf, @intCast(d_inner), hidden_dim);
             }
             // alpha + beta already produced by the fused shader.
         } else {

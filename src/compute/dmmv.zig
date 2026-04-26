@@ -83,23 +83,6 @@ pub const QuantizeQ8_1Push = extern struct {
     num_blocks: u32,
 };
 
-/// Push constants for `dmmv_q4k_fused_wqkv_z.comp` — Q4_K dense fused
-/// matvec for two output matrices that share the same input vector but
-/// have DIFFERENT row counts. Used by the Mamba2 SSM proj path to fuse
-/// wqkv (M_a = ssm_d_inner + 2*n_group*d_state) and z (M_b = ssm_d_inner)
-/// dispatches into one. Distinct from `DmmvPushConstants` because it
-/// carries two M values and two A/Y offsets.
-pub const FusedWqkvZQ4KPush = extern struct {
-    M_a: u32,
-    M_b: u32,
-    K: u32,
-    a_offset_a: u32,
-    a_offset_b: u32,
-    x_offset: u32,
-    y_offset_a: u32,
-    y_offset_b: u32,
-};
-
 /// Push constants for `count_experts.comp` (effort-6 Step 3 helper). Mirrors
 /// llama.cpp's count_experts push so the shader is structurally identical
 /// to the upstream version. All strides are in u32 units (not bytes).
@@ -139,51 +122,6 @@ pub const MulMmQ4KPush = extern struct {
     d_offset: u32,
 };
 
-/// Push constants for `mul_mmq_q4k.comp` (effort-6 Step 4 of 5 foundation:
-/// tiled Q4_K weight × Q8_1 activation GEMM). Distinct from `MulMmQ4KPush`
-/// because the B-side stride is in u32 units of the Q8_1 stream, not in
-/// f32 elements. `b_offset` is in BYTES (the shader divides by 4).
-/// Per-column Q8_1 stride (`stride_b_u32`) = (K/32) * 9 — one Q8_1 block
-/// is 36 bytes = 9 u32. Layout for D mirrors `MulMmQ4KPush`.
-pub const MulMmqQ4KPush = extern struct {
-    M: u32,
-    N: u32,
-    K: u32,
-    stride_b_u32: u32,
-    stride_d: u32,
-    a_offset: u32,
-    b_offset: u32,
-    d_offset: u32,
-};
-
-/// Push constants for `mul_mm_id_q4k.comp` (effort-6 Step 2 of 5 foundation:
-/// tiled Q4_K MUL_MAT_ID GEMM — MoE gather variant). Adds five
-/// MUL_MAT_ID-specific fields on top of `MulMmQ4KPush`'s shape:
-/// `batch_stride_a` (BYTES between consecutive experts in A),
-/// `batch_stride_d` (FLOATS per output token = n_experts_used × M),
-/// `nei0` (slots per token = top_k), `nei1` (number of token rows in
-/// data_ids), `nbi1` (u32 stride between token rows in data_ids — often
-/// = 2 × top_k × n_layers when sharing a routing-capture buffer), and
-/// `ids_offset` (u32 base offset into data_ids — non-zero when picking
-/// one layer's slice out of a shared routing-capture buffer).
-/// `a_offset` is in BYTES, `b_offset` and `d_offset` are in FLOATS,
-/// `ids_offset` is in u32 units.
-pub const MulMmIdQ4KPush = extern struct {
-    M: u32,
-    K: u32,
-    stride_b: u32,
-    stride_d: u32,
-    batch_stride_a: u32,
-    batch_stride_d: u32,
-    nei0: u32,
-    nei1: u32,
-    nbi1: u32,
-    a_offset: u32,
-    b_offset: u32,
-    d_offset: u32,
-    ids_offset: u32,
-};
-
 /// Size in bytes of a single Q8_1 output block (32 int8 values + f16 d + f16 d*sum).
 pub const Q8_1_BLOCK_BYTES: u32 = 36;
 
@@ -196,18 +134,6 @@ pub const DmmvDispatch = struct {
     /// in at the call site when M is large enough to benefit from 4× fewer
     /// workgroups with 4× more hidden-vector reuse per workgroup.
     pipeline_q4k_wide: ?Pipeline,
-    /// Dense fused Q4_K gate+up DMMV. Reads the input tile once, runs both
-    /// W_gate and W_up dequant + dot product in the same workgroup. Dense
-    /// analogue of pipeline_q4k_fused_gate_up_moe (5 bindings: W_gate, W_up,
-    /// X, Y_gate, Y_up). Enabled when both gate and up weights are Q4_K.
-    pipeline_q4k_fused_gate_up: ?Pipeline,
-    /// Mamba2 SSM proj fused wqkv+z DMMV. Same shared-input idea as
-    /// pipeline_q4k_fused_gate_up but supports DIFFERENT output row counts
-    /// for the two matrices (wqkv has M_a = ssm_d_inner + 2*n_group*d_state,
-    /// z has M_b = ssm_d_inner). 5 bindings (W_a, W_b, X, Y_a, Y_b),
-    /// FusedWqkvZQ4KPush push constants. Saves 1 dispatch + 1 barrier per
-    /// SSM layer per token when both weights are Q4_K.
-    pipeline_q4k_fused_wqkv_z: ?Pipeline,
     /// Cross-token batched MoE DMMV. Same Q4_K weight layout as
     /// pipeline_q4k_moe_kpar but the dispatch grid adds a token_idx
     /// dimension (grid.z) so one dispatch covers all N prompt tokens'
@@ -310,30 +236,6 @@ pub const DmmvDispatch = struct {
     /// will add the MUL_MAT_ID variant. 3 bindings (A weights, B f32
     /// activations, D f32 outputs), push = MulMmQ4KPush.
     pipeline_mul_mm_q4k: ?Pipeline,
-    /// Effort-6 Step 4 of 5 foundation (phase 1): tiled Q4_K weight × Q8_1
-    /// activation GEMM. Companion to `pipeline_mul_mm_q4k` but B-side comes
-    /// from `quantize_q8_1.comp` instead of f32 directly. Phase 1 still
-    /// uses an f32 fma inner loop after dequantizing Q8_1 in the tile load
-    /// (correctness reference == mul_mm_q4k against an f32 round-trip of
-    /// the activation). Phase 2 will replace the inner loop with hardware
-    /// integer-dot (dotPacked4x8EXT) for the ~2× win once the plumbing has
-    /// been validated. Pipeline loads at startup; no production callers
-    /// until Step 5 wires the prefill dispatch threshold. 3 bindings
-    /// (A weights, B Q8_1 stream, D f32 outputs), push = MulMmqQ4KPush.
-    pipeline_mul_mmq_q4k: ?Pipeline,
-    /// Effort-6 Step 2 of 5 foundation: tiled Q4_K MUL_MAT_ID GEMM — the
-    /// MoE-gather variant of `pipeline_mul_mm_q4k`. Each WG handles one
-    /// expert (gl_WorkGroupID.z), gathers up to BN=16 routed tokens via
-    /// `data_ids` into a shared `row_ids[]` list, runs the same Q4_K ×
-    /// f32 tiled GEMM against the expert's per-expert weight slice, and
-    /// scatters outputs to the correct (token, slot, row) positions.
-    /// Pipeline loads at startup; no production callers in this cycle.
-    /// Step 5 (pipeline selection) will wire the prefill MoE FFN through
-    /// this shader once the threshold (n_tokens > 8) holds and the
-    /// routing-capture buffer is populated. 5 bindings (A weights, B f32
-    /// activations, D f32 outputs, IDS u32 routing, COUNTS u32 per-expert
-    /// counts), push = MulMmIdQ4KPush.
-    pipeline_mul_mm_id_q4k: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -421,28 +323,6 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
-        // Dense fused gate+up Q4_K DMMV — same push layout as dmmv_q4k plus
-        // a second weight binding and a second output binding. 5 bindings
-        // total (W_gate, W_up, X, Y_gate, Y_up). Used by decode FFN on
-        // Gemma dense layers to halve the dispatch count.
-        const q4k_fgu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_fused_gate_up = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fgu_path, 5, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
-            log.warn("Q4_K dense fused gate+up shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-
-        // Mamba2 SSM proj fused wqkv+z Q4_K DMMV. Same 5 bindings as
-        // pipeline_q4k_fused_gate_up but the two outputs have different M
-        // counts (wqkv > z), so a dedicated push struct is required.
-        const fused_wqkv_z_push_size = @sizeOf(FusedWqkvZQ4KPush);
-        const q4k_fused_wqkv_z_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_wqkv_z.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_fused_wqkv_z = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_wqkv_z_path, 5, fused_wqkv_z_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
-            log.warn("Q4_K SSM proj fused wqkv+z shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        if (pipeline_q4k_fused_wqkv_z != null) {
-            log.info("ssm_proj fused wqkv+z (Q4_K) pipeline loaded; opt-in via ZINC_SSM_PROJ_FUSED=1", .{});
-        }
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
         const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
@@ -682,48 +562,9 @@ pub const DmmvDispatch = struct {
             log.info("mul_mm_q4k pipeline loaded (tiled Q4_K dense GEMM; LM head opt-in via ZINC_MUL_MM_LM_HEAD=1)", .{});
         }
 
-        // Effort-6 Step 4 of 5: tiled Q4_K weight × Q8_1 activation GEMM
-        // foundation (phase 1: f32 inner loop, Q8_1 dequant in tile load).
-        // Same tile shape and binding count as mul_mm_q4k (3 bindings: A
-        // Q4_K weights, B Q8_1 activation stream, D f32 output) but the B
-        // side is consumed as Q8_1 packed blocks instead of f32. Phase 2
-        // will replace the f32 inner loop with hardware integer-dot
-        // accumulation. Pipeline loads at startup; no production callers
-        // until Step 5 wires the pipeline-selection threshold for prefill
-        // dispatches that have N >> 1 prompt tokens batched.
-        const mul_mmq_q4k_push_size = @sizeOf(MulMmqQ4KPush);
-        const mul_mmq_q4k_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mmq_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mmq_q4k = pipeline_mod.createFromSpirvWithOptions(instance, mul_mmq_q4k_path, 3, mul_mmq_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
-            log.warn("mul_mmq_q4k shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        if (pipeline_mul_mmq_q4k != null) {
-            log.info("mul_mmq_q4k pipeline loaded (tiled Q4_K × Q8_1 GEMM, foundation phase 1; not yet wired)", .{});
-        }
-
-        // Effort-6 Step 2 of 5 foundation: tiled Q4_K MUL_MAT_ID GEMM. Same
-        // tile shape as mul_mm_q4k (BM=32, BN=16, BK=32, WG=64) but adds
-        // per-expert dispatch (gl_WorkGroupID.z) and the row_ids gather
-        // for MoE prefill. 5 bindings (A weights, B activations, D outputs,
-        // IDS routing, COUNTS expert-count). Pipeline registers at startup;
-        // no production callers in this cycle. Step 5 wires this in once
-        // the routing-capture buffer + count_experts dispatch are sequenced
-        // per-layer.
-        const mul_mm_id_q4k_push_size = @sizeOf(MulMmIdQ4KPush);
-        const mul_mm_id_q4k_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_id_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_id_q4k = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_id_q4k_path, 5, mul_mm_id_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
-            log.warn("mul_mm_id_q4k shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        if (pipeline_mul_mm_id_q4k != null) {
-            log.info("mul_mm_id_q4k pipeline loaded (tiled Q4_K MUL_MAT_ID GEMM, foundation; not yet wired)", .{});
-        }
-
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
-            .pipeline_q4k_fused_gate_up = pipeline_q4k_fused_gate_up,
-            .pipeline_q4k_fused_wqkv_z = pipeline_q4k_fused_wqkv_z,
             .pipeline_mxfp4 = pipeline_mxfp4,
             .pipeline_q5_0 = pipeline_q5_0,
             .pipeline_q5_1 = pipeline_q5_1,
@@ -752,8 +593,6 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_q8_1 = pipeline_q4k_q8_1,
             .pipeline_count_experts = pipeline_count_experts,
             .pipeline_mul_mm_q4k = pipeline_mul_mm_q4k,
-            .pipeline_mul_mmq_q4k = pipeline_mul_mmq_q4k,
-            .pipeline_mul_mm_id_q4k = pipeline_mul_mm_id_q4k,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -1278,236 +1117,11 @@ pub const DmmvDispatch = struct {
         );
     }
 
-    /// Dispatch the SSM proj fused wqkv+z DMMV
-    /// (`dmmv_q4k_fused_wqkv_z.comp`). Both weights are Q4_K, both share the
-    /// same input vector X, and they have DIFFERENT row counts M_a (wqkv)
-    /// and M_b (z). Saves 1 vkCmdDispatch + 1 computeBufferBarrier per SSM
-    /// layer per token compared to two separate `dispatchDmmv` calls.
-    ///
-    /// Dispatch grid: (ceil(max(M_a, M_b) / 2), 1, 1). Local size = 64.
-    /// NUM_ROWS=2 in the shader; keep these in sync.
-    ///
-    /// Returns `error.PipelineNotLoaded` if the pipeline isn't loaded.
-    pub fn recordSsmProjFusedWqkvZ(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        push_desc_fn: ?PushDescriptorFn,
-        a_a_buf: vk.c.VkBuffer,
-        a_a_size: vk.c.VkDeviceSize,
-        a_b_buf: vk.c.VkBuffer,
-        a_b_size: vk.c.VkDeviceSize,
-        x_buf: vk.c.VkBuffer,
-        x_size: vk.c.VkDeviceSize,
-        y_a_buf: vk.c.VkBuffer,
-        y_a_size: vk.c.VkDeviceSize,
-        y_b_buf: vk.c.VkBuffer,
-        y_b_size: vk.c.VkDeviceSize,
-        M_a: u32,
-        M_b: u32,
-        K: u32,
-    ) !void {
-        const pip = if (self.pipeline_q4k_fused_wqkv_z) |*p| p else return error.PipelineNotLoaded;
-        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
-        if (M_a == 0 and M_b == 0) return error.InvalidArgument;
-        const push = FusedWqkvZQ4KPush{
-            .M_a = M_a,
-            .M_b = M_b,
-            .K = K,
-            .a_offset_a = 0,
-            .a_offset_b = 0,
-            .x_offset = 0,
-            .y_offset_a = 0,
-            .y_offset_b = 0,
-        };
-        const infos = [5]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = a_a_buf, .offset = 0, .range = a_a_size },
-            .{ .buffer = a_b_buf, .offset = 0, .range = a_b_size },
-            .{ .buffer = x_buf,   .offset = 0, .range = x_size   },
-            .{ .buffer = y_a_buf, .offset = 0, .range = y_a_size },
-            .{ .buffer = y_b_buf, .offset = 0, .range = y_b_size },
-        };
-        const M_max = @max(M_a, M_b);
-        const wg_x = (M_max + 1) / 2;
-        cmd.pushDescAndDispatch(
-            pip,
-            push_desc_fn,
-            infos[0..],
-            std.mem.asBytes(&push),
-            wg_x,
-            1,
-            1,
-        );
-    }
-
-    /// Effort-6 Step 4 (phase 1): dispatch the tiled Q4_K × Q8_1 GEMM
-    /// (`mul_mmq_q4k.comp`). Computes D[M, N] = A[M, K] (Q4_K) × B[K, N]
-    /// (Q8_1 packed) — same output shape as `recordMulMmQ4K` but the B
-    /// side is the Q8_1 block stream produced by `pipeline_quantize_q8_1`.
-    ///
-    /// Tile shape: WG = 64 threads producing a 32 × 16 output tile.
-    /// Dispatch grid: ((M+31)/32) × ((N+15)/16) × 1.
-    ///
-    /// Constraints:
-    /// - K must be a multiple of 256 (Q4_K super-block size).
-    /// - K must be a multiple of 32 (Q8_1 block size). Implied by the
-    ///   above since 256 % 32 == 0.
-    /// - `a_offset` and `b_offset` are in BYTES; `d_offset` is in FLOATS.
-    /// - `stride_b_u32` is the per-column Q8_1 stride in u32 units,
-    ///   normally `(K / 32) * 9`.
-    ///
-    /// Returns `error.PipelineNotLoaded` if mul_mmq_q4k.spv isn't loaded,
-    /// `error.InvalidArgument` for K-misaligned inputs.
-    pub fn recordMulMmqQ4K(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        push_desc_fn: ?PushDescriptorFn,
-        a_buf: vk.c.VkBuffer,
-        a_size: vk.c.VkDeviceSize,
-        b_buf: vk.c.VkBuffer,
-        b_size: vk.c.VkDeviceSize,
-        d_buf: vk.c.VkBuffer,
-        d_size: vk.c.VkDeviceSize,
-        M: u32,
-        N: u32,
-        K: u32,
-        stride_b_u32: u32,
-        stride_d: u32,
-        a_offset: u32,
-        b_offset: u32,
-        d_offset: u32,
-    ) !void {
-        const pip = if (self.pipeline_mul_mmq_q4k) |*p| p else return error.PipelineNotLoaded;
-        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
-        if (M == 0 or N == 0) return error.InvalidArgument;
-        const push = MulMmqQ4KPush{
-            .M = M,
-            .N = N,
-            .K = K,
-            .stride_b_u32 = stride_b_u32,
-            .stride_d = stride_d,
-            .a_offset = a_offset,
-            .b_offset = b_offset,
-            .d_offset = d_offset,
-        };
-        const infos = [3]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = a_buf, .offset = 0, .range = a_size },
-            .{ .buffer = b_buf, .offset = 0, .range = b_size },
-            .{ .buffer = d_buf, .offset = 0, .range = d_size },
-        };
-        const wg_x = (M + 31) / 32;
-        const wg_y = (N + 15) / 16;
-        cmd.pushDescAndDispatch(
-            pip,
-            push_desc_fn,
-            infos[0..],
-            std.mem.asBytes(&push),
-            wg_x,
-            wg_y,
-            1,
-        );
-    }
-
-    /// Effort-6 Step 2 (foundation): dispatch the tiled Q4_K MUL_MAT_ID GEMM
-    /// (`mul_mm_id_q4k.comp`). Per-expert dispatch (gl_WorkGroupID.z),
-    /// tokens routed to each expert gathered via `data_ids` into a shared
-    /// `row_ids[BN]` list inside the WG, GEMM body identical to
-    /// `recordMulMmQ4K`. Output is scattered to per-(token, slot, row)
-    /// positions: `data_d[d_offset + token_idx * batch_stride_d
-    ///                    + slot_idx * stride_d + row]`.
-    ///
-    /// Tile shape: WG = 64 threads producing a 32 × 16 output tile.
-    /// Dispatch grid: gridX = ((M+31)/32), gridY = caller-chosen worst-case
-    /// N-tile bound (typically `((max_routings_per_expert + 15) / 16)` —
-    /// for ZINC's prefill with `n_tokens × top_k` total routings, set
-    /// gridY = `((n_tokens × top_k + 15) / 16)` and rely on the
-    /// `data_expert_count[expert_idx]` early-exit), gridZ = `n_experts`.
-    ///
-    /// Constraints:
-    /// - K must be a multiple of 256 (Q4_K super-block size).
-    /// - `a_offset` is in BYTES (the shader divides by 4 to index a_u32[]).
-    /// - `b_offset` and `d_offset` are in FLOATS.
-    /// - `ids_offset` is in u32 units.
-    /// - `batch_stride_a` is in BYTES (per-expert weight slice size).
-    /// - `batch_stride_d` is in FLOATS (per-token output stride =
-    ///   n_experts_used × stride_d).
-    ///
-    /// Returns `error.PipelineNotLoaded` if `mul_mm_id_q4k.spv` is not
-    /// loaded; `error.InvalidArgument` for K-misaligned inputs.
-    pub fn recordMulMmIdQ4K(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        push_desc_fn: ?PushDescriptorFn,
-        a_buf: vk.c.VkBuffer,
-        a_size: vk.c.VkDeviceSize,
-        b_buf: vk.c.VkBuffer,
-        b_size: vk.c.VkDeviceSize,
-        d_buf: vk.c.VkBuffer,
-        d_size: vk.c.VkDeviceSize,
-        ids_buf: vk.c.VkBuffer,
-        ids_size: vk.c.VkDeviceSize,
-        counts_buf: vk.c.VkBuffer,
-        counts_size: vk.c.VkDeviceSize,
-        M: u32,
-        K: u32,
-        stride_b: u32,
-        stride_d: u32,
-        batch_stride_a: u32,
-        batch_stride_d: u32,
-        nei0: u32,
-        nei1: u32,
-        nbi1: u32,
-        a_offset: u32,
-        b_offset: u32,
-        d_offset: u32,
-        ids_offset: u32,
-        n_experts: u32,
-        n_tile_y: u32,
-    ) !void {
-        const pip = if (self.pipeline_mul_mm_id_q4k) |*p| p else return error.PipelineNotLoaded;
-        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
-        if (M == 0 or n_experts == 0 or n_tile_y == 0) return error.InvalidArgument;
-        if (nei0 == 0 or nei1 == 0) return error.InvalidArgument;
-        const push = MulMmIdQ4KPush{
-            .M = M,
-            .K = K,
-            .stride_b = stride_b,
-            .stride_d = stride_d,
-            .batch_stride_a = batch_stride_a,
-            .batch_stride_d = batch_stride_d,
-            .nei0 = nei0,
-            .nei1 = nei1,
-            .nbi1 = nbi1,
-            .a_offset = a_offset,
-            .b_offset = b_offset,
-            .d_offset = d_offset,
-            .ids_offset = ids_offset,
-        };
-        const infos = [5]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = a_buf, .offset = 0, .range = a_size },
-            .{ .buffer = b_buf, .offset = 0, .range = b_size },
-            .{ .buffer = d_buf, .offset = 0, .range = d_size },
-            .{ .buffer = ids_buf, .offset = 0, .range = ids_size },
-            .{ .buffer = counts_buf, .offset = 0, .range = counts_size },
-        };
-        const wg_x = (M + 31) / 32;
-        cmd.pushDescAndDispatch(
-            pip,
-            push_desc_fn,
-            infos[0..],
-            std.mem.asBytes(&push),
-            wg_x,
-            n_tile_y,
-            n_experts,
-        );
-    }
-
     /// Destroy the loaded pipelines and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
         if (self.pipeline_q4k_wide) |*p| p.deinit();
-        if (self.pipeline_q4k_fused_gate_up) |*p| p.deinit();
-        if (self.pipeline_q4k_fused_wqkv_z) |*p| p.deinit();
         if (self.pipeline_q5_1) |*p| p.deinit();
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();
@@ -1532,8 +1146,6 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_q8_1) |*p| p.deinit();
         if (self.pipeline_count_experts) |*p| p.deinit();
         if (self.pipeline_mul_mm_q4k) |*p| p.deinit();
-        if (self.pipeline_mul_mmq_q4k) |*p| p.deinit();
-        if (self.pipeline_mul_mm_id_q4k) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }
