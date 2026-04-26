@@ -39,8 +39,8 @@ const float kvalues_mxfp4[16] = float[16](
     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
 );
 
-shared float s_sum0[2];
-shared float s_sum1[2];
+shared float s_sum0[4];  // max 4 subgroups for workgroup size 64 (SIMD16)
+shared float s_sum1[4];
 
 // E8M0 to float: 2^(e - 127)
 float e8m0_to_fp32(uint e) {
@@ -116,8 +116,12 @@ void main() {
         }
         barrier();
         if (tid == 0u) {
-            sum0 = s_sum0[0] + s_sum0[1];
-            sum1 = s_sum1[0] + s_sum1[1];
+            sum0 = s_sum0[0];
+            sum1 = s_sum1[0];
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) {
+                sum0 += s_sum0[sg];
+                sum1 += s_sum1[sg];
+            }
         }
     }
 

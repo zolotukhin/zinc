@@ -9,6 +9,7 @@
 // Memory access is perfectly coalesced: adjacent threads read adjacent
 // weight elements within the same row.
 
+#extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
@@ -29,6 +30,8 @@ layout(push_constant) uniform PC {
 };
 
 shared float s_x[SPEC_K];
+// For cross-subgroup reduction when gl_NumSubgroups > 1 (e.g. Intel Xe2 SIMD16).
+shared float s_sg_sums[4];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
@@ -50,8 +53,15 @@ void main() {
         partial += w[w_base + j] * s_x[j];
     }
 
-    // Subgroup reduction (RDNA4 wave64 = full workgroup in one subgroup)
     float sum = subgroupAdd(partial);
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum;
+        barrier();
+        if (tid == 0u) {
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum += s_sg_sums[sg];
+        }
+        barrier();
+    }
 
     if (tid == 0u) {
         if (acc_mode != 0u)

@@ -37,8 +37,8 @@ layout(set = 0, binding = 2) buffer VectorY { float y_data[];  };
 const uint Q5_1_BLOCK_SIZE = 32;
 const uint Q5_1_BYTES      = 24;
 
-shared float s_sum0[2];
-shared float s_sum1[2];
+shared float s_sum0[4];  // max 4 subgroups for workgroup size 64 (SIMD16)
+shared float s_sum1[4];
 
 void main() {
     uint wg_id = gl_WorkGroupID.x;
@@ -141,8 +141,12 @@ void main() {
         }
         barrier();
         if (tid == 0u) {
-            sum0 = s_sum0[0] + s_sum0[1];
-            sum1 = s_sum1[0] + s_sum1[1];
+            sum0 = s_sum0[0];
+            sum1 = s_sum1[0];
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) {
+                sum0 += s_sum0[sg];
+                sum1 += s_sum1[sg];
+            }
         }
     }
 

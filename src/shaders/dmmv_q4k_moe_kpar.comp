@@ -14,6 +14,7 @@
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
@@ -38,6 +39,10 @@ layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; }
 
 const uint NUM_ROWS = 2u;
 const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
+
+// Shared memory for cross-subgroup reduction when gl_NumSubgroups > 1
+// (e.g. Intel Xe2 SIMD16: 4 subgroups per 64-thread workgroup).
+shared float s_sg_sums[4];
 
 vec4 unpack_nibbles_lo(uint v) {
     return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
@@ -150,8 +155,15 @@ void main() {
             sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
         }
 
-        // Subgroup reduction (wave64: single subgroupAdd covers all 64 threads)
         sum = subgroupAdd(sum);
+        if (gl_NumSubgroups > 1u) {
+            if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum;
+            barrier();
+            if (tid == 0u) {
+                for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum += s_sg_sums[sg];
+            }
+            barrier();
+        }
         if (tid == 0u) {
             y_data[y_base + row] = sum;
         }
