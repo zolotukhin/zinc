@@ -2747,7 +2747,7 @@ pub const InferenceEngine = struct {
         }
         if (profile.gpu_routed_moe_layers == 0 and profile.fallback_moe_layers > 0 and self.layer_tensors.len > 0) {
             const layer0 = self.layer_tensors[0];
-            log.info("  fallback-moe path: gate_exps={s} up_exps={s} down_exps={s} (GPU-routed path currently supports q4_k/q4_k/{{q4_k,q5_k}})", .{
+            log.info("  fallback-moe path: gate_exps={s} up_exps={s} down_exps={s} (GPU-routed path currently supports q4_k/q4_k/{{q4_k,q5_1,q5_k,q6_k}})", .{
                 if (layer0.ffn_gate_exps) |t| @tagName(t.info.type_) else "-",
                 if (layer0.ffn_up_exps) |t| @tagName(t.info.type_) else "-",
                 if (layer0.ffn_down_exps) |t| @tagName(t.info.type_) else "-",
@@ -4996,6 +4996,7 @@ fn canUseBatchedQ4kMoe(engine: *const InferenceEngine, gate_quant: GGMLType, dow
 fn canUseGpuRoutedMoeDown(engine: *const InferenceEngine, down_quant: GGMLType) bool {
     return switch (down_quant) {
         .q4_k => true,
+        .q5_1 => engine.dmmv_q5_1_moe_pipe.handle != null,
         .q5_k => engine.dmmv_q5k_moe_pipe.handle != null,
         .q6_k => engine.dmmv_q6k_moe_pipe.handle != null,
         else => false,
@@ -9817,6 +9818,8 @@ test "batched MoE Metal shaders compile" {
 
     var dmmv_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
     defer metal_pipeline.freePipeline(&dmmv_pipe);
+    var dmmv_q5_1_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe");
+    defer metal_pipeline.freePipeline(&dmmv_q5_1_moe_pipe);
     var dmmv_q5k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
     defer metal_pipeline.freePipeline(&dmmv_q5k_moe_pipe);
     var dmmv_q5k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe_k2048");
@@ -9859,6 +9862,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(rope_pipe.handle != null);
     try std.testing.expect(sigmoid_mul_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
+    try std.testing.expect(dmmv_q5_1_moe_pipe.handle != null);
     try std.testing.expect(dmmv_q5k_moe_pipe.handle != null);
     try std.testing.expect(dmmv_q5k_moe_k2048_pipe.handle != null);
     try std.testing.expect(dmmv_q6k_moe_pipe.handle != null);
