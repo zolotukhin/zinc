@@ -76,6 +76,16 @@ test "Metal prefillBatched validate path diffs last-token logits within 1e-3" {
     try expectContainsNear(src, "if (mode == .validate)", "try self.prefillBatch(state, prompt_tokens);", 1500);
 }
 
+test "Metal Gemma MoE validation is env gated and fails above 1e-3" {
+    const src = @embedFile("compute/forward_metal.zig");
+    try expectContains(src, "ZINC_GEMMA_MOE_VALIDATE");
+    try expectContainsNear(src, "fn shouldValidateGemmaMoe", "engine.position == 0", 500);
+    try expectContainsNear(src, "fn shouldValidateGemmaMoe", "layer_idx == 0", 500);
+    try expectContainsNear(src, "fn validateGemmaMoePostVector", "const tol: f32 = 1e-3;", 5000);
+    try expectContainsNear(src, "fn validateGemmaMoePostVector", "return error.GemmaMoeValidationFailed;", 8000);
+    try expectContains(src, "try validateGemmaMoePostVector(");
+}
+
 test "Metal prefillBatched uses gemm/rope batched dispatch helpers" {
     const src = @embedFile("compute/forward_metal.zig");
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "dispatchGemmBatchedOnCmd", 12000);

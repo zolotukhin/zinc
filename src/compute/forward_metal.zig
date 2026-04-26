@@ -1337,6 +1337,7 @@ pub const InferenceEngine = struct {
     max_context_tokens: u32,
     profile_enabled: bool,
     debug_validation_enabled: bool,
+    gemma_moe_validation_enabled: bool,
     private_decode_buffers: bool,
     command_encoder_mode: CommandEncoderMode,
     kv_cache_q8: bool,
@@ -1425,7 +1426,8 @@ pub const InferenceEngine = struct {
         self.max_context_tokens = max_ctx;
         self.profile_enabled = options.profile_enabled;
         self.debug_validation_enabled = options.debug_validation_enabled;
-        self.private_decode_buffers = if (options.debug_validation_enabled)
+        self.gemma_moe_validation_enabled = readBoolEnv("ZINC_GEMMA_MOE_VALIDATE") orelse false;
+        self.private_decode_buffers = if (options.debug_validation_enabled or self.gemma_moe_validation_enabled)
             false
         else
             options.private_decode_buffers_override orelse
@@ -2003,6 +2005,9 @@ pub const InferenceEngine = struct {
             cfg.n_layers, cfg.n_heads, cfg.head_dim, cfg.hidden_dim,
         });
         log.debug("Metal decode buffers: {s}", .{if (self.private_decode_buffers) "private+staged-readback" else "shared"});
+        if (self.gemma_moe_validation_enabled) {
+            log.info("Gemma MoE validation enabled for layer 0 position 0", .{});
+        }
         if (self.q8_tg_override) |tg| {
             log.debug("Metal q8_0 threadgroup override: {d}", .{tg});
         }
@@ -5015,6 +5020,149 @@ fn canUseGpuRoutedBatchedMoe(engine: *const InferenceEngine, lt: LayerTensors) b
     return engine.softmax_topk_pipe.handle != null and engine.moe_weighted_acc_pipe.handle != null;
 }
 
+const SliceDiff = struct {
+    max_abs: f32,
+    max_idx: usize,
+    rms: f64,
+};
+
+fn diffF32Slices(expected: []const f32, actual: []const f32) SliceDiff {
+    const n = @min(expected.len, actual.len);
+    var max_abs: f32 = 0;
+    var max_idx: usize = 0;
+    var sum_sq: f64 = 0;
+    for (0..n) |i| {
+        const delta = actual[i] - expected[i];
+        const abs_delta = @abs(delta);
+        if (abs_delta > max_abs) {
+            max_abs = abs_delta;
+            max_idx = i;
+        }
+        sum_sq += @as(f64, delta) * @as(f64, delta);
+    }
+    const rms = if (n > 0) @sqrt(sum_sq / @as(f64, @floatFromInt(n))) else 0;
+    return .{ .max_abs = max_abs, .max_idx = max_idx, .rms = rms };
+}
+
+fn shouldValidateGemmaMoe(engine: *const InferenceEngine, layer_idx: usize) bool {
+    return engine.gemma_moe_validation_enabled and
+        engine.config.architecture == .gemma and
+        engine.position == 0 and
+        layer_idx == 0;
+}
+
+fn validateGemmaMoePostVector(
+    engine: *InferenceEngine,
+    layer_idx: usize,
+    lt: LayerTensors,
+    gate_up_layout: MoeGateUpLayout,
+    expert_ids: []const u32,
+    adjusted_expert_weights: []const f32,
+    shexp_gate_weight: f32,
+    expert_input_ptr: [*]const f32,
+    shared_input_ptr: [*]const f32,
+    actual_post_moe: []const f32,
+    hidden_dim: u32,
+    inter_dim: u32,
+    shexp_inter_dim: u32,
+) !void {
+    const cfg = engine.config;
+    const allocator = engine.allocator;
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const tdo = engine.model.gguf_file.tensor_data_offset;
+    const gate_exps = gate_up_layout.gate_tensor;
+    const up_exps = gate_up_layout.up_tensor;
+    const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
+    const gate_shexp = lt.ffn_gate_shexp orelse lt.ffn_gate;
+    const up_shexp = lt.ffn_up_shexp orelse lt.ffn_up;
+    const down_shexp = lt.ffn_down_shexp orelse lt.ffn_down;
+    const has_shexp = gate_shexp != null and up_shexp != null and down_shexp != null;
+    const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
+
+    const expected_expert = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(expected_expert);
+    const expected_shared = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(expected_shared);
+    const expected_total = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(expected_total);
+    @memset(expected_expert, 0);
+    @memset(expected_shared, 0);
+
+    const gate_tmp = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(gate_tmp);
+    const up_tmp = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(up_tmp);
+    const act_tmp = try allocator.alloc(f32, inter_dim);
+    defer allocator.free(act_tmp);
+    const down_tmp = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(down_tmp);
+
+    for (expert_ids, adjusted_expert_weights) |eid, weight| {
+        try cpuDmmvFallback(mmap, gate_exps, tdo, expert_input_ptr, gate_tmp.ptr, inter_dim, hidden_dim, gate_up_layout.gateOffset(eid), allocator);
+        try cpuDmmvFallback(mmap, up_exps, tdo, expert_input_ptr, up_tmp.ptr, inter_dim, hidden_dim, gate_up_layout.upOffset(eid), allocator);
+        cpuGeGLU(gate_tmp.ptr, up_tmp.ptr, act_tmp.ptr, inter_dim);
+        try cpuDmmvFallback(mmap, down_exps, tdo, act_tmp.ptr, down_tmp.ptr, hidden_dim, inter_dim, eid * expert_down_bytes, allocator);
+        if (lt.ffn_down_exps_bias) |bias| {
+            addBiasFromTensorSlice(engine, down_tmp.ptr, bias, eid, hidden_dim);
+        }
+        for (0..hidden_dim) |i| expected_expert[i] += weight * down_tmp[i];
+    }
+    if (lt.post_ffw_norm_2) |post_norm_2_t| {
+        const post_norm_2 = try tensorF32Slice(engine, post_norm_2_t, hidden_dim);
+        cpuRmsNormMul(expected_expert.ptr, post_norm_2, expected_expert.ptr, hidden_dim, 1, cfg.rms_norm_eps);
+    }
+
+    if (has_shexp) {
+        const gate_sh = try allocator.alloc(f32, shexp_inter_dim);
+        defer allocator.free(gate_sh);
+        const up_sh = try allocator.alloc(f32, shexp_inter_dim);
+        defer allocator.free(up_sh);
+        const act_sh = try allocator.alloc(f32, shexp_inter_dim);
+        defer allocator.free(act_sh);
+        try cpuDmmvFallback(mmap, gate_shexp.?, tdo, shared_input_ptr, gate_sh.ptr, shexp_inter_dim, hidden_dim, 0, allocator);
+        try cpuDmmvFallback(mmap, up_shexp.?, tdo, shared_input_ptr, up_sh.ptr, shexp_inter_dim, hidden_dim, 0, allocator);
+        cpuGeGLU(gate_sh.ptr, up_sh.ptr, act_sh.ptr, shexp_inter_dim);
+        try cpuDmmvFallback(mmap, down_shexp.?, tdo, act_sh.ptr, expected_shared.ptr, hidden_dim, shexp_inter_dim, 0, allocator);
+        if (lt.post_ffw_norm_1) |post_norm_1_t| {
+            const post_norm_1 = try tensorF32Slice(engine, post_norm_1_t, hidden_dim);
+            cpuRmsNormMul(expected_shared.ptr, post_norm_1, expected_shared.ptr, hidden_dim, 1, cfg.rms_norm_eps);
+        }
+        for (0..hidden_dim) |i| expected_shared[i] *= shexp_gate_weight;
+    }
+
+    for (0..hidden_dim) |i| expected_total[i] = expected_expert[i] + expected_shared[i];
+    if (engine.post_ffn_norm_present[layer_idx]) {
+        const post_norm_ptr: [*]const f32 = @ptrCast(@alignCast(engine.post_ffn_norm_bufs[layer_idx].cpu_ptr.?));
+        cpuRmsNormMul(expected_total.ptr, post_norm_ptr[0..hidden_dim], expected_total.ptr, hidden_dim, 1, cfg.rms_norm_eps);
+    }
+
+    const diff = diffF32Slices(expected_total[0..hidden_dim], actual_post_moe);
+    const tol: f32 = 1e-3;
+    if (diff.max_abs > tol) {
+        log.err("Gemma MoE validate[failed]: pos={d} layer={d} post_moe max_abs_diff={d:.6} idx={d} ref={d:.6} candidate={d:.6} rms_diff={d:.6} tol={d:.6}", .{
+            engine.position,
+            layer_idx,
+            diff.max_abs,
+            diff.max_idx,
+            expected_total[diff.max_idx],
+            actual_post_moe[diff.max_idx],
+            diff.rms,
+            tol,
+        });
+        return error.GemmaMoeValidationFailed;
+    }
+    log.info("Gemma MoE validate[ok]: pos={d} layer={d} post_moe max_abs_diff={d:.6} idx={d} ref={d:.6} candidate={d:.6} rms_diff={d:.6} tol={d:.6}", .{
+        engine.position,
+        layer_idx,
+        diff.max_abs,
+        diff.max_idx,
+        expected_total[diff.max_idx],
+        actual_post_moe[diff.max_idx],
+        diff.rms,
+        tol,
+    });
+}
+
 fn runGemmaExplicitMoeFallback(
     engine: *InferenceEngine,
     profile: ?*RuntimeProfile,
@@ -5394,6 +5542,25 @@ fn runGemmaExplicitMoeFallback(
         const post_norm_ptr: [*]const f32 = @ptrCast(@alignCast(engine.post_ffn_norm_bufs[layer_idx].cpu_ptr.?));
         cpuRmsNormMul(expert_accum_ptr, post_norm_ptr[0..hidden_dim], expert_accum_ptr, hidden_dim, 1, cfg.rms_norm_eps);
     }
+    if (shouldValidateGemmaMoe(engine, layer_idx)) {
+        const validation_start = profileStart(profile != null);
+        try validateGemmaMoePostVector(
+            engine,
+            layer_idx,
+            lt,
+            gate_up_layout,
+            expert_ids[0..cfg.n_experts_used],
+            adjusted_expert_weights[0..cfg.n_experts_used],
+            shexp_gate_weight,
+            expert_input_ptr,
+            norm_ptr,
+            expert_accum_ptr[0..hidden_dim],
+            hidden_dim,
+            inter_dim,
+            shexp_inter_dim,
+        );
+        if (profile) |p| p.debug_validation_ns += profileElapsedNs(validation_start);
+    }
     {
         const hidden_out: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
         if (folded_layer_output_scale != 1.0) {
@@ -5605,7 +5772,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
 
     const head_v_dim: u32 = if (d_inner > 0) d_inner / @max(dt_rank, 1) else 0;
     const d_conv: u32 = cfg.ssm_d_conv;
-    const use_single_gpu_cmd = !engine.debug_validation_enabled and is_moe and blk: {
+    const use_single_gpu_cmd = !engine.debug_validation_enabled and !engine.gemma_moe_validation_enabled and is_moe and blk: {
         for (engine.layer_tensors) |lt| {
             if (!canUseGpuRoutedBatchedMoe(engine, lt)) break :blk false;
         }
