@@ -1138,12 +1138,19 @@ pub const DmmvDispatch = struct {
         layer: u32,
         n_experts_used: u32,
         n_experts: u32,
+        /// Byte offset into `counts_buf` where this dispatch's `n_experts`
+        /// u32 outputs should land. Must be aligned to the device's storage
+        /// buffer offset alignment (typically 4-256 B; n_experts × 4 is a
+        /// natural multiple). Pass 0 to write to the start of the buffer.
+        d_offset_bytes: vk.c.VkDeviceSize,
     ) !void {
         const pip = if (self.pipeline_count_experts) |*p| p else return error.PipelineNotLoaded;
         if (n_tokens == 0 or n_experts == 0 or n_experts_used == 0 or n_layers == 0) {
             return error.InvalidArgument;
         }
         if (layer >= n_layers) return error.InvalidArgument;
+        const out_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_experts) * @sizeOf(u32);
+        if (d_offset_bytes + out_bytes > counts_size) return error.InvalidArgument;
         const slot_stride_u32: u32 = 2 * n_experts_used;
         const push = CountExpertsPush{
             .ne00 = n_experts_used,
@@ -1154,7 +1161,7 @@ pub const DmmvDispatch = struct {
         };
         const infos = [2]vk.c.VkDescriptorBufferInfo{
             .{ .buffer = routing_buf, .offset = 0, .range = routing_size },
-            .{ .buffer = counts_buf, .offset = 0, .range = counts_size },
+            .{ .buffer = counts_buf, .offset = d_offset_bytes, .range = out_bytes },
         };
         cmd.pushDescAndDispatch(
             pip,

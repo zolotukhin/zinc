@@ -889,6 +889,13 @@ pub const InferenceEngine = struct {
     routing_capture_buf: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
     routing_capture_slot_bytes: u32 = 0,
     routing_capture_max_tokens: u32 = 0,
+    // Effort-6 Step 5 prerequisite: per-(layer, expert) routing count buffer
+    // populated at the end of prefillBatch by count_experts dispatches. Layout:
+    //   counts[layer * n_experts + expert] = number of (token, slot) pairs at
+    //   that layer with routed expert == `expert`. Sized n_layers * n_experts
+    //   * sizeof(u32). Consumed by mul_mm_id_q4k's data_expert_count binding
+    //   when Step 5 wires per-layer batched MoE GEMM (later cycle).
+    prefill_expert_count_buf: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
     // Descriptor management
     shared_pool: vk.c.VkDescriptorPool,
     // Pre-built tensor name → pointer map (O(1) lookup, replaces O(n) linear scan)
@@ -966,6 +973,16 @@ pub const InferenceEngine = struct {
     // slot(position, layer). Unused downstream this cycle — the buffer is the
     // prerequisite for Step 11b (token-permute) and 11c (grouped MoE GEMM).
     use_capture_routing: bool = false,
+    // Effort-6 Step 5 prerequisite (ZINC_COUNT_EXPERTS_PREFILL=1). When set
+    // alongside ZINC_CAPTURE_ROUTING=1, prefillBatch dispatches the
+    // count_experts shader once per MoE layer at the end of prefill, scanning
+    // routing_capture_buf and writing per-(layer, expert) counts into
+    // prefill_expert_count_buf. mul_mm_id_q4k consumes data_expert_count for
+    // its early-exit path; this wire-in produces the buffer it needs without
+    // changing the per-token MoE FFN dispatch shape (which still goes through
+    // the GEMV path). Cost: n_layers count_experts dispatches at the end of
+    // prefill, each O(n_experts * 256-thread sum). Expected overhead < 2 ms.
+    use_count_experts_prefill: bool = false,
     // Opt-in via ZINC_MUL_MM_LM_HEAD=1 (effort-6 Step 1 wire-in). When set
     // and the mul_mm_q4k pipeline is loaded and the LM-head weight is Q4_K
     // and hidden_dim is a multiple of 256, the final-tail LM head is
@@ -1934,6 +1951,39 @@ pub const InferenceEngine = struct {
             log.info("ZINC_MUL_MM_LM_HEAD=1 requested but prerequisites missing (mul_mm_q4k pipeline or push descriptors); using DMMV", .{});
         }
 
+        // Effort-6 Step 5 prerequisite: count_experts wire-in. When
+        // ZINC_COUNT_EXPERTS_PREFILL=1 is set alongside ZINC_CAPTURE_ROUTING=1
+        // and the count_experts pipeline is loaded, prefillBatch will scan
+        // the captured routing buffer at the end of prefill and produce a
+        // per-(layer, expert) count buffer. mul_mm_id_q4k binds this buffer
+        // for its early-exit path; the next cycle will wire it into the
+        // batched MoE FFN dispatch.
+        const count_experts_env = std.posix.getenv("ZINC_COUNT_EXPERTS_PREFILL");
+        const count_experts_flag = count_experts_env != null and std.mem.eql(u8, count_experts_env.?, "1");
+        const count_experts_enabled = count_experts_flag and
+            capture_flag and routing_capture_buf.handle != null and
+            dmmv.pipeline_count_experts != null and
+            instance.push_descriptor_fn != null and
+            n_used_experts > 0 and config.n_experts > 0 and config.n_layers > 0;
+        var prefill_expert_count_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
+        if (count_experts_enabled) {
+            const counts_bytes: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, config.n_layers) *
+                @as(vk.c.VkDeviceSize, config.n_experts) *
+                @sizeOf(u32);
+            prefill_expert_count_buf = try Buffer.initDeviceLocal(
+                instance,
+                counts_bytes,
+                vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            );
+            errdefer prefill_expert_count_buf.deinit();
+            log.info("ZINC_COUNT_EXPERTS_PREFILL=1: prefill expert-count buffer {d} B (layers={d} experts={d})", .{
+                counts_bytes, config.n_layers, config.n_experts,
+            });
+        } else if (count_experts_flag) {
+            log.info("ZINC_COUNT_EXPERTS_PREFILL=1 requested but prerequisites missing (capture-routing flag, count_experts pipeline, or push descriptors); skipping", .{});
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
@@ -1950,9 +2000,11 @@ pub const InferenceEngine = struct {
             .use_batch_attn = batch_attn_enabled,
             .use_capture_routing = capture_flag and routing_capture_buf.handle != null,
             .use_mul_mm_lm_head = mul_mm_lm_head_enabled,
+            .use_count_experts_prefill = count_experts_enabled,
             .routing_capture_buf = routing_capture_buf,
             .routing_capture_slot_bytes = routing_capture_slot_bytes,
             .routing_capture_max_tokens = routing_capture_max_tokens,
+            .prefill_expert_count_buf = prefill_expert_count_buf,
             .ssm_mmq_scratch = ssm_mmq_scratch,
             .ssm_mmq_scratch_alt = ssm_mmq_scratch_alt,
             .elementwise = elementwise,
@@ -8824,6 +8876,61 @@ pub const InferenceEngine = struct {
             primary_pending = false;
         }
 
+        // Effort-6 Step 5 prerequisite: per-(layer, expert) routing counts.
+        // After all prefill tokens have written their routing into
+        // routing_capture_buf, dispatch count_experts once per layer to
+        // populate prefill_expert_count_buf[layer * n_experts + expert].
+        // The decode_cmd is idle now (drained above), so we reuse it for the
+        // sweep. mul_mm_id_q4k consumes data_expert_count for early-exit; the
+        // wire-in into a batched MoE FFN dispatch follows in a later cycle.
+        if (self.use_count_experts_prefill and
+            self.prefill_expert_count_buf.handle != null and
+            self.routing_capture_buf.handle != null and
+            self.dmmv.pipeline_count_experts != null)
+        {
+            const cfg = self.model.config;
+            const n_tokens_capped: u32 = @intCast(@min(
+                @as(usize, prompt_tokens.len),
+                @as(usize, self.routing_capture_max_tokens),
+            ));
+            if (n_tokens_capped > 0 and cfg.n_experts_used > 0 and cfg.n_experts > 0) {
+                try self.decode_cmd.reset();
+                try self.decode_cmd.begin();
+                // The routing buffer was written via vkCmdCopyBuffer (transfer
+                // writes) in the prior submissions. Even though those CBs have
+                // drained on the host, we still need a transfer→compute barrier
+                // inside this CB for the count_experts shader to observe the
+                // memory writes under the explicit-spec memory model.
+                self.decode_cmd.transferToComputeBarrier();
+                var layer: u32 = 0;
+                while (layer < cfg.n_layers) : (layer += 1) {
+                    const d_off: vk.c.VkDeviceSize =
+                        @as(vk.c.VkDeviceSize, layer) *
+                        @as(vk.c.VkDeviceSize, cfg.n_experts) *
+                        @sizeOf(u32);
+                    self.dmmv.recordCountExperts(
+                        &self.decode_cmd,
+                        self.instance.push_descriptor_fn,
+                        self.routing_capture_buf.handle,
+                        self.routing_capture_buf.size,
+                        self.prefill_expert_count_buf.handle,
+                        self.prefill_expert_count_buf.size,
+                        n_tokens_capped,
+                        cfg.n_layers,
+                        layer,
+                        cfg.n_experts_used,
+                        cfg.n_experts,
+                        d_off,
+                    ) catch |err| {
+                        log.warn("count_experts dispatch failed at layer {d}: {s}", .{ layer, @errorName(err) });
+                        break;
+                    };
+                }
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+            }
+        }
+
         if (enable_gpu_phase_timing) {
             // Snapshot accumulated per-phase GPU time into prefill-scoped fields
             // before wiping the decode-oriented sample state.
@@ -9480,6 +9587,7 @@ pub const InferenceEngine = struct {
         self.allocator.free(self.gpu_ssm_states);
         self.router_output_buf.deinit();
         if (self.routing_capture_buf.handle != null) self.routing_capture_buf.deinit();
+        if (self.prefill_expert_count_buf.handle != null) self.prefill_expert_count_buf.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
         self.kv_page_pool.deinit();
