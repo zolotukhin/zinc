@@ -49,7 +49,13 @@ layout(set = 0, binding = 2) readonly  buffer RouterWeights   { float router_w[]
 layout(set = 0, binding = 3) writeonly buffer FfnNormBuf      { float ffn_norm_out[];};
 layout(set = 0, binding = 4) writeonly buffer RouterLogits    { float router_out[];  };
 
-const uint NUM_ROWS = 2u;
+// NUM_ROWS = 1 (one router row per WG) doubles the WG count for small-M
+// router DMMVs (n_experts=128 → 128 WGs vs 64 WGs at NUM_ROWS=2). At
+// wave64 with 64 CUs on R9700 the NUM_ROWS=2 dispatch was ~1 wave/CU,
+// well below the 4-wave/SIMD RDNA4 occupancy sweet-spot. NUM_ROWS=1
+// brings us closer to 2 waves/CU; the extra rms reduction work is
+// trivial (one subgroupAdd per WG over a 64-element wavefront sum).
+const uint NUM_ROWS = 1u;
 
 shared float s_rms_inv;
 

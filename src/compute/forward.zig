@@ -3061,7 +3061,10 @@ pub const InferenceEngine = struct {
             .K = k,
             .eps_bits = @bitCast(eps),
         };
-        const wg_x: u32 = (m + 1) / 2;
+        // NUM_ROWS=1 in rms_norm_dmmv_f32.comp → one router row per WG.
+        // Matches the shader's WG-per-row layout for the small-M router case
+        // (n_experts=128 → 128 WGs vs the prior 64 WGs at NUM_ROWS=2).
+        const wg_x: u32 = m;
         if (pip.uses_push_descriptors) {
             self.pushDispatch5(
                 pip,
