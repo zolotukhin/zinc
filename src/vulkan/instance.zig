@@ -334,7 +334,7 @@ pub const Instance = struct {
     }
 };
 
-fn queryDeviceCapabilities(allocator: std.mem.Allocator, physical_device: vk.c.VkPhysicalDevice) !DeviceCapabilities {
+pub fn queryDeviceCapabilities(allocator: std.mem.Allocator, physical_device: vk.c.VkPhysicalDevice) !DeviceCapabilities {
     var ext_count: u32 = 0;
     var result = vk.c.vkEnumerateDeviceExtensionProperties(physical_device, null, &ext_count, null);
     if (result != vk.c.VK_SUCCESS) return error.DeviceExtensionEnumerationFailed;
