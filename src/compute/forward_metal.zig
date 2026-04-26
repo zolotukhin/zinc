@@ -2534,9 +2534,7 @@ pub const InferenceEngine = struct {
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(self.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
             try cpuDmmvFallback(mmap, self.lm_head, tdo, in_ptr, out_ptr, cfg.vocab_size, hidden_dim, 0, self.allocator);
-            var argmax_cmd = try metal_command.beginCommand(self.device.ctx);
-            dispatchArgmaxOnCmd(self, &argmax_cmd, &self.logits_buf, &self.argmax_buf, cfg.vocab_size);
-            argmax_cmd.commitAndWait();
+            writeCpuArgmax(self, out_ptr, cfg.vocab_size);
         } else {
             const x_offset_bytes: u32 = (n_tokens - 1) * hidden_dim * @sizeOf(f32);
             dispatchLmHeadWithInputOffset(self, &cmd, &scratch.norm, &self.logits_buf, hidden_dim, cfg.vocab_size, x_offset_bytes);
@@ -3135,6 +3133,24 @@ fn dispatchArgmaxOnCmd(
     const push = ArgmaxPush{ .n = n };
     const bufs = [_]*const MetalBuffer{ logits_buf, output_buf };
     cmd.dispatchV2(&engine.argmax_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ArgmaxPush), 2);
+}
+
+fn writeCpuArgmax(engine: *const InferenceEngine, logits: [*]const f32, n: u32) void {
+    if (n == 0) return;
+    const ptr = engine.argmax_buf.cpu_ptr orelse return;
+
+    var max_val: f32 = logits[0];
+    var max_idx: u32 = 0;
+    for (logits[0..n], 0..) |value, i| {
+        if (value > max_val) {
+            max_val = value;
+            max_idx = @intCast(i);
+        }
+    }
+
+    const argmax_words: [*]u32 = @ptrCast(@alignCast(ptr));
+    argmax_words[0] = max_idx;
+    argmax_words[1] = 0;
 }
 
 fn canUseFusedNormQ8Dmmv(
@@ -6213,10 +6229,8 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
             try cpuDmmvFallback(mmap, engine.lm_head, tdo, in_ptr, out_ptr, cfg.vocab_size, hidden_dim, 0, engine.allocator);
-            var argmax_cmd = try beginProfiledCommand(engine, profile);
-            dispatchArgmaxOnCmd(engine, &argmax_cmd, &engine.logits_buf, &engine.argmax_buf, cfg.vocab_size);
+            writeCpuArgmax(engine, out_ptr, cfg.vocab_size);
             if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
-            commitAndWaitProfiled(&argmax_cmd, profile);
         } else {
             dispatchLmHeadOnCmd(engine, cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
             profileBarrier(cmd, profile, .final);
@@ -6235,14 +6249,15 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
             try cpuDmmvFallback(mmap, engine.lm_head, tdo, in_ptr, out_ptr, cfg.vocab_size, hidden_dim, 0, engine.allocator);
-            cmd = try beginProfiledCommand(engine, profile);
+            writeCpuArgmax(engine, out_ptr, cfg.vocab_size);
+            if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         } else {
             dispatchLmHeadOnCmd(engine, &cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
             profileBarrier(&cmd, profile, .final);
+            dispatchArgmaxOnCmd(engine, &cmd, &engine.logits_buf, &engine.argmax_buf, cfg.vocab_size);
+            if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
+            commitAndWaitProfiled(&cmd, profile);
         }
-        dispatchArgmaxOnCmd(engine, &cmd, &engine.logits_buf, &engine.argmax_buf, cfg.vocab_size);
-        if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
-        commitAndWaitProfiled(&cmd, profile);
     }
     if (engine.debug_validation_enabled and engine.position == 5) {
         const debug_start = profileStart(profile != null);
