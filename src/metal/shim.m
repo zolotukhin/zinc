@@ -209,7 +209,7 @@ void mtl_free_buffer(MetalBuf* buf) {
 
 // --- Pipeline management ---
 
-MetalPipe* mtl_create_pipeline(MetalCtx* ctx, const char* msl_source, const char* fn_name) {
+static MetalPipe* mtl_create_pipeline_impl(MetalCtx* ctx, const char* msl_source, const char* fn_name, int report_errors) {
     if (!ctx || !msl_source || !fn_name) return NULL;
 
     NSError* error = nil;
@@ -219,23 +219,29 @@ MetalPipe* mtl_create_pipeline(MetalCtx* ctx, const char* msl_source, const char
 
     id<MTLLibrary> library = [ctx->device newLibraryWithSource:source options:options error:&error];
     if (!library) {
-        fprintf(stderr, "Error: MSL compilation failed for '%s': %s\n",
-                fn_name, [[error localizedDescription] UTF8String]);
+        if (report_errors) {
+            fprintf(stderr, "Error: MSL compilation failed for '%s': %s\n",
+                    fn_name, [[error localizedDescription] UTF8String]);
+        }
         return NULL;
     }
 
     NSString* name = [NSString stringWithUTF8String:fn_name];
     id<MTLFunction> function = [library newFunctionWithName:name];
     if (!function) {
-        fprintf(stderr, "Error: Kernel function '%s' not found in compiled MSL.\n", fn_name);
+        if (report_errors) {
+            fprintf(stderr, "Error: Kernel function '%s' not found in compiled MSL.\n", fn_name);
+        }
         return NULL;
     }
 
     id<MTLComputePipelineState> state = [ctx->device newComputePipelineStateWithFunction:function
                                                                                    error:&error];
     if (!state) {
-        fprintf(stderr, "Error: Failed to create compute pipeline for '%s': %s\n",
-                fn_name, [[error localizedDescription] UTF8String]);
+        if (report_errors) {
+            fprintf(stderr, "Error: Failed to create compute pipeline for '%s': %s\n",
+                    fn_name, [[error localizedDescription] UTF8String]);
+        }
         return NULL;
     }
 
@@ -243,6 +249,14 @@ MetalPipe* mtl_create_pipeline(MetalCtx* ctx, const char* msl_source, const char
     if (!pipe) return NULL;
     pipe->state = state;
     return pipe;
+}
+
+MetalPipe* mtl_create_pipeline(MetalCtx* ctx, const char* msl_source, const char* fn_name) {
+    return mtl_create_pipeline_impl(ctx, msl_source, fn_name, 1);
+}
+
+MetalPipe* mtl_create_pipeline_quiet(MetalCtx* ctx, const char* msl_source, const char* fn_name) {
+    return mtl_create_pipeline_impl(ctx, msl_source, fn_name, 0);
 }
 
 MetalPipe* mtl_create_pipeline_from_lib(MetalCtx* ctx, const void* lib_data, size_t lib_size, const char* fn_name) {

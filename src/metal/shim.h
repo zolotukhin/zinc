@@ -39,6 +39,7 @@ void mtl_free_buffer(MetalBuf* buf);
 
 // Pipeline management
 MetalPipe* mtl_create_pipeline(MetalCtx* ctx, const char* msl_source, const char* fn_name);
+MetalPipe* mtl_create_pipeline_quiet(MetalCtx* ctx, const char* msl_source, const char* fn_name);
 MetalPipe* mtl_create_pipeline_from_lib(MetalCtx* ctx, const void* lib_data, size_t lib_size, const char* fn_name);
 uint32_t mtl_pipeline_max_threads(MetalPipe* pipe);
 uint32_t mtl_pipeline_thread_execution_width(MetalPipe* pipe);

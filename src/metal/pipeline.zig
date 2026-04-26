@@ -31,6 +31,17 @@ pub fn createPipeline(ctx: ?*shim.MetalCtx, msl_source: [*:0]const u8, fn_name: 
     };
 }
 
+fn createPipelineQuiet(ctx: ?*shim.MetalCtx, msl_source: [*:0]const u8, fn_name: [*:0]const u8) !MetalPipeline {
+    const handle = shim.mtl_create_pipeline_quiet(ctx, msl_source, fn_name);
+    if (handle == null) return error.MetalPipelineCreateFailed;
+    return .{
+        .handle = handle,
+        .max_threads_per_threadgroup = shim.mtl_pipeline_max_threads(handle),
+        .thread_execution_width = shim.mtl_pipeline_thread_execution_width(handle),
+        .static_threadgroup_memory_length = shim.mtl_pipeline_static_threadgroup_memory_length(handle),
+    };
+}
+
 /// Create a compute pipeline from a precompiled metallib binary blob.
 pub fn createPipelineFromLib(ctx: ?*shim.MetalCtx, lib_data: [*]const u8, lib_size: usize, fn_name: [*:0]const u8) !MetalPipeline {
     const handle = shim.mtl_create_pipeline_from_lib(ctx, lib_data, lib_size, fn_name);
@@ -88,7 +99,7 @@ test "createPipeline fails on invalid MSL" {
 
     try std.testing.expectError(
         error.MetalPipelineCreateFailed,
-        createPipeline(ctx, "this is not valid MSL", "main0"),
+        createPipelineQuiet(ctx, "this is not valid MSL", "main0"),
     );
 }
 
@@ -109,7 +120,7 @@ test "createPipeline fails on wrong function name" {
 
     try std.testing.expectError(
         error.MetalPipelineCreateFailed,
-        createPipeline(ctx, msl_source, "nonexistent_function"),
+        createPipelineQuiet(ctx, msl_source, "nonexistent_function"),
     );
 }
 
