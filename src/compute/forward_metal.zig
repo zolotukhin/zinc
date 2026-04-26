@@ -662,6 +662,16 @@ const SoftmaxTopkBatchedPush = extern struct {
     output_stride: u32,
 };
 
+/// Push constants for packing batched MoE routes by expert.
+/// `ids` stores token_idx * k + topk_slot for each routed token.
+const MoeRoutePackPush = extern struct {
+    n_tokens: u32,
+    n_experts: u32,
+    k: u32,
+    routing_stride: u32,
+    ids_stride: u32,
+};
+
 /// Push constants for GPU-weighted batched MoE accumulation.
 const MoeWeightedAccPush = extern struct {
     n: u32,
@@ -1252,6 +1262,7 @@ pub const InferenceEngine = struct {
     moe_acc_batched_pipe: MetalPipeline,
     softmax_topk_pipe: MetalPipeline,
     softmax_topk_batched_pipe: MetalPipeline,
+    moe_route_pack_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
     residual_rms_norm_pipe: MetalPipeline,
@@ -1577,6 +1588,7 @@ pub const InferenceEngine = struct {
         self.moe_acc_batched_pipe = try loadShaderPipeline(ctx, "moe_accumulate_batched");
         self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
         self.softmax_topk_batched_pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
+        self.moe_route_pack_pipe = try loadShaderPipeline(ctx, "moe_route_pack");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
         self.residual_rms_norm_pipe = try loadShaderPipeline(ctx, "residual_rms_norm");
@@ -2154,6 +2166,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.moe_acc_batched_pipe);
         metal_pipeline.freePipeline(&self.softmax_topk_pipe);
         metal_pipeline.freePipeline(&self.softmax_topk_batched_pipe);
+        metal_pipeline.freePipeline(&self.moe_route_pack_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
         metal_pipeline.freePipeline(&self.residual_rms_norm_pipe);
@@ -4227,6 +4240,27 @@ fn dispatchSoftmaxTopkBatchedOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ logits, output };
     cmd.dispatchV2(&engine.softmax_topk_batched_pipe, .{ n_tokens, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkBatchedPush), 0);
+}
+
+fn dispatchMoeRoutePackOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    routing: *const MetalBuffer,
+    counts: *const MetalBuffer,
+    ids: *const MetalBuffer,
+    n_tokens: u32,
+    n_experts: u32,
+    k: u32,
+) void {
+    const push = MoeRoutePackPush{
+        .n_tokens = n_tokens,
+        .n_experts = n_experts,
+        .k = k,
+        .routing_stride = k * 2,
+        .ids_stride = n_tokens,
+    };
+    const bufs = [_]*const MetalBuffer{ routing, counts, ids };
+    cmd.dispatchV2(&engine.moe_route_pack_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeRoutePackPush), 0);
 }
 
 fn dispatchSigmoidScaleAccOnCmd(
@@ -9645,6 +9679,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&topk_pipe);
     var topk_batched_pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
     defer metal_pipeline.freePipeline(&topk_batched_pipe);
+    var route_pack_pipe = try loadShaderPipeline(ctx, "moe_route_pack");
+    defer metal_pipeline.freePipeline(&route_pack_pipe);
     var sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
     defer metal_pipeline.freePipeline(&sigmoid_scale_acc_pipe);
     var moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
@@ -9668,6 +9704,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(lmhead_pipe_1024.handle != null);
     try std.testing.expect(topk_pipe.handle != null);
     try std.testing.expect(topk_batched_pipe.handle != null);
+    try std.testing.expect(route_pack_pipe.handle != null);
     try std.testing.expect(sigmoid_scale_acc_pipe.handle != null);
     try std.testing.expect(moe_weighted_acc_pipe.handle != null);
 }
@@ -9864,6 +9901,59 @@ test "softmax_topk_batched shader routes each token independently" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), w10 + w11 + w12, 0.01);
     try std.testing.expect(w00 > w01 and w01 > w02);
     try std.testing.expect(w10 > w11 and w11 > w12);
+}
+
+test "moe_route_pack shader groups batched routing by expert" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "moe_route_pack");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const n_tokens: u32 = 2;
+    const n_experts: u32 = 6;
+    const k: u32 = 3;
+    const routing_stride: u32 = k * 2;
+    const ids_stride: u32 = n_tokens;
+
+    var routing_buf = try metal_buffer.createBuffer(ctx, n_tokens * routing_stride * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&routing_buf);
+    var counts_buf = try metal_buffer.createBuffer(ctx, n_experts * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&counts_buf);
+    var ids_buf = try metal_buffer.createBuffer(ctx, n_experts * ids_stride * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&ids_buf);
+
+    const routing_ptr: [*]u32 = @ptrCast(@alignCast(routing_buf.cpu_ptr.?));
+    @memcpy(routing_ptr[0 .. n_tokens * routing_stride], &[_]u32{
+        2, 5, 3, 0, 0, 0,
+        0, 3, 4, 0, 0, 0,
+    });
+    @memset(counts_buf.cpu_ptr.?[0..counts_buf.size], 0);
+    @memset(ids_buf.cpu_ptr.?[0..ids_buf.size], 0xff);
+
+    const push = MoeRoutePackPush{
+        .n_tokens = n_tokens,
+        .n_experts = n_experts,
+        .k = k,
+        .routing_stride = routing_stride,
+        .ids_stride = ids_stride,
+    };
+    const bufs = [_]*const MetalBuffer{ &routing_buf, &counts_buf, &ids_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(MoeRoutePackPush), 0);
+    cmd.commitAndWait();
+
+    const counts_ptr: [*]const u32 = @ptrCast(@alignCast(counts_buf.cpu_ptr.?));
+    const ids_ptr: [*]const u32 = @ptrCast(@alignCast(ids_buf.cpu_ptr.?));
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1, 2, 1, 1 }, counts_ptr[0..n_experts]);
+    try std.testing.expectEqual(@as(u32, 3), ids_ptr[0 * ids_stride + 0]);
+    try std.testing.expectEqual(@as(u32, 0), ids_ptr[2 * ids_stride + 0]);
+    try std.testing.expectEqual(@as(u32, 2), ids_ptr[3 * ids_stride + 0]);
+    try std.testing.expectEqual(@as(u32, 4), ids_ptr[3 * ids_stride + 1]);
+    try std.testing.expectEqual(@as(u32, 5), ids_ptr[4 * ids_stride + 0]);
+    try std.testing.expectEqual(@as(u32, 1), ids_ptr[5 * ids_stride + 0]);
 }
 
 test "kv_cache_write shader writes K and V slices at token offset" {
