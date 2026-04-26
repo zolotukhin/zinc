@@ -5219,6 +5219,11 @@ pub const InferenceEngine = struct {
             //   - ffn_norm + router weights are both f32 (shader bindings)
             //   - router has no bias term and no Gemma-specific scale
             const router_tensor_opt = lt.ffn_gate_inp;
+            // The fused shader (rms_norm_dmmv_f32.comp) reads hidden /
+            // ffn_norm weights / router weights as vec4 since cycle 42, so
+            // gate the path on K%4==0. Every catalog MoE checkpoint today
+            // satisfies this (Qwen 3.5/3.6 hidden_dim=2048); reject and
+            // fall back to the unfused path otherwise.
             const can_fuse_rms_router = self.use_fused_rms_router and
                 is_moe and
                 config.architecture != .gemma and
@@ -5227,7 +5232,8 @@ pub const InferenceEngine = struct {
                 router_tensor_opt != null and
                 router_tensor_opt.?.info.type_ == .f32 and
                 lt.ffn_gate_inp_bias == null and
-                lt.ffn_gate_inp_scale == null;
+                lt.ffn_gate_inp_scale == null and
+                (hidden_dim % 4) == 0;
             if (!can_fuse_rms_router) {
                 try self.dispatchRmsNorm(
                     self.hidden_buf.handle,

@@ -1,13 +1,22 @@
 #version 460
-// ZINC — Fused RMS norm + f32 router DMMV.
+// ZINC — Fused RMS norm + f32 router DMMV (vec4 coalesced reads).
 //
 // Replaces the (rms_norm_mul + dispatchDmmv) pair used by the MoE
 // router on non-Gemma architectures (Qwen 3.5/3.6 MoE etc) where
 // router weights are f32. Saves one vkCmdDispatch + one pipeline
 // barrier per MoE layer (30 on Qwen3.6 35B-A3B, ~1.5 ms / decode).
 //
-// Each workgroup is 64 threads = 1 wave64 on RDNA4. NUM_ROWS=2
-// router output rows per workgroup, dispatched as ((M+1)/2, 1, 1).
+// Each workgroup is 64 threads = 1 wave64 on RDNA4. NUM_ROWS=1 router
+// output row per workgroup, dispatched as (M, 1, 1).
+//
+// Cycle 42 (effort-6): hidden, ffn_norm weights, router weights, and
+// the WG-0 ffn_norm writeback are all reorganized as vec4-strided
+// reads/writes. RDNA4's L1 issues 128-bit loads in one transaction,
+// so vec4 cuts the inner-loop transaction count by 4× on the router
+// matvec (the dominant cost in the moe_router phase). Requires K % 4
+// == 0; the dispatch-side gate falls back to the unfused path when
+// this isn't satisfied (today every MoE checkpoint has K=hidden_dim
+// divisible by 4 — Qwen 3.5/3.6 K=2048).
 //
 // Algorithm:
 //   1. All WGs independently compute the same RMS norm scale via
@@ -21,16 +30,18 @@
 //      (recomputed-per-iteration) normalized hidden, hitting L1 for
 //      hidden + ffn_norm_weights re-reads.
 //
-// Output values are bit-for-bit identical to the standalone
-// rms_norm_mul.spv since both shaders use the same subgroupAdd
-// reduction inside one wave64 and the same multiplication order
-// `weight * (x * rms_inv)`.
+// Output values match the scalar version up to fp32 reordering of the
+// dot/RMS reductions (4-wide rather than 1-wide partial sums). The
+// per-row router logit and the per-element ffn_norm_buf are within
+// the same eps band as the prior shader; downstream softmax/topk
+// rounding tolerates that drift identically to other vec4-bind
+// dmmv_q4k variants in this tree.
 //
 // Bindings:
-//   0  hidden            (f32, K=hidden_dim)
-//   1  ffn_norm_weights  (f32, K)
-//   2  router_weights    (f32, M*K row-major)
-//   3  ffn_norm_buf      (f32, K — written by WG 0 only)
+//   0  hidden            (f32, K=hidden_dim, indexed as vec4)
+//   1  ffn_norm_weights  (f32, K, indexed as vec4)
+//   2  router_weights    (f32, M*K row-major, indexed as vec4)
+//   3  ffn_norm_buf      (f32, K — written by WG 0 only, vec4 store)
 //   4  router_logits_buf (f32, M)
 
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -39,15 +50,15 @@ layout(local_size_x = 64) in;
 
 layout(push_constant) uniform PushConstants {
     uint M;        // router output rows = n_experts
-    uint K;        // hidden_dim
+    uint K;        // hidden_dim (must be divisible by 4)
     uint eps_bits; // RMS norm epsilon (f32 bits)
 };
 
-layout(set = 0, binding = 0) readonly  buffer Hidden          { float hidden_data[]; };
-layout(set = 0, binding = 1) readonly  buffer FfnNormWeights  { float ffn_norm_w[];  };
-layout(set = 0, binding = 2) readonly  buffer RouterWeights   { float router_w[];    };
-layout(set = 0, binding = 3) writeonly buffer FfnNormBuf      { float ffn_norm_out[];};
-layout(set = 0, binding = 4) writeonly buffer RouterLogits    { float router_out[];  };
+layout(set = 0, binding = 0) readonly  buffer Hidden          { vec4 hidden_v4[];   };
+layout(set = 0, binding = 1) readonly  buffer FfnNormWeights  { vec4 ffn_norm_w_v4[]; };
+layout(set = 0, binding = 2) readonly  buffer RouterWeights   { vec4 router_w_v4[]; };
+layout(set = 0, binding = 3) writeonly buffer FfnNormBuf      { vec4 ffn_norm_out_v4[]; };
+layout(set = 0, binding = 4) writeonly buffer RouterLogits    { float router_out[]; };
 
 // NUM_ROWS = 1 (one router row per WG) doubles the WG count for small-M
 // router DMMVs (n_experts=128 → 128 WGs vs 64 WGs at NUM_ROWS=2). At
@@ -63,12 +74,13 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint wg_id = gl_WorkGroupID.x;
     float eps = uintBitsToFloat(eps_bits);
+    uint K_v4 = K >> 2;  // K / 4 (gated by the CPU-side K%4==0 check)
 
-    // --- Pass 1: sum of squares for RMS ---
+    // --- Pass 1: sum of squares for RMS (vec4 reads) ---
     float sum_sq = 0.0;
-    for (uint i = tid; i < K; i += 64u) {
-        float v = hidden_data[i];
-        sum_sq += v * v;
+    for (uint i = tid; i < K_v4; i += 64u) {
+        vec4 v = hidden_v4[i];
+        sum_sq += dot(v, v);
     }
     sum_sq = subgroupAdd(sum_sq);
 
@@ -82,11 +94,11 @@ void main() {
     // Single-writer (only WG 0) so no inter-WG race. The dispatch barrier
     // makes the writes visible to subsequent compute dispatches that read
     // ffn_norm_buf (gate/up/down expert DMMVs, shared-expert DMMVs).
-    // Multiplication order matches rms_norm_mul.comp:
+    // Multiplication order matches the scalar version per element:
     //   y[i] = weight[i] * (x[i] * rms_inv)
     if (wg_id == 0u) {
-        for (uint i = tid; i < K; i += 64u) {
-            ffn_norm_out[i] = ffn_norm_w[i] * (hidden_data[i] * rms_inv);
+        for (uint i = tid; i < K_v4; i += 64u) {
+            ffn_norm_out_v4[i] = ffn_norm_w_v4[i] * (hidden_v4[i] * rms_inv);
         }
     }
 
@@ -96,14 +108,11 @@ void main() {
         if (row >= M) break;
 
         float sum = 0.0;
-        uint w_base = row * K;
-        for (uint k = tid; k < K; k += 64u) {
+        uint w_base_v4 = row * K_v4;
+        for (uint k_v4 = tid; k_v4 < K_v4; k_v4 += 64u) {
             // Recompute normalized value from cached hidden/weights.
-            // Same expression as the WG-0 writeback above so router_out
-            // matches what an unfused (rms_norm + dmmv f32) sequence would
-            // have produced.
-            float nv = ffn_norm_w[k] * (hidden_data[k] * rms_inv);
-            sum += nv * router_w[w_base + k];
+            vec4 nv = ffn_norm_w_v4[k_v4] * (hidden_v4[k_v4] * rms_inv);
+            sum += dot(nv, router_w_v4[w_base_v4 + k_v4]);
         }
         sum = subgroupAdd(sum);
         if (tid == 0u) {
