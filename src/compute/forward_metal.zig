@@ -3370,6 +3370,7 @@ fn classifyDmmvPath(engine: *InferenceEngine, tensor: *const metal_loader.Loaded
         std.mem.endsWith(u8, name, "ffn_up.weight") or
         std.mem.endsWith(u8, name, "ffn_down.weight"))
     {
+        if (engine.config.architecture == .gemma and engine.config.n_experts > 0) return .shared_expert;
         return .dense_ffn;
     }
     return .other;
@@ -3629,12 +3630,13 @@ fn cpuDmmvQ8_0ParallelArgmax(
 }
 
 fn cpuLmHeadFallbackWithArgmax(
-    engine: *const InferenceEngine,
+    engine: *InferenceEngine,
     input: [*]const f32,
     output: [*]f32,
 ) !void {
     const mmap = engine.model.mmap_data orelse return error.NoMmapData;
     const tdo = engine.model.gguf_file.tensor_data_offset;
+    recordDmmvProfile(engine, engine.lm_head, engine.config.vocab_size, engine.config.hidden_dim);
     if (engine.lm_head.info.type_ == .q8_0) {
         const off: usize = @intCast(tdo + engine.lm_head.info.offset);
         const raw = mmap[off..];
@@ -3880,6 +3882,7 @@ fn dispatchLmHeadWithInputOffset(
     x_offset_bytes: u32,
 ) void {
     const tensor = engine.lm_head;
+    recordDmmvProfile(engine, tensor, vocab_size, hidden_dim);
     const weight_buf: *const MetalBuffer = if (engine.lm_head_private_buf.handle != null)
         &engine.lm_head_private_buf
     else
@@ -3941,6 +3944,7 @@ fn dispatchDmmvOnCmdWithInputOffset(
     extra_byte_offset: u32,
     x_byte_offset: u32,
 ) void {
+    recordDmmvProfile(engine, tensor, M, K);
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         // CPU fallback for unsupported quant types. Re-open a command buffer
         // afterwards so later kernels in the same logical sequence still record.
