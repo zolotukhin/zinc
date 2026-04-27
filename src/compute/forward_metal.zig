@@ -702,6 +702,17 @@ const MoeRouteScatterPush = extern struct {
     debug: u32,
 };
 
+/// Push constants for gathering token-ordered expert inputs into route slots.
+/// Destination is route-slot indexed: `[token * k + slot][hidden_dim]`.
+const MoeRouteGatherPush = extern struct {
+    n_tokens: u32,
+    hidden_dim: u32,
+    n_experts: u32,
+    k: u32,
+    routing_stride: u32,
+    debug: u32,
+};
+
 /// Push constants for GPU-weighted batched MoE accumulation.
 const MoeWeightedAccPush = extern struct {
     n: u32,
@@ -1134,6 +1145,7 @@ const BatchedPrefillScratch = struct {
     moe_routing: MetalBuffer,
     moe_expert_counts: MetalBuffer,
     moe_packed_ids: MetalBuffer,
+    moe_route_input: MetalBuffer,
     moe_expert_gate: MetalBuffer,
     moe_expert_up: MetalBuffer,
     moe_expert_swiglu: MetalBuffer,
@@ -1216,6 +1228,11 @@ const BatchedPrefillScratch = struct {
             var mut = packed_ids;
             metal_buffer.freeBuffer(&mut);
         }
+        const moe_input = try metal_buffer.createBuffer(ctx, @max(route_slots * hidden_n * f32_sz, 4));
+        errdefer {
+            var mut = moe_input;
+            metal_buffer.freeBuffer(&mut);
+        }
         const moe_gate = try metal_buffer.createBuffer(ctx, @max(route_slots * inter_n * f32_sz, 4));
         errdefer {
             var mut = moe_gate;
@@ -1247,6 +1264,7 @@ const BatchedPrefillScratch = struct {
             .moe_routing = routing,
             .moe_expert_counts = counts,
             .moe_packed_ids = packed_ids,
+            .moe_route_input = moe_input,
             .moe_expert_gate = moe_gate,
             .moe_expert_up = moe_up,
             .moe_expert_swiglu = moe_swiglu,
@@ -1269,6 +1287,7 @@ const BatchedPrefillScratch = struct {
         metal_buffer.freeBuffer(&self.moe_routing);
         metal_buffer.freeBuffer(&self.moe_expert_counts);
         metal_buffer.freeBuffer(&self.moe_packed_ids);
+        metal_buffer.freeBuffer(&self.moe_route_input);
         metal_buffer.freeBuffer(&self.moe_expert_gate);
         metal_buffer.freeBuffer(&self.moe_expert_up);
         metal_buffer.freeBuffer(&self.moe_expert_swiglu);
@@ -1395,6 +1414,7 @@ pub const InferenceEngine = struct {
     softmax_topk_scaled_pipe: MetalPipeline,
     softmax_topk_batched_pipe: MetalPipeline,
     moe_route_pack_pipe: MetalPipeline,
+    moe_route_gather_pipe: MetalPipeline,
     moe_route_scatter_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
@@ -1729,6 +1749,7 @@ pub const InferenceEngine = struct {
         self.softmax_topk_scaled_pipe = try loadShaderPipeline(ctx, "softmax_topk_scaled");
         self.softmax_topk_batched_pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
         self.moe_route_pack_pipe = try loadShaderPipeline(ctx, "moe_route_pack");
+        self.moe_route_gather_pipe = try loadShaderPipeline(ctx, "moe_route_gather");
         self.moe_route_scatter_pipe = try loadShaderPipeline(ctx, "moe_route_scatter");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
@@ -2316,6 +2337,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.softmax_topk_scaled_pipe);
         metal_pipeline.freePipeline(&self.softmax_topk_batched_pipe);
         metal_pipeline.freePipeline(&self.moe_route_pack_pipe);
+        metal_pipeline.freePipeline(&self.moe_route_gather_pipe);
         metal_pipeline.freePipeline(&self.moe_route_scatter_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
@@ -4677,6 +4699,31 @@ fn dispatchMoeRouteScatterOnCmd(
     const total = n_tokens * hidden_dim;
     const bufs = [_]*const MetalBuffer{ counts, ids, routing, src, dst };
     cmd.dispatchV2(&engine.moe_route_scatter_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeRouteScatterPush), 0);
+}
+
+fn dispatchMoeRouteGatherOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    routing: *const MetalBuffer,
+    src: *const MetalBuffer,
+    dst: *const MetalBuffer,
+    n_tokens: u32,
+    hidden_dim: u32,
+    n_experts: u32,
+    k: u32,
+    debug: bool,
+) void {
+    const push = MoeRouteGatherPush{
+        .n_tokens = n_tokens,
+        .hidden_dim = hidden_dim,
+        .n_experts = n_experts,
+        .k = k,
+        .routing_stride = k * 2,
+        .debug = if (debug) 1 else 0,
+    };
+    const total = n_tokens * k * hidden_dim;
+    const bufs = [_]*const MetalBuffer{ routing, src, dst };
+    cmd.dispatchV2(&engine.moe_route_gather_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeRouteGatherPush), 0);
 }
 
 fn dispatchSigmoidScaleAccOnCmd(
@@ -10840,6 +10887,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&topk_batched_pipe);
     var route_pack_pipe = try loadShaderPipeline(ctx, "moe_route_pack");
     defer metal_pipeline.freePipeline(&route_pack_pipe);
+    var route_gather_pipe = try loadShaderPipeline(ctx, "moe_route_gather");
+    defer metal_pipeline.freePipeline(&route_gather_pipe);
     var route_scatter_pipe = try loadShaderPipeline(ctx, "moe_route_scatter");
     defer metal_pipeline.freePipeline(&route_scatter_pipe);
     var sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
@@ -10873,6 +10922,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(topk_scaled_pipe.handle != null);
     try std.testing.expect(topk_batched_pipe.handle != null);
     try std.testing.expect(route_pack_pipe.handle != null);
+    try std.testing.expect(route_gather_pipe.handle != null);
     try std.testing.expect(route_scatter_pipe.handle != null);
     try std.testing.expect(sigmoid_scale_acc_pipe.handle != null);
     try std.testing.expect(moe_weighted_acc_pipe.handle != null);
@@ -11134,6 +11184,64 @@ test "moe_route_pack shader groups batched routing by expert" {
     try std.testing.expectEqual(@as(u32, 1), ids_ptr[5 * ids_stride + 0]);
 }
 
+test "moe_route_gather shader expands token inputs into route slots" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "moe_route_gather");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const n_tokens: usize = 2;
+    const n_experts: usize = 5;
+    const k: usize = 3;
+    const hidden_dim: usize = 4;
+    const routing_stride: usize = k * 2;
+    const route_slots: usize = n_tokens * k;
+
+    var routing_buf = try metal_buffer.createBuffer(ctx, n_tokens * routing_stride * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&routing_buf);
+    var src_buf = try metal_buffer.createBuffer(ctx, n_tokens * hidden_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&src_buf);
+    var dst_buf = try metal_buffer.createBuffer(ctx, route_slots * hidden_dim * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dst_buf);
+
+    const routing_ptr: [*]u32 = @ptrCast(@alignCast(routing_buf.cpu_ptr.?));
+    @memcpy(routing_ptr[0 .. n_tokens * routing_stride], &[_]u32{
+        2, 1, 3, 0, 0, 0,
+        1, 4, 0, 0, 0, 0,
+    });
+
+    const src_ptr: [*]f32 = @ptrCast(@alignCast(src_buf.cpu_ptr.?));
+    @memcpy(src_ptr[0 .. n_tokens * hidden_dim], &[_]f32{
+        1.0,  2.0,  3.0,  4.0,
+        10.0, 20.0, 30.0, 40.0,
+    });
+    @memset(dst_buf.cpu_ptr.?[0..dst_buf.size], 0);
+
+    const push = MoeRouteGatherPush{
+        .n_tokens = @intCast(n_tokens),
+        .hidden_dim = @intCast(hidden_dim),
+        .n_experts = @intCast(n_experts),
+        .k = @intCast(k),
+        .routing_stride = @intCast(routing_stride),
+        .debug = 1,
+    };
+    const bufs = [_]*const MetalBuffer{ &routing_buf, &src_buf, &dst_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((route_slots * hidden_dim + 63) / 64), 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeRouteGatherPush), 0);
+    cmd.commitAndWait();
+
+    const dst_ptr: [*]const f32 = @ptrCast(@alignCast(dst_buf.cpu_ptr.?));
+    for (0..route_slots) |route| {
+        const token = route / k;
+        for (0..hidden_dim) |dim| {
+            try std.testing.expectEqual(src_ptr[token * hidden_dim + dim], dst_ptr[route * hidden_dim + dim]);
+        }
+    }
+}
+
 test "moe_route_scatter shader accumulates packed batched routes by token" {
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -11323,6 +11431,7 @@ test "BatchedPrefillScratch allocates Gemma MoE route scratch" {
     try std.testing.expectEqual(@as(usize, n_tokens * engine.config.n_experts_used * 2 * @sizeOf(u32)), scratch.moe_routing.size);
     try std.testing.expectEqual(@as(usize, engine.config.n_experts * @sizeOf(u32)), scratch.moe_expert_counts.size);
     try std.testing.expectEqual(@as(usize, engine.config.n_experts * n_tokens * @sizeOf(u32)), scratch.moe_packed_ids.size);
+    try std.testing.expectEqual(@as(usize, route_slots * engine.config.hidden_dim * @sizeOf(f32)), scratch.moe_route_input.size);
     try std.testing.expectEqual(@as(usize, route_slots * inter_dim * @sizeOf(f32)), scratch.moe_expert_gate.size);
     try std.testing.expectEqual(scratch.moe_expert_gate.size, scratch.moe_expert_up.size);
     try std.testing.expectEqual(scratch.moe_expert_gate.size, scratch.moe_expert_swiglu.size);
