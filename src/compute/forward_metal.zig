@@ -3977,7 +3977,7 @@ fn dispatchDmmvMoeQ4kOnCmd(
         x_expert_stride != 0 and
         M >= 1024 and
         engine.dmmv_q4k_moe_k2048_1024_pipe.max_threads_per_threadgroup >= 1024;
-    const rows_per_wg: u32 = if (use_1024_k2048) 32 else if (k2048_or_less) 16 else 8;
+    const rows_per_wg: u32 = if (use_1024_k2048) 32 else 16;
     const block_size: u32 = if (use_1024_k2048) 1024 else if (k2048_or_less) 512 else 256;
     const wgs = (M + rows_per_wg - 1) / rows_per_wg;
     const pipe = if (use_1024_k2048)
