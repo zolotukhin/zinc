@@ -1095,6 +1095,27 @@ fn canUseBatchedPrefill(engine: *const InferenceEngine) bool {
     return true;
 }
 
+const BatchedPrefillAttentionDims = struct {
+    max_q_dim: u32,
+    max_kv_dim: u32,
+};
+
+fn batchedPrefillAttentionDims(engine: *const InferenceEngine) !BatchedPrefillAttentionDims {
+    const cfg = engine.config;
+    const hidden_dim = cfg.hidden_dim;
+    var max_q_dim: u32 = 0;
+    var max_kv_dim: u32 = 0;
+
+    for (engine.layer_tensors) |lt| {
+        const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
+        max_q_dim = @max(max_q_dim, attn.q_dim);
+        max_kv_dim = @max(max_kv_dim, attn.kv_dim);
+    }
+
+    if (max_q_dim == 0 or max_kv_dim == 0) return error.InvalidTensorShape;
+    return .{ .max_q_dim = max_q_dim, .max_kv_dim = max_kv_dim };
+}
+
 /// Scratch GPU buffers needed by `prefillBatched` for a batch of `n_tokens`.
 /// All buffers are shared-mode so CPU code can dequantize embeddings directly
 /// into `hidden` and read the last-token slice back out at the end.
@@ -2519,7 +2540,7 @@ pub const InferenceEngine = struct {
         const cfg = self.config;
         const hidden_dim = cfg.hidden_dim;
         const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
-        const attn = try resolveLayerAttentionParams(cfg, self.layer_tensors[0], hidden_dim, self.kv_cache_q8);
+        const attn_dims = try batchedPrefillAttentionDims(self);
 
         if (position_base == 0 and state.generated_tokens.items.len == 0) {
             try self.resetRequestState(target_context_tokens);
@@ -2527,7 +2548,7 @@ pub const InferenceEngine = struct {
             state.generated_tokens.clearRetainingCapacity();
         }
 
-        var scratch = try BatchedPrefillScratch.init(self, n_tokens, attn.q_dim, attn.kv_dim, inter_dim);
+        var scratch = try BatchedPrefillScratch.init(self, n_tokens, attn_dims.max_q_dim, attn_dims.max_kv_dim, inter_dim);
         defer scratch.deinit();
 
         // Pre-dequantize embeddings for the whole prompt into scratch.hidden.
@@ -2546,9 +2567,10 @@ pub const InferenceEngine = struct {
 
         for (0..cfg.n_layers) |layer_idx| {
             const lt = self.layer_tensors[layer_idx];
+            const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, self.kv_cache_q8);
             const q_t = lt.attn_q.?;
             const k_t = lt.attn_k.?;
-            const v_t = lt.attn_v.?;
+            const v_t = if (attn.use_k_as_v) k_t else lt.attn_v.?;
             const o_t = lt.attn_output.?;
             const gate_t = lt.ffn_gate.?;
             const up_t = lt.ffn_up.?;
