@@ -40,7 +40,7 @@ header h1 span{color:var(--accent)}
 .model-progress.indeterminate .model-progress-fill{width:35%;animation:slide 1.15s linear infinite}
 @keyframes slide{from{transform:translateX(-120%)}to{transform:translateX(320%)}}
 #messages{flex:1;overflow-y:auto;padding:20px;scroll-behavior:smooth}
-.msg{display:flex;gap:10px;margin-bottom:14px;max-width:720px;margin-left:auto;margin-right:auto;animation:fadeIn .2s ease}
+.msg{display:flex;gap:10px;margin-bottom:14px;max-width:960px;margin-left:auto;margin-right:auto;animation:fadeIn .2s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .msg.u{justify-content:flex-end}
 .msg .av{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px}
@@ -116,7 +116,7 @@ header h1 span{color:var(--accent)}
 .model-picker{min-height:auto;margin-top:10vh}
 }
 #ia{padding:12px 20px;background:var(--bg2);border-top:1px solid var(--border)}
-#ia .in{max-width:720px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
+#ia .in{max-width:960px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
 #ia textarea{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;font-size:14px;font-family:inherit;resize:none;min-height:42px;max-height:140px;line-height:1.5;transition:border-color .15s}
 #ia textarea:focus{outline:none;border-color:var(--accent)}
 #ia textarea::placeholder{color:var(--muted)}
@@ -129,7 +129,7 @@ header h1 span{color:var(--accent)}
 #ia .btn-clear{background:var(--bg3);color:var(--muted);border:1px solid var(--border);padding:0 14px;font-size:12px;font-weight:600}
 #ia .btn-clear:hover{border-color:var(--accent);color:#fff}
 #ia .btn:disabled{opacity:.25;cursor:not-allowed}
-.hint{text-align:center;font-size:11px;color:var(--muted);margin-top:6px;max-width:720px;margin-left:auto;margin-right:auto}
+.hint{text-align:center;font-size:11px;color:var(--muted);margin-top:6px;max-width:960px;margin-left:auto;margin-right:auto}
 @media (max-width:720px){
 body{height:100dvh}
 header{padding:10px 12px;gap:8px}
