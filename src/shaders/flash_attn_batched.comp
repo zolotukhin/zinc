@@ -56,10 +56,14 @@ shared float s_scores[BLOCK_SIZE];
 // budget as the prior scalar s_q[512]). See flash_attn.comp for the
 // equivalent decode-side change.
 shared vec4 s_q4[128];     // supports head_dim up to 512
-// Page-id cache. Phase 4's V-accumulation does block_len lookups per
-// (thread, d) pair; caching once per block makes the inner loops
-// shared-memory only.
-shared uint s_page_ids_block[BLOCK_SIZE];
+// Per-block KV base offset cache. Mirrors flash_attn.comp: K[i,:] and
+// V[i,:] live at the same in-buffer offset (kv_head * head_dim is uniform
+// across i), so we precompute the vec4 base for the whole block once.
+// The inner loops in Phase 1 and Phase 4 then reduce to a single LDS
+// read + the d4 offset, avoiding the per-iter base arithmetic that was
+// duplicated across (lane, phase) pairs. 256 * 4 B = 1 KB LDS, same
+// budget as the prior s_page_ids_block.
+shared uint s_kv_base_v4[BLOCK_SIZE];
 // Accumulator for output, packed as vec4 so Phase 4 can hold 4 d-values
 // per thread per LDS slot and Phase 5 emits 16-byte coherent stores.
 // 128 vec4 = 512 floats (same LDS as the prior scalar s_out[512]).
@@ -113,28 +117,39 @@ void main() {
         const uint block_end = min(block_start + BLOCK_SIZE, causal_len);
         const uint block_len = block_end - block_start;
 
-        // Stage page_ids[] for this block once so Phase 1 and Phase 4
-        // can read shared memory instead of the global page table.
+        // Precompute the K/V base offset per token slot in this block.
+        // s_kv_base_v4[i] is the vec4-index of K[i, kv_head, 0] and
+        // V[i, kv_head, 0] inside k_data_v4 / v_data_v4. Eliminates the
+        // per-(lane, phase) base computation that previously sat inside
+        // the Phase 1 and Phase 4 inner loops.
         for (uint i = tid; i < block_len; i += 64u) {
             const uint seq_pos = block_start + i;
-            s_page_ids_block[i] = page_ids[seq_pos / page_size];
+            const uint page_id = page_ids[seq_pos / page_size];
+            const uint page_off = seq_pos % page_size;
+            s_kv_base_v4[i] = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                               + kv_head * head_dim) >> 2;
         }
         barrier();
 
         // Phase 1: compute attention scores for this block (vec4 K loads).
         for (uint i = tid; i < block_len; i += 64u) {
-            const uint seq_pos = block_start + i;
-            const uint page_off = seq_pos % page_size;
-            const uint page_id  = s_page_ids_block[i];
+            const uint k_base_v4 = s_kv_base_v4[i];
 
-            const uint k_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
-                                    + kv_head * head_dim) >> 2;
-
-            float dot_acc = 0.0;
-            for (uint d4 = 0u; d4 < head_dim_v4; d4++) {
-                dot_acc += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
+            // 2-way ILP via paired acc0/acc1 mirrors flash_attn.comp.
+            // Breaks the single-acc dependency chain so two K loads +
+            // two FMAs can be in flight per inner iter. head_dim_v4 is
+            // always even in practice; tail loop is a safety net.
+            float acc0 = 0.0;
+            float acc1 = 0.0;
+            uint d4 = 0u;
+            for (; d4 + 2u <= head_dim_v4; d4 += 2u) {
+                acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
+                acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
             }
-            s_scores[i] = dot_acc * scale;
+            for (; d4 < head_dim_v4; d4++) {
+                acc0 += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
+            }
+            s_scores[i] = (acc0 + acc1) * scale;
         }
         barrier();
 
@@ -202,28 +217,14 @@ void main() {
             vec4 acc1 = vec4(0.0);
             uint i = i_lo;
             for (; i + 2u <= i_hi; i += 2u) {
-                const uint seq_pos_0 = block_start + i;
-                const uint seq_pos_1 = seq_pos_0 + 1u;
-                const uint page_off_0 = seq_pos_0 % page_size;
-                const uint page_off_1 = seq_pos_1 % page_size;
-                const uint page_id_0 = s_page_ids_block[i];
-                const uint page_id_1 = s_page_ids_block[i + 1u];
-
-                const uint v_base_v4_0 = ((page_id_0 * page_size + page_off_0) * n_kv_heads * head_dim
-                                          + kv_head * head_dim) >> 2;
-                const uint v_base_v4_1 = ((page_id_1 * page_size + page_off_1) * n_kv_heads * head_dim
-                                          + kv_head * head_dim) >> 2;
+                const uint v_base_v4_0 = s_kv_base_v4[i];
+                const uint v_base_v4_1 = s_kv_base_v4[i + 1u];
 
                 acc0 += s_scores[i] * v_data_v4[v_base_v4_0 + d4];
                 acc1 += s_scores[i + 1u] * v_data_v4[v_base_v4_1 + d4];
             }
             for (; i < i_hi; i++) {
-                const uint seq_pos = block_start + i;
-                const uint page_off = seq_pos % page_size;
-                const uint page_id  = s_page_ids_block[i];
-                const uint v_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
-                                        + kv_head * head_dim) >> 2;
-                acc0 += s_scores[i] * v_data_v4[v_base_v4 + d4];
+                acc0 += s_scores[i] * v_data_v4[s_kv_base_v4[i] + d4];
             }
             vec4 acc = acc0 + acc1;
 
@@ -238,12 +239,7 @@ void main() {
             for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
                 vec4 acc = vec4(0.0);
                 for (uint i = 0u; i < block_len; i++) {
-                    const uint seq_pos = block_start + i;
-                    const uint page_off = seq_pos % page_size;
-                    const uint page_id  = s_page_ids_block[i];
-                    const uint v_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
-                                            + kv_head * head_dim) >> 2;
-                    acc += s_scores[i] * v_data_v4[v_base_v4 + d4];
+                    acc += s_scores[i] * v_data_v4[s_kv_base_v4[i] + d4];
                 }
                 s_out_v4[d4] = s_out_v4[d4] * rescale + acc;
             }
