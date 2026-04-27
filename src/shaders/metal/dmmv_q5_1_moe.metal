@@ -9,6 +9,10 @@ using namespace metal;
 // Each workgroup handles 2 rows of one expert (matches the per-token shader's
 // 2-rows-per-WG layout). All experts share the same input vector slice in X
 // (or n_experts_used × inter_dim slices when x_expert_stride != 0).
+//
+// Gemma's expert-down shape has K=704, so the two rows in a workgroup used to
+// reread the same activation vector from device memory. Cache the vector once
+// per workgroup while keeping the existing 64-thread layout.
 
 struct MoeDmmvPush {
     uint M;
@@ -20,6 +24,8 @@ struct MoeDmmvPush {
     uint y_offset;
 };
 
+#define X_CACHE_MAX 4096
+
 kernel void main0(
     device const uchar* W                     [[buffer(0)]],
     constant MoeDmmvPush& p                   [[buffer(1)]],
@@ -27,6 +33,7 @@ kernel void main0(
     device float* Y                           [[buffer(3)]],
     device const uint* expert_ids             [[buffer(4)]],
     uint3 tg_pos                              [[threadgroup_position_in_grid]],
+    uint3 local_pos                           [[thread_position_in_threadgroup]],
     uint tid                                  [[thread_index_in_simdgroup]],
     uint sgid                                 [[simdgroup_index_in_threadgroup]]
 ) {
@@ -46,6 +53,14 @@ kernel void main0(
 
     // Per-expert input slice (x_expert_stride is in float elements).
     device const float* x = X + (p.x_offset / 4) + expert_slot * p.x_expert_stride;
+    threadgroup float x_cache[X_CACHE_MAX];
+    const bool use_cache = p.K <= X_CACHE_MAX;
+    if (use_cache) {
+        for (uint i = local_pos.x; i < p.K; i += 64u) {
+            x_cache[i] = x[i];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float sum = 0.0f;
 
@@ -74,8 +89,8 @@ kernel void main0(
             const uint q0 = lo | (bit_lo << 4);
             const uint q1 = hi | (bit_hi << 4);
 
-            const float x0 = x[base + j];
-            const float x1 = x[base + 16 + j];
+            const float x0 = use_cache ? x_cache[base + j] : x[base + j];
+            const float x1 = use_cache ? x_cache[base + 16 + j] : x[base + 16 + j];
 
             sum_qx += float(q0) * x0 + float(q1) * x1;
             sum_x  += x0 + x1;
