@@ -147,16 +147,26 @@ void main() {
             // was precomputed for this whole block at the top of the loop.
             uint k_base_v4 = s_kv_base_v4[i];
 
-            // Dot product q . k via vec4 chunks. 2-way ILP via paired
-            // accumulators acc0/acc1 mirrors the Phase 4 D-split unroll
-            // (cycle 6): breaks the single-acc dependency chain so the
-            // wave can have two K loads + two FMAs in flight per inner
-            // iter, hiding K-load latency. head_dim_v4 is even for every
-            // model in this codebase (head_dim ∈ {64,128,256,512}); the
-            // tail loop is a safety net for an odd value.
+            // Dot product q . k via vec4 chunks. 4-way ILP via paired
+            // accumulators acc0..acc3 mirrors the Phase 4 D-split 4-way
+            // unroll (cycle 9): the wave can have four K loads + four
+            // FMAs in flight per inner iter, hiding K-load latency
+            // further than the cycle-8 2-way pattern. Reads across d4
+            // are contiguous within K[i,:] so the four loads coalesce
+            // tightly. head_dim_v4 ∈ {16,32,64,128} for all models in
+            // this codebase, all multiples of 4, so the unroll is exact;
+            // the 2-way and 1-way tails are safety nets.
             float acc0 = 0.0;
             float acc1 = 0.0;
+            float acc2 = 0.0;
+            float acc3 = 0.0;
             uint d4 = 0u;
+            for (; d4 + 4u <= head_dim_v4; d4 += 4u) {
+                acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
+                acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
+                acc2 += dot(s_q4[d4 + 2u], k_data_v4[k_base_v4 + d4 + 2u]);
+                acc3 += dot(s_q4[d4 + 3u], k_data_v4[k_base_v4 + d4 + 3u]);
+            }
             for (; d4 + 2u <= head_dim_v4; d4 += 2u) {
                 acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
                 acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
@@ -165,7 +175,7 @@ void main() {
                 acc0 += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
             }
 
-            s_scores[i] = (acc0 + acc1) * scale;
+            s_scores[i] = ((acc0 + acc1) + (acc2 + acc3)) * scale;
         }
 
         barrier();

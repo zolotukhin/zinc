@@ -135,13 +135,22 @@ void main() {
         for (uint i = tid; i < block_len; i += 64u) {
             const uint k_base_v4 = s_kv_base_v4[i];
 
-            // 2-way ILP via paired acc0/acc1 mirrors flash_attn.comp.
-            // Breaks the single-acc dependency chain so two K loads +
-            // two FMAs can be in flight per inner iter. head_dim_v4 is
-            // always even in practice; tail loop is a safety net.
+            // 4-way ILP via paired acc0..acc3 mirrors flash_attn.comp.
+            // Lets four K loads + four FMAs be in flight per inner iter,
+            // hiding K-load latency further than the cycle-8 2-way path.
+            // head_dim_v4 ∈ {16,32,64,128} are all multiples of 4; the
+            // 2-way and 1-way tails are safety nets.
             float acc0 = 0.0;
             float acc1 = 0.0;
+            float acc2 = 0.0;
+            float acc3 = 0.0;
             uint d4 = 0u;
+            for (; d4 + 4u <= head_dim_v4; d4 += 4u) {
+                acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
+                acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
+                acc2 += dot(s_q4[d4 + 2u], k_data_v4[k_base_v4 + d4 + 2u]);
+                acc3 += dot(s_q4[d4 + 3u], k_data_v4[k_base_v4 + d4 + 3u]);
+            }
             for (; d4 + 2u <= head_dim_v4; d4 += 2u) {
                 acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
                 acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
@@ -149,7 +158,7 @@ void main() {
             for (; d4 < head_dim_v4; d4++) {
                 acc0 += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
             }
-            s_scores[i] = (acc0 + acc1) * scale;
+            s_scores[i] = ((acc0 + acc1) + (acc2 + acc3)) * scale;
         }
         barrier();
 
