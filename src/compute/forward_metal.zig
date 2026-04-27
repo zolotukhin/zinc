@@ -4059,8 +4059,9 @@ fn dispatchDmmvMoeQ5_1OnCmd(
         .y_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
-    // 2 rows per workgroup (matches dmmv_q5_1.metal: 2 simdgroups × 32 threads).
-    const rows_per_wg: u32 = 2;
+    // 4 rows per workgroup: each 32-lane simdgroup computes two rows while
+    // sharing the cached activation vector.
+    const rows_per_wg: u32 = 4;
     const block_size: u32 = 64;
     const wgs = (M + rows_per_wg - 1) / rows_per_wg;
     cmd.dispatchV2(&engine.dmmv_q5_1_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);

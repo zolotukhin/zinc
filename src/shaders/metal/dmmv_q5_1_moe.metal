@@ -5,9 +5,10 @@ using namespace metal;
 // per-slot expert ID from the routing buffer (router_output_buf written by
 // softmax_topk or by the Gemma fallback's CPU topKSoftmax).
 //
-// Dispatch: grid (rows / 2, n_experts_used, 1), threadgroup (64, 1, 1).
-// Each workgroup handles 2 rows of one expert (matches the per-token shader's
-// 2-rows-per-WG layout). All experts share the same input vector slice in X
+// Dispatch: grid (ceil(rows / 4), n_experts_used, 1), threadgroup (64, 1, 1).
+// Each workgroup handles 4 rows of one expert: each simdgroup computes two
+// adjacent rows while sharing the same cached activation vector. All experts
+// share the same input vector slice in X
 // (or n_experts_used × inter_dim slices when x_expert_stride != 0).
 //
 // Gemma's expert-down shape has K=704, so the two rows in a workgroup used to
@@ -40,16 +41,22 @@ kernel void main0(
     const uint expert_slot = tg_pos.y;
     const uint expert_id   = expert_ids[expert_slot];
 
-    // 32 threads per simdgroup, 2 simdgroups per threadgroup => 2 rows per WG.
-    const uint row = tg_pos.x * 2 + sgid;
-    if (row >= p.M) return;
+    // 32 threads per simdgroup, 2 simdgroups per threadgroup, 2 rows per
+    // simdgroup => 4 rows per WG. Keep all threads alive through the cache
+    // barrier even on tail workgroups.
+    const uint row0 = tg_pos.x * 4u + sgid * 2u;
+    const uint row1 = row0 + 1u;
+    const bool valid0 = row0 < p.M;
+    const bool valid1 = row1 < p.M;
 
     const uint nb  = p.K / 32;     // Q5_1 blocks per row
     const uint bpb = 24;           // bytes per Q5_1 block
 
     // Per-expert weight base offset.
-    ulong expert_base = ulong(p.a_offset) + ulong(expert_id) * ulong(p.expert_stride);
-    device const uchar* src = W + expert_base + ulong(row) * ulong(nb) * ulong(bpb);
+    const ulong expert_base = ulong(p.a_offset) + ulong(expert_id) * ulong(p.expert_stride);
+    const ulong row_bytes = ulong(nb) * ulong(bpb);
+    device const uchar* src0 = W + expert_base + ulong(row0) * row_bytes;
+    device const uchar* src1 = W + expert_base + ulong(row1) * row_bytes;
 
     // Per-expert input slice (x_expert_stride is in float elements).
     device const float* x = X + (p.x_offset / 4) + expert_slot * p.x_expert_stride;
@@ -62,46 +69,81 @@ kernel void main0(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    float sum = 0.0f;
+    if (!valid0 && !valid1) {
+        return;
+    }
+
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
 
     for (uint b = tid; b < nb; b += 32) {
-        device const uchar* block = src + b * bpb;
+        device const uchar* block0 = src0 + b * bpb;
+        device const uchar* block1 = src1 + b * bpb;
 
-        const float d = float(*((device const half*)block));
-        const float m = float(*((device const half*)(block + 2)));
+        const float d0 = float(*((device const half*)block0));
+        const float m0 = float(*((device const half*)(block0 + 2)));
+        const uint qh0 = uint(block0[4]) | (uint(block0[5]) << 8)
+                       | (uint(block0[6]) << 16) | (uint(block0[7]) << 24);
+        device const uchar* qs0 = block0 + 8;
 
-        const uint qh = uint(block[4]) | (uint(block[5]) << 8)
-                      | (uint(block[6]) << 16) | (uint(block[7]) << 24);
+        float d1 = 0.0f;
+        float m1 = 0.0f;
+        uint qh1 = 0u;
+        device const uchar* qs1 = qs0;
+        if (valid1) {
+            d1 = float(*((device const half*)block1));
+            m1 = float(*((device const half*)(block1 + 2)));
+            qh1 = uint(block1[4]) | (uint(block1[5]) << 8)
+                | (uint(block1[6]) << 16) | (uint(block1[7]) << 24);
+            qs1 = block1 + 8;
+        }
 
-        device const uchar* qs = block + 8;
         const uint base = b * 32;
 
-        float sum_qx = 0.0f;
+        float sum_qx0 = 0.0f;
+        float sum_qx1 = 0.0f;
         float sum_x  = 0.0f;
         for (uint j = 0; j < 16; j++) {
-            const uchar q_byte = qs[j];
-            const uint lo = q_byte & 0x0F;
-            const uint hi = q_byte >> 4;
+            const uchar q_byte0 = qs0[j];
+            const uint lo0 = q_byte0 & 0x0F;
+            const uint hi0 = q_byte0 >> 4;
 
-            const uint bit_lo = (qh >> j)        & 1;
-            const uint bit_hi = (qh >> (j + 16)) & 1;
+            const uint bit_lo0 = (qh0 >> j)        & 1;
+            const uint bit_hi0 = (qh0 >> (j + 16)) & 1;
 
-            const uint q0 = lo | (bit_lo << 4);
-            const uint q1 = hi | (bit_hi << 4);
+            const uint q00 = lo0 | (bit_lo0 << 4);
+            const uint q01 = hi0 | (bit_hi0 << 4);
 
             const float x0 = use_cache ? x_cache[base + j] : x[base + j];
             const float x1 = use_cache ? x_cache[base + 16 + j] : x[base + 16 + j];
 
-            sum_qx += float(q0) * x0 + float(q1) * x1;
+            sum_qx0 += float(q00) * x0 + float(q01) * x1;
             sum_x  += x0 + x1;
+
+            if (valid1) {
+                const uchar q_byte1 = qs1[j];
+                const uint lo1 = q_byte1 & 0x0F;
+                const uint hi1 = q_byte1 >> 4;
+                const uint bit_lo1 = (qh1 >> j)        & 1;
+                const uint bit_hi1 = (qh1 >> (j + 16)) & 1;
+                const uint q10 = lo1 | (bit_lo1 << 4);
+                const uint q11 = hi1 | (bit_hi1 << 4);
+                sum_qx1 += float(q10) * x0 + float(q11) * x1;
+            }
         }
 
-        sum += d * sum_qx + m * sum_x;
+        sum0 += d0 * sum_qx0 + m0 * sum_x;
+        if (valid1) {
+            sum1 += d1 * sum_qx1 + m1 * sum_x;
+        }
     }
 
-    sum = simd_sum(sum);
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
 
     if (tid == 0) {
-        Y[(p.y_offset / 4) + expert_slot * p.M + row] = sum;
+        device float* out = Y + (p.y_offset / 4) + expert_slot * p.M;
+        if (valid0) out[row0] = sum0;
+        if (valid1) out[row1] = sum1;
     }
 }
