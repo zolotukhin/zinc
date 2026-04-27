@@ -45,6 +45,12 @@ shared float s_scores[BLOCK_SIZE];
 // O(block_len * head_dim) redundant global reads per block. Staging it
 // once collapses that to one head_dim-sized cooperative load.
 shared float s_q[512];     // supports head_dim up to 512 (Gemma 4 global layers)
+// Page-id cache. Phase 4's V-accumulation re-reads page_ids[] once per
+// (d, i) pair: 64 threads * (head_dim/64) * block_len lookups per block.
+// On head_dim=128 that is 32,768 lookups per WG per block, all to a tiny
+// page table that should be cache-resident anyway. Loading once into LDS
+// at the top of each block makes the inner loops shared-memory only.
+shared uint s_page_ids_block[BLOCK_SIZE];
 // Accumulator for output vector, one element per thread slot
 shared float s_out[512];   // supports head_dim up to 512 (Gemma 4 global layers)
 // Running softmax state
@@ -91,15 +97,24 @@ void main() {
         uint block_end = min(block_start + BLOCK_SIZE, seq_len);
         uint block_len = block_end - block_start;
 
+        // Stage the page_ids[] entries for this block into LDS so both
+        // Phase 1 (one lookup per score) and Phase 4 (head_dim/64 *
+        // block_len lookups per thread) can read shared memory.
+        for (uint i = tid; i < block_len; i += 64u) {
+            uint seq_pos = block_start + i;
+            s_page_ids_block[i] = page_ids[seq_pos / page_size];
+        }
+        barrier();
+
         // --- Phase 1: Compute attention scores for this block ---
         // Each thread computes one or more scores (stride of 64 across block_len)
         for (uint i = tid; i < block_len; i += 64u) {
             uint seq_pos = block_start + i;
 
-            // Paged lookup: find which page this position is in
-            uint page_idx = seq_pos / page_size;
+            // Paged lookup uses the cached page id; offset within page is
+            // a cheap modulo of the sequence position.
             uint page_off = seq_pos % page_size;
-            uint page_id = page_ids[page_idx];
+            uint page_id = s_page_ids_block[i];
 
             // K cache layout: k_data[page_id * page_size * head_dim * n_kv_heads
             //                         + page_off * head_dim * n_kv_heads
@@ -190,9 +205,8 @@ void main() {
             float acc = 0.0;
             for (uint i = 0u; i < block_len; i++) {
                 uint seq_pos = block_start + i;
-                uint page_idx = seq_pos / page_size;
                 uint page_off = seq_pos % page_size;
-                uint page_id = page_ids[page_idx];
+                uint page_id = s_page_ids_block[i];
 
                 uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
                               + kv_head * head_dim;
