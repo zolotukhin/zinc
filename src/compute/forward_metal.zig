@@ -3144,7 +3144,7 @@ pub const InferenceEngine = struct {
                 {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_1024_pipe, .push_idx = 1, .rows_per_wg = 32, .block_size = 1024 };
                 }
-                if (k2048_or_less and
+                if (K <= 3072 and
                     self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
                     ((tensor == self.lm_head and M >= 65536) or M >= 1024))
                 {

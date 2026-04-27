@@ -20,13 +20,13 @@ inline float2 get_scale_min_k4(uint j, device const uchar* sc) {
     );
 }
 
-// Large-M specialization for K <= 2048: more rows per threadgroup than the
+// Large-M specialization for K <= 3072: more rows per threadgroup than the
 // generic kernel so the staged input vector is reused across a wider row slice.
-// The wider row slice is now restricted to K <= 2048, which keeps threadgroup
-// memory at 8 KiB and avoids the occupancy regression seen on K=4096 paths.
+// The wider row slice stays below K=4096, where prior cycles saw an occupancy
+// regression, while covering Gemma's 2816-wide shared and attention projections.
 #define TG_SIZE 512
 #define ROWS_PER_TG (TG_SIZE / 32)
-#define MAX_K_VEC4 512
+#define MAX_K_VEC4 768
 
 kernel void main0(
     device const uchar* W [[buffer(0)]],
