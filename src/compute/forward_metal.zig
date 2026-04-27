@@ -2854,15 +2854,12 @@ pub const InferenceEngine = struct {
         if (shouldCpuLmHeadFallback(self)) {
             cmd.commitAndWait();
             const src_base = @as(usize, n_tokens - 1) * hidden_dim;
-            const src_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
+            const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
             const dst_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
-            @memcpy(dst_ptr[0..hidden_dim], src_ptr[src_base .. src_base + hidden_dim]);
-            var final_cmd = try metal_command.beginCommand(self.device.ctx);
-            dispatchRmsNormOnCmd(self, &final_cmd, &self.hidden_buf, &self.norm_buf, &self.final_norm_gpu, hidden_dim, 1);
-            final_cmd.commitAndWait();
-            const in_ptr: [*]const f32 = @ptrCast(@alignCast(self.norm_buf.cpu_ptr.?));
+            @memcpy(dst_ptr[0..hidden_dim], hidden_ptr[src_base .. src_base + hidden_dim]);
+            const norm_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.norm.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
-            try cpuLmHeadFallbackWithArgmax(self, in_ptr, out_ptr);
+            try cpuLmHeadFallbackWithArgmax(self, norm_ptr + src_base, out_ptr);
         } else {
             const x_offset_bytes: u32 = (n_tokens - 1) * hidden_dim * @sizeOf(f32);
             dispatchLmHeadWithInputOffset(self, &cmd, &scratch.norm, &self.logits_buf, hidden_dim, cfg.vocab_size, x_offset_bytes);
