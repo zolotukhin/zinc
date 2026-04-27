@@ -157,18 +157,21 @@ void main() {
             // s_kv_base_uv4 lowers to a single ds_read_b32.
             uint k_base_v4 = s_kv_base_uv4[i >> 2][i & 3u];
 
-            // Dot product q . k via vec4 chunks. 8-way ILP via paired
-            // accumulators acc0..acc7 extends cycle 10's 4-way pattern to
-            // mirror Phase 4's cycle-12 8-way unroll: the wave can have
-            // eight K loads + eight FMAs in flight per inner iter, hiding
-            // K-load latency further (RDNA4 L2 hit ~50-100 cycles). Reads
-            // across d4 are contiguous within K[i,:] so the eight loads
-            // coalesce tightly within the lane's row. head_dim_v4 ∈
-            // {16,32,64,128} for all models in this codebase, all
-            // multiples of 8, so the 8-way main loop is exact for every
-            // current model; the 4-way / 2-way / 1-way tails are safety
-            // nets. Register pressure: 8 acc + 8 K vec4 in flight ≈ 40
-            // VGPR/lane, well inside RDNA4's 256 VGPR/lane limit.
+            // Dot product q . k via vec4 chunks. 16-way ILP via paired
+            // accumulators acc0..acc15 extends cycle 14's 8-way pattern
+            // to mirror Phase 4's cycle-16 16-way unroll: doubles
+            // in-flight K loads (16 vs 8) and FMAs (16 vs 8) per inner
+            // iter to better hide RDNA4 vmem latency (~50-100 cycles for
+            // L2 hits, ~500-1000 for DRAM). Reads across d4 are
+            // contiguous within K[i,:] so the 16 loads coalesce tightly
+            // within the lane's row. head_dim_v4 ∈ {16,32,64,128} for
+            // all models in this codebase, all multiples of 16, so the
+            // 16-way main loop is exact for every current model; the
+            // 8-way / 4-way / 2-way / 1-way tails are safety nets.
+            // Register pressure: 16 float acc + 16 K vec4 in flight ≈
+            // 80 VGPR/lane (16 vec4 = 64 VGPR for K, 16 acc = 16 VGPR;
+            // Q is broadcast from LDS), well inside RDNA4's 256 VGPR
+            // /lane limit.
             float acc0 = 0.0;
             float acc1 = 0.0;
             float acc2 = 0.0;
@@ -177,7 +180,33 @@ void main() {
             float acc5 = 0.0;
             float acc6 = 0.0;
             float acc7 = 0.0;
+            float acc8 = 0.0;
+            float acc9 = 0.0;
+            float acc10 = 0.0;
+            float acc11 = 0.0;
+            float acc12 = 0.0;
+            float acc13 = 0.0;
+            float acc14 = 0.0;
+            float acc15 = 0.0;
             uint d4 = 0u;
+            for (; d4 + 16u <= head_dim_v4; d4 += 16u) {
+                acc0  += dot(s_q4[d4],       k_data_v4[k_base_v4 + d4]);
+                acc1  += dot(s_q4[d4 + 1u],  k_data_v4[k_base_v4 + d4 + 1u]);
+                acc2  += dot(s_q4[d4 + 2u],  k_data_v4[k_base_v4 + d4 + 2u]);
+                acc3  += dot(s_q4[d4 + 3u],  k_data_v4[k_base_v4 + d4 + 3u]);
+                acc4  += dot(s_q4[d4 + 4u],  k_data_v4[k_base_v4 + d4 + 4u]);
+                acc5  += dot(s_q4[d4 + 5u],  k_data_v4[k_base_v4 + d4 + 5u]);
+                acc6  += dot(s_q4[d4 + 6u],  k_data_v4[k_base_v4 + d4 + 6u]);
+                acc7  += dot(s_q4[d4 + 7u],  k_data_v4[k_base_v4 + d4 + 7u]);
+                acc8  += dot(s_q4[d4 + 8u],  k_data_v4[k_base_v4 + d4 + 8u]);
+                acc9  += dot(s_q4[d4 + 9u],  k_data_v4[k_base_v4 + d4 + 9u]);
+                acc10 += dot(s_q4[d4 + 10u], k_data_v4[k_base_v4 + d4 + 10u]);
+                acc11 += dot(s_q4[d4 + 11u], k_data_v4[k_base_v4 + d4 + 11u]);
+                acc12 += dot(s_q4[d4 + 12u], k_data_v4[k_base_v4 + d4 + 12u]);
+                acc13 += dot(s_q4[d4 + 13u], k_data_v4[k_base_v4 + d4 + 13u]);
+                acc14 += dot(s_q4[d4 + 14u], k_data_v4[k_base_v4 + d4 + 14u]);
+                acc15 += dot(s_q4[d4 + 15u], k_data_v4[k_base_v4 + d4 + 15u]);
+            }
             for (; d4 + 8u <= head_dim_v4; d4 += 8u) {
                 acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
                 acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
@@ -202,7 +231,8 @@ void main() {
                 acc0 += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
             }
 
-            float score = (((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7))) * scale;
+            float score = ((((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7)))
+                          + (((acc8 + acc9) + (acc10 + acc11)) + ((acc12 + acc13) + (acc14 + acc15)))) * scale;
             s_scores_v4[i >> 2][i & 3u] = score;
             local_max = max(local_max, score);
         }
