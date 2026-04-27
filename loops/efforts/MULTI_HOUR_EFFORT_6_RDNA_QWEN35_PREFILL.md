@@ -1,81 +1,259 @@
 # Optimization 6: RDNA Prefill Recovery for Qwen3.5/3.6-35B-A3B
 
-## Current state update (2026-04-25, post-reboot, latest llama.cpp 9725a313b)
+## TL;DR  (2026-04-26, after 50 autonomous-loop cycles)
 
-Re-measured against a healthy baseline (DPM locked high, no co-resident
-systemd llama-server, llama.cpp built from master HEAD — which now has
-Gemma 4 architecture support added in fcc750875).
+**Effort 6 has moved prefill from 78.11 → 90.24 tok/s (+15.5%) over 50
+cycles.** All gains came from **micro-restructures of existing
+shaders**, NOT from the multi-week tiled-GEMM port that earlier
+cycles attempted.
 
-Long-context prefill (154-token prompt, the workload this effort
-targets):
+What landed (5 winning cycles):
+
+| cycle | tok/s | delta | what changed |
+|---|---:|---:|---|
+| 22 | 80.61 | +2.5 | wire count_experts post-prefill sweep (foundation) |
+| 28 | 83.07 | +2.5 | rms_norm_dmmv_f32 NUM_ROWS=2→1 (occupancy) |
+| 42 | 86.94 | +3.9 | rms_norm_dmmv_f32 vec4 reads/writes (cache-line) |
+| 46 | 87.82 | +0.9 | rms_norm_mul vec4 + per-thread reg cache |
+| 50 | 90.24 | +2.4 | ssm_delta_net 8t×8r → 16t×4r (cache-line + occupancy) |
+
+What was tried and reverted (cycles 14-21 + 40):
+
+The 5-step llama.cpp tiled-GEMM port was **fully implemented as
+foundationKeeps**: count_experts (cycle 14), mul_mm_q4k (cycle 16),
+mul_mmq_q4k (cycle 18), mul_mm_id_q4k (cycle 21). All four
+foundations stayed dormant. mul_mm_q4k was wired into the LM head
+only (N=1 — the worst case for tiled GEMM, since the BN tile is
+wasted) and measured FLAT (78.14 vs 78.55 noise band). The other
+three pipelines had **zero callers anywhere**. Cycle 40 audited and
+reverted **1470 LOC** of dormant infrastructure. mul_mm_q4k.comp +
+count_experts.comp survived as currently-wired infrastructure;
+mul_mm_id_q4k.comp and mul_mmq_q4k.comp were deleted.
+
+**The lesson is not "the GEMM port doesn't work."** The lesson is
+**porting foundations without wiring them into the actual hot path
+banks no tok/s** — and the wire-up is a "high-risk one-cycle
+refactor needed for buffer layout" (cycle 40 self-analysis) that
+the loop has refused to attempt in a single cycle.
+
+What's left to attempt (concrete, cycle-sized):
+
+1. **Wire mul_mm_q4k into SSM proj prefill** (the deferred cycle-40
+   work). SSM proj fires 4 DMMVs × 30 layers × 154 tokens — perfect
+   amortization shape, unlike the LM head. Two-phase plan: build
+   gather/scatter helper standalone with synthetic [M, K, N] data;
+   wire ONE projection (z is the simplest, M=d_inner) and measure SSM
+   proj phase delta.
+2. **Apply cycle-50 pattern to MoE inner loops.** dmmv_q4k_moe_kpar
+   (M=1408, NUM_ROWS=2) and dmmv_q4k_moe_fused_down_acc are
+   structurally similar to pre-cycle-50 ssm_delta. The 884ms MoE
+   bucket (24% of prefill) has been untouched since cycle 40.
+3. **Parallel-scan SSM prefill** — the largest unattacked structural
+   lever. Token-recurrent state is currently scanned token-by-token.
+4. **Q pre-load in flash_attn.comp** — eliminates head_dim × block_len
+   redundant reads in the Q.K dot loop.
+
+## Current measured gap (long-context prefill, 154-token prompt, after cycle 50)
 
 | model                       | ZINC P  | llama P  | ZINC %  |
 |-----------------------------|--------:|---------:|--------:|
-| Qwen 3.5 35B A3B Q4_K_XL    |    77.8 |    196.8 |     40% |
-| Qwen 3.6 35B A3B Q4_K_XL    |    78.5 |    189.5 |     41% |
-| Gemma 4 26B A4B (MoE)       |    40.7 |    161.1 |     25% |
-| GPT-OSS 20B                 |    94.8 |    120.3 |     79% |
+| Qwen 3.5/3.6 35B A3B Q4_K_XL |  90.24 |   ~180   |    50% |
 
-Both Qwen 35B variants stuck at 40% of llama.cpp on long-context prefill.
-Gemma 4 26B MoE worse at 25%. GPT-OSS 20B closer at 79% (smaller MoE).
-Decode side is in better shape (60-80% of llama.cpp) — the asymmetry
-reflects ZINC's MoE FFN running per-token in prefill while llama.cpp
-batches across N tokens with grouped expert dispatch.
+Latest site benchmark (short prompt, 5 tokens): ZINC 67-69 tok/s vs
+llama.cpp 182-184 tok/s. The 154-token loop benchmark is more
+favorable to ZINC (longer prefill amortizes setup overhead).
 
-## Cross-token batched MoE infrastructure (already shipped)
+ZINC remains at parity-or-better on dense models (Qwen 3 8B prefill
+164% of llama.cpp). The gap is **MoE+SSM only** and proportional to
+MoE/SSM share.
 
-Commit `c36bd23` lands `dmmv_q4k_moe_batched.comp` — Q4_K weights × N
-prompt tokens, dispatch grid `((M+1)/2, n_experts_used, n_tokens)`,
-routing buffer flattened to `[n_tokens × n_experts_used]`. Helper:
-`DmmvDispatch.recordMoeBatchedDispatch`. Pipeline loads at startup
-(`dmmv_q4k_moe_batched pipeline loaded (cross-token MoE; not yet
-wired)`) but no call site uses it yet.
+## Phase budget snapshot (after cycle 50)
 
-The shader is the GEMV equivalent of llama.cpp's grouped-expert mmq
-dispatch. With it in place, the wire-in is what's missing to close
-the prefill gap.
+Total prefill ≈ 1.7 s on the flagship 154-token benchmark (90.24 tok/s).
 
-## Wire-in plan (the actual remaining work)
+- **MoE: ~884 ms (24% of prefill)** — biggest bucket, untouched
+  since cycle 40 reverted the dormant GEMM foundations
+- SSM: ssm_delta ~450 ms (post-cycle-50), ssm_proj ~325 ms, ssm_gnorm
+  ~50 ms, ssm_out ~80 ms
+- Attention: ~340 ms (q.k dot + flash_attn + RoPE)
+- topk: ~117 ms (single-WG single-pass; cross-WG parallelism untried)
+- norm + LM head + tail: small (dead-tail-skip already shaves these)
 
-1. **Build per-layer routing buffer for all N prompt tokens.** Existing
-   `routing_capture_buf` (gated on `ZINC_CAPTURE_ROUTING=1`,
-   forward.zig:885) already has the right shape:
-   `[max_tokens × n_layers × (2 × n_experts_used × u32)]` storing
-   per-(token, slot) {expert_id, expert_weight_bits}. The capture
-   currently runs during per-token MoE; for prefillBatched, we need
-   the router DMMV to run on N tokens at once first, then softmax-topk
-   per token, then write the routing into the capture buffer.
+**Don't refresh from this snapshot blindly** — re-run with
+`ZINC_PREFILL_PROFILE=1` before targeting any sub-bucket; cycle 50's
+ssm_delta restructure shifts the budget.
 
-2. **Allocate output scratch.** `[N × n_experts_used × inter_dim]` of
-   f32. For Qwen 3.5/3.6 35B-A3B with N=154 prompt, n_experts_used=8,
-   inter=1408: 154 × 8 × 1408 × 4 = 6.7 MiB per-layer scratch. Reusable
-   across layers.
+## Why the GEMV-cross-token approach fails  (kept as record)
 
-3. **Dispatch batched gate / up / down** via
-   `recordMoeBatchedDispatch`. The shader handles all (token,
-   expert_slot) pairs in one kernel.
+Earlier cycles tried `dmmv_q4k_moe_batched.comp` (commit `c36bd23`)
+as a structural swing. It dispatches **1.7M workgroups** (M ×
+n_experts_used × n_tokens) where R9700 caps at ~1024 in flight. The
+shader stays in tree as record but should not be wired. The
+empirical evidence from 9 wire-in cycles: flat or negative.
 
-4. **Per-token weighted accumulation.** New shader: `moe_weighted_acc_batched.comp`
-   (or extend the existing `moe_weighted_acc.comp` to take a batch
-   dimension). For each token, sum n_experts_used expert outputs
-   weighted by routing probs from the routing buffer, into the per-
-   token slice of `scratch_hidden`.
+| approach | total WGs | per-WG work | WG saturation on R9700 |
+|---|---:|---|---|
+| ZINC per-token GEMV (current) | 154 × 8 × 704 = 867k | 1 dot | over-saturated, dispatch-bound |
+| `dmmv_q4k_moe_batched.comp` (GEMV cross-token) | 1408 × 8 × 154 = 1.7M | 1 dot | even worse |
+| llama.cpp `mul_mm` MUL_MAT_ID (tiled GEMM) | 22 × 1 × 128 = 2,816 | 64×64 tile = 4096 dots | balanced |
 
-5. **Relax the gate.** `canUseBatchedPrefillRdna` currently returns
-   `false` for `n_experts > 0` (line 747). Open it conditionally on
-   `pipeline_q4k_moe_batched != null` and the new `moe_weighted_acc_batched`
-   pipeline being loaded.
+The structural answer is per-expert grouped GEMM. The architectural
+shape is correct; the foundation port was correct. The missing piece
+is the **wire-up into prefillBatched** with the gather/scatter
+buffer layout.
 
-6. **Coexist with SSM layers.** qwen35moe has SSM on 30 of 40 layers.
-   Two options: (a) fall back to per-token for SSM layers within an
-   otherwise-batched prefillBatched body, or (b) defer wire-in until
-   parallel-scan SSM also lands. Option (a) is far simpler and gets
-   us the MoE-FFN savings on every layer while accepting the SSM
-   layer cost stays as-is.
+## The original port plan  (preserved as historical context — cycles 14-21 + 40 below)
 
-Validate via `ZINC_BATCHED_PREFILL=validate` — the existing per-token
-path is the reference, so if last-token logits match within ~1e-3 the
-wire-in is correct.
+The 5-step plan below was attempted and partially landed:
+
+- **Step 1 (mul_mm_q4k)**: PORTED in cycle 16, wired LM-head only,
+  measured FLAT, KEPT in tree.
+- **Step 2 (mul_mm_id_q4k)**: PORTED in cycle 21 as foundationKeep.
+  Stayed dormant. **DELETED in cycle 40 revert.**
+- **Step 3 (count_experts)**: PORTED in cycle 14, WIRED in cycle 22
+  behind ZINC_COUNT_EXPERTS_PREFILL=1, KEPT in tree.
+- **Step 4 (mul_mmq_q4k Q8_1 variant)**: PORTED in cycle 18 as
+  foundationKeep. Stayed dormant. **DELETED in cycle 40 revert.**
+- **Step 5 (wire pipeline selection in prefillBatched)**: NEVER
+  COMPLETED. Cycle 40 self-analysis flagged this as multi-cycle work.
+
+llama.cpp's MoE prefill is a four-piece system. The reference is
+unchanged; what changed is the realization that wiring is harder
+than porting:
+
+### 1. Tiled Q4_K GEMM (foundation, no MoE yet)
+
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
+  — the dispatch shape, tile loop, shared-memory cooperative loads.
+  Look at the `#ifndef COOPMAT` branch (warp-tiled MAC) since RDNA4
+  has no cooperative_matrix support.
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl`
+  — block-load + dequant helpers.
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl`
+  — Q4_K-specific block decode at lines 303-364 (can be reused; it
+  matches our existing `dmmv_q4k_moe_kpar.comp` layout exactly).
+
+**Tile params (start with these, then tune)**:
+- `BM=64, BN=64, BK=32, WM=64, WN=32, WMITER=2, WNITER=2, TM=4, TN=2`
+- `local_size_x=128` (subgroup_size=64 × NUM_WARPS=2)
+- LDS budget: `BM*(BK/2+1)*4 + BN*(BK/2+1)*4 = ~5 KiB` per WG, fits
+
+**Output**: `src/shaders/mul_mm_q4k.comp` + pipeline registration in
+`src/compute/dmmv.zig`. Test against the existing per-token Q4_K DMMV
+on a synthetic [M, K, N] matmul before integrating with prefill.
+
+### 2. MUL_MAT_ID variant (the MoE gather)
+
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_id_funcs.glsl`
+  — the `load_row_ids` function. Each WG scans the `data_ids` buffer
+  with subgroup ballot (`subgroupBallot`, `subgroupBallotBitCount`)
+  to find tokens whose routed expert matches this WG's `expert_idx`,
+  then accumulates them into a `row_ids[BN]` shared list. **This is
+  the load-balancing mechanism.** Without it, expert-grouped tiles
+  waste cycles on padding tokens.
+
+- `mul_mm.comp` lines 144-145: `gl_WorkGroupID.z = expert_idx`,
+  early-exit `if (ic*BN >= data_expert_count[expert_idx])`.
+
+**Output**: same file as #1 with `#ifdef MUL_MAT_ID` guards added,
+plus an early-exit using `data_expert_count`. Most of the GEMM body
+is unchanged.
+
+### 3. count_experts.comp (trivial helper)
+
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/count_experts.comp`
+  — 50 lines, do not modify. Reads the per-token expert_id buffer,
+  outputs a `[n_experts]` count buffer that the GEMM uses for
+  early-exit. Port directly.
+
+**Output**: `src/shaders/count_experts.comp` + pipeline + dispatch
+helper.
+
+### 4. mul_mmq variant (Q8_1-quantized activation)
+
+**Reference**:
+- `~/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq.comp`
+  — same tiled GEMM as `mul_mm` but the activation is pre-quantized to
+  Q8_1 by `quantize_q8_1.comp` (which we already have). The inner-loop
+  dot uses `dotPacked4x8EXT` (`GL_EXT_integer_dot_product`).
+  R9700 supports this — `vulkaninfo --summary | grep
+  integerDotProduct4x8BitPackedSignedAccelerated` returns true.
+- `mul_mmq_funcs.glsl` Q4_K branch (lines 303-364) is the integer-dot
+  version of the dequant + scale we already do in f32.
+
+**Output**: `src/shaders/mul_mmq_q4k.comp`. Adds another ~2× on top
+of #1-3 because activation bandwidth drops 4× (f32 → Q8_1) and the
+inner dot uses hardware integer-dot.
+
+### 5. Pipeline selection in `prefillBatched`
+
+After #1-4 land:
+- For dense FFN (Gemma 4 31B): use `mul_mm_q4k` with N=N_tokens.
+- For MoE FFN (Qwen 3.5/3.6, Gemma 4 26B, GPT-OSS): use
+  `mul_mm_id_q4k` with `data_ids` from the existing
+  `routing_capture_buf` (forward.zig:885) and `data_expert_count`
+  from #3.
+- Threshold: switch from per-token GEMV to GEMM when
+  `n_tokens > 8` (matches llama.cpp's `mul_mat_vec_max_cols = 8`
+  in `ggml-vulkan.cpp` line 267).
+
+Validate via `ZINC_BATCHED_PREFILL=validate` against the per-token
+reference. Q8_1 quantization adds ~2^-7 noise per element so the
+mmq path validates against `tol=1e-2` instead of `1e-3`; the f32
+mul_mm path should match `1e-3` cleanly.
+
+## What not to attempt  (proven dead-ends)
+
+These are the 11-cycle Effort 6 negative results. Do not re-spend
+cycles on them:
+
+- **GEMV cross-token batching** (the `dmmv_q4k_moe_batched.comp`
+  pipeline). Empirically flat or negative across 9 wire-in cycles.
+  Architecturally wrong for RDNA4 at this token-count regime.
+  Pipeline + helper stay in tree as record but should not be wired.
+- **Three-way RMS+K+V DMMV fusion** (cycle 14 of Effort 10, cycle 11
+  of Effort 6). Register pressure collapses occupancy.
+- **Wide NUM_ROWS variants on the MoE kpar shader** (cycle 12 of
+  Effort 10). Underutilizes occupancy at MoE expert M=1408.
+- **Triple-fused MoE swiglu+down+weighted-acc** (cycle 9 of Effort 6).
+  Regressed — the existing path's overlap is already good.
+- **Barrier scoping computeBarrier→computeBufferBarrier** (cycles 1,
+  16, 18 of Effort 10). RADV doesn't differentiate the access masks
+  via PipelineBarrier1; would need PipelineBarrier2 to even test
+  the hypothesis.
+
+## Existing infrastructure to reuse
+
+- `routing_capture_buf` (`forward.zig:885`, gated `ZINC_CAPTURE_ROUTING=1`).
+  Shape `[max_tokens × n_layers × (2 × n_experts_used × u32)]` storing
+  `{expert_id, weight_bits}` per (token, slot). Already populated
+  during per-token MoE; matches what `mul_mm_id_q4k` needs as
+  `data_ids` input.
+- `quantize_q8_1.comp` + `pipeline_quantize_q8_1` (commit `5103042`-ish
+  era). Activation pre-quantizer; reused as-is by step 4.
+- `dmmv_q4k_q8_1.comp` (commit `27f0c76`). Already proves the Q4_K
+  integer-dot decode path works correctly on R9700 at GEMV; the
+  per-block dequant translates directly to the GEMM inner loop.
+- `dmmv_q4k_moe_kpar.comp` Q4_K block decode (lines 100-160). Same
+  bit layout as `mul_mmq_funcs.glsl`'s Q4_K branch.
+
+## Validation
+
+Every change must pass `ZINC_BATCHED_PREFILL=validate` on every MoE
+catalog model (Qwen 3.5 35B, Qwen 3.6 35B, Gemma 4 26B, GPT-OSS 20B).
+Greedy-output check on a 50-token generation must match the per-token
+reference for the first 10 tokens minimum.
+
+## Expected outcome
+
+If steps 1-4 ship correctly, Qwen 3.6 35B-A3B prefill on R9700 should
+move from **78 → 150-200 tok/s** (closing 40% → 80-100% of
+llama.cpp). Gemma 4 26B MoE from **41 → 100-130 tok/s**. GPT-OSS
+from **95 → 100-130 tok/s** (smaller relative gain since it's
+already at 79%).
 
 ## Original plan (preserved below)
 
@@ -165,7 +343,7 @@ Only a handful of changes produced a real best-checkpoint improvement. All share
 - **Last-layer attention dead-tail extension (+~2%):** extend the dead-tail skip into the full last-layer attention block (Q/gate DMMV, Q-norm, Q-RoPE, flash_attn, sigmoid, O-proj, residual) for non-terminal prefill tokens.
 - **K-parallel non-MoE Q5_K shader (+~3%):** wave64 inner-loop parallelism on a single shader; cumulative direction for Step 8 below.
 
-Best checkpoint reached: **`28.07 tok/s`** prefill. Target: `150 tok/s` (Phase 2), `300 tok/s` (Phase 3). Roughly one fifth of the way to Phase 2 — with the flat region we have been in for many cycles, the remaining gap is structural, not incremental.
+Best checkpoint as of cycle 50 (2026-04-26): **`90.24 tok/s`** prefill. Target: `150 tok/s` (Phase 2), `300 tok/s` (Phase 3). At 60% of Phase 2 — the remaining gap is now a mix of (a) MoE bucket attack which is structural, (b) the deferred mul_mm_q4k SSM-proj wire-up, and (c) extending the cycle-42/46/50 micro-restructure pattern to remaining hot kernels.
 
 ### What has been proven flat on RDNA4 — do not try again without new evidence
 
@@ -215,15 +393,22 @@ A prior attempt extended the double-buffered prefill pipeline from 2-deep to 3-d
 
 Numbers below are for the flagship long-context benchmark. They are a snapshot; the loop should re-run with `ZINC_PREFILL_PROFILE=1` before starting a new structural attack so the agent targets the real largest bucket instead of a stale one.
 
+**Stale snapshot (first run, ~28 tok/s):**
 - attention: ~0.7 s
 - MoE (router + topk + gate_up + swiglu + down + weighted_acc): ~1.6 s
 - shared expert: small, typically <0.1 s
-- SSM (proj + conv + delta + gnorm + out): ~1.8 s — **largest single bucket**
-  - ssm_proj alone: ~1.3 s — the single largest sub-bucket
-- final tail (norm + LM head): ~0.1 s (the dead-tail skip already drops this for non-terminal tokens)
-- CPU + submit/wait gap after GPU phases sum: ~0.5–0.8 s
+- SSM (proj + conv + delta + gnorm + out): ~1.8 s
+  - ssm_proj alone: ~1.3 s
 
-The fact that SSM proj is the single largest bucket and has never been batched across prompt tokens is the loudest unexploited signal in the effort.
+**Cycle 50 snapshot (90.24 tok/s, total prefill ≈ 1.7 s):**
+- MoE: **~884 ms (24%)** — biggest bucket; untouched since cycle 40
+- ssm_delta: ~450 ms (post-cycle-50 — was ~498 ms before)
+- attention: ~340 ms
+- ssm_proj: ~325 ms
+- topk: ~117 ms
+- ssm_out + ssm_gnorm: ~130 ms combined
+
+The MoE bucket has flipped to the largest unattacked surface. ssm_proj has been restructured (kpar shaders are the active path); the deferred work is wiring mul_mm_q4k for SSM proj (cycle 40's flagged refactor).
 
 ## Dormant Infrastructure Already In The Tree
 
@@ -236,23 +421,29 @@ These code paths were added in earlier cycles and compile into the binary, but h
 
 What is **not** in the tree, despite being mentioned in earlier commits or docs:
 
-- A "device-side per-(token, layer) MoE routing capture" buffer (referenced in earlier commit messages) is not present in the working tree (no matches for `prefill_routing`, `moe_routing_buf`, `routing_capture`). Treat any plan that depends on it as needing the foundation work first.
-- No `quantize_q8_1.comp` shader, no Q8_1 buffer plumbing, no `mul_mmq` pipeline. Step 10 has to add all three.
+- ~~"device-side per-(token, layer) MoE routing capture" buffer not in tree~~ → **OUT OF DATE**: `routing_capture_buf` IS in tree (forward.zig:885, gated `ZINC_CAPTURE_ROUTING=1`). Useful as `data_ids` input to a future MUL_MAT_ID GEMM port.
+- ~~No `quantize_q8_1.comp` shader, no Q8_1 buffer plumbing, no `mul_mmq` pipeline~~ → **OUT OF DATE**: `quantize_q8_1.comp` + `pipeline_quantize_q8_1` ARE in tree. `mul_mmq_q4k.comp` was ported (cycle 18), reverted as dormant (cycle 40), deleted. Re-port + wire is the deferred work, not "Step 10 has to add all three."
 
 Any cycle whose self-analysis proposes "batch X across prompt tokens" and does not reference the existing `recordBatchDispatch` / `recordCoopMatmul` helpers is proposing unnecessary new infrastructure. Check for the existing helper first.
 
 ## Big Bets — the path to 2× and beyond
 
-The existing Steps 1–7 covered telemetry, dormant infrastructure wiring, and incremental batching. The plateau they reached is **`28.07 tok/s`** prefill on the flagship — roughly one fifth of Phase 2 (`150 tok/s`) and one tenth of Phase 3 (`300 tok/s`). To close that gap and surpass llama.cpp on this workload, the remaining wins are not micro-optimizations of the current shader family — they are **algorithmic ports from llama.cpp / vllm**. Each of the bets below is a multi-cycle investment with a concrete shape, a measured reference implementation, and an estimated upside derived from the reference codebase.
+The existing Steps 1–7 covered telemetry, dormant infrastructure wiring, and incremental batching. The first run plateaued at **`28.07 tok/s`**. The second-+third-run loop (cycles 1-50) restructured single-shader hot paths and reached **`90.24 tok/s`** at cycle 50 — 3.2× over the first-run plateau. The remaining gap to llama.cpp's ~180 tok/s is split:
 
-| Bet | Step | Reference | Est. upside on flagship 154-tok prefill | Risk |
-|-----|------|-----------|----------------------------------------|------|
-| Wave64 K-parallel single-column DMMV | 8 | llama.cpp `mul_mat_vec_base.glsl` | +30–60% directly; precondition for Steps 9/10 | Low (per-shader local change, easy A/B) |
-| NUM_COLS=2..8 specialized DMMV family on top of Step 8 | 9 | llama.cpp `mul_mat_vec_max_cols=8` | +40–80% on prompt-loop DMMVs | Low after Step 8 |
-| `quantize_q8_1` + `mul_mmq` integer dot product path | 10 | llama.cpp `mul_mmq.comp` + `quantize_q8_1.comp` | 2–4× on the largest Q4_K/Q5_K prefill DMMVs | Medium (new shader family, new buffer plumbing) |
-| Grouped-MoE GEMM (token permute → per-expert grouped matmul → unpermute) | 11 | vllm `fused_moe` + llama.cpp `mul_mat_id` | 5–10× on the MoE phase; biggest single MoE win available | Medium (correctness gates required) |
-| RDNA shared-memory occupancy limiter on flash_attn + heavy DMMV | 12 | llama.cpp `ggml-vulkan.cpp:2990` | +5–15% on attention; cleans up RDNA cache-thrash | Low (LDS allocation tweak) |
-| Coop-matrix `mul_mm` for projections where N >> 8 | 13 | llama.cpp `mul_mm.comp` + `mul_mm_funcs.glsl` | 2–3× on large prefill projections | Medium-high (largest new shader) |
+- **Algorithmic ports** still pending: parallel-scan SSM (Step 11-equivalent), grouped MoE GEMM wire-up (Step 11 in this section's nomenclature). These are multi-cycle investments.
+- **Micro-restructures** of the cycle-42/46/50 winning pattern still applicable to MoE inner loops (dmmv_q4k_moe_kpar, dmmv_q4k_moe_fused_down_acc) — single-cycle wins.
+
+Each of the bets below is a multi-cycle investment with a concrete shape, a measured reference implementation, and an estimated upside derived from the reference codebase. **NOTE (cycle 50):** Steps 8/10's foundations were ported and reverted in cycles 14-21+40 — see TL;DR. Step 11 (grouped MoE) remains the highest-leverage MoE bet and was never wired.
+
+| Bet | Step | Status (cycle 50) | Reference | Est. upside | Risk |
+|-----|------|-------------------|-----------|------------|------|
+| Wave64 K-parallel single-column DMMV | 8 | **DONE** — kpar shaders in tree (`dmmv_q4k_batch_kpar`, `dmmv_q5k_moe_kpar`, `dmmv_q6k_batch_kpar`, `dmmv_q4k_moe_kpar`); subgroupAdd-reduction pattern is the canonical inner loop. | llama.cpp `mul_mat_vec_base.glsl` | (already harvested) | — |
+| NUM_COLS=2..8 specialized DMMV family | 9 | **TRIED PIECEMEAL, FLAT** — pair-batch via existing batch shaders measured -0.12 to -0.8 tok/s across multiple cycles. NUM_COLS=2..8 on the kpar path is untried but requires different shader plumbing than what exists. | llama.cpp `mul_mat_vec_max_cols=8` | +40–80% on prompt-loop DMMVs (untested at scale) | Low after kpar |
+| `quantize_q8_1` + `mul_mmq` integer dot product path | 10 | **REVERTED** — `mul_mmq_q4k.comp` ported in cycle 18 as foundationKeep, stayed dormant, deleted in cycle 40. `quantize_q8_1.comp` survives in tree. Re-doing the same way is a known dead-end; the missing piece is the wire-up. | llama.cpp `mul_mmq.comp` + `quantize_q8_1.comp` | 2–4× on the largest Q4_K/Q5_K prefill DMMVs | Medium |
+| Grouped-MoE GEMM (token permute → per-expert grouped matmul → unpermute) | 11 | **NEVER WIRED** — `mul_mm_id_q4k.comp` ported in cycle 21 as foundationKeep, stayed dormant, **DELETED** in cycle 40. The MoE bucket (884ms = 24% of prefill) has been untouched since cycle 40. Highest-leverage MoE bet remaining. | vllm `fused_moe` + llama.cpp `mul_mat_id` | 5–10× on the MoE phase; biggest single MoE win available | Medium (correctness gates required) |
+| RDNA shared-memory occupancy limiter on flash_attn + heavy DMMV | 12 | **UNTRIED** | llama.cpp `ggml-vulkan.cpp:2990` | +5–15% on attention; cleans up RDNA cache-thrash | Low (LDS allocation tweak) |
+| Coop-matrix `mul_mm` for projections where N >> 8 | 13 | **N/A** — RDNA4 has no `cooperative_matrix` extension; the warp-tiled `mul_mm.comp` (Step 1 of the inner port plan) is what we'd port. Already attempted as `mul_mm_q4k.comp` (cycle 16, kept LM-head-only, FLAT). | llama.cpp `mul_mm.comp` + `mul_mm_funcs.glsl` | (subsumed by Step 1 wire-up of `mul_mm_q4k`) | Medium-high |
+| **NEW** Cycle-42/46/50 micro-restructure pattern | 14 | **PARTIAL** — landed +9.4 tok/s across 3 cycles. Targets: dmmv_q4k_moe_kpar, dmmv_q4k_moe_fused_down_acc, moe_weighted_acc. | (in-tree: ssm_delta_net.comp post-cycle-50, rms_norm_dmmv_f32.comp post-cycle-42) | +1–3% per kernel, compounding | Low (well-validated pattern) |
 
 ### How these bets compose
 
@@ -410,7 +601,7 @@ Primary files:
 
 Reference:
 
-- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl` (`K_PER_ITER`, subgroupAdd reduction)
+- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl` (`K_PER_ITER`, subgroupAdd reduction)
 - `mul_mat_vec.comp` (per-quant-type inner loop)
 
 Why this is the precondition:
@@ -439,7 +630,7 @@ Primary files:
 
 Reference:
 
-- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:267` (`mul_mat_vec_max_cols = 8`)
+- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:267` (`mul_mat_vec_max_cols = 8`)
 - `mul_mat_vec_base.glsl` (NUM_COLS column-loop unroll)
 
 Concrete microsteps:
@@ -467,7 +658,7 @@ Primary files (all new):
 
 Reference:
 
-- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp`
+- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp`
 - `mul_mmq.comp` + `mul_mmq_funcs.glsl`
 - `ggml-vulkan.cpp:7856` (`should_use_mmvq` heuristic) and `:7975` (`ggml_vk_quantize_q8_1` call site)
 
@@ -497,9 +688,9 @@ Primary files:
 
 Reference:
 
-- `/Users/zolotukhin/Workplace/vllm/vllm/model_executor/layers/fused_moe/fused_moe.py` (`fused_experts_impl`, `invoke_fused_moe_kernel`)
-- `/Users/zolotukhin/Workplace/vllm/vllm/model_executor/layers/fused_moe/moe_permute_unpermute.py`
-- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp` (the `MUL_MAT_ID` row-gather path)
+- `/Users/stepan/Workspace/vllm/vllm/model_executor/layers/fused_moe/fused_moe.py` (`fused_experts_impl`, `invoke_fused_moe_kernel`)
+- `/Users/stepan/Workspace/vllm/vllm/model_executor/layers/fused_moe/moe_permute_unpermute.py`
+- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp` (the `MUL_MAT_ID` row-gather path)
 
 Why this is the largest remaining MoE win:
 
@@ -529,7 +720,7 @@ Primary files:
 
 Reference:
 
-- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:2990-2994` — RDNA-specific dummy LDS allocation (26–30 KB) on flash attention to force 4-subgroup-per-SIMD occupancy and avoid cache thrashing.
+- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:2990-2994` — RDNA-specific dummy LDS allocation (26–30 KB) on flash attention to force 4-subgroup-per-SIMD occupancy and avoid cache thrashing.
 
 Concrete microstep:
 
@@ -550,8 +741,8 @@ Primary files:
 
 Reference:
 
-- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
-- `/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl` (per-quant-type tile loaders)
+- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp`
+- `/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl` (per-quant-type tile loaders)
 
 Concrete microsteps:
 

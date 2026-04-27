@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">Where Qwen 35B prefill time goes on RDNA4 at cycle 50</title>
+  <desc id="desc">A horizontal bar chart of the per-phase GPU time budget for a 154-token Qwen 3.6 35B-A3B prefill on a Radeon AI PRO R9700 at cycle 50 of effort 6, showing SSM at 925 ms, MoE at 739 ms, Attention at 333 ms, and Shared expert at 110 ms. A reference bar shows llama.cpp completing the same prompt in approximately 855 ms of wall time. Dispatch counts annotated: ZINC issues about 45,000 GPU workgroup launches per prompt where llama.cpp issues 288.</desc>
+  <defs>
+    <linearGradient id="bg-q35" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-q35" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .q-title { font: 700 30px Georgia, serif; fill: #10233c; }
+      .q-sub { font: 500 16px Arial, sans-serif; fill: #53657b; }
+      .q-label { font: 600 16px Arial, sans-serif; fill: #10233c; }
+      .q-value { font: 700 15px Arial, sans-serif; fill: #ffffff; }
+      .q-value-out { font: 700 15px Arial, sans-serif; fill: #10233c; }
+      .q-axis { font: 400 13px Arial, sans-serif; fill: #53657b; }
+      .q-note { font: 400 13px Arial, sans-serif; fill: #445567; }
+      .q-meta { font: 600 14px Arial, sans-serif; fill: #10233c; }
+      .q-meta-muted { font: 400 13px Arial, sans-serif; fill: #53657b; }
+      .q-llama { font: 700 15px Arial, sans-serif; fill: #ffffff; }
+      .q-pct { font: 600 13px Arial, sans-serif; fill: #d8e3ee; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="620" fill="url(#bg-q35)"/>
+
+  <g transform="translate(72 50)">
+    <text class="q-title">Where Qwen 35B prefill time goes on RDNA4 at cycle 50</text>
+    <text class="q-sub" x="0" y="28">154-token prompt, Qwen 3.6 35B-A3B Q4_K_XL, Radeon AI PRO R9700. ZINC at 90.24 tok/s vs llama.cpp at 180 tok/s.</text>
+  </g>
+
+  <!-- scale: 1000 ms = 480 px, bar origin x=300, axis 0 to 2000 ms -->
+  <g transform="translate(0 130)" filter="url(#shadow-q35)">
+
+    <!-- ZINC phase bars -->
+    <g>
+      <text class="q-label" x="290" y="40" text-anchor="end">SSM block</text>
+      <rect x="300" y="20" width="444" height="32" fill="#19324a" rx="4"/>
+      <text class="q-value" x="734" y="40" text-anchor="end">925 ms</text>
+      <text class="q-pct" x="754" y="40">44%</text>
+    </g>
+
+    <g>
+      <text class="q-label" x="290" y="85" text-anchor="end">MoE block</text>
+      <rect x="300" y="65" width="354" height="32" fill="#2f5877" rx="4"/>
+      <text class="q-value" x="644" y="85" text-anchor="end">739 ms</text>
+      <text class="q-pct" x="664" y="85">35%</text>
+    </g>
+
+    <g>
+      <text class="q-label" x="290" y="130" text-anchor="end">Attention</text>
+      <rect x="300" y="110" width="160" height="32" fill="#3b6d8d" rx="4"/>
+      <text class="q-value" x="450" y="130" text-anchor="end">333 ms</text>
+      <text class="q-pct" x="470" y="130">16%</text>
+    </g>
+
+    <g>
+      <text class="q-label" x="290" y="175" text-anchor="end">Shared expert</text>
+      <rect x="300" y="155" width="53" height="32" fill="#5ea0c9" rx="4"/>
+      <text class="q-value-out" x="362" y="175">110 ms (5%)</text>
+    </g>
+
+    <!-- separator -->
+    <line x1="80" y1="215" x2="1060" y2="215" stroke="#cdd6e0" stroke-width="1" stroke-dasharray="4 4"/>
+
+    <!-- llama.cpp wall reference -->
+    <g>
+      <text class="q-label" x="290" y="245" text-anchor="end">llama.cpp wall total</text>
+      <rect x="300" y="225" width="410" height="32" fill="#b95c2b" rx="4"/>
+      <text class="q-llama" x="700" y="245" text-anchor="end">855 ms</text>
+      <text class="q-meta-muted" x="720" y="245">on the same prompt and weights</text>
+    </g>
+
+    <!-- ZINC wall reference (bracket spanning the SSM+MoE+Attn+Shared total) -->
+    <g>
+      <text class="q-label" x="290" y="290" text-anchor="end">ZINC wall total</text>
+      <rect x="300" y="270" width="819" height="32" fill="#324d6c" rx="4" opacity="0.55"/>
+      <text class="q-value" x="1109" y="290" text-anchor="end">1,707 ms</text>
+      <text class="q-meta-muted" x="720" y="290">2,110 ms GPU phase, overlapping via 2-deep CB pipeline</text>
+    </g>
+
+    <!-- axis -->
+    <g transform="translate(0 320)">
+      <line x1="300" y1="0" x2="1140" y2="0" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="300" y1="0" x2="300" y2="6" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="540" y1="0" x2="540" y2="6" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="780" y1="0" x2="780" y2="6" stroke="#9fb0c0" stroke-width="1.5"/>
+      <line x1="1020" y1="0" x2="1020" y2="6" stroke="#9fb0c0" stroke-width="1.5"/>
+      <text class="q-axis" x="300" y="22" text-anchor="middle">0 ms</text>
+      <text class="q-axis" x="540" y="22" text-anchor="middle">500 ms</text>
+      <text class="q-axis" x="780" y="22" text-anchor="middle">1,000 ms</text>
+      <text class="q-axis" x="1020" y="22" text-anchor="middle">1,500 ms</text>
+    </g>
+  </g>
+
+  <!-- dispatch count callout -->
+  <g transform="translate(72 510)">
+    <text class="q-meta">Dispatches per prefill</text>
+    <text class="q-meta-muted" x="0" y="20">ZINC per-token loop: about 45,000 GPU workgroup launches.  llama.cpp batched matmul-id: 288. The 100x dispatch divergence is the structural shape of the gap, not the per-shader cost.</text>
+  </g>
+
+  <text class="q-note" x="72" y="595">Source: cycle 50 ZINC_PREFILL_PROFILE snapshot. SSM bucket includes ssm_proj 318 ms, ssm_delta 449 ms, ssm_out 113 ms, ssm_conv 50 ms, ssm_gnorm 48 ms.</text>
+</svg>

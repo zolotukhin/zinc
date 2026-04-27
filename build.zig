@@ -99,13 +99,19 @@ pub fn build(b: *std.Build) void {
         "residual_rms_norm",
         "rms_norm_add",
         "dmmv_q4k_wide",
-        "dmmv_q4k_fused_gate_up",
         "dmmv_q4k_q8_1",
         "dmmv_q4k_moe_batched",
         "dmmv_q4k_moe_fused_down_acc",
         "dmmv_q5k_moe_fused_down_acc",
         "rms_norm_dmmv_f32",
         "rms_norm_dmmv_q4k_alpha_beta",
+        // Effort-6 GEMM port: tiled Q4_K dense GEMM (Step 1) for LM head
+        // and per-expert count helper (Step 3). The MUL_MAT_ID gather
+        // (mul_mm_id_q4k) and Q8_1-activation variant (mul_mmq_q4k) were
+        // landed as foundations but never wired; reverted in cycle 40
+        // pivot. See loops/efforts/MULTI_HOUR_EFFORT_6_RDNA_QWEN35_PREFILL.md.
+        "mul_mm_q4k",
+        "count_experts",
     };
 
     const compile_shaders = b.option(bool, "shaders", "Compile GLSL shaders to SPIR-V (requires glslc)") orelse is_linux;

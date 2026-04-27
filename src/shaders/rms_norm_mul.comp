@@ -1,69 +1,98 @@
 #version 460
-// Fused RMS normalization + scale multiply
+// Fused RMS normalization + scale multiply (vec4 + register-cached x).
 // y = weight * (x / sqrt(mean(x^2) + eps))
-// Each workgroup processes one token position across the hidden dimension.
+//
+// Cycle 46 (effort-6): mirrors the cycle-42 vec4 transformation that
+// lifted rms_norm_dmmv_f32.comp from 83 → 87 tok/s. Three changes
+// vs. the prior shader:
+//   1. x[], weight[], y[] are bound as vec4 buffers — RDNA4's L1 issues
+//      128-bit loads in one transaction so the dispatch issue rate
+//      drops 4× on the inner loop.
+//   2. The N elements each thread owns are *cached in a vec4 register
+//      array between the two passes*. The first pass reads x for the
+//      sum-of-squares; the second pass would otherwise re-read the
+//      same elements. With per-WG working set (8 KiB at hidden_dim=2048,
+//      16 KiB at hidden_dim=4096) potentially exceeding the per-CU L1
+//      (32 KiB) once 16 WGs/CU are in flight, the second-pass re-read
+//      may DRAM-miss; the register cache keeps it on-chip.
+//   3. Wave64 subgroupAdd reduction matches cycle 42; non-wave64
+//      devices fall back through the gl_NumSubgroups path (below).
+//
+// Each workgroup processes one token across the hidden dimension.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+//
+// Requires N to be divisible by 4 (every supported model has hidden_dim
+// and head_dim divisible by 4 — q_norm/k_norm head_dim ∈ {64,96,128,…},
+// attn_norm hidden_dim ∈ {2048,3584,4096,…}). The dispatch-side already
+// only emits this shader on power-of-two-aligned tensors.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 64) in;
 
-layout(set = 0, binding = 0) readonly buffer X {
-    float x[];
-};
-
-layout(set = 0, binding = 1) readonly buffer Weight {
-    float weight[];
-};
-
-layout(set = 0, binding = 2) writeonly buffer Y {
-    float y[];
-};
+layout(set = 0, binding = 0) readonly  buffer X      { vec4 x_v4[];      };
+layout(set = 0, binding = 1) readonly  buffer Weight { vec4 weight_v4[]; };
+layout(set = 0, binding = 2) writeonly buffer Y      { vec4 y_v4[];      };
 
 layout(push_constant) uniform PushConstants {
-    uint N;      // hidden dimension
-    float eps;   // epsilon for numerical stability (typically 1e-5)
+    uint N;      // hidden dimension (must be divisible by 4)
+    float eps;   // epsilon for numerical stability
 };
 
-// Shared memory for partial sums when N > 64
+// MAX_PER_THREAD = 16 covers every per-token call site we have today:
+//   hidden_dim ∈ {2048, 3584, 4096} → N_v4 ∈ {512, 896, 1024}, per-thread ≤ 16
+//   head_dim ∈ {64, 96, 128}        → N_v4 ∈ {16, 24, 32}, per-thread ≤ 1
+// Each entry is 4 floats = 4 VGPRs; 16 × 4 = 64 VGPRs per thread, leaving
+// ~190 VGPRs of the 256 available so RDNA4 can schedule ≥3 waves/SIMD.
+const uint MAX_PER_THREAD = 16u;
+
+// Shared memory for cross-subgroup reduction when subgroup size < 64
+// (rare on RDNA4 but kept for portability with smaller-wave devices).
 shared float s_partial[64];
+shared float s_rms_inv;
 
 void main() {
-    uint tid = gl_LocalInvocationID.x;
-    uint token = gl_WorkGroupID.x;         // each WG handles one token
-    uint base = token * N;                 // offset into x[] for this token
+    uint tid   = gl_LocalInvocationID.x;
+    uint token = gl_WorkGroupID.x;
+    uint N_v4  = N >> 2;
+    uint base_v4 = token * N_v4;
 
-    // --- Pass 1: accumulate sum of squares ---
-    // Each thread strides across the hidden dimension, accumulating its share.
+    // --- Pass 1: read x as vec4, accumulate sum_sq, cache in registers ---
+    vec4 reg_x[MAX_PER_THREAD];
     float sum_sq = 0.0;
-    for (uint i = tid; i < N; i += 64) {
-        float val = x[base + i];
-        sum_sq += val * val;
+    uint slot = 0u;
+    for (uint i_v4 = tid; i_v4 < N_v4; i_v4 += 64u) {
+        vec4 v = x_v4[base_v4 + i_v4];
+        if (slot < MAX_PER_THREAD) reg_x[slot] = v;
+        slot++;
+        sum_sq += dot(v, v);
     }
 
-    // Reduce within the subgroup (wave64 — covers the full workgroup on RDNA4).
+    // Reduce within the subgroup (wave64 covers the full WG on RDNA4).
     sum_sq = subgroupAdd(sum_sq);
 
-    // For architectures where subgroup size < workgroup size, fall back to shared memory.
-    if (gl_SubgroupSize < 64) {
-        s_partial[tid] = sum_sq;
+    // Fallback for devices where subgroup size < workgroup size.
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) s_partial[gl_SubgroupID] = sum_sq;
         barrier();
-        if (tid == 0) {
-            float total = 0.0;
-            uint num_subgroups = (64 + gl_SubgroupSize - 1) / gl_SubgroupSize;
-            for (uint s = 0; s < num_subgroups; s++) {
-                total += s_partial[s * gl_SubgroupSize];
-            }
-            s_partial[0] = total;
+        if (tid == 0u) {
+            float merged = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_partial[sg];
+            s_rms_inv = inversesqrt(merged / float(N) + eps);
         }
         barrier();
-        sum_sq = s_partial[0];
+    } else if (tid == 0u) {
+        s_rms_inv = inversesqrt(sum_sq / float(N) + eps);
     }
+    barrier();
+    float rms_inv = s_rms_inv;
 
-    // Compute reciprocal of RMS: 1 / sqrt(mean(x^2) + eps)
-    float rms_inv = inversesqrt(sum_sq / float(N) + eps);
-
-    // --- Pass 2: normalize and multiply by weight ---
-    for (uint i = tid; i < N; i += 64) {
-        y[base + i] = weight[i] * (x[base + i] * rms_inv);
+    // --- Pass 2: replay cached x, vec4 multiply by weight, vec4 store ---
+    // For the rare N > 4096 case (per-thread count > MAX_PER_THREAD),
+    // re-read x_v4 from memory; the register cache covers the common path.
+    slot = 0u;
+    for (uint i_v4 = tid; i_v4 < N_v4; i_v4 += 64u) {
+        vec4 v = (slot < MAX_PER_THREAD) ? reg_x[slot] : x_v4[base_v4 + i_v4];
+        slot++;
+        y_v4[base_v4 + i_v4] = weight_v4[i_v4] * (v * rms_inv);
     }
 }
