@@ -221,32 +221,57 @@ void main() {
         if (head_dim_v4 == 32u) {
             uint d4 = tid & 31u;
             uint i_half = tid >> 5;
-            // half_block rounded down to multiple of 4 so both i_lo
-            // values are aligned for ds_read_b128 in the main vec4
-            // loop. For block_len < 8 this drops to 0 and the lower-half
-            // lanes idle for that block — only affects very small block
-            // lengths (decode iters at L < 8) which are far below the
-            // per-token decode cost ceiling. block_len=256 yields
-            // half_block=128 unchanged.
-            uint half_block = (block_len >> 1) & ~3u;
+            // half_block rounded down to multiple of 8 so both i_lo
+            // values are aligned for the 8-way main loop's pair of
+            // ds_read_b128 (s_kv_base_uv4[i>>2] and s_kv_base_uv4[(i>>2)+1]).
+            // For block_len < 16 this drops to 0 and the lower-half lanes
+            // idle for that block — only affects small block lengths
+            // (decode iters at L < 16) which are far below the per-token
+            // decode cost ceiling. block_len=256 yields half_block=128
+            // unchanged.
+            uint half_block = (block_len >> 1) & ~7u;
             uint i_lo = i_half * half_block;
             uint i_hi = (i_half == 0u) ? half_block : block_len;
 
-            // 4-way ILP via paired partial accumulators acc0..acc3;
-            // mirrors flash_attn.comp. Lets the wave have four V loads in
-            // flight before any FMA retires — extends cycle 6's 2-way win.
-            // With s_kv_base_uv4 / s_scores_v4 the base+score reads are
-            // each one ds_read_b128 per main-loop iter (replaces 4×
+            // 8-way ILP via partial accumulators acc0..acc7; mirrors
+            // flash_attn.comp. Lets the wave have eight V loads in flight
+            // before any FMA retires — extends cycle 9's 4-way pattern.
+            // Register pressure: 8 vec4 acc + 2 uvec4 bases + 2 vec4
+            // scores ≈ 48 extra VGPR/lane, well inside RDNA4's 256 VGPR
+            // limit. Each main-loop iter issues 2 ds_read_b128 for
+            // v_bases and 2 ds_read_b128 for scores (replaces 8×
             // ds_read_b32 each).
             vec4 acc0 = vec4(0.0);
             vec4 acc1 = vec4(0.0);
             vec4 acc2 = vec4(0.0);
             vec4 acc3 = vec4(0.0);
+            vec4 acc4 = vec4(0.0);
+            vec4 acc5 = vec4(0.0);
+            vec4 acc6 = vec4(0.0);
+            vec4 acc7 = vec4(0.0);
             uint i = i_lo;
+            // 8-way main: 8 consecutive i's per iter; for block_len=256
+            // (full block) i_hi - i_lo = 128 so 16 iters per lane.
+            for (; i + 8u <= i_hi; i += 8u) {
+                uvec4 v_bases_lo = s_kv_base_uv4[i >> 2];
+                uvec4 v_bases_hi = s_kv_base_uv4[(i >> 2) + 1u];
+                vec4 scores_lo = s_scores_v4[i >> 2];
+                vec4 scores_hi = s_scores_v4[(i >> 2) + 1u];
+
+                acc0 += scores_lo.x * v_data_v4[v_bases_lo.x + d4];
+                acc1 += scores_lo.y * v_data_v4[v_bases_lo.y + d4];
+                acc2 += scores_lo.z * v_data_v4[v_bases_lo.z + d4];
+                acc3 += scores_lo.w * v_data_v4[v_bases_lo.w + d4];
+                acc4 += scores_hi.x * v_data_v4[v_bases_hi.x + d4];
+                acc5 += scores_hi.y * v_data_v4[v_bases_hi.y + d4];
+                acc6 += scores_hi.z * v_data_v4[v_bases_hi.z + d4];
+                acc7 += scores_hi.w * v_data_v4[v_bases_hi.w + d4];
+            }
+            // 4-way tail: 0..7 leftover i's when block_len is not a
+            // multiple of 16.
             for (; i + 4u <= i_hi; i += 4u) {
                 uvec4 v_bases = s_kv_base_uv4[i >> 2];
                 vec4 scores4 = s_scores_v4[i >> 2];
-
                 acc0 += scores4.x * v_data_v4[v_bases.x + d4];
                 acc1 += scores4.y * v_data_v4[v_bases.y + d4];
                 acc2 += scores4.z * v_data_v4[v_bases.z + d4];
@@ -256,7 +281,7 @@ void main() {
                 acc0 += s_scores_v4[i >> 2][i & 3u]
                         * v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + d4];
             }
-            vec4 acc = (acc0 + acc1) + (acc2 + acc3);
+            vec4 acc = ((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7));
 
             if (i_half == 1u) {
                 s_partial_v4[d4] = acc;
