@@ -46,9 +46,15 @@ layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[];  };
 layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[];  };
 
 // Shared memory for attention block processing
-// Attention scores for one 256-token block (max scores held at once)
+// Attention scores for one 256-token block (max scores held at once),
+// packed as vec4 so Phase 4's inner V-accumulation reads four consecutive
+// scores via one ds_read_b128 instead of four ds_read_b32. Phase 1/2/3
+// still touch individual scores via swizzle (s_scores_v4[i>>2][i&3u]),
+// which the SPIR-V → AMDGPU compiler lowers to ds_read/write_b32 at the
+// scalar component offset. 64 vec4 = 256 floats, same 1 KB LDS budget.
 const uint BLOCK_SIZE = 256u;
-shared float s_scores[BLOCK_SIZE];
+const uint BLOCK_SIZE_V4 = BLOCK_SIZE >> 2;  // 64
+shared vec4 s_scores_v4[BLOCK_SIZE_V4];
 // Query vector cached in shared memory once per workgroup, packed as vec4
 // so Phase 1's dot loop reads aligned 16-byte chunks. 128 vec4 = 512
 // floats (same LDS budget as the prior scalar s_q[512]).
@@ -56,14 +62,13 @@ shared vec4 s_q4[128];     // supports head_dim up to 512 (Gemma 4 global layers
 // Per-block KV base offset cache. Each block_start..block_end token slot
 // has a fixed (page_id, page_off) pair, and K[i,:] and V[i,:] live at the
 // same in-buffer offset (the kv_head * head_dim shift is uniform across i).
-// The original shader recomputed this base per (lane, i) inside Phase 1's
-// per-i loop and again inside Phase 4's inner V-accumulation loop. With
-// the D-split path 32 lanes redundantly compute the same v_base for each
-// i — for block_len=256 that is ~32x duplicated arithmetic per block.
-// Precomputing once at block setup (parallel-loaded across the 64 lanes)
-// makes the inner loops a single LDS read per i. 256 * 4 B = 1 KB LDS,
-// same budget as the prior s_page_ids_block.
-shared uint s_kv_base_v4[BLOCK_SIZE];
+// Packed as uvec4 so Phase 4's 4-way unrolled inner loop reads four
+// consecutive bases via one ds_read_b128 instead of four ds_read_b32 —
+// halves the LDS-issue cycles on the hot V-accumulation loop alongside
+// the scores vec4 alias above. Phase 1's setup writes scalar slots via
+// the same swizzle pattern; the compiler lowers component stores to
+// ds_write_b32 at the scalar offset. 64 uvec4 = 256 uints (same 1 KB).
+shared uvec4 s_kv_base_uv4[BLOCK_SIZE_V4];
 // Accumulator for output vector, packed as vec4 so Phase 4's V-acc holds
 // 4 d-values per thread in one 16-byte LDS slot and Phase 5 writes back
 // 16 bytes per coherent store. 128 vec4 = 512 floats (same LDS as the
@@ -121,31 +126,36 @@ void main() {
         uint block_len = block_end - block_start;
 
         // Precompute the K/V base offset per token slot in this block.
-        // s_kv_base_v4[i] is the vec4-index of K[i, kv_head, 0] and
-        // V[i, kv_head, 0] inside k_data_v4 / v_data_v4. The inner loops
-        // then index `kv_data_v4[s_kv_base_v4[i] + d4]` with no per-iter
-        // arithmetic. Combines the prior page-id cache with the base
-        // computation that was duplicated across (lane, phase) pairs.
+        // s_kv_base_uv4[i>>2][i&3u] is the vec4-index of K[i, kv_head, 0]
+        // and V[i, kv_head, 0] inside k_data_v4 / v_data_v4. Phase 1 reads
+        // one base per i via component access; Phase 4's 4-way unrolled
+        // inner loop reads four bases at once as a uvec4 LDS broadcast.
         for (uint i = tid; i < block_len; i += 64u) {
             uint seq_pos = block_start + i;
             uint page_id = page_ids[seq_pos / page_size];
             uint page_off = seq_pos % page_size;
-            s_kv_base_v4[i] = ((page_id * page_size + page_off) * n_kv_heads * head_dim
-                               + kv_head * head_dim) >> 2;
+            s_kv_base_uv4[i >> 2][i & 3u] = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                              + kv_head * head_dim) >> 2;
         }
         barrier();
 
-        // --- Phase 1: Compute attention scores for this block ---
-        // Each thread computes one or more scores (stride of 64 across block_len).
+        // --- Phase 1+2: Compute attention scores AND track local max ---
+        // Each thread computes its scores (stride 64 across block_len) and
+        // updates local_max in the same pass — eliminates Phase 2's full
+        // read-back of s_scores and the cycle-0 barrier between Phase 1
+        // and Phase 2 (each lane only reads/writes its own s_scores slot
+        // here, so no cross-lane LDS dependency exists in this segment).
         // K is read as vec4: each iteration loads 16 bytes per thread and
         // performs one dot(vec4, vec4), so the inner loop runs head_dim/4
         // iterations instead of head_dim. q_base/k_base are head_dim-aligned
         // and head_dim is divisible by 4, so the vec4 alias is valid.
+        float local_max = -1.0e30;
         for (uint i = tid; i < block_len; i += 64u) {
-            // K cache layout (vec4 view): k_data_v4[s_kv_base_v4[i] + d4]
+            // K cache layout (vec4 view): k_data_v4[k_base_v4 + d4]
             // covers head_dim/4 vec4 chunks of K[i, kv_head, :]. The base
-            // was precomputed for this whole block at the top of the loop.
-            uint k_base_v4 = s_kv_base_v4[i];
+            // was precomputed for this whole block; the swizzle access on
+            // s_kv_base_uv4 lowers to a single ds_read_b32.
+            uint k_base_v4 = s_kv_base_uv4[i >> 2][i & 3u];
 
             // Dot product q . k via vec4 chunks. 4-way ILP via paired
             // accumulators acc0..acc3 mirrors the Phase 4 D-split 4-way
@@ -175,16 +185,11 @@ void main() {
                 acc0 += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
             }
 
-            s_scores[i] = ((acc0 + acc1) + (acc2 + acc3)) * scale;
+            float score = ((acc0 + acc1) + (acc2 + acc3)) * scale;
+            s_scores_v4[i >> 2][i & 3u] = score;
+            local_max = max(local_max, score);
         }
 
-        barrier();
-
-        // --- Phase 2: Find max score in this block (for numerical stability) ---
-        float local_max = -1.0e30;
-        for (uint i = tid; i < block_len; i += 64u) {
-            local_max = max(local_max, s_scores[i]);
-        }
         float block_max = subgroupMax(local_max);
         if (gl_NumSubgroups > 1u) {
             if (gl_SubgroupInvocationID == 0u) {
@@ -208,8 +213,8 @@ void main() {
         // --- Phase 3: Compute exp(score - new_max) and sum ---
         float local_sum = 0.0;
         for (uint i = tid; i < block_len; i += 64u) {
-            float e = exp(s_scores[i] - new_max);
-            s_scores[i] = e;
+            float e = exp(s_scores_v4[i >> 2][i & 3u] - new_max);
+            s_scores_v4[i >> 2][i & 3u] = e;
             local_sum += e;
         }
         float block_sum = subgroupAdd(local_sum);
@@ -252,39 +257,49 @@ void main() {
         if (head_dim_v4 == 32u) {
             uint d4 = tid & 31u;
             uint i_half = tid >> 5;
-            uint half_block = (block_len + 1u) >> 1;
+            // half_block must round down to a multiple of 4 so both i_lo
+            // values are aligned for ds_read_b128 in the main vec4 loop.
+            // For block_len < 8 this drops to 0, idling the lower-half
+            // 32 lanes for that block — only block_lens 1..7 are affected
+            // (decode iters at very small L), and those iters are far
+            // below the per-token decode cost ceiling, so the small-L
+            // penalty is negligible. For block_len=256 (the dominant
+            // case at L=1500) this yields half_block=128 unchanged.
+            uint half_block = (block_len >> 1) & ~3u;
             uint i_lo = i_half * half_block;
-            uint i_hi = (i_half == 0u) ? min(half_block, block_len) : block_len;
+            uint i_hi = (i_half == 0u) ? half_block : block_len;
 
             // Split the i-loop accumulator into four independent partial
             // accumulators acc0..acc3 and unroll the loop by 4. Cycle 6
             // moved 1-way → 2-way and gained +14.7%; 4-way extends that
-            // by exposing more ILP — the wave can have four V loads (and
-            // four s_scores[]/s_kv_base_v4[] reads) in flight before any
-            // FMA retires, so the FMA pipeline stays full through the
-            // V-load latency. Register pressure: 4 vec4 acc + 4 uint base
-            // = 20 extra VGPR/lane, well inside RDNA4's 256 VGPR limit.
-            // The math is identical: acc = acc0+acc1+acc2+acc3 covers the
-            // same i range. Tail loop handles 0..3 leftover i's.
+            // by exposing more ILP — the wave can have four V loads in
+            // flight before any FMA retires, so the FMA pipeline stays
+            // full through the V-load latency. Register pressure: 4 vec4
+            // acc + 1 uvec4 base + 1 vec4 scores = 24 extra VGPR/lane,
+            // well inside RDNA4's 256 VGPR limit. With the vec4 scores
+            // and uvec4 base aliases, each main-loop iter issues 1
+            // ds_read_b128 for v_bases (replaces 4 ds_read_b32) and 1
+            // ds_read_b128 for scores (replaces 4 ds_read_b32) — halves
+            // the LDS-issue cycles in the inner loop.
             vec4 acc0 = vec4(0.0);
             vec4 acc1 = vec4(0.0);
             vec4 acc2 = vec4(0.0);
             vec4 acc3 = vec4(0.0);
             uint i = i_lo;
             for (; i + 4u <= i_hi; i += 4u) {
-                uint v_base_v4_0 = s_kv_base_v4[i];
-                uint v_base_v4_1 = s_kv_base_v4[i + 1u];
-                uint v_base_v4_2 = s_kv_base_v4[i + 2u];
-                uint v_base_v4_3 = s_kv_base_v4[i + 3u];
+                uvec4 v_bases = s_kv_base_uv4[i >> 2];
+                vec4 scores4 = s_scores_v4[i >> 2];
 
-                acc0 += s_scores[i]      * v_data_v4[v_base_v4_0 + d4];
-                acc1 += s_scores[i + 1u] * v_data_v4[v_base_v4_1 + d4];
-                acc2 += s_scores[i + 2u] * v_data_v4[v_base_v4_2 + d4];
-                acc3 += s_scores[i + 3u] * v_data_v4[v_base_v4_3 + d4];
+                acc0 += scores4.x * v_data_v4[v_bases.x + d4];
+                acc1 += scores4.y * v_data_v4[v_bases.y + d4];
+                acc2 += scores4.z * v_data_v4[v_bases.z + d4];
+                acc3 += scores4.w * v_data_v4[v_bases.w + d4];
             }
-            // Tail: handle 0..3 leftover i's.
+            // Trailing scalar tail: 0..3 leftover i's on the upper half
+            // (only present when block_len is not a multiple of 8).
             for (; i < i_hi; i++) {
-                acc0 += s_scores[i] * v_data_v4[s_kv_base_v4[i] + d4];
+                acc0 += s_scores_v4[i >> 2][i & 3u]
+                        * v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + d4];
             }
             vec4 acc = (acc0 + acc1) + (acc2 + acc3);
 
@@ -296,10 +311,29 @@ void main() {
                 s_out_v4[d4] = s_out_v4[d4] * rescale + acc + s_partial_v4[d4];
             }
         } else {
+            // Non-D-split path (head_dim_v4 != 32, e.g. head_dim=256/512).
+            // Each lane owns a unique d4 and walks the full block_len with
+            // a single accumulator. Vec4-unrolled inner loop reads scores
+            // and v_bases as one ds_read_b128 each per 4 i values; tail
+            // handles block_len%4 trailing i's.
             for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
-                vec4 acc = vec4(0.0);
-                for (uint i = 0u; i < block_len; i++) {
-                    acc += s_scores[i] * v_data_v4[s_kv_base_v4[i] + d4];
+                vec4 acc0 = vec4(0.0);
+                vec4 acc1 = vec4(0.0);
+                vec4 acc2 = vec4(0.0);
+                vec4 acc3 = vec4(0.0);
+                uint i_v4_end = block_len >> 2;
+                for (uint i_v4 = 0u; i_v4 < i_v4_end; i_v4++) {
+                    uvec4 v_bases = s_kv_base_uv4[i_v4];
+                    vec4 scores4 = s_scores_v4[i_v4];
+                    acc0 += scores4.x * v_data_v4[v_bases.x + d4];
+                    acc1 += scores4.y * v_data_v4[v_bases.y + d4];
+                    acc2 += scores4.z * v_data_v4[v_bases.z + d4];
+                    acc3 += scores4.w * v_data_v4[v_bases.w + d4];
+                }
+                vec4 acc = (acc0 + acc1) + (acc2 + acc3);
+                for (uint i = i_v4_end << 2; i < block_len; i++) {
+                    acc += s_scores_v4[i >> 2][i & 3u]
+                           * v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + d4];
                 }
                 s_out_v4[d4] = s_out_v4[d4] * rescale + acc;
             }
