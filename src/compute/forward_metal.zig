@@ -260,6 +260,7 @@ fn shouldUseGlobalQ8Override(arch: config_mod.Architecture, tensor_name: []const
     return !(std.mem.endsWith(u8, tensor_name, "ffn_gate.weight") or
         std.mem.endsWith(u8, tensor_name, "ffn_up.weight") or
         std.mem.endsWith(u8, tensor_name, "ffn_down.weight") or
+        std.mem.endsWith(u8, tensor_name, "attn_output.weight") or
         std.mem.endsWith(u8, tensor_name, "ffn_gate_shexp.weight") or
         std.mem.endsWith(u8, tensor_name, "ffn_up_shexp.weight") or
         std.mem.endsWith(u8, tensor_name, "ffn_down_shexp.weight"));
