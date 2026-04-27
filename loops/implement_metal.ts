@@ -4,7 +4,7 @@
  *
  * Autonomous loop that iteratively implements the Metal/Apple Silicon inference
  * backend. Each cycle:
- *   1. Build locally (zig build)
+ *   1. Build locally (zig build -Doptimize=ReleaseFast by default)
  *   2. Run unit tests (zig build test)
  *   3. Run inference with model (zinc -m model.gguf --prompt "..." -n N)
  *   4. Analyze output: build errors? test failures? correct tokens? tok/s?
@@ -58,6 +58,7 @@ const STALL_THRESHOLD = 5; // Cycles without tok/s improvement before studying r
 const TEST_TIMEOUT_MS = parsePositiveIntEnv("ZINC_TEST_TIMEOUT_MS", 120_000);
 const RUN_TIMEOUT_MS = parsePositiveIntEnv("ZINC_RUN_TIMEOUT_MS", 300_000);
 const STOP_ON_TARGET = parseBoolEnv("ZINC_STOP_ON_TARGET", true);
+const BUILD_OPTIMIZE = process.env.ZINC_BUILD_OPTIMIZE ?? "ReleaseFast";
 
 const BLOCKED_GIT_OPS = [
   "Bash(git checkout:*)",
@@ -110,6 +111,10 @@ function zincPromptArgs(): string[] {
 
 function displayModelLabel(): string {
   return MODEL_PATH ? basename(MODEL_PATH) : MODEL_ID;
+}
+
+function zigBuildArgs(): string[] {
+  return BUILD_OPTIMIZE === "Debug" ? ["build"] : ["build", `-Doptimize=${BUILD_OPTIMIZE}`];
 }
 
 // ── Phase detection ──────────────────────────────────────────────────
@@ -462,8 +467,9 @@ async function runCommand(
 // ── Build, test, and run ─────────────────────────────────────────────
 
 async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
-  console.log(clr("1;33", "  🔨 Building..."));
-  const build = await runCommand("zig", ["build"], { timeout: 120_000 });
+  const buildArgs = zigBuildArgs();
+  console.log(clr("1;33", `  🔨 Building (${buildArgs.join(" ")})...`));
+  const build = await runCommand("zig", buildArgs, { timeout: 120_000 });
 
   if (build.exitCode !== 0) {
     return {

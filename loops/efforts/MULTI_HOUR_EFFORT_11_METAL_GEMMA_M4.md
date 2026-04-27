@@ -20,17 +20,66 @@ ZINC_MODEL_ID=gemma4-12b-q4k-m \
 ZINC_PROMPT_MODE=chat \
 ZINC_TEST_PROMPT="What is the capital of France?" \
 ZINC_MAX_TOKENS=12 \
-ZINC_TARGET_TOK_PER_SEC=3 \
-ZINC_BENCHMARK_RUNS=1 \
+ZINC_TARGET_TOK_PER_SEC=50 \
+ZINC_STOP_ON_TARGET=0 \
+ZINC_BENCHMARK_RUNS=3 \
+ZINC_PROFILE_EVERY=1 \
+ZINC_BUILD_OPTIMIZE=ReleaseFast \
 ZINC_TEST_TIMEOUT_MS=300000 \
 ZINC_RUN_TIMEOUT_MS=900000 \
-bun loops/implement_metal.ts --effort 11 --agent codex --cycles 100
+ZINC_CODEX_REASONING_EFFORT=xhigh \
+bun loops/implement_metal.ts --resume --effort 11 --agent codex --model gpt-5.5 --cycles 100
 ```
 
 Use `--agent claude` if desired; the effort is written for either agent.
-Use `ZINC_BENCHMARK_RUNS=3` only after a candidate speedup looks real.
+Use `ZINC_BENCHMARK_RUNS=1` only for quick triage. The cycle-23 to cycle-38
+region has too much noise for one-sample keeps.
+
+Important harness detail:
+
+- `implement_metal.ts` must build the verifier binary with
+  `zig build -Doptimize=ReleaseFast`.
+- If the loop says `Building (zig build)` or the verifier measures a binary
+  produced by plain `zig build`, stop and fix the harness before optimizing.
+- Agent-side `--profile` numbers are not accepted unless the official loop
+  verifier was built with the same optimize mode.
 
 ## Current baseline
+
+Current post-cycle-38 state:
+
+```text
+Best official loop verifier: 15.89 tok/s (cycle 33)
+Current official loop verifier: 15.80 tok/s (cycle 38)
+Current stall: 17 cycles
+Cycle-38 agent ReleaseFast profile: 36.55 tok/s, correct Paris output
+Cycle-38 official verifier: 15.80 tok/s, correct Paris output
+Post-harness-fix manual ReleaseFast profile: 28.70 tok/s, correct Paris output
+Post-harness-fix manual ReleaseFast no-profile run: 25.73 tok/s, correct Paris output
+```
+
+Diagnosis:
+
+- The old official verifier path was rebuilding with plain `zig build`.
+- Agents were profiling after `zig build -Doptimize=ReleaseFast`.
+- That means the loop's keep/revert decision was comparing Debug-ish verifier
+  throughput against ReleaseFast agent profiles.
+- The next cycle must first establish a new ReleaseFast verifier baseline. Do
+  not spend another cycle on speculative kernel retunes until the verifier and
+  profile agree within normal run-to-run noise.
+
+Expected first run after the harness fix:
+
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zinc --model-id gemma4-12b-q4k-m \
+  --prompt "What is the capital of France?" --chat -n 12 --profile
+```
+
+The output must contain Paris and should be treated as the new baseline only if
+the loop verifier reports the same optimize mode and roughly the same decode
+range. If the profile is around `25-40 tok/s` but the verifier remains around
+`15 tok/s`, fix measurement before changing model kernels.
 
 Measured locally before this effort file was created:
 
@@ -91,20 +140,21 @@ Minimum acceptable milestone:
 
 - Gemma chat remains coherent on `What is the capital of France?`.
 - `zig build test` passes.
-- Decode reaches at least `1 tok/s` on the local M4 managed model.
-- 20-token chat prefill drops materially below the current 90 second range.
+- Official ReleaseFast verifier is coherent and reproducible.
+- Decode stays above the old Debug plateau of `15 tok/s`.
+- 20-token chat prefill stays materially below the original 90 second range.
 
 Target milestone:
 
-- Decode reaches at least `3 tok/s`.
-- Prefill no longer spends most of wall time in per-token fallback MoE.
-- Profile shows a named bottleneck after MoE rather than generic
+- Official ReleaseFast verifier reaches at least `50 tok/s`.
+- Prefill no longer spends most wall time in per-token fallback MoE.
+- Profile shows named remaining bottlenecks rather than generic
   `fallback-moe`.
 
 Stretch milestone:
 
 - Gemma 4 12B chat feels interactive for short prompts: first answer token
-  in under 10 seconds for the France prompt and decode above `5 tok/s`.
+  in under 5 seconds for the France prompt and decode above `70 tok/s`.
 
 ## Execution order
 
@@ -117,10 +167,25 @@ right benchmark:
 - `ZINC_PROMPT_MODE=chat`
 - `ZINC_TEST_PROMPT="What is the capital of France?"`
 - `ZINC_MAX_TOKENS=12`
-- `ZINC_BENCHMARK_RUNS=1` while iterations are slow
+- `ZINC_BUILD_OPTIMIZE=ReleaseFast`
+- `ZINC_BENCHMARK_RUNS=3` for plateau work
 
 The loop should classify `The capital of France is **Paris**.` as correct.
 If it does not, fix the harness before optimizing.
+
+Current Step 0 gate after cycle 38:
+
+1. Confirm the build line says
+   `Building (zig build -Doptimize=ReleaseFast)`.
+2. Compare the loop verifier output with an immediate `--profile` run from the
+   same binary.
+3. If verifier and profile differ by more than about 20 percent, fix the
+   measurement path before touching kernels.
+4. If both report roughly `25-40 tok/s`, reset the mental baseline to that
+   ReleaseFast number and ignore the old `15.89 tok/s` Debug plateau as a
+   performance target.
+5. If both report roughly `15 tok/s`, the agent's cycle-38 `36.55 tok/s`
+   profile was not reproducible and must not be used as evidence.
 
 ### Step 1 - Establish a Gemma MoE parity switch
 
@@ -282,6 +347,42 @@ llama.cpp shape more directly:
 
 This is higher risk and should not be the first implementation step.
 
+## Post-cycle-38 execution path
+
+The original Step 1 to Step 8 foundations have mostly landed. The remaining
+work is no longer "make Gemma coherent"; it is "make the measured ReleaseFast
+path coherent and faster." Use this order now:
+
+1. Measurement reconciliation. Do not make model-kernel edits until the official
+   verifier and `--profile` command use the same optimize mode and agree within
+   normal noise.
+2. Current bottleneck classification. Every agent cycle must quote the current
+   `--profile` lines for `commitAndWait`, `record breakdown`, `dmmv bytes`, and
+   `path bytes` before choosing an optimization.
+3. If `commitAndWait` dominates and `cmds=commits=28`, reduce the remaining GPU
+   work inside the 28 request commands. Do not chase command count unless the
+   profile proves extra commands came back.
+4. If `final` dominates record time, inspect the final norm plus LM-head path.
+   Prior CPU Q8 scheduling, row-pairing, skip-store, and GPU argmax attempts
+   already regressed, so only try a new LM-head change with before/after phase
+   timing.
+5. If `gpu-moe` or `moe-expert` bytes dominate, optimize the exact Q4_K/Q5_1
+   MoE phase shown by profile. Avoid broad fused-expert rewrites unless there
+   is a small isolated correctness test and a direct before/after profile.
+6. If prefill remains near `9-10s` for the 20-token chat prompt after decode is
+   stable, return to grouped batched prefill. Do not mix prefill and decode
+   changes in one cycle.
+
+Acceptance for future keeps:
+
+- Correct Paris answer in chat mode.
+- `zig build test` passes.
+- Official verifier, not agent-only profile, improves by at least `1 tok/s`
+  while stalled at this plateau, or a profile phase drops by at least 10 percent
+  with no verifier regression.
+- The self-analysis must name the phase it targeted and include before/after
+  numbers from the same optimize mode.
+
 ## Known dead ends - do not repeat
 
 These were already measured locally and should not be retried unless the
@@ -294,6 +395,19 @@ surrounding path has changed substantially:
 - GPU post-MoE post-norm/residual tail regressed when tried as an isolated
   micro-change.
 - Fused Q5_1 expert-down + weighted accumulate regressed.
+- Broad Gemma GPU-routed decode MoE broke correctness in cycle 3.
+- Grouped Q4_K column input-addressing changes regressed cycle 15.
+- Gemma K-as-V V-unit-norm handling in batched prefill regressed cycle 18.
+- Q5_1 four-rows-per-workgroup variants regressed cycles 24 and 28.
+- CPU Q8 LM-head scheduling, row pairing, unused-logit skip-store, and GPU
+  argmax variants regressed or broke tests in cycles 25, 26, 29, and 30.
+- vLLM-style projection-to-activation fused expert kernel regressed badly in
+  cycle 34.
+- Shared expert dual Q4_K gate/up fusion regressed in cycle 35.
+- 64-thread Q4_K fused gate/up groups regressed in cycle 37.
+- K-cap/cached Q4_K widening beyond the current `K <= 3072` should not be tried
+  unless profile identifies the `K=2816` large-M Q4_K path as the remaining
+  bottleneck and excludes the known-bad `K=4096` case.
 
 ## Measurement gates
 
@@ -319,6 +433,10 @@ Reject a change if:
 - It reduces correctness validation but only because a check was weakened.
 - It moves work from profile-visible GPU time into unprofiled CPU work.
 - It improves raw Gemma completions but regresses chat mode.
+- It is justified only by an agent-side `--profile` speedup while the official
+  verifier does not reproduce the gain under the same optimize mode.
+- It lands within one-sample noise after cycle 38 without a measured phase
+  reduction.
 
 ## Files likely to change
 
