@@ -27,18 +27,22 @@ layout(push_constant) uniform PushConstants {
     uint sink_offset;     // starting index into sink_data for this layer (layer_idx * n_heads)
 };
 
-// Buffer bindings. Q and K are aliased as vec4 so Phase 1's dot loop can
-// issue 16-byte coherent loads (one wave-instruction per 4 head_dim
-// elements) instead of 4 scalar loads. All head_dim values used in this
-// codebase (128/256/512) are divisible by 4, and q_base/k_base offsets
-// are multiples of head_dim, so the alias is always valid.
+// Buffer bindings. Q, K, V, and Output are aliased as vec4 so the inner
+// dot/V-acc loops can issue 16-byte coherent loads/stores (one wave
+// instruction per 4 head_dim elements) instead of 4 scalar ones. All
+// head_dim values used in this codebase (128/256/512) are divisible by 4,
+// and q_base/k_base/v_base/o_base offsets are multiples of head_dim, so
+// the alias is always valid. The Q/K vec4 view feeds Phase 1; the V/O
+// vec4 view feeds Phase 4 (V-acc) and Phase 5 (write-out).
 layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];     };
 layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[];  };
 layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];     };
 layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[];  };
 layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];     };
+layout(set = 0, binding = 2) readonly  buffer VCacheV4  { vec4  v_data_v4[];  };
 layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];   };
 layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];     };
+layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[];  };
 layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[];  };
 
 // Shared memory for attention block processing
@@ -55,8 +59,11 @@ shared vec4 s_q4[128];     // supports head_dim up to 512 (Gemma 4 global layers
 // page table that should be cache-resident anyway. Loading once into LDS
 // at the top of each block makes the inner loops shared-memory only.
 shared uint s_page_ids_block[BLOCK_SIZE];
-// Accumulator for output vector, one element per thread slot
-shared float s_out[512];   // supports head_dim up to 512 (Gemma 4 global layers)
+// Accumulator for output vector, packed as vec4 so Phase 4's V-acc holds
+// 4 d-values per thread in one 16-byte LDS slot and Phase 5 writes back
+// 16 bytes per coherent store. 128 vec4 = 512 floats (same LDS as the
+// prior scalar s_out[512]).
+shared vec4 s_out_v4[128]; // supports head_dim up to 512 (Gemma 4 global layers)
 // Running softmax state
 shared float s_max_old;
 shared float s_sum_old;
@@ -74,18 +81,15 @@ void main() {
     uint q_base = head * head_dim;
 
     // --- Load query vector into registers ---
-    // Each thread handles head_dim/64 elements with stride 64.
-    // For head_dim=128, each thread handles 2 elements.
-
-    // Initialize output accumulator (scalar; Phase 4 reads element-wise)
-    // and stage Q into shared memory as vec4 (Phase 1's dot loop reads
-    // 4-element chunks).
-    for (uint d = tid; d < head_dim; d += 64u) {
-        s_out[d] = 0.0;
-    }
+    // Each thread handles one vec4 (4 floats) per stride-64 step. For
+    // head_dim=128 (head_dim_v4=32) only threads 0..31 enter the loop,
+    // so init covers 32*4 = 128 floats = head_dim. For head_dim=256 all
+    // 64 threads do one iter; for head_dim=512 each thread does two
+    // iters. The same vec4 layout feeds Phase 4 (V-acc) and Phase 5.
     uint head_dim_v4 = head_dim >> 2;
     uint q_base_v4 = q_base >> 2;
     for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        s_out_v4[d4] = vec4(0.0);
         s_q4[d4] = q_data_v4[q_base_v4 + d4];
     }
 
@@ -197,28 +201,30 @@ void main() {
         }
 
         // --- Phase 4: Rescale previous accumulator + accumulate new V ---
-        // Previous accum was weighted relative to the old max; we rescale
-        // to the new max and add this block's V contribution in one pass.
-        // Each thread owns the same set of d indices in both the rescale
-        // and the accumulation (s_out[d] is touched only by thread tid for
-        // d % 64 == tid), so no inter-thread barrier is needed between
-        // them. Fusing saves one shared-memory write+read round trip and
-        // one workgroup barrier per block.
+        // V is read as vec4: each thread holds a vec4 acc covering 4
+        // contiguous d values, and the inner loop reads one 16-byte
+        // V chunk per i instead of one float. For head_dim=128 only
+        // 32 threads (tid<head_dim_v4) do work in this phase but each
+        // covers 4 d values, halving the wave's outer-loop iterations
+        // vs the prior scalar layout. For head_dim>=256 all 64 threads
+        // stay active and each vec4 op replaces 4 scalar ops.
+        // Each thread owns its own s_out_v4[d4] across both the rescale
+        // and the accumulation, so no intra-WG barrier is needed.
         float rescale = exp(s_max_old - new_max);
 
-        for (uint d = tid; d < head_dim; d += 64u) {
-            float acc = 0.0;
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            vec4 acc = vec4(0.0);
             for (uint i = 0u; i < block_len; i++) {
                 uint seq_pos = block_start + i;
                 uint page_off = seq_pos % page_size;
                 uint page_id = s_page_ids_block[i];
 
-                uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
-                              + kv_head * head_dim;
+                uint v_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                  + kv_head * head_dim) >> 2;
 
-                acc += s_scores[i] * v_data[v_base + d];
+                acc += s_scores[i] * v_data_v4[v_base_v4 + d4];
             }
-            s_out[d] = s_out[d] * rescale + acc;
+            s_out_v4[d4] = s_out_v4[d4] * rescale + acc;
         }
 
         barrier();
@@ -242,9 +248,9 @@ void main() {
     }
 
     float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
-    uint o_base = head * head_dim;
+    uint o_base_v4 = (head * head_dim) >> 2;
 
-    for (uint d = tid; d < head_dim; d += 64u) {
-        o_data[o_base + d] = s_out[d] * rescale * inv_sum;
+    for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        o_data_v4[o_base_v4 + d4] = s_out_v4[d4] * rescale * inv_sum;
     }
 }

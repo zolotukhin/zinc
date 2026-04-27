@@ -377,7 +377,7 @@ test "flash attention sink buffer stays in final normalization" {
     // pattern landed; the invariant is that sink_val still feeds final_sum.
     try expectContains(src, "float sink_val = sink_data[sink_offset + head];");
     try expectContains(src, "final_sum = s_sum_old * rescale + exp(sink_val - sink_max);");
-    try expectContains(src, "o_data[o_base + d] = s_out[d] * rescale * inv_sum;");
+    try expectContains(src, "o_data_v4[o_base_v4 + d4] = s_out_v4[d4] * rescale * inv_sum;");
 }
 
 test "F32 DMMV uses K-parallel reduction via subgroupAdd" {
@@ -525,11 +525,13 @@ test "Vulkan Q5_1 DMMV shader exists and uses factored dot product" {
 
 test "Vulkan flash_attn supports head_dim up to 512" {
     // Gemma 4 global attention layers use head_dim=512.
-    // The Vulkan shader uses shared memory sized for 512 and strided loops.
+    // The Vulkan shader uses vec4-packed shared memory sized for 512 (128 vec4)
+    // and strided loops over head_dim_v4 = head_dim/4.
     const src = @embedFile("shaders/flash_attn.comp");
-    try expectContains(src, "s_out[512]");
-    // Uses strided loop (tid increments by 64) that naturally handles any head_dim
-    try expectContains(src, "for (uint d = tid; d < head_dim; d += 64u)");
+    try expectContains(src, "shared vec4 s_out_v4[128]");
+    // Uses strided loop (tid increments by 64) that naturally handles any
+    // head_dim by iterating over head_dim_v4 vec4 chunks.
+    try expectContains(src, "for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u)");
 }
 
 test "Metal forward derives per-layer head_dim from attn_q_norm tensor" {

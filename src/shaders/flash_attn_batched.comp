@@ -32,17 +32,21 @@ layout(push_constant) uniform PushConstants {
     uint sink_offset;     // layer_idx * n_heads — index into sink_data
 };
 
-// Q and K aliased as vec4 so Phase 1's dot loop issues 16-byte coherent
-// loads instead of 4 scalar loads. Mirrors the decode-side flash_attn.comp
-// change. q_base/k_base are head_dim-aligned and head_dim is divisible
-// by 4 for every model, so the alias is always valid.
+// Q, K, V, and Output aliased as vec4 so the inner dot/V-acc loops issue
+// 16-byte coherent loads/stores instead of 4 scalar ones. Mirrors the
+// decode-side flash_attn.comp change. q_base/k_base/v_base/o_base are
+// head_dim-aligned and head_dim is divisible by 4 for every model, so
+// the alias is always valid. The Q/K view feeds Phase 1; the V/O view
+// feeds Phase 4 (V-acc) and Phase 5 (write-out).
 layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];   };
 layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[]; };
 layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];   };
 layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[]; };
 layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];   };
+layout(set = 0, binding = 2) readonly  buffer VCacheV4  { vec4  v_data_v4[]; };
 layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[]; };
 layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];   };
+layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[]; };
 layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
 
 const uint BLOCK_SIZE = 256u;
@@ -56,7 +60,10 @@ shared vec4 s_q4[128];     // supports head_dim up to 512
 // (thread, d) pair; caching once per block makes the inner loops
 // shared-memory only.
 shared uint s_page_ids_block[BLOCK_SIZE];
-shared float s_out[512];   // supports head_dim up to 512
+// Accumulator for output, packed as vec4 so Phase 4 can hold 4 d-values
+// per thread per LDS slot and Phase 5 emits 16-byte coherent stores.
+// 128 vec4 = 512 floats (same LDS as the prior scalar s_out[512]).
+shared vec4 s_out_v4[128]; // supports head_dim up to 512
 shared float s_max_old;
 shared float s_sum_old;
 shared float s_reduce[64];
@@ -78,14 +85,14 @@ void main() {
     // to KV entries [0 .. seq_start + query_idx] inclusive.
     const uint causal_len = seq_start + query_idx + 1u;
 
-    // Initialize per-query running state, scalar s_out (Phase 4 reads
-    // element-wise), and stage Q into LDS as vec4 chunks.
-    for (uint d = tid; d < head_dim; d += 64u) {
-        s_out[d] = 0.0;
-    }
+    // Initialize per-query running state, vec4-packed s_out, and stage Q
+    // into LDS as vec4 chunks. For head_dim=128 (head_dim_v4=32) only
+    // threads 0..31 enter the loop, covering 32*4 = 128 = head_dim. For
+    // head_dim=256/512 all 64 threads stay active.
     const uint head_dim_v4 = head_dim >> 2;
     const uint q_base_v4 = q_base >> 2;
     for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        s_out_v4[d4] = vec4(0.0);
         s_q4[d4] = q_data_v4[q_base_v4 + d4];
     }
     if (tid == 0u) {
@@ -166,22 +173,26 @@ void main() {
         }
 
         // Phase 4: rescale previous accum and add this block's V in one
-        // pass. Each thread owns the same s_out[d] indices in both
-        // operations, so no inter-thread barrier is required between the
-        // rescale and the accumulation.
+        // pass, with vec4 V loads. Each thread owns one vec4 of d (4
+        // contiguous floats) per stride-64 step. For head_dim=128 only
+        // 32 threads (tid<head_dim_v4) participate but each covers 4 d
+        // values, halving the wave's outer-loop iterations vs the prior
+        // scalar layout. For head_dim>=256 all 64 threads stay active.
+        // Each thread owns its own s_out_v4[d4] across both the rescale
+        // and the accumulation, so no intra-WG barrier is needed.
         const float rescale = exp(s_max_old - new_max);
 
-        for (uint d = tid; d < head_dim; d += 64u) {
-            float acc = 0.0;
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            vec4 acc = vec4(0.0);
             for (uint i = 0u; i < block_len; i++) {
                 const uint seq_pos = block_start + i;
                 const uint page_off = seq_pos % page_size;
                 const uint page_id  = s_page_ids_block[i];
-                const uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
-                                  + kv_head * head_dim;
-                acc += s_scores[i] * v_data[v_base + d];
+                const uint v_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                        + kv_head * head_dim) >> 2;
+                acc += s_scores[i] * v_data_v4[v_base_v4 + d4];
             }
-            s_out[d] = s_out[d] * rescale + acc;
+            s_out_v4[d4] = s_out_v4[d4] * rescale + acc;
         }
         barrier();
 
@@ -206,7 +217,8 @@ void main() {
     }
 
     const float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
-    for (uint d = tid; d < head_dim; d += 64u) {
-        o_data[out_base + d] = s_out[d] * rescale * inv_sum;
+    const uint out_base_v4 = out_base >> 2;
+    for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        o_data_v4[out_base_v4 + d4] = s_out_v4[d4] * rescale * inv_sum;
     }
 }
