@@ -4059,9 +4059,9 @@ fn dispatchDmmvMoeQ5_1OnCmd(
         .y_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, routing_buf };
-    // 4 rows per workgroup: each 32-lane simdgroup computes two rows while
-    // sharing the cached activation vector.
-    const rows_per_wg: u32 = 4;
+    // Match llama.cpp's Metal mul_mv_id Q5_1 shape: two simdgroups per
+    // threadgroup, four Q5_1 rows per simdgroup, one cached activation vector.
+    const rows_per_wg: u32 = 8;
     const block_size: u32 = 64;
     const wgs = (M + rows_per_wg - 1) / rows_per_wg;
     cmd.dispatchV2(&engine.dmmv_q5_1_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
@@ -10199,6 +10199,110 @@ test "dmmv_q4k_moe_k2048 shader matches CPU reference across selected experts" {
                 expected += ref_row[i] * input_slice[i];
             }
             try std.testing.expectApproxEqAbs(expected, output_ptr[slot * M + row], 0.05);
+        }
+    }
+}
+
+test "dmmv_q5_1_moe shader matches CPU reference across selected experts" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 19;
+    const K: usize = 64;
+    const n_used: usize = 3;
+    const n_experts: usize = 4;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 24;
+    const expert_stride: usize = M * row_bytes;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, n_experts * expert_stride);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, n_used * K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, n_used * M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    var routing_buf = try metal_buffer.createBuffer(ctx, n_used * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&routing_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+    @memset(routing_buf.cpu_ptr.?[0..routing_buf.size], 0);
+
+    for (0..n_experts) |expert| {
+        for (0..M) |row| {
+            for (0..blocks_per_row) |blk| {
+                const base = expert * expert_stride + row * row_bytes + blk * 24;
+                const d = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + ((expert + row + blk) % 5)))));
+                const m = @as(f16, @floatCast(-0.25 + 0.015625 * @as(f32, @floatFromInt((expert * 3 + row + blk) % 9))));
+                std.mem.writeInt(u16, weight_buf.cpu_ptr.?[base..][0..2], @bitCast(d), .little);
+                std.mem.writeInt(u16, weight_buf.cpu_ptr.?[base + 2 ..][0..2], @bitCast(m), .little);
+
+                var qh: u32 = 0;
+                for (0..32) |j| {
+                    if (((expert * 13 + row * 7 + blk * 5 + j * 3) % 5) >= 2) {
+                        qh |= @as(u32, 1) << @intCast(j);
+                    }
+                }
+                std.mem.writeInt(u32, weight_buf.cpu_ptr.?[base + 4 ..][0..4], qh, .little);
+
+                for (0..16) |j| {
+                    const lo: u8 = @intCast((expert * 11 + row * 5 + blk * 3 + j * 7) & 0x0F);
+                    const hi: u8 = @intCast((expert * 17 + row * 3 + blk * 13 + j * 5) & 0x0F);
+                    weight_buf.cpu_ptr.?[base + 8 + j] = lo | (hi << 4);
+                }
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        for (0..K) |i| {
+            const raw: i32 = @intCast((slot * 29 + i * 11 + 3) % 23);
+            input_ptr[slot * K + i] = 0.0625 * @as(f32, @floatFromInt(raw - 11));
+        }
+    }
+
+    const routing_ptr: [*]u32 = @ptrCast(@alignCast(routing_buf.cpu_ptr.?));
+    routing_ptr[0] = 3;
+    routing_ptr[1] = 0;
+    routing_ptr[2] = 2;
+
+    const push = MoeDmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = 0,
+        .expert_stride = @intCast(expert_stride),
+        .x_expert_stride = @intCast(K),
+        .x_offset = 0,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf, &routing_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 7) / 8), @intCast(n_used), 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    for (0..n_used) |slot| {
+        const expert_id = routing_ptr[slot];
+        const matrix_raw = weight_buf.cpu_ptr.?[@as(usize, expert_id) * expert_stride ..][0..expert_stride];
+        const input_slice = input_ptr[slot * K .. (slot + 1) * K];
+        for (0..M) |row| {
+            dequantRow(matrix_raw, @intCast(row), @intCast(K), .q5_1, ref_row);
+            var expected: f32 = 0.0;
+            for (0..K) |i| {
+                expected += ref_row[i] * input_slice[i];
+            }
+            try std.testing.expectApproxEqAbs(expected, output_ptr[slot * M + row], 0.001);
         }
     }
 }
