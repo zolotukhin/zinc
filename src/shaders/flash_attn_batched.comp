@@ -145,16 +145,32 @@ void main() {
         for (uint i = tid; i < block_len; i += 64u) {
             const uint k_base_v4 = s_kv_base_uv4[i >> 2][i & 3u];
 
-            // 4-way ILP via paired acc0..acc3 mirrors flash_attn.comp.
-            // Lets four K loads + four FMAs be in flight per inner iter,
-            // hiding K-load latency further than the cycle-8 2-way path.
-            // head_dim_v4 ∈ {16,32,64,128} are all multiples of 4; the
-            // 2-way and 1-way tails are safety nets.
+            // 8-way ILP via paired acc0..acc7 mirrors flash_attn.comp.
+            // Lets eight K loads + eight FMAs be in flight per inner iter,
+            // hiding K-load latency further than the cycle-10 4-way path
+            // (RDNA4 L2 hit ~50-100 cycles). head_dim_v4 ∈ {16,32,64,128}
+            // are all multiples of 8; the 4-way / 2-way / 1-way tails are
+            // safety nets. Register pressure: 8 acc + 8 K vec4 in flight ≈
+            // 40 VGPR/lane, well inside RDNA4's 256 VGPR/lane limit.
             float acc0 = 0.0;
             float acc1 = 0.0;
             float acc2 = 0.0;
             float acc3 = 0.0;
+            float acc4 = 0.0;
+            float acc5 = 0.0;
+            float acc6 = 0.0;
+            float acc7 = 0.0;
             uint d4 = 0u;
+            for (; d4 + 8u <= head_dim_v4; d4 += 8u) {
+                acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
+                acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
+                acc2 += dot(s_q4[d4 + 2u], k_data_v4[k_base_v4 + d4 + 2u]);
+                acc3 += dot(s_q4[d4 + 3u], k_data_v4[k_base_v4 + d4 + 3u]);
+                acc4 += dot(s_q4[d4 + 4u], k_data_v4[k_base_v4 + d4 + 4u]);
+                acc5 += dot(s_q4[d4 + 5u], k_data_v4[k_base_v4 + d4 + 5u]);
+                acc6 += dot(s_q4[d4 + 6u], k_data_v4[k_base_v4 + d4 + 6u]);
+                acc7 += dot(s_q4[d4 + 7u], k_data_v4[k_base_v4 + d4 + 7u]);
+            }
             for (; d4 + 4u <= head_dim_v4; d4 += 4u) {
                 acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
                 acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
@@ -168,7 +184,7 @@ void main() {
             for (; d4 < head_dim_v4; d4++) {
                 acc0 += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
             }
-            const float score = ((acc0 + acc1) + (acc2 + acc3)) * scale;
+            const float score = (((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7))) * scale;
             s_scores_v4[i >> 2][i & 3u] = score;
             local_max = max(local_max, score);
         }
