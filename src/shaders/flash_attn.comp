@@ -186,21 +186,16 @@ void main() {
             block_sum = s_reduce_scalar;
         }
 
-        // --- Phase 4: Rescale previous accumulator and add new contribution ---
-        // Previous accum was weighted by sum_old * exp(max_old - max_old) relative
-        // to the old max. We need to rescale it to the new max.
+        // --- Phase 4: Rescale previous accumulator + accumulate new V ---
+        // Previous accum was weighted relative to the old max; we rescale
+        // to the new max and add this block's V contribution in one pass.
+        // Each thread owns the same set of d indices in both the rescale
+        // and the accumulation (s_out[d] is touched only by thread tid for
+        // d % 64 == tid), so no inter-thread barrier is needed between
+        // them. Fusing saves one shared-memory write+read round trip and
+        // one workgroup barrier per block.
         float rescale = exp(s_max_old - new_max);
 
-        // Rescale running output and running sum
-        for (uint d = tid; d < head_dim; d += 64u) {
-            s_out[d] = s_out[d] * rescale;
-        }
-
-        barrier();
-
-        // Accumulate weighted V vectors for this block.
-        // Each thread iterates over head_dim in strides of 64 and accumulates
-        // the weighted sum of V vectors for the positions it owns.
         for (uint d = tid; d < head_dim; d += 64u) {
             float acc = 0.0;
             for (uint i = 0u; i < block_len; i++) {
@@ -213,7 +208,7 @@ void main() {
 
                 acc += s_scores[i] * v_data[v_base + d];
             }
-            s_out[d] += acc;
+            s_out[d] = s_out[d] * rescale + acc;
         }
 
         barrier();

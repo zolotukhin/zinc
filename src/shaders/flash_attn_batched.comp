@@ -41,7 +41,15 @@ layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
 
 const uint BLOCK_SIZE = 256u;
 shared float s_scores[BLOCK_SIZE];
-shared float s_out[512];  // supports head_dim up to 512
+// Q for this (head, query_idx) is constant across every score and block.
+// Stage it once at the top instead of re-reading from DRAM in the inner
+// dot loop. See flash_attn.comp for the equivalent decode-side change.
+shared float s_q[512];     // supports head_dim up to 512
+// Page-id cache. Phase 4's V-accumulation does block_len lookups per
+// (thread, d) pair; caching once per block makes the inner loops
+// shared-memory only.
+shared uint s_page_ids_block[BLOCK_SIZE];
+shared float s_out[512];   // supports head_dim up to 512
 shared float s_max_old;
 shared float s_sum_old;
 shared float s_reduce[64];
@@ -63,9 +71,10 @@ void main() {
     // to KV entries [0 .. seq_start + query_idx] inclusive.
     const uint causal_len = seq_start + query_idx + 1u;
 
-    // Initialize per-query running state.
+    // Initialize per-query running state and stage Q into LDS.
     for (uint d = tid; d < head_dim; d += 64u) {
         s_out[d] = 0.0;
+        s_q[d] = q_data[q_base + d];
     }
     if (tid == 0u) {
         s_max_old = -1.0e30;
@@ -79,19 +88,26 @@ void main() {
         const uint block_end = min(block_start + BLOCK_SIZE, causal_len);
         const uint block_len = block_end - block_start;
 
+        // Stage page_ids[] for this block once so Phase 1 and Phase 4
+        // can read shared memory instead of the global page table.
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint seq_pos = block_start + i;
+            s_page_ids_block[i] = page_ids[seq_pos / page_size];
+        }
+        barrier();
+
         // Phase 1: compute attention scores for this block.
         for (uint i = tid; i < block_len; i += 64u) {
             const uint seq_pos = block_start + i;
-            const uint page_idx = seq_pos / page_size;
             const uint page_off = seq_pos % page_size;
-            const uint page_id  = page_ids[page_idx];
+            const uint page_id  = s_page_ids_block[i];
 
             const uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
                               + kv_head * head_dim;
 
             float dot = 0.0;
             for (uint d = 0u; d < head_dim; d++) {
-                dot += q_data[q_base + d] * k_data[k_base + d];
+                dot += s_q[d] * k_data[k_base + d];
             }
             s_scores[i] = dot * scale;
         }
@@ -137,26 +153,23 @@ void main() {
             block_sum = s_reduce_scalar;
         }
 
-        // Phase 4: rescale previous accum and add this block's contribution.
+        // Phase 4: rescale previous accum and add this block's V in one
+        // pass. Each thread owns the same s_out[d] indices in both
+        // operations, so no inter-thread barrier is required between the
+        // rescale and the accumulation.
         const float rescale = exp(s_max_old - new_max);
-
-        for (uint d = tid; d < head_dim; d += 64u) {
-            s_out[d] = s_out[d] * rescale;
-        }
-        barrier();
 
         for (uint d = tid; d < head_dim; d += 64u) {
             float acc = 0.0;
             for (uint i = 0u; i < block_len; i++) {
                 const uint seq_pos = block_start + i;
-                const uint page_idx = seq_pos / page_size;
                 const uint page_off = seq_pos % page_size;
-                const uint page_id  = page_ids[page_idx];
+                const uint page_id  = s_page_ids_block[i];
                 const uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
                                   + kv_head * head_dim;
                 acc += s_scores[i] * v_data[v_base + d];
             }
-            s_out[d] += acc;
+            s_out[d] = s_out[d] * rescale + acc;
         }
         barrier();
 
