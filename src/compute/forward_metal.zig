@@ -5264,24 +5264,32 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
 }
 
 fn dotQ8_0Row(raw_data: []const u8, row: u32, cols: u32, input: [*]const f32) f32 {
+    const Vec8f = @Vector(8, f32);
+    const Vec8i8 = @Vector(8, i8);
+    const Vec8i32 = @Vector(8, i32);
     const block_size: usize = 32;
     const bpb: usize = 34;
     const bpr = @as(usize, cols) / block_size;
     const row_off = @as(usize, row) * bpr * bpb;
-    var dot: f32 = 0;
+    var acc: Vec8f = @splat(0.0);
     var in_i: usize = 0;
     for (0..bpr) |b| {
         const bo = row_off + b * bpb;
         const scale_bits = std.mem.readInt(u16, raw_data[bo..][0..2], .little);
         const scale: f32 = @floatCast(@as(f16, @bitCast(scale_bits)));
-        for (0..block_size) |j| {
-            const q: i8 = @bitCast(raw_data[bo + 2 + j]);
-            const w = @as(f32, @floatFromInt(q)) * scale;
-            dot += w * input[in_i];
-            in_i += 1;
+        const scale_vec: Vec8f = @splat(scale);
+        inline for (0..4) |chunk| {
+            const q_arr: [8]u8 = raw_data[bo + 2 + chunk * 8 ..][0..8].*;
+            const q_i8: Vec8i8 = @bitCast(q_arr);
+            const q_i32: Vec8i32 = @intCast(q_i8);
+            const q_f: Vec8f = @floatFromInt(q_i32);
+            const x_arr: [8]f32 = input[in_i + chunk * 8 ..][0..8].*;
+            const x: Vec8f = x_arr;
+            acc += (q_f * scale_vec) * x;
         }
+        in_i += block_size;
     }
-    return dot;
+    return @reduce(.Add, acc);
 }
 
 fn readMmapFloats(mmap: []const u8, base_off: usize, tensor_type: GGMLType, output: []f32) void {
