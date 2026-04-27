@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 460" role="img" aria-labelledby="kvtitle kvdesc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <title id="kvtitle">RDNA4 32 GB VRAM budget across KV cache quantization choices and context lengths</title>
+  <desc id="kvdesc">Six stacked horizontal bars sharing a 32 GB total VRAM scale on a Radeon AI PRO R9700 with Qwen3.5-35B-A3B Q4_K_M weights. Each bar shows model weights, KV cache, working memory, and any spill past the 32 GB ceiling. Top three bars compare FP16 KV at 8k, 32k, and 128k context. Bottom three bars compare 8-bit, 4-bit, and 3-bit (TurboQuant style) KV at 128k context.</desc>
+
+  <style>
+    .axis-text { fill: #444; font-size: 13px; }
+    .row-label { fill: #222; font-size: 13px; font-weight: 600; }
+    .small { fill: #555; font-size: 11px; }
+    .seg-text { fill: #fff; font-size: 12px; font-weight: 600; }
+    .ceiling { stroke: #b00020; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .ceiling-text { fill: #b00020; font-size: 12px; font-weight: 600; }
+    .header { fill: #111; font-size: 14px; font-weight: 700; }
+    .group-label { fill: #222; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }
+  </style>
+
+  <!-- chart area: x from 130 to 770 (640 px) maps to 0..40 GB -->
+  <!-- 32 GB ceiling at: 130 + 640 * 32/40 = 130 + 512 = 642 -->
+
+  <text x="20" y="28" class="header">VRAM budget on a 32 GB RDNA4 card, Qwen3.5-35B-A3B Q4_K_M (~20.0 GiB weights)</text>
+  <text x="20" y="46" class="small">Bars share a 0 to 40 GB scale. Red dashed line is the 32 GB ceiling on a Radeon AI PRO R9700.</text>
+
+  <!-- gridlines and axis -->
+  <g stroke="#ddd" stroke-width="1">
+    <line x1="130" y1="80" x2="130" y2="420" />
+    <line x1="290" y1="80" x2="290" y2="420" />
+    <line x1="450" y1="80" x2="450" y2="420" />
+    <line x1="610" y1="80" x2="610" y2="420" />
+    <line x1="770" y1="80" x2="770" y2="420" />
+  </g>
+  <g class="axis-text">
+    <text x="130" y="437" text-anchor="middle">0 GB</text>
+    <text x="290" y="437" text-anchor="middle">10 GB</text>
+    <text x="450" y="437" text-anchor="middle">20 GB</text>
+    <text x="610" y="437" text-anchor="middle">30 GB</text>
+    <text x="770" y="437" text-anchor="middle">40 GB</text>
+  </g>
+
+  <!-- 32 GB ceiling -->
+  <line x1="642" y1="72" x2="642" y2="424" class="ceiling" />
+  <text x="646" y="78" class="ceiling-text">32 GB ceiling (R9700)</text>
+
+  <!-- group labels -->
+  <text x="20" y="100" class="group-label">FP16 KV</text>
+  <text x="20" y="252" class="group-label">128k CONTEXT</text>
+
+  <!-- helper: 1 GiB ≈ 16 px (640/40), so width(GB) = GB * 16 -->
+
+  <!-- Row 1: FP16 KV, 8k context -->
+  <g>
+    <text x="125" y="118" text-anchor="end" class="row-label">FP16 KV, 8k</text>
+    <text x="125" y="134" text-anchor="end" class="small">~21.0 GiB used</text>
+    <!-- weights 20.0 GB at x=130 -->
+    <rect x="130" y="108" width="320" height="28" fill="#1f6feb" />
+    <text x="290" y="126" text-anchor="middle" class="seg-text">Weights 20.0</text>
+    <!-- KV 0.96 GiB -->
+    <rect x="450" y="108" width="15.4" height="28" fill="#f59e0b" />
+    <!-- Working 0.5 GB -->
+    <rect x="465.4" y="108" width="8" height="28" fill="#10b981" />
+    <text x="478" y="126" class="small">KV 0.96, work 0.5</text>
+  </g>
+
+  <!-- Row 2: FP16 KV, 32k context -->
+  <g>
+    <text x="125" y="158" text-anchor="end" class="row-label">FP16 KV, 32k</text>
+    <text x="125" y="174" text-anchor="end" class="small">~24.3 GiB used</text>
+    <rect x="130" y="148" width="320" height="28" fill="#1f6feb" />
+    <text x="290" y="166" text-anchor="middle" class="seg-text">Weights 20.0</text>
+    <!-- KV 3.84 GB ~ 61 px -->
+    <rect x="450" y="148" width="61.4" height="28" fill="#f59e0b" />
+    <text x="481" y="166" text-anchor="middle" class="seg-text">KV 3.84</text>
+    <rect x="511.4" y="148" width="8" height="28" fill="#10b981" />
+    <text x="524" y="166" class="small">work 0.5</text>
+  </g>
+
+  <!-- Row 3: FP16 KV, 128k context — overflows -->
+  <g>
+    <text x="125" y="198" text-anchor="end" class="row-label">FP16 KV, 128k</text>
+    <text x="125" y="214" text-anchor="end" class="small">~35.9 GiB, OOM</text>
+    <rect x="130" y="188" width="320" height="28" fill="#1f6feb" />
+    <text x="290" y="206" text-anchor="middle" class="seg-text">Weights 20.0</text>
+    <!-- KV 15.36 GB ~ 245.7 px -->
+    <rect x="450" y="188" width="245.7" height="28" fill="#f59e0b" />
+    <text x="572" y="206" text-anchor="middle" class="seg-text">KV 15.36</text>
+    <!-- working 0.5 GB ~ 8 px -->
+    <rect x="695.7" y="188" width="8" height="28" fill="#10b981" />
+    <!-- spill rectangle striped -->
+    <pattern id="spill" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#fde2e2"/>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#b00020" stroke-width="2"/>
+    </pattern>
+    <rect x="703.7" y="188" width="0" height="28" fill="url(#spill)" />
+    <text x="708" y="206" class="ceiling-text">past ceiling</text>
+  </g>
+
+  <!-- divider -->
+  <line x1="20" y1="232" x2="860" y2="232" stroke="#bbb" stroke-width="0.8" />
+
+  <!-- Row 4: INT8 KV, 128k context -->
+  <g>
+    <text x="125" y="278" text-anchor="end" class="row-label">INT8 KV, 128k</text>
+    <text x="125" y="294" text-anchor="end" class="small">~28.2 GiB used</text>
+    <rect x="130" y="268" width="320" height="28" fill="#1f6feb" />
+    <text x="290" y="286" text-anchor="middle" class="seg-text">Weights 20.0</text>
+    <!-- KV 7.68 GB ~ 122.9 px -->
+    <rect x="450" y="268" width="122.9" height="28" fill="#f59e0b" />
+    <text x="511" y="286" text-anchor="middle" class="seg-text">KV 7.68</text>
+    <rect x="572.9" y="268" width="8" height="28" fill="#10b981" />
+    <text x="585" y="286" class="small">work 0.5</text>
+  </g>
+
+  <!-- Row 5: Q4 KV, 128k context -->
+  <g>
+    <text x="125" y="318" text-anchor="end" class="row-label">Q4 KV, 128k</text>
+    <text x="125" y="334" text-anchor="end" class="small">~24.3 GiB used</text>
+    <rect x="130" y="308" width="320" height="28" fill="#1f6feb" />
+    <text x="290" y="326" text-anchor="middle" class="seg-text">Weights 20.0</text>
+    <!-- KV 3.84 GB ~ 61 px -->
+    <rect x="450" y="308" width="61.4" height="28" fill="#f59e0b" />
+    <text x="481" y="326" text-anchor="middle" class="seg-text">KV 3.84</text>
+    <rect x="511.4" y="308" width="8" height="28" fill="#10b981" />
+    <text x="524" y="326" class="small">work 0.5</text>
+  </g>
+
+  <!-- Row 6: Q3 (TurboQuant-style) KV, 128k context -->
+  <g>
+    <text x="125" y="358" text-anchor="end" class="row-label">3-bit KV, 128k</text>
+    <text x="125" y="374" text-anchor="end" class="small">~23.4 GiB used</text>
+    <rect x="130" y="348" width="320" height="28" fill="#1f6feb" />
+    <text x="290" y="366" text-anchor="middle" class="seg-text">Weights 20.0</text>
+    <!-- KV 2.88 GB ~ 46 px -->
+    <rect x="450" y="348" width="46.1" height="28" fill="#f59e0b" />
+    <text x="473" y="366" text-anchor="middle" class="seg-text">2.88</text>
+    <rect x="496.1" y="348" width="8" height="28" fill="#10b981" />
+    <text x="509" y="366" class="small">work 0.5</text>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(20, 400)">
+    <rect x="0" y="0" width="14" height="14" fill="#1f6feb"/>
+    <text x="20" y="11" class="small">Q4_K_M weights</text>
+    <rect x="140" y="0" width="14" height="14" fill="#f59e0b"/>
+    <text x="160" y="11" class="small">KV cache</text>
+    <rect x="240" y="0" width="14" height="14" fill="#10b981"/>
+    <text x="260" y="11" class="small">working memory</text>
+    <rect x="380" y="0" width="14" height="14" fill="url(#spill)" stroke="#b00020" stroke-width="0.5"/>
+    <text x="400" y="11" class="small">past 32 GB ceiling</text>
+    <text x="540" y="11" class="small">All sizes in GiB. KV math: 2 × 60 × 4 × 128 × tokens × bytes_per_elem.</text>
+  </g>
+</svg>

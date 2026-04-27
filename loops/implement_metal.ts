@@ -47,16 +47,25 @@ const EFFORTS_DIR = resolve(REPO_ROOT, "loops", "efforts");
 const RESULTS_DIR = resolve(REPO_ROOT, ".metal_optimize");
 const MODEL_ID = process.env.ZINC_MODEL_ID ?? "qwen35-35b-a3b-q4k-xl";
 const MODEL_PATH = process.env.ZINC_MODEL ?? null;
-const TEST_PROMPT = "The capital of France is";
-const MAX_TOKENS = 64; // Enough tokens for stable decode throughput measurement
+const TEST_PROMPT = process.env.ZINC_TEST_PROMPT ?? "The capital of France is";
+const PROMPT_MODE = process.env.ZINC_PROMPT_MODE ?? "raw";
+const MAX_TOKENS = parsePositiveIntEnv("ZINC_MAX_TOKENS", 64); // Enough tokens for stable decode throughput measurement
 const REFERENCE_TEXT = "Paris"; // Expected in correct output
-const TARGET_TOK_PER_SEC = 50;
-const BENCHMARK_RUNS = 3; // Median of N inference runs for noise reduction
-const PROFILE_EVERY = 5; // Run with --profile every N cycles
+const TARGET_TOK_PER_SEC = parsePositiveFloatEnv("ZINC_TARGET_TOK_PER_SEC", 50);
+const BENCHMARK_RUNS = parsePositiveIntEnv("ZINC_BENCHMARK_RUNS", 3); // Median of N inference runs for noise reduction
+const PROFILE_EVERY = parsePositiveIntEnv("ZINC_PROFILE_EVERY", 5); // Run with --profile every N cycles
 const STALL_THRESHOLD = 5; // Cycles without tok/s improvement before studying references
+const TEST_TIMEOUT_MS = parsePositiveIntEnv("ZINC_TEST_TIMEOUT_MS", 120_000);
+const RUN_TIMEOUT_MS = parsePositiveIntEnv("ZINC_RUN_TIMEOUT_MS", 300_000);
+const STOP_ON_TARGET = parseBoolEnv("ZINC_STOP_ON_TARGET", true);
 
 const BLOCKED_GIT_OPS = [
   "Bash(git checkout:*)",
+  "Bash(git fetch:*)",
+  "Bash(git merge:*)",
+  "Bash(git pull:*)",
+  "Bash(git push:*)",
+  "Bash(git rebase:*)",
   "Bash(git revert:*)",
   "Bash(git restore:*)",
   "Bash(git reset:*)",
@@ -66,8 +75,37 @@ const BLOCKED_GIT_OPS = [
 
 type AgentKind = "claude" | "codex";
 
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parsePositiveFloatEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoolEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 function zincModelArgs(): string[] {
   return MODEL_PATH ? ["-m", MODEL_PATH] : ["--model-id", MODEL_ID];
+}
+
+function zincPromptArgs(): string[] {
+  const args = ["--prompt", TEST_PROMPT];
+  if (PROMPT_MODE === "chat") args.push("--chat");
+  return args;
 }
 
 function displayModelLabel(): string {
@@ -451,7 +489,7 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
   console.log(clr("1;32", "  ✅ Build OK"));
 
   console.log(clr("1;33", "  🧪 Testing..."));
-  const test = await runCommand("zig", ["build", "test"], { timeout: 120_000 });
+  const test = await runCommand("zig", ["build", "test"], { timeout: TEST_TIMEOUT_MS });
 
   if (test.exitCode !== 0) {
     return {
@@ -499,7 +537,7 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
     };
   }
 
-  console.log(clr("1;33", `  🚀 Running inference (${maxTokens} tokens, ${BENCHMARK_RUNS} samples)...`));
+  console.log(clr("1;33", `  🚀 Running inference (${maxTokens} tokens, ${BENCHMARK_RUNS} samples, ${PROMPT_MODE} prompt)...`));
   const tokPerSecSamples: number[] = [];
   let lastRun: RunResult = { exitCode: -1, stdout: "", stderr: "" };
   let lastCombined = "";
@@ -507,8 +545,8 @@ async function buildTestRun(maxTokens: number): Promise<BuildRunResult> {
   for (let sample = 0; sample < BENCHMARK_RUNS; sample++) {
     const run = await runCommand(
       "./zig-out/bin/zinc",
-      [...zincModelArgs(), "--prompt", TEST_PROMPT, "-n", String(maxTokens)],
-      { timeout: 300_000 },
+      [...zincModelArgs(), ...zincPromptArgs(), "-n", String(maxTokens)],
+      { timeout: RUN_TIMEOUT_MS },
     );
     lastRun = run;
     lastCombined = run.stderr + run.stdout;
@@ -1196,13 +1234,14 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
     "2. CORRECTNESS IS SACRED. Output MUST contain 'Paris'. Speed without correctness = instant revert.",
     "3. All 27+ tests must continue passing.",
     "4. Do NOT modify src/vulkan/, loops/, or .env.",
-    "5. Zig 0.15.2 API: ArrayList is unmanaged (pass allocator to append/deinit).",
-    "6. MSL shaders use 'main0' as entry point (SPIRV-Cross convention).",
-    "7. Metal push constants go in buffer[n_bufs] (see shim.m mtl_dispatch).",
-    "8. The Metal command pattern: beginCommand → dispatch → barrier → dispatch → commitAndWait.",
-    "9. UMA advantage: all buffers are SharedMode — cpu_ptr gives direct CPU access to GPU data.",
-    "10. Read the profile output and run output BEFORE deciding what to optimize.",
-    "11. Prefer changes to forward_metal.zig and shaders. Avoid refactoring infrastructure.",
+    "5. Do NOT run git push, git pull, git fetch, git merge, git rebase, git reset, git checkout, or git restore. The harness owns git commits/reverts.",
+    "6. Zig 0.15.2 API: ArrayList is unmanaged (pass allocator to append/deinit).",
+    "7. MSL shaders use 'main0' as entry point (SPIRV-Cross convention).",
+    "8. Metal push constants go in buffer[n_bufs] (see shim.m mtl_dispatch).",
+    "9. The Metal command pattern: beginCommand → dispatch → barrier → dispatch → commitAndWait.",
+    "10. UMA advantage: all buffers are SharedMode — cpu_ptr gives direct CPU access to GPU data.",
+    "11. Read the profile output and run output BEFORE deciding what to optimize.",
+    "12. Prefer changes to forward_metal.zig and shaders. Avoid refactoring infrastructure.",
     "",
     "## Output Format",
     "After making your change, print these 3 lines:",
@@ -1290,8 +1329,8 @@ async function runProfileBenchmark(): Promise<string> {
   console.log(clr("1;33", "  📊 Profiling run (--profile)..."));
   const run = await runCommand(
     "./zig-out/bin/zinc",
-    [...zincModelArgs(), "--prompt", TEST_PROMPT, "-n", "32", "--profile"],
-    { timeout: 300_000 },
+    [...zincModelArgs(), ...zincPromptArgs(), "-n", String(Math.min(MAX_TOKENS, 32)), "--profile"],
+    { timeout: RUN_TIMEOUT_MS },
   );
   const combined = (run.stderr + run.stdout).slice(-4000);
   console.log(clr("2", "    profile captured"));
@@ -1766,7 +1805,7 @@ async function main() {
     console.log(clr("2", `  stall=${state.stalledCycles} best=${state.bestTokPerSec.toFixed(2)} target=${TARGET_TOK_PER_SEC}`));
 
     // Check if we're done
-    if (verify.containsReference && verify.tokPerSec != null && verify.tokPerSec >= TARGET_TOK_PER_SEC) {
+    if (STOP_ON_TARGET && verify.containsReference && verify.tokPerSec != null && verify.tokPerSec >= TARGET_TOK_PER_SEC) {
       console.log(clr("1;32", "\n" + "=".repeat(64)));
       console.log(clr("1;32", `  TARGET REACHED: ${verify.tokPerSec.toFixed(1)} tok/s >= ${TARGET_TOK_PER_SEC} with correct output!`));
       console.log(clr("1;32", "=".repeat(64)));

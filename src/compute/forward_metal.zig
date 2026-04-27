@@ -2557,9 +2557,16 @@ pub const InferenceEngine = struct {
             const embed_offset = self.model.gguf_file.tensor_data_offset + self.token_embed.info.offset;
             const embed_raw = mmap[embed_offset..];
             const hidden_ptr: [*]f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
+            const embedding_scale: f32 = if (cfg.architecture == .gemma)
+                @floatCast(@sqrt(@as(f64, @floatFromInt(hidden_dim))))
+            else
+                1.0;
             for (prompt_tokens, 0..) |token_id, t| {
                 const out_slice = hidden_ptr[t * hidden_dim .. (t + 1) * hidden_dim];
                 dequantRow(embed_raw, token_id, hidden_dim, self.token_embed.info.type_, out_slice);
+                if (embedding_scale != 1.0) {
+                    for (out_slice) |*value| value.* *= embedding_scale;
+                }
             }
         }
 

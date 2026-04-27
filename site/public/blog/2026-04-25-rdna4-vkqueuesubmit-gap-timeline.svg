@@ -1,0 +1,214 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Per-layer vs per-prompt Vulkan submit timeline on a 60-layer RDNA4 prefill</title>
+  <desc id="desc">A horizontal timeline of a 60-layer prefill on RDNA4. The top lane shows the current per-layer submit shape: 60 narrow GPU-work segments separated by 60 small CPU-and-submit gap markers that visibly accumulate across the prompt. A summary at the right reads twelve to twenty-four milliseconds of submit gap, depending on queue contention. The bottom lane shows the per-prompt submit shape: one continuous GPU-work block with a single submit gap at the front and a single fence wait at the back.</desc>
+  <defs>
+    <linearGradient id="bg-sub" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-sub" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .s-title { font: 700 30px Georgia, serif; fill: #10233c; }
+      .s-sub { font: 500 16px Arial, sans-serif; fill: #53657b; }
+      .s-section { font: 700 14px Arial, sans-serif; fill: #2c3e54; }
+      .s-label { font: 600 14px Arial, sans-serif; fill: #10233c; }
+      .s-value { font: 700 13px Arial, sans-serif; fill: #ffffff; }
+      .s-value-out { font: 700 13px Arial, sans-serif; fill: #10233c; }
+      .s-axis { font: 400 12px Arial, sans-serif; fill: #53657b; }
+      .s-note { font: 400 13px Arial, sans-serif; fill: #445567; }
+      .s-tag { font: 700 12px Arial, sans-serif; fill: #10233c; }
+      .s-legend { font: 500 13px Arial, sans-serif; fill: #2c3e54; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" fill="url(#bg-sub)"/>
+
+  <g transform="translate(72 44)">
+    <text class="s-title">Where the submit gaps actually live in a 60-layer prefill</text>
+    <text class="s-sub" x="0" y="28">Top lane: today's per-layer submit shape. Bottom lane: one vkQueueSubmit for the whole prompt. Same kernels, same dispatches, same total compute.</text>
+  </g>
+
+  <g transform="translate(0 120)" filter="url(#shadow-sub)">
+
+    <!-- Lane A: per-layer submits -->
+    <text class="s-section" x="72" y="24">Per-layer submits, 60 layers</text>
+    <text class="s-note" x="72" y="44">Each thin vertical bar is one layer's GPU work. Each small amber tick between bars is one submit gap (CPU + amdgpu ioctl + scheduler hop).</text>
+
+    <!-- Layer band: x=72..1090 = 1018 px wide; per layer ~14.5 px including gap -->
+    <!-- 60 layers, each layer = 12 px GPU + 5 px gap = 17 px; 60*17 = 1020 px -->
+    <g transform="translate(72 70)">
+      <!-- Generate 60 GPU work bars (teal) and 59 amber gap ticks between them -->
+      <!-- We'll inline them for SVG validity -->
+      <!-- GPU bars at x=0,17,34,...,1003 (60 of them) -->
+      <rect x="0"   y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="17"  y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="34"  y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="51"  y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="68"  y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="85"  y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="102" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="119" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="136" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="153" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="170" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="187" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="204" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="221" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="238" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="255" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="272" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="289" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="306" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="323" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="340" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="357" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="374" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="391" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="408" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="425" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="442" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="459" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="476" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="493" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="510" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="527" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="544" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="561" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="578" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="595" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="612" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="629" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="646" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="663" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="680" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="697" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="714" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="731" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="748" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="765" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="782" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="799" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="816" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="833" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="850" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="867" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="884" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="901" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="918" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="935" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="952" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="969" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="986" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+      <rect x="1003" y="0" width="12" height="60" rx="2" fill="#0f766e"/>
+
+      <!-- Submit gap ticks (amber): 59 gaps, each at x=12,29,46,...,995 -->
+      <rect x="12"  y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="29"  y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="46"  y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="63"  y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="80"  y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="97"  y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="114" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="131" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="148" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="165" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="182" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="199" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="216" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="233" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="250" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="267" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="284" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="301" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="318" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="335" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="352" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="369" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="386" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="403" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="420" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="437" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="454" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="471" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="488" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="505" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="522" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="539" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="556" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="573" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="590" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="607" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="624" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="641" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="658" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="675" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="692" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="709" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="726" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="743" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="760" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="777" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="794" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="811" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="828" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="845" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="862" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="879" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="896" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="913" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="930" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="947" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="964" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="981" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+      <rect x="998" y="14" width="5" height="32" rx="1" fill="#b45309"/>
+
+      <!-- Tag annotations -->
+      <text class="s-tag" x="0" y="-6">layer 1</text>
+      <text class="s-tag" x="1015" y="-6" text-anchor="end">layer 60</text>
+    </g>
+
+    <!-- Lane A summary box -->
+    <g transform="translate(72 152)">
+      <rect x="0" y="0" width="1018" height="32" rx="4" fill="#fff5e6" stroke="#b45309" stroke-width="1"/>
+      <text class="s-label" x="14" y="21" fill="#7c3a00">Cumulative submit gap across 60 layers: ~12 to 24 ms (best case), up to 120 ms under amdgpu queue contention.</text>
+    </g>
+
+    <text class="s-note" x="72" y="206">Read the top lane as a comb. The teeth are GPU work. The amber slivers between teeth are dead time the kernels cannot reach.</text>
+
+    <!-- Lane B: per-prompt submit -->
+    <text class="s-section" x="72" y="256">Per-prompt submit, 60 layers in one command buffer</text>
+    <text class="s-note" x="72" y="276">One vkQueueSubmit at the front, one fence wait at the back. The recorder runs in parallel with the previous prompt under double-buffering.</text>
+
+    <g transform="translate(72 302)">
+      <!-- Single front submit gap -->
+      <rect x="0" y="14" width="6" height="32" rx="1" fill="#b45309"/>
+      <text class="s-tag" x="0" y="-6">submit</text>
+
+      <!-- Single solid GPU work bar spanning all 60 layers -->
+      <rect x="6" y="0" width="1003" height="60" rx="3" fill="#0f766e"/>
+      <text class="s-value" x="507" y="35" text-anchor="middle">60 layers of GPU work, no scheduler hops between layers</text>
+
+      <!-- Single fence wait at end -->
+      <rect x="1009" y="14" width="6" height="32" rx="1" fill="#2563eb"/>
+      <text class="s-tag" x="1015" y="-6" text-anchor="end">fence</text>
+    </g>
+
+    <!-- Lane B summary box -->
+    <g transform="translate(72 384)">
+      <rect x="0" y="0" width="1018" height="32" rx="4" fill="#e6f4f1" stroke="#0f766e" stroke-width="1"/>
+      <text class="s-label" x="14" y="21" fill="#0a4d44">Cumulative submit cost: ~0.2 to 2 ms total. With AMD user-mode queues on Linux 6.16+, well under 0.1 ms.</text>
+    </g>
+
+    <!-- Legend -->
+    <g transform="translate(72 438)">
+      <rect x="0" y="6" width="14" height="14" rx="2" fill="#0f766e"/>
+      <text class="s-legend" x="22" y="18">GPU work (kernels, dispatches, barriers)</text>
+      <rect x="320" y="6" width="14" height="14" rx="2" fill="#b45309"/>
+      <text class="s-legend" x="342" y="18">vkQueueSubmit gap (CPU + ioctl + scheduler)</text>
+      <rect x="700" y="6" width="14" height="14" rx="2" fill="#2563eb"/>
+      <text class="s-legend" x="722" y="18">vkWaitForFences (host sync)</text>
+    </g>
+  </g>
+</svg>
