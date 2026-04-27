@@ -1364,7 +1364,9 @@ pub const InferenceEngine = struct {
     dmmv_f16_pipe: MetalPipeline,
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
+    dmmv_q4k_moe_cols_pipe: MetalPipeline,
     dmmv_q5_1_moe_pipe: MetalPipeline,
+    dmmv_q5_1_moe_cols_pipe: MetalPipeline,
     dmmv_q5k_moe_pipe: MetalPipeline,
     dmmv_q5k_moe_k2048_pipe: MetalPipeline,
     dmmv_q6k_moe_pipe: MetalPipeline,
@@ -1696,7 +1698,9 @@ pub const InferenceEngine = struct {
         self.dmmv_f16_pipe = try loadShaderPipeline(ctx, "dmmv_f16");
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
+        self.dmmv_q4k_moe_cols_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_cols");
         self.dmmv_q5_1_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe");
+        self.dmmv_q5_1_moe_cols_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe_cols");
         self.dmmv_q5k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe");
         self.dmmv_q5k_moe_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_moe_k2048");
         self.dmmv_q6k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_moe");
@@ -2283,7 +2287,9 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f16_pipe);
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_moe_cols_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5_1_moe_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q5_1_moe_cols_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_moe_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_moe_pipe);
@@ -3978,6 +3984,61 @@ fn dispatchDmmvMoeOnCmd(
         .q6_k => dispatchDmmvMoeQ6kOnCmd(engine, cmd, tensor, input_buf, output_buf, routing_buf, M, K, expert_stride, x_expert_stride, extra_byte_offset),
         else => return error.UnsupportedQuantType,
     }
+}
+
+/// Dispatch a grouped column MoE DMMV for batched Gemma prefill. The grouped
+/// kernels consume route-packed IDs and produce route-slot-indexed output:
+/// `[token * k + slot][M]`. `input_buf` is also route-slot-indexed; callers
+/// that start from token-ordered hidden states must gather/expand them first.
+fn dispatchDmmvMoeColsOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    counts_buf: *const MetalBuffer,
+    packed_ids_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    expert_stride: u32,
+    extra_byte_offset: u32,
+    x_byte_offset: u32,
+    y_byte_offset: u32,
+    ids_stride: u32,
+    n_experts: u32,
+    max_count: u32,
+) !void {
+    const route_blocks = @max(max_count, 1);
+    recordMoeDmmvProfile(engine, tensor.info.type_, M, K, route_blocks);
+
+    const pipe: *const MetalPipeline = switch (tensor.info.type_) {
+        .q4_k => &engine.dmmv_q4k_moe_cols_pipe,
+        .q5_1 => &engine.dmmv_q5_1_moe_cols_pipe,
+        else => return error.UnsupportedQuantType,
+    };
+    if (pipe.handle == null) return error.UnsupportedQuantType;
+
+    const push = MoeColsDmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+        .expert_stride = expert_stride,
+        .x_offset = x_byte_offset,
+        .y_offset = y_byte_offset,
+        .ids_stride = ids_stride,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, counts_buf, packed_ids_buf };
+    const rows_per_wg: u32 = 2;
+    const cols_per_wg: u32 = 4;
+    cmd.dispatchV2(
+        pipe,
+        .{ (M + rows_per_wg - 1) / rows_per_wg, n_experts, (route_blocks + cols_per_wg - 1) / cols_per_wg },
+        .{ 64, 1, 1 },
+        &bufs,
+        &push,
+        @sizeOf(MoeColsDmmvPush),
+        1,
+    );
 }
 
 /// Preload norm weights from mmap into an f32 Metal buffer (done once at init).
