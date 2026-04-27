@@ -1523,6 +1523,7 @@ pub const InferenceEngine = struct {
     dmmv_mxfp4_pipe: MetalPipeline,
     dmmv_q8_0_k2048_pipe: MetalPipeline,
     dmmv_q8_0_dual_pipe: MetalPipeline,
+    dmmv_q8_0_pair_pipe: MetalPipeline,
     dmmv_q8_0_k2048_fused_norm_pipe: MetalPipeline,
     dmmv_q8_0_dual_fused_norm_pipe: MetalPipeline,
     dmmv_q8_0_repacked_pipe: MetalPipeline,
@@ -1863,6 +1864,7 @@ pub const InferenceEngine = struct {
         self.dmmv_mxfp4_pipe = try loadShaderPipeline(ctx, "dmmv_mxfp4");
         self.dmmv_q8_0_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048");
         self.dmmv_q8_0_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual");
+        self.dmmv_q8_0_pair_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_pair");
         self.dmmv_q8_0_k2048_fused_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_k2048_fused_norm");
         self.dmmv_q8_0_dual_fused_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_dual_fused_norm");
         self.dmmv_q8_0_repacked_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_repacked");
@@ -2458,6 +2460,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_mxfp4_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q8_0_pair_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_k2048_fused_norm_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_dual_fused_norm_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_repacked_pipe);
@@ -3696,6 +3699,24 @@ fn canUseDualQ8Dmmv(
         engine.dmmv_q8_0_dual_pipe.max_threads_per_threadgroup >= block_size;
 }
 
+fn canUsePairedQ8Dmmv(
+    engine: *const InferenceEngine,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+    M0: u32,
+    M1: u32,
+    K: u32,
+) bool {
+    const block_size = engine.q8_dual_tg_override orelse 512;
+    return tensor0.info.type_ == .q8_0 and
+        tensor1.info.type_ == .q8_0 and
+        M0 == M1 and
+        M0 > 0 and
+        K <= 4096 and
+        engine.dmmv_q8_0_pair_pipe.thread_execution_width == 32 and
+        engine.dmmv_q8_0_pair_pipe.max_threads_per_threadgroup >= block_size;
+}
+
 fn dispatchDualQ8DmmvOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -3731,6 +3752,37 @@ fn dispatchDualQ8DmmvOnCmd(
     const simd_width = if (engine.dmmv_q8_0_dual_pipe.thread_execution_width > 0) engine.dmmv_q8_0_dual_pipe.thread_execution_width else @as(u32, 32);
     const rows_per_wg: u32 = block_size / simd_width;
     cmd.dispatchV2(&engine.dmmv_q8_0_dual_pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
+}
+
+fn dispatchPairedQ8DmmvOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output0_buf: *const MetalBuffer,
+    output1_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+) void {
+    recordDmmvProfile(engine, tensor0, M, K);
+    recordDmmvProfile(engine, tensor1, M, K);
+
+    const push = DualQ8DmmvPush{
+        .M0 = M,
+        .M1 = M,
+        .K = K,
+        .a0_offset = tensorPageOffset(engine.model, tensor0),
+        .a1_offset = tensorPageOffset(engine.model, tensor1),
+        .x_offset = 0,
+        .y0_offset = 0,
+        .y1_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor0.gpu_buffer, &tensor1.gpu_buffer, input_buf, output0_buf, output1_buf };
+    const block_size = engine.q8_dual_tg_override orelse 512;
+    const simd_width = if (engine.dmmv_q8_0_pair_pipe.thread_execution_width > 0) engine.dmmv_q8_0_pair_pipe.thread_execution_width else @as(u32, 32);
+    const rows_per_wg: u32 = (block_size / simd_width) * 2;
+    cmd.dispatchV2(&engine.dmmv_q8_0_pair_pipe, .{ (M + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
 }
 
 /// Fused RMSNorm + Dual Q8_0 DMMV: reads raw hidden state, computes norm inline,
@@ -5414,8 +5466,12 @@ fn dispatchFullAttnPrepOnCmd(
         // Packed: project full Q+gate into attn_out_buf, then deinterleave.
         const q_full_dim = attn.q_dim * 2;
         dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.attn_out_buf, q_full_dim, hidden_dim, 0);
-        dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, attn.kv_dim, hidden_dim, 0);
-        dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+        if (cfg.architecture == .gemma and !attn.use_k_as_v and canUsePairedQ8Dmmv(engine, k_tensor, v_tensor, attn.kv_dim, attn.kv_dim, hidden_dim)) {
+            dispatchPairedQ8DmmvOnCmd(engine, cmd, k_tensor, v_tensor, &engine.norm_buf, &engine.k_buf, &engine.v_buf, attn.kv_dim, hidden_dim);
+        } else {
+            dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, attn.kv_dim, hidden_dim, 0);
+            dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+        }
         profileBarrier(cmd, profile, .full_attn);
         dispatchDeinterleaveOnCmd(engine, cmd, &engine.attn_out_buf, &engine.q_buf, &engine.gate_buf, attn.head_dim, cfg.n_heads);
         profileBarrier(cmd, profile, .full_attn);
@@ -5425,8 +5481,12 @@ fn dispatchFullAttnPrepOnCmd(
         if (gate_mode.separate_attn_gate) {
             dispatchDmmvOnCmd(engine, cmd, lt.attn_gate.?, &engine.norm_buf, &engine.gate_buf, attn.q_dim, hidden_dim, 0);
         }
-        dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, attn.kv_dim, hidden_dim, 0);
-        dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+        if (cfg.architecture == .gemma and !attn.use_k_as_v and canUsePairedQ8Dmmv(engine, k_tensor, v_tensor, attn.kv_dim, attn.kv_dim, hidden_dim)) {
+            dispatchPairedQ8DmmvOnCmd(engine, cmd, k_tensor, v_tensor, &engine.norm_buf, &engine.k_buf, &engine.v_buf, attn.kv_dim, hidden_dim);
+        } else {
+            dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, attn.kv_dim, hidden_dim, 0);
+            dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+        }
         profileBarrier(cmd, profile, .full_attn);
     }
 
@@ -11583,6 +11643,97 @@ test "dmmv_q8_0_dual shader matches CPU reference across both outputs" {
         dequantRow(weight1_buf.cpu_ptr.?[0..weight1_buf.size], @intCast(row), @intCast(K), .q8_0, ref_row);
         for (0..K) |i| expected += ref_row[i] * input_ptr[i];
         try std.testing.expectApproxEqAbs(expected, output1_ptr[row], 0.05);
+    }
+}
+
+test "dmmv_q8_0_pair shader matches CPU reference for equal-shape outputs" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q8_0_pair");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 67;
+    const K: usize = 256;
+    const blocks_per_row: usize = K / 32;
+    const row_bytes: usize = blocks_per_row * 34;
+
+    var weight0_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight0_buf);
+    var weight1_buf = try metal_buffer.createBuffer(ctx, M * row_bytes);
+    defer metal_buffer.freeBuffer(&weight1_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output0_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output0_buf);
+    var output1_buf = try metal_buffer.createBuffer(ctx, M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output1_buf);
+
+    @memset(weight0_buf.cpu_ptr.?[0..weight0_buf.size], 0);
+    @memset(weight1_buf.cpu_ptr.?[0..weight1_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output0_buf.cpu_ptr.?[0..output0_buf.size], 0);
+    @memset(output1_buf.cpu_ptr.?[0..output1_buf.size], 0);
+
+    for (0..M) |row| {
+        for (0..blocks_per_row) |blk| {
+            const base = row * row_bytes + blk * 34;
+            const scale0 = @as(f16, @floatCast(0.03125 * @as(f32, @floatFromInt(1 + (row % 5) + (blk % 7)))));
+            const scale1 = @as(f16, @floatCast(0.046875 * @as(f32, @floatFromInt(1 + (row % 3) + (blk % 5)))));
+            const bits0 = @as(u16, @bitCast(scale0));
+            const bits1 = @as(u16, @bitCast(scale1));
+            weight0_buf.cpu_ptr.?[base] = @truncate(bits0);
+            weight0_buf.cpu_ptr.?[base + 1] = @truncate(bits0 >> 8);
+            weight1_buf.cpu_ptr.?[base] = @truncate(bits1);
+            weight1_buf.cpu_ptr.?[base + 1] = @truncate(bits1 >> 8);
+            for (0..32) |e| {
+                const q0_raw: i32 = @intCast((row * 11 + blk * 7 + e * 5) % 63);
+                const q1_raw: i32 = @intCast((row * 13 + blk * 3 + e * 7) % 61);
+                weight0_buf.cpu_ptr.?[base + 2 + e] = @bitCast(@as(i8, @intCast(q0_raw - 31)));
+                weight1_buf.cpu_ptr.?[base + 2 + e] = @bitCast(@as(i8, @intCast(q1_raw - 30)));
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..K) |i| {
+        const raw: i32 = @intCast((i * 13 + 7) % 29);
+        input_ptr[i] = 0.125 * @as(f32, @floatFromInt(raw - 14));
+    }
+
+    const push = DualQ8DmmvPush{
+        .M0 = @intCast(M),
+        .M1 = @intCast(M),
+        .K = @intCast(K),
+        .a0_offset = 0,
+        .a1_offset = 0,
+        .x_offset = 0,
+        .y0_offset = 0,
+        .y1_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &weight0_buf, &weight1_buf, &input_buf, &output0_buf, &output1_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 31) / 32), 1, 1 }, .{ 512, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const output0_ptr: [*]const f32 = @ptrCast(@alignCast(output0_buf.cpu_ptr.?));
+    const output1_ptr: [*]const f32 = @ptrCast(@alignCast(output1_buf.cpu_ptr.?));
+
+    for (0..M) |row| {
+        var expected0: f32 = 0;
+        var expected1: f32 = 0;
+        dequantRow(weight0_buf.cpu_ptr.?[0..weight0_buf.size], @intCast(row), @intCast(K), .q8_0, ref_row);
+        for (0..K) |i| expected0 += ref_row[i] * input_ptr[i];
+        dequantRow(weight1_buf.cpu_ptr.?[0..weight1_buf.size], @intCast(row), @intCast(K), .q8_0, ref_row);
+        for (0..K) |i| expected1 += ref_row[i] * input_ptr[i];
+        try std.testing.expectApproxEqAbs(expected0, output0_ptr[row], 0.05);
+        try std.testing.expectApproxEqAbs(expected1, output1_ptr[row], 0.05);
     }
 }
 
