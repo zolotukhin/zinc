@@ -103,6 +103,7 @@ pub const SamplingParams = struct {
 const ProfilePhase = enum(u8) {
     embed_upload,
     attention,
+    flash_attn_kernel,
     ssm,
     ssm_proj,
     ssm_conv,
@@ -127,6 +128,7 @@ const ProfilePhase = enum(u8) {
         return switch (self) {
             .embed_upload => "embed",
             .attention => "attention",
+            .flash_attn_kernel => "flash_attn",
             .ssm => "ssm",
             .ssm_proj => "ssm_proj",
             .ssm_conv => "ssm_conv",
@@ -4494,6 +4496,16 @@ pub const InferenceEngine = struct {
                 // the flash_attn_batched pipeline with n_queries=1 and
                 // seq_start=state.position. Output is bit-equivalent to the
                 // decode shader for n_queries=1. Speed cycle enables n>1 later.
+                //
+                // The flash_attn_kernel ProfilePhase wraps just the kernel
+                // dispatch (and its computeBarrier) so --profile output
+                // separates kernel time from QKV/RoPE/output-proj time
+                // within the broader .attention phase. This is the
+                // diagnostic the Effort 11 plan asks for in Step 2 to
+                // attribute the L-dependent ms (~46 ms at L=1162) to the
+                // flash_attn dispatch vs other dispatches before
+                // committing to a shader rewrite.
+                const flash_attn_kernel_phase = self.beginProfilePhase();
                 const use_batched = self.use_batch_attn and self.attention.pipeline_batched != null;
                 if (use_batched) {
                     const pip = &self.attention.pipeline_batched.?;
@@ -4601,6 +4613,7 @@ pub const InferenceEngine = struct {
                     }
                 }
                 self.decode_cmd.computeBarrier();
+                self.endProfilePhase(.flash_attn_kernel, flash_attn_kernel_phase);
 
                 // Self-check the first attention layer at seq_len=1: with only one KV token,
                 // flash attention must reproduce the current V slice for each query head's KV group.
@@ -10007,6 +10020,7 @@ pub fn generate(
             const avg_query_read_ms = @as(f64, @floatFromInt(engine.profile_total_query_read_ns)) / @as(f64, @floatFromInt(engine.profile_sample_count)) / 1_000_000.0;
             const avg_embed_phase_ms = engine.avgProfilePhaseMs(.embed_upload);
             const avg_attention_phase_ms = engine.avgProfilePhaseMs(.attention);
+            const avg_flash_attn_phase_ms = engine.avgProfilePhaseMs(.flash_attn_kernel);
             const avg_ssm_phase_ms = engine.avgProfilePhaseMs(.ssm);
             const avg_moe_phase_ms = engine.avgProfilePhaseMs(.moe_routed);
             const avg_shared_phase_ms = engine.avgProfilePhaseMs(.shared_expert);
@@ -10034,9 +10048,10 @@ pub fn generate(
                 avg_desc_writes,
                 avg_desc_bindings,
             });
-            log.info("PROFILE: avg GPU phases embed={d:.2} ms attention={d:.2} ms ssm={d:.2} ms moe={d:.2} ms shared={d:.2} ms tail={d:.2} ms", .{
+            log.info("PROFILE: avg GPU phases embed={d:.2} ms attention={d:.2} ms (flash_attn={d:.2} ms) ssm={d:.2} ms moe={d:.2} ms shared={d:.2} ms tail={d:.2} ms", .{
                 avg_embed_phase_ms,
                 avg_attention_phase_ms,
+                avg_flash_attn_phase_ms,
                 avg_ssm_phase_ms,
                 avg_moe_phase_ms,
                 avg_shared_phase_ms,
