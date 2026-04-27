@@ -4531,6 +4531,13 @@ fn cpuDmmvFallback(
 ) !void {
     const off: usize = @intCast(data_offset + tensor.info.offset + extra_byte_offset);
     const raw = mmap[off..];
+    if (tensor.info.type_ == .q8_0) {
+        for (0..M) |row| {
+            output[row] = dotQ8_0Row(raw, @intCast(row), K, input);
+        }
+        return;
+    }
+
     const row_buf = try allocator.alloc(f32, K);
     defer allocator.free(row_buf);
     for (0..M) |row| {
@@ -4992,6 +4999,27 @@ pub fn dequantRow(raw_data: []const u8, row: u32, cols: u32, quant_type: GGMLTyp
             @memset(output, 0);
         },
     }
+}
+
+fn dotQ8_0Row(raw_data: []const u8, row: u32, cols: u32, input: [*]const f32) f32 {
+    const block_size: usize = 32;
+    const bpb: usize = 34;
+    const bpr = @as(usize, cols) / block_size;
+    const row_off = @as(usize, row) * bpr * bpb;
+    var dot: f32 = 0;
+    var in_i: usize = 0;
+    for (0..bpr) |b| {
+        const bo = row_off + b * bpb;
+        const scale_bits = std.mem.readInt(u16, raw_data[bo..][0..2], .little);
+        const scale: f32 = @floatCast(@as(f16, @bitCast(scale_bits)));
+        for (0..block_size) |j| {
+            const q: i8 = @bitCast(raw_data[bo + 2 + j]);
+            const w = @as(f32, @floatFromInt(q)) * scale;
+            dot += w * input[in_i];
+            in_i += 1;
+        }
+    }
+    return dot;
 }
 
 fn readMmapFloats(mmap: []const u8, base_off: usize, tensor_type: GGMLType, output: []f32) void {
@@ -9667,6 +9695,41 @@ test "dmmv_q6k_moe shader matches CPU reference across selected experts" {
             }
             try std.testing.expectApproxEqAbs(expected, output_ptr[slot * M + row], 0.05);
         }
+    }
+}
+
+test "dotQ8_0Row matches dequantized row dot" {
+    const M: usize = 3;
+    const K: usize = 64;
+    const block_size: usize = 32;
+    const bpb: usize = 34;
+    const bpr = K / block_size;
+
+    var raw: [M * bpr * bpb]u8 = undefined;
+    for (0..M) |row| {
+        for (0..bpr) |block| {
+            const bo = (row * bpr + block) * bpb;
+            const scale = @as(f32, 0.125) * @as(f32, @floatFromInt(row + block + 1));
+            const scale_bits: u16 = @bitCast(@as(f16, @floatCast(scale)));
+            std.mem.writeInt(u16, raw[bo..][0..2], scale_bits, .little);
+            for (0..block_size) |j| {
+                const q: i8 = @intCast(@as(i32, @intCast((row * 17 + block * 11 + j * 3) % 31)) - 15);
+                raw[bo + 2 + j] = @bitCast(q);
+            }
+        }
+    }
+
+    var input: [K]f32 = undefined;
+    for (&input, 0..) |*v, i| {
+        v.* = (@as(f32, @floatFromInt((i * 7) % 19)) - 9.0) * 0.03125;
+    }
+
+    var row_buf: [K]f32 = undefined;
+    for (0..M) |row| {
+        dequantRow(raw[0..], @intCast(row), @intCast(K), .q8_0, row_buf[0..]);
+        var expected: f32 = 0;
+        for (0..K) |i| expected += row_buf[i] * input[i];
+        try std.testing.expectApproxEqAbs(expected, dotQ8_0Row(raw[0..], @intCast(row), @intCast(K), input[0..].ptr), 0.00001);
     }
 }
 
