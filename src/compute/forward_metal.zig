@@ -348,6 +348,7 @@ pub const RuntimeProfile = struct {
     debug_validation_ns: u64 = 0,
     dmmv_total_bytes: u64 = 0,
     dmmv_q4k_bytes: u64 = 0,
+    dmmv_q5_1_bytes: u64 = 0,
     dmmv_q5k_bytes: u64 = 0,
     dmmv_q6k_bytes: u64 = 0,
     dmmv_q8_0_bytes: u64 = 0,
@@ -3024,11 +3025,13 @@ pub const InferenceEngine = struct {
             });
         }
         if (profile.dmmv_total_bytes > 0) {
-            log.info("  dmmv bytes: q8_0 {d:.2} GiB ({d:.1}%) q4_k {d:.2} GiB ({d:.1}%) q5_k {d:.2} GiB ({d:.1}%) q6_k {d:.2} GiB ({d:.1}%)", .{
+            log.info("  dmmv bytes: q8_0 {d:.2} GiB ({d:.1}%) q4_k {d:.2} GiB ({d:.1}%) q5_1 {d:.2} GiB ({d:.1}%) q5_k {d:.2} GiB ({d:.1}%) q6_k {d:.2} GiB ({d:.1}%)", .{
                 bytesToGiB(profile.dmmv_q8_0_bytes),
                 pctOf(profile.dmmv_total_bytes, profile.dmmv_q8_0_bytes),
                 bytesToGiB(profile.dmmv_q4k_bytes),
                 pctOf(profile.dmmv_total_bytes, profile.dmmv_q4k_bytes),
+                bytesToGiB(profile.dmmv_q5_1_bytes),
+                pctOf(profile.dmmv_total_bytes, profile.dmmv_q5_1_bytes),
                 bytesToGiB(profile.dmmv_q5k_bytes),
                 pctOf(profile.dmmv_total_bytes, profile.dmmv_q5k_bytes),
                 bytesToGiB(profile.dmmv_q6k_bytes),
@@ -3332,6 +3335,7 @@ fn recordDispatchQuantBytes(profile: *RuntimeProfile, quant_type: GGMLType, byte
     profile.dmmv_total_bytes += bytes;
     switch (quant_type) {
         .q4_k => profile.dmmv_q4k_bytes += bytes,
+        .q5_1 => profile.dmmv_q5_1_bytes += bytes,
         .q5_k => profile.dmmv_q5k_bytes += bytes,
         .q6_k => profile.dmmv_q6k_bytes += bytes,
         .q8_0 => profile.dmmv_q8_0_bytes += bytes,
