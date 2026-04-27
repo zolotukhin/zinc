@@ -459,8 +459,8 @@ test("historyTransportContent compacts long assistant history", () => {
 test("chatMaxTokens gives thinking enough room to finish", () => {
   const { chatMaxTokens } = loadChatUiApi();
 
-  expect(chatMaxTokens(false)).toBe(1024);
-  expect(chatMaxTokens(true)).toBe(4096);
+  expect(chatMaxTokens(false)).toBe(2048);
+  expect(chatMaxTokens(true)).toBe(16384);
 });
 
 test("reasoningIsLowSignal flags trivial meta reasoning", () => {
