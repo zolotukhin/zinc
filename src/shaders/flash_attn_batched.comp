@@ -195,15 +195,37 @@ void main() {
             uint i_lo = i_half * half_block;
             uint i_hi = (i_half == 0u) ? min(half_block, block_len) : block_len;
 
-            vec4 acc = vec4(0.0);
-            for (uint i = i_lo; i < i_hi; i++) {
+            // 2-way ILP via paired partial accumulators acc0/acc1; mirrors
+            // flash_attn.comp. Lets the wave have two V loads in flight
+            // before either FMA retires.
+            vec4 acc0 = vec4(0.0);
+            vec4 acc1 = vec4(0.0);
+            uint i = i_lo;
+            for (; i + 2u <= i_hi; i += 2u) {
+                const uint seq_pos_0 = block_start + i;
+                const uint seq_pos_1 = seq_pos_0 + 1u;
+                const uint page_off_0 = seq_pos_0 % page_size;
+                const uint page_off_1 = seq_pos_1 % page_size;
+                const uint page_id_0 = s_page_ids_block[i];
+                const uint page_id_1 = s_page_ids_block[i + 1u];
+
+                const uint v_base_v4_0 = ((page_id_0 * page_size + page_off_0) * n_kv_heads * head_dim
+                                          + kv_head * head_dim) >> 2;
+                const uint v_base_v4_1 = ((page_id_1 * page_size + page_off_1) * n_kv_heads * head_dim
+                                          + kv_head * head_dim) >> 2;
+
+                acc0 += s_scores[i] * v_data_v4[v_base_v4_0 + d4];
+                acc1 += s_scores[i + 1u] * v_data_v4[v_base_v4_1 + d4];
+            }
+            for (; i < i_hi; i++) {
                 const uint seq_pos = block_start + i;
                 const uint page_off = seq_pos % page_size;
                 const uint page_id  = s_page_ids_block[i];
                 const uint v_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
                                         + kv_head * head_dim) >> 2;
-                acc += s_scores[i] * v_data_v4[v_base_v4 + d4];
+                acc0 += s_scores[i] * v_data_v4[v_base_v4 + d4];
             }
+            vec4 acc = acc0 + acc1;
 
             if (i_half == 1u) {
                 s_partial_v4[d4] = acc;

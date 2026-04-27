@@ -233,8 +233,35 @@ void main() {
             uint i_lo = i_half * half_block;
             uint i_hi = (i_half == 0u) ? min(half_block, block_len) : block_len;
 
-            vec4 acc = vec4(0.0);
-            for (uint i = i_lo; i < i_hi; i++) {
+            // Split the i-loop accumulator into two independent partial
+            // accumulators acc0/acc1 and unroll the loop by 2. This breaks
+            // the single-accumulator dependency chain on `acc`, letting the
+            // wave issue both V loads (and both s_scores[] reads) before
+            // either FMA needs to retire — exposing 2-way ILP and helping
+            // the compiler hide V-load latency. The math is identical:
+            // acc = acc0 + acc1 covers the same i range as the prior single
+            // accumulator. Tail handles odd-length i ranges.
+            vec4 acc0 = vec4(0.0);
+            vec4 acc1 = vec4(0.0);
+            uint i = i_lo;
+            for (; i + 2u <= i_hi; i += 2u) {
+                uint seq_pos_0 = block_start + i;
+                uint seq_pos_1 = seq_pos_0 + 1u;
+                uint page_off_0 = seq_pos_0 % page_size;
+                uint page_off_1 = seq_pos_1 % page_size;
+                uint page_id_0 = s_page_ids_block[i];
+                uint page_id_1 = s_page_ids_block[i + 1u];
+
+                uint v_base_v4_0 = ((page_id_0 * page_size + page_off_0) * n_kv_heads * head_dim
+                                    + kv_head * head_dim) >> 2;
+                uint v_base_v4_1 = ((page_id_1 * page_size + page_off_1) * n_kv_heads * head_dim
+                                    + kv_head * head_dim) >> 2;
+
+                acc0 += s_scores[i] * v_data_v4[v_base_v4_0 + d4];
+                acc1 += s_scores[i + 1u] * v_data_v4[v_base_v4_1 + d4];
+            }
+            // Tail: handle the final i if (i_hi - i_lo) is odd.
+            for (; i < i_hi; i++) {
                 uint seq_pos = block_start + i;
                 uint page_off = seq_pos % page_size;
                 uint page_id = s_page_ids_block[i];
@@ -242,8 +269,9 @@ void main() {
                 uint v_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
                                   + kv_head * head_dim) >> 2;
 
-                acc += s_scores[i] * v_data_v4[v_base_v4 + d4];
+                acc0 += s_scores[i] * v_data_v4[v_base_v4 + d4];
             }
+            vec4 acc = acc0 + acc1;
 
             if (i_half == 1u) {
                 s_partial_v4[d4] = acc;
