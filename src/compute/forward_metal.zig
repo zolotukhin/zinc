@@ -3699,6 +3699,35 @@ fn canUseDualQ8Dmmv(
         engine.dmmv_q8_0_dual_pipe.max_threads_per_threadgroup >= block_size;
 }
 
+fn isGemmaSharedGateUpQ8Pair(
+    engine: *const InferenceEngine,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+) bool {
+    if (engine.config.architecture != .gemma) return false;
+    if (tensor0.info.type_ != .q8_0 or tensor1.info.type_ != .q8_0) return false;
+
+    const name0 = tensor0.info.name;
+    const name1 = tensor1.info.name;
+    return (std.mem.endsWith(u8, name0, "ffn_gate_shexp.weight") and
+        std.mem.endsWith(u8, name1, "ffn_up_shexp.weight")) or
+        (std.mem.endsWith(u8, name0, "ffn_up_shexp.weight") and
+            std.mem.endsWith(u8, name1, "ffn_gate_shexp.weight"));
+}
+
+fn pairedQ8DmmvBlockSize(
+    engine: *const InferenceEngine,
+    tensor0: *const metal_loader.LoadedTensor,
+    tensor1: *const metal_loader.LoadedTensor,
+) u32 {
+    if (isGemmaSharedGateUpQ8Pair(engine, tensor0, tensor1) and
+        engine.dmmv_q8_0_pair_pipe.max_threads_per_threadgroup >= 256)
+    {
+        return 256;
+    }
+    return engine.q8_dual_tg_override orelse 512;
+}
+
 fn canUsePairedQ8Dmmv(
     engine: *const InferenceEngine,
     tensor0: *const metal_loader.LoadedTensor,
@@ -3707,7 +3736,7 @@ fn canUsePairedQ8Dmmv(
     M1: u32,
     K: u32,
 ) bool {
-    const block_size = engine.q8_dual_tg_override orelse 512;
+    const block_size = pairedQ8DmmvBlockSize(engine, tensor0, tensor1);
     return tensor0.info.type_ == .q8_0 and
         tensor1.info.type_ == .q8_0 and
         M0 == M1 and
@@ -3779,7 +3808,7 @@ fn dispatchPairedQ8DmmvOnCmd(
         .y1_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &tensor0.gpu_buffer, &tensor1.gpu_buffer, input_buf, output0_buf, output1_buf };
-    const block_size = engine.q8_dual_tg_override orelse 512;
+    const block_size = pairedQ8DmmvBlockSize(engine, tensor0, tensor1);
     const simd_width = if (engine.dmmv_q8_0_pair_pipe.thread_execution_width > 0) engine.dmmv_q8_0_pair_pipe.thread_execution_width else @as(u32, 32);
     const rows_per_wg: u32 = (block_size / simd_width) * 2;
     cmd.dispatchV2(&engine.dmmv_q8_0_pair_pipe, .{ (M + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 0);
@@ -6919,8 +6948,12 @@ fn recordGemmaGpuRoutedMoeOnCmd(
             gate_up_layout.up_base_offset,
         );
     }
-    dispatchDmmvOnCmd(engine, cmd, gate_shexp, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
-    dispatchDmmvOnCmd(engine, cmd, up_shexp, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
+    if (canUsePairedQ8Dmmv(engine, gate_shexp, up_shexp, shexp_inter_dim, shexp_inter_dim, hidden_dim)) {
+        dispatchPairedQ8DmmvOnCmd(engine, cmd, gate_shexp, up_shexp, &engine.norm_buf, &engine.gate_buf, &engine.up_buf, shexp_inter_dim, hidden_dim);
+    } else {
+        dispatchDmmvOnCmd(engine, cmd, gate_shexp, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
+        dispatchDmmvOnCmd(engine, cmd, up_shexp, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
+    }
     if (lt.ffn_gate_inp_shexp) |gate_tensor| {
         dispatchDmmvOnCmd(engine, cmd, gate_tensor, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
     }
