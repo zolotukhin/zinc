@@ -182,6 +182,14 @@ pub const DmmvDispatch = struct {
     /// Y_up, routing). Halves the dispatch count for the MoE gate+up phase
     /// and reads the shared input once per block.
     pipeline_q4k_fused_gate_up_moe: ?Pipeline,
+    /// Fused gate+up+SwiGLU Q4_K dense pipeline (4 bindings: W_gate, W_up,
+    /// X, swiglu_out). Replaces the dense FFN front-end dispatch trio
+    /// (gate DMMV + up DMMV + swiglu element-wise) with a single dispatch
+    /// that computes silu(W_gate·x) * (W_up·x) inline. Eliminates gate_buf
+    /// and up_buf from the dense decode datapath. Saves one global compute
+    /// barrier per layer (gate+up → swiglu), and reads the shared input
+    /// once per block. Same DmmvPushConstants layout as pipeline_q4k.
+    pipeline_q4k_fused_gate_up_swiglu: ?Pipeline,
     /// Fused Q4_K MoE down + weighted_acc pipeline (4 bindings: A, X,
     /// Y=hidden_buf, routing). Each WG owns NUM_ROWS=2 hidden rows and
     /// loops over n_used experts internally, eliminating the separate
@@ -440,6 +448,16 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // Dense fused gate+up+SwiGLU: reads ffn_norm_buf once per block,
+        // dot-products against W_gate and W_up, applies silu(gate)*up
+        // inline, and writes a single swiglu_buf row. 4 bindings (W_gate,
+        // W_up, X, swiglu). Same DmmvPushConstants as pipeline_q4k.
+        const q4k_fused_gate_up_swiglu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_swiglu.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_fused_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_swiglu_path, 4, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K dense fused gate+up+SwiGLU shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // Fused Q4_K MoE down + weighted_acc: each WG accumulates over
         // n_used experts and writes hidden_buf[row] += sum (NUM_ROWS=2).
         // 4 bindings (A, X=swiglu_buf, Y=hidden_buf, routing). Push struct
@@ -581,6 +599,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_q4k_moe_batched = pipeline_q4k_moe_batched,
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
+            .pipeline_q4k_fused_gate_up_swiglu = pipeline_q4k_fused_gate_up_swiglu,
             .pipeline_q4k_moe_fused_down_acc = pipeline_q4k_moe_fused_down_acc,
             .pipeline_q5k_moe_fused_down_acc = pipeline_q5k_moe_fused_down_acc,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,

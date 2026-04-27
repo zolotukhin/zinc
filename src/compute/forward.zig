@@ -982,6 +982,18 @@ pub const InferenceEngine = struct {
     // single dispatch (cycle-13 application of the cycle-8 fused_rms
     // pattern to a smaller M target). Disable with ZINC_FUSED_SSM_AB=0.
     use_fused_ssm_pre_norm: bool = false,
+    // Effort-11 cycle-8: dense Q4_K fused gate+up+SwiGLU. Single dispatch
+    // replacing the per-layer (gate DMMV → up DMMV → swiglu) trio at the
+    // dense FFN front-end. Eliminates gate_buf and up_buf round-trips and
+    // saves one global compute barrier per layer (gate+up → swiglu).
+    // Disable with ZINC_FUSED_DENSE_FFN=0. Per-call gates: architecture
+    // is dense + non-Gemma (SwiGLU activation), gate/up tensors are Q4_K,
+    // inter_dim ≤ 12288 (Gemma 4 31B at 25600 regressed in cycle-7's
+    // gate+up-only attempt — wider FFN tilts register pressure the wrong
+    // way). Cycle-7 attempted gate+up only and reverted; this cycle adds
+    // the SwiGLU fold which removes the gate_buf/up_buf write+read pair
+    // entirely, a structurally distinct change.
+    use_fused_dense_ffn: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
     // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
     // slot(position, layer). Unused downstream this cycle — the buffer is the
@@ -1862,6 +1874,21 @@ pub const InferenceEngine = struct {
             log.info("Fused SSM pre-norm DISABLED via ZINC_FUSED_SSM_AB=0", .{});
         }
 
+        // Fused dense gate+up+SwiGLU (effort-11 cycle 8). Default ON when
+        // the pipeline is loaded; disable via ZINC_FUSED_DENSE_FFN=0. The
+        // architecture / quant / size gates run per call so non-matching
+        // models silently fall back to the gate / up / swiglu trio.
+        const fused_dense_ffn_env = std.posix.getenv("ZINC_FUSED_DENSE_FFN");
+        const fused_dense_ffn_explicitly_off = fused_dense_ffn_env != null and std.mem.eql(u8, fused_dense_ffn_env.?, "0");
+        const fused_dense_ffn_enabled = !fused_dense_ffn_explicitly_off and
+            dmmv.pipeline_q4k_fused_gate_up_swiglu != null and
+            instance.push_descriptor_fn != null;
+        if (fused_dense_ffn_enabled) {
+            log.info("Fused dense gate+up+SwiGLU ENABLED (default, set ZINC_FUSED_DENSE_FFN=0 to disable)", .{});
+        } else if (fused_dense_ffn_explicitly_off) {
+            log.info("Fused dense gate+up+SwiGLU DISABLED via ZINC_FUSED_DENSE_FFN=0", .{});
+        }
+
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -2047,6 +2074,7 @@ pub const InferenceEngine = struct {
             .use_moe_fused_down_acc = moe_fused_down_acc_enabled,
             .use_fused_rms_router = fused_rms_router_enabled,
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
+            .use_fused_dense_ffn = fused_dense_ffn_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -6626,31 +6654,50 @@ pub const InferenceEngine = struct {
                 }
             } else {
                 // Dense FFN: gate → up → SwiGLU → down → residual.
-                // Note: a fused Q4_K dense gate+up shader exists
-                // (dmmv_q4k_fused_gate_up.comp, mirrors the MoE variant) but
-                // measured +11% decode regression on gemma4-31b (inter_dim=
-                // 25600) from the doubled per-workgroup register pressure.
-                // It's a small win on Qwen3-8B (inter_dim=11008) and a loss
-                // on Gemma's wider FFN, so stay with two separate DMMVs until
-                // we have a size-gated selector that's a net win.
+                // Effort-11 cycle-8: when the dense fused gate+up+SwiGLU
+                // pipeline is loaded and the per-call gates pass (Q4_K
+                // gate+up tensors, SwiGLU activation = non-Gemma + non-
+                // gpt_oss, inter_dim ≤ 12288 to keep Gemma 4 31B's wider
+                // FFN on the unfused path), one dispatch replaces the
+                // (gate DMMV + up DMMV + swiglu) trio. Eliminates the
+                // gate_buf and up_buf write+read round-trips and saves
+                // one global compute barrier per layer. Cycle-7 attempted
+                // gate+up only and reverted; this variant additionally
+                // folds the SwiGLU inline so the freed buffers are
+                // physically removed from the dense decode datapath.
                 const gate_tensor = lt.ffn_gate orelse return error.TensorNotFound;
                 const up_tensor = lt.ffn_up orelse return error.TensorNotFound;
                 const down_tensor = lt.ffn_down orelse return error.TensorNotFound;
 
-                try self.dispatchDmmv(gate_tensor, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim);
-                try self.dispatchDmmv(up_tensor, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
-                self.decode_cmd.computeBarrier();
+                const fused_dense_ffn_eligible = self.use_fused_dense_ffn and
+                    self.dmmv.pipeline_q4k_fused_gate_up_swiglu != null and
+                    config.architecture != .gemma and
+                    config.architecture != .gpt_oss and
+                    gate_tensor.info.type_ == .q4_k and
+                    up_tensor.info.type_ == .q4_k and
+                    inter_dim <= 12288 and
+                    (hidden_dim % 4) == 0 and
+                    (hidden_dim % 256) == 0;
 
-                try self.dispatchFfnActivation(
-                    self.gate_buf.handle,
-                    self.gate_buf.size,
-                    self.up_buf.handle,
-                    self.up_buf.size,
-                    self.swiglu_buf.handle,
-                    self.swiglu_buf.size,
-                    inter_dim,
-                );
-                self.decode_cmd.computeBarrier();
+                if (fused_dense_ffn_eligible) {
+                    try self.dispatchDmmvFusedGateUpSwiglu(gate_tensor, up_tensor, self.ffn_norm_buf, hidden_size, self.swiglu_buf, inter_dim, hidden_dim);
+                    self.decode_cmd.computeBarrier();
+                } else {
+                    try self.dispatchDmmv(gate_tensor, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim);
+                    try self.dispatchDmmv(up_tensor, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
+                    self.decode_cmd.computeBarrier();
+
+                    try self.dispatchFfnActivation(
+                        self.gate_buf.handle,
+                        self.gate_buf.size,
+                        self.up_buf.handle,
+                        self.up_buf.size,
+                        self.swiglu_buf.handle,
+                        self.swiglu_buf.size,
+                        inter_dim,
+                    );
+                    self.decode_cmd.computeBarrier();
+                }
 
                 // Fast path: fuse down proj + post_ffw_norm + residual add into
                 // two dispatches when the Gemma tail is active and the fused
@@ -7469,6 +7516,50 @@ pub const InferenceEngine = struct {
         K: u32,
     ) !void {
         return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 1);
+    }
+
+    /// Dispatch the dense fused gate+up+SwiGLU shader. Replaces the
+    /// (gate DMMV → up DMMV → swiglu) trio with a single dispatch that
+    /// writes silu(W_gate·x) * (W_up·x) directly into swiglu_buf.
+    /// Push-descriptor only (we always run with push descriptors on
+    /// RDNA4); the per-call gate in the dense FFN site falls back to
+    /// the unfused trio when push descriptors aren't available.
+    fn dispatchDmmvFusedGateUpSwiglu(
+        self: *InferenceEngine,
+        gate_tensor: *const LoadedTensor,
+        up_tensor: *const LoadedTensor,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
+        swiglu_buf: Buffer,
+        M: u32,
+        K: u32,
+    ) !void {
+        const pip = &(self.dmmv.pipeline_q4k_fused_gate_up_swiglu orelse return error.ShaderNotLoaded);
+        const push = DmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = 0,
+            .x_offset = 0,
+            .y_offset = 0,
+            .acc_mode = 0,
+        };
+        // NUM_ROWS=2 in the shader; one workgroup per row pair.
+        const wg_x: u32 = (M + 1) / 2;
+        self.pushDispatch4(
+            pip,
+            std.mem.asBytes(&push),
+            gate_tensor.gpu_buffer.handle,
+            gate_tensor.gpu_buffer.size,
+            up_tensor.gpu_buffer.handle,
+            up_tensor.gpu_buffer.size,
+            input_buf.handle,
+            input_size,
+            swiglu_buf.handle,
+            swiglu_buf.size,
+            wg_x,
+            1,
+            1,
+        );
     }
 
     /// Dispatch a DMMV with byte offset into stacked weight tensor (for MoE experts).
