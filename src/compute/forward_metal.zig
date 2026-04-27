@@ -9735,6 +9735,119 @@ test "dmmv_q4k_moe_k2048 shader matches CPU reference across selected experts" {
     }
 }
 
+test "dmmv_q4k_moe_cols shader matches per-route CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_cols");
+    defer metal_pipeline.freePipeline(&pipe);
+
+    const M: usize = 7;
+    const K: usize = 512;
+    const n_tokens: usize = 5;
+    const k_used: usize = 2;
+    const n_experts: usize = 3;
+    const route_slots = n_tokens * k_used;
+    const blocks_per_row: usize = K / 256;
+    const row_bytes: usize = blocks_per_row * 144;
+    const expert_stride: usize = M * row_bytes;
+
+    var weight_buf = try metal_buffer.createBuffer(ctx, n_experts * expert_stride);
+    defer metal_buffer.freeBuffer(&weight_buf);
+    var input_buf = try metal_buffer.createBuffer(ctx, route_slots * K * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&input_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, route_slots * M * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+    var counts_buf = try metal_buffer.createBuffer(ctx, n_experts * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&counts_buf);
+    var ids_buf = try metal_buffer.createBuffer(ctx, n_experts * n_tokens * @sizeOf(u32));
+    defer metal_buffer.freeBuffer(&ids_buf);
+
+    @memset(weight_buf.cpu_ptr.?[0..weight_buf.size], 0);
+    @memset(input_buf.cpu_ptr.?[0..input_buf.size], 0);
+    @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
+    @memset(counts_buf.cpu_ptr.?[0..counts_buf.size], 0);
+    @memset(ids_buf.cpu_ptr.?[0..ids_buf.size], 0xff);
+
+    const weight_ptr = weight_buf.cpu_ptr.?;
+    for (0..n_experts) |expert| {
+        for (0..M) |row| {
+            for (0..blocks_per_row) |blk| {
+                const base = expert * expert_stride + row * row_bytes + blk * 144;
+                const d = @as(f16, @floatCast(0.015625 * @as(f32, @floatFromInt(1 + expert + (row % 5) + blk))));
+                const dmin = @as(f16, @floatCast(0.0078125 * @as(f32, @floatFromInt(1 + ((expert + row + blk) % 7)))));
+                const d_bits = @as(u16, @bitCast(d));
+                const dmin_bits = @as(u16, @bitCast(dmin));
+                std.mem.writeInt(u16, weight_ptr[base..][0..2], d_bits, .little);
+                std.mem.writeInt(u16, weight_ptr[base + 2 ..][0..2], dmin_bits, .little);
+                for (0..12) |i| {
+                    weight_ptr[base + 4 + i] = @intCast((expert * 31 + row * 9 + blk * 5 + i * 3) & 0xFF);
+                }
+                for (0..128) |i| {
+                    const lo: u8 = @intCast((expert * 19 + row * 13 + blk * 17 + i * 7) & 0x0F);
+                    const hi: u8 = @intCast((expert * 11 + row * 5 + blk * 3 + i * 9) & 0x0F);
+                    weight_ptr[base + 16 + i] = lo | (hi << 4);
+                }
+            }
+        }
+    }
+
+    const input_ptr: [*]f32 = @ptrCast(@alignCast(input_buf.cpu_ptr.?));
+    for (0..route_slots) |route| {
+        for (0..K) |i| {
+            const raw: i32 = @intCast((route * 17 + i * 11 + 5) % 23);
+            input_ptr[route * K + i] = 0.03125 * @as(f32, @floatFromInt(raw - 11));
+        }
+    }
+
+    const counts_ptr: [*]u32 = @ptrCast(@alignCast(counts_buf.cpu_ptr.?));
+    const ids_ptr: [*]u32 = @ptrCast(@alignCast(ids_buf.cpu_ptr.?));
+    counts_ptr[1] = @intCast(n_tokens);
+    counts_ptr[2] = @intCast(n_tokens);
+    for (0..n_tokens) |token| {
+        ids_ptr[1 * n_tokens + token] = @intCast(token * k_used);
+        ids_ptr[2 * n_tokens + token] = @intCast(token * k_used + 1);
+    }
+
+    const push = MoeColsDmmvPush{
+        .M = @intCast(M),
+        .K = @intCast(K),
+        .a_offset = 0,
+        .expert_stride = @intCast(expert_stride),
+        .x_offset = 0,
+        .y_offset = 0,
+        .ids_stride = @intCast(n_tokens),
+    };
+    const bufs = [_]*const MetalBuffer{ &weight_buf, &input_buf, &output_buf, &counts_buf, &ids_buf };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(&pipe, .{ @intCast((M + 1) / 2), @intCast(n_experts), @intCast((n_tokens + 3) / 4) }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeColsDmmvPush), 1);
+    cmd.commitAndWait();
+
+    const allocator = std.testing.allocator;
+    const ref_row = try allocator.alloc(f32, K);
+    defer allocator.free(ref_row);
+
+    const output_ptr: [*]const f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+    var max_diff: f32 = 0.0;
+    for (0..route_slots) |route| {
+        const expert_id: usize = if (route % 2 == 0) 1 else 2;
+        const matrix_raw = weight_buf.cpu_ptr.?[expert_id * expert_stride ..][0..expert_stride];
+        const input_slice = input_ptr[route * K .. (route + 1) * K];
+        for (0..M) |row| {
+            dequantRow(matrix_raw, @intCast(row), @intCast(K), .q4_k, ref_row);
+            var expected: f32 = 0.0;
+            for (0..K) |i| {
+                expected += ref_row[i] * input_slice[i];
+            }
+            const actual = output_ptr[route * M + row];
+            max_diff = @max(max_diff, @abs(expected - actual));
+        }
+    }
+    try std.testing.expect(max_diff < 0.001);
+}
+
 test "dmmv_q5k_moe shader matches CPU reference across selected experts" {
     const ctx = shim.mtl_init();
     try std.testing.expect(ctx != null);
@@ -10588,6 +10701,8 @@ test "batched MoE Metal shaders compile" {
 
     var dmmv_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
     defer metal_pipeline.freePipeline(&dmmv_pipe);
+    var dmmv_q4k_moe_cols_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_cols");
+    defer metal_pipeline.freePipeline(&dmmv_q4k_moe_cols_pipe);
     var dmmv_q5_1_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe");
     defer metal_pipeline.freePipeline(&dmmv_q5_1_moe_pipe);
     var dmmv_q5_1_moe_cols_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe_cols");
@@ -10642,6 +10757,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(rope_pipe.handle != null);
     try std.testing.expect(sigmoid_mul_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
+    try std.testing.expect(dmmv_q4k_moe_cols_pipe.handle != null);
     try std.testing.expect(dmmv_q5_1_moe_pipe.handle != null);
     try std.testing.expect(dmmv_q5_1_moe_cols_pipe.handle != null);
     try std.testing.expect(dmmv_q5k_moe_pipe.handle != null);
