@@ -272,6 +272,20 @@ M.addEventListener('scroll',function(){
 },{passive:true});
 function autoScroll(){if(!userScrolledUp)M.scrollTop=M.scrollHeight}
 function autoScrollReasoning(bbl){let rb=bbl.querySelector('.reasoning-body');if(rb)rb.scrollTop=rb.scrollHeight}
+let renderTimer=null,pendingRender=null;
+function scheduleRender(fn){
+  pendingRender=fn;
+  if(renderTimer!==null)return;
+  renderTimer=setTimeout(function(){
+    renderTimer=null;
+    let f=pendingRender;pendingRender=null;
+    if(f)f();
+  },80);
+}
+function flushPendingRender(){
+  if(renderTimer!==null){clearTimeout(renderTimer);renderTimer=null}
+  if(pendingRender){let f=pendingRender;pendingRender=null;f()}
+}
 
 function newChatSessionId(){
   try{
@@ -1582,6 +1596,7 @@ async function send(){
                 saveChatState();
               }
               let html=rendered.html;
+              flushPendingRender();
               if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();autoScroll()}
               finishReason='stop';
               sawFinishReason=true;
@@ -1603,6 +1618,7 @@ async function send(){
                 saveChatState();
               }
               let html=rendered.html;
+              flushPendingRender();
               if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();autoScroll()}
               finishReason='stop';
               sawFinishReason=true;
@@ -1616,14 +1632,16 @@ async function send(){
               draftEntry={role:'assistant',content:'',raw:'',transport:'',partial:true};
               H.push(draftEntry);
             }
-            let rendered=assistantHtmlFromRaw(raw,thinking);
             draftEntry.raw=raw;
-            draftEntry.content=rendered.view.answer||stripTrailingArtifacts(raw);
             draftEntry.transport='';
-            saveChatState();
-            let html=rendered.html;
-            if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();autoScroll();autoScrollReasoning(bbl)}
-            let visibleAnswer=rendered.view.answer||stripTrailingArtifacts(raw);
+            let visibleAnswer=(splitDisplayContent(raw,thinking).answer)||stripTrailingArtifacts(raw);
+            scheduleRender(function(){
+              let rendered=assistantHtmlFromRaw(raw,thinking);
+              draftEntry.content=rendered.view.answer||stripTrailingArtifacts(raw);
+              saveChatState();
+              let html=rendered.html;
+              if(html){bbl.innerHTML=html;bbl.appendChild(cur);highlightAll();autoScroll();autoScrollReasoning(bbl)}
+            });
             if(findRestartedAnswerStart(visibleAnswer)!==-1){
               errorMessage='Response started repeating itself and was stopped early.';
               activeController.abort();
@@ -1656,6 +1674,7 @@ async function send(){
     else errorMessage=errorMessage||(e?.message||'Request failed')
   }
   clearStallTimer();
+  flushPendingRender();
   if(cur.parentNode)cur.remove();
   highlightAll();
   activeController=null;stopRequested=false;setGenerating(false);I.focus();
