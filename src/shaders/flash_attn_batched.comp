@@ -32,8 +32,14 @@ layout(push_constant) uniform PushConstants {
     uint sink_offset;     // layer_idx * n_heads — index into sink_data
 };
 
+// Q and K aliased as vec4 so Phase 1's dot loop issues 16-byte coherent
+// loads instead of 4 scalar loads. Mirrors the decode-side flash_attn.comp
+// change. q_base/k_base are head_dim-aligned and head_dim is divisible
+// by 4 for every model, so the alias is always valid.
 layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];   };
+layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[]; };
 layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];   };
+layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[]; };
 layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];   };
 layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[]; };
 layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];   };
@@ -42,9 +48,10 @@ layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
 const uint BLOCK_SIZE = 256u;
 shared float s_scores[BLOCK_SIZE];
 // Q for this (head, query_idx) is constant across every score and block.
-// Stage it once at the top instead of re-reading from DRAM in the inner
-// dot loop. See flash_attn.comp for the equivalent decode-side change.
-shared float s_q[512];     // supports head_dim up to 512
+// Stage it once at the top as vec4 (128 vec4 = 512 floats; same LDS
+// budget as the prior scalar s_q[512]). See flash_attn.comp for the
+// equivalent decode-side change.
+shared vec4 s_q4[128];     // supports head_dim up to 512
 // Page-id cache. Phase 4's V-accumulation does block_len lookups per
 // (thread, d) pair; caching once per block makes the inner loops
 // shared-memory only.
@@ -71,10 +78,15 @@ void main() {
     // to KV entries [0 .. seq_start + query_idx] inclusive.
     const uint causal_len = seq_start + query_idx + 1u;
 
-    // Initialize per-query running state and stage Q into LDS.
+    // Initialize per-query running state, scalar s_out (Phase 4 reads
+    // element-wise), and stage Q into LDS as vec4 chunks.
     for (uint d = tid; d < head_dim; d += 64u) {
         s_out[d] = 0.0;
-        s_q[d] = q_data[q_base + d];
+    }
+    const uint head_dim_v4 = head_dim >> 2;
+    const uint q_base_v4 = q_base >> 2;
+    for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        s_q4[d4] = q_data_v4[q_base_v4 + d4];
     }
     if (tid == 0u) {
         s_max_old = -1.0e30;
@@ -96,20 +108,20 @@ void main() {
         }
         barrier();
 
-        // Phase 1: compute attention scores for this block.
+        // Phase 1: compute attention scores for this block (vec4 K loads).
         for (uint i = tid; i < block_len; i += 64u) {
             const uint seq_pos = block_start + i;
             const uint page_off = seq_pos % page_size;
             const uint page_id  = s_page_ids_block[i];
 
-            const uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
-                              + kv_head * head_dim;
+            const uint k_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                    + kv_head * head_dim) >> 2;
 
-            float dot = 0.0;
-            for (uint d = 0u; d < head_dim; d++) {
-                dot += s_q[d] * k_data[k_base + d];
+            float dot_acc = 0.0;
+            for (uint d4 = 0u; d4 < head_dim_v4; d4++) {
+                dot_acc += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
             }
-            s_scores[i] = dot * scale;
+            s_scores[i] = dot_acc * scale;
         }
         barrier();
 

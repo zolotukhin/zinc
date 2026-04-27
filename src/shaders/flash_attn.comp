@@ -27,9 +27,15 @@ layout(push_constant) uniform PushConstants {
     uint sink_offset;     // starting index into sink_data for this layer (layer_idx * n_heads)
 };
 
-// Buffer bindings
+// Buffer bindings. Q and K are aliased as vec4 so Phase 1's dot loop can
+// issue 16-byte coherent loads (one wave-instruction per 4 head_dim
+// elements) instead of 4 scalar loads. All head_dim values used in this
+// codebase (128/256/512) are divisible by 4, and q_base/k_base offsets
+// are multiples of head_dim, so the alias is always valid.
 layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];     };
+layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[];  };
 layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];     };
+layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[];  };
 layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];     };
 layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];   };
 layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];     };
@@ -39,12 +45,10 @@ layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[];  };
 // Attention scores for one 256-token block (max scores held at once)
 const uint BLOCK_SIZE = 256u;
 shared float s_scores[BLOCK_SIZE];
-// Query vector cached in shared memory once per workgroup. Q is constant
-// across every score and every block for a given head, but the original
-// dot loop re-read q_data[] from DRAM for each (i, d) pair which costs
-// O(block_len * head_dim) redundant global reads per block. Staging it
-// once collapses that to one head_dim-sized cooperative load.
-shared float s_q[512];     // supports head_dim up to 512 (Gemma 4 global layers)
+// Query vector cached in shared memory once per workgroup, packed as vec4
+// so Phase 1's dot loop reads aligned 16-byte chunks. 128 vec4 = 512
+// floats (same LDS budget as the prior scalar s_q[512]).
+shared vec4 s_q4[128];     // supports head_dim up to 512 (Gemma 4 global layers)
 // Page-id cache. Phase 4's V-accumulation re-reads page_ids[] once per
 // (d, i) pair: 64 threads * (head_dim/64) * block_len lookups per block.
 // On head_dim=128 that is 32,768 lookups per WG per block, all to a tiny
@@ -73,12 +77,16 @@ void main() {
     // Each thread handles head_dim/64 elements with stride 64.
     // For head_dim=128, each thread handles 2 elements.
 
-    // Initialize output accumulator and stage Q into shared memory.
-    // Both happen in the same cooperative loop because the same threads
-    // own the same indices.
+    // Initialize output accumulator (scalar; Phase 4 reads element-wise)
+    // and stage Q into shared memory as vec4 (Phase 1's dot loop reads
+    // 4-element chunks).
     for (uint d = tid; d < head_dim; d += 64u) {
         s_out[d] = 0.0;
-        s_q[d] = q_data[q_base + d];
+    }
+    uint head_dim_v4 = head_dim >> 2;
+    uint q_base_v4 = q_base >> 2;
+    for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        s_q4[d4] = q_data_v4[q_base_v4 + d4];
     }
 
     if (tid == 0u) {
@@ -107,7 +115,11 @@ void main() {
         barrier();
 
         // --- Phase 1: Compute attention scores for this block ---
-        // Each thread computes one or more scores (stride of 64 across block_len)
+        // Each thread computes one or more scores (stride of 64 across block_len).
+        // K is read as vec4: each iteration loads 16 bytes per thread and
+        // performs one dot(vec4, vec4), so the inner loop runs head_dim/4
+        // iterations instead of head_dim. q_base/k_base are head_dim-aligned
+        // and head_dim is divisible by 4, so the vec4 alias is valid.
         for (uint i = tid; i < block_len; i += 64u) {
             uint seq_pos = block_start + i;
 
@@ -121,18 +133,16 @@ void main() {
             //                         + kv_head * head_dim + d]
             // Simplified: each page stores page_size tokens, each token stores
             // n_kv_heads * head_dim floats.
-            uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
-                          + kv_head * head_dim;
+            uint k_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                              + kv_head * head_dim) >> 2;
 
-            // Dot product q . k. Q is staged in shared memory by the
-            // cooperative load above, so the inner loop only reads one
-            // global tensor (K) per iteration.
-            float dot = 0.0;
-            for (uint d = 0u; d < head_dim; d++) {
-                dot += s_q[d] * k_data[k_base + d];
+            // Dot product q . k via vec4 chunks.
+            float dot_acc = 0.0;
+            for (uint d4 = 0u; d4 < head_dim_v4; d4++) {
+                dot_acc += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
             }
 
-            s_scores[i] = dot * scale;
+            s_scores[i] = dot_acc * scale;
         }
 
         barrier();
