@@ -266,9 +266,9 @@ fn shouldUseGlobalQ8Override(arch: config_mod.Architecture, tensor_name: []const
 }
 
 fn shouldCpuQ8Fallback(arch: config_mod.Architecture, tensor_name: []const u8) bool {
-    return arch == .gemma and
-        (std.mem.endsWith(u8, tensor_name, "ffn_down.weight") or
-            std.mem.endsWith(u8, tensor_name, "ffn_down_shexp.weight"));
+    _ = arch;
+    _ = tensor_name;
+    return false;
 }
 
 fn shouldDebugAttentionValidation(cfg: ModelConfig, position: u32, layer_idx: usize) bool {
@@ -653,6 +653,12 @@ const SoftmaxTopkPush = extern struct {
     k: u32,
 };
 
+const SoftmaxTopkScaledPush = extern struct {
+    n_experts: u32,
+    k: u32,
+    logit_scale_bits: u32,
+};
+
 /// Push constants for batched GPU softmax + top-k routing.
 /// Outputs one packed routing row per token: [k expert ids][k f32 weights as u32].
 const SoftmaxTopkBatchedPush = extern struct {
@@ -679,10 +685,23 @@ const MoeWeightedAccPush = extern struct {
     src_stride: u32,
 };
 
+const MoeWeightedAccScaledPush = extern struct {
+    n: u32,
+    n_used: u32,
+    src_stride: u32,
+    scale_offset: u32,
+};
+
 /// Push constants for RMS norm dispatch (matches rms_norm_mul.metal: buffer(0)).
 const RmsNormPush = extern struct {
     n: u32, // elements per group
     eps: f32, // epsilon
+};
+
+const RmsNormOffsetPush = extern struct {
+    n: u32,
+    eps: f32,
+    weight_offset: u32,
 };
 
 /// Push constants for fused residual-add + RMS norm (matches residual_rms_norm.metal: buffer(0)).
@@ -1258,13 +1277,16 @@ pub const InferenceEngine = struct {
     swiglu_batched_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
     rms_norm_pipe: MetalPipeline,
+    rms_norm_offset_pipe: MetalPipeline,
     moe_acc_pipe: MetalPipeline,
     moe_acc_batched_pipe: MetalPipeline,
     softmax_topk_pipe: MetalPipeline,
+    softmax_topk_scaled_pipe: MetalPipeline,
     softmax_topk_batched_pipe: MetalPipeline,
     moe_route_pack_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
+    moe_weighted_acc_scaled_pipe: MetalPipeline,
     residual_rms_norm_pipe: MetalPipeline,
     moe_weighted_acc_shared_pipe: MetalPipeline,
     copy_u32_pipe: MetalPipeline,
@@ -1586,13 +1608,16 @@ pub const InferenceEngine = struct {
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
         self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
+        self.rms_norm_offset_pipe = try loadShaderPipeline(ctx, "rms_norm_mul_offset");
         self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
         self.moe_acc_batched_pipe = try loadShaderPipeline(ctx, "moe_accumulate_batched");
         self.softmax_topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
+        self.softmax_topk_scaled_pipe = try loadShaderPipeline(ctx, "softmax_topk_scaled");
         self.softmax_topk_batched_pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
         self.moe_route_pack_pipe = try loadShaderPipeline(ctx, "moe_route_pack");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
+        self.moe_weighted_acc_scaled_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_scaled");
         self.residual_rms_norm_pipe = try loadShaderPipeline(ctx, "residual_rms_norm");
         self.moe_weighted_acc_shared_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_shared");
         self.copy_u32_pipe = try loadShaderPipeline(ctx, "copy_u32");
@@ -2167,13 +2192,16 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
         metal_pipeline.freePipeline(&self.rms_norm_pipe);
+        metal_pipeline.freePipeline(&self.rms_norm_offset_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_batched_pipe);
         metal_pipeline.freePipeline(&self.softmax_topk_pipe);
+        metal_pipeline.freePipeline(&self.softmax_topk_scaled_pipe);
         metal_pipeline.freePipeline(&self.softmax_topk_batched_pipe);
         metal_pipeline.freePipeline(&self.moe_route_pack_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
+        metal_pipeline.freePipeline(&self.moe_weighted_acc_scaled_pipe);
         metal_pipeline.freePipeline(&self.residual_rms_norm_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_shared_pipe);
         metal_pipeline.freePipeline(&self.copy_u32_pipe);
@@ -2789,7 +2817,7 @@ pub const InferenceEngine = struct {
     /// Q5_K/Q6_K/F32: SPIRV-Cross — each thread handles 1 row (64 rows per workgroup, 64 threads).
     /// Q8_0/F16: SPIRV-Cross — each workgroup handles 2 rows (64 threads cooperate via simd_sum).
     fn dmmvPipelineForType(
-        self: *InferenceEngine,
+        self: *const InferenceEngine,
         tensor: *const metal_loader.LoadedTensor,
         M: u32,
         K: u32,
@@ -3748,6 +3776,38 @@ fn dispatchRmsNormOnCmd(
     cmd.dispatchV2(&engine.rms_norm_pipe, .{ n_groups, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(RmsNormPush), 0);
 }
 
+fn dispatchRmsNormOnCmdWithWeightOffset(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    weights: *const MetalBuffer,
+    weight_offset: u32,
+    n: u32,
+    n_groups: u32,
+) void {
+    const push = RmsNormOffsetPush{ .n = n, .eps = engine.config.rms_norm_eps, .weight_offset = weight_offset };
+    const bufs = [_]*const MetalBuffer{ input, output, weights };
+    const tg_size: u32 = @min(
+        @max(engine.rms_norm_offset_pipe.max_threads_per_threadgroup, 32),
+        if (n >= 1024) @as(u32, 1024) else if (n >= 256) @as(u32, 256) else @as(u32, 32),
+    );
+    cmd.dispatchV2(&engine.rms_norm_offset_pipe, .{ n_groups, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(RmsNormOffsetPush), 0);
+}
+
+fn dispatchRmsNormOnCmdWithTensorWeights(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    input: *const MetalBuffer,
+    output: *const MetalBuffer,
+    weights: *const metal_loader.LoadedTensor,
+    n: u32,
+    n_groups: u32,
+) void {
+    const weight_offset: u32 = @intCast(tensorPageOffset(engine.model, weights) / @sizeOf(f32));
+    dispatchRmsNormOnCmdWithWeightOffset(engine, cmd, input, output, &weights.gpu_buffer, weight_offset, n, n_groups);
+}
+
 /// Fused residual-add + RMS norm: hidden += scale * residual; norm_out = weights * normalize(hidden).
 /// Eliminates one barrier per layer vs separate scale_acc + barrier + rms_norm.
 /// residual_rms_norm.metal: buffer(0)=push, buffer(1)=hidden, buffer(2)=residual, buffer(3)=norm_out, buffer(4)=weights.
@@ -4223,9 +4283,30 @@ fn dispatchSoftmaxTopkOnCmd(
     n_experts: u32,
     k: u32,
 ) void {
-    const push = SoftmaxTopkPush{ .n_experts = n_experts, .k = k };
+    const push = SoftmaxTopkPush{
+        .n_experts = n_experts,
+        .k = k,
+    };
     const bufs = [_]*const MetalBuffer{ logits, output };
     cmd.dispatchV2(&engine.softmax_topk_pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkPush), 0);
+}
+
+fn dispatchSoftmaxTopkScaledOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    logits: *const MetalBuffer,
+    output: *const MetalBuffer,
+    n_experts: u32,
+    k: u32,
+    logit_scale: f32,
+) void {
+    const push = SoftmaxTopkScaledPush{
+        .n_experts = n_experts,
+        .k = k,
+        .logit_scale_bits = @as(u32, @bitCast(logit_scale)),
+    };
+    const bufs = [_]*const MetalBuffer{ logits, output };
+    cmd.dispatchV2(&engine.softmax_topk_scaled_pipe, .{ 1, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SoftmaxTopkScaledPush), 0);
 }
 
 fn dispatchSoftmaxTopkBatchedOnCmd(
@@ -4298,6 +4379,27 @@ fn dispatchMoeWeightedAccOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ accum, src, routing };
     cmd.dispatchV2(&engine.moe_weighted_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccPush), 3);
+}
+
+fn dispatchMoeWeightedAccScaledOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    accum: *const MetalBuffer,
+    src: *const MetalBuffer,
+    routing: *const MetalBuffer,
+    scales: *const metal_loader.LoadedTensor,
+    n: u32,
+    n_used: u32,
+    src_stride: u32,
+) void {
+    const push = MoeWeightedAccScaledPush{
+        .n = n,
+        .n_used = n_used,
+        .src_stride = src_stride,
+        .scale_offset = @intCast(tensorPageOffset(engine.model, scales) / @sizeOf(f32)),
+    };
+    const bufs = [_]*const MetalBuffer{ accum, src, routing, &scales.gpu_buffer };
+    cmd.dispatchV2(&engine.moe_weighted_acc_scaled_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeWeightedAccScaledPush), 3);
 }
 
 /// Fused MoE weighted accumulate + shared expert: accum += sum(w_i * expert_i) + sh_weight * shared.
@@ -5003,8 +5105,42 @@ fn canUseGpuRoutedMoeDown(engine: *const InferenceEngine, down_quant: GGMLType) 
     };
 }
 
+fn isF32Tensor(tensor: ?*const metal_loader.LoadedTensor) bool {
+    return if (tensor) |t| t.info.type_ == .f32 else false;
+}
+
 fn canUseGpuRoutedBatchedMoe(engine: *const InferenceEngine, lt: LayerTensors) bool {
-    if (engine.config.architecture == .gemma) return false;
+    if (engine.config.architecture == .gemma) {
+        const gate_up_exps = lt.ffn_gate_up_exps orelse return false;
+        const down_exps = lt.ffn_down_exps orelse return false;
+        const gate_shexp = lt.ffn_gate_shexp orelse return false;
+        const up_shexp = lt.ffn_up_shexp orelse return false;
+        const down_shexp = lt.ffn_down_shexp orelse return false;
+
+        if (engine.config.n_experts_used != 8) return false;
+        if (gate_up_exps.info.type_ != .q4_k) return false;
+        if (!canUseGpuRoutedMoeDown(engine, down_exps.info.type_)) return false;
+        if (engine.dmmvPipelineForType(gate_shexp, engine.config.shared_expert_intermediate_dim, engine.config.hidden_dim) == null) return false;
+        if (engine.dmmvPipelineForType(up_shexp, engine.config.shared_expert_intermediate_dim, engine.config.hidden_dim) == null) return false;
+        if (engine.dmmvPipelineForType(down_shexp, engine.config.hidden_dim, engine.config.shared_expert_intermediate_dim) == null) return false;
+        if (lt.ffn_gate_inp == null or lt.ffn_gate_inp_bias != null) return false;
+        if (lt.ffn_gate_exps_bias != null or lt.ffn_up_exps_bias != null or lt.ffn_down_exps_bias != null) return false;
+        if (!isF32Tensor(lt.ffn_gate_inp_scale) or !isF32Tensor(lt.pre_ffw_norm_2) or
+            !isF32Tensor(lt.post_ffw_norm_1) or !isF32Tensor(lt.post_ffw_norm_2) or
+            !isF32Tensor(lt.ffn_down_exps_scale))
+        {
+            return false;
+        }
+        if (lt.ffn_gate_inp_shexp) |gate| {
+            if (engine.dmmvPipelineForType(gate, 1, engine.config.hidden_dim) == null) return false;
+        }
+        return engine.softmax_topk_scaled_pipe.handle != null and
+            engine.geglu_batched_pipe.handle != null and
+            engine.geglu_pipe.handle != null and
+            engine.moe_weighted_acc_scaled_pipe.handle != null and
+            engine.sigmoid_scale_acc_pipe.handle != null and
+            engine.scale_acc_pipe.handle != null;
+    }
     if (lt.ffn_gate_up_exps != null) return false;
     const gate_exps = lt.ffn_gate_exps orelse return false;
     const up_exps = lt.ffn_up_exps orelse return false;
@@ -5642,16 +5778,188 @@ fn runGemmaExplicitMoeFallback(
     if (profile) |p| p.fallback_moe_record_ns += profileElapsedNs(moe_record_start);
 }
 
-fn recordGpuRoutedBatchedMoeOnCmd(
+fn recordGemmaGpuRoutedMoeOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
     profile: ?*RuntimeProfile,
+    layer_idx: usize,
     lt: LayerTensors,
     hidden_dim: u32,
     inter_dim: u32,
     shexp_inter_dim: u32,
 ) !void {
     const cfg = engine.config;
+    const gate_up_layout = try resolveMoeGateUpLayout(lt, inter_dim, hidden_dim);
+    const gate_exps = gate_up_layout.gate_tensor;
+    const up_exps = gate_up_layout.up_tensor;
+    const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
+    const down_scales = lt.ffn_down_exps_scale orelse return error.MissingTensor;
+    const pre_ffw_norm_2 = lt.pre_ffw_norm_2 orelse return error.MissingTensor;
+    const post_ffw_norm_1 = lt.post_ffw_norm_1 orelse return error.MissingTensor;
+    const post_ffw_norm_2 = lt.post_ffw_norm_2 orelse return error.MissingTensor;
+    const gate_shexp = lt.ffn_gate_shexp orelse return error.MissingTensor;
+    const up_shexp = lt.ffn_up_shexp orelse return error.MissingTensor;
+    const down_shexp = lt.ffn_down_shexp orelse return error.MissingTensor;
+    const expert_down_bytes = expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim);
+
+    const router_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hidden_dim)));
+    dispatchSoftmaxTopkScaledOnCmd(engine, cmd, &engine.router_logits_buf, &engine.router_output_buf, cfg.n_experts, cfg.n_experts_used, router_scale);
+
+    // llama.cpp's build_moe_ffn keeps selected_experts on device and feeds it
+    // into mul_mat_id. For Gemma decode N=1, router_output_buf is that compact
+    // selected_experts+weights row; the DMMV MoE kernels consume the expert ids
+    // directly and the accumulate kernel consumes the weights.
+    dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &engine.hidden_buf, &engine.residual_buf, pre_ffw_norm_2, hidden_dim, 1);
+    dispatchZeroF32OnCmd(engine, cmd, &engine.moe_out_buf, hidden_dim);
+    profileBarrier(cmd, profile, .gpu_routed_moe); // routes, expert input, and zeroed output visible
+
+    try dispatchDmmvMoeOnCmd(
+        engine,
+        cmd,
+        gate_exps,
+        &engine.residual_buf,
+        &engine.expert_gate_batch_buf,
+        &engine.router_output_buf,
+        inter_dim,
+        hidden_dim,
+        gate_up_layout.gate_expert_stride,
+        0,
+        gate_up_layout.gate_base_offset,
+    );
+    try dispatchDmmvMoeOnCmd(
+        engine,
+        cmd,
+        up_exps,
+        &engine.residual_buf,
+        &engine.expert_up_batch_buf,
+        &engine.router_output_buf,
+        inter_dim,
+        hidden_dim,
+        gate_up_layout.up_expert_stride,
+        0,
+        gate_up_layout.up_base_offset,
+    );
+    dispatchDmmvOnCmd(engine, cmd, gate_shexp, &engine.norm_buf, &engine.gate_buf, shexp_inter_dim, hidden_dim, 0);
+    dispatchDmmvOnCmd(engine, cmd, up_shexp, &engine.norm_buf, &engine.up_buf, shexp_inter_dim, hidden_dim, 0);
+    if (lt.ffn_gate_inp_shexp) |gate_tensor| {
+        dispatchDmmvOnCmd(engine, cmd, gate_tensor, &engine.norm_buf, &engine.router_logits_buf, 1, hidden_dim, 0);
+    }
+    profileBarrier(cmd, profile, .gpu_routed_moe); // gate/up/shared projections visible before GeGLU
+
+    {
+        const push = SwiGLUPush{ .n = inter_dim };
+        const bufs = [_]*const MetalBuffer{ &engine.expert_gate_batch_buf, &engine.expert_swiglu_batch_buf, &engine.expert_up_batch_buf };
+        cmd.dispatchV2(&engine.geglu_batched_pipe, .{ (inter_dim + 63) / 64, cfg.n_experts_used, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+    }
+    dispatchFfnActivationOnCmd(engine, cmd, &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf, shexp_inter_dim);
+    profileBarrier(cmd, profile, .gpu_routed_moe); // activations visible before down projections
+
+    try dispatchDmmvMoeOnCmd(
+        engine,
+        cmd,
+        down_exps,
+        &engine.expert_swiglu_batch_buf,
+        &engine.expert_down_batch_buf,
+        &engine.router_output_buf,
+        hidden_dim,
+        inter_dim,
+        expert_down_bytes,
+        inter_dim,
+        0,
+    );
+    dispatchDmmvOnCmd(engine, cmd, down_shexp, &engine.swiglu_buf, &engine.down_buf, hidden_dim, shexp_inter_dim, 0);
+    profileBarrier(cmd, profile, .gpu_routed_moe); // down outputs visible before accumulate
+
+    dispatchMoeWeightedAccScaledOnCmd(
+        engine,
+        cmd,
+        &engine.moe_out_buf,
+        &engine.expert_down_batch_buf,
+        &engine.router_output_buf,
+        down_scales,
+        hidden_dim,
+        cfg.n_experts_used,
+        hidden_dim,
+    );
+    profileBarrier(cmd, profile, .gpu_routed_moe); // expert contribution visible before post expert norm
+
+    dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &engine.moe_out_buf, &engine.moe_out_buf, post_ffw_norm_2, hidden_dim, 1);
+    dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &engine.down_buf, &engine.down_buf, post_ffw_norm_1, hidden_dim, 1);
+    profileBarrier(cmd, profile, .gpu_routed_moe); // post expert/shared norms visible before shared add
+
+    if (lt.ffn_gate_inp_shexp != null) {
+        dispatchSigmoidScaleAccOnCmd(engine, cmd, &engine.moe_out_buf, &engine.down_buf, &engine.router_logits_buf, hidden_dim);
+    } else {
+        const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+        const acc_bufs = [_]*const MetalBuffer{ &engine.moe_out_buf, &engine.down_buf };
+        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+    }
+    profileBarrier(cmd, profile, .gpu_routed_moe); // combined MoE contribution visible before final post-FFN norm
+
+    if (engine.post_ffn_norm_present[layer_idx]) {
+        dispatchRmsNormOnCmd(engine, cmd, &engine.moe_out_buf, &engine.moe_out_buf, &engine.post_ffn_norm_bufs[layer_idx], hidden_dim, 1);
+        profileBarrier(cmd, profile, .gpu_routed_moe);
+    }
+
+    if (shouldValidateGemmaMoe(engine, layer_idx)) {
+        commitAndWaitProfiled(cmd, profile);
+
+        const routing: [*]const u32 = @ptrCast(@alignCast(engine.router_output_buf.cpu_ptr.?));
+        const scales = try tensorF32Slice(engine, down_scales, cfg.n_experts);
+        var expert_ids: [16]u32 = undefined;
+        var adjusted_weights: [16]f32 = undefined;
+        const n_used: usize = @intCast(cfg.n_experts_used);
+        for (0..n_used) |slot| {
+            const expert_id = routing[slot];
+            expert_ids[slot] = expert_id;
+            adjusted_weights[slot] = @as(f32, @bitCast(routing[n_used + slot])) * scales[@intCast(expert_id)];
+        }
+
+        const gate_value: f32 = if (lt.ffn_gate_inp_shexp != null) blk: {
+            const gate_ptr: [*]const f32 = @ptrCast(@alignCast(engine.router_logits_buf.cpu_ptr.?));
+            break :blk 1.0 / (1.0 + @exp(-gate_ptr[0]));
+        } else 1.0;
+        const expert_input_ptr: [*]const f32 = @ptrCast(@alignCast(engine.residual_buf.cpu_ptr.?));
+        const shared_input_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
+        const actual_post_moe: [*]const f32 = @ptrCast(@alignCast(engine.moe_out_buf.cpu_ptr.?));
+        try validateGemmaMoePostVector(
+            engine,
+            layer_idx,
+            lt,
+            gate_up_layout,
+            expert_ids[0..n_used],
+            adjusted_weights[0..n_used],
+            gate_value,
+            expert_input_ptr,
+            shared_input_ptr,
+            actual_post_moe[0..hidden_dim],
+            hidden_dim,
+            inter_dim,
+            shexp_inter_dim,
+        );
+        cmd.* = try beginProfiledCommand(engine, profile);
+    }
+
+    const res_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+    const res_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.moe_out_buf };
+    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
+    profileBarrier(cmd, profile, .gpu_routed_moe); // hidden_buf visible to next layer
+}
+
+fn recordGpuRoutedBatchedMoeOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    profile: ?*RuntimeProfile,
+    layer_idx: usize,
+    lt: LayerTensors,
+    hidden_dim: u32,
+    inter_dim: u32,
+    shexp_inter_dim: u32,
+) !void {
+    const cfg = engine.config;
+    if (cfg.architecture == .gemma) {
+        return recordGemmaGpuRoutedMoeOnCmd(engine, cmd, profile, layer_idx, lt, hidden_dim, inter_dim, shexp_inter_dim);
+    }
     const gate_exps = lt.ffn_gate_exps orelse return error.MissingTensor;
     const up_exps = lt.ffn_up_exps orelse return error.MissingTensor;
     const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
@@ -5878,7 +6186,8 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 const router_in_buf: *const MetalBuffer = blk: {
                     if (cfg.architecture == .gemma) {
-                        dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.residual_buf, &engine.unit_rms_norm_weights, hidden_dim, 1);
+                        const gate_scale = lt.ffn_gate_inp_scale orelse return error.MissingTensor;
+                        dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &engine.hidden_buf, &engine.residual_buf, gate_scale, hidden_dim, 1);
                         profileBarrier(cmd, profile, .router);
                         break :blk &engine.residual_buf;
                     }
@@ -5890,7 +6199,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                     if (profile) |p| p.layer_record_ns += profileElapsedNs(layer_record_start);
                     if (profile) |p| p.gpu_routed_moe_layers += 1;
                     const moe_record_start = profileStart(profile != null);
-                    try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, profile, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, profile, layer_idx, lt, hidden_dim, inter_dim, shexp_inter_dim);
                     if (profile) |p| p.gpu_routed_moe_record_ns += profileElapsedNs(moe_record_start);
                 } else if (profile) |p| {
                     p.layer_record_ns += profileElapsedNs(layer_record_start);
@@ -6073,7 +6382,8 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
                 const router_in_buf: *const MetalBuffer = blk: {
                     if (cfg.architecture == .gemma) {
-                        dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.residual_buf, &engine.unit_rms_norm_weights, hidden_dim, 1);
+                        const gate_scale = lt.ffn_gate_inp_scale orelse return error.MissingTensor;
+                        dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &engine.hidden_buf, &engine.residual_buf, gate_scale, hidden_dim, 1);
                         profileBarrier(cmd, profile, .router);
                         break :blk &engine.residual_buf;
                     }
@@ -6085,7 +6395,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                     if (profile) |p| p.layer_record_ns += profileElapsedNs(layer_record_start);
                     if (profile) |p| p.gpu_routed_moe_layers += 1;
                     const moe_record_start = profileStart(profile != null);
-                    try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, profile, lt, hidden_dim, inter_dim, shexp_inter_dim);
+                    try recordGpuRoutedBatchedMoeOnCmd(engine, cmd, profile, layer_idx, lt, hidden_dim, inter_dim, shexp_inter_dim);
                     if (profile) |p| p.gpu_routed_moe_record_ns += profileElapsedNs(moe_record_start);
                 } else if (profile) |p| {
                     p.layer_record_ns += profileElapsedNs(layer_record_start);
@@ -9583,9 +9893,9 @@ test "global q8 override skips gemma shared expert q8 tensors" {
     try std.testing.expect(shouldUseGlobalQ8Override(.qwen35, "blk.0.ffn_down.weight"));
 }
 
-test "gemma shared down q8 tensors use CPU fallback" {
-    try std.testing.expect(shouldCpuQ8Fallback(.gemma, "blk.0.ffn_down.weight"));
-    try std.testing.expect(shouldCpuQ8Fallback(.gemma, "blk.0.ffn_down_shexp.weight"));
+test "gemma shared down q8 tensors stay GPU eligible" {
+    try std.testing.expect(!shouldCpuQ8Fallback(.gemma, "blk.0.ffn_down.weight"));
+    try std.testing.expect(!shouldCpuQ8Fallback(.gemma, "blk.0.ffn_down_shexp.weight"));
     try std.testing.expect(!shouldCpuQ8Fallback(.gemma, "blk.0.ffn_up.weight"));
     try std.testing.expect(!shouldCpuQ8Fallback(.qwen35, "blk.0.ffn_down.weight"));
 }
@@ -9837,6 +10147,8 @@ test "batched MoE Metal shaders compile" {
 
     var swiglu_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
     defer metal_pipeline.freePipeline(&swiglu_pipe);
+    var rms_norm_offset_pipe = try loadShaderPipeline(ctx, "rms_norm_mul_offset");
+    defer metal_pipeline.freePipeline(&rms_norm_offset_pipe);
 
     var acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate_batched");
     defer metal_pipeline.freePipeline(&acc_pipe);
@@ -9847,6 +10159,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&lmhead_pipe_1024);
     var topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
     defer metal_pipeline.freePipeline(&topk_pipe);
+    var topk_scaled_pipe = try loadShaderPipeline(ctx, "softmax_topk_scaled");
+    defer metal_pipeline.freePipeline(&topk_scaled_pipe);
     var topk_batched_pipe = try loadShaderPipeline(ctx, "softmax_topk_batched");
     defer metal_pipeline.freePipeline(&topk_batched_pipe);
     var route_pack_pipe = try loadShaderPipeline(ctx, "moe_route_pack");
@@ -9855,6 +10169,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&sigmoid_scale_acc_pipe);
     var moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
     defer metal_pipeline.freePipeline(&moe_weighted_acc_pipe);
+    var moe_weighted_acc_scaled_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_scaled");
+    defer metal_pipeline.freePipeline(&moe_weighted_acc_scaled_pipe);
 
     try std.testing.expect(deinterleave_pipe.handle != null);
     try std.testing.expect(flash_attn_pipe.handle != null);
@@ -9870,14 +10186,17 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(dmmv_moe_pipe_k2048.handle != null);
     try std.testing.expect(dmmv_moe_pipe_k2048_1024.handle != null);
     try std.testing.expect(swiglu_pipe.handle != null);
+    try std.testing.expect(rms_norm_offset_pipe.handle != null);
     try std.testing.expect(acc_pipe.handle != null);
     try std.testing.expect(lmhead_pipe.handle != null);
     try std.testing.expect(lmhead_pipe_1024.handle != null);
     try std.testing.expect(topk_pipe.handle != null);
+    try std.testing.expect(topk_scaled_pipe.handle != null);
     try std.testing.expect(topk_batched_pipe.handle != null);
     try std.testing.expect(route_pack_pipe.handle != null);
     try std.testing.expect(sigmoid_scale_acc_pipe.handle != null);
     try std.testing.expect(moe_weighted_acc_pipe.handle != null);
+    try std.testing.expect(moe_weighted_acc_scaled_pipe.handle != null);
 }
 
 test "deinterleave shader splits block-interleaved Q and gate" {
