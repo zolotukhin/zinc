@@ -39,8 +39,14 @@ layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[];  };
 // Attention scores for one 256-token block (max scores held at once)
 const uint BLOCK_SIZE = 256u;
 shared float s_scores[BLOCK_SIZE];
+// Query vector cached in shared memory once per workgroup. Q is constant
+// across every score and every block for a given head, but the original
+// dot loop re-read q_data[] from DRAM for each (i, d) pair which costs
+// O(block_len * head_dim) redundant global reads per block. Staging it
+// once collapses that to one head_dim-sized cooperative load.
+shared float s_q[512];     // supports head_dim up to 512 (Gemma 4 global layers)
 // Accumulator for output vector, one element per thread slot
-shared float s_out[512];  // supports head_dim up to 512 (Gemma 4 global layers)
+shared float s_out[512];   // supports head_dim up to 512 (Gemma 4 global layers)
 // Running softmax state
 shared float s_max_old;
 shared float s_sum_old;
@@ -61,9 +67,12 @@ void main() {
     // Each thread handles head_dim/64 elements with stride 64.
     // For head_dim=128, each thread handles 2 elements.
 
-    // Initialize output accumulator in shared memory
+    // Initialize output accumulator and stage Q into shared memory.
+    // Both happen in the same cooperative loop because the same threads
+    // own the same indices.
     for (uint d = tid; d < head_dim; d += 64u) {
         s_out[d] = 0.0;
+        s_q[d] = q_data[q_base + d];
     }
 
     if (tid == 0u) {
@@ -100,10 +109,12 @@ void main() {
             uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
                           + kv_head * head_dim;
 
-            // Dot product q . k
+            // Dot product q . k. Q is staged in shared memory by the
+            // cooperative load above, so the inner loop only reads one
+            // global tensor (K) per iteration.
             float dot = 0.0;
             for (uint d = 0u; d < head_dim; d++) {
-                dot += q_data[q_base + d] * k_data[k_base + d];
+                dot += s_q[d] * k_data[k_base + d];
             }
 
             s_scores[i] = dot * scale;
