@@ -77,6 +77,12 @@ void main() {
     uint q_offset_in_half = 32u * v_im + l0;
     uint y_offset_local = 64u * v_im + l0;
 
+    // v_im-uniform shift used to pick lo (v_im=0) or hi (v_im=1) halves of the
+    // 32-bit scale words. Replaces the bytes[12] dynamic indexing + 4 if/else
+    // conditionals in the per-iteration scale decode (always lo for sb_a/sb_b
+    // and always hi for sb_c/sb_d when v_im ∈ {0,1}).
+    uint shift = v_im * 16u;
+
     uint blocks_per_row = K / 256u;
 
     for (uint r = 0u; r < NUM_ROWS; r++) {
@@ -122,25 +128,21 @@ void main() {
                 vec4 by2 = x_v4[x_global_base_v4 + b_idx2];
                 vec4 by3 = x_v4[x_global_base_v4 + b_idx2 + 8u];
 
-                uint bytes[12];
-                bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
-                bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
-                bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
+                // v_im-uniform decode: sb_a/sb_b always take lo (sb<4),
+                // sb_c/sb_d always take hi (sb>=4) for v_im ∈ {0,1}. Replaces
+                // the bytes[12] array + 4 if/else with straight shift+mask.
+                uint sc0_v = sc0 >> shift;
+                uint sc1_v = sc1 >> shift;
+                uint sc2_v = sc2 >> shift;
 
-                float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
-                uint sb_a = 2u * v_im;
-                uint sb_b = 2u * v_im + 1u;
-                uint sb_c = 2u * v_im + 4u;
-                uint sb_d = 2u * v_im + 5u;
-
-                if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a+4u] & 63u); }
-                else { sc_a = float((bytes[sb_a+4u]&0xFu)|((bytes[sb_a-4u]>>6)<<4)); mn_a = float(((bytes[sb_a+4u]>>4)&0xFu)|((bytes[sb_a]>>6)<<4)); }
-                if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b+4u] & 63u); }
-                else { sc_b = float((bytes[sb_b+4u]&0xFu)|((bytes[sb_b-4u]>>6)<<4)); mn_b = float(((bytes[sb_b+4u]>>4)&0xFu)|((bytes[sb_b]>>6)<<4)); }
-                if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c+4u] & 63u); }
-                else { sc_c = float((bytes[sb_c+4u]&0xFu)|((bytes[sb_c-4u]>>6)<<4)); mn_c = float(((bytes[sb_c+4u]>>4)&0xFu)|((bytes[sb_c]>>6)<<4)); }
-                if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d+4u] & 63u); }
-                else { sc_d = float((bytes[sb_d+4u]&0xFu)|((bytes[sb_d-4u]>>6)<<4)); mn_d = float(((bytes[sb_d+4u]>>4)&0xFu)|((bytes[sb_d]>>6)<<4)); }
+                float sc_a = float(sc0_v & 0x3Fu);
+                float mn_a = float(sc1_v & 0x3Fu);
+                float sc_b = float((sc0_v >> 8u) & 0x3Fu);
+                float mn_b = float((sc1_v >> 8u) & 0x3Fu);
+                float sc_c = float((sc2_v & 0xFu) | ((sc0_v & 0xC0u) >> 2u));
+                float mn_c = float(((sc2_v & 0xF0u) >> 4u) | ((sc1_v & 0xC0u) >> 2u));
+                float sc_d = float(((sc2_v >> 8u) & 0xFu) | (((sc0_v >> 8u) & 0xC0u) >> 2u));
+                float mn_d = float((((sc2_v >> 8u) & 0xF0u) >> 4u) | (((sc1_v >> 8u) & 0xC0u) >> 2u));
 
                 float factor0 = d_val * sc_a; float bias0 = dmin_val * mn_a;
                 float factor1 = d_val * sc_b; float bias1 = dmin_val * mn_b;
