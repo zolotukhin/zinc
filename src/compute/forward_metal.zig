@@ -1086,12 +1086,26 @@ const BatchedPrefillScratch = struct {
     up: MetalBuffer,
     swiglu: MetalBuffer,
     down: MetalBuffer,
+    moe_routing: MetalBuffer,
+    moe_expert_counts: MetalBuffer,
+    moe_packed_ids: MetalBuffer,
+    moe_expert_gate: MetalBuffer,
+    moe_expert_up: MetalBuffer,
+    moe_expert_swiglu: MetalBuffer,
+    moe_expert_down: MetalBuffer,
+    moe_route_slots: u32,
 
     fn init(engine: *InferenceEngine, n_tokens: u32, q_dim: u32, kv_dim: u32, inter_dim: u32) !BatchedPrefillScratch {
         const ctx = engine.device.ctx;
         const hidden_dim = engine.config.hidden_dim;
         const f32_sz: usize = @sizeOf(f32);
+        const u32_sz: usize = @sizeOf(u32);
         const n: usize = n_tokens;
+        const hidden_n: usize = hidden_dim;
+        const inter_n: usize = inter_dim;
+        const n_experts: usize = engine.config.n_experts;
+        const k_used: usize = engine.config.n_experts_used;
+        const route_slots = n * k_used;
         const h = try metal_buffer.createBuffer(ctx, n * hidden_dim * f32_sz);
         errdefer {
             var mut = h;
@@ -1138,6 +1152,41 @@ const BatchedPrefillScratch = struct {
             metal_buffer.freeBuffer(&mut);
         }
         const db = try metal_buffer.createBuffer(ctx, n * hidden_dim * f32_sz);
+        errdefer {
+            var mut = db;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const routing = try metal_buffer.createBuffer(ctx, @max(n * k_used * 2 * u32_sz, 4));
+        errdefer {
+            var mut = routing;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const counts = try metal_buffer.createBuffer(ctx, @max(n_experts * u32_sz, 4));
+        errdefer {
+            var mut = counts;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const packed_ids = try metal_buffer.createBuffer(ctx, @max(n_experts * n * u32_sz, 4));
+        errdefer {
+            var mut = packed_ids;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const moe_gate = try metal_buffer.createBuffer(ctx, @max(route_slots * inter_n * f32_sz, 4));
+        errdefer {
+            var mut = moe_gate;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const moe_up = try metal_buffer.createBuffer(ctx, @max(route_slots * inter_n * f32_sz, 4));
+        errdefer {
+            var mut = moe_up;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const moe_swiglu = try metal_buffer.createBuffer(ctx, @max(route_slots * inter_n * f32_sz, 4));
+        errdefer {
+            var mut = moe_swiglu;
+            metal_buffer.freeBuffer(&mut);
+        }
+        const moe_down = try metal_buffer.createBuffer(ctx, @max(route_slots * hidden_n * f32_sz, 4));
         return .{
             .n_tokens = n_tokens,
             .hidden = h,
@@ -1150,6 +1199,14 @@ const BatchedPrefillScratch = struct {
             .up = ub,
             .swiglu = sw,
             .down = db,
+            .moe_routing = routing,
+            .moe_expert_counts = counts,
+            .moe_packed_ids = packed_ids,
+            .moe_expert_gate = moe_gate,
+            .moe_expert_up = moe_up,
+            .moe_expert_swiglu = moe_swiglu,
+            .moe_expert_down = moe_down,
+            .moe_route_slots = @intCast(route_slots),
         };
     }
 
@@ -1164,6 +1221,13 @@ const BatchedPrefillScratch = struct {
         metal_buffer.freeBuffer(&self.up);
         metal_buffer.freeBuffer(&self.swiglu);
         metal_buffer.freeBuffer(&self.down);
+        metal_buffer.freeBuffer(&self.moe_routing);
+        metal_buffer.freeBuffer(&self.moe_expert_counts);
+        metal_buffer.freeBuffer(&self.moe_packed_ids);
+        metal_buffer.freeBuffer(&self.moe_expert_gate);
+        metal_buffer.freeBuffer(&self.moe_expert_up);
+        metal_buffer.freeBuffer(&self.moe_expert_swiglu);
+        metal_buffer.freeBuffer(&self.moe_expert_down);
     }
 };
 
@@ -10662,12 +10726,67 @@ test "moe_route_pack shader groups batched routing by expert" {
     const counts_ptr: [*]const u32 = @ptrCast(@alignCast(counts_buf.cpu_ptr.?));
     const ids_ptr: [*]const u32 = @ptrCast(@alignCast(ids_buf.cpu_ptr.?));
     try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1, 2, 1, 1 }, counts_ptr[0..n_experts]);
+    var count_sum: u32 = 0;
+    var nonzero_counts: u32 = 0;
+    for (counts_ptr[0..n_experts]) |count| {
+        count_sum += count;
+        if (count > 0) nonzero_counts += 1;
+    }
+    try std.testing.expectEqual(n_tokens * k, count_sum);
+    try std.testing.expect(nonzero_counts > 0);
     try std.testing.expectEqual(@as(u32, 3), ids_ptr[0 * ids_stride + 0]);
     try std.testing.expectEqual(@as(u32, 0), ids_ptr[2 * ids_stride + 0]);
     try std.testing.expectEqual(@as(u32, 2), ids_ptr[3 * ids_stride + 0]);
     try std.testing.expectEqual(@as(u32, 4), ids_ptr[3 * ids_stride + 1]);
     try std.testing.expectEqual(@as(u32, 5), ids_ptr[4 * ids_stride + 0]);
     try std.testing.expectEqual(@as(u32, 1), ids_ptr[5 * ids_stride + 0]);
+}
+
+test "BatchedPrefillScratch allocates Gemma MoE route scratch" {
+    var device = try metal_device.MetalDevice.init(std.testing.allocator, 0);
+    defer device.deinit();
+
+    var engine: InferenceEngine = undefined;
+    engine.device = &device;
+    engine.config = .{
+        .architecture = .gemma,
+        .n_layers = 1,
+        .n_heads = 1,
+        .n_kv_heads = 1,
+        .head_dim = 16,
+        .hidden_dim = 32,
+        .intermediate_dim = 16,
+        .vocab_size = 64,
+        .context_length = 128,
+        .rope_freq_base = 10000.0,
+        .n_experts = 6,
+        .n_experts_used = 3,
+        .rope_dim = 16,
+        .ssm_d_conv = 0,
+        .ssm_d_inner = 0,
+        .ssm_d_state = 0,
+        .ssm_dt_rank = 0,
+        .ssm_n_group = 0,
+        .full_attn_interval = 1,
+        .shared_expert_intermediate_dim = 48,
+    };
+
+    const n_tokens: u32 = 2;
+    const q_dim: u32 = 32;
+    const kv_dim: u32 = 16;
+    const inter_dim: u32 = 16;
+    var scratch = try BatchedPrefillScratch.init(&engine, n_tokens, q_dim, kv_dim, inter_dim);
+    defer scratch.deinit();
+
+    const route_slots = n_tokens * engine.config.n_experts_used;
+    try std.testing.expectEqual(route_slots, scratch.moe_route_slots);
+    try std.testing.expectEqual(@as(usize, n_tokens * engine.config.n_experts_used * 2 * @sizeOf(u32)), scratch.moe_routing.size);
+    try std.testing.expectEqual(@as(usize, engine.config.n_experts * @sizeOf(u32)), scratch.moe_expert_counts.size);
+    try std.testing.expectEqual(@as(usize, engine.config.n_experts * n_tokens * @sizeOf(u32)), scratch.moe_packed_ids.size);
+    try std.testing.expectEqual(@as(usize, route_slots * inter_dim * @sizeOf(f32)), scratch.moe_expert_gate.size);
+    try std.testing.expectEqual(scratch.moe_expert_gate.size, scratch.moe_expert_up.size);
+    try std.testing.expectEqual(scratch.moe_expert_gate.size, scratch.moe_expert_swiglu.size);
+    try std.testing.expectEqual(@as(usize, route_slots * engine.config.hidden_dim * @sizeOf(f32)), scratch.moe_expert_down.size);
 }
 
 test "kv_cache_write shader writes K and V slices at token offset" {
