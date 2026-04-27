@@ -5506,9 +5506,16 @@ fn dispatchFullAttnPrepOnCmd(
         profileBarrier(cmd, profile, .full_attn);
     } else {
         // Separate: project Q directly to q_buf, gate (if present) to gate_buf.
-        dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.q_buf, attn.q_dim, hidden_dim, 0);
-        if (gate_mode.separate_attn_gate) {
-            dispatchDmmvOnCmd(engine, cmd, lt.attn_gate.?, &engine.norm_buf, &engine.gate_buf, attn.q_dim, hidden_dim, 0);
+        if (gate_mode.separate_attn_gate and
+            cfg.architecture == .gemma and
+            canUsePairedQ8Dmmv(engine, q_tensor, lt.attn_gate.?, attn.q_dim, attn.q_dim, hidden_dim))
+        {
+            dispatchPairedQ8DmmvOnCmd(engine, cmd, q_tensor, lt.attn_gate.?, &engine.norm_buf, &engine.q_buf, &engine.gate_buf, attn.q_dim, hidden_dim);
+        } else {
+            dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.q_buf, attn.q_dim, hidden_dim, 0);
+            if (gate_mode.separate_attn_gate) {
+                dispatchDmmvOnCmd(engine, cmd, lt.attn_gate.?, &engine.norm_buf, &engine.gate_buf, attn.q_dim, hidden_dim, 0);
+            }
         }
         if (cfg.architecture == .gemma and !attn.use_k_as_v and canUsePairedQ8Dmmv(engine, k_tensor, v_tensor, attn.kv_dim, attn.kv_dim, hidden_dim)) {
             dispatchPairedQ8DmmvOnCmd(engine, cmd, k_tensor, v_tensor, &engine.norm_buf, &engine.k_buf, &engine.v_buf, attn.kv_dim, hidden_dim);
