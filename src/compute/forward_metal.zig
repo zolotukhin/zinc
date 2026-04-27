@@ -2553,10 +2553,13 @@ pub const InferenceEngine = struct {
             mutable.request_profile.sample_ns += profileElapsedNs(sample_start);
         };
 
-        if (self.config.final_logit_softcapping <= 0.0) if (self.argmax_buf.cpu_ptr) |ptr| {
+        // Final logit softcapping is monotonic, so it cannot change greedy
+        // argmax order. The LM-head path already writes argmax_buf; use it
+        // directly instead of rescanning Gemma's full vocab every token.
+        if (self.argmax_buf.cpu_ptr) |ptr| {
             const argmax_words: [*]const u32 = @ptrCast(@alignCast(ptr));
             return argmax_words[0];
-        };
+        }
 
         const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
         const logits = logits_ptr[0..self.config.vocab_size];
