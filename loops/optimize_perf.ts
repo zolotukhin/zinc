@@ -162,6 +162,26 @@ const PREFILL_BENCHMARK_PROMPT = [
   "Based on the reference above, the capital of France is",
 ].join("\n");
 
+// Long-context decode benchmark for Effort 11. The prompt is a single
+// English narrative excerpt designed to tokenize to ~1500 tokens on
+// Qwen 3 8B (no chat-template overhead, no list/code tokenizer
+// quirks). Decode at L≈1500 is where the user-visible curve drop
+// hurts most in chat sessions, and it's still under the L=2300 GPU
+// hang we observed during manual cycles 71-73 of flash_attn.comp.
+const LONG_CONTEXT_DECODE_PROMPT = [
+  "Once upon a time, in a small village nestled between rolling hills and a meandering river, there lived a young blacksmith named Tomas. His forge stood at the edge of the marketplace, its chimney trailing thin grey smoke into the morning air. Every dawn he rose before the sun, lit the coals, and shaped iron into the tools and trinkets the villagers needed: horseshoes, kettles, hinges, plowshares. Tomas was not yet thirty, but the lines around his eyes told of long days and patient craft. He had inherited the forge from his father, who had inherited it from his father before him, three generations of black iron and orange sparks. The villagers respected him, though few understood why he often paused mid-strike to listen to the wind, or why on certain summer evenings he would walk alone along the riverbank, far past the willow trees, to a place no one else cared to go. The river there was deeper, its water darker, and the reeds grew taller than a man.",
+  "",
+  "Tomas had been going to that place since he was a boy, ever since the day his mother had taken him there to teach him the names of the herbs that grew along the bank. She had died the following winter, and the place had become his alone, a kind of memorial that did not need a stone. On this particular morning, however, Tomas did not go to the river. Instead, when he opened the forge, he found something unusual lying on the cold anvil: a sealed letter, its red wax stamped with a sigil he did not recognize. There was no draft, no ash disturbed, no footprint in the soot. The letter had simply appeared. Tomas turned it over in his rough hands. The paper was thick, expensive, and the wax had not yet hardened completely. Whoever left it had done so within the last hour.",
+  "",
+  "He carried it outside into the daylight and broke the seal with his thumb. The handwriting inside was elegant, precise, and the words were short: \"Come tonight, when the moon is over the willow. Bring nothing. Tell no one.\" There was no signature. Tomas read it twice, then a third time, and the more he read it the more he felt the weight of the morning shift around him. The wind, which had been still, began to stir. The smoke from his chimney bent westward toward the river. A horse in the marketplace whinnied without reason. Tomas folded the letter carefully and slipped it into the leather pouch at his belt, the one where he kept his grandfather's small iron compass and a single silver coin from a country no one in the village had heard of.",
+  "",
+  "He returned to the forge and worked through the day as he always did, but his mind was not on the iron. He shoed two horses for the miller, repaired a broken latch for the inn, and shaped four new nails for the carpenter, but he did all of it as if he were a man underwater. The customers noticed nothing. The village turned its slow wheel of bread and gossip and bargain and rest. The sun climbed, paused, and began its descent. When the bells of the small chapel rang for evening prayer, Tomas wiped his hands on his leather apron, banked the coals, and locked the forge for the night. He did not eat supper. He walked to the river path and waited for the moon.",
+  "",
+  "The moon rose late that evening, slow and full, the color of old brass. By the time it crested the willow at the bend of the river, Tomas had been waiting for nearly an hour. The reeds whispered. An owl called once and was silent. Tomas was about to turn back when a figure stepped out from behind the largest willow trunk. It was a woman he had never seen before, tall, with hair the color of river silt and a long traveling cloak the color of moss. She held no lantern, yet her face was clearly visible in the moonlight, as if she carried her own quiet light.",
+  "",
+  "Continue the story, describing what the woman said next and how Tomas responded.",
+].join("\n");
+
 type MetricMode = "decode" | "prefill";
 
 type EffortSpec = {
@@ -337,6 +357,55 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
       {
         path: "/Users/stepan/Workspace/llama.cpp/ggml/src/llama-graph.cpp",
         focus: "Reference for swing #4 (parallel-scan SSM). Search for ggml_ssm_scan to find the prefill-time scan op. The CUDA implementation is at ggml/src/ggml-cuda/ssm-scan.cu — it computes the recurrence via Blelloch scan over the token axis. The math is identical between CUDA and Vulkan; what changes is the WG layout (one WG per head per chunk).",
+      },
+    ],
+  },
+  11: {
+    doc: "MULTI_HOUR_EFFORT_11_RDNA_DECODE_LONG_CONTEXT.md",
+    summary: "Flatten the RDNA4 decode-with-context curve on Qwen 3 8B + 35B (target: decode at L=1500 ≥ 60% of empty-context decode)",
+    metricMode: "decode",
+    primaryMetricLabel: "decode tok/s at L≈1500",
+    benchmarkPrompt: LONG_CONTEXT_DECODE_PROMPT,
+    benchmarkMaxTokens: 32,
+    benchmarkMethod: "decode 32 tokens after prefilling a ~1500-token English narrative on Qwen3-8B-Q4_K_M.gguf with RADV_PERFTEST=coop_matrix; report decode tok/s as the primary metric",
+    knownFlatCategories: [
+      "Q-stage in flash_attn.comp (commit 6ece0a8). Already landed and bit-correct on Qwen 3 8B; bumps L=5 decode 54 → 82 tok/s. Don't revert. The shared float s_q[512] cooperative load at the top of the kernel is the right shape.",
+      "Per-block page_ids[] cache (commit f68b7d7). Already landed; +5-9% prefill on L=466. Don't revert.",
+      "Phase 4 rescale + V-acc fusion (commit 539b2aa). Bit-correct at L=466 but is the leading suspect for the L=2325 GPU hang. The bisect in Step 1 of the effort doc decides whether to keep, fix, or revert. Until then, do not extend the fusion or pile additional fused operations on top of it.",
+      "Naive full-block-tile staging into LDS (BLOCK_SIZE=256 × head_dim=128 × 4 = 128 KB per WG). Won't fit RDNA4's 64 KB per-WG envelope. Only chunked V staging (CHUNK ~ 32) fits. See Step 3 of the effort doc.",
+    ],
+    structuralSwingIdeas: [
+      "BISECT THE L=2325 GPU HANG. Manual cycles 71/72/73 landed flash_attn fixes; L=2325 decode then started returning amdgpu ring timeout + device wedged dmesg lines. Build four binaries by checkout: 5858b4f (pre-fix), 6ece0a8 (Q-stage only), f68b7d7 (Q-stage + page_id cache), 539b2aa (current head). Run -n 16 --raw with the long4k prompt at L=2325 against each. The first binary that hangs is guilty. Either fix or revert. Until rooted out, do not test any cycle at L ≥ 2300.",
+      "ADD VULKAN TIMESTAMPS AROUND flash_attn DISPATCH. Wrap one layer's flash_attn vkCmdDispatch with vkCmdWriteTimestamp pre/post via the existing recordTimestamp helper (or extend it). Read back at end-of-step. The L-dependent ms today is ~46 ms at L=1162 (= 58.8ms - 12.4ms baseline). The bandwidth floor on attention reads at L=1162 is 0.6 ms. The 77x gap between measured and BW floor must be attributed to flash_attn vs other dispatches before any cycle invests in shader rewrites.",
+      "STAGE V CHUNK-BY-CHUNK INTO SHARED MEMORY. CHUNK=32 fits in 16 KB of LDS (32 * 128 * 4 = 16384 bytes). Refactor Phase 4: outer loop over chunks of i, inner loop over the chunk's 32 i values × head_dim/64 d's. Cooperative load V[chunk, :] into s_v[CHUNK * head_dim], barrier, then 64 threads broadcast-read s_v in the inner FMA loop. Land behind ZINC_FA_V_TILE=1 first; flag-on validates against per-token reference at tol=1e-4 then promotes to default if perf positive at L=1500.",
+      "MULTI-Q-PER-WG (Br=2..8). The deeper llama.cpp pattern: process Br query rows per workgroup so K/V tile reads are amortized Br-fold. For decode this is forced to Br=1, but for batched flash_attn (used by prefill on Qwen 3 8B and Gemma 4 31B) Br > 1 directly speeds up prefill at any L. Multi-cycle: requires Q/K-tile shape rewrite, register layout change, and dispatch-side n_queries adjustment.",
+      "PHASE 3+4 REGISTER-RESIDENT COHESION. Keep Pf[r] = exp(score - max) in registers across the V-acc loop instead of round-tripping through s_scores[]. Each thread would own a (score_range, dim_range) tile. References llama.cpp flash_attn.comp lines 355-384. Higher risk than the rescale fusion because thread ownership of i and d both change. Defer until Steps 1-3 are complete.",
+      "POPULATE flash_attn_cm1.comp COOPMAT VARIANT. RDNA3+ supports VK_KHR_cooperative_matrix and the R9700 advertises it. Cooperative-matrix wmma intrinsics on the Q.K matmul and the softmax-V matmul could deliver substantial throughput on attention if the layout matches. References /Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp. Multi-week port; price separately.",
+    ],
+    referenceImplementations: [
+      {
+        path: "/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn.comp",
+        focus: "Scalar fallback flash_attn (RDNA's default path when coopmat is not used). Lines 44-90 are the Q shared-memory staging loop (we already ported a simpler version). Lines 220-251 are the per-thread Q register cache for very long head_dim. Lines 355-384 are the FUSED EXP + V LOOP that Step 5 (Phase 3+4 cohesion) targets. Lines 196-218 are the optional SHMEM_STAGING block that loads K cooperatively into shared memory once per block — this is the V-tile staging Step 3 wants to mirror, just for V instead of K.",
+      },
+      {
+        path: "/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp",
+        focus: "KHR cooperative_matrix variant of flash_attn. Reference for the cooperative-matrix swing in structuralSwingIdeas[5]. Look at how the Q.K matmul and the score.V matmul are decomposed into wmma tiles, what subgroup_size/coopmat_M/coopmat_N constraints apply, and how the softmax cross-tile reduction is done.",
+      },
+      {
+        path: "/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+        focus: "Search for `get_fa_tuning_params_scalar` and the surrounding dispatch logic (~lines 2854-2928). Reference for the host-side flash_attn shape decisions: block_rows (Br), block_cols (Bc), gqa_ratio collapse when N <= 8, and the limit_occupancy_shmem RDNA-specific dummy LDS allocation that throttles wave occupancy to avoid cache thrashing on AMD.",
+      },
+      {
+        path: "/Users/stepan/Workspace/zinc/src/shaders/flash_attn.comp",
+        focus: "Current state after manual cycles 71/72/73. Lines 41-49: shared memory layout (s_scores, s_q, s_page_ids_block, s_out, plus the small scalars for max/sum). Lines 73-81: Q + s_out cooperative init. Lines 101-108: per-block page_id staging with barrier. Lines 196-219: the suspect rescale + V-acc fusion (also mirrored in flash_attn_batched.comp). The Phase 1 dot loop reads s_q[d] (no longer q_data[]) for each K column.",
+      },
+      {
+        path: "/Users/stepan/Workspace/zinc/src/shaders/flash_attn_batched.comp",
+        focus: "Prefill flash attention; same patterns as flash_attn.comp at this point. Used by ZINC_BATCH_ATTN=1 decode and by canUseBatchedPrefillRdna prefill. Lines mirror flash_attn.comp's structure with grid.y=n_queries instead of the per-token decode shape.",
+      },
+      {
+        path: "/Users/stepan/Workspace/zinc/src/shaders/dmmv_q4k_moe_kpar.comp",
+        focus: "Wave64 K-parallel pattern reference. THREADS_PER_BLOCK=16 with subgroupAdd reduction is the structural shape Step 4 (multi-Q-per-WG) and any subdivide-row-across-threads attack would adopt. Look at the cooperative-load loop, the fma chain, and the reduction.",
       },
     ],
   },
