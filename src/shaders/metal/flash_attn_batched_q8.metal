@@ -18,6 +18,7 @@ struct BatchedFlashAttnQ8Push {
     uint kv_len;
     uint n_queries;
     uint kv_pos_offset;
+    uint sliding_window_size;
     uint kv_head_stride_bytes;   // bytes between heads for one token
     uint kv_token_stride_bytes;  // bytes between tokens
 };
@@ -109,6 +110,9 @@ kernel void main0(
     // Causal: query at position (kv_pos_offset + query_idx) attends to
     // KV entries 0..(kv_pos_offset + query_idx) inclusive.
     const uint causal_len = p.kv_pos_offset + query_idx + 1;
+    const uint window_start = (p.sliding_window_size != 0u && causal_len > p.sliding_window_size)
+        ? (causal_len - p.sliding_window_size)
+        : 0u;
 
     // Q layout matches flash_attn_batched: q[query_idx * n_heads * head_dim + head * head_dim]
     const uint q_base = (query_idx * p.n_heads + head) * p.head_dim;
@@ -131,7 +135,7 @@ kernel void main0(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint block_start = 0; block_start < causal_len; block_start += FLASH_BLOCK_TOKENS) {
+    for (uint block_start = window_start; block_start < causal_len; block_start += FLASH_BLOCK_TOKENS) {
         const uint block_tokens = min(FLASH_BLOCK_TOKENS, causal_len - block_start);
         const uint block_base_bytes = block_start * p.kv_token_stride_bytes + kv_head * p.kv_head_stride_bytes;
         float local_max = -INFINITY;

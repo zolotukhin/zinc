@@ -574,6 +574,7 @@ const BatchedFlashAttnPush = extern struct {
     kv_len: u32,
     n_queries: u32,
     kv_pos_offset: u32,
+    sliding_window_size: u32,
 };
 
 /// Push constants for flash_attn_batched_q8 — adds byte strides for the Q8
@@ -585,6 +586,7 @@ const BatchedFlashAttnQ8Push = extern struct {
     kv_len: u32,
     n_queries: u32,
     kv_pos_offset: u32,
+    sliding_window_size: u32,
     kv_head_stride_bytes: u32,
     kv_token_stride_bytes: u32,
 };
@@ -772,6 +774,11 @@ const MoeWeightedAccSharedPush = extern struct {
 /// Push constants for sigmoid multiply dispatch (matches sigmoid_mul.metal: buffer(0)).
 const SigmoidMulPush = extern struct {
     n: u32,
+};
+
+const SigmoidScaleAccBatchedPush = extern struct {
+    n_tokens: u32,
+    hidden_dim: u32,
 };
 
 /// Push constants for RoPE dispatch (matches rope_fused.metal: buffer(0)).
@@ -1062,6 +1069,95 @@ fn batchedPrefillMode() BatchedPrefillMode {
     return .off;
 }
 
+fn gemmaBatchedPrefillEnabled() bool {
+    const raw = std.posix.getenv("ZINC_GEMMA_BATCHED_PREFILL") orelse return false;
+    return std.mem.eql(u8, raw, "1") or std.mem.eql(u8, raw, "validate");
+}
+
+fn supportsBatchedGemmQuant(t: GGMLType) bool {
+    return t == .q4_k or t == .q6_k;
+}
+
+fn supportsGroupedGemmaMoeCols(engine: *const InferenceEngine, t: GGMLType) bool {
+    return switch (t) {
+        .q4_k => engine.dmmv_q4k_moe_cols_pipe.handle != null,
+        .q5_1 => engine.dmmv_q5_1_moe_cols_pipe.handle != null,
+        else => false,
+    };
+}
+
+fn canUseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
+    const cfg = engine.config;
+    const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else cfg.hidden_dim * 4;
+    if (!gemmaBatchedPrefillEnabled()) return false;
+    if (cfg.architecture != .gemma or cfg.n_experts == 0) return false;
+    if (cfg.ssm_d_inner > 0) return false;
+    if (engine.private_decode_buffers) return false;
+    if (fullAttentionInterval(cfg) != 1) return false;
+    if (engine.attn_sink_values != null) return false;
+    if (!shouldCpuLmHeadFallback(engine) and !supportsBatchedGemmQuant(engine.lm_head.info.type_)) return false;
+
+    for (0..cfg.n_layers) |i| {
+        if (engine.layer_output_scales[i] != 1.0) return false;
+
+        const lt = engine.layer_tensors[i];
+        if (lt.attn_gate != null) return false;
+        if (lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+
+        const attn = resolveLayerAttentionParams(cfg, lt, cfg.hidden_dim, engine.kv_cache_q8) catch return false;
+        const q = lt.attn_q orelse return false;
+        const k = lt.attn_k orelse return false;
+        const o = lt.attn_output orelse return false;
+        if (!supportsBatchedGemmQuant(q.info.type_) or !supportsBatchedGemmQuant(k.info.type_) or
+            !supportsBatchedGemmQuant(o.info.type_)) return false;
+        if (!attn.use_k_as_v) {
+            const v = lt.attn_v orelse return false;
+            if (!supportsBatchedGemmQuant(v.info.type_)) return false;
+        }
+
+        const q_rows: u32 = @intCast(q.info.numElements() / cfg.hidden_dim);
+        if (q_rows >= attn.q_dim * 2) return false;
+
+        if (!hasExplicitGemmaMoeTensors(cfg, lt)) return false;
+        const gate_inp = lt.ffn_gate_inp orelse return false;
+        if (!supportsBatchedGemmQuant(gate_inp.info.type_)) return false;
+        if (lt.ffn_gate_inp_bias != null or lt.ffn_gate_exps_bias != null or
+            lt.ffn_up_exps_bias != null or lt.ffn_down_exps_bias != null) return false;
+
+        const gate_up_layout = resolveMoeGateUpLayout(lt, inter_dim, cfg.hidden_dim) catch return false;
+        if (gate_up_layout.gate_tensor.info.type_ != .q4_k or gate_up_layout.up_tensor.info.type_ != .q4_k) return false;
+        const down_exps = lt.ffn_down_exps orelse return false;
+        if (!supportsGroupedGemmaMoeCols(engine, down_exps.info.type_)) return false;
+
+        const gate_shexp = lt.ffn_gate_shexp orelse return false;
+        const up_shexp = lt.ffn_up_shexp orelse return false;
+        const down_shexp = lt.ffn_down_shexp orelse return false;
+        if (!supportsBatchedGemmQuant(gate_shexp.info.type_) or
+            !supportsBatchedGemmQuant(up_shexp.info.type_) or
+            !supportsBatchedGemmQuant(down_shexp.info.type_)) return false;
+        if (lt.ffn_gate_inp_shexp) |gate| {
+            if (!supportsBatchedGemmQuant(gate.info.type_)) return false;
+        }
+
+        if (!isF32Tensor(lt.ffn_gate_inp_scale) or !isF32Tensor(lt.pre_ffw_norm_2) or
+            !isF32Tensor(lt.post_ffw_norm_1) or !isF32Tensor(lt.post_ffw_norm_2) or
+            !isF32Tensor(lt.ffn_down_exps_scale))
+        {
+            return false;
+        }
+    }
+
+    return engine.softmax_topk_batched_pipe.handle != null and
+        engine.moe_route_pack_pipe.handle != null and
+        engine.moe_route_gather_pipe.handle != null and
+        engine.moe_route_scatter_scaled_pipe.handle != null and
+        engine.geglu_batched_pipe.handle != null and
+        engine.sigmoid_scale_acc_batched_pipe.handle != null and
+        engine.zero_f32_pipe.handle != null and
+        engine.scale_acc_pipe.handle != null;
+}
+
 /// Returns true when the model + engine state match the narrow slice that
 /// `prefillBatched` currently knows how to run: LLaMA-style dense attention
 /// + dense FFN, Q4_K/Q6_K weights, no Q/K norms, no biases, no attention
@@ -1070,9 +1166,10 @@ fn batchedPrefillMode() BatchedPrefillMode {
 /// Every unsupported case falls back to the per-token path.
 fn canUseBatchedPrefill(engine: *const InferenceEngine) bool {
     const cfg = engine.config;
+    if (cfg.architecture == .gemma) return canUseGemmaBatchedPrefill(engine);
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
-    if (cfg.architecture == .gemma or cfg.architecture == .gpt_oss) return false;
+    if (cfg.architecture == .gpt_oss) return false;
     if (engine.private_decode_buffers) return false;
     // Both f32 and Q8 KV caches are supported — we dispatch the matching
     // flash_attn_batched / kv_cache_write variant below.
@@ -1173,6 +1270,7 @@ const BatchedPrefillScratch = struct {
         const n: usize = n_tokens;
         const hidden_n: usize = hidden_dim;
         const inter_n: usize = inter_dim;
+        const ffn_scratch_n: usize = @max(inter_n, @as(usize, engine.config.shared_expert_intermediate_dim));
         const n_experts: usize = engine.config.n_experts;
         const k_used: usize = engine.config.n_experts_used;
         const route_slots = n * k_used;
@@ -1206,17 +1304,17 @@ const BatchedPrefillScratch = struct {
             var mut = ao;
             metal_buffer.freeBuffer(&mut);
         }
-        const gb = try metal_buffer.createBuffer(ctx, n * inter_dim * f32_sz);
+        const gb = try metal_buffer.createBuffer(ctx, n * ffn_scratch_n * f32_sz);
         errdefer {
             var mut = gb;
             metal_buffer.freeBuffer(&mut);
         }
-        const ub = try metal_buffer.createBuffer(ctx, n * inter_dim * f32_sz);
+        const ub = try metal_buffer.createBuffer(ctx, n * ffn_scratch_n * f32_sz);
         errdefer {
             var mut = ub;
             metal_buffer.freeBuffer(&mut);
         }
-        const sw = try metal_buffer.createBuffer(ctx, n * inter_dim * f32_sz);
+        const sw = try metal_buffer.createBuffer(ctx, n * ffn_scratch_n * f32_sz);
         errdefer {
             var mut = sw;
             metal_buffer.freeBuffer(&mut);
@@ -1431,6 +1529,7 @@ pub const InferenceEngine = struct {
     moe_route_scatter_pipe: MetalPipeline,
     moe_route_scatter_scaled_pipe: MetalPipeline,
     sigmoid_scale_acc_pipe: MetalPipeline,
+    sigmoid_scale_acc_batched_pipe: MetalPipeline,
     moe_weighted_acc_pipe: MetalPipeline,
     moe_weighted_acc_scaled_pipe: MetalPipeline,
     residual_rms_norm_pipe: MetalPipeline,
@@ -1767,6 +1866,7 @@ pub const InferenceEngine = struct {
         self.moe_route_scatter_pipe = try loadShaderPipeline(ctx, "moe_route_scatter");
         self.moe_route_scatter_scaled_pipe = try loadShaderPipeline(ctx, "moe_route_scatter_scaled");
         self.sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
+        self.sigmoid_scale_acc_batched_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc_batched");
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
         self.moe_weighted_acc_scaled_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_scaled");
         self.residual_rms_norm_pipe = try loadShaderPipeline(ctx, "residual_rms_norm");
@@ -2356,6 +2456,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.moe_route_scatter_pipe);
         metal_pipeline.freePipeline(&self.moe_route_scatter_scaled_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_scale_acc_pipe);
+        metal_pipeline.freePipeline(&self.sigmoid_scale_acc_batched_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_scaled_pipe);
         metal_pipeline.freePipeline(&self.residual_rms_norm_pipe);
@@ -2584,6 +2685,7 @@ pub const InferenceEngine = struct {
         const cfg = self.config;
         const hidden_dim = cfg.hidden_dim;
         const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
+        const shexp_inter_dim: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
         const attn_dims = try batchedPrefillAttentionDims(self);
 
         if (position_base == 0 and state.generated_tokens.items.len == 0) {
@@ -2595,7 +2697,6 @@ pub const InferenceEngine = struct {
         var scratch = try BatchedPrefillScratch.init(self, n_tokens, attn_dims.max_q_dim, attn_dims.max_kv_dim, inter_dim);
         defer scratch.deinit();
 
-        // Pre-dequantize embeddings for the whole prompt into scratch.hidden.
         {
             const mmap = self.model.mmap_data orelse return error.NoMmapData;
             const embed_offset = self.model.gguf_file.tensor_data_offset + self.token_embed.info.offset;
@@ -2623,11 +2724,8 @@ pub const InferenceEngine = struct {
             const k_t = lt.attn_k.?;
             const v_t = if (attn.use_k_as_v) k_t else lt.attn_v.?;
             const o_t = lt.attn_output.?;
-            const gate_t = lt.ffn_gate.?;
-            const up_t = lt.ffn_up.?;
-            const down_t = lt.ffn_down.?;
+            const is_gemma_moe = cfg.architecture == .gemma and hasExplicitGemmaMoeTensors(cfg, lt);
 
-            // === Attention block ===
             dispatchRmsNormOnCmd(self, &cmd, &scratch.hidden, &scratch.norm, &self.attn_norm_bufs[layer_idx], hidden_dim, n_tokens);
             cmd.barrier();
 
@@ -2636,8 +2734,6 @@ pub const InferenceEngine = struct {
             dispatchGemmBatchedOnCmd(self, &cmd, v_t, &scratch.norm, &scratch.v, attn.kv_dim, hidden_dim, n_tokens);
             cmd.barrier();
 
-            // Per-head Q/K RMSNorms (Qwen3 and similar). Each head-slice of a token
-            // is one workgroup; batching is just n_tokens × n_heads workgroups.
             if (self.attn_q_norm_present[layer_idx]) {
                 dispatchRmsNormOnCmd(self, &cmd, &scratch.q, &scratch.q, &self.attn_q_norm_bufs[layer_idx], attn.head_dim, cfg.n_heads * n_tokens);
             }
@@ -2678,6 +2774,7 @@ pub const InferenceEngine = struct {
                     kv_len,
                     n_tokens,
                     position_base,
+                    attn.sliding_window_size,
                     attn.kv_cache_head_stride_bytes,
                     attn.kv_cache_bytes_per_token,
                 );
@@ -2695,15 +2792,18 @@ pub const InferenceEngine = struct {
                     kv_len,
                     n_tokens,
                     position_base,
+                    attn.sliding_window_size,
                 );
             }
             cmd.barrier();
 
             dispatchGemmBatchedOnCmd(self, &cmd, o_t, &scratch.attn_out, &scratch.down, hidden_dim, attn.q_dim, n_tokens);
             cmd.barrier();
+            if (self.post_attn_norm_present[layer_idx]) {
+                dispatchRmsNormOnCmd(self, &cmd, &scratch.down, &scratch.down, &self.post_attn_norm_bufs[layer_idx], hidden_dim, n_tokens);
+                cmd.barrier();
+            }
 
-            // Fused residual-add + FFN-norm over all N tokens: eliminates
-            // separate scale_acc → barrier → rms_norm dispatches per layer.
             {
                 const push = ResidualRmsNormPush{ .n = hidden_dim, .eps = cfg.rms_norm_eps, .scale = 1.0 };
                 const bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down, &scratch.norm, &self.ffn_norm_bufs[layer_idx] };
@@ -2711,38 +2811,44 @@ pub const InferenceEngine = struct {
             }
             cmd.barrier();
 
-            dispatchGemmBatchedOnCmd(self, &cmd, gate_t, &scratch.norm, &scratch.gate, inter_dim, hidden_dim, n_tokens);
-            dispatchGemmBatchedOnCmd(self, &cmd, up_t, &scratch.norm, &scratch.up, inter_dim, hidden_dim, n_tokens);
-            cmd.barrier();
+            if (is_gemma_moe) {
+                try recordGemmaBatchedPrefillMoeOnCmd(self, &cmd, layer_idx, lt, &scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
+            } else {
+                const gate_t = lt.ffn_gate.?;
+                const up_t = lt.ffn_up.?;
+                const down_t = lt.ffn_down.?;
+                dispatchGemmBatchedOnCmd(self, &cmd, gate_t, &scratch.norm, &scratch.gate, inter_dim, hidden_dim, n_tokens);
+                dispatchGemmBatchedOnCmd(self, &cmd, up_t, &scratch.norm, &scratch.up, inter_dim, hidden_dim, n_tokens);
+                cmd.barrier();
 
-            // Batched SwiGLU: grid.x covers inter_dim, grid.y is the token index.
-            {
-                const push = SwiGLUPush{ .n = inter_dim };
-                const bufs = [_]*const MetalBuffer{ &scratch.gate, &scratch.swiglu, &scratch.up };
-                cmd.dispatchV2(&self.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, n_tokens, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+                {
+                    const push = SwiGLUPush{ .n = inter_dim };
+                    const bufs = [_]*const MetalBuffer{ &scratch.gate, &scratch.swiglu, &scratch.up };
+                    cmd.dispatchV2(&self.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, n_tokens, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+                }
+                cmd.barrier();
+
+                dispatchGemmBatchedOnCmd(self, &cmd, down_t, &scratch.swiglu, &scratch.down, hidden_dim, inter_dim, n_tokens);
+                cmd.barrier();
+                if (self.post_ffn_norm_present[layer_idx]) {
+                    dispatchRmsNormOnCmd(self, &cmd, &scratch.down, &scratch.down, &self.post_ffn_norm_bufs[layer_idx], hidden_dim, n_tokens);
+                    cmd.barrier();
+                }
+
+                {
+                    const total = n_tokens * hidden_dim;
+                    const push = ScaleAccPush{ .n = total, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                    const bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down };
+                    cmd.dispatchV2(&self.scale_acc_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 0);
+                }
+                cmd.barrier();
             }
-            cmd.barrier();
-
-            dispatchGemmBatchedOnCmd(self, &cmd, down_t, &scratch.swiglu, &scratch.down, hidden_dim, inter_dim, n_tokens);
-            cmd.barrier();
-
-            {
-                const total = n_tokens * hidden_dim;
-                const push = ScaleAccPush{ .n = total, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                const bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down };
-                cmd.dispatchV2(&self.scale_acc_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 0);
-            }
-            cmd.barrier();
         }
 
-        // Final RMSNorm over all N tokens into scratch.norm. The last token is
-        // what feeds the LM head.
         dispatchRmsNormOnCmd(self, &cmd, &scratch.hidden, &scratch.norm, &self.final_norm_gpu, hidden_dim, n_tokens);
         cmd.barrier();
 
-        // LM head on the last token via DmmvPush.x_offset (bytes into scratch.norm).
         if (shouldCpuLmHeadFallback(self)) {
-            // Rare quant path (Gemma Q8). Fall back to the CPU LM head.
             cmd.commitAndWait();
             const src_base = @as(usize, n_tokens - 1) * hidden_dim;
             const src_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
@@ -2760,8 +2866,6 @@ pub const InferenceEngine = struct {
             cmd.barrier();
             dispatchArgmaxOnCmd(self, &cmd, &self.logits_buf, &self.argmax_buf, cfg.vocab_size);
             cmd.commitAndWait();
-            // Keep engine.hidden_buf consistent with the advancing position so
-            // any subsequent single-token decodeStep sees the right residual.
             const src_base = @as(usize, n_tokens - 1) * hidden_dim;
             const src_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
             const dst_ptr: [*]f32 = @ptrCast(@alignCast(self.hidden_buf.cpu_ptr.?));
@@ -4277,6 +4381,7 @@ fn dispatchFlashAttnBatchedOnCmd(
     kv_len: u32,
     n_queries: u32,
     kv_pos_offset: u32,
+    sliding_window_size: u32,
 ) void {
     const push = BatchedFlashAttnPush{
         .head_dim = head_dim,
@@ -4285,6 +4390,7 @@ fn dispatchFlashAttnBatchedOnCmd(
         .kv_len = kv_len,
         .n_queries = n_queries,
         .kv_pos_offset = kv_pos_offset,
+        .sliding_window_size = sliding_window_size,
     };
     const bufs = [_]*const MetalBuffer{ q_buf, k_cache, v_cache, out_buf };
     cmd.dispatchV2(&engine.flash_attn_batched_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnPush), 0);
@@ -4305,6 +4411,7 @@ fn dispatchFlashAttnBatchedQ8OnCmd(
     kv_len: u32,
     n_queries: u32,
     kv_pos_offset: u32,
+    sliding_window_size: u32,
     kv_head_stride_bytes: u32,
     kv_token_stride_bytes: u32,
 ) void {
@@ -4315,6 +4422,7 @@ fn dispatchFlashAttnBatchedQ8OnCmd(
         .kv_len = kv_len,
         .n_queries = n_queries,
         .kv_pos_offset = kv_pos_offset,
+        .sliding_window_size = sliding_window_size,
         .kv_head_stride_bytes = kv_head_stride_bytes,
         .kv_token_stride_bytes = kv_token_stride_bytes,
     };
@@ -4772,6 +4880,156 @@ fn dispatchMoeRouteGatherOnCmd(
     cmd.dispatchV2(&engine.moe_route_gather_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(MoeRouteGatherPush), 0);
 }
 
+fn recordGemmaBatchedPrefillMoeOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    layer_idx: usize,
+    lt: LayerTensors,
+    scratch: *BatchedPrefillScratch,
+    hidden_dim: u32,
+    inter_dim: u32,
+    shexp_inter_dim: u32,
+    n_tokens: u32,
+) !void {
+    const cfg = engine.config;
+    const gate_up_layout = try resolveMoeGateUpLayout(lt, inter_dim, hidden_dim);
+    const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
+    const gate_scale = lt.ffn_gate_inp_scale orelse return error.MissingTensor;
+    const pre_ffw_norm_2 = lt.pre_ffw_norm_2 orelse return error.MissingTensor;
+    const post_ffw_norm_1 = lt.post_ffw_norm_1 orelse return error.MissingTensor;
+    const post_ffw_norm_2 = lt.post_ffw_norm_2 orelse return error.MissingTensor;
+    const down_exps = lt.ffn_down_exps orelse return error.MissingTensor;
+    const down_scales = lt.ffn_down_exps_scale orelse return error.MissingTensor;
+    const gate_shexp = lt.ffn_gate_shexp orelse return error.MissingTensor;
+    const up_shexp = lt.ffn_up_shexp orelse return error.MissingTensor;
+    const down_shexp = lt.ffn_down_shexp orelse return error.MissingTensor;
+
+    const total_hidden = n_tokens * hidden_dim;
+    const route_slots = n_tokens * cfg.n_experts_used;
+
+    dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &scratch.hidden, &scratch.down, gate_scale, hidden_dim, n_tokens);
+    cmd.barrier();
+    const router_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hidden_dim)));
+    dispatchScaleInPlaceOnCmd(engine, cmd, &scratch.down, &scratch.moe_route_input, total_hidden, router_scale, null, .router);
+    dispatchGemmBatchedOnCmd(engine, cmd, router_t, &scratch.down, &scratch.gate, cfg.n_experts, hidden_dim, n_tokens);
+    cmd.barrier();
+
+    dispatchSoftmaxTopkBatchedOnCmd(engine, cmd, &scratch.gate, &scratch.moe_routing, n_tokens, cfg.n_experts, cfg.n_experts_used);
+    cmd.barrier();
+    dispatchMoeRoutePackOnCmd(engine, cmd, &scratch.moe_routing, &scratch.moe_expert_counts, &scratch.moe_packed_ids, n_tokens, cfg.n_experts, cfg.n_experts_used);
+    cmd.barrier();
+
+    dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &scratch.hidden, &scratch.down, pre_ffw_norm_2, hidden_dim, n_tokens);
+    cmd.barrier();
+    dispatchMoeRouteGatherOnCmd(engine, cmd, &scratch.moe_routing, &scratch.down, &scratch.moe_route_input, n_tokens, hidden_dim, cfg.n_experts, cfg.n_experts_used, false);
+    cmd.barrier();
+
+    try dispatchDmmvMoeColsOnCmd(
+        engine,
+        cmd,
+        gate_up_layout.gate_tensor,
+        &scratch.moe_route_input,
+        &scratch.moe_expert_gate,
+        &scratch.moe_expert_counts,
+        &scratch.moe_packed_ids,
+        inter_dim,
+        hidden_dim,
+        gate_up_layout.gate_expert_stride,
+        gate_up_layout.gate_base_offset,
+        0,
+        0,
+        n_tokens,
+        cfg.n_experts,
+        n_tokens,
+    );
+    try dispatchDmmvMoeColsOnCmd(
+        engine,
+        cmd,
+        gate_up_layout.up_tensor,
+        &scratch.moe_route_input,
+        &scratch.moe_expert_up,
+        &scratch.moe_expert_counts,
+        &scratch.moe_packed_ids,
+        inter_dim,
+        hidden_dim,
+        gate_up_layout.up_expert_stride,
+        gate_up_layout.up_base_offset,
+        0,
+        0,
+        n_tokens,
+        cfg.n_experts,
+        n_tokens,
+    );
+    cmd.barrier();
+
+    {
+        const push = SwiGLUPush{ .n = inter_dim };
+        const bufs = [_]*const MetalBuffer{ &scratch.moe_expert_gate, &scratch.moe_expert_swiglu, &scratch.moe_expert_up };
+        cmd.dispatchV2(&engine.geglu_batched_pipe, .{ (inter_dim + 63) / 64, route_slots, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+    }
+    cmd.barrier();
+
+    dispatchZeroF32OnCmd(engine, cmd, &scratch.down, total_hidden);
+    try dispatchDmmvMoeColsOnCmd(
+        engine,
+        cmd,
+        down_exps,
+        &scratch.moe_expert_swiglu,
+        &scratch.moe_expert_down,
+        &scratch.moe_expert_counts,
+        &scratch.moe_packed_ids,
+        hidden_dim,
+        inter_dim,
+        expertSliceBytes(down_exps.info.type_, hidden_dim, inter_dim),
+        0,
+        0,
+        0,
+        n_tokens,
+        cfg.n_experts,
+        n_tokens,
+    );
+    cmd.barrier();
+    dispatchMoeRouteScatterScaledOnCmd(engine, cmd, &scratch.moe_expert_counts, &scratch.moe_packed_ids, &scratch.moe_routing, &scratch.moe_expert_down, &scratch.down, down_scales, n_tokens, hidden_dim, cfg.n_experts, cfg.n_experts_used, false);
+    cmd.barrier();
+    dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &scratch.down, &scratch.down, post_ffw_norm_2, hidden_dim, n_tokens);
+    cmd.barrier();
+
+    dispatchGemmBatchedOnCmd(engine, cmd, gate_shexp, &scratch.norm, &scratch.gate, shexp_inter_dim, hidden_dim, n_tokens);
+    dispatchGemmBatchedOnCmd(engine, cmd, up_shexp, &scratch.norm, &scratch.up, shexp_inter_dim, hidden_dim, n_tokens);
+    cmd.barrier();
+    {
+        const push = SwiGLUPush{ .n = shexp_inter_dim };
+        const bufs = [_]*const MetalBuffer{ &scratch.gate, &scratch.swiglu, &scratch.up };
+        cmd.dispatchV2(&engine.geglu_batched_pipe, .{ (shexp_inter_dim + 63) / 64, n_tokens, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+    }
+    cmd.barrier();
+    dispatchGemmBatchedOnCmd(engine, cmd, down_shexp, &scratch.swiglu, &scratch.moe_route_input, hidden_dim, shexp_inter_dim, n_tokens);
+    cmd.barrier();
+    dispatchRmsNormOnCmdWithTensorWeights(engine, cmd, &scratch.moe_route_input, &scratch.moe_route_input, post_ffw_norm_1, hidden_dim, n_tokens);
+    cmd.barrier();
+
+    if (lt.ffn_gate_inp_shexp) |gate_t| {
+        dispatchGemmBatchedOnCmd(engine, cmd, gate_t, &scratch.norm, &scratch.gate, 1, hidden_dim, n_tokens);
+        cmd.barrier();
+        dispatchSigmoidScaleAccBatchedOnCmd(engine, cmd, &scratch.down, &scratch.moe_route_input, &scratch.gate, n_tokens, hidden_dim);
+    } else {
+        const push = ScaleAccPush{ .n = total_hidden, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+        const bufs = [_]*const MetalBuffer{ &scratch.down, &scratch.moe_route_input };
+        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (total_hidden + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 0);
+    }
+    cmd.barrier();
+
+    if (engine.post_ffn_norm_present[layer_idx]) {
+        dispatchRmsNormOnCmd(engine, cmd, &scratch.down, &scratch.down, &engine.post_ffn_norm_bufs[layer_idx], hidden_dim, n_tokens);
+        cmd.barrier();
+    }
+
+    const res_push = ScaleAccPush{ .n = total_hidden, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+    const res_bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down };
+    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (total_hidden + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &res_bufs, &res_push, @sizeOf(ScaleAccPush), 0);
+    cmd.barrier();
+}
+
 fn dispatchSigmoidScaleAccOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -4783,6 +5041,24 @@ fn dispatchSigmoidScaleAccOnCmd(
     const push = ScaleAccPush{ .n = n, .scale_bits = 0 };
     const bufs = [_]*const MetalBuffer{ accum, src, gate };
     cmd.dispatchV2(&engine.sigmoid_scale_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 3);
+}
+
+fn dispatchSigmoidScaleAccBatchedOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    accum: *const MetalBuffer,
+    src: *const MetalBuffer,
+    gate: *const MetalBuffer,
+    n_tokens: u32,
+    hidden_dim: u32,
+) void {
+    const push = SigmoidScaleAccBatchedPush{
+        .n_tokens = n_tokens,
+        .hidden_dim = hidden_dim,
+    };
+    const total = n_tokens * hidden_dim;
+    const bufs = [_]*const MetalBuffer{ accum, src, gate };
+    cmd.dispatchV2(&engine.sigmoid_scale_acc_batched_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SigmoidScaleAccBatchedPush), 3);
 }
 
 fn dispatchMoeWeightedAccOnCmd(
@@ -10941,6 +11217,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&route_scatter_scaled_pipe);
     var sigmoid_scale_acc_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc");
     defer metal_pipeline.freePipeline(&sigmoid_scale_acc_pipe);
+    var sigmoid_scale_acc_batched_pipe = try loadShaderPipeline(ctx, "sigmoid_scale_acc_batched");
+    defer metal_pipeline.freePipeline(&sigmoid_scale_acc_batched_pipe);
     var moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
     defer metal_pipeline.freePipeline(&moe_weighted_acc_pipe);
     var moe_weighted_acc_scaled_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_scaled");
@@ -10974,6 +11252,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(route_scatter_pipe.handle != null);
     try std.testing.expect(route_scatter_scaled_pipe.handle != null);
     try std.testing.expect(sigmoid_scale_acc_pipe.handle != null);
+    try std.testing.expect(sigmoid_scale_acc_batched_pipe.handle != null);
     try std.testing.expect(moe_weighted_acc_pipe.handle != null);
     try std.testing.expect(moe_weighted_acc_scaled_pipe.handle != null);
 }
