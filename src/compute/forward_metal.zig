@@ -2587,12 +2587,9 @@ pub const InferenceEngine = struct {
             var final_cmd = try metal_command.beginCommand(self.device.ctx);
             dispatchRmsNormOnCmd(self, &final_cmd, &self.hidden_buf, &self.norm_buf, &self.final_norm_gpu, hidden_dim, 1);
             final_cmd.commitAndWait();
-            const mmap = self.model.mmap_data orelse return error.NoMmapData;
-            const tdo = self.model.gguf_file.tensor_data_offset;
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(self.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(self.logits_buf.cpu_ptr.?));
-            try cpuDmmvFallback(mmap, self.lm_head, tdo, in_ptr, out_ptr, cfg.vocab_size, hidden_dim, 0, self.allocator);
-            writeCpuArgmax(self, out_ptr, cfg.vocab_size);
+            try cpuLmHeadFallbackWithArgmax(self, in_ptr, out_ptr);
         } else {
             const x_offset_bytes: u32 = (n_tokens - 1) * hidden_dim * @sizeOf(f32);
             dispatchLmHeadWithInputOffset(self, &cmd, &scratch.norm, &self.logits_buf, hidden_dim, cfg.vocab_size, x_offset_bytes);
@@ -3209,6 +3206,130 @@ fn writeCpuArgmax(engine: *const InferenceEngine, logits: [*]const f32, n: u32) 
     const argmax_words: [*]u32 = @ptrCast(@alignCast(ptr));
     argmax_words[0] = max_idx;
     argmax_words[1] = 0;
+}
+
+const CpuArgmaxResult = struct {
+    idx: u32 = 0,
+    val: f32 = -std.math.inf(f32),
+};
+
+fn betterArgmax(candidate: CpuArgmaxResult, best: CpuArgmaxResult) bool {
+    return candidate.val > best.val or (candidate.val == best.val and candidate.idx < best.idx);
+}
+
+fn writeCpuArgmaxResult(engine: *const InferenceEngine, result: CpuArgmaxResult) void {
+    const ptr = engine.argmax_buf.cpu_ptr orelse return;
+    const argmax_words: [*]u32 = @ptrCast(@alignCast(ptr));
+    argmax_words[0] = result.idx;
+    argmax_words[1] = 0;
+}
+
+fn cpuDmmvQ8_0RowsArgmax(
+    raw: []const u8,
+    start_row: u32,
+    end_row: u32,
+    K: u32,
+    input: [*]const f32,
+    output: [*]f32,
+) CpuArgmaxResult {
+    var best = CpuArgmaxResult{};
+    var row = start_row;
+    while (row < end_row) : (row += 1) {
+        const value = dotQ8_0Row(raw, row, K, input);
+        output[row] = value;
+        const candidate = CpuArgmaxResult{ .idx = row, .val = value };
+        if (betterArgmax(candidate, best)) best = candidate;
+    }
+    return best;
+}
+
+fn cpuDmmvQ8_0RowsArgmaxWorker(
+    raw: []const u8,
+    start_row: u32,
+    end_row: u32,
+    K: u32,
+    input: [*]const f32,
+    output: [*]f32,
+    partial: *CpuArgmaxResult,
+) void {
+    partial.* = cpuDmmvQ8_0RowsArgmax(raw, start_row, end_row, K, input, output);
+}
+
+fn cpuDmmvQ8_0ParallelArgmax(
+    raw: []const u8,
+    M: u32,
+    K: u32,
+    input: [*]const f32,
+    output: [*]f32,
+    allocator: std.mem.Allocator,
+) CpuArgmaxResult {
+    if (M == 0) return .{};
+
+    const row_count: usize = @intCast(M);
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const worker_count = @min(@min(cpu_count, @as(usize, 16)), row_count);
+    if (worker_count <= 1 or row_count < 2048) {
+        return cpuDmmvQ8_0RowsArgmax(raw, 0, M, K, input, output);
+    }
+
+    const partials = allocator.alloc(CpuArgmaxResult, worker_count) catch {
+        return cpuDmmvQ8_0RowsArgmax(raw, 0, M, K, input, output);
+    };
+    defer allocator.free(partials);
+
+    const threads = allocator.alloc(std.Thread, worker_count) catch {
+        return cpuDmmvQ8_0RowsArgmax(raw, 0, M, K, input, output);
+    };
+    defer allocator.free(threads);
+
+    const rows_per_worker = (row_count + worker_count - 1) / worker_count;
+    var spawned: usize = 0;
+    while (spawned < worker_count) : (spawned += 1) {
+        const start: u32 = @intCast(spawned * rows_per_worker);
+        const end_usize = @min(row_count, (spawned + 1) * rows_per_worker);
+        const end: u32 = @intCast(end_usize);
+        if (start >= end) break;
+        partials[spawned] = .{};
+        threads[spawned] = std.Thread.spawn(.{}, cpuDmmvQ8_0RowsArgmaxWorker, .{
+            raw,
+            start,
+            end,
+            K,
+            input,
+            output,
+            &partials[spawned],
+        }) catch {
+            for (threads[0..spawned]) |thread| thread.join();
+            return cpuDmmvQ8_0RowsArgmax(raw, 0, M, K, input, output);
+        };
+    }
+
+    for (threads[0..spawned]) |thread| thread.join();
+
+    var best = CpuArgmaxResult{};
+    for (partials[0..spawned]) |partial| {
+        if (betterArgmax(partial, best)) best = partial;
+    }
+    return best;
+}
+
+fn cpuLmHeadFallbackWithArgmax(
+    engine: *const InferenceEngine,
+    input: [*]const f32,
+    output: [*]f32,
+) !void {
+    const mmap = engine.model.mmap_data orelse return error.NoMmapData;
+    const tdo = engine.model.gguf_file.tensor_data_offset;
+    if (engine.lm_head.info.type_ == .q8_0) {
+        const off: usize = @intCast(tdo + engine.lm_head.info.offset);
+        const raw = mmap[off..];
+        const result = cpuDmmvQ8_0ParallelArgmax(raw, engine.config.vocab_size, engine.config.hidden_dim, input, output, engine.allocator);
+        writeCpuArgmaxResult(engine, result);
+        return;
+    }
+
+    try cpuDmmvFallback(mmap, engine.lm_head, tdo, input, output, engine.config.vocab_size, engine.config.hidden_dim, 0, engine.allocator);
+    writeCpuArgmax(engine, output, engine.config.vocab_size);
 }
 
 fn canUseFusedNormQ8Dmmv(
@@ -6795,12 +6916,9 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         profileBarrier(cmd, profile, .final);
         if (shouldCpuLmHeadFallback(engine)) {
             commitAndWaitProfiled(cmd, profile);
-            const mmap = engine.model.mmap_data orelse return error.NoMmapData;
-            const tdo = engine.model.gguf_file.tensor_data_offset;
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
-            try cpuDmmvFallback(mmap, engine.lm_head, tdo, in_ptr, out_ptr, cfg.vocab_size, hidden_dim, 0, engine.allocator);
-            writeCpuArgmax(engine, out_ptr, cfg.vocab_size);
+            try cpuLmHeadFallbackWithArgmax(engine, in_ptr, out_ptr);
             if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         } else {
             dispatchLmHeadOnCmd(engine, cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
@@ -6815,12 +6933,9 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         profileBarrier(&cmd, profile, .final);
         if (shouldCpuLmHeadFallback(engine)) {
             commitAndWaitProfiled(&cmd, profile);
-            const mmap = engine.model.mmap_data orelse return error.NoMmapData;
-            const tdo = engine.model.gguf_file.tensor_data_offset;
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
-            try cpuDmmvFallback(mmap, engine.lm_head, tdo, in_ptr, out_ptr, cfg.vocab_size, hidden_dim, 0, engine.allocator);
-            writeCpuArgmax(engine, out_ptr, cfg.vocab_size);
+            try cpuLmHeadFallbackWithArgmax(engine, in_ptr, out_ptr);
             if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
         } else {
             dispatchLmHeadOnCmd(engine, &cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
@@ -9730,6 +9845,52 @@ test "dotQ8_0Row matches dequantized row dot" {
         var expected: f32 = 0;
         for (0..K) |i| expected += row_buf[i] * input[i];
         try std.testing.expectApproxEqAbs(expected, dotQ8_0Row(raw[0..], @intCast(row), @intCast(K), input[0..].ptr), 0.00001);
+    }
+}
+
+test "cpu Q8_0 parallel argmax matches serial row pass" {
+    const allocator = std.testing.allocator;
+    const M: u32 = 4096;
+    const K: u32 = 64;
+    const block_size: usize = 32;
+    const bpb: usize = 34;
+    const bpr: usize = @as(usize, K) / block_size;
+    const row_bytes = bpr * bpb;
+
+    const raw = try allocator.alloc(u8, @as(usize, M) * row_bytes);
+    defer allocator.free(raw);
+    const input = try allocator.alloc(f32, K);
+    defer allocator.free(input);
+    const parallel_out = try allocator.alloc(f32, M);
+    defer allocator.free(parallel_out);
+    const serial_out = try allocator.alloc(f32, M);
+    defer allocator.free(serial_out);
+
+    for (0..@as(usize, M)) |row| {
+        for (0..bpr) |block| {
+            const bo = row * row_bytes + block * bpb;
+            const scale = @as(f32, 0.03125) * @as(f32, @floatFromInt(1 + ((row + block) % 7)));
+            const scale_bits: u16 = @bitCast(@as(f16, @floatCast(scale)));
+            std.mem.writeInt(u16, raw[bo..][0..2], scale_bits, .little);
+            for (0..block_size) |j| {
+                const q_raw: i32 = @intCast((row * 13 + block * 7 + j * 5) % 63);
+                const q: i8 = @intCast(q_raw - 31);
+                raw[bo + 2 + j] = @bitCast(q);
+            }
+        }
+    }
+
+    for (input, 0..) |*v, i| {
+        v.* = (@as(f32, @floatFromInt((i * 3) % 17)) - 8.0) * 0.125;
+    }
+
+    const parallel_best = cpuDmmvQ8_0ParallelArgmax(raw, M, K, input.ptr, parallel_out.ptr, allocator);
+    const serial_best = cpuDmmvQ8_0RowsArgmax(raw, 0, M, K, input.ptr, serial_out.ptr);
+
+    try std.testing.expectEqual(serial_best.idx, parallel_best.idx);
+    try std.testing.expectApproxEqAbs(serial_best.val, parallel_best.val, 0.00001);
+    for (0..@as(usize, M)) |row| {
+        try std.testing.expectApproxEqAbs(serial_out[row], parallel_out[row], 0.00001);
     }
 }
 
