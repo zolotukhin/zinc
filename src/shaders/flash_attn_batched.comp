@@ -210,23 +210,29 @@ void main() {
             uint i_lo = i_half * half_block;
             uint i_hi = (i_half == 0u) ? min(half_block, block_len) : block_len;
 
-            // 2-way ILP via paired partial accumulators acc0/acc1; mirrors
-            // flash_attn.comp. Lets the wave have two V loads in flight
-            // before either FMA retires.
+            // 4-way ILP via paired partial accumulators acc0..acc3;
+            // mirrors flash_attn.comp. Lets the wave have four V loads in
+            // flight before any FMA retires — extends cycle 6's 2-way win.
             vec4 acc0 = vec4(0.0);
             vec4 acc1 = vec4(0.0);
+            vec4 acc2 = vec4(0.0);
+            vec4 acc3 = vec4(0.0);
             uint i = i_lo;
-            for (; i + 2u <= i_hi; i += 2u) {
+            for (; i + 4u <= i_hi; i += 4u) {
                 const uint v_base_v4_0 = s_kv_base_v4[i];
                 const uint v_base_v4_1 = s_kv_base_v4[i + 1u];
+                const uint v_base_v4_2 = s_kv_base_v4[i + 2u];
+                const uint v_base_v4_3 = s_kv_base_v4[i + 3u];
 
-                acc0 += s_scores[i] * v_data_v4[v_base_v4_0 + d4];
+                acc0 += s_scores[i]      * v_data_v4[v_base_v4_0 + d4];
                 acc1 += s_scores[i + 1u] * v_data_v4[v_base_v4_1 + d4];
+                acc2 += s_scores[i + 2u] * v_data_v4[v_base_v4_2 + d4];
+                acc3 += s_scores[i + 3u] * v_data_v4[v_base_v4_3 + d4];
             }
             for (; i < i_hi; i++) {
                 acc0 += s_scores[i] * v_data_v4[s_kv_base_v4[i] + d4];
             }
-            vec4 acc = acc0 + acc1;
+            vec4 acc = (acc0 + acc1) + (acc2 + acc3);
 
             if (i_half == 1u) {
                 s_partial_v4[d4] = acc;
