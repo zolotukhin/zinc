@@ -64,6 +64,12 @@ shared uint s_page_ids_block[BLOCK_SIZE];
 // per thread per LDS slot and Phase 5 emits 16-byte coherent stores.
 // 128 vec4 = 512 floats (same LDS as the prior scalar s_out[512]).
 shared vec4 s_out_v4[128]; // supports head_dim up to 512
+// Phase 4 D-split partial buffer. Mirrors flash_attn.comp: when
+// head_dim_v4 == 32 (head_dim=128, Qwen 3 8B) the original loop only
+// keeps 32 of 64 wave lanes busy. The D-split path pairs lanes
+// (tid, tid+32) on the same d4 and splits the i-axis between them,
+// using this LDS to merge partials. 32 vec4 = 512 B.
+shared vec4 s_partial_v4[32];
 shared float s_max_old;
 shared float s_sum_old;
 shared float s_reduce[64];
@@ -173,18 +179,24 @@ void main() {
         }
 
         // Phase 4: rescale previous accum and add this block's V in one
-        // pass, with vec4 V loads. Each thread owns one vec4 of d (4
-        // contiguous floats) per stride-64 step. For head_dim=128 only
-        // 32 threads (tid<head_dim_v4) participate but each covers 4 d
-        // values, halving the wave's outer-loop iterations vs the prior
-        // scalar layout. For head_dim>=256 all 64 threads stay active.
-        // Each thread owns its own s_out_v4[d4] across both the rescale
-        // and the accumulation, so no intra-WG barrier is needed.
+        // pass, with vec4 V loads. For head_dim=128 (head_dim_v4 == 32,
+        // Qwen 3 8B) the D-split path pairs lanes (tid, tid + 32) on the
+        // same d4 and splits the i-axis between them, doubling active
+        // lane count and halving inner-loop iters. The hi-half writes its
+        // partial to LDS; the lo-half merges and updates s_out_v4.
+        // For head_dim_v4 >= 64 (head_dim=256/512) every lane already
+        // covers a unique d4, so no split is needed.
         const float rescale = exp(s_max_old - new_max);
 
-        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        if (head_dim_v4 == 32u) {
+            uint d4 = tid & 31u;
+            uint i_half = tid >> 5;
+            uint half_block = (block_len + 1u) >> 1;
+            uint i_lo = i_half * half_block;
+            uint i_hi = (i_half == 0u) ? min(half_block, block_len) : block_len;
+
             vec4 acc = vec4(0.0);
-            for (uint i = 0u; i < block_len; i++) {
+            for (uint i = i_lo; i < i_hi; i++) {
                 const uint seq_pos = block_start + i;
                 const uint page_off = seq_pos % page_size;
                 const uint page_id  = s_page_ids_block[i];
@@ -192,7 +204,27 @@ void main() {
                                         + kv_head * head_dim) >> 2;
                 acc += s_scores[i] * v_data_v4[v_base_v4 + d4];
             }
-            s_out_v4[d4] = s_out_v4[d4] * rescale + acc;
+
+            if (i_half == 1u) {
+                s_partial_v4[d4] = acc;
+            }
+            barrier();
+            if (i_half == 0u) {
+                s_out_v4[d4] = s_out_v4[d4] * rescale + acc + s_partial_v4[d4];
+            }
+        } else {
+            for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+                vec4 acc = vec4(0.0);
+                for (uint i = 0u; i < block_len; i++) {
+                    const uint seq_pos = block_start + i;
+                    const uint page_off = seq_pos % page_size;
+                    const uint page_id  = s_page_ids_block[i];
+                    const uint v_base_v4 = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                            + kv_head * head_dim) >> 2;
+                    acc += s_scores[i] * v_data_v4[v_base_v4 + d4];
+                }
+                s_out_v4[d4] = s_out_v4[d4] * rescale + acc;
+            }
         }
         barrier();
 
