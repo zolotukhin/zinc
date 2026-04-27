@@ -274,32 +274,27 @@ void main() {
         if (head_dim_v4 == 32u) {
             uint d4 = tid & 31u;
             uint i_half = tid >> 5;
-            // half_block must round down to a multiple of 8 so both i_lo
-            // values are aligned for the 8-way main loop's pair of
-            // ds_read_b128 (s_kv_base_uv4[i>>2] and s_kv_base_uv4[(i>>2)+1]).
-            // For block_len < 16 this drops to 0, idling the lower-half
-            // 32 lanes for that block — only block_lens 1..15 are affected
-            // (decode iters at very small L), and those iters are far
-            // below the per-token decode cost ceiling, so the small-L
-            // penalty is negligible. For block_len=256 (the dominant
-            // case at L=1500) this yields half_block=128 unchanged.
+            // half_block stays a multiple of 8 (not 16): rounding to 16 at
+            // L=1500's partial block (block_len=220 → half_block=96 vs 104)
+            // would balloon the lo/hi imbalance from 1 iter to 3 iters.
+            // The 16-way main loop handles half_block=128 (full block) with
+            // 8 iters; the 8-way / 4-way / 1-way tails clean up the partial
+            // block's 8/4/0 leftover i's per half.
             uint half_block = (block_len >> 1) & ~7u;
             uint i_lo = i_half * half_block;
             uint i_hi = (i_half == 0u) ? half_block : block_len;
 
-            // Split the i-loop accumulator into eight independent partial
-            // accumulators acc0..acc7 and unroll the main loop by 8. Cycle 6
-            // moved 1-way → 2-way (+14.7%); cycle 9 went 2-way → 4-way
-            // (+7.5%); 8-way extends that further by exposing more ILP —
-            // the wave can have eight V loads in flight before any FMA
-            // retires, so the FMA pipeline stays full through the V-load
-            // latency (RDNA4 L2 hit ~50-100 cycles). Register pressure:
-            // 8 vec4 acc + 2 uvec4 bases + 2 vec4 scores ≈ 48 extra VGPR/
-            // lane, still well inside RDNA4's 256 VGPR/lane limit. With
-            // the vec4 scores and uvec4 base aliases, each main-loop iter
-            // issues 2 ds_read_b128 for v_bases (replaces 8 ds_read_b32)
-            // and 2 ds_read_b128 for scores (replaces 8 ds_read_b32) —
-            // same LDS-issue rate per i as the cycle-9 4-way path.
+            // 16-way ILP via partial accumulators acc0..acc15 extends
+            // cycle 12's 8-way pattern: doubles in-flight V loads (16 vs
+            // 8) and FMAs (16 vs 8) per inner iter to better hide V-load
+            // latency. RDNA4 L2 hit ~50-100 cycles; 16 V loads in flight
+            // saturate the load-throughput pipe and keep FMAs busy across
+            // the latency window. Register pressure: 16 vec4 acc + 4 uvec4
+            // bases + 4 vec4 scores ≈ 96 extra VGPR/lane, still inside
+            // RDNA4's 256 VGPR/lane limit. Each 16-way iter issues 4
+            // ds_read_b128 for v_bases (replaces 16 ds_read_b32) and 4
+            // ds_read_b128 for scores (replaces 16 ds_read_b32) — same
+            // LDS-issue rate per i as the 8-way path.
             vec4 acc0 = vec4(0.0);
             vec4 acc1 = vec4(0.0);
             vec4 acc2 = vec4(0.0);
@@ -308,11 +303,52 @@ void main() {
             vec4 acc5 = vec4(0.0);
             vec4 acc6 = vec4(0.0);
             vec4 acc7 = vec4(0.0);
+            vec4 acc8 = vec4(0.0);
+            vec4 acc9 = vec4(0.0);
+            vec4 acc10 = vec4(0.0);
+            vec4 acc11 = vec4(0.0);
+            vec4 acc12 = vec4(0.0);
+            vec4 acc13 = vec4(0.0);
+            vec4 acc14 = vec4(0.0);
+            vec4 acc15 = vec4(0.0);
             uint i = i_lo;
-            // 8-way main: handles 8 consecutive i's per iter via 2
-            // ds_read_b128 (v_bases) + 2 ds_read_b128 (scores) + 8 V loads
-            // + 8 FMAs. For block_len=256 (full block), i_hi - i_lo = 128
-            // so this loop runs 16 iters per lane.
+            // 16-way main: handles 16 consecutive i's per iter via 4
+            // ds_read_b128 (v_bases) + 4 ds_read_b128 (scores) + 16 V
+            // loads + 16 FMAs. For block_len=256 (full block, dominant
+            // case at L=1500) i_hi - i_lo = 128 so this loop runs 8 iters
+            // per lane.
+            for (; i + 16u <= i_hi; i += 16u) {
+                uvec4 v_bases_0 = s_kv_base_uv4[i >> 2];
+                uvec4 v_bases_1 = s_kv_base_uv4[(i >> 2) + 1u];
+                uvec4 v_bases_2 = s_kv_base_uv4[(i >> 2) + 2u];
+                uvec4 v_bases_3 = s_kv_base_uv4[(i >> 2) + 3u];
+                vec4 scores_0 = s_scores_v4[i >> 2];
+                vec4 scores_1 = s_scores_v4[(i >> 2) + 1u];
+                vec4 scores_2 = s_scores_v4[(i >> 2) + 2u];
+                vec4 scores_3 = s_scores_v4[(i >> 2) + 3u];
+
+                acc0  += scores_0.x * v_data_v4[v_bases_0.x + d4];
+                acc1  += scores_0.y * v_data_v4[v_bases_0.y + d4];
+                acc2  += scores_0.z * v_data_v4[v_bases_0.z + d4];
+                acc3  += scores_0.w * v_data_v4[v_bases_0.w + d4];
+                acc4  += scores_1.x * v_data_v4[v_bases_1.x + d4];
+                acc5  += scores_1.y * v_data_v4[v_bases_1.y + d4];
+                acc6  += scores_1.z * v_data_v4[v_bases_1.z + d4];
+                acc7  += scores_1.w * v_data_v4[v_bases_1.w + d4];
+                acc8  += scores_2.x * v_data_v4[v_bases_2.x + d4];
+                acc9  += scores_2.y * v_data_v4[v_bases_2.y + d4];
+                acc10 += scores_2.z * v_data_v4[v_bases_2.z + d4];
+                acc11 += scores_2.w * v_data_v4[v_bases_2.w + d4];
+                acc12 += scores_3.x * v_data_v4[v_bases_3.x + d4];
+                acc13 += scores_3.y * v_data_v4[v_bases_3.y + d4];
+                acc14 += scores_3.z * v_data_v4[v_bases_3.z + d4];
+                acc15 += scores_3.w * v_data_v4[v_bases_3.w + d4];
+            }
+            // 8-way tail: handles 0..15 leftover i's after the 16-way
+            // main when block_len is not a multiple of 32. At L=1500's
+            // partial block (block_len=220 → half_block=104), the lower
+            // half has 104 i's = 6 16-way iters + 1 8-way iter; the upper
+            // half has 116 i's = 7 16-way iters + 1 4-way iter.
             for (; i + 8u <= i_hi; i += 8u) {
                 uvec4 v_bases_lo = s_kv_base_uv4[i >> 2];
                 uvec4 v_bases_hi = s_kv_base_uv4[(i >> 2) + 1u];
@@ -328,10 +364,7 @@ void main() {
                 acc6 += scores_hi.z * v_data_v4[v_bases_hi.z + d4];
                 acc7 += scores_hi.w * v_data_v4[v_bases_hi.w + d4];
             }
-            // 4-way tail: handles 0..7 leftover i's on the upper half
-            // when block_len is not a multiple of 16 (e.g. partial last
-            // block at L=1500 where block_len=220 → upper has 116 i's;
-            // 14 8-way iters cover 112, leaving 4 for this tail).
+            // 4-way tail: handles 0..7 leftover i's after the 8-way tail.
             for (; i + 4u <= i_hi; i += 4u) {
                 uvec4 v_bases = s_kv_base_uv4[i >> 2];
                 vec4 scores4 = s_scores_v4[i >> 2];
@@ -345,7 +378,8 @@ void main() {
                 acc0 += s_scores_v4[i >> 2][i & 3u]
                         * v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + d4];
             }
-            vec4 acc = ((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7));
+            vec4 acc = (((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7)))
+                     + (((acc8 + acc9) + (acc10 + acc11)) + ((acc12 + acc13) + (acc14 + acc15)));
 
             if (i_half == 1u) {
                 s_partial_v4[d4] = acc;
