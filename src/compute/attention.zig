@@ -40,12 +40,29 @@ pub const FlashAttnBatchedPush = extern struct {
     sink_offset: u32,
 };
 
+/// Push constants for flash_attn_split_merge. Reads N_I_CHUNKS partial outputs
+/// per head from binding 0, applies the per-head sink, normalizes, writes the
+/// final output to binding 1.
+pub const FlashAttnSplitMergePush = extern struct {
+    head_dim: u32,
+    n_heads: u32,
+    sink_offset: u32,
+};
+
 /// Manages flash attention pipeline and dispatch.
 pub const AttentionDispatch = struct {
     /// Vulkan compute pipeline, or null if unavailable.
     pipeline: ?Pipeline,
     /// Batched variant — processes N queries per dispatch with causal mask.
     pipeline_batched: ?Pipeline,
+    /// Split-K variant — same flash_attn.spv specialized with N_I_CHUNKS=fa_split_k_active
+    /// so it writes per-chunk partials into partial_attn_out_buf instead of the
+    /// final normalized output. Created lazily when ZINC_FA_SPLIT_K is set.
+    pipeline_split: ?Pipeline,
+    /// Split-K merge pass — combines per-chunk partials and applies sinks.
+    pipeline_split_merge: ?Pipeline,
+    /// N_I_CHUNKS the split pipelines were specialized with (1 if disabled).
+    fa_split_k_active: u32,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -107,9 +124,62 @@ pub const AttentionDispatch = struct {
             break :blk null;
         };
 
+        // Split-K variant. The pipeline reuses flash_attn.spv with the
+        // N_I_CHUNKS spec const set; its "output" binding (4) is wired to
+        // partial_attn_out_buf at dispatch time. The merge pass (3 bindings:
+        // partial, output, sinks) takes the per-head sink merge from the
+        // original Phase 5. Default N_I_CHUNKS=4 (delivers +3.7% at L≈846 and
+        // +11% at L=5 vs the no-split path on R9700; the 32→128 WG count
+        // amortizes the SIMD pool starvation that 32 WGs across 64 CUs hit).
+        // Override with ZINC_FA_SPLIT_K=N (N ∈ {0,1,2,4}; 0 or 1 disable).
+        var pipeline_split: ?Pipeline = null;
+        var pipeline_split_merge: ?Pipeline = null;
+        var fa_split_k_active: u32 = 1;
+        const fa_split_k_env = std.posix.getenv("ZINC_FA_SPLIT_K");
+        const fa_split_k_request: u32 = blk: {
+            if (fa_split_k_env) |raw| {
+                const parsed = std.fmt.parseInt(u32, raw, 10) catch 0;
+                if (parsed == 2 or parsed == 4) break :blk parsed;
+                break :blk 1; // any non-{2,4} value disables
+            }
+            break :blk 4; // default-on with N=4
+        };
+        if (fa_split_k_request > 1) {
+            // path_buf was reused by the batched-shader path above; rebuild
+            // the flash_attn.spv path before specializing the split-K variant.
+            const split_attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
+            const split_specs = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = fa_split_k_request }};
+            pipeline_split = pipeline_mod.createFromSpirvWithOptions(instance, split_attn_path, 6, @sizeOf(FlashAttnPush), &split_specs, wave64_push_options, allocator) catch |err| blk: {
+                log.warn("flash_attn split-K specialization not loaded: {s}", .{@errorName(err)});
+                break :blk null;
+            };
+
+            const merge_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_split_merge.spv", .{shader_dir}) catch unreachable;
+            const merge_specs = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = fa_split_k_request }};
+            // The merge shader uses local_size_x=64 but does not require wave64;
+            // still pass the same options for consistency with the other
+            // wave64 attention pipelines.
+            pipeline_split_merge = pipeline_mod.createFromSpirvWithOptions(instance, merge_path, 3, @sizeOf(FlashAttnSplitMergePush), &merge_specs, wave64_push_options, allocator) catch |err| blk: {
+                log.warn("flash_attn_split_merge shader not loaded: {s}", .{@errorName(err)});
+                break :blk null;
+            };
+
+            if (pipeline_split != null and pipeline_split_merge != null) {
+                fa_split_k_active = fa_split_k_request;
+            } else {
+                if (pipeline_split) |*p| p.deinit();
+                if (pipeline_split_merge) |*p| p.deinit();
+                pipeline_split = null;
+                pipeline_split_merge = null;
+            }
+        }
+
         return AttentionDispatch{
             .pipeline = pipeline,
             .pipeline_batched = pipeline_batched,
+            .pipeline_split = pipeline_split,
+            .pipeline_split_merge = pipeline_split_merge,
+            .fa_split_k_active = fa_split_k_active,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -194,11 +264,62 @@ pub const AttentionDispatch = struct {
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, n_queries, 1);
     }
 
+    /// Record the split-K flash attention dispatch (per-chunk partial pass).
+    /// Grid: (n_heads, n_chunks, 1). Each WG runs the same flash_attn body but
+    /// scoped to its (head, chunk_id) i-range and writes (O_partial, M, L) to
+    /// the partial output buffer bound at slot 4.
+    pub fn recordFlashAttnSplit(
+        self: *const AttentionDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        head_dim: u32,
+        n_heads: u32,
+        n_kv_heads: u32,
+        seq_len: u32,
+        page_size: u32,
+        attn_scale: f32,
+        sink_offset: u32,
+    ) !void {
+        const pip = if (self.pipeline_split) |*p| p else return error.ShaderNotLoaded;
+        const push = FlashAttnPush{
+            .head_dim = head_dim,
+            .n_heads = n_heads,
+            .n_kv_heads = n_kv_heads,
+            .seq_len = seq_len,
+            .page_size = page_size,
+            .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
+            .sink_offset = sink_offset,
+        };
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, self.fa_split_k_active, 1);
+    }
+
+    /// Record the split-K merge pass dispatch — combines per-chunk partials
+    /// for each head, applies the per-head sink term, and writes the final
+    /// normalized attention output. One workgroup per head.
+    pub fn recordFlashAttnSplitMerge(
+        self: *const AttentionDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        head_dim: u32,
+        n_heads: u32,
+        sink_offset: u32,
+    ) !void {
+        const pip = if (self.pipeline_split_merge) |*p| p else return error.ShaderNotLoaded;
+        const push = FlashAttnSplitMergePush{
+            .head_dim = head_dim,
+            .n_heads = n_heads,
+            .sink_offset = sink_offset,
+        };
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
+    }
+
     /// Destroy the loaded pipeline and descriptor pool.
     /// @param self Dispatch wrapper to tear down in place.
     pub fn deinit(self: *AttentionDispatch) void {
         if (self.pipeline) |*p| p.deinit();
         if (self.pipeline_batched) |*p| p.deinit();
+        if (self.pipeline_split) |*p| p.deinit();
+        if (self.pipeline_split_merge) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

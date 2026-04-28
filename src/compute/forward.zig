@@ -48,6 +48,7 @@ const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
 const FlashAttnBatchedPush = attn_mod.FlashAttnBatchedPush;
+const FlashAttnSplitMergePush = attn_mod.FlashAttnSplitMergePush;
 const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 const memory_plan = @import("../gpu/memory_plan.zig");
@@ -860,6 +861,16 @@ pub const InferenceEngine = struct {
     k_buf: Buffer, // K projection: n_kv_heads * head_dim f32
     v_buf: Buffer, // V projection: n_kv_heads * head_dim f32
     attn_out_buf: Buffer, // attention output: n_heads * head_dim f32
+    // Split-K flash attention: partial output buffer holding per-(head, chunk)
+    // unnormalized O accumulator + (M, L) softmax state. Layout matches the
+    // shader's expectation:
+    //   partial O (n_heads * fa_split_k * head_dim floats)
+    //   LSE (n_heads * fa_split_k * 2 floats), starting at byte offset
+    //     n_heads * fa_split_k * head_dim * 4
+    // Allocated only when ZINC_FA_SPLIT_K is set; handle remains null otherwise.
+    partial_attn_out_buf: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
+    // Number of i-axis chunks the split-K dispatch uses (1 = disabled, ≥2 = on).
+    fa_split_k: u32 = 1,
     o_proj_buf: Buffer, // output projection: hidden_dim f32
     ffn_norm_buf: Buffer, // FFN norm output: hidden_dim f32
     gate_buf: Buffer, // MoE expert gate output: intermediate_dim f32
@@ -1965,6 +1976,23 @@ pub const InferenceEngine = struct {
             log.info("softmax_topk v2 DISABLED via ZINC_TOPK_V1=1; using v1 shared-mem scan", .{});
         }
 
+        // Split-K flash attention. Default-on with N_I_CHUNKS=4. The
+        // attention.zig init resolves ZINC_FA_SPLIT_K and creates the pair
+        // of pipelines (split, merge); we just mirror the active count here
+        // and allocate the partial-output buffer when active.
+        const fa_split_k = attention.fa_split_k_active;
+        if (fa_split_k > 1) {
+            log.info("Flash-attn split-K ENABLED: N_I_CHUNKS={d} (default; set ZINC_FA_SPLIT_K=0 to disable)", .{fa_split_k});
+        }
+        var partial_attn_out_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
+        if (fa_split_k > 1) {
+            const partial_o_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * fa_split_k * config.head_dim;
+            const partial_lse_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * fa_split_k * 2;
+            const partial_size = (partial_o_floats + partial_lse_floats) * @sizeOf(f32);
+            partial_attn_out_buf = try Buffer.initDeviceLocal(instance, partial_size, storage_xfer);
+            errdefer partial_attn_out_buf.deinit();
+        }
+
         // Batched flash-attention foundation (opt-in). When ZINC_BATCH_ATTN=1 and
         // the flash_attn_batched pipeline is loaded, the attention call site
         // routes through the batched shader. Foundation step calls with
@@ -2173,6 +2201,8 @@ pub const InferenceEngine = struct {
             .k_buf = k_buf,
             .v_buf = v_buf,
             .attn_out_buf = attn_out_buf,
+            .partial_attn_out_buf = partial_attn_out_buf,
+            .fa_split_k = fa_split_k,
             .o_proj_buf = o_proj_buf,
             .ffn_norm_buf = ffn_norm_buf,
             .gate_buf = gate_buf,
@@ -4787,7 +4817,103 @@ pub const InferenceEngine = struct {
                 // committing to a shader rewrite.
                 const flash_attn_kernel_phase = self.beginProfilePhase();
                 const use_batched = self.use_batch_attn and self.attention.pipeline_batched != null;
-                if (use_batched) {
+                const use_split_k = !use_batched and self.fa_split_k > 1 and
+                    self.attention.pipeline_split != null and
+                    self.attention.pipeline_split_merge != null and
+                    self.partial_attn_out_buf.handle != null;
+                if (use_split_k) {
+                    // Split-K dispatch (flash_attn writes per-chunk partials)
+                    // followed by the merge pass (combines partials, applies sinks,
+                    // writes final output). The split shader reuses flash_attn.spv
+                    // specialized with N_I_CHUNKS so binding 4 holds partials and
+                    // binding 5 (sinks) is unused — we still bind it for layout
+                    // compatibility with the original 6-binding pipeline.
+                    const split_pip = &self.attention.pipeline_split.?;
+                    const merge_pip = &self.attention.pipeline_split_merge.?;
+                    const sink_buf = self.attn_sinks_buf;
+                    const sink_offset: u32 = layer * config.n_heads;
+                    if (split_pip.uses_push_descriptors) {
+                        const split_push = FlashAttnPush{
+                            .head_dim = layer_head_dim,
+                            .n_heads = config.n_heads,
+                            .n_kv_heads = layer_n_kv_heads,
+                            .seq_len = state.position + 1,
+                            .page_size = kv_page_size_tokens,
+                            .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
+                            .sink_offset = sink_offset,
+                        };
+                        self.pushDispatch6(
+                            split_pip,
+                            std.mem.asBytes(&split_push),
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            self.kv_k_cache[layer_idx].handle,
+                            self.kv_k_cache[layer_idx].size,
+                            self.kv_v_cache[layer_idx].handle,
+                            self.kv_v_cache[layer_idx].size,
+                            self.page_table_buf.handle,
+                            self.page_table_buf.size,
+                            self.partial_attn_out_buf.handle,
+                            self.partial_attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                            config.n_heads,
+                            self.fa_split_k,
+                            1,
+                        );
+                    } else {
+                        const split_ds = try self.allocDescSet(split_pip.descriptor_set_layout);
+                        self.writeDescSet6(
+                            split_ds,
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            self.kv_k_cache[layer_idx].handle,
+                            self.kv_k_cache[layer_idx].size,
+                            self.kv_v_cache[layer_idx].handle,
+                            self.kv_v_cache[layer_idx].size,
+                            self.page_table_buf.handle,
+                            self.page_table_buf.size,
+                            self.partial_attn_out_buf.handle,
+                            self.partial_attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                        );
+                        try self.attention.recordFlashAttnSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale, sink_offset);
+                    }
+                    self.decode_cmd.computeBarrier();
+                    if (merge_pip.uses_push_descriptors) {
+                        const merge_push = FlashAttnSplitMergePush{
+                            .head_dim = layer_head_dim,
+                            .n_heads = config.n_heads,
+                            .sink_offset = sink_offset,
+                        };
+                        self.pushDispatch3(
+                            merge_pip,
+                            std.mem.asBytes(&merge_push),
+                            self.partial_attn_out_buf.handle,
+                            self.partial_attn_out_buf.size,
+                            self.attn_out_buf.handle,
+                            self.attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                            config.n_heads,
+                            1,
+                            1,
+                        );
+                    } else {
+                        const merge_ds = try self.allocDescSet(merge_pip.descriptor_set_layout);
+                        self.writeDescSet3(
+                            merge_ds,
+                            self.partial_attn_out_buf.handle,
+                            self.partial_attn_out_buf.size,
+                            self.attn_out_buf.handle,
+                            self.attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                        );
+                        try self.attention.recordFlashAttnSplitMerge(&self.decode_cmd, merge_ds, layer_head_dim, config.n_heads, sink_offset);
+                    }
+                } else if (use_batched) {
                     const pip = &self.attention.pipeline_batched.?;
                     const sink_buf = self.attn_sinks_buf;
                     const sink_offset: u32 = layer * config.n_heads;
@@ -10039,6 +10165,7 @@ pub const InferenceEngine = struct {
         self.gate_buf.deinit();
         self.ffn_norm_buf.deinit();
         self.o_proj_buf.deinit();
+        if (self.partial_attn_out_buf.handle != null) self.partial_attn_out_buf.deinit();
         self.attn_out_buf.deinit();
         self.v_buf.deinit();
         self.k_buf.deinit();
