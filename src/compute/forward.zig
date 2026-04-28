@@ -1064,6 +1064,14 @@ pub const InferenceEngine = struct {
     profile_phase_ranges: [max_profile_phase_ranges]ProfilePhaseRange = undefined,
     profile_phase_range_count: u32 = 0,
     profile_logged_cpu_moe_fallback: bool = false,
+    // ZINC_FA_PROFILE_LAYER=1 instruments per-layer flash_attn_kernel timing
+    // and prints a histogram at end-of-generation. Auto-enables profile_enabled
+    // (the benchmark cycle does not pass --profile, so the flag must turn on
+    // its own timestamp recording). Decode-only — prefill ranges are tagged
+    // distinctly via prefill_active so we ignore them when accumulating.
+    fa_profile_layer: bool = false,
+    fa_per_layer_ns: [128]u64 = [_]u64{0} ** 128,
+    fa_per_layer_count: [128]u32 = [_]u32{0} ** 128,
     // Always-on lightweight prefill timing (CPU-side, no GPU queries).
     // Populated by decodeStep() when prefill_active is set by prefillBatch(),
     // so effort-6 can see where prefill time goes without needing --profile.
@@ -1898,6 +1906,17 @@ pub const InferenceEngine = struct {
             log.info("Fused dense gate+up+SwiGLU DISABLED via ZINC_FUSED_DENSE_FFN=0", .{});
         }
 
+        // ZINC_FA_PROFILE_LAYER=1 — per-layer flash_attn_kernel timing histogram
+        // (effort-11 run-3 enablement). Auto-enables timestamp recording so the
+        // benchmark cycle (which does not pass --profile) still emits per-layer
+        // ms data. Default OFF to keep the benchmark's hot path zero-overhead.
+        const fa_profile_layer_env = std.posix.getenv("ZINC_FA_PROFILE_LAYER");
+        const fa_profile_layer_enabled = fa_profile_layer_env != null and
+            !std.mem.eql(u8, fa_profile_layer_env.?, "0");
+        if (fa_profile_layer_enabled) {
+            log.info("Per-layer flash_attn timing ENABLED via ZINC_FA_PROFILE_LAYER=1 (auto-enables profile)", .{});
+        }
+
         // Fused Q+K norm+rope + KV cache write (effort-11 cycle 12). Default
         // ON when the pipeline is loaded; disable via ZINC_FUSED_QK_KV=0.
         // Per-call gates apply (q_norm/k_norm tensors present, push descriptors,
@@ -2101,6 +2120,13 @@ pub const InferenceEngine = struct {
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
             .use_fused_dense_ffn = fused_dense_ffn_enabled,
             .use_fused_qk_kv = fused_qk_kv_enabled,
+            .fa_profile_layer = fa_profile_layer_enabled,
+            // ZINC_FA_PROFILE_LAYER=1 auto-enables timestamp recording. The
+            // benchmark cycle does not pass --profile, so without this the
+            // diagnostic emits no data. Cost is one timestamp per dispatch
+            // and a vkGetQueryPoolResults wait per token; tolerable for the
+            // diagnostic but tangibly slows the flag-on case.
+            .profile_enabled = fa_profile_layer_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -2251,6 +2277,8 @@ pub const InferenceEngine = struct {
         self.profile_total_counters.reset();
         self.profile_phase_range_count = 0;
         self.profile_logged_cpu_moe_fallback = false;
+        self.fa_per_layer_ns = [_]u64{0} ** 128;
+        self.fa_per_layer_count = [_]u32{0} ** 128;
     }
 
     fn avgProfilePhaseMs(self: *const InferenceEngine, phase: ProfilePhase) f64 {
@@ -2461,11 +2489,24 @@ pub const InferenceEngine = struct {
             self.profile_total_gpu_ms += elapsed_ms;
             if (elapsed_ms > self.profile_max_gpu_ms) self.profile_max_gpu_ms = elapsed_ms;
             self.profile_sample_count += 1;
+            // Per-layer flash_attn_kernel accumulator (ZINC_FA_PROFILE_LAYER=1).
+            // The Nth flash_attn_kernel range in token order corresponds to
+            // layer N (Qwen 3 8B is all-attention; hybrid models still emit a
+            // flash_attn_kernel range per attention layer in layer order). We
+            // skip prefill ranges by gating on prefill_active so the histogram
+            // only reflects decode-time per-layer ms.
+            var fa_layer_idx: u32 = 0;
+            const fa_record = self.fa_profile_layer and !self.prefill_active;
             for (0..self.profile_phase_range_count) |i| {
                 const range = self.profile_phase_ranges[i];
                 if (range.end_query >= count or range.start_query >= count) continue;
                 const phase_ns_f64 = @as(f64, @floatFromInt(timestamps[range.end_query] -| timestamps[range.start_query])) * self.timestamp_period_ns;
                 self.profile_token_counters.gpu_phase_ns[@intFromEnum(range.phase)] += @intFromFloat(@max(phase_ns_f64, 0.0));
+                if (fa_record and range.phase == .flash_attn_kernel and fa_layer_idx < self.fa_per_layer_ns.len) {
+                    self.fa_per_layer_ns[fa_layer_idx] += @intFromFloat(@max(phase_ns_f64, 0.0));
+                    self.fa_per_layer_count[fa_layer_idx] += 1;
+                    fa_layer_idx += 1;
+                }
             }
             self.profile_total_cpu_embed_ns += self.profile_token_counters.cpu_embed_ns;
             self.profile_total_cpu_record_ns += self.profile_token_counters.cpu_record_ns;
@@ -10382,6 +10423,53 @@ pub fn generate(
         }
     } else {
         log.info("Generated {d} tokens", .{decode_tokens});
+    }
+
+    // Per-layer flash_attn_kernel histogram (ZINC_FA_PROFILE_LAYER=1).
+    // Each entry is the average ms across the sampled decode tokens for the
+    // Nth flash_attn dispatch in token order. For Qwen 3 8B that maps 1:1 to
+    // attention layer N. For hybrid models (SSM-interleaved) the index
+    // collapses across only attention-bearing layers — sufficient to spot a
+    // class-level outlier (full-attn vs SWA, first vs last). Unlocks the
+    // structural-swing #6 attack: pick the slowest layer-class and target it.
+    if (engine.fa_profile_layer) {
+        var max_layer: u32 = 0;
+        for (0..engine.fa_per_layer_count.len) |i| {
+            if (engine.fa_per_layer_count[i] > 0) max_layer = @intCast(i + 1);
+        }
+        if (max_layer > 0) {
+            var total_ns: u64 = 0;
+            var min_ms: f64 = std.math.inf(f64);
+            var max_ms: f64 = 0.0;
+            var min_idx: u32 = 0;
+            var max_idx: u32 = 0;
+            log.info("FA_PROFILE_LAYER: per-layer flash_attn ms (avg over decode tokens, {d} dispatches/layer)", .{
+                if (max_layer > 0) engine.fa_per_layer_count[0] else 0,
+            });
+            for (0..max_layer) |i| {
+                const cnt = engine.fa_per_layer_count[i];
+                if (cnt == 0) continue;
+                const avg_ms = @as(f64, @floatFromInt(engine.fa_per_layer_ns[i])) /
+                    @as(f64, @floatFromInt(cnt)) / 1_000_000.0;
+                total_ns += engine.fa_per_layer_ns[i];
+                if (avg_ms < min_ms) {
+                    min_ms = avg_ms;
+                    min_idx = @intCast(i);
+                }
+                if (avg_ms > max_ms) {
+                    max_ms = avg_ms;
+                    max_idx = @intCast(i);
+                }
+                log.info("FA_PROFILE_LAYER:   L{d:0>2} {d:.4} ms", .{ i, avg_ms });
+            }
+            const total_avg_ms = @as(f64, @floatFromInt(total_ns)) /
+                @as(f64, @floatFromInt(@max(engine.fa_per_layer_count[0], 1))) / 1_000_000.0;
+            log.info("FA_PROFILE_LAYER: summary min=L{d}({d:.4}ms) max=L{d}({d:.4}ms) ratio={d:.2}x total_per_token={d:.3}ms", .{
+                min_idx, min_ms, max_idx, max_ms,
+                if (min_ms > 0) max_ms / min_ms else 0.0,
+                total_avg_ms,
+            });
+        }
     }
 
     // Print per-layer diagnostic summary (stored during BOS processing)
