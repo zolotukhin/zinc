@@ -131,6 +131,17 @@ const ProfilePhase = enum(u8) {
     // dense FFN — making it explicit unblocks targeted attacks on the
     // dominant decode bucket without re-deriving it from the residual.
     dense_ffn,
+    // Sub-buckets of dense_ffn (run-4 cycle 12 enablement). Effort-11
+    // run-4 has a 56% dense_ffn bucket but the original profile lumps
+    // gate+up+SwiGLU and down_proj+residual together. Splitting them
+    // identifies which dispatch dominates so the next structural attack
+    // (split-M/split-K, K-axis kpar variants, cross-layer fusion) can
+    // target the correct shader instead of attacking a 30% sub-bucket
+    // assuming it's the 56% top-level. Inner phases nest inside the
+    // outer dense_ffn bucket; the GPU timestamps are independent so the
+    // sub-bucket sums won't double-count the outer total.
+    dense_ffn_gateup,
+    dense_ffn_down,
     final_tail,
 
     fn label(self: @This()) []const u8 {
@@ -157,6 +168,8 @@ const ProfilePhase = enum(u8) {
             .shared_down => "shared_down",
             .shared_gate_acc => "shared_gate",
             .dense_ffn => "dense_ffn",
+            .dense_ffn_gateup => "dense_ffn_gateup",
+            .dense_ffn_down => "dense_ffn_down",
             .final_tail => "tail",
         };
     }
@@ -7135,6 +7148,7 @@ pub const InferenceEngine = struct {
                     (hidden_dim % 4) == 0 and
                     (hidden_dim % 256) == 0;
 
+                const dense_ffn_gateup_phase = self.beginProfilePhase();
                 if (fused_dense_ffn_eligible) {
                     try self.dispatchDmmvFusedGateUpSwiglu(gate_tensor, up_tensor, self.ffn_norm_buf, hidden_size, self.swiglu_buf, inter_dim, hidden_dim);
                     self.decode_cmd.computeBarrier();
@@ -7154,6 +7168,7 @@ pub const InferenceEngine = struct {
                     );
                     self.decode_cmd.computeBarrier();
                 }
+                self.endProfilePhase(.dense_ffn_gateup, dense_ffn_gateup_phase);
 
                 // Fast path: fuse down proj + post_ffw_norm + residual add into
                 // two dispatches when the Gemma tail is active and the fused
@@ -7162,6 +7177,7 @@ pub const InferenceEngine = struct {
                 const use_fused_pfn_decode = lt.post_ffw_norm != null and
                     self.elementwise.pipeline_rms_norm_add != null and
                     !self.validation_diagnostics_enabled;
+                const dense_ffn_down_phase = self.beginProfilePhase();
                 if (lt.post_ffw_norm == null and !self.validation_diagnostics_enabled) {
                     // Fused: down DMMV accumulates directly into hidden_buf,
                     // eliminating separate scale_acc dispatch + barrier
@@ -7266,6 +7282,7 @@ pub const InferenceEngine = struct {
                         );
                     }
                 }
+                self.endProfilePhase(.dense_ffn_down, dense_ffn_down_phase);
                 self.endProfilePhase(.dense_ffn, dense_ffn_phase);
             }
 
@@ -10714,6 +10731,10 @@ pub fn generate(
                 engine.avgProfilePhaseMs(.shared_swiglu),
                 engine.avgProfilePhaseMs(.shared_down),
                 engine.avgProfilePhaseMs(.shared_gate_acc),
+            });
+            log.info("PROFILE: avg dense_ffn subphases gateup={d:.2} ms down={d:.2} ms", .{
+                engine.avgProfilePhaseMs(.dense_ffn_gateup),
+                engine.avgProfilePhaseMs(.dense_ffn_down),
             });
             log.info("PROFILE: fallback counts cpu_ssm={d} cpu_moe={d} cpu_shared_gate={d} cpu_argmax={d}", .{
                 engine.profile_total_counters.cpu_ssm_fallbacks,

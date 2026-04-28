@@ -1,7 +1,7 @@
 #version 460
 // ZINC — Q6_K DMMV, K-parallel (llama.cpp-style)
 // 16 threads per Q6_K superblock, 4 blocks processed in parallel.
-// Each thread handles 16 weight elements via packed reads + vec4 B.
+// Each thread handles 16 weight elements via byte loads + vec4 B reads.
 // Wave64 subgroupAdd reduction. Zero shared memory.
 //
 // Q6_K block (256 elements, 210 bytes):
@@ -9,6 +9,22 @@
 //   [128..191] qh (64 bytes, high 2 bits)
 //   [192..207] scales (16 signed int8)
 //   [208..209] d (f16)
+//
+// Cycle 9 (effort-11 run-4): X reads upgraded from scalar f32 to vec4.
+// Each outer block iteration now issues 4 vec4 loads (16 contiguous
+// floats covering offsets +0/+32/+64/+96 within the block half) instead
+// of 16 scalar loads, cutting the LSU transaction count 4× on the
+// Q6_K LM-head dispatch (Qwen 3-8B Q4_K_M ships output.weight as Q6_K).
+// Per-block sub-block scale reads (s0, s2, s4, s6) are hoisted out of
+// the inner l-loop since `is = e_start / 16` is loop-invariant within
+// the 4 l-iterations — saves 12 redundant scale-byte loads per block.
+// Bit-equivalent to the prior shader: same FMA chain, same dot sum
+// accumulation order, same sign-extension semantics.
+//
+// Requires x_offset to be 16-byte aligned. All Q6_K decode call sites
+// today (LM head with x_offset = 0 or (n-1)*hidden_dim*4) satisfy this:
+// hidden_dim is a multiple of 4 on every supported model so per-token
+// strides of hidden_dim*4 bytes are 16-byte aligned.
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_KHR_shader_subgroup_basic : require
@@ -17,7 +33,7 @@
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
-layout(set = 0, binding = 1) readonly buffer Input  { float x[]; };
+layout(set = 0, binding = 1) readonly buffer Input  { vec4 x_v4[]; };
 layout(set = 0, binding = 2) buffer Output { float y[]; };
 
 layout(push_constant) uniform PC {
@@ -31,8 +47,8 @@ layout(push_constant) uniform PC {
 
 const uint NUM_ROWS = 2u;
 
-// Shared memory for cross-subgroup reduction when gl_NumSubgroups > 1
-// (e.g. Intel Xe2 SIMD16: 4 subgroups per 64-thread workgroup).
+// Cross-subgroup reduction (Intel Xe2 SIMD16: 4 subgroups per 64-thread WG).
+// On RDNA wave64 this is dead; gl_NumSubgroups == 1.
 shared float s_sg_sums[4];
 
 float fp16_to_fp32(uint h) {
@@ -42,13 +58,24 @@ float fp16_to_fp32(uint h) {
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint wg_id = gl_WorkGroupID.x;
-    uint x_base = x_offset / 4u;
+    uint x_v4_base = x_offset / 16u;  // vec4 index base for X
     uint y_base = y_offset / 4u;
     uint blocks_per_row = K / 256u;
 
-    // 16 threads per block, 4 blocks per iteration
+    // 16 threads per block, 4 blocks per iteration.
     uint itid = tid % 16u;
     uint ix = tid / 16u;
+
+    // Hoist thread-position invariants (loop-invariant per thread).
+    uint half_id = itid / 8u;        // 0 or 1 (which 128-element half)
+    uint local_id = itid % 8u;       // 0..7 within half
+    uint e_start = local_id * 4u;    // first byte index this thread handles within the sub-half
+    uint is = e_start / 16u;         // sub-block scale index (0 for local_id < 4, 1 for local_id ≥ 4)
+
+    // Vec4 offset (in vec4 units) of this thread's first X element within
+    // a block: half_id selects the 128-element half, e_start the position
+    // within the sub-half. Both are multiples of 4, so the divide is exact.
+    uint x_v4_in_block_base = (half_id * 128u + e_start) / 4u;
 
     for (uint r = 0u; r < NUM_ROWS; r++) {
         uint row = wg_id * NUM_ROWS + r;
@@ -57,48 +84,56 @@ void main() {
         uint row_offset = a_offset + row * blocks_per_row * 210u;
         float sum = 0.0;
 
-        // Each thread processes 16 elements per block:
-        // itid determines which 16 elements within the 256-element block
-        // Split: 2 halves of 128, each half has 4 groups of 32
-        // Thread handles: 4 elements from each of 4 positions
-        uint half_id = itid / 8u;  // 0 or 1 (which 128-element half)
-        uint local_id = itid % 8u; // 0..7 within half
-
         for (uint b = ix; b < blocks_per_row; b += 4u) {
             uint bb = row_offset + b * 210u;
             uint d_bits = uint(w[bb + 208u]) | (uint(w[bb + 209u]) << 8);
             float d = fp16_to_fp32(d_bits);
 
-            uint xi = b * 256u;
             uint ql_base = bb + half_id * 64u;
             uint qh_base = bb + 128u + half_id * 32u;
             uint sc_base = bb + 192u + half_id * 8u;
 
-            // Each thread handles 4 elements at offset local_id*4 within each of 4 sub-groups
-            // Process 2 sub-groups of 32 elements each (ql_lo/ql_hi pairs)
-            uint e_start = local_id * 4u;
+            // Hoisted sub-block scales (constant for the 4 l-iterations).
+            // Q6_K scales are signed int8 (-128..127); manual sign extension
+            // matches the prior shader byte-for-byte.
+            uint b_s0 = uint(w[sc_base + is]);
+            uint b_s2 = uint(w[sc_base + is + 2u]);
+            uint b_s4 = uint(w[sc_base + is + 4u]);
+            uint b_s6 = uint(w[sc_base + is + 6u]);
+            float s0 = (b_s0 >= 128u) ? float(b_s0) - 256.0 : float(b_s0);
+            float s2 = (b_s2 >= 128u) ? float(b_s2) - 256.0 : float(b_s2);
+            float s4 = (b_s4 >= 128u) ? float(b_s4) - 256.0 : float(b_s4);
+            float s6 = (b_s6 >= 128u) ? float(b_s6) - 256.0 : float(b_s6);
 
-            for (uint l = e_start; l < e_start + 4u; l++) {
-                uint is = l / 16u;
+            float ds0 = d * s0;
+            float ds2 = d * s2;
+            float ds4 = d * s4;
+            float ds6 = d * s6;
+
+            // Vec4 X reads: 4 vec4 = 16 contiguous floats covering the 4
+            // l-iterations at offsets +0, +32, +64, +96 within the block half.
+            uint x_v4_block = x_v4_base + (b * 256u) / 4u + x_v4_in_block_base;
+            vec4 bx0  = x_v4[x_v4_block];
+            vec4 bx32 = x_v4[x_v4_block + 8u];
+            vec4 bx64 = x_v4[x_v4_block + 16u];
+            vec4 bx96 = x_v4[x_v4_block + 24u];
+
+            // Inner 4-iteration scalar loop (compiler unrolls cleanly).
+            for (uint li = 0u; li < 4u; li++) {
+                uint l = e_start + li;
                 uint ql_lo = uint(w[ql_base + l]);
                 uint ql_hi = uint(w[ql_base + l + 32u]);
-                uint qh_v = uint(w[qh_base + l]);
+                uint qh_v  = uint(w[qh_base + l]);
 
                 uint q1 = (ql_lo & 0xFu) | (((qh_v >> 0) & 3u) << 4);
                 uint q2 = (ql_hi & 0xFu) | (((qh_v >> 2) & 3u) << 4);
-                uint q3 = (ql_lo >> 4) | (((qh_v >> 4) & 3u) << 4);
-                uint q4 = (ql_hi >> 4) | (((qh_v >> 6) & 3u) << 4);
+                uint q3 = (ql_lo >> 4)   | (((qh_v >> 4) & 3u) << 4);
+                uint q4 = (ql_hi >> 4)   | (((qh_v >> 6) & 3u) << 4);
 
-                float s0 = float(int(w[sc_base + is])) - (w[sc_base + is] >= 128u ? 256.0 : 0.0);
-                float s2 = float(int(w[sc_base + is + 2u])) - (w[sc_base + is + 2u] >= 128u ? 256.0 : 0.0);
-                float s4 = float(int(w[sc_base + is + 4u])) - (w[sc_base + is + 4u] >= 128u ? 256.0 : 0.0);
-                float s6 = float(int(w[sc_base + is + 6u])) - (w[sc_base + is + 6u] >= 128u ? 256.0 : 0.0);
-
-                uint x_off = xi + half_id * 128u;
-                sum += d * s0 * (float(q1) - 32.0) * x[x_base + x_off + l];
-                sum += d * s2 * (float(q2) - 32.0) * x[x_base + x_off + l + 32u];
-                sum += d * s4 * (float(q3) - 32.0) * x[x_base + x_off + l + 64u];
-                sum += d * s6 * (float(q4) - 32.0) * x[x_base + x_off + l + 96u];
+                sum += ds0 * (float(q1) - 32.0) * bx0[li];
+                sum += ds2 * (float(q2) - 32.0) * bx32[li];
+                sum += ds4 * (float(q3) - 32.0) * bx64[li];
+                sum += ds6 * (float(q4) - 32.0) * bx96[li];
             }
         }
 

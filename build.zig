@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
         "softmax_topk",
         "softmax_topk_v2",
         "flash_attn",
+        "flash_attn_split_merge",
         "deinterleave",
         "vadd",
         "scale_accumulate",
@@ -77,6 +78,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_q4k_moe",
         "dmmv_q4k_moe_kpar",
         "dmmv_q4k_fused_gate_up_moe",
+        "dmmv_q4k_fused_gate_up_swiglu",
         "dmmv_mxfp4_moe",
         "dmmv_q5_1_moe",
         "dmmv_q5k_moe",
@@ -105,6 +107,7 @@ pub fn build(b: *std.Build) void {
         "dmmv_q5k_moe_fused_down_acc",
         "rms_norm_dmmv_f32",
         "rms_norm_dmmv_q4k_alpha_beta",
+        "qk_norm_rope_kv_write",
         // Effort-6 GEMM port: tiled Q4_K dense GEMM (Step 1) for LM head
         // and per-expert count helper (Step 3). The MUL_MAT_ID gather
         // (mul_mm_id_q4k) and Q8_1-activation variant (mul_mmq_q4k) were
