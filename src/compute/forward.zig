@@ -8109,6 +8109,40 @@ pub const InferenceEngine = struct {
         };
 
         if (pip.uses_push_descriptors) {
+            // K-large dense Q4_K path: TPB=32 variant (pipeline_q4k_kpar32).
+            // Targets dense down_proj on Qwen 3-class models (K=inter_dim
+            // ≈ 12288 ≥ 8000); excludes Q/K/V/O projections (K=hidden_dim
+            // ≈ 4096) and gate/up (K=hidden_dim) which keep TPB=16. Same
+            // 3-binding layout and DmmvPushConstants — bit-equivalent dot
+            // math, just a different intra-WG split (32 lanes per block,
+            // 2 blocks per WG vs 16 lanes / 4 blocks). Effort-11 cycle-2.
+            if (qt == .q4_k and K >= 8000 and M < 65536 and self.dmmv.pipeline_q4k_kpar32 != null) {
+                const k32_pip = &self.dmmv.pipeline_q4k_kpar32.?;
+                const push_k32 = DmmvPushConstants{
+                    .M = M,
+                    .K = K,
+                    .a_offset = a_offset,
+                    .x_offset = x_offset,
+                    .y_offset = y_offset,
+                    .acc_mode = acc_mode,
+                };
+                // NUM_ROWS=2 → one workgroup per 2 rows (matches pipeline_q4k).
+                self.pushDispatch3(
+                    k32_pip,
+                    std.mem.asBytes(&push_k32),
+                    tensor.gpu_buffer.handle,
+                    tensor.gpu_buffer.size,
+                    input_buf.handle,
+                    input_size,
+                    output_buf.handle,
+                    output_buf.size,
+                    (M + 1) / 2,
+                    1,
+                    1,
+                );
+                return;
+            }
+
             // Wide-vocab LM-head fast path: NUM_ROWS=8 variant (pipeline_q4k_wide)
             // for tall Q4_K matrices like Gemma 4 31B (M=262144). Same binding
             // layout as pipeline_q4k, only the shader constant differs. 4× fewer
