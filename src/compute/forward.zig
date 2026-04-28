@@ -20,6 +20,7 @@ const Graph = @import("graph.zig").Graph;
 const dmmv_mod = @import("dmmv.zig");
 const DmmvDispatch = dmmv_mod.DmmvDispatch;
 const DmmvPushConstants = dmmv_mod.DmmvPushConstants;
+const OprojMergePushConstants = dmmv_mod.OprojMergePushConstants;
 const MoeDmmvPushConstants = dmmv_mod.MoeDmmvPushConstants;
 const MoeFusedDownAccPushConstants = dmmv_mod.MoeFusedDownAccPushConstants;
 const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
@@ -1013,6 +1014,18 @@ pub const InferenceEngine = struct {
     // the SwiGLU fold which removes the gate_buf/up_buf write+read pair
     // entirely, a structurally distinct change.
     use_fused_dense_ffn: bool = false,
+    // Effort-11 cycle-17: fused split-K flash attention merge + o_proj
+    // DMMV-acc. When ZINC_FUSED_OPROJ_MERGE=1 (and split-K is active), the
+    // o_proj dispatch site uses a single dmmv_q4k_o_proj_merge dispatch
+    // that reads partials directly from partial_attn_out_buf, computes
+    // per-head LSE merge weights with sink fold-in, stages the merged
+    // attn_out into LDS, and runs the standard Q4_K matmul accumulating
+    // into hidden_buf. Eliminates the flash_attn_split_merge dispatch +
+    // its barrier (1 dispatch + 1 barrier per attention layer = 36/token
+    // at L≈1500 with 36 layers). Gated for safety: requires Q4_K W_o,
+    // hidden_dim ≤ 4096 (LDS capacity), and the standard residual flow
+    // (no post_attn_norm, no validation diagnostics). Default OFF.
+    use_fused_oproj_merge: bool = false,
     // Effort-11 cycle-12: fused Q+K norm+rope + KV cache write. Single
     // dispatch replacing the per-attention-layer (Q norm+rope → K norm+rope
     // → kv_cache_write) trio on Qwen 3 family dense attention. Saves
@@ -1924,6 +1937,23 @@ pub const InferenceEngine = struct {
             log.info("Fused dense gate+up+SwiGLU DISABLED via ZINC_FUSED_DENSE_FFN=0", .{});
         }
 
+        // Fused split-K merge + o_proj DMMV-acc (effort-11 cycle 17). When
+        // ZINC_FUSED_OPROJ_MERGE=1 AND split-K is active, the o_proj site
+        // calls dispatchDmmvOprojMerge instead of (separate merge dispatch +
+        // dispatchDmmvAcc), saving 1 dispatch + 1 barrier per attention
+        // layer. Default OFF — opt-in this cycle for safety; per-call
+        // architecture/quant/size gates fall back to the unfused path when
+        // the conditions aren't met (e.g., Gemma post_attn_norm,
+        // hidden_dim > 4096, validation_diagnostics_enabled).
+        const fused_oproj_merge_env = std.posix.getenv("ZINC_FUSED_OPROJ_MERGE");
+        const fused_oproj_merge_enabled = fused_oproj_merge_env != null and
+            std.mem.eql(u8, fused_oproj_merge_env.?, "1") and
+            dmmv.pipeline_q4k_o_proj_merge != null and
+            instance.push_descriptor_fn != null;
+        if (fused_oproj_merge_enabled) {
+            log.info("Fused split-K merge + o_proj ENABLED via ZINC_FUSED_OPROJ_MERGE=1", .{});
+        }
+
         // ZINC_FA_PROFILE_LAYER=1 — per-layer flash_attn_kernel timing histogram
         // (effort-11 run-3 enablement). Auto-enables timestamp recording so the
         // benchmark cycle (which does not pass --profile) still emits per-layer
@@ -2154,6 +2184,7 @@ pub const InferenceEngine = struct {
             .use_fused_rms_router = fused_rms_router_enabled,
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
             .use_fused_dense_ffn = fused_dense_ffn_enabled,
+            .use_fused_oproj_merge = fused_oproj_merge_enabled,
             .use_fused_qk_kv = fused_qk_kv_enabled,
             .fa_profile_layer = fa_profile_layer_enabled,
             // ZINC_FA_PROFILE_LAYER=1 auto-enables timestamp recording. The
@@ -4821,6 +4852,27 @@ pub const InferenceEngine = struct {
                     self.attention.pipeline_split != null and
                     self.attention.pipeline_split_merge != null and
                     self.partial_attn_out_buf.handle != null;
+                // Effort-11 cycle-17: when ZINC_FUSED_OPROJ_MERGE=1 and split-K
+                // is active, we replace the (merge → barrier → o_proj) pair
+                // with a single dmmv_q4k_o_proj_merge dispatch. The flag is
+                // off by default; when it engages, the merge dispatch below
+                // is skipped and the o_proj site routes through
+                // dispatchDmmvOprojMerge (which reads the partials directly
+                // from partial_attn_out_buf).
+                const o_tensor_for_merge = lt.attn_output;
+                const o_proj_quant_ok = if (o_tensor_for_merge) |ot| ot.info.type_ == .q4_k else false;
+                const apply_attn_gate_for_merge = lt.attn_gate != null;
+                const post_attn_norm_for_merge = config.architecture == .gemma and lt.post_attention_norm != null;
+                const fused_oproj_merge_active = self.use_fused_oproj_merge and
+                    use_split_k and
+                    self.dmmv.pipeline_q4k_o_proj_merge != null and
+                    o_proj_quant_ok and
+                    !apply_attn_gate_for_merge and
+                    !post_attn_norm_for_merge and
+                    !self.validation_diagnostics_enabled and
+                    hidden_dim <= 4096 and
+                    config.n_heads <= 64 and
+                    self.fa_split_k <= 8;
                 if (use_split_k) {
                     // Split-K dispatch (flash_attn writes per-chunk partials)
                     // followed by the merge pass (combines partials, applies sinks,
@@ -4881,37 +4933,39 @@ pub const InferenceEngine = struct {
                         try self.attention.recordFlashAttnSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale, sink_offset);
                     }
                     self.decode_cmd.computeBarrier();
-                    if (merge_pip.uses_push_descriptors) {
-                        const merge_push = FlashAttnSplitMergePush{
-                            .head_dim = layer_head_dim,
-                            .n_heads = config.n_heads,
-                            .sink_offset = sink_offset,
-                        };
-                        self.pushDispatch3(
-                            merge_pip,
-                            std.mem.asBytes(&merge_push),
-                            self.partial_attn_out_buf.handle,
-                            self.partial_attn_out_buf.size,
-                            self.attn_out_buf.handle,
-                            self.attn_out_buf.size,
-                            sink_buf.handle,
-                            sink_buf.size,
-                            config.n_heads,
-                            1,
-                            1,
-                        );
-                    } else {
-                        const merge_ds = try self.allocDescSet(merge_pip.descriptor_set_layout);
-                        self.writeDescSet3(
-                            merge_ds,
-                            self.partial_attn_out_buf.handle,
-                            self.partial_attn_out_buf.size,
-                            self.attn_out_buf.handle,
-                            self.attn_out_buf.size,
-                            sink_buf.handle,
-                            sink_buf.size,
-                        );
-                        try self.attention.recordFlashAttnSplitMerge(&self.decode_cmd, merge_ds, layer_head_dim, config.n_heads, sink_offset);
+                    if (!fused_oproj_merge_active) {
+                        if (merge_pip.uses_push_descriptors) {
+                            const merge_push = FlashAttnSplitMergePush{
+                                .head_dim = layer_head_dim,
+                                .n_heads = config.n_heads,
+                                .sink_offset = sink_offset,
+                            };
+                            self.pushDispatch3(
+                                merge_pip,
+                                std.mem.asBytes(&merge_push),
+                                self.partial_attn_out_buf.handle,
+                                self.partial_attn_out_buf.size,
+                                self.attn_out_buf.handle,
+                                self.attn_out_buf.size,
+                                sink_buf.handle,
+                                sink_buf.size,
+                                config.n_heads,
+                                1,
+                                1,
+                            );
+                        } else {
+                            const merge_ds = try self.allocDescSet(merge_pip.descriptor_set_layout);
+                            self.writeDescSet3(
+                                merge_ds,
+                                self.partial_attn_out_buf.handle,
+                                self.partial_attn_out_buf.size,
+                                self.attn_out_buf.handle,
+                                self.attn_out_buf.size,
+                                sink_buf.handle,
+                                sink_buf.size,
+                            );
+                            try self.attention.recordFlashAttnSplitMerge(&self.decode_cmd, merge_ds, layer_head_dim, config.n_heads, sink_offset);
+                        }
                     }
                 } else if (use_batched) {
                     const pip = &self.attention.pipeline_batched.?;
@@ -5286,10 +5340,33 @@ pub const InferenceEngine = struct {
                     // Use o_cols (from O weight tensor shape) — matches actual attention output dim.
                     // Gemma 4 has mixed head_dim (256 SWA vs 512 global); o_cols is always correct
                     // while q_dim (from config) uses the max head_dim.
-                    try self.dispatchDmmvAcc(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.hidden_buf, hidden_dim, o_cols);
-                    if (lt.attn_output_bias) |bias| {
-                        self.decode_cmd.computeBarrier();
-                        try self.dispatchBiasAdd(self.hidden_buf.handle, hidden_size, bias, hidden_dim);
+                    if (fused_oproj_merge_active and lt.attn_output_bias == null) {
+                        // Effort-11 cycle-17: replace (merge → barrier → o_proj DMMV-acc)
+                        // with a single dispatch that reads partials from
+                        // partial_attn_out_buf, computes per-head LSE merge weights
+                        // with sink fold-in, stages attn_out into LDS, and runs
+                        // the Q4_K matmul accumulating into hidden_buf. Bias path
+                        // falls through to the unfused dispatch (the post-bias
+                        // residual barrier is unchanged).
+                        const sink_offset_for_merge: u32 = layer * config.n_heads;
+                        try self.dispatchDmmvOprojMerge(
+                            o_tensor,
+                            self.partial_attn_out_buf,
+                            self.attn_sinks_buf,
+                            self.hidden_buf,
+                            hidden_dim,
+                            o_cols,
+                            config.n_heads,
+                            self.fa_split_k,
+                            sink_offset_for_merge,
+                            layer_head_dim,
+                        );
+                    } else {
+                        try self.dispatchDmmvAcc(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.hidden_buf, hidden_dim, o_cols);
+                        if (lt.attn_output_bias) |bias| {
+                            self.decode_cmd.computeBarrier();
+                            try self.dispatchBiasAdd(self.hidden_buf.handle, hidden_size, bias, hidden_dim);
+                        }
                     }
                     self.decode_cmd.computeBarrier();
                 } else {
@@ -7936,6 +8013,58 @@ pub const InferenceEngine = struct {
             input_size,
             swiglu_buf.handle,
             swiglu_buf.size,
+            wg_x,
+            1,
+            1,
+        );
+    }
+
+    /// Dispatch the fused split-K flash attention merge + Q4_K o_proj
+    /// DMMV-acc shader. Replaces the (flash_attn_split_merge → barrier →
+    /// dispatchDmmvAcc(o_proj)) trio with a single dispatch that reads
+    /// partials directly, computes the per-head LSE merge weights with
+    /// sink fold-in, stages the merged attn_out into LDS (16 KB), and
+    /// runs the standard Q4_K matmul reading the B-vector from LDS while
+    /// accumulating into hidden_buf. Push-descriptor only.
+    fn dispatchDmmvOprojMerge(
+        self: *InferenceEngine,
+        o_tensor: *const LoadedTensor,
+        partial_buf: Buffer,
+        sinks_buf: Buffer,
+        hidden_buf: Buffer,
+        M: u32,
+        K: u32,
+        n_heads: u32,
+        n_i_chunks: u32,
+        sink_offset: u32,
+        head_dim: u32,
+    ) !void {
+        const pip = &(self.dmmv.pipeline_q4k_o_proj_merge orelse return error.ShaderNotLoaded);
+        const push = OprojMergePushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = 0,
+            .x_offset = 0,
+            .y_offset = 0,
+            .acc_mode = 1,
+            .n_heads = n_heads,
+            .n_i_chunks = n_i_chunks,
+            .sink_offset = sink_offset,
+            .head_dim = head_dim,
+        };
+        // NUM_ROWS=2 in the shader; one workgroup per row pair.
+        const wg_x: u32 = (M + 1) / 2;
+        self.pushDispatch4(
+            pip,
+            std.mem.asBytes(&push),
+            o_tensor.gpu_buffer.handle,
+            o_tensor.gpu_buffer.size,
+            partial_buf.handle,
+            partial_buf.size,
+            hidden_buf.handle,
+            hidden_buf.size,
+            sinks_buf.handle,
+            sinks_buf.size,
             wg_x,
             1,
             1,

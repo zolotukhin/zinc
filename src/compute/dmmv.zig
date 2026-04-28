@@ -75,6 +75,24 @@ pub const MoeFusedDownAccPushConstants = extern struct {
     n_used: u32,
 };
 
+/// Push constants for the fused split-K merge + o_proj DMMV-acc shader
+/// (src/shaders/dmmv_q4k_o_proj_merge.comp). Adds the merge-pass parameters
+/// to the standard DmmvPushConstants so a single dispatch reads partials,
+/// computes per-head LSE merge weights, stages attn_out into LDS, and runs
+/// the Q4_K matmul with residual accumulation.
+pub const OprojMergePushConstants = extern struct {
+    M: u32,
+    K: u32,
+    a_offset: u32,
+    x_offset: u32,
+    y_offset: u32,
+    acc_mode: u32 = 1,
+    n_heads: u32,
+    n_i_chunks: u32,
+    sink_offset: u32,
+    head_dim: u32,
+};
+
 /// Push constants for the quantize_q8_1 shader.
 /// `ne` = number of f32 input elements (must be a multiple of 32).
 /// `num_blocks` = ne / 32. Pass explicitly so the shader does not have to divide.
@@ -190,6 +208,16 @@ pub const DmmvDispatch = struct {
     /// barrier per layer (gate+up → swiglu), and reads the shared input
     /// once per block. Same DmmvPushConstants layout as pipeline_q4k.
     pipeline_q4k_fused_gate_up_swiglu: ?Pipeline,
+    /// Fused split-K merge + Q4_K o_proj DMMV-acc pipeline (4 bindings:
+    /// W_o, partial_attn_out_buf, hidden_buf, sinks). Replaces the
+    /// (flash_attn_split_merge → o_proj DMMV-acc) pair with one dispatch:
+    /// each WG reads per-head M, L, computes LSE merge weights with sink
+    /// fold-in, stages the merged attn_out (hidden_dim floats) into LDS,
+    /// then runs the standard Q4_K matmul reading the B-vector from LDS
+    /// and accumulating into hidden_buf. Saves 1 dispatch + 1 barrier per
+    /// attention layer when split-K is active. Push constants:
+    /// OprojMergePushConstants. Gated behind ZINC_FUSED_OPROJ_MERGE.
+    pipeline_q4k_o_proj_merge: ?Pipeline,
     /// Fused Q4_K MoE down + weighted_acc pipeline (4 bindings: A, X,
     /// Y=hidden_buf, routing). Each WG owns NUM_ROWS=2 hidden rows and
     /// loops over n_used experts internally, eliminating the separate
@@ -458,6 +486,19 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // Fused split-K merge + Q4_K o_proj DMMV-acc. 4 bindings (W_o,
+        // partial_attn_out_buf, hidden_buf, sinks). Push uses
+        // OprojMergePushConstants — same DmmvPushConstants prefix plus
+        // n_heads, n_i_chunks, sink_offset, head_dim. Used when
+        // ZINC_FUSED_OPROJ_MERGE=1 and split-K is active to fold the
+        // merge dispatch into o_proj.
+        const oproj_merge_push_size = @sizeOf(OprojMergePushConstants);
+        const q4k_o_proj_merge_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_o_proj_merge.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_o_proj_merge = pipeline_mod.createFromSpirvWithOptions(instance, q4k_o_proj_merge_path, 4, oproj_merge_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K fused o_proj+merge shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // Fused Q4_K MoE down + weighted_acc: each WG accumulates over
         // n_used experts and writes hidden_buf[row] += sum (NUM_ROWS=2).
         // 4 bindings (A, X=swiglu_buf, Y=hidden_buf, routing). Push struct
@@ -600,6 +641,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_moe_batched = pipeline_q4k_moe_batched,
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
             .pipeline_q4k_fused_gate_up_swiglu = pipeline_q4k_fused_gate_up_swiglu,
+            .pipeline_q4k_o_proj_merge = pipeline_q4k_o_proj_merge,
             .pipeline_q4k_moe_fused_down_acc = pipeline_q4k_moe_fused_down_acc,
             .pipeline_q5k_moe_fused_down_acc = pipeline_q5k_moe_fused_down_acc,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
@@ -1155,6 +1197,8 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q4k_moe_batched) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_moe) |*p| p.deinit();
+        if (self.pipeline_q4k_fused_gate_up_swiglu) |*p| p.deinit();
+        if (self.pipeline_q4k_o_proj_merge) |*p| p.deinit();
         if (self.pipeline_q4k_moe_fused_down_acc) |*p| p.deinit();
         if (self.pipeline_q5k_moe_fused_down_acc) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();

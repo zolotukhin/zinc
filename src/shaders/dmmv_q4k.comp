@@ -73,6 +73,14 @@ void main() {
     uint blocks_per_row = K / 256u;
     uint a_base = a_offset / 4u;  // uint32 base
 
+    // v_im-uniform shift (matches dmmv_q4k_moe_kpar.comp). v_im ∈ {0,1}; the
+    // sub-blocks each thread touches are sb_a/sb_b ∈ {0..3} (lo half of the
+    // 32-bit scale words for v_im=0; hi half for v_im=1) and sb_c/sb_d ∈ {4..7}
+    // (always need the two-byte combine path). Shifting sc0/sc1/sc2 right by
+    // 16*v_im selects the relevant byte pair without dynamic indexing or
+    // branching, eliminating the bytes[12] array + 4 if/else conditionals.
+    uint shift = v_im * 16u;
+
     for (uint r = 0u; r < NUM_ROWS; r++) {
         uint row = wg_id * NUM_ROWS + r;
         if (row >= M) break;
@@ -94,17 +102,6 @@ void main() {
             uint sc1 = a_u32[blk_u32 + 2u];
             uint sc2 = a_u32[blk_u32 + 3u];
 
-            // Decode scale and min for the 4 sub-blocks this thread touches
-            // Sub-blocks: sb0 = 2*v_im + 0, sb1 = 2*v_im + 1 (from v_in)
-            // But we access 4 sub-blocks: at y_offset positions 0, 32, 64, 96
-            uint sb0 = v_im * 4u + v_in * 2u;
-            uint sb1 = sb0 + 1u;
-
-            // Simple scale decode from raw bytes
-            // scales are at blk_u32+1 as raw bytes
-            uint scales_byte_off = a_offset + i * 144u + row * blocks_per_row * 144u + 4u;
-
-            // Fall back to simple approach for scale decode
             // Read qs as packed uint32 (4 bytes = 4 nibble-pairs = 8 q values)
             uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset / 4u];
             uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u]; // +64 bytes = +16 u32
@@ -123,51 +120,29 @@ void main() {
             vec4 by2 = x_v4[x_base + b_idx2];
             vec4 by3 = x_v4[x_base + b_idx2 + 8u];
 
-            // Decode scales for sub-blocks accessed by this thread
-            // Sub-block indices for the 4 dot products:
-            //   q0_lo uses sb = 2*v_im + 0 = sb0
-            //   q0_hi uses sb = 2*v_im + 1 = sb1
-            //   q1_lo uses sb = 2*v_im + 4 + 0 (second half)
-            //   q1_hi uses sb = 2*v_im + 4 + 1
+            // Decode scales for the 4 sub-blocks (sb_a..sb_d) using v_im-uniform
+            // shift: sb_a/sb_b always take the lo branch (sb < 4), sb_c/sb_d
+            // always take the hi branch (sb >= 4) for v_im ∈ {0,1}, so the
+            // dynamic bytes[12] array + 4 if/else conditionals collapse into
+            // straight-line shift+mask arithmetic. Bit-equivalent to the
+            // original (verified against the MoE kpar variant).
+            uint sc0_v = sc0 >> shift;
+            uint sc1_v = sc1 >> shift;
+            uint sc2_v = sc2 >> shift;
 
-            // Read raw scale bytes (from uint8 view would be cleaner, but we only have uint32)
-            // Reconstruct from the 3 scale uint32s
-            // bytes 0..3 -> sc0, bytes 4..7 -> sc1, bytes 8..11 -> sc2
-            // For sub-blocks 0..3: scale = byte[sb] & 63
-            // For sub-blocks 4..7: scale = (byte[sb+4] & 0xF) | ((byte[sb-4] >> 6) << 4)
+            float sc_a = float(sc0_v & 0x3Fu);
+            float mn_a = float(sc1_v & 0x3Fu);
+            float sc_b = float((sc0_v >> 8u) & 0x3Fu);
+            float mn_b = float((sc1_v >> 8u) & 0x3Fu);
+            float sc_c = float((sc2_v & 0xFu) | ((sc0_v & 0xC0u) >> 2u));
+            float mn_c = float(((sc2_v & 0xF0u) >> 4u) | ((sc1_v & 0xC0u) >> 2u));
+            float sc_d = float(((sc2_v >> 8u) & 0xFu) | (((sc0_v >> 8u) & 0xC0u) >> 2u));
+            float mn_d = float((((sc2_v >> 8u) & 0xF0u) >> 4u) | (((sc1_v >> 8u) & 0xC0u) >> 2u));
 
-            // Extract individual scale bytes from packed uint32s
-            float factor0, bias0, factor1, bias1, factor2, bias2, factor3, bias3;
-            {
-                // Simple per-byte extraction from uint32 scale words
-                uint sb_a = 2u * v_im;       // sub-block for first half low nibble
-                uint sb_b = 2u * v_im + 1u;  // sub-block for first half high nibble
-                uint sb_c = 2u * v_im + 4u;  // sub-block for second half low nibble
-                uint sb_d = 2u * v_im + 5u;  // sub-block for second half high nibble
-
-                // Extract scale/min bytes
-                // bytes[0..11] packed in sc0(bytes 0..3), sc1(bytes 4..7), sc2(bytes 8..11)
-                uint bytes[12];
-                bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
-                bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
-                bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
-
-                float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
-                // Decode 6-bit scales and mins
-                if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a+4u] & 63u); }
-                else { sc_a = float((bytes[sb_a+4u]&0xFu)|((bytes[sb_a-4u]>>6)<<4)); mn_a = float(((bytes[sb_a+4u]>>4)&0xFu)|((bytes[sb_a]>>6)<<4)); }
-                if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b+4u] & 63u); }
-                else { sc_b = float((bytes[sb_b+4u]&0xFu)|((bytes[sb_b-4u]>>6)<<4)); mn_b = float(((bytes[sb_b+4u]>>4)&0xFu)|((bytes[sb_b]>>6)<<4)); }
-                if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c+4u] & 63u); }
-                else { sc_c = float((bytes[sb_c+4u]&0xFu)|((bytes[sb_c-4u]>>6)<<4)); mn_c = float(((bytes[sb_c+4u]>>4)&0xFu)|((bytes[sb_c]>>6)<<4)); }
-                if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d+4u] & 63u); }
-                else { sc_d = float((bytes[sb_d+4u]&0xFu)|((bytes[sb_d-4u]>>6)<<4)); mn_d = float(((bytes[sb_d+4u]>>4)&0xFu)|((bytes[sb_d]>>6)<<4)); }
-
-                factor0 = d_val * sc_a; bias0 = dmin_val * mn_a;
-                factor1 = d_val * sc_b; bias1 = dmin_val * mn_b;
-                factor2 = d_val * sc_c; bias2 = dmin_val * mn_c;
-                factor3 = d_val * sc_d; bias3 = dmin_val * mn_d;
-            }
+            float factor0 = d_val * sc_a; float bias0 = dmin_val * mn_a;
+            float factor1 = d_val * sc_b; float bias1 = dmin_val * mn_b;
+            float factor2 = d_val * sc_c; float bias2 = dmin_val * mn_c;
+            float factor3 = d_val * sc_d; float bias3 = dmin_val * mn_d;
 
             // 4 dot products: factor * q - bias, dot with B
             sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);

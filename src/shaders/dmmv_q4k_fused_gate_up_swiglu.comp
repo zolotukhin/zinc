@@ -70,14 +70,28 @@ vec4 unpack_nibbles_hi(uint v) {
                 float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
 }
 
-void decode_sb(uint bytes[12], uint sb, out float sc, out float mn) {
-    if (sb < 4u) {
-        sc = float(bytes[sb] & 63u);
-        mn = float(bytes[sb + 4u] & 63u);
-    } else {
-        sc = float((bytes[sb + 4u] & 0xFu) | ((bytes[sb - 4u] >> 6) << 4));
-        mn = float(((bytes[sb + 4u] >> 4) & 0xFu) | ((bytes[sb] >> 6) << 4));
-    }
+// v_im-uniform straight-line scale decode. Matches dmmv_q4k_moe_kpar.comp's
+// shift+mask form: shifting sc{0,1,2} right by 16*v_im selects the byte
+// pair this thread needs without dynamic indexing or branching, replacing
+// the bytes[12] array + 4 if/else conditionals. Bit-equivalent to the
+// original decode_sb function for v_im ∈ {0,1}.
+void decode_scales(uint sc0, uint sc1, uint sc2, uint shift,
+                   out float sc_a, out float mn_a,
+                   out float sc_b, out float mn_b,
+                   out float sc_c, out float mn_c,
+                   out float sc_d, out float mn_d) {
+    uint sc0_v = sc0 >> shift;
+    uint sc1_v = sc1 >> shift;
+    uint sc2_v = sc2 >> shift;
+
+    sc_a = float(sc0_v & 0x3Fu);
+    mn_a = float(sc1_v & 0x3Fu);
+    sc_b = float((sc0_v >> 8u) & 0x3Fu);
+    mn_b = float((sc1_v >> 8u) & 0x3Fu);
+    sc_c = float((sc2_v & 0xFu) | ((sc0_v & 0xC0u) >> 2u));
+    mn_c = float(((sc2_v & 0xF0u) >> 4u) | ((sc1_v & 0xC0u) >> 2u));
+    sc_d = float(((sc2_v >> 8u) & 0xFu) | (((sc0_v >> 8u) & 0xC0u) >> 2u));
+    mn_d = float((((sc2_v >> 8u) & 0xF0u) >> 4u) | (((sc1_v >> 8u) & 0xC0u) >> 2u));
 }
 
 void main() {
@@ -102,10 +116,9 @@ void main() {
     uint a_base_u32 = a_offset / 4u;
     uint blocks_per_row = K / 256u;
 
-    uint sb_a = 2u * v_im;
-    uint sb_b = 2u * v_im + 1u;
-    uint sb_c = 2u * v_im + 4u;
-    uint sb_d = 2u * v_im + 5u;
+    // v_im-uniform shift hoisted out of the inner per-block loop; v_im is
+    // loop-invariant (a function of tid only) so it lifts cleanly.
+    uint shift = v_im * 16u;
 
     for (uint r = 0u; r < NUM_ROWS; r++) {
         uint row = wg_id * NUM_ROWS + r;
@@ -144,16 +157,10 @@ void main() {
                 vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
                 vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
 
-                uint bytes[12];
-                bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
-                bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
-                bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
-
                 float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
-                decode_sb(bytes, sb_a, sc_a, mn_a);
-                decode_sb(bytes, sb_b, sc_b, mn_b);
-                decode_sb(bytes, sb_c, sc_c, mn_c);
-                decode_sb(bytes, sb_d, sc_d, mn_d);
+                decode_scales(sc0, sc1, sc2, shift,
+                              sc_a, mn_a, sc_b, mn_b,
+                              sc_c, mn_c, sc_d, mn_d);
 
                 float f0 = d_val * sc_a, b0 = dmin_val * mn_a;
                 float f1 = d_val * sc_b, b1 = dmin_val * mn_b;
@@ -184,16 +191,10 @@ void main() {
                 vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
                 vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
 
-                uint bytes[12];
-                bytes[0] = sc0 & 0xFFu; bytes[1] = (sc0>>8)&0xFFu; bytes[2] = (sc0>>16)&0xFFu; bytes[3] = (sc0>>24)&0xFFu;
-                bytes[4] = sc1 & 0xFFu; bytes[5] = (sc1>>8)&0xFFu; bytes[6] = (sc1>>16)&0xFFu; bytes[7] = (sc1>>24)&0xFFu;
-                bytes[8] = sc2 & 0xFFu; bytes[9] = (sc2>>8)&0xFFu; bytes[10] = (sc2>>16)&0xFFu; bytes[11] = (sc2>>24)&0xFFu;
-
                 float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
-                decode_sb(bytes, sb_a, sc_a, mn_a);
-                decode_sb(bytes, sb_b, sc_b, mn_b);
-                decode_sb(bytes, sb_c, sc_c, mn_c);
-                decode_sb(bytes, sb_d, sc_d, mn_d);
+                decode_scales(sc0, sc1, sc2, shift,
+                              sc_a, mn_a, sc_b, mn_b,
+                              sc_c, mn_c, sc_d, mn_d);
 
                 float f0 = d_val * sc_a, b0 = dmin_val * mn_a;
                 float f1 = d_val * sc_b, b1 = dmin_val * mn_b;
