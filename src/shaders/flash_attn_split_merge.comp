@@ -134,18 +134,58 @@ void main() {
     }
     barrier();
 
-    // Combine the partials per d. Each thread handles head_dim_v4 / 64 vec4
-    // slots (head_dim=128 → 32 vec4 → 1 slot every 2 lanes; the surplus
-    // lanes idle which matches the existing flash_attn output-write loop).
+    // Phase B — combine the partials per d (effort-11 cycle 23).
+    //
+    // Fast path (N_I_CHUNKS == 4 && head_dim_v4 == 32, the dominant
+    // configuration for Qwen3 8B / 35B head_dim=128 attention): pair
+    // lanes via a cluster-2 chunk split. The prior loop kept only 32 of
+    // 64 wave lanes busy because head_dim_v4 == 32 means just 32 unique
+    // d4 slots exist; the surplus 32 lanes sat idle. The new mapping is
+    //   d4              = tid >> 1   (paired lanes share a d4)
+    //   chunk_pair_id   = tid & 1u   (0 → chunks {0,1}, 1 → chunks {2,3})
+    // Each lane FMAs 2 of the 4 partial outputs into a per-lane acc,
+    // and a cluster_size=2 subgroupClusteredAdd merges the two halves
+    // into both lanes of the pair. The cluster_id == 0 lane writes the
+    // final output. All 64 lanes now issue partial-output vec4 loads in
+    // parallel, doubling VMEM throughput on the merge dispatch's read
+    // bandwidth (chunks × head_dim_v4 = 4 × 32 = 128 vec4 reads per
+    // head: prior path issued 32 × 4 reads with 32 lanes idle on each
+    // cycle; new path issues 64 × 2 with all lanes active).
+    //
+    // FP32 summation order shifts from serial left-to-right to a 2+2
+    // tree (lane-LO sums {0,1} then cluster-merges with lane-HI's {2,3}
+    // sum). ULP-different but below the noise floor for greedy decoding,
+    // matching the cycle-22 Phase A precedent.
+    //
+    // Slow path: original loop, bit-equivalent to pre-cycle-23. Folded
+    // out at pipeline-spec time when N_I_CHUNKS != 4 (spec const).
     float inv_L = s_inv_L_full;
     uint o_base_v4 = (head * head_dim) >> 2;
 
-    for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
-        vec4 acc = vec4(0.0);
-        for (uint i = 0u; i < N_I_CHUNKS; i++) {
-            uint partial_base_v4 = ((head * N_I_CHUNKS + i) * head_dim) >> 2;
-            acc += s_weights[i] * p_data_v4[partial_base_v4 + d4];
+    if (N_I_CHUNKS == 4u && head_dim_v4 == 32u) {
+        uint d4 = tid >> 1u;
+        uint chunk_pair_id = tid & 1u;
+        uint chunk_lo = chunk_pair_id * 2u;
+        uint chunk_hi = chunk_lo + 1u;
+        uint partial_base_lo_v4 = ((head * 4u + chunk_lo) * head_dim) >> 2;
+        uint partial_base_hi_v4 = ((head * 4u + chunk_hi) * head_dim) >> 2;
+
+        vec4 acc = s_weights[chunk_lo] * p_data_v4[partial_base_lo_v4 + d4]
+                 + s_weights[chunk_hi] * p_data_v4[partial_base_hi_v4 + d4];
+
+        vec4 merged = subgroupClusteredAdd(acc, 2u);
+
+        if (chunk_pair_id == 0u) {
+            o_data_v4[o_base_v4 + d4] = merged * inv_L;
         }
-        o_data_v4[o_base_v4 + d4] = acc * inv_L;
+    } else {
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            vec4 acc = vec4(0.0);
+            for (uint i = 0u; i < N_I_CHUNKS; i++) {
+                uint partial_base_v4 = ((head * N_I_CHUNKS + i) * head_dim) >> 2;
+                acc += s_weights[i] * p_data_v4[partial_base_v4 + d4];
+            }
+            o_data_v4[o_base_v4 + d4] = acc * inv_L;
+        }
     }
 }
