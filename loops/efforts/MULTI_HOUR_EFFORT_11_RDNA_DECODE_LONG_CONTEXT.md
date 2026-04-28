@@ -1,24 +1,48 @@
 # Effort 11 — Flatten the RDNA4 decode-with-context curve
 
-## TL;DR  (2026-04-28, after run-1 cycles 1–17 + run-2 cycles 1–13)
+## TL;DR  (2026-04-28, after run-1 + run-2 + run-3, total 46 cycles)
 
-**Original target met by 2x. Plateau on attention internals.
-Cross-layer fusion is the new productive lever.**
+**3.18× over baseline. flash_attn cut to 12% of decode time. Dense
+FFN is now the dominant bucket at 56%. Cross-layer fusion is hard.**
 
-Run-1 (17 cycles, 12 keeps): vec4 I/O + D-split + 4/8/16-way ILP
-unrolling on flash_attn.comp Phase 1 and Phase 4 took decode at
-L=1500 on Qwen 3 8B from 31.19 → 93.68 tok/s (3.0×).
+| run | cycles | keeps | starting → best tok/s | dominant lever |
+|---|---:|---:|---|---|
+| 1 | 17 | 12 | 31.19 → 93.68 | vec4 I/O + D-split + 4/8/16-way ILP on flash_attn |
+| 2 | 13 | 2  | 93.39 → 96.16 | dispatch + barrier fusion (gate+up+SwiGLU; Q+K norm+rope+kv_write) |
+| 3 | 16 | 1  | 96.16 → 99.38 | split-K flash attention (N_I_CHUNKS=4 + merge pass) |
 
-Run-2 (13 cycles, 2 keeps, 6 reverts, 5 measured-flat): the
-attention-shader-internal levers were exhausted, but two
-cross-layer dispatch+barrier fusions landed:
+Run-3's perf-keep was cycle 12: a split-K flash attention shader
+that splits the i-axis into 4 chunks per (head) and uses a separate
+merge pass to combine partial M/L/O across chunks. **8 × 4 = 32 WGs
+restores the WG concurrency that naive GQA collapse destroyed.**
+This is the single change that made flash_attn drop from ~56% to
+~12% of decode time per the cycle-11 ProfilePhase data.
 
-| cycle | tok/s | Δ | what |
-|---:|---:|---:|---|
-| run-2 8  | 94.42 | +1.32 | Fuse Q4_K gate+up DMMV + SwiGLU into one dispatch on dense FFN (saves 2 dispatches + 2 barriers × 36 layers/token) |
-| run-2 12 | 96.16 | +1.74 | Fuse Q-norm+rope, K-norm+rope, KV-cache-write into one wg_id-branched dispatch on attention layers (saves 2 dispatches + 1 barrier × 36 layers/token) |
+**Calibration finding from run-3 cycle 11**: the LONG_CONTEXT_DECODE_PROMPT
+tokenizes to ~846 tokens on Qwen 3 8B, NOT the ~1500 the comment
+claimed. All run-2 and run-3 measurements were at L≈846. The spec
+text has been corrected. The structural conclusions still hold.
 
-Combined trajectory: 31.19 → 96.16 tok/s, **3.08x at L=1500**.
+## Phase budget at L≈846 after run-3 cycle 12
+
+```
+total decode time per token: ~10.05 ms
+  flash_attn:    12% (~1.2 ms)   ← cut from ~56% by split-K
+  dense_ffn:     56% (~6.15 ms)  ← new dominant bucket
+  other:         32% (~2.7 ms)   ← norms, residuals, lm_head, host gap
+
+dense_ffn breakdown:
+  gate+up+SwiGLU fused (cycle 8 of run-2): the bulk
+  down+residual (Q4_K DMMV-acc): 2.4× the Q4_K bandwidth floor (per c10 audit)
+
+per-layer profile (FA_PROFILE_LAYER): all 36 layers run uniformly
+  cv = 0.004, ratio = 1.05× across layers
+  no single-layer outlier, no layer-class anomaly
+```
+
+The 56% FFN bucket is the lever for run-4. Cycle 12's win pattern
+(split-K with merge pass) is the template the next attack should
+mirror onto down_proj.
 
 ```
 trajectory at L=1500 (Qwen 3 8B Q4_K_M)
@@ -44,40 +68,46 @@ needed because the loop measures at L=1500 where the hang doesn't
 reproduce. The agent rewrote the attack plan in real time based on
 profiling signal and shipped 12 keeps in a row.
 
-## What's left (for run-3)
+## What's left (for run-4)
 
-**Attention-shader internals are exhausted.** Run-2 confirmed:
-- ILP unrolling saturated at 16-way (32-way flat, both phases)
-- BLOCK_SIZE flat (256/384/512 all equivalent)
-- LDS staging of K or V dead in any form (-29% / -12% / -44% across 3 attempts)
-- GQA collapse Q_PER_KV=4 kills concurrency (-9.9%; 32→8 WGs starves R9700's 64 CUs)
-- All Phase 4 micro-changes flat (V-load promotion, drop barriers, subgroup merge, register-resident accumulators)
+**Attention-shader internals are exhausted (confirmed across 3 runs).**
+The bucket has moved.
 
-**Cross-layer dispatch + barrier fusion is the productive lever.**
-Run-2 cycles 8 and 12 demonstrate the pattern: pick two adjacent
-dispatches with a hot-buffer round-trip between them, fold them
-into one wg_id-branched shader. Each fusion saves 36 dispatches +
-36 barriers per decoded token. The next two cross-layer fusions:
+**Dense FFN is the new dominant bucket (56% of decode time).** The
+two attacks that landed in run-2 (cycle 8: gate+up+SwiGLU fused;
+cycle 12: Q+K norm+rope+kv_write fused) plus run-3 cycle 12's
+split-K cleared everything cheap. What's left on FFN:
 
-1. **O-proj-residual + next-layer attn-norm**. The agent's cycle-12
-   nextIdeas list flagged this as the next attack. Saves 36
-   dispatches + 36 barriers/token. Partial-sum buffer pattern.
-2. **down-proj-residual + next-layer attn-norm**. Mirror of the
-   previous on the FFN→attention boundary.
+1. **FFN split-M down_proj DMMV.** Mirror cycle-12's flash_attn
+   split-K trick onto down_proj: split the M axis across more WGs
+   with a merge pass that sums M-tile partials. Currently down_proj
+   uses pipeline_q4k NUM_ROWS=2; tiling M further restores SIMD
+   occupancy without breaking the inner-loop shape (which is
+   already 78–85% of bandwidth-floor optimal). Top priority for
+   run-4.
+2. **FFN K-axis parallelism on down_proj.** down_proj has K=12288,
+   the largest K in the model. Try THREADS_PER_BLOCK=32 (split
+   each row across 32 threads) on JUST the down_proj path with
+   subgroupClusteredAdd reduction. Engages more lanes per row
+   while keeping NUM_ROWS=2. Distinct from cycle 9's failed wide
+   NUM_ROWS=8 (which split M, not K).
+3. **Cross-layer fusion via last-WG-does-norm pattern.** Both
+   alternatives failed in run-3: cycle 5 (separate-buffer) -7%;
+   cycle 15 (atomic-counter cross-WG sync) broken output. Third
+   pattern unattempted: the LAST WG of o_proj's dispatch executes
+   the rms_norm in-place after accumulate-in-place is done. Tricky
+   to make robust on RDNA4; needs careful memory-scope semantics
+   and a sentinel-value-wait inside the last-WG path.
 
-**Refined GQA collapse is still viable** if we preserve concurrency:
-- Q_PER_KV=2 (16 WGs vs 8 at full collapse) keeps the SIMD pool fed
-- Split-K dispatch (n_kv_heads × n_i_chunks WGs) restores full WG
-  count via i-axis tiling with a merge pass
+**Refined GQA collapse via split-K combination is still viable.**
+Both standalone Q_PER_KV=4 (-9.9%) and Q_PER_KV=2 (-17.5%) failed
+because of WG-count loss. Combining with split-K's WG multiplier
+gives 8 × 2 × 4 = 64 WGs (healthy concurrency) AND 2× K/V
+amortization. Cycle-sized.
 
-**V-cache float16** halves V bandwidth and doubles L2 effective
-capacity. kv_cache_write + flash_attn two-shader change. Multi-cycle
-but the V-bandwidth-dominated regime makes it the highest-leverage
-remaining shader-side lever after cross-layer fusion.
-
-**flash_attn_cm1.comp KHR coopmat port** is the structural ceiling
-beyond all of the above. Multi-week. Pursue when the cheaper levers
-above are exhausted.
+**flash_attn_cm1.comp KHR coopmat port** is still the structural
+ceiling. Multi-week. Pursue when the FFN attacks above are
+exhausted.
 
 ## On the L=2325 GPU hang  (deferred, not blocking)
 
@@ -320,17 +350,19 @@ Original criterion **met** as of cycle 17:
 - ~~Empty-context decode and L=466 prefill within 5% of pre-effort rates~~ → both improved (the same vec4 + ILP wins help short context too).
 - L=2325 GPU hang: deferred. Confirmed L≥2300-only across 18 cycles measuring at L=1500.
 
-New criterion (run-3):
+New criterion (run-4):
 
-- Decode at L=1500 ≥ **110 tok/s** via 2-3 cross-layer fusions plus
-  GQA-q2 or split-K. (Adjusted down from the prior 120 target;
-  cycle-3 GQA-q4 already proved naive multi-Q amortization can't
-  deliver 4× — we likely capture ~half of that with the safer
-  variants.)
+- Decode at L≈846 ≥ **108 tok/s** via FFN split-M down_proj +
+  K-axis parallelism on down_proj + last-WG cross-layer fusion +
+  split-K-with-GQA-q2. Adjusted from the prior "110 at L=1500"
+  target now that we know the actual measurement L is ≈846, not
+  1500. The 56% FFN bucket has ~30% of compute headroom (currently
+  78-85% of bandwidth-floor) so 99.38 → 108 (+8.7%) is plausible
+  if 2 of the 4 attacks land cleanly.
 - No regression in empty-context decode at L=5.
-- At least one of {V-cache float16, flash_attn_cm1.comp coopmat}
-  measured by end of run-3 — these are the structural-ceiling levers
-  and need data even if they don't ship in run-3.
+- L=1500-token prompt benchmark added to the suite (separate from
+  the existing L≈846 default) so the original "≥120 tok/s at L=1500"
+  ambition can be re-measured directly.
 
 ## Non-goals
 
