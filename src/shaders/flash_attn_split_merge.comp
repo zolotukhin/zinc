@@ -14,6 +14,7 @@
 //     idx = lse_base + (head * N_I_CHUNKS + chunk_id) * 2 + (0:M, 1:L)
 
 #extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
 
 layout(local_size_x = 64) in;
 
@@ -47,35 +48,89 @@ void main() {
     uint lse_base = n_heads * N_I_CHUNKS * head_dim;
     uint lse_head_base = lse_base + head * N_I_CHUNKS * 2u;
 
-    // Stage per-chunk M, L into LDS.
-    if (tid < N_I_CHUNKS) {
-        s_M_chunks[tid] = p_data[lse_head_base + tid * 2u + 0u];
-        s_L_chunks[tid] = p_data[lse_head_base + tid * 2u + 1u];
-    }
-    barrier();
+    // Phase A — per-head merge weights and inv_L (effort-11 cycle 22).
+    //
+    // Fast path (N_I_CHUNKS == 4, the only configuration shipped via the
+    // host-side ZINC_FA_SPLIT_K=4 default): cluster-parallel reduction.
+    // Lanes 0..3 each load one chunk's (M, L), then subgroupClusteredMax
+    // (cluster_size = 4) computes the per-head M_global / M_full and
+    // subgroupClusteredAdd computes L_full, all in parallel within a
+    // single 4-lane cluster. Replaces the prior staged-LDS + single-thread
+    // scalar reduction (which used 2 barriers; the new path uses 1).
+    //
+    // Lanes 4..63 execute the same subgroup ops with identity values
+    // (-1e30 / 0) so the GLSL/SPIR-V uniform-control-flow rules hold.
+    // Their per-lane results are unused (they don't write to LDS).
+    //
+    // L_full's summation order changes from serial-left-to-right to
+    // tree (4-element binary). This is fp32 ULP-different vs the prior
+    // path; the difference is below the noise floor for greedy decoding
+    // (the inv_L scales the final attn output, not used in any exact
+    // comparison). Coherence is verified at L≈846 in the keep gate.
+    //
+    // Slow path (N_I_CHUNKS != 4): the original scalar-on-tid==0 form,
+    // bit-equivalent to pre-cycle-22. Folded out at pipeline-spec time
+    // because N_I_CHUNKS is a spec const.
+    if (N_I_CHUNKS == 4u) {
+        bool lane_active = tid < 4u;
+        uint chunk = tid;
 
-    // Single-thread scalar reduction of M, L, sink — N_I_CHUNKS is small (≤16)
-    // so the loop is tight and avoids the overhead of a subgroup reduction.
-    if (tid == 0u) {
-        float M_global = -1.0e30;
-        for (uint i = 0u; i < N_I_CHUNKS; i++) {
-            M_global = max(M_global, s_M_chunks[i]);
-        }
-        float sink_val = sink_data[sink_offset + head];
-        bool has_sink = !isnan(sink_val);
-        float M_full = has_sink ? max(M_global, sink_val) : M_global;
+        float M_c = lane_active ? p_data[lse_head_base + chunk * 2u + 0u] : -1.0e30;
+        float L_c = lane_active ? p_data[lse_head_base + chunk * 2u + 1u] : 0.0;
 
-        float L_full = 0.0;
-        for (uint i = 0u; i < N_I_CHUNKS; i++) {
-            float Li = s_L_chunks[i];
-            float w = (Li > 0.0) ? exp(s_M_chunks[i] - M_full) : 0.0;
-            s_weights[i] = w;
-            L_full += w * Li;
+        // Cluster-max across the 4 chunks of this head.
+        float M_global = subgroupClusteredMax(M_c, 4u);
+
+        // Sink fold-in: chunk 0 lane reads sink_val, others get the
+        // identity. Per-lane M_full has the sink applied only on chunk 0;
+        // a second cluster-max broadcasts the (potentially larger)
+        // sink-folded M_full to all chunks of the cluster.
+        float sink_val = (lane_active && chunk == 0u) ? sink_data[sink_offset + head] : -1.0e30;
+        bool sink_lane_has_sink = (lane_active && chunk == 0u) && !isnan(sink_val);
+        float M_full_local = sink_lane_has_sink ? max(M_global, sink_val) : M_global;
+        float M_full = subgroupClusteredMax(M_full_local, 4u);
+
+        float w = (lane_active && L_c > 0.0) ? exp(M_c - M_full) : 0.0;
+        if (lane_active) s_weights[chunk] = w;
+
+        // L contribution per chunk + sink term on chunk 0 lane, then
+        // cluster-add to get L_full.
+        float L_contrib = w * L_c;
+        if (sink_lane_has_sink) L_contrib += exp(sink_val - M_full);
+        float L_full = subgroupClusteredAdd(L_contrib, 4u);
+
+        if (lane_active && chunk == 0u) {
+            s_inv_L_full = (L_full > 0.0) ? (1.0 / L_full) : 0.0;
         }
-        if (has_sink) {
-            L_full += exp(sink_val - M_full);
+    } else {
+        // Stage per-chunk M, L into LDS.
+        if (tid < N_I_CHUNKS) {
+            s_M_chunks[tid] = p_data[lse_head_base + tid * 2u + 0u];
+            s_L_chunks[tid] = p_data[lse_head_base + tid * 2u + 1u];
         }
-        s_inv_L_full = (L_full > 0.0) ? (1.0 / L_full) : 0.0;
+        barrier();
+
+        if (tid == 0u) {
+            float M_global = -1.0e30;
+            for (uint i = 0u; i < N_I_CHUNKS; i++) {
+                M_global = max(M_global, s_M_chunks[i]);
+            }
+            float sink_val = sink_data[sink_offset + head];
+            bool has_sink = !isnan(sink_val);
+            float M_full = has_sink ? max(M_global, sink_val) : M_global;
+
+            float L_full = 0.0;
+            for (uint i = 0u; i < N_I_CHUNKS; i++) {
+                float Li = s_L_chunks[i];
+                float w = (Li > 0.0) ? exp(s_M_chunks[i] - M_full) : 0.0;
+                s_weights[i] = w;
+                L_full += w * Li;
+            }
+            if (has_sink) {
+                L_full += exp(sink_val - M_full);
+            }
+            s_inv_L_full = (L_full > 0.0) ? (1.0 / L_full) : 0.0;
+        }
     }
     barrier();
 

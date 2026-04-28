@@ -152,15 +152,6 @@ pub const DmmvDispatch = struct {
     /// in at the call site when M is large enough to benefit from 4× fewer
     /// workgroups with 4× more hidden-vector reuse per workgroup.
     pipeline_q4k_wide: ?Pipeline,
-    /// Q4K dense DMMV with THREADS_PER_BLOCK=32 (vs TPB=16 in pipeline_q4k).
-    /// Same 3-binding layout and push constants. Effort-11 cycle-2: lower
-    /// per-thread VGPR pressure (q/by vec4s and factor/bias scalars halve)
-    /// targets higher wave occupancy on R9700 for K-large dispatches —
-    /// dense down_proj on Qwen 3-class models has K=inter_dim ≥ 12288 and
-    /// is the new dominant FFN bucket after split-K cut flash_attn to 12%
-    /// of decode. Routed when q4_k and K ≥ 8000 (excludes o_proj and
-    /// q/k/v projections which keep the 4-blocks-in-parallel TPB=16 shape).
-    pipeline_q4k_kpar32: ?Pipeline,
     /// Cross-token batched MoE DMMV. Same Q4_K weight layout as
     /// pipeline_q4k_moe_kpar but the dispatch grid adds a token_idx
     /// dimension (grid.z) so one dispatch covers all N prompt tokens'
@@ -367,16 +358,6 @@ pub const DmmvDispatch = struct {
             log.warn("Q4_K wide shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
-
-        // TPB=32 dense Q4_K variant for K-large dispatches (down_proj). Same
-        // 3-binding layout and push constants as pipeline_q4k. Effort-11
-        // cycle-2 — see field doc for the occupancy hypothesis.
-        const q4k_kpar32_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_kpar32.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_kpar32 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_kpar32_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
-            log.warn("Q4_K kpar32 shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
         const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
@@ -642,7 +623,6 @@ pub const DmmvDispatch = struct {
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
-            .pipeline_q4k_kpar32 = pipeline_q4k_kpar32,
             .pipeline_mxfp4 = pipeline_mxfp4,
             .pipeline_q5_0 = pipeline_q5_0,
             .pipeline_q5_1 = pipeline_q5_1,
@@ -1202,7 +1182,6 @@ pub const DmmvDispatch = struct {
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
         if (self.pipeline_q4k_wide) |*p| p.deinit();
-        if (self.pipeline_q4k_kpar32) |*p| p.deinit();
         if (self.pipeline_q5_1) |*p| p.deinit();
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();

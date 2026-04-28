@@ -8,6 +8,15 @@
 //   [0..3]    d(f16) + dmin(f16)      — u32[0]
 //   [4..15]   k_scales (12 bytes)     — u32[1..3]
 //   [16..143] qs (128 bytes)          — u32[4..35]
+//
+// Effort-11 cycle 21: row/block loop swap. The block-iter loop is now outer
+// and processes both NUM_ROWS=2 rows per i. This lets the WG read each B
+// vector tile (4 vec4 = 16 floats per thread, 1 KB per WG-iter) ONCE and
+// reuse it for both rows of the row-pair, halving the B-vector VMEM op
+// count and L1/L2 traffic for B. Per-thread accumulation order within
+// sum0 / sum1 is preserved (same i sequence per row), so the result is
+// bit-equivalent to the pre-swap path. Applies cumulatively to every
+// pipeline_q4k dispatch (Q/K/V/O projections, down_proj, LM head).
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
@@ -81,51 +90,47 @@ void main() {
     // branching, eliminating the bytes[12] array + 4 if/else conditionals.
     uint shift = v_im * 16u;
 
-    for (uint r = 0u; r < NUM_ROWS; r++) {
-        uint row = wg_id * NUM_ROWS + r;
-        if (row >= M) break;
+    uint row0 = wg_id * NUM_ROWS;
+    if (row0 >= M) return;
+    uint row1 = row0 + 1u;
+    bool row1_valid = row1 < M;
 
-        uint row_u32 = a_base + row * blocks_per_row * Q4K_BLOCK_U32;
-        float sum = 0.0;
+    uint row0_u32 = a_base + row0 * blocks_per_row * Q4K_BLOCK_U32;
+    uint row1_u32 = a_base + row1 * blocks_per_row * Q4K_BLOCK_U32;
 
-        // Stride over blocks: ix, ix+4, ix+8, ...
-        for (uint i = ix; i < blocks_per_row; i += it_size) {
-            uint blk_u32 = row_u32 + i * Q4K_BLOCK_U32;
+    float sum0 = 0.0;
+    float sum1 = 0.0;
 
-            // Read d and dmin from u32[0]
+    // Stride over blocks: ix, ix+4, ix+8, ...
+    for (uint i = ix; i < blocks_per_row; i += it_size) {
+        // ── B reads (shared between row0 and row1) ──
+        uint b_idx = (i * 256u + y_offset_local) / 4u;
+        vec4 by0 = x_v4[x_base + b_idx];
+        vec4 by1 = x_v4[x_base + b_idx + 8u];  // +32 elements = +8 vec4
+        uint b_idx2 = (i * 256u + y_offset_local + 128u) / 4u;
+        vec4 by2 = x_v4[x_base + b_idx2];
+        vec4 by3 = x_v4[x_base + b_idx2 + 8u];
+
+        // ── Row 0 ──
+        {
+            uint blk_u32 = row0_u32 + i * Q4K_BLOCK_U32;
+
             uint d_dmin = a_u32[blk_u32];
             float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
             float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
 
-            // Read scales: u32[1..3] = 12 bytes of packed 6-bit scales
             uint sc0 = a_u32[blk_u32 + 1u];
             uint sc1 = a_u32[blk_u32 + 2u];
             uint sc2 = a_u32[blk_u32 + 3u];
 
-            // Read qs as packed uint32 (4 bytes = 4 nibble-pairs = 8 q values)
             uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset / 4u];
-            uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u]; // +64 bytes = +16 u32
+            uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u];
 
-            // Extract low and high nibbles as vec4
             vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
             vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
             vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
             vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
 
-            // Load B vector as vec4 (4 floats per load, 4 loads = 16 floats)
-            uint b_idx = (i * 256u + y_offset_local) / 4u;
-            vec4 by0 = x_v4[x_base + b_idx];
-            vec4 by1 = x_v4[x_base + b_idx + 8u];  // +32 elements = +8 vec4
-            uint b_idx2 = (i * 256u + y_offset_local + 128u) / 4u;
-            vec4 by2 = x_v4[x_base + b_idx2];
-            vec4 by3 = x_v4[x_base + b_idx2 + 8u];
-
-            // Decode scales for the 4 sub-blocks (sb_a..sb_d) using v_im-uniform
-            // shift: sb_a/sb_b always take the lo branch (sb < 4), sb_c/sb_d
-            // always take the hi branch (sb >= 4) for v_im ∈ {0,1}, so the
-            // dynamic bytes[12] array + 4 if/else conditionals collapse into
-            // straight-line shift+mask arithmetic. Bit-equivalent to the
-            // original (verified against the MoE kpar variant).
             uint sc0_v = sc0 >> shift;
             uint sc1_v = sc1 >> shift;
             uint sc2_v = sc2 >> shift;
@@ -144,27 +149,92 @@ void main() {
             float factor2 = d_val * sc_c; float bias2 = dmin_val * mn_c;
             float factor3 = d_val * sc_d; float bias3 = dmin_val * mn_d;
 
-            // 4 dot products: factor * q - bias, dot with B
-            sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
-            sum += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
-            sum += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
-            sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+            sum0 += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+            sum0 += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+            sum0 += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+            sum0 += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
         }
 
-        sum = subgroupAdd(sum);
+        // ── Row 1 (skipped when M is odd and this is the last WG) ──
+        if (row1_valid) {
+            uint blk_u32 = row1_u32 + i * Q4K_BLOCK_U32;
+
+            uint d_dmin = a_u32[blk_u32];
+            float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+            uint sc0 = a_u32[blk_u32 + 1u];
+            uint sc1 = a_u32[blk_u32 + 2u];
+            uint sc2 = a_u32[blk_u32 + 3u];
+
+            uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset / 4u];
+            uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u];
+
+            vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
+            vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
+            vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
+            vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
+
+            uint sc0_v = sc0 >> shift;
+            uint sc1_v = sc1 >> shift;
+            uint sc2_v = sc2 >> shift;
+
+            float sc_a = float(sc0_v & 0x3Fu);
+            float mn_a = float(sc1_v & 0x3Fu);
+            float sc_b = float((sc0_v >> 8u) & 0x3Fu);
+            float mn_b = float((sc1_v >> 8u) & 0x3Fu);
+            float sc_c = float((sc2_v & 0xFu) | ((sc0_v & 0xC0u) >> 2u));
+            float mn_c = float(((sc2_v & 0xF0u) >> 4u) | ((sc1_v & 0xC0u) >> 2u));
+            float sc_d = float(((sc2_v >> 8u) & 0xFu) | (((sc0_v >> 8u) & 0xC0u) >> 2u));
+            float mn_d = float((((sc2_v >> 8u) & 0xF0u) >> 4u) | (((sc1_v >> 8u) & 0xC0u) >> 2u));
+
+            float factor0 = d_val * sc_a; float bias0 = dmin_val * mn_a;
+            float factor1 = d_val * sc_b; float bias1 = dmin_val * mn_b;
+            float factor2 = d_val * sc_c; float bias2 = dmin_val * mn_c;
+            float factor3 = d_val * sc_d; float bias3 = dmin_val * mn_d;
+
+            sum1 += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+            sum1 += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+            sum1 += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+            sum1 += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+        }
+    }
+
+    // Reduce + write row 0.
+    sum0 = subgroupAdd(sum0);
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum0;
+        barrier();
+        if (tid == 0u) {
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum0 += s_sg_sums[sg];
+        }
+        barrier();
+    }
+    if (tid == 0u) {
+        if (acc_mode != 0u)
+            y_data[y_base + row0] += sum0;
+        else
+            y_data[y_base + row0] = sum0;
+    }
+
+    // Reduce + write row 1 (skipped when M is odd and this is the last WG).
+    // The skip is uniform across the WG so the barriers inside the cross-sg
+    // path remain reachable by all threads.
+    if (row1_valid) {
+        sum1 = subgroupAdd(sum1);
         if (gl_NumSubgroups > 1u) {
-            if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum;
+            if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum1;
             barrier();
             if (tid == 0u) {
-                for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum += s_sg_sums[sg];
+                for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum1 += s_sg_sums[sg];
             }
             barrier();
         }
         if (tid == 0u) {
             if (acc_mode != 0u)
-                y_data[y_base + row] += sum;
+                y_data[y_base + row1] += sum1;
             else
-                y_data[y_base + row] = sum;
+                y_data[y_base + row1] = sum1;
         }
     }
 }
