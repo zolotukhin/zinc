@@ -113,6 +113,14 @@ function displayModelLabel(): string {
   return MODEL_PATH ? basename(MODEL_PATH) : MODEL_ID;
 }
 
+function isGemmaRun(state?: Pick<RunState, "effortId" | "effortFile" | "effortPlan">): boolean {
+  const model = displayModelLabel().toLowerCase();
+  return model.includes("gemma") ||
+    state?.effortId === 11 ||
+    (state?.effortFile?.toLowerCase().includes("gemma") ?? false) ||
+    (state?.effortPlan?.toLowerCase().includes("gemma") ?? false);
+}
+
 function zigBuildArgs(): string[] {
   return BUILD_OPTIMIZE === "Debug" ? ["build"] : ["build", `-Doptimize=${BUILD_OPTIMIZE}`];
 }
@@ -1018,6 +1026,12 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
     diagnosis.push(`Output: "${trunc(lastResult.outputText, 80)}"`);
     if (lastResult.tokPerSecSamples.length > 1) {
       diagnosis.push(`Benchmark samples: [${lastResult.tokPerSecSamples.map(s => s.toFixed(1)).join(", ")}] tok/s`);
+      const sampleMin = Math.min(...lastResult.tokPerSecSamples);
+      const sampleMax = Math.max(...lastResult.tokPerSecSamples);
+      const sampleRange = sampleMax - sampleMin;
+      if (sampleRange > Math.max(2.0, current * 0.2)) {
+        diagnosis.push(`Benchmark variance warning: sample range ${sampleRange.toFixed(1)} tok/s is too wide for reliable direction. Do not optimize from the low sample; compare against accepted best and profile evidence.`);
+      }
     }
   } else {
     diagnosis.push(`## Status: TARGET REACHED — ${lastResult.tokPerSec?.toFixed(1)} tok/s ≥${TARGET_TOK_PER_SEC}`);
@@ -1032,24 +1046,33 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
     diagnosis.push("Guessing is not working. Before making ANY more changes, you MUST study how");
     diagnosis.push("production Metal inference engines solve this exact problem:");
     diagnosis.push("");
-    diagnosis.push("### Step 1: Clone and read llama.cpp Metal backend");
-    diagnosis.push("```bash");
-    diagnosis.push("git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp");
-    diagnosis.push("```");
+    const llamaMetal = existsSync("/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-metal/ggml-metal.metal")
+      ? "/Users/zolotukhin/Workplace/llama.cpp/ggml/src/ggml-metal"
+      : "/tmp/llama.cpp/ggml/src/ggml-metal";
+    const vllmMoe = existsSync("/Users/zolotukhin/Workplace/vllm/vllm/model_executor/layers/fused_moe")
+      ? "/Users/zolotukhin/Workplace/vllm/vllm/model_executor/layers/fused_moe"
+      : "/tmp/vllm/vllm/model_executor/layers/fused_moe";
+    diagnosis.push("### Step 1: Read llama.cpp Metal backend");
+    if (llamaMetal.startsWith("/tmp/")) {
+      diagnosis.push("```bash");
+      diagnosis.push("git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp");
+      diagnosis.push("```");
+    }
     diagnosis.push("Read these files:");
-    diagnosis.push("- `/tmp/llama.cpp/ggml/src/ggml-metal/ggml-metal.m` — the core Metal dispatch loop");
-    diagnosis.push("- Look at how they batch command buffers, manage encoders, handle MoE expert dispatch");
-    diagnosis.push("- Look at their threadgroup sizes for Q4_K DMMV and how they tile matmuls");
+    diagnosis.push(`- \`${llamaMetal}/ggml-metal.m\` — the core Metal dispatch loop`);
+    diagnosis.push(`- \`${llamaMetal}/ggml-metal.metal\` — Q8/Q4 matvec kernels`);
+    diagnosis.push("- Look at how they batch command buffers, manage encoders, and choose per-shape Q8 paths");
     diagnosis.push("- Note how many commitAndWait calls happen per token (likely 1)");
     diagnosis.push("");
-    diagnosis.push("### Step 2: Clone and read vLLM Metal / MPS backend");
-    diagnosis.push("```bash");
-    diagnosis.push("git clone --depth 1 https://github.com/vllm-project/vllm /tmp/vllm");
-    diagnosis.push("```");
+    diagnosis.push("### Step 2: Read vLLM MoE packing");
+    if (vllmMoe.startsWith("/tmp/")) {
+      diagnosis.push("```bash");
+      diagnosis.push("git clone --depth 1 https://github.com/vllm-project/vllm /tmp/vllm");
+      diagnosis.push("```");
+    }
     diagnosis.push("Read these files:");
-    diagnosis.push("- `/tmp/vllm/vllm/attention/backends/` — attention dispatch strategies");
-    diagnosis.push("- Look at how they handle MoE routing and expert parallelism");
-    diagnosis.push("- Check their memory management and buffer pooling approach");
+    diagnosis.push(`- \`${vllmMoe}\` — topk -> align/pack -> grouped expert flow`);
+    diagnosis.push("- Look at which ideas require many prompt tokens; do not force those into single-token decode");
     diagnosis.push("");
     diagnosis.push("### Step 3: Apply what you learned");
     diagnosis.push("Identify the SPECIFIC technique from llama.cpp or vLLM that addresses our bottleneck,");
@@ -1095,6 +1118,25 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
     );
   }
 
+  const gemmaRun = isGemmaRun(state);
+  const modelContext = gemmaRun ? [
+    "## Model (Gemma 4 12B Q4_K_M)",
+    "- 30 layers, all current profile steps are attention + Gemma MoE (`mix/step: attn 30.0 gpu-moe 30.0`).",
+    "- hidden_dim=2816, n_heads=16, n_kv_heads=8, vocab=262144.",
+    "- MoE FFN: 128 experts, 8 active per token, intermediate=704, shared expert=2112.",
+    "- Hot request profile after cycle 49: q8_0 52.56 GiB, q4_k 13.96 GiB, q5_1 9.31 GiB.",
+    "- Hot path bytes: attn 31.16 GiB, moe-expert 23.26 GiB, shared 14.83 GiB, lm-head 6.57 GiB.",
+    "",
+  ] : [
+    "## Model (Qwen3.5-35B-A3B, Q4_K, 20.7 GB)",
+    "- 40 layers: every 4th is full attention (layers 3,7,11,...,39), rest are SSM/delta-net.",
+    "- MoE FFN: 256 experts, 8 active per token, + shared expert.",
+    "- head_dim=256, hidden_dim=2048, n_heads=16, n_kv_heads=2.",
+    "- Active parameters per token: ~3B (due to MoE sparsity).",
+    "- Effective working set per decode step: ~1.7 GB at Q4_K.",
+    "",
+  ];
+
   sections.push(
     ...diagnosis,
     "",
@@ -1103,13 +1145,7 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
     "- Apple GPU family: Apple9 (M4), simdgroup_matrix = true, bfloat = true",
     "- macOS, Metal compute only",
     "",
-    "## Model (Qwen3.5-35B-A3B, Q4_K, 20.7 GB)",
-    "- 40 layers: every 4th is full attention (layers 3,7,11,...,39), rest are SSM/delta-net",
-    "- MoE FFN: 256 experts, 8 active per token, + shared expert",
-    "- head_dim=256, hidden_dim=2048, n_heads=16, n_kv_heads=2",
-    "- Active parameters per token: ~3B (due to MoE sparsity)",
-    "- Effective working set per decode step: ~1.7 GB at Q4_K",
-    "",
+    ...modelContext,
   );
 
   if (isOptimize) {
@@ -1117,13 +1153,19 @@ export function buildPrompt(state: RunState, lastResult: BuildRunResult): string
     sections.push(
       "## Bandwidth Analysis",
       "- Memory BW: 546 GB/s theoretical, ~480 GB/s achievable",
-      "- Working set per token: ~1.7 GB (only active experts + attention layers)",
-      "- Theoretical BW-limited decode: ~280 tok/s (480 / 1.7)",
-      `- Current: ${lastResult.tokPerSec?.toFixed(1)} tok/s → ${((lastResult.tokPerSec ?? 0) / 280 * 100).toFixed(0)}% of theoretical BW limit`,
-      "- This means MOST time is lost to dispatch overhead, sync, or compute bottlenecks — NOT bandwidth",
+      ...(gemmaRun ? [
+        "- Gemma cycle-49 Q8 attention microbenchmarks already hit ~370-510 GB/s on accepted hot shapes.",
+        "- Treat broad Q8 threadgroup/repack work as low-probability unless an exact-shape benchmark proves the candidate wins first.",
+        "- Decode target ≥50 tok/s means about ≤20 ms/token; current accepted best 37.79 tok/s is about 26.5 ms/token.",
+      ] : [
+        "- Working set per token: ~1.7 GB (only active experts + attention layers)",
+        "- Theoretical BW-limited decode: ~280 tok/s (480 / 1.7)",
+        `- Current: ${lastResult.tokPerSec?.toFixed(1)} tok/s → ${((lastResult.tokPerSec ?? 0) / 280 * 100).toFixed(0)}% of theoretical BW limit`,
+        "- This means MOST time is lost to dispatch overhead, sync, or compute bottlenecks — NOT bandwidth",
+      ]),
       "",
       "## Baseline Reference",
-      "- llama.cpp Metal on this machine: 72.93 tok/s decode (tg128)",
+      gemmaRun ? "- Current accepted ZINC best: 37.79 tok/s; target is 50 tok/s before chasing larger redesigns." : "- llama.cpp Metal on this machine: 72.93 tok/s decode (tg128)",
       `- ZINC target: ≥${TARGET_TOK_PER_SEC} tok/s`,
       `- ZINC current: ${lastResult.tokPerSec?.toFixed(1)} tok/s`,
       "",
@@ -1350,11 +1392,21 @@ export function buildSelfReview(state: RunState): string {
   if (recent.length === 0) return "";
 
   const kept = recent.filter(c => c.kept);
-  const reverted = recent.filter(c => !c.kept);
   const tpsValues = kept.filter(c => c.tokPerSec != null).map(c => c.tokPerSec!);
-  const tpsStart = recent[0].tokPerSec ?? 0;
-  const tpsEnd = recent[recent.length - 1].tokPerSec ?? tpsStart;
-  const delta = tpsEnd - tpsStart;
+  const rawTpsStart = recent[0].tokPerSec ?? 0;
+  const rawTpsEnd = recent[recent.length - 1].tokPerSec ?? rawTpsStart;
+  const rawDelta = rawTpsEnd - rawTpsStart;
+  const priorKeptTps = state.cycles
+    .slice(0, -recent.length)
+    .filter(c => c.kept && c.tokPerSec != null)
+    .map(c => c.tokPerSec!);
+  const acceptedStart = priorKeptTps.length > 0
+    ? Math.max(...priorKeptTps)
+    : (tpsValues.length > 0 ? tpsValues[0] : rawTpsStart);
+  const acceptedEnd = tpsValues.length > 0
+    ? Math.max(acceptedStart, ...tpsValues)
+    : acceptedStart;
+  const acceptedDelta = acceptedEnd - acceptedStart;
 
   // Categorize approaches by keywords
   const categories: Record<string, { kept: number; reverted: number }> = {};
@@ -1380,7 +1432,8 @@ export function buildSelfReview(state: RunState): string {
     `## Self-Review (last ${recent.length} cycles)`,
     "",
     `- Kept: ${kept.length}/${recent.length} changes`,
-    `- tok/s movement: ${tpsStart.toFixed(1)} → ${tpsEnd.toFixed(1)} (${delta >= 0 ? "+" : ""}${delta.toFixed(1)})`,
+    `- Accepted best movement: ${acceptedStart.toFixed(1)} → ${acceptedEnd.toFixed(1)} (${acceptedDelta >= 0 ? "+" : ""}${acceptedDelta.toFixed(1)})`,
+    `- Raw measured movement, including reverted candidates: ${rawTpsStart.toFixed(1)} → ${rawTpsEnd.toFixed(1)} (${rawDelta >= 0 ? "+" : ""}${rawDelta.toFixed(1)})`,
     `- Best tok/s in window: ${tpsValues.length > 0 ? Math.max(...tpsValues).toFixed(1) : "N/A"}`,
     "",
     "### What's working vs not:",
@@ -1394,13 +1447,18 @@ export function buildSelfReview(state: RunState): string {
   }
 
   lines.push("");
-  if (delta < 1) {
-    lines.push("### ⚠ Low progress — strategic pivot recommended:");
+  if (kept.length === 0) {
+    lines.push("### ⚠ No accepted progress — strategic pivot required:");
+    lines.push("- Do NOT treat faster reverted candidates as progress");
+    lines.push("- Stop doubling down on categories with 0 kept changes");
+    lines.push("- Build missing measurement/microbench coverage before another kernel retune");
+  } else if (acceptedDelta < 1) {
+    lines.push("### ⚠ Low progress in accepted changes — strategic pivot recommended:");
     lines.push("- STOP trying small variations of what already failed");
     lines.push("- Focus on categories with >50% success rate above");
     lines.push("- If no category is working, the bottleneck is elsewhere — profile first");
   } else {
-    lines.push(`### Progress is positive (+${delta.toFixed(1)} tok/s). Double down on what's working.`);
+    lines.push(`### Progress is positive in accepted changes (+${acceptedDelta.toFixed(1)} tok/s). Double down only on kept categories.`);
   }
 
   // Most impactful kept changes

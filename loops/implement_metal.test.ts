@@ -396,6 +396,24 @@ describe("buildSelfReview", () => {
     expect(review).toContain("strategic pivot");
   });
 
+  test("does not count reverted-cycle movement as accepted progress", () => {
+    const cycles = Array.from({ length: 10 }, (_, i) => makeCycle({
+      cycle: i + 1,
+      description: "Retune Q8 threadgroup",
+      kept: false,
+      tokPerSec: 34 + i * 0.4,
+    }));
+    const state = makeState({
+      cycles,
+      bestTokPerSec: 37.8,
+      currentBest: { tokPerSec: 37.8, containsReference: true },
+    });
+    const review = buildSelfReview(state);
+    expect(review).toContain("No accepted progress");
+    expect(review).toContain("Do NOT treat faster reverted candidates as progress");
+    expect(review).not.toContain("Progress is positive");
+  });
+
   test("shows top performing changes", () => {
     const cycles = [
       makeCycle({ cycle: 1, description: "Fuse RMS+DMMV kernels", kept: true, tokPerSec: 38.5 }),
@@ -490,6 +508,21 @@ describe("buildPrompt", () => {
     expect(prompt).toContain("llama.cpp");
     expect(prompt).toContain("vllm");
     expect(prompt).toContain("ggml-metal");
+  });
+
+  test("Gemma effort prompt uses Gemma model facts instead of Qwen facts", () => {
+    const state = makeState({ effortId: 11 });
+    const result = makeResult({
+      tokPerSec: 37.8,
+      containsReference: true,
+      strongAnswer: true,
+      outputQualityScore: 4,
+      outputText: "The capital of France is Paris.",
+    });
+    const prompt = buildPrompt(state, result);
+    expect(prompt).toContain("Model (Gemma 4 12B Q4_K_M)");
+    expect(prompt).toContain("hidden_dim=2816");
+    expect(prompt).not.toContain("Model (Qwen3.5-35B");
   });
 
   test("includes pre-stall warning at 3 cycles", () => {
@@ -595,5 +628,20 @@ describe("buildPrompt", () => {
     const prompt = buildPrompt(state, result);
     expect(prompt).toContain("35.5");
     expect(prompt).toContain("36.5");
+  });
+
+  test("warns when benchmark samples are too noisy for direction", () => {
+    const state = makeState();
+    const result = makeResult({
+      tokPerSec: 30.2,
+      tokPerSecSamples: [37.6, 25.4, 30.2],
+      containsReference: true,
+      strongAnswer: true,
+      outputQualityScore: 4,
+      outputText: "The capital of France is Paris.",
+    });
+    const prompt = buildPrompt(state, result);
+    expect(prompt).toContain("Benchmark variance warning");
+    expect(prompt).toContain("too wide for reliable direction");
   });
 });

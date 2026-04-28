@@ -177,27 +177,27 @@ const CompareSummary = struct {
 
 fn helpText() []const u8 {
     return
-        \\Usage: zinc-bench-metal-shapes -m <model.gguf> [options]
-        \\
-        \\Benchmarks the exact local hot q8_0 Metal shapes from the real GGUF model.
-        \\
-        \\Options:
-        \\  -m, --model <path>         GGUF model path (required)
-        \\  -d, --device <index>       Metal device index (default: 0)
-        \\  --case <name>              all | lm_head | attn_q | attn_k | attn_v | attn_out
-        \\                            | ssm_qkv | ssm_gate | ssm_dual | ssm_out
-        \\                            | router | shared_gate | shared_up | shared_down | shared_dual
-        \\                            | moe_gate | moe_up | moe_down
-        \\  --pipeline <mode>          runtime | k2048 | both (default: both)
-        \\  --iterations <n>           Timed dispatches per case (default: 200)
-        \\  --warmup <n>               Warmup dispatches per case (default: 25)
-        \\  --tg <threads>             Override threadgroup size
-        \\  -h, --help                 Show this help text
-        \\
-        \\Examples:
-        \\  zig build bench-metal-shapes -- -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
-        \\  zig build bench-metal-shapes -- -m model.gguf --case lm_head --pipeline both
-        \\
+    \\Usage: zinc-bench-metal-shapes -m <model.gguf> [options]
+    \\
+    \\Benchmarks the exact local hot q8_0 Metal shapes from the real GGUF model.
+    \\
+    \\Options:
+    \\  -m, --model <path>         GGUF model path (required)
+    \\  -d, --device <index>       Metal device index (default: 0)
+    \\  --case <name>              all | lm_head | attn_q | attn_k | attn_v | attn_out
+    \\                            | ssm_qkv | ssm_gate | ssm_dual | ssm_out
+    \\                            | router | shared_gate | shared_up | shared_down | shared_dual
+    \\                            | moe_gate | moe_up | moe_down
+    \\  --pipeline <mode>          runtime | k2048 | both (default: both)
+    \\  --iterations <n>           Timed dispatches per case (default: 200)
+    \\  --warmup <n>               Warmup dispatches per case (default: 25)
+    \\  --tg <threads>             Override threadgroup size
+    \\  -h, --help                 Show this help text
+    \\
+    \\Examples:
+    \\  zig build bench-metal-shapes -- -m /Users/zolotukhin/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
+    \\  zig build bench-metal-shapes -- -m model.gguf --case lm_head --pipeline both
+    \\
     ;
 }
 
@@ -288,7 +288,7 @@ fn loadShaderPipeline(ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
     if (stat.size > 1024 * 1024) return error.ShaderTooLarge;
 
     var source_buf: [1024 * 1024 + 1]u8 = undefined;
-    const bytes_read = try file.readAll(source_buf[0..source_buf.len - 1]);
+    const bytes_read = try file.readAll(source_buf[0 .. source_buf.len - 1]);
     source_buf[bytes_read] = 0;
 
     var fn_buf: [16]u8 = undefined;
@@ -471,6 +471,7 @@ fn resolveHotCase(model: *const metal_loader.Model, case_id: CaseId) !HotCase {
             const inter_dim = model.config.shared_expert_intermediate_dim;
             const hidden_dim = model.config.hidden_dim;
             const tensor = findTensorBySuffixAndShape(model, "ffn_gate_shexp.weight", .q8_0, inter_dim, hidden_dim) orelse
+                findTensorBySuffixAndShape(model, "ffn_gate.weight", .q8_0, inter_dim, hidden_dim) orelse
                 return error.MissingSharedGateTensor;
             break :blk .{
                 .key = "shared_gate",
@@ -484,6 +485,7 @@ fn resolveHotCase(model: *const metal_loader.Model, case_id: CaseId) !HotCase {
             const inter_dim = model.config.shared_expert_intermediate_dim;
             const hidden_dim = model.config.hidden_dim;
             const tensor = findTensorBySuffixAndShape(model, "ffn_up_shexp.weight", .q8_0, inter_dim, hidden_dim) orelse
+                findTensorBySuffixAndShape(model, "ffn_up.weight", .q8_0, inter_dim, hidden_dim) orelse
                 return error.MissingSharedUpTensor;
             break :blk .{
                 .key = "shared_up",
@@ -497,6 +499,7 @@ fn resolveHotCase(model: *const metal_loader.Model, case_id: CaseId) !HotCase {
             const inter_dim = model.config.shared_expert_intermediate_dim;
             const hidden_dim = model.config.hidden_dim;
             const tensor = findTensorBySuffixAndShape(model, "ffn_down_shexp.weight", .q8_0, hidden_dim, inter_dim) orelse
+                findTensorBySuffixAndShape(model, "ffn_down.weight", .q8_0, hidden_dim, inter_dim) orelse
                 return error.MissingSharedDownTensor;
             break :blk .{
                 .key = "shared_down",
@@ -510,8 +513,10 @@ fn resolveHotCase(model: *const metal_loader.Model, case_id: CaseId) !HotCase {
             const inter_dim = model.config.shared_expert_intermediate_dim;
             const hidden_dim = model.config.hidden_dim;
             const gate = findTensorBySuffixAndShape(model, "ffn_gate_shexp.weight", .q8_0, inter_dim, hidden_dim) orelse
+                findTensorBySuffixAndShape(model, "ffn_gate.weight", .q8_0, inter_dim, hidden_dim) orelse
                 return error.MissingSharedGateTensor;
             const up = findTensorBySuffixAndShape(model, "ffn_up_shexp.weight", .q8_0, inter_dim, hidden_dim) orelse
+                findTensorBySuffixAndShape(model, "ffn_up.weight", .q8_0, inter_dim, hidden_dim) orelse
                 return error.MissingSharedUpTensor;
             break :blk .{
                 .key = "shared_dual",

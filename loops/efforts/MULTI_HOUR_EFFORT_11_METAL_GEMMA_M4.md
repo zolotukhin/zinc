@@ -22,7 +22,7 @@ ZINC_TEST_PROMPT="What is the capital of France?" \
 ZINC_MAX_TOKENS=12 \
 ZINC_TARGET_TOK_PER_SEC=50 \
 ZINC_STOP_ON_TARGET=0 \
-ZINC_BENCHMARK_RUNS=3 \
+ZINC_BENCHMARK_RUNS=5 \
 ZINC_PROFILE_EVERY=1 \
 ZINC_BUILD_OPTIMIZE=ReleaseFast \
 ZINC_TEST_TIMEOUT_MS=300000 \
@@ -32,8 +32,9 @@ bun loops/implement_metal.ts --resume --effort 11 --agent codex --model gpt-5.5 
 ```
 
 Use `--agent claude` if desired; the effort is written for either agent.
-Use `ZINC_BENCHMARK_RUNS=1` only for quick triage. The cycle-23 to cycle-38
-region has too much noise for one-sample keeps.
+Use `ZINC_BENCHMARK_RUNS=1` only for quick triage. Use at least 5 samples at
+the current cycle-49 plateau because one low sample can swing the median by
+more than the improvement threshold.
 
 Important harness detail:
 
@@ -46,40 +47,67 @@ Important harness detail:
 
 ## Current baseline
 
-Current post-cycle-38 state:
+Current post-cycle-70 state:
 
 ```text
-Best official loop verifier: 15.89 tok/s (cycle 33)
-Current official loop verifier: 15.80 tok/s (cycle 38)
-Current stall: 17 cycles
-Cycle-38 agent ReleaseFast profile: 36.55 tok/s, correct Paris output
-Cycle-38 official verifier: 15.80 tok/s, correct Paris output
-Post-harness-fix manual ReleaseFast profile: 28.70 tok/s, correct Paris output
-Post-harness-fix manual ReleaseFast no-profile run: 25.73 tok/s, correct Paris output
+Best official ReleaseFast verifier: 37.79 tok/s (cycle 49)
+Current accepted code: cycle 49 plus later pre-cycle empty commits
+Current stall: 21 cycles
+Last 10 cycles kept: 0/10
+Last 20 cycles kept: 0/20
+Cycle 70 candidate: 37.35 tok/s median, reverted against 37.79
+Cycle 71 pre-agent baseline was noisy: [37.6, 25.4, 30.2] tok/s
 ```
 
 Diagnosis:
 
-- The old official verifier path was rebuilding with plain `zig build`.
-- Agents were profiling after `zig build -Doptimize=ReleaseFast`.
-- That means the loop's keep/revert decision was comparing Debug-ish verifier
-  throughput against ReleaseFast agent profiles.
-- The next cycle must first establish a new ReleaseFast verifier baseline. Do
-  not spend another cycle on speculative kernel retunes until the verifier and
-  profile agree within normal run-to-run noise.
+- The old post-cycle-38 measurement gap is fixed; the verifier now builds
+  `ReleaseFast`.
+- Cycles 40-49 found the real gains: Q8 byte/profile accounting, paired Q8
+  equal-shape attention K/V, paired shared-expert Q8 gate/up, paired attention
+  Q/gate, and routing `attn_output.weight` back to the 256-thread Q8 path.
+- Cycles 50-70 are a measured-dead basin. Broad Q8 retunes, repacks, fused
+  shared gate/up GeGLU, CPU LM-head tweaks, and default-on batched prefill all
+  failed to beat the cycle-49 accepted best.
+- The prompt/harness must not call rejected-cycle sample movement "progress".
+  Future work should pivot to missing measurement or a structural change with a
+  small proof, not another near-identical Q8 threadgroup experiment.
 
-Expected first run after the harness fix:
+Accepted cycle-49 profile snapshot:
 
-```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zinc --model-id gemma4-12b-q4k-m \
-  --prompt "What is the capital of France?" --chat -n 12 --profile
+```text
+Prefill: ~9.0 s for 20 chat tokens (~2.2 tok/s)
+Decode: 37.79 tok/s best official median
+Metal profile: steps=28 prompt=20 completion=8 cmds=28 commits=28
+record breakdown: final ~635 ms/request, gpu-moe ~3.9 ms/request
+dmmv bytes/request: q8_0 52.56 GiB, q4_k 13.96 GiB, q5_1 9.31 GiB
+path bytes/request: attn 31.16 GiB, moe-expert 23.26 GiB, shared 14.83 GiB, lm-head 6.57 GiB
+q8 hot shapes: shared M=2112 K=2816, attn M=4096 K=2816, attn M=2048 K=2816, attn_output M=2816 K=4096
 ```
 
-The output must contain Paris and should be treated as the new baseline only if
-the loop verifier reports the same optimize mode and roughly the same decode
-range. If the profile is around `25-40 tok/s` but the verifier remains around
-`15 tok/s`, fix measurement before changing model kernels.
+Exact-shape Q8 benchmark on accepted code:
+
+```text
+attn_q     M=4096 K=2816: 0.024 ms, 508.94 GB/s
+attn_k     M=2048 K=2816: 0.014 ms, 434.58 GB/s
+attn_v     M=2048 K=2816: 0.016 ms, 373.18 GB/s
+attn_out   M=2816 K=4096: 0.026 ms, 466.51 GB/s
+lm_head    M=262144 K=2816: 1.782 ms, 440.09 GB/s as raw GPU DMMV
+shared_gate M=2112 K=2816: 0.016 ms, 384.14 GB/s
+shared_up   M=2112 K=2816: 0.019 ms, 332.58 GB/s
+shared_down M=2816 K=2112: 0.015 ms, 424.96 GB/s
+shared_dual gate+up: 0.036 ms dual vs 0.031 ms separate; raw dual kernel is 16% slower, but production cycle 43 still improved official verifier by reducing dispatch overhead
+```
+
+Conclusion:
+
+- The accepted attention Q8 kernels are already near bandwidth roof on
+  exact-shape microbenchmarks.
+- The remaining decode gap to 50 tok/s is likely not a generic Q8 threadgroup
+  size issue.
+- The two credible next directions are: improve measurement around the shared
+  expert / LM-head path, or make a structural prefill/decode separation so the
+  loop does not optimize from noisy aggregate request profiles.
 
 Measured locally before this effort file was created:
 
@@ -168,7 +196,7 @@ right benchmark:
 - `ZINC_TEST_PROMPT="What is the capital of France?"`
 - `ZINC_MAX_TOKENS=12`
 - `ZINC_BUILD_OPTIMIZE=ReleaseFast`
-- `ZINC_BENCHMARK_RUNS=3` for plateau work
+- `ZINC_BENCHMARK_RUNS=5` for plateau work
 
 The loop should classify `The capital of France is **Paris**.` as correct.
 If it does not, fix the harness before optimizing.
@@ -347,41 +375,47 @@ llama.cpp shape more directly:
 
 This is higher risk and should not be the first implementation step.
 
-## Post-cycle-38 execution path
+## Post-cycle-70 execution path
 
 The original Step 1 to Step 8 foundations have mostly landed. The remaining
-work is no longer "make Gemma coherent"; it is "make the measured ReleaseFast
-path coherent and faster." Use this order now:
+work is no longer "make Gemma coherent"; it is "escape the cycle-49 plateau
+without repeating the Q8 retune basin." Use this order now:
 
-1. Measurement reconciliation. Do not make model-kernel edits until the official
-   verifier and `--profile` command use the same optimize mode and agree within
-   normal noise.
-2. Current bottleneck classification. Every agent cycle must quote the current
-   `--profile` lines for `commitAndWait`, `record breakdown`, `dmmv bytes`, and
-   `path bytes` before choosing an optimization.
-3. If `commitAndWait` dominates and `cmds=commits=28`, reduce the remaining GPU
-   work inside the 28 request commands. Do not chase command count unless the
-   profile proves extra commands came back.
-4. If `final` dominates record time, inspect the final norm plus LM-head path.
-   Prior CPU Q8 scheduling, row-pairing, skip-store, and GPU argmax attempts
-   already regressed, so only try a new LM-head change with before/after phase
-   timing.
-5. If `gpu-moe` or `moe-expert` bytes dominate, optimize the exact Q4_K/Q5_1
-   MoE phase shown by profile. Avoid broad fused-expert rewrites unless there
-   is a small isolated correctness test and a direct before/after profile.
-6. If prefill remains near `9-10s` for the 20-token chat prompt after decode is
-   stable, return to grouped batched prefill. Do not mix prefill and decode
-   changes in one cycle.
+1. Treat the accepted best as `37.79 tok/s`, not the latest noisy baseline.
+   If a verifier sample range exceeds 20 percent, do not infer a bottleneck
+   from that low sample. Re-run or profile the accepted code.
+2. Do not edit a production kernel until the exact-shape benchmark covers the
+   target shape and shows a plausible win. Use:
+   `zig build bench-metal-shapes -- --model ~/Library/Caches/zinc/models/models/gemma4-12b-q4k-m/model.gguf --case <case> --iterations 100 --warmup 10`.
+3. First measurement gap: shared expert now has exact-shape data. The raw
+   `shared_dual` kernel is slower than two separate DMMVs, but cycle 43 showed
+   verifier improvement from fewer dispatches. Do not simply disable pairing;
+   if attacking this path, measure a command-level variant that compares
+   dual-vs-separate inside the real layer command shape.
+4. Second measurement gap: isolate CPU LM-head wall time vs raw GPU DMMV.
+   The raw GPU `lm_head` shape can move ~440 GB/s, but previous GPU argmax /
+   GPU LM-head attempts broke tests or increased waits. A new attempt must
+   prove the readback/topk boundary, not just the matvec, is the issue.
+5. Third measurement gap: split decode-only profile from request profile.
+   Current `--profile` combines 20-token prefill and 8-token decode; the 9 s
+   prefill dominates `commitAndWait`. Do not use aggregate request wait time
+   to justify decode-only Q8 changes.
+6. If no decode microbench shows headroom, pivot to prefill. Prefill is still
+   ~9 s for 20 chat tokens; that is the largest user-visible latency gap.
+   Only re-open Gemma batched prefill with `ZINC_BATCHED_PREFILL=validate`
+   logits parity first.
 
 Acceptance for future keeps:
 
 - Correct Paris answer in chat mode.
 - `zig build test` passes.
 - Official verifier, not agent-only profile, improves by at least `1 tok/s`
-  while stalled at this plateau, or a profile phase drops by at least 10 percent
-  with no verifier regression.
+  over `37.79 tok/s`, or a profile/microbench phase drops by at least 10
+  percent with no verifier regression.
 - The self-analysis must name the phase it targeted and include before/after
   numbers from the same optimize mode.
+- Any change in the Q8 basin must cite `bench-metal-shapes` before/after
+  numbers for the exact shape being changed.
 
 ## Known dead ends - do not repeat
 
@@ -408,6 +442,22 @@ surrounding path has changed substantially:
 - K-cap/cached Q4_K widening beyond the current `K <= 3072` should not be tried
   unless profile identifies the `K=2816` large-M Q4_K path as the remaining
   bottleneck and excludes the known-bad `K=4096` case.
+- Raising shared Q8 gate/up threadgroup size to 512 regressed cycle 44.
+- Large attention Q/O quad-row Q8 path regressed cycle 45.
+- 256-thread paired Q8 K/V override regressed cycle 46.
+- K=2816-specialized paired Q8 shader regressed cycle 48.
+- Fused paired Q8 shared gate/up GeGLU regressed cycle 50.
+- Shared-expert down Q8 through Apple9 512-thread path regressed cycle 51.
+- CPU Q8 LM-head heap allocation, worker scheduling, row pairing, 16-lane dot,
+  and CPU final-norm movement all regressed or failed to beat cycle 49.
+- Gemma Q8 `attn_output.weight` K=4096 special shader and repacked layout both
+  regressed cycles 54 and 70. The accepted path is the 256-thread runtime Q8
+  shader.
+- Default-on Gemma batched prefill without validation-on logits parity regressed
+  cycle 69.
+- "No code change / studied references" cycles are not useful if they still
+  end in a reverted candidate. The next study cycle must land measurement
+  coverage or update this effort with a concrete no-code conclusion.
 
 ## Measurement gates
 
@@ -437,6 +487,10 @@ Reject a change if:
   verifier does not reproduce the gain under the same optimize mode.
 - It lands within one-sample noise after cycle 38 without a measured phase
   reduction.
+- It cites raw rejected-cycle movement as progress when no change was kept.
+- It changes Q8 kernel/threadgroup/repack logic without exact-shape
+  `bench-metal-shapes` evidence for that same shape.
+- It optimizes from a verifier run whose sample range is wider than 20 percent.
 
 ## Files likely to change
 
