@@ -43,6 +43,7 @@ const KvCacheWriteBatchedPush = elementwise_mod.KvCacheWriteBatchedPush;
 const ResidualRmsNormPush = elementwise_mod.ResidualRmsNormPush;
 const RmsNormAddPush = elementwise_mod.RmsNormAddPush;
 const NormRopePush = elementwise_mod.NormRopePush;
+const QkNormRopeKvWritePush = elementwise_mod.QkNormRopeKvWritePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
@@ -994,6 +995,14 @@ pub const InferenceEngine = struct {
     // the SwiGLU fold which removes the gate_buf/up_buf write+read pair
     // entirely, a structurally distinct change.
     use_fused_dense_ffn: bool = false,
+    // Effort-11 cycle-12: fused Q+K norm+rope + KV cache write. Single
+    // dispatch replacing the per-attention-layer (Q norm+rope → K norm+rope
+    // → kv_cache_write) trio on Qwen 3 family dense attention. Saves
+    // 2 dispatches + 1 global compute barrier per attention layer.
+    // Disable with ZINC_FUSED_QK_KV=0. Per-call gates: q_norm and k_norm
+    // tensors both present, push descriptors active, !packed_q_gate,
+    // !use_k_as_v, !apply_v_unit_norm_early, !diagnostics.
+    use_fused_qk_kv: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
     // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
     // slot(position, layer). Unused downstream this cycle — the buffer is the
@@ -1889,6 +1898,22 @@ pub const InferenceEngine = struct {
             log.info("Fused dense gate+up+SwiGLU DISABLED via ZINC_FUSED_DENSE_FFN=0", .{});
         }
 
+        // Fused Q+K norm+rope + KV cache write (effort-11 cycle 12). Default
+        // ON when the pipeline is loaded; disable via ZINC_FUSED_QK_KV=0.
+        // Per-call gates apply (q_norm/k_norm tensors present, push descriptors,
+        // !packed_q_gate, !use_k_as_v, !apply_v_unit_norm_early, !diagnostics).
+        const fused_qk_kv_env = std.posix.getenv("ZINC_FUSED_QK_KV");
+        const fused_qk_kv_explicitly_off = fused_qk_kv_env != null and std.mem.eql(u8, fused_qk_kv_env.?, "0");
+        const fused_qk_kv_enabled = !fused_qk_kv_explicitly_off and
+            elementwise.pipeline_qk_norm_rope_kv_write != null and
+            elementwise.pipeline_kv_cache_write != null and
+            instance.push_descriptor_fn != null;
+        if (fused_qk_kv_enabled) {
+            log.info("Fused Q+K norm+rope + KV cache write ENABLED (default, set ZINC_FUSED_QK_KV=0 to disable)", .{});
+        } else if (fused_qk_kv_explicitly_off) {
+            log.info("Fused Q+K norm+rope + KV cache write DISABLED via ZINC_FUSED_QK_KV=0", .{});
+        }
+
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -2075,6 +2100,7 @@ pub const InferenceEngine = struct {
             .use_fused_rms_router = fused_rms_router_enabled,
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
             .use_fused_dense_ffn = fused_dense_ffn_enabled,
+            .use_fused_qk_kv = fused_qk_kv_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -3078,6 +3104,51 @@ pub const InferenceEngine = struct {
         );
     }
 
+    fn pushDispatch8(
+        self: *InferenceEngine,
+        pip: *const Pipeline,
+        push_data: []const u8,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
+        buf4: vk.c.VkBuffer,
+        size4: vk.c.VkDeviceSize,
+        buf5: vk.c.VkBuffer,
+        size5: vk.c.VkDeviceSize,
+        buf6: vk.c.VkBuffer,
+        size6: vk.c.VkDeviceSize,
+        buf7: vk.c.VkBuffer,
+        size7: vk.c.VkDeviceSize,
+        wg_x: u32,
+        wg_y: u32,
+        wg_z: u32,
+    ) void {
+        const infos = [8]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+            .{ .buffer = buf1, .offset = 0, .range = size1 },
+            .{ .buffer = buf2, .offset = 0, .range = size2 },
+            .{ .buffer = buf3, .offset = 0, .range = size3 },
+            .{ .buffer = buf4, .offset = 0, .range = size4 },
+            .{ .buffer = buf5, .offset = 0, .range = size5 },
+            .{ .buffer = buf6, .offset = 0, .range = size6 },
+            .{ .buffer = buf7, .offset = 0, .range = size7 },
+        };
+        self.decode_cmd.pushDescAndDispatch(
+            pip,
+            self.instance.push_descriptor_fn,
+            infos[0..],
+            push_data,
+            wg_x,
+            wg_y,
+            wg_z,
+        );
+    }
+
     fn dispatchRmsNorm(
         self: *InferenceEngine,
         input_buf: vk.c.VkBuffer,
@@ -3670,6 +3741,83 @@ pub const InferenceEngine = struct {
 
     /// Fused RMS norm + RoPE in-place on a head buffer.
     /// Eliminates 1 dispatch + 1 barrier vs separate norm then RoPE.
+    /// Fused Q+K norm + RoPE + KV cache write. One dispatch absorbs:
+    ///   - Q per-head RMS norm + RoPE (in-place on q_buf)
+    ///   - K per-head RMS norm + RoPE (writes directly to kv_k_cache slot)
+    ///   - V copy from v_buf into kv_v_cache slot
+    /// Saves 2 dispatches + 1 barrier per attention layer vs the original
+    /// (Q norm+rope → K norm+rope → kv_cache_write) trio. Caller is
+    /// responsible for ensuring a barrier follows this dispatch before any
+    /// consumer of q_buf, kv_k_cache, or kv_v_cache runs.
+    fn dispatchQkNormRopeKvWrite(
+        self: *InferenceEngine,
+        q_buf: vk.c.VkBuffer,
+        q_size: vk.c.VkDeviceSize,
+        q_weight_buf: vk.c.VkBuffer,
+        q_weight_size: vk.c.VkDeviceSize,
+        k_buf: vk.c.VkBuffer,
+        k_size: vk.c.VkDeviceSize,
+        k_weight_buf: vk.c.VkBuffer,
+        k_weight_size: vk.c.VkDeviceSize,
+        freq_buf: ?vk.c.VkBuffer,
+        freq_size: vk.c.VkDeviceSize,
+        kv_k_buf: vk.c.VkBuffer,
+        kv_k_size: vk.c.VkDeviceSize,
+        v_buf: vk.c.VkBuffer,
+        v_size: vk.c.VkDeviceSize,
+        kv_v_buf: vk.c.VkBuffer,
+        kv_v_size: vk.c.VkDeviceSize,
+        head_dim: u32,
+        rope_dim: u32,
+        n_q_heads: u32,
+        n_k_heads: u32,
+        position: u32,
+        freq_base: f32,
+        attn_scale: f32,
+        eps: f32,
+        dst_offset_floats: u32,
+    ) void {
+        const pip = &(self.elementwise.pipeline_qk_norm_rope_kv_write orelse return);
+        const push = QkNormRopeKvWritePush{
+            .head_dim = head_dim,
+            .rope_dim = rope_dim,
+            .n_q_heads = n_q_heads,
+            .n_k_heads = n_k_heads,
+            .position = position,
+            .freq_base_bits = @bitCast(freq_base),
+            .attn_scale_bits = @bitCast(attn_scale),
+            .eps_bits = @bitCast(eps),
+            .dst_offset = dst_offset_floats,
+        };
+        // Bind a dummy buffer for the unused freq binding when no precomputed
+        // freq buffer is supplied. Mirrors dispatchNormRopeInPlace's pattern.
+        const fb_handle: vk.c.VkBuffer = if (freq_buf) |fb| fb else q_buf;
+        const fb_size: vk.c.VkDeviceSize = if (freq_buf) |_| freq_size else q_size;
+        self.pushDispatch8(
+            pip,
+            std.mem.asBytes(&push),
+            q_buf,
+            q_size,
+            q_weight_buf,
+            q_weight_size,
+            k_buf,
+            k_size,
+            k_weight_buf,
+            k_weight_size,
+            fb_handle,
+            fb_size,
+            kv_k_buf,
+            kv_k_size,
+            v_buf,
+            v_size,
+            kv_v_buf,
+            kv_v_size,
+            n_q_heads + n_k_heads,
+            1,
+            1,
+        );
+    }
+
     fn dispatchNormRopeInPlace(
         self: *InferenceEngine,
         buf: vk.c.VkBuffer,
@@ -4328,7 +4476,61 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                 }
 
-                if (q_norm_tensor) |qn| {
+                // Effort-11 cycle-12: fused Q+K norm+rope + KV cache write
+                // path. Single dispatch absorbs the (Q norm+rope → K norm+rope
+                // → kv_cache_write) trio when all per-call gates pass. Saves
+                // 2 dispatches + 1 global compute barrier per attention layer.
+                const physical_token_for_fused = if (self.use_fused_qk_kv)
+                    self.physicalTokenIndex(state.position) catch null
+                else
+                    null;
+                const fused_qk_kv_eligible = self.use_fused_qk_kv and
+                    self.elementwise.pipeline_qk_norm_rope_kv_write != null and
+                    q_norm_tensor != null and
+                    k_norm_tensor != null and
+                    !packed_q_gate and
+                    !use_k_as_v and
+                    !apply_v_unit_norm_early and
+                    !is_dead_attn_tail and
+                    config.architecture != .gemma and
+                    !(state.position == 0 and self.validation_diagnostics_enabled) and
+                    physical_token_for_fused != null;
+
+                if (fused_qk_kv_eligible) {
+                    const qn = q_norm_tensor.?;
+                    const kn = k_norm_tensor.?;
+                    const dst_offset_floats: u32 = physical_token_for_fused.? * layer_kv_dim;
+                    self.dispatchQkNormRopeKvWrite(
+                        self.q_buf.handle,
+                        self.q_buf.size,
+                        qn.gpu_buffer.handle,
+                        qn.gpu_buffer.size,
+                        self.k_buf.handle,
+                        self.k_buf.size,
+                        kn.gpu_buffer.handle,
+                        kn.gpu_buffer.size,
+                        freq_buf_handle,
+                        self.rope_freq_buf.size,
+                        self.kv_k_cache[layer_idx].handle,
+                        self.kv_k_cache[layer_idx].size,
+                        self.v_buf.handle,
+                        self.v_buf.size,
+                        self.kv_v_cache[layer_idx].handle,
+                        self.kv_v_cache[layer_idx].size,
+                        layer_head_dim,
+                        layer_rope_dim,
+                        config.n_heads,
+                        layer_n_kv_heads,
+                        state.position,
+                        rope_freq,
+                        rope_attn_scale,
+                        rms_norm_eps,
+                        dst_offset_floats,
+                    );
+                    self.decode_cmd.computeBarrier();
+                    q_rope_done = true;
+                    k_rope_done = true;
+                } else if (q_norm_tensor) |qn| {
                     // Skip Q norm/RoPE for dead-tail tokens: q_buf only feeds flash_attn.
                     // Still mark q_rope_done=true so the fallback-path Q RoPE below is
                     // also skipped (avoids reading stale q_buf).
@@ -4366,14 +4568,63 @@ pub const InferenceEngine = struct {
                         );
                     }
                 }
-                if (k_norm_tensor) |kn| {
-                    if (use_fused_norm_rope) {
-                        // Fused K norm + K RoPE in a single dispatch
-                        self.dispatchNormRopeInPlace(
+                if (!fused_qk_kv_eligible) {
+                    if (k_norm_tensor) |kn| {
+                        if (use_fused_norm_rope) {
+                            // Fused K norm + K RoPE in a single dispatch
+                            self.dispatchNormRopeInPlace(
+                                self.k_buf.handle,
+                                self.k_buf.size,
+                                kn.gpu_buffer.handle,
+                                kn.gpu_buffer.size,
+                                freq_buf_handle,
+                                self.rope_freq_buf.size,
+                                layer_head_dim,
+                                layer_rope_dim,
+                                layer_n_kv_heads,
+                                state.position,
+                                rope_freq,
+                                rope_attn_scale,
+                                rms_norm_eps,
+                            );
+                            k_rope_done = true;
+                        } else {
+                            try self.dispatchRmsNorm(
+                                self.k_buf.handle,
+                                self.k_buf.size,
+                                kn.gpu_buffer.handle,
+                                kn.gpu_buffer.size,
+                                self.k_buf.handle,
+                                self.k_buf.size,
+                                layer_head_dim,
+                                layer_n_kv_heads,
+                                rms_norm_eps,
+                            );
+                        }
+                    }
+                    // Gemma 4 applies plain RMS norm (unit weights) to V per-head.
+                    // Mirrors Metal forward_metal.zig:3460-3462. For use_k_as_v
+                    // layers this already ran ahead of Q/K norms above — skip here.
+                    if (config.architecture == .gemma and config.rope_freq_base_swa > 0 and !apply_v_unit_norm_early) {
+                        try self.dispatchRmsNorm(
+                            self.v_buf.handle,
+                            self.v_buf.size,
+                            self.unit_norm_weights.handle,
+                            self.unit_norm_weights.size,
+                            self.v_buf.handle,
+                            self.v_buf.size,
+                            layer_head_dim,
+                            layer_n_kv_heads,
+                            rms_norm_eps,
+                        );
+                    }
+                    self.decode_cmd.computeBarrier();
+
+                    if (!k_rope_done) {
+                        // K RoPE first — KV cache write reads k_buf, so it must complete before the write.
+                        try self.dispatchRopeInPlace(
                             self.k_buf.handle,
                             self.k_buf.size,
-                            kn.gpu_buffer.handle,
-                            kn.gpu_buffer.size,
                             freq_buf_handle,
                             self.rope_freq_buf.size,
                             layer_head_dim,
@@ -4382,126 +4633,79 @@ pub const InferenceEngine = struct {
                             state.position,
                             rope_freq,
                             rope_attn_scale,
-                            rms_norm_eps,
-                        );
-                        k_rope_done = true;
-                    } else {
-                        try self.dispatchRmsNorm(
-                            self.k_buf.handle,
-                            self.k_buf.size,
-                            kn.gpu_buffer.handle,
-                            kn.gpu_buffer.size,
-                            self.k_buf.handle,
-                            self.k_buf.size,
-                            layer_head_dim,
-                            layer_n_kv_heads,
-                            rms_norm_eps,
                         );
                     }
-                }
-                // Gemma 4 applies plain RMS norm (unit weights) to V per-head.
-                // Mirrors Metal forward_metal.zig:3460-3462. For use_k_as_v
-                // layers this already ran ahead of Q/K norms above — skip here.
-                if (config.architecture == .gemma and config.rope_freq_base_swa > 0 and !apply_v_unit_norm_early) {
-                    try self.dispatchRmsNorm(
-                        self.v_buf.handle,
-                        self.v_buf.size,
-                        self.unit_norm_weights.handle,
-                        self.unit_norm_weights.size,
-                        self.v_buf.handle,
-                        self.v_buf.size,
-                        layer_head_dim,
-                        layer_n_kv_heads,
-                        rms_norm_eps,
-                    );
-                }
-                self.decode_cmd.computeBarrier();
-
-                if (!k_rope_done) {
-                    // K RoPE first — KV cache write reads k_buf, so it must complete before the write.
-                    try self.dispatchRopeInPlace(
-                        self.k_buf.handle,
-                        self.k_buf.size,
-                        freq_buf_handle,
-                        self.rope_freq_buf.size,
-                        layer_head_dim,
-                        layer_rope_dim,
-                        layer_n_kv_heads,
-                        state.position,
-                        rope_freq,
-                        rope_attn_scale,
-                    );
-                }
-                // KV cache write: use compute shader to stay in compute pipeline,
-                // avoiding compute→transfer + transfer→compute stage transitions.
-                {
-                    const physical_token = try self.physicalTokenIndex(state.position);
-                    if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
-                        if (!k_rope_done) self.decode_cmd.computeBarrier();
-                        const push = KvCacheWritePush{
-                            .kv_dim = layer_kv_dim,
-                            .dst_offset = physical_token * layer_kv_dim,
-                        };
-                        if (kv_pip.uses_push_descriptors) {
-                            self.pushDispatch4(
-                                kv_pip,
-                                std.mem.asBytes(&push),
-                                self.k_buf.handle,
-                                self.k_buf.size,
-                                self.kv_k_cache[layer_idx].handle,
-                                self.kv_k_cache[layer_idx].size,
-                                self.v_buf.handle,
-                                self.v_buf.size,
-                                self.kv_v_cache[layer_idx].handle,
-                                self.kv_v_cache[layer_idx].size,
-                                (layer_kv_dim + 63) / 64,
-                                1,
-                                1,
-                            );
+                    // KV cache write: use compute shader to stay in compute pipeline,
+                    // avoiding compute→transfer + transfer→compute stage transitions.
+                    {
+                        const physical_token = try self.physicalTokenIndex(state.position);
+                        if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
+                            if (!k_rope_done) self.decode_cmd.computeBarrier();
+                            const push = KvCacheWritePush{
+                                .kv_dim = layer_kv_dim,
+                                .dst_offset = physical_token * layer_kv_dim,
+                            };
+                            if (kv_pip.uses_push_descriptors) {
+                                self.pushDispatch4(
+                                    kv_pip,
+                                    std.mem.asBytes(&push),
+                                    self.k_buf.handle,
+                                    self.k_buf.size,
+                                    self.kv_k_cache[layer_idx].handle,
+                                    self.kv_k_cache[layer_idx].size,
+                                    self.v_buf.handle,
+                                    self.v_buf.size,
+                                    self.kv_v_cache[layer_idx].handle,
+                                    self.kv_v_cache[layer_idx].size,
+                                    (layer_kv_dim + 63) / 64,
+                                    1,
+                                    1,
+                                );
+                            } else {
+                                const ds = try self.allocDescSet(kv_pip.descriptor_set_layout);
+                                self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
+                                self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (layer_kv_dim + 63) / 64, 1, 1);
+                            }
+                            if (!q_rope_done) {
+                                // Q RoPE overlaps with KV write — no data dependency between them.
+                                try self.dispatchRopeInPlace(
+                                    self.q_buf.handle,
+                                    self.q_buf.size,
+                                    freq_buf_handle,
+                                    self.rope_freq_buf.size,
+                                    layer_head_dim,
+                                    layer_rope_dim,
+                                    config.n_heads,
+                                    state.position,
+                                    rope_freq,
+                                    rope_attn_scale,
+                                );
+                            }
+                            self.decode_cmd.computeBarrier();
                         } else {
-                            const ds = try self.allocDescSet(kv_pip.descriptor_set_layout);
-                            self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
-                            self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (layer_kv_dim + 63) / 64, 1, 1);
+                            // Transfer fallback: Q RoPE before barrier (original order preserved)
+                            if (!q_rope_done) {
+                                try self.dispatchRopeInPlace(
+                                    self.q_buf.handle,
+                                    self.q_buf.size,
+                                    freq_buf_handle,
+                                    self.rope_freq_buf.size,
+                                    layer_head_dim,
+                                    layer_rope_dim,
+                                    config.n_heads,
+                                    state.position,
+                                    rope_freq,
+                                    rope_attn_scale,
+                                );
+                            }
+                            self.decode_cmd.computeAndTransferBarrier();
+                            const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * layer_kv_vec_size;
+                            const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
+                            const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
+                            self.decode_cmd.transferToComputeBarrier();
                         }
-                        if (!q_rope_done) {
-                            // Q RoPE overlaps with KV write — no data dependency between them.
-                            try self.dispatchRopeInPlace(
-                                self.q_buf.handle,
-                                self.q_buf.size,
-                                freq_buf_handle,
-                                self.rope_freq_buf.size,
-                                layer_head_dim,
-                                layer_rope_dim,
-                                config.n_heads,
-                                state.position,
-                                rope_freq,
-                                rope_attn_scale,
-                            );
-                        }
-                        self.decode_cmd.computeBarrier();
-                    } else {
-                        // Transfer fallback: Q RoPE before barrier (original order preserved)
-                        if (!q_rope_done) {
-                            try self.dispatchRopeInPlace(
-                                self.q_buf.handle,
-                                self.q_buf.size,
-                                freq_buf_handle,
-                                self.rope_freq_buf.size,
-                                layer_head_dim,
-                                layer_rope_dim,
-                                config.n_heads,
-                                state.position,
-                                rope_freq,
-                                rope_attn_scale,
-                            );
-                        }
-                        self.decode_cmd.computeAndTransferBarrier();
-                        const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * layer_kv_vec_size;
-                        const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
-                        const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
-                        self.decode_cmd.transferToComputeBarrier();
                     }
                 }
 

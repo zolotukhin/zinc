@@ -1,0 +1,171 @@
+#version 460
+// ZINC — Fused Q+K RMS norm + RoPE + KV cache write.
+//
+// Combines three back-to-back dispatches on the per-attention-layer hot
+// path into a single dispatch:
+//   - Q per-head RMS norm + Q RoPE (n_q_heads WGs, in-place on q_buf)
+//   - K per-head RMS norm + K RoPE (n_k_heads WGs, writes directly into
+//     kv_k_cache at dst_offset, skipping the k_buf in-place round-trip)
+//   - V copy from v_buf into kv_v_cache (folded into K-WGs: each K-WG
+//     additionally copies its head's slice of V)
+//
+// Saves per attention layer:
+//   - 2 dispatches (Q norm+rope + K norm+rope + kv_cache_write → 1)
+//   - 1 global compute barrier (the old barrier between K norm+rope and
+//     kv_cache_write is no longer needed; both are now in one dispatch
+//     and write to disjoint memory)
+//
+// Dispatch: (n_q_heads + n_k_heads, 1, 1)
+// WG layout:
+//   wg_id < n_q_heads  → process Q head wg_id (in-place on q_buf)
+//   else               → process K head (wg_id - n_q_heads):
+//                          - read k_buf, normalize+rotate, write to kv_k_cache
+//                          - copy v_buf → kv_v_cache for this head's slice
+//
+// Bindings:
+//   0 q_data    (read-write, n_q_heads * head_dim floats, in-place)
+//   1 q_weight  (readonly, head_dim floats — Q per-head norm weights)
+//   2 k_src     (readonly, n_k_heads * head_dim floats — raw K projection)
+//   3 k_weight  (readonly, head_dim floats — K per-head norm weights)
+//   4 freq_buf  (readonly, half_rot floats — precomputed inv_freq, optional)
+//   5 kv_k      (writeonly into a slice — full kv_k_cache buffer)
+//   6 v_src     (readonly, n_k_heads * head_dim floats — raw V projection)
+//   7 kv_v      (writeonly into a slice — full kv_v_cache buffer)
+//
+// Push:
+//   head_dim, rope_dim, n_q_heads, n_k_heads,
+//   position, freq_base_bits, attn_scale_bits, eps_bits,
+//   dst_offset (physical_token * kv_dim, in floats)
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0)          buffer QData   { float q_data[];   };
+layout(set = 0, binding = 1) readonly buffer QWeight { float q_weight[]; };
+layout(set = 0, binding = 2) readonly buffer KSrc    { float k_src[];    };
+layout(set = 0, binding = 3) readonly buffer KWeight { float k_weight[]; };
+layout(set = 0, binding = 4) readonly buffer FreqBuf { float inv_freq[]; };
+layout(set = 0, binding = 5)          buffer KvK     { float kv_k[];     };
+layout(set = 0, binding = 6) readonly buffer VSrc    { float v_src[];    };
+layout(set = 0, binding = 7)          buffer KvV     { float kv_v[];     };
+
+layout(push_constant) uniform PushConstants {
+    uint  head_dim;
+    uint  rope_dim;
+    uint  n_q_heads;
+    uint  n_k_heads;
+    uint  position;
+    uint  freq_base_bits;   // 0 ⇒ use freq buffer
+    uint  attn_scale_bits;  // 0 ⇒ scale = 1.0
+    uint  eps_bits;
+    uint  dst_offset;       // physical_token * kv_dim (floats)
+};
+
+shared float s_partial[64];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg  = gl_WorkGroupID.x;
+
+    bool is_q = (wg < n_q_heads);
+    uint head = is_q ? wg : (wg - n_q_heads);
+    uint base = head * head_dim;
+    float eps = uintBitsToFloat(eps_bits);
+
+    // K-WG destination base in kv_k_cache:
+    // dst_offset (physical_token * kv_dim) + head * head_dim
+    uint k_dst_base = dst_offset + base;
+
+    // ── Pass 1: sum-of-squares for per-head RMS norm.
+    float sum_sq = 0.0;
+    if (is_q) {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            float val = q_data[base + i];
+            sum_sq += val * val;
+        }
+    } else {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            float val = k_src[base + i];
+            sum_sq += val * val;
+        }
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+
+    // Cross-subgroup reduction fallback (matches norm_rope.comp; rare on
+    // wave64 RDNA but devices like Intel Xe2 SIMD16 need this).
+    if (gl_SubgroupSize < 64u) {
+        s_partial[tid] = sum_sq;
+        barrier();
+        if (tid == 0u) {
+            float total = 0.0;
+            uint num_sg = (64u + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+            for (uint s = 0u; s < num_sg; s++) {
+                total += s_partial[s * gl_SubgroupSize];
+            }
+            s_partial[0] = total;
+        }
+        barrier();
+        sum_sq = s_partial[0];
+    }
+
+    float rms_inv = inversesqrt(sum_sq / float(head_dim) + eps);
+
+    // ── Pass 2: normalize + RoPE (rotated dims), write to destination.
+    float freq_base = uintBitsToFloat(freq_base_bits);
+    float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;
+    bool use_freq_buf = (freq_base_bits == 0u);
+    uint half_rot = rope_dim / 2u;
+
+    for (uint i = tid; i < half_rot; i += 64u) {
+        float val_lo, val_hi;
+        if (is_q) {
+            val_lo = q_weight[i]            * (q_data[base + i]            * rms_inv);
+            val_hi = q_weight[i + half_rot] * (q_data[base + i + half_rot] * rms_inv);
+        } else {
+            val_lo = k_weight[i]            * (k_src[base + i]            * rms_inv);
+            val_hi = k_weight[i + half_rot] * (k_src[base + i + half_rot] * rms_inv);
+        }
+
+        float freq_i;
+        if (use_freq_buf) {
+            freq_i = inv_freq[i];
+        } else {
+            float exponent = float(2u * i) / float(rope_dim);
+            freq_i = 1.0 / pow(freq_base, exponent);
+        }
+        float theta = float(position) * freq_i;
+        float cos_t = cos(theta) * attn_scale;
+        float sin_t = sin(theta) * attn_scale;
+
+        float rot_lo = val_lo * cos_t - val_hi * sin_t;
+        float rot_hi = val_lo * sin_t + val_hi * cos_t;
+
+        if (is_q) {
+            q_data[base + i]            = rot_lo;
+            q_data[base + i + half_rot] = rot_hi;
+        } else {
+            kv_k[k_dst_base + i]            = rot_lo;
+            kv_k[k_dst_base + i + half_rot] = rot_hi;
+        }
+    }
+
+    // Non-rotated dims (when head_dim > rope_dim): just normalize.
+    for (uint i = rope_dim + tid; i < head_dim; i += 64u) {
+        if (is_q) {
+            q_data[base + i] = q_weight[i] * (q_data[base + i] * rms_inv);
+        } else {
+            kv_k[k_dst_base + i] = k_weight[i] * (k_src[base + i] * rms_inv);
+        }
+    }
+
+    // ── K-WGs additionally copy V for their head into kv_v_cache.
+    // V has no per-head norm or RoPE on the standard path (this fused
+    // dispatch is gated off for Gemma's V unit-norm and use_k_as_v).
+    if (!is_q) {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            kv_v[k_dst_base + i] = v_src[base + i];
+        }
+    }
+}
