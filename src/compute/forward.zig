@@ -123,6 +123,12 @@ const ProfilePhase = enum(u8) {
     shared_swiglu,
     shared_down,
     shared_gate_acc,
+    // Dense FFN (Qwen 3 8B-style, no MoE/no SSM). The fused gate+up+SwiGLU
+    // and the down_proj_acc both bucket here. Effort 11 cycle 11
+    // enablement: previously unaccounted ~60% of decode at L=846 was
+    // dense FFN — making it explicit unblocks targeted attacks on the
+    // dominant decode bucket without re-deriving it from the residual.
+    dense_ffn,
     final_tail,
 
     fn label(self: @This()) []const u8 {
@@ -148,6 +154,7 @@ const ProfilePhase = enum(u8) {
             .shared_swiglu => "shared_swiglu",
             .shared_down => "shared_down",
             .shared_gate_acc => "shared_gate",
+            .dense_ffn => "dense_ffn",
             .final_tail => "tail",
         };
     }
@@ -6910,6 +6917,7 @@ pub const InferenceEngine = struct {
                 // gate+up only and reverted; this variant additionally
                 // folds the SwiGLU inline so the freed buffers are
                 // physically removed from the dense decode datapath.
+                const dense_ffn_phase = self.beginProfilePhase();
                 const gate_tensor = lt.ffn_gate orelse return error.TensorNotFound;
                 const up_tensor = lt.ffn_up orelse return error.TensorNotFound;
                 const down_tensor = lt.ffn_down orelse return error.TensorNotFound;
@@ -7055,6 +7063,7 @@ pub const InferenceEngine = struct {
                         );
                     }
                 }
+                self.endProfilePhase(.dense_ffn, dense_ffn_phase);
             }
 
             // Per-layer output scaling (Gemma 4 proportional): hidden_buf *= scale
@@ -10360,6 +10369,7 @@ pub fn generate(
             const avg_ssm_phase_ms = engine.avgProfilePhaseMs(.ssm);
             const avg_moe_phase_ms = engine.avgProfilePhaseMs(.moe_routed);
             const avg_shared_phase_ms = engine.avgProfilePhaseMs(.shared_expert);
+            const avg_dense_ffn_phase_ms = engine.avgProfilePhaseMs(.dense_ffn);
             const avg_tail_phase_ms = engine.avgProfilePhaseMs(.final_tail);
             const avg_desc_allocs = @as(f64, @floatFromInt(engine.profile_total_counters.descriptor_allocs)) / @as(f64, @floatFromInt(engine.profile_sample_count));
             const avg_desc_writes = @as(f64, @floatFromInt(engine.profile_total_counters.descriptor_write_calls)) / @as(f64, @floatFromInt(engine.profile_sample_count));
@@ -10384,13 +10394,14 @@ pub fn generate(
                 avg_desc_writes,
                 avg_desc_bindings,
             });
-            log.info("PROFILE: avg GPU phases embed={d:.2} ms attention={d:.2} ms (flash_attn={d:.2} ms) ssm={d:.2} ms moe={d:.2} ms shared={d:.2} ms tail={d:.2} ms", .{
+            log.info("PROFILE: avg GPU phases embed={d:.2} ms attention={d:.2} ms (flash_attn={d:.2} ms) ssm={d:.2} ms moe={d:.2} ms shared={d:.2} ms dense_ffn={d:.2} ms tail={d:.2} ms", .{
                 avg_embed_phase_ms,
                 avg_attention_phase_ms,
                 avg_flash_attn_phase_ms,
                 avg_ssm_phase_ms,
                 avg_moe_phase_ms,
                 avg_shared_phase_ms,
+                avg_dense_ffn_phase_ms,
                 avg_tail_phase_ms,
             });
             log.info("PROFILE: avg SSM subphases proj={d:.2} ms conv={d:.2} ms delta={d:.2} ms gnorm={d:.2} ms out={d:.2} ms", .{
