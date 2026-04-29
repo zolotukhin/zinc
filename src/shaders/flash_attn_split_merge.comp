@@ -1,0 +1,96 @@
+#version 460
+// ZINC — Split-K flash attention merge pass.
+// Companion to flash_attn.comp's split-K mode (N_I_CHUNKS > 1). One workgroup
+// per query head: read N_I_CHUNKS partials produced by the split-K dispatch,
+// combine them via the standard log-sum-exp merge, fold in the per-head sink
+// term, normalize, and write the final attention output.
+//
+// Dispatch: grid (n_heads, 1, 1), local_size_x = 64.
+//
+// Input buffer (binding 0) layout:
+//   partial O region: head_dim * N_I_CHUNKS * n_heads floats
+//     idx = (head * N_I_CHUNKS + chunk_id) * head_dim + d
+//   LSE region (offset = n_heads * N_I_CHUNKS * head_dim):
+//     idx = lse_base + (head * N_I_CHUNKS + chunk_id) * 2 + (0:M, 1:L)
+
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 0) const uint N_I_CHUNKS = 2u;
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;        // dimension per head
+    uint n_heads;         // number of query heads
+    uint sink_offset;     // starting index into sink_data for this layer
+};
+
+layout(set = 0, binding = 0) readonly  buffer Partial    { float p_data[];     };
+layout(set = 0, binding = 0) readonly  buffer PartialV4  { vec4  p_data_v4[];  };
+layout(set = 0, binding = 1) writeonly buffer Output     { float o_data[];     };
+layout(set = 0, binding = 1) writeonly buffer OutputV4   { vec4  o_data_v4[];  };
+layout(set = 0, binding = 2) readonly  buffer Sinks      { float sink_data[];  };
+
+// LDS: per-chunk M, L, and post-merge weights. Sized for up to 16 chunks
+// (a generous ceiling — the host caller dispatches with N_I_CHUNKS in {2, 4}
+// during normal use but the shader degrades gracefully for higher values).
+shared float s_M_chunks[16];
+shared float s_L_chunks[16];
+shared float s_weights[16];
+shared float s_inv_L_full;
+
+void main() {
+    uint head = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint head_dim_v4 = head_dim >> 2;
+    uint lse_base = n_heads * N_I_CHUNKS * head_dim;
+    uint lse_head_base = lse_base + head * N_I_CHUNKS * 2u;
+
+    // Stage per-chunk M, L into LDS.
+    if (tid < N_I_CHUNKS) {
+        s_M_chunks[tid] = p_data[lse_head_base + tid * 2u + 0u];
+        s_L_chunks[tid] = p_data[lse_head_base + tid * 2u + 1u];
+    }
+    barrier();
+
+    // Single-thread scalar reduction of M, L, sink — N_I_CHUNKS is small (≤16)
+    // so the loop is tight and avoids the overhead of a subgroup reduction.
+    if (tid == 0u) {
+        float M_global = -1.0e30;
+        for (uint i = 0u; i < N_I_CHUNKS; i++) {
+            M_global = max(M_global, s_M_chunks[i]);
+        }
+        float sink_val = sink_data[sink_offset + head];
+        bool has_sink = !isnan(sink_val);
+        float M_full = has_sink ? max(M_global, sink_val) : M_global;
+
+        float L_full = 0.0;
+        for (uint i = 0u; i < N_I_CHUNKS; i++) {
+            float Li = s_L_chunks[i];
+            float w = (Li > 0.0) ? exp(s_M_chunks[i] - M_full) : 0.0;
+            s_weights[i] = w;
+            L_full += w * Li;
+        }
+        if (has_sink) {
+            L_full += exp(sink_val - M_full);
+        }
+        s_inv_L_full = (L_full > 0.0) ? (1.0 / L_full) : 0.0;
+    }
+    barrier();
+
+    // Combine the partials per d. Each thread handles head_dim_v4 / 64 vec4
+    // slots (head_dim=128 → 32 vec4 → 1 slot every 2 lanes; the surplus
+    // lanes idle which matches the existing flash_attn output-write loop).
+    float inv_L = s_inv_L_full;
+    uint o_base_v4 = (head * head_dim) >> 2;
+
+    for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        vec4 acc = vec4(0.0);
+        for (uint i = 0u; i < N_I_CHUNKS; i++) {
+            uint partial_base_v4 = ((head * N_I_CHUNKS + i) * head_dim) >> 2;
+            acc += s_weights[i] * p_data_v4[partial_base_v4 + d4];
+        }
+        o_data_v4[o_base_v4 + d4] = acc * inv_L;
+    }
+}

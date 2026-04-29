@@ -1477,6 +1477,36 @@ fn isReplacementArtifact(text: []const u8) bool {
     return true;
 }
 
+// Returns the byte length of the longest prefix of `bytes` that ends on a
+// complete UTF-8 codepoint boundary. Trailing bytes that form an incomplete
+// sequence (e.g. one or two bytes of a 4-byte emoji) are excluded so they can
+// be carried into the next streaming chunk. Byte-level BPE tokenizers (Qwen,
+// GPT-2) routinely split multi-byte characters across single-byte tokens; if
+// those bytes are shipped to the browser one event at a time, TextDecoder
+// emits U+FFFD per orphan byte.
+fn lastCompleteUtf8End(bytes: []const u8) usize {
+    if (bytes.len == 0) return 0;
+    // Walk back over up to 3 trailing continuation bytes (10xxxxxx).
+    var i: usize = bytes.len;
+    var continuations: usize = 0;
+    while (i > 0 and continuations < 3) {
+        const b = bytes[i - 1];
+        if ((b & 0xC0) != 0x80) break;
+        i -= 1;
+        continuations += 1;
+    }
+    if (i == 0) return bytes.len; // all continuations, nothing to anchor on — flush as-is
+    const lead = bytes[i - 1];
+    const expected: usize = if (lead < 0x80) 1
+        else if ((lead & 0xE0) == 0xC0) 2
+        else if ((lead & 0xF0) == 0xE0) 3
+        else if ((lead & 0xF8) == 0xF0) 4
+        else 1; // malformed lead — let it through
+    const have = bytes.len - (i - 1);
+    if (have >= expected) return bytes.len;
+    return i - 1;
+}
+
 fn trimDanglingHeading(text: []const u8) ?[]const u8 {
     const trimmed = std.mem.trimRight(u8, text, " \t\r\n");
     if (trimmed.len == 0) return null;
@@ -1492,6 +1522,65 @@ fn checkHeading(trimmed: []const u8, start: usize) ?[]const u8 {
     }
     if (start == 0) return "";
     return std.mem.trimRight(u8, trimmed[0 .. start - 1], " \t\r\n");
+}
+
+/// Validates that the model the client requested is the one currently loaded;
+/// if not, attempts to swap to it. Returns `true` if generation may proceed,
+/// `false` if an error response was already sent.
+///
+/// Caller must already hold the shared generation lock (i.e. have an active
+/// `GenerationGuard`), since `activateManagedModel` requires it.
+fn ensureRequestedModelActive(
+    conn: *http.Connection,
+    manager: *model_manager_mod.ModelManager,
+    server_state: *ServerState,
+    requested_model: []const u8,
+) !bool {
+    if (requested_model.len == 0) return true;
+
+    if (manager.currentResources()) |current| {
+        if (current.managed_id) |active_id| {
+            if (std.mem.eql(u8, active_id, requested_model)) return true;
+        }
+        if (comptime runtime.supports_model_management) {
+            // The model may have been loaded by --model <path> with no managed_id;
+            // resolve the catalog entry that corresponds to the on-disk file so
+            // a request for that catalog id is treated as a no-op rather than a swap.
+            if (catalog_mod.findForLoadedModel(current.managed_id, current.model_path, current.display_name)) |entry| {
+                if (std.mem.eql(u8, entry.id, requested_model)) return true;
+            }
+        }
+    }
+
+    if (comptime !runtime.supports_model_management) {
+        try conn.sendError(404, "model_not_found", "Requested model is not loaded; this build does not support runtime model swapping");
+        return false;
+    }
+
+    manager.activateManagedModel(requested_model, true) catch |err| {
+        const status: u16 = switch (err) {
+            error.UnknownManagedModel, error.ModelNotInstalled => 404,
+            error.GpuAlreadyReserved => 409,
+            else => 400,
+        };
+        const code = switch (err) {
+            error.UnknownManagedModel, error.ModelNotInstalled => "model_not_found",
+            else => "invalid_request_error",
+        };
+        const msg = switch (err) {
+            error.UnknownManagedModel => "Unknown model id",
+            error.ModelNotInstalled => "Model is not installed in the local cache",
+            error.ModelUnsupportedOnThisGpu => "Model is not supported on the current GPU",
+            error.ModelDoesNotFit => "Model does not fit the current GPU memory budget",
+            error.GpuAlreadyReserved => "Another zinc process owns this GPU",
+            else => @errorName(err),
+        };
+        log.warn("Model activation failed for '{s}': {s}", .{ requested_model, @errorName(err) });
+        try conn.sendError(status, code, msg);
+        return false;
+    };
+    server_state.clearChatReuseCache();
+    return true;
 }
 
 fn handleChatCompletions(
@@ -1514,6 +1603,7 @@ fn handleChatCompletions(
 
     var generation_guard = GenerationGuard.acquire(server_state);
     defer generation_guard.release();
+    if (!try ensureRequestedModelActive(conn, manager, server_state, parsed.parsed.value.model)) return;
     const resources = manager.currentResources() orelse {
         try conn.sendError(503, "service_unavailable", "No model is currently loaded");
         return;
@@ -1707,8 +1797,6 @@ fn handleChatCompletions(
             }
         }.check;
         const stop_strs = chat_stop_strs[0..];
-        var pending_tokens: [16]u32 = undefined; // tokens waiting to be sent
-        var pending_count: usize = 0;
         var gen_text_buf: [32768]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
@@ -1789,12 +1877,6 @@ fn handleChatCompletions(
                     }
                 }
 
-                // Add to pending queue
-                if (thinking_enabled and pending_count < pending_tokens.len) {
-                    pending_tokens[pending_count] = prev_token;
-                    pending_count += 1;
-                }
-
                 // Check for explicit chat stops, reopened think blocks, and leaked prompt-analysis tails.
                 if (findStreamingStopStart(gen_text_buf[0..gen_text_len])) |stop_idx| {
                     gen_text_len = stop_idx;
@@ -1805,7 +1887,6 @@ fn handleChatCompletions(
                         streamText(conn, cleaned_pending, req_id, ts, model_name) catch return;
                     }
                     sent_text_len = gen_text_len;
-                    pending_count = 0;
                     stopped = true;
                 }
                 if (stopped) break;
@@ -1830,19 +1911,24 @@ fn handleChatCompletions(
 
                 if (!is_partial) {
                     if (thinking_enabled) {
-                        // Safe to send all pending tokens
-                        for (pending_tokens[0..pending_count]) |tid| {
-                            streamToken(conn, tid, tokenizer, req_id, ts, model_name) catch return;
+                        // Stream the accumulated bytes since the last safe send,
+                        // trimmed to a UTF-8 codepoint boundary so partial multi-
+                        // byte chars (emojis, CJK) carry into the next iteration.
+                        const pending_slice = gen_text_buf[sent_text_len..gen_text_len];
+                        const safe_end_rel = lastCompleteUtf8End(pending_slice);
+                        if (safe_end_rel > 0) {
+                            streamText(conn, pending_slice[0..safe_end_rel], req_id, ts, model_name) catch return;
                         }
-                        pending_count = 0;
+                        sent_text_len += safe_end_rel;
                     } else {
                         const visible = stripThinkingForDisabledResponse(gen_text_buf[0..gen_text_len], &visible_buf) catch gen_text_buf[0..gen_text_len];
-                        if (visible.len > sent_visible_len) {
-                            streamText(conn, visible[sent_visible_len..], req_id, ts, model_name) catch return;
-                            sent_visible_len = visible.len;
+                        const safe_visible = lastCompleteUtf8End(visible);
+                        if (safe_visible > sent_visible_len) {
+                            streamText(conn, visible[sent_visible_len..safe_visible], req_id, ts, model_name) catch return;
+                            sent_visible_len = safe_visible;
                         }
+                        sent_text_len = gen_text_len;
                     }
-                    sent_text_len = gen_text_len;
                 }
 
                 generated += 1;
@@ -1998,6 +2084,7 @@ fn handleCompletions(
 
     var generation_guard = GenerationGuard.acquire(server_state);
     defer generation_guard.release();
+    if (!try ensureRequestedModelActive(conn, manager, server_state, parsed.model_id)) return;
     const resources = manager.currentResources() orelse {
         try conn.sendError(503, "service_unavailable", "No model is currently loaded");
         return;
@@ -2430,21 +2517,6 @@ fn jsonEscape(input: []const u8, buf: []u8) []const u8 {
     return buf[0..out];
 }
 
-/// Send a single token as an SSE ChatCompletionChunk event.
-fn streamToken(
-    conn: *http.Connection,
-    token_id: u32,
-    tokenizer: *const tokenizer_mod.Tokenizer,
-    req_id: []const u8,
-    ts: i64,
-    model_name: []const u8,
-) !void {
-    // Decode GPT-2 byte encoding to real UTF-8
-    var decode_buf: [256]u8 = undefined;
-    const token_text = tokenizer.decodeToken(token_id, &decode_buf);
-    try streamText(conn, token_text, req_id, ts, model_name);
-}
-
 fn streamText(
     conn: *http.Connection,
     text: []const u8,
@@ -2644,6 +2716,59 @@ test "jsonEscape plain ASCII passthrough" {
     var buf: [64]u8 = undefined;
     const result = jsonEscape("Hello, World! 123", &buf);
     try std.testing.expectEqualStrings("Hello, World! 123", result);
+}
+
+test "lastCompleteUtf8End passes complete ASCII" {
+    try std.testing.expectEqual(@as(usize, 5), lastCompleteUtf8End("hello"));
+}
+
+test "lastCompleteUtf8End passes complete multi-byte char" {
+    // ⭐ U+2B50 = 0xE2 0xAD 0x90 (3 bytes), preceded by ASCII
+    const s = "hi \xE2\xAD\x90";
+    try std.testing.expectEqual(s.len, lastCompleteUtf8End(s));
+}
+
+test "lastCompleteUtf8End trims partial 4-byte emoji" {
+    // 🔧 U+1F527 = 0xF0 0x9F 0x94 0xA7. Cut at each prefix length 1..3 — should
+    // trim back to before the lead byte. Full sequence passes through.
+    const full = "abc\xF0\x9F\x94\xA7";
+    try std.testing.expectEqual(full.len, lastCompleteUtf8End(full));
+    try std.testing.expectEqual(@as(usize, 3), lastCompleteUtf8End(full[0..4])); // F0
+    try std.testing.expectEqual(@as(usize, 3), lastCompleteUtf8End(full[0..5])); // F0 9F
+    try std.testing.expectEqual(@as(usize, 3), lastCompleteUtf8End(full[0..6])); // F0 9F 94
+}
+
+test "lastCompleteUtf8End trims partial 3-byte sequence" {
+    // ⭐ split mid-codepoint
+    const full = "ok \xE2\xAD\x90";
+    try std.testing.expectEqual(@as(usize, 3), lastCompleteUtf8End(full[0..4])); // E2
+    try std.testing.expectEqual(@as(usize, 3), lastCompleteUtf8End(full[0..5])); // E2 AD
+    try std.testing.expectEqual(full.len, lastCompleteUtf8End(full));
+}
+
+test "lastCompleteUtf8End empty input" {
+    try std.testing.expectEqual(@as(usize, 0), lastCompleteUtf8End(""));
+}
+
+test "lastCompleteUtf8End streams emoji byte-by-byte without dropping bytes" {
+    // Simulate the streaming server's flush boundary: a 4-byte emoji arrives
+    // one byte at a time; each call must hold back the partial bytes until
+    // the next chunk completes the codepoint. Concatenating the emitted
+    // chunks must reproduce the original bytes exactly.
+    const full = "x\xF0\x9F\x94\xA7y";
+    var emitted: std.ArrayList(u8) = .{};
+    defer emitted.deinit(std.testing.allocator);
+
+    var sent: usize = 0;
+    var len: usize = 0;
+    while (len <= full.len) : (len += 1) {
+        const safe = lastCompleteUtf8End(full[0..len]);
+        if (safe > sent) {
+            try emitted.appendSlice(std.testing.allocator, full[sent..safe]);
+            sent = safe;
+        }
+    }
+    try std.testing.expectEqualSlices(u8, full, emitted.items);
 }
 
 test "findStringEnd no closing quote returns null" {

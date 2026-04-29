@@ -1,0 +1,257 @@
+#version 460
+// ZINC — Q4_K DMMV-acc fused with split-K flash attention merge.
+//
+// Replaces (flash_attn_split_merge → barrier → o_proj DMMV-acc) with a
+// single dispatch:
+//   1. Each WG cooperatively reads the per-head M, L from the LSE region
+//      of partial_attn_out_buf, computes per-chunk weights and inv_L
+//      (with sink fold-in).
+//   2. WG cooperatively stages the merged attn_out (per-token, hidden_dim
+//      floats = 16 KB at hidden_dim=4096) into LDS.
+//   3. Standard Q4_K DMMV-acc (matches dmmv_q4k.comp) reads B-vector from
+//      LDS instead of global memory and accumulates W_o · attn_out into
+//      hidden_buf for the residual.
+//
+// Save per attention layer: 1 dispatch + 1 barrier (the merge pass and
+// its succeeding barrier disappear). At L≈1500 with 36 layers and split-K
+// active, that's 36 dispatches + 36 barriers/token off the host hot path.
+//
+// Bindings:
+//   0  W_o      (Q4_K, [M=hidden_dim, K=hidden_dim] row-major u32 stream)
+//   1  partial  (f32, partial_attn_out_buf — partials region + LSE region)
+//   2  hidden   (f32, hidden_buf — read+write for the residual accumulate)
+//   3  sinks    (f32, full per-model sinks buffer; sink_offset chooses layer)
+//
+// Push:
+//   uint M;           // hidden_dim (n_heads * head_dim)
+//   uint K;           // hidden_dim
+//   uint a_offset;    // bytes into W_o
+//   uint x_offset;    // ignored (partial layout uses head*N_I_CHUNKS+chunk indexing)
+//   uint y_offset;    // bytes into hidden
+//   uint acc_mode;    // = 1 (always accumulate residual on this fused path)
+//   uint n_heads;
+//   uint n_i_chunks;  // matches the split-K spec const used by flash_attn
+//   uint sink_offset; // layer * n_heads
+//   uint head_dim;
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint acc_mode;
+    uint n_heads;
+    uint n_i_chunks;
+    uint sink_offset;
+    uint head_dim;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA   { uint  a_u32[];     };
+layout(set = 0, binding = 1) readonly buffer Partial   { float p_data[];    };
+layout(set = 0, binding = 2)          buffer VectorY   { float y_data[];    };
+layout(set = 0, binding = 3) readonly buffer Sinks     { float sink_data[]; };
+
+const uint NUM_ROWS = 2u;
+const uint Q4K_BLOCK_U32 = 36u;
+
+// LDS for the merged attn_out — supports up to hidden_dim = 4096 (Qwen 3 8B).
+// Compile-time fixed; if a future model needs larger, we'll size up here
+// (or fall back to the unfused path via the dispatch flag).
+shared float s_attn_out[4096];
+
+// Per-head merge state. Up to 64 heads × 8 chunks weights = 512 + 64 inv_L.
+// Qwen 3 8B uses 32 heads × 4 chunks = 128 + 32 — well inside the buffer.
+shared float s_weights[512];
+shared float s_inv_L[64];
+
+// Cross-subgroup reduction (matches dmmv_q4k.comp; rare on RDNA wave64).
+shared float s_sg_sums[4];
+
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
+}
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    uint hidden_dim = K;
+    uint h_dim = head_dim;
+    uint n_h = n_heads;
+    uint n_c = n_i_chunks;
+
+    // ── Phase A: Compute per-head merge weights and inv_L ──
+    // Each thread tid handles one (head, chunk) pair when tid < n_h*n_c (max 32*4=128 here),
+    // produces a weight value. Then a per-head reduction computes M_full and L_full.
+    // For Qwen3 8B (n_heads=32, n_i_chunks=4 → 128 (h,c) pairs), but local_size_x=64,
+    // so we loop. We split the work: each thread tid handles head=tid (when tid < n_h)
+    // and processes all chunks for that head. Single-thread per head is OK because the
+    // inner loop is tiny (4 chunks).
+    uint lse_base = n_h * n_c * h_dim; // float index into p_data
+    if (tid < n_h) {
+        uint head = tid;
+        uint lse_h_base = lse_base + head * n_c * 2u;
+
+        float M_local[16];
+        float L_local[16];
+        for (uint c = 0u; c < n_c; c++) {
+            M_local[c] = p_data[lse_h_base + c * 2u + 0u];
+            L_local[c] = p_data[lse_h_base + c * 2u + 1u];
+        }
+        float M_global = M_local[0];
+        for (uint c = 1u; c < n_c; c++) M_global = max(M_global, M_local[c]);
+
+        float sink_val = sink_data[sink_offset + head];
+        bool has_sink = !isnan(sink_val);
+        float M_full = has_sink ? max(M_global, sink_val) : M_global;
+
+        float L_full = 0.0;
+        for (uint c = 0u; c < n_c; c++) {
+            float w = (L_local[c] > 0.0) ? exp(M_local[c] - M_full) : 0.0;
+            s_weights[head * n_c + c] = w;
+            L_full += w * L_local[c];
+        }
+        if (has_sink) L_full += exp(sink_val - M_full);
+        s_inv_L[head] = (L_full > 0.0) ? (1.0 / L_full) : 0.0;
+    }
+    barrier();
+
+    // ── Phase B: Stage merged attn_out into LDS ──
+    // attn_out has hidden_dim elements = n_heads * head_dim.
+    // Each thread iterates over its assigned k indices.
+    // hidden_dim is K; for Qwen3 8B = 4096 = 64 elements per thread.
+    for (uint k = tid; k < hidden_dim; k += 64u) {
+        uint head = k / h_dim;
+        uint d = k - head * h_dim;
+        float acc = 0.0;
+        // Sum over chunks: weight[head, chunk] * partial[head, chunk, d]
+        // Partial layout (matches flash_attn.comp's split-K writeback):
+        //   partial_o_base = ((head * N_I_CHUNKS + chunk) * head_dim + d)
+        for (uint c = 0u; c < n_c; c++) {
+            uint p_idx = (head * n_c + c) * h_dim + d;
+            acc = fma(s_weights[head * n_c + c], p_data[p_idx], acc);
+        }
+        s_attn_out[k] = acc * s_inv_L[head];
+    }
+    barrier();
+
+    // ── Phase C: Standard Q4_K DMMV-acc using LDS-staged attn_out ──
+    // Identical inner loop to dmmv_q4k.comp; only difference is `by*` vec4
+    // reads come from s_attn_out instead of x_v4.
+    const uint THREADS_PER_BLOCK = 16u;
+    const uint it_size = 64u / THREADS_PER_BLOCK;
+    uint itid = tid % THREADS_PER_BLOCK;
+    uint ix = tid / THREADS_PER_BLOCK;
+
+    uint il = itid / 4u;
+    uint ir = itid % 4u;
+    uint v_im = il / 2u;
+    uint v_in = il % 2u;
+    uint l0 = 4u * (2u * ir + v_in);
+    uint q_offset = 32u * v_im + l0;
+    uint y_offset_local = 64u * v_im + l0;
+
+    uint y_base = y_offset / 4u;
+    uint blocks_per_row = K / 256u;
+    uint a_base = a_offset / 4u;
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
+
+        uint row_u32 = a_base + row * blocks_per_row * Q4K_BLOCK_U32;
+        float sum = 0.0;
+
+        for (uint i = ix; i < blocks_per_row; i += it_size) {
+            uint blk_u32 = row_u32 + i * Q4K_BLOCK_U32;
+
+            uint d_dmin = a_u32[blk_u32];
+            float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+            uint sc0 = a_u32[blk_u32 + 1u];
+            uint sc1 = a_u32[blk_u32 + 2u];
+            uint sc2 = a_u32[blk_u32 + 3u];
+
+            uint qs_u32_0 = a_u32[blk_u32 + 4u + q_offset / 4u];
+            uint qs_u32_1 = a_u32[blk_u32 + 4u + q_offset / 4u + 16u];
+
+            vec4 q0_lo = unpack_nibbles_lo(qs_u32_0);
+            vec4 q0_hi = unpack_nibbles_hi(qs_u32_0);
+            vec4 q1_lo = unpack_nibbles_lo(qs_u32_1);
+            vec4 q1_hi = unpack_nibbles_hi(qs_u32_1);
+
+            // Read B vector from LDS (s_attn_out) instead of global x_v4.
+            // Indices match dmmv_q4k.comp:
+            //   b_idx_elem = i*256 + y_offset_local
+            //   by0 = elements [b_idx, b_idx+1, b_idx+2, b_idx+3]
+            //   by1 = elements [b_idx+32, ..., b_idx+35]
+            //   by2 = elements [b_idx+128, ..., b_idx+131]
+            //   by3 = elements [b_idx+160, ..., b_idx+163]
+            uint b_idx = i * 256u + y_offset_local;
+            vec4 by0 = vec4(s_attn_out[b_idx],      s_attn_out[b_idx + 1u],  s_attn_out[b_idx + 2u],  s_attn_out[b_idx + 3u]);
+            vec4 by1 = vec4(s_attn_out[b_idx + 32u], s_attn_out[b_idx + 33u], s_attn_out[b_idx + 34u], s_attn_out[b_idx + 35u]);
+            vec4 by2 = vec4(s_attn_out[b_idx + 128u], s_attn_out[b_idx + 129u], s_attn_out[b_idx + 130u], s_attn_out[b_idx + 131u]);
+            vec4 by3 = vec4(s_attn_out[b_idx + 160u], s_attn_out[b_idx + 161u], s_attn_out[b_idx + 162u], s_attn_out[b_idx + 163u]);
+
+            uint sb_a = 2u * v_im;
+            uint sb_b = 2u * v_im + 1u;
+            uint sb_c = 2u * v_im + 4u;
+            uint sb_d = 2u * v_im + 5u;
+
+            uint bytes[12];
+            bytes[0]  = sc0 & 0xFFu; bytes[1]  = (sc0 >> 8) & 0xFFu; bytes[2]  = (sc0 >> 16) & 0xFFu; bytes[3]  = (sc0 >> 24) & 0xFFu;
+            bytes[4]  = sc1 & 0xFFu; bytes[5]  = (sc1 >> 8) & 0xFFu; bytes[6]  = (sc1 >> 16) & 0xFFu; bytes[7]  = (sc1 >> 24) & 0xFFu;
+            bytes[8]  = sc2 & 0xFFu; bytes[9]  = (sc2 >> 8) & 0xFFu; bytes[10] = (sc2 >> 16) & 0xFFu; bytes[11] = (sc2 >> 24) & 0xFFu;
+
+            float sc_a, mn_a, sc_b, mn_b, sc_c, mn_c, sc_d, mn_d;
+            if (sb_a < 4u) { sc_a = float(bytes[sb_a] & 63u); mn_a = float(bytes[sb_a + 4u] & 63u); }
+            else { sc_a = float((bytes[sb_a + 4u] & 0xFu) | ((bytes[sb_a - 4u] >> 6) << 4)); mn_a = float(((bytes[sb_a + 4u] >> 4) & 0xFu) | ((bytes[sb_a] >> 6) << 4)); }
+            if (sb_b < 4u) { sc_b = float(bytes[sb_b] & 63u); mn_b = float(bytes[sb_b + 4u] & 63u); }
+            else { sc_b = float((bytes[sb_b + 4u] & 0xFu) | ((bytes[sb_b - 4u] >> 6) << 4)); mn_b = float(((bytes[sb_b + 4u] >> 4) & 0xFu) | ((bytes[sb_b] >> 6) << 4)); }
+            if (sb_c < 4u) { sc_c = float(bytes[sb_c] & 63u); mn_c = float(bytes[sb_c + 4u] & 63u); }
+            else { sc_c = float((bytes[sb_c + 4u] & 0xFu) | ((bytes[sb_c - 4u] >> 6) << 4)); mn_c = float(((bytes[sb_c + 4u] >> 4) & 0xFu) | ((bytes[sb_c] >> 6) << 4)); }
+            if (sb_d < 4u) { sc_d = float(bytes[sb_d] & 63u); mn_d = float(bytes[sb_d + 4u] & 63u); }
+            else { sc_d = float((bytes[sb_d + 4u] & 0xFu) | ((bytes[sb_d - 4u] >> 6) << 4)); mn_d = float(((bytes[sb_d + 4u] >> 4) & 0xFu) | ((bytes[sb_d] >> 6) << 4)); }
+
+            float factor0 = d_val * sc_a, bias0 = dmin_val * mn_a;
+            float factor1 = d_val * sc_b, bias1 = dmin_val * mn_b;
+            float factor2 = d_val * sc_c, bias2 = dmin_val * mn_c;
+            float factor3 = d_val * sc_d, bias3 = dmin_val * mn_d;
+
+            sum += dot(vec4(factor0) * q0_lo - vec4(bias0), by0);
+            sum += dot(vec4(factor1) * q0_hi - vec4(bias1), by1);
+            sum += dot(vec4(factor2) * q1_lo - vec4(bias2), by2);
+            sum += dot(vec4(factor3) * q1_hi - vec4(bias3), by3);
+        }
+
+        sum = subgroupAdd(sum);
+        if (gl_NumSubgroups > 1u) {
+            if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum;
+            barrier();
+            if (tid == 0u) {
+                for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum += s_sg_sums[sg];
+            }
+            barrier();
+        }
+        if (tid == 0u) {
+            if (acc_mode != 0u)
+                y_data[y_base + row] += sum;
+            else
+                y_data[y_base + row] = sum;
+        }
+    }
+}

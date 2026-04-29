@@ -75,6 +75,24 @@ pub const MoeFusedDownAccPushConstants = extern struct {
     n_used: u32,
 };
 
+/// Push constants for the fused split-K merge + o_proj DMMV-acc shader
+/// (src/shaders/dmmv_q4k_o_proj_merge.comp). Adds the merge-pass parameters
+/// to the standard DmmvPushConstants so a single dispatch reads partials,
+/// computes per-head LSE merge weights, stages attn_out into LDS, and runs
+/// the Q4_K matmul with residual accumulation.
+pub const OprojMergePushConstants = extern struct {
+    M: u32,
+    K: u32,
+    a_offset: u32,
+    x_offset: u32,
+    y_offset: u32,
+    acc_mode: u32 = 1,
+    n_heads: u32,
+    n_i_chunks: u32,
+    sink_offset: u32,
+    head_dim: u32,
+};
+
 /// Push constants for the quantize_q8_1 shader.
 /// `ne` = number of f32 input elements (must be a multiple of 32).
 /// `num_blocks` = ne / 32. Pass explicitly so the shader does not have to divide.
@@ -134,6 +152,15 @@ pub const DmmvDispatch = struct {
     /// in at the call site when M is large enough to benefit from 4× fewer
     /// workgroups with 4× more hidden-vector reuse per workgroup.
     pipeline_q4k_wide: ?Pipeline,
+    /// Q4K dense DMMV with THREADS_PER_BLOCK=32 (vs TPB=16 in pipeline_q4k).
+    /// Same 3-binding layout and push constants. Effort-11 cycle-2: lower
+    /// per-thread VGPR pressure (q/by vec4s and factor/bias scalars halve)
+    /// targets higher wave occupancy on R9700 for K-large dispatches —
+    /// dense down_proj on Qwen 3-class models has K=inter_dim ≥ 12288 and
+    /// is the new dominant FFN bucket after split-K cut flash_attn to 12%
+    /// of decode. Routed when q4_k and K ≥ 8000 (excludes o_proj and
+    /// q/k/v projections which keep the 4-blocks-in-parallel TPB=16 shape).
+    pipeline_q4k_kpar32: ?Pipeline,
     /// Cross-token batched MoE DMMV. Same Q4_K weight layout as
     /// pipeline_q4k_moe_kpar but the dispatch grid adds a token_idx
     /// dimension (grid.z) so one dispatch covers all N prompt tokens'
@@ -182,6 +209,24 @@ pub const DmmvDispatch = struct {
     /// Y_up, routing). Halves the dispatch count for the MoE gate+up phase
     /// and reads the shared input once per block.
     pipeline_q4k_fused_gate_up_moe: ?Pipeline,
+    /// Fused gate+up+SwiGLU Q4_K dense pipeline (4 bindings: W_gate, W_up,
+    /// X, swiglu_out). Replaces the dense FFN front-end dispatch trio
+    /// (gate DMMV + up DMMV + swiglu element-wise) with a single dispatch
+    /// that computes silu(W_gate·x) * (W_up·x) inline. Eliminates gate_buf
+    /// and up_buf from the dense decode datapath. Saves one global compute
+    /// barrier per layer (gate+up → swiglu), and reads the shared input
+    /// once per block. Same DmmvPushConstants layout as pipeline_q4k.
+    pipeline_q4k_fused_gate_up_swiglu: ?Pipeline,
+    /// Fused split-K merge + Q4_K o_proj DMMV-acc pipeline (4 bindings:
+    /// W_o, partial_attn_out_buf, hidden_buf, sinks). Replaces the
+    /// (flash_attn_split_merge → o_proj DMMV-acc) pair with one dispatch:
+    /// each WG reads per-head M, L, computes LSE merge weights with sink
+    /// fold-in, stages the merged attn_out (hidden_dim floats) into LDS,
+    /// then runs the standard Q4_K matmul reading the B-vector from LDS
+    /// and accumulating into hidden_buf. Saves 1 dispatch + 1 barrier per
+    /// attention layer when split-K is active. Push constants:
+    /// OprojMergePushConstants. Gated behind ZINC_FUSED_OPROJ_MERGE.
+    pipeline_q4k_o_proj_merge: ?Pipeline,
     /// Fused Q4_K MoE down + weighted_acc pipeline (4 bindings: A, X,
     /// Y=hidden_buf, routing). Each WG owns NUM_ROWS=2 hidden rows and
     /// loops over n_used experts internally, eliminating the separate
@@ -323,6 +368,15 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // TPB=32 dense Q4_K variant for K-large dispatches (down_proj). Same
+        // 3-binding layout and push constants as pipeline_q4k. Effort-11
+        // cycle-2 — see field doc for the occupancy hypothesis.
+        const q4k_kpar32_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_kpar32.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_kpar32 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_kpar32_path, 3, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K kpar32 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
         const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
@@ -437,6 +491,29 @@ pub const DmmvDispatch = struct {
         const q4k_fused_gate_up_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_moe.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k_fused_gate_up_moe = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_path, 6, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE fused gate+up shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Dense fused gate+up+SwiGLU: reads ffn_norm_buf once per block,
+        // dot-products against W_gate and W_up, applies silu(gate)*up
+        // inline, and writes a single swiglu_buf row. 4 bindings (W_gate,
+        // W_up, X, swiglu). Same DmmvPushConstants as pipeline_q4k.
+        const q4k_fused_gate_up_swiglu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_swiglu.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_fused_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_swiglu_path, 4, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K dense fused gate+up+SwiGLU shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
+        // Fused split-K merge + Q4_K o_proj DMMV-acc. 4 bindings (W_o,
+        // partial_attn_out_buf, hidden_buf, sinks). Push uses
+        // OprojMergePushConstants — same DmmvPushConstants prefix plus
+        // n_heads, n_i_chunks, sink_offset, head_dim. Used when
+        // ZINC_FUSED_OPROJ_MERGE=1 and split-K is active to fold the
+        // merge dispatch into o_proj.
+        const oproj_merge_push_size = @sizeOf(OprojMergePushConstants);
+        const q4k_o_proj_merge_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_o_proj_merge.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_o_proj_merge = pipeline_mod.createFromSpirvWithOptions(instance, q4k_o_proj_merge_path, 4, oproj_merge_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K fused o_proj+merge shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -565,6 +642,7 @@ pub const DmmvDispatch = struct {
         return DmmvDispatch{
             .pipeline_q4k = pipeline_q4k,
             .pipeline_q4k_wide = pipeline_q4k_wide,
+            .pipeline_q4k_kpar32 = pipeline_q4k_kpar32,
             .pipeline_mxfp4 = pipeline_mxfp4,
             .pipeline_q5_0 = pipeline_q5_0,
             .pipeline_q5_1 = pipeline_q5_1,
@@ -581,6 +659,8 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_moe_kpar = pipeline_q4k_moe_kpar,
             .pipeline_q4k_moe_batched = pipeline_q4k_moe_batched,
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
+            .pipeline_q4k_fused_gate_up_swiglu = pipeline_q4k_fused_gate_up_swiglu,
+            .pipeline_q4k_o_proj_merge = pipeline_q4k_o_proj_merge,
             .pipeline_q4k_moe_fused_down_acc = pipeline_q4k_moe_fused_down_acc,
             .pipeline_q5k_moe_fused_down_acc = pipeline_q5k_moe_fused_down_acc,
             .pipeline_mxfp4_moe = pipeline_mxfp4_moe,
@@ -1122,6 +1202,7 @@ pub const DmmvDispatch = struct {
     pub fn deinit(self: *DmmvDispatch) void {
         if (self.pipeline_q4k) |*p| p.deinit();
         if (self.pipeline_q4k_wide) |*p| p.deinit();
+        if (self.pipeline_q4k_kpar32) |*p| p.deinit();
         if (self.pipeline_q5_1) |*p| p.deinit();
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();
@@ -1136,6 +1217,8 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q4k_moe_batched) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_moe) |*p| p.deinit();
+        if (self.pipeline_q4k_fused_gate_up_swiglu) |*p| p.deinit();
+        if (self.pipeline_q4k_o_proj_merge) |*p| p.deinit();
         if (self.pipeline_q4k_moe_fused_down_acc) |*p| p.deinit();
         if (self.pipeline_q5k_moe_fused_down_acc) |*p| p.deinit();
         if (self.pipeline_q5k_moe) |*p| p.deinit();

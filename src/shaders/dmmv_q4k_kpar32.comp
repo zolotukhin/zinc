@@ -1,0 +1,167 @@
+#version 460
+// ZINC — Q4_K dense DMMV with THREADS_PER_BLOCK=32 (vs TPB=16 in dmmv_q4k.comp).
+// 32 threads cooperate on each Q4_K superblock; 2 blocks-in-parallel per WG
+// (vs 4 in TPB=16). Each thread covers 8 elements per block (vs 16),
+// halving per-thread register pressure for q vec4s, by vec4s, and the
+// factor/bias scratch — which on RDNA4 should bump wave occupancy per CU
+// (run-3 audit notes the dense FFN bucket sits at 56% of decode time at
+// L≈846 with down_proj at 2.4× the Q4_K bandwidth floor; lower per-thread
+// VGPR usage is the suspected lever).
+//
+// Bit-equivalent to dmmv_q4k.comp: identical scale decode (v_im-uniform
+// shift), identical dot-product math, identical reduction. The mapping
+// from the 16-thread layout splits each TPB=16 thread's 4-dot inner loop
+// into two TPB=32 threads doing 2 dots each:
+//   is_hi_qs=0 lane (itid 0..15):  qs_u32_0  +  by0/by1  +  scales sb_a, sb_b
+//   is_hi_qs=1 lane (itid 16..31): qs_u32_1  +  by2/by3  +  scales sb_c, sb_d
+//
+// Routing: dispatched only when K ≥ 8000 (= dense down_proj on Qwen 3-class
+// dense models with inter_dim ≥ 8192). The non-K-large dispatches stay on
+// pipeline_q4k.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint acc_mode; // 0 = overwrite, 1 = accumulate (y += result)
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
+layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
+
+const uint NUM_ROWS = 2u;
+const uint Q4K_BLOCK_U32 = 36u;  // 144 bytes / 4
+
+// Cross-subgroup reduction (Intel Xe2 SIMD16: 4 subgroups per 64-thread WG).
+// On RDNA wave64 this is dead; gl_NumSubgroups == 1.
+shared float s_sg_sums[4];
+
+vec4 unpack_nibbles_lo(uint v) {
+    return vec4(float(v & 0xFu), float((v >> 8) & 0xFu),
+                float((v >> 16) & 0xFu), float((v >> 24) & 0xFu));
+}
+vec4 unpack_nibbles_hi(uint v) {
+    return vec4(float((v >> 4) & 0xFu), float((v >> 12) & 0xFu),
+                float((v >> 20) & 0xFu), float((v >> 28) & 0xFu));
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+
+    // 32 threads per block, 2 blocks-in-parallel per WG.
+    const uint THREADS_PER_BLOCK = 32u;
+    const uint it_size = 64u / THREADS_PER_BLOCK;  // = 2
+    uint itid = tid % THREADS_PER_BLOCK;  // 0..31 within a block
+    uint ix = tid / THREADS_PER_BLOCK;    // 0..1 which block in parallel
+
+    // Within the 32 threads of one block, split lanes into two groups of 16:
+    //   is_hi_qs=0 (itid 0..15)  → qs_u32_0  +  by_lo at +0/+32 elements
+    //                              + scales sb_a, sb_b
+    //   is_hi_qs=1 (itid 16..31) → qs_u32_1  +  by_lo at +128/+160 elements
+    //                              + scales sb_c, sb_d
+    uint itid_half = itid % 16u;       // 0..15 within the qs group
+    uint is_hi_qs  = itid / 16u;       // 0 or 1
+
+    uint il = itid_half / 4u;          // 0..3
+    uint ir = itid_half % 4u;          // 0..3
+    uint v_im = il / 2u;               // 0 or 1: which 128-element half
+    uint v_in = il % 2u;               // 0 or 1: which 64-element sub-half
+    uint l0 = 4u * (2u * ir + v_in);   // 0, 4, 8, ..., 28 within sub-half
+    uint q_offset_in_half = 32u * v_im + l0; // qs byte offset within the 64-byte half
+    // Y offset shifts +128 elements when is_hi_qs (the qs_u32_1 group covers
+    // the second 128-element half of the block in B-vector space).
+    uint y_offset_local = 64u * v_im + l0 + 128u * is_hi_qs;
+
+    uint x_base = x_offset / 16u;
+    uint y_base = y_offset / 4u;
+    uint blocks_per_row = K / 256u;
+    uint a_base = a_offset / 4u;
+    uint shift = v_im * 16u;           // v_im-uniform shift for scale decode
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = wg_id * NUM_ROWS + r;
+        if (row >= M) break;
+
+        uint row_u32 = a_base + row * blocks_per_row * Q4K_BLOCK_U32;
+        float sum = 0.0;
+
+        // Stride over blocks: ix, ix+2, ix+4, ...
+        for (uint i = ix; i < blocks_per_row; i += it_size) {
+            uint blk_u32 = row_u32 + i * Q4K_BLOCK_U32;
+
+            // d + dmin (uniform across all 32 threads of this block).
+            uint d_dmin = a_u32[blk_u32];
+            float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+
+            // Scale words (12 bytes of packed 6-bit scales; uniform).
+            uint sc0 = a_u32[blk_u32 + 1u];
+            uint sc1 = a_u32[blk_u32 + 2u];
+            uint sc2 = a_u32[blk_u32 + 3u];
+
+            // ONE qs uint32 (selected by is_hi_qs): 4 bytes = 8 nibble-pairs.
+            uint qs_u32 = a_u32[blk_u32 + 4u + q_offset_in_half / 4u + 16u * is_hi_qs];
+            vec4 q_lo = unpack_nibbles_lo(qs_u32);
+            vec4 q_hi = unpack_nibbles_hi(qs_u32);
+
+            // 2 B-vector vec4 loads (8 floats per thread, vs 16 in TPB=16).
+            uint b_idx = (i * 256u + y_offset_local) / 4u;
+            vec4 by_lo = x_v4[x_base + b_idx];        // elements y_offset_local + 0..3
+            vec4 by_hi = x_v4[x_base + b_idx + 8u];   // elements y_offset_local + 32..35
+
+            // Decode all 4 sub-block scales (sb_a..sb_d) with v_im-uniform
+            // shift — bit-equivalent to dmmv_q4k.comp.
+            uint sc0_v = sc0 >> shift;
+            uint sc1_v = sc1 >> shift;
+            uint sc2_v = sc2 >> shift;
+            float sc_a = float(sc0_v & 0x3Fu);
+            float mn_a = float(sc1_v & 0x3Fu);
+            float sc_b = float((sc0_v >> 8u) & 0x3Fu);
+            float mn_b = float((sc1_v >> 8u) & 0x3Fu);
+            float sc_c = float((sc2_v & 0xFu) | ((sc0_v & 0xC0u) >> 2u));
+            float mn_c = float(((sc2_v & 0xF0u) >> 4u) | ((sc1_v & 0xC0u) >> 2u));
+            float sc_d = float(((sc2_v >> 8u) & 0xFu) | (((sc0_v >> 8u) & 0xC0u) >> 2u));
+            float mn_d = float((((sc2_v >> 8u) & 0xF0u) >> 4u) | (((sc1_v >> 8u) & 0xC0u) >> 2u));
+
+            // Pick this thread's pair: is_hi_qs=0 → sb_a, sb_b; is_hi_qs=1 → sb_c, sb_d.
+            // Compiled as straight-line select instructions; no divergent
+            // control flow even though lanes 0..15 vs 16..31 take different
+            // branches semantically.
+            float factor_lo = (is_hi_qs == 0u) ? d_val * sc_a : d_val * sc_c;
+            float bias_lo  = (is_hi_qs == 0u) ? dmin_val * mn_a : dmin_val * mn_c;
+            float factor_hi = (is_hi_qs == 0u) ? d_val * sc_b : d_val * sc_d;
+            float bias_hi  = (is_hi_qs == 0u) ? dmin_val * mn_b : dmin_val * mn_d;
+
+            // 2 dot products per thread (vs 4 in TPB=16).
+            sum += dot(vec4(factor_lo) * q_lo - vec4(bias_lo), by_lo);
+            sum += dot(vec4(factor_hi) * q_hi - vec4(bias_hi), by_hi);
+        }
+
+        sum = subgroupAdd(sum);
+        if (gl_NumSubgroups > 1u) {
+            if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum;
+            barrier();
+            if (tid == 0u) {
+                for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum += s_sg_sums[sg];
+            }
+            barrier();
+        }
+        if (tid == 0u) {
+            if (acc_mode != 0u)
+                y_data[y_base + row] += sum;
+            else
+                y_data[y_base + row] = sum;
+        }
+    }
+}

@@ -162,6 +162,26 @@ const PREFILL_BENCHMARK_PROMPT = [
   "Based on the reference above, the capital of France is",
 ].join("\n");
 
+// Long-context decode benchmark for Effort 11. The prompt is a single
+// English narrative excerpt designed to tokenize to ~1500 tokens on
+// Qwen 3 8B (no chat-template overhead, no list/code tokenizer
+// quirks). Decode at L≈1500 is where the user-visible curve drop
+// hurts most in chat sessions, and it's still under the L=2300 GPU
+// hang we observed during manual cycles 71-73 of flash_attn.comp.
+const LONG_CONTEXT_DECODE_PROMPT = [
+  "Once upon a time, in a small village nestled between rolling hills and a meandering river, there lived a young blacksmith named Tomas. His forge stood at the edge of the marketplace, its chimney trailing thin grey smoke into the morning air. Every dawn he rose before the sun, lit the coals, and shaped iron into the tools and trinkets the villagers needed: horseshoes, kettles, hinges, plowshares. Tomas was not yet thirty, but the lines around his eyes told of long days and patient craft. He had inherited the forge from his father, who had inherited it from his father before him, three generations of black iron and orange sparks. The villagers respected him, though few understood why he often paused mid-strike to listen to the wind, or why on certain summer evenings he would walk alone along the riverbank, far past the willow trees, to a place no one else cared to go. The river there was deeper, its water darker, and the reeds grew taller than a man.",
+  "",
+  "Tomas had been going to that place since he was a boy, ever since the day his mother had taken him there to teach him the names of the herbs that grew along the bank. She had died the following winter, and the place had become his alone, a kind of memorial that did not need a stone. On this particular morning, however, Tomas did not go to the river. Instead, when he opened the forge, he found something unusual lying on the cold anvil: a sealed letter, its red wax stamped with a sigil he did not recognize. There was no draft, no ash disturbed, no footprint in the soot. The letter had simply appeared. Tomas turned it over in his rough hands. The paper was thick, expensive, and the wax had not yet hardened completely. Whoever left it had done so within the last hour.",
+  "",
+  "He carried it outside into the daylight and broke the seal with his thumb. The handwriting inside was elegant, precise, and the words were short: \"Come tonight, when the moon is over the willow. Bring nothing. Tell no one.\" There was no signature. Tomas read it twice, then a third time, and the more he read it the more he felt the weight of the morning shift around him. The wind, which had been still, began to stir. The smoke from his chimney bent westward toward the river. A horse in the marketplace whinnied without reason. Tomas folded the letter carefully and slipped it into the leather pouch at his belt, the one where he kept his grandfather's small iron compass and a single silver coin from a country no one in the village had heard of.",
+  "",
+  "He returned to the forge and worked through the day as he always did, but his mind was not on the iron. He shoed two horses for the miller, repaired a broken latch for the inn, and shaped four new nails for the carpenter, but he did all of it as if he were a man underwater. The customers noticed nothing. The village turned its slow wheel of bread and gossip and bargain and rest. The sun climbed, paused, and began its descent. When the bells of the small chapel rang for evening prayer, Tomas wiped his hands on his leather apron, banked the coals, and locked the forge for the night. He did not eat supper. He walked to the river path and waited for the moon.",
+  "",
+  "The moon rose late that evening, slow and full, the color of old brass. By the time it crested the willow at the bend of the river, Tomas had been waiting for nearly an hour. The reeds whispered. An owl called once and was silent. Tomas was about to turn back when a figure stepped out from behind the largest willow trunk. It was a woman he had never seen before, tall, with hair the color of river silt and a long traveling cloak the color of moss. She held no lantern, yet her face was clearly visible in the moonlight, as if she carried her own quiet light.",
+  "",
+  "Continue the story, describing what the woman said next and how Tomas responded.",
+].join("\n");
+
 type MetricMode = "decode" | "prefill";
 
 type EffortSpec = {
@@ -337,6 +357,67 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
       {
         path: "/Users/stepan/Workspace/llama.cpp/ggml/src/llama-graph.cpp",
         focus: "Reference for swing #4 (parallel-scan SSM). Search for ggml_ssm_scan to find the prefill-time scan op. The CUDA implementation is at ggml/src/ggml-cuda/ssm-scan.cu — it computes the recurrence via Blelloch scan over the token axis. The math is identical between CUDA and Vulkan; what changes is the WG layout (one WG per head per chunk).",
+      },
+    ],
+  },
+  11: {
+    doc: "MULTI_HOUR_EFFORT_11_RDNA_DECODE_LONG_CONTEXT.md",
+    summary: "Flatten the RDNA4 decode-with-context curve on Qwen 3 8B + 35B (target: decode at L=1500 ≥ 60% of empty-context decode)",
+    metricMode: "decode",
+    primaryMetricLabel: "decode tok/s at L≈846",
+    benchmarkPrompt: LONG_CONTEXT_DECODE_PROMPT,
+    benchmarkMaxTokens: 32,
+    benchmarkMethod: "decode 32 tokens after prefilling the LONG_CONTEXT_DECODE_PROMPT (tokenizes to ~846 tokens on Qwen 3 8B's BPE, NOT 1500 as the prompt comment originally claimed — calibration finding from run-3 cycle 11) on Qwen3-8B-Q4_K_M.gguf with RADV_PERFTEST=coop_matrix; report decode tok/s as the primary metric",
+    knownFlatCategories: [
+      "LDS STAGING OF K OR V IN flash_attn IS UNAMBIGUOUSLY DEAD. Three attempts lost (-44%, -12%, -29%). The 8-cycle vec4 LDS read floor + bank-conflict multiplier exceeds what 16-way ILP hides on cached scattered global K/V reads. Plus the LDS halves WGs/CU occupancy. DO NOT propose any cooperative LDS staging for K or V on flash_attn.",
+      "GQA COLLAPSE STARVES R9700'S 64 CUs WITHOUT SPLIT-K. Naive Q_PER_KV=4 (-9.9% in run-2 cycle 3) and Q_PER_KV=2 (-17.5% in run-3 cycle 4) BOTH lose because reducing the dispatch grid from n_heads=32 to n_kv_heads=8 (or n_kv_heads*2=16) starves the SIMD pool of waves. Standalone GQA collapse is dead. The fix is split-K dispatch (run-3 cycle 12 won +4.1% with N_I_CHUNKS=4), which restores WG count via i-axis tiling instead of trying to keep WG count by reducing amortization. If GQA collapse is re-attempted, ONLY combined with split-K so the dispatch is at least n_kv_heads × Q_PER_KV-budget × n_i_chunks WGs.",
+      "PHASE 4 + PHASE 1 MICRO-CHANGES ARE EXHAUSTED. V-load promotion above score multiplies (run-2 c1, flat); drop redundant post-Phase-4 barrier (run-2 c4, flat); subgroupShuffleXor merge + drop barriers (run-1 c13, run-2 c5, flat); register-resident accumulators across blocks (run-1 c15, flat); 32-way ILP (run-1 c18, flat); narrow buffer-scoped barriers at 6 dense-decode sites (run-3 c2, flat). The 16-way ILP shape is the saturation point. Don't propose further attention-shader micro-tuning — split-K cycle 12 already cut flash_attn to 12% of decode time, so the lever has moved to FFN.",
+      "BLOCK_SIZE TUNING IS FLAT. 256→512 (run-2 c2, flat); 256→384 (run-2 c13, +0.34 below threshold); split-K N_I_CHUNKS=8 (run-3 c13, flat vs N_I_CHUNKS=4). 4 i-chunks is the sweet spot; don't re-tune block-size or chunk-count on flash_attn.",
+      "V-CACHE FLOAT16 REGRESSES. Run-3 cycle 7: kv_cache_write_kvf16 + flash_attn_kvf16 with packHalf2x16 / unpackHalf2x16 measured -1.57 tok/s (-1.6%) at L≈846. The unpack inside the Phase 4 inner loop costs more than the bandwidth halving saves at this scale. Don't re-attempt V-cache f16 against the current scalar V-load pattern. (Could revisit if a coopmat or Br>1 path is built that absorbs unpack cleanly.)",
+      "WIDE NUM_ROWS DMMV VARIANTS UNDER-SATURATE. Run-3 cycle 9 routed K≥8000 acc through NUM_ROWS=8 (Q4_K dense): -3.83 tok/s. Larger NUM_ROWS halves the WG count and starves R9700's CUs. NUM_ROWS=2 is the right shape; don't try NUM_ROWS≥4 wide variants on dense Q4_K paths.",
+      "rms_norm FOLDED INTO ADJACENT MATVECS IS AT-OR-BELOW THRESHOLD. Run-3 cycle 1 (rms_norm + gate+up+SwiGLU all-in-one): -0.37 tok/s. Run-3 cycle 14 (rms_norm + Q4_K matvec on Q/K/V): +0.49 below threshold. Run-2 cycle 9 (ffn_norm into the gate+up+SwiGLU fusion): +0.16 below threshold. rms_norm is small enough relative to the matvec that fusing doesn't measurably move the metric. Don't re-attempt rms_norm folding into matvecs.",
+      "K+V PROJECTION FUSION REGRESSES. Dedicated dmmv_q4k_fused_kv shader (run-2 c10, -1.1%). The two projections already overlap; fusing adds register pressure without saving wall time. Don't re-attempt.",
+      "GATE+UP-ONLY FUSION (without SwiGLU) IS FLAT. Run-2 c7. The fusion only wins WITH SwiGLU folded in. Don't re-test gate+up alone.",
+      "PER-TOKEN COS/SIN PRECOMPUTE FOR RoPE IS BELOW THRESHOLD. Run-2 cycle 13: +0.29 tok/s. The pow+cos+sin is small; precomputing doesn't move the needle.",
+      "O_PROJ + ffn_norm CROSS-LAYER FUSION FAILS NAIVELY. Run-3 cycle 5 routed o_proj to a separate buffer + did residual_rms_norm: -7% at L≈846, -32% at L=5. The current accumulate-in-place pattern (o_proj DMMV-acc directly into hidden_buf) is faster than introducing a separate buffer, even with one fewer dispatch. Run-3 cycle 15 attempted atomic-counter cross-WG sync for last-WG-does-norm pattern: produced garbled output (memory ordering broken even with GL_KHR_memory_scope_semantics). DON'T propose o_proj + ffn_norm fusion via separate buffer or atomic-counter cross-WG sync — both are dead. A safe cross-layer fusion would need to keep o_proj's accumulate-in-place behavior and add the norm via a different mechanism (last-warp-of-last-WG-does-norm, or persistent-thread pattern).",
+      "sigmoid_mul (attn_gate) FOLDED INTO SPLIT-K MERGE PASS IS FLAT. Run-3 cycle 16: mean +0.15, median -0.20 at L≈846. The merge pass is already lightweight; adding the attn_gate doesn't hurt but doesn't help. Don't re-attempt.",
+      "MANUAL-CYCLE + LANDED-LOOP FOUNDATIONS — DON'T REVERT. Q-stage in flash_attn (commit 6ece0a8); s_kv_base_v4 precompute (run-1 cycle 8 superseding the page_ids cache from f68b7d7); Phase 4 rescale+V-acc fusion (commit 539b2aa); fused gate+up+SwiGLU dense FFN dispatch (run-2 cycle 8); fused Q+K norm+rope+kv_cache_write (run-2 cycle 12); split-K flash attention with N_I_CHUNKS=4 + merge pass (run-3 cycle 12). All bit-correct.",
+      "L=2325 GPU HANG IS L≥2300-ONLY. Confirmed across 50+ cycles measuring at L≈846. Watchdog-duration issue, not correctness. Defer to separate effort if L>2300 needs fixing.",
+    ],
+    structuralSwingIdeas: [
+      "DENSE FFN IS NOW THE 56% BUCKET — MOST PROMISING NEW ATTACKS LIVE HERE. After run-3 cycle 12's split-K flash attention cut flash_attn from 56% to 12% of decode time, dense_ffn (per-layer fused gate+up+SwiGLU + down+residual) is the new dominant bucket at 6.15 ms / 56% of decode at L≈846. Per cycle 10's audit, down_proj alone is at 2.4× the Q4_K bandwidth floor — there's room. Specific viable attacks below.",
+      "FFN SPLIT-M DOWN_PROJ DMMV. Mirror cycle-12's flash_attn split-K trick onto down_proj: split the M dimension of the down projection across multiple WGs with a merge pass that sums the M-tile partial outputs into hidden. Currently down_proj uses pipeline_q4k with NUM_ROWS=2 (M tiles per WG = 2). Increasing parallelism by tiling M across more WGs restores SIMD occupancy without breaking the inner-loop shape (which we know is 78-85% of bandwidth-floor optimal). Reference: run-3 cycle 12's merge-pass shader for the partial-output reduction pattern.",
+      "FFN K-AXIS PARALLELISM ON DOWN_PROJ. The dense down_proj has K=12288 (Qwen 3 8B inter_dim) — the largest K in the model. Current Q4_K kpar uses THREADS_PER_BLOCK=16 = 16 threads cooperating across K. Try THREADS_PER_BLOCK=32 (split each row across 32 threads) on JUST the down_proj path with subgroupClusteredAdd reduction; this engages more lanes per row while keeping NUM_ROWS=2. Cycle 9 of run-3's 'wide NUM_ROWS=8' approach failed for under-saturation; the analog at the K-axis instead of M-axis avoids that failure mode.",
+      "CROSS-LAYER FUSION VIA LAST-WG-DOES-NORM PATTERN (NOT atomic-counter, NOT separate-buffer). Run-3 cycle 5's separate-buffer approach broke o_proj's accumulate-in-place; cycle 15's atomic-counter cross-WG sync produced broken output. The third pattern that's untried: have the LAST WG of o_proj's dispatch (gl_WorkGroupID == grid_size-1, OR signaled by a counter that's incremented atomically AT THE END of each WG with proper memory_scope_semantics) execute the rms_norm in-place on hidden_buf after the accumulate is done. The trick is making the last-WG detection robust on RDNA4: the simplest is gl_WorkGroupID.x == gl_NumWorkGroups.x-1 + an explicit barrier inside that WG that waits on a sentinel value other WGs write at end-of-acc. Bit-correctness is the hard part; validate with --validate-coherence at L=5 and L=846.",
+      "SUBGROUP-PARALLELIZE THE SPLIT-K MERGE SHADER. Cycle 12's merge currently does scalar reduce on tid==0 (per cycle-12 nextIdeas). Subgroup-parallel reduction across 64 lanes for the M/L reduction would shave a small amount off each merge dispatch. Cheap cycle-sized win; cycle 12's nextIdeas list flagged it.",
+      "COMBINE SPLIT-K WITH GQA Q_PER_KV=2. Cycle-12 split-K dispatches n_kv_heads × N_I_CHUNKS = 8 × 4 = 32 WGs. Adding Q_PER_KV=2 collapse to that gives n_kv_heads × Q_PER_KV_BUDGET × N_I_CHUNKS = 8 × 2 × 4 = 64 WGs — even more concurrency, plus 2× K/V amortization per WG. The Q_PER_KV=2 collapse alone failed (-17.5%) because of WG count loss; combined with split-K's WG multiplication, the WG count is healthy AND the K/V amortization is captured. Reference: run-3 cycle 12's split-K merge pass + run-2 cycle 3's GQA collapse layout (revert reasons documented).",
+      "FA_PROFILE_LAYER L≈846 INSPECTION (cycle 8 of run-3 already extended this with median/stddev/cv/warmup_ratio). Run a cycle that just sweeps the per-layer profile at L=846 with all keeps in place and dumps the full 36-layer histogram. May reveal a layer-class anomaly (full-attn vs SWA layers, layer 0 cold-start, layer 32 outlier from cycle 1's brief observation). Cheap diagnostic; valuable if found.",
+      "flash_attn_cm1.comp KHR COOPMAT PORT. RDNA3+ supports VK_KHR_cooperative_matrix and R9700 advertises it. The structural ceiling for further attention speedup. Multi-week port. Reference: /Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp. Pursue when the dense-FFN attacks above are exhausted.",
+    ],
+    referenceImplementations: [
+      {
+        path: "/Users/stepan/Workspace/zinc/src/shaders/flash_attn.comp",
+        focus: "Current state after 17 cycles of optimization (31.19 → 93.68 tok/s at L=1500). Read the entire shader. Key structural shapes that delivered: (1) cycle 5 D-split — pair lanes (tid, tid+32) on the same d4 and split the i-axis to engage all 64 wave lanes when head_dim=128. (2) cycle 8 s_kv_base_v4 — precompute (page_id*page_size+page_off)*n_kv_heads*head_dim+kv_head*head_dim per i once per block, replacing the prior s_page_ids_block. (3) cycles 6/9/12/16 Phase 4 ILP unrolls (2-way → 4-way → 8-way → 16-way, paired vec4 accumulators). (4) cycles 10/14/17 Phase 1 ILP unrolls (4-way → 8-way → 16-way). The current 16-way pattern is the exhausted ceiling on ILP; 32-way (cycle 18) measured flat.",
+      },
+      {
+        path: "/Users/stepan/Workspace/zinc/src/shaders/flash_attn_batched.comp",
+        focus: "Mirrors flash_attn.comp's structure with grid.y = n_queries. Every cycle in this effort has mirrored the decode-side change to this shader so prefill and ZINC_BATCH_ATTN=1 paths benefit equally. Read alongside flash_attn.comp to see which lines line up.",
+      },
+      {
+        path: "/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn.comp",
+        focus: "Scalar fallback flash_attn. Search for `Br` and `Bc` to see how multiple Q rows per WG are handled — that's the multi-Q-per-WG / GQA collapse target. Lines 44-90 are Q staging (we ported a simpler version). Lines 196-218 are SHMEM_STAGING for cooperative K loads (note: ZINC's cycle-1 attempt at K-parallel-with-subgroupAdd FAILED -44%; but cooperative K staging without the subgroup reduction is structurally different and unattempted). Lines 355-384 are the fused exp+V loop.",
+      },
+      {
+        path: "/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+        focus: "Search for `gqa_ratio` and `get_fa_tuning_params_scalar` (~lines 2854-2928 and ~8866). The gqa_ratio collapse is the host-side change needed for multi-Q-per-WG: when n_heads / n_kv_heads = q_per_kv > 1, dispatch grid.x = n_kv_heads (not n_heads) and the shader processes q_per_kv query heads per WG. ZINC currently dispatches grid.x = n_heads.",
+      },
+      {
+        path: "/Users/stepan/Workspace/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp",
+        focus: "KHR cooperative_matrix variant of flash_attn. Reference for the deferred cooperative-matrix swing. Look at how Q.K and score.V matmuls are decomposed into wmma tiles, what subgroup_size/coopmat_M/coopmat_N constraints apply, and how cross-tile softmax reduction is done.",
+      },
+      {
+        path: "/Users/stepan/Workspace/zinc/src/shaders/dmmv_q4k_moe_kpar.comp",
+        focus: "Wave64 K-parallel pattern reference. NOTE: the cycle-1 'K-parallel Phase 1' attempt that reduced ONE row across all 64 threads with subgroupAdd lost -44%. That is NOT the pattern this shader uses. dmmv_q4k_moe_kpar splits 64 threads as THREADS_PER_BLOCK=16 (cooperative on K dim) × NUM_ROWS=4 (parallel rows). For multi-Q-per-WG, the analog is THREADS_PER_BLOCK_PER_Q × Q_PER_WG. Read the inner loop and reduction shape.",
       },
     ],
   },

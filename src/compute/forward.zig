@@ -20,6 +20,7 @@ const Graph = @import("graph.zig").Graph;
 const dmmv_mod = @import("dmmv.zig");
 const DmmvDispatch = dmmv_mod.DmmvDispatch;
 const DmmvPushConstants = dmmv_mod.DmmvPushConstants;
+const OprojMergePushConstants = dmmv_mod.OprojMergePushConstants;
 const MoeDmmvPushConstants = dmmv_mod.MoeDmmvPushConstants;
 const MoeFusedDownAccPushConstants = dmmv_mod.MoeFusedDownAccPushConstants;
 const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
@@ -43,10 +44,12 @@ const KvCacheWriteBatchedPush = elementwise_mod.KvCacheWriteBatchedPush;
 const ResidualRmsNormPush = elementwise_mod.ResidualRmsNormPush;
 const RmsNormAddPush = elementwise_mod.RmsNormAddPush;
 const NormRopePush = elementwise_mod.NormRopePush;
+const QkNormRopeKvWritePush = elementwise_mod.QkNormRopeKvWritePush;
 const attn_mod = @import("attention.zig");
 const AttentionDispatch = attn_mod.AttentionDispatch;
 const FlashAttnPush = attn_mod.FlashAttnPush;
 const FlashAttnBatchedPush = attn_mod.FlashAttnBatchedPush;
+const FlashAttnSplitMergePush = attn_mod.FlashAttnSplitMergePush;
 const ArgmaxDispatch = @import("argmax.zig").ArgmaxDispatch;
 const GGMLType = @import("../model/gguf.zig").GGMLType;
 const memory_plan = @import("../gpu/memory_plan.zig");
@@ -103,6 +106,7 @@ pub const SamplingParams = struct {
 const ProfilePhase = enum(u8) {
     embed_upload,
     attention,
+    flash_attn_kernel,
     ssm,
     ssm_proj,
     ssm_conv,
@@ -121,12 +125,19 @@ const ProfilePhase = enum(u8) {
     shared_swiglu,
     shared_down,
     shared_gate_acc,
+    // Dense FFN (Qwen 3 8B-style, no MoE/no SSM). The fused gate+up+SwiGLU
+    // and the down_proj_acc both bucket here. Effort 11 cycle 11
+    // enablement: previously unaccounted ~60% of decode at L=846 was
+    // dense FFN — making it explicit unblocks targeted attacks on the
+    // dominant decode bucket without re-deriving it from the residual.
+    dense_ffn,
     final_tail,
 
     fn label(self: @This()) []const u8 {
         return switch (self) {
             .embed_upload => "embed",
             .attention => "attention",
+            .flash_attn_kernel => "flash_attn",
             .ssm => "ssm",
             .ssm_proj => "ssm_proj",
             .ssm_conv => "ssm_conv",
@@ -145,6 +156,7 @@ const ProfilePhase = enum(u8) {
             .shared_swiglu => "shared_swiglu",
             .shared_down => "shared_down",
             .shared_gate_acc => "shared_gate",
+            .dense_ffn => "dense_ffn",
             .final_tail => "tail",
         };
     }
@@ -850,6 +862,16 @@ pub const InferenceEngine = struct {
     k_buf: Buffer, // K projection: n_kv_heads * head_dim f32
     v_buf: Buffer, // V projection: n_kv_heads * head_dim f32
     attn_out_buf: Buffer, // attention output: n_heads * head_dim f32
+    // Split-K flash attention: partial output buffer holding per-(head, chunk)
+    // unnormalized O accumulator + (M, L) softmax state. Layout matches the
+    // shader's expectation:
+    //   partial O (n_heads * fa_split_k * head_dim floats)
+    //   LSE (n_heads * fa_split_k * 2 floats), starting at byte offset
+    //     n_heads * fa_split_k * head_dim * 4
+    // Allocated only when ZINC_FA_SPLIT_K is set; handle remains null otherwise.
+    partial_attn_out_buf: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
+    // Number of i-axis chunks the split-K dispatch uses (1 = disabled, ≥2 = on).
+    fa_split_k: u32 = 1,
     o_proj_buf: Buffer, // output projection: hidden_dim f32
     ffn_norm_buf: Buffer, // FFN norm output: hidden_dim f32
     gate_buf: Buffer, // MoE expert gate output: intermediate_dim f32
@@ -980,6 +1002,38 @@ pub const InferenceEngine = struct {
     // single dispatch (cycle-13 application of the cycle-8 fused_rms
     // pattern to a smaller M target). Disable with ZINC_FUSED_SSM_AB=0.
     use_fused_ssm_pre_norm: bool = false,
+    // Effort-11 cycle-8: dense Q4_K fused gate+up+SwiGLU. Single dispatch
+    // replacing the per-layer (gate DMMV → up DMMV → swiglu) trio at the
+    // dense FFN front-end. Eliminates gate_buf and up_buf round-trips and
+    // saves one global compute barrier per layer (gate+up → swiglu).
+    // Disable with ZINC_FUSED_DENSE_FFN=0. Per-call gates: architecture
+    // is dense + non-Gemma (SwiGLU activation), gate/up tensors are Q4_K,
+    // inter_dim ≤ 12288 (Gemma 4 31B at 25600 regressed in cycle-7's
+    // gate+up-only attempt — wider FFN tilts register pressure the wrong
+    // way). Cycle-7 attempted gate+up only and reverted; this cycle adds
+    // the SwiGLU fold which removes the gate_buf/up_buf write+read pair
+    // entirely, a structurally distinct change.
+    use_fused_dense_ffn: bool = false,
+    // Effort-11 cycle-17: fused split-K flash attention merge + o_proj
+    // DMMV-acc. When ZINC_FUSED_OPROJ_MERGE=1 (and split-K is active), the
+    // o_proj dispatch site uses a single dmmv_q4k_o_proj_merge dispatch
+    // that reads partials directly from partial_attn_out_buf, computes
+    // per-head LSE merge weights with sink fold-in, stages the merged
+    // attn_out into LDS, and runs the standard Q4_K matmul accumulating
+    // into hidden_buf. Eliminates the flash_attn_split_merge dispatch +
+    // its barrier (1 dispatch + 1 barrier per attention layer = 36/token
+    // at L≈1500 with 36 layers). Gated for safety: requires Q4_K W_o,
+    // hidden_dim ≤ 4096 (LDS capacity), and the standard residual flow
+    // (no post_attn_norm, no validation diagnostics). Default OFF.
+    use_fused_oproj_merge: bool = false,
+    // Effort-11 cycle-12: fused Q+K norm+rope + KV cache write. Single
+    // dispatch replacing the per-attention-layer (Q norm+rope → K norm+rope
+    // → kv_cache_write) trio on Qwen 3 family dense attention. Saves
+    // 2 dispatches + 1 global compute barrier per attention layer.
+    // Disable with ZINC_FUSED_QK_KV=0. Per-call gates: q_norm and k_norm
+    // tensors both present, push descriptors active, !packed_q_gate,
+    // !use_k_as_v, !apply_v_unit_norm_early, !diagnostics.
+    use_fused_qk_kv: bool = false,
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1). When set, after each GPU MoE
     // softmax_topk we copy the top-k ids+weights into routing_capture_buf at
     // slot(position, layer). Unused downstream this cycle — the buffer is the
@@ -1041,6 +1095,14 @@ pub const InferenceEngine = struct {
     profile_phase_ranges: [max_profile_phase_ranges]ProfilePhaseRange = undefined,
     profile_phase_range_count: u32 = 0,
     profile_logged_cpu_moe_fallback: bool = false,
+    // ZINC_FA_PROFILE_LAYER=1 instruments per-layer flash_attn_kernel timing
+    // and prints a histogram at end-of-generation. Auto-enables profile_enabled
+    // (the benchmark cycle does not pass --profile, so the flag must turn on
+    // its own timestamp recording). Decode-only — prefill ranges are tagged
+    // distinctly via prefill_active so we ignore them when accumulating.
+    fa_profile_layer: bool = false,
+    fa_per_layer_ns: [128]u64 = [_]u64{0} ** 128,
+    fa_per_layer_count: [128]u32 = [_]u32{0} ** 128,
     // Always-on lightweight prefill timing (CPU-side, no GPU queries).
     // Populated by decodeStep() when prefill_active is set by prefillBatch(),
     // so effort-6 can see where prefill time goes without needing --profile.
@@ -1860,6 +1922,65 @@ pub const InferenceEngine = struct {
             log.info("Fused SSM pre-norm DISABLED via ZINC_FUSED_SSM_AB=0", .{});
         }
 
+        // Fused dense gate+up+SwiGLU (effort-11 cycle 8). Default ON when
+        // the pipeline is loaded; disable via ZINC_FUSED_DENSE_FFN=0. The
+        // architecture / quant / size gates run per call so non-matching
+        // models silently fall back to the gate / up / swiglu trio.
+        const fused_dense_ffn_env = std.posix.getenv("ZINC_FUSED_DENSE_FFN");
+        const fused_dense_ffn_explicitly_off = fused_dense_ffn_env != null and std.mem.eql(u8, fused_dense_ffn_env.?, "0");
+        const fused_dense_ffn_enabled = !fused_dense_ffn_explicitly_off and
+            dmmv.pipeline_q4k_fused_gate_up_swiglu != null and
+            instance.push_descriptor_fn != null;
+        if (fused_dense_ffn_enabled) {
+            log.info("Fused dense gate+up+SwiGLU ENABLED (default, set ZINC_FUSED_DENSE_FFN=0 to disable)", .{});
+        } else if (fused_dense_ffn_explicitly_off) {
+            log.info("Fused dense gate+up+SwiGLU DISABLED via ZINC_FUSED_DENSE_FFN=0", .{});
+        }
+
+        // Fused split-K merge + o_proj DMMV-acc (effort-11 cycle 17). When
+        // ZINC_FUSED_OPROJ_MERGE=1 AND split-K is active, the o_proj site
+        // calls dispatchDmmvOprojMerge instead of (separate merge dispatch +
+        // dispatchDmmvAcc), saving 1 dispatch + 1 barrier per attention
+        // layer. Default OFF — opt-in this cycle for safety; per-call
+        // architecture/quant/size gates fall back to the unfused path when
+        // the conditions aren't met (e.g., Gemma post_attn_norm,
+        // hidden_dim > 4096, validation_diagnostics_enabled).
+        const fused_oproj_merge_env = std.posix.getenv("ZINC_FUSED_OPROJ_MERGE");
+        const fused_oproj_merge_enabled = fused_oproj_merge_env != null and
+            std.mem.eql(u8, fused_oproj_merge_env.?, "1") and
+            dmmv.pipeline_q4k_o_proj_merge != null and
+            instance.push_descriptor_fn != null;
+        if (fused_oproj_merge_enabled) {
+            log.info("Fused split-K merge + o_proj ENABLED via ZINC_FUSED_OPROJ_MERGE=1", .{});
+        }
+
+        // ZINC_FA_PROFILE_LAYER=1 — per-layer flash_attn_kernel timing histogram
+        // (effort-11 run-3 enablement). Auto-enables timestamp recording so the
+        // benchmark cycle (which does not pass --profile) still emits per-layer
+        // ms data. Default OFF to keep the benchmark's hot path zero-overhead.
+        const fa_profile_layer_env = std.posix.getenv("ZINC_FA_PROFILE_LAYER");
+        const fa_profile_layer_enabled = fa_profile_layer_env != null and
+            !std.mem.eql(u8, fa_profile_layer_env.?, "0");
+        if (fa_profile_layer_enabled) {
+            log.info("Per-layer flash_attn timing ENABLED via ZINC_FA_PROFILE_LAYER=1 (auto-enables profile)", .{});
+        }
+
+        // Fused Q+K norm+rope + KV cache write (effort-11 cycle 12). Default
+        // ON when the pipeline is loaded; disable via ZINC_FUSED_QK_KV=0.
+        // Per-call gates apply (q_norm/k_norm tensors present, push descriptors,
+        // !packed_q_gate, !use_k_as_v, !apply_v_unit_norm_early, !diagnostics).
+        const fused_qk_kv_env = std.posix.getenv("ZINC_FUSED_QK_KV");
+        const fused_qk_kv_explicitly_off = fused_qk_kv_env != null and std.mem.eql(u8, fused_qk_kv_env.?, "0");
+        const fused_qk_kv_enabled = !fused_qk_kv_explicitly_off and
+            elementwise.pipeline_qk_norm_rope_kv_write != null and
+            elementwise.pipeline_kv_cache_write != null and
+            instance.push_descriptor_fn != null;
+        if (fused_qk_kv_enabled) {
+            log.info("Fused Q+K norm+rope + KV cache write ENABLED (default, set ZINC_FUSED_QK_KV=0 to disable)", .{});
+        } else if (fused_qk_kv_explicitly_off) {
+            log.info("Fused Q+K norm+rope + KV cache write DISABLED via ZINC_FUSED_QK_KV=0", .{});
+        }
+
         // Q5_K MoE K-parallel shader: default ON when the pipeline is loaded,
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.5-35B flagship prefill. Mirrors the
@@ -1883,6 +2004,23 @@ pub const InferenceEngine = struct {
             log.info("softmax_topk v2 (subgroup-parallel) ENABLED (default, set ZINC_TOPK_V1=1 to revert)", .{});
         } else if (topk_v1_forced) {
             log.info("softmax_topk v2 DISABLED via ZINC_TOPK_V1=1; using v1 shared-mem scan", .{});
+        }
+
+        // Split-K flash attention. Default-on with N_I_CHUNKS=4. The
+        // attention.zig init resolves ZINC_FA_SPLIT_K and creates the pair
+        // of pipelines (split, merge); we just mirror the active count here
+        // and allocate the partial-output buffer when active.
+        const fa_split_k = attention.fa_split_k_active;
+        if (fa_split_k > 1) {
+            log.info("Flash-attn split-K ENABLED: N_I_CHUNKS={d} (default; set ZINC_FA_SPLIT_K=0 to disable)", .{fa_split_k});
+        }
+        var partial_attn_out_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
+        if (fa_split_k > 1) {
+            const partial_o_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * fa_split_k * config.head_dim;
+            const partial_lse_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * fa_split_k * 2;
+            const partial_size = (partial_o_floats + partial_lse_floats) * @sizeOf(f32);
+            partial_attn_out_buf = try Buffer.initDeviceLocal(instance, partial_size, storage_xfer);
+            errdefer partial_attn_out_buf.deinit();
         }
 
         // Batched flash-attention foundation (opt-in). When ZINC_BATCH_ATTN=1 and
@@ -2045,6 +2183,16 @@ pub const InferenceEngine = struct {
             .use_moe_fused_down_acc = moe_fused_down_acc_enabled,
             .use_fused_rms_router = fused_rms_router_enabled,
             .use_fused_ssm_pre_norm = fused_ssm_ab_enabled,
+            .use_fused_dense_ffn = fused_dense_ffn_enabled,
+            .use_fused_oproj_merge = fused_oproj_merge_enabled,
+            .use_fused_qk_kv = fused_qk_kv_enabled,
+            .fa_profile_layer = fa_profile_layer_enabled,
+            // ZINC_FA_PROFILE_LAYER=1 auto-enables timestamp recording. The
+            // benchmark cycle does not pass --profile, so without this the
+            // diagnostic emits no data. Cost is one timestamp per dispatch
+            // and a vkGetQueryPoolResults wait per token; tolerable for the
+            // diagnostic but tangibly slows the flag-on case.
+            .profile_enabled = fa_profile_layer_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
             .use_mmq_ssm = mmq_ssm_enabled,
@@ -2084,6 +2232,8 @@ pub const InferenceEngine = struct {
             .k_buf = k_buf,
             .v_buf = v_buf,
             .attn_out_buf = attn_out_buf,
+            .partial_attn_out_buf = partial_attn_out_buf,
+            .fa_split_k = fa_split_k,
             .o_proj_buf = o_proj_buf,
             .ffn_norm_buf = ffn_norm_buf,
             .gate_buf = gate_buf,
@@ -2195,6 +2345,8 @@ pub const InferenceEngine = struct {
         self.profile_total_counters.reset();
         self.profile_phase_range_count = 0;
         self.profile_logged_cpu_moe_fallback = false;
+        self.fa_per_layer_ns = [_]u64{0} ** 128;
+        self.fa_per_layer_count = [_]u32{0} ** 128;
     }
 
     fn avgProfilePhaseMs(self: *const InferenceEngine, phase: ProfilePhase) f64 {
@@ -2405,11 +2557,24 @@ pub const InferenceEngine = struct {
             self.profile_total_gpu_ms += elapsed_ms;
             if (elapsed_ms > self.profile_max_gpu_ms) self.profile_max_gpu_ms = elapsed_ms;
             self.profile_sample_count += 1;
+            // Per-layer flash_attn_kernel accumulator (ZINC_FA_PROFILE_LAYER=1).
+            // The Nth flash_attn_kernel range in token order corresponds to
+            // layer N (Qwen 3 8B is all-attention; hybrid models still emit a
+            // flash_attn_kernel range per attention layer in layer order). We
+            // skip prefill ranges by gating on prefill_active so the histogram
+            // only reflects decode-time per-layer ms.
+            var fa_layer_idx: u32 = 0;
+            const fa_record = self.fa_profile_layer and !self.prefill_active;
             for (0..self.profile_phase_range_count) |i| {
                 const range = self.profile_phase_ranges[i];
                 if (range.end_query >= count or range.start_query >= count) continue;
                 const phase_ns_f64 = @as(f64, @floatFromInt(timestamps[range.end_query] -| timestamps[range.start_query])) * self.timestamp_period_ns;
                 self.profile_token_counters.gpu_phase_ns[@intFromEnum(range.phase)] += @intFromFloat(@max(phase_ns_f64, 0.0));
+                if (fa_record and range.phase == .flash_attn_kernel and fa_layer_idx < self.fa_per_layer_ns.len) {
+                    self.fa_per_layer_ns[fa_layer_idx] += @intFromFloat(@max(phase_ns_f64, 0.0));
+                    self.fa_per_layer_count[fa_layer_idx] += 1;
+                    fa_layer_idx += 1;
+                }
             }
             self.profile_total_cpu_embed_ns += self.profile_token_counters.cpu_embed_ns;
             self.profile_total_cpu_record_ns += self.profile_token_counters.cpu_record_ns;
@@ -3048,6 +3213,51 @@ pub const InferenceEngine = struct {
         );
     }
 
+    fn pushDispatch8(
+        self: *InferenceEngine,
+        pip: *const Pipeline,
+        push_data: []const u8,
+        buf0: vk.c.VkBuffer,
+        size0: vk.c.VkDeviceSize,
+        buf1: vk.c.VkBuffer,
+        size1: vk.c.VkDeviceSize,
+        buf2: vk.c.VkBuffer,
+        size2: vk.c.VkDeviceSize,
+        buf3: vk.c.VkBuffer,
+        size3: vk.c.VkDeviceSize,
+        buf4: vk.c.VkBuffer,
+        size4: vk.c.VkDeviceSize,
+        buf5: vk.c.VkBuffer,
+        size5: vk.c.VkDeviceSize,
+        buf6: vk.c.VkBuffer,
+        size6: vk.c.VkDeviceSize,
+        buf7: vk.c.VkBuffer,
+        size7: vk.c.VkDeviceSize,
+        wg_x: u32,
+        wg_y: u32,
+        wg_z: u32,
+    ) void {
+        const infos = [8]vk.c.VkDescriptorBufferInfo{
+            .{ .buffer = buf0, .offset = 0, .range = size0 },
+            .{ .buffer = buf1, .offset = 0, .range = size1 },
+            .{ .buffer = buf2, .offset = 0, .range = size2 },
+            .{ .buffer = buf3, .offset = 0, .range = size3 },
+            .{ .buffer = buf4, .offset = 0, .range = size4 },
+            .{ .buffer = buf5, .offset = 0, .range = size5 },
+            .{ .buffer = buf6, .offset = 0, .range = size6 },
+            .{ .buffer = buf7, .offset = 0, .range = size7 },
+        };
+        self.decode_cmd.pushDescAndDispatch(
+            pip,
+            self.instance.push_descriptor_fn,
+            infos[0..],
+            push_data,
+            wg_x,
+            wg_y,
+            wg_z,
+        );
+    }
+
     fn dispatchRmsNorm(
         self: *InferenceEngine,
         input_buf: vk.c.VkBuffer,
@@ -3640,6 +3850,83 @@ pub const InferenceEngine = struct {
 
     /// Fused RMS norm + RoPE in-place on a head buffer.
     /// Eliminates 1 dispatch + 1 barrier vs separate norm then RoPE.
+    /// Fused Q+K norm + RoPE + KV cache write. One dispatch absorbs:
+    ///   - Q per-head RMS norm + RoPE (in-place on q_buf)
+    ///   - K per-head RMS norm + RoPE (writes directly to kv_k_cache slot)
+    ///   - V copy from v_buf into kv_v_cache slot
+    /// Saves 2 dispatches + 1 barrier per attention layer vs the original
+    /// (Q norm+rope → K norm+rope → kv_cache_write) trio. Caller is
+    /// responsible for ensuring a barrier follows this dispatch before any
+    /// consumer of q_buf, kv_k_cache, or kv_v_cache runs.
+    fn dispatchQkNormRopeKvWrite(
+        self: *InferenceEngine,
+        q_buf: vk.c.VkBuffer,
+        q_size: vk.c.VkDeviceSize,
+        q_weight_buf: vk.c.VkBuffer,
+        q_weight_size: vk.c.VkDeviceSize,
+        k_buf: vk.c.VkBuffer,
+        k_size: vk.c.VkDeviceSize,
+        k_weight_buf: vk.c.VkBuffer,
+        k_weight_size: vk.c.VkDeviceSize,
+        freq_buf: ?vk.c.VkBuffer,
+        freq_size: vk.c.VkDeviceSize,
+        kv_k_buf: vk.c.VkBuffer,
+        kv_k_size: vk.c.VkDeviceSize,
+        v_buf: vk.c.VkBuffer,
+        v_size: vk.c.VkDeviceSize,
+        kv_v_buf: vk.c.VkBuffer,
+        kv_v_size: vk.c.VkDeviceSize,
+        head_dim: u32,
+        rope_dim: u32,
+        n_q_heads: u32,
+        n_k_heads: u32,
+        position: u32,
+        freq_base: f32,
+        attn_scale: f32,
+        eps: f32,
+        dst_offset_floats: u32,
+    ) void {
+        const pip = &(self.elementwise.pipeline_qk_norm_rope_kv_write orelse return);
+        const push = QkNormRopeKvWritePush{
+            .head_dim = head_dim,
+            .rope_dim = rope_dim,
+            .n_q_heads = n_q_heads,
+            .n_k_heads = n_k_heads,
+            .position = position,
+            .freq_base_bits = @bitCast(freq_base),
+            .attn_scale_bits = @bitCast(attn_scale),
+            .eps_bits = @bitCast(eps),
+            .dst_offset = dst_offset_floats,
+        };
+        // Bind a dummy buffer for the unused freq binding when no precomputed
+        // freq buffer is supplied. Mirrors dispatchNormRopeInPlace's pattern.
+        const fb_handle: vk.c.VkBuffer = if (freq_buf) |fb| fb else q_buf;
+        const fb_size: vk.c.VkDeviceSize = if (freq_buf) |_| freq_size else q_size;
+        self.pushDispatch8(
+            pip,
+            std.mem.asBytes(&push),
+            q_buf,
+            q_size,
+            q_weight_buf,
+            q_weight_size,
+            k_buf,
+            k_size,
+            k_weight_buf,
+            k_weight_size,
+            fb_handle,
+            fb_size,
+            kv_k_buf,
+            kv_k_size,
+            v_buf,
+            v_size,
+            kv_v_buf,
+            kv_v_size,
+            n_q_heads + n_k_heads,
+            1,
+            1,
+        );
+    }
+
     fn dispatchNormRopeInPlace(
         self: *InferenceEngine,
         buf: vk.c.VkBuffer,
@@ -4298,7 +4585,61 @@ pub const InferenceEngine = struct {
                     self.decode_cmd.computeBarrier();
                 }
 
-                if (q_norm_tensor) |qn| {
+                // Effort-11 cycle-12: fused Q+K norm+rope + KV cache write
+                // path. Single dispatch absorbs the (Q norm+rope → K norm+rope
+                // → kv_cache_write) trio when all per-call gates pass. Saves
+                // 2 dispatches + 1 global compute barrier per attention layer.
+                const physical_token_for_fused = if (self.use_fused_qk_kv)
+                    self.physicalTokenIndex(state.position) catch null
+                else
+                    null;
+                const fused_qk_kv_eligible = self.use_fused_qk_kv and
+                    self.elementwise.pipeline_qk_norm_rope_kv_write != null and
+                    q_norm_tensor != null and
+                    k_norm_tensor != null and
+                    !packed_q_gate and
+                    !use_k_as_v and
+                    !apply_v_unit_norm_early and
+                    !is_dead_attn_tail and
+                    config.architecture != .gemma and
+                    !(state.position == 0 and self.validation_diagnostics_enabled) and
+                    physical_token_for_fused != null;
+
+                if (fused_qk_kv_eligible) {
+                    const qn = q_norm_tensor.?;
+                    const kn = k_norm_tensor.?;
+                    const dst_offset_floats: u32 = physical_token_for_fused.? * layer_kv_dim;
+                    self.dispatchQkNormRopeKvWrite(
+                        self.q_buf.handle,
+                        self.q_buf.size,
+                        qn.gpu_buffer.handle,
+                        qn.gpu_buffer.size,
+                        self.k_buf.handle,
+                        self.k_buf.size,
+                        kn.gpu_buffer.handle,
+                        kn.gpu_buffer.size,
+                        freq_buf_handle,
+                        self.rope_freq_buf.size,
+                        self.kv_k_cache[layer_idx].handle,
+                        self.kv_k_cache[layer_idx].size,
+                        self.v_buf.handle,
+                        self.v_buf.size,
+                        self.kv_v_cache[layer_idx].handle,
+                        self.kv_v_cache[layer_idx].size,
+                        layer_head_dim,
+                        layer_rope_dim,
+                        config.n_heads,
+                        layer_n_kv_heads,
+                        state.position,
+                        rope_freq,
+                        rope_attn_scale,
+                        rms_norm_eps,
+                        dst_offset_floats,
+                    );
+                    self.decode_cmd.computeBarrier();
+                    q_rope_done = true;
+                    k_rope_done = true;
+                } else if (q_norm_tensor) |qn| {
                     // Skip Q norm/RoPE for dead-tail tokens: q_buf only feeds flash_attn.
                     // Still mark q_rope_done=true so the fallback-path Q RoPE below is
                     // also skipped (avoids reading stale q_buf).
@@ -4336,14 +4677,63 @@ pub const InferenceEngine = struct {
                         );
                     }
                 }
-                if (k_norm_tensor) |kn| {
-                    if (use_fused_norm_rope) {
-                        // Fused K norm + K RoPE in a single dispatch
-                        self.dispatchNormRopeInPlace(
+                if (!fused_qk_kv_eligible) {
+                    if (k_norm_tensor) |kn| {
+                        if (use_fused_norm_rope) {
+                            // Fused K norm + K RoPE in a single dispatch
+                            self.dispatchNormRopeInPlace(
+                                self.k_buf.handle,
+                                self.k_buf.size,
+                                kn.gpu_buffer.handle,
+                                kn.gpu_buffer.size,
+                                freq_buf_handle,
+                                self.rope_freq_buf.size,
+                                layer_head_dim,
+                                layer_rope_dim,
+                                layer_n_kv_heads,
+                                state.position,
+                                rope_freq,
+                                rope_attn_scale,
+                                rms_norm_eps,
+                            );
+                            k_rope_done = true;
+                        } else {
+                            try self.dispatchRmsNorm(
+                                self.k_buf.handle,
+                                self.k_buf.size,
+                                kn.gpu_buffer.handle,
+                                kn.gpu_buffer.size,
+                                self.k_buf.handle,
+                                self.k_buf.size,
+                                layer_head_dim,
+                                layer_n_kv_heads,
+                                rms_norm_eps,
+                            );
+                        }
+                    }
+                    // Gemma 4 applies plain RMS norm (unit weights) to V per-head.
+                    // Mirrors Metal forward_metal.zig:3460-3462. For use_k_as_v
+                    // layers this already ran ahead of Q/K norms above — skip here.
+                    if (config.architecture == .gemma and config.rope_freq_base_swa > 0 and !apply_v_unit_norm_early) {
+                        try self.dispatchRmsNorm(
+                            self.v_buf.handle,
+                            self.v_buf.size,
+                            self.unit_norm_weights.handle,
+                            self.unit_norm_weights.size,
+                            self.v_buf.handle,
+                            self.v_buf.size,
+                            layer_head_dim,
+                            layer_n_kv_heads,
+                            rms_norm_eps,
+                        );
+                    }
+                    self.decode_cmd.computeBarrier();
+
+                    if (!k_rope_done) {
+                        // K RoPE first — KV cache write reads k_buf, so it must complete before the write.
+                        try self.dispatchRopeInPlace(
                             self.k_buf.handle,
                             self.k_buf.size,
-                            kn.gpu_buffer.handle,
-                            kn.gpu_buffer.size,
                             freq_buf_handle,
                             self.rope_freq_buf.size,
                             layer_head_dim,
@@ -4352,126 +4742,79 @@ pub const InferenceEngine = struct {
                             state.position,
                             rope_freq,
                             rope_attn_scale,
-                            rms_norm_eps,
-                        );
-                        k_rope_done = true;
-                    } else {
-                        try self.dispatchRmsNorm(
-                            self.k_buf.handle,
-                            self.k_buf.size,
-                            kn.gpu_buffer.handle,
-                            kn.gpu_buffer.size,
-                            self.k_buf.handle,
-                            self.k_buf.size,
-                            layer_head_dim,
-                            layer_n_kv_heads,
-                            rms_norm_eps,
                         );
                     }
-                }
-                // Gemma 4 applies plain RMS norm (unit weights) to V per-head.
-                // Mirrors Metal forward_metal.zig:3460-3462. For use_k_as_v
-                // layers this already ran ahead of Q/K norms above — skip here.
-                if (config.architecture == .gemma and config.rope_freq_base_swa > 0 and !apply_v_unit_norm_early) {
-                    try self.dispatchRmsNorm(
-                        self.v_buf.handle,
-                        self.v_buf.size,
-                        self.unit_norm_weights.handle,
-                        self.unit_norm_weights.size,
-                        self.v_buf.handle,
-                        self.v_buf.size,
-                        layer_head_dim,
-                        layer_n_kv_heads,
-                        rms_norm_eps,
-                    );
-                }
-                self.decode_cmd.computeBarrier();
-
-                if (!k_rope_done) {
-                    // K RoPE first — KV cache write reads k_buf, so it must complete before the write.
-                    try self.dispatchRopeInPlace(
-                        self.k_buf.handle,
-                        self.k_buf.size,
-                        freq_buf_handle,
-                        self.rope_freq_buf.size,
-                        layer_head_dim,
-                        layer_rope_dim,
-                        layer_n_kv_heads,
-                        state.position,
-                        rope_freq,
-                        rope_attn_scale,
-                    );
-                }
-                // KV cache write: use compute shader to stay in compute pipeline,
-                // avoiding compute→transfer + transfer→compute stage transitions.
-                {
-                    const physical_token = try self.physicalTokenIndex(state.position);
-                    if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
-                        if (!k_rope_done) self.decode_cmd.computeBarrier();
-                        const push = KvCacheWritePush{
-                            .kv_dim = layer_kv_dim,
-                            .dst_offset = physical_token * layer_kv_dim,
-                        };
-                        if (kv_pip.uses_push_descriptors) {
-                            self.pushDispatch4(
-                                kv_pip,
-                                std.mem.asBytes(&push),
-                                self.k_buf.handle,
-                                self.k_buf.size,
-                                self.kv_k_cache[layer_idx].handle,
-                                self.kv_k_cache[layer_idx].size,
-                                self.v_buf.handle,
-                                self.v_buf.size,
-                                self.kv_v_cache[layer_idx].handle,
-                                self.kv_v_cache[layer_idx].size,
-                                (layer_kv_dim + 63) / 64,
-                                1,
-                                1,
-                            );
+                    // KV cache write: use compute shader to stay in compute pipeline,
+                    // avoiding compute→transfer + transfer→compute stage transitions.
+                    {
+                        const physical_token = try self.physicalTokenIndex(state.position);
+                        if (self.elementwise.pipeline_kv_cache_write) |*kv_pip| {
+                            if (!k_rope_done) self.decode_cmd.computeBarrier();
+                            const push = KvCacheWritePush{
+                                .kv_dim = layer_kv_dim,
+                                .dst_offset = physical_token * layer_kv_dim,
+                            };
+                            if (kv_pip.uses_push_descriptors) {
+                                self.pushDispatch4(
+                                    kv_pip,
+                                    std.mem.asBytes(&push),
+                                    self.k_buf.handle,
+                                    self.k_buf.size,
+                                    self.kv_k_cache[layer_idx].handle,
+                                    self.kv_k_cache[layer_idx].size,
+                                    self.v_buf.handle,
+                                    self.v_buf.size,
+                                    self.kv_v_cache[layer_idx].handle,
+                                    self.kv_v_cache[layer_idx].size,
+                                    (layer_kv_dim + 63) / 64,
+                                    1,
+                                    1,
+                                );
+                            } else {
+                                const ds = try self.allocDescSet(kv_pip.descriptor_set_layout);
+                                self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
+                                self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (layer_kv_dim + 63) / 64, 1, 1);
+                            }
+                            if (!q_rope_done) {
+                                // Q RoPE overlaps with KV write — no data dependency between them.
+                                try self.dispatchRopeInPlace(
+                                    self.q_buf.handle,
+                                    self.q_buf.size,
+                                    freq_buf_handle,
+                                    self.rope_freq_buf.size,
+                                    layer_head_dim,
+                                    layer_rope_dim,
+                                    config.n_heads,
+                                    state.position,
+                                    rope_freq,
+                                    rope_attn_scale,
+                                );
+                            }
+                            self.decode_cmd.computeBarrier();
                         } else {
-                            const ds = try self.allocDescSet(kv_pip.descriptor_set_layout);
-                            self.writeDescSet4(ds, self.k_buf.handle, self.k_buf.size, self.kv_k_cache[layer_idx].handle, self.kv_k_cache[layer_idx].size, self.v_buf.handle, self.v_buf.size, self.kv_v_cache[layer_idx].handle, self.kv_v_cache[layer_idx].size);
-                            self.decode_cmd.dispatchWithPush(kv_pip, ds, std.mem.asBytes(&push), (layer_kv_dim + 63) / 64, 1, 1);
+                            // Transfer fallback: Q RoPE before barrier (original order preserved)
+                            if (!q_rope_done) {
+                                try self.dispatchRopeInPlace(
+                                    self.q_buf.handle,
+                                    self.q_buf.size,
+                                    freq_buf_handle,
+                                    self.rope_freq_buf.size,
+                                    layer_head_dim,
+                                    layer_rope_dim,
+                                    config.n_heads,
+                                    state.position,
+                                    rope_freq,
+                                    rope_attn_scale,
+                                );
+                            }
+                            self.decode_cmd.computeAndTransferBarrier();
+                            const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * layer_kv_vec_size;
+                            const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
+                            const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
+                            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
+                            self.decode_cmd.transferToComputeBarrier();
                         }
-                        if (!q_rope_done) {
-                            // Q RoPE overlaps with KV write — no data dependency between them.
-                            try self.dispatchRopeInPlace(
-                                self.q_buf.handle,
-                                self.q_buf.size,
-                                freq_buf_handle,
-                                self.rope_freq_buf.size,
-                                layer_head_dim,
-                                layer_rope_dim,
-                                config.n_heads,
-                                state.position,
-                                rope_freq,
-                                rope_attn_scale,
-                            );
-                        }
-                        self.decode_cmd.computeBarrier();
-                    } else {
-                        // Transfer fallback: Q RoPE before barrier (original order preserved)
-                        if (!q_rope_done) {
-                            try self.dispatchRopeInPlace(
-                                self.q_buf.handle,
-                                self.q_buf.size,
-                                freq_buf_handle,
-                                self.rope_freq_buf.size,
-                                layer_head_dim,
-                                layer_rope_dim,
-                                config.n_heads,
-                                state.position,
-                                rope_freq,
-                                rope_attn_scale,
-                            );
-                        }
-                        self.decode_cmd.computeAndTransferBarrier();
-                        const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * layer_kv_vec_size;
-                        const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
-                        const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
-                        self.decode_cmd.transferToComputeBarrier();
                     }
                 }
 
@@ -4494,8 +4837,137 @@ pub const InferenceEngine = struct {
                 // the flash_attn_batched pipeline with n_queries=1 and
                 // seq_start=state.position. Output is bit-equivalent to the
                 // decode shader for n_queries=1. Speed cycle enables n>1 later.
+                //
+                // The flash_attn_kernel ProfilePhase wraps just the kernel
+                // dispatch (and its computeBarrier) so --profile output
+                // separates kernel time from QKV/RoPE/output-proj time
+                // within the broader .attention phase. This is the
+                // diagnostic the Effort 11 plan asks for in Step 2 to
+                // attribute the L-dependent ms (~46 ms at L=1162) to the
+                // flash_attn dispatch vs other dispatches before
+                // committing to a shader rewrite.
+                const flash_attn_kernel_phase = self.beginProfilePhase();
                 const use_batched = self.use_batch_attn and self.attention.pipeline_batched != null;
-                if (use_batched) {
+                const use_split_k = !use_batched and self.fa_split_k > 1 and
+                    self.attention.pipeline_split != null and
+                    self.attention.pipeline_split_merge != null and
+                    self.partial_attn_out_buf.handle != null;
+                // Effort-11 cycle-17: when ZINC_FUSED_OPROJ_MERGE=1 and split-K
+                // is active, we replace the (merge → barrier → o_proj) pair
+                // with a single dmmv_q4k_o_proj_merge dispatch. The flag is
+                // off by default; when it engages, the merge dispatch below
+                // is skipped and the o_proj site routes through
+                // dispatchDmmvOprojMerge (which reads the partials directly
+                // from partial_attn_out_buf).
+                const o_tensor_for_merge = lt.attn_output;
+                const o_proj_quant_ok = if (o_tensor_for_merge) |ot| ot.info.type_ == .q4_k else false;
+                const apply_attn_gate_for_merge = lt.attn_gate != null;
+                const post_attn_norm_for_merge = config.architecture == .gemma and lt.post_attention_norm != null;
+                const fused_oproj_merge_active = self.use_fused_oproj_merge and
+                    use_split_k and
+                    self.dmmv.pipeline_q4k_o_proj_merge != null and
+                    o_proj_quant_ok and
+                    !apply_attn_gate_for_merge and
+                    !post_attn_norm_for_merge and
+                    !self.validation_diagnostics_enabled and
+                    hidden_dim <= 4096 and
+                    config.n_heads <= 64 and
+                    self.fa_split_k <= 8;
+                if (use_split_k) {
+                    // Split-K dispatch (flash_attn writes per-chunk partials)
+                    // followed by the merge pass (combines partials, applies sinks,
+                    // writes final output). The split shader reuses flash_attn.spv
+                    // specialized with N_I_CHUNKS so binding 4 holds partials and
+                    // binding 5 (sinks) is unused — we still bind it for layout
+                    // compatibility with the original 6-binding pipeline.
+                    const split_pip = &self.attention.pipeline_split.?;
+                    const merge_pip = &self.attention.pipeline_split_merge.?;
+                    const sink_buf = self.attn_sinks_buf;
+                    const sink_offset: u32 = layer * config.n_heads;
+                    if (split_pip.uses_push_descriptors) {
+                        const split_push = FlashAttnPush{
+                            .head_dim = layer_head_dim,
+                            .n_heads = config.n_heads,
+                            .n_kv_heads = layer_n_kv_heads,
+                            .seq_len = state.position + 1,
+                            .page_size = kv_page_size_tokens,
+                            .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
+                            .sink_offset = sink_offset,
+                        };
+                        self.pushDispatch6(
+                            split_pip,
+                            std.mem.asBytes(&split_push),
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            self.kv_k_cache[layer_idx].handle,
+                            self.kv_k_cache[layer_idx].size,
+                            self.kv_v_cache[layer_idx].handle,
+                            self.kv_v_cache[layer_idx].size,
+                            self.page_table_buf.handle,
+                            self.page_table_buf.size,
+                            self.partial_attn_out_buf.handle,
+                            self.partial_attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                            config.n_heads,
+                            self.fa_split_k,
+                            1,
+                        );
+                    } else {
+                        const split_ds = try self.allocDescSet(split_pip.descriptor_set_layout);
+                        self.writeDescSet6(
+                            split_ds,
+                            self.q_buf.handle,
+                            self.q_buf.size,
+                            self.kv_k_cache[layer_idx].handle,
+                            self.kv_k_cache[layer_idx].size,
+                            self.kv_v_cache[layer_idx].handle,
+                            self.kv_v_cache[layer_idx].size,
+                            self.page_table_buf.handle,
+                            self.page_table_buf.size,
+                            self.partial_attn_out_buf.handle,
+                            self.partial_attn_out_buf.size,
+                            sink_buf.handle,
+                            sink_buf.size,
+                        );
+                        try self.attention.recordFlashAttnSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, state.position + 1, kv_page_size_tokens, config.attn_scale, sink_offset);
+                    }
+                    self.decode_cmd.computeBarrier();
+                    if (!fused_oproj_merge_active) {
+                        if (merge_pip.uses_push_descriptors) {
+                            const merge_push = FlashAttnSplitMergePush{
+                                .head_dim = layer_head_dim,
+                                .n_heads = config.n_heads,
+                                .sink_offset = sink_offset,
+                            };
+                            self.pushDispatch3(
+                                merge_pip,
+                                std.mem.asBytes(&merge_push),
+                                self.partial_attn_out_buf.handle,
+                                self.partial_attn_out_buf.size,
+                                self.attn_out_buf.handle,
+                                self.attn_out_buf.size,
+                                sink_buf.handle,
+                                sink_buf.size,
+                                config.n_heads,
+                                1,
+                                1,
+                            );
+                        } else {
+                            const merge_ds = try self.allocDescSet(merge_pip.descriptor_set_layout);
+                            self.writeDescSet3(
+                                merge_ds,
+                                self.partial_attn_out_buf.handle,
+                                self.partial_attn_out_buf.size,
+                                self.attn_out_buf.handle,
+                                self.attn_out_buf.size,
+                                sink_buf.handle,
+                                sink_buf.size,
+                            );
+                            try self.attention.recordFlashAttnSplitMerge(&self.decode_cmd, merge_ds, layer_head_dim, config.n_heads, sink_offset);
+                        }
+                    }
+                } else if (use_batched) {
                     const pip = &self.attention.pipeline_batched.?;
                     const sink_buf = self.attn_sinks_buf;
                     const sink_offset: u32 = layer * config.n_heads;
@@ -4601,6 +5073,7 @@ pub const InferenceEngine = struct {
                     }
                 }
                 self.decode_cmd.computeBarrier();
+                self.endProfilePhase(.flash_attn_kernel, flash_attn_kernel_phase);
 
                 // Self-check the first attention layer at seq_len=1: with only one KV token,
                 // flash attention must reproduce the current V slice for each query head's KV group.
@@ -4867,10 +5340,33 @@ pub const InferenceEngine = struct {
                     // Use o_cols (from O weight tensor shape) — matches actual attention output dim.
                     // Gemma 4 has mixed head_dim (256 SWA vs 512 global); o_cols is always correct
                     // while q_dim (from config) uses the max head_dim.
-                    try self.dispatchDmmvAcc(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.hidden_buf, hidden_dim, o_cols);
-                    if (lt.attn_output_bias) |bias| {
-                        self.decode_cmd.computeBarrier();
-                        try self.dispatchBiasAdd(self.hidden_buf.handle, hidden_size, bias, hidden_dim);
+                    if (fused_oproj_merge_active and lt.attn_output_bias == null) {
+                        // Effort-11 cycle-17: replace (merge → barrier → o_proj DMMV-acc)
+                        // with a single dispatch that reads partials from
+                        // partial_attn_out_buf, computes per-head LSE merge weights
+                        // with sink fold-in, stages attn_out into LDS, and runs
+                        // the Q4_K matmul accumulating into hidden_buf. Bias path
+                        // falls through to the unfused dispatch (the post-bias
+                        // residual barrier is unchanged).
+                        const sink_offset_for_merge: u32 = layer * config.n_heads;
+                        try self.dispatchDmmvOprojMerge(
+                            o_tensor,
+                            self.partial_attn_out_buf,
+                            self.attn_sinks_buf,
+                            self.hidden_buf,
+                            hidden_dim,
+                            o_cols,
+                            config.n_heads,
+                            self.fa_split_k,
+                            sink_offset_for_merge,
+                            layer_head_dim,
+                        );
+                    } else {
+                        try self.dispatchDmmvAcc(o_tensor, self.attn_out_buf, self.attn_out_buf.size, self.hidden_buf, hidden_dim, o_cols);
+                        if (lt.attn_output_bias) |bias| {
+                            self.decode_cmd.computeBarrier();
+                            try self.dispatchBiasAdd(self.hidden_buf.handle, hidden_size, bias, hidden_dim);
+                        }
                     }
                     self.decode_cmd.computeBarrier();
                 } else {
@@ -6613,31 +7109,51 @@ pub const InferenceEngine = struct {
                 }
             } else {
                 // Dense FFN: gate → up → SwiGLU → down → residual.
-                // Note: a fused Q4_K dense gate+up shader exists
-                // (dmmv_q4k_fused_gate_up.comp, mirrors the MoE variant) but
-                // measured +11% decode regression on gemma4-31b (inter_dim=
-                // 25600) from the doubled per-workgroup register pressure.
-                // It's a small win on Qwen3-8B (inter_dim=11008) and a loss
-                // on Gemma's wider FFN, so stay with two separate DMMVs until
-                // we have a size-gated selector that's a net win.
+                // Effort-11 cycle-8: when the dense fused gate+up+SwiGLU
+                // pipeline is loaded and the per-call gates pass (Q4_K
+                // gate+up tensors, SwiGLU activation = non-Gemma + non-
+                // gpt_oss, inter_dim ≤ 12288 to keep Gemma 4 31B's wider
+                // FFN on the unfused path), one dispatch replaces the
+                // (gate DMMV + up DMMV + swiglu) trio. Eliminates the
+                // gate_buf and up_buf write+read round-trips and saves
+                // one global compute barrier per layer. Cycle-7 attempted
+                // gate+up only and reverted; this variant additionally
+                // folds the SwiGLU inline so the freed buffers are
+                // physically removed from the dense decode datapath.
+                const dense_ffn_phase = self.beginProfilePhase();
                 const gate_tensor = lt.ffn_gate orelse return error.TensorNotFound;
                 const up_tensor = lt.ffn_up orelse return error.TensorNotFound;
                 const down_tensor = lt.ffn_down orelse return error.TensorNotFound;
 
-                try self.dispatchDmmv(gate_tensor, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim);
-                try self.dispatchDmmv(up_tensor, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
-                self.decode_cmd.computeBarrier();
+                const fused_dense_ffn_eligible = self.use_fused_dense_ffn and
+                    self.dmmv.pipeline_q4k_fused_gate_up_swiglu != null and
+                    config.architecture != .gemma and
+                    config.architecture != .gpt_oss and
+                    gate_tensor.info.type_ == .q4_k and
+                    up_tensor.info.type_ == .q4_k and
+                    inter_dim <= 12288 and
+                    (hidden_dim % 4) == 0 and
+                    (hidden_dim % 256) == 0;
 
-                try self.dispatchFfnActivation(
-                    self.gate_buf.handle,
-                    self.gate_buf.size,
-                    self.up_buf.handle,
-                    self.up_buf.size,
-                    self.swiglu_buf.handle,
-                    self.swiglu_buf.size,
-                    inter_dim,
-                );
-                self.decode_cmd.computeBarrier();
+                if (fused_dense_ffn_eligible) {
+                    try self.dispatchDmmvFusedGateUpSwiglu(gate_tensor, up_tensor, self.ffn_norm_buf, hidden_size, self.swiglu_buf, inter_dim, hidden_dim);
+                    self.decode_cmd.computeBarrier();
+                } else {
+                    try self.dispatchDmmv(gate_tensor, self.ffn_norm_buf, hidden_size, self.gate_buf, inter_dim, hidden_dim);
+                    try self.dispatchDmmv(up_tensor, self.ffn_norm_buf, hidden_size, self.up_buf, inter_dim, hidden_dim);
+                    self.decode_cmd.computeBarrier();
+
+                    try self.dispatchFfnActivation(
+                        self.gate_buf.handle,
+                        self.gate_buf.size,
+                        self.up_buf.handle,
+                        self.up_buf.size,
+                        self.swiglu_buf.handle,
+                        self.swiglu_buf.size,
+                        inter_dim,
+                    );
+                    self.decode_cmd.computeBarrier();
+                }
 
                 // Fast path: fuse down proj + post_ffw_norm + residual add into
                 // two dispatches when the Gemma tail is active and the fused
@@ -6750,6 +7266,7 @@ pub const InferenceEngine = struct {
                         );
                     }
                 }
+                self.endProfilePhase(.dense_ffn, dense_ffn_phase);
             }
 
             // Per-layer output scaling (Gemma 4 proportional): hidden_buf *= scale
@@ -7458,6 +7975,102 @@ pub const InferenceEngine = struct {
         return self.dispatchDmmvInner(tensor, input_buf, input_size, output_buf, M, K, 0, 0, 0, 1);
     }
 
+    /// Dispatch the dense fused gate+up+SwiGLU shader. Replaces the
+    /// (gate DMMV → up DMMV → swiglu) trio with a single dispatch that
+    /// writes silu(W_gate·x) * (W_up·x) directly into swiglu_buf.
+    /// Push-descriptor only (we always run with push descriptors on
+    /// RDNA4); the per-call gate in the dense FFN site falls back to
+    /// the unfused trio when push descriptors aren't available.
+    fn dispatchDmmvFusedGateUpSwiglu(
+        self: *InferenceEngine,
+        gate_tensor: *const LoadedTensor,
+        up_tensor: *const LoadedTensor,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
+        swiglu_buf: Buffer,
+        M: u32,
+        K: u32,
+    ) !void {
+        const pip = &(self.dmmv.pipeline_q4k_fused_gate_up_swiglu orelse return error.ShaderNotLoaded);
+        const push = DmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = 0,
+            .x_offset = 0,
+            .y_offset = 0,
+            .acc_mode = 0,
+        };
+        // NUM_ROWS=2 in the shader; one workgroup per row pair.
+        const wg_x: u32 = (M + 1) / 2;
+        self.pushDispatch4(
+            pip,
+            std.mem.asBytes(&push),
+            gate_tensor.gpu_buffer.handle,
+            gate_tensor.gpu_buffer.size,
+            up_tensor.gpu_buffer.handle,
+            up_tensor.gpu_buffer.size,
+            input_buf.handle,
+            input_size,
+            swiglu_buf.handle,
+            swiglu_buf.size,
+            wg_x,
+            1,
+            1,
+        );
+    }
+
+    /// Dispatch the fused split-K flash attention merge + Q4_K o_proj
+    /// DMMV-acc shader. Replaces the (flash_attn_split_merge → barrier →
+    /// dispatchDmmvAcc(o_proj)) trio with a single dispatch that reads
+    /// partials directly, computes the per-head LSE merge weights with
+    /// sink fold-in, stages the merged attn_out into LDS (16 KB), and
+    /// runs the standard Q4_K matmul reading the B-vector from LDS while
+    /// accumulating into hidden_buf. Push-descriptor only.
+    fn dispatchDmmvOprojMerge(
+        self: *InferenceEngine,
+        o_tensor: *const LoadedTensor,
+        partial_buf: Buffer,
+        sinks_buf: Buffer,
+        hidden_buf: Buffer,
+        M: u32,
+        K: u32,
+        n_heads: u32,
+        n_i_chunks: u32,
+        sink_offset: u32,
+        head_dim: u32,
+    ) !void {
+        const pip = &(self.dmmv.pipeline_q4k_o_proj_merge orelse return error.ShaderNotLoaded);
+        const push = OprojMergePushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = 0,
+            .x_offset = 0,
+            .y_offset = 0,
+            .acc_mode = 1,
+            .n_heads = n_heads,
+            .n_i_chunks = n_i_chunks,
+            .sink_offset = sink_offset,
+            .head_dim = head_dim,
+        };
+        // NUM_ROWS=2 in the shader; one workgroup per row pair.
+        const wg_x: u32 = (M + 1) / 2;
+        self.pushDispatch4(
+            pip,
+            std.mem.asBytes(&push),
+            o_tensor.gpu_buffer.handle,
+            o_tensor.gpu_buffer.size,
+            partial_buf.handle,
+            partial_buf.size,
+            hidden_buf.handle,
+            hidden_buf.size,
+            sinks_buf.handle,
+            sinks_buf.size,
+            wg_x,
+            1,
+            1,
+        );
+    }
+
     /// Dispatch a DMMV with byte offset into stacked weight tensor (for MoE experts).
     fn dispatchDmmvWithOffset(
         self: *InferenceEngine,
@@ -7496,6 +8109,40 @@ pub const InferenceEngine = struct {
         };
 
         if (pip.uses_push_descriptors) {
+            // K-large dense Q4_K path: TPB=32 variant (pipeline_q4k_kpar32).
+            // Targets dense down_proj on Qwen 3-class models (K=inter_dim
+            // ≈ 12288 ≥ 8000); excludes Q/K/V/O projections (K=hidden_dim
+            // ≈ 4096) and gate/up (K=hidden_dim) which keep TPB=16. Same
+            // 3-binding layout and DmmvPushConstants — bit-equivalent dot
+            // math, just a different intra-WG split (32 lanes per block,
+            // 2 blocks per WG vs 16 lanes / 4 blocks). Effort-11 cycle-2.
+            if (qt == .q4_k and K >= 8000 and M < 65536 and self.dmmv.pipeline_q4k_kpar32 != null) {
+                const k32_pip = &self.dmmv.pipeline_q4k_kpar32.?;
+                const push_k32 = DmmvPushConstants{
+                    .M = M,
+                    .K = K,
+                    .a_offset = a_offset,
+                    .x_offset = x_offset,
+                    .y_offset = y_offset,
+                    .acc_mode = acc_mode,
+                };
+                // NUM_ROWS=2 → one workgroup per 2 rows (matches pipeline_q4k).
+                self.pushDispatch3(
+                    k32_pip,
+                    std.mem.asBytes(&push_k32),
+                    tensor.gpu_buffer.handle,
+                    tensor.gpu_buffer.size,
+                    input_buf.handle,
+                    input_size,
+                    output_buf.handle,
+                    output_buf.size,
+                    (M + 1) / 2,
+                    1,
+                    1,
+                );
+                return;
+            }
+
             // Wide-vocab LM-head fast path: NUM_ROWS=8 variant (pipeline_q4k_wide)
             // for tall Q4_K matrices like Gemma 4 31B (M=262144). Same binding
             // layout as pipeline_q4k, only the shader constant differs. 4× fewer
@@ -9681,6 +10328,7 @@ pub const InferenceEngine = struct {
         self.gate_buf.deinit();
         self.ffn_norm_buf.deinit();
         self.o_proj_buf.deinit();
+        if (self.partial_attn_out_buf.handle != null) self.partial_attn_out_buf.deinit();
         self.attn_out_buf.deinit();
         self.v_buf.deinit();
         self.k_buf.deinit();
@@ -10007,9 +10655,11 @@ pub fn generate(
             const avg_query_read_ms = @as(f64, @floatFromInt(engine.profile_total_query_read_ns)) / @as(f64, @floatFromInt(engine.profile_sample_count)) / 1_000_000.0;
             const avg_embed_phase_ms = engine.avgProfilePhaseMs(.embed_upload);
             const avg_attention_phase_ms = engine.avgProfilePhaseMs(.attention);
+            const avg_flash_attn_phase_ms = engine.avgProfilePhaseMs(.flash_attn_kernel);
             const avg_ssm_phase_ms = engine.avgProfilePhaseMs(.ssm);
             const avg_moe_phase_ms = engine.avgProfilePhaseMs(.moe_routed);
             const avg_shared_phase_ms = engine.avgProfilePhaseMs(.shared_expert);
+            const avg_dense_ffn_phase_ms = engine.avgProfilePhaseMs(.dense_ffn);
             const avg_tail_phase_ms = engine.avgProfilePhaseMs(.final_tail);
             const avg_desc_allocs = @as(f64, @floatFromInt(engine.profile_total_counters.descriptor_allocs)) / @as(f64, @floatFromInt(engine.profile_sample_count));
             const avg_desc_writes = @as(f64, @floatFromInt(engine.profile_total_counters.descriptor_write_calls)) / @as(f64, @floatFromInt(engine.profile_sample_count));
@@ -10034,12 +10684,14 @@ pub fn generate(
                 avg_desc_writes,
                 avg_desc_bindings,
             });
-            log.info("PROFILE: avg GPU phases embed={d:.2} ms attention={d:.2} ms ssm={d:.2} ms moe={d:.2} ms shared={d:.2} ms tail={d:.2} ms", .{
+            log.info("PROFILE: avg GPU phases embed={d:.2} ms attention={d:.2} ms (flash_attn={d:.2} ms) ssm={d:.2} ms moe={d:.2} ms shared={d:.2} ms dense_ffn={d:.2} ms tail={d:.2} ms", .{
                 avg_embed_phase_ms,
                 avg_attention_phase_ms,
+                avg_flash_attn_phase_ms,
                 avg_ssm_phase_ms,
                 avg_moe_phase_ms,
                 avg_shared_phase_ms,
+                avg_dense_ffn_phase_ms,
                 avg_tail_phase_ms,
             });
             log.info("PROFILE: avg SSM subphases proj={d:.2} ms conv={d:.2} ms delta={d:.2} ms gnorm={d:.2} ms out={d:.2} ms", .{
@@ -10072,6 +10724,53 @@ pub fn generate(
         }
     } else {
         log.info("Generated {d} tokens", .{decode_tokens});
+    }
+
+    // Per-layer flash_attn_kernel histogram (ZINC_FA_PROFILE_LAYER=1).
+    // Each entry is the average ms across the sampled decode tokens for the
+    // Nth flash_attn dispatch in token order. For Qwen 3 8B that maps 1:1 to
+    // attention layer N. For hybrid models (SSM-interleaved) the index
+    // collapses across only attention-bearing layers — sufficient to spot a
+    // class-level outlier (full-attn vs SWA, first vs last). Unlocks the
+    // structural-swing #6 attack: pick the slowest layer-class and target it.
+    if (engine.fa_profile_layer) {
+        var max_layer: u32 = 0;
+        for (0..engine.fa_per_layer_count.len) |i| {
+            if (engine.fa_per_layer_count[i] > 0) max_layer = @intCast(i + 1);
+        }
+        if (max_layer > 0) {
+            var total_ns: u64 = 0;
+            var min_ms: f64 = std.math.inf(f64);
+            var max_ms: f64 = 0.0;
+            var min_idx: u32 = 0;
+            var max_idx: u32 = 0;
+            log.info("FA_PROFILE_LAYER: per-layer flash_attn ms (avg over decode tokens, {d} dispatches/layer)", .{
+                if (max_layer > 0) engine.fa_per_layer_count[0] else 0,
+            });
+            for (0..max_layer) |i| {
+                const cnt = engine.fa_per_layer_count[i];
+                if (cnt == 0) continue;
+                const avg_ms = @as(f64, @floatFromInt(engine.fa_per_layer_ns[i])) /
+                    @as(f64, @floatFromInt(cnt)) / 1_000_000.0;
+                total_ns += engine.fa_per_layer_ns[i];
+                if (avg_ms < min_ms) {
+                    min_ms = avg_ms;
+                    min_idx = @intCast(i);
+                }
+                if (avg_ms > max_ms) {
+                    max_ms = avg_ms;
+                    max_idx = @intCast(i);
+                }
+                log.info("FA_PROFILE_LAYER:   L{d:0>2} {d:.4} ms", .{ i, avg_ms });
+            }
+            const total_avg_ms = @as(f64, @floatFromInt(total_ns)) /
+                @as(f64, @floatFromInt(@max(engine.fa_per_layer_count[0], 1))) / 1_000_000.0;
+            log.info("FA_PROFILE_LAYER: summary min=L{d}({d:.4}ms) max=L{d}({d:.4}ms) ratio={d:.2}x total_per_token={d:.3}ms", .{
+                min_idx, min_ms, max_idx, max_ms,
+                if (min_ms > 0) max_ms / min_ms else 0.0,
+                total_avg_ms,
+            });
+        }
     }
 
     // Print per-layer diagnostic summary (stored during BOS processing)

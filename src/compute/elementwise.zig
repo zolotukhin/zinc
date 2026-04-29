@@ -179,6 +179,22 @@ pub const RmsNormDmmvQ4kAlphaBetaPush = extern struct {
     eps_bits: u32, // RMS norm epsilon (f32 bits)
 };
 
+/// Push constants for fused Q+K norm + RoPE + KV cache write shader
+/// (src/shaders/qk_norm_rope_kv_write.comp). Folds the per-attention-layer
+/// (Q norm+rope → K norm+rope → kv_cache_write) trio on Qwen 3 family
+/// dense attention into a single dispatch.
+pub const QkNormRopeKvWritePush = extern struct {
+    head_dim: u32,
+    rope_dim: u32,
+    n_q_heads: u32,
+    n_k_heads: u32,
+    position: u32,
+    freq_base_bits: u32,   // 0 ⇒ use freq buffer
+    attn_scale_bits: u32,  // 0 ⇒ scale = 1.0
+    eps_bits: u32,
+    dst_offset: u32,       // physical_token * kv_dim (in floats)
+};
+
 /// Manages element-wise fused kernel pipelines.
 pub const ElementwiseDispatch = struct {
     /// RMS NORM pipeline, or null.
@@ -244,6 +260,12 @@ pub const ElementwiseDispatch = struct {
     /// layers each). WG 0 also writes norm_buf so downstream wqkv/z DMMVs
     /// see the pre-normalized hidden vector.
     pipeline_rms_norm_dmmv_q4k_alpha_beta: ?Pipeline,
+    /// Fused Q+K norm + RoPE + KV cache write pipeline (8 bindings:
+    /// q_data, q_norm_w, k_src, k_norm_w, freq_buf, kv_k_cache, v_src,
+    /// kv_v_cache). Replaces (Q norm+rope → K norm+rope → kv_cache_write)
+    /// on Qwen 3 dense attention layers, saving 2 dispatches + 1 barrier
+    /// per attention layer.
+    pipeline_qk_norm_rope_kv_write: ?Pipeline,
     /// Descriptor pool for this dispatch.
     descriptor_pool: vk.c.VkDescriptorPool,
     /// Logical device.
@@ -502,6 +524,17 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
 
+        // qk_norm_rope_kv_write: fused Q+K norm + RoPE + KV cache write,
+        // 8 bindings (q_data, q_norm_w, k_src, k_norm_w, freq_buf,
+        // kv_k_cache, v_src, kv_v_cache). Targets the per-attention-layer
+        // (Q norm+rope → K norm+rope → kv_cache_write) trio on Qwen 3
+        // family dense attention. Saves 2 dispatches + 1 barrier per layer.
+        const qk_norm_rope_kv_write_path = std.fmt.bufPrint(&path_buf, "{s}/qk_norm_rope_kv_write.spv", .{shader_dir}) catch unreachable;
+        const pipeline_qk_norm_rope_kv_write = pipeline_mod.createFromSpirvWithOptions(instance, qk_norm_rope_kv_write_path, 8, @sizeOf(QkNormRopeKvWritePush), &.{}, push_wave64_options, allocator) catch |err| blk: {
+            log.warn("qk_norm_rope_kv_write shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         return ElementwiseDispatch{
             .pipeline_rms_norm = pipeline_rms_norm,
             .pipeline_swiglu = pipeline_swiglu,
@@ -531,6 +564,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_norm_rope = pipeline_norm_rope,
             .pipeline_rms_norm_dmmv_f32 = pipeline_rms_norm_dmmv_f32,
             .pipeline_rms_norm_dmmv_q4k_alpha_beta = pipeline_rms_norm_dmmv_q4k_alpha_beta,
+            .pipeline_qk_norm_rope_kv_write = pipeline_qk_norm_rope_kv_write,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -895,6 +929,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_norm_rope) |*p| p.deinit();
         if (self.pipeline_rms_norm_dmmv_f32) |*p| p.deinit();
         if (self.pipeline_rms_norm_dmmv_q4k_alpha_beta) |*p| p.deinit();
+        if (self.pipeline_qk_norm_rope_kv_write) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.* = undefined;
     }

@@ -17,6 +17,14 @@
 
 layout(local_size_x = 64) in;
 
+// Split-K: when N_I_CHUNKS > 1 the dispatch grid is (n_heads, N_I_CHUNKS, 1) and
+// each WG processes 1/N_I_CHUNKS of the i-axis, writing partial unnormalized O,
+// running max M, and running sum L to the output buffer (in a layout the
+// flash_attn_split_merge shader expects). When N_I_CHUNKS == 1 (default) the
+// shader is bit-equivalent to the pre-split path: grid (n_heads, 1, 1), full
+// i-axis sweep, final normalize + sink merge written to o_data.
+layout(constant_id = 0) const uint N_I_CHUNKS = 1u;
+
 layout(push_constant) uniform PushConstants {
     uint head_dim;      // dimension per head (e.g. 128)
     uint n_heads;       // number of query heads
@@ -27,32 +35,59 @@ layout(push_constant) uniform PushConstants {
     uint sink_offset;     // starting index into sink_data for this layer (layer_idx * n_heads)
 };
 
-// Buffer bindings
+// Buffer bindings. Q, K, V, and Output are aliased as vec4 so the inner
+// dot/V-acc loops can issue 16-byte coherent loads/stores (one wave
+// instruction per 4 head_dim elements) instead of 4 scalar ones. All
+// head_dim values used in this codebase (128/256/512) are divisible by 4,
+// and q_base/k_base/v_base/o_base offsets are multiples of head_dim, so
+// the alias is always valid. The Q/K vec4 view feeds Phase 1; the V/O
+// vec4 view feeds Phase 4 (V-acc) and Phase 5 (write-out).
 layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];     };
+layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[];  };
 layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];     };
+layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[];  };
 layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];     };
+layout(set = 0, binding = 2) readonly  buffer VCacheV4  { vec4  v_data_v4[];  };
 layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];   };
 layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];     };
+layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[];  };
 layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[];  };
 
 // Shared memory for attention block processing
-// Attention scores for one 256-token block (max scores held at once)
+// Attention scores for one 256-token block (max scores held at once),
+// packed as vec4 so Phase 4's inner V-accumulation reads four consecutive
+// scores via one ds_read_b128 instead of four ds_read_b32. Phase 1/2/3
+// still touch individual scores via swizzle (s_scores_v4[i>>2][i&3u]),
+// which the SPIR-V → AMDGPU compiler lowers to ds_read/write_b32 at the
+// scalar component offset. 64 vec4 = 256 floats, same 1 KB LDS budget.
 const uint BLOCK_SIZE = 256u;
-shared float s_scores[BLOCK_SIZE];
-// Query vector cached in shared memory once per workgroup. Q is constant
-// across every score and every block for a given head, but the original
-// dot loop re-read q_data[] from DRAM for each (i, d) pair which costs
-// O(block_len * head_dim) redundant global reads per block. Staging it
-// once collapses that to one head_dim-sized cooperative load.
-shared float s_q[512];     // supports head_dim up to 512 (Gemma 4 global layers)
-// Page-id cache. Phase 4's V-accumulation re-reads page_ids[] once per
-// (d, i) pair: 64 threads * (head_dim/64) * block_len lookups per block.
-// On head_dim=128 that is 32,768 lookups per WG per block, all to a tiny
-// page table that should be cache-resident anyway. Loading once into LDS
-// at the top of each block makes the inner loops shared-memory only.
-shared uint s_page_ids_block[BLOCK_SIZE];
-// Accumulator for output vector, one element per thread slot
-shared float s_out[512];   // supports head_dim up to 512 (Gemma 4 global layers)
+const uint BLOCK_SIZE_V4 = BLOCK_SIZE >> 2;  // 64
+shared vec4 s_scores_v4[BLOCK_SIZE_V4];
+// Query vector cached in shared memory once per workgroup, packed as vec4
+// so Phase 1's dot loop reads aligned 16-byte chunks. 128 vec4 = 512
+// floats (same LDS budget as the prior scalar s_q[512]).
+shared vec4 s_q4[128];     // supports head_dim up to 512 (Gemma 4 global layers)
+// Per-block KV base offset cache. Each block_start..block_end token slot
+// has a fixed (page_id, page_off) pair, and K[i,:] and V[i,:] live at the
+// same in-buffer offset (the kv_head * head_dim shift is uniform across i).
+// Packed as uvec4 so Phase 4's 4-way unrolled inner loop reads four
+// consecutive bases via one ds_read_b128 instead of four ds_read_b32 —
+// halves the LDS-issue cycles on the hot V-accumulation loop alongside
+// the scores vec4 alias above. Phase 1's setup writes scalar slots via
+// the same swizzle pattern; the compiler lowers component stores to
+// ds_write_b32 at the scalar offset. 64 uvec4 = 256 uints (same 1 KB).
+shared uvec4 s_kv_base_uv4[BLOCK_SIZE_V4];
+// Accumulator for output vector, packed as vec4 so Phase 4's V-acc holds
+// 4 d-values per thread in one 16-byte LDS slot and Phase 5 writes back
+// 16 bytes per coherent store. 128 vec4 = 512 floats (same LDS as the
+// prior scalar s_out[512]).
+shared vec4 s_out_v4[128]; // supports head_dim up to 512 (Gemma 4 global layers)
+// Phase 4 D-split partial buffer. When head_dim_v4 == 32 (head_dim=128),
+// only 32 of the 64 wave lanes own a unique d4 in the original formulation.
+// The D-split path pairs lanes (tid, tid+32) on the same d4 and splits the
+// i-axis between them; the upper-half lanes write their partial here for
+// the lower-half lanes to merge before updating s_out_v4. 32 vec4 = 512 B.
+shared vec4 s_partial_v4[32];
 // Running softmax state
 shared float s_max_old;
 shared float s_sum_old;
@@ -61,6 +96,7 @@ shared float s_reduce_scalar;
 
 void main() {
     uint head = gl_WorkGroupID.x;   // query head index
+    uint chunk_id = gl_WorkGroupID.y; // 0 when N_I_CHUNKS == 1, else 0..N_I_CHUNKS-1
     uint tid = gl_LocalInvocationID.x;  // 0..63
 
     // GQA: map query head to its corresponding KV head
@@ -69,16 +105,31 @@ void main() {
     // Base offset into query buffer for this head
     uint q_base = head * head_dim;
 
-    // --- Load query vector into registers ---
-    // Each thread handles head_dim/64 elements with stride 64.
-    // For head_dim=128, each thread handles 2 elements.
+    // Compute this WG's i-axis range. When N_I_CHUNKS == 1 the compiler folds
+    // the spec-const branch and this collapses to [0, seq_len) — bit-equivalent
+    // to the pre-split path. With N_I_CHUNKS > 1 each chunk takes a contiguous
+    // slice; the last chunk picks up any non-divisible tail.
+    uint i_start;
+    uint i_end;
+    if (N_I_CHUNKS == 1u) {
+        i_start = 0u;
+        i_end = seq_len;
+    } else {
+        i_start = (chunk_id * seq_len) / N_I_CHUNKS;
+        i_end = (chunk_id + 1u == N_I_CHUNKS) ? seq_len : (((chunk_id + 1u) * seq_len) / N_I_CHUNKS);
+    }
 
-    // Initialize output accumulator and stage Q into shared memory.
-    // Both happen in the same cooperative loop because the same threads
-    // own the same indices.
-    for (uint d = tid; d < head_dim; d += 64u) {
-        s_out[d] = 0.0;
-        s_q[d] = q_data[q_base + d];
+    // --- Load query vector into registers ---
+    // Each thread handles one vec4 (4 floats) per stride-64 step. For
+    // head_dim=128 (head_dim_v4=32) only threads 0..31 enter the loop,
+    // so init covers 32*4 = 128 floats = head_dim. For head_dim=256 all
+    // 64 threads do one iter; for head_dim=512 each thread does two
+    // iters. The same vec4 layout feeds Phase 4 (V-acc) and Phase 5.
+    uint head_dim_v4 = head_dim >> 2;
+    uint q_base_v4 = q_base >> 2;
+    for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+        s_out_v4[d4] = vec4(0.0);
+        s_q4[d4] = q_data_v4[q_base_v4 + d4];
     }
 
     if (tid == 0u) {
@@ -93,55 +144,122 @@ void main() {
     uint total_pages = (seq_len + page_size - 1u) / page_size;
 
     // --- Process KV cache in 256-token blocks ---
-    for (uint block_start = 0u; block_start < seq_len; block_start += BLOCK_SIZE) {
-        uint block_end = min(block_start + BLOCK_SIZE, seq_len);
+    for (uint block_start = i_start; block_start < i_end; block_start += BLOCK_SIZE) {
+        uint block_end = min(block_start + BLOCK_SIZE, i_end);
         uint block_len = block_end - block_start;
 
-        // Stage the page_ids[] entries for this block into LDS so both
-        // Phase 1 (one lookup per score) and Phase 4 (head_dim/64 *
-        // block_len lookups per thread) can read shared memory.
+        // Precompute the K/V base offset per token slot in this block.
+        // s_kv_base_uv4[i>>2][i&3u] is the vec4-index of K[i, kv_head, 0]
+        // and V[i, kv_head, 0] inside k_data_v4 / v_data_v4. Phase 1 reads
+        // one base per i via component access; Phase 4's 4-way unrolled
+        // inner loop reads four bases at once as a uvec4 LDS broadcast.
         for (uint i = tid; i < block_len; i += 64u) {
             uint seq_pos = block_start + i;
-            s_page_ids_block[i] = page_ids[seq_pos / page_size];
-        }
-        barrier();
-
-        // --- Phase 1: Compute attention scores for this block ---
-        // Each thread computes one or more scores (stride of 64 across block_len)
-        for (uint i = tid; i < block_len; i += 64u) {
-            uint seq_pos = block_start + i;
-
-            // Paged lookup uses the cached page id; offset within page is
-            // a cheap modulo of the sequence position.
+            uint page_id = page_ids[seq_pos / page_size];
             uint page_off = seq_pos % page_size;
-            uint page_id = s_page_ids_block[i];
-
-            // K cache layout: k_data[page_id * page_size * head_dim * n_kv_heads
-            //                         + page_off * head_dim * n_kv_heads
-            //                         + kv_head * head_dim + d]
-            // Simplified: each page stores page_size tokens, each token stores
-            // n_kv_heads * head_dim floats.
-            uint k_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
-                          + kv_head * head_dim;
-
-            // Dot product q . k. Q is staged in shared memory by the
-            // cooperative load above, so the inner loop only reads one
-            // global tensor (K) per iteration.
-            float dot = 0.0;
-            for (uint d = 0u; d < head_dim; d++) {
-                dot += s_q[d] * k_data[k_base + d];
-            }
-
-            s_scores[i] = dot * scale;
+            s_kv_base_uv4[i >> 2][i & 3u] = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                              + kv_head * head_dim) >> 2;
         }
-
         barrier();
 
-        // --- Phase 2: Find max score in this block (for numerical stability) ---
+        // --- Phase 1+2: Compute attention scores AND track local max ---
+        // Each thread computes its scores (stride 64 across block_len) and
+        // updates local_max in the same pass — eliminates Phase 2's full
+        // read-back of s_scores and the cycle-0 barrier between Phase 1
+        // and Phase 2 (each lane only reads/writes its own s_scores slot
+        // here, so no cross-lane LDS dependency exists in this segment).
+        // K is read as vec4: each iteration loads 16 bytes per thread and
+        // performs one dot(vec4, vec4), so the inner loop runs head_dim/4
+        // iterations instead of head_dim. q_base/k_base are head_dim-aligned
+        // and head_dim is divisible by 4, so the vec4 alias is valid.
         float local_max = -1.0e30;
         for (uint i = tid; i < block_len; i += 64u) {
-            local_max = max(local_max, s_scores[i]);
+            // K cache layout (vec4 view): k_data_v4[k_base_v4 + d4]
+            // covers head_dim/4 vec4 chunks of K[i, kv_head, :]. The base
+            // was precomputed for this whole block; the swizzle access on
+            // s_kv_base_uv4 lowers to a single ds_read_b32.
+            uint k_base_v4 = s_kv_base_uv4[i >> 2][i & 3u];
+
+            // Dot product q . k via vec4 chunks. 16-way ILP via paired
+            // accumulators acc0..acc15 extends cycle 14's 8-way pattern
+            // to mirror Phase 4's cycle-16 16-way unroll: doubles
+            // in-flight K loads (16 vs 8) and FMAs (16 vs 8) per inner
+            // iter to better hide RDNA4 vmem latency (~50-100 cycles for
+            // L2 hits, ~500-1000 for DRAM). Reads across d4 are
+            // contiguous within K[i,:] so the 16 loads coalesce tightly
+            // within the lane's row. head_dim_v4 ∈ {16,32,64,128} for
+            // all models in this codebase, all multiples of 16, so the
+            // 16-way main loop is exact for every current model; the
+            // 8-way / 4-way / 2-way / 1-way tails are safety nets.
+            // Register pressure: 16 float acc + 16 K vec4 in flight ≈
+            // 80 VGPR/lane (16 vec4 = 64 VGPR for K, 16 acc = 16 VGPR;
+            // Q is broadcast from LDS), well inside RDNA4's 256 VGPR
+            // /lane limit.
+            float acc0 = 0.0;
+            float acc1 = 0.0;
+            float acc2 = 0.0;
+            float acc3 = 0.0;
+            float acc4 = 0.0;
+            float acc5 = 0.0;
+            float acc6 = 0.0;
+            float acc7 = 0.0;
+            float acc8 = 0.0;
+            float acc9 = 0.0;
+            float acc10 = 0.0;
+            float acc11 = 0.0;
+            float acc12 = 0.0;
+            float acc13 = 0.0;
+            float acc14 = 0.0;
+            float acc15 = 0.0;
+            uint d4 = 0u;
+            for (; d4 + 16u <= head_dim_v4; d4 += 16u) {
+                acc0  += dot(s_q4[d4],       k_data_v4[k_base_v4 + d4]);
+                acc1  += dot(s_q4[d4 + 1u],  k_data_v4[k_base_v4 + d4 + 1u]);
+                acc2  += dot(s_q4[d4 + 2u],  k_data_v4[k_base_v4 + d4 + 2u]);
+                acc3  += dot(s_q4[d4 + 3u],  k_data_v4[k_base_v4 + d4 + 3u]);
+                acc4  += dot(s_q4[d4 + 4u],  k_data_v4[k_base_v4 + d4 + 4u]);
+                acc5  += dot(s_q4[d4 + 5u],  k_data_v4[k_base_v4 + d4 + 5u]);
+                acc6  += dot(s_q4[d4 + 6u],  k_data_v4[k_base_v4 + d4 + 6u]);
+                acc7  += dot(s_q4[d4 + 7u],  k_data_v4[k_base_v4 + d4 + 7u]);
+                acc8  += dot(s_q4[d4 + 8u],  k_data_v4[k_base_v4 + d4 + 8u]);
+                acc9  += dot(s_q4[d4 + 9u],  k_data_v4[k_base_v4 + d4 + 9u]);
+                acc10 += dot(s_q4[d4 + 10u], k_data_v4[k_base_v4 + d4 + 10u]);
+                acc11 += dot(s_q4[d4 + 11u], k_data_v4[k_base_v4 + d4 + 11u]);
+                acc12 += dot(s_q4[d4 + 12u], k_data_v4[k_base_v4 + d4 + 12u]);
+                acc13 += dot(s_q4[d4 + 13u], k_data_v4[k_base_v4 + d4 + 13u]);
+                acc14 += dot(s_q4[d4 + 14u], k_data_v4[k_base_v4 + d4 + 14u]);
+                acc15 += dot(s_q4[d4 + 15u], k_data_v4[k_base_v4 + d4 + 15u]);
+            }
+            for (; d4 + 8u <= head_dim_v4; d4 += 8u) {
+                acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
+                acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
+                acc2 += dot(s_q4[d4 + 2u], k_data_v4[k_base_v4 + d4 + 2u]);
+                acc3 += dot(s_q4[d4 + 3u], k_data_v4[k_base_v4 + d4 + 3u]);
+                acc4 += dot(s_q4[d4 + 4u], k_data_v4[k_base_v4 + d4 + 4u]);
+                acc5 += dot(s_q4[d4 + 5u], k_data_v4[k_base_v4 + d4 + 5u]);
+                acc6 += dot(s_q4[d4 + 6u], k_data_v4[k_base_v4 + d4 + 6u]);
+                acc7 += dot(s_q4[d4 + 7u], k_data_v4[k_base_v4 + d4 + 7u]);
+            }
+            for (; d4 + 4u <= head_dim_v4; d4 += 4u) {
+                acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
+                acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
+                acc2 += dot(s_q4[d4 + 2u], k_data_v4[k_base_v4 + d4 + 2u]);
+                acc3 += dot(s_q4[d4 + 3u], k_data_v4[k_base_v4 + d4 + 3u]);
+            }
+            for (; d4 + 2u <= head_dim_v4; d4 += 2u) {
+                acc0 += dot(s_q4[d4],      k_data_v4[k_base_v4 + d4]);
+                acc1 += dot(s_q4[d4 + 1u], k_data_v4[k_base_v4 + d4 + 1u]);
+            }
+            for (; d4 < head_dim_v4; d4++) {
+                acc0 += dot(s_q4[d4], k_data_v4[k_base_v4 + d4]);
+            }
+
+            float score = ((((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7)))
+                          + (((acc8 + acc9) + (acc10 + acc11)) + ((acc12 + acc13) + (acc14 + acc15)))) * scale;
+            s_scores_v4[i >> 2][i & 3u] = score;
+            local_max = max(local_max, score);
         }
+
         float block_max = subgroupMax(local_max);
         if (gl_NumSubgroups > 1u) {
             if (gl_SubgroupInvocationID == 0u) {
@@ -165,8 +283,8 @@ void main() {
         // --- Phase 3: Compute exp(score - new_max) and sum ---
         float local_sum = 0.0;
         for (uint i = tid; i < block_len; i += 64u) {
-            float e = exp(s_scores[i] - new_max);
-            s_scores[i] = e;
+            float e = exp(s_scores_v4[i >> 2][i & 3u] - new_max);
+            s_scores_v4[i >> 2][i & 3u] = e;
             local_sum += e;
         }
         float block_sum = subgroupAdd(local_sum);
@@ -187,28 +305,169 @@ void main() {
         }
 
         // --- Phase 4: Rescale previous accumulator + accumulate new V ---
-        // Previous accum was weighted relative to the old max; we rescale
-        // to the new max and add this block's V contribution in one pass.
-        // Each thread owns the same set of d indices in both the rescale
-        // and the accumulation (s_out[d] is touched only by thread tid for
-        // d % 64 == tid), so no inter-thread barrier is needed between
-        // them. Fusing saves one shared-memory write+read round trip and
-        // one workgroup barrier per block.
+        // V is read as vec4: each thread holds a vec4 acc covering 4
+        // contiguous d values, and the inner loop reads one 16-byte
+        // V chunk per i instead of one float.
+        //
+        // For head_dim=128 (head_dim_v4 == 32, Qwen 3 8B) the original
+        // d4-strided loop kept only 32 of the 64 wave lanes busy. The
+        // D-split path pairs lanes (tid, tid + 32) on the same d4 and
+        // splits the i-axis between them, doubling the active lane
+        // count and halving the inner-loop iteration count. The hi-half
+        // lane writes its partial accumulator into LDS; the lo-half
+        // lane merges it and updates s_out_v4.
+        //
+        // For head_dim_v4 >= 64 (head_dim=256/512) every lane already
+        // covers a unique d4, so no split is needed. head_dim_v4 == 16
+        // (head_dim=64) is not currently exercised by any model and
+        // would need a 4-way split, so it falls through to the original
+        // path.
         float rescale = exp(s_max_old - new_max);
 
-        for (uint d = tid; d < head_dim; d += 64u) {
-            float acc = 0.0;
-            for (uint i = 0u; i < block_len; i++) {
-                uint seq_pos = block_start + i;
-                uint page_off = seq_pos % page_size;
-                uint page_id = s_page_ids_block[i];
+        if (head_dim_v4 == 32u) {
+            uint d4 = tid & 31u;
+            uint i_half = tid >> 5;
+            // half_block stays a multiple of 8 (not 16): rounding to 16 at
+            // L=1500's partial block (block_len=220 → half_block=96 vs 104)
+            // would balloon the lo/hi imbalance from 1 iter to 3 iters.
+            // The 16-way main loop handles half_block=128 (full block) with
+            // 8 iters; the 8-way / 4-way / 1-way tails clean up the partial
+            // block's 8/4/0 leftover i's per half.
+            uint half_block = (block_len >> 1) & ~7u;
+            uint i_lo = i_half * half_block;
+            uint i_hi = (i_half == 0u) ? half_block : block_len;
 
-                uint v_base = (page_id * page_size + page_off) * n_kv_heads * head_dim
-                              + kv_head * head_dim;
+            // 16-way ILP via partial accumulators acc0..acc15 extends
+            // cycle 12's 8-way pattern: doubles in-flight V loads (16 vs
+            // 8) and FMAs (16 vs 8) per inner iter to better hide V-load
+            // latency. RDNA4 L2 hit ~50-100 cycles; 16 V loads in flight
+            // saturate the load-throughput pipe and keep FMAs busy across
+            // the latency window. Register pressure: 16 vec4 acc + 4 uvec4
+            // bases + 4 vec4 scores ≈ 96 extra VGPR/lane, still inside
+            // RDNA4's 256 VGPR/lane limit. Each 16-way iter issues 4
+            // ds_read_b128 for v_bases (replaces 16 ds_read_b32) and 4
+            // ds_read_b128 for scores (replaces 16 ds_read_b32) — same
+            // LDS-issue rate per i as the 8-way path.
+            vec4 acc0 = vec4(0.0);
+            vec4 acc1 = vec4(0.0);
+            vec4 acc2 = vec4(0.0);
+            vec4 acc3 = vec4(0.0);
+            vec4 acc4 = vec4(0.0);
+            vec4 acc5 = vec4(0.0);
+            vec4 acc6 = vec4(0.0);
+            vec4 acc7 = vec4(0.0);
+            vec4 acc8 = vec4(0.0);
+            vec4 acc9 = vec4(0.0);
+            vec4 acc10 = vec4(0.0);
+            vec4 acc11 = vec4(0.0);
+            vec4 acc12 = vec4(0.0);
+            vec4 acc13 = vec4(0.0);
+            vec4 acc14 = vec4(0.0);
+            vec4 acc15 = vec4(0.0);
+            uint i = i_lo;
+            // 16-way main: handles 16 consecutive i's per iter via 4
+            // ds_read_b128 (v_bases) + 4 ds_read_b128 (scores) + 16 V
+            // loads + 16 FMAs. For block_len=256 (full block, dominant
+            // case at L=1500) i_hi - i_lo = 128 so this loop runs 8 iters
+            // per lane.
+            for (; i + 16u <= i_hi; i += 16u) {
+                uvec4 v_bases_0 = s_kv_base_uv4[i >> 2];
+                uvec4 v_bases_1 = s_kv_base_uv4[(i >> 2) + 1u];
+                uvec4 v_bases_2 = s_kv_base_uv4[(i >> 2) + 2u];
+                uvec4 v_bases_3 = s_kv_base_uv4[(i >> 2) + 3u];
+                vec4 scores_0 = s_scores_v4[i >> 2];
+                vec4 scores_1 = s_scores_v4[(i >> 2) + 1u];
+                vec4 scores_2 = s_scores_v4[(i >> 2) + 2u];
+                vec4 scores_3 = s_scores_v4[(i >> 2) + 3u];
 
-                acc += s_scores[i] * v_data[v_base + d];
+                acc0  += scores_0.x * v_data_v4[v_bases_0.x + d4];
+                acc1  += scores_0.y * v_data_v4[v_bases_0.y + d4];
+                acc2  += scores_0.z * v_data_v4[v_bases_0.z + d4];
+                acc3  += scores_0.w * v_data_v4[v_bases_0.w + d4];
+                acc4  += scores_1.x * v_data_v4[v_bases_1.x + d4];
+                acc5  += scores_1.y * v_data_v4[v_bases_1.y + d4];
+                acc6  += scores_1.z * v_data_v4[v_bases_1.z + d4];
+                acc7  += scores_1.w * v_data_v4[v_bases_1.w + d4];
+                acc8  += scores_2.x * v_data_v4[v_bases_2.x + d4];
+                acc9  += scores_2.y * v_data_v4[v_bases_2.y + d4];
+                acc10 += scores_2.z * v_data_v4[v_bases_2.z + d4];
+                acc11 += scores_2.w * v_data_v4[v_bases_2.w + d4];
+                acc12 += scores_3.x * v_data_v4[v_bases_3.x + d4];
+                acc13 += scores_3.y * v_data_v4[v_bases_3.y + d4];
+                acc14 += scores_3.z * v_data_v4[v_bases_3.z + d4];
+                acc15 += scores_3.w * v_data_v4[v_bases_3.w + d4];
             }
-            s_out[d] = s_out[d] * rescale + acc;
+            // 8-way tail: handles 0..15 leftover i's after the 16-way
+            // main when block_len is not a multiple of 32. At L=1500's
+            // partial block (block_len=220 → half_block=104), the lower
+            // half has 104 i's = 6 16-way iters + 1 8-way iter; the upper
+            // half has 116 i's = 7 16-way iters + 1 4-way iter.
+            for (; i + 8u <= i_hi; i += 8u) {
+                uvec4 v_bases_lo = s_kv_base_uv4[i >> 2];
+                uvec4 v_bases_hi = s_kv_base_uv4[(i >> 2) + 1u];
+                vec4 scores_lo = s_scores_v4[i >> 2];
+                vec4 scores_hi = s_scores_v4[(i >> 2) + 1u];
+
+                acc0 += scores_lo.x * v_data_v4[v_bases_lo.x + d4];
+                acc1 += scores_lo.y * v_data_v4[v_bases_lo.y + d4];
+                acc2 += scores_lo.z * v_data_v4[v_bases_lo.z + d4];
+                acc3 += scores_lo.w * v_data_v4[v_bases_lo.w + d4];
+                acc4 += scores_hi.x * v_data_v4[v_bases_hi.x + d4];
+                acc5 += scores_hi.y * v_data_v4[v_bases_hi.y + d4];
+                acc6 += scores_hi.z * v_data_v4[v_bases_hi.z + d4];
+                acc7 += scores_hi.w * v_data_v4[v_bases_hi.w + d4];
+            }
+            // 4-way tail: handles 0..7 leftover i's after the 8-way tail.
+            for (; i + 4u <= i_hi; i += 4u) {
+                uvec4 v_bases = s_kv_base_uv4[i >> 2];
+                vec4 scores4 = s_scores_v4[i >> 2];
+                acc0 += scores4.x * v_data_v4[v_bases.x + d4];
+                acc1 += scores4.y * v_data_v4[v_bases.y + d4];
+                acc2 += scores4.z * v_data_v4[v_bases.z + d4];
+                acc3 += scores4.w * v_data_v4[v_bases.w + d4];
+            }
+            // 1-way tail: 0..3 leftover i's after the 4-way tail.
+            for (; i < i_hi; i++) {
+                acc0 += s_scores_v4[i >> 2][i & 3u]
+                        * v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + d4];
+            }
+            vec4 acc = (((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7)))
+                     + (((acc8 + acc9) + (acc10 + acc11)) + ((acc12 + acc13) + (acc14 + acc15)));
+
+            if (i_half == 1u) {
+                s_partial_v4[d4] = acc;
+            }
+            barrier();
+            if (i_half == 0u) {
+                s_out_v4[d4] = s_out_v4[d4] * rescale + acc + s_partial_v4[d4];
+            }
+        } else {
+            // Non-D-split path (head_dim_v4 != 32, e.g. head_dim=256/512).
+            // Each lane owns a unique d4 and walks the full block_len with
+            // a single accumulator. Vec4-unrolled inner loop reads scores
+            // and v_bases as one ds_read_b128 each per 4 i values; tail
+            // handles block_len%4 trailing i's.
+            for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+                vec4 acc0 = vec4(0.0);
+                vec4 acc1 = vec4(0.0);
+                vec4 acc2 = vec4(0.0);
+                vec4 acc3 = vec4(0.0);
+                uint i_v4_end = block_len >> 2;
+                for (uint i_v4 = 0u; i_v4 < i_v4_end; i_v4++) {
+                    uvec4 v_bases = s_kv_base_uv4[i_v4];
+                    vec4 scores4 = s_scores_v4[i_v4];
+                    acc0 += scores4.x * v_data_v4[v_bases.x + d4];
+                    acc1 += scores4.y * v_data_v4[v_bases.y + d4];
+                    acc2 += scores4.z * v_data_v4[v_bases.z + d4];
+                    acc3 += scores4.w * v_data_v4[v_bases.w + d4];
+                }
+                vec4 acc = (acc0 + acc1) + (acc2 + acc3);
+                for (uint i = i_v4_end << 2; i < block_len; i++) {
+                    acc += s_scores_v4[i >> 2][i & 3u]
+                           * v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + d4];
+                }
+                s_out_v4[d4] = s_out_v4[d4] * rescale + acc;
+            }
         }
 
         barrier();
@@ -221,20 +480,42 @@ void main() {
         barrier();
     }
 
-    // --- Phase 5: Normalize output by total softmax sum ---
-    float final_sum = s_sum_old;
-    float rescale = 1.0;
-    float sink_val = sink_data[sink_offset + head];
-    if (!isnan(sink_val)) {
-        float sink_max = max(s_max_old, sink_val);
-        rescale = s_sum_old > 0.0 ? exp(s_max_old - sink_max) : 0.0;
-        final_sum = s_sum_old * rescale + exp(sink_val - sink_max);
-    }
+    if (N_I_CHUNKS == 1u) {
+        // --- Phase 5: Normalize output by total softmax sum ---
+        float final_sum = s_sum_old;
+        float rescale = 1.0;
+        float sink_val = sink_data[sink_offset + head];
+        if (!isnan(sink_val)) {
+            float sink_max = max(s_max_old, sink_val);
+            rescale = s_sum_old > 0.0 ? exp(s_max_old - sink_max) : 0.0;
+            final_sum = s_sum_old * rescale + exp(sink_val - sink_max);
+        }
 
-    float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
-    uint o_base = head * head_dim;
+        float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
+        uint o_base_v4 = (head * head_dim) >> 2;
 
-    for (uint d = tid; d < head_dim; d += 64u) {
-        o_data[o_base + d] = s_out[d] * rescale * inv_sum;
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            o_data_v4[o_base_v4 + d4] = s_out_v4[d4] * rescale * inv_sum;
+        }
+    } else {
+        // --- Split-K Phase 5: emit partial unnormalized O, max M, sum L ---
+        // Buffer layout (writeonly view of o_data, o_data_v4 — actually points
+        // at partial_attn_out_buf in the host wiring). Partial outputs first,
+        // followed by per-chunk LSE pairs.
+        //   partial O region: head_dim * N_I_CHUNKS * n_heads floats
+        //     index = (head * N_I_CHUNKS + chunk_id) * head_dim + d
+        //   LSE region (offset = n_heads * N_I_CHUNKS * head_dim):
+        //     index = lse_base + (head * N_I_CHUNKS + chunk_id) * 2 + (0:M, 1:L)
+        // No sinks here — sinks fold in inside flash_attn_split_merge.
+        uint partial_o_base_v4 = ((head * N_I_CHUNKS + chunk_id) * head_dim) >> 2;
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            o_data_v4[partial_o_base_v4 + d4] = s_out_v4[d4];
+        }
+        if (tid == 0u) {
+            uint lse_base = n_heads * N_I_CHUNKS * head_dim;
+            uint lse_idx = lse_base + (head * N_I_CHUNKS + chunk_id) * 2u;
+            o_data[lse_idx + 0u] = s_max_old;
+            o_data[lse_idx + 1u] = s_sum_old;
+        }
     }
 }

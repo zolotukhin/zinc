@@ -57,14 +57,20 @@ pub const CachedGpuProfile = struct {
 };
 
 /// On-disk manifest written alongside an installed GGUF model file.
+///
+/// `sha256` is optional: hand-rolled manifests for symlinked local files
+/// (e.g. `download_url:"local"`) frequently omit it because the user can't
+/// or won't precompute the digest of an existing GGUF. Treat it as a hint,
+/// not a required field — the catalog's `sha256` is the source of truth
+/// when a checksum needs to be enforced.
 pub const InstalledManifest = struct {
     size_bytes: u64,
-    sha256: []u8,
+    sha256: ?[]u8,
     required_vram_bytes: ?u64,
 
-    /// Frees the owned sha256 slice and invalidates the struct.
+    /// Frees the owned sha256 slice (if any) and invalidates the struct.
     pub fn deinit(self: *InstalledManifest, allocator: std.mem.Allocator) void {
-        allocator.free(self.sha256);
+        if (self.sha256) |s| allocator.free(s);
         self.* = undefined;
     }
 };
@@ -664,14 +670,14 @@ fn readInstalledManifest(path: []const u8, allocator: std.mem.Allocator) !?Insta
     defer allocator.free(data);
 
     const size_i64 = extractJsonI64Field(data, "size_bytes") orelse return error.InvalidManifest;
-    const sha256 = extractJsonStringField(data, "sha256") orelse return error.InvalidManifest;
+    const sha256_opt = extractJsonStringField(data, "sha256");
     const required_vram_i64 = extractJsonI64Field(data, "required_vram_bytes");
     if (size_i64 < 0) return error.InvalidManifest;
     if (required_vram_i64) |v| if (v < 0) return error.InvalidManifest;
 
     return .{
         .size_bytes = @intCast(size_i64),
-        .sha256 = try allocator.dupe(u8, sha256),
+        .sha256 = if (sha256_opt) |s| try allocator.dupe(u8, s) else null,
         .required_vram_bytes = if (required_vram_i64) |v| @intCast(v) else null,
     };
 }
