@@ -343,6 +343,7 @@ pub const RuntimeProfile = struct {
     fallback_moe_record_ns: u64 = 0,
     dense_ffn_record_ns: u64 = 0,
     final_record_ns: u64 = 0,
+    cpu_lm_head_wall_ns: u64 = 0,
     gpu_completion_wait_ns: u64 = 0,
     sample_ns: u64 = 0,
     total_step_ns: u64 = 0,
@@ -3008,7 +3009,7 @@ pub const InferenceEngine = struct {
             nsToMs(profile.sample_ns),
             avgMs(profile.sample_ns, profile.sample_calls),
         });
-        log.info("  wait: commitAndWait {d:.2} ms ({d:.3} ms/step, {d:.1}% of traced time; includes queued GPU work + CPU wait) | record breakdown layer {d:.2} ms gpu-moe {d:.2} ms fallback-moe {d:.2} ms dense {d:.2} ms final {d:.2} ms", .{
+        log.info("  wait: commitAndWait {d:.2} ms ({d:.3} ms/step, {d:.1}% of traced time; includes queued GPU work + CPU wait) | record breakdown layer {d:.2} ms gpu-moe {d:.2} ms fallback-moe {d:.2} ms dense {d:.2} ms final {d:.2} ms cpu-lm-head {d:.2} ms", .{
             nsToMs(profile.gpu_completion_wait_ns),
             avgMs(profile.gpu_completion_wait_ns, profile.decode_steps),
             pctOf(traced_request_ns, profile.gpu_completion_wait_ns),
@@ -3017,6 +3018,7 @@ pub const InferenceEngine = struct {
             nsToMs(profile.fallback_moe_record_ns),
             nsToMs(profile.dense_ffn_record_ns),
             nsToMs(profile.final_record_ns),
+            nsToMs(profile.cpu_lm_head_wall_ns),
         });
         if (profile.decode_steps > 0) {
             const steps_f = @as(f64, @floatFromInt(profile.decode_steps));
@@ -3641,6 +3643,10 @@ fn cpuLmHeadFallbackWithArgmax(
     const mmap = engine.model.mmap_data orelse return error.NoMmapData;
     const tdo = engine.model.gguf_file.tensor_data_offset;
     recordDmmvProfile(engine, engine.lm_head, engine.config.vocab_size, engine.config.hidden_dim);
+    const wall_start = profileStart(engine.profile_enabled);
+    defer if (engine.profile_enabled) {
+        engine.request_profile.cpu_lm_head_wall_ns += profileElapsedNs(wall_start);
+    };
     if (engine.lm_head.info.type_ == .q8_0) {
         const off: usize = @intCast(tdo + engine.lm_head.info.offset);
         const raw = mmap[off..];
