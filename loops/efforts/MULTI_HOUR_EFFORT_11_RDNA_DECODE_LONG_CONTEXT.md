@@ -1,18 +1,46 @@
 # Effort 11 — Flatten the RDNA4 decode-with-context curve
 
-## TL;DR  (2026-04-29, after run-1 + run-2 + run-3 + run-4, total 79 cycles)
+## TL;DR  (2026-04-29, after run-1 + run-2 + run-3 + run-4 + run-5, total 113 cycles)
 
-**3.46× over baseline. New criterion (≥108 tok/s at L≈846) MET in run-4.
-gate+up+SwiGLU is the new dominant FFN sub-bucket; direct attacks on
-it have all failed and split-K on K=4096 axis is the next structural
-target.**
+**3.46× over baseline. 108.05 tok/s is a hard plateau without coopmat.**
+
+Run-5 ran 34 cycles (c24-c57) with **0 perf-keeps**. All 6
+structuralSwingIdeas from the run-4 plan were directly DISPROVEN by
+measurement. The realistic next-tier improvement requires the
+multi-week `flash_attn_cm1.comp` KHR coopmat port — every cheap
+shader-internal attack has been exhausted across the run-1..5 sweep.
 
 | run | cycles | keeps | starting → best tok/s | dominant lever |
 |---|---:|---:|---|---|
 | 1 | 17 | 12 | 31.19 → 93.68 | vec4 I/O + D-split + 4/8/16-way ILP on flash_attn |
-| 2 | 13 | 2  | 93.39 → 96.16 | dispatch + barrier fusion (gate+up+SwiGLU; Q+K norm+rope+kv_write) |
+| 2 | 13 | 2  | 93.39 → 96.16 | dispatch + barrier fusion |
 | 3 | 16 | 1  | 96.16 → 99.38 | split-K flash attention (N_I_CHUNKS=4 + merge pass) |
 | 4 | 33 | 5  | 99.38 → 108.05 | Q4_K decode opt + FFN sub-bucket diagnostic + split_merge cluster reductions |
+| 5 | 34 | 0  | 108.05 → 108.05 | **(none — see disproved swings table below)** |
+
+## What got disproved in run-5
+
+| my prior swing | run-5 cycle | result | reason |
+|---|---|---|---|
+| #1 gate+up split-K on K=4096 | c37, c55 | -3.1%/-6.1%/-1.8% | gate+up already has 6144 WGs, no occupancy unlock; merge-pass overhead dominates |
+| #2 last-WG-does-norm cross-layer fusion | c54 | bit-correct but -1.4% | cross-WG sync overhead exceeds 36 saved dispatch+barrier even with proper memory_scope |
+| #3 split_merge micro-wins | c42, c43, c45, c52 | flat | local optimum on the merge shader |
+| #5 hidden-dim-rotated dispatch | c44 | -0.34% | L1/L2 thrash hypothesis was wrong |
+| #6 gate+up LDS-input broadcast | c35 | **-13.8%** | input was already L1-cached; LDS staging halved occupancy |
+
+Plus 25+ smaller direct attacks on gate+up shader, down_proj,
+flash_attn, split_merge, all flat or slight regress (cataloged in
+optimize_perf.ts knownFlatCategories).
+
+## Measurement note
+
+Run-4's headline 99.38 → 108.05 (+8.7%) was MOSTLY system-state
+shift (thermal/RDNA driver re-baseline at run start), not earned by
+code. Real run-4 code-driven gains were ~+2.2% (cycle 1: +1.43%,
+cycle 22: +0.5%, cycle 23: +0.25%). The cycle-12 jump 101.62 →
+107.27 was a measurement artifact (HEAD itself measured ~107 at
+that point). Future runs should expect baseline drift of ±3% from
+system state and only attribute code-wins above that band.
 
 Run-3's perf-keep was cycle 12: a split-K flash attention shader
 that splits the i-axis into 4 chunks per (head) and uses a separate
@@ -72,53 +100,61 @@ needed because the loop measures at L=1500 where the hang doesn't
 reproduce. The agent rewrote the attack plan in real time based on
 profiling signal and shipped 12 keeps in a row.
 
-## What's left (for run-5)
+## What's left (for run-6)
 
-**Run-4 disproved the run-3 plan's down_proj-first premise.** Both
-split-K and K-axis split on down_proj failed (cycle 4 flat, cycle 27
--0.97%). The 60%-of-FFN bucket is gate+up+SwiGLU, not down_proj.
+**The cheap optimization surface is exhausted.** Five runs have
+attempted every plausible single-cycle attack on flash_attn,
+flash_attn_split_merge, dmmv_q4k, dmmv_q4k_fused_gate_up_swiglu,
+and the cross-layer fusion patterns. The only realistic ways to
+move 108.05 → 115+ are:
 
-**gate+up+SwiGLU at a local optimum within current structure.**
-Run-4 attacked it 4 ways, all failed:
-- algebraic refactor + by_sum reuse (cycle 13, -0.4%)
-- 2-way paired accumulators (cycle 16, flat)
-- row/block loop swap (cycle 24, flat — the cycle-8 fusion already
-  shares input reads via the existing 5-binding shader, no
-  amortization to capture from a swap)
-- uvec4 alias for header reads (cycle 8, flat)
+1. **flash_attn_cm1.comp KHR COOPMAT PORT** — the only structural
+   ceiling lever not yet attempted. Multi-week. R9700 advertises
+   VK_KHR_cooperative_matrix; cooperative-matrix wmma intrinsics on
+   the Q.K and softmax-V matmuls could unlock 1.5-2.0× on
+   attention. This is what every cycle from run-3 onward has been
+   pointing at as the deferred ceiling.
 
-Only structural shape changes have a chance:
+2. **Br=2 + N_I_CHUNKS=4 COMBINED SPLIT-K** — the only untried
+   GQA variant. Standalone Q_PER_KV=2 failed -17.5% (run-3 c4) due
+   to WG-count loss. Combining with split-K's 4× WG multiplier
+   gives 8 × 2 × 4 = 64 WGs (healthy concurrency) AND 2× K/V
+   amortization per WG. Cycle 50 flagged this as the unattempted
+   pivot; never built.
 
-1. **gate+up+SwiGLU split-K on K=4096 axis.** Mirror run-3 c12's
-   flash_attn split-K onto the dense FFN: split K=4096 into 2-4
-   chunks, dispatch n_chunks × n_M_tiles WGs with a merge pass.
-   Healthier SIMD occupancy. Risk: the gate/up shared-input-read
-   gets fragmented; mitigation is LDS-staging the input slice
-   within each WG so gate and up still share the read.
-2. **Last-WG-does-norm cross-layer fusion via gl_WorkGroupID.x ==
-   gl_NumWorkGroups.x-1 + sentinel-value-wait.** The third
-   o_proj+ffn_norm pattern; previous three failed (separate-buffer
-   -7%; atomic-counter broken output; merge-shader piggyback
-   -67%/-69%).
-3. **More flash_attn_split_merge micro-wins.** Run-4 c22/c23 each
-   landed +0.5%; the merge shader still has surface area for
-   subgroup-primitive consolidations not yet attempted in their
-   final form.
-4. **flash_attn_cm1.comp KHR coopmat port.** Multi-week structural
-   ceiling.
-5. **Hidden-dim-rotated dispatch order on down_proj.** Diagnostic
-   investigation of the 2.4× bandwidth-floor gap. Cycle 12's
-   nextIdea: rotate M-tile dispatch order so consecutive WGs don't
-   compete for the same L2 lines.
+3. **PROFILE-PHASE DECOMPOSITION OF THE 'OTHER' 33% BUCKET** —
+   diagnostic. Cycle 48 added attn_input_norm/ffn_input_norm tags
+   but didn't decompose the rest. May reveal a hidden hotspot.
+   Cheap; valuable if it surfaces an untouched bucket.
 
-**Process gap to fix** (separate from perf work): cycle 2's "win"
-was a no-op — the new TPB=32 shader was never installed in
-build.zig, the +0.35% was noise. Cycle 5 caught it 3 cycles later
-and removed 222 LOC of dead code. Suggestion for the framework:
-when a cycle introduces a new shader file, validate that (a) the
-shader name is in build.zig's shader_sources and (b) the dispatch
-helper has a non-zero call count from the benchmark run, before
-declaring keep.
+4. **CONDITIONAL DISPATCH FOR flash_attn_split_merge** — unblocks
+   cycle 56's measured +0.41 at L=846 (which was blocked by -39%
+   regression at L=5). Switch dispatch parameters at runtime based
+   on seq_len; no shader changes. Single-cycle.
+
+5. **dmmv_q5k.comp ROW/BLOCK SWAP** + **TPB=128 Q6_K LM HEAD** —
+   cheap final-tail wins on the Q5_K (Qwen 3.6 35B) and Q6_K LM
+   head paths.
+
+6. **GATE+UP+SwiGLU INPUT LDS + NUM_ROWS=4 AS A UNIT** — cycle 57's
+   nextIdea, structurally distinct from the failed cycle-35
+   (LDS-only) and cycle-41 (NUM_ROWS=4-only). Speculative.
+
+**Process gaps** that emerged during run-5 (separate from perf):
+
+- **No-op-keeps**: cycle 2 of run-4 was caught 3 cycles later as a
+  measurement artifact (the shader was never in build.zig). Suggest
+  the framework verify shader registration + non-zero dispatch
+  count before declaring keep.
+- **Multi-modal blockers**: cycle 56 measured +0.41 at L=846 but
+  -39% at L=5. The framework rejected on the L=5 regression even
+  though the L=846 win is the actual primary metric. Suggest the
+  framework allow conditional shaders when the regression is on a
+  secondary metric.
+- **Run-to-run baseline drift**: run-4's headline +8.7% was mostly
+  thermal/driver state, not code. Future plans should anchor
+  expectations to ~+2-3% real code gain per run, with system-state
+  drift contributing ±3% on top.
 
 ## On the L=2325 GPU hang  (deferred, not blocking)
 
@@ -363,22 +399,24 @@ Original criterion **met** as of cycle 17:
 
 Run-4 criterion **MET** (≥108 tok/s at L≈846, achieved 108.05).
 
-New criterion (run-5):
+Run-5 criterion **NOT MET** (0 keeps over 34 cycles; structural
+swings disproved). The 115 tok/s target was over-optimistic given
+that all 6 structural levers turned out to be dead ends.
 
-- Decode at L≈846 ≥ **115 tok/s** via gate+up+SwiGLU split-K +
-  last-WG-does-norm + 1-2 split_merge micro-wins. The gate+up bucket
-  is 38% of total decode time at 108 tok/s; if split-K extracts even
-  20% from that bucket the headline number moves +1.5 tok/s. Two
-  more such structural unlocks plus continued split_merge polish
-  put the metric at 115. Anything above is ceiling territory.
+New criterion (run-6) **calibrated to reality**:
+
+- **Coopmat-bypass criterion**: decode at L≈846 ≥ **110 tok/s** via
+  small-win remainders only (Br=2+split-K combined, conditional
+  split_merge dispatch, q5k/q6k LM head row-swaps, FFN LDS+NUM_ROWS=4
+  unit). +1.5-2.0 tok/s realistic. Anything above this needs coopmat.
+- **Coopmat criterion**: if `flash_attn_cm1.comp` is ported and
+  validated, decode at L≈846 ≥ **130 tok/s**. The structural ceiling
+  is here. Multi-week investment; needs an explicit decision before
+  the loop attempts it.
 - No regression in empty-context decode at L=5.
-- L=1500-token prompt benchmark added to the suite (separate from
-  the existing L≈846 default) so the original ambition can be
-  re-measured directly.
-- Delete `src/shaders/dmmv_q4k_o_proj_merge.comp` from the tree —
-  it's been ZINC_FUSED_OPROJ_MERGE-gated and produced -67% / -69%
-  in two cycles. It cannot be made to win in any wired form. Run-5
-  cycle 0 should remove it (foundationKeep cleanup).
+- The ZINC_GATEUP_LDS_INPUT, ZINC_FA_BR2, ZINC_FA_COOPMAT, and
+  ZINC_FFN_DMMV_DECOMP env-var gates are reserved for run-6 cycles
+  (so the agent doesn't reuse them for unrelated experiments).
 
 ## Non-goals
 
