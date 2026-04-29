@@ -1,15 +1,18 @@
 # Effort 11 — Flatten the RDNA4 decode-with-context curve
 
-## TL;DR  (2026-04-28, after run-1 + run-2 + run-3, total 46 cycles)
+## TL;DR  (2026-04-29, after run-1 + run-2 + run-3 + run-4, total 79 cycles)
 
-**3.18× over baseline. flash_attn cut to 12% of decode time. Dense
-FFN is now the dominant bucket at 56%. Cross-layer fusion is hard.**
+**3.46× over baseline. New criterion (≥108 tok/s at L≈846) MET in run-4.
+gate+up+SwiGLU is the new dominant FFN sub-bucket; direct attacks on
+it have all failed and split-K on K=4096 axis is the next structural
+target.**
 
 | run | cycles | keeps | starting → best tok/s | dominant lever |
 |---|---:|---:|---|---|
 | 1 | 17 | 12 | 31.19 → 93.68 | vec4 I/O + D-split + 4/8/16-way ILP on flash_attn |
 | 2 | 13 | 2  | 93.39 → 96.16 | dispatch + barrier fusion (gate+up+SwiGLU; Q+K norm+rope+kv_write) |
 | 3 | 16 | 1  | 96.16 → 99.38 | split-K flash attention (N_I_CHUNKS=4 + merge pass) |
+| 4 | 33 | 5  | 99.38 → 108.05 | Q4_K decode opt + FFN sub-bucket diagnostic + split_merge cluster reductions |
 
 Run-3's perf-keep was cycle 12: a split-K flash attention shader
 that splits the i-axis into 4 chunks per (head) and uses a separate
@@ -23,26 +26,27 @@ tokenizes to ~846 tokens on Qwen 3 8B, NOT the ~1500 the comment
 claimed. All run-2 and run-3 measurements were at L≈846. The spec
 text has been corrected. The structural conclusions still hold.
 
-## Phase budget at L≈846 after run-3 cycle 12
+## Phase budget at L≈846 after run-4 cycle 23
 
 ```
-total decode time per token: ~10.05 ms
-  flash_attn:    12% (~1.2 ms)   ← cut from ~56% by split-K
-  dense_ffn:     56% (~6.15 ms)  ← new dominant bucket
-  other:         32% (~2.7 ms)   ← norms, residuals, lm_head, host gap
+total decode time per token: ~9.25 ms (108 tok/s)
+  dense_ffn:     56% (~5.2 ms)
+    gate+up+SwiGLU:  60% of FFN  (3.55 ms = 38% of total)  ← THE BUCKET
+    down+residual:   40% of FFN  (2.40 ms = 26% of total)
+  flash_attn:    11%  (~1.0 ms)  ← cut from ~56% by run-3 split-K
+  other:         33%  (~3.0 ms)  ← norms, residuals, lm_head, host gap
 
-dense_ffn breakdown:
-  gate+up+SwiGLU fused (cycle 8 of run-2): the bulk
-  down+residual (Q4_K DMMV-acc): 2.4× the Q4_K bandwidth floor (per c10 audit)
-
-per-layer profile (FA_PROFILE_LAYER): all 36 layers run uniformly
-  cv = 0.004, ratio = 1.05× across layers
-  no single-layer outlier, no layer-class anomaly
+per-layer profile (FA_PROFILE_LAYER): all 36 layers uniform
+  cv = 0.004, ratio = 1.05×, no single-layer outlier
 ```
 
-The 56% FFN bucket is the lever for run-4. Cycle 12's win pattern
-(split-K with merge pass) is the template the next attack should
-mirror onto down_proj.
+**Calibration finding from run-4 cycle 12** inverted the prior swing
+list: down_proj was assumed dominant; it's actually 40% of FFN. The
+gate+up+SwiGLU shader is the 60% sub-bucket, but every direct attack
+on it failed in run-4 (algebraic refactor, paired accumulators, loop
+swap, uvec4 alias, all flat-or-regress). The shader is at a local
+optimum within its current structure; only structural shape changes
+(split-K on K=4096, input broadcast via LDS) have a chance.
 
 ```
 trajectory at L=1500 (Qwen 3 8B Q4_K_M)
@@ -68,46 +72,53 @@ needed because the loop measures at L=1500 where the hang doesn't
 reproduce. The agent rewrote the attack plan in real time based on
 profiling signal and shipped 12 keeps in a row.
 
-## What's left (for run-4)
+## What's left (for run-5)
 
-**Attention-shader internals are exhausted (confirmed across 3 runs).**
-The bucket has moved.
+**Run-4 disproved the run-3 plan's down_proj-first premise.** Both
+split-K and K-axis split on down_proj failed (cycle 4 flat, cycle 27
+-0.97%). The 60%-of-FFN bucket is gate+up+SwiGLU, not down_proj.
 
-**Dense FFN is the new dominant bucket (56% of decode time).** The
-two attacks that landed in run-2 (cycle 8: gate+up+SwiGLU fused;
-cycle 12: Q+K norm+rope+kv_write fused) plus run-3 cycle 12's
-split-K cleared everything cheap. What's left on FFN:
+**gate+up+SwiGLU at a local optimum within current structure.**
+Run-4 attacked it 4 ways, all failed:
+- algebraic refactor + by_sum reuse (cycle 13, -0.4%)
+- 2-way paired accumulators (cycle 16, flat)
+- row/block loop swap (cycle 24, flat — the cycle-8 fusion already
+  shares input reads via the existing 5-binding shader, no
+  amortization to capture from a swap)
+- uvec4 alias for header reads (cycle 8, flat)
 
-1. **FFN split-M down_proj DMMV.** Mirror cycle-12's flash_attn
-   split-K trick onto down_proj: split the M axis across more WGs
-   with a merge pass that sums M-tile partials. Currently down_proj
-   uses pipeline_q4k NUM_ROWS=2; tiling M further restores SIMD
-   occupancy without breaking the inner-loop shape (which is
-   already 78–85% of bandwidth-floor optimal). Top priority for
-   run-4.
-2. **FFN K-axis parallelism on down_proj.** down_proj has K=12288,
-   the largest K in the model. Try THREADS_PER_BLOCK=32 (split
-   each row across 32 threads) on JUST the down_proj path with
-   subgroupClusteredAdd reduction. Engages more lanes per row
-   while keeping NUM_ROWS=2. Distinct from cycle 9's failed wide
-   NUM_ROWS=8 (which split M, not K).
-3. **Cross-layer fusion via last-WG-does-norm pattern.** Both
-   alternatives failed in run-3: cycle 5 (separate-buffer) -7%;
-   cycle 15 (atomic-counter cross-WG sync) broken output. Third
-   pattern unattempted: the LAST WG of o_proj's dispatch executes
-   the rms_norm in-place after accumulate-in-place is done. Tricky
-   to make robust on RDNA4; needs careful memory-scope semantics
-   and a sentinel-value-wait inside the last-WG path.
+Only structural shape changes have a chance:
 
-**Refined GQA collapse via split-K combination is still viable.**
-Both standalone Q_PER_KV=4 (-9.9%) and Q_PER_KV=2 (-17.5%) failed
-because of WG-count loss. Combining with split-K's WG multiplier
-gives 8 × 2 × 4 = 64 WGs (healthy concurrency) AND 2× K/V
-amortization. Cycle-sized.
+1. **gate+up+SwiGLU split-K on K=4096 axis.** Mirror run-3 c12's
+   flash_attn split-K onto the dense FFN: split K=4096 into 2-4
+   chunks, dispatch n_chunks × n_M_tiles WGs with a merge pass.
+   Healthier SIMD occupancy. Risk: the gate/up shared-input-read
+   gets fragmented; mitigation is LDS-staging the input slice
+   within each WG so gate and up still share the read.
+2. **Last-WG-does-norm cross-layer fusion via gl_WorkGroupID.x ==
+   gl_NumWorkGroups.x-1 + sentinel-value-wait.** The third
+   o_proj+ffn_norm pattern; previous three failed (separate-buffer
+   -7%; atomic-counter broken output; merge-shader piggyback
+   -67%/-69%).
+3. **More flash_attn_split_merge micro-wins.** Run-4 c22/c23 each
+   landed +0.5%; the merge shader still has surface area for
+   subgroup-primitive consolidations not yet attempted in their
+   final form.
+4. **flash_attn_cm1.comp KHR coopmat port.** Multi-week structural
+   ceiling.
+5. **Hidden-dim-rotated dispatch order on down_proj.** Diagnostic
+   investigation of the 2.4× bandwidth-floor gap. Cycle 12's
+   nextIdea: rotate M-tile dispatch order so consecutive WGs don't
+   compete for the same L2 lines.
 
-**flash_attn_cm1.comp KHR coopmat port** is still the structural
-ceiling. Multi-week. Pursue when the FFN attacks above are
-exhausted.
+**Process gap to fix** (separate from perf work): cycle 2's "win"
+was a no-op — the new TPB=32 shader was never installed in
+build.zig, the +0.35% was noise. Cycle 5 caught it 3 cycles later
+and removed 222 LOC of dead code. Suggestion for the framework:
+when a cycle introduces a new shader file, validate that (a) the
+shader name is in build.zig's shader_sources and (b) the dispatch
+helper has a non-zero call count from the benchmark run, before
+declaring keep.
 
 ## On the L=2325 GPU hang  (deferred, not blocking)
 
@@ -350,19 +361,24 @@ Original criterion **met** as of cycle 17:
 - ~~Empty-context decode and L=466 prefill within 5% of pre-effort rates~~ → both improved (the same vec4 + ILP wins help short context too).
 - L=2325 GPU hang: deferred. Confirmed L≥2300-only across 18 cycles measuring at L=1500.
 
-New criterion (run-4):
+Run-4 criterion **MET** (≥108 tok/s at L≈846, achieved 108.05).
 
-- Decode at L≈846 ≥ **108 tok/s** via FFN split-M down_proj +
-  K-axis parallelism on down_proj + last-WG cross-layer fusion +
-  split-K-with-GQA-q2. Adjusted from the prior "110 at L=1500"
-  target now that we know the actual measurement L is ≈846, not
-  1500. The 56% FFN bucket has ~30% of compute headroom (currently
-  78-85% of bandwidth-floor) so 99.38 → 108 (+8.7%) is plausible
-  if 2 of the 4 attacks land cleanly.
+New criterion (run-5):
+
+- Decode at L≈846 ≥ **115 tok/s** via gate+up+SwiGLU split-K +
+  last-WG-does-norm + 1-2 split_merge micro-wins. The gate+up bucket
+  is 38% of total decode time at 108 tok/s; if split-K extracts even
+  20% from that bucket the headline number moves +1.5 tok/s. Two
+  more such structural unlocks plus continued split_merge polish
+  put the metric at 115. Anything above is ceiling territory.
 - No regression in empty-context decode at L=5.
 - L=1500-token prompt benchmark added to the suite (separate from
-  the existing L≈846 default) so the original "≥120 tok/s at L=1500"
-  ambition can be re-measured directly.
+  the existing L≈846 default) so the original ambition can be
+  re-measured directly.
+- Delete `src/shaders/dmmv_q4k_o_proj_merge.comp` from the tree —
+  it's been ZINC_FUSED_OPROJ_MERGE-gated and produced -67% / -69%
+  in two cycles. It cannot be made to win in any wired form. Run-5
+  cycle 0 should remove it (foundationKeep cleanup).
 
 ## Non-goals
 
