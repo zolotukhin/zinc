@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 580" role="img" aria-labelledby="spectitle specdesc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <title id="spectitle">Speculative decoding on Qwen 35B-A3B with the gated delta-net SSM state rewind tax called out</title>
+  <desc id="specdesc">A two-row diagram. The top row shows a Qwen 3.5 0.8B draft model emitting four sequential tokens, each annotated with its SSM hidden state s1 through s4. The bottom row shows a Qwen 3.6 35B-A3B verifier pass that reads roughly 2 GB of active weights once and verifies all four draft tokens together. Three of the four draft tokens are accepted in green; the fourth is rejected in red. An arrow shows the verifier rewinding the SSM hidden state from s4 back to s3, the last accepted state, indicating that the rejected step's checkpointed SSM state has to be discarded and the verifier has to re-emit token 4 from s3. Annotations call out the per-step bandwidth of each component, including the 0.36 GB draft active-weight read at Q4 and the 1.8 GB SSM checkpoint that has to be staged per draft step.</desc>
+
+  <style>
+    .h-title    { fill: #10233c; font-size: 19px; font-weight: 700; }
+    .h-sub      { fill: #53657b; font-size: 12px; font-weight: 500; }
+    .lane-text  { fill: #1a1a1a; font-size: 13px; font-weight: 700; }
+    .lane-sub   { fill: #555; font-size: 11px; }
+    .tok-text   { fill: #ffffff; font-size: 12px; font-weight: 700; }
+    .tok-sub    { fill: #ffffff; font-size: 10px; }
+    .accept     { fill: #15803d; }
+    .reject     { fill: #b00020; }
+    .draft      { fill: #1f6feb; }
+    .verify     { fill: #6d28d9; }
+    .ann        { fill: #1a1a1a; font-size: 11px; }
+    .ann-bold   { fill: #1a1a1a; font-size: 11px; font-weight: 700; }
+    .axis-line  { stroke: #c4c4c4; stroke-width: 1; }
+    .arrow      { stroke: #1a1a1a; stroke-width: 1.4; fill: none; }
+    .rewind     { stroke: #b00020; stroke-width: 2; fill: none; stroke-dasharray: 5 4; }
+    .rewind-text{ fill: #b00020; font-size: 12px; font-weight: 700; }
+    .state-label{ fill: #444; font-size: 10px; font-style: italic; }
+    .cost-bg    { fill: #f6f4ec; stroke: #d4d4d4; stroke-width: 0.6; }
+    .cost-text  { fill: #1a1a1a; font-size: 11px; }
+    .cost-bold  { fill: #1a1a1a; font-size: 11px; font-weight: 700; }
+  </style>
+
+  <!-- Background -->
+  <rect width="1100" height="580" fill="#fbfaf5"/>
+
+  <!-- Title -->
+  <text x="40" y="40" class="h-title">Speculative decoding on Qwen 35B-A3B, with the SSM state rewind tax</text>
+  <text x="40" y="60" class="h-sub">Draft = Qwen 3.5 0.8B at Q4_K_M (~0.36 GB). Verifier = Qwen 3.6 35B-A3B at Q4_K_M (~2.0 GB active). Lookahead γ = 4. Three accepts, one reject.</text>
+
+  <!-- Lane labels -->
+  <text x="40" y="115" class="lane-text">Draft model</text>
+  <text x="40" y="131" class="lane-sub">0.8B dense, ~0.36 GB / token</text>
+
+  <text x="40" y="295" class="lane-text">Verifier</text>
+  <text x="40" y="311" class="lane-sub">35B-A3B, ~2.0 GB once / γ tokens</text>
+
+  <text x="40" y="450" class="lane-text">SSM state lane</text>
+  <text x="40" y="466" class="lane-sub">gated delta-net, ~60 MB × 30 layers</text>
+
+  <!-- Lane separators -->
+  <line x1="200" y1="80" x2="200" y2="540" class="axis-line"/>
+
+  <!-- DRAFT TOKENS (4 boxes, each emitting one token sequentially) -->
+  <!-- token 1 -->
+  <g>
+    <rect x="240" y="100" width="140" height="56" rx="6" class="draft"/>
+    <text x="310" y="123" text-anchor="middle" class="tok-text">draft tok 1</text>
+    <text x="310" y="142" text-anchor="middle" class="tok-sub">read 0.36 GB, fork s0 → s1</text>
+  </g>
+  <!-- token 2 -->
+  <g>
+    <rect x="400" y="100" width="140" height="56" rx="6" class="draft"/>
+    <text x="470" y="123" text-anchor="middle" class="tok-text">draft tok 2</text>
+    <text x="470" y="142" text-anchor="middle" class="tok-sub">read 0.36 GB, fork s1 → s2</text>
+  </g>
+  <!-- token 3 -->
+  <g>
+    <rect x="560" y="100" width="140" height="56" rx="6" class="draft"/>
+    <text x="630" y="123" text-anchor="middle" class="tok-text">draft tok 3</text>
+    <text x="630" y="142" text-anchor="middle" class="tok-sub">read 0.36 GB, fork s2 → s3</text>
+  </g>
+  <!-- token 4 -->
+  <g>
+    <rect x="720" y="100" width="140" height="56" rx="6" class="draft"/>
+    <text x="790" y="123" text-anchor="middle" class="tok-text">draft tok 4</text>
+    <text x="790" y="142" text-anchor="middle" class="tok-sub">read 0.36 GB, fork s3 → s4</text>
+  </g>
+
+  <!-- arrows between draft tokens -->
+  <path d="M380 128 L400 128" class="arrow" marker-end="url(#arrowhead)"/>
+  <path d="M540 128 L560 128" class="arrow" marker-end="url(#arrowhead)"/>
+  <path d="M700 128 L720 128" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <!-- arrow head -->
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#1a1a1a"/>
+    </marker>
+    <marker id="arrowhead-red" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#b00020"/>
+    </marker>
+  </defs>
+
+  <!-- Total draft cost note -->
+  <rect x="900" y="100" width="170" height="56" rx="6" class="cost-bg"/>
+  <text x="985" y="120" text-anchor="middle" class="cost-bold">Total draft cost</text>
+  <text x="985" y="138" text-anchor="middle" class="cost-text">γ × 0.36 GB = 1.44 GB</text>
+  <text x="985" y="151" text-anchor="middle" class="cost-text">+ γ KV / SSM rewinds</text>
+
+  <!-- VERIFIER -->
+  <g>
+    <rect x="240" y="280" width="620" height="56" rx="6" class="verify"/>
+    <text x="550" y="305" text-anchor="middle" class="tok-text">verifier batch verify (γ + 1 = 5 logits, one forward pass)</text>
+    <text x="550" y="324" text-anchor="middle" class="tok-sub">~2.0 GB active-weight read once, KV reads scale with prompt length not γ</text>
+  </g>
+
+  <!-- Accept / reject markers below verifier -->
+  <g>
+    <!-- tok 1 accepted -->
+    <rect x="240" y="350" width="140" height="28" rx="4" class="accept"/>
+    <text x="310" y="369" text-anchor="middle" class="tok-text">accept tok 1</text>
+    <!-- tok 2 accepted -->
+    <rect x="400" y="350" width="140" height="28" rx="4" class="accept"/>
+    <text x="470" y="369" text-anchor="middle" class="tok-text">accept tok 2</text>
+    <!-- tok 3 accepted -->
+    <rect x="560" y="350" width="140" height="28" rx="4" class="accept"/>
+    <text x="630" y="369" text-anchor="middle" class="tok-text">accept tok 3</text>
+    <!-- tok 4 rejected -->
+    <rect x="720" y="350" width="140" height="28" rx="4" class="reject"/>
+    <text x="790" y="369" text-anchor="middle" class="tok-text">reject tok 4</text>
+  </g>
+
+  <!-- Verify cost note -->
+  <rect x="900" y="280" width="170" height="56" rx="6" class="cost-bg"/>
+  <text x="985" y="300" text-anchor="middle" class="cost-bold">Verifier cost</text>
+  <text x="985" y="318" text-anchor="middle" class="cost-text">2.0 GB weights / step</text>
+  <text x="985" y="331" text-anchor="middle" class="cost-text">amortized over γ + 1</text>
+
+  <!-- SSM STATE LANE -->
+  <g>
+    <!-- s0 -->
+    <rect x="200" y="430" width="40" height="40" rx="4" fill="#cbd5e1" stroke="#475569" stroke-width="1"/>
+    <text x="220" y="455" text-anchor="middle" class="state-label">s0</text>
+    <!-- s1 -->
+    <rect x="290" y="430" width="40" height="40" rx="4" fill="#a7c4e2" stroke="#1f6feb" stroke-width="1"/>
+    <text x="310" y="455" text-anchor="middle" class="state-label">s1</text>
+    <!-- s2 -->
+    <rect x="450" y="430" width="40" height="40" rx="4" fill="#a7c4e2" stroke="#1f6feb" stroke-width="1"/>
+    <text x="470" y="455" text-anchor="middle" class="state-label">s2</text>
+    <!-- s3 -->
+    <rect x="610" y="430" width="40" height="40" rx="4" fill="#a7c4e2" stroke="#1f6feb" stroke-width="1"/>
+    <text x="630" y="455" text-anchor="middle" class="state-label">s3</text>
+    <!-- s4 (discarded) -->
+    <rect x="770" y="430" width="40" height="40" rx="4" fill="#fde2e2" stroke="#b00020" stroke-width="1.4" stroke-dasharray="3 2"/>
+    <text x="790" y="455" text-anchor="middle" class="state-label">s4 ✕</text>
+  </g>
+
+  <!-- arrows between states -->
+  <path d="M240 450 L290 450" class="arrow" marker-end="url(#arrowhead)"/>
+  <path d="M330 450 L450 450" class="arrow" marker-end="url(#arrowhead)"/>
+  <path d="M490 450 L610 450" class="arrow" marker-end="url(#arrowhead)"/>
+  <path d="M650 450 L770 450" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <!-- rewind arrow from s4 to s3 -->
+  <path d="M790 430 C 790 395, 690 395, 650 425" class="rewind" marker-end="url(#arrowhead-red)"/>
+  <text x="720" y="395" text-anchor="middle" class="rewind-text">rewind: discard s4, restore s3, re-decode tok 4</text>
+
+  <!-- SSM cost note -->
+  <rect x="900" y="430" width="170" height="56" rx="6" class="cost-bg"/>
+  <text x="985" y="450" text-anchor="middle" class="cost-bold">SSM rewind tax</text>
+  <text x="985" y="468" text-anchor="middle" class="cost-text">checkpoint per draft</text>
+  <text x="985" y="481" text-anchor="middle" class="cost-text">step, ~1.8 GB total</text>
+
+  <!-- Bottom summary line -->
+  <text x="40" y="535" class="ann-bold">Net per accepted token:</text>
+  <text x="220" y="535" class="ann">at α = 0.55, γ = 4, this round emits 3 useful tokens for the cost of one verifier pass plus four draft passes plus four SSM checkpoints.</text>
+  <text x="40" y="552" class="ann">The cost ratio c = (draft + checkpoint) / verifier = 0.20 on this configuration, 4× the c that drives the EAGLE / Llama-70B speedup math, which is closer to 0.05.</text>
+
+</svg>

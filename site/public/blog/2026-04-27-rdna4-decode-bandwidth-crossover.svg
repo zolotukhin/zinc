@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 520" role="img" aria-labelledby="dctitle dcdesc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <title id="dctitle">Decode bytes per token on Qwen 3.5 35B-A3B as a function of context length on a Radeon AI PRO R9700</title>
+  <desc id="dcdesc">A line chart with context length on the x-axis from 1k to 128k tokens on a logarithmic scale and bytes read per decode token on the y-axis from 0 to 18 GB. A horizontal dashed line marks the 2 GB active weights floor for the 3B active parameters of Qwen 35B-A3B at Q4_K_M. Three rising curves stacked above the floor show total bytes per token under three KV cache representations: FP16, INT8, and Q4 K plus INT8 V. A vertical marker at 16k tokens highlights the crossover where the FP16 KV cache reads equal the 2 GB active weights. Decode tok/s ceilings derived from the 640 GB/s R9700 bandwidth are annotated at 8k, 32k, and 128k.</desc>
+
+  <style>
+    .header     { fill: #111; font-size: 15px; font-weight: 700; }
+    .sub        { fill: #555; font-size: 11px; }
+    .axis-text  { fill: #444; font-size: 12px; }
+    .axis-title { fill: #222; font-size: 12px; font-weight: 600; }
+    .grid       { stroke: #e6e6e6; stroke-width: 1; }
+    .grid-major { stroke: #cccccc; stroke-width: 1; }
+    .floor      { stroke: #1f6feb; stroke-width: 1.4; stroke-dasharray: 6 4; fill: none; }
+    .floor-text { fill: #1f6feb; font-size: 11px; font-weight: 600; }
+    .crossover  { stroke: #b00020; stroke-width: 1.4; stroke-dasharray: 4 3; }
+    .cross-text { fill: #b00020; font-size: 12px; font-weight: 700; }
+    .curve-fp16 { stroke: #c2410c; stroke-width: 2.2; fill: none; }
+    .curve-q8   { stroke: #15803d; stroke-width: 2.2; fill: none; }
+    .curve-q4   { stroke: #6d28d9; stroke-width: 2.2; fill: none; }
+    .annot      { fill: #1a1a1a; font-size: 11px; font-weight: 600; }
+    .annot-bg   { fill: #ffffff; fill-opacity: 0.85; stroke: #d4d4d4; stroke-width: 0.6; }
+    .legend-text { fill: #1a1a1a; font-size: 12px; font-weight: 600; }
+  </style>
+
+  <!-- Title block -->
+  <text x="20" y="26" class="header">Decode bytes per token vs context length, Qwen 3.5 35B-A3B on a Radeon AI PRO R9700</text>
+  <text x="20" y="44" class="sub">Active weights at Q4_K_M (~2 GB) sit beneath the KV cache reads. FP16 KV crosses the weights at roughly 16k context.</text>
+
+  <!-- Plot area:
+       x: 80 .. 800   (720 px wide)
+       y: 80 .. 420   (340 px tall)
+       y range: 0 .. 18 GB  (so 1 GB = 18.89 px)
+       x range: log2 from 1k(10) to 128k(17)  -> 7 octaves over 720 px = 102.857 px/octave
+       x mapping: x_px = 80 + (log2(L_kTokens) - 0) * 102.857
+                  for L=1k -> log2(1)=0  -> 80
+                  for L=2k -> log2(2)=1  -> 182.86
+                  for L=4k -> log2(4)=2  -> 285.71
+                  for L=8k -> log2(8)=3  -> 388.57
+                  for L=16k -> log2(16)=4 -> 491.43
+                  for L=32k -> log2(32)=5 -> 594.29
+                  for L=64k -> log2(64)=6 -> 697.14
+                  for L=128k -> log2(128)=7 -> 800
+  -->
+
+  <!-- Y gridlines -->
+  <g class="grid">
+    <line x1="80"  y1="80"  x2="800" y2="80"  />
+    <line x1="80"  y1="118" x2="800" y2="118" />
+    <line x1="80"  y1="156" x2="800" y2="156" />
+    <line x1="80"  y1="194" x2="800" y2="194" />
+    <line x1="80"  y1="232" x2="800" y2="232" />
+    <line x1="80"  y1="270" x2="800" y2="270" />
+    <line x1="80"  y1="308" x2="800" y2="308" />
+    <line x1="80"  y1="346" x2="800" y2="346" />
+    <line x1="80"  y1="384" x2="800" y2="384" />
+  </g>
+  <line x1="80" y1="420" x2="800" y2="420" class="grid-major" />
+  <line x1="80" y1="80"  x2="80"  y2="420" class="grid-major" />
+
+  <!-- Y axis labels (0,2,4,...,18 GB) -->
+  <g class="axis-text">
+    <text x="74" y="424" text-anchor="end">0</text>
+    <text x="74" y="386" text-anchor="end">2</text>
+    <text x="74" y="348" text-anchor="end">4</text>
+    <text x="74" y="310" text-anchor="end">6</text>
+    <text x="74" y="272" text-anchor="end">8</text>
+    <text x="74" y="234" text-anchor="end">10</text>
+    <text x="74" y="196" text-anchor="end">12</text>
+    <text x="74" y="158" text-anchor="end">14</text>
+    <text x="74" y="120" text-anchor="end">16</text>
+    <text x="74" y="84"  text-anchor="end">18</text>
+  </g>
+  <text x="20" y="70" class="axis-title">GB read per decode token</text>
+
+  <!-- X axis labels at 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k -->
+  <g class="axis-text">
+    <text x="80"     y="438" text-anchor="middle">1k</text>
+    <text x="182.86" y="438" text-anchor="middle">2k</text>
+    <text x="285.71" y="438" text-anchor="middle">4k</text>
+    <text x="388.57" y="438" text-anchor="middle">8k</text>
+    <text x="491.43" y="438" text-anchor="middle">16k</text>
+    <text x="594.29" y="438" text-anchor="middle">32k</text>
+    <text x="697.14" y="438" text-anchor="middle">64k</text>
+    <text x="800"    y="438" text-anchor="middle">128k</text>
+  </g>
+  <text x="440" y="458" text-anchor="middle" class="axis-title">Context length (tokens, log2)</text>
+
+  <!-- Active weights floor: 2 GB -->
+  <line x1="80" y1="382" x2="800" y2="382" class="floor" />
+  <text x="86" y="377" class="floor-text">Active weights floor: ~2 GB at Q4_K_M (3B active params)</text>
+
+  <!-- 16k crossover vertical line -->
+  <line x1="491.43" y1="80" x2="491.43" y2="420" class="crossover" />
+  <text x="495" y="96" class="cross-text">16k crossover: KV reads = active weights</text>
+
+  <!-- Curves
+       y_px formula: 420 - GB * 18.889
+       Active = 2 GB
+       FP16 KV = L * 0.000120 GB per token
+       Q8 KV   = L * 0.000060 GB
+       Q4 K + Q8 V = L * 0.000045 GB
+       Total = 2 + KV
+       For each L: y = 420 - (2 + KV(L)) * 18.889
+  -->
+
+  <!-- FP16 KV curve: total = 2 + L*120/1024/1024 GB (with L in tokens) -->
+  <!-- 1k: total=2.117 -> y=420-39.99 = 380.01
+       2k: total=2.234 -> y=420-42.20 = 377.80
+       4k: total=2.469 -> y=420-46.62 = 373.38
+       8k: total=2.937 -> y=420-55.46 = 364.54
+       16k: total=3.875 -> y=420-73.20 = 346.80
+       32k: total=5.750 -> y=420-108.61 = 311.39
+       64k: total=9.500 -> y=420-179.45 = 240.55
+       128k: total=17.000 -> y=420-321.11 = 98.89
+  -->
+  <polyline class="curve-fp16" points="
+    80,380.01
+    182.86,377.80
+    285.71,373.38
+    388.57,364.54
+    491.43,346.80
+    594.29,311.39
+    697.14,240.55
+    800,98.89
+  "/>
+
+  <!-- Q8 KV curve: total = 2 + L*60/1024/1024 GB
+       1k:   2.059  -> y=381.10
+       2k:   2.117  -> y=380.01
+       4k:   2.234  -> y=377.80
+       8k:   2.469  -> y=373.38
+       16k:  2.937  -> y=364.54
+       32k:  3.875  -> y=346.80
+       64k:  5.750  -> y=311.39
+       128k: 9.500  -> y=240.55
+  -->
+  <polyline class="curve-q8" points="
+    80,381.10
+    182.86,380.01
+    285.71,377.80
+    388.57,373.38
+    491.43,364.54
+    594.29,346.80
+    697.14,311.39
+    800,240.55
+  "/>
+
+  <!-- Q4K+Q8V curve: total = 2 + L*45/1024/1024 GB
+       1k:   2.044  -> y=381.39
+       2k:   2.088  -> y=380.56
+       4k:   2.176  -> y=378.91
+       8k:   2.352  -> y=375.59
+       16k:  2.703  -> y=368.96
+       32k:  3.406  -> y=355.69
+       64k:  4.813  -> y=329.13
+       128k: 7.625  -> y=275.97
+  -->
+  <polyline class="curve-q4" points="
+    80,381.39
+    182.86,380.56
+    285.71,378.91
+    388.57,375.59
+    491.43,368.96
+    594.29,355.69
+    697.14,329.13
+    800,275.97
+  "/>
+
+  <!-- Decode tok/s annotations at three context points -->
+  <!-- 8k: FP16 ceiling ~218 tok/s -->
+  <g>
+    <rect x="338" y="298" width="118" height="18" rx="3" class="annot-bg"/>
+    <text x="397" y="311" text-anchor="middle" class="annot">8k FP16: 218 tok/s</text>
+  </g>
+  <line x1="397" y1="316" x2="388.57" y2="364.54" stroke="#888" stroke-width="0.8" />
+
+  <!-- 32k: FP16 ceiling ~111 tok/s -->
+  <g>
+    <rect x="500" y="244" width="124" height="18" rx="3" class="annot-bg"/>
+    <text x="562" y="257" text-anchor="middle" class="annot">32k FP16: 111 tok/s</text>
+  </g>
+  <line x1="562" y1="262" x2="594.29" y2="311.39" stroke="#888" stroke-width="0.8" />
+
+  <!-- 128k: FP16 ceiling 38 tok/s -->
+  <g>
+    <rect x="640" y="100" width="118" height="18" rx="3" class="annot-bg"/>
+    <text x="699" y="113" text-anchor="middle" class="annot">128k FP16: 38 tok/s</text>
+  </g>
+  <line x1="699" y1="118" x2="800" y2="98.89" stroke="#888" stroke-width="0.8" />
+
+  <!-- 128k Q4 ceiling -->
+  <g>
+    <rect x="618" y="259" width="142" height="18" rx="3" class="annot-bg"/>
+    <text x="689" y="272" text-anchor="middle" class="annot">128k Q4 K + Q8 V: 84 tok/s</text>
+  </g>
+  <line x1="689" y1="277" x2="800" y2="275.97" stroke="#888" stroke-width="0.8" />
+
+  <!-- Curve labels -->
+  <text x="804" y="102" class="annot" fill="#c2410c">FP16 KV</text>
+  <text x="804" y="244" class="annot" fill="#15803d">INT8 KV</text>
+  <text x="804" y="280" class="annot" fill="#6d28d9">Q4 K + Q8 V</text>
+
+  <!-- Legend / footer -->
+  <g transform="translate(80 478)">
+    <text x="0" y="0" class="sub">Curves: total bytes per decode token = 2 GB active weights + KV cache reads at the prompt length.</text>
+    <text x="0" y="16" class="sub">Decode tok/s ceiling = 640 GB/s GDDR6 bandwidth on the R9700 divided by total bytes per token. Real engines sit below the ceiling.</text>
+  </g>
+</svg>
