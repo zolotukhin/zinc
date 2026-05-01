@@ -27,6 +27,7 @@ struct DmmvPush {
 #define NR0   2
 #define QK_K  256
 #define BLOCK_SIZE 144
+#define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
 
 kernel void main0(
     device const uchar* W [[buffer(0)]],
@@ -74,7 +75,7 @@ kernel void main0(
     for (int ib = ix; ib < nb; ib += 4) {
         float4 sumy = {0.f, 0.f, 0.f, 0.f};
 
-        for (short i = 0; i < 8; ++i) {
+        FOR_UNROLL (short i = 0; i < 8; ++i) {
             yl[i + 0] = y4[i +   0]; sumy[0] += yl[i + 0];
             yl[i + 8] = y4[i +  32]; sumy[1] += yl[i + 8];
             yh[i + 0] = y4[i + 128]; sumy[2] += yh[i + 0];
@@ -88,7 +89,7 @@ kernel void main0(
         // Pointer to d/dmin halves for this block
         device const half* dh = (device const half*)(x_base + (uint64_t)ib * BLOCK_SIZE);
 
-        for (short row = 0; row < NR0; row++) {
+        FOR_UNROLL (short row = 0; row < NR0; row++) {
             sc16[0] = sc[0] & kmask1;
             sc16[1] = sc[2] & kmask1;
             sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
@@ -99,7 +100,7 @@ kernel void main0(
             float4 acc1 = {0.f, 0.f, 0.f, 0.f};
             float4 acc2 = {0.f, 0.f, 0.f, 0.f};
 
-            for (short i = 0; i < 4; ++i) {
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
                 acc1[0] += yl[2 * i + 0] * (q1[i] & 0x000F);
                 acc1[1] += yl[2 * i + 1] * (q1[i] & 0x0F00);
                 acc1[2] += yl[2 * i + 8] * (q1[i] & 0x00F0);
