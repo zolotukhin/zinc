@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">Roofline of the AMD Radeon AI PRO R9700 with batch=1 decode and prefill workloads</title>
+  <desc id="desc">A log-log roofline plot for the AMD Radeon AI PRO R9700. The diagonal bandwidth line at 644 GB per second meets three flat ceilings: dense FP16 at 195 TFLOPS, dense INT8 at 390 TOPS, and dense INT4 at 780 TOPS. A red dot at arithmetic intensity 1.7 marks batch=1 LLM decode at roughly 1.1 TFLOPS. A yellow dot at intensity 32 marks prefill at batch 16, and a second yellow dot at intensity 512 sits at the corner of the FP16 ceiling for prefill at batch 256.</desc>
+  <defs>
+    <linearGradient id="bg-roof" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf5"/>
+      <stop offset="100%" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow-roof" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <style>
+      .title { font: 700 26px Georgia, serif; fill: #10233c; }
+      .sub { font: 500 14px Arial, sans-serif; fill: #53657b; }
+      .axisTitle { font: 700 14px Arial, sans-serif; fill: #2c3e54; }
+      .axis { font: 400 12px Arial, sans-serif; fill: #53657b; }
+      .ceiling { font: 700 13px Arial, sans-serif; fill: #1e3a5f; }
+      .ridge { font: 600 11px Arial, sans-serif; fill: #6b7a8b; }
+      .pointlbl { font: 700 13px Arial, sans-serif; fill: #10233c; }
+      .pointsub { font: 500 11px Arial, sans-serif; fill: #445567; }
+      .foot { font: 400 11px Arial, sans-serif; fill: #6b7a8b; }
+      .verdict { font: 700 14px Arial, sans-serif; fill: #b1452b; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="720" fill="url(#bg-roof)"/>
+
+  <g transform="translate(64 38)">
+    <text class="title">Where batch=1 decode lands on the R9700 roofline</text>
+    <text class="sub" x="0" y="24">Peak compute ceilings vs. 644 GB/s memory bandwidth, plotted against arithmetic intensity. Dense (non-sparse) ceilings shown.</text>
+  </g>
+
+  <!-- Plot area: x from 80 to 960 (5 decades 0.1..10000), y from 580 to 120 (6 decades 1..1e6 GFLOPS) -->
+  <g filter="url(#shadow-roof)">
+    <rect x="80" y="120" width="880" height="460" fill="#ffffff" rx="6"/>
+  </g>
+
+  <!-- Gridlines: vertical (each decade) -->
+  <g stroke="#e3e9ef" stroke-width="1">
+    <line x1="80"  y1="120" x2="80"  y2="580"/>
+    <line x1="256" y1="120" x2="256" y2="580"/>
+    <line x1="432" y1="120" x2="432" y2="580"/>
+    <line x1="608" y1="120" x2="608" y2="580"/>
+    <line x1="784" y1="120" x2="784" y2="580"/>
+    <line x1="960" y1="120" x2="960" y2="580"/>
+  </g>
+  <!-- Gridlines: horizontal (each decade) -->
+  <g stroke="#e3e9ef" stroke-width="1">
+    <line x1="80" y1="120"   x2="960" y2="120"/>
+    <line x1="80" y1="196.7" x2="960" y2="196.7"/>
+    <line x1="80" y1="273.3" x2="960" y2="273.3"/>
+    <line x1="80" y1="350"   x2="960" y2="350"/>
+    <line x1="80" y1="426.7" x2="960" y2="426.7"/>
+    <line x1="80" y1="503.3" x2="960" y2="503.3"/>
+    <line x1="80" y1="580"   x2="960" y2="580"/>
+  </g>
+
+  <!-- Frame -->
+  <rect x="80" y="120" width="880" height="460" fill="none" stroke="#9fb0c0" stroke-width="1.4"/>
+
+  <!-- Bandwidth diagonal: P = 644 * I (GFLOPS).
+       Goes from (I=0.1, P=64.4) at (80, 441.2) up to (I=303, P=195000) at (516.7, 174.4). -->
+  <line x1="80" y1="441.2" x2="516.7" y2="174.4" stroke="#1f6feb" stroke-width="3"/>
+
+  <!-- Diagonal annotation, placed below the diagonal in a clear area -->
+  <g transform="translate(220 525) rotate(-31)">
+    <text class="ceiling" fill="#1f6feb">644 GB/s memory bandwidth</text>
+  </g>
+
+  <!-- FP16 ceiling at y = 174.4, from x=516.7 to x=960 -->
+  <line x1="516.7" y1="174.4" x2="960" y2="174.4" stroke="#1f6feb" stroke-width="3"/>
+  <text class="ceiling" x="950" y="190" text-anchor="end" fill="#1f6feb">FP16 dense   195 TFLOPS</text>
+
+  <!-- INT8 ceiling at y = 151.4, from x=569.5 to x=960. Intensity 606 -->
+  <line x1="569.5" y1="151.4" x2="960" y2="151.4" stroke="#0e7a5f" stroke-width="2.5" stroke-dasharray="6 4"/>
+  <text class="ceiling" x="950" y="145" text-anchor="end" fill="#0e7a5f">INT8 dense   390 TOPS</text>
+
+  <!-- INT4 ceiling at y = 128.4, from x=622.6 to x=960. Intensity 1211 -->
+  <line x1="622.6" y1="128.4" x2="960" y2="128.4" stroke="#7c4ddb" stroke-width="2.5" stroke-dasharray="3 4"/>
+  <text class="ceiling" x="950" y="121" text-anchor="end" fill="#7c4ddb">INT4 dense   780 TOPS</text>
+
+  <!-- Ridge point at FP16 (I=303). x=516.7. Vertical dashed line. -->
+  <line x1="516.7" y1="174.4" x2="516.7" y2="555" stroke="#9fb0c0" stroke-width="1" stroke-dasharray="3 4"/>
+  <text class="ridge" x="513" y="572" text-anchor="end">FP16 ridge ≈ 303 ops/byte</text>
+
+  <!-- Decode point: I=1.7, P=1094.8 GFLOPS. (120.5, 347) -->
+  <circle cx="120.5" cy="347" r="9" fill="#d63a2f" stroke="#ffffff" stroke-width="2.2"/>
+  <line x1="129" y1="347" x2="190" y2="380" stroke="#d63a2f" stroke-width="1.4"/>
+  <g transform="translate(196 380)">
+    <text class="pointlbl" fill="#d63a2f">batch=1 decode</text>
+    <text class="pointsub" y="16">Qwen 3.5 35B-A3B, ~1.7 ops/byte, ~1.1 TFLOPS reachable</text>
+  </g>
+
+  <!-- Prefill batch=16: I=32, P=20608 GFLOPS. (344.9, 249.3) -->
+  <circle cx="344.9" cy="249.3" r="8" fill="#e0a930" stroke="#ffffff" stroke-width="2.2"/>
+  <line x1="352" y1="247" x2="395" y2="225" stroke="#9c6f15" stroke-width="1.4"/>
+  <g transform="translate(400 220)">
+    <text class="pointlbl" fill="#9c6f15">prefill at batch 16</text>
+    <text class="pointsub" y="16">~32 ops/byte, still bandwidth-bound at ~21 TFLOPS</text>
+  </g>
+
+  <!-- Prefill batch=256: I=512, hits FP16 ceiling P=195000 GFLOPS. (556.8, 174.4) -->
+  <circle cx="556.8" cy="174.4" r="9" fill="#e0a930" stroke="#ffffff" stroke-width="2.2"/>
+  <line x1="556.8" y1="183" x2="610" y2="320" stroke="#9c6f15" stroke-width="1.4"/>
+  <g transform="translate(615 320)">
+    <text class="pointlbl" fill="#9c6f15">prefill at batch 256</text>
+    <text class="pointsub" y="16">~512 ops/byte, compute-bound at the FP16 ceiling</text>
+  </g>
+
+  <!-- X-axis ticks and labels -->
+  <g class="axis" text-anchor="middle">
+    <text x="80"  y="600">0.1</text>
+    <text x="256" y="600">1</text>
+    <text x="432" y="600">10</text>
+    <text x="608" y="600">100</text>
+    <text x="784" y="600">1000</text>
+    <text x="960" y="600">10000</text>
+  </g>
+  <text class="axisTitle" x="520" y="630" text-anchor="middle">Arithmetic intensity (operations per byte read)</text>
+
+  <!-- Y-axis ticks and labels -->
+  <g class="axis" text-anchor="end">
+    <text x="72" y="584">1 GF</text>
+    <text x="72" y="507">10 GF</text>
+    <text x="72" y="430">100 GF</text>
+    <text x="72" y="354">1 TF</text>
+    <text x="72" y="277">10 TF</text>
+    <text x="72" y="200">100 TF</text>
+    <text x="72" y="124">1 PF</text>
+  </g>
+  <g transform="translate(20 350) rotate(-90)">
+    <text class="axisTitle" text-anchor="middle">Achievable throughput (FLOP/s)</text>
+  </g>
+
+  <!-- Verdict bar at the bottom -->
+  <g transform="translate(80 660)">
+    <text class="verdict">The decode dot lives ~180× to the left of the FP16 ridge. Prefill is the workload that earns those ceilings.</text>
+  </g>
+
+  <!-- Footnote -->
+  <text class="foot" x="80" y="700">Ceilings: dense, non-sparse. Sparsity-on doubles each ceiling and the ridge point. Bandwidth: 256-bit GDDR6 at 20 Gb/s = 644 GB/s. Sources: AMD R9700 page, Williams et al (Roofline, CACM 2009).</text>
+</svg>
