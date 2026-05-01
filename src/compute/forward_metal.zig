@@ -1513,6 +1513,7 @@ pub const InferenceEngine = struct {
     // DMMV compute pipelines (one per quant type)
     dmmv_q4k_pipe: MetalPipeline,
     dmmv_q4k_k2048_pipe: MetalPipeline,
+    dmmv_q4k_k5376_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
     dmmv_q4k_lmhead_1024_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
@@ -1854,6 +1855,7 @@ pub const InferenceEngine = struct {
         // Load DMMV compute pipelines for all quant types
         self.dmmv_q4k_pipe = try loadShaderPipeline(ctx, "dmmv_q4k");
         self.dmmv_q4k_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
+        self.dmmv_q4k_k5376_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k5376");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
         self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
@@ -2341,7 +2343,7 @@ pub const InferenceEngine = struct {
             });
         }
         log.debug(
-            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
+            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | dmmv_q4k_k5376 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_pipe.thread_execution_width,
                 self.dmmv_q4k_pipe.max_threads_per_threadgroup,
@@ -2349,6 +2351,9 @@ pub const InferenceEngine = struct {
                 self.dmmv_q4k_k2048_pipe.thread_execution_width,
                 self.dmmv_q4k_k2048_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_k2048_pipe.static_threadgroup_memory_length,
+                self.dmmv_q4k_k5376_pipe.thread_execution_width,
+                self.dmmv_q4k_k5376_pipe.max_threads_per_threadgroup,
+                self.dmmv_q4k_k5376_pipe.static_threadgroup_memory_length,
                 self.dmmv_q4k_lmhead_pipe.thread_execution_width,
                 self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_lmhead_pipe.static_threadgroup_memory_length,
@@ -2450,6 +2455,7 @@ pub const InferenceEngine = struct {
 
         metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_k5376_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_1024_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
@@ -3123,7 +3129,7 @@ pub const InferenceEngine = struct {
 
     /// Get the DMMV pipeline, push constant buffer index, rows-per-workgroup, and block size.
     /// Q4_K: native Metal kernel — 32 threads (1 simdgroup) per row, 4 rows per threadgroup (64 threads).
-    /// Q4_K wide: specialized large-M kernel — 16 rows per threadgroup (512 threads).
+    /// Q4_K wide: specialized large-M kernels — 16 rows per threadgroup (512 threads).
     /// Q4_K LM head 1024: dedicated vocab projection kernel — 32 rows per threadgroup (1024 threads).
     /// On Apple9/M4, the 1024-thread shape tends to trade away too much
     /// occupancy for reuse, so keep that path reserved for Apple10-class parts.
@@ -3150,6 +3156,12 @@ pub const InferenceEngine = struct {
                     self.dmmv_q4k_lmhead_1024_pipe.max_threads_per_threadgroup >= 1024)
                 {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_1024_pipe, .push_idx = 1, .rows_per_wg = 32, .block_size = 1024 };
+                }
+                if (K == 5376 and
+                    M >= 1024 and
+                    self.dmmv_q4k_k5376_pipe.max_threads_per_threadgroup >= 512)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q4k_k5376_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
                 }
                 if (K <= 3072 and
                     self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
@@ -11880,6 +11892,8 @@ test "batched MoE Metal shaders compile" {
 
     var dmmv_pipe_k2048 = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
     defer metal_pipeline.freePipeline(&dmmv_pipe_k2048);
+    var dmmv_pipe_k5376 = try loadShaderPipeline(ctx, "dmmv_q4k_k5376");
+    defer metal_pipeline.freePipeline(&dmmv_pipe_k5376);
 
     var dmmv_moe_pipe_k2048 = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048");
     defer metal_pipeline.freePipeline(&dmmv_moe_pipe_k2048);
