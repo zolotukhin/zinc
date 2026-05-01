@@ -332,8 +332,9 @@ MetalCmd* mtl_begin_command_mode(MetalCtx* ctx, uint8_t serial) {
         return NULL;
     }
 
-    MTLDispatchType dispatch_type = serial ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent;
-    id<MTLComputeCommandEncoder> encoder = [cmd_buf computeCommandEncoderWithDispatchType:dispatch_type];
+    id<MTLComputeCommandEncoder> encoder = serial
+        ? [cmd_buf computeCommandEncoder]
+        : [cmd_buf computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
     if (!encoder) {
         fprintf(stderr, "Error: Failed to create compute command encoder.\n");
         return NULL;
