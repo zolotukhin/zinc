@@ -1570,6 +1570,7 @@ pub const InferenceEngine = struct {
     dmmv_q4k_k2048_pipe: MetalPipeline,
     dmmv_q4k_k5376_pipe: MetalPipeline,
     dmmv_q4k_dual_pipe: MetalPipeline,
+    dmmv_q4k_dual_llama_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
     dmmv_q4k_lmhead_1024_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
@@ -1918,6 +1919,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
         self.dmmv_q4k_k5376_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k5376");
         self.dmmv_q4k_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual");
+        self.dmmv_q4k_dual_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual_llama");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
         self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
@@ -2520,6 +2522,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_k5376_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_dual_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_dual_llama_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_1024_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
@@ -3875,16 +3878,21 @@ fn canUseDenseQ4KGateUpDual(
     M: u32,
     K: u32,
 ) bool {
+    const can_use_llama_dual = K >= 5376 and
+        engine.dmmv_q4k_dual_llama_pipe.handle != null and
+        engine.dmmv_q4k_dual_llama_pipe.max_threads_per_threadgroup >= 64;
+    const can_use_staged_dual = K < 5376 and
+        engine.dmmv_q4k_dual_pipe.handle != null and
+        engine.dmmv_q4k_dual_pipe.max_threads_per_threadgroup >= 256;
+
     return engine.config.architecture == .gemma and
         engine.config.n_experts == 0 and
         gate.info.type_ == .q4_k and
         up.info.type_ == .q4_k and
         M > 0 and
         K > 0 and
-        K < 5376 and
         K % 256 == 0 and
-        engine.dmmv_q4k_dual_pipe.handle != null and
-        engine.dmmv_q4k_dual_pipe.max_threads_per_threadgroup >= 256;
+        (can_use_llama_dual or can_use_staged_dual);
 }
 
 fn dispatchDenseQ4KGateUpDualOnCmd(
@@ -3912,8 +3920,12 @@ fn dispatchDenseQ4KGateUpDualOnCmd(
         .y1_offset = 0,
     };
     const bufs = [_]*const MetalBuffer{ &gate.gpu_buffer, &up.gpu_buffer, input_buf, gate_buf, up_buf };
-    const rows_per_wg: u32 = 16;
-    cmd.dispatchV2(&engine.dmmv_q4k_dual_pipe, .{ (M + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 2);
+    const use_llama_dual = K >= 5376 and engine.dmmv_q4k_dual_llama_pipe.handle != null;
+    const pipe = if (use_llama_dual) &engine.dmmv_q4k_dual_llama_pipe else &engine.dmmv_q4k_dual_pipe;
+    const rows_per_wg: u32 = if (use_llama_dual) 4 else 16;
+    const block_size: u32 = if (use_llama_dual) 64 else 256;
+    const projections: u32 = if (use_llama_dual) 2 else 1;
+    cmd.dispatchV2(pipe, .{ (M + rows_per_wg - 1) / rows_per_wg, projections, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 2);
 }
 
 fn dispatchDualQ8DmmvOnCmd(
@@ -12283,6 +12295,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&dmmv_pipe_k5376);
     var dmmv_q4k_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual");
     defer metal_pipeline.freePipeline(&dmmv_q4k_dual_pipe);
+    var dmmv_q4k_dual_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual_llama");
+    defer metal_pipeline.freePipeline(&dmmv_q4k_dual_llama_pipe);
 
     var dmmv_moe_pipe_k2048 = try loadShaderPipeline(ctx, "dmmv_q4k_moe_k2048");
     defer metal_pipeline.freePipeline(&dmmv_moe_pipe_k2048);
@@ -12343,6 +12357,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(dmmv_q6k_moe_pipe.handle != null);
     try std.testing.expect(dmmv_pipe_k2048.handle != null);
     try std.testing.expect(dmmv_q4k_dual_pipe.handle != null);
+    try std.testing.expect(dmmv_q4k_dual_llama_pipe.handle != null);
     try std.testing.expect(dmmv_moe_pipe_k2048.handle != null);
     try std.testing.expect(dmmv_moe_pipe_k2048_1024.handle != null);
     try std.testing.expect(swiglu_pipe.handle != null);
