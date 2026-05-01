@@ -3159,9 +3159,10 @@ pub const InferenceEngine = struct {
                 bytesToGiB(profile.dmmv_q6k_bytes),
                 pctOf(profile.dmmv_total_bytes, profile.dmmv_q6k_bytes),
             });
-            log.info("  path bytes: ssm {d:.2} GiB attn {d:.2} GiB moe-expert {d:.2} GiB shared {d:.2} GiB lm-head {d:.2} GiB router {d:.2} GiB", .{
+            log.info("  path bytes: ssm {d:.2} GiB attn {d:.2} GiB dense {d:.2} GiB moe-expert {d:.2} GiB shared {d:.2} GiB lm-head {d:.2} GiB router {d:.2} GiB", .{
                 bytesToGiB(profile.ssm_bytes),
                 bytesToGiB(profile.full_attn_bytes),
+                bytesToGiB(profile.dense_ffn_bytes),
                 bytesToGiB(profile.moe_expert_bytes),
                 bytesToGiB(profile.shared_expert_bytes),
                 bytesToGiB(profile.lm_head_bytes),
