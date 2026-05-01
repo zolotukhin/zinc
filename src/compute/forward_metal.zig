@@ -3257,10 +3257,13 @@ pub const InferenceEngine = struct {
                 {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_1024_pipe, .push_idx = 1, .rows_per_wg = 32, .block_size = 1024 };
                 }
-                // Adapt llama.cpp's `ggml_metal_op_mul_mat` shape-driven
-                // dispatch: the K=5376 wide Q4_K path is useful for all
-                // large dense Gemma projections, not just the LM head.
+                // Adapt llama.cpp's `ggml_metal_op_mul_mat` / `kernel_mul_mv_q4_K_f32`
+                // decode choice: keep single-token layer projections on the
+                // 2-simdgroup no-staged-input path. Staging Gemma 31B's 21 KiB
+                // activation vector per workgroup costs occupancy and only the
+                // very large LM head has enough rows to amortize that cache.
                 if (K == 5376 and
+                    tensor == self.lm_head and
                     M >= 1024 and
                     self.dmmv_q4k_k5376_pipe.max_threads_per_threadgroup >= 512)
                 {
@@ -3875,7 +3878,7 @@ fn canUseDenseQ4KGateUpDual(
         up.info.type_ == .q4_k and
         M > 0 and
         K > 0 and
-        K <= 5376 and
+        K < 5376 and
         K % 256 == 0 and
         engine.dmmv_q4k_dual_pipe.handle != null and
         engine.dmmv_q4k_dual_pipe.max_threads_per_threadgroup >= 256;
