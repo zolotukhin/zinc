@@ -79,6 +79,7 @@ inline void accumulate_q4k(
 }
 
 #define TG_SIZE 256
+#define MAX_K_VEC4 1344
 #define ROWS_PER_SIMDGROUP 2
 #define ROWS_PER_TG ((TG_SIZE / 32) * ROWS_PER_SIMDGROUP)
 
@@ -94,7 +95,7 @@ kernel void main0(
     uint lane                                     [[thread_index_in_simdgroup]],
     uint sg_idx                                   [[simdgroup_index_in_threadgroup]]
 ) {
-    threadgroup float4 x_cache4[1024];
+    threadgroup float4 x_cache4[MAX_K_VEC4];
 
     device const float* input = X + (p.x_offset >> 2);
     const uint k_vec4 = p.K >> 2;
