@@ -1602,6 +1602,7 @@ pub const InferenceEngine = struct {
     dmmv_f32_pipe: MetalPipeline,
     dmmv_q4k_moe_pipe: MetalPipeline,
     dmmv_q4k_moe_gate_up_pipe: MetalPipeline,
+    dmmv_q4k_dense_gate_up_geglu_pipe: MetalPipeline,
     dmmv_q4k_moe_cols_pipe: MetalPipeline,
     dmmv_q5_1_moe_pipe: MetalPipeline,
     dmmv_q5_1_moe_cols_pipe: MetalPipeline,
@@ -1950,6 +1951,7 @@ pub const InferenceEngine = struct {
         self.dmmv_f32_pipe = try loadShaderPipeline(ctx, "dmmv_f32");
         self.dmmv_q4k_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe");
         self.dmmv_q4k_moe_gate_up_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_gate_up");
+        self.dmmv_q4k_dense_gate_up_geglu_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dense_gate_up_geglu");
         self.dmmv_q4k_moe_cols_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_cols");
         self.dmmv_q5_1_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe");
         self.dmmv_q5_1_moe_cols_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe_cols");
@@ -2549,6 +2551,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_f32_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_gate_up_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_dense_gate_up_geglu_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_moe_cols_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5_1_moe_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5_1_moe_cols_pipe);
@@ -3929,6 +3932,62 @@ fn dispatchDenseQ4KGateUpDualOnCmd(
     const block_size: u32 = if (use_llama_dual) 64 else 256;
     const projections: u32 = if (use_llama_dual) 2 else 1;
     cmd.dispatchV2(pipe, .{ (M + rows_per_wg - 1) / rows_per_wg, projections, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(DualQ8DmmvPush), 2);
+}
+
+fn canUseDenseQ4KGateUpGeGLU(
+    engine: *const InferenceEngine,
+    gate: *const metal_loader.LoadedTensor,
+    up: *const metal_loader.LoadedTensor,
+    M: u32,
+    K: u32,
+) bool {
+    return !engine.debug_validation_enabled and
+        engine.config.architecture == .gemma and
+        engine.config.n_experts == 0 and
+        usesGeglu(engine.config) and
+        gate.info.type_ == .q4_k and
+        up.info.type_ == .q4_k and
+        M > 0 and
+        K > 0 and
+        K % 256 == 0 and
+        engine.dmmv_q4k_dense_gate_up_geglu_pipe.handle != null and
+        engine.dmmv_q4k_dense_gate_up_geglu_pipe.max_threads_per_threadgroup >= 64;
+}
+
+fn dispatchDenseQ4KGateUpGeGLUOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    gate: *const metal_loader.LoadedTensor,
+    up: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+) void {
+    recordDmmvProfile(engine, gate, M, K);
+    recordDmmvProfile(engine, up, M, K);
+
+    const push = DualQ8DmmvPush{
+        .M0 = M,
+        .M1 = M,
+        .K = K,
+        .a0_offset = tensorPageOffset(engine.model, gate),
+        .a1_offset = tensorPageOffset(engine.model, up),
+        .x_offset = 0,
+        .y0_offset = 0,
+        .y1_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &gate.gpu_buffer, &up.gpu_buffer, input_buf, output_buf };
+    const rows_per_wg: u32 = 4;
+    cmd.dispatchV2(
+        &engine.dmmv_q4k_dense_gate_up_geglu_pipe,
+        .{ (M + rows_per_wg - 1) / rows_per_wg, 1, 1 },
+        .{ 64, 1, 1 },
+        &bufs,
+        &push,
+        @sizeOf(DualQ8DmmvPush),
+        2,
+    );
 }
 
 fn dispatchDualQ8DmmvOnCmd(
@@ -8200,15 +8259,19 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 var local_cmd_storage: MetalCommand = undefined;
                 var using_local_cmd = false;
                 const cmd = try acquireLayerCommand(engine, layer_shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
-                if (canUseDenseQ4KGateUpDual(engine, gate_t, up_t, inter_dim, hidden_dim)) {
+                const fused_gate_up_geglu = canUseDenseQ4KGateUpGeGLU(engine, gate_t, up_t, inter_dim, hidden_dim);
+                if (fused_gate_up_geglu) {
+                    dispatchDenseQ4KGateUpGeGLUOnCmd(engine, cmd, gate_t, up_t, &engine.norm_buf, &engine.swiglu_buf, inter_dim, hidden_dim);
+                } else if (canUseDenseQ4KGateUpDual(engine, gate_t, up_t, inter_dim, hidden_dim)) {
                     dispatchDenseQ4KGateUpDualOnCmd(engine, cmd, gate_t, up_t, &engine.norm_buf, &engine.gate_buf, &engine.up_buf, inter_dim, hidden_dim);
                 } else {
                     dispatchDmmvOnCmd(engine, cmd, gate_t, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, 0);
                     dispatchDmmvOnCmd(engine, cmd, up_t, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, 0);
                 }
-                profileBarrier(cmd, profile, .dense_ffn);
-
-                dispatchFfnActivationOnCmd(engine, cmd, &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf, inter_dim);
+                if (!fused_gate_up_geglu) {
+                    profileBarrier(cmd, profile, .dense_ffn);
+                    dispatchFfnActivationOnCmd(engine, cmd, &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf, inter_dim);
+                }
                 profileBarrier(cmd, profile, .dense_ffn);
 
                 dispatchDmmvOnCmd(engine, cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
@@ -12255,6 +12318,8 @@ test "batched MoE Metal shaders compile" {
     defer metal_pipeline.freePipeline(&dmmv_pipe);
     var dmmv_q4k_moe_gate_up_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_gate_up");
     defer metal_pipeline.freePipeline(&dmmv_q4k_moe_gate_up_pipe);
+    var dmmv_q4k_dense_gate_up_geglu_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dense_gate_up_geglu");
+    defer metal_pipeline.freePipeline(&dmmv_q4k_dense_gate_up_geglu_pipe);
     var dmmv_q4k_moe_cols_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_moe_cols");
     defer metal_pipeline.freePipeline(&dmmv_q4k_moe_cols_pipe);
     var dmmv_q5_1_moe_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1_moe");
@@ -12326,6 +12391,7 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(sigmoid_mul_pipe.handle != null);
     try std.testing.expect(dmmv_pipe.handle != null);
     try std.testing.expect(dmmv_q4k_moe_gate_up_pipe.handle != null);
+    try std.testing.expect(dmmv_q4k_dense_gate_up_geglu_pipe.handle != null);
     try std.testing.expect(dmmv_q4k_moe_cols_pipe.handle != null);
     try std.testing.expect(dmmv_q5_1_moe_pipe.handle != null);
     try std.testing.expect(dmmv_q5_1_moe_cols_pipe.handle != null);
