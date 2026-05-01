@@ -4422,6 +4422,24 @@ fn dispatchDenseQ6kSimdgroupDmmvOnCmd(
     extra_byte_offset: u32,
     x_byte_offset: u32,
 ) void {
+    if (engine.dmmv_q6k_moe_pipe.handle != null and M >= 1024 and K >= 4096) {
+        const push = MoeDmmvPush{
+            .M = M,
+            .K = K,
+            .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+            .expert_stride = 0,
+            .x_expert_stride = 0,
+            .x_offset = x_byte_offset,
+            .y_offset = 0,
+        };
+        const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, &engine.expert_ids_buf };
+        const rows_per_wg: u32 = 8;
+        const block_size: u32 = 256;
+        const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+        cmd.dispatchV2(&engine.dmmv_q6k_moe_pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+        return;
+    }
+
     if (engine.dmmv_q6k_llama_pipe.handle != null) {
         const push = DmmvPush{
             .M = M,
