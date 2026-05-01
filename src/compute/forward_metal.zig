@@ -4427,12 +4427,15 @@ fn canUseDenseQ6kSimdgroupDmmv(
     M: u32,
     K: u32,
 ) bool {
+    // Dense single-token decode should follow llama.cpp's mul_mv Q6_K path.
+    // The MoE Q6_K shader stages X in threadgroup memory for routed experts;
+    // that does not match this N=1 dense projection shape.
     return engine.config.architecture == .gemma and
         engine.config.n_experts == 0 and
         tensor.info.type_ == .q6_k and
         M > 0 and
         K % 256 == 0 and
-        (engine.dmmv_q6k_llama_pipe.handle != null or engine.dmmv_q6k_moe_pipe.handle != null);
+        engine.dmmv_q6k_llama_pipe.handle != null;
 }
 
 fn dispatchDenseQ6kSimdgroupDmmvOnCmd(
@@ -4446,24 +4449,6 @@ fn dispatchDenseQ6kSimdgroupDmmvOnCmd(
     extra_byte_offset: u32,
     x_byte_offset: u32,
 ) void {
-    if (engine.dmmv_q6k_moe_pipe.handle != null and M >= 1024 and K >= 4096) {
-        const push = MoeDmmvPush{
-            .M = M,
-            .K = K,
-            .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
-            .expert_stride = 0,
-            .x_expert_stride = 0,
-            .x_offset = x_byte_offset,
-            .y_offset = 0,
-        };
-        const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, &engine.expert_ids_buf };
-        const rows_per_wg: u32 = 8;
-        const block_size: u32 = 256;
-        const wgs = (M + rows_per_wg - 1) / rows_per_wg;
-        cmd.dispatchV2(&engine.dmmv_q6k_moe_pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
-        return;
-    }
-
     if (engine.dmmv_q6k_llama_pipe.handle != null) {
         const push = DmmvPush{
             .M = M,
@@ -4479,20 +4464,7 @@ fn dispatchDenseQ6kSimdgroupDmmvOnCmd(
         return;
     }
 
-    const push = MoeDmmvPush{
-        .M = M,
-        .K = K,
-        .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
-        .expert_stride = 0,
-        .x_expert_stride = 0,
-        .x_offset = x_byte_offset,
-        .y_offset = 0,
-    };
-    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, &engine.expert_ids_buf };
-    const rows_per_wg: u32 = 8;
-    const block_size: u32 = 256;
-    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
-    cmd.dispatchV2(&engine.dmmv_q6k_moe_pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+    dispatchDmmvOnCmdWithWeightBuf(engine, cmd, tensor, &tensor.gpu_buffer, tensorPageOffset(engine.model, tensor), input_buf, output_buf, M, K, extra_byte_offset);
 }
 
 fn dispatchDmmvMoeQ6kOnCmd(
