@@ -3942,6 +3942,10 @@ fn canUseDenseQ4KGateUpGeGLU(
     M: u32,
     K: u32,
 ) bool {
+    // llama.cpp keeps single-token dense FFN gate/up as regular mul_mv nodes;
+    // vLLM's fused/packed expert flow only pays off once there are multiple
+    // token-expert rows to group. For Gemma 31B decode (K=5376), prefer the
+    // lower-register llama-style dual matvec plus separate GeGLU path.
     return !engine.debug_validation_enabled and
         engine.config.architecture == .gemma and
         engine.config.n_experts == 0 and
@@ -3950,6 +3954,7 @@ fn canUseDenseQ4KGateUpGeGLU(
         up.info.type_ == .q4_k and
         M > 0 and
         K > 0 and
+        K < 5376 and
         K % 256 == 0 and
         engine.dmmv_q4k_dense_gate_up_geglu_pipe.handle != null and
         engine.dmmv_q4k_dense_gate_up_geglu_pipe.max_threads_per_threadgroup >= 64;
