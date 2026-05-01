@@ -1583,7 +1583,6 @@ pub const InferenceEngine = struct {
     dmmv_q4k_dual_pipe: MetalPipeline,
     dmmv_q4k_dual_llama_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
-    dmmv_q4k_lmhead_k5376_pipe: MetalPipeline,
     dmmv_q4k_lmhead_1024_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q5k_native_pipe: MetalPipeline,
@@ -1932,7 +1931,6 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual");
         self.dmmv_q4k_dual_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual_llama");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
-        self.dmmv_q4k_lmhead_k5376_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_k5376");
         self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q5k_native_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_native");
@@ -2532,7 +2530,6 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_dual_llama_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
-        metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_k5376_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_1024_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_native_pipe);
@@ -3278,13 +3275,6 @@ pub const InferenceEngine = struct {
                 // ~5 GB/s effective on Apple9 (cycle 24 of Effort 12 profile)
                 // versus llama.cpp's ~440 GB/s on the same shape; do not
                 // re-specialize without bench-metal-shapes evidence.
-                if (tensor == self.lm_head and
-                    K > 3072 and K <= 6144 and
-                    M >= 65536 and
-                    self.dmmv_q4k_lmhead_k5376_pipe.max_threads_per_threadgroup >= 512)
-                {
-                    break :blk .{ .pipe = &self.dmmv_q4k_lmhead_k5376_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
-                }
                 if (K <= 3072 and
                     self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
                     ((tensor == self.lm_head and M >= 65536) or M >= 1024))
@@ -12298,8 +12288,6 @@ test "batched MoE Metal shaders compile" {
 
     var lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
     defer metal_pipeline.freePipeline(&lmhead_pipe);
-    var lmhead_k5376_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_k5376");
-    defer metal_pipeline.freePipeline(&lmhead_k5376_pipe);
     var lmhead_pipe_1024 = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
     defer metal_pipeline.freePipeline(&lmhead_pipe_1024);
     var topk_pipe = try loadShaderPipeline(ctx, "softmax_topk");
@@ -12351,7 +12339,6 @@ test "batched MoE Metal shaders compile" {
     try std.testing.expect(rms_norm_offset_pipe.handle != null);
     try std.testing.expect(acc_pipe.handle != null);
     try std.testing.expect(lmhead_pipe.handle != null);
-    try std.testing.expect(lmhead_k5376_pipe.handle != null);
     try std.testing.expect(lmhead_pipe_1024.handle != null);
     try std.testing.expect(topk_pipe.handle != null);
     try std.testing.expect(topk_scaled_pipe.handle != null);
