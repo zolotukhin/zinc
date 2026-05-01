@@ -7269,11 +7269,18 @@ fn acquireLayerCommand(
 
 fn canUseDenseSharedDecodeCommand(engine: *const InferenceEngine) bool {
     const cfg = engine.config;
-    return cfg.architecture == .gemma and
-        cfg.n_experts == 0 and
-        cfg.ssm_d_inner == 0 and
-        !engine.debug_validation_enabled and
-        !engine.gemma_moe_validation_enabled;
+    if (cfg.architecture != .gemma) return false;
+    if (cfg.n_experts != 0) return false;
+    if (cfg.ssm_d_inner != 0) return false;
+    if (engine.debug_validation_enabled or engine.gemma_moe_validation_enabled) return false;
+
+    for (engine.layer_tensors) |lt| {
+        if (lt.attn_gate != null) return false;
+        if (lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+    }
+
+    return true;
 }
 
 fn beginProfiledCommand(engine: *InferenceEngine, profile: ?*RuntimeProfile) !MetalCommand {
@@ -7325,6 +7332,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
     const head_v_dim: u32 = if (d_inner > 0) d_inner / @max(dt_rank, 1) else 0;
     const d_conv: u32 = cfg.ssm_d_conv;
     const use_dense_layer_cmd = canUseDenseSharedDecodeCommand(engine);
+    const dense_cmd_group_layers: usize = 4;
     const use_single_gpu_cmd = !engine.debug_validation_enabled and !engine.gemma_moe_validation_enabled and is_moe and blk: {
         for (engine.layer_tensors) |lt| {
             if (!canUseGpuRoutedBatchedMoe(engine, lt)) break :blk false;
@@ -7359,6 +7367,14 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         profileBarrier(cmd, profile, .embed);
     }
 
+    var dense_group_cmd_storage = MetalCommand{
+        .handle = null,
+        .dispatch_count = 0,
+        .barrier_count = 0,
+        .barrier_enabled = false,
+    };
+    const layer_count: usize = @intCast(cfg.n_layers);
+
     for (0..cfg.n_layers) |layer_idx| {
         const layer: u32 = @intCast(layer_idx);
         const lt = engine.layer_tensors[layer_idx];
@@ -7366,17 +7382,13 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
         const skip_pre_ffn_router = is_moe and !use_gpu_routed_moe and hasExplicitGemmaMoeTensors(cfg, lt);
         const layer_output_scale = engine.layer_output_scales[layer_idx];
-        var dense_layer_cmd_storage = MetalCommand{
-            .handle = null,
-            .dispatch_count = 0,
-            .barrier_count = 0,
-            .barrier_enabled = false,
-        };
         const layer_shared_cmd: ?*MetalCommand = if (shared_cmd) |cmd|
             cmd
         else if (use_dense_layer_cmd) blk: {
-            dense_layer_cmd_storage = try beginProfiledCommand(engine, profile);
-            break :blk &dense_layer_cmd_storage;
+            if (dense_group_cmd_storage.handle == null) {
+                dense_group_cmd_storage = try beginProfiledCommand(engine, profile);
+            }
+            break :blk &dense_group_cmd_storage;
         } else null;
 
         if (is_full_attn) {
@@ -8023,8 +8035,11 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         if (engine.debug_validation_enabled and engine.position == 0) {
             logLayerDiagnostics(engine, lt, layer, is_full_attn, "post_ffn");
         }
-        if (use_dense_layer_cmd and dense_layer_cmd_storage.handle != null) {
-            commitAndWaitProfiled(&dense_layer_cmd_storage, profile);
+        if (use_dense_layer_cmd and dense_group_cmd_storage.handle != null) {
+            const next_layer = layer_idx + 1;
+            if (next_layer == layer_count or next_layer % dense_cmd_group_layers == 0) {
+                commitAndWaitProfiled(&dense_group_cmd_storage, profile);
+            }
         }
     }
 
