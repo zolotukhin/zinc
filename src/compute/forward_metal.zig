@@ -3140,8 +3140,9 @@ pub const InferenceEngine = struct {
     /// Q4_K LM head 1024: dedicated vocab projection kernel — 32 rows per threadgroup (1024 threads).
     /// On Apple9/M4, the 1024-thread shape tends to trade away too much
     /// occupancy for reuse, so keep that path reserved for Apple10-class parts.
-    /// Reusing the wider shape outside the LM head improves staged-vector reuse on
-    /// the large decode-side Q4_K projections that still dominate token time.
+    /// Keep Gemma 31B's K=5376 decode on the llama.cpp-style 2-simdgroup
+    /// Q4_K kernel: caching the 21 KiB activation vector costs occupancy and
+    /// buys little reuse compared with the much larger weight stream.
     /// Q5_K/Q6_K/F32: SPIRV-Cross — each thread handles 1 row (64 rows per workgroup, 64 threads).
     /// Q8_0/F16: SPIRV-Cross — each workgroup handles 2 rows (64 threads cooperate via simd_sum).
     fn dmmvPipelineForType(
@@ -3163,12 +3164,6 @@ pub const InferenceEngine = struct {
                     self.dmmv_q4k_lmhead_1024_pipe.max_threads_per_threadgroup >= 1024)
                 {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_1024_pipe, .push_idx = 1, .rows_per_wg = 32, .block_size = 1024 };
-                }
-                if (K == 5376 and
-                    M >= 1024 and
-                    self.dmmv_q4k_k5376_pipe.max_threads_per_threadgroup >= 512)
-                {
-                    break :blk .{ .pipe = &self.dmmv_q4k_k5376_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
                 }
                 if (K <= 3072 and
                     self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
@@ -3779,7 +3774,7 @@ fn canUseDenseQ4KGateUpDual(
         up.info.type_ == .q4_k and
         M > 0 and
         K > 0 and
-        K <= 5376 and
+        K < 5376 and
         K % 256 == 0 and
         engine.dmmv_q4k_dual_pipe.handle != null and
         engine.dmmv_q4k_dual_pipe.max_threads_per_threadgroup >= 256;
