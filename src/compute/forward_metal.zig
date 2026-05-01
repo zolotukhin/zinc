@@ -343,7 +343,6 @@ pub const RuntimeProfile = struct {
     fallback_moe_record_ns: u64 = 0,
     dense_ffn_record_ns: u64 = 0,
     final_record_ns: u64 = 0,
-    cpu_lm_head_wall_ns: u64 = 0,
     gpu_completion_wait_ns: u64 = 0,
     sample_ns: u64 = 0,
     total_step_ns: u64 = 0,
@@ -3009,7 +3008,7 @@ pub const InferenceEngine = struct {
             nsToMs(profile.sample_ns),
             avgMs(profile.sample_ns, profile.sample_calls),
         });
-        log.info("  wait: commitAndWait {d:.2} ms ({d:.3} ms/step, {d:.1}% of traced time; includes queued GPU work + CPU wait) | record breakdown layer {d:.2} ms gpu-moe {d:.2} ms fallback-moe {d:.2} ms dense {d:.2} ms final {d:.2} ms cpu-lm-head {d:.2} ms", .{
+        log.info("  wait: commitAndWait {d:.2} ms ({d:.3} ms/step, {d:.1}% of traced time; includes queued GPU work + CPU wait) | record breakdown layer {d:.2} ms gpu-moe {d:.2} ms fallback-moe {d:.2} ms dense {d:.2} ms final {d:.2} ms", .{
             nsToMs(profile.gpu_completion_wait_ns),
             avgMs(profile.gpu_completion_wait_ns, profile.decode_steps),
             pctOf(traced_request_ns, profile.gpu_completion_wait_ns),
@@ -3018,7 +3017,6 @@ pub const InferenceEngine = struct {
             nsToMs(profile.fallback_moe_record_ns),
             nsToMs(profile.dense_ffn_record_ns),
             nsToMs(profile.final_record_ns),
-            nsToMs(profile.cpu_lm_head_wall_ns),
         });
         if (profile.decode_steps > 0) {
             const steps_f = @as(f64, @floatFromInt(profile.decode_steps));
@@ -3546,56 +3544,6 @@ fn writeCpuArgmaxResult(engine: *const InferenceEngine, result: CpuArgmaxResult)
     argmax_words[1] = 0;
 }
 
-// Adapted from llama.cpp ggml-metal.metal kernel_mul_mv_q8_0_f32_impl (NR0=2):
-// process two adjacent rows in a single inner loop pass, sharing the input
-// activation load and giving the compiler two independent FMA chains to
-// schedule. The math is identical to two separate dotQ8_0Row calls.
-fn dotQ8_0RowPair(
-    raw_data: []const u8,
-    row_a: u32,
-    row_b: u32,
-    cols: u32,
-    input: [*]const f32,
-) [2]f32 {
-    const Vec8f = @Vector(8, f32);
-    const Vec8i8 = @Vector(8, i8);
-    const Vec8i32 = @Vector(8, i32);
-    const block_size: usize = 32;
-    const bpb: usize = 34;
-    const bpr = @as(usize, cols) / block_size;
-    const row_a_off = @as(usize, row_a) * bpr * bpb;
-    const row_b_off = @as(usize, row_b) * bpr * bpb;
-    var acc_a: Vec8f = @splat(0.0);
-    var acc_b: Vec8f = @splat(0.0);
-    var in_i: usize = 0;
-    for (0..bpr) |b| {
-        const bo_a = row_a_off + b * bpb;
-        const bo_b = row_b_off + b * bpb;
-        const scale_a_bits = std.mem.readInt(u16, raw_data[bo_a..][0..2], .little);
-        const scale_b_bits = std.mem.readInt(u16, raw_data[bo_b..][0..2], .little);
-        const scale_a: f32 = @floatCast(@as(f16, @bitCast(scale_a_bits)));
-        const scale_b: f32 = @floatCast(@as(f16, @bitCast(scale_b_bits)));
-        const scale_a_vec: Vec8f = @splat(scale_a);
-        const scale_b_vec: Vec8f = @splat(scale_b);
-        inline for (0..4) |chunk| {
-            const x_arr: [8]f32 = input[in_i + chunk * 8 ..][0..8].*;
-            const x: Vec8f = x_arr;
-            const q_a_arr: [8]u8 = raw_data[bo_a + 2 + chunk * 8 ..][0..8].*;
-            const q_a_i8: Vec8i8 = @bitCast(q_a_arr);
-            const q_a_i32: Vec8i32 = @intCast(q_a_i8);
-            const q_a_f: Vec8f = @floatFromInt(q_a_i32);
-            acc_a += (q_a_f * scale_a_vec) * x;
-            const q_b_arr: [8]u8 = raw_data[bo_b + 2 + chunk * 8 ..][0..8].*;
-            const q_b_i8: Vec8i8 = @bitCast(q_b_arr);
-            const q_b_i32: Vec8i32 = @intCast(q_b_i8);
-            const q_b_f: Vec8f = @floatFromInt(q_b_i32);
-            acc_b += (q_b_f * scale_b_vec) * x;
-        }
-        in_i += block_size;
-    }
-    return [_]f32{ @reduce(.Add, acc_a), @reduce(.Add, acc_b) };
-}
-
 fn cpuDmmvQ8_0RowsArgmax(
     raw: []const u8,
     start_row: u32,
@@ -3606,16 +3554,7 @@ fn cpuDmmvQ8_0RowsArgmax(
 ) CpuArgmaxResult {
     var best = CpuArgmaxResult{};
     var row = start_row;
-    while (row + 1 < end_row) : (row += 2) {
-        const pair = dotQ8_0RowPair(raw, row, row + 1, K, input);
-        output[row] = pair[0];
-        output[row + 1] = pair[1];
-        const cand_a = CpuArgmaxResult{ .idx = row, .val = pair[0] };
-        if (betterArgmax(cand_a, best)) best = cand_a;
-        const cand_b = CpuArgmaxResult{ .idx = row + 1, .val = pair[1] };
-        if (betterArgmax(cand_b, best)) best = cand_b;
-    }
-    if (row < end_row) {
+    while (row < end_row) : (row += 1) {
         const value = dotQ8_0Row(raw, row, K, input);
         output[row] = value;
         const candidate = CpuArgmaxResult{ .idx = row, .val = value };
@@ -3702,10 +3641,6 @@ fn cpuLmHeadFallbackWithArgmax(
     const mmap = engine.model.mmap_data orelse return error.NoMmapData;
     const tdo = engine.model.gguf_file.tensor_data_offset;
     recordDmmvProfile(engine, engine.lm_head, engine.config.vocab_size, engine.config.hidden_dim);
-    const wall_start = profileStart(engine.profile_enabled);
-    defer if (engine.profile_enabled) {
-        engine.request_profile.cpu_lm_head_wall_ns += profileElapsedNs(wall_start);
-    };
     if (engine.lm_head.info.type_ == .q8_0) {
         const off: usize = @intCast(tdo + engine.lm_head.info.offset);
         const raw = mmap[off..];
