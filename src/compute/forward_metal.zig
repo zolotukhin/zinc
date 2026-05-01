@@ -3774,7 +3774,7 @@ fn canUseDenseQ4KGateUpDual(
         up.info.type_ == .q4_k and
         M > 0 and
         K > 0 and
-        K < 5376 and
+        K <= 5376 and
         K % 256 == 0 and
         engine.dmmv_q4k_dual_pipe.handle != null and
         engine.dmmv_q4k_dual_pipe.max_threads_per_threadgroup >= 256;
