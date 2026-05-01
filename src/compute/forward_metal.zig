@@ -4193,6 +4193,10 @@ fn dispatchDmmvOnCmdWithInputOffset(
     x_byte_offset: u32,
 ) void {
     recordDmmvProfile(engine, tensor, M, K);
+    if (canUseDenseGemmaDecodeGemm(engine, tensor, M, K, extra_byte_offset, x_byte_offset)) {
+        dispatchGemmBatchedOnCmd(engine, cmd, tensor, input_buf, output_buf, M, K, 1);
+        return;
+    }
     if (canUseDenseQ6kSimdgroupDmmv(engine, tensor, M, K)) {
         dispatchDenseQ6kSimdgroupDmmvOnCmd(engine, cmd, tensor, input_buf, output_buf, M, K, extra_byte_offset, x_byte_offset);
         return;
@@ -4368,6 +4372,26 @@ fn dispatchDmmvMoeQ5_1OnCmd(
     const block_size: u32 = 64;
     const wgs = (M + rows_per_wg - 1) / rows_per_wg;
     cmd.dispatchV2(&engine.dmmv_q5_1_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+}
+
+fn canUseDenseGemmaDecodeGemm(
+    engine: *const InferenceEngine,
+    tensor: *const metal_loader.LoadedTensor,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+    x_byte_offset: u32,
+) bool {
+    const cfg = engine.config;
+    if (cfg.architecture != .gemma or cfg.n_experts != 0 or cfg.ssm_d_inner != 0) return false;
+    if (extra_byte_offset != 0 or x_byte_offset != 0) return false;
+    if (M < 1024 or K % 256 != 0) return false;
+
+    return switch (tensor.info.type_) {
+        .q4_k => engine.gemm_q4k_pipe.handle != null,
+        .q6_k => engine.gemm_q6k_pipe.handle != null,
+        else => false,
+    };
 }
 
 fn canUseDenseQ6kSimdgroupDmmv(
