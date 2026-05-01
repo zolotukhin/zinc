@@ -1575,6 +1575,7 @@ pub const InferenceEngine = struct {
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q5k_native_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
+    dmmv_q6k_llama_pipe: MetalPipeline,
     dmmv_q8_0_pipe: MetalPipeline,
     dmmv_q5_0_pipe: MetalPipeline,
     dmmv_q5_1_pipe: MetalPipeline,
@@ -1922,6 +1923,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q5k_native_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_native");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
+        self.dmmv_q6k_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_llama");
         self.dmmv_q8_0_pipe = try loadShaderPipeline(ctx, "dmmv_q8_0");
         self.dmmv_q5_0_pipe = try loadShaderPipeline(ctx, "dmmv_q5_0");
         self.dmmv_q5_1_pipe = try loadShaderPipeline(ctx, "dmmv_q5_1");
@@ -2523,6 +2525,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_native_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q6k_llama_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q8_0_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5_0_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5_1_pipe);
@@ -4193,12 +4196,12 @@ fn dispatchDmmvOnCmdWithInputOffset(
     x_byte_offset: u32,
 ) void {
     recordDmmvProfile(engine, tensor, M, K);
-    if (canUseDenseGemmaDecodeGemm(engine, tensor, M, K, extra_byte_offset, x_byte_offset)) {
-        dispatchGemmBatchedOnCmd(engine, cmd, tensor, input_buf, output_buf, M, K, 1);
-        return;
-    }
     if (canUseDenseQ6kSimdgroupDmmv(engine, tensor, M, K)) {
         dispatchDenseQ6kSimdgroupDmmvOnCmd(engine, cmd, tensor, input_buf, output_buf, M, K, extra_byte_offset, x_byte_offset);
+        return;
+    }
+    if (canUseDenseGemmaDecodeGemm(engine, tensor, M, K, extra_byte_offset, x_byte_offset)) {
+        dispatchGemmBatchedOnCmd(engine, cmd, tensor, input_buf, output_buf, M, K, 1);
         return;
     }
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
@@ -4405,8 +4408,7 @@ fn canUseDenseQ6kSimdgroupDmmv(
         tensor.info.type_ == .q6_k and
         M > 0 and
         K % 256 == 0 and
-        engine.dmmv_q6k_moe_pipe.handle != null and
-        engine.dmmv_q6k_moe_pipe.max_threads_per_threadgroup >= 256;
+        (engine.dmmv_q6k_llama_pipe.handle != null or engine.dmmv_q6k_moe_pipe.handle != null);
 }
 
 fn dispatchDenseQ6kSimdgroupDmmvOnCmd(
@@ -4420,6 +4422,21 @@ fn dispatchDenseQ6kSimdgroupDmmvOnCmd(
     extra_byte_offset: u32,
     x_byte_offset: u32,
 ) void {
+    if (engine.dmmv_q6k_llama_pipe.handle != null) {
+        const push = DmmvPush{
+            .M = M,
+            .K = K,
+            .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+            .x_offset = x_byte_offset,
+            .y_offset = 0,
+        };
+        const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf };
+        const rows_per_wg: u32 = 4;
+        const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+        cmd.dispatchV2(&engine.dmmv_q6k_llama_pipe, .{ wgs, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(DmmvPush), 1);
+        return;
+    }
+
     const push = MoeDmmvPush{
         .M = M,
         .K = K,
