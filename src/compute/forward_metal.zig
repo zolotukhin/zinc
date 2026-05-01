@@ -3257,9 +3257,11 @@ pub const InferenceEngine = struct {
                 {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_1024_pipe, .push_idx = 1, .rows_per_wg = 32, .block_size = 1024 };
                 }
+                // Adapt llama.cpp's `ggml_metal_op_mul_mat` shape-driven
+                // dispatch: the K=5376 wide Q4_K path is useful for all
+                // large dense Gemma projections, not just the LM head.
                 if (K == 5376 and
-                    tensor == self.lm_head and
-                    M >= 65536 and
+                    M >= 1024 and
                     self.dmmv_q4k_k5376_pipe.max_threads_per_threadgroup >= 512)
                 {
                     break :blk .{ .pipe = &self.dmmv_q4k_k5376_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
