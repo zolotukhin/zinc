@@ -1248,6 +1248,18 @@ fn canUseDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
     return true;
 }
 
+fn defaultCommandEncoderMode(cfg: ModelConfig) CommandEncoderMode {
+    // llama.cpp records dependent decode graphs into ordinary serial compute
+    // encoders and relies on encoder order instead of inserting a buffer-scope
+    // memory barrier between every node. Dense Gemma 31B is a long dependency
+    // chain, so avoiding those barriers is more valuable than concurrent
+    // dispatch overlap.
+    if (cfg.architecture == .gemma and cfg.n_experts == 0 and cfg.ssm_d_inner == 0 and cfg.hidden_dim >= 5000) {
+        return .serial;
+    }
+    return .concurrent;
+}
+
 /// Returns true when the model + engine state match a supported batched
 /// prefill slice. Dense Gemma allows the Gemma 4 norms, GEGLU, sliding-window
 /// attention, and per-layer output scale that the per-token path applies.
@@ -1798,7 +1810,7 @@ pub const InferenceEngine = struct {
             options.private_decode_buffers_override orelse
                 readBoolEnv("ZINC_METAL_PRIVATE_DECODE") orelse
                 modelSupportsPrivateDecodeBuffers(model, cfg);
-        self.command_encoder_mode = options.command_encoder_mode orelse .concurrent;
+        self.command_encoder_mode = options.command_encoder_mode orelse defaultCommandEncoderMode(cfg);
         self.kv_cache_q8 = kv_cache_q8;
         self.kv_cache_head_stride_bytes = kv_cache_head_stride_bytes;
         self.kv_cache_bytes_per_token = @intCast(kv_cache_bytes_per_token);
@@ -2842,7 +2854,7 @@ pub const InferenceEngine = struct {
             }
         }
 
-        var cmd = try metal_command.beginCommand(self.device.ctx);
+        var cmd = try metal_command.beginCommandWithMode(self.device.ctx, self.command_encoder_mode);
 
         for (0..cfg.n_layers) |layer_idx| {
             const lt = self.layer_tensors[layer_idx];
@@ -2995,7 +3007,7 @@ pub const InferenceEngine = struct {
                 (next_layer % dense_gemma_prefill_chunk_layers == 0 or next_layer == @as(usize, @intCast(cfg.n_layers))))
             {
                 cmd.commitAndWait();
-                cmd = try metal_command.beginCommand(self.device.ctx);
+                cmd = try metal_command.beginCommandWithMode(self.device.ctx, self.command_encoder_mode);
             }
         }
 
