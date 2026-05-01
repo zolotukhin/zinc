@@ -1775,6 +1775,10 @@ pub const InferenceEngine = struct {
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
         self.lm_head_private_buf = .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
         self.expert_ids_buf = try metal_buffer.createBuffer(ctx, expert_ids_size);
+        {
+            const ids_ptr: [*]u32 = @ptrCast(@alignCast(self.expert_ids_buf.cpu_ptr.?));
+            ids_ptr[0] = 0;
+        }
         self.expert_gate_batch_buf = try createMetalBufferForMode(ctx, expert_inter_batch_size, self.private_decode_buffers);
         self.expert_up_batch_buf = try createMetalBufferForMode(ctx, expert_inter_batch_size, self.private_decode_buffers);
         self.expert_swiglu_batch_buf = try createMetalBufferForMode(ctx, expert_inter_batch_size, self.private_decode_buffers);
@@ -4039,6 +4043,10 @@ fn dispatchDmmvOnCmdWithInputOffset(
     x_byte_offset: u32,
 ) void {
     recordDmmvProfile(engine, tensor, M, K);
+    if (canUseDenseQ6kSimdgroupDmmv(engine, tensor, M, K)) {
+        dispatchDenseQ6kSimdgroupDmmvOnCmd(engine, cmd, tensor, input_buf, output_buf, M, K, extra_byte_offset, x_byte_offset);
+        return;
+    }
     const pip = engine.dmmvPipelineForType(tensor, M, K) orelse {
         // CPU fallback for unsupported quant types. Re-open a command buffer
         // afterwards so later kernels in the same logical sequence still record.
@@ -4210,6 +4218,48 @@ fn dispatchDmmvMoeQ5_1OnCmd(
     const block_size: u32 = 64;
     const wgs = (M + rows_per_wg - 1) / rows_per_wg;
     cmd.dispatchV2(&engine.dmmv_q5_1_moe_pipe, .{ wgs, engine.config.n_experts_used, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
+}
+
+fn canUseDenseQ6kSimdgroupDmmv(
+    engine: *const InferenceEngine,
+    tensor: *const metal_loader.LoadedTensor,
+    M: u32,
+    K: u32,
+) bool {
+    return engine.config.architecture == .gemma and
+        engine.config.n_experts == 0 and
+        tensor.info.type_ == .q6_k and
+        M > 0 and
+        K % 256 == 0 and
+        engine.dmmv_q6k_moe_pipe.handle != null and
+        engine.dmmv_q6k_moe_pipe.max_threads_per_threadgroup >= 256;
+}
+
+fn dispatchDenseQ6kSimdgroupDmmvOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    M: u32,
+    K: u32,
+    extra_byte_offset: u32,
+    x_byte_offset: u32,
+) void {
+    const push = MoeDmmvPush{
+        .M = M,
+        .K = K,
+        .a_offset = tensorPageOffset(engine.model, tensor) + extra_byte_offset,
+        .expert_stride = 0,
+        .x_expert_stride = 0,
+        .x_offset = x_byte_offset,
+        .y_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &tensor.gpu_buffer, input_buf, output_buf, &engine.expert_ids_buf };
+    const rows_per_wg: u32 = 8;
+    const block_size: u32 = 256;
+    const wgs = (M + rows_per_wg - 1) / rows_per_wg;
+    cmd.dispatchV2(&engine.dmmv_q6k_moe_pipe, .{ wgs, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(MoeDmmvPush), 1);
 }
 
 fn dispatchDmmvMoeQ6kOnCmd(
