@@ -7166,6 +7166,15 @@ fn acquireLayerCommand(
     return local_cmd_storage;
 }
 
+fn canUseDenseSharedDecodeCommand(engine: *const InferenceEngine) bool {
+    const cfg = engine.config;
+    return cfg.architecture == .gemma and
+        cfg.n_experts == 0 and
+        cfg.ssm_d_inner == 0 and
+        !engine.debug_validation_enabled and
+        !engine.gemma_moe_validation_enabled;
+}
+
 fn beginProfiledCommand(engine: *InferenceEngine, profile: ?*RuntimeProfile) !MetalCommand {
     const cmd = try metal_command.beginCommandWithMode(engine.device.ctx, engine.command_encoder_mode);
     if (profile) |p| p.command_buffers += 1;
@@ -7214,6 +7223,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
 
     const head_v_dim: u32 = if (d_inner > 0) d_inner / @max(dt_rank, 1) else 0;
     const d_conv: u32 = cfg.ssm_d_conv;
+    const use_dense_layer_cmd = canUseDenseSharedDecodeCommand(engine);
     const use_single_gpu_cmd = !engine.debug_validation_enabled and !engine.gemma_moe_validation_enabled and is_moe and blk: {
         for (engine.layer_tensors) |lt| {
             if (!canUseGpuRoutedBatchedMoe(engine, lt)) break :blk false;
@@ -7255,13 +7265,25 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
         const skip_pre_ffn_router = is_moe and !use_gpu_routed_moe and hasExplicitGemmaMoeTensors(cfg, lt);
         const layer_output_scale = engine.layer_output_scales[layer_idx];
+        var dense_layer_cmd_storage = MetalCommand{
+            .handle = null,
+            .dispatch_count = 0,
+            .barrier_count = 0,
+            .barrier_enabled = false,
+        };
+        const layer_shared_cmd: ?*MetalCommand = if (shared_cmd) |cmd|
+            cmd
+        else if (use_dense_layer_cmd) blk: {
+            dense_layer_cmd_storage = try beginProfiledCommand(engine, profile);
+            break :blk &dense_layer_cmd_storage;
+        } else null;
 
         if (is_full_attn) {
             if (profile) |p| p.full_attn_layers += 1;
             const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
-            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
+            var cmd = try acquireLayerCommand(engine, layer_shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
             const layer_record_start = profileStart(profile != null);
             dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
             profileBarrier(cmd, profile, .full_attn); // norm_buf visible before attn prep reads it
@@ -7311,8 +7333,8 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
             // Eliminates one barrier vs separate scale_acc + barrier + rms_norm.
             dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
-            if (!is_moe) {
-                // dense FFN: norm_buf is ready (no barrier needed between fused dispatch and FFN)
+            if (!is_moe and layer_shared_cmd != null) {
+                profileBarrier(cmd, profile, .dense_ffn);
             }
             if (is_moe and !skip_pre_ffn_router) {
                 profileBarrier(cmd, profile, .router); // norm_buf visible before router DMMV
@@ -7346,7 +7368,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             // ===== SSM: fused batch 1 + recurrent body + batch 2 =====
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
-            var cmd = try acquireLayerCommand(engine, shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
+            var cmd = try acquireLayerCommand(engine, layer_shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
             const layer_record_start = profileStart(profile != null);
             const wqkv_t = lt.attn_qkv orelse return error.MissingTensor;
             const z_t = lt.attn_gate orelse return error.MissingTensor;
@@ -7510,6 +7532,9 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
             // Eliminates one barrier vs separate scale_acc + barrier + rms_norm.
             dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
+            if (!is_moe and layer_shared_cmd != null) {
+                profileBarrier(cmd, profile, .dense_ffn);
+            }
             if (is_moe and !skip_pre_ffn_router) {
                 profileBarrier(cmd, profile, .router);
                 const router_t = lt.ffn_gate_inp orelse return error.MissingTensor;
@@ -7841,27 +7866,37 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
 
             {
                 const dense_record_start = profileStart(profile != null);
-                var cmd = try beginProfiledCommand(engine, profile);
-                dispatchDmmvOnCmd(engine, &cmd, gate_t, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, 0);
-                dispatchDmmvOnCmd(engine, &cmd, up_t, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, 0);
-                profileBarrier(&cmd, profile, .dense_ffn);
+                var local_cmd_storage: MetalCommand = undefined;
+                var using_local_cmd = false;
+                const cmd = try acquireLayerCommand(engine, layer_shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
+                dispatchDmmvOnCmd(engine, cmd, gate_t, &engine.norm_buf, &engine.gate_buf, inter_dim, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, cmd, up_t, &engine.norm_buf, &engine.up_buf, inter_dim, hidden_dim, 0);
+                profileBarrier(cmd, profile, .dense_ffn);
 
-                dispatchFfnActivationOnCmd(engine, &cmd, &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf, inter_dim);
-                profileBarrier(&cmd, profile, .dense_ffn);
+                dispatchFfnActivationOnCmd(engine, cmd, &engine.gate_buf, &engine.swiglu_buf, &engine.up_buf, inter_dim);
+                profileBarrier(cmd, profile, .dense_ffn);
 
-                dispatchDmmvOnCmd(engine, &cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
-                profileBarrier(&cmd, profile, .dense_ffn);
+                dispatchDmmvOnCmd(engine, cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
+                profileBarrier(cmd, profile, .dense_ffn);
                 if (engine.post_ffn_norm_present[layer_idx]) {
-                    dispatchRmsNormOnCmd(engine, &cmd, &engine.down_buf, &engine.down_buf, &engine.post_ffn_norm_bufs[layer_idx], hidden_dim, 1);
-                    profileBarrier(&cmd, profile, .dense_ffn);
+                    dispatchRmsNormOnCmd(engine, cmd, &engine.down_buf, &engine.down_buf, &engine.post_ffn_norm_bufs[layer_idx], hidden_dim, 1);
+                    profileBarrier(cmd, profile, .dense_ffn);
                 }
 
+                if (layer_shared_cmd != null) {
+                    const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                    const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+                    profileBarrier(cmd, profile, .dense_ffn);
+                }
                 if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
-                commitAndWaitProfiled(&cmd, profile);
+                if (using_local_cmd) {
+                    commitAndWaitProfiled(cmd, profile);
 
-                const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
-                const down_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
-                for (0..hidden_dim) |i| hidden_ptr[i] += down_ptr[i];
+                    const hidden_ptr: [*]f32 = @ptrCast(@alignCast(engine.hidden_buf.cpu_ptr.?));
+                    const down_ptr: [*]const f32 = @ptrCast(@alignCast(engine.down_buf.cpu_ptr.?));
+                    for (0..hidden_dim) |i| hidden_ptr[i] += down_ptr[i];
+                }
             }
         }
 
@@ -7871,7 +7906,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 (if (use_gpu_routed_moe) .gpu_routed_moe else .fallback_moe)
             else
                 .dense_ffn;
-            if (shared_cmd) |cmd| {
+            if (layer_shared_cmd) |cmd| {
                 dispatchScaleInPlaceOnCmd(engine, cmd, &engine.hidden_buf, &engine.residual_buf, hidden_dim, layer_output_scale, profile, scale_barrier_class);
             } else {
                 var scale_cmd = try beginProfiledCommand(engine, profile);
@@ -7882,6 +7917,9 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
 
         if (engine.debug_validation_enabled and engine.position == 0) {
             logLayerDiagnostics(engine, lt, layer, is_full_attn, "post_ffn");
+        }
+        if (use_dense_layer_cmd and dense_layer_cmd_storage.handle != null) {
+            commitAndWaitProfiled(&dense_layer_cmd_storage, profile);
         }
     }
 
