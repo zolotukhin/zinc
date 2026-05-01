@@ -3878,10 +3878,12 @@ fn canUseDenseQ4KGateUpDual(
     M: u32,
     K: u32,
 ) bool {
-    // llama.cpp's dense single-token path records gate/up as ordinary
-    // `kernel_mul_mv_q4_K_f32` matvecs. Keep the custom dual dispatch only
-    // for the older staged small-K shape; the K=5376 dual variant is not
-    // covered by the exact-shape bench and can hide the base kernel signal.
+    // For K=5376 Gemma 31B, use the llama.cpp row layout in
+    // dmmv_q4k_dual_llama: it keeps kernel_mul_mv_q4_K_f32's 2-SG/2-row
+    // mapping and only fuses the two independent gate/up launches.
+    const can_use_llama_dual = K >= 5376 and
+        engine.dmmv_q4k_dual_llama_pipe.handle != null and
+        engine.dmmv_q4k_dual_llama_pipe.max_threads_per_threadgroup >= 64;
     const can_use_staged_dual = K < 5376 and
         engine.dmmv_q4k_dual_pipe.handle != null and
         engine.dmmv_q4k_dual_pipe.max_threads_per_threadgroup >= 256;
@@ -3893,7 +3895,7 @@ fn canUseDenseQ4KGateUpDual(
         M > 0 and
         K > 0 and
         K % 256 == 0 and
-        can_use_staged_dual;
+        (can_use_llama_dual or can_use_staged_dual);
 }
 
 fn dispatchDenseQ4KGateUpDualOnCmd(
