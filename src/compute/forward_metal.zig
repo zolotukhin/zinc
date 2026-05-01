@@ -4389,12 +4389,14 @@ fn canUseDenseGemmaDecodeGemm(
     if (cfg.architecture != .gemma or cfg.n_experts != 0 or cfg.ssm_d_inner != 0) return false;
     if (extra_byte_offset != 0 or x_byte_offset != 0) return false;
     if (M < 1024 or K % 256 != 0) return false;
+    _ = tensor;
 
-    return switch (tensor.info.type_) {
-        .q4_k => engine.gemm_q4k_pipe.handle != null,
-        .q6_k => engine.gemm_q6k_pipe.handle != null,
-        else => false,
-    };
+    // This call site is single-token decode (N=1). llama.cpp's
+    // `ggml_metal_op_mul_mat` keeps that case on `kernel_mul_mv_*` and only
+    // switches to simdgroup matrix-matrix once the RHS batch clears its
+    // break-even threshold. Dense batched prefill still calls
+    // `dispatchGemmBatchedOnCmd` directly with N > 1.
+    return false;
 }
 
 fn canUseDenseQ6kSimdgroupDmmv(
