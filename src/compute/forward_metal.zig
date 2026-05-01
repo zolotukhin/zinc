@@ -7568,7 +7568,11 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
     const head_v_dim: u32 = if (d_inner > 0) d_inner / @max(dt_rank, 1) else 0;
     const d_conv: u32 = cfg.ssm_d_conv;
     const use_dense_layer_cmd = canUseDenseSharedDecodeCommand(engine);
-    const dense_cmd_group_layers: usize = 4;
+    // Dense Gemma follows llama.cpp's graph submission pattern: enqueue larger
+    // ordered chunks asynchronously and wait once at the token boundary. Eight
+    // layers keeps the command buffers below the single-buffer correctness cliff
+    // while reducing queue traffic for Gemma 31B's 60 dependent layers.
+    const dense_cmd_group_layers: usize = 8;
     const use_single_gpu_cmd = !engine.debug_validation_enabled and !engine.gemma_moe_validation_enabled and is_moe and blk: {
         for (engine.layer_tensors) |lt| {
             if (!canUseGpuRoutedBatchedMoe(engine, lt)) break :blk false;
