@@ -252,6 +252,13 @@ fn extractConfig(gf: *const gguf.GGUFFile) ModelConfig {
 }
 
 fn shouldCopyOutOfMmap(config: ModelConfig, tensor_info: gguf.TensorInfo, data_offset: u64) bool {
+    if (config.architecture == .gemma and config.n_experts == 0 and config.hidden_dim >= 5000) {
+        switch (tensor_info.type_) {
+            .q4_k, .q6_k => return true,
+            else => {},
+        }
+    }
+
     if (config.architecture != .gemma) return false;
     if (!(config.n_experts > 0 and config.rope_freq_base_swa > 0)) return false;
     if (data_offset <= std.math.maxInt(u32)) return false;
@@ -371,6 +378,7 @@ pub fn load(
 
     var total_size: u64 = 0;
     var copied_tensor_count: usize = 0;
+    var copied_tensor_bytes: u64 = 0;
     for (gf.tensors.items) |tensor_info| {
         const tensor_size = tensor_info.sizeBytes();
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
@@ -382,6 +390,7 @@ pub fn load(
             const tensor_bytes: usize = @intCast(tensor_size);
             @memcpy(buf.cpu_ptr.?[0..tensor_bytes], mmap_data[src_off .. src_off + tensor_bytes]);
             copied_tensor_count += 1;
+            copied_tensor_bytes += tensor_size;
             break :blk .{ buf, @as(u32, 0) };
         } else blk: {
             // Page-align the offset for Metal buffer wrapping
@@ -415,7 +424,10 @@ pub fn load(
         total_size / (1024 * 1024),
     });
     if (copied_tensor_count > 0) {
-        log.info("Metal loader copied {d} tensors out of mmap for stable access", .{copied_tensor_count});
+        log.info("Metal loader copied {d} tensors ({d} MB) out of mmap for stable access", .{
+            copied_tensor_count,
+            copied_tensor_bytes / (1024 * 1024),
+        });
     }
 
     return Model{
@@ -534,4 +546,52 @@ test "shouldCopyOutOfMmap only selects gemma ISWA q8 attention tensors above u32
     non_gemma.rope_freq_base_swa = 0;
     non_gemma.n_experts = 0;
     try std.testing.expect(!shouldCopyOutOfMmap(non_gemma, attn_q, @as(u64, std.math.maxInt(u32)) + 1));
+}
+
+test "shouldCopyOutOfMmap selects dense gemma 31b q4/q6 hot weights" {
+    const cfg = ModelConfig{
+        .architecture = .gemma,
+        .n_layers = 60,
+        .n_heads = 32,
+        .n_kv_heads = 16,
+        .head_dim = 256,
+        .hidden_dim = 5376,
+        .intermediate_dim = 21504,
+        .vocab_size = 262144,
+        .context_length = 262144,
+        .rope_freq_base = 1_000_000.0,
+        .rope_freq_base_swa = 10_000.0,
+        .n_experts = 0,
+        .n_experts_used = 0,
+        .rope_dim = 64,
+        .ssm_d_conv = 0,
+        .ssm_d_inner = 0,
+        .ssm_d_state = 0,
+        .ssm_dt_rank = 0,
+        .ssm_n_group = 0,
+        .full_attn_interval = 1,
+        .shared_expert_intermediate_dim = 0,
+    };
+
+    const q4_weight = gguf.TensorInfo{
+        .name = "blk.0.ffn_gate.weight",
+        .n_dims = 2,
+        .dims = .{ 5376, 21504, 1, 1 },
+        .type_ = .q4_k,
+        .offset = 0,
+    };
+    var q6_weight = q4_weight;
+    q6_weight.type_ = .q6_k;
+    var f32_norm = q4_weight;
+    f32_norm.name = "blk.0.attn_norm.weight";
+    f32_norm.type_ = .f32;
+
+    try std.testing.expect(shouldCopyOutOfMmap(cfg, q4_weight, 4096));
+    try std.testing.expect(shouldCopyOutOfMmap(cfg, q6_weight, 4096));
+    try std.testing.expect(!shouldCopyOutOfMmap(cfg, f32_norm, 4096));
+
+    var moe_gemma = cfg;
+    moe_gemma.n_experts = 128;
+    moe_gemma.n_experts_used = 8;
+    try std.testing.expect(!shouldCopyOutOfMmap(moe_gemma, q4_weight, 4096));
 }
