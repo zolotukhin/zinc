@@ -339,6 +339,12 @@ MetalCmd* mtl_begin_command_mode(MetalCtx* ctx, uint8_t serial) {
         return NULL;
     }
 
+    // Match llama.cpp's ggml_metal_graph_compute submission pattern: enqueue
+    // command buffers before the caller records the graph work, then commit
+    // after encoding. On Apple GPUs this lets the command queue establish order
+    // early for the dense decode chunks that are committed asynchronously.
+    [cmd_buf enqueue];
+
     MetalCmd* cmd = (MetalCmd*)calloc(1, sizeof(MetalCmd));
     if (!cmd) return NULL;
     cmd->cmd_buf = cmd_buf;
