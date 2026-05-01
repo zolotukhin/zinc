@@ -3294,7 +3294,16 @@ pub const InferenceEngine = struct {
             .q5_1 => .{ .pipe = &self.dmmv_q5_1_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
             .mxfp4 => .{ .pipe = &self.dmmv_mxfp4_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
-            .q6_k => .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
+            .q6_k => blk: {
+                if (self.config.architecture == .gemma and
+                    self.config.n_experts == 0 and
+                    K % 256 == 0 and
+                    self.dmmv_q6k_llama_pipe.handle != null)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q6k_llama_pipe, .push_idx = 1, .rows_per_wg = 4, .block_size = 64 };
+                }
+                break :blk .{ .pipe = &self.dmmv_q6k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 };
+            },
             .q8_0 => blk: {
                 const simd_width = if (self.dmmv_q8_0_pipe.thread_execution_width > 0) self.dmmv_q8_0_pipe.thread_execution_width else @as(u32, 32);
                 if (self.device.chip == .apple9 and simd_width == 32) {
