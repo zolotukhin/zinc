@@ -71,7 +71,7 @@ test "Metal prefillBatched gates on env flag and supported architecture" {
 
 test "Metal prefillBatched validate path diffs last-token logits within 1e-3" {
     const src = @embedFile("compute/forward_metal.zig");
-    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "if (mode == .validate)", 12000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "if (mode == .validate)", 16000);
     try expectContainsNear(src, "if (mode == .validate)", "const tol: f32 = 1e-3;", 1500);
     try expectContainsNear(src, "if (mode == .validate)", "try self.prefillBatch(state, prompt_tokens);", 1500);
 }
@@ -105,7 +105,7 @@ test "Metal prefillBatched supports prefix reuse by extending KV at state.positi
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "const position_base: u32 = state.position;", 2000);
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "return error.KvStateNotAvailable;", 2000);
     try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "const kv_len = position_base + n_tokens;", 12000);
-    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "self.position = position_base + n_tokens;", 12000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "self.position = position_base + n_tokens;", 16000);
 }
 
 test "Vulkan prefillBatched gates on env flag + canUseBatchedPrefillRdna" {

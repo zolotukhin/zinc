@@ -19,6 +19,7 @@ struct BatchedFlashAttnQ8Push {
     uint n_queries;
     uint kv_pos_offset;
     uint sliding_window_size;
+    uint attn_scale_bits;        // 0 = 1/sqrt(head_dim), otherwise bitcast f32 scale
     uint kv_head_stride_bytes;   // bytes between heads for one token
     uint kv_token_stride_bytes;  // bytes between tokens
 };
@@ -105,7 +106,7 @@ kernel void main0(
     const uint q_per_kv = max(p.n_heads / max(p.n_kv_heads, 1u), 1u);
     const uint kv_head = head / q_per_kv;
     const uint vec4_dim = p.head_dim >> 2;
-    const float scale = rsqrt((float)p.head_dim);
+    const float scale = p.attn_scale_bits != 0u ? as_type<float>(p.attn_scale_bits) : rsqrt((float)p.head_dim);
 
     // Causal: query at position (kv_pos_offset + query_idx) attends to
     // KV entries 0..(kv_pos_offset + query_idx) inclusive.

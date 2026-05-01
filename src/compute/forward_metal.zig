@@ -577,6 +577,7 @@ const BatchedFlashAttnPush = extern struct {
     n_queries: u32,
     kv_pos_offset: u32,
     sliding_window_size: u32,
+    attn_scale_bits: u32,
 };
 
 /// Push constants for flash_attn_batched_q8 — adds byte strides for the Q8
@@ -589,6 +590,7 @@ const BatchedFlashAttnQ8Push = extern struct {
     n_queries: u32,
     kv_pos_offset: u32,
     sliding_window_size: u32,
+    attn_scale_bits: u32,
     kv_head_stride_bytes: u32,
     kv_token_stride_bytes: u32,
 };
@@ -1103,6 +1105,10 @@ fn batchedPrefillMode() BatchedPrefillMode {
     return .off;
 }
 
+fn batchedPrefillEnvPresent() bool {
+    return std.posix.getenv("ZINC_BATCHED_PREFILL") != null;
+}
+
 fn gemmaBatchedPrefillEnabled() bool {
     const raw = std.posix.getenv("ZINC_GEMMA_BATCHED_PREFILL") orelse return false;
     return std.mem.eql(u8, raw, "1") or std.mem.eql(u8, raw, "validate");
@@ -1194,15 +1200,64 @@ fn canUseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
         engine.scale_acc_pipe.handle != null;
 }
 
-/// Returns true when the model + engine state match the narrow slice that
-/// `prefillBatched` currently knows how to run: LLaMA-style dense attention
-/// + dense FFN, Q4_K/Q6_K weights, no Q/K norms, no biases, no attention
-/// gate, no post-attn/post-ffn norms, no sliding window, no per-layer output
-/// scale, no attention sinks, f32 KV cache, shared-mode decode buffers.
+fn shouldDefaultDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
+    const cfg = engine.config;
+    return cfg.architecture == .gemma and cfg.n_experts == 0 and cfg.hidden_dim >= 5000;
+}
+
+fn canUseDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
+    const cfg = engine.config;
+    if (cfg.architecture != .gemma or cfg.n_experts != 0) return false;
+    if (cfg.ssm_d_inner > 0) return false;
+    if (engine.private_decode_buffers) return false;
+    if (fullAttentionInterval(cfg) != 1) return false;
+    if (engine.attn_sink_values != null) return false;
+    if (!shouldCpuLmHeadFallback(engine) and !supportsBatchedGemmQuant(engine.lm_head.info.type_)) return false;
+    if (engine.geglu_batched_pipe.handle == null or
+        engine.gemm_q4k_pipe.handle == null or
+        engine.gemm_q6k_pipe.handle == null)
+    {
+        return false;
+    }
+
+    for (0..cfg.n_layers) |i| {
+        const lt = engine.layer_tensors[i];
+        if (lt.attn_gate != null) return false;
+        if (lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+
+        const attn = resolveLayerAttentionParams(cfg, lt, cfg.hidden_dim, engine.kv_cache_q8) catch return false;
+        const q = lt.attn_q orelse return false;
+        const k = lt.attn_k orelse return false;
+        const o = lt.attn_output orelse return false;
+        const gate = lt.ffn_gate orelse return false;
+        const up = lt.ffn_up orelse return false;
+        const down = lt.ffn_down orelse return false;
+        for ([_]*const metal_loader.LoadedTensor{ q, k, o, gate, up, down }) |t| {
+            if (!supportsBatchedGemmQuant(t.info.type_)) return false;
+        }
+        if (!attn.use_k_as_v) {
+            const v = lt.attn_v orelse return false;
+            if (!supportsBatchedGemmQuant(v.info.type_)) return false;
+        }
+
+        const q_rows: u32 = @intCast(q.info.numElements() / cfg.hidden_dim);
+        if (q_rows >= attn.q_dim * 2) return false;
+    }
+
+    return true;
+}
+
+/// Returns true when the model + engine state match a supported batched
+/// prefill slice. Dense Gemma allows the Gemma 4 norms, GEGLU, sliding-window
+/// attention, and per-layer output scale that the per-token path applies.
 /// Every unsupported case falls back to the per-token path.
 fn canUseBatchedPrefill(engine: *const InferenceEngine) bool {
     const cfg = engine.config;
-    if (cfg.architecture == .gemma) return canUseGemmaBatchedPrefill(engine);
+    if (cfg.architecture == .gemma) {
+        if (cfg.n_experts > 0) return canUseGemmaBatchedPrefill(engine);
+        return canUseDenseGemmaBatchedPrefill(engine);
+    }
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gpt_oss) return false;
@@ -2725,7 +2780,13 @@ pub const InferenceEngine = struct {
     /// exceeds 1e-3.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         if (prompt_tokens.len == 0) return;
-        const mode = batchedPrefillMode();
+        const requested_mode = batchedPrefillMode();
+        const mode: BatchedPrefillMode = if (requested_mode == .off and
+            !batchedPrefillEnvPresent() and
+            shouldDefaultDenseGemmaBatchedPrefill(self))
+            .on
+        else
+            requested_mode;
         if (mode == .off or !canUseBatchedPrefill(self)) {
             return self.prefillBatch(state, prompt_tokens);
         }
@@ -2751,6 +2812,8 @@ pub const InferenceEngine = struct {
         const inter_dim: u32 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
         const shexp_inter_dim: u32 = if (cfg.shared_expert_intermediate_dim > 0) cfg.shared_expert_intermediate_dim else inter_dim;
         const attn_dims = try batchedPrefillAttentionDims(self);
+        const chunk_dense_gemma_prefill = cfg.architecture == .gemma and cfg.n_experts == 0;
+        const dense_gemma_prefill_chunk_layers: usize = 4;
 
         if (position_base == 0 and state.generated_tokens.items.len == 0) {
             try self.resetRequestState(target_context_tokens);
@@ -2795,16 +2858,29 @@ pub const InferenceEngine = struct {
 
             dispatchGemmBatchedOnCmd(self, &cmd, q_t, &scratch.norm, &scratch.q, attn.q_dim, hidden_dim, n_tokens);
             dispatchGemmBatchedOnCmd(self, &cmd, k_t, &scratch.norm, &scratch.k, attn.kv_dim, hidden_dim, n_tokens);
-            dispatchGemmBatchedOnCmd(self, &cmd, v_t, &scratch.norm, &scratch.v, attn.kv_dim, hidden_dim, n_tokens);
+            if (!attn.use_k_as_v) {
+                dispatchGemmBatchedOnCmd(self, &cmd, v_t, &scratch.norm, &scratch.v, attn.kv_dim, hidden_dim, n_tokens);
+            }
             cmd.barrier();
 
+            const apply_v_unit_norm = cfg.architecture == .gemma and cfg.rope_freq_base_swa > 0;
+            if (apply_v_unit_norm) {
+                const v_src = if (attn.use_k_as_v) &scratch.k else &scratch.v;
+                dispatchRmsNormOnCmd(self, &cmd, v_src, &scratch.v, &self.unit_rms_norm_weights, attn.head_dim, attn.n_kv_heads * n_tokens);
+                if (attn.use_k_as_v) {
+                    cmd.barrier();
+                }
+            } else if (attn.use_k_as_v) {
+                dispatchCopyF32OnCmd(self, &cmd, &scratch.k, &scratch.v, n_tokens * attn.kv_dim);
+                cmd.barrier();
+            }
             if (self.attn_q_norm_present[layer_idx]) {
                 dispatchRmsNormOnCmd(self, &cmd, &scratch.q, &scratch.q, &self.attn_q_norm_bufs[layer_idx], attn.head_dim, cfg.n_heads * n_tokens);
             }
             if (self.attn_k_norm_present[layer_idx]) {
                 dispatchRmsNormOnCmd(self, &cmd, &scratch.k, &scratch.k, &self.attn_k_norm_bufs[layer_idx], attn.head_dim, attn.n_kv_heads * n_tokens);
             }
-            if (self.attn_q_norm_present[layer_idx] or self.attn_k_norm_present[layer_idx]) {
+            if (self.attn_q_norm_present[layer_idx] or self.attn_k_norm_present[layer_idx] or apply_v_unit_norm) {
                 cmd.barrier();
             }
 
@@ -2888,7 +2964,8 @@ pub const InferenceEngine = struct {
                 {
                     const push = SwiGLUPush{ .n = inter_dim };
                     const bufs = [_]*const MetalBuffer{ &scratch.gate, &scratch.swiglu, &scratch.up };
-                    cmd.dispatchV2(&self.swiglu_batched_pipe, .{ (inter_dim + 63) / 64, n_tokens, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
+                    const pipe = if (usesGeglu(cfg)) &self.geglu_batched_pipe else &self.swiglu_batched_pipe;
+                    cmd.dispatchV2(pipe, .{ (inter_dim + 63) / 64, n_tokens, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(SwiGLUPush), 0);
                 }
                 cmd.barrier();
 
@@ -2906,6 +2983,19 @@ pub const InferenceEngine = struct {
                     cmd.dispatchV2(&self.scale_acc_pipe, .{ (total + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 0);
                 }
                 cmd.barrier();
+            }
+
+            const layer_output_scale = self.layer_output_scales[layer_idx];
+            if (layer_output_scale != 1.0) {
+                dispatchScaleInPlaceOnCmd(self, &cmd, &scratch.hidden, &scratch.down, n_tokens * hidden_dim, layer_output_scale, null, .dense_ffn);
+            }
+
+            const next_layer = layer_idx + 1;
+            if (chunk_dense_gemma_prefill and
+                (next_layer % dense_gemma_prefill_chunk_layers == 0 or next_layer == @as(usize, @intCast(cfg.n_layers))))
+            {
+                cmd.commitAndWait();
+                cmd = try metal_command.beginCommand(self.device.ctx);
             }
         }
 
@@ -4737,6 +4827,7 @@ fn dispatchFlashAttnBatchedOnCmd(
         .n_queries = n_queries,
         .kv_pos_offset = kv_pos_offset,
         .sliding_window_size = sliding_window_size,
+        .attn_scale_bits = if (engine.config.attn_scale != 0) @as(u32, @bitCast(engine.config.attn_scale)) else 0,
     };
     const bufs = [_]*const MetalBuffer{ q_buf, k_cache, v_cache, out_buf };
     cmd.dispatchV2(&engine.flash_attn_batched_pipe, .{ n_heads, n_queries, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(BatchedFlashAttnPush), 0);
@@ -4769,6 +4860,7 @@ fn dispatchFlashAttnBatchedQ8OnCmd(
         .n_queries = n_queries,
         .kv_pos_offset = kv_pos_offset,
         .sliding_window_size = sliding_window_size,
+        .attn_scale_bits = if (engine.config.attn_scale != 0) @as(u32, @bitCast(engine.config.attn_scale)) else 0,
         .kv_head_stride_bytes = kv_head_stride_bytes,
         .kv_token_stride_bytes = kv_token_stride_bytes,
     };
