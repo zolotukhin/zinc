@@ -1701,6 +1701,19 @@ async function main() {
     console.log(clr("1;35", `  CYCLE ${cycle}`));
     console.log(clr("1;35", "═".repeat(64)));
 
+    // Live-reload the effort doc each cycle so edits during a long run
+    // take effect on the next cycle without needing --resume. The doc
+    // is re-spliced into every agent prompt anyway; only the in-memory
+    // copy needs to refresh.
+    if (state.effortId != null) {
+      const refreshed = await loadEffortPlan(state.effortId);
+      if (refreshed && refreshed.plan !== state.effortPlan) {
+        state.effortPlan = refreshed.plan;
+        state.effortFile = refreshed.file;
+        console.log(clr("1;36", `  Effort plan reloaded (${refreshed.file}, ${refreshed.plan.length} chars)`));
+      }
+    }
+
     const cycleDir = join(runDir, `cycle-${String(cycle).padStart(3, "0")}`);
     await mkdir(cycleDir, { recursive: true });
 
@@ -1766,6 +1779,14 @@ async function main() {
     let kept = false;
     const prevTps = state.bestTokPerSec;
     const verifyTps = verify.tokPerSec ?? 0;
+    // Proportional bands so the keep/reject thresholds scale with the
+    // current best. At a 0.21 tok/s baseline a hardcoded 0.5/0.3 band
+    // accepts every diff under +0.6 as "kept-within-noise" and ratchets
+    // best upward by accumulated noise (Effort 12 cycles 1-24). Below the
+    // floor the hardcoded values still apply, so the behavior is
+    // unchanged on the 12B effort where prevTps was 30+ tok/s.
+    const improveBand = Math.max(0.5, prevTps * 0.05);
+    const noiseBand = Math.max(0.3, prevTps * 0.03);
 
     if (verify.buildExitCode !== 0 || verify.testExitCode !== 0) {
       // Build or test broken → revert
@@ -1785,18 +1806,20 @@ async function main() {
       await runCommand("git", ["reset", "--hard", preHash]);
       state.failedApproaches.push(`${description} — broke correctness`);
       state.stalledCycles++;
-    } else if (verify.containsReference && verifyTps > prevTps + 0.5) {
+    } else if (verify.containsReference && verifyTps > prevTps + improveBand) {
       // Meaningful speed improvement with correct output
       kept = true;
       state.bestTokPerSec = verifyTps;
       state.stalledCycles = 0;
-      console.log(clr("1;32", `  ✅ KEPT — ${verifyTps.toFixed(2)} tok/s (was ${prevTps.toFixed(2)}, +${(verifyTps - prevTps).toFixed(2)})`));
-    } else if (verify.containsReference && verifyTps >= prevTps - 0.3) {
-      // Within noise band, correct output — keep (might enable future gains)
+      console.log(clr("1;32", `  ✅ KEPT — ${verifyTps.toFixed(2)} tok/s (was ${prevTps.toFixed(2)}, +${(verifyTps - prevTps).toFixed(2)}; band ±${improveBand.toFixed(2)})`));
+    } else if (verify.containsReference && verifyTps >= prevTps - noiseBand) {
+      // Within noise band, correct output — keep the change but DO NOT
+      // advance bestTokPerSec. Advancing on noise creates a one-way
+      // ratchet that pretends throughput improved when it did not
+      // (Effort 12 cycles 1-24 went 0.21 → 0.30 this way, all noise).
       kept = true;
-      if (verifyTps > prevTps) state.bestTokPerSec = verifyTps;
       state.stalledCycles++;
-      console.log(clr("1;33", `  ≈ KEPT — ${verifyTps.toFixed(2)} tok/s (within noise of ${prevTps.toFixed(2)})`));
+      console.log(clr("1;33", `  ≈ KEPT — ${verifyTps.toFixed(2)} tok/s (within ${noiseBand.toFixed(2)} of ${prevTps.toFixed(2)}; best unchanged)`));
     } else if (verify.containsReference && !state.currentBest?.containsReference) {
       // Gained correctness for the first time
       kept = true;
@@ -1805,7 +1828,7 @@ async function main() {
       console.log(clr("1;32", `  ✅ KEPT — gained correct output! ${verifyTps.toFixed(2)} tok/s`));
     } else {
       // Regressed speed or no correctness
-      console.log(clr("1;31", `  ↩ REVERTING — ${verifyTps.toFixed(2)} tok/s < ${prevTps.toFixed(2)} (regressed ${(prevTps - verifyTps).toFixed(2)} tok/s)`));
+      console.log(clr("1;31", `  ↩ REVERTING — ${verifyTps.toFixed(2)} tok/s < ${prevTps.toFixed(2)} (regressed ${(prevTps - verifyTps).toFixed(2)} tok/s; band -${noiseBand.toFixed(2)})`));
       await runCommand("git", ["reset", "--hard", preHash]);
       state.failedApproaches.push(`${description} — regressed from ${prevTps.toFixed(1)} to ${verifyTps.toFixed(1)} tok/s`);
       state.stalledCycles++;

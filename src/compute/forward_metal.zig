@@ -1568,7 +1568,6 @@ pub const InferenceEngine = struct {
     // DMMV compute pipelines (one per quant type)
     dmmv_q4k_pipe: MetalPipeline,
     dmmv_q4k_k2048_pipe: MetalPipeline,
-    dmmv_q4k_k5376_pipe: MetalPipeline,
     dmmv_q4k_dual_pipe: MetalPipeline,
     dmmv_q4k_dual_llama_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
@@ -1917,7 +1916,6 @@ pub const InferenceEngine = struct {
         // Load DMMV compute pipelines for all quant types
         self.dmmv_q4k_pipe = try loadShaderPipeline(ctx, "dmmv_q4k");
         self.dmmv_q4k_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
-        self.dmmv_q4k_k5376_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k5376");
         self.dmmv_q4k_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual");
         self.dmmv_q4k_dual_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual_llama");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
@@ -2408,7 +2406,7 @@ pub const InferenceEngine = struct {
             });
         }
         log.debug(
-            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | dmmv_q4k_k5376 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
+            "Metal pipeline caps: dmmv_q4k tw={d} max={d} stgmem={d} | dmmv_q4k_k2048 tw={d} max={d} stgmem={d} | lmhead512 tw={d} max={d} stgmem={d} | lmhead1024 tw={d} max={d} stgmem={d}",
             .{
                 self.dmmv_q4k_pipe.thread_execution_width,
                 self.dmmv_q4k_pipe.max_threads_per_threadgroup,
@@ -2416,9 +2414,6 @@ pub const InferenceEngine = struct {
                 self.dmmv_q4k_k2048_pipe.thread_execution_width,
                 self.dmmv_q4k_k2048_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_k2048_pipe.static_threadgroup_memory_length,
-                self.dmmv_q4k_k5376_pipe.thread_execution_width,
-                self.dmmv_q4k_k5376_pipe.max_threads_per_threadgroup,
-                self.dmmv_q4k_k5376_pipe.static_threadgroup_memory_length,
                 self.dmmv_q4k_lmhead_pipe.thread_execution_width,
                 self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup,
                 self.dmmv_q4k_lmhead_pipe.static_threadgroup_memory_length,
@@ -2520,7 +2515,6 @@ pub const InferenceEngine = struct {
 
         metal_pipeline.freePipeline(&self.dmmv_q4k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
-        metal_pipeline.freePipeline(&self.dmmv_q4k_k5376_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_dual_llama_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
@@ -3263,18 +3257,12 @@ pub const InferenceEngine = struct {
                 {
                     break :blk .{ .pipe = &self.dmmv_q4k_lmhead_1024_pipe, .push_idx = 1, .rows_per_wg = 32, .block_size = 1024 };
                 }
-                // Adapt llama.cpp's `ggml_metal_op_mul_mat` / `kernel_mul_mv_q4_K_f32`
-                // decode choice: keep single-token layer projections on the
-                // 2-simdgroup no-staged-input path. Staging Gemma 31B's 21 KiB
-                // activation vector per workgroup costs occupancy and only the
-                // very large LM head has enough rows to amortize that cache.
-                if (K == 5376 and
-                    tensor == self.lm_head and
-                    M >= 1024 and
-                    self.dmmv_q4k_k5376_pipe.max_threads_per_threadgroup >= 512)
-                {
-                    break :blk .{ .pipe = &self.dmmv_q4k_k5376_pipe, .push_idx = 1, .rows_per_wg = 16, .block_size = 512 };
-                }
+                // K=5376 (Gemma 31B dense) and other wide-K Q4_K shapes fall
+                // through to the llama.cpp-style 2-simdgroup base kernel below.
+                // The previous specialized 512-thread/16-row variant ran at
+                // ~5 GB/s effective on Apple9 (cycle 24 of Effort 12 profile)
+                // versus llama.cpp's ~440 GB/s on the same shape; do not
+                // re-specialize without bench-metal-shapes evidence.
                 if (K <= 3072 and
                     self.dmmv_q4k_lmhead_pipe.max_threads_per_threadgroup >= 512 and
                     ((tensor == self.lm_head and M >= 65536) or M >= 1024))
@@ -12295,8 +12283,6 @@ test "batched MoE Metal shaders compile" {
 
     var dmmv_pipe_k2048 = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
     defer metal_pipeline.freePipeline(&dmmv_pipe_k2048);
-    var dmmv_pipe_k5376 = try loadShaderPipeline(ctx, "dmmv_q4k_k5376");
-    defer metal_pipeline.freePipeline(&dmmv_pipe_k5376);
     var dmmv_q4k_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual");
     defer metal_pipeline.freePipeline(&dmmv_q4k_dual_pipe);
     var dmmv_q4k_dual_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual_llama");
