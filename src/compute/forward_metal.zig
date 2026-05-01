@@ -7303,6 +7303,68 @@ fn commitAndWaitProfiled(cmd: *MetalCommand, profile: ?*RuntimeProfile) void {
     }
 }
 
+fn commitAsyncProfiled(cmd: *MetalCommand, profile: ?*RuntimeProfile) void {
+    if (profile) |p| {
+        p.dispatch_calls += cmd.dispatch_count;
+        p.barrier_calls += cmd.barrier_count;
+    }
+    cmd.commitAsync();
+}
+
+fn waitCommandProfiled(cmd: *MetalCommand, profile: ?*RuntimeProfile) void {
+    const wait_start = profileStart(profile != null);
+    cmd.wait();
+    if (profile) |p| {
+        p.commit_waits += 1;
+        p.gpu_completion_wait_ns += profileElapsedNs(wait_start);
+    }
+}
+
+fn releaseCommands(cmds: []MetalCommand) void {
+    for (cmds) |*cmd| {
+        if (cmd.handle != null) cmd.wait();
+    }
+}
+
+fn waitPendingDenseCommands(cmds: []MetalCommand, count: *usize, profile: ?*RuntimeProfile) void {
+    const n = count.*;
+    if (n == 0) return;
+
+    // Metal command queues execute command buffers in commit order. Mirroring
+    // llama.cpp's graph submission pattern, wait on the last dense chunk to
+    // synchronize the token, then release the already-completed earlier chunks.
+    waitCommandProfiled(&cmds[n - 1], profile);
+    releaseCommands(cmds[0 .. n - 1]);
+    count.* = 0;
+}
+
+fn releasePendingDenseCommands(cmds: []MetalCommand, count: *usize) void {
+    releaseCommands(cmds[0..count.*]);
+    count.* = 0;
+}
+
+fn submitPendingDenseCommand(
+    cmd: *MetalCommand,
+    pending_cmds: []MetalCommand,
+    pending_count: *usize,
+    profile: ?*RuntimeProfile,
+) void {
+    if (cmd.handle == null) return;
+    if (pending_count.* == pending_cmds.len) {
+        waitPendingDenseCommands(pending_cmds, pending_count, profile);
+    }
+
+    commitAsyncProfiled(cmd, profile);
+    pending_cmds[pending_count.*] = cmd.*;
+    pending_count.* += 1;
+    cmd.* = .{
+        .handle = null,
+        .dispatch_count = 0,
+        .barrier_count = 0,
+        .barrier_enabled = false,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Decode step — runs all layers plus optional final norm + LM head.
 // ---------------------------------------------------------------------------
@@ -7373,6 +7435,9 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         .barrier_count = 0,
         .barrier_enabled = false,
     };
+    var dense_pending_cmds: [64]MetalCommand = undefined;
+    var dense_pending_count: usize = 0;
+    errdefer waitPendingDenseCommands(dense_pending_cmds[0..], &dense_pending_count, profile);
     const layer_count: usize = @intCast(cfg.n_layers);
 
     for (0..cfg.n_layers) |layer_idx| {
@@ -8038,7 +8103,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         if (use_dense_layer_cmd and dense_group_cmd_storage.handle != null) {
             const next_layer = layer_idx + 1;
             if (next_layer == layer_count or next_layer % dense_cmd_group_layers == 0) {
-                commitAndWaitProfiled(&dense_group_cmd_storage, profile);
+                submitPendingDenseCommand(&dense_group_cmd_storage, dense_pending_cmds[0..], &dense_pending_count, profile);
             }
         }
     }
@@ -8047,6 +8112,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         if (shared_cmd) |cmd| {
             commitAndWaitProfiled(cmd, profile);
         }
+        waitPendingDenseCommands(dense_pending_cmds[0..], &dense_pending_count, profile);
         engine.position += 1;
         return;
     }
@@ -8087,6 +8153,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             commitAndWaitProfiled(&cmd, profile);
         }
     }
+    releasePendingDenseCommands(dense_pending_cmds[0..], &dense_pending_count);
     if (engine.debug_validation_enabled and engine.position == 5) {
         const debug_start = profileStart(profile != null);
         try debugCompareFinalLogits(engine);
