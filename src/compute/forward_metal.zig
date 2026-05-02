@@ -6091,7 +6091,10 @@ fn dispatchFullAttnPrepOnCmd(
         engine.attn_k_norm_present[layer_idx];
     // Q/K norms are independent — concurrent dispatch overlaps them when
     // not fused into the rope+kv-write kernel.
-    if (!fuse_qk_norm_into_rope_kv) {
+    const did_qk_norm_dispatch =
+        !fuse_qk_norm_into_rope_kv and
+        (engine.attn_q_norm_present[layer_idx] or engine.attn_k_norm_present[layer_idx]);
+    if (did_qk_norm_dispatch) {
         if (engine.attn_q_norm_present[layer_idx]) {
             dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], attn.head_dim, cfg.n_heads);
         }
@@ -6099,10 +6102,19 @@ fn dispatchFullAttnPrepOnCmd(
             dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], attn.head_dim, attn.n_kv_heads);
         }
     }
-    if (need_v_unit_norm and !fuse_v_unit_norm_into_rope_kv) {
+    const did_v_norm_dispatch = need_v_unit_norm and !fuse_v_unit_norm_into_rope_kv;
+    if (did_v_norm_dispatch) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.v_buf, &engine.v_buf, &engine.unit_rms_norm_weights, attn.head_dim, attn.n_kv_heads);
     }
-    profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
+    // Adapted from llama.cpp's `ggml_metal_op_concurrency_check` (ggml-metal-ops.cpp:159):
+    // skip the post-norm barrier when no Q/K/V norm dispatch was issued — the
+    // preceding QKV-projection barrier (above) already orders writes to q_buf,
+    // k_buf, v_buf before the rope+kv-write kernel reads them. On Gemma 31B
+    // (Q/K norm + V unit norm both folded into the fused rope+kv-write), this
+    // drops 60 redundant barriers/token from the dense full-attn hot path.
+    if (did_qk_norm_dispatch or did_v_norm_dispatch) {
+        profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
+    }
 
     if (can_fuse_rope_kv_write) {
         // Fused Q-rope + K-rope + KV cache write (with optional V unit norm
