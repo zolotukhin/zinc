@@ -7786,12 +7786,18 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
-            if (engine.post_attn_norm_present[layer_idx]) {
+            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and
+                shouldDebugAttentionValidation(cfg, engine.position, layer_idx);
+            // Three-way fusion on the attn-side: post_attn_norm + residual_add +
+            // ffn_norm collapses two dispatches and one barrier into one. Reuses
+            // the post_norm_residual_rms_norm.metal kernel introduced for the
+            // FFN-side fusion (cycle 44). Saves ≈60 dispatches and ≈60 barriers
+            // per token on Gemma 31B's 60 dense full-attn layers.
+            const can_fuse_post_attn_norm = engine.post_attn_norm_present[layer_idx] and !should_debug_attn_compare;
+            if (engine.post_attn_norm_present[layer_idx] and !can_fuse_post_attn_norm) {
                 dispatchRmsNormOnCmd(engine, cmd, &engine.down_buf, &engine.down_buf, &engine.post_attn_norm_bufs[layer_idx], hidden_dim, 1);
                 profileBarrier(cmd, profile, .full_attn);
             }
-            const should_debug_attn_compare = engine.debug_validation_enabled and using_local_cmd and
-                shouldDebugAttentionValidation(cfg, engine.position, layer_idx);
             if (should_debug_attn_compare) {
                 commitAndWaitProfiled(cmd, profile);
                 const debug_start = profileStart(profile != null);
@@ -7800,9 +7806,22 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 local_cmd_storage = try beginProfiledCommand(engine, profile);
                 cmd = &local_cmd_storage;
             }
-            // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
-            // Eliminates one barrier vs separate scale_acc + barrier + rms_norm.
-            dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
+            if (can_fuse_post_attn_norm) {
+                dispatchPostNormResidualRmsNormOnCmd(
+                    engine,
+                    cmd,
+                    &engine.hidden_buf,
+                    &engine.down_buf,
+                    &engine.post_attn_norm_bufs[layer_idx],
+                    &engine.norm_buf,
+                    &engine.ffn_norm_bufs[layer_idx],
+                    hidden_dim,
+                );
+            } else {
+                // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
+                // Eliminates one barrier vs separate scale_acc + barrier + rms_norm.
+                dispatchResidualRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.down_buf, &engine.norm_buf, &engine.ffn_norm_bufs[layer_idx], hidden_dim, 1.0);
+            }
             if (!is_moe and layer_shared_cmd != null) {
                 profileBarrier(cmd, profile, .dense_ffn);
             }
