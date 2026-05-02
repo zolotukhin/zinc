@@ -798,6 +798,14 @@ const ResidualRmsNormPush = extern struct {
     scale: f32,
 };
 
+/// Push constants for triple-fused residual_norm + residual_add + output_norm
+/// (matches post_norm_residual_rms_norm.metal: buffer(0)). Replaces the
+/// separate post_*_norm + barrier + residual_rms_norm pair.
+const PostNormResidualRmsNormPush = extern struct {
+    n: u32,
+    eps: f32,
+};
+
 /// Push constants for fused MoE weighted acc + shared expert (matches moe_weighted_acc_shared.metal: buffer(3)).
 /// Eliminates one barrier per layer vs separate moe_weighted_acc + sigmoid_scale_acc.
 const MoeWeightedAccSharedPush = extern struct {
@@ -1644,6 +1652,7 @@ pub const InferenceEngine = struct {
     moe_weighted_acc_pipe: MetalPipeline,
     moe_weighted_acc_scaled_pipe: MetalPipeline,
     residual_rms_norm_pipe: MetalPipeline,
+    post_norm_residual_rms_norm_pipe: MetalPipeline,
     moe_weighted_acc_shared_pipe: MetalPipeline,
     copy_u32_pipe: MetalPipeline,
     copy_f32_pipe: MetalPipeline,
@@ -1993,6 +2002,7 @@ pub const InferenceEngine = struct {
         self.moe_weighted_acc_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc");
         self.moe_weighted_acc_scaled_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_scaled");
         self.residual_rms_norm_pipe = try loadShaderPipeline(ctx, "residual_rms_norm");
+        self.post_norm_residual_rms_norm_pipe = try loadShaderPipeline(ctx, "post_norm_residual_rms_norm");
         self.moe_weighted_acc_shared_pipe = try loadShaderPipeline(ctx, "moe_weighted_acc_shared");
         self.copy_u32_pipe = try loadShaderPipeline(ctx, "copy_u32");
         self.copy_f32_pipe = try loadShaderPipeline(ctx, "copy_f32");
@@ -2591,6 +2601,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.moe_weighted_acc_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_scaled_pipe);
         metal_pipeline.freePipeline(&self.residual_rms_norm_pipe);
+        metal_pipeline.freePipeline(&self.post_norm_residual_rms_norm_pipe);
         metal_pipeline.freePipeline(&self.moe_weighted_acc_shared_pipe);
         metal_pipeline.freePipeline(&self.copy_u32_pipe);
         metal_pipeline.freePipeline(&self.copy_f32_pipe);
@@ -4857,6 +4868,29 @@ fn dispatchResidualRmsNormOnCmd(
     const push = ResidualRmsNormPush{ .n = n, .eps = engine.config.rms_norm_eps, .scale = scale };
     const bufs = [_]*const MetalBuffer{ hidden, residual, norm_out, weights };
     cmd.dispatchV2(&engine.residual_rms_norm_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ResidualRmsNormPush), 0);
+}
+
+/// Triple-fused: residual_norm + residual_add + output_norm.
+///   residual_normed[i] = residual_w[i] * residual[i] * rsqrt(mean(residual^2))
+///   hidden[i]         += residual_normed[i]
+///   norm_out[i]        = output_w[i]   * hidden[i]   * rsqrt(mean(hidden^2))
+/// Replaces (post_*_norm in-place) + barrier + (residual_rms_norm) with a
+/// single dispatch on the dense-FFN/next-attn boundary.
+/// post_norm_residual_rms_norm.metal: buffer(0)=push, (1)=hidden,
+/// (2)=residual, (3)=residual_w, (4)=norm_out, (5)=output_w.
+fn dispatchPostNormResidualRmsNormOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    hidden: *const MetalBuffer,
+    residual: *const MetalBuffer,
+    residual_w: *const MetalBuffer,
+    norm_out: *const MetalBuffer,
+    output_w: *const MetalBuffer,
+    n: u32,
+) void {
+    const push = PostNormResidualRmsNormPush{ .n = n, .eps = engine.config.rms_norm_eps };
+    const bufs = [_]*const MetalBuffer{ hidden, residual, residual_w, norm_out, output_w };
+    cmd.dispatchV2(&engine.post_norm_residual_rms_norm_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(PostNormResidualRmsNormPush), 0);
 }
 
 /// Dispatch a Q4_K × f32 batched matmul.
@@ -8322,41 +8356,60 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
 
                 dispatchDmmvOnCmd(engine, cmd, down_t, &engine.swiglu_buf, &engine.down_buf, hidden_dim, inter_dim, 0);
                 profileBarrier(cmd, profile, .dense_ffn);
-                if (engine.post_ffn_norm_present[layer_idx]) {
-                    dispatchRmsNormOnCmd(engine, cmd, &engine.down_buf, &engine.down_buf, &engine.post_ffn_norm_bufs[layer_idx], hidden_dim, 1);
-                    profileBarrier(cmd, profile, .dense_ffn);
-                }
 
-                if (layer_shared_cmd != null) {
-                    // Fuse scale_acc + next-layer attn_norm into one residual_rms_norm
-                    // dispatch when there is a next layer in the same dense path. This
-                    // removes one dispatch + one barrier per layer transition (≈59/token
-                    // for Gemma 31B) without changing arithmetic: hidden += down, then
-                    // norm_buf = attn_norm_w[layer+1] * rms(hidden).
-                    const next_layer_idx_u = layer_idx + 1;
-                    const can_fuse_next_attn_norm = use_dense_layer_cmd and
-                        next_layer_idx_u < layer_count and
-                        layer_output_scale == 1.0 and
-                        engine.layer_output_scales[next_layer_idx_u] != 0.0 and
-                        ((@as(u32, @intCast(next_layer_idx_u)) + 1) % full_attn_interval == 0);
-                    if (can_fuse_next_attn_norm) {
-                        dispatchResidualRmsNormOnCmd(
-                            engine,
-                            cmd,
-                            &engine.hidden_buf,
-                            &engine.down_buf,
-                            &engine.norm_buf,
-                            &engine.attn_norm_bufs[next_layer_idx_u],
-                            hidden_dim,
-                            1.0,
-                        );
+                const next_layer_idx_u = layer_idx + 1;
+                const can_fuse_next_attn_norm = layer_shared_cmd != null and
+                    use_dense_layer_cmd and
+                    next_layer_idx_u < layer_count and
+                    layer_output_scale == 1.0 and
+                    engine.layer_output_scales[next_layer_idx_u] != 0.0 and
+                    ((@as(u32, @intCast(next_layer_idx_u)) + 1) % full_attn_interval == 0);
+
+                // Three-way fusion: post_ffn_norm + residual_add + next-attn-norm
+                // collapses two dispatches and two barriers into one. Adapted from
+                // the existing residual_rms_norm.metal pattern + llama.cpp
+                // `ggml_metal_op_rms_norm` op-fusion idea, extended with a second
+                // reduction. Saves ≈59 dispatches and ≈59 barriers per token on
+                // Gemma 31B's 60 dense full-attn layers.
+                if (can_fuse_next_attn_norm and engine.post_ffn_norm_present[layer_idx]) {
+                    dispatchPostNormResidualRmsNormOnCmd(
+                        engine,
+                        cmd,
+                        &engine.hidden_buf,
+                        &engine.down_buf,
+                        &engine.post_ffn_norm_bufs[layer_idx],
+                        &engine.norm_buf,
+                        &engine.attn_norm_bufs[next_layer_idx_u],
+                        hidden_dim,
+                    );
+                    profileBarrier(cmd, profile, .dense_ffn);
+                    prev_fused_attn_norm = true;
+                } else {
+                    if (engine.post_ffn_norm_present[layer_idx]) {
+                        dispatchRmsNormOnCmd(engine, cmd, &engine.down_buf, &engine.down_buf, &engine.post_ffn_norm_bufs[layer_idx], hidden_dim, 1);
                         profileBarrier(cmd, profile, .dense_ffn);
-                        prev_fused_attn_norm = true;
-                    } else {
-                        const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                        const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
-                        profileBarrier(cmd, profile, .dense_ffn);
+                    }
+
+                    if (layer_shared_cmd != null) {
+                        if (can_fuse_next_attn_norm) {
+                            dispatchResidualRmsNormOnCmd(
+                                engine,
+                                cmd,
+                                &engine.hidden_buf,
+                                &engine.down_buf,
+                                &engine.norm_buf,
+                                &engine.attn_norm_bufs[next_layer_idx_u],
+                                hidden_dim,
+                                1.0,
+                            );
+                            profileBarrier(cmd, profile, .dense_ffn);
+                            prev_fused_attn_norm = true;
+                        } else {
+                            const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                            const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                            cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+                            profileBarrier(cmd, profile, .dense_ffn);
+                        }
                     }
                 }
                 if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
