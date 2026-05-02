@@ -841,13 +841,16 @@ const RopeNativePush = extern struct {
     position: u32,
 };
 
-/// Push constants for fused single-token RoPE-K + KV cache write (matches
-/// rope_kv_cache_write.metal: buffer(0)). One TG per KV head; the kernel
-/// rotates K and writes both K and V into the cache slot in one dispatch,
-/// saving the rope→kv-write barrier on Gemma 31B's 60-layer hot path.
+/// Push constants for fused single-token RoPE-Q + RoPE-K + KV cache write
+/// (matches rope_kv_cache_write.metal: buffer(0)). Grid = n_q_heads + n_kv_heads;
+/// the first `n_q_heads` slots rotate Q in place, the remaining slots rotate K
+/// and write both K and V into the cache slot. Folding Q-rope into this
+/// kernel saves one dispatch per dense full-attn layer (≈60/token on
+/// Gemma 31B).
 const RopeKvCacheWritePush = extern struct {
     stride: u32,
     rope_dim: u32,
+    n_q_heads: u32,
     position: u32,
     dst_offset: u32,
     apply_v_norm: u32,
@@ -5979,20 +5982,24 @@ fn dispatchFullAttnPrepOnCmd(
     }
     profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
 
-    // RoPE Q/K are independent — concurrent dispatch overlaps them.
-    dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
-
     if (can_fuse_rope_kv_write) {
+        // Fused Q-rope + K-rope + KV cache write (with optional V unit norm)
+        // in a single dispatch. Grid = n_q_heads + n_kv_heads; the first
+        // n_q_heads slots rotate q_buf in place, the rest rotate K and write
+        // K/V into the layer's cache slot.
         dispatchFusedRopeKvCacheWriteOnCmd(
             engine,
             cmd,
             layer_idx,
             attn,
+            cfg.n_heads,
             engine.position,
             engine.position * attn.kv_dim,
             fuse_v_unit_norm_into_rope_kv,
         );
     } else {
+        // Slow path: separate Q-rope, K-rope, and KV cache write dispatches.
+        dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
         dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
         profileBarrier(cmd, profile, .full_attn); // rope outputs visible before KV cache write
 
@@ -6010,15 +6017,19 @@ fn dispatchFullAttnPrepOnCmd(
 
 /// Adapted from llama.cpp `ggml_metal_op_rope_set_rows`: rotates the K vector
 /// for the current token and writes the result (plus an unrotated V copy)
-/// directly into the layer's KV cache slot. One TG per KV head. When
-/// `apply_v_norm` is true, the kernel also RMS-normalizes V (unit weights)
-/// per head before writing to v_cache, subsuming the standalone
-/// `dispatchRmsNormOnCmd` over v_buf for Gemma SWA.
+/// directly into the layer's KV cache slot. Extended to also rotate the Q
+/// vector in the same dispatch so the dense decode path collapses
+/// (Q-rope, K-rope+kv-write, V-norm+kv-write) into one kernel — one fewer
+/// dispatch per dense full-attn layer (≈60/token on Gemma 31B). Grid =
+/// n_q_heads + n_kv_heads. When `apply_v_norm` is true, the kernel also
+/// RMS-normalizes V (unit weights) per head before writing to v_cache,
+/// subsuming the standalone `dispatchRmsNormOnCmd` over v_buf for Gemma SWA.
 fn dispatchFusedRopeKvCacheWriteOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
     layer_idx: usize,
     attn: LayerAttentionParams,
+    n_q_heads: u32,
     position: u32,
     dst_offset: u32,
     apply_v_norm: bool,
@@ -6027,19 +6038,21 @@ fn dispatchFusedRopeKvCacheWriteOnCmd(
     const push = RopeKvCacheWritePush{
         .stride = attn.head_dim,
         .rope_dim = attn.rope_dim,
+        .n_q_heads = n_q_heads,
         .position = position,
         .dst_offset = dst_offset,
         .apply_v_norm = if (apply_v_norm) 1 else 0,
         .eps = engine.config.rms_norm_eps,
     };
     const bufs = [_]*const MetalBuffer{
+        &engine.q_buf,
         &engine.k_buf,
         &engine.v_buf,
         freq_buf,
         &engine.kv_k_cache[layer_idx],
         &engine.kv_v_cache[layer_idx],
     };
-    cmd.dispatchV2(&engine.rope_kv_cache_write_pipe, .{ attn.n_kv_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeKvCacheWritePush), 0);
+    cmd.dispatchV2(&engine.rope_kv_cache_write_pipe, .{ n_q_heads + attn.n_kv_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeKvCacheWritePush), 0);
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
