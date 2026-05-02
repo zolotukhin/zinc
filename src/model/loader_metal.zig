@@ -36,9 +36,19 @@ pub const Model = struct {
     mmap_data: ?[]align(std.heap.page_size_min) const u8,
     mmap_file: ?std.fs.File,
     allocator: std.mem.Allocator,
+    /// Residency set wiring all model weight buffers down on macOS 15+.
+    /// Null on older systems or if creation failed (the loader logs and degrades).
+    weight_rset: ?*shim.MetalRSet = null,
 
     /// Release Metal buffers, GGUF metadata, and the backing file mapping.
     pub fn deinit(self: *Model) void {
+        // The residency set holds (retained) MTLBuffer references. End its
+        // residency before freeing the underlying buffers so Metal stops
+        // tracking them first.
+        if (self.weight_rset) |rs| {
+            shim.mtl_rset_free(rs);
+            self.weight_rset = null;
+        }
         for (self.tensors.items) |*t| {
             metal_buffer.freeBuffer(&t.gpu_buffer);
         }
@@ -523,6 +533,35 @@ pub fn load(
         }
     }
 
+    // Wire all weight buffers into a single MTLResidencySet so the OS can't
+    // page them out between layer dispatches. This mirrors llama.cpp's
+    // `ggml_metal_buffer_rset_init` and is the missing piece behind the
+    // 130x bench-vs-real bandwidth gap on dense Gemma 31B: kernel microbench
+    // sees 491 GB/s, real inference sees ~4 GB/s. Without residency hints,
+    // `commandBufferWithUnretainedReferences` cannot guarantee that the 17 GB
+    // working set stays wired across the 60 layers per token.
+    var weight_rset: ?*shim.MetalRSet = null;
+    if (shim.mtl_rset_supported() != 0) {
+        const initial_capacity: u32 = @intCast(tensor_arenas.items.len + loaded_tensors.items.len);
+        if (shim.mtl_rset_create(metal_ctx, initial_capacity)) |rs| {
+            for (tensor_arenas.items) |*arena| {
+                if (arena.handle) |h| shim.mtl_rset_add_buffer(rs, h);
+            }
+            // Tensors that aren't aliased into an arena (mmap-wrapped or
+            // standalone copies) own their own MTLBuffer and need to be
+            // added directly.
+            for (loaded_tensors.items) |*t| {
+                if (!t.gpu_buffer.owns_handle) continue;
+                if (t.gpu_buffer.handle) |h| shim.mtl_rset_add_buffer(rs, h);
+            }
+            shim.mtl_rset_commit_and_request(rs);
+            weight_rset = rs;
+            log.info("Metal loader wired weight buffers into MTLResidencySet (commandBufferWithUnretainedReferences-safe)", .{});
+        } else {
+            log.warn("Metal loader: MTLResidencySet creation failed; weights remain pageable", .{});
+        }
+    }
+
     return Model{
         .config = config,
         .gguf_file = gf,
@@ -531,6 +570,7 @@ pub fn load(
         .mmap_data = mmap_data,
         .mmap_file = file,
         .allocator = allocator,
+        .weight_rset = weight_rset,
     };
 }
 

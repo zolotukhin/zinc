@@ -35,6 +35,14 @@ struct MetalCmd {
     uint8_t is_concurrent;
 };
 
+// Residency set wrapper. The `id` is held as `void *` so this header compiles
+// on SDKs where MTLResidencySet is unavailable; the @available check at runtime
+// gates actual API usage. Adapted from llama.cpp ggml-metal-device.m.
+struct MetalRSet {
+    id<MTLDevice> device;
+    void *rset; // id<MTLResidencySet> on macOS 15+, nil otherwise
+};
+
 // --- Device lifecycle ---
 
 MetalCtx* mtl_init(void) {
@@ -478,4 +486,100 @@ void mtl_wait(MetalCmd* cmd) {
 
     cmd->cmd_buf = nil;
     free(cmd);
+}
+
+// --- Residency sets (macOS 15+) ---
+//
+// Mirrors llama.cpp `ggml_metal_buffer_rset_init` / `_rset_free`: build a
+// residency set covering all model weight buffers, commit + request residency
+// once, and rely on Metal to keep them wired down. Without this, on real
+// inference workloads the OS may evict the 17 GB of weights between layer
+// dispatches, masking the kernel's real bandwidth (kernels that microbench
+// at 491 GB/s have been observed at ~4 GB/s effective in real runs).
+
+uint8_t mtl_rset_supported(void) {
+#if defined(__MAC_15_0) || defined(__IPHONE_18_0)
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+MetalRSet* mtl_rset_create(MetalCtx* ctx, uint32_t initial_capacity) {
+    if (!ctx) return NULL;
+#if defined(__MAC_15_0) || defined(__IPHONE_18_0)
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        MTLResidencySetDescriptor* desc = [[MTLResidencySetDescriptor alloc] init];
+        desc.label = @"zinc_model_weights";
+        desc.initialCapacity = (NSUInteger)initial_capacity;
+
+        NSError* error = nil;
+        id<MTLResidencySet> rset = [ctx->device newResidencySetWithDescriptor:desc error:&error];
+        if (!rset || error) {
+            if (error) {
+                fprintf(stderr, "Error: failed to create MTLResidencySet: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+            return NULL;
+        }
+
+        MetalRSet* out = (MetalRSet*)calloc(1, sizeof(MetalRSet));
+        if (!out) {
+            return NULL;
+        }
+        out->device = ctx->device;
+        // Transfer +1 retain into the C pointer; balanced in mtl_rset_free.
+        out->rset = (__bridge_retained void*)rset;
+        // The device's command queue gets the residency set so command buffers
+        // automatically see all member allocations as resident.
+        [ctx->queue addResidencySet:rset];
+        return out;
+    }
+#endif
+    (void)initial_capacity;
+    return NULL;
+}
+
+void mtl_rset_add_buffer(MetalRSet* rset, MetalBuf* buf) {
+    if (!rset || !buf || !buf->buffer) return;
+#if defined(__MAC_15_0) || defined(__IPHONE_18_0)
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        if (rset->rset) {
+            id<MTLResidencySet> rs = (__bridge id<MTLResidencySet>)rset->rset;
+            [rs addAllocation:buf->buffer];
+        }
+    }
+#endif
+}
+
+void mtl_rset_commit_and_request(MetalRSet* rset) {
+    if (!rset) return;
+#if defined(__MAC_15_0) || defined(__IPHONE_18_0)
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        if (rset->rset) {
+            id<MTLResidencySet> rs = (__bridge id<MTLResidencySet>)rset->rset;
+            [rs commit];
+            [rs requestResidency];
+        }
+    }
+#endif
+}
+
+void mtl_rset_free(MetalRSet* rset) {
+    if (!rset) return;
+#if defined(__MAC_15_0) || defined(__IPHONE_18_0)
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        if (rset->rset) {
+            // __bridge_transfer hands the +1 reference back to ARC for release.
+            id<MTLResidencySet> rs = (__bridge_transfer id<MTLResidencySet>)rset->rset;
+            [rs endResidency];
+            [rs removeAllAllocations];
+            rs = nil;
+            rset->rset = NULL;
+        }
+    }
+#endif
+    rset->device = nil;
+    free(rset);
 }

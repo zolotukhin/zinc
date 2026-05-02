@@ -9,6 +9,7 @@ typedef struct MetalCtx MetalCtx;
 typedef struct MetalBuf MetalBuf;
 typedef struct MetalPipe MetalPipe;
 typedef struct MetalCmd MetalCmd;
+typedef struct MetalRSet MetalRSet;
 
 enum {
     ZINC_MTL_GPU_FAMILY_APPLE7 = 1007,
@@ -67,5 +68,15 @@ void mtl_barrier(MetalCmd* cmd);
 void mtl_commit_and_wait(MetalCmd* cmd);
 void mtl_commit_async(MetalCmd* cmd);
 void mtl_wait(MetalCmd* cmd);
+
+// Residency set management (macOS 15+). Wires GPU buffers down so they don't
+// page-fault on cold access. Adapted from llama.cpp ggml-metal-device.m
+// `ggml_metal_buffer_rset_init`. Returns NULL on systems where the API is
+// unavailable; all subsequent calls become no-ops in that case.
+MetalRSet* mtl_rset_create(MetalCtx* ctx, uint32_t initial_capacity);
+void mtl_rset_add_buffer(MetalRSet* rset, MetalBuf* buf);
+void mtl_rset_commit_and_request(MetalRSet* rset);
+void mtl_rset_free(MetalRSet* rset);
+uint8_t mtl_rset_supported(void);
 
 #endif // ZINC_METAL_SHIM_H
