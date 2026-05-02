@@ -3891,12 +3891,10 @@ fn canUseDenseQ4KGateUpDual(
     M: u32,
     K: u32,
 ) bool {
-    // For K=5376 Gemma 31B, use the llama.cpp row layout in
-    // dmmv_q4k_dual_llama: it keeps kernel_mul_mv_q4_K_f32's 2-SG/2-row
-    // mapping and only fuses the two independent gate/up launches.
-    const can_use_llama_dual = K >= 5376 and
-        engine.dmmv_q4k_dual_llama_pipe.handle != null and
-        engine.dmmv_q4k_dual_llama_pipe.max_threads_per_threadgroup >= 64;
+    // llama.cpp keeps single-token FFN gate/up as ordinary mul_mv nodes.
+    // vLLM-style packing/fusion only pays off when there are multiple
+    // token-expert rows to group, so keep Gemma 31B decode on the measured
+    // single-projection Q4_K kernel instead of the custom K=5376 dual dispatch.
     const can_use_staged_dual = K < 5376 and
         engine.dmmv_q4k_dual_pipe.handle != null and
         engine.dmmv_q4k_dual_pipe.max_threads_per_threadgroup >= 256;
@@ -3908,7 +3906,7 @@ fn canUseDenseQ4KGateUpDual(
         M > 0 and
         K > 0 and
         K % 256 == 0 and
-        (can_use_llama_dual or can_use_staged_dual);
+        can_use_staged_dual;
 }
 
 fn dispatchDenseQ4KGateUpDualOnCmd(
