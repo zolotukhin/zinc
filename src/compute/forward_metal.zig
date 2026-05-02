@@ -490,6 +490,19 @@ const DualQ8DmmvPush = extern struct {
     y1_offset: u32,
 };
 
+/// Push for `dmmv_q4k_qk_dual.metal` — dense Gemma single-token Q+K dual
+/// matvec. Matches `QKDualPush` in the kernel.
+const QKDualPush = extern struct {
+    M_q: u32,
+    M_k: u32,
+    K: u32,
+    a_q_offset: u32,
+    a_k_offset: u32,
+    x_offset: u32,
+    y_q_offset: u32,
+    y_k_offset: u32,
+};
+
 const CopyU32Push = extern struct {
     n_words: u32,
     src_offset_words: u32,
@@ -1607,6 +1620,7 @@ pub const InferenceEngine = struct {
     dmmv_q4k_k2048_pipe: MetalPipeline,
     dmmv_q4k_dual_pipe: MetalPipeline,
     dmmv_q4k_dual_llama_pipe: MetalPipeline,
+    dmmv_q4k_qk_dual_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
     dmmv_q4k_lmhead_1024_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
@@ -1958,6 +1972,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_k2048_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_k2048");
         self.dmmv_q4k_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual");
         self.dmmv_q4k_dual_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_dual_llama");
+        self.dmmv_q4k_qk_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_qk_dual");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
         self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
@@ -2560,6 +2575,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_k2048_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_dual_llama_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_qk_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_1024_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
@@ -3954,6 +3970,68 @@ fn canUseDenseQ4KGateUpDual(
         K > 0 and
         K % 256 == 0 and
         can_use_staged_dual;
+}
+
+/// Pairs the dense Gemma attention Q and K projections (same K, both Q4_K,
+/// distinct M_q and M_k) into one dispatch via `dmmv_q4k_qk_dual.metal`.
+/// The kernel uses a single-axis row layout (rows 0..M_q-1 → Q, rows
+/// M_q..M_q+M_k-1 → K), so total threadgroups equal the sum of the two
+/// separate single-projection dispatches and no GPU work is wasted —
+/// the only saving is one fewer encoded dispatch per dense full-attn
+/// layer (≈60/token on Gemma 31B's 60 layers). Requires
+/// M_q % (NSG*NR0) == 0 (NSG=2, NR0=2 → 4) so a threadgroup never
+/// straddles the projection boundary.
+fn canUseDenseQ4KQKDual(
+    engine: *const InferenceEngine,
+    q: *const metal_loader.LoadedTensor,
+    k: *const metal_loader.LoadedTensor,
+    M_q: u32,
+    M_k: u32,
+    K: u32,
+) bool {
+    return engine.config.architecture == .gemma and
+        engine.config.n_experts == 0 and
+        q.info.type_ == .q4_k and
+        k.info.type_ == .q4_k and
+        K > 0 and
+        K % 256 == 0 and
+        M_q > 0 and
+        M_k > 0 and
+        (M_q % 4) == 0 and
+        engine.dmmv_q4k_qk_dual_pipe.handle != null and
+        engine.dmmv_q4k_qk_dual_pipe.max_threads_per_threadgroup >= 64;
+}
+
+fn dispatchDenseQ4KQKDualOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    q_tensor: *const metal_loader.LoadedTensor,
+    k_tensor: *const metal_loader.LoadedTensor,
+    input_buf: *const MetalBuffer,
+    q_buf: *const MetalBuffer,
+    k_buf: *const MetalBuffer,
+    M_q: u32,
+    M_k: u32,
+    K: u32,
+) void {
+    recordDmmvProfile(engine, q_tensor, M_q, K);
+    recordDmmvProfile(engine, k_tensor, M_k, K);
+
+    const push = QKDualPush{
+        .M_q = M_q,
+        .M_k = M_k,
+        .K = K,
+        .a_q_offset = tensorPageOffset(engine.model, q_tensor),
+        .a_k_offset = tensorPageOffset(engine.model, k_tensor),
+        .x_offset = 0,
+        .y_q_offset = 0,
+        .y_k_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{ &q_tensor.gpu_buffer, &k_tensor.gpu_buffer, input_buf, q_buf, k_buf };
+    const rows_per_wg: u32 = 4; // NSG=2 * NR0=2
+    const block_size: u32 = 64;
+    const total_rows = M_q + M_k;
+    cmd.dispatchV2(&engine.dmmv_q4k_qk_dual_pipe, .{ (total_rows + rows_per_wg - 1) / rows_per_wg, 1, 1 }, .{ block_size, 1, 1 }, &bufs, &push, @sizeOf(QKDualPush), 2);
 }
 
 fn dispatchDenseQ4KGateUpDualOnCmd(
@@ -5914,22 +5992,39 @@ fn dispatchFullAttnPrepOnCmd(
         profileBarrier(cmd, profile, .full_attn);
     } else {
         // Separate: project Q directly to q_buf, gate (if present) to gate_buf.
-        if (gate_mode.separate_attn_gate and
+        // Q+K Q4_K dual path: when there is no separate attn_gate and Q/K
+        // are both Q4_K (Gemma 31B dense full-attn layers), pair the two
+        // projections into a single dispatch via dmmv_q4k_qk_dual. V stays
+        // separate because Gemma 31B stores V as Q6_K. Saves one dispatch
+        // per qualifying dense full-attn layer with no wasted threadgroups.
+        const can_dual_qk = !gate_mode.separate_attn_gate and
+            !attn.use_k_as_v and
+            canUseDenseQ4KQKDual(engine, q_tensor, k_tensor, attn.q_dim, attn.kv_dim, hidden_dim);
+        if (can_dual_qk) {
+            dispatchDenseQ4KQKDualOnCmd(engine, cmd, q_tensor, k_tensor, &engine.norm_buf, &engine.q_buf, &engine.k_buf, attn.q_dim, attn.kv_dim, hidden_dim);
+            dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+        } else if (gate_mode.separate_attn_gate and
             cfg.architecture == .gemma and
             canUsePairedQ8Dmmv(engine, q_tensor, lt.attn_gate.?, attn.q_dim, attn.q_dim, hidden_dim))
         {
             dispatchPairedQ8DmmvOnCmd(engine, cmd, q_tensor, lt.attn_gate.?, &engine.norm_buf, &engine.q_buf, &engine.gate_buf, attn.q_dim, hidden_dim);
+            if (cfg.architecture == .gemma and !attn.use_k_as_v and canUsePairedQ8Dmmv(engine, k_tensor, v_tensor, attn.kv_dim, attn.kv_dim, hidden_dim)) {
+                dispatchPairedQ8DmmvOnCmd(engine, cmd, k_tensor, v_tensor, &engine.norm_buf, &engine.k_buf, &engine.v_buf, attn.kv_dim, hidden_dim);
+            } else {
+                dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, attn.kv_dim, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+            }
         } else {
             dispatchDmmvOnCmd(engine, cmd, q_tensor, &engine.norm_buf, &engine.q_buf, attn.q_dim, hidden_dim, 0);
             if (gate_mode.separate_attn_gate) {
                 dispatchDmmvOnCmd(engine, cmd, lt.attn_gate.?, &engine.norm_buf, &engine.gate_buf, attn.q_dim, hidden_dim, 0);
             }
-        }
-        if (cfg.architecture == .gemma and !attn.use_k_as_v and canUsePairedQ8Dmmv(engine, k_tensor, v_tensor, attn.kv_dim, attn.kv_dim, hidden_dim)) {
-            dispatchPairedQ8DmmvOnCmd(engine, cmd, k_tensor, v_tensor, &engine.norm_buf, &engine.k_buf, &engine.v_buf, attn.kv_dim, hidden_dim);
-        } else {
-            dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, attn.kv_dim, hidden_dim, 0);
-            dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+            if (cfg.architecture == .gemma and !attn.use_k_as_v and canUsePairedQ8Dmmv(engine, k_tensor, v_tensor, attn.kv_dim, attn.kv_dim, hidden_dim)) {
+                dispatchPairedQ8DmmvOnCmd(engine, cmd, k_tensor, v_tensor, &engine.norm_buf, &engine.k_buf, &engine.v_buf, attn.kv_dim, hidden_dim);
+            } else {
+                dispatchDmmvOnCmd(engine, cmd, k_tensor, &engine.norm_buf, &engine.k_buf, attn.kv_dim, hidden_dim, 0);
+                dispatchDmmvOnCmd(engine, cmd, v_tensor, &engine.norm_buf, &engine.v_buf, attn.kv_dim, hidden_dim, 0);
+            }
         }
         profileBarrier(cmd, profile, .full_attn);
     }
