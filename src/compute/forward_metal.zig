@@ -1673,6 +1673,7 @@ pub const InferenceEngine = struct {
     swiglu_pipe: MetalPipeline,
     swiglu_batched_pipe: MetalPipeline,
     scale_acc_pipe: MetalPipeline,
+    scale_in_place_pipe: MetalPipeline,
     rms_norm_pipe: MetalPipeline,
     rms_norm_offset_pipe: MetalPipeline,
     moe_acc_pipe: MetalPipeline,
@@ -2025,6 +2026,7 @@ pub const InferenceEngine = struct {
         self.swiglu_pipe = try loadShaderPipeline(ctx, "swiglu");
         self.swiglu_batched_pipe = try loadShaderPipeline(ctx, "swiglu_batched");
         self.scale_acc_pipe = try loadShaderPipeline(ctx, "scale_accumulate");
+        self.scale_in_place_pipe = try loadShaderPipeline(ctx, "scale_in_place");
         self.rms_norm_pipe = try loadShaderPipeline(ctx, "rms_norm_mul");
         self.rms_norm_offset_pipe = try loadShaderPipeline(ctx, "rms_norm_mul_offset");
         self.moe_acc_pipe = try loadShaderPipeline(ctx, "moe_accumulate");
@@ -2626,6 +2628,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.swiglu_pipe);
         metal_pipeline.freePipeline(&self.swiglu_batched_pipe);
         metal_pipeline.freePipeline(&self.scale_acc_pipe);
+        metal_pipeline.freePipeline(&self.scale_in_place_pipe);
         metal_pipeline.freePipeline(&self.rms_norm_pipe);
         metal_pipeline.freePipeline(&self.rms_norm_offset_pipe);
         metal_pipeline.freePipeline(&self.moe_acc_pipe);
@@ -5361,15 +5364,18 @@ fn dispatchScaleInPlaceOnCmd(
     barrier_class: BarrierClass,
 ) void {
     if (n == 0 or scale == 1.0) return;
+    _ = scratch;
 
-    dispatchCopyF32OnCmd(engine, cmd, buf, scratch, n);
-    profileBarrier(cmd, profile, barrier_class);
-    dispatchZeroF32OnCmd(engine, cmd, buf, n);
-    profileBarrier(cmd, profile, barrier_class);
-
+    // Single-dispatch in-place scale: data[i] *= scale. Replaces a 3-step
+    // copy/zero/scale_acc round trip (which took 3 dispatches and 3 barriers
+    // per call) with one dispatch + one trailing barrier. On dense Gemma 31B
+    // this fires once per layer and the old path was responsible for ≈180
+    // dispatches and ≈180 barriers per token. Mirrors the Vulkan
+    // `scale_in_place.comp` shader; adapted for Metal's SPIRV-Cross buffer
+    // convention (push at buffer 0, data at buffer 1).
     const push = ScaleAccPush{ .n = n, .scale_bits = @as(u32, @bitCast(scale)) };
-    const bufs = [_]*const MetalBuffer{ buf, scratch };
-    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 0);
+    const bufs = [_]*const MetalBuffer{buf};
+    cmd.dispatchV2(&engine.scale_in_place_pipe, .{ (n + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(ScaleAccPush), 0);
     profileBarrier(cmd, profile, barrier_class);
 }
 
