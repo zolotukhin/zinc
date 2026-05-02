@@ -3145,6 +3145,22 @@ pub const InferenceEngine = struct {
                 @as(f64, @floatFromInt(profile.fallback_moe_layers)) / steps_f,
                 @as(f64, @floatFromInt(profile.dense_ffn_layers)) / steps_f,
             });
+            log.info("  dispatch/step: total {d:.1} barriers {d:.1} (cmds {d:.2} commits {d:.2})", .{
+                @as(f64, @floatFromInt(profile.dispatch_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.command_buffers)) / steps_f,
+                @as(f64, @floatFromInt(profile.commit_waits)) / steps_f,
+            });
+            log.info("  barriers/step: embed {d:.1} attn {d:.1} ssm {d:.1} router {d:.1} gpu-moe {d:.1} fallback-moe {d:.1} dense {d:.1} final {d:.1}", .{
+                @as(f64, @floatFromInt(profile.embed_barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.full_attn_barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.ssm_barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.router_barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.gpu_routed_moe_barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.fallback_moe_barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.dense_ffn_barrier_calls)) / steps_f,
+                @as(f64, @floatFromInt(profile.final_barrier_calls)) / steps_f,
+            });
         }
         if (profile.dmmv_total_bytes > 0) {
             log.info("  dmmv bytes: q8_0 {d:.2} GiB ({d:.1}%) q4_k {d:.2} GiB ({d:.1}%) q5_1 {d:.2} GiB ({d:.1}%) q5_k {d:.2} GiB ({d:.1}%) q6_k {d:.2} GiB ({d:.1}%)", .{
