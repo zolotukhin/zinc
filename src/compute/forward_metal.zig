@@ -841,6 +841,17 @@ const RopeNativePush = extern struct {
     position: u32,
 };
 
+/// Push constants for fused single-token RoPE-K + KV cache write (matches
+/// rope_kv_cache_write.metal: buffer(0)). One TG per KV head; the kernel
+/// rotates K and writes both K and V into the cache slot in one dispatch,
+/// saving the rope→kv-write barrier on Gemma 31B's 60-layer hot path.
+const RopeKvCacheWritePush = extern struct {
+    stride: u32,
+    rope_dim: u32,
+    position: u32,
+    dst_offset: u32,
+};
+
 /// Push constants for flash attention dispatch (matches flash_attn.metal: buffer(0)).
 const FlashAttnPush = extern struct {
     head_dim: u32,
@@ -1628,6 +1639,7 @@ pub const InferenceEngine = struct {
     kv_cache_write_q8_pipe: MetalPipeline,
     rope_pipe: MetalPipeline,
     rope_native_pipe: MetalPipeline,
+    rope_kv_cache_write_pipe: MetalPipeline,
     sigmoid_mul_pipe: MetalPipeline,
     geglu_pipe: MetalPipeline,
     geglu_batched_pipe: MetalPipeline,
@@ -1978,6 +1990,7 @@ pub const InferenceEngine = struct {
         self.kv_cache_write_q8_pipe = try loadShaderPipeline(ctx, "kv_cache_write_q8");
         self.rope_pipe = try loadShaderPipeline(ctx, "rope_fused");
         self.rope_native_pipe = try loadShaderPipeline(ctx, "rope_native");
+        self.rope_kv_cache_write_pipe = try loadShaderPipeline(ctx, "rope_kv_cache_write");
         self.sigmoid_mul_pipe = try loadShaderPipeline(ctx, "sigmoid_mul");
         self.geglu_pipe = try loadShaderPipeline(ctx, "geglu");
         self.geglu_batched_pipe = try loadShaderPipeline(ctx, "geglu_batched");
@@ -2577,6 +2590,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.kv_cache_write_q8_pipe);
         metal_pipeline.freePipeline(&self.rope_pipe);
         metal_pipeline.freePipeline(&self.rope_native_pipe);
+        metal_pipeline.freePipeline(&self.rope_kv_cache_write_pipe);
         metal_pipeline.freePipeline(&self.sigmoid_mul_pipe);
         metal_pipeline.freePipeline(&self.geglu_pipe);
         metal_pipeline.freePipeline(&self.geglu_batched_pipe);
@@ -5947,18 +5961,71 @@ fn dispatchFullAttnPrepOnCmd(
 
     // RoPE Q/K are independent — concurrent dispatch overlaps them.
     dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
-    dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
-    profileBarrier(cmd, profile, .full_attn); // rope outputs visible before KV cache write
 
-    dispatchKvCacheWriteOnCmd(
-        engine,
-        cmd,
-        layer_idx,
-        attn.kv_dim,
-        engine.position * attn.kv_dim,
-        @intCast(@as(u64, engine.position) * attn.kv_cache_bytes_per_token),
-    );
+    // Fuse RoPE-K with the K/V cache write when:
+    //   - cache is f32 (kv_cache_q8 path keeps its own quantizing kernel),
+    //   - V is projected separately (use_k_as_v requires a copy this kernel
+    //     does not perform),
+    //   - rope_dim is even (the kernel processes pairs).
+    // Saves one barrier and one dispatch per dense full-attn layer (≈60/token
+    // on Gemma 31B). The rope→kv-write barrier can be skipped because the
+    // outer caller already issues a barrier before flash attention reads the
+    // cache and q_buf.
+    const can_fuse_rope_kv_write =
+        !engine.kv_cache_q8 and
+        !attn.use_k_as_v and
+        (attn.rope_dim % 2) == 0;
+    if (can_fuse_rope_kv_write) {
+        dispatchFusedRopeKvCacheWriteOnCmd(
+            engine,
+            cmd,
+            layer_idx,
+            attn,
+            engine.position,
+            engine.position * attn.kv_dim,
+        );
+    } else {
+        dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
+        profileBarrier(cmd, profile, .full_attn); // rope outputs visible before KV cache write
+
+        dispatchKvCacheWriteOnCmd(
+            engine,
+            cmd,
+            layer_idx,
+            attn.kv_dim,
+            engine.position * attn.kv_dim,
+            @intCast(@as(u64, engine.position) * attn.kv_cache_bytes_per_token),
+        );
+    }
     return gate_mode.apply_attn_gate;
+}
+
+/// Adapted from llama.cpp `ggml_metal_op_rope_set_rows`: rotates the K vector
+/// for the current token and writes the result (plus an unrotated V copy)
+/// directly into the layer's KV cache slot. One TG per KV head.
+fn dispatchFusedRopeKvCacheWriteOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    layer_idx: usize,
+    attn: LayerAttentionParams,
+    position: u32,
+    dst_offset: u32,
+) void {
+    const freq_buf = selectRopeFreqBuffer(engine, attn.rope_dim, attn.rope_freq_base, attn.use_rope_freq_factors);
+    const push = RopeKvCacheWritePush{
+        .stride = attn.head_dim,
+        .rope_dim = attn.rope_dim,
+        .position = position,
+        .dst_offset = dst_offset,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &engine.k_buf,
+        &engine.v_buf,
+        freq_buf,
+        &engine.kv_k_cache[layer_idx],
+        &engine.kv_v_cache[layer_idx],
+    };
+    cmd.dispatchV2(&engine.rope_kv_cache_write_pipe, .{ attn.n_kv_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeKvCacheWritePush), 0);
 }
 
 /// CPU fallback DMMV for K > shared memory limit (4096).
