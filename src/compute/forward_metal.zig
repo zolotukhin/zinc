@@ -850,6 +850,8 @@ const RopeKvCacheWritePush = extern struct {
     rope_dim: u32,
     position: u32,
     dst_offset: u32,
+    apply_v_norm: u32,
+    eps: f32,
 };
 
 /// Push constants for flash attention dispatch (matches flash_attn.metal: buffer(0)).
@@ -5954,14 +5956,6 @@ fn dispatchFullAttnPrepOnCmd(
     if (engine.attn_k_norm_present[layer_idx]) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], attn.head_dim, attn.n_kv_heads);
     }
-    if (cfg.architecture == .gemma and cfg.rope_freq_base_swa > 0) {
-        dispatchRmsNormOnCmd(engine, cmd, &engine.v_buf, &engine.v_buf, &engine.unit_rms_norm_weights, attn.head_dim, attn.n_kv_heads);
-    }
-    profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
-
-    // RoPE Q/K are independent — concurrent dispatch overlaps them.
-    dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
-
     // Fuse RoPE-K with the K/V cache write when:
     //   - cache is f32 (kv_cache_q8 path keeps its own quantizing kernel),
     //   - V is projected separately (use_k_as_v requires a copy this kernel
@@ -5975,6 +5969,19 @@ fn dispatchFullAttnPrepOnCmd(
         !engine.kv_cache_q8 and
         !attn.use_k_as_v and
         (attn.rope_dim % 2) == 0;
+    const need_v_unit_norm = cfg.architecture == .gemma and cfg.rope_freq_base_swa > 0;
+    // When the fused rope+kv-write kernel will fire, it can also fold the
+    // unit-weight V RMS norm into the same dispatch, eliminating the
+    // standalone v_buf normalize (≈60 dispatches/token on Gemma 31B).
+    const fuse_v_unit_norm_into_rope_kv = can_fuse_rope_kv_write and need_v_unit_norm;
+    if (need_v_unit_norm and !fuse_v_unit_norm_into_rope_kv) {
+        dispatchRmsNormOnCmd(engine, cmd, &engine.v_buf, &engine.v_buf, &engine.unit_rms_norm_weights, attn.head_dim, attn.n_kv_heads);
+    }
+    profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
+
+    // RoPE Q/K are independent — concurrent dispatch overlaps them.
+    dispatchRopeOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
+
     if (can_fuse_rope_kv_write) {
         dispatchFusedRopeKvCacheWriteOnCmd(
             engine,
@@ -5983,6 +5990,7 @@ fn dispatchFullAttnPrepOnCmd(
             attn,
             engine.position,
             engine.position * attn.kv_dim,
+            fuse_v_unit_norm_into_rope_kv,
         );
     } else {
         dispatchRopeOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, engine.position, attn.rope_freq_base, attn.use_rope_freq_factors);
@@ -6002,7 +6010,10 @@ fn dispatchFullAttnPrepOnCmd(
 
 /// Adapted from llama.cpp `ggml_metal_op_rope_set_rows`: rotates the K vector
 /// for the current token and writes the result (plus an unrotated V copy)
-/// directly into the layer's KV cache slot. One TG per KV head.
+/// directly into the layer's KV cache slot. One TG per KV head. When
+/// `apply_v_norm` is true, the kernel also RMS-normalizes V (unit weights)
+/// per head before writing to v_cache, subsuming the standalone
+/// `dispatchRmsNormOnCmd` over v_buf for Gemma SWA.
 fn dispatchFusedRopeKvCacheWriteOnCmd(
     engine: *InferenceEngine,
     cmd: *MetalCommand,
@@ -6010,6 +6021,7 @@ fn dispatchFusedRopeKvCacheWriteOnCmd(
     attn: LayerAttentionParams,
     position: u32,
     dst_offset: u32,
+    apply_v_norm: bool,
 ) void {
     const freq_buf = selectRopeFreqBuffer(engine, attn.rope_dim, attn.rope_freq_base, attn.use_rope_freq_factors);
     const push = RopeKvCacheWritePush{
@@ -6017,6 +6029,8 @@ fn dispatchFusedRopeKvCacheWriteOnCmd(
         .rope_dim = attn.rope_dim,
         .position = position,
         .dst_offset = dst_offset,
+        .apply_v_norm = if (apply_v_norm) 1 else 0,
+        .eps = engine.config.rms_norm_eps,
     };
     const bufs = [_]*const MetalBuffer{
         &engine.k_buf,

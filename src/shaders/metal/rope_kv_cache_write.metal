@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include <simd/simd.h>
 using namespace metal;
 
 // Fused single-token RoPE-K + KV cache write. Adapted from
@@ -11,13 +12,18 @@ using namespace metal;
 //   - copies pass-through K elements (rope_dim..stride) verbatim
 //   - copies v_in[head] into v_cache[dst_offset + head*stride ..]
 //
-// V is not rotated; the host applies any V-side RMS norm before this dispatch.
+// When apply_v_norm != 0, V is RMS-normalized per head with unit weights
+// before being written to v_cache (Gemma SWA path). This subsumes the
+// separate `dispatchRmsNormOnCmd` over v_buf that previously preceded this
+// kernel, saving one dispatch per dense full-attn layer.
 
 struct RopeKvCacheWritePush {
-    uint stride;     // elements per head (head_dim)
-    uint rope_dim;   // number of rotary dimensions per head (<= stride)
-    uint position;   // token position for this step
-    uint dst_offset; // element offset into kv_k_cache / kv_v_cache (= position * kv_dim)
+    uint stride;        // elements per head (head_dim)
+    uint rope_dim;      // number of rotary dimensions per head (<= stride)
+    uint position;      // token position for this step
+    uint dst_offset;    // element offset into kv_k_cache / kv_v_cache (= position * kv_dim)
+    uint apply_v_norm;  // 0 = copy V verbatim; nonzero = RMS-normalize V (unit weights)
+    float eps;          // RMS norm epsilon (only used when apply_v_norm != 0)
 };
 
 kernel void main0(
@@ -28,7 +34,10 @@ kernel void main0(
     device float* k_cache      [[buffer(4)]],
     device float* v_cache      [[buffer(5)]],
     uint head [[threadgroup_position_in_grid]],
-    uint tid  [[thread_position_in_threadgroup]]
+    uint tid  [[thread_position_in_threadgroup]],
+    uint subgroup_size [[thread_execution_width]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
     const uint stride = p.stride;
     const uint half_rot = p.rope_dim / 2;
@@ -51,8 +60,39 @@ kernel void main0(
         k_cache[dst_base + i] = k_in[base + i];
     }
 
-    // V copy.
-    for (uint i = tid; i < stride; i += 64) {
-        v_cache[dst_base + i] = v_in[base + i];
+    if (p.apply_v_norm != 0u) {
+        // Compute per-head sum of squares for V, threadgroup-reduce, then
+        // multiply each element by rsqrt(mean + eps) while writing to v_cache.
+        // Mirrors `rms_norm_mul.metal` but folds the read/normalize/write into
+        // the same kernel that performs the V cache copy.
+        threadgroup float shmem[2]; // 64 threads / 32 lanes = 2 simdgroups
+
+        float sum_sq = 0.0f;
+        for (uint i = tid; i < stride; i += 64) {
+            const float v = v_in[base + i];
+            sum_sq += v * v;
+        }
+        sum_sq = simd_sum(sum_sq);
+        if (simd_lane == 0) {
+            shmem[simd_group] = sum_sq;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup float shared_rms_inv;
+        if (tid == 0) {
+            const float total = shmem[0] + shmem[1];
+            shared_rms_inv = rsqrt((total / float(stride)) + p.eps);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float rms_inv = shared_rms_inv;
+
+        for (uint i = tid; i < stride; i += 64) {
+            v_cache[dst_base + i] = v_in[base + i] * rms_inv;
+        }
+    } else {
+        // V copy.
+        for (uint i = tid; i < stride; i += 64) {
+            v_cache[dst_base + i] = v_in[base + i];
+        }
     }
 }
