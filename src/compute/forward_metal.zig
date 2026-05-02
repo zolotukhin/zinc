@@ -7896,10 +7896,20 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
     const d_conv: u32 = cfg.ssm_d_conv;
     const use_dense_layer_cmd = canUseDenseSharedDecodeCommand(engine);
     // Dense Gemma follows llama.cpp's graph submission pattern: enqueue larger
-    // ordered chunks asynchronously and wait once at the token boundary. Eight
-    // layers keeps the command buffers below the single-buffer correctness cliff
-    // while reducing queue traffic for Gemma 31B's 60 dependent layers.
-    const dense_cmd_group_layers: usize = 8;
+    // ordered chunks asynchronously and wait once at the token boundary.
+    // llama.cpp's `ggml-metal-context.m::ggml_metal_set_n_cb` warns "optimal
+    // values for n_cb are 1 or 2" and that >2 "can degrade the performance",
+    // because each extra command buffer adds queue scheduling latency and a
+    // GPU clock-ramp window between submissions. Cycle 51 confirmed neither
+    // barrier cost nor lack of concurrency explains the 65× kernel-vs-wall
+    // gap on Gemma 31B (Serial and Concurrent encoders measured the same
+    // 0.25 tok/s with 9 cmd buffers/token), leaving cmd-buffer-boundary
+    // scheduling and GPU clock throttling between small chunks as the
+    // dominant remaining cost. Cut the dense chunks from 8 to 2 by raising
+    // the per-chunk layer count from 8 to 30 — the older single-chunk (60)
+    // attempt broke correctness, so 30 is a conservative step toward
+    // llama.cpp's n_cb=2 target while staying clear of the prior cliff.
+    const dense_cmd_group_layers: usize = 30;
     const use_single_gpu_cmd = !engine.debug_validation_enabled and !engine.gemma_moe_validation_enabled and is_moe and blk: {
         for (engine.layer_tensors) |lt| {
             if (!canUseGpuRoutedBatchedMoe(engine, lt)) break :blk false;
