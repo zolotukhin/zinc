@@ -6,6 +6,7 @@ using namespace metal;
 struct Params {
     uint n;
     float eps;
+    float hidden_scale;
 };
 
 // Triple-fused: residual_norm + residual_add + output_norm.
@@ -64,14 +65,22 @@ kernel void main0(
 
     // Pass 2: hidden += residual_w[i] * residual[i] * rms_inv_r;
     // accumulate sum of squares for hidden norm; cache new hidden in registers.
+    // hidden write is multiplied by p.hidden_scale (folds the per-layer
+    // layer_output_scale that was previously a separate scale_in_place
+    // dispatch + barrier — saves ≈60 dispatches/60 barriers per token on
+    // Gemma 31B). The cached h_vals stay unscaled so the second-pass norm
+    // remains computed on the un-scaled residual stream, exactly matching
+    // the original (post_norm_residual_rms_norm → barrier → scale_in_place)
+    // ordering.
     float h_vals[MAX_PER_THREAD];
     float sum_sq_h = 0.0f;
     uint count = 0;
+    const float hidden_scale = p.hidden_scale;
     for (uint i = tid; i < p.n; i += TG_SIZE) {
         const float r = residual[base + i];
         const float r_normed = residual_w[i] * (r * rms_inv_r);
         const float h = hidden[base + i] + r_normed;
-        hidden[base + i] = h;
+        hidden[base + i] = h * hidden_scale;
         h_vals[count++] = h;
         sum_sq_h += h * h;
     }

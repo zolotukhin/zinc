@@ -827,10 +827,14 @@ const ResidualRmsNormPush = extern struct {
 
 /// Push constants for triple-fused residual_norm + residual_add + output_norm
 /// (matches post_norm_residual_rms_norm.metal: buffer(0)). Replaces the
-/// separate post_*_norm + barrier + residual_rms_norm pair.
+/// separate post_*_norm + barrier + residual_rms_norm pair. `hidden_scale`
+/// folds the per-layer `layer_output_scale` (previously a standalone
+/// scale_in_place dispatch + barrier) into the same kernel — pass 1.0 to
+/// disable.
 const PostNormResidualRmsNormPush = extern struct {
     n: u32,
     eps: f32,
+    hidden_scale: f32,
 };
 
 /// Push constants for fused MoE weighted acc + shared expert (matches moe_weighted_acc_shared.metal: buffer(3)).
@@ -5071,8 +5075,13 @@ fn dispatchPostNormResidualRmsNormOnCmd(
     norm_out: *const MetalBuffer,
     output_w: *const MetalBuffer,
     n: u32,
+    hidden_scale: f32,
 ) void {
-    const push = PostNormResidualRmsNormPush{ .n = n, .eps = engine.config.rms_norm_eps };
+    const push = PostNormResidualRmsNormPush{
+        .n = n,
+        .eps = engine.config.rms_norm_eps,
+        .hidden_scale = hidden_scale,
+    };
     const bufs = [_]*const MetalBuffer{ hidden, residual, residual_w, norm_out, output_w };
     cmd.dispatchV2(&engine.post_norm_residual_rms_norm_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(PostNormResidualRmsNormPush), 0);
 }
@@ -8062,6 +8071,11 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         const use_gpu_routed_moe = is_moe and canUseGpuRoutedBatchedMoe(engine, lt);
         const skip_pre_ffn_router = is_moe and !use_gpu_routed_moe and hasExplicitGemmaMoeTensors(cfg, lt);
         const layer_output_scale = engine.layer_output_scales[layer_idx];
+        // Set true when the per-layer `layer_output_scale` is folded into the
+        // FFN-side fused `post_norm_residual_rms_norm` kernel below — the
+        // standalone scale_in_place dispatch + barrier at the layer tail can
+        // then be skipped (≈60 dispatches/60 barriers per token on Gemma 31B).
+        var layer_output_scale_fused_into_post_norm: bool = false;
         const layer_shared_cmd: ?*MetalCommand = if (shared_cmd) |cmd|
             cmd
         else if (use_dense_layer_cmd) blk: {
@@ -8147,6 +8161,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                     &engine.norm_buf,
                     &engine.ffn_norm_bufs[layer_idx],
                     hidden_dim,
+                    1.0,
                 );
             } else {
                 // Fused residual-add + RMS norm: hidden += down; norm_buf = normalize(hidden) * weights.
@@ -8708,10 +8723,16 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 profileBarrier(cmd, profile, .dense_ffn);
 
                 const next_layer_idx_u = layer_idx + 1;
+                const layer_output_scale_folded_pre = skip_pre_ffn_router and !engine.debug_validation_enabled;
+                // The fused kernel now folds an arbitrary `hidden_scale` into
+                // its in-place hidden write, so a non-unit `layer_output_scale`
+                // no longer disqualifies the four-way fusion. The scale_in_place
+                // dispatch + barrier at the layer tail is skipped when this
+                // path fires (see `layer_output_scale_fused_into_post_norm`).
+                const can_fold_layer_scale_here = layer_output_scale != 1.0 and !layer_output_scale_folded_pre;
                 const can_fuse_next_attn_norm = layer_shared_cmd != null and
                     use_dense_layer_cmd and
                     next_layer_idx_u < layer_count and
-                    layer_output_scale == 1.0 and
                     engine.layer_output_scales[next_layer_idx_u] != 0.0 and
                     ((@as(u32, @intCast(next_layer_idx_u)) + 1) % full_attn_interval == 0);
 
@@ -8720,8 +8741,15 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 // the existing residual_rms_norm.metal pattern + llama.cpp
                 // `ggml_metal_op_rms_norm` op-fusion idea, extended with a second
                 // reduction. Saves ≈59 dispatches and ≈59 barriers per token on
-                // Gemma 31B's 60 dense full-attn layers.
+                // Gemma 31B's 60 dense full-attn layers. Now also folds
+                // `layer_output_scale` into the in-place hidden write — RMS norm
+                // is invariant to (positive) scaling and the cached h_vals stay
+                // unscaled, so the second-pass norm output is bit-identical to
+                // the previous (post_norm_residual_rms_norm → barrier → scale_in_place)
+                // ordering. Removes the trailing scale_in_place dispatch+barrier
+                // (≈60 dispatches/60 barriers per token on Gemma 31B).
                 if (can_fuse_next_attn_norm and engine.post_ffn_norm_present[layer_idx]) {
+                    const hidden_scale: f32 = if (can_fold_layer_scale_here) layer_output_scale else 1.0;
                     dispatchPostNormResidualRmsNormOnCmd(
                         engine,
                         cmd,
@@ -8731,9 +8759,11 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                         &engine.norm_buf,
                         &engine.attn_norm_bufs[next_layer_idx_u],
                         hidden_dim,
+                        hidden_scale,
                     );
                     profileBarrier(cmd, profile, .dense_ffn);
                     prev_fused_attn_norm = true;
+                    if (can_fold_layer_scale_here) layer_output_scale_fused_into_post_norm = true;
                 } else {
                     if (engine.post_ffn_norm_present[layer_idx]) {
                         dispatchRmsNormOnCmd(engine, cmd, &engine.down_buf, &engine.down_buf, &engine.post_ffn_norm_bufs[layer_idx], hidden_dim, 1);
@@ -8773,7 +8803,7 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             }
         }
 
-        const layer_output_scale_folded = skip_pre_ffn_router and !engine.debug_validation_enabled;
+        const layer_output_scale_folded = (skip_pre_ffn_router and !engine.debug_validation_enabled) or layer_output_scale_fused_into_post_norm;
         if (layer_output_scale != 1.0 and !layer_output_scale_folded) {
             const scale_barrier_class: BarrierClass = if (is_moe)
                 (if (use_gpu_routed_moe) .gpu_routed_moe else .fallback_moe)
