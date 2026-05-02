@@ -214,6 +214,47 @@ Hard ceiling:
   numbers above 30 unless prefill is also dramatically improved or the
   bandwidth math changes (e.g. quant tier, KV layout).
 
+## What cycles 1-40 taught us (and why kernel tuning is done)
+
+Updated 2026-05-01 after cycle 40. `bench-metal-shapes --case dense_q4k_5376`
+now gives ground truth: the dense Gemma 31B Q4_K/Q6_K kernels are not the
+bottleneck.
+
+```text
+LM head        Q4_K M=262144 K=5376 → 491 GB/s
+attn_q         Q4_K M=8192   K=5376 → 594 GB/s
+attn_k         Q4_K M=4096   K=5376 → 561 GB/s
+attn_v         Q6_K M=4096   K=5376 → 453 GB/s
+attn_out       Q4_K M=5376   K=8192 → 629 GB/s
+ffn_gate       Q4_K M=21504  K=5376 → 504 GB/s
+ffn_up         Q4_K M=21504  K=5376 → 490 GB/s
+ffn_down       Q4_K M=5376   K=21504 → 499 GB/s
+```
+
+**All kernels run at or above the M4's ~480 GB/s effective ceiling.**
+
+Sum-of-kernels per layer ≈ 1.0 ms. Times 60 layers = 60 ms per token if
+the dispatches were perfectly pipelined. Real cycle-40 measurement is
+3460 ms per token. The 57x gap is between dispatches, not inside them.
+
+The dispatch chain alone needs ~3.4 s per token for ~600 small dispatches.
+That points at one or more of:
+
+1. Encoder switch / barrier overhead (each `mtl_barrier` creates a new
+   compute encoder; on Apple this is ~10-30 us per switch, but the math
+   here implies something much heavier).
+2. Pipeline stalls from dependent dispatches that can't overlap.
+3. Buffer rebinding cost per dispatch.
+4. GPU clock not ramping to full speed when individual dispatches are
+   ~50 us — power management leaving the card idle most of the wall
+   clock.
+5. Some ZINC-specific control-flow round-trip per dispatch.
+
+**Stop tuning kernels.** Cycles 41+ must measure dispatch cadence and
+GPU-active vs GPU-idle time on the real run, then attack the gap. Adding
+another shader variant is wasted unless it removes a barrier or fuses
+two dispatches into one.
+
 ## What cycles 1-24 taught us
 
 23 of 24 cycles were "kept-within-noise" (only cycle 5 broke coherence
@@ -279,13 +320,23 @@ Acceptance:
 - The dominant phase is named (not "agent made changes").
 - The next cycle is targeted at that phase, not at a guess.
 
-### Step 1 - Replace `dmmv_q4k_k5376.metal` with the llama.cpp shape
+### Step 1 [DONE 2026-05-01] - K=5376 kernel removed
 
-`dmmv_q4k_k5376.metal` (created cycle 2) is the single largest cause of
-the decode wall. It runs at ~5 GB/s effective. llama.cpp's
+The post-cycle-24 K=5376 specialization (`dmmv_q4k_k5376.metal`) was
+deleted in commit `22bbc75`. K=5376 traffic now falls through to the
+base `dmmv_q4k.metal` (llama.cpp port, NSG=2, NR0=2, 64 threads).
+Microbench confirms the base kernel hits 491-629 GB/s on every dense
+31B shape. **Kernel tuning is closed.** Step 2 is now the live problem.
+
+Historical context for this step:
+
+`dmmv_q4k_k5376.metal` (created cycle 2) was a 512-thread/16-row/TGM-
+cached variant that ran at ~5 GB/s effective on Apple9. llama.cpp's
 `kernel_mul_mv_q4_K_f32` on Apple9 hits ~440 GB/s on the same K=5376
 shapes. Stop tuning the existing kernel; rebuild from the llama.cpp
 reference shape.
+
+(Original Step 1 detail kept below for reference; do not re-execute.)
 
 Required architectural choices (all from llama.cpp):
 
@@ -323,7 +374,88 @@ Acceptance:
   is somewhere else (e.g. attention, KV cache, sampling). Stop. Do
   Step 0 again with an updated profile.
 
-### Step 2 - Identify and fix the dense FFN dispatch
+### Step 2 [LIVE] - Find and remove the per-dispatch overhead
+
+This is the active step as of 2026-05-01.
+
+The kernel side is fine. Per-token GPU work is 3460 ms but the sum of
+the kernels is ~60 ms. The 57x gap is dispatch overhead.
+
+Static count of barriers in the decode hot path (`src/compute/forward_metal.zig`
+lines 2868-3001, dense Gemma path): ~10-15 `cmd.barrier()` per layer
+× 60 layers = **600-900 barriers per token**, plus 3 more after the
+layer loop. The bench tool dispatches the same kernels 50 times in a
+tight loop with no barriers and gets 500 GB/s; the real run forces
+strict ordering on every phase boundary.
+
+`cmd.barrier()` calls `memoryBarrierWithScope:MTLBarrierScopeBuffers`
+inside a concurrent compute encoder (`shim.m::mtl_begin_command_mode`,
+`MTLDispatchTypeConcurrent`). Independent dispatches between barriers
+overlap freely; barriers serialize. Almost every barrier in the
+current dense decode is data-dependency-required (RMS → Q/K/V → RoPE
+→ KV write → FA → O → residual → RMS → gate/up → SwiGLU → down →
+post-norm → scale_acc), so removing barriers without fusion will
+break correctness.
+
+The lever is **fusion**, not barrier removal:
+
+1. Fuse `scale_acc` (residual add) + next layer's `pre-attn RMS` into
+   one kernel. That kills one barrier per layer = 60 barriers per
+   token gone.
+2. Fuse `RMS norm` + (`Q` projection) into one kernel that reads the
+   hidden vector once and writes Q directly. K and V can run
+   concurrently from the same norm output.
+3. Fuse `RoPE` + `KV cache write` into one kernel for the K side
+   (V already does not need RoPE).
+4. Fuse `O projection` + `residual add into hidden` so the post-attn
+   path lands the residual in one dispatch.
+5. Fuse `gate` + `up` + `GeGLU` into one kernel. Already partially
+   present (`dmmv_q4k_dense_gate_up_geglu.metal` from cycle 36).
+   Verify it actually replaces three dispatches with one in the
+   default decode path; if not, wire it in.
+6. Fuse `down` + `post-ffn RMS` + `scale_acc` into one kernel.
+
+Each successful fusion removes one or more barriers. Six fusions ×
+60 layers = 360-540 fewer barriers per token. If a barrier costs even
+4 ms, that is 1.4-2.2 s/token recovered.
+
+Required measurement first (single cycle, no kernel change):
+
+1. Add a counter in `forward_metal.zig` decode that, on the first
+   decoded token, reports:
+   - total `cmd.barrier()` calls
+   - total `cmd.dispatchV2` (and v2_tgmem) calls
+   - count of `mtl_begin_command` / `commit_and_wait` per token
+   - per-phase dispatch count (attn, ffn, norm, residual)
+2. Print once on cycle entry, then continue with default behavior.
+3. Compare the printed barrier count against the math (~600-900) to
+   confirm the hypothesis before fusing anything.
+
+After the count is known, each subsequent cycle implements ONE
+fusion from the list above and reports:
+- before/after `cmd.barrier()` count
+- before/after per-token GPU wait ms
+- bench-metal-shapes for any new fused shape
+
+Acceptance:
+
+- First cycle on Step 2 lands instrumentation only.
+- Each fusion cycle removes a measurable number of barriers and is
+  evaluated by the harness against decode tok/s.
+- When per-token GPU wait drops below 200 ms or barrier count drops
+  below 200 per token, Step 2 is done.
+
+Out of scope on this step:
+
+- Adding more matvec variants. Kernels run at ~500 GB/s; do not
+  retune.
+- Tensor copy / arena packing experiments. Already done in cycle 40,
+  no decode improvement.
+- Flag-gated paths. Default-on or do not write.
+- `bench-metal-shapes` cases unrelated to a fusion landing the same
+  cycle.
+
+### Step 2 [LEGACY] - Identify and fix the dense FFN dispatch
 
 The 31B dense FFN gate/up/down shapes are larger than 12B's MoE expert
 shapes. If the current code path falls back to a CPU loop for any
