@@ -854,6 +854,7 @@ const RopeKvCacheWritePush = extern struct {
     position: u32,
     dst_offset: u32,
     apply_v_norm: u32,
+    apply_qk_norm: u32,
     eps: f32,
 };
 
@@ -5952,13 +5953,6 @@ fn dispatchFullAttnPrepOnCmd(
         cmd.* = try metal_command.beginCommand(engine.device.ctx);
     }
 
-    // Q/K norms are independent — concurrent dispatch overlaps them.
-    if (engine.attn_q_norm_present[layer_idx]) {
-        dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], attn.head_dim, cfg.n_heads);
-    }
-    if (engine.attn_k_norm_present[layer_idx]) {
-        dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], attn.head_dim, attn.n_kv_heads);
-    }
     // Fuse RoPE-K with the K/V cache write when:
     //   - cache is f32 (kv_cache_q8 path keeps its own quantizing kernel),
     //   - V is projected separately (use_k_as_v requires a copy this kernel
@@ -5977,16 +5971,37 @@ fn dispatchFullAttnPrepOnCmd(
     // unit-weight V RMS norm into the same dispatch, eliminating the
     // standalone v_buf normalize (≈60 dispatches/token on Gemma 31B).
     const fuse_v_unit_norm_into_rope_kv = can_fuse_rope_kv_write and need_v_unit_norm;
+    // When the fused rope+kv-write kernel will fire and both per-head Q/K
+    // norm weights are present (Gemma 4 attn_q_norm + attn_k_norm), the
+    // kernel also folds in those two RMS-norm passes, eliminating two
+    // standalone DMMV-equivalent dispatches per dense full-attn layer
+    // (≈60+60/token on Gemma 31B). Adapted from llama.cpp's pattern of
+    // op-fusing rms_norm into the immediately-following producer.
+    const fuse_qk_norm_into_rope_kv =
+        can_fuse_rope_kv_write and
+        engine.attn_q_norm_present[layer_idx] and
+        engine.attn_k_norm_present[layer_idx];
+    // Q/K norms are independent — concurrent dispatch overlaps them when
+    // not fused into the rope+kv-write kernel.
+    if (!fuse_qk_norm_into_rope_kv) {
+        if (engine.attn_q_norm_present[layer_idx]) {
+            dispatchRmsNormOnCmd(engine, cmd, &engine.q_buf, &engine.q_buf, &engine.attn_q_norm_bufs[layer_idx], attn.head_dim, cfg.n_heads);
+        }
+        if (engine.attn_k_norm_present[layer_idx]) {
+            dispatchRmsNormOnCmd(engine, cmd, &engine.k_buf, &engine.k_buf, &engine.attn_k_norm_bufs[layer_idx], attn.head_dim, attn.n_kv_heads);
+        }
+    }
     if (need_v_unit_norm and !fuse_v_unit_norm_into_rope_kv) {
         dispatchRmsNormOnCmd(engine, cmd, &engine.v_buf, &engine.v_buf, &engine.unit_rms_norm_weights, attn.head_dim, attn.n_kv_heads);
     }
     profileBarrier(cmd, profile, .full_attn); // norm outputs visible before rope
 
     if (can_fuse_rope_kv_write) {
-        // Fused Q-rope + K-rope + KV cache write (with optional V unit norm)
-        // in a single dispatch. Grid = n_q_heads + n_kv_heads; the first
-        // n_q_heads slots rotate q_buf in place, the rest rotate K and write
-        // K/V into the layer's cache slot.
+        // Fused Q-rope + K-rope + KV cache write (with optional V unit norm
+        // and optional Q/K-norm) in a single dispatch. Grid = n_q_heads +
+        // n_kv_heads; the first n_q_heads slots normalize+rotate q_buf in
+        // place, the rest normalize+rotate K and write K/V into the layer's
+        // cache slot.
         dispatchFusedRopeKvCacheWriteOnCmd(
             engine,
             cmd,
@@ -5996,6 +6011,7 @@ fn dispatchFullAttnPrepOnCmd(
             engine.position,
             engine.position * attn.kv_dim,
             fuse_v_unit_norm_into_rope_kv,
+            fuse_qk_norm_into_rope_kv,
         );
     } else {
         // Slow path: separate Q-rope, K-rope, and KV cache write dispatches.
@@ -6033,6 +6049,7 @@ fn dispatchFusedRopeKvCacheWriteOnCmd(
     position: u32,
     dst_offset: u32,
     apply_v_norm: bool,
+    apply_qk_norm: bool,
 ) void {
     const freq_buf = selectRopeFreqBuffer(engine, attn.rope_dim, attn.rope_freq_base, attn.use_rope_freq_factors);
     const push = RopeKvCacheWritePush{
@@ -6042,8 +6059,20 @@ fn dispatchFusedRopeKvCacheWriteOnCmd(
         .position = position,
         .dst_offset = dst_offset,
         .apply_v_norm = if (apply_v_norm) 1 else 0,
+        .apply_qk_norm = if (apply_qk_norm) 1 else 0,
         .eps = engine.config.rms_norm_eps,
     };
+    // q_norm_w / k_norm_w buffers are unused when apply_qk_norm == 0; bind a
+    // valid placeholder (unit_rms_norm_weights) to satisfy Metal buffer slot
+    // requirements without allocating new buffers.
+    const q_norm_buf: *const MetalBuffer = if (apply_qk_norm)
+        &engine.attn_q_norm_bufs[layer_idx]
+    else
+        &engine.unit_rms_norm_weights;
+    const k_norm_buf: *const MetalBuffer = if (apply_qk_norm)
+        &engine.attn_k_norm_bufs[layer_idx]
+    else
+        &engine.unit_rms_norm_weights;
     const bufs = [_]*const MetalBuffer{
         &engine.q_buf,
         &engine.k_buf,
@@ -6051,6 +6080,8 @@ fn dispatchFusedRopeKvCacheWriteOnCmd(
         freq_buf,
         &engine.kv_k_cache[layer_idx],
         &engine.kv_v_cache[layer_idx],
+        q_norm_buf,
+        k_norm_buf,
     };
     cmd.dispatchV2(&engine.rope_kv_cache_write_pipe, .{ n_q_heads + attn.n_kv_heads, 1, 1 }, .{ 64, 1, 1 }, &bufs, &push, @sizeOf(RopeKvCacheWritePush), 0);
 }
