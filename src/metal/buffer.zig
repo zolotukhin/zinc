@@ -17,6 +17,8 @@ pub const MetalBuffer = struct {
     is_mmap_wrapped: bool,
     /// True if this buffer holds Q8_0 data in the SIMD-coalesced repacked layout.
     is_repacked_q8: bool = false,
+    /// False for lightweight aliases into a larger Metal buffer owned elsewhere.
+    owns_handle: bool = true,
 
     /// Return the raw CPU-visible pointer for shared-mode buffers.
     pub fn contents(self: *const MetalBuffer) ?[*]u8 {
@@ -66,10 +68,23 @@ pub fn wrapMmap(ctx: ?*shim.MetalCtx, ptr: [*]u8, size: usize) !MetalBuffer {
     };
 }
 
+/// Create a lightweight view into an existing buffer. The returned handle is
+/// not retained and must not be freed independently of the owner.
+pub fn aliasBuffer(base: *const MetalBuffer, offset: usize, size: usize) MetalBuffer {
+    return .{
+        .handle = base.handle,
+        .size = size,
+        .cpu_ptr = if (base.cpu_ptr) |ptr| ptr + offset else null,
+        .is_mmap_wrapped = base.is_mmap_wrapped,
+        .is_repacked_q8 = base.is_repacked_q8,
+        .owns_handle = false,
+    };
+}
+
 /// Free a Metal buffer handle and clear it from the wrapper.
 pub fn freeBuffer(buf: *MetalBuffer) void {
     if (buf.handle) |h| {
-        shim.mtl_free_buffer(h);
+        if (buf.owns_handle) shim.mtl_free_buffer(h);
         buf.handle = null;
     }
 }

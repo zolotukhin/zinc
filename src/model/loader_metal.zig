@@ -32,6 +32,7 @@ pub const Model = struct {
     config: ModelConfig,
     gguf_file: gguf.GGUFFile,
     tensors: std.ArrayList(LoadedTensor),
+    tensor_arenas: std.ArrayList(MetalBuffer),
     mmap_data: ?[]align(std.heap.page_size_min) const u8,
     mmap_file: ?std.fs.File,
     allocator: std.mem.Allocator,
@@ -42,6 +43,10 @@ pub const Model = struct {
             metal_buffer.freeBuffer(&t.gpu_buffer);
         }
         self.tensors.deinit(self.allocator);
+        for (self.tensor_arenas.items) |*arena| {
+            metal_buffer.freeBuffer(arena);
+        }
+        self.tensor_arenas.deinit(self.allocator);
 
         if (self.mmap_data) |data| {
             std.posix.munmap(data);
@@ -271,6 +276,57 @@ fn shouldCopyOutOfMmap(config: ModelConfig, tensor_info: gguf.TensorInfo, data_o
         std.mem.endsWith(u8, name, "attn_output.weight");
 }
 
+const copied_tensor_arena_alignment: usize = 4096;
+const copied_tensor_arena_limit: usize = 256 * 1024 * 1024;
+
+fn alignForwardPow2(value: usize, alignment: usize) usize {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+fn shouldPackCopiedTensorArenas(config: ModelConfig) bool {
+    return config.architecture == .gemma and config.n_experts == 0 and config.hidden_dim >= 5000;
+}
+
+fn planCopiedTensorArenas(
+    gf: *const gguf.GGUFFile,
+    config: ModelConfig,
+    allocator: std.mem.Allocator,
+) !std.ArrayList(usize) {
+    var arena_sizes: std.ArrayList(usize) = .{};
+    errdefer arena_sizes.deinit(allocator);
+
+    if (!shouldPackCopiedTensorArenas(config)) return arena_sizes;
+
+    var current_size: usize = 0;
+    for (gf.tensors.items) |tensor_info| {
+        const tensor_size: usize = @intCast(tensor_info.sizeBytes());
+        const data_offset = gf.tensor_data_offset + tensor_info.offset;
+        if (!shouldCopyOutOfMmap(config, tensor_info, data_offset)) continue;
+
+        const aligned_size = alignForwardPow2(tensor_size, copied_tensor_arena_alignment);
+        if (aligned_size > copied_tensor_arena_limit) {
+            if (current_size > 0) {
+                try arena_sizes.append(allocator, current_size);
+                current_size = 0;
+            }
+            try arena_sizes.append(allocator, aligned_size);
+            continue;
+        }
+
+        if (current_size == 0) {
+            current_size = aligned_size;
+        } else if (current_size + aligned_size > copied_tensor_arena_limit) {
+            try arena_sizes.append(allocator, current_size);
+            current_size = aligned_size;
+        } else {
+            current_size += aligned_size;
+        }
+    }
+
+    if (current_size > 0) try arena_sizes.append(allocator, current_size);
+    return arena_sizes;
+}
+
 /// Inspect a GGUF file and extract only the model configuration (no GPU operations).
 pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfig {
     const file = try std.fs.cwd().openFile(path, .{});
@@ -376,15 +432,49 @@ pub fn load(
         loaded_tensors.deinit(allocator);
     }
 
+    var tensor_arenas: std.ArrayList(MetalBuffer) = .{};
+    errdefer {
+        for (tensor_arenas.items) |*arena| {
+            metal_buffer.freeBuffer(arena);
+        }
+        tensor_arenas.deinit(allocator);
+    }
+
+    var arena_sizes = try planCopiedTensorArenas(&gf, config, allocator);
+    defer arena_sizes.deinit(allocator);
+    for (arena_sizes.items) |arena_size| {
+        try tensor_arenas.append(allocator, try metal_buffer.createBuffer(metal_ctx, arena_size));
+    }
+
     var total_size: u64 = 0;
     var copied_tensor_count: usize = 0;
     var copied_tensor_bytes: u64 = 0;
+    var arena_index: usize = 0;
+    var arena_offset: usize = 0;
     for (gf.tensors.items) |tensor_info| {
         const tensor_size = tensor_info.sizeBytes();
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
 
         const copy_out = shouldCopyOutOfMmap(config, tensor_info, data_offset);
-        const gpu_buf, const buffer_offset = if (copy_out) blk: {
+        const gpu_buf, const buffer_offset = if (copy_out and tensor_arenas.items.len > 0) blk: {
+            const tensor_bytes: usize = @intCast(tensor_size);
+            const aligned_size = alignForwardPow2(tensor_bytes, copied_tensor_arena_alignment);
+            while (arena_index < tensor_arenas.items.len and arena_offset + aligned_size > tensor_arenas.items[arena_index].size) {
+                arena_index += 1;
+                arena_offset = 0;
+            }
+            if (arena_index >= tensor_arenas.items.len) return error.MetalBufferAllocFailed;
+
+            const arena = &tensor_arenas.items[arena_index];
+            const src_off: usize = @intCast(data_offset);
+            @memcpy(arena.cpu_ptr.?[arena_offset .. arena_offset + tensor_bytes], mmap_data[src_off .. src_off + tensor_bytes]);
+            copied_tensor_count += 1;
+            copied_tensor_bytes += tensor_size;
+            const buf = metal_buffer.aliasBuffer(arena, arena_offset, tensor_bytes);
+            const offset: u32 = @intCast(arena_offset);
+            arena_offset += aligned_size;
+            break :blk .{ buf, offset };
+        } else if (copy_out) blk: {
             var buf = try metal_buffer.createBuffer(metal_ctx, @intCast(tensor_size));
             const src_off: usize = @intCast(data_offset);
             const tensor_bytes: usize = @intCast(tensor_size);
@@ -428,12 +518,16 @@ pub fn load(
             copied_tensor_count,
             copied_tensor_bytes / (1024 * 1024),
         });
+        if (tensor_arenas.items.len > 0) {
+            log.info("Metal loader packed copied tensors into {d} shared arenas", .{tensor_arenas.items.len});
+        }
     }
 
     return Model{
         .config = config,
         .gguf_file = gf,
         .tensors = loaded_tensors,
+        .tensor_arenas = tensor_arenas,
         .mmap_data = mmap_data,
         .mmap_file = file,
         .allocator = allocator,
