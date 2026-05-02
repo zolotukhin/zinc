@@ -479,6 +479,20 @@ const DmmvPush = extern struct {
     y_offset: u32,
 };
 
+/// Push for `dmmv_q4k_lmhead_norm.metal` — Q4_K matvec with fused
+/// per-simdgroup RMS reduction over the unnormalized hidden vector
+/// and an inline `norm_weight * rms_inv` scaling on each X load.
+/// Used by the dense Gemma 31B final LM head to drop the standalone
+/// `rms_norm_mul` dispatch + barrier in the final phase.
+const DmmvNormPush = extern struct {
+    M: u32,
+    K: u32,
+    a_offset: u32,
+    x_offset: u32,
+    y_offset: u32,
+    eps: f32,
+};
+
 const DualQ8DmmvPush = extern struct {
     M0: u32,
     M1: u32,
@@ -1630,6 +1644,7 @@ pub const InferenceEngine = struct {
     dmmv_q4k_qk_dual_pipe: MetalPipeline,
     dmmv_q4k_lmhead_pipe: MetalPipeline,
     dmmv_q4k_lmhead_1024_pipe: MetalPipeline,
+    dmmv_q4k_lmhead_norm_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q5k_native_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
@@ -1983,6 +1998,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_qk_dual_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_qk_dual");
         self.dmmv_q4k_lmhead_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead");
         self.dmmv_q4k_lmhead_1024_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_1024");
+        self.dmmv_q4k_lmhead_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_norm");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q5k_native_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_native");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
@@ -2587,6 +2603,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_qk_dual_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_1024_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_norm_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_native_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
@@ -4343,6 +4360,65 @@ fn dispatchLmHeadOnCmd(
     }
 
     dispatchDmmvOnCmd(engine, cmd, engine.lm_head, input_buf, output_buf, vocab_size, hidden_dim, 0);
+}
+
+/// True when the dense Gemma final LM head can fuse `final_norm` (RMS
+/// scaled by `final_norm_gpu`) into its Q4_K matvec via
+/// `dmmv_q4k_lmhead_norm.metal`. The fused kernel mirrors the base
+/// llama.cpp `kernel_mul_mv_q4_K_f32` row layout (NSG=2, NR0=2, 64
+/// threads) used by `dmmv_q4k.metal` for K=hidden_dim=5376 on Gemma
+/// 31B, so we only enable it where the base kernel would already have
+/// been selected (Q4_K, K%256==0, no private weight buffer).
+fn canUseLmHeadFusedNorm(engine: *const InferenceEngine, hidden_dim: u32) bool {
+    return engine.lm_head.info.type_ == .q4_k and
+        hidden_dim > 0 and
+        hidden_dim % 256 == 0 and
+        engine.lm_head_private_buf.handle == null and
+        engine.dmmv_q4k_lmhead_norm_pipe.handle != null and
+        engine.dmmv_q4k_lmhead_norm_pipe.max_threads_per_threadgroup >= 64;
+}
+
+/// Fused `final_norm` + Q4_K LM head DMMV. Reads the unnormalized
+/// hidden vector + `final_norm_gpu` weights, computes the RMS
+/// reciprocal per simdgroup, and applies `norm_weight * rms_inv` to
+/// the X loads inside the matvec. Saves one dispatch + one barrier
+/// in the final phase of dense Gemma decode.
+fn dispatchLmHeadFusedNormOnCmd(
+    engine: *InferenceEngine,
+    cmd: *MetalCommand,
+    hidden_buf: *const MetalBuffer,
+    norm_weight_buf: *const MetalBuffer,
+    output_buf: *const MetalBuffer,
+    hidden_dim: u32,
+    vocab_size: u32,
+) void {
+    recordDmmvProfile(engine, engine.lm_head, vocab_size, hidden_dim);
+
+    const push = DmmvNormPush{
+        .M = vocab_size,
+        .K = hidden_dim,
+        .a_offset = tensorPageOffset(engine.model, engine.lm_head),
+        .x_offset = 0,
+        .y_offset = 0,
+        .eps = engine.config.rms_norm_eps,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &engine.lm_head.gpu_buffer,
+        hidden_buf,
+        output_buf,
+        norm_weight_buf,
+    };
+    const rows_per_wg: u32 = 4; // NSG=2 * NR0=2
+    const block_size: u32 = 64;
+    cmd.dispatchV2(
+        &engine.dmmv_q4k_lmhead_norm_pipe,
+        .{ (vocab_size + rows_per_wg - 1) / rows_per_wg, 1, 1 },
+        .{ block_size, 1, 1 },
+        &bufs,
+        &push,
+        @sizeOf(DmmvNormPush),
+        1,
+    );
 }
 
 /// Variant of `dispatchLmHeadOnCmd` that accepts a byte offset into `input_buf`.
@@ -8733,17 +8809,31 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
     }
 
     // ===== Final: GPU norm → LM head (batched) =====
+    // For dense Q4_K LM heads (Gemma 31B), the standalone `final_norm`
+    // dispatch + barrier are folded into the LM head matvec via the
+    // `dmmv_q4k_lmhead_norm` kernel — drops one dispatch and one
+    // barrier from the final phase per decode step.
     const final_record_start = profileStart(profile != null);
+    const cpu_lm_head = shouldCpuLmHeadFallback(engine);
+    const fuse_final_norm = !cpu_lm_head and canUseLmHeadFusedNorm(engine, hidden_dim);
     if (shared_cmd) |cmd| {
-        dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
-        profileBarrier(cmd, profile, .final);
-        if (shouldCpuLmHeadFallback(engine)) {
+        if (cpu_lm_head) {
+            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
+            profileBarrier(cmd, profile, .final);
             commitAndWaitProfiled(cmd, profile);
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
             try cpuLmHeadFallbackWithArgmax(engine, in_ptr, out_ptr);
             if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
+        } else if (fuse_final_norm) {
+            dispatchLmHeadFusedNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.final_norm_gpu, &engine.logits_buf, hidden_dim, cfg.vocab_size);
+            profileBarrier(cmd, profile, .final);
+            dispatchArgmaxOnCmd(engine, cmd, &engine.logits_buf, &engine.argmax_buf, cfg.vocab_size);
+            if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
+            commitAndWaitProfiled(cmd, profile);
         } else {
+            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
+            profileBarrier(cmd, profile, .final);
             dispatchLmHeadOnCmd(engine, cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
             profileBarrier(cmd, profile, .final);
             dispatchArgmaxOnCmd(engine, cmd, &engine.logits_buf, &engine.argmax_buf, cfg.vocab_size);
@@ -8752,15 +8842,23 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
         }
     } else {
         var cmd = try beginProfiledCommand(engine, profile);
-        dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
-        profileBarrier(&cmd, profile, .final);
-        if (shouldCpuLmHeadFallback(engine)) {
+        if (cpu_lm_head) {
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
+            profileBarrier(&cmd, profile, .final);
             commitAndWaitProfiled(&cmd, profile);
             const in_ptr: [*]const f32 = @ptrCast(@alignCast(engine.norm_buf.cpu_ptr.?));
             const out_ptr: [*]f32 = @ptrCast(@alignCast(engine.logits_buf.cpu_ptr.?));
             try cpuLmHeadFallbackWithArgmax(engine, in_ptr, out_ptr);
             if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
+        } else if (fuse_final_norm) {
+            dispatchLmHeadFusedNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.final_norm_gpu, &engine.logits_buf, hidden_dim, cfg.vocab_size);
+            profileBarrier(&cmd, profile, .final);
+            dispatchArgmaxOnCmd(engine, &cmd, &engine.logits_buf, &engine.argmax_buf, cfg.vocab_size);
+            if (profile) |p| p.final_record_ns += profileElapsedNs(final_record_start);
+            commitAndWaitProfiled(&cmd, profile);
         } else {
+            dispatchRmsNormOnCmd(engine, &cmd, &engine.hidden_buf, &engine.norm_buf, &engine.final_norm_gpu, hidden_dim, 1);
+            profileBarrier(&cmd, profile, .final);
             dispatchLmHeadOnCmd(engine, &cmd, &engine.norm_buf, &engine.logits_buf, hidden_dim, cfg.vocab_size);
             profileBarrier(&cmd, profile, .final);
             dispatchArgmaxOnCmd(engine, &cmd, &engine.logits_buf, &engine.argmax_buf, cfg.vocab_size);
