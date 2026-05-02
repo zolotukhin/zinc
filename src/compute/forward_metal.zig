@@ -1287,14 +1287,21 @@ fn canUseDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
 }
 
 fn defaultCommandEncoderMode(cfg: ModelConfig) CommandEncoderMode {
-    // llama.cpp records dependent decode graphs into ordinary serial compute
-    // encoders and relies on encoder order instead of inserting a buffer-scope
-    // memory barrier between every node. Dense Gemma 31B is a long dependency
-    // chain, so avoiding those barriers is more valuable than concurrent
-    // dispatch overlap.
-    if (cfg.architecture == .gemma and cfg.n_experts == 0 and cfg.ssm_d_inner == 0 and cfg.hidden_dim >= 5000) {
-        return .serial;
-    }
+    _ = cfg;
+    // Apple9 power-management traps: with `MTLDispatchTypeSerial`, the GPU
+    // appears to drain the in-flight warps and let the cores idle between
+    // every dispatch, even when the next dispatch is data-independent. The
+    // K=5376 dense kernels measure 491–629 GB/s in `bench-metal-shapes`
+    // (which uses `beginCommand`, i.e. the concurrent encoder) yet the
+    // real Gemma 31B decode achieves ~5 GB/s effective when running through
+    // the serial encoder. Switching back to `MTLDispatchTypeConcurrent`
+    // (which is exactly the encoder llama.cpp's `ggml-metal.m` uses for its
+    // graph compute) lets independent Q/K/V and gate/up projections overlap
+    // and — more importantly — keeps the GPU busy enough that power-management
+    // does not down-clock between the per-layer chain. Every existing
+    // `profileBarrier()` was placed at a real data-dependency boundary while
+    // this code originally ran on a concurrent encoder, so promoting them
+    // back to live `MTLBarrierScopeBuffers` barriers preserves ordering.
     return .concurrent;
 }
 
