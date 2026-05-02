@@ -7684,6 +7684,12 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
     errdefer waitPendingDenseCommands(dense_pending_cmds[0..], &dense_pending_count, profile);
     const layer_count: usize = @intCast(cfg.n_layers);
 
+    // Fusion across the dense-FFN/next-attn boundary: when the previous dense
+    // layer ended with a fused residual_rms_norm that already wrote norm_buf
+    // using the next layer's attn_norm weights, skip the redundant attn_norm
+    // dispatch + barrier at the start of this layer.
+    var prev_fused_attn_norm: bool = false;
+
     for (0..cfg.n_layers) |layer_idx| {
         const layer: u32 = @intCast(layer_idx);
         const lt = engine.layer_tensors[layer_idx];
@@ -7707,8 +7713,16 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
             var using_local_cmd = false;
             var cmd = try acquireLayerCommand(engine, layer_shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
             const layer_record_start = profileStart(profile != null);
-            dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
-            profileBarrier(cmd, profile, .full_attn); // norm_buf visible before attn prep reads it
+            if (prev_fused_attn_norm) {
+                // Previous layer's residual_rms_norm already wrote norm_buf using
+                // attn_norm_bufs[layer_idx]; its trailing barrier (or the implicit
+                // cross-command-buffer ordering at chunk boundaries) makes it
+                // visible before the QKV dispatches read norm_buf.
+                prev_fused_attn_norm = false;
+            } else {
+                dispatchRmsNormOnCmd(engine, cmd, &engine.hidden_buf, &engine.norm_buf, &engine.attn_norm_bufs[layer_idx], hidden_dim, 1);
+                profileBarrier(cmd, profile, .full_attn); // norm_buf visible before attn prep reads it
+            }
             const apply_attn_gate = try dispatchFullAttnPrepOnCmd(engine, cmd, profile, layer_idx, lt, attn, hidden_dim);
             profileBarrier(cmd, profile, .full_attn); // KV cache + q_buf visible before flash attn
             dispatchFlashAttnOnCmd(
@@ -8314,10 +8328,36 @@ fn runDecodeStep(engine: *InferenceEngine, emit_logits: bool) !void {
                 }
 
                 if (layer_shared_cmd != null) {
-                    const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
-                    const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
-                    cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
-                    profileBarrier(cmd, profile, .dense_ffn);
+                    // Fuse scale_acc + next-layer attn_norm into one residual_rms_norm
+                    // dispatch when there is a next layer in the same dense path. This
+                    // removes one dispatch + one barrier per layer transition (≈59/token
+                    // for Gemma 31B) without changing arithmetic: hidden += down, then
+                    // norm_buf = attn_norm_w[layer+1] * rms(hidden).
+                    const next_layer_idx_u = layer_idx + 1;
+                    const can_fuse_next_attn_norm = use_dense_layer_cmd and
+                        next_layer_idx_u < layer_count and
+                        layer_output_scale == 1.0 and
+                        engine.layer_output_scales[next_layer_idx_u] != 0.0 and
+                        ((@as(u32, @intCast(next_layer_idx_u)) + 1) % full_attn_interval == 0);
+                    if (can_fuse_next_attn_norm) {
+                        dispatchResidualRmsNormOnCmd(
+                            engine,
+                            cmd,
+                            &engine.hidden_buf,
+                            &engine.down_buf,
+                            &engine.norm_buf,
+                            &engine.attn_norm_bufs[next_layer_idx_u],
+                            hidden_dim,
+                            1.0,
+                        );
+                        profileBarrier(cmd, profile, .dense_ffn);
+                        prev_fused_attn_norm = true;
+                    } else {
+                        const acc_push = ScaleAccPush{ .n = hidden_dim, .scale_bits = @as(u32, @bitCast(@as(f32, 1.0))) };
+                        const acc_bufs = [_]*const MetalBuffer{ &engine.hidden_buf, &engine.down_buf };
+                        cmd.dispatchV2(&engine.scale_acc_pipe, .{ (hidden_dim + 63) / 64, 1, 1 }, .{ 64, 1, 1 }, &acc_bufs, &acc_push, @sizeOf(ScaleAccPush), 0);
+                        profileBarrier(cmd, profile, .dense_ffn);
+                    }
                 }
                 if (profile) |p| p.dense_ffn_record_ns += profileElapsedNs(dense_record_start);
                 if (using_local_cmd) {
