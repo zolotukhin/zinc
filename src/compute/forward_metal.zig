@@ -1792,6 +1792,15 @@ pub const InferenceEngine = struct {
     q8_tg_override: ?u32,
     q8_dual_tg_override: ?u32,
     request_profile: RuntimeProfile,
+    /// Residency set covering all engine-owned scratch + KV-cache + per-layer
+    /// norm buffers, mirroring the model loader's weight residency set.
+    /// `commandBufferWithUnretainedReferences` skips Metal's auto-residency
+    /// tracking, so any buffer touched by a recorded dispatch must be
+    /// explicitly wired down. Without this the scratch path competes with
+    /// the 17.5 GB weight working set and the OS pages it out between
+    /// dispatches. Null on macOS < 15 or if creation failed (engine still
+    /// runs, just unprotected).
+    scratch_rset: ?*shim.MetalRSet = null,
 
     /// Initialize the Metal inference engine, allocating GPU buffers and compiling pipelines.
     pub fn init(
@@ -1886,6 +1895,7 @@ pub const InferenceEngine = struct {
         self.q8_tg_override = null;
         self.q8_dual_tg_override = null;
         self.request_profile = .{};
+        self.scratch_rset = null;
         self.private_ssm_qkv_bufs = null;
         self.private_ssm_gate_bufs = null;
         self.private_ssm_out_bufs = null;
@@ -2546,11 +2556,113 @@ pub const InferenceEngine = struct {
             },
         );
 
+        // Wire engine-owned scratch + KV cache + per-layer norm buffers into
+        // a residency set, mirroring the model loader's weight residency set
+        // (loader_metal.zig:weight_rset). Required because the engine uses
+        // `commandBufferWithUnretainedReferences` (shim.m:mtl_begin_command_mode),
+        // which disables Metal's per-command-buffer auto-residency tracking.
+        // Cycle 57 saw the weight residency set move decode 0.2 → 3.4 tok/s on
+        // the dense 31B; the scratch buffers (KV cache, hidden/q/k/v/gate/up/
+        // down/swiglu, per-layer norms) are touched on every layer too and
+        // share the same paging pressure.
+        if (shim.mtl_rset_supported() != 0) {
+            // Generous capacity estimate: 30 standalone scratch + 4*n_experts_used
+            //   + 2*n_layers (KV cache) + 6*n_layers (norms) + ssm slack.
+            const capacity_estimate: u32 = @intCast(64 +
+                4 * cfg.n_experts_used +
+                @as(usize, 8) * cfg.n_layers +
+                @as(usize, 8) * cfg.n_layers);
+            if (shim.mtl_rset_create(ctx, capacity_estimate)) |rs| {
+                self.addScratchToResidencySet(rs);
+                shim.mtl_rset_commit_and_request(rs);
+                self.scratch_rset = rs;
+                log.info("Metal engine wired scratch + KV cache + norm buffers into MTLResidencySet", .{});
+            } else {
+                log.warn("Metal engine: scratch MTLResidencySet creation failed; scratch remains pageable", .{});
+            }
+        }
+
         return self;
+    }
+
+    /// Add every persistently-allocated engine buffer to the given residency
+    /// set. Buffers with null handles (uninitialized optionals or Gemma
+    /// SWA-only layers) are skipped by `mtl_rset_add_buffer`.
+    fn addScratchToResidencySet(self: *InferenceEngine, rs: *shim.MetalRSet) void {
+        const add = struct {
+            fn one(set: *shim.MetalRSet, buf: *const MetalBuffer) void {
+                if (buf.handle) |h| shim.mtl_rset_add_buffer(set, h);
+            }
+        }.one;
+
+        add(rs, &self.hidden_buf);
+        add(rs, &self.residual_buf);
+        add(rs, &self.norm_buf);
+        add(rs, &self.q_buf);
+        add(rs, &self.k_buf);
+        add(rs, &self.v_buf);
+        add(rs, &self.attn_out_buf);
+        add(rs, &self.gate_buf);
+        add(rs, &self.up_buf);
+        add(rs, &self.swiglu_buf);
+        add(rs, &self.down_buf);
+        add(rs, &self.moe_out_buf);
+        add(rs, &self.router_logits_buf);
+        add(rs, &self.router_output_buf);
+        add(rs, &self.logits_buf);
+        add(rs, &self.logits_readback_buf);
+        add(rs, &self.argmax_buf);
+        add(rs, &self.embed_staging);
+        add(rs, &self.lm_head_private_buf);
+        add(rs, &self.expert_ids_buf);
+        add(rs, &self.expert_gate_batch_buf);
+        add(rs, &self.expert_up_batch_buf);
+        add(rs, &self.expert_swiglu_batch_buf);
+        add(rs, &self.expert_down_batch_buf);
+
+        for (self.expert_gate_bufs) |*b| add(rs, b);
+        for (self.expert_up_bufs) |*b| add(rs, b);
+        for (self.expert_swiglu_bufs) |*b| add(rs, b);
+        for (self.expert_down_bufs) |*b| add(rs, b);
+
+        for (self.kv_k_cache) |*b| add(rs, b);
+        for (self.kv_v_cache) |*b| add(rs, b);
+        add(rs, &self.page_table_buf);
+        add(rs, &self.attn_sinks_buf);
+
+        for (self.attn_norm_bufs) |*b| add(rs, b);
+        for (self.attn_q_norm_bufs) |*b| add(rs, b);
+        for (self.attn_k_norm_bufs) |*b| add(rs, b);
+        for (self.post_attn_norm_bufs) |*b| add(rs, b);
+        for (self.ffn_norm_bufs) |*b| add(rs, b);
+        for (self.post_ffn_norm_bufs) |*b| add(rs, b);
+        add(rs, &self.final_norm_gpu);
+        add(rs, &self.unit_rms_norm_weights);
+        add(rs, &self.rope_freq_buf);
+        add(rs, &self.rope_variant_freq_buf);
+
+        if (self.ssm_conv_state_bufs) |bufs| for (bufs) |*b| add(rs, b);
+        if (self.ssm_state_bufs) |bufs| for (bufs) |*b| add(rs, b);
+        if (self.ssm_conv_kernel_bufs) |bufs| for (bufs) |*b| add(rs, b);
+        if (self.ssm_dt_bias_bufs) |bufs| for (bufs) |*b| add(rs, b);
+        if (self.ssm_a_bufs) |bufs| for (bufs) |*b| add(rs, b);
+        if (self.ssm_norm_weight_bufs) |bufs| for (bufs) |*b| add(rs, b);
+
+        if (self.private_ssm_qkv_bufs) |bufs| for (bufs) |*b| add(rs, b);
+        if (self.private_ssm_gate_bufs) |bufs| for (bufs) |*b| add(rs, b);
+        if (self.private_ssm_out_bufs) |bufs| for (bufs) |*b| add(rs, b);
     }
 
     /// Release all GPU buffers, pipelines, and associated resources.
     pub fn deinit(self: *InferenceEngine) void {
+        // The scratch residency set holds (retained) MTLBuffer references.
+        // End its residency before freeing the underlying buffers so Metal
+        // stops tracking them first (matches loader_metal.zig:Model.deinit
+        // ordering).
+        if (self.scratch_rset) |rs| {
+            shim.mtl_rset_free(rs);
+            self.scratch_rset = null;
+        }
         metal_buffer.freeBuffer(&self.hidden_buf);
         metal_buffer.freeBuffer(&self.residual_buf);
         metal_buffer.freeBuffer(&self.norm_buf);
