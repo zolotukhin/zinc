@@ -17,7 +17,7 @@ const jsonLd = {
     {
       '@type': 'SoftwareApplication',
       name: 'ZINC',
-      description: 'LLM inference engine for AMD GPUs and Apple Silicon, built with Zig, Vulkan compute shaders, and Metal. 37.95 tok/s on RDNA4 and 35.61 tok/s on Apple M4 Max for the 35B model.',
+      description: 'LLM inference engine for AMD GPUs and Apple Silicon, built with Zig, Vulkan compute shaders, and Metal. 103.72 tok/s on RDNA4 and 46.36 tok/s on Apple M4 Max for the 35B model.',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'Linux, macOS',
       url: `${siteUrl}/zinc`,
@@ -53,7 +53,7 @@ const jsonLd = {
           name: 'What performance does ZINC achieve on RDNA4 and Apple Silicon?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode number is 37.95 tok/s on Qwen3.5-35B-A3B-UD-Q4_K_XL (26.3 ms/tok). On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.5-35B-A3B-UD-Q4_K_XL measures 35.61 tok/s in the Metal benchmark and about 34.74 tok/s through raw HTTP /v1/completions.',
+            text: 'On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode number is 103.72 tok/s on Qwen3.5-35B-A3B-UD-Q4_K_XL — 1.07x llama.cpp on the same machine. On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.5-35B-A3B-UD-Q4_K_XL measures 46.36 tok/s decode in the Metal benchmark.',
           },
         },
         {
@@ -73,7 +73,7 @@ const jsonLd = {
 
 <BaseLayout
   title="ZINC — LLM Inference Engine"
-  description="ZINC is a local LLM inference engine for AMD GPUs and Apple Silicon. 37.95 tok/s on RDNA4 and 35.61 tok/s on Apple M4 Max for the 35B model, with hand-tuned Vulkan and Metal backends."
+  description="ZINC is a local LLM inference engine for AMD GPUs and Apple Silicon. 103.72 tok/s on RDNA4 and 46.36 tok/s on Apple M4 Max for the 35B model, with hand-tuned Vulkan and Metal backends."
   keywords="ZINC, LLM inference engine, AMD GPU, RDNA4, RDNA3, RX 9070 XT, RX 7900 XTX, Radeon AI PRO R9700, Vulkan compute, Zig, TurboQuant, KV cache compression, vLLM alternative, llama.cpp alternative, ROCm alternative, OpenAI compatible API, local AI, continuous batching, paged KV cache, GGUF, LLaMA, Qwen, Mistral, Mamba"
   jsonLd={jsonLd}
 >
@@ -138,14 +138,18 @@ const jsonLd = {
 
     <table>
       <thead>
-        <tr><th>GPU</th><th>Model</th><th>Path</th><th>Result</th></tr>
+        <tr><th>GPU</th><th>Model</th><th>Path</th><th>ZINC</th><th>llama.cpp</th></tr>
       </thead>
       <tbody>
-        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>CLI plain decode</td><td>37.95 tok/s (26.3 ms/tok)</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>decode</td><td><strong>103.72 tok/s</strong></td><td>96.76 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen3.6-35B-A3B-UD-Q4_K_XL</td><td>decode</td><td>99.40 tok/s</td><td>104.48 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Gemma 4 31B (dense)</td><td>decode</td><td><strong>44.53 tok/s</strong></td><td>32.17 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>GPT-OSS 20B</td><td>decode</td><td>83.41 tok/s</td><td>181.72 tok/s</td></tr>
+        <tr><td><strong>AI PRO R9700</strong></td><td>Qwen 3 8B (dense)</td><td>prefill</td><td><strong>115.85 tok/s</strong></td><td>84.73 tok/s</td></tr>
       </tbody>
     </table>
 
-    <p>These numbers are CLI plain decode (128-token runs, single-stream, <code>RADV_PERFTEST=coop_matrix</code>). Measured 2026-03-31 on the RDNA4 test node with <code>zig build -Doptimize=ReleaseFast</code>.</p>
+    <p>Median tok/s across the perf suite's runs (2026-05-02 refresh) on the RDNA4 test node with <code>zig build -Doptimize=ReleaseFast</code> and <code>RADV_PERFTEST=coop_matrix</code>. Bold rows are where ZINC currently beats llama.cpp on the same hardware. Full breakdown: <a href="/zinc/performance">/zinc/performance</a>.</p>
 
     <h2>Performance on Apple Silicon</h2>
 
@@ -153,17 +157,18 @@ const jsonLd = {
 
     <table>
       <thead>
-        <tr><th>Machine</th><th>Model</th><th>Path</th><th>Result</th></tr>
+        <tr><th>Machine</th><th>Model</th><th>Path</th><th>ZINC</th><th>llama.cpp</th></tr>
       </thead>
       <tbody>
-        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td><code>bench-metal</code> plain decode</td><td>35.61 tok/s avg, 35.58 tok/s median, 28.1 ms/tok</td></tr>
-        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td><code>bench-metal</code> prefill</td><td>36.2 tok/s avg, 36.6 tok/s median</td></tr>
-        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>raw HTTP <code>/v1/completions</code>, <code>c=1</code></td><td>34.74 tok/s, 7.37s avg latency</td></tr>
-        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>raw HTTP <code>/v1/completions</code>, <code>c=4</code></td><td>34.71 tok/s aggregate, 18.45s avg latency, 28.40s p95</td></tr>
+        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Qwen3.5-35B-A3B-UD-Q4_K_XL</td><td>decode</td><td>46.36 tok/s</td><td>77.70 tok/s</td></tr>
+        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Qwen3.6-35B-A3B-UD-Q4_K_XL</td><td>decode</td><td>38.13 tok/s</td><td>79.88 tok/s</td></tr>
+        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Gemma 4 12B</td><td>decode</td><td>43.68 tok/s</td><td>92.17 tok/s</td></tr>
+        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>Qwen 3 8B (dense)</td><td>decode</td><td>32.74 tok/s</td><td>83.67 tok/s</td></tr>
+        <tr><td><strong>Mac Studio (M4 Max)</strong></td><td>GPT-OSS 20B</td><td>decode</td><td>25.98 tok/s</td><td>119.85 tok/s</td></tr>
       </tbody>
     </table>
 
-    <p>Those Apple numbers are for the exact machine above, not a generic "Apple Silicon" average. Short chat completions are slower and more prompt-dependent than the raw decode path, so the table keeps the API comparison on <code>/v1/completions</code>.</p>
+    <p>Those Apple numbers are for the exact machine above (2026-05-02 refresh), not a generic "Apple Silicon" average. Metal decode is closing the gap on the larger A3B models; the Gemma 4 31B path is the active optimization target. Full breakdown including prefill: <a href="/zinc/performance">/zinc/performance</a>.</p>
 
     <h2>What ZINC does</h2>
 
