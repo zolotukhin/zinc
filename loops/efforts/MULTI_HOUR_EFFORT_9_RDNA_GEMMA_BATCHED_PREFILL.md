@@ -10,7 +10,7 @@ Root cause of the 60+ absolute-diff validate divergence was twofold:
 
 1. **Missing V RMS norm.** Per-token applies a plain unit-weight RMS norm
    to V on every Gemma 4 layer (matches forward_metal.zig and llama.cpp's
-   gemma3 graph). Batched was skipping this entirely.
+   gemma graph). Batched was skipping this entirely.
 2. **V aliased to scratch_k on full-attn layers.** Gemma 4's full-attention
    layers omit `attn_v` and expect V to equal the raw K projection. Batched
    was feeding scratch_k directly into the KV cache write and flash-attn as

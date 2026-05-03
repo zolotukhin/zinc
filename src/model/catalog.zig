@@ -328,10 +328,6 @@ test "find returns null for unknown model" {
     try std.testing.expect(find("nonexistent-model-id") == null);
 }
 
-test "removed qwen35 2B managed id is absent from catalog" {
-    try std.testing.expect(find("qwen35-2b-q4k-m") == null);
-}
-
 test "find returns known entry" {
     const entry = find("qwen3-8b-q4k-m") orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("Qwen3 8B Q4_K_M", entry.display_name);

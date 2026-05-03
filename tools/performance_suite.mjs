@@ -18,10 +18,7 @@ const DEFAULT_RDNA_WORKDIR = "/root/zinc";
 const DEFAULT_RDNA_MODEL_ROOT = "/root/models";
 const TARGET_ORDER = ["rdna", "metal"];
 const MAX_CAPTURE_CHARS = 256_000;
-const PUBLIC_BENCHMARK_EXCLUDED_MODEL_IDS = new Set([
-  "qwen35-2b-q4k-m",
-  "gemma-3-12b-it-q4k-m",
-]);
+const PUBLIC_BENCHMARK_EXCLUDED_MODEL_IDS = new Set();
 
 function modelPath(root, dir) {
   return path.join(root, dir, "model.gguf");

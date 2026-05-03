@@ -24,7 +24,7 @@ const breadcrumbItems = [
 ];
 
 const scenarioOrder = ['core', 'context-medium', 'context-long', 'decode-extended'];
-const hiddenBenchmarkModels = new Set(['qwen35-2b-q4k-m']);
+const hiddenBenchmarkModels = new Set<string>();
 const scenarioMeta: Record<string, { label: string; short: string; eyebrow: string; description: string }> = {
   core: {
     label: 'Quick Answer',
