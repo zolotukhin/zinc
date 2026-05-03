@@ -1507,7 +1507,7 @@ async function prepareRdna(args, creds) {
     console.log("Stopping pre-existing llama-server processes on RDNA node...");
     const remote = [
       "systemctl stop llama-server 2>/dev/null || true",
-      "pkill -9 -f llama-server 2>/dev/null || true",
+      "pkill -9 -x llama-server 2>/dev/null || true",
       "sleep 2",
       "echo 'cleared'",
     ].join(" && ");
