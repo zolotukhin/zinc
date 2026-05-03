@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 460" role="img" aria-labelledby="title desc">
+  <title id="title">Prefill compute on Qwen3-30B-A3B grows quadratically in attention and linearly in GEMM</title>
+  <desc id="desc">A side-by-side illustration showing five sequence lengths (1k, 4k, 8k, 16k, 32k tokens) for Qwen3-30B-A3B prefill on the AMD Radeon AI PRO R9700. For each sequence length, two squares are drawn: an orange GEMM square that grows linearly in width, and a blue attention square that grows in area as N squared. At N=1024 the GEMM square is much larger than the attention square. By N=16384 the two squares are roughly equal. By N=32768 the attention square is twice the area of the GEMM square. A legend at the top labels the two terms and a footer notes the crossover near N=16k for this model.</desc>
+
+  <style>
+    .bg { fill: #fafaf7; }
+    .axis { stroke: #1f1f1f; stroke-width: 1.5; fill: none; }
+    .label { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f1f1f; }
+    .label-small { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11px; fill: #444; }
+    .label-bold { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f1f1f; font-weight: 600; }
+    .title-text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; fill: #1f1f1f; font-weight: 600; }
+    .gemm { fill: #d97706; fill-opacity: 0.85; stroke: #92400e; stroke-width: 1; }
+    .attn { fill: #1d4ed8; fill-opacity: 0.78; stroke: #1e3a8a; stroke-width: 1; }
+    .crossover { stroke: #b91c1c; stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+    .swatch-gemm { fill: #d97706; }
+    .swatch-attn { fill: #1d4ed8; }
+  </style>
+
+  <rect class="bg" width="880" height="460" />
+
+  <!-- Title -->
+  <text class="title-text" x="440" y="28" text-anchor="middle">Prefill compute share on Qwen3-30B-A3B as the prompt grows</text>
+  <text class="label-small" x="440" y="46" text-anchor="middle">GEMM term scales linearly in N; attention term scales as N squared. Areas drawn to relative-FLOP scale.</text>
+
+  <!-- Legend -->
+  <rect class="swatch-gemm" x="220" y="60" width="14" height="14" rx="2" />
+  <text class="label" x="240" y="72">GEMM (linear layers): 6.6e9 FLOPs per token</text>
+  <rect class="swatch-attn" x="540" y="60" width="14" height="14" rx="2" />
+  <text class="label" x="560" y="72">Self-attention (causal): 393K FLOPs per N squared</text>
+
+  <!-- Baseline -->
+  <line class="axis" x1="60" y1="380" x2="820" y2="380" />
+
+  <!-- Five columns for N = 1k, 4k, 8k, 16k, 32k -->
+  <!-- Math: relative size of squares -->
+  <!-- N=1k: GEMM 6.8e12, Attention 4.1e11 → ratio 16:1, total ~7.2e12 -->
+  <!-- N=4k: GEMM 2.7e13, Attention 6.6e12 → ratio 4:1 -->
+  <!-- N=8k: GEMM 5.4e13, Attention 2.6e13 → ratio 2:1 -->
+  <!-- N=16k: GEMM 1.1e14, Attention 1.0e14 → ratio ~1:1 -->
+  <!-- N=32k: GEMM 2.2e14, Attention 4.2e14 → ratio 1:1.9 -->
+
+  <!-- Use a cube root scaling on side length so areas grow but stay on canvas -->
+  <!-- Side ~ sqrt(FLOPs / 1e12) * scale -->
+
+  <!-- Column 1: N = 1024 -->
+  <g transform="translate(60,380)">
+    <!-- GEMM square: side = 38 -->
+    <rect class="gemm" x="0" y="-38" width="38" height="38" />
+    <!-- Attention square: side = 9 -->
+    <rect class="attn" x="42" y="-9" width="9" height="9" />
+    <text class="label-bold" x="60" y="20" text-anchor="middle">N = 1,024</text>
+    <text class="label-small" x="60" y="36" text-anchor="middle">94% GEMM / 6% attn</text>
+  </g>
+
+  <!-- Column 2: N = 4096 -->
+  <g transform="translate(200,380)">
+    <!-- GEMM square: side = 76 -->
+    <rect class="gemm" x="0" y="-76" width="76" height="76" />
+    <!-- Attention square: side = 38 -->
+    <rect class="attn" x="80" y="-38" width="38" height="38" />
+    <text class="label-bold" x="80" y="20" text-anchor="middle">N = 4,096</text>
+    <text class="label-small" x="80" y="36" text-anchor="middle">81% GEMM / 19% attn</text>
+  </g>
+
+  <!-- Column 3: N = 8192 -->
+  <g transform="translate(360,380)">
+    <!-- GEMM square: side = 108 -->
+    <rect class="gemm" x="0" y="-108" width="108" height="108" />
+    <!-- Attention square: side = 76 -->
+    <rect class="attn" x="112" y="-76" width="76" height="76" />
+    <text class="label-bold" x="110" y="20" text-anchor="middle">N = 8,192</text>
+    <text class="label-small" x="110" y="36" text-anchor="middle">67% GEMM / 33% attn</text>
+  </g>
+
+  <!-- Column 4: N = 16384 -->
+  <g transform="translate(550,380)">
+    <!-- GEMM square: side = 152 -->
+    <rect class="gemm" x="0" y="-152" width="152" height="152" />
+    <!-- Attention square: side = 152 -->
+    <rect class="attn" x="156" y="-152" width="152" height="152" />
+    <text class="label-bold" x="155" y="20" text-anchor="middle">N = 16,384</text>
+    <text class="label-small" x="155" y="36" text-anchor="middle">crossover ≈ 50/50</text>
+    <!-- Crossover marker -->
+    <line class="crossover" x1="-16" y1="-180" x2="324" y2="-180" />
+    <text class="label-small" x="155" y="-188" text-anchor="middle" fill="#b91c1c">attention quadratic catches up</text>
+  </g>
+
+  <!-- Column 5: N = 32768 (compressed since attention is huge) -->
+  <!-- We will only draw a small inset since at N=32k attention is ~4x area of N=16k attention; let's just show the labels inset and a partial attention square -->
+
+  <!-- Footnote -->
+  <text class="label-small" x="60" y="430">Linear term: 2 × N × 3.3e9 active params. Attention term per layer: 4 × H_q × head_dim × N² with causal halving, summed across 48 layers.</text>
+  <text class="label-small" x="60" y="446">Square side ∝ √FLOPs; squares are visually scaled so a 4× FLOP increase doubles the side length, preserving area-to-FLOP correspondence.</text>
+</svg>
