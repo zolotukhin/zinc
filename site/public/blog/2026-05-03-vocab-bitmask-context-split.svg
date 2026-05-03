@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 420" role="img" aria-labelledby="title desc">
+  <title id="title">The 151,936-entry vocab bitmask used by constrained decoding, before and after the adaptive cache split</title>
+  <desc id="desc">A two-row diagram comparing the naive per-step vocab bitmask used by llama.cpp's legacy GBNF path against the adaptive token mask cache used by XGrammar. The top row shows a single horizontal strip 151,936 cells wide, mostly red, with a sparse scattering of green cells representing the small set of grammar-valid tokens at one mid-decode JSON parser state. A label reads scan all 151,936 entries per token. The bottom row shows the same 151,936-cell strip split into two regions: a long dark grey region labeled context-independent mask cache, hit by a single state-keyed lookup, and a short red region labeled context-dependent tokens, resolved per step by walking the pushdown automaton against the small remaining set.</desc>
+
+  <style>
+    .bg { fill: #fafaf7; }
+    .label { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f1f1f; }
+    .label-small { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11px; fill: #444; }
+    .label-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; fill: #1f1f1f; }
+    .label-bold { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f1f1f; font-weight: 600; }
+    .title-text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; fill: #1f1f1f; font-weight: 600; }
+    .section-label { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; fill: #1f1f1f; font-weight: 600; }
+    .strip-bg-red { fill: #b91c1c; fill-opacity: 0.85; }
+    .strip-bg-grey { fill: #4b5563; fill-opacity: 0.92; }
+    .strip-bg-context { fill: #b91c1c; fill-opacity: 0.85; }
+    .valid-tick { stroke: #16a34a; stroke-width: 1.4; stroke-opacity: 0.95; }
+    .frame { fill: none; stroke: #1f1f1f; stroke-width: 1; }
+    .arrow-line { stroke: #1f1f1f; stroke-width: 1.2; fill: none; }
+    .swatch-red { fill: #b91c1c; fill-opacity: 0.85; }
+    .swatch-grey { fill: #4b5563; fill-opacity: 0.92; }
+    .swatch-green { fill: #16a34a; }
+    .divider { stroke: #1f1f1f; stroke-width: 1.5; stroke-dasharray: 3 3; }
+  </style>
+
+  <rect class="bg" width="880" height="420" />
+
+  <!-- Title -->
+  <text class="title-text" x="440" y="26" text-anchor="middle">The 151,936-entry vocab bitmask, before and after the adaptive cache split</text>
+  <text class="label-small" x="440" y="44" text-anchor="middle">Each strip represents the full Qwen3 vocabulary at a single mid-decode JSON parser state.</text>
+
+  <!-- Legend -->
+  <rect class="swatch-red" x="200" y="58" width="14" height="10" />
+  <text class="label-small" x="220" y="67">grammar-rejected</text>
+  <rect class="swatch-green" x="340" y="58" width="14" height="10" />
+  <text class="label-small" x="360" y="67">grammar-valid (a few dozen tokens)</text>
+  <rect class="swatch-grey" x="540" y="58" width="14" height="10" />
+  <text class="label-small" x="560" y="67">resolved by precomputed cache lookup</text>
+
+  <!-- TOP: Legacy GBNF path -->
+  <text class="section-label" x="60" y="108">Legacy GBNF walk: scan all 151,936 entries per decoded token</text>
+
+  <!-- Strip 1: red base with sparse green ticks -->
+  <rect class="strip-bg-red" x="60" y="120" width="760" height="46" />
+  <!-- Sparse valid-token ticks at scattered positions -->
+  <line class="valid-tick" x1="93" y1="122" x2="93" y2="164" />
+  <line class="valid-tick" x1="106" y1="122" x2="106" y2="164" />
+  <line class="valid-tick" x1="121" y1="122" x2="121" y2="164" />
+  <line class="valid-tick" x1="144" y1="122" x2="144" y2="164" />
+  <line class="valid-tick" x1="158" y1="122" x2="158" y2="164" />
+  <line class="valid-tick" x1="171" y1="122" x2="171" y2="164" />
+  <line class="valid-tick" x1="189" y1="122" x2="189" y2="164" />
+  <line class="valid-tick" x1="202" y1="122" x2="202" y2="164" />
+  <line class="valid-tick" x1="216" y1="122" x2="216" y2="164" />
+  <line class="valid-tick" x1="234" y1="122" x2="234" y2="164" />
+  <line class="valid-tick" x1="248" y1="122" x2="248" y2="164" />
+  <line class="valid-tick" x1="263" y1="122" x2="263" y2="164" />
+  <line class="valid-tick" x1="277" y1="122" x2="277" y2="164" />
+  <line class="valid-tick" x1="295" y1="122" x2="295" y2="164" />
+  <line class="valid-tick" x1="312" y1="122" x2="312" y2="164" />
+  <line class="valid-tick" x1="329" y1="122" x2="329" y2="164" />
+  <line class="valid-tick" x1="343" y1="122" x2="343" y2="164" />
+  <line class="valid-tick" x1="357" y1="122" x2="357" y2="164" />
+  <line class="valid-tick" x1="372" y1="122" x2="372" y2="164" />
+  <line class="valid-tick" x1="389" y1="122" x2="389" y2="164" />
+  <line class="valid-tick" x1="406" y1="122" x2="406" y2="164" />
+  <line class="valid-tick" x1="423" y1="122" x2="423" y2="164" />
+  <line class="valid-tick" x1="441" y1="122" x2="441" y2="164" />
+  <line class="valid-tick" x1="458" y1="122" x2="458" y2="164" />
+  <line class="valid-tick" x1="473" y1="122" x2="473" y2="164" />
+  <line class="valid-tick" x1="488" y1="122" x2="488" y2="164" />
+  <line class="valid-tick" x1="502" y1="122" x2="502" y2="164" />
+  <line class="valid-tick" x1="517" y1="122" x2="517" y2="164" />
+  <line class="valid-tick" x1="534" y1="122" x2="534" y2="164" />
+  <line class="valid-tick" x1="551" y1="122" x2="551" y2="164" />
+  <line class="valid-tick" x1="568" y1="122" x2="568" y2="164" />
+  <line class="valid-tick" x1="582" y1="122" x2="582" y2="164" />
+  <line class="valid-tick" x1="595" y1="122" x2="595" y2="164" />
+  <line class="valid-tick" x1="611" y1="122" x2="611" y2="164" />
+  <line class="valid-tick" x1="628" y1="122" x2="628" y2="164" />
+  <line class="valid-tick" x1="641" y1="122" x2="641" y2="164" />
+  <line class="valid-tick" x1="657" y1="122" x2="657" y2="164" />
+  <line class="valid-tick" x1="672" y1="122" x2="672" y2="164" />
+  <line class="valid-tick" x1="688" y1="122" x2="688" y2="164" />
+  <line class="valid-tick" x1="704" y1="122" x2="704" y2="164" />
+  <line class="valid-tick" x1="721" y1="122" x2="721" y2="164" />
+  <line class="valid-tick" x1="736" y1="122" x2="736" y2="164" />
+  <line class="valid-tick" x1="751" y1="122" x2="751" y2="164" />
+  <line class="valid-tick" x1="767" y1="122" x2="767" y2="164" />
+  <line class="valid-tick" x1="784" y1="122" x2="784" y2="164" />
+  <line class="valid-tick" x1="801" y1="122" x2="801" y2="164" />
+  <rect class="frame" x="60" y="120" width="760" height="46" />
+
+  <!-- Token-index axis under strip 1 -->
+  <text class="label-small" x="60" y="184">token 0</text>
+  <text class="label-small" x="820" y="184" text-anchor="end">token 151,935</text>
+  <text class="label-mono" x="440" y="184" text-anchor="middle">cost per step: O(vocab) grammar walk &#8594; 4 to 8 ms on a 152k-token vocab</text>
+
+  <!-- TOP-DOWN ARROW between strips -->
+  <text class="section-label" x="440" y="218" text-anchor="middle">XGrammar splits the same mask into two pieces</text>
+  <line class="arrow-line" x1="440" y1="226" x2="440" y2="248" />
+  <polygon points="436,246 444,246 440,254" fill="#1f1f1f" />
+
+  <!-- BOTTOM: XGrammar adaptive cache split -->
+  <text class="section-label" x="60" y="278">Adaptive token mask cache: state-keyed lookup over 95+ percent of the vocab; tiny remainder runs the parser</text>
+
+  <!-- Strip 2: long grey context-independent + short red context-dependent.
+       Split at ~95% of width: 760 * 0.96 = 729.6 -> 730 -->
+  <rect class="strip-bg-grey" x="60" y="290" width="730" height="46" />
+  <rect class="strip-bg-context" x="790" y="290" width="30" height="46" />
+  <line class="divider" x1="790" y1="284" x2="790" y2="346" />
+  <rect class="frame" x="60" y="290" width="760" height="46" />
+
+  <!-- Region labels under strip 2 -->
+  <text class="label-bold" x="60" y="356">context-independent mask cache</text>
+  <text class="label-small" x="60" y="372">precomputed per (grammar, tokenizer); one bitset lookup per step</text>
+
+  <text class="label-bold" x="820" y="356" text-anchor="end">context-dependent</text>
+  <text class="label-small" x="820" y="372" text-anchor="end">walked against pushdown automaton</text>
+
+  <!-- Per-step cost annotation -->
+  <text class="label-mono" x="440" y="396" text-anchor="middle">cost per step: O(state) cache hit + O(small) parser walk &#8594; 30 to 50 us, independent of vocab size</text>
+  <text class="label-small" x="440" y="412" text-anchor="middle">XGrammar paper, MLC team, November 2024. llguidance reaches the same neighborhood with a Rust Earley parser and no precompile step.</text>
+</svg>
