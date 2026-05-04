@@ -1,19 +1,27 @@
 #version 460
+// Vec4-coalesced scale-accumulate: a[i] += scale * b[i], 4 elements per thread.
+// Each thread issues one 16-byte ds_read_b128 / vmem_load_dword_x4 instead of
+// four scalar ones; on RDNA4 L1 this reduces the residual-add transaction
+// count by 4× per dispatch. Caller must pass N divisible by 4 — every
+// scale_accumulate caller in this tree feeds either hidden_dim (always
+// divisible by 4 for the supported models — Qwen3.5/3.6/Gemma 4 all use
+// hidden_dim ∈ {2048, 3584, 4096, …}) or n_tokens × hidden_dim, so the
+// invariant holds without runtime checks.
+
 layout(local_size_x = 64) in;
 
-// a[i] += scale * b[i]
-layout(set = 0, binding = 0) buffer Accum { float a[]; };
-layout(set = 0, binding = 1) readonly buffer Src { float b[]; };
+layout(set = 0, binding = 0) buffer Accum         { vec4 a_v4[]; };
+layout(set = 0, binding = 1) readonly buffer Src  { vec4 b_v4[]; };
 
 layout(push_constant) uniform PC {
-    uint N;
+    uint N;          // total f32 elements (must be divisible by 4)
     uint scale_bits; // float reinterpreted as uint
 };
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-    if (i < N) {
-        float scale = uintBitsToFloat(scale_bits);
-        a[i] += scale * b[i];
-    }
+    uint idx_v4 = gl_GlobalInvocationID.x;
+    uint N_v4 = N >> 2;
+    if (idx_v4 >= N_v4) return;
+    float scale = uintBitsToFloat(scale_bits);
+    a_v4[idx_v4] += vec4(scale) * b_v4[idx_v4];
 }

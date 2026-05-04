@@ -116,71 +116,60 @@ void main() {
     uint v_offset = 2 * qk_dim + h * head_v_dim;
 
     // Load the active Q/K slice. Elements beyond k_len are never read.
+    // Fuse Q and K loads into a single iteration so the compiler can issue
+    // both LDS writes back-to-back per loop iter.
     for (uint i = tid; i < k_len; i += 64) {
         s_q[i] = conv_out[q_offset + i];
-    }
-    for (uint i = tid; i < k_len; i += 64) {
         s_k[i] = conv_out[k_offset + i];
     }
     barrier();
 
     // --- Step 2: L2 normalize Q and K, scale Q by 1/sqrt(d_state) ---
-    // L2 normalize Q
-    {
-        float partial = 0.0;
-        for (uint i = tid; i < k_len; i += 64) {
-            partial += s_q[i] * s_q[i];
-        }
-        partial = subgroupAdd(partial);
-        if (gl_NumSubgroups > 1u) {
-            if (gl_SubgroupInvocationID == 0u) {
-                s_reduce[gl_SubgroupID] = partial;
-            }
-            barrier();
-            if (tid == 0u) {
-                float merged = 0.0;
-                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
-                    merged += s_reduce[sg];
-                }
-                s_reduce_scalar = merged;
-            }
-            barrier();
-            partial = s_reduce_scalar;
-        }
-        float inv_norm = inversesqrt(max(partial, 1e-12));
-        float q_scale = inv_norm / sqrt(float(d_state));
-        for (uint i = tid; i < k_len; i += 64) {
-            s_q[i] *= q_scale;
-        }
+    // Fused Q + K L2 normalize: one combined sum-sq pass + one combined scale
+    // pass. Each thread reads s_q[i] and s_k[i] together and accumulates two
+    // partials, halving the LDS-read iteration count vs the two-pass form
+    // and letting the compiler pipeline both subgroupAdds. Saves one
+    // intra-kernel barrier on the wave64 fast path (no synchronization is
+    // needed between the sum-sq and scale passes since each thread only
+    // writes back its own s_q/s_k slots).
+    float partial_q = 0.0;
+    float partial_k = 0.0;
+    for (uint i = tid; i < k_len; i += 64) {
+        float qi = s_q[i];
+        float ki = s_k[i];
+        partial_q += qi * qi;
+        partial_k += ki * ki;
     }
-    barrier();
-
-    // L2 normalize K
-    {
-        float partial = 0.0;
-        for (uint i = tid; i < k_len; i += 64) {
-            partial += s_k[i] * s_k[i];
+    partial_q = subgroupAdd(partial_q);
+    partial_k = subgroupAdd(partial_k);
+    if (gl_NumSubgroups > 1u) {
+        // Stash both partials at distinct slots so a single barrier covers
+        // both reductions.
+        if (gl_SubgroupInvocationID == 0u) {
+            s_reduce[gl_SubgroupID] = partial_q;
+            s_reduce[gl_SubgroupID + 4u] = partial_k;
         }
-        partial = subgroupAdd(partial);
-        if (gl_NumSubgroups > 1u) {
-            if (gl_SubgroupInvocationID == 0u) {
-                s_reduce[gl_SubgroupID] = partial;
+        barrier();
+        if (tid == 0u) {
+            float merged_q = 0.0;
+            float merged_k = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                merged_q += s_reduce[sg];
+                merged_k += s_reduce[sg + 4u];
             }
-            barrier();
-            if (tid == 0u) {
-                float merged = 0.0;
-                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
-                    merged += s_reduce[sg];
-                }
-                s_reduce_scalar = merged;
-            }
-            barrier();
-            partial = s_reduce_scalar;
+            s_reduce_scalar = merged_q;
+            s_reduce[8] = merged_k;
         }
-        float inv_norm = inversesqrt(max(partial, 1e-12));
-        for (uint i = tid; i < k_len; i += 64) {
-            s_k[i] *= inv_norm;
-        }
+        barrier();
+        partial_q = s_reduce_scalar;
+        partial_k = s_reduce[8];
+    }
+    float inv_norm_q = inversesqrt(max(partial_q, 1e-12));
+    float inv_norm_k = inversesqrt(max(partial_k, 1e-12));
+    float q_scale = inv_norm_q / sqrt(float(d_state));
+    for (uint i = tid; i < k_len; i += 64) {
+        s_q[i] *= q_scale;
+        s_k[i] *= inv_norm_k;
     }
     barrier();
 

@@ -783,6 +783,8 @@ pub const ElementwiseDispatch = struct {
     }
 
     /// Record a scale-accumulate dispatch: a[i] += scale * b[i].
+    /// Vec4-coalesced: each thread handles one vec4 (4 f32 elements). Caller
+    /// must pass n_elements divisible by 4; every in-tree caller already does.
     pub fn recordScaleAcc(
         self: *const ElementwiseDispatch,
         cmd: *CommandBuffer,
@@ -793,7 +795,7 @@ pub const ElementwiseDispatch = struct {
     ) !void {
         const pip = if (self.pipeline_scale_acc) |*p| p else return error.ShaderNotLoaded;
         const push = ScaleAccPush{ .N = n_elements, .scale_bits = @bitCast(scale) };
-        const workgroups = (n_elements + 63) / 64;
+        const workgroups = (n_elements + 255) / 256;
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);
     }
 

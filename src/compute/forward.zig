@@ -3679,7 +3679,7 @@ pub const InferenceEngine = struct {
                 accum_size,
                 src_buf,
                 src_size,
-                (n_elements + 63) / 64,
+                (n_elements + 255) / 256,
                 1,
                 1,
             );
@@ -3717,7 +3717,7 @@ pub const InferenceEngine = struct {
                 src_buf,
                 src_offset,
                 src_size,
-                (n_elements + 63) / 64,
+                (n_elements + 255) / 256,
                 1,
                 1,
             );
