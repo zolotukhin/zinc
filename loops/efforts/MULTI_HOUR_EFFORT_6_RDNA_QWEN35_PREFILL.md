@@ -1,5 +1,97 @@
 # Optimization 6: RDNA Prefill Recovery for Qwen3.5/3.6-35B-A3B
 
+## PIVOT 2026-05-04 (after 22 cycles of the second run)
+
+**Best: 119.20 tok/s at cycle 15** (commit `7370398`). 22 cycles, 2 kept,
++3.5% over the run's 115.19 baseline. Both keeps are Q8_0 fusion in the
+shared-expert / SSM path:
+
+- cycle 11 (+3.01 tok/s): fused gate+up+SwiGLU shared-expert dispatch
+- cycle 15 (+1.00 tok/s): fused shared-expert down + sigmoid_scale_acc
+
+Phase budget refresh after cycle 15: **ssm = 803 ms is now the largest
+bucket**, displacing MoE (was 884 ms in the cycle-50 snapshot).
+llama.cpp reference still ~180 tok/s ⇒ we need **+50% more** to win.
+Micro-restructures alone will not bridge that.
+
+### What's banned for the next 10 cycles (proven flat in this run)
+
+Do not propose another variant of these unless the cycle prompt cites
+new structural evidence the loop has not seen:
+
+- **MoE inner-shader thread shape variants** — cycles 1, 2, 6, 10,
+  19, 20, 22 all measured flat or negative on dmmv_q4k_moe_kpar,
+  dmmv_q4k_moe_fused_down_acc, dmmv_q4k_fused_gate_up_moe,
+  dmmv_q5k_moe_fused_down_acc with 32t×Nr, NUM_ROWS halving, and
+  row/block swap. Y=n_used already saturates wave count; cache-line
+  and occupancy levers cannot move a bandwidth bottleneck on these
+  shaders.
+- **Register-cache LICM on attention / conv / norm shaders** —
+  cycles 9, 13, 14, 17, 18, 21 all flat. The values are not re-read
+  enough to amortize VGPR pressure on RDNA4.
+- **Vec4 coalesce passes on already-shipped patterns** — cycles 1, 5.
+  The cycle-42/46/50 round already harvested the easy ones.
+
+### What the next 10 cycles must attack — Bet A (SSM dispatch fusion)
+
+The 803 ms SSM bucket decomposes (per ZINC_PREFILL_PROFILE=1 trail):
+ssm_delta ~400 ms, ssm_proj ~325 ms, ssm_out + ssm_gnorm ~80 ms. The
+structural lever is **dispatch fusion**: today every SSM op runs once
+per token via the per-token decodeStep loop. llama.cpp's `ssm_scan.comp`
+folds the token loop **inside one dispatch** and keeps state in
+registers, eliminating ~153× state-buffer round-trips per layer per
+head. This is not parallel-scan — it's a sequential `for (i=0; i<n_tok; i++)`
+inside the shader. Cycle 16 of this run came within 0.21 tok/s of
+keeping a fused wqkv + ssm_conv1d shader (119.41 vs 119.20). The
+direction is right; the cycles below break it into landable pieces.
+
+**Cycle landing order (each is one cycle, each is independently
+revertable, each has a measurable phase delta as the keep gate):**
+
+1. **A1 — Land cycle-16's fused wqkv+conv1d shader for real.** Re-run
+   it as a flag-default-on path; if the 0.21 tok/s gap was variance,
+   take it. If it regresses, identify which side (Q4_K vs Q8_0
+   variant) regressed and ship only the winning quant.
+   Keep gate: ssm_proj phase drops ≥10 ms in profile output.
+2. **A2 — Fuse ssm_conv1d + ssm_delta input read.** Today conv1d
+   writes to a buffer and ssm_delta reads it back. Fold the conv1d
+   output into ssm_delta's first read by passing the post-conv1d
+   buffer as ssm_delta's input directly (already true in some
+   topologies — verify and remove the intermediate barrier).
+   Keep gate: −1 dispatch + −1 barrier per SSM layer per token; ssm
+   bucket drops ≥15 ms.
+3. **A3 — Token-loop inside ssm_delta_net.comp** (the big one).
+   Replace per-token dispatch with one dispatch per layer per
+   prefill, with `n_tok` as a push constant and the recurrence loop
+   inside the shader. State stays in registers across iterations;
+   external state buffer is read once at i=0, written once at
+   i=n_tok-1. Validate via `ZINC_BATCHED_PREFILL=validate` against
+   per-token reference at tol=1e-3. **This is the largest single
+   lever in the entire effort.** Estimated upside: ssm_delta
+   400→120 ms.
+4. **A4 — Same transform on ssm_proj rms_norm + alpha + beta fused
+   shader** (cycle 17 attempted, regressed because state-buffer
+   round-trip persisted). With A3's pattern proven, the loop body is
+   the same structural transform.
+
+If A1-A4 each land their estimated saving (10 + 15 + 280 + 50 = 355
+ms), prefill goes from 1700 ms → 1345 ms ⇒ **115 → 145 tok/s**, with
+Bets B and C still in reserve to clear 180.
+
+### Loop discipline
+
+- After each accepted cycle, refresh ZINC_PREFILL_PROFILE=1 phase
+  numbers and write them into the cycle's selfAnalysis. The biggest
+  bucket should be the next cycle's target.
+- A "foundationKeep" cycle (no tok/s movement, infra only) is
+  permitted ONLY when it is a named precondition for A1-A4. Do not
+  accept foundationKeeps for hypothetical future bets.
+- If three consecutive cycles target SSM and revert, run one cycle
+  on Bet B (mul_mm_q4k SSM-proj wire-up) before returning. Do not
+  drift back into the banned MoE micro-restructure cycle.
+
+---
+
 ## TL;DR  (2026-04-26, after 50 autonomous-loop cycles)
 
 **Effort 6 has moved prefill from 78.11 → 90.24 tok/s (+15.5%) over 50
