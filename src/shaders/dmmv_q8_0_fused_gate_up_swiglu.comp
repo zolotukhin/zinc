@@ -1,0 +1,197 @@
+#version 460
+// ZINC — Q8_0 fused gate+up DMMV with inline SwiGLU activation.
+//
+// Q8_0 sibling of dmmv_q4k_fused_gate_up_swiglu.comp. Used for the
+// shared expert in MoE models where shared FFN weights are quantized
+// to Q8_0 (e.g. Qwen 3.5/3.6 35B-A3B). Replaces three sequential
+// dispatches (gate DMMV + up DMMV + SwiGLU) with one fused dispatch
+// that produces silu(gate) * up directly.
+//
+// Q8_0 block layout (32 elements, 34 bytes):
+//   [0..1]   f16 d   — block scale
+//   [2..33]  int8 qs — 32 signed 8-bit quantized values
+//
+// Dispatch: ((M+1)/2, 1, 1).
+//   gl_WorkGroupID.x → row pair within FFN inter_dim
+//
+// Bindings:
+//   0 W_gate   (Q8_0, M*K row-major)
+//   1 W_up     (Q8_0, same shape as W_gate)
+//   2 X        (input vector, f32 — ffn_norm_buf)
+//   3 swiglu   (output, f32, M elements — silu(gate) * up)
+//
+// Push: same DmmvPushConstants struct as dmmv_q4k_fused_gate_up_swiglu
+// (M, K, a_offset, x_offset, y_offset, acc_mode). acc_mode is ignored —
+// the fused output always overwrites swiglu[].
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint acc_mode;  // ignored; swiglu always overwrites
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixAGate { uint8_t a_gate_data[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixAUp   { uint8_t a_up_data[];   };
+layout(set = 0, binding = 2) readonly buffer VectorX     { float x_data[];        };
+layout(set = 0, binding = 3) writeonly buffer Swiglu     { float swiglu[];        };
+
+const uint NUM_ROWS = 2u;
+const uint Q8_0_BLOCK_SIZE = 32u;
+const uint Q8_0_BYTES = 34u;
+
+// Shared memory for cross-subgroup reduction (handles SIMD16/wave32/wave64).
+shared float s_sum_gate[4];
+shared float s_sum_up[4];
+
+float dot_q8_block_gate(const uint qs_off, const uint x_base) {
+    float block_sum = 0.0;
+    for (uint i = 0u; i < 8u; i++) {
+        const uint q_off = qs_off + i * 4u;
+        const uint x_off = x_base + i * 4u;
+        const ivec4 qv = ivec4(
+            int(int8_t(a_gate_data[q_off + 0u])),
+            int(int8_t(a_gate_data[q_off + 1u])),
+            int(int8_t(a_gate_data[q_off + 2u])),
+            int(int8_t(a_gate_data[q_off + 3u]))
+        );
+        const vec4 xv = vec4(
+            x_data[x_off + 0u],
+            x_data[x_off + 1u],
+            x_data[x_off + 2u],
+            x_data[x_off + 3u]
+        );
+        block_sum += dot(vec4(qv), xv);
+    }
+    return block_sum;
+}
+
+float dot_q8_block_up(const uint qs_off, const uint x_base) {
+    float block_sum = 0.0;
+    for (uint i = 0u; i < 8u; i++) {
+        const uint q_off = qs_off + i * 4u;
+        const uint x_off = x_base + i * 4u;
+        const ivec4 qv = ivec4(
+            int(int8_t(a_up_data[q_off + 0u])),
+            int(int8_t(a_up_data[q_off + 1u])),
+            int(int8_t(a_up_data[q_off + 2u])),
+            int(int8_t(a_up_data[q_off + 3u]))
+        );
+        const vec4 xv = vec4(
+            x_data[x_off + 0u],
+            x_data[x_off + 1u],
+            x_data[x_off + 2u],
+            x_data[x_off + 3u]
+        );
+        block_sum += dot(vec4(qv), xv);
+    }
+    return block_sum;
+}
+
+void main() {
+    uint wg_id = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint row0 = wg_id * NUM_ROWS;
+    uint row1 = row0 + 1u;
+
+    uint blocks_per_row = K / Q8_0_BLOCK_SIZE;
+
+    float sum_gate0 = 0.0;
+    float sum_gate1 = 0.0;
+    float sum_up0 = 0.0;
+    float sum_up1 = 0.0;
+
+    // Strided block loop: each thread handles blocks tid, tid+64, tid+128, ...
+    for (uint blk = tid; blk < blocks_per_row; blk += 64u) {
+        uint x_base = x_offset / 4u + blk * Q8_0_BLOCK_SIZE;
+
+        if (row0 < M) {
+            uint byte_off_g = a_offset + row0 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits_g = uint(a_gate_data[byte_off_g]) | (uint(a_gate_data[byte_off_g + 1u]) << 8);
+            float d_g = unpackHalf2x16(d_bits_g).x;
+            sum_gate0 += d_g * dot_q8_block_gate(byte_off_g + 2u, x_base);
+
+            uint byte_off_u = a_offset + row0 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits_u = uint(a_up_data[byte_off_u]) | (uint(a_up_data[byte_off_u + 1u]) << 8);
+            float d_u = unpackHalf2x16(d_bits_u).x;
+            sum_up0 += d_u * dot_q8_block_up(byte_off_u + 2u, x_base);
+        }
+
+        if (row1 < M) {
+            uint byte_off_g = a_offset + row1 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits_g = uint(a_gate_data[byte_off_g]) | (uint(a_gate_data[byte_off_g + 1u]) << 8);
+            float d_g = unpackHalf2x16(d_bits_g).x;
+            sum_gate1 += d_g * dot_q8_block_gate(byte_off_g + 2u, x_base);
+
+            uint byte_off_u = a_offset + row1 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits_u = uint(a_up_data[byte_off_u]) | (uint(a_up_data[byte_off_u + 1u]) << 8);
+            float d_u = unpackHalf2x16(d_bits_u).x;
+            sum_up1 += d_u * dot_q8_block_up(byte_off_u + 2u, x_base);
+        }
+    }
+
+    // Subgroup reduction
+    sum_gate0 = subgroupAdd(sum_gate0);
+    sum_gate1 = subgroupAdd(sum_gate1);
+    sum_up0 = subgroupAdd(sum_up0);
+    sum_up1 = subgroupAdd(sum_up1);
+
+    // Cross-subgroup reduction via shared memory (no-op on wave64).
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect()) {
+            // Pack 2 rows × 2 streams = 4 partials into shared memory.
+            // Use s_sum_gate[sg]    for row0 gate
+            //     s_sum_up[sg]      for row0 up
+            //     s_sum_gate[sg+2]  for row1 gate (reuse 4-slot array)
+            //     s_sum_up[sg+2]    for row1 up
+            s_sum_gate[gl_SubgroupID] = sum_gate0;
+            s_sum_up[gl_SubgroupID] = sum_up0;
+        }
+        barrier();
+        if (tid == 0u) {
+            sum_gate0 = s_sum_gate[0];
+            sum_up0 = s_sum_up[0];
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) {
+                sum_gate0 += s_sum_gate[sg];
+                sum_up0 += s_sum_up[sg];
+            }
+        }
+        barrier();
+        // Repeat for row1 (reuse the same shared slots).
+        if (subgroupElect()) {
+            s_sum_gate[gl_SubgroupID] = sum_gate1;
+            s_sum_up[gl_SubgroupID] = sum_up1;
+        }
+        barrier();
+        if (tid == 0u) {
+            sum_gate1 = s_sum_gate[0];
+            sum_up1 = s_sum_up[0];
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) {
+                sum_gate1 += s_sum_gate[sg];
+                sum_up1 += s_sum_up[sg];
+            }
+        }
+    }
+
+    if (tid == 0u) {
+        uint y_base = y_offset / 4u;
+        if (row0 < M) {
+            float silu_g = sum_gate0 / (1.0 + exp(-sum_gate0));
+            swiglu[y_base + row0] = silu_g * sum_up0;
+        }
+        if (row1 < M) {
+            float silu_g = sum_gate1 / (1.0 + exp(-sum_gate1));
+            swiglu[y_base + row1] = silu_g * sum_up1;
+        }
+    }
+}

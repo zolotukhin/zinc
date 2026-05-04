@@ -6148,12 +6148,41 @@ pub const InferenceEngine = struct {
                     const has_shared_expert = gate_shexp != null and up_shexp != null and down_shexp != null;
                     const shexp_size = @as(vk.c.VkDeviceSize, shexp_inter_dim) * @sizeOf(f32);
 
+                    // Effort-6 cycle-11: fuse the shared expert (gate DMMV + up DMMV
+                    // + SwiGLU) trio into one dispatch using the
+                    // dmmv_*_fused_gate_up_swiglu shaders (Q4_K shader is shared
+                    // with the dense FFN path; Q8_0 shader is new in this cycle
+                    // for Qwen 3.5/3.6 MoE shared experts). The fused dispatch
+                    // overlaps with MoE down (same as the current shared gate/up
+                    // overlap) but writes to gate_buf instead of swiglu_buf, since
+                    // swiglu_buf is being read concurrently by the MoE down DMMV.
+                    // The shared down DMMV later reads from gate_buf in this
+                    // path, eliminating one DMMV dispatch + one separate SwiGLU
+                    // dispatch per layer per token.
+                    const FusedShexpKind = enum { none, q4k, q8_0 };
+                    const fused_shexp_kind: FusedShexpKind = blk: {
+                        if (!has_shared_expert) break :blk .none;
+                        if (!self.use_fused_dense_ffn) break :blk .none;
+                        const g = gate_shexp orelse break :blk .none;
+                        const u = up_shexp orelse break :blk .none;
+                        if ((hidden_dim % 4) != 0) break :blk .none;
+                        if ((hidden_dim % 256) != 0) break :blk .none;
+                        if (g.info.type_ == .q4_k and u.info.type_ == .q4_k and
+                            self.dmmv.pipeline_q4k_fused_gate_up_swiglu != null) break :blk .q4k;
+                        if (g.info.type_ == .q8_0 and u.info.type_ == .q8_0 and
+                            self.dmmv.pipeline_q8_0_fused_gate_up_swiglu != null and
+                            (hidden_dim % 32) == 0) break :blk .q8_0;
+                        break :blk .none;
+                    };
+                    const fused_shexp_eligible = fused_shexp_kind != .none;
+
                     if (state.position == 0 and layer == 0) {
-                        log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s}", .{
+                        log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s} fused_shexp={s}", .{
                             if (gate_shexp) |t| @tagName(t.info.type_) else "none",
                             if (up_shexp) |t| @tagName(t.info.type_) else "none",
                             if (down_shexp) |t| @tagName(t.info.type_) else "none",
                             if (shexp_gate) |t| @tagName(t.info.type_) else "none",
+                            @tagName(fused_shexp_kind),
                         });
                     }
 
@@ -6228,9 +6257,35 @@ pub const InferenceEngine = struct {
                     // No buffer conflicts: MoE down reads swiglu_buf/writes down_buf
                     // (or fused: writes hidden_buf); shared gate/up read
                     // ffn_norm_buf/write gate_buf,up_buf,router_logits_buf.
+                    // When fused_shexp is eligible, one fused dispatch replaces
+                    // gate+up DMMV pair AND the later shared SwiGLU dispatch; the
+                    // fused output goes to gate_buf so it doesn't collide with
+                    // MoE down's concurrent swiglu_buf read.
                     if (has_shared_expert) {
-                        try self.dispatchDmmv(gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
-                        try self.dispatchDmmv(up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, shexp_inter_dim, hidden_dim);
+                        switch (fused_shexp_kind) {
+                            .q4k => try self.dispatchDmmvFusedGateUpSwiglu(
+                                gate_shexp.?,
+                                up_shexp.?,
+                                self.ffn_norm_buf,
+                                hidden_size,
+                                self.gate_buf,
+                                shexp_inter_dim,
+                                hidden_dim,
+                            ),
+                            .q8_0 => try self.dispatchDmmvFusedGateUpSwigluQ8_0(
+                                gate_shexp.?,
+                                up_shexp.?,
+                                self.ffn_norm_buf,
+                                hidden_size,
+                                self.gate_buf,
+                                shexp_inter_dim,
+                                hidden_dim,
+                            ),
+                            .none => {
+                                try self.dispatchDmmv(gate_shexp.?, self.ffn_norm_buf, hidden_size, self.gate_buf, shexp_inter_dim, hidden_dim);
+                                try self.dispatchDmmv(up_shexp.?, self.ffn_norm_buf, hidden_size, self.up_buf, shexp_inter_dim, hidden_dim);
+                            },
+                        }
                         if (shexp_gate) |sg| {
                             try self.dispatchDmmv(sg, self.ffn_norm_buf, hidden_size, self.router_logits_buf, 1, hidden_dim);
                         }
@@ -6285,7 +6340,9 @@ pub const InferenceEngine = struct {
                     // Overlap: dispatch shared expert SwiGLU alongside weighted_acc.
                     // No buffer conflicts: weighted_acc reads down_buf+router_output_buf/writes hidden_buf;
                     // SwiGLU reads gate_buf+up_buf/writes swiglu_buf.
-                    if (has_shared_expert) {
+                    // Skipped when fused_shexp_eligible — the fused gate+up dispatch
+                    // already produced silu(gate)*up directly into gate_buf.
+                    if (has_shared_expert and !fused_shexp_eligible) {
                         try self.dispatchFfnActivation(
                             self.gate_buf.handle,
                             self.gate_buf.size,
@@ -6304,9 +6361,13 @@ pub const InferenceEngine = struct {
                     // Shared expert down projection (run BEFORE post_ffw_norm for Gemma 4
                     // so that MoE + shared expert outputs are accumulated in moe_out_buf
                     // and normed together. Matches Metal forward_metal.zig:5110-5128.)
+                    // Reads from gate_buf when fused_shexp_eligible (the fused
+                    // dispatch wrote silu(gate)*up into gate_buf), otherwise from
+                    // swiglu_buf (the legacy SwiGLU dispatch's output).
                     if (has_shared_expert) {
                         const shared_down_phase = self.beginProfilePhase();
-                        try self.dispatchDmmv(down_shexp.?, self.swiglu_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
+                        const shexp_act_buf = if (fused_shexp_eligible) self.gate_buf else self.swiglu_buf;
+                        try self.dispatchDmmv(down_shexp.?, shexp_act_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
                         self.decode_cmd.computeBarrier();
                         self.endProfilePhase(.shared_down, shared_down_phase);
                     }
@@ -8018,6 +8079,46 @@ pub const InferenceEngine = struct {
             .acc_mode = 0,
         };
         // NUM_ROWS=2 in the shader; one workgroup per row pair.
+        const wg_x: u32 = (M + 1) / 2;
+        self.pushDispatch4(
+            pip,
+            std.mem.asBytes(&push),
+            gate_tensor.gpu_buffer.handle,
+            gate_tensor.gpu_buffer.size,
+            up_tensor.gpu_buffer.handle,
+            up_tensor.gpu_buffer.size,
+            input_buf.handle,
+            input_size,
+            swiglu_buf.handle,
+            swiglu_buf.size,
+            wg_x,
+            1,
+            1,
+        );
+    }
+
+    /// Q8_0 variant of dispatchDmmvFusedGateUpSwiglu. Same 4-binding
+    /// shape and push struct; used by the shared expert path on Qwen
+    /// 3.5 / 3.6 MoE packs where the shared FFN weights are Q8_0.
+    fn dispatchDmmvFusedGateUpSwigluQ8_0(
+        self: *InferenceEngine,
+        gate_tensor: *const LoadedTensor,
+        up_tensor: *const LoadedTensor,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
+        swiglu_buf: Buffer,
+        M: u32,
+        K: u32,
+    ) !void {
+        const pip = &(self.dmmv.pipeline_q8_0_fused_gate_up_swiglu orelse return error.ShaderNotLoaded);
+        const push = DmmvPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = 0,
+            .x_offset = 0,
+            .y_offset = 0,
+            .acc_mode = 0,
+        };
         const wg_x: u32 = (M + 1) / 2;
         self.pushDispatch4(
             pip,
