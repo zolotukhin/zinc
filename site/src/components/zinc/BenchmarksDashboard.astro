@@ -318,6 +318,29 @@ function formatRuns(runs: number | null | undefined, warmupRuns: number | null |
   return `${runs ?? 0} measured · ${warmupRuns ?? 0} warmup`;
 }
 
+const familyOrder = ['gemma', 'gpt-oss', 'llama', 'qwen 3 ', 'qwen 3.5', 'qwen 3.6'];
+function familyRank(family: string | undefined) {
+  const f = (family ?? '').toLowerCase().trim();
+  for (let i = 0; i < familyOrder.length; i++) {
+    if (f.startsWith(familyOrder[i].trim())) return i;
+  }
+  return familyOrder.length;
+}
+function modelSizeBillions(id: string) {
+  const m = id.match(/(\d+)b/i);
+  return m ? Number(m[1]) : 0;
+}
+function modelOrderKey(model: any): [number, number, string] {
+  return [familyRank(model.family), modelSizeBillions(model.id ?? ''), model.id ?? ''];
+}
+function compareModels(a: any, b: any) {
+  const ka = modelOrderKey(a);
+  const kb = modelOrderKey(b);
+  if (ka[0] !== kb[0]) return ka[0] - kb[0];
+  if (ka[1] !== kb[1]) return ka[1] - kb[1];
+  return ka[2].localeCompare(kb[2]);
+}
+
 function scenarioRows(target: any, scenarioId: string) {
   return [...target.models]
     .map((model: any) => ({
@@ -325,7 +348,7 @@ function scenarioRows(target: any, scenarioId: string) {
       scenario: scenarioForModel(model, scenarioId),
     }))
     .filter((row) => row.scenario != null)
-    .sort((a, b) => (decodeValue(b.scenario) ?? 0) - (decodeValue(a.scenario) ?? 0));
+    .sort((a, b) => compareModels(a.model, b.model));
 }
 
 function scenarioSummary(target: any, scenarioId: string) {
@@ -630,7 +653,7 @@ const jsonLd = {
                 <header class="board-head">
                   <div>
                     <h3>Head-to-Head</h3>
-                    <p>Sorted by ZINC decode. Overall includes end-to-end throughput and total latency for directional context; runner transport still differs between ZINC and llama.cpp.</p>
+                    <p>Models in canonical order (consistent across targets and scenarios). Overall includes end-to-end throughput and total latency for directional context; runner transport still differs between ZINC and llama.cpp.</p>
                   </div>
                   <div class="legend">
                     <span><i class="legend-swatch zinc"></i>ZINC</span>
@@ -647,11 +670,10 @@ const jsonLd = {
                         <th>Prefill</th>
                         <th>Decode</th>
                         <th>Overall</th>
-                        <th>Status</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map((row, rowIndex) => {
+                      {rows.map((row) => {
                         const zincPrompt = promptValue(row.scenario);
                         const baselinePrompt = baselinePromptValue(row.scenario);
                         const zincDecode = decodeValue(row.scenario);
@@ -663,23 +685,16 @@ const jsonLd = {
                         const promptRatio = promptRatioValue(row.scenario);
                         const decodeRatio = decodeRatioValue(row.scenario);
                         const endToEndRatio = endToEndRatioValue(row.scenario);
-                        const status = scenarioStatus(row.scenario);
                         const runCount = sampleCount(row.scenario?.zinc?.decode_tps) || sampleCount(row.scenario?.baseline?.decode_tps);
 
                         return (
                           <tr>
                             <th scope="row" class="model-cell">
                               <div class="model-row">
-                                <span class="rank-chip">{rowIndex + 1}</span>
                                 <div>
                                   <strong>{row.model.label}</strong>
-                                  <small>{formatMetric(promptTokensValue(row.scenario), 'tok prompt', 0)} · {formatMetric(row.scenario.max_tokens, 'tok cap', 0)} · {row.scenario.prompt_mode === 'chat' ? 'chat' : 'raw'} · {runCount || 0} runs</small>
+                                  <small>{formatMetric(promptTokensValue(row.scenario), 'tok prompt', 0)} · {formatMetric(row.scenario.max_tokens, 'tok cap', 0)} · {runCount || 0} runs</small>
                                 </div>
-                              </div>
-                              <div class="chip-row">
-                                <span class="chip">{row.model.family}</span>
-                                <span class="chip">{row.model.quant}</span>
-                                <span class="chip">{row.scenario.prompt_mode === 'chat' ? 'Chat' : 'Raw'}</span>
                               </div>
                             </th>
                             <td>
@@ -700,12 +715,9 @@ const jsonLd = {
                                     </div>
                                   </div>
                                   {hasValue(promptRatio) ? (
-                                    <div class="metric-footer">
+                                    <div class="metric-footer compact">
                                       <strong class:list={['ratio-pill', ratioTone(promptRatio)]}>{formatPercent(promptRatio)}</strong>
                                       <small>{formatSignedMetric(promptDeltaValue(row.scenario), 'tok/s')}</small>
-                                      <div class="meter-track">
-                                        <div class:list={['meter-fill', ratioTone(promptRatio)]} style={`width:${meterWidth(promptRatio)}%`}></div>
-                                      </div>
                                     </div>
                                   ) : (
                                     <div class="metric-missing">
@@ -739,12 +751,9 @@ const jsonLd = {
                                     </div>
                                   </div>
                                   {hasValue(decodeRatio) ? (
-                                    <div class="metric-footer">
+                                    <div class="metric-footer compact">
                                       <strong class:list={['ratio-pill', ratioTone(decodeRatio)]}>{formatPercent(decodeRatio)}</strong>
                                       <small>{formatSignedMetric(decodeDeltaValue(row.scenario), 'tok/s')}</small>
-                                      <div class="meter-track">
-                                        <div class:list={['meter-fill', ratioTone(decodeRatio)]} style={`width:${meterWidth(decodeRatio)}%`}></div>
-                                      </div>
                                     </div>
                                   ) : (
                                     <div class="metric-missing">
@@ -795,13 +804,6 @@ const jsonLd = {
                                   <strong>Telemetry pending</strong>
                                   <small>No end-to-end or latency metrics were published.</small>
                                 </div>
-                              )}
-                            </td>
-                            <td class="status-cell">
-                              <strong class:list={['status-pill', status.tone]}>{status.label}</strong>
-                              <small>{status.note}</small>
-                              {hasValue(decodeRatio) && (
-                                <small>{row.scenario?.comparison?.leader === 'zinc' ? 'ZINC ahead' : 'llama.cpp ahead'} · {formatSignedMetric(decodeDeltaValue(row.scenario), 'tok/s')}</small>
                               )}
                             </td>
                           </tr>
