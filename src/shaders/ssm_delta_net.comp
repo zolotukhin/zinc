@@ -4,17 +4,17 @@
 // replacing the CPU-side computation with a fully GPU-resident kernel.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 //
-// Each workgroup handles one 4-row tile of one head, with 16 threads per row.
-// Dispatch shape: dt_rank × ceil(head_v_dim / 4) × 1.
+// Each workgroup handles one 2-row tile of one head, with 32 threads per row.
+// Dispatch shape: dt_rank × ceil(head_v_dim / 2) × 1.
 // State per head is head_v_dim × head_v_dim (128×128 = 16384 floats).
-// With 64 threads = 4 rows × 16 threads/row, ALL threads are active during
-// state update. Each thread handles 128/16=8 strided columns, then
-// subgroupShuffleXor (xor 1,2,4,8) reduces partial sums across 16 threads.
-// 1024 workgroups (16 per CU) — wider work for better latency hiding on
-// RDNA4 and 2× cache line efficiency vs the prior 8-thread mapping
-// (each row's per-iter access goes from 32 bytes (25% line) to 64 bytes
-// (50% line)). Halved per-thread reg_state[8] vs [16] cuts VGPR
-// pressure, lifting wave-occupancy on each SIMD32.
+// With 64 threads = 2 rows × 32 threads/row, ALL threads are active during
+// state update. Each thread handles 128/32=4 strided columns, then
+// subgroupShuffleXor (xor 1,2,4,8,16) reduces partial sums across 32 threads.
+// 2048 workgroups (32 per CU) — extends cycle-50's 16t×4r restructure with
+// the same direction: halved per-thread reg_state[4] vs [8] cuts VGPR
+// pressure further, lifting wave-occupancy on each SIMD32. Each row's
+// per-iter access becomes 128 bytes (full line), maximizing line
+// efficiency for 32-thread × 4 byte coalesced reads.
 //
 // Algorithm per head h:
 //   1. Extract Q, K, V slices from conv_out
@@ -26,7 +26,7 @@
 //      then s[row][col] += k[col] * d
 //   6. Readout: output[h*head_v_dim + row] = dot(s[row], q)
 //
-// Dispatch: dt_rank × ceil(head_v_dim / 64) × 1 workgroups
+// Dispatch: dt_rank × ceil(head_v_dim / 2) × 1 workgroups
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -107,8 +107,8 @@ void main() {
 
     uint qk_dim = d_state * n_group;
     uint k_len = min(head_v_dim, d_state);
-    uint rows_per_tile = 4u;
-    uint row = row_block * rows_per_tile + (tid / 16u);
+    uint rows_per_tile = 2u;
+    uint row = row_block * rows_per_tile + (tid / 32u);
 
     // --- Step 1: Load Q and K into shared memory ---
     // conv_out layout: [Q(qk_dim), K(qk_dim), V(d_inner)]
@@ -217,11 +217,11 @@ void main() {
     }
     barrier();
 
-    // --- Steps 4-6: State update and readout (16 threads per row) ---
-    // Thread mapping: tid = row_in_tile * 16 + col_thread
-    const uint THREADS_PER_ROW = 16u;
-    uint row_in_tile = tid / THREADS_PER_ROW;  // 0..3
-    uint col_thread = tid % THREADS_PER_ROW;   // 0..15
+    // --- Steps 4-6: State update and readout (32 threads per row) ---
+    // Thread mapping: tid = row_in_tile * 32 + col_thread
+    const uint THREADS_PER_ROW = 32u;
+    uint row_in_tile = tid / THREADS_PER_ROW;  // 0..1
+    uint col_thread = tid % THREADS_PER_ROW;   // 0..31
     row = row_block * rows_per_tile + row_in_tile;
 
     if (row_in_tile >= rows_per_tile || row >= head_v_dim) return;
@@ -242,13 +242,13 @@ void main() {
     // only the storage location of the intermediate state value changes
     // (register vs DRAM/L2).
     //
-    // MAX_COLS_PER_THREAD = 8 covers head_v_dim ≤ 128 (Qwen 3.5/3.6
+    // MAX_COLS_PER_THREAD = 4 covers head_v_dim ≤ 128 (Qwen 3.5/3.6
     // mamba-2: head_v_dim = d_inner / dt_rank = 4096 / 32 = 128). Matches
     // the existing s_q[128] / s_k[128] shared-mem upper bound; head_v_dim
     // larger than 128 has never been a supported configuration here.
-    // Halved from 16 → 8 by widening THREADS_PER_ROW from 8 → 16, which
-    // reduces VGPR pressure and lifts wave-occupancy.
-    const uint MAX_COLS_PER_THREAD = 8u;
+    // Halved from 8 → 4 by widening THREADS_PER_ROW from 16 → 32, which
+    // reduces VGPR pressure further and lifts wave-occupancy on each SIMD32.
+    const uint MAX_COLS_PER_THREAD = 4u;
     float reg_state[MAX_COLS_PER_THREAD];
 
     // Phase 1: Decay state into register cache and accumulate sk.
@@ -263,13 +263,14 @@ void main() {
         }
     }
 
-    // Reduce sk across the 16 threads owning this row. xor 8 stays within
-    // each 16-lane group of wave64 (lanes 0-15, 16-31, 32-47, 48-63), so
-    // the partial sums never cross into a different row's lane set.
+    // Reduce sk across the 32 threads owning this row. xor 16 stays within
+    // each 32-lane group of wave64 (lanes 0-31 and lanes 32-63), so the
+    // partial sums never cross into a different row's lane set.
     sk += subgroupShuffleXor(sk, 1u);
     sk += subgroupShuffleXor(sk, 2u);
     sk += subgroupShuffleXor(sk, 4u);
     sk += subgroupShuffleXor(sk, 8u);
+    sk += subgroupShuffleXor(sk, 16u);
 
     // d = beta * (v[row] - sk)
     float d_val = b_val * (v_val - sk);
@@ -293,6 +294,7 @@ void main() {
     o_val += subgroupShuffleXor(o_val, 2u);
     o_val += subgroupShuffleXor(o_val, 4u);
     o_val += subgroupShuffleXor(o_val, 8u);
+    o_val += subgroupShuffleXor(o_val, 16u);
 
     if (col_thread == 0u) {
         out_data[h * head_v_dim + row] = o_val;
