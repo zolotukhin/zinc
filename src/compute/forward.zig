@@ -20,6 +20,7 @@ const Graph = @import("graph.zig").Graph;
 const dmmv_mod = @import("dmmv.zig");
 const DmmvDispatch = dmmv_mod.DmmvDispatch;
 const DmmvPushConstants = dmmv_mod.DmmvPushConstants;
+const DmmvSigmoidAccPushConstants = dmmv_mod.DmmvSigmoidAccPushConstants;
 const OprojMergePushConstants = dmmv_mod.OprojMergePushConstants;
 const MoeDmmvPushConstants = dmmv_mod.MoeDmmvPushConstants;
 const MoeFusedDownAccPushConstants = dmmv_mod.MoeFusedDownAccPushConstants;
@@ -6176,13 +6177,28 @@ pub const InferenceEngine = struct {
                     };
                     const fused_shexp_eligible = fused_shexp_kind != .none;
 
+                    // Fuse the shared-expert tail (down DMMV + sigmoid_scale_acc)
+                    // when down_shexp is Q8_0 and the model uses the sigmoid-gated
+                    // shared expert (Qwen 3.5 / 3.6 MoE). Saves 1 dispatch + 1
+                    // barrier per layer per token. Requires no post_ffw_norm so
+                    // the standalone in-place norm on down_buf doesn't apply.
+                    const fused_shexp_tail_eligible = has_shared_expert and
+                        shexp_gate != null and
+                        lt.post_ffw_norm == null and
+                        lt.post_ffw_norm_1 == null and
+                        down_shexp != null and
+                        down_shexp.?.info.type_ == .q8_0 and
+                        self.dmmv.pipeline_q8_0_sigmoid_acc != null and
+                        self.elementwise.pipeline_sigmoid_scale_acc != null;
+
                     if (state.position == 0 and layer == 0) {
-                        log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s} fused_shexp={s}", .{
+                        log.info("FASTPATH: shared gate={s} up={s} down={s} gate_inp={s} fused_shexp={s} fused_tail={}", .{
                             if (gate_shexp) |t| @tagName(t.info.type_) else "none",
                             if (up_shexp) |t| @tagName(t.info.type_) else "none",
                             if (down_shexp) |t| @tagName(t.info.type_) else "none",
                             if (shexp_gate) |t| @tagName(t.info.type_) else "none",
                             @tagName(fused_shexp_kind),
+                            fused_shexp_tail_eligible,
                         });
                     }
 
@@ -6367,7 +6383,26 @@ pub const InferenceEngine = struct {
                     if (has_shared_expert) {
                         const shared_down_phase = self.beginProfilePhase();
                         const shexp_act_buf = if (fused_shexp_eligible) self.gate_buf else self.swiglu_buf;
-                        try self.dispatchDmmv(down_shexp.?, shexp_act_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
+                        if (fused_shexp_tail_eligible) {
+                            // Fused: down_shexp matvec + sigmoid(shexp_gate) +
+                            // accumulate directly into hidden_buf. Replaces the
+                            // standalone dispatchDmmv → barrier → sigmoid_scale_acc
+                            // pair below for the non-Gemma shared expert tail.
+                            try self.dispatchDmmvQ8_0SigmoidAcc(
+                                down_shexp.?,
+                                shexp_act_buf,
+                                shexp_size,
+                                self.hidden_buf,
+                                hidden_size,
+                                self.router_logits_buf,
+                                @sizeOf(f32),
+                                hidden_dim,
+                                shexp_inter_dim,
+                                0,
+                            );
+                        } else {
+                            try self.dispatchDmmv(down_shexp.?, shexp_act_buf, shexp_size, self.down_buf, hidden_dim, shexp_inter_dim);
+                        }
                         self.decode_cmd.computeBarrier();
                         self.endProfilePhase(.shared_down, shared_down_phase);
                     }
@@ -6461,8 +6496,11 @@ pub const InferenceEngine = struct {
                     }
 
                     // Non-Gemma-4 path: shared expert still needs residual into hidden_buf
-                    // separately (no post_ffw_norm to share).
-                    if (has_shared_expert and !has_post_ffw_norm) {
+                    // separately (no post_ffw_norm to share). When the fused
+                    // shared-expert tail (down + sigmoid_acc) ran above, this
+                    // block already produced hidden_buf += sigmoid * down, so
+                    // we skip the standalone sigmoid_scale_acc here.
+                    if (has_shared_expert and !has_post_ffw_norm and !fused_shexp_tail_eligible) {
                         // Post-FFN norm on shared expert down projection (Gemma 4 non-post_ffw — unreachable in practice)
                         if (lt.post_ffw_norm) |pfn_tensor| {
                             try self.dispatchRmsNorm(
@@ -8131,6 +8169,52 @@ pub const InferenceEngine = struct {
             input_size,
             swiglu_buf.handle,
             swiglu_buf.size,
+            wg_x,
+            1,
+            1,
+        );
+    }
+
+    /// Fused Q8_0 down DMMV + sigmoid-gated scale-accumulate.
+    /// Replaces (dispatchDmmv(down_shexp) + computeBarrier +
+    /// dispatchSigmoidScaleAcc + computeBarrier) on the Qwen 3.5/3.6
+    /// shared-expert tail. Computes:
+    ///   hidden_buf[row] += sigmoid(gate_buf[gate_offset]) * sum_k(W[row,k] * input[k])
+    /// in a single dispatch. Saves 1 dispatch + 1 barrier per layer per token.
+    fn dispatchDmmvQ8_0SigmoidAcc(
+        self: *InferenceEngine,
+        down_tensor: *const LoadedTensor,
+        input_buf: Buffer,
+        input_size: vk.c.VkDeviceSize,
+        out_buf: Buffer,
+        out_size: vk.c.VkDeviceSize,
+        gate_buf: Buffer,
+        gate_size: vk.c.VkDeviceSize,
+        M: u32,
+        K: u32,
+        gate_offset: u32,
+    ) !void {
+        const pip = &(self.dmmv.pipeline_q8_0_sigmoid_acc orelse return error.ShaderNotLoaded);
+        const push = DmmvSigmoidAccPushConstants{
+            .M = M,
+            .K = K,
+            .a_offset = 0,
+            .x_offset = 0,
+            .y_offset = 0,
+            .gate_offset = gate_offset,
+        };
+        const wg_x: u32 = (M + 1) / 2;
+        self.pushDispatch4(
+            pip,
+            std.mem.asBytes(&push),
+            down_tensor.gpu_buffer.handle,
+            down_tensor.gpu_buffer.size,
+            input_buf.handle,
+            input_size,
+            out_buf.handle,
+            out_size,
+            gate_buf.handle,
+            gate_size,
             wg_x,
             1,
             1,

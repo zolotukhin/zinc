@@ -1,0 +1,132 @@
+#version 460
+// ZINC — Q8_0 DMMV fused with sigmoid-gated scale-accumulate.
+//
+// Replaces the (dmmv_q8_0 → barrier → sigmoid_scale_acc) pair on the
+// Qwen 3.5 / 3.6 shared-expert down projection. Saves 1 dispatch +
+// 1 barrier per layer per token. Mirrors cycle 11's gate+up+SwiGLU
+// fusion pattern: same Q8_0 dot-product inner loop, but folds the
+// sigmoid gating + accumulate that the standalone sigmoid_scale_acc
+// dispatch was doing into the matvec write-back.
+//
+// Performs: y[row] += sigmoid(gate[gate_offset]) * sum_k(W[row,k] * x[k])
+//
+// Bindings:
+//   0  W                Q8_0 down weights (down_shexp tensor)
+//   1  x                gate_buf (fused gate+up+SwiGLU output)
+//   2  y                hidden_buf (RW, accumulates with sigmoid scaling)
+//   3  gate             router_logits_buf (provides shexp_gate scalar)
+//
+// Push: same shape as DmmvPushConstants but acc_mode replaced by gate_offset
+// (we always accumulate; the gate_offset selects which f32 in router_logits_buf
+// holds the shared-expert gate scalar — typically 0).
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+// Specialization constants kept compatible with dmmv_q8_0.comp.
+layout(constant_id = 0) const uint SPEC_M = 4096;
+layout(constant_id = 1) const uint SPEC_K = 4096;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint gate_offset;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint8_t a_data[]; };
+layout(set = 0, binding = 1) readonly buffer VectorX { float    x_data[]; };
+layout(set = 0, binding = 2)          buffer VectorY { float    y_data[]; };
+layout(set = 0, binding = 3) readonly buffer Gate    { float    gate_data[]; };
+
+const uint Q8_0_BLOCK_SIZE = 32u;
+const uint Q8_0_BYTES      = 34u;
+
+shared float s_sum0[4];
+shared float s_sum1[4];
+
+float dot_q8_block(const uint qs_off, const uint x_base) {
+    float block_sum = 0.0;
+    for (uint i = 0u; i < 8u; i++) {
+        const uint q_off = qs_off + i * 4u;
+        const uint x_off = x_base + i * 4u;
+        const ivec4 qv = ivec4(
+            int(int8_t(a_data[q_off + 0u])),
+            int(int8_t(a_data[q_off + 1u])),
+            int(int8_t(a_data[q_off + 2u])),
+            int(int8_t(a_data[q_off + 3u]))
+        );
+        const vec4 xv = vec4(
+            x_data[x_off + 0u],
+            x_data[x_off + 1u],
+            x_data[x_off + 2u],
+            x_data[x_off + 3u]
+        );
+        block_sum += dot(vec4(qv), xv);
+    }
+    return block_sum;
+}
+
+void main() {
+    uint wg_id = gl_WorkGroupID.x;
+    uint row0  = wg_id * 2u;
+    uint row1  = row0 + 1u;
+    uint tid   = gl_LocalInvocationID.x;
+
+    uint blocks_per_row = K / Q8_0_BLOCK_SIZE;
+
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+
+    for (uint blk = tid; blk < blocks_per_row; blk += 64u) {
+        uint x_base = x_offset / 4u + blk * Q8_0_BLOCK_SIZE;
+
+        if (row0 < M) {
+            uint byte_off = a_offset + row0 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
+            float d = unpackHalf2x16(d_bits).x;
+            uint qs_off = byte_off + 2u;
+            sum0 += d * dot_q8_block(qs_off, x_base);
+        }
+
+        if (row1 < M) {
+            uint byte_off = a_offset + row1 * blocks_per_row * Q8_0_BYTES + blk * Q8_0_BYTES;
+            uint d_bits = uint(a_data[byte_off]) | (uint(a_data[byte_off + 1u]) << 8);
+            float d = unpackHalf2x16(d_bits).x;
+            uint qs_off = byte_off + 2u;
+            sum1 += d * dot_q8_block(qs_off, x_base);
+        }
+    }
+
+    sum0 = subgroupAdd(sum0);
+    sum1 = subgroupAdd(sum1);
+
+    if (gl_NumSubgroups > 1u) {
+        if (subgroupElect()) {
+            s_sum0[gl_SubgroupID] = sum0;
+            s_sum1[gl_SubgroupID] = sum1;
+        }
+        barrier();
+        if (tid == 0u) {
+            sum0 = s_sum0[0];
+            sum1 = s_sum1[0];
+            for (uint sg = 1u; sg < gl_NumSubgroups; sg++) {
+                sum0 += s_sum0[sg];
+                sum1 += s_sum1[sg];
+            }
+        }
+    }
+
+    if (tid == 0u) {
+        float gate_val = 1.0 / (1.0 + exp(-gate_data[gate_offset]));
+        uint y_base = y_offset / 4u;
+        if (row0 < M) y_data[y_base + row0] += gate_val * sum0;
+        if (row1 < M) y_data[y_base + row1] += gate_val * sum1;
+    }
+}

@@ -93,6 +93,20 @@ pub const OprojMergePushConstants = extern struct {
     head_dim: u32,
 };
 
+/// Push constants for the fused Q8_0 DMMV + sigmoid-gated scale-accumulate
+/// shader (src/shaders/dmmv_q8_0_sigmoid_acc.comp). Same prefix as
+/// DmmvPushConstants but `acc_mode` is replaced by `gate_offset` (the
+/// shader always accumulates and always sigmoid-gates; gate_offset selects
+/// which f32 in the gate buffer holds the shexp_gate scalar — typically 0).
+pub const DmmvSigmoidAccPushConstants = extern struct {
+    M: u32,
+    K: u32,
+    a_offset: u32,
+    x_offset: u32,
+    y_offset: u32,
+    gate_offset: u32,
+};
+
 /// Push constants for the quantize_q8_1 shader.
 /// `ne` = number of f32 input elements (must be a multiple of 32).
 /// `num_blocks` = ne / 32. Pass explicitly so the shader does not have to divide.
@@ -215,6 +229,13 @@ pub const DmmvDispatch = struct {
     /// to fuse the per-token shared-expert (gate DMMV + up DMMV +
     /// SwiGLU) trio into one dispatch.
     pipeline_q8_0_fused_gate_up_swiglu: ?Pipeline,
+    /// Q8_0 DMMV fused with sigmoid-gated scale-accumulate. Replaces
+    /// the (down_shexp DMMV → barrier → sigmoid_scale_acc) pair on the
+    /// Qwen 3.5 / 3.6 shared-expert tail when the shared down weights
+    /// are Q8_0. 4 bindings (W, X=gate_buf, Y=hidden_buf, gate=router_logits_buf).
+    /// Push: DmmvSigmoidAccPushConstants. Saves 1 dispatch + 1 barrier
+    /// per layer per token.
+    pipeline_q8_0_sigmoid_acc: ?Pipeline,
     /// Fused split-K merge + Q4_K o_proj DMMV-acc pipeline (4 bindings:
     /// W_o, partial_attn_out_buf, hidden_buf, sinks). Replaces the
     /// (flash_attn_split_merge → o_proj DMMV-acc) pair with one dispatch:
@@ -501,6 +522,17 @@ pub const DmmvDispatch = struct {
             break :blk null;
         };
 
+        // Q8_0 DMMV fused with sigmoid-gated scale-accumulate. Replaces the
+        // (down_shexp DMMV → barrier → sigmoid_scale_acc) pair on the
+        // Qwen 3.5 / 3.6 shared-expert tail. 4 bindings (W, X=gate_buf,
+        // Y=hidden_buf, gate=router_logits_buf). Push: DmmvSigmoidAccPushConstants.
+        const sigmoid_acc_push_size = @sizeOf(DmmvSigmoidAccPushConstants);
+        const q8_0_sigmoid_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_sigmoid_acc.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q8_0_sigmoid_acc = pipeline_mod.createFromSpirvWithOptions(instance, q8_0_sigmoid_acc_path, 4, sigmoid_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q8_0 fused sigmoid-acc shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+
         // Fused split-K merge + Q4_K o_proj DMMV-acc. 4 bindings (W_o,
         // partial_attn_out_buf, hidden_buf, sinks). Push uses
         // OprojMergePushConstants — same DmmvPushConstants prefix plus
@@ -657,6 +689,7 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_fused_gate_up_moe = pipeline_q4k_fused_gate_up_moe,
             .pipeline_q4k_fused_gate_up_swiglu = pipeline_q4k_fused_gate_up_swiglu,
             .pipeline_q8_0_fused_gate_up_swiglu = pipeline_q8_0_fused_gate_up_swiglu,
+            .pipeline_q8_0_sigmoid_acc = pipeline_q8_0_sigmoid_acc,
             .pipeline_q4k_o_proj_merge = pipeline_q4k_o_proj_merge,
             .pipeline_q4k_moe_fused_down_acc = pipeline_q4k_moe_fused_down_acc,
             .pipeline_q5k_moe_fused_down_acc = pipeline_q5k_moe_fused_down_acc,
@@ -1215,6 +1248,7 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_fused_gate_up_moe) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_swiglu) |*p| p.deinit();
         if (self.pipeline_q8_0_fused_gate_up_swiglu) |*p| p.deinit();
+        if (self.pipeline_q8_0_sigmoid_acc) |*p| p.deinit();
         if (self.pipeline_q4k_o_proj_merge) |*p| p.deinit();
         if (self.pipeline_q4k_moe_fused_down_acc) |*p| p.deinit();
         if (self.pipeline_q5k_moe_fused_down_acc) |*p| p.deinit();
