@@ -4,17 +4,16 @@
 // replacing the CPU-side computation with a fully GPU-resident kernel.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 //
-// Each workgroup handles one 2-row tile of one head, with 32 threads per row.
-// Dispatch shape: dt_rank × ceil(head_v_dim / 2) × 1.
+// Each workgroup handles ONE row of one head, with all 64 threads cooperating
+// on the row. Dispatch shape: dt_rank × head_v_dim × 1.
 // State per head is head_v_dim × head_v_dim (128×128 = 16384 floats).
-// With 64 threads = 2 rows × 32 threads/row, ALL threads are active during
-// state update. Each thread handles 128/32=4 strided columns, then
-// subgroupShuffleXor (xor 1,2,4,8,16) reduces partial sums across 32 threads.
-// 2048 workgroups (32 per CU) — extends cycle-50's 16t×4r restructure with
-// the same direction: halved per-thread reg_state[4] vs [8] cuts VGPR
-// pressure further, lifting wave-occupancy on each SIMD32. Each row's
-// per-iter access becomes 128 bytes (full line), maximizing line
-// efficiency for 32-thread × 4 byte coalesced reads.
+// With 64 threads × 1 row, ALL threads are active during state update.
+// Each thread handles 128/64=2 strided columns, then a single wave-wide
+// subgroupAdd reduces the row's partial sums (replaces the 5-stage
+// subgroupShuffleXor 1,2,4,8,16 chain that the 32t×2r path needed to
+// keep the two rows' lanes segregated). 4096 workgroups; extends the
+// cycle-50 sequence (8t×8r → 16t×4r → 32t×2r → 64t×1r) by halving
+// reg_state[2] vs [4] and collapsing the row reduction to one wave op.
 //
 // Algorithm per head h:
 //   1. Extract Q, K, V slices from conv_out
@@ -26,11 +25,10 @@
 //      then s[row][col] += k[col] * d
 //   6. Readout: output[h*head_v_dim + row] = dot(s[row], q)
 //
-// Dispatch: dt_rank × ceil(head_v_dim / 2) × 1 workgroups
+// Dispatch: dt_rank × head_v_dim × 1 workgroups
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
 
@@ -100,15 +98,14 @@ shared float s_reduce_scalar;
 
 void main() {
     uint h = gl_WorkGroupID.x;           // head index
-    uint row_block = gl_WorkGroupID.y;   // 64-row tile index within the head
+    uint row_block = gl_WorkGroupID.y;   // single-row tile index within the head
     uint tid = gl_LocalInvocationID.x;   // 0..63
 
     if (h >= dt_rank) return;
 
     uint qk_dim = d_state * n_group;
     uint k_len = min(head_v_dim, d_state);
-    uint rows_per_tile = 2u;
-    uint row = row_block * rows_per_tile + (tid / 32u);
+    uint row = row_block;
 
     // --- Step 1: Load Q and K into shared memory ---
     // conv_out layout: [Q(qk_dim), K(qk_dim), V(d_inner)]
@@ -217,14 +214,16 @@ void main() {
     }
     barrier();
 
-    // --- Steps 4-6: State update and readout (32 threads per row) ---
-    // Thread mapping: tid = row_in_tile * 32 + col_thread
-    const uint THREADS_PER_ROW = 32u;
-    uint row_in_tile = tid / THREADS_PER_ROW;  // 0..1
-    uint col_thread = tid % THREADS_PER_ROW;   // 0..31
-    row = row_block * rows_per_tile + row_in_tile;
+    // --- Steps 4-6: State update and readout (64 threads per row, 1 row per WG) ---
+    // Thread mapping: tid = col_thread (0..63), all 64 threads cooperate on
+    // this WG's single row. Replaces cycle-23's 32t×2r split — with a single
+    // row per WG the entire wave64 reduces via one subgroupAdd instead of
+    // five subgroupShuffleXor stages that had to stay inside per-row 32-lane
+    // segments.
+    const uint THREADS_PER_ROW = 64u;
+    uint col_thread = tid;                     // 0..63
 
-    if (row_in_tile >= rows_per_tile || row >= head_v_dim) return;
+    if (row >= head_v_dim) return;
 
     float g_val = s_gate;
     float b_val = s_beta_val;
@@ -242,13 +241,14 @@ void main() {
     // only the storage location of the intermediate state value changes
     // (register vs DRAM/L2).
     //
-    // MAX_COLS_PER_THREAD = 4 covers head_v_dim ≤ 128 (Qwen 3.5/3.6
+    // MAX_COLS_PER_THREAD = 2 covers head_v_dim ≤ 128 (Qwen 3.5/3.6
     // mamba-2: head_v_dim = d_inner / dt_rank = 4096 / 32 = 128). Matches
     // the existing s_q[128] / s_k[128] shared-mem upper bound; head_v_dim
     // larger than 128 has never been a supported configuration here.
-    // Halved from 8 → 4 by widening THREADS_PER_ROW from 16 → 32, which
-    // reduces VGPR pressure further and lifts wave-occupancy on each SIMD32.
-    const uint MAX_COLS_PER_THREAD = 4u;
+    // Halved from 4 → 2 by widening THREADS_PER_ROW from 32 → 64. Brings the
+    // cycle-50 sequence (8t×8r → 16t×4r → 32t×2r → 64t×1r) to its endpoint:
+    // one full wave per row, single subgroupAdd reduction.
+    const uint MAX_COLS_PER_THREAD = 2u;
     float reg_state[MAX_COLS_PER_THREAD];
 
     // Phase 1: Decay state into register cache and accumulate sk.
@@ -263,14 +263,28 @@ void main() {
         }
     }
 
-    // Reduce sk across the 32 threads owning this row. xor 16 stays within
-    // each 32-lane group of wave64 (lanes 0-31 and lanes 32-63), so the
-    // partial sums never cross into a different row's lane set.
-    sk += subgroupShuffleXor(sk, 1u);
-    sk += subgroupShuffleXor(sk, 2u);
-    sk += subgroupShuffleXor(sk, 4u);
-    sk += subgroupShuffleXor(sk, 8u);
-    sk += subgroupShuffleXor(sk, 16u);
+    // Reduce sk across all 64 threads of this WG (one row per WG, so the
+    // wave-wide sum is what we want). Replaces cycle-23's 5-stage
+    // subgroupShuffleXor 1..16 chain with a single wave op. The
+    // multi-subgroup fallback mirrors the L2 norm reductions above; on
+    // RDNA4 wave64 (the active path) gl_NumSubgroups == 1 and the
+    // fallback constant-folds away.
+    sk = subgroupAdd(sk);
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            s_reduce[gl_SubgroupID] = sk;
+        }
+        barrier();
+        if (tid == 0u) {
+            float merged = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                merged += s_reduce[sg];
+            }
+            s_reduce_scalar = merged;
+        }
+        barrier();
+        sk = s_reduce_scalar;
+    }
 
     // d = beta * (v[row] - sk)
     float d_val = b_val * (v_val - sk);
@@ -290,11 +304,22 @@ void main() {
         state[row_base + col] = s;
     }
 
-    o_val += subgroupShuffleXor(o_val, 1u);
-    o_val += subgroupShuffleXor(o_val, 2u);
-    o_val += subgroupShuffleXor(o_val, 4u);
-    o_val += subgroupShuffleXor(o_val, 8u);
-    o_val += subgroupShuffleXor(o_val, 16u);
+    o_val = subgroupAdd(o_val);
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            s_reduce[gl_SubgroupID] = o_val;
+        }
+        barrier();
+        if (tid == 0u) {
+            float merged = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                merged += s_reduce[sg];
+            }
+            s_reduce_scalar = merged;
+        }
+        barrier();
+        o_val = s_reduce_scalar;
+    }
 
     if (col_thread == 0u) {
         out_data[h * head_v_dim + row] = o_val;
