@@ -6240,7 +6240,12 @@ pub const InferenceEngine = struct {
                             .y_offset = 0,
                             .n_used = n_used,
                         };
-                        const wg_x: u32 = (hidden_dim + 1) / 2;
+                        // Cycle 28: both Q4_K and Q5_K fused_down_acc shaders
+                        // run NUM_ROWS=4 (1024 WGs at hidden_dim=4096, 4×
+                        // oversubscribed on R9700; halves dispatch count vs
+                        // NUM_ROWS=2 and amortizes per-WG launch cost across
+                        // 4 weighted-acc rows of the n_used-expert dot loop).
+                        const wg_x: u32 = (hidden_dim + 3) / 4;
                         self.pushDispatch4(
                             pip,
                             std.mem.asBytes(&push),

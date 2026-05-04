@@ -4,13 +4,20 @@
 // separate moe_weighted_acc dispatch by computing each expert's down
 // output and weighted-accumulating into hidden_buf in one kernel.
 //
-// Each WG handles NUM_ROWS=2 rows of hidden_buf. Within the WG, the
+// Each WG handles NUM_ROWS rows of hidden_buf. Within the WG, the
 // outer loop iterates over n_used experts, multiplying each expert's
 // dot product by its routing weight and summing into the row-local
 // accumulator. Final write: hidden[row] += row_acc — race-free since
 // each row is owned by exactly one WG.
 //
-// Dispatch: ((M+1)/2, 1, 1).
+// NUM_ROWS=4 (cycle 28): with M=hidden_dim=4096 the dispatch is 1024
+// WGs (vs 2048 at NUM_ROWS=2). R9700 capacity ≈ 256 simultaneous
+// wave64 across 64 CUs, so 1024 WGs still oversubscribes 4×. Halving
+// the WG count amortizes per-WG launch cost over 4 weighted-acc rows
+// instead of 2; the per-WG X reads (swiglu_buf for n_used experts)
+// live in L1 across the 4 rows. Mirror of Q4_K change.
+//
+// Dispatch: ((M+3)/4, 1, 1).
 // Bindings (4 total):
 //   0: A — Q5_K stacked expert down weights
 //   1: X — swiglu output, n_used contiguous slabs of inter_dim each
@@ -38,7 +45,7 @@ layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
 layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
 layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
 
-const uint NUM_ROWS = 2u;
+const uint NUM_ROWS = 4u;
 const uint Q5K_BLOCK_U32 = 44u;
 
 vec4 unpack_nibbles_lo(uint v) {

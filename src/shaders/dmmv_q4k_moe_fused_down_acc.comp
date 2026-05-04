@@ -4,7 +4,7 @@
 // expert's down output and weighted-accumulating into hidden_buf in
 // one kernel.
 //
-// Each WG handles NUM_ROWS=2 rows of hidden_buf. Within the WG, the
+// Each WG handles NUM_ROWS rows of hidden_buf. Within the WG, the
 // outer loop iterates over n_used experts: read the expert's weight
 // matrix slice + swiglu input slice, compute the K-parallel dot
 // product (wave64 subgroupAdd reduction), multiply by the routing
@@ -12,7 +12,18 @@
 // hidden[row] += row_acc — race-free since each row is owned by
 // exactly one WG (no atomics).
 //
-// Dispatch: ((M+1)/2, 1, 1).
+// NUM_ROWS=4 (cycle 28): with M=hidden_dim=4096 the dispatch is 1024
+// WGs (vs 2048 at NUM_ROWS=2). R9700 capacity ≈ 256 simultaneous
+// wave64 across 64 CUs, so 1024 WGs still oversubscribes 4×. Halving
+// the WG count amortizes per-WG launch cost (descriptor binding,
+// scoreboarding, scratch alloc) over 4 rows of weighted-acc work
+// instead of 2 — and the per-WG X reads (swiglu_buf for n_used
+// experts) live in L1 across the 4 rows since the per-expert footprint
+// (~2.5 KB per expert × 8 experts = 20 KB) fits the per-CU LDS+L1
+// budget. Distinct from cycle-12-of-effort-10's NUM_ROWS=4 attempt on
+// dmmv_q4k_moe_kpar at M=1408 (which under-saturated at 352 WGs).
+//
+// Dispatch: ((M+3)/4, 1, 1).
 // Bindings (4 total, same shape as dmmv_q4k_moe_kpar except Y is the
 // shared accumulation target instead of a per-expert output):
 //   0: A — Q4_K stacked expert down weights
@@ -48,7 +59,7 @@ layout(set = 0, binding = 1) readonly buffer VectorX { vec4 x_v4[]; };
 layout(set = 0, binding = 2) buffer VectorY { float y_data[]; };
 layout(set = 0, binding = 3) readonly buffer MoeRouting { uint routing_data[]; };
 
-const uint NUM_ROWS = 2u;
+const uint NUM_ROWS = 4u;
 const uint Q4K_BLOCK_U32 = 36u;
 
 vec4 unpack_nibbles_lo(uint v) {
