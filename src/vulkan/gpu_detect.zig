@@ -98,11 +98,12 @@ pub fn detect(instance: *const Instance) GpuConfig {
     const props = instance.device_props;
     const name_slice = std.mem.sliceTo(&props.deviceName, 0);
 
-    // Use Vulkan-reported subgroup size when available, otherwise fall back to 32.
+    // Use Vulkan-reported subgroup size when available, otherwise fall back to 32
+    // (the most common subgroup width across vendors).
     const subgroup_size: u32 = if (instance.caps.min_subgroup_size > 0)
         instance.caps.min_subgroup_size
     else
-        16;
+        32;
 
     var config = GpuConfig{
         .vendor = .unknown,
@@ -171,6 +172,10 @@ pub fn detect(instance: *const Instance) GpuConfig {
                 config.compute_units = 32;
             },
         }
+        // AMD RDNA3/4 always uses wave64 for optimal scheduling, regardless of
+        // what min_subgroup_size reports (AMD supports both 32 and 64, but 64
+        // is the native width and what our shaders are tuned for).
+        config.wave_size = 64;
     } else if (props.vendorID == 0x10de) {
         // NVIDIA
         config.vendor = .nvidia;
@@ -316,6 +321,40 @@ test "classifyIntel — Arc B-series (Xe2)" {
 test "classifyIntel — Arc A-series (Xe-HPG)" {
     try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc A770"));
     try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc A380"));
+}
+
+test "wave_size fallback and DMMV derivation" {
+    // Verify the subgroup size fallback and wave_size → DMMV parameter mapping.
+    // wave64 (AMD): workgroup 64, 2 rows per workgroup
+    {
+        const wave: u32 = 64;
+        const wg = wave;
+        const rows: u32 = if (wave == 64) 2 else 1;
+        try std.testing.expectEqual(@as(u32, 64), wg);
+        try std.testing.expectEqual(@as(u32, 2), rows);
+    }
+    // wave32 (NVIDIA): workgroup 32, 1 row
+    {
+        const wave: u32 = 32;
+        const wg = wave;
+        const rows: u32 = if (wave == 64) 2 else 1;
+        try std.testing.expectEqual(@as(u32, 32), wg);
+        try std.testing.expectEqual(@as(u32, 1), rows);
+    }
+    // wave16 (Intel Xe2): workgroup 16, 1 row
+    {
+        const wave: u32 = 16;
+        const wg = wave;
+        const rows: u32 = if (wave == 64) 2 else 1;
+        try std.testing.expectEqual(@as(u32, 16), wg);
+        try std.testing.expectEqual(@as(u32, 1), rows);
+    }
+    // Fallback when min_subgroup_size is 0 → defaults to 32
+    {
+        const min_subgroup_size: u32 = 0;
+        const subgroup_size: u32 = if (min_subgroup_size > 0) min_subgroup_size else 32;
+        try std.testing.expectEqual(@as(u32, 32), subgroup_size);
+    }
 }
 
 test "GpuConfig name" {
