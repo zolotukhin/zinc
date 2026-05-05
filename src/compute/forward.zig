@@ -1003,13 +1003,6 @@ pub const InferenceEngine = struct {
     // Disable with ZINC_TOPK_V1=1 to fall back to the v1 shader (single-thread
     // serial scan in shared memory).
     use_softmax_topk_v2: bool = true,
-    // Opt-in via ZINC_MMQ_SSM=1. When set and the dmmv_q8_0_q8_1 pipeline is
-    // loaded, runSsmLayerGpu quantizes norm_buf once into a Q8_1 scratch
-    // buffer and routes the 4 SSM proj DMMVs (wqkv/z/alpha/beta) through the
-    // integer-dot mmq variant — cuts activation bandwidth ~3.6× and swaps
-    // int8*f32 dot for int8*int8. Effective only when all four tensors are
-    // Q8_0.
-    use_mmq_ssm: bool = false,
     // Default-on when the rms_norm_dmmv_q4k_alpha_beta pipeline is loaded
     // and the layer's alpha+beta SSM proj tensors are f32. Folds the
     // per-SSM-layer (rms_norm_mul → alpha DMMV → beta DMMV) trio into a
@@ -1080,11 +1073,6 @@ pub const InferenceEngine = struct {
     // impact is bounded; the win comes later when the same shader feeds
     // the per-prompt-token MoE phase via Step 2 (MUL_MAT_ID variant).
     use_mul_mm_lm_head: bool = false,
-    // Q8_1 scratch pair (primary / alt). Swapped alongside decode_cmd during
-    // the double-buffered prefill pipeline so the two in-flight CBs don't
-    // race on the same scratch region. Size = (hidden_dim/32)*36 bytes.
-    ssm_mmq_scratch: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
-    ssm_mmq_scratch_alt: Buffer = .{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = null },
     // Opt-in via ZINC_BATCH_ATTN=1. Foundation for prefill-path attention
     // batching (effort-6 Step 6 A). When set and flash_attn_batched is
     // loaded, the attention call site routes through the batched shader with
@@ -2050,34 +2038,6 @@ pub const InferenceEngine = struct {
             log.info("ZINC_BATCH_ATTN=1 requested but flash_attn_batched pipeline absent; using decode-shape shader", .{});
         }
 
-        // SSM mmq path (opt-in). Effective only when (a) flag is on, (b) both
-        // quantize_q8_1 and dmmv_q8_0_q8_1 pipelines loaded, (c) push
-        // descriptors available (same gate as the rest of the mmq-adjacent
-        // push-descriptor helpers). The runtime also validates that all four
-        // SSM proj tensors are Q8_0 before selecting the mmq path.
-        const mmq_ssm_env = std.posix.getenv("ZINC_MMQ_SSM");
-        const mmq_ssm_flag = mmq_ssm_env != null and std.mem.eql(u8, mmq_ssm_env.?, "1");
-        const mmq_ssm_enabled = mmq_ssm_flag and
-            dmmv.pipeline_quantize_q8_1 != null and
-            dmmv.pipeline_q8_0_q8_1 != null and
-            instance.push_descriptor_fn != null;
-        var ssm_mmq_scratch = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
-        var ssm_mmq_scratch_alt = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
-        if (mmq_ssm_enabled) {
-            // One Q8_1 block per 32 f32 elements, 36 bytes per block.
-            // hidden_dim is guaranteed non-zero here (the encoder wouldn't run
-            // otherwise); we also assume it's a multiple of 32 (every Q8_0
-            // weight in the tree requires this).
-            const q81_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, (config.hidden_dim / 32) * 36);
-            ssm_mmq_scratch = try Buffer.initDeviceLocal(instance, q81_bytes, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            errdefer ssm_mmq_scratch.deinit();
-            ssm_mmq_scratch_alt = try Buffer.initDeviceLocal(instance, q81_bytes, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            errdefer ssm_mmq_scratch_alt.deinit();
-            log.info("SSM mmq path ENABLED (ZINC_MMQ_SSM=1); Q8_1 scratch pair = 2x {d} B", .{q81_bytes});
-        } else if (mmq_ssm_flag) {
-            log.info("ZINC_MMQ_SSM=1 requested but prerequisites missing (q8_1 pipelines or push descriptors); using f32 SSM proj", .{});
-        }
-
         // Step 11a foundation: per-(token, layer) routing capture buffer.
         // Enabled by ZINC_CAPTURE_ROUTING=1. Dormant downstream — this cycle only
         // verifies the copy path is correct and measures the flag-on overhead so
@@ -2209,7 +2169,6 @@ pub const InferenceEngine = struct {
             .profile_enabled = fa_profile_layer_enabled,
             .use_q4k_batch_kpar = q4k_batch_kpar_enabled,
             .use_softmax_topk_v2 = topk_v2_enabled,
-            .use_mmq_ssm = mmq_ssm_enabled,
             .use_batch_attn = batch_attn_enabled,
             .use_capture_routing = capture_flag and routing_capture_buf.handle != null,
             .use_mul_mm_lm_head = mul_mm_lm_head_enabled,
@@ -2221,8 +2180,6 @@ pub const InferenceEngine = struct {
             .prefill_expert_count_buf = prefill_expert_count_buf,
             .prefill_ffn_input_capture_buf = prefill_ffn_input_capture_buf,
             .prefill_ffn_input_capture_max_tokens = prefill_ffn_input_capture_max_tokens,
-            .ssm_mmq_scratch = ssm_mmq_scratch,
-            .ssm_mmq_scratch_alt = ssm_mmq_scratch_alt,
             .elementwise = elementwise,
             .attention = attention,
             .argmax = argmax,
@@ -4287,7 +4244,6 @@ pub const InferenceEngine = struct {
             const use_fused_ssm_pre_norm = blk: {
                 if (!self.use_fused_ssm_pre_norm) break :blk false;  // env-gated kill switch
                 if (is_full_attn) break :blk false;
-                if (self.use_mmq_ssm) break :blk false;  // mmq path uses its own quantize_q8_1 prelude
                 if (self.elementwise.pipeline_rms_norm_dmmv_q4k_alpha_beta == null) break :blk false;
                 if ((hidden_dim % 4) != 0) break :blk false;  // shader reads as f32 vec4
                 if (attn_norm.info.type_ != .f32) break :blk false;  // shader reads attn_norm as f32 vec4
@@ -8803,120 +8759,7 @@ pub const InferenceEngine = struct {
         }
         const ssm_proj_phase = self.beginProfilePhase();
 
-        // mmq path (opt-in via ZINC_MMQ_SSM=1): quantize norm_buf once per
-        // (token, layer) into self.ssm_mmq_scratch, then dispatch the 4 SSM
-        // proj matvecs as Q8_0 × Q8_1 integer-dot. Falls through to the f32
-        // dispatchDmmv path whenever any tensor isn't Q8_0 or the pipelines
-        // aren't loaded.
-        const mmq_q8_ready = self.use_mmq_ssm and
-            wqkv_tensor.info.type_ == .q8_0 and
-            (is_dead_tail or z_tensor.info.type_ == .q8_0) and
-            alpha_tensor.info.type_ == .q8_0 and
-            beta_tensor.info.type_ == .q8_0;
-
-        // Q4_K mmq path — opt-in via ZINC_MMQ_SSM=1 once the same flag was
-        // enabled. Activates when all SSM proj tensors are Q4_K (Q4_K_M /
-        // Q4_K_XL packs) and both quantize_q8_1 + dmmv_q4k_q8_1 pipelines
-        // loaded. K must be a multiple of 256 (Q4_K super-block size).
-        const mmq_q4k_ready = self.use_mmq_ssm and
-            self.dmmv.pipeline_q4k_q8_1 != null and
-            self.dmmv.pipeline_quantize_q8_1 != null and
-            (hidden_dim % 256) == 0 and
-            wqkv_tensor.info.type_ == .q4_k and
-            (is_dead_tail or z_tensor.info.type_ == .q4_k) and
-            alpha_tensor.info.type_ == .q4_k and
-            beta_tensor.info.type_ == .q4_k;
-
-        const mmq_ready = mmq_q8_ready or mmq_q4k_ready;
-
-        if (mmq_ready) {
-            try self.dmmv.recordQuantizeQ8_1(
-                &self.decode_cmd,
-                self.instance.push_descriptor_fn,
-                self.norm_buf.handle,
-                hidden_size,
-                self.ssm_mmq_scratch.handle,
-                self.ssm_mmq_scratch.size,
-                hidden_dim,
-            );
-            // Quantize writes -> mmq matvecs read. Buffer-scoped barrier on the
-            // Q8_1 scratch (writes by quantize_q8_1 finish, then reads by the
-            // mmq dispatch proceed). norm_buf itself is untouched.
-            self.decode_cmd.computeBufferBarrier(self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size);
-
-            const mmq = &self.dmmv;
-            if (mmq_q4k_ready) {
-                try mmq.recordMmqQ4_K_Q8_1(
-                    &self.decode_cmd,
-                    self.instance.push_descriptor_fn,
-                    wqkv_tensor.gpu_buffer.handle, wqkv_tensor.gpu_buffer.size,
-                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                    self.attn_out_buf.handle, self.attn_out_buf.size,
-                    @intCast(conv_channels), hidden_dim, 0, 0, 0, 0,
-                );
-                if (!is_dead_tail) {
-                    try mmq.recordMmqQ4_K_Q8_1(
-                        &self.decode_cmd,
-                        self.instance.push_descriptor_fn,
-                        z_tensor.gpu_buffer.handle, z_tensor.gpu_buffer.size,
-                        self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                        self.gate_buf.handle, self.gate_buf.size,
-                        @intCast(d_inner), hidden_dim, 0, 0, 0, 0,
-                    );
-                }
-                try mmq.recordMmqQ4_K_Q8_1(
-                    &self.decode_cmd,
-                    self.instance.push_descriptor_fn,
-                    alpha_tensor.gpu_buffer.handle, alpha_tensor.gpu_buffer.size,
-                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                    self.router_logits_buf.handle, self.router_logits_buf.size,
-                    dt_rank, hidden_dim, 0, 0, 0, 0,
-                );
-                try mmq.recordMmqQ4_K_Q8_1(
-                    &self.decode_cmd,
-                    self.instance.push_descriptor_fn,
-                    beta_tensor.gpu_buffer.handle, beta_tensor.gpu_buffer.size,
-                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                    self.down_buf.handle, self.down_buf.size,
-                    dt_rank, hidden_dim, 0, 0, 0, 0,
-                );
-            } else {
-                try mmq.recordMmqQ8_0_Q8_1(
-                    &self.decode_cmd,
-                    self.instance.push_descriptor_fn,
-                    wqkv_tensor.gpu_buffer.handle, wqkv_tensor.gpu_buffer.size,
-                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                    self.attn_out_buf.handle, self.attn_out_buf.size,
-                    @intCast(conv_channels), hidden_dim, 0, 0, 0, 0,
-                );
-                if (!is_dead_tail) {
-                    try mmq.recordMmqQ8_0_Q8_1(
-                        &self.decode_cmd,
-                        self.instance.push_descriptor_fn,
-                        z_tensor.gpu_buffer.handle, z_tensor.gpu_buffer.size,
-                        self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                        self.gate_buf.handle, self.gate_buf.size,
-                        @intCast(d_inner), hidden_dim, 0, 0, 0, 0,
-                    );
-                }
-                try mmq.recordMmqQ8_0_Q8_1(
-                    &self.decode_cmd,
-                    self.instance.push_descriptor_fn,
-                    alpha_tensor.gpu_buffer.handle, alpha_tensor.gpu_buffer.size,
-                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                    self.router_logits_buf.handle, self.router_logits_buf.size,
-                    dt_rank, hidden_dim, 0, 0, 0, 0,
-                );
-                try mmq.recordMmqQ8_0_Q8_1(
-                    &self.decode_cmd,
-                    self.instance.push_descriptor_fn,
-                    beta_tensor.gpu_buffer.handle, beta_tensor.gpu_buffer.size,
-                    self.ssm_mmq_scratch.handle, self.ssm_mmq_scratch.size,
-                    self.down_buf.handle, self.down_buf.size,
-                    dt_rank, hidden_dim, 0, 0, 0, 0,
-                );
-            }
-        } else if (use_fused_pre_norm) {
+        if (use_fused_pre_norm) {
             // Fused fast path: rms_norm + alpha DMMV + beta DMMV in one
             // dispatch. WG 0 of the fused shader writes norm_buf so the
             // wqkv/z DMMVs below see a pre-normalized hidden vector. The
@@ -9717,12 +9560,6 @@ pub const InferenceEngine = struct {
                 // alt slot. Bring the pending-fence flags along with them.
                 std.mem.swap(CommandBuffer, &self.decode_cmd, &self.prefill_cmd_alt);
                 std.mem.swap(Buffer, &self.embed_staging, &self.prefill_embed_alt);
-                // mmq scratch pair swaps with the CB slot so the two in-flight
-                // CBs don't race on the same Q8_1 region. No-op when the mmq
-                // path is disabled (both buffers are zero-sized handles).
-                if (self.use_mmq_ssm) {
-                    std.mem.swap(Buffer, &self.ssm_mmq_scratch, &self.ssm_mmq_scratch_alt);
-                }
                 std.mem.swap(bool, &primary_pending, &alt_pending);
                 // The slot we just swapped into may have a pending submit from
                 // two iterations back. Drain it before reusing the CB + staging.
@@ -10536,8 +10373,6 @@ pub const InferenceEngine = struct {
         if (self.batched_scratch_up) |*b| b.deinit();
         if (self.batched_scratch_swiglu) |*b| b.deinit();
         if (self.batched_scratch_down) |*b| b.deinit();
-        if (self.ssm_mmq_scratch.handle != null) self.ssm_mmq_scratch.deinit();
-        if (self.ssm_mmq_scratch_alt.handle != null) self.ssm_mmq_scratch_alt.deinit();
         self.cmd_pool.deinit();
         self.* = undefined;
     }

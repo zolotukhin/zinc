@@ -267,22 +267,13 @@ pub const DmmvDispatch = struct {
     pipeline_q5_1_moe: ?Pipeline,
     /// MoE Q6K pipeline (4 bindings: A, x, y, routing), or null.
     pipeline_q6k_moe: ?Pipeline,
-    /// Foundation for mul_mmq: quantize an F32 activation into Q8_1 blocks.
-    /// 2 bindings (A f32 vec4 in, D u32 stream out), push constants {ne, num_blocks}.
+    /// Foundation for future mul_mmq work: quantize an F32 activation into
+    /// Q8_1 blocks. 2 bindings (A f32 vec4 in, D u32 stream out), push
+    /// constants {ne, num_blocks}. Activation pre-quantizer preserved as
+    /// reusable infrastructure (per effort-6 plan); the SSM proj mmq DMMV
+    /// consumers (dmmv_q8_0_q8_1, dmmv_q4k_q8_1) were measured flat in
+    /// cycles 8 + 33 of the loop and removed in cycle 60's pivot.
     pipeline_quantize_q8_1: ?Pipeline,
-    /// mul_mmq variant: Q8_0 weight × Q8_1 activation -> f32. Same 3-binding
-    /// shape as pipeline_q8_0 but the second binding is a Q8_1 block stream
-    /// produced by pipeline_quantize_q8_1. Enables integer dot product on the
-    /// SSM proj hot path when ZINC_MMQ_SSM=1.
-    pipeline_q8_0_q8_1: ?Pipeline,
-    /// mul_mmq variant: Q4_K weight × Q8_1 activation -> f32. Mirrors the
-    /// Q8_0 mmq pipeline binding shape (3 bindings: A weights, X Q8_1 stream,
-    /// Y f32 output) but supports the Q4_K super-block layout used by
-    /// Q4_K_M / Q4_K_XL packs. Activation comes from pipeline_quantize_q8_1.
-    /// Pipeline registered but not wired into call sites yet — needs a
-    /// numerical validation pass against the f32 dmmv_q4k path before it can
-    /// replace any production DMMV.
-    pipeline_q4k_q8_1: ?Pipeline,
     /// Effort-6 Step 3 foundation for the MUL_MAT_ID tiled GEMM port.
     /// Counts how many tokens were routed to each expert. Output is a
     /// `[n_experts]` u32 buffer that the future MUL_MAT_ID GEMM uses for the
@@ -614,33 +605,6 @@ pub const DmmvDispatch = struct {
             log.info("quantize_q8_1 pipeline loaded (mul_mmq foundation)", .{});
         }
 
-        // mul_mmq consumer: Q8_0 weight × Q8_1 activation -> f32.
-        // Reuses DmmvPushConstants (M, K, a_offset, x_offset, y_offset, acc_mode).
-        const q8q81_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_q8_1.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q8q81_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
-            log.warn("dmmv_q8_0_q8_1 shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        if (pipeline_q8_0_q8_1 != null) {
-            log.info("dmmv_q8_0_q8_1 pipeline loaded (mul_mmq consumer)", .{});
-        }
-
-        // mul_mmq Q4_K variant: Q4_K weight × Q8_1 activation -> f32.
-        // Same 3-binding shape and DmmvPushConstants layout as the Q8_0
-        // counterpart. Pipeline loads at startup; not yet swapped into any
-        // call site until the numerical validation against the f32 dmmv_q4k
-        // path lands. Enables integer-dot mmq for Q4_K_M / Q4_K_XL packs
-        // — biggest target is the SSM proj on qwen35moe / qwen36moe and the
-        // MoE FFN gate/up/down on the same models.
-        const q4k_q81_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_q8_1.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_q81_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
-            log.warn("dmmv_q4k_q8_1 shader not loaded: {s}", .{@errorName(err)});
-            break :blk null;
-        };
-        if (pipeline_q4k_q8_1 != null) {
-            log.info("dmmv_q4k_q8_1 pipeline loaded (Q4_K mmq consumer; not yet wired)", .{});
-        }
-
         // Effort 6 Step 3: foundation helper for MUL_MAT_ID GEMM port.
         // Counts tokens-per-expert from a per-(token, layer) routing buffer.
         // 2 bindings (A routing in, D counts out), push = CountExpertsPush.
@@ -699,8 +663,6 @@ pub const DmmvDispatch = struct {
             .pipeline_q5k_moe_kpar = pipeline_q5k_moe_kpar,
             .pipeline_q6k_moe = pipeline_q6k_moe,
             .pipeline_quantize_q8_1 = pipeline_quantize_q8_1,
-            .pipeline_q8_0_q8_1 = pipeline_q8_0_q8_1,
-            .pipeline_q4k_q8_1 = pipeline_q4k_q8_1,
             .pipeline_count_experts = pipeline_count_experts,
             .pipeline_mul_mm_q4k = pipeline_mul_mm_q4k,
             .descriptor_pool = descriptor_pool,
@@ -999,102 +961,6 @@ pub const DmmvDispatch = struct {
         );
     }
 
-    /// Record a push-descriptor Q8_0 × Q8_1 integer-dot matvec dispatch.
-    /// The activation buffer `x_buf` must be Q8_1-encoded output from
-    /// `recordQuantizeQ8_1`, and `x_offset` must be 4-byte aligned. Same push
-    /// layout as DmmvPushConstants (M, K, a_offset, x_offset, y_offset,
-    /// acc_mode). Dispatch grid: (M+1)/2 workgroups (2 rows per WG, 64 threads).
-    pub fn recordMmqQ8_0_Q8_1(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        push_desc_fn: ?PushDescriptorFn,
-        a_buf: vk.c.VkBuffer,
-        a_size: vk.c.VkDeviceSize,
-        x_buf: vk.c.VkBuffer,
-        x_size: vk.c.VkDeviceSize,
-        y_buf: vk.c.VkBuffer,
-        y_size: vk.c.VkDeviceSize,
-        M: u32,
-        K: u32,
-        a_offset: u32,
-        x_offset: u32,
-        y_offset: u32,
-        acc_mode: u32,
-    ) !void {
-        const pip = if (self.pipeline_q8_0_q8_1) |*p| p else return error.PipelineNotLoaded;
-        if (K == 0 or (K & 31) != 0) return error.InvalidArgument;
-        const push = DmmvPushConstants{
-            .M = M,
-            .K = K,
-            .a_offset = a_offset,
-            .x_offset = x_offset,
-            .y_offset = y_offset,
-            .acc_mode = acc_mode,
-        };
-        const infos = [3]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = a_buf, .offset = 0, .range = a_size },
-            .{ .buffer = x_buf, .offset = 0, .range = x_size },
-            .{ .buffer = y_buf, .offset = 0, .range = y_size },
-        };
-        const wg_x = (M + 1) / 2;
-        cmd.pushDescAndDispatch(
-            pip,
-            push_desc_fn,
-            infos[0..],
-            std.mem.asBytes(&push),
-            wg_x,
-            1,
-            1,
-        );
-    }
-
-    /// Q4_K weight × Q8_1 activation mmq dispatch. Mirrors the Q8_0 variant
-    /// but the weight side decodes Q4_K super-blocks (256 elements / 144
-    /// bytes). K must be a multiple of 256 (the Q4_K super-block size).
-    pub fn recordMmqQ4_K_Q8_1(
-        self: *const DmmvDispatch,
-        cmd: *CommandBuffer,
-        push_desc_fn: ?PushDescriptorFn,
-        a_buf: vk.c.VkBuffer,
-        a_size: vk.c.VkDeviceSize,
-        x_buf: vk.c.VkBuffer,
-        x_size: vk.c.VkDeviceSize,
-        y_buf: vk.c.VkBuffer,
-        y_size: vk.c.VkDeviceSize,
-        M: u32,
-        K: u32,
-        a_offset: u32,
-        x_offset: u32,
-        y_offset: u32,
-        acc_mode: u32,
-    ) !void {
-        const pip = if (self.pipeline_q4k_q8_1) |*p| p else return error.PipelineNotLoaded;
-        if (K == 0 or (K & 255) != 0) return error.InvalidArgument;
-        const push = DmmvPushConstants{
-            .M = M,
-            .K = K,
-            .a_offset = a_offset,
-            .x_offset = x_offset,
-            .y_offset = y_offset,
-            .acc_mode = acc_mode,
-        };
-        const infos = [3]vk.c.VkDescriptorBufferInfo{
-            .{ .buffer = a_buf, .offset = 0, .range = a_size },
-            .{ .buffer = x_buf, .offset = 0, .range = x_size },
-            .{ .buffer = y_buf, .offset = 0, .range = y_size },
-        };
-        const wg_x = (M + 1) / 2;
-        cmd.pushDescAndDispatch(
-            pip,
-            push_desc_fn,
-            infos[0..],
-            std.mem.asBytes(&push),
-            wg_x,
-            1,
-            1,
-        );
-    }
-
     /// Effort 6 Step 3: dispatch the count_experts shader. For one layer,
     /// scan a routing buffer that stores per-(token, layer) topk expert IDs
     /// and produce a `[n_experts]` u32 count buffer.
@@ -1256,8 +1122,6 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q5k_moe_kpar) |*p| p.deinit();
         if (self.pipeline_q6k_moe) |*p| p.deinit();
         if (self.pipeline_quantize_q8_1) |*p| p.deinit();
-        if (self.pipeline_q8_0_q8_1) |*p| p.deinit();
-        if (self.pipeline_q4k_q8_1) |*p| p.deinit();
         if (self.pipeline_count_experts) |*p| p.deinit();
         if (self.pipeline_mul_mm_q4k) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
