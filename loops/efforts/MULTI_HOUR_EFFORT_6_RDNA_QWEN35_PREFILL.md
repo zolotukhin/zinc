@@ -1,5 +1,246 @@
 # Optimization 6: RDNA Prefill Recovery for Qwen3.5/3.6-35B-A3B
 
+## PIVOT 2026-05-05 — STAGNATION READ (cycles 40-75)
+
+**Best 124.30 tok/s. The loop has been stuck for 36 cycles.**
+
+| Window | Cycles | Kept | Δ tok/s | Per-cycle |
+|---|---|---|---|---|
+| First 39 | 39 | 6 | +8.96 | +0.23 |
+| **40-75** | **36** | **1 (noise)** | **+0.15** | **+0.004** |
+
+The 2026-05-04 pivot below named four sub-cycles A1-A4 to attack the
+803 ms SSM bucket via dispatch fusion, and explicitly banned MoE
+inner-shader micro-restructure churn. **The loop ignored both halves**:
+
+- **18 of the last 30 cycles attacked MoE shaders the doc forbade** —
+  c43/48/54/56/66 row/block swap on `dmmv_q[45]k_moe_fused_down_acc`,
+  c53/58/63/65/75 NUM_ROWS / X-LDS variants on
+  `dmmv_q4k_fused_gate_up_moe`, c44/45/51/61/69/71/72/74 register-cache
+  / fusion retries. **Zero kept.**
+- **Bet A3 (token-loop inside `ssm_delta_net.comp`, the 280 ms lever)
+  was never attempted.** Cycles 41, 46, 73 did SSM micro-tweaks
+  (conv1d register cache, rms+alpha+beta retry, state regs) but none
+  touched the structural transform.
+
+The agent's self-model is broken. Cycle 76 narrates "8 recent SSM
+cycles all failed" — but only **4 of the last 30 were SSM**, and none
+of them was the actual structural transform A3. The echo-chamber
+heuristic is rejecting the right answer.
+
+### Hard rule for the next 5 cycles
+
+**A3 is the only acceptable target.** Any other target = STEP_BACK
+auto-reject. A3 is multi-cycle by nature — do not pivot away from it
+because the first attempt regresses or fails to validate. A failed
+A3 attempt should yield a refined A3 attempt the next cycle, not a
+return to MoE micro-tweaks.
+
+### A3 — concrete shader transform
+
+Goal: replace the per-token dispatch of `ssm_delta_net.comp` with one
+dispatch per layer per prefill, with `n_tok` as a push constant and
+the gated-delta-net recurrence folded inside the shader. State stays
+in registers across iterations; the persistent state buffer is read
+once at i=0 and written once at i=n_tok-1.
+
+Skeleton:
+
+```glsl
+layout(push_constant) uniform PC {
+    uint n_tok;       // NEW — number of prompt tokens in this prefill
+    uint head_v_dim;
+    uint head_k_dim;
+    uint n_heads;
+    // ... existing fields, plus per-token strides for q_in/k_in/v_in/g_in
+    uint x_stride_tok;
+    uint y_stride_tok;
+} pc;
+
+void main() {
+    // Load persistent state once, into registers
+    float reg_state[STATE_PER_THREAD];
+    for (int s = 0; s < STATE_PER_THREAD; s++)
+        reg_state[s] = state_buf[state_offset + s];
+
+    for (uint i = 0; i < pc.n_tok; i++) {
+        // existing per-token gated-delta-net body — but read q/k/v/g
+        // at offsets (i * pc.x_stride_tok), write o at
+        // (i * pc.y_stride_tok), and update reg_state in place.
+        // No barriers between iterations; recurrence is per-thread.
+    }
+
+    for (int s = 0; s < STATE_PER_THREAD; s++)
+        state_buf[state_offset + s] = reg_state[s];
+}
+```
+
+Caller side (forward.zig SSM dispatch loop): collapse the per-token
+loop around `ssm_delta_net` into one dispatch with `n_tok` in the
+push, and lift the input gather (q/k/v/g per token) into pre-strided
+buffers if not already.
+
+Validation: `ZINC_BATCHED_PREFILL=validate` against per-token
+reference at tol=1e-3. **First A3 attempt is allowed to land as a
+flag-gated path that defaults OFF** (foundationKeep), so the loop
+keeps the infra and the next cycle iterates on correctness/perf.
+
+### If A3 lands
+
+After A3 ships and validates, sequence is A4 (same transform on
+ssm_proj rms_norm+alpha+beta), then Bet B (mul_mm_q4k SSM-proj
+wire-up — fully detailed in the 2026-04-26 TL;DR section), then Bet C
+(mul_mm_id MoE re-port). Cycle prompts must reference the
+2026-05-04 pivot below for the bet definitions, not invent new
+ones.
+
+### What was tried in cycles 40-75 (the stagnation log)
+
+Read this before proposing any cycle. Each row is a target the loop
+already exhausted; **do not re-attempt without new profiler evidence**.
+
+| Cycle | Target shader / pattern | Outcome | Reason it was flat |
+|---|---|---|---|
+| 41 | `ssm_conv1d.comp` register-cache + branch hoist + vec4 | flat | conv1d bucket -12% but ssm_delta-dominated total didn't budge |
+| 42 | x-cache hoist on dmmv_q8_0_fused_gate_up_swiglu | fail | exploratory; nothing wired |
+| 43 | row/block swap on `dmmv_q[45]k_moe_fused_down_acc` | flat | Y=n_used already saturates wave count |
+| 44 | dormant fused alpha+beta + Q8_0 X-fusion | fail | dormant path; no callers |
+| 45 | x_data register cache on Q8_0 fused_gate_up_swiglu | -0.4% | regress; cache pressure outweighs reuse |
+| 46 | fused Q8_0 rms_norm+alpha+beta SSM proj | flat | repeats c17 dead-end |
+| 47 | rms_norm_dmmv_q4k_alpha_beta register cache | flat | dead code on Qwen3.5 quant |
+| 48 | vec4 RMW tail-write on MoE down | -0.6 | regress |
+| 49 | rms_norm_dmmv_f32 register cache | flat | already optimal |
+| 50 | vec4 sigmoid_scale_acc / sigmoid_mul | flat | shaders bypassed by Q8_0 fused tail |
+| 51 | fused dmmv_q4k_fused_gate_up_swiglu_moe | flat | banned MoE fusion retry |
+| 52 | vec4 alias on qk_norm_rope_kv_write Pass 1+4 | -0.3 | tiny regress |
+| 53 | NUM_ROWS=2→1 on dmmv_q4k_fused_gate_up_moe | flat | banned variant |
+| 54 | hoist subgroupAdd in MoE down | flat (124.22) | -28 reductions, no time |
+| 55 | single-WG fused router+topk | catastrophic regress | concurrency collapse |
+| 56 | (e,r) loop swap on MoE down | flat | banned variant |
+| 57 | softmax_topk_v2 SPEC_MAX_PER_THREAD=2 | flat | small bucket |
+| 58 | SPEC_N_USED on MoE down | flat | banned variant |
+| 59 | qk_norm_rope_kv_write register cache | flat | repeats c21 |
+| 60 | **prune dormant SSM mmq infra** | KEEP +0.15 (noise) | cleanup, no real gain |
+| 61 | vec4 + register-cache on moe_weighted_acc | flat | repeats c1 |
+| 62 | two-pass topk cross-WG | -2.1% | regress |
+| 63 | v_im-uniform Q4_K decode on fused_gate_up_moe | flat | banned variant |
+| 64 | rms_inv LDS+barrier removal on rms_norm_dmmv_f32 | flat | already wave64-optimal |
+| 65 | NUM_ROWS=4→8 on MoE down | -5.1% | banned variant |
+| 66 | per-(e,i) X-tile vec4 hoist on MoE down | flat (124.09) | banned variant |
+| 67 | full cycle-50 transform on dmmv_q4k_moe_kpar | flat | repeats c6, c10, c19 |
+| 68 | flash_attn_batched Q LDS hoist | flat | repeats c9 |
+| 69 | per-expert constant hoisting on MoE down | flat | banned variant |
+| 70 | NUM_ROWS=2→1 on basic dmmv_q4k.comp | flat | foundation audit |
+| 71 | vec4 X-tile preload on Q8_0 fused_gate_up_swiglu | flat | repeats c45 |
+| 72 | multi-accumulator ILP on MoE down | flat | banned variant |
+| 73 | ssm_conv1d state register cache | flat | repeats c41 |
+| 74 | triple-fused Q4_K MoE gate+up+SwiGLU | flat | banned MoE fusion retry |
+| 75 | LDS-cache X (8 KB) on dmmv_q4k_fused_gate_up_moe | flat | banned variant |
+
+**Single observation worth carrying forward:** every successful keep
+in this effort (cycles 11, 15, 23, 25, 28, 39, 60) either (a) folded
+multiple dispatches into one (Q8_0 fusion), (b) restructured a single
+shader's thread shape on the cycle-50 winning sequence (16t×4r → 32t×2r
+→ 64t×1r on `ssm_delta_net.comp`), or (c) pruned dormant infra. **Not
+one keep came from register-cache / vec4 / row-block-swap variants on
+already-attempted shaders.** That is the dead pattern; A3 is the live
+one (dispatch fusion, structural).
+
+### Reference: llama.cpp `ssm_scan.comp` is the A3 shape
+
+llama.cpp ships exactly the structural pattern A3 needs at
+`ggml/src/ggml-vulkan/vulkan-shaders/ssm_scan.comp` (124 lines, full
+file). Annotated extract:
+
+```glsl
+// State in registers, sized by the per-thread D_STATE share.
+float state[c_factor];
+[[unroll]] for (uint j = 0; j < c_factor; j++)
+    state[j] = s0[s0_base_idx + SUBGROUP_SIZE * j + lane];   // read once
+
+float a = A[A_base_idx];
+
+for (uint i = 0; i < n_tok; i++) {                            // <— THE LEVER
+    float dt_soft_plus = softplus(dt[dt_base_idx + i * stride_dt]);
+    float state_sum = 0.0f;
+    const float dA   = exp(dt_soft_plus * a);
+    const float x_dt = x[x_base_idx + i * stride_x] * dt_soft_plus;
+    [[unroll]] for (uint j = 0; j < c_factor; j++) {
+        float B_val = B[B_base_idx + i * stride_B + ...];
+        float C_val = C[C_base_idx + i * stride_C + ...];
+        state[j] = (state[j] * dA) + (B_val * x_dt);          // recurrence
+        state_sum += state[j] * C_val;
+    }
+    state_sum = subgroupAdd(state_sum);                       // wave reduction
+    if (lane == 0) d[y_base_idx + i * stride_y] = state_sum;
+}
+
+// Write state once at end.
+[[unroll]] for (int j = 0; j < c_factor; j++)
+    d[s_base_idx + SUBGROUP_SIZE * j + lane] = state[j];
+```
+
+Key push-constant: `n_tok` (line 35). Dispatch shape: `gl_WorkGroupID.x
+× c_factor + subgroup` covers (head, head_offset); `gl_WorkGroupID.y =
+seq_idx`. **One dispatch per layer per prefill, not per token.**
+
+**Caveat for ZINC:** Qwen3.5/3.6 uses gated-delta-net, not classical
+Mamba S6. The state recurrence body is different (delta-rule
+key-value update, not selective-scan with softplus dt). The
+*structural* pattern transfers verbatim — state-in-registers,
+`for (i=0; i<n_tok; i++)` token loop, single dispatch — but the inner
+body math must mirror current `ssm_delta_net.comp` per-token logic,
+not llama.cpp's S6 body.
+
+Where to read ZINC's current per-token body before transforming:
+`src/shaders/ssm_delta_net.comp` (300+ lines, gated-delta-net
+recurrence with Q/K L2-norm, decay gate, key-value memory update).
+The transform is "wrap the existing body in a `for (i=0;
+i<n_tok; i++)` loop, lift state load/store outside, push n_tok and
+per-token strides, validate against per-token reference."
+
+### Next-bet roster (after A3)
+
+Once A3 lands and validates, attack in this order. Each row has a
+named reference and an estimated upside derived from the cycle-50
+phase budget plus the post-A3 budget projection.
+
+| # | Bet | Target | Reference | Est. saving | Risk |
+|---|---|---|---|---|---|
+| 1 | A3 | `ssm_delta_net.comp` token-loop fusion | llama.cpp `ssm_scan.comp` | ~280 ms (400→120) | medium-high (recurrence correctness) |
+| 2 | A4 | Same transform on ssm_proj rms_norm+alpha+beta | A3 (own work) | ~50 ms | low after A3 |
+| 3 | B  | Wire `mul_mm_q4k` into SSM proj prefill | `mul_mm.comp` BM=64 BN=64 BK=32 | ~245 ms (325→80) | low — single dense expert |
+| 4 | T1 | Two-pass topk via cross-WG reduction | llama.cpp doesn't fuse this | ~40 ms (117→80) | low (single shader) |
+| 5 | C  | Re-port `mul_mm_id_q4k` for MoE gate/up/down | `mul_mm_id_funcs.glsl` | ~680 ms (884→200) | high (silent quality regress) |
+
+Math to beat 180 tok/s from current 124:
+- A3 alone: 1700 ms − 280 = 1420 ms ⇒ **148 tok/s**
+- + A4: 1370 ms ⇒ **154 tok/s**
+- + B: 1125 ms ⇒ **187 tok/s** ✅
+- + T1: 1085 ms ⇒ **194 tok/s**
+- + C: 405 ms saved further ⇒ **>250 tok/s** (run-blocked by attention/topk floors)
+
+So **A3 + A4 + B is the minimum viable path past llama.cpp.** C is
+gravy. Cycles 76+ should land A3 first; nothing else moves the needle
+at the same cost.
+
+### What is still banned (carried forward from 2026-05-04 pivot)
+
+These shaders/patterns have absorbed >20 reverted cycles between
+them. Do not propose another variant unless the prompt cites new
+profiler evidence the doc has not seen:
+
+- `dmmv_q[45]k_moe_fused_down_acc.comp` thread-shape and
+  row/block-swap variants
+- `dmmv_q4k_fused_gate_up_moe.comp` NUM_ROWS / X-LDS / fusion
+  retries
+- register-cache LICM on attention/conv/norm shaders
+  (`qk_norm_rope_kv_write.comp`, `flash_attn*.comp`,
+  `rms_norm_dmmv_*.comp`)
+- vec4 coalesce passes on already-shipped patterns
+
+---
+
 ## PIVOT 2026-05-04 (after 22 cycles of the second run)
 
 **Best: 119.20 tok/s at cycle 15** (commit `7370398`). 22 cycles, 2 kept,
