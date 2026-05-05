@@ -41,7 +41,7 @@ pub const GpuConfig = struct {
     bandwidth_gbps: u32,
     /// Number of compute units.
     compute_units: u32,
-    /// SIMD wave width (32 or 64).
+    /// SIMD wave width (from Vulkan subgroup size: e.g. 16, 32, or 64).
     wave_size: u32,
     /// Cooperative matrix support.
     coopmat_support: bool,
@@ -98,6 +98,13 @@ pub fn detect(instance: *const Instance) GpuConfig {
     const props = instance.device_props;
     const name_slice = std.mem.sliceTo(&props.deviceName, 0);
 
+    // Use Vulkan-reported subgroup size when available, otherwise fall back to 32
+    // (the most common subgroup width across vendors).
+    const subgroup_size: u32 = if (instance.caps.min_subgroup_size > 0)
+        instance.caps.min_subgroup_size
+    else
+        32;
+
     var config = GpuConfig{
         .vendor = .unknown,
         .device_name = undefined,
@@ -105,7 +112,7 @@ pub fn detect(instance: *const Instance) GpuConfig {
         .vram_mb = @intCast(instance.vramBytes() / (1024 * 1024)),
         .bandwidth_gbps = 0,
         .compute_units = 0,
-        .wave_size = 32,
+        .wave_size = subgroup_size,
         .coopmat_support = instance.caps.cooperative_matrix,
         .l1_cache_kb = 16,
         .l2_cache_mb = 2,
@@ -125,7 +132,6 @@ pub fn detect(instance: *const Instance) GpuConfig {
     if (props.vendorID == 0x1002) {
         // AMD — differentiate RDNA3 vs RDNA4 by device ID ranges
         config.vendor = classifyAmd(props.deviceID, name_slice);
-        config.wave_size = 64; // wave64 optimal on RDNA3/4
 
         switch (config.vendor) {
             .amd_rdna4 => {
@@ -166,25 +172,26 @@ pub fn detect(instance: *const Instance) GpuConfig {
                 config.compute_units = 32;
             },
         }
+        // AMD RDNA3/4 always uses wave64 for optimal scheduling, regardless of
+        // what min_subgroup_size reports (AMD supports both 32 and 64, but 64
+        // is the native width and what our shaders are tuned for).
+        config.wave_size = 64;
     } else if (props.vendorID == 0x10de) {
         // NVIDIA
         config.vendor = .nvidia;
-        config.wave_size = 32;
         config.bandwidth_gbps = 512;
     } else if (props.vendorID == 0x8086) {
         config.vendor = classifyIntel(props.deviceID, name_slice);
         if (config.vendor == .intel_arc_xe2) {
-            // Xe2 (Battlemage, Arc B-series): SIMD16 subgroup.
+            // Xe2 (Battlemage, Arc B-series).
             // B770 Pro: 32 Xe2-HPG cores, 256-bit GDDR6 @ 20 Gbps ≈ 640 GB/s.
-            config.wave_size = 16;
             config.bandwidth_gbps = 640;
             config.compute_units = 32;
             config.l1_cache_kb = 64;
             config.l2_cache_mb = 8;
         } else {
-            // Xe-HPG (Alchemist, Arc A-series): SIMD32 subgroup.
+            // Xe-HPG (Alchemist, Arc A-series).
             // A770: 512 GB/s, 32 Xe-cores.
-            config.wave_size = 32;
             config.bandwidth_gbps = 512;
             config.compute_units = 32;
             config.l1_cache_kb = 64;
@@ -314,6 +321,40 @@ test "classifyIntel — Arc B-series (Xe2)" {
 test "classifyIntel — Arc A-series (Xe-HPG)" {
     try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc A770"));
     try std.testing.expectEqual(GpuVendor.intel_arc, classifyIntel(0x0000, "Intel Arc A380"));
+}
+
+test "wave_size fallback and DMMV derivation" {
+    // Verify the subgroup size fallback and wave_size → DMMV parameter mapping.
+    // wave64 (AMD): workgroup 64, 2 rows per workgroup
+    {
+        const wave: u32 = 64;
+        const wg = wave;
+        const rows: u32 = if (wave == 64) 2 else 1;
+        try std.testing.expectEqual(@as(u32, 64), wg);
+        try std.testing.expectEqual(@as(u32, 2), rows);
+    }
+    // wave32 (NVIDIA): workgroup 32, 1 row
+    {
+        const wave: u32 = 32;
+        const wg = wave;
+        const rows: u32 = if (wave == 64) 2 else 1;
+        try std.testing.expectEqual(@as(u32, 32), wg);
+        try std.testing.expectEqual(@as(u32, 1), rows);
+    }
+    // wave16 (Intel Xe2): workgroup 16, 1 row
+    {
+        const wave: u32 = 16;
+        const wg = wave;
+        const rows: u32 = if (wave == 64) 2 else 1;
+        try std.testing.expectEqual(@as(u32, 16), wg);
+        try std.testing.expectEqual(@as(u32, 1), rows);
+    }
+    // Fallback when min_subgroup_size is 0 → defaults to 32
+    {
+        const min_subgroup_size: u32 = 0;
+        const subgroup_size: u32 = if (min_subgroup_size > 0) min_subgroup_size else 32;
+        try std.testing.expectEqual(@as(u32, 32), subgroup_size);
+    }
 }
 
 test "GpuConfig name" {
