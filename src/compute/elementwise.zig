@@ -91,6 +91,14 @@ pub const SsmDeltaNetPush = extern struct {
     dt_bias_is_f16: u32,
     has_dt_bias: u32,
     has_ssm_a: u32,
+    // A3: token-loop fold inside the shader. n_tok=1 keeps the shader
+    // structurally equivalent to the pre-A3 form (state hoisted to
+    // registers but only one iteration). n_tok>1 amortizes one
+    // state-buffer DRAM round-trip across n_tok prefill tokens.
+    n_tok: u32,
+    conv_stride_tok: u32, // floats: 2*qk_dim + d_inner
+    ab_stride_tok: u32, // floats: dt_rank
+    y_stride_tok: u32, // floats: d_inner
 };
 
 /// Push constants for SSM gated norm shader.

@@ -8913,6 +8913,14 @@ pub const InferenceEngine = struct {
                 .dt_bias_is_f16 = if (dt_bias_tensor) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
                 .has_dt_bias = if (dt_bias_tensor != null) 1 else 0,
                 .has_ssm_a = if (ssm_a_tensor != null) 1 else 0,
+                // A3: per-token loop folded inside shader. Production
+                // dispatches one token per call (n_tok=1); the strides
+                // are populated for forward-compatibility with future
+                // batched calls but unused at n_tok=1.
+                .n_tok = 1,
+                .conv_stride_tok = d_inner + 2 * n_group * d_state,
+                .ab_stride_tok = dt_rank,
+                .y_stride_tok = d_inner,
             };
             if (pip.uses_push_descriptors) {
                 // 64t×1r: one WG per (head, row) pair — see ssm_delta_net.comp
@@ -11397,7 +11405,7 @@ test "request budget keeps small generations on fewer kv pages" {
 test "push constant struct sizes match GLSL expectations" {
     const ew = @import("elementwise.zig");
     try std.testing.expectEqual(@as(usize, 12), @sizeOf(ew.SsmConv1dPush));
-    try std.testing.expectEqual(@as(usize, 36), @sizeOf(ew.SsmDeltaNetPush));
+    try std.testing.expectEqual(@as(usize, 52), @sizeOf(ew.SsmDeltaNetPush));
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(ew.SsmGatedNormPush));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(ew.SoftmaxTopkPush));
 }

@@ -1,29 +1,38 @@
 #version 460
-// ZINC — SSM delta-net recurrent state update
+// ZINC — SSM delta-net recurrent state update (A3: token-loop folded)
 // Performs the delta-net autoregressive state update for Mamba/SSM layers,
 // replacing the CPU-side computation with a fully GPU-resident kernel.
 // Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+//
+// A3 — token-loop fold: the per-token recurrence is now wrapped in a
+// `for (uint t = 0; t < n_tok; t++)` loop INSIDE the shader, with the
+// per-thread row register-cache (`reg_state[]`) hoisted outside the loop.
+// State is read once at t=0 and written once at t=n_tok-1, eliminating
+// (n_tok - 1) round-trips through DRAM/L2 per (head, row) pair per layer
+// per prefill. The shape of the per-token body is unchanged from the
+// pre-A3 wave64 kernel; only the surrounding loop is new.
+//
+// At n_tok=1 (the current production dispatch shape) the t loop runs
+// once and the kernel is structurally equivalent to the pre-A3 form
+// modulo the hoisted register-cache. Validates against the per-token
+// reference at tol=1e-3.
 //
 // Each workgroup handles ONE row of one head, with all 64 threads cooperating
 // on the row. Dispatch shape: dt_rank × head_v_dim × 1.
 // State per head is head_v_dim × head_v_dim (128×128 = 16384 floats).
 // With 64 threads × 1 row, ALL threads are active during state update.
-// Each thread handles 128/64=2 strided columns, then a single wave-wide
-// subgroupAdd reduces the row's partial sums (replaces the 5-stage
-// subgroupShuffleXor 1,2,4,8,16 chain that the 32t×2r path needed to
-// keep the two rows' lanes segregated). 4096 workgroups; extends the
-// cycle-50 sequence (8t×8r → 16t×4r → 32t×2r → 64t×1r) by halving
-// reg_state[2] vs [4] and collapsing the row reduction to one wave op.
+// Each thread handles 128/64=2 strided columns.
 //
-// Algorithm per head h:
-//   1. Extract Q, K, V slices from conv_out
+// Algorithm per (head h, token t):
+//   1. Extract Q, K, V slices from conv_out at per-token offset.
 //      conv_out layout: [Q(n_group*d_state), K(n_group*d_state), V(d_inner)]
 //   2. L2 normalize Q and K per group, scale Q by 1/sqrt(d_state)
 //   3. Compute gate = exp(softplus(alpha + dt_bias) * ssm_a), beta_val = sigmoid(beta)
-//   4. Decay state: s *= gate
-//   5. For each row: sk = dot(s[row], k), d = beta_val * (v[row] - sk)
-//      then s[row][col] += k[col] * d
-//   6. Readout: output[h*head_v_dim + row] = dot(s[row], q)
+//   4. Decay register state: reg_state *= gate
+//   5. For each row: sk = dot(reg_state, k), d = beta * (v[row] - sk)
+//      then reg_state[col] += k[col] * d
+//   6. Readout: out[t * y_stride + h*head_v_dim + row] = dot(reg_state, q)
+//   (state DRAM I/O happens once before/after the t loop)
 //
 // Dispatch: dt_rank × head_v_dim × 1 workgroups
 
@@ -31,15 +40,17 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
 
 layout(local_size_x = 64) in;
 
 // conv_out: output of conv1d+SiLU, layout [Q(n_group*d_state), K(n_group*d_state), V(d_inner)]
+// per token, with per-token stride conv_stride_tok.
 layout(set = 0, binding = 0) readonly buffer ConvOut {
     float conv_out[];
 };
 
-// dt_bias: per-head bias for DT (dt_rank floats)
+// dt_bias: per-head bias for DT (dt_rank floats) — shared across tokens
 layout(set = 0, binding = 1) readonly buffer DtBiasF32 {
     float dt_bias_f32[];
 };
@@ -47,17 +58,17 @@ layout(set = 0, binding = 1) readonly buffer DtBiasF16 {
     float16_t dt_bias_f16[];
 };
 
-// alpha: per-head DT projection (dt_rank floats)
+// alpha: per-head DT projection (dt_rank floats per token, stride ab_stride_tok)
 layout(set = 0, binding = 2) readonly buffer Alpha {
     float alpha[];
 };
 
-// beta: per-head beta projection (dt_rank floats)
+// beta: per-head beta projection (dt_rank floats per token, stride ab_stride_tok)
 layout(set = 0, binding = 3) readonly buffer Beta {
     float beta[];
 };
 
-// ssm_a weights: decay factors per head (dt_rank floats, may be f16)
+// ssm_a weights: decay factors per head (dt_rank floats, may be f16) — shared
 layout(set = 0, binding = 4) readonly buffer SsmAF32 {
     float ssm_a_f32[];
 };
@@ -66,11 +77,12 @@ layout(set = 0, binding = 4) readonly buffer SsmAF16 {
 };
 
 // Persistent recurrent state: dt_rank * head_v_dim * head_v_dim floats, read+write
+// Read once at t=0, written once at t=n_tok-1 per dispatch.
 layout(set = 0, binding = 5) buffer State {
     float state[];
 };
 
-// Output: d_inner floats — delta-net readout
+// Output: d_inner floats per token, stride y_stride_tok — delta-net readout
 layout(set = 0, binding = 6) writeonly buffer Output {
     float out_data[];
 };
@@ -85,6 +97,10 @@ layout(push_constant) uniform PushConstants {
     uint dt_bias_is_f16; // 1 if dt_bias stored as f16, 0 if f32
     uint has_dt_bias;    // 1 if dt_bias tensor exists, 0 otherwise
     uint has_ssm_a;      // 1 if ssm_a tensor exists, 0 otherwise
+    uint n_tok;          // A3: number of tokens to process in this dispatch (≥1)
+    uint conv_stride_tok; // A3: per-token stride in conv_out (in floats, =2*qk_dim+d_inner)
+    uint ab_stride_tok;   // A3: per-token stride in alpha/beta (in floats, =dt_rank)
+    uint y_stride_tok;    // A3: per-token stride in out_data (in floats, =d_inner)
 };
 
 // Shared memory for Q and K vectors (up to 128 elements each)
@@ -107,210 +123,231 @@ void main() {
     uint k_len = min(head_v_dim, d_state);
     uint row = row_block;
 
-    // --- Step 1: Load Q and K into shared memory ---
-    // conv_out layout: [Q(qk_dim), K(qk_dim), V(d_inner)]
-    // Q and K are grouped: group index for this head
-    uint k_hi = (n_group == dt_rank) ? h : (h % n_group);
-    uint q_offset = k_hi * d_state;
-    uint k_offset = qk_dim + k_hi * d_state;
-    uint v_offset = 2 * qk_dim + h * head_v_dim;
-
-    // Load the active Q/K slice. Elements beyond k_len are never read.
-    // Fuse Q and K loads into a single iteration so the compiler can issue
-    // both LDS writes back-to-back per loop iter.
-    for (uint i = tid; i < k_len; i += 64) {
-        s_q[i] = conv_out[q_offset + i];
-        s_k[i] = conv_out[k_offset + i];
-    }
-    barrier();
-
-    // --- Step 2: L2 normalize Q and K, scale Q by 1/sqrt(d_state) ---
-    // Fused Q + K L2 normalize: one combined sum-sq pass + one combined scale
-    // pass. Each thread reads s_q[i] and s_k[i] together and accumulates two
-    // partials, halving the LDS-read iteration count vs the two-pass form
-    // and letting the compiler pipeline both subgroupAdds. Saves one
-    // intra-kernel barrier on the wave64 fast path (no synchronization is
-    // needed between the sum-sq and scale passes since each thread only
-    // writes back its own s_q/s_k slots).
-    float partial_q = 0.0;
-    float partial_k = 0.0;
-    for (uint i = tid; i < k_len; i += 64) {
-        float qi = s_q[i];
-        float ki = s_k[i];
-        partial_q += qi * qi;
-        partial_k += ki * ki;
-    }
-    partial_q = subgroupAdd(partial_q);
-    partial_k = subgroupAdd(partial_k);
-    if (gl_NumSubgroups > 1u) {
-        // Stash both partials at distinct slots so a single barrier covers
-        // both reductions.
-        if (gl_SubgroupInvocationID == 0u) {
-            s_reduce[gl_SubgroupID] = partial_q;
-            s_reduce[gl_SubgroupID + 4u] = partial_k;
-        }
-        barrier();
-        if (tid == 0u) {
-            float merged_q = 0.0;
-            float merged_k = 0.0;
-            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
-                merged_q += s_reduce[sg];
-                merged_k += s_reduce[sg + 4u];
-            }
-            s_reduce_scalar = merged_q;
-            s_reduce[8] = merged_k;
-        }
-        barrier();
-        partial_q = s_reduce_scalar;
-        partial_k = s_reduce[8];
-    }
-    float inv_norm_q = inversesqrt(max(partial_q, 1e-12));
-    float inv_norm_k = inversesqrt(max(partial_k, 1e-12));
-    float q_scale = inv_norm_q / sqrt(float(d_state));
-    for (uint i = tid; i < k_len; i += 64) {
-        s_q[i] *= q_scale;
-        s_k[i] *= inv_norm_k;
-    }
-    barrier();
-
-    // --- Step 3: Compute gate and beta_val (single thread, broadcast via shared) ---
-    if (tid == 0) {
-        float a = alpha[h];
-        if (has_dt_bias != 0) {
-            if (dt_bias_is_f16 != 0) {
-                a += float(dt_bias_f16[h]);
-            } else {
-                a += dt_bias_f32[h];
-            }
-        }
-        // softplus: log(1 + exp(a))
-        float sp = log(1.0 + exp(a));
-        float gate_val;
-        if (has_ssm_a != 0) {
-            float ssm_a_val;
-            if (ssm_a_is_f16 != 0) {
-                ssm_a_val = float(ssm_a_f16[h]);
-            } else {
-                ssm_a_val = ssm_a_f32[h];
-            }
-            gate_val = sp * ssm_a_val;
-        } else {
-            gate_val = -sp;
-        }
-        s_gate = exp(gate_val);
-        // sigmoid(beta)
-        s_beta_val = 1.0 / (1.0 + exp(-beta[h]));
-    }
-    barrier();
-
-    // --- Steps 4-6: State update and readout (64 threads per row, 1 row per WG) ---
-    // Thread mapping: tid = col_thread (0..63), all 64 threads cooperate on
-    // this WG's single row. Replaces cycle-23's 32t×2r split — with a single
-    // row per WG the entire wave64 reduces via one subgroupAdd instead of
-    // five subgroupShuffleXor stages that had to stay inside per-row 32-lane
-    // segments.
+    // --- Hoisted: load persistent state into per-thread registers once ---
+    // For A3, reg_state[] persists across the t-loop iterations, so the
+    // state buffer is only touched once at the start (read) and once at
+    // the end (write) per dispatch. At n_tok=1 this is identical to the
+    // pre-A3 in-place pattern.
     const uint THREADS_PER_ROW = 64u;
+    const uint MAX_COLS_PER_THREAD = 2u;
     uint col_thread = tid;                     // 0..63
 
     if (row >= head_v_dim) return;
 
-    float g_val = s_gate;
-    float b_val = s_beta_val;
-    float v_val = conv_out[v_offset + row];
-
-    // State layout: state[h * head_v_dim * head_v_dim + row * head_v_dim + col]
     uint s_base = h * head_v_dim * head_v_dim;
     uint row_base = s_base + row * head_v_dim;
 
-    // Register-cached state: read each col once, hold decayed value across
-    // the sk reduction, then write back updated value at the end. Cuts the
-    // 4 separate passes (decay-write / dot-read / update-rw / readout-read)
-    // down to one read + one write per col. Bit-equivalent to the original
-    // because all multiplications and additions execute in the same order;
-    // only the storage location of the intermediate state value changes
-    // (register vs DRAM/L2).
-    //
-    // MAX_COLS_PER_THREAD = 2 covers head_v_dim ≤ 128 (Qwen 3.5/3.6
-    // mamba-2: head_v_dim = d_inner / dt_rank = 4096 / 32 = 128). Matches
-    // the existing s_q[128] / s_k[128] shared-mem upper bound; head_v_dim
-    // larger than 128 has never been a supported configuration here.
-    // Halved from 4 → 2 by widening THREADS_PER_ROW from 32 → 64. Brings the
-    // cycle-50 sequence (8t×8r → 16t×4r → 32t×2r → 64t×1r) to its endpoint:
-    // one full wave per row, single subgroupAdd reduction.
-    const uint MAX_COLS_PER_THREAD = 2u;
     float reg_state[MAX_COLS_PER_THREAD];
-
-    // Phase 1: Decay state into register cache and accumulate sk.
-    float sk = 0.0;
-    for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
+    [[unroll]] for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
         uint col = col_thread + i * THREADS_PER_ROW;
-        if (col >= head_v_dim) break;
-        float s = state[row_base + col] * g_val;
-        reg_state[i] = s;
-        if (col < k_len) {
-            sk += s * s_k[col];
+        if (col < head_v_dim) {
+            reg_state[i] = state[row_base + col];
         }
     }
 
-    // Reduce sk across all 64 threads of this WG (one row per WG, so the
-    // wave-wide sum is what we want). Replaces cycle-23's 5-stage
-    // subgroupShuffleXor 1..16 chain with a single wave op. The
-    // multi-subgroup fallback mirrors the L2 norm reductions above; on
-    // RDNA4 wave64 (the active path) gl_NumSubgroups == 1 and the
-    // fallback constant-folds away.
-    sk = subgroupAdd(sk);
-    if (gl_NumSubgroups > 1u) {
-        if (gl_SubgroupInvocationID == 0u) {
-            s_reduce[gl_SubgroupID] = sk;
+    // --- Hoisted: load shared dt_bias and ssm_a per head once ---
+    // These are constants across the t loop (per head, not per token).
+    // Reading them once and broadcasting via registers saves n_tok-1
+    // redundant LDS reads per dispatch. (Compiler may already do this
+    // via uniform analysis, but be explicit.)
+    float dt_bias_val = 0.0;
+    if (has_dt_bias != 0) {
+        if (dt_bias_is_f16 != 0) {
+            dt_bias_val = float(dt_bias_f16[h]);
+        } else {
+            dt_bias_val = dt_bias_f32[h];
         }
-        barrier();
-        if (tid == 0u) {
-            float merged = 0.0;
-            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
-                merged += s_reduce[sg];
+    }
+    float ssm_a_val = 0.0;
+    if (has_ssm_a != 0) {
+        if (ssm_a_is_f16 != 0) {
+            ssm_a_val = float(ssm_a_f16[h]);
+        } else {
+            ssm_a_val = ssm_a_f32[h];
+        }
+    }
+
+    // --- Per-token loop: A3 fold ---
+    for (uint t = 0u; t < n_tok; t++) {
+        uint conv_base = t * conv_stride_tok;
+        uint ab_base   = t * ab_stride_tok;
+        uint y_base    = t * y_stride_tok;
+
+        // conv_out layout per token: [Q(qk_dim), K(qk_dim), V(d_inner)]
+        // Q and K are grouped: group index for this head
+        uint k_hi = (n_group == dt_rank) ? h : (h % n_group);
+        uint q_offset = conv_base + k_hi * d_state;
+        uint k_offset = conv_base + qk_dim + k_hi * d_state;
+        uint v_offset = conv_base + 2u * qk_dim + h * head_v_dim;
+
+        // --- Step 1: Load Q and K into shared memory + accumulate sum-sq
+        // in registers in the same pass. The L2 norm scale-back pass below
+        // re-reads from registers (not LDS), eliminating one set of LDS
+        // loads per element vs the prior load→sum-sq→scale three-pass form.
+        float qi_reg[2];
+        float ki_reg[2];
+        float partial_q = 0.0;
+        float partial_k = 0.0;
+        [[unroll]] for (uint j = 0u; j < 2u; j++) {
+            uint i = tid + j * 64u;
+            if (i < k_len) {
+                float qi = conv_out[q_offset + i];
+                float ki = conv_out[k_offset + i];
+                qi_reg[j] = qi;
+                ki_reg[j] = ki;
+                s_q[i] = qi;
+                s_k[i] = ki;
+                partial_q += qi * qi;
+                partial_k += ki * ki;
+            } else {
+                qi_reg[j] = 0.0;
+                ki_reg[j] = 0.0;
             }
-            s_reduce_scalar = merged;
+        }
+        // No barrier yet — LDS writes only consumed after the scale pass below
+        // re-writes them.
+
+        // --- Step 2: L2 normalize Q and K, scale Q by 1/sqrt(d_state) ---
+        partial_q = subgroupAdd(partial_q);
+        partial_k = subgroupAdd(partial_k);
+        if (gl_NumSubgroups > 1u) {
+            // Stash both partials at distinct slots so a single barrier covers
+            // both reductions.
+            if (gl_SubgroupInvocationID == 0u) {
+                s_reduce[gl_SubgroupID] = partial_q;
+                s_reduce[gl_SubgroupID + 4u] = partial_k;
+            }
+            barrier();
+            if (tid == 0u) {
+                float merged_q = 0.0;
+                float merged_k = 0.0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                    merged_q += s_reduce[sg];
+                    merged_k += s_reduce[sg + 4u];
+                }
+                s_reduce_scalar = merged_q;
+                s_reduce[8] = merged_k;
+            }
+            barrier();
+            partial_q = s_reduce_scalar;
+            partial_k = s_reduce[8];
+        }
+        float inv_norm_q = inversesqrt(max(partial_q, 1e-12));
+        float inv_norm_k = inversesqrt(max(partial_k, 1e-12));
+        float q_scale = inv_norm_q / sqrt(float(d_state));
+
+        // Scale-back from registers (NOT from LDS) — eliminates the redundant
+        // LDS-read pass that the original two-pass scale form had.
+        [[unroll]] for (uint j = 0u; j < 2u; j++) {
+            uint i = tid + j * 64u;
+            if (i < k_len) {
+                s_q[i] = qi_reg[j] * q_scale;
+                s_k[i] = ki_reg[j] * inv_norm_k;
+            }
         }
         barrier();
-        sk = s_reduce_scalar;
+
+        // --- Step 3: Compute gate and beta_val (single thread, broadcast via shared) ---
+        if (tid == 0) {
+            float a = alpha[ab_base + h];
+            a += dt_bias_val;
+            // softplus: log(1 + exp(a))
+            float sp = log(1.0 + exp(a));
+            float gate_val;
+            if (has_ssm_a != 0) {
+                gate_val = sp * ssm_a_val;
+            } else {
+                gate_val = -sp;
+            }
+            s_gate = exp(gate_val);
+            // sigmoid(beta)
+            s_beta_val = 1.0 / (1.0 + exp(-beta[ab_base + h]));
+        }
+        barrier();
+
+        // --- Steps 4-6: State update and readout (64 threads per row, 1 row per WG) ---
+        float g_val = s_gate;
+        float b_val = s_beta_val;
+        float v_val = conv_out[v_offset + row];
+
+        // Phase 1: Decay register state in place, accumulate sk.
+        float sk = 0.0;
+        [[unroll]] for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
+            uint col = col_thread + i * THREADS_PER_ROW;
+            if (col >= head_v_dim) break;
+            reg_state[i] *= g_val;
+            if (col < k_len) {
+                sk += reg_state[i] * s_k[col];
+            }
+        }
+
+        // Reduce sk across the wave.
+        sk = subgroupAdd(sk);
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) {
+                s_reduce[gl_SubgroupID] = sk;
+            }
+            barrier();
+            if (tid == 0u) {
+                float merged = 0.0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                    merged += s_reduce[sg];
+                }
+                s_reduce_scalar = merged;
+            }
+            barrier();
+            sk = s_reduce_scalar;
+        }
+
+        // d = beta * (v[row] - sk)
+        float d_val = b_val * (v_val - sk);
+
+        // Phase 2: Apply rank-1 update to register state, accumulate readout.
+        // State write to DRAM is deferred until after the t loop.
+        float o_val = 0.0;
+        [[unroll]] for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
+            uint col = col_thread + i * THREADS_PER_ROW;
+            if (col >= head_v_dim) break;
+            if (col < k_len) {
+                reg_state[i] += s_k[col] * d_val;
+                o_val += reg_state[i] * s_q[col];
+            }
+        }
+
+        o_val = subgroupAdd(o_val);
+        if (gl_NumSubgroups > 1u) {
+            if (gl_SubgroupInvocationID == 0u) {
+                s_reduce[gl_SubgroupID] = o_val;
+            }
+            barrier();
+            if (tid == 0u) {
+                float merged = 0.0;
+                for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                    merged += s_reduce[sg];
+                }
+                s_reduce_scalar = merged;
+            }
+            barrier();
+            o_val = s_reduce_scalar;
+        }
+
+        if (col_thread == 0u) {
+            out_data[y_base + h * head_v_dim + row] = o_val;
+        }
+
+        // Inter-iteration barrier: ensure all threads finished using LDS
+        // (s_q/s_k/s_gate/s_beta) before the next iter overwrites them.
+        // Skipped on the last iter (no further LDS writes).
+        if (t + 1u < n_tok) {
+            barrier();
+        }
     }
 
-    // d = beta * (v[row] - sk)
-    float d_val = b_val * (v_val - sk);
-
-    // Phase 2: Apply the rank-1 update from the cached state, write back,
-    // and accumulate the readout dot. Cols outside [0, k_len) only get the
-    // decayed value written back (no rank-1 update, no readout contribution).
-    float o_val = 0.0;
-    for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
+    // --- Hoisted: write final state back to DRAM once per dispatch ---
+    [[unroll]] for (uint i = 0u; i < MAX_COLS_PER_THREAD; i++) {
         uint col = col_thread + i * THREADS_PER_ROW;
-        if (col >= head_v_dim) break;
-        float s = reg_state[i];
-        if (col < k_len) {
-            s += s_k[col] * d_val;
-            o_val += s * s_q[col];
+        if (col < head_v_dim) {
+            state[row_base + col] = reg_state[i];
         }
-        state[row_base + col] = s;
-    }
-
-    o_val = subgroupAdd(o_val);
-    if (gl_NumSubgroups > 1u) {
-        if (gl_SubgroupInvocationID == 0u) {
-            s_reduce[gl_SubgroupID] = o_val;
-        }
-        barrier();
-        if (tid == 0u) {
-            float merged = 0.0;
-            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
-                merged += s_reduce[sg];
-            }
-            s_reduce_scalar = merged;
-        }
-        barrier();
-        o_val = s_reduce_scalar;
-    }
-
-    if (col_thread == 0u) {
-        out_data[h * head_v_dim + row] = o_val;
     }
 }
