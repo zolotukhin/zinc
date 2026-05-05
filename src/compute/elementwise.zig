@@ -78,6 +78,9 @@ pub const SsmConv1dPush = extern struct {
     conv_channels: u32,
     d_conv: u32,
     kernel_is_f16: u32,
+    // Circular state buffer rotation (0..d_conv-2). Host advances per
+    // token; reset to 0 when ssm conv state is zeroed (resetRequestState).
+    state_offset: u32,
 };
 
 /// Push constants for SSM delta-net state update shader.
@@ -829,12 +832,14 @@ pub const ElementwiseDispatch = struct {
         conv_channels: u32,
         d_conv: u32,
         kernel_is_f16: bool,
+        state_offset: u32,
     ) !void {
         const pip = if (self.pipeline_ssm_conv1d) |*p| p else return error.ShaderNotLoaded;
         const push = SsmConv1dPush{
             .conv_channels = conv_channels,
             .d_conv = d_conv,
             .kernel_is_f16 = if (kernel_is_f16) 1 else 0,
+            .state_offset = state_offset,
         };
         const workgroups = (conv_channels + 63) / 64;
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), workgroups, 1, 1);

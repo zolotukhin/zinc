@@ -1,16 +1,22 @@
 #version 460
-// ZINC — SSM 1D convolution with SiLU activation
-// Performs conv1d over a sliding state window and applies SiLU (x * sigmoid(x)).
-// Used in Mamba/SSM layers to convolve the QKV projection before state-space mixing.
-// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
+// ZINC — SSM 1D convolution with SiLU activation (circular state buffer)
 //
 // Each thread processes one channel:
-//   1. Convolve: sum = Σ kernel[ch * d_conv + ki] * input[ki]
-//      where input[ki] = state[ki * conv_channels + ch] for ki < d_conv-1,
-//            input[d_conv-1] = current_input[ch]
+//   1. Convolve via a CIRCULAR state buffer: tap k of the d_conv-tap kernel
+//      reads state slot ((state_offset + k) mod d_conv_1) for k < d_conv-1,
+//      and current_input for the last tap.
 //   2. SiLU:    out[ch] = sum * sigmoid(sum)
-//   3. Shift state left and write current_input as newest entry.
+//   3. Write current_input into state slot (state_offset mod d_conv_1) — the
+//      slot we just used as tap 0. The shift loop is eliminated; only one
+//      state write per channel per token (was three: state[0]=state[1],
+//      state[1]=state[2], state[2]=current_input).
 //
+// state_offset is a per-layer counter incremented after each conv1d dispatch.
+// On prefill reset (resetRequestState), the host zeroes both the state buffer
+// and the per-layer offsets, so the initial pass behaves identically to the
+// pre-circular-buffer logic (offset=0 → reads slots 0,1,2 in order).
+//
+// Optimized for AMD RDNA4 (wave64): workgroup = 64 threads = 1 full wave.
 // Dispatch: ceil(conv_channels / 64) × 1 × 1
 
 #extension GL_EXT_shader_explicit_arithmetic_types : require
@@ -48,6 +54,7 @@ layout(push_constant) uniform PushConstants {
     uint conv_channels;  // number of channels (d_inner + 2 * n_group * d_state)
     uint d_conv;         // kernel size (typically 4)
     uint kernel_is_f16;  // 1 if kernel weights are stored as f16, 0 if f32
+    uint state_offset;   // circular-buffer rotation: 0..d_conv_1-1, advances per token
 };
 
 void main() {
@@ -56,7 +63,15 @@ void main() {
 
     uint d_conv_1 = d_conv - 1;  // number of state rows (typically 3)
 
-    // --- Convolution ---
+    // The host advances state_offset modulo d_conv_1 (forward.zig:8847)
+    // and resets to 0 on resetRequestState, so state_offset is always
+    // in [0, d_conv_1). This lets us cheap-subtract instead of `%`.
+    // For ki in [0, d_conv_1), (state_offset + ki) is in [0, 2*d_conv_1)
+    // so a single `if (slot >= d_conv_1) slot -= d_conv_1` suffices,
+    // typically lowered to a conditional move on RDNA — fewer cycles
+    // than the integer-divide-style `%` lowering.
+
+    // --- Convolution via circular state buffer ---
     float sum = 0.0;
     for (uint ki = 0; ki < d_conv; ki++) {
         // Kernel layout: [conv_channels, d_conv] — d_conv is the fast dimension
@@ -68,10 +83,14 @@ void main() {
             kw = conv_kernel_f32[k_idx];
         }
 
-        // Input: state rows for ki < d_conv-1, current input for the last position
+        // Tap k for k < d_conv-1 reads circular state; tap d_conv-1 reads
+        // current_input. Conditional subtract replaces `%` (see comment
+        // above main() for why).
         float sv;
         if (ki < d_conv_1) {
-            sv = state[ki * conv_channels + ch];
+            uint slot = state_offset + ki;
+            if (slot >= d_conv_1) slot -= d_conv_1;
+            sv = state[slot * conv_channels + ch];
         } else {
             sv = current_input[ch];
         }
@@ -83,13 +102,7 @@ void main() {
     float sig = 1.0 / (1.0 + exp(-sum));
     out_data[ch] = sum * sig;
 
-    // --- Update state: shift left, write current input as newest ---
-    // Move rows forward: state[ki] = state[ki+1] for ki = 0 .. d_conv-3
-    if (d_conv_1 > 1) {
-        for (uint ki = 0; ki < d_conv_1 - 1; ki++) {
-            state[ki * conv_channels + ch] = state[(ki + 1) * conv_channels + ch];
-        }
-    }
-    // Write current input into the last state row
-    state[(d_conv_1 - 1) * conv_channels + ch] = current_input[ch];
+    // --- Update state: single write to the slot we just used as tap 0 ---
+    // state_offset is already in [0, d_conv_1) so no `%` is needed.
+    state[state_offset * conv_channels + ch] = current_input[ch];
 }

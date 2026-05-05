@@ -915,6 +915,12 @@ pub const InferenceEngine = struct {
     // GPU-side SSM state (persistent across tokens, for Phase 3c GPU SSM)
     gpu_ssm_conv_states: []Buffer, // [n_layers] device-local conv state: (d_conv-1) * conv_channels * f32
     gpu_ssm_states: []Buffer, // [n_layers] device-local recurrent state: num_heads * head_v_dim^2 * f32
+    // Per-layer circular-buffer rotation index for ssm_conv1d. Advances 0..d_conv-2
+    // per dispatch on the layer. Reset to 0 alongside gpu_ssm_conv_states zero-fill
+    // in resetRequestState. Recording-time host counter; the value at the time the
+    // dispatch is RECORDED is captured into the push constant for that command, so
+    // multi-deep CB pipelining works without aliasing.
+    ssm_conv_state_offsets: []u32, // [n_layers]
     // GPU-side MoE router output (for Phase 3c GPU router)
     router_output_buf: Buffer, // GPU-side expert_ids[k] u32 + expert_weights[k] f32 for fast MoE routing
     // Step 11a foundation (ZINC_CAPTURE_ROUTING=1): per-(token, layer) capture of
@@ -1616,6 +1622,9 @@ pub const InferenceEngine = struct {
         errdefer allocator.free(gpu_ssm_conv_states);
         const gpu_ssm_states = try allocator.alloc(Buffer, config.n_layers);
         errdefer allocator.free(gpu_ssm_states);
+        const ssm_conv_state_offsets = try allocator.alloc(u32, config.n_layers);
+        errdefer allocator.free(ssm_conv_state_offsets);
+        @memset(ssm_conv_state_offsets, 0);
         if (has_ssm) {
             const d_inner_g = config.ssm_d_inner;
             const dt_rank_g = config.ssm_dt_rank;
@@ -2230,6 +2239,7 @@ pub const InferenceEngine = struct {
             .ssm_hidden_staging = ssm_hidden_staging,
             .gpu_ssm_conv_states = gpu_ssm_conv_states,
             .gpu_ssm_states = gpu_ssm_states,
+            .ssm_conv_state_offsets = ssm_conv_state_offsets,
             .router_output_buf = router_output_buf,
             .shared_pool = shared_pool,
             .tensor_map = tensor_map,
@@ -2472,6 +2482,9 @@ pub const InferenceEngine = struct {
         for (self.ssm_states) |state_buf| {
             if (state_buf.len > 0) @memset(state_buf, 0);
         }
+        // Reset circular-buffer offsets so the first dispatch reads slots
+        // 0,1,2 in their natural order (matching the zeroed state buffer).
+        @memset(self.ssm_conv_state_offsets, 0);
 
         var has_gpu_ssm = false;
         for (self.gpu_ssm_conv_states) |buf| {
@@ -8825,11 +8838,19 @@ pub const InferenceEngine = struct {
         const ssm_conv_phase = self.beginProfilePhase();
         {
             const pip = &(self.elementwise.pipeline_ssm_conv1d orelse return error.ShaderNotLoaded);
+            // Capture the recording-time offset for THIS dispatch's push
+            // constant; advance the host counter for the NEXT dispatch on
+            // the same layer. Multi-deep CB pipelining works because each
+            // dispatch's push constant is captured at record time.
+            const cur_offset = self.ssm_conv_state_offsets[layer_idx];
+            const d_conv_1: u32 = if (d_conv > 0) d_conv - 1 else 1;
+            self.ssm_conv_state_offsets[layer_idx] = (cur_offset + 1) % d_conv_1;
             if (pip.uses_push_descriptors) {
                 const push = SsmConv1dPush{
                     .conv_channels = conv_channels,
                     .d_conv = d_conv,
                     .kernel_is_f16 = if (conv_kernel_is_f16) 1 else 0,
+                    .state_offset = cur_offset,
                 };
                 self.pushDispatch4(pip, std.mem.asBytes(&push), self.attn_out_buf.handle, qkv_bytes, conv_tensor.gpu_buffer.handle, conv_tensor.gpu_buffer.size, self.gpu_ssm_conv_states[layer_idx].handle, self.gpu_ssm_conv_states[layer_idx].size, self.swiglu_buf.handle, qkv_bytes, (conv_channels + 63) / 64, 1, 1);
             } else {
@@ -8845,7 +8866,7 @@ pub const InferenceEngine = struct {
                     self.swiglu_buf.handle,
                     qkv_bytes, // binding 3: output
                 );
-                try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16);
+                try self.elementwise.recordSsmConv1d(&self.decode_cmd, ds, conv_channels, d_conv, conv_kernel_is_f16, cur_offset);
             }
         }
         // Narrow: delta_net only reads swiglu_buf (conv1d output), router_logits_buf (alpha,
@@ -10321,6 +10342,7 @@ pub const InferenceEngine = struct {
         for (self.gpu_ssm_states) |*b| if (b.handle != null) b.deinit();
         self.allocator.free(self.gpu_ssm_conv_states);
         self.allocator.free(self.gpu_ssm_states);
+        self.allocator.free(self.ssm_conv_state_offsets);
         self.router_output_buf.deinit();
         if (self.routing_capture_buf.handle != null) self.routing_capture_buf.deinit();
         if (self.prefill_expert_count_buf.handle != null) self.prefill_expert_count_buf.deinit();
@@ -11404,7 +11426,7 @@ test "request budget keeps small generations on fewer kv pages" {
 
 test "push constant struct sizes match GLSL expectations" {
     const ew = @import("elementwise.zig");
-    try std.testing.expectEqual(@as(usize, 12), @sizeOf(ew.SsmConv1dPush));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(ew.SsmConv1dPush));
     try std.testing.expectEqual(@as(usize, 52), @sizeOf(ew.SsmDeltaNetPush));
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(ew.SsmGatedNormPush));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(ew.SoftmaxTopkPush));
