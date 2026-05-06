@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" role="img" aria-labelledby="title desc">
+  <title id="title">Top-p versus min-p truncation on a flattened Qwen3 logit distribution at temperature 1.4</title>
+  <desc id="desc">A two-panel diagram comparing nucleus top-p sampling against min-p sampling on a Qwen3-style next-token distribution after temperature 1.4 scaling. Both panels show the same bar chart of token probabilities sorted by rank: a tall first bar at 0.20, three medium bars at 0.13, 0.09, and 0.07, two shorter bars at 0.05 and 0.04, then a long sloping tail of small bars from 0.0099 down to 0.001. The top panel overlays a red dashed line marking the top-p nucleus boundary at cumulative probability 0.95, which lands deep in the tail and admits forty-one tokens, including thirty-seven low-probability tail tokens. The bottom panel overlays a blue dashed line at min-p threshold equal to 0.05 times the top probability, which is 0.010, and admits only the top six tokens.</desc>
+
+  <style>
+    .bg { fill: #fafaf7; }
+    .label { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; fill: #1f1f1f; }
+    .label-small { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 10.5px; fill: #444; }
+    .label-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; fill: #1f1f1f; }
+    .label-bold { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; fill: #1f1f1f; font-weight: 600; }
+    .title-text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; fill: #1f1f1f; font-weight: 600; }
+    .panel-title { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f1f1f; font-weight: 600; }
+    .axis { stroke: #1f1f1f; stroke-width: 1; }
+    .axis-tick { stroke: #1f1f1f; stroke-width: 0.8; }
+    .grid { stroke: #d4d4d0; stroke-width: 0.6; stroke-dasharray: 2 3; }
+    .bar-admitted { fill: #15803d; fill-opacity: 0.92; }
+    .bar-excluded { fill: #ffffff; stroke: #94a3b8; stroke-width: 0.8; }
+    .topp-line { stroke: #b91c1c; stroke-width: 1.6; stroke-dasharray: 6 4; fill: none; }
+    .minp-line { stroke: #1d4ed8; stroke-width: 1.6; stroke-dasharray: 6 4; fill: none; }
+    .topp-fill { fill: #b91c1c; fill-opacity: 0.05; }
+    .minp-fill { fill: #1d4ed8; fill-opacity: 0.05; }
+    .annotation { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11.5px; fill: #1f1f1f; }
+    .annotation-red { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11.5px; fill: #991b1b; font-weight: 600; }
+    .annotation-blue { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11.5px; fill: #1e40af; font-weight: 600; }
+    .frame { fill: none; stroke: #1f1f1f; stroke-width: 1; }
+  </style>
+
+  <rect class="bg" width="880" height="560" />
+
+  <!-- Title -->
+  <text class="title-text" x="440" y="26" text-anchor="middle">Top-p versus min-p on the same Qwen3 logit distribution at temperature 1.4</text>
+  <text class="label-small" x="440" y="44" text-anchor="middle">Bars are token probabilities ranked by descending value. Same distribution in both panels.</text>
+
+  <!-- Top panel: Top-p -->
+  <text class="panel-title" x="80" y="76">Top-p truncation, p = 0.95</text>
+  <text class="label-small" x="80" y="92">Threshold is the cumulative probability of the admitted prefix.</text>
+
+  <!-- Top panel chart frame -->
+  <line class="axis" x1="80" y1="240" x2="830" y2="240" />
+  <line class="axis" x1="80" y1="100" x2="80" y2="240" />
+
+  <!-- Y-axis ticks for top panel -->
+  <line class="axis-tick" x1="76" y1="240" x2="80" y2="240" />
+  <text class="label-small" x="72" y="244" text-anchor="end">0</text>
+  <line class="axis-tick" x1="76" y1="170" x2="80" y2="170" />
+  <text class="label-small" x="72" y="174" text-anchor="end">0.10</text>
+  <line class="axis-tick" x1="76" y1="100" x2="80" y2="100" />
+  <text class="label-small" x="72" y="104" text-anchor="end">0.20</text>
+
+  <!-- Top-p shading (extends across all bars since top-p admits 41 tokens which exceeds visible range) -->
+  <rect class="topp-fill" x="80" y="100" width="750" height="140" />
+
+  <!-- 30 bars, each width 22, gap 3, starting at x=85 -->
+  <!-- Heights converted: y_top = 240 - h * (140/0.20). For 0.20 -> 100. -->
+  <!-- All bars in top panel are admitted (filled green) since top-p line is past visible range -->
+  <!-- Bar 1: 0.20 -->
+  <rect class="bar-admitted" x="85" y="100" width="22" height="140" />
+  <!-- Bar 2: 0.13 -->
+  <rect class="bar-admitted" x="110" y="149" width="22" height="91" />
+  <!-- Bar 3: 0.09 -->
+  <rect class="bar-admitted" x="135" y="177" width="22" height="63" />
+  <!-- Bar 4: 0.07 -->
+  <rect class="bar-admitted" x="160" y="191" width="22" height="49" />
+  <!-- Bar 5: 0.05 -->
+  <rect class="bar-admitted" x="185" y="205" width="22" height="35" />
+  <!-- Bar 6: 0.04 -->
+  <rect class="bar-admitted" x="210" y="212" width="22" height="28" />
+  <!-- Tail bars 7-30, heights drop from 0.0099 to ~0.001 -->
+  <!-- 0.0099 -> 6.93 px -->
+  <rect class="bar-admitted" x="235" y="233" width="22" height="7" />
+  <rect class="bar-admitted" x="260" y="233" width="22" height="7" />
+  <rect class="bar-admitted" x="285" y="234" width="22" height="6" />
+  <rect class="bar-admitted" x="310" y="234" width="22" height="6" />
+  <rect class="bar-admitted" x="335" y="234" width="22" height="6" />
+  <rect class="bar-admitted" x="360" y="235" width="22" height="5" />
+  <rect class="bar-admitted" x="385" y="235" width="22" height="5" />
+  <rect class="bar-admitted" x="410" y="235" width="22" height="5" />
+  <rect class="bar-admitted" x="435" y="236" width="22" height="4" />
+  <rect class="bar-admitted" x="460" y="236" width="22" height="4" />
+  <rect class="bar-admitted" x="485" y="236" width="22" height="4" />
+  <rect class="bar-admitted" x="510" y="236" width="22" height="4" />
+  <rect class="bar-admitted" x="535" y="237" width="22" height="3" />
+  <rect class="bar-admitted" x="560" y="237" width="22" height="3" />
+  <rect class="bar-admitted" x="585" y="237" width="22" height="3" />
+  <rect class="bar-admitted" x="610" y="237" width="22" height="3" />
+  <rect class="bar-admitted" x="635" y="238" width="22" height="2" />
+  <rect class="bar-admitted" x="660" y="238" width="22" height="2" />
+  <rect class="bar-admitted" x="685" y="238" width="22" height="2" />
+  <rect class="bar-admitted" x="710" y="238" width="22" height="2" />
+  <rect class="bar-admitted" x="735" y="239" width="22" height="1" />
+  <rect class="bar-admitted" x="760" y="239" width="22" height="1" />
+  <rect class="bar-admitted" x="785" y="239" width="22" height="1" />
+  <rect class="bar-admitted" x="810" y="239" width="22" height="1" />
+
+  <!-- Top-p indicator: arrow showing it extends well past visible -->
+  <text class="annotation-red" x="745" y="120">top-p admits 41 tokens</text>
+  <text class="annotation-red" x="745" y="135">37 of them in the tail</text>
+  <text class="annotation-red" x="745" y="150">with p &lt; 0.01 each</text>
+  <line class="topp-line" x1="80" y1="166" x2="830" y2="166" />
+  <text class="annotation-red" x="745" y="178">cumulative = 0.95</text>
+
+  <!-- X-axis label for top panel -->
+  <text class="label-small" x="455" y="262" text-anchor="middle">token rank (sorted by probability, descending). Tail continues past rank 30.</text>
+
+  <!-- Bottom panel: Min-p -->
+  <text class="panel-title" x="80" y="304">Min-p truncation, threshold = 0.05 × top probability = 0.010</text>
+  <text class="label-small" x="80" y="320">Threshold scales with the top token, not with cumulative mass.</text>
+
+  <!-- Bottom panel chart frame -->
+  <line class="axis" x1="80" y1="468" x2="830" y2="468" />
+  <line class="axis" x1="80" y1="328" x2="80" y2="468" />
+
+  <!-- Y-axis ticks for bottom panel -->
+  <line class="axis-tick" x1="76" y1="468" x2="80" y2="468" />
+  <text class="label-small" x="72" y="472" text-anchor="end">0</text>
+  <line class="axis-tick" x1="76" y1="398" x2="80" y2="398" />
+  <text class="label-small" x="72" y="402" text-anchor="end">0.10</text>
+  <line class="axis-tick" x1="76" y1="328" x2="80" y2="328" />
+  <text class="label-small" x="72" y="332" text-anchor="end">0.20</text>
+
+  <!-- Min-p shading (only top 6 bars, x=85 to x=232) -->
+  <rect class="minp-fill" x="80" y="328" width="155" height="140" />
+
+  <!-- Bottom panel bars -->
+  <!-- Top 6 admitted (green) -->
+  <rect class="bar-admitted" x="85" y="328" width="22" height="140" />
+  <rect class="bar-admitted" x="110" y="377" width="22" height="91" />
+  <rect class="bar-admitted" x="135" y="405" width="22" height="63" />
+  <rect class="bar-admitted" x="160" y="419" width="22" height="49" />
+  <rect class="bar-admitted" x="185" y="433" width="22" height="35" />
+  <rect class="bar-admitted" x="210" y="440" width="22" height="28" />
+  <!-- Tail 24 bars excluded (hollow) -->
+  <rect class="bar-excluded" x="235" y="461" width="22" height="7" />
+  <rect class="bar-excluded" x="260" y="461" width="22" height="7" />
+  <rect class="bar-excluded" x="285" y="462" width="22" height="6" />
+  <rect class="bar-excluded" x="310" y="462" width="22" height="6" />
+  <rect class="bar-excluded" x="335" y="462" width="22" height="6" />
+  <rect class="bar-excluded" x="360" y="463" width="22" height="5" />
+  <rect class="bar-excluded" x="385" y="463" width="22" height="5" />
+  <rect class="bar-excluded" x="410" y="463" width="22" height="5" />
+  <rect class="bar-excluded" x="435" y="464" width="22" height="4" />
+  <rect class="bar-excluded" x="460" y="464" width="22" height="4" />
+  <rect class="bar-excluded" x="485" y="464" width="22" height="4" />
+  <rect class="bar-excluded" x="510" y="464" width="22" height="4" />
+  <rect class="bar-excluded" x="535" y="465" width="22" height="3" />
+  <rect class="bar-excluded" x="560" y="465" width="22" height="3" />
+  <rect class="bar-excluded" x="585" y="465" width="22" height="3" />
+  <rect class="bar-excluded" x="610" y="465" width="22" height="3" />
+  <rect class="bar-excluded" x="635" y="466" width="22" height="2" />
+  <rect class="bar-excluded" x="660" y="466" width="22" height="2" />
+  <rect class="bar-excluded" x="685" y="466" width="22" height="2" />
+  <rect class="bar-excluded" x="710" y="466" width="22" height="2" />
+  <rect class="bar-excluded" x="735" y="467" width="22" height="1" />
+  <rect class="bar-excluded" x="760" y="467" width="22" height="1" />
+  <rect class="bar-excluded" x="785" y="467" width="22" height="1" />
+  <rect class="bar-excluded" x="810" y="467" width="22" height="1" />
+
+  <!-- Min-p threshold line at p=0.01 -> y=468 - 0.01 * 700 = 468 - 7 = 461 -->
+  <line class="minp-line" x1="80" y1="461" x2="830" y2="461" />
+  <text class="annotation-blue" x="745" y="348">min-p admits 6 tokens</text>
+  <text class="annotation-blue" x="745" y="363">all above 0.05 × top</text>
+  <text class="annotation-blue" x="745" y="378">= 0.010 cutoff</text>
+
+  <!-- Boundary line between admitted and excluded in bottom panel -->
+  <line class="minp-line" x1="232" y1="328" x2="232" y2="468" stroke-dasharray="2 3" stroke-opacity="0.6" />
+
+  <!-- X-axis label for bottom panel -->
+  <text class="label-small" x="455" y="490" text-anchor="middle">token rank (sorted by probability, descending). Same 30 tokens shown.</text>
+
+  <!-- Footer legend -->
+  <rect x="180" y="514" width="14" height="10" class="bar-admitted" />
+  <text class="label-small" x="200" y="523">admitted by sampler</text>
+  <rect x="320" y="514" width="14" height="10" class="bar-excluded" />
+  <text class="label-small" x="340" y="523">truncated</text>
+  <line x1="430" y1="519" x2="450" y2="519" class="topp-line" />
+  <text class="label-small" x="456" y="523">top-p cumulative cutoff</text>
+  <line x1="595" y1="519" x2="615" y2="519" class="minp-line" />
+  <text class="label-small" x="621" y="523">min-p threshold</text>
+
+  <text class="label-small" x="440" y="546" text-anchor="middle">Top-p chases a cumulative mass of 0.95 and walks the tail. Min-p sets a floor at 0.05 of the top token and stops there.</text>
+</svg>

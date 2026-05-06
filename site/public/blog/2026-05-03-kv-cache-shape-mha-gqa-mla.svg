@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" role="img" aria-labelledby="title desc" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial">
+  <title id="title">Per-token KV cache shape across MHA, GQA, and MLA on a 48-layer Qwen-class transformer</title>
+  <desc id="desc">A two-panel comparison. Top panel shows the per-layer key-value tensor structure for multi-head attention as 32 narrow teal and slate slices, for grouped-query attention as four wider teal and slate slices, and for multi-head latent attention as one wide green latent block with a thin purple decoupled rope key block on top. Bottom panel is a horizontal bar chart of bytes per token at FP16: MHA 768 kilobytes, GQA 96 kilobytes, MLA 54 kilobytes, with annotations of resident KV cache size at 128k context: 96 GB, 12 GB, and 6.75 GB respectively.</desc>
+
+  <defs>
+    <linearGradient id="bgFade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1729"/>
+      <stop offset="100%" stop-color="#0a1020"/>
+    </linearGradient>
+    <pattern id="kHatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#3eb1c8"/>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#2c8ea1" stroke-width="1"/>
+    </pattern>
+    <pattern id="vHatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#4c5b6a"/>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#384451" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="880" height="560" fill="url(#bgFade)"/>
+
+  <!-- Header -->
+  <text x="40" y="40" fill="#e8edf5" font-size="20" font-weight="700">Per-token KV cache shape across attention variants</text>
+  <text x="40" y="62" fill="#8ea0b8" font-size="13">48-layer Qwen-class transformer, FP16 cache, 128 head dim</text>
+
+  <!-- Top panel: structural diagrams -->
+  <g transform="translate(0, 92)">
+    <text x="40" y="0" fill="#c1cdde" font-size="13" font-weight="600" letter-spacing="0.5">PER-LAYER KV TENSOR STRUCTURE</text>
+
+    <!-- MHA column -->
+    <g transform="translate(60, 20)">
+      <text x="120" y="14" fill="#e8edf5" font-size="14" font-weight="600" text-anchor="middle">MHA</text>
+      <text x="120" y="32" fill="#8ea0b8" font-size="11" text-anchor="middle">32 K heads + 32 V heads</text>
+      <!-- 32 K slices -->
+      <g>
+        <rect x="0" y="44" width="240" height="60" fill="url(#kHatch)" stroke="#1a2538" stroke-width="0.5"/>
+        <g stroke="#0f1729" stroke-width="1">
+          <line x1="7.5" y1="44" x2="7.5" y2="104"/><line x1="15" y1="44" x2="15" y2="104"/>
+          <line x1="22.5" y1="44" x2="22.5" y2="104"/><line x1="30" y1="44" x2="30" y2="104"/>
+          <line x1="37.5" y1="44" x2="37.5" y2="104"/><line x1="45" y1="44" x2="45" y2="104"/>
+          <line x1="52.5" y1="44" x2="52.5" y2="104"/><line x1="60" y1="44" x2="60" y2="104"/>
+          <line x1="67.5" y1="44" x2="67.5" y2="104"/><line x1="75" y1="44" x2="75" y2="104"/>
+          <line x1="82.5" y1="44" x2="82.5" y2="104"/><line x1="90" y1="44" x2="90" y2="104"/>
+          <line x1="97.5" y1="44" x2="97.5" y2="104"/><line x1="105" y1="44" x2="105" y2="104"/>
+          <line x1="112.5" y1="44" x2="112.5" y2="104"/><line x1="120" y1="44" x2="120" y2="104"/>
+          <line x1="127.5" y1="44" x2="127.5" y2="104"/><line x1="135" y1="44" x2="135" y2="104"/>
+          <line x1="142.5" y1="44" x2="142.5" y2="104"/><line x1="150" y1="44" x2="150" y2="104"/>
+          <line x1="157.5" y1="44" x2="157.5" y2="104"/><line x1="165" y1="44" x2="165" y2="104"/>
+          <line x1="172.5" y1="44" x2="172.5" y2="104"/><line x1="180" y1="44" x2="180" y2="104"/>
+          <line x1="187.5" y1="44" x2="187.5" y2="104"/><line x1="195" y1="44" x2="195" y2="104"/>
+          <line x1="202.5" y1="44" x2="202.5" y2="104"/><line x1="210" y1="44" x2="210" y2="104"/>
+          <line x1="217.5" y1="44" x2="217.5" y2="104"/><line x1="225" y1="44" x2="225" y2="104"/>
+          <line x1="232.5" y1="44" x2="232.5" y2="104"/>
+        </g>
+      </g>
+      <text x="-6" y="78" fill="#9aacbf" font-size="11" text-anchor="end">K</text>
+      <!-- 32 V slices -->
+      <g>
+        <rect x="0" y="106" width="240" height="60" fill="url(#vHatch)" stroke="#1a2538" stroke-width="0.5"/>
+        <g stroke="#0f1729" stroke-width="1">
+          <line x1="7.5" y1="106" x2="7.5" y2="166"/><line x1="15" y1="106" x2="15" y2="166"/>
+          <line x1="22.5" y1="106" x2="22.5" y2="166"/><line x1="30" y1="106" x2="30" y2="166"/>
+          <line x1="37.5" y1="106" x2="37.5" y2="166"/><line x1="45" y1="106" x2="45" y2="166"/>
+          <line x1="52.5" y1="106" x2="52.5" y2="166"/><line x1="60" y1="106" x2="60" y2="166"/>
+          <line x1="67.5" y1="106" x2="67.5" y2="166"/><line x1="75" y1="106" x2="75" y2="166"/>
+          <line x1="82.5" y1="106" x2="82.5" y2="166"/><line x1="90" y1="106" x2="90" y2="166"/>
+          <line x1="97.5" y1="106" x2="97.5" y2="166"/><line x1="105" y1="106" x2="105" y2="166"/>
+          <line x1="112.5" y1="106" x2="112.5" y2="166"/><line x1="120" y1="106" x2="120" y2="166"/>
+          <line x1="127.5" y1="106" x2="127.5" y2="166"/><line x1="135" y1="106" x2="135" y2="166"/>
+          <line x1="142.5" y1="106" x2="142.5" y2="166"/><line x1="150" y1="106" x2="150" y2="166"/>
+          <line x1="157.5" y1="106" x2="157.5" y2="166"/><line x1="165" y1="106" x2="165" y2="166"/>
+          <line x1="172.5" y1="106" x2="172.5" y2="166"/><line x1="180" y1="106" x2="180" y2="166"/>
+          <line x1="187.5" y1="106" x2="187.5" y2="166"/><line x1="195" y1="106" x2="195" y2="166"/>
+          <line x1="202.5" y1="106" x2="202.5" y2="166"/><line x1="210" y1="106" x2="210" y2="166"/>
+          <line x1="217.5" y1="106" x2="217.5" y2="166"/><line x1="225" y1="106" x2="225" y2="166"/>
+          <line x1="232.5" y1="106" x2="232.5" y2="166"/>
+        </g>
+      </g>
+      <text x="-6" y="140" fill="#9aacbf" font-size="11" text-anchor="end">V</text>
+      <text x="120" y="186" fill="#c1cdde" font-size="11" text-anchor="middle">2 × 32 × 128 = 8192 elem/layer</text>
+    </g>
+
+    <!-- GQA column -->
+    <g transform="translate(330, 20)">
+      <text x="120" y="14" fill="#e8edf5" font-size="14" font-weight="600" text-anchor="middle">GQA (Qwen3-30B-A3B)</text>
+      <text x="120" y="32" fill="#8ea0b8" font-size="11" text-anchor="middle">4 K heads + 4 V heads</text>
+      <!-- 4 K bars -->
+      <g>
+        <rect x="0" y="44" width="240" height="60" fill="url(#kHatch)" stroke="#1a2538" stroke-width="0.5"/>
+        <g stroke="#0f1729" stroke-width="1.5">
+          <line x1="60" y1="44" x2="60" y2="104"/>
+          <line x1="120" y1="44" x2="120" y2="104"/>
+          <line x1="180" y1="44" x2="180" y2="104"/>
+        </g>
+      </g>
+      <text x="-6" y="78" fill="#9aacbf" font-size="11" text-anchor="end">K</text>
+      <!-- 4 V bars -->
+      <g>
+        <rect x="0" y="106" width="240" height="60" fill="url(#vHatch)" stroke="#1a2538" stroke-width="0.5"/>
+        <g stroke="#0f1729" stroke-width="1.5">
+          <line x1="60" y1="106" x2="60" y2="166"/>
+          <line x1="120" y1="106" x2="120" y2="166"/>
+          <line x1="180" y1="106" x2="180" y2="166"/>
+        </g>
+      </g>
+      <text x="-6" y="140" fill="#9aacbf" font-size="11" text-anchor="end">V</text>
+      <text x="120" y="186" fill="#c1cdde" font-size="11" text-anchor="middle">2 × 4 × 128 = 1024 elem/layer</text>
+    </g>
+
+    <!-- MLA column -->
+    <g transform="translate(600, 20)">
+      <text x="120" y="14" fill="#e8edf5" font-size="14" font-weight="600" text-anchor="middle">MLA (DeepSeek-V2 lineage)</text>
+      <text x="120" y="32" fill="#8ea0b8" font-size="11" text-anchor="middle">latent c_KV + decoupled RoPE k</text>
+      <!-- decoupled RoPE k (small purple) -->
+      <rect x="0" y="44" width="240" height="14" fill="#8b5cf6" stroke="#1a2538" stroke-width="0.5"/>
+      <text x="120" y="55" fill="#0f1729" font-size="10" text-anchor="middle" font-weight="700">d_h^R = 64</text>
+      <!-- latent c_KV (large green) -->
+      <rect x="0" y="58" width="240" height="108" fill="#5dbb89" stroke="#1a2538" stroke-width="0.5"/>
+      <text x="120" y="116" fill="#0f1729" font-size="14" text-anchor="middle" font-weight="700">d_c = 512 (shared latent)</text>
+      <text x="-6" y="78" fill="#9aacbf" font-size="11" text-anchor="end">k_R</text>
+      <text x="-6" y="116" fill="#9aacbf" font-size="11" text-anchor="end">c</text>
+      <text x="120" y="186" fill="#c1cdde" font-size="11" text-anchor="middle">512 + 64 = 576 elem/layer</text>
+    </g>
+  </g>
+
+  <!-- Bottom panel: bytes per token chart -->
+  <g transform="translate(0, 320)">
+    <text x="40" y="0" fill="#c1cdde" font-size="13" font-weight="600" letter-spacing="0.5">BYTES PER TOKEN AT FP16, 48 LAYERS</text>
+
+    <!-- Bars: width proportional to KB. Max bar width = 720 px. MHA = 768 KB -> 720, GQA = 96 KB -> 90, MLA = 54 KB -> 50.6 -->
+    <g transform="translate(140, 26)">
+      <!-- Axis -->
+      <line x1="0" y1="155" x2="720" y2="155" stroke="#2a3a55" stroke-width="1"/>
+      <g fill="#6b7d97" font-size="10" text-anchor="middle">
+        <line x1="0" y1="153" x2="0" y2="158" stroke="#6b7d97"/>
+        <text x="0" y="172">0</text>
+        <line x1="180" y1="153" x2="180" y2="158" stroke="#6b7d97"/>
+        <text x="180" y="172">192 KB</text>
+        <line x1="360" y1="153" x2="360" y2="158" stroke="#6b7d97"/>
+        <text x="360" y="172">384 KB</text>
+        <line x1="540" y1="153" x2="540" y2="158" stroke="#6b7d97"/>
+        <text x="540" y="172">576 KB</text>
+        <line x1="720" y1="153" x2="720" y2="158" stroke="#6b7d97"/>
+        <text x="720" y="172">768 KB</text>
+      </g>
+
+      <!-- MHA bar -->
+      <text x="-12" y="22" fill="#e8edf5" font-size="12" text-anchor="end" font-weight="600">MHA</text>
+      <rect x="0" y="8" width="720" height="28" fill="#3eb1c8" opacity="0.85"/>
+      <text x="710" y="27" fill="#0f1729" font-size="13" text-anchor="end" font-weight="700">768 KB / token  •  96 GB at 128k</text>
+
+      <!-- GQA bar -->
+      <text x="-12" y="64" fill="#e8edf5" font-size="12" text-anchor="end" font-weight="600">GQA, 4 KV</text>
+      <rect x="0" y="50" width="90" height="28" fill="#3eb1c8" opacity="0.85"/>
+      <text x="98" y="69" fill="#c1cdde" font-size="13" font-weight="700">96 KB / token  •  12 GB at 128k</text>
+
+      <!-- MLA bar -->
+      <text x="-12" y="106" fill="#e8edf5" font-size="12" text-anchor="end" font-weight="600">MLA</text>
+      <rect x="0" y="92" width="50.6" height="28" fill="#5dbb89" opacity="0.9"/>
+      <rect x="50.6" y="92" width="0" height="28" fill="#8b5cf6"/>
+      <text x="58" y="111" fill="#c1cdde" font-size="13" font-weight="700">54 KB / token  •  6.75 GB at 128k</text>
+    </g>
+  </g>
+
+  <!-- Footer note -->
+  <g transform="translate(40, 530)">
+    <text x="0" y="0" fill="#8ea0b8" font-size="11">MLA stores a single shared latent per layer; the per-head K and V are reconstructed at attention time via a small dense matmul, trading ~0.4 ms of compute per decode step for half the KV bandwidth on a 32 GB RDNA4 card.</text>
+  </g>
+</svg>
