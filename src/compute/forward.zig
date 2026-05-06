@@ -1171,6 +1171,16 @@ pub const InferenceEngine = struct {
     // a numerical answer to "does the n_tok>1 path match the per-token
     // reference?" — the question cycles 98/99 reverted without resolving.
     a3b_per_token_delta_out: ?Buffer = null,
+    // Cycle 104 enablement: per-token capture of layer-0 z-projection output
+    // (gate_buf), strided by token. gate_buf is overwritten by token i+1's
+    // z DMMV, so a future cycle's A3b production wire-up at layer 0 (which
+    // skips per-token delta_net + gnorm in favor of a single batched
+    // delta_net + per-token gnorm reading from a strided buffer) needs this
+    // captured to feed gnorm in Pass 2. Cycles 97/101 captured the SSM
+    // delta_net inputs (alpha, beta, conv_out) and output; this completes
+    // the input set so Pass 2's gnorm has both delta_net output (batched)
+    // and z gate (captured) per token. Default-OFF behind ZINC_A3B_VALIDATE=1.
+    a3b_gate_capture: ?Buffer = null,
     a3b_capture_max_tokens: u32 = 0,
 
     // Scratch buffers for the Vulkan/RDNA batched prefill path (lazy-init,
@@ -2203,6 +2213,7 @@ pub const InferenceEngine = struct {
         var a3b_state_backup: ?Buffer = null;
         var a3b_delta_out: ?Buffer = null;
         var a3b_per_token_delta_out: ?Buffer = null;
+        var a3b_gate_capture: ?Buffer = null;
         var a3b_capture_max_tokens: u32 = 0;
         if (a3b_validate_enabled) {
             const A3B_MAX_TOKENS: u32 = 2048;
@@ -2239,8 +2250,16 @@ pub const InferenceEngine = struct {
             errdefer if (a3b_delta_out) |*b| b.deinit();
             a3b_per_token_delta_out = try Buffer.initDeviceLocal(instance, out_bytes_a3b, usage_src_dst);
             errdefer if (a3b_per_token_delta_out) |*b| b.deinit();
+            // Cycle 104: per-token gate_buf capture for layer 0. Sized as the
+            // per-token output buffer (n_tokens × d_inner × f32) since
+            // gate_buf has the same per-token footprint as delta_net's
+            // output. usage_dst is sufficient: this buffer is only written
+            // by vkCmdCopyBuffer (capture) and read by future cycles'
+            // production wire-up via shader binding.
+            a3b_gate_capture = try Buffer.initDeviceLocal(instance, out_bytes_a3b, usage_src_dst);
+            errdefer if (a3b_gate_capture) |*b| b.deinit();
             a3b_capture_max_tokens = A3B_MAX_TOKENS;
-            log.info("ZINC_A3B_VALIDATE=1: A3b layer-0 capture buffers allocated (max {d} tokens, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems)", .{
+            log.info("ZINC_A3B_VALIDATE=1: A3b layer-0 capture buffers allocated (max {d} tokens, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems; cycle-104 added gate capture)", .{
                 A3B_MAX_TOKENS, dt_rank_a3b, conv_ch_a3b, d_inner_a3b, state_elems_a3b,
             });
         } else if (a3b_validate_flag) {
@@ -2281,6 +2300,7 @@ pub const InferenceEngine = struct {
             .a3b_state_backup = a3b_state_backup,
             .a3b_delta_out = a3b_delta_out,
             .a3b_per_token_delta_out = a3b_per_token_delta_out,
+            .a3b_gate_capture = a3b_gate_capture,
             .a3b_capture_max_tokens = a3b_capture_max_tokens,
             .routing_capture_buf = routing_capture_buf,
             .routing_capture_slot_bytes = routing_capture_slot_bytes,
@@ -9016,6 +9036,23 @@ pub const InferenceEngine = struct {
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.a3b_beta_capture.?.handle, 1, &r_beta);
             const r_conv = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = conv_dst_off, .size = qkv_bytes };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.a3b_conv_out_capture.?.handle, 1, &r_conv);
+            // Cycle 104 enablement: also capture gate_buf (z-projection
+            // output) at the per-token strided slot, when present. gate_buf
+            // is overwritten by the next per-token z DMMV, so this snapshot
+            // is required for any future A3b production wire-up that defers
+            // gnorm to a Pass 2 reading from per-token strided buffers
+            // (instead of the per-token gate_buf overwrite chain). The wider
+            // computeAndTransferBarrier above (line ~9010) already covers
+            // the gate_buf write→transfer-read hazard so no extra barrier
+            // is required. Gated on (!is_dead_tail) because z DMMV is
+            // skipped at last-layer non-terminal tokens — at layer 0 this
+            // is always false in the current dead-tail design, but the
+            // guard documents the precondition.
+            if (self.a3b_gate_capture != null and !is_dead_tail) {
+                const gate_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
+                const r_gate = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = gate_dst_off, .size = z_bytes };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gate_buf.handle, self.a3b_gate_capture.?.handle, 1, &r_gate);
+            }
         }
 
         // --- GPU SSM diagnostic: readback conv1d output at layer 0 for comparison with CPU SSM_DBG ---
@@ -10703,6 +10740,7 @@ pub const InferenceEngine = struct {
         if (self.a3b_state_backup) |*b| b.deinit();
         if (self.a3b_delta_out) |*b| b.deinit();
         if (self.a3b_per_token_delta_out) |*b| b.deinit();
+        if (self.a3b_gate_capture) |*b| b.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
         self.kv_page_pool.deinit();
