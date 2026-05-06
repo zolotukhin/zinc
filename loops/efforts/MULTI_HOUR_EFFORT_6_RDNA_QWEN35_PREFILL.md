@@ -1,5 +1,129 @@
 # Optimization 6: RDNA Prefill Recovery for Qwen3.5/3.6-35B-A3B
 
+## PIVOT 2026-05-05 (PM) — A3 IS HALF-DONE; A3b NEVER LANDED
+
+**Best 127.16 tok/s at cycle 84.** A3a kept at cycle 77 (+2.10),
+ssm_conv1d circular buffer at cycle 84 (+0.86). 16 cycles, 2 keeps.
+
+### Critical finding: A3 was split and only half landed
+
+Cycle 77's self-analysis explicitly split A3 into two sub-bets:
+
+- **A3a — shader-side transform** (token-loop wrapper inside
+  `ssm_delta_net.comp`, state hoist, L2 norm reg cache,
+  dt_bias/ssm_a broadcast). **KEPT** at cycle 77, +2.10 tok/s. The
+  gain came entirely from inner-loop register/LDS polish at
+  `n_tok=1`, NOT from the actual structural lever.
+- **A3b — dispatch restructure** (call `ssm_delta_net` ONCE per
+  layer per prefill with `n_tok = prompt_len`, eliminating ~153×
+  state DRAM round-trips). **NEVER LANDED.**
+
+Hard evidence at `forward.zig:8937-8941`:
+
+```zig
+// A3: per-token loop folded inside shader. Production
+// dispatches one token per call (n_tok=1); the strides
+// are populated for forward-compatibility with future
+// batched calls but unused at n_tok=1.
+.n_tok = 1,
+```
+
+The shader supports `n_tok > 1` (lines 149-325 of
+`ssm_delta_net.comp`). The strides for batched calls are wired in
+the push struct (line 8942-8944). **The dispatch site is hard-coded
+to 1 anyway.** The 15.4 GB/prefill of state round-trip traffic that
+A3 was supposed to eliminate is still being paid.
+
+### Critical finding: A4 attempts misread the lever
+
+Cycles 78, 80, 81 attempted A4 as "Q8_0 fused rms_norm+alpha+beta"
+shaders. All reverted. **A4 is not a fusion problem.** The real A4
+is the same `n_tok = prompt_len` batching for the ssm_proj DMMVs
+that A3b is for ssm_delta_net. The agent solved the wrong problem
+three times.
+
+### Critical finding: cycles 85-91 are back to the banned pattern
+
+Seven consecutive reverts, all banned-list retries:
+
+| Cycle | Target | Result |
+|---|---|---|
+| 85 | LDS broadcast removal in ssm_delta_net (s_gate, s_beta_val) | flat |
+| 86 | register-cache `current_input` in ssm_conv1d | flat (126.93) |
+| 87 | uint16 packed quant reads in dmmv_q8_0 | flat |
+| 88 | LICM/register-cache on ssm_delta + dmmv_q8_0 + rms_norm | flat |
+| 89 | drop pre-scale s_q/s_k LDS writes + step-2 barrier | flat |
+| 90 | register-cache delta_net_output + pre-compute SiLU in ssm_gated_norm | -0.31% |
+| 91 | vec4 X-tile preload + register-cache in dmmv_q8_0 | flat |
+
+**Every one of these is a register-cache or LDS-narrowing variant
+on a shader the doc has banned.** The previous bans aren't holding
+because the agent reads "I cannot try X without new evidence" and
+finds creative reframings of the same dead pattern. Cycle 76+
+prompts must include the literal A3b/A4-real/B sequence as the
+*only* acceptable targets.
+
+### Hard rule for cycles 92-100
+
+**A3b is the only acceptable target.** Concretely:
+
+1. **The change is in `forward.zig`, not the shader.** Move the
+   SSM phase (lines ~8910-9000) out of the per-token `decodeStep`
+   loop into either (a) a pre-pass that runs once per layer with
+   `n_tok = prompt_len` after all conv1d outputs are accumulated,
+   or (b) restructure the prefill loop so SSM batching is
+   independent of attention/MoE per-token work.
+2. **n_tok push must equal `prompt_tokens.len`** at line 8941, and
+   the dispatch grid must be `(dt_rank, head_v_dim, 1)` per layer
+   (not per token). Strides at lines 8942-8944 are already correct.
+3. **Validate via `ZINC_BATCHED_PREFILL=validate`** at tol=1e-3
+   against the per-token reference. The shader's n_tok=1 path stays
+   correct; the new n_tok>1 path needs verification.
+4. **First A3b attempt is allowed to land as flag-gated default-off
+   foundationKeep** if it validates but is flat. The next cycle
+   iterates correctness/perf. **Do not pivot to MoE micro-tweaks
+   because A3b's first cut didn't tok/s.**
+
+### After A3b — corrected next-bet roster
+
+| # | Bet | Target | Est. saving | Cycles |
+|---|---|---|---|---|
+| 1 | **A3b** | dispatch restructure for `ssm_delta_net` | **150-250ms** (~+15-20 tok/s) | 1-3 |
+| 2 | **A4-real** | same restructure for `ssm_proj` DMMVs (rms+alpha+beta DMMV; NOT a fusion) | 50-80ms | 1-2 |
+| 3 | **B** | wire `mul_mm_q4k.comp` into SSM proj prefill (already in tree at LM-head only) | 245ms | 2-3 |
+| 4 | **Q8_1 mmq** | port `quantize_q8_1.comp` + integer-dot Q4_K matmul | 80-150ms | 4-6 |
+| 5 | **C** | port `mul_mm_id_q4k` for MoE gate/up/down | 680ms | 5-8 |
+
+Math to beat 180 tok/s from current 127.16:
+- A3b: 127 → ~145
+- + A4-real: ~150
+- + B: ~170
+- + Q8_1 mmq: ~180 ✅
+- + C: 200+
+
+**A3b + A4-real + B is the minimum viable path.** None has been
+tried correctly. The loop is burning cycles on dead patterns
+because the doc let it interpret "A3 attempted" as "A3 done."
+
+### Strengthened ban (cycles 85-91 evidence)
+
+The following are NOT acceptable targets until A3b ships:
+
+- Any register-cache / LICM variant on
+  `ssm_delta_net.comp`, `ssm_gated_norm.comp`, `ssm_conv1d.comp`,
+  `dmmv_q8_0.comp`, `qk_norm_rope_kv_write.comp` — all attempted
+  multiple times across cycles 21, 41, 73, 79, 85-91. Any cycle
+  proposing one is auto-revert before running.
+- LDS broadcast / barrier-narrowing on the same shaders.
+- vec4 X-tile / uint16 packed-quant reads on dmmv_q8_0.
+- Q8_0 fused-rms+alpha+beta retries on ssm_proj (cycles 17, 46,
+  78, 80, 81 all reverted; this is not the lever).
+
+If the next 5 cycles all attempt one of these, escalate to user
+and stop the loop — the controller is broken, not the bet roster.
+
+---
+
 ## PIVOT 2026-05-05 — STAGNATION READ (cycles 40-75)
 
 **Best 124.30 tok/s. The loop has been stuck for 36 cycles.**
