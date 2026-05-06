@@ -2216,23 +2216,39 @@ pub const InferenceEngine = struct {
         var a3b_gate_capture: ?Buffer = null;
         var a3b_capture_max_tokens: u32 = 0;
         if (a3b_validate_enabled) {
-            const A3B_MAX_TOKENS: u32 = 2048;
+            // Cycle 123: extend the layer-0-only validation to ALL SSM layers.
+            // The capture/state-backup/output buffers are sized to hold
+            // n_layers × max_tokens slots so every SSM layer's per-token
+            // (alpha, beta, conv_out) inputs and per-token delta_out outputs
+            // can be captured during the per-token loop. After the loop
+            // drains, prefillBatch dispatches one batched ssm_delta_net per
+            // SSM layer (state-backed-up, zeroed, dispatched at
+            // n_tok=prompt_len, restored) and diffs against the per-token
+            // output for that layer. Cap dropped 2048 → 256 to keep total
+            // memory under ~1 GB; the long-context benchmark uses 154 tokens
+            // so 256 is enough headroom.
+            const A3B_MAX_TOKENS: u32 = 256;
+            const n_layers_a3b = config.n_layers;
             const dt_rank_a3b = config.ssm_dt_rank;
             const d_inner_a3b = config.ssm_d_inner;
             const head_v_dim_a3b = d_inner_a3b / dt_rank_a3b;
             const conv_ch_a3b = d_inner_a3b + 2 * config.ssm_n_group * config.ssm_d_state;
             const state_elems_a3b = dt_rank_a3b * head_v_dim_a3b * head_v_dim_a3b;
             const ab_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, n_layers_a3b) *
                 @as(vk.c.VkDeviceSize, A3B_MAX_TOKENS) *
                 @as(vk.c.VkDeviceSize, dt_rank_a3b) *
                 @sizeOf(f32);
             const conv_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, n_layers_a3b) *
                 @as(vk.c.VkDeviceSize, A3B_MAX_TOKENS) *
                 @as(vk.c.VkDeviceSize, conv_ch_a3b) *
                 @sizeOf(f32);
             const state_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, n_layers_a3b) *
                 @as(vk.c.VkDeviceSize, state_elems_a3b) * @sizeOf(f32);
             const out_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, n_layers_a3b) *
                 @as(vk.c.VkDeviceSize, A3B_MAX_TOKENS) *
                 @as(vk.c.VkDeviceSize, d_inner_a3b) *
                 @sizeOf(f32);
@@ -2250,17 +2266,12 @@ pub const InferenceEngine = struct {
             errdefer if (a3b_delta_out) |*b| b.deinit();
             a3b_per_token_delta_out = try Buffer.initDeviceLocal(instance, out_bytes_a3b, usage_src_dst);
             errdefer if (a3b_per_token_delta_out) |*b| b.deinit();
-            // Cycle 104: per-token gate_buf capture for layer 0. Sized as the
-            // per-token output buffer (n_tokens × d_inner × f32) since
-            // gate_buf has the same per-token footprint as delta_net's
-            // output. usage_dst is sufficient: this buffer is only written
-            // by vkCmdCopyBuffer (capture) and read by future cycles'
-            // production wire-up via shader binding.
             a3b_gate_capture = try Buffer.initDeviceLocal(instance, out_bytes_a3b, usage_src_dst);
             errdefer if (a3b_gate_capture) |*b| b.deinit();
             a3b_capture_max_tokens = A3B_MAX_TOKENS;
-            log.info("ZINC_A3B_VALIDATE=1: A3b layer-0 capture buffers allocated (max {d} tokens, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems; cycle-104 added gate capture)", .{
-                A3B_MAX_TOKENS, dt_rank_a3b, conv_ch_a3b, d_inner_a3b, state_elems_a3b,
+            const total_mb_a3b: u64 = @intCast((ab_bytes_a3b * 2 + conv_bytes_a3b + state_bytes_a3b + out_bytes_a3b * 3) / (1024 * 1024));
+            log.info("ZINC_A3B_VALIDATE=1: A3b ALL-LAYER capture buffers allocated (n_layers={d}, max_tokens={d}, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems, total {d} MB)", .{
+                n_layers_a3b, A3B_MAX_TOKENS, dt_rank_a3b, conv_ch_a3b, d_inner_a3b, state_elems_a3b, total_mb_a3b,
             });
         } else if (a3b_validate_flag) {
             log.info("ZINC_A3B_VALIDATE=1 requested but prerequisites missing (no SSM, missing pipeline, or no push descriptors); skipping", .{});
@@ -8993,15 +9004,17 @@ pub const InferenceEngine = struct {
         // gnorm and that path has its own barrier. gpu_ssm_conv_states is only read by the
         // NEXT token's conv1d in a different command buffer (cross-CB sync via submission
         // ordering + cycle 5 pipeline waitForCompletion).
-        // Effort-6 cycle 97 (A3b foundation): when the validation flag is on
-        // and we're in prefill at layer 0, widen the barrier so the same
-        // conv1d/alpha/beta writes are visible to both the delta_net compute
-        // read and the upcoming vkCmdCopyBuffer transfer reads that capture
-        // the per-token slice. Flag-off path keeps the original narrow
-        // compute→compute barrier so non-validate prefills are unaffected.
+        // Effort-6 cycle 123 (A3b all-layer extension): when the validation
+        // flag is on and we're in prefill, widen the barrier on EVERY SSM
+        // layer so the conv1d/alpha/beta writes are visible to both the
+        // delta_net compute read and the upcoming vkCmdCopyBuffer transfer
+        // reads that capture the per-token slice. Cycle 97/101/104 only
+        // captured at layer 0; this extension covers all SSM layers via
+        // (layer × max_tokens + token) absolute offsets in the capture
+        // buffers. Flag-off path keeps the original narrow compute→compute
+        // barrier so non-validate prefills are unaffected.
         const a3b_capture_this_layer = self.use_a3b_validate and
             self.prefill_active and
-            layer == 0 and
             self.a3b_alpha_capture != null and
             self.a3b_beta_capture != null and
             self.a3b_conv_out_capture != null and
@@ -9018,38 +9031,35 @@ pub const InferenceEngine = struct {
         }
         self.endProfilePhase(.ssm_conv, ssm_conv_phase);
 
-        // A3b capture: copy this token's (alpha, beta, conv_out) slices into
-        // the per-token strided slots in the capture buffers. The post-prefill
-        // batched ssm_delta_net dispatch (in prefillBatch, after the per-token
-        // loop drains) reads these via push.{conv,ab}_stride_tok with
-        // n_tok=prompt_len. Captures run on the transfer queue concurrently
-        // with delta_net's compute read of the same source buffers (allowed
-        // because both are reads of writes synchronized by the wider barrier
-        // above). Flag-off and non-layer-0 layers are skipped entirely.
+        // A3b all-layer capture: copy this (layer, token)'s (alpha, beta,
+        // conv_out) slices into the per-(layer, token) strided slots in the
+        // capture buffers. Layout: slot(layer, token) = (layer × max_tokens
+        // + token) × per_data_bytes. The post-prefill batched ssm_delta_net
+        // dispatches (in prefillBatch, one per SSM layer, after the
+        // per-token loop drains) read each layer's slice via push.{conv,ab}
+        // _stride_tok with n_tok=prompt_len. The non-SSM (attention) layers
+        // also enter runSsmLayerGpu? No — they don't; this function is only
+        // called on SSM layers. So the capture wastes only the (layer,
+        // token) slots whose layer is an attention layer, which is OK.
         if (a3b_capture_this_layer) {
             const tok_idx = self.prefill_current_token_idx;
-            const ab_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * ab_bytes;
-            const conv_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * qkv_bytes;
+            const max_tokens = self.a3b_capture_max_tokens;
+            const layer_stride_ab: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, max_tokens) * ab_bytes;
+            const layer_stride_conv: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, max_tokens) * qkv_bytes;
+            const layer_stride_z: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, max_tokens) * z_bytes;
+            const ab_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, layer) * layer_stride_ab + @as(vk.c.VkDeviceSize, tok_idx) * ab_bytes;
+            const conv_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, layer) * layer_stride_conv + @as(vk.c.VkDeviceSize, tok_idx) * qkv_bytes;
             const r_alpha = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = ab_dst_off, .size = ab_bytes };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.a3b_alpha_capture.?.handle, 1, &r_alpha);
             const r_beta = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = ab_dst_off, .size = ab_bytes };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.a3b_beta_capture.?.handle, 1, &r_beta);
             const r_conv = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = conv_dst_off, .size = qkv_bytes };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.a3b_conv_out_capture.?.handle, 1, &r_conv);
-            // Cycle 104 enablement: also capture gate_buf (z-projection
-            // output) at the per-token strided slot, when present. gate_buf
-            // is overwritten by the next per-token z DMMV, so this snapshot
-            // is required for any future A3b production wire-up that defers
-            // gnorm to a Pass 2 reading from per-token strided buffers
-            // (instead of the per-token gate_buf overwrite chain). The wider
-            // computeAndTransferBarrier above (line ~9010) already covers
-            // the gate_buf write→transfer-read hazard so no extra barrier
-            // is required. Gated on (!is_dead_tail) because z DMMV is
-            // skipped at last-layer non-terminal tokens — at layer 0 this
-            // is always false in the current dead-tail design, but the
-            // guard documents the precondition.
+            // gate_buf capture (z-projection output): same per-(layer, token)
+            // strided layout. Skipped on dead-tail tokens because gate_buf
+            // isn't written then.
             if (self.a3b_gate_capture != null and !is_dead_tail) {
-                const gate_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
+                const gate_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, layer) * layer_stride_z + @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
                 const r_gate = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = gate_dst_off, .size = z_bytes };
                 vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gate_buf.handle, self.a3b_gate_capture.?.handle, 1, &r_gate);
             }
@@ -9148,14 +9158,13 @@ pub const InferenceEngine = struct {
         // (delta_net RMW) is only read by the NEXT token's delta_net in a different
         // command buffer (cross-CB sync via submission ordering + cycle 5 pipelined
         // waitForCompletion). Follows cycle 21's multi-buffer pattern.
-        // Cycle 101 enablement: when ZINC_A3B_VALIDATE=1 and we are at layer 0,
-        // widen this barrier to cover the upcoming transfer-read that captures
-        // the per-token attn_out_buf slice. Both reads (gnorm compute, capture
-        // transfer) happen after this barrier so a single compute→{compute+
-        // transfer} barrier is sufficient.
+        // Cycle 123: extend per-token delta_out capture to ALL SSM layers.
+        // Slot layout: (layer × max_tokens + token) × z_bytes. The
+        // post-prefill batched dispatches diff against this per-(layer,
+        // token) reference. Flag-off path takes the original narrow
+        // compute→compute barrier so production prefills are unaffected.
         const a3b_capture_output = self.use_a3b_validate and
             self.prefill_active and
-            layer == 0 and
             self.a3b_per_token_delta_out != null and
             self.prefill_current_token_idx < self.a3b_capture_max_tokens;
         if (!is_dead_tail) {
@@ -9169,12 +9178,11 @@ pub const InferenceEngine = struct {
                 self.decode_cmd.computeBuffersBarrier(&delta_to_gnorm_ranges);
             }
         }
-        // A3b cycle-101 capture: snapshot this token's attn_out_buf slice into
-        // the per-token strided slot of a3b_per_token_delta_out for later
-        // comparison against a3b_delta_out (the batched dispatch output).
         if (a3b_capture_output) {
             const tok_idx = self.prefill_current_token_idx;
-            const out_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
+            const max_tokens = self.a3b_capture_max_tokens;
+            const layer_stride_z: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, max_tokens) * z_bytes;
+            const out_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, layer) * layer_stride_z + @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
             const r_out = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = out_dst_off, .size = z_bytes };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.a3b_per_token_delta_out.?.handle, 1, &r_out);
         }
@@ -9884,16 +9892,17 @@ pub const InferenceEngine = struct {
             }
         }
 
-        // Effort-6 cycle 97 (A3b foundation): batched ssm_delta_net dispatch
-        // for layer 0 with n_tok=prompt_len. This exercises the shader's
-        // n_tok>1 path on production data while leaving the per-token forward
-        // pass intact. State[0] is backed up before and restored after so the
-        // real per-token-committed state survives for decode. Output goes to
-        // a3b_delta_out (smoke-tested via 16-byte logits_staging readback).
-        // This path adds a few-millisecond CPU + GPU overhead per prefill;
-        // future cycles will lift the layer-0 cap, add per-token reference
-        // capture for diff comparison, and ultimately replace the per-token
-        // dispatches.
+        // Effort-6 cycle 123 (A3b all-layer extension): batched
+        // ssm_delta_net dispatches for ALL SSM layers with n_tok=prompt_len.
+        // Each SSM layer's state is backed up to a per-layer slot in
+        // a3b_state_backup, zeroed, dispatched with the per-(layer, token)
+        // strided captures, then restored. Per-layer batched output is
+        // diffed against the per-token reference captured in runSsmLayerGpu
+        // (also strided per-(layer, token)). Cycle 97/101/104 only dispatched
+        // layer 0; this extension validates the n_tok>1 shader correctness
+        // across every SSM layer in the model — the precondition for
+        // production wire-up. Flag-OFF path (default) is unchanged from
+        // production.
         if (self.use_a3b_validate and
             self.a3b_alpha_capture != null and
             self.a3b_beta_capture != null and
@@ -9906,7 +9915,7 @@ pub const InferenceEngine = struct {
             prompt_tokens.len <= self.a3b_capture_max_tokens)
         {
             const cfg_a3b = &self.model.config;
-            if (cfg_a3b.ssm_d_inner > 0 and cfg_a3b.ssm_dt_rank > 0 and self.gpu_ssm_states.len > 0 and self.gpu_ssm_states[0].handle != null) {
+            if (cfg_a3b.ssm_d_inner > 0 and cfg_a3b.ssm_dt_rank > 0 and self.gpu_ssm_states.len > 0) {
                 const dt_rank_a3b = cfg_a3b.ssm_dt_rank;
                 const d_inner_a3b = cfg_a3b.ssm_d_inner;
                 const head_v_dim_a3b = d_inner_a3b / dt_rank_a3b;
@@ -9914,162 +9923,214 @@ pub const InferenceEngine = struct {
                 const state_elems_a3b = dt_rank_a3b * head_v_dim_a3b * head_v_dim_a3b;
                 const state_bytes_a3b: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, state_elems_a3b) * @sizeOf(f32);
                 const n_tok_a3b: u32 = @intCast(prompt_tokens.len);
+                const max_tokens_a3b: vk.c.VkDeviceSize = @intCast(self.a3b_capture_max_tokens);
+                const full_attn_interval_a3b: u32 = if (cfg_a3b.full_attn_interval > 0) cfg_a3b.full_attn_interval else 1;
 
-                const lt_a3b = self.layer_tensors[0];
-                const dt_bias_t = lt_a3b.ssm_dt_bias;
-                const ssm_a_t = lt_a3b.ssm_a;
-                const dt_bias_buf = if (dt_bias_t) |t| t.gpu_buffer.handle else self.down_buf.handle;
-                const dt_bias_size = if (dt_bias_t) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32));
-                const ssm_a_buf = if (ssm_a_t) |t| t.gpu_buffer.handle else self.down_buf.handle;
-                const ssm_a_size = if (ssm_a_t) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32));
+                // Per-layer offsets into the (layer, token, data) capture
+                // buffers. Each layer's slot is a contiguous max_tokens ×
+                // per_data block within the buffer; the per-token loop above
+                // already wrote each (layer, token) slot at this stride.
+                const ab_layer_stride: vk.c.VkDeviceSize = max_tokens_a3b * @as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32);
+                const conv_layer_stride: vk.c.VkDeviceSize = max_tokens_a3b * @as(vk.c.VkDeviceSize, conv_ch_a3b) * @sizeOf(f32);
+                const out_layer_stride: vk.c.VkDeviceSize = max_tokens_a3b * @as(vk.c.VkDeviceSize, d_inner_a3b) * @sizeOf(f32);
+                const conv_total_layer: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, conv_ch_a3b) * @sizeOf(f32);
+                const ab_total_layer: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32);
+                const out_total_layer: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, d_inner_a3b) * @sizeOf(f32);
 
-                try self.decode_cmd.reset();
-                try self.decode_cmd.begin();
-
-                // Make prior compute writes (state[0] from per-token delta_net)
-                // visible to the upcoming transfer-read backup, and make prior
-                // transfer writes (capture buffers from per-token CBs) visible
-                // for compute reads later.
-                self.decode_cmd.computeToTransferBarrier();
-                {
-                    const r_backup = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = state_bytes_a3b };
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gpu_ssm_states[0].handle, self.a3b_state_backup.?.handle, 1, &r_backup);
-                }
-                // Order the read-from-state copy before the write-to-state fill.
-                self.decode_cmd.transferToTransferBarrier();
-                vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.gpu_ssm_states[0].handle, 0, state_bytes_a3b, 0);
-                // State + capture buffers: transfer writes → upcoming compute reads.
-                self.decode_cmd.transferToComputeBarrier();
-
-                {
-                    const pip = &(self.elementwise.pipeline_ssm_delta_net.?);
-                    const push = SsmDeltaNetPush{
-                        .d_inner = d_inner_a3b,
-                        .dt_rank = dt_rank_a3b,
-                        .head_v_dim = head_v_dim_a3b,
-                        .d_state = cfg_a3b.ssm_d_state,
-                        .n_group = cfg_a3b.ssm_n_group,
-                        .ssm_a_is_f16 = if (ssm_a_t) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
-                        .dt_bias_is_f16 = if (dt_bias_t) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
-                        .has_dt_bias = if (dt_bias_t != null) 1 else 0,
-                        .has_ssm_a = if (ssm_a_t != null) 1 else 0,
-                        .n_tok = n_tok_a3b,
-                        .conv_stride_tok = conv_ch_a3b,
-                        .ab_stride_tok = dt_rank_a3b,
-                        .y_stride_tok = d_inner_a3b,
-                    };
-                    const conv_total: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, conv_ch_a3b) * @sizeOf(f32);
-                    const ab_total: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32);
-                    const out_total: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, d_inner_a3b) * @sizeOf(f32);
-                    self.pushDispatch7(
-                        pip,
-                        std.mem.asBytes(&push),
-                        self.a3b_conv_out_capture.?.handle,
-                        conv_total,
-                        dt_bias_buf,
-                        dt_bias_size,
-                        self.a3b_alpha_capture.?.handle,
-                        ab_total,
-                        self.a3b_beta_capture.?.handle,
-                        ab_total,
-                        ssm_a_buf,
-                        ssm_a_size,
-                        self.gpu_ssm_states[0].handle,
-                        state_bytes_a3b,
-                        self.a3b_delta_out.?.handle,
-                        out_total,
-                        dt_rank_a3b,
-                        head_v_dim_a3b,
-                        1,
-                    );
-                }
-
-                // dispatch wrote state[0] (compute) and delta_out (compute);
-                // upcoming copies read both as transfer.
-                self.decode_cmd.computeToTransferBarrier();
-                {
-                    const r_restore = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = state_bytes_a3b };
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_state_backup.?.handle, self.gpu_ssm_states[0].handle, 1, &r_restore);
-                }
-                // Cycle 101 enablement: compare batched output against the
-                // per-token output captured in runSsmLayerGpu. Sample 16 floats
-                // × 3 tokens (first/middle/last) × 2 sources (batched, per-token),
-                // packed contiguously into logits_staging, then CPU-diff each
-                // pair so the loop has a numerical answer to "does n_tok>1
-                // produce the same output as n_tok=1 N times in a row?".
-                // Layout (96 floats, 384 bytes):
-                //   [0..16]:  batched   token 0
-                //   [16..32]: per-token token 0
-                //   [32..48]: batched   token mid
-                //   [48..64]: per-token token mid
-                //   [64..80]: batched   token last
-                //   [80..96]: per-token token last
+                // Sample 16 floats × 3 tokens × 2 sources per layer.
                 const sample_floats: u32 = 16;
                 const sample_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, sample_floats) * @sizeOf(f32);
-                const sample_total_bytes: vk.c.VkDeviceSize = sample_bytes * 6;
+                const samples_per_layer_bytes: vk.c.VkDeviceSize = sample_bytes * 6;
                 const tok_first: u32 = 0;
                 const tok_mid: u32 = if (n_tok_a3b > 2) n_tok_a3b / 2 else 0;
                 const tok_last: u32 = n_tok_a3b - 1;
+
+                // Build the SSM-layer index list once: layers where
+                // ((L+1) % full_attn_interval) != 0. Each entry is the
+                // absolute layer index used to compute state/capture offsets.
+                var ssm_layer_indices_buf: [128]u32 = undefined;
+                var ssm_count: usize = 0;
+                {
+                    var L: u32 = 0;
+                    while (L < cfg_a3b.n_layers and ssm_count < ssm_layer_indices_buf.len) : (L += 1) {
+                        const is_full_attn = ((L + 1) % full_attn_interval_a3b) == 0;
+                        if (!is_full_attn and L < self.gpu_ssm_states.len and self.gpu_ssm_states[L].handle != null) {
+                            ssm_layer_indices_buf[ssm_count] = L;
+                            ssm_count += 1;
+                        }
+                    }
+                }
+                const ssm_layers = ssm_layer_indices_buf[0..ssm_count];
+
+                const sample_total_bytes: vk.c.VkDeviceSize = samples_per_layer_bytes * @as(vk.c.VkDeviceSize, ssm_count);
                 const can_sample = self.a3b_per_token_delta_out != null and
                     self.logits_staging.size >= sample_total_bytes and
                     self.logits_staging.mapped != null and
                     @as(vk.c.VkDeviceSize, d_inner_a3b) >= @as(vk.c.VkDeviceSize, sample_floats);
-                if (can_sample) {
-                    const slot_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, d_inner_a3b) * @sizeOf(f32);
-                    const tokens = [_]u32{ tok_first, tok_mid, tok_last };
-                    var staging_off: vk.c.VkDeviceSize = 0;
-                    for (tokens) |tok| {
-                        const src_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok) * slot_bytes;
-                        const r_b = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = staging_off, .size = sample_bytes };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_delta_out.?.handle, self.logits_staging.handle, 1, &r_b);
-                        staging_off += sample_bytes;
-                        const r_p = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = staging_off, .size = sample_bytes };
-                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_per_token_delta_out.?.handle, self.logits_staging.handle, 1, &r_p);
-                        staging_off += sample_bytes;
-                    }
-                }
-                try self.decode_cmd.end();
-                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
-                if (can_sample) {
-                    const base: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
-                    const tok_idxs = [_]u32{ tok_first, tok_mid, tok_last };
-                    const labels = [_][]const u8{ "first", "mid", "last" };
-                    var max_diff_overall: f64 = 0.0;
-                    for (tok_idxs, labels, 0..) |tok, label, slot| {
-                        const off_b = slot * 2 * sample_floats;
-                        const off_p = off_b + sample_floats;
-                        var sum_sq: f64 = 0.0;
-                        var max_d: f64 = 0.0;
-                        var sum_b: f64 = 0.0;
-                        var sum_p: f64 = 0.0;
-                        for (0..sample_floats) |k| {
-                            const b: f64 = base[off_b + k];
-                            const p: f64 = base[off_p + k];
-                            const d = b - p;
-                            sum_sq += d * d;
-                            const ad = if (d < 0) -d else d;
-                            if (ad > max_d) max_d = ad;
-                            sum_b += b * b;
-                            sum_p += p * p;
+                if (ssm_count > 0) {
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+
+                    // Phase 1: backup all SSM layers' states into per-layer
+                    // slots in a3b_state_backup. Use a single
+                    // compute→transfer barrier covering all layers since the
+                    // per-token CBs have already drained on the host above.
+                    self.decode_cmd.computeToTransferBarrier();
+                    for (ssm_layers, 0..) |L, ssm_idx| {
+                        const backup_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, ssm_idx) * state_bytes_a3b;
+                        const r_backup = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = backup_off, .size = state_bytes_a3b };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gpu_ssm_states[L].handle, self.a3b_state_backup.?.handle, 1, &r_backup);
+                    }
+
+                    // Phase 2: zero all SSM layers' states. Order after
+                    // backup reads via transfer→transfer barrier.
+                    self.decode_cmd.transferToTransferBarrier();
+                    for (ssm_layers) |L| {
+                        vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.gpu_ssm_states[L].handle, 0, state_bytes_a3b, 0);
+                    }
+
+                    // Phase 3: dispatch batched delta_net for each SSM
+                    // layer. Each dispatch reads the layer's slot in the
+                    // capture buffers and writes to the layer's slot in
+                    // a3b_delta_out. State buffer is the actual per-layer
+                    // gpu_ssm_states[L] (now zeroed). Single compute barrier
+                    // between dispatches because the next layer's dispatch
+                    // doesn't share buffers with the current one (different
+                    // state buf, different capture-buffer slot).
+                    self.decode_cmd.transferToComputeBarrier();
+                    const pip = &(self.elementwise.pipeline_ssm_delta_net.?);
+                    for (ssm_layers) |L| {
+                        const lt_a3b = self.layer_tensors[L];
+                        const dt_bias_t = lt_a3b.ssm_dt_bias;
+                        const ssm_a_t = lt_a3b.ssm_a;
+                        const dt_bias_buf = if (dt_bias_t) |t| t.gpu_buffer.handle else self.down_buf.handle;
+                        const dt_bias_size = if (dt_bias_t) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32));
+                        const ssm_a_buf = if (ssm_a_t) |t| t.gpu_buffer.handle else self.down_buf.handle;
+                        const ssm_a_size = if (ssm_a_t) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32));
+
+                        const push = SsmDeltaNetPush{
+                            .d_inner = d_inner_a3b,
+                            .dt_rank = dt_rank_a3b,
+                            .head_v_dim = head_v_dim_a3b,
+                            .d_state = cfg_a3b.ssm_d_state,
+                            .n_group = cfg_a3b.ssm_n_group,
+                            .ssm_a_is_f16 = if (ssm_a_t) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                            .dt_bias_is_f16 = if (dt_bias_t) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                            .has_dt_bias = if (dt_bias_t != null) 1 else 0,
+                            .has_ssm_a = if (ssm_a_t != null) 1 else 0,
+                            .n_tok = n_tok_a3b,
+                            .conv_stride_tok = conv_ch_a3b,
+                            .ab_stride_tok = dt_rank_a3b,
+                            .y_stride_tok = d_inner_a3b,
+                        };
+
+                        const conv_layer_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, L) * conv_layer_stride;
+                        const ab_layer_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, L) * ab_layer_stride;
+                        const out_layer_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, L) * out_layer_stride;
+
+                        const infos = [7]vk.c.VkDescriptorBufferInfo{
+                            .{ .buffer = self.a3b_conv_out_capture.?.handle, .offset = conv_layer_off, .range = conv_total_layer },
+                            .{ .buffer = dt_bias_buf, .offset = 0, .range = dt_bias_size },
+                            .{ .buffer = self.a3b_alpha_capture.?.handle, .offset = ab_layer_off, .range = ab_total_layer },
+                            .{ .buffer = self.a3b_beta_capture.?.handle, .offset = ab_layer_off, .range = ab_total_layer },
+                            .{ .buffer = ssm_a_buf, .offset = 0, .range = ssm_a_size },
+                            .{ .buffer = self.gpu_ssm_states[L].handle, .offset = 0, .range = state_bytes_a3b },
+                            .{ .buffer = self.a3b_delta_out.?.handle, .offset = out_layer_off, .range = out_total_layer },
+                        };
+                        self.decode_cmd.pushDescAndDispatch(
+                            pip,
+                            self.instance.push_descriptor_fn,
+                            infos[0..],
+                            std.mem.asBytes(&push),
+                            dt_rank_a3b,
+                            head_v_dim_a3b,
+                            1,
+                        );
+                        // Compute barrier between dispatches so successive
+                        // layer dispatches see clean state writes (they
+                        // touch independent buffers but the driver may
+                        // serialize compute-to-compute writes via a barrier).
+                        self.decode_cmd.computeBarrier();
+                    }
+
+                    // Phase 4: restore each SSM layer's state from backup.
+                    // Compute→transfer barrier covers all dispatches above.
+                    self.decode_cmd.computeToTransferBarrier();
+                    for (ssm_layers, 0..) |L, ssm_idx| {
+                        const backup_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, ssm_idx) * state_bytes_a3b;
+                        const r_restore = vk.c.VkBufferCopy{ .srcOffset = backup_off, .dstOffset = 0, .size = state_bytes_a3b };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_state_backup.?.handle, self.gpu_ssm_states[L].handle, 1, &r_restore);
+                    }
+
+                    // Phase 5: per-layer sample copies into logits_staging.
+                    // Layout per layer: 16 floats × 6 (b/p × first/mid/last).
+                    if (can_sample) {
+                        const tokens = [_]u32{ tok_first, tok_mid, tok_last };
+                        var staging_off: vk.c.VkDeviceSize = 0;
+                        for (ssm_layers) |L| {
+                            const layer_out_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, L) * out_layer_stride;
+                            for (tokens) |tok| {
+                                const tok_slot_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok) * @as(vk.c.VkDeviceSize, d_inner_a3b) * @sizeOf(f32);
+                                const r_b = vk.c.VkBufferCopy{ .srcOffset = layer_out_off + tok_slot_off, .dstOffset = staging_off, .size = sample_bytes };
+                                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_delta_out.?.handle, self.logits_staging.handle, 1, &r_b);
+                                staging_off += sample_bytes;
+                                const r_p = vk.c.VkBufferCopy{ .srcOffset = layer_out_off + tok_slot_off, .dstOffset = staging_off, .size = sample_bytes };
+                                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_per_token_delta_out.?.handle, self.logits_staging.handle, 1, &r_p);
+                                staging_off += sample_bytes;
+                            }
                         }
-                        const l2 = @sqrt(sum_sq);
-                        const norm_b = @sqrt(sum_b);
-                        const norm_p = @sqrt(sum_p);
-                        const rel = if (norm_p > 1e-12) l2 / norm_p else l2;
-                        if (max_d > max_diff_overall) max_diff_overall = max_d;
-                        log.info("ZINC_A3B_VALIDATE: tok[{s}]={d} sample[0..16] L2_diff={e:.6} max_abs={e:.6} rel={e:.6} ||b||={e:.6} ||p||={e:.6} b[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}] p[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
-                            label, tok, l2, max_d, rel, norm_b, norm_p,
-                            base[off_b + 0], base[off_b + 1], base[off_b + 2], base[off_b + 3],
-                            base[off_p + 0], base[off_p + 1], base[off_p + 2], base[off_p + 3],
+                    }
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    // CPU-side: read back samples and compute per-layer verdict.
+                    if (can_sample) {
+                        const base: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                        const labels = [_][]const u8{ "first", "mid", "last" };
+                        var max_diff_overall: f64 = 0.0;
+                        var pass_layers: u32 = 0;
+                        var pass_e2_layers: u32 = 0;
+                        var fail_layers: u32 = 0;
+                        for (ssm_layers, 0..) |L, ssm_idx| {
+                            const layer_base: usize = ssm_idx * 6 * sample_floats;
+                            var max_d_layer: f64 = 0.0;
+                            for (0..3) |slot| {
+                                const off_b = layer_base + slot * 2 * sample_floats;
+                                const off_p = off_b + sample_floats;
+                                var max_d: f64 = 0.0;
+                                for (0..sample_floats) |k| {
+                                    const b: f64 = base[off_b + k];
+                                    const p: f64 = base[off_p + k];
+                                    const d = b - p;
+                                    const ad = if (d < 0) -d else d;
+                                    if (ad > max_d) max_d = ad;
+                                }
+                                if (max_d > max_d_layer) max_d_layer = max_d;
+                                if (max_d > max_diff_overall) max_diff_overall = max_d;
+                                _ = labels;
+                            }
+                            const layer_verdict: []const u8 = if (max_d_layer < 1e-3) "PASS@1e-3" else if (max_d_layer < 1e-2) "PASS@1e-2" else "FAIL";
+                            if (max_d_layer < 1e-3) {
+                                pass_layers += 1;
+                            } else if (max_d_layer < 1e-2) {
+                                pass_e2_layers += 1;
+                            } else {
+                                fail_layers += 1;
+                            }
+                            log.info("ZINC_A3B_VALIDATE: layer={d} verdict={s} max_abs_diff={e:.6} (3 sample tokens × 16 floats)", .{
+                                L, layer_verdict, max_d_layer,
+                            });
+                        }
+                        const overall_verdict: []const u8 = if (fail_layers > 0) "FAIL" else if (pass_e2_layers > 0) "PASS@1e-2" else "PASS@1e-3";
+                        log.info("ZINC_A3B_VALIDATE: ALL-LAYER batched vs per-token verdict={s} (max_abs_diff={e:.6}, n_tok={d}, ssm_layers={d}, pass_1e-3={d} pass_1e-2={d} fail={d})", .{
+                            overall_verdict, max_diff_overall, n_tok_a3b, ssm_count, pass_layers, pass_e2_layers, fail_layers,
+                        });
+                    } else {
+                        log.info("ZINC_A3B_VALIDATE: ALL-LAYER batched ssm_delta_net dispatched (n_tok={d}, ssm_layers={d}; sample skipped — no per-token capture or staging too small {d} < {d})", .{
+                            n_tok_a3b, ssm_count, self.logits_staging.size, sample_total_bytes,
                         });
                     }
-                    const verdict: []const u8 = if (max_diff_overall < 1e-3) "PASS@1e-3" else if (max_diff_overall < 1e-2) "PASS@1e-2" else "FAIL";
-                    log.info("ZINC_A3B_VALIDATE: layer 0 batched vs per-token verdict={s} (max_abs_diff={e:.6}, n_tok={d})", .{
-                        verdict, max_diff_overall, n_tok_a3b,
-                    });
-                } else {
-                    log.info("ZINC_A3B_VALIDATE: layer 0 batched ssm_delta_net n_tok={d} dispatched (sample skipped — no per-token capture or staging too small)", .{n_tok_a3b});
                 }
             }
         }
