@@ -1164,6 +1164,13 @@ pub const InferenceEngine = struct {
     a3b_conv_out_capture: ?Buffer = null,
     a3b_state_backup: ?Buffer = null,
     a3b_delta_out: ?Buffer = null,
+    // Cycle 101 enablement: per-token capture of layer-0 ssm_delta_net output
+    // (attn_out_buf), strided by token. Filled in runSsmLayerGpu alongside
+    // the existing input captures. Compared against a3b_delta_out (the
+    // batched dispatch's output) at the end of prefillBatch, so the loop has
+    // a numerical answer to "does the n_tok>1 path match the per-token
+    // reference?" — the question cycles 98/99 reverted without resolving.
+    a3b_per_token_delta_out: ?Buffer = null,
     a3b_capture_max_tokens: u32 = 0,
 
     // Scratch buffers for the Vulkan/RDNA batched prefill path (lazy-init,
@@ -2195,6 +2202,7 @@ pub const InferenceEngine = struct {
         var a3b_conv_out_capture: ?Buffer = null;
         var a3b_state_backup: ?Buffer = null;
         var a3b_delta_out: ?Buffer = null;
+        var a3b_per_token_delta_out: ?Buffer = null;
         var a3b_capture_max_tokens: u32 = 0;
         if (a3b_validate_enabled) {
             const A3B_MAX_TOKENS: u32 = 2048;
@@ -2229,6 +2237,8 @@ pub const InferenceEngine = struct {
             errdefer if (a3b_state_backup) |*b| b.deinit();
             a3b_delta_out = try Buffer.initDeviceLocal(instance, out_bytes_a3b, usage_src_dst);
             errdefer if (a3b_delta_out) |*b| b.deinit();
+            a3b_per_token_delta_out = try Buffer.initDeviceLocal(instance, out_bytes_a3b, usage_src_dst);
+            errdefer if (a3b_per_token_delta_out) |*b| b.deinit();
             a3b_capture_max_tokens = A3B_MAX_TOKENS;
             log.info("ZINC_A3B_VALIDATE=1: A3b layer-0 capture buffers allocated (max {d} tokens, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems)", .{
                 A3B_MAX_TOKENS, dt_rank_a3b, conv_ch_a3b, d_inner_a3b, state_elems_a3b,
@@ -2270,6 +2280,7 @@ pub const InferenceEngine = struct {
             .a3b_conv_out_capture = a3b_conv_out_capture,
             .a3b_state_backup = a3b_state_backup,
             .a3b_delta_out = a3b_delta_out,
+            .a3b_per_token_delta_out = a3b_per_token_delta_out,
             .a3b_capture_max_tokens = a3b_capture_max_tokens,
             .routing_capture_buf = routing_capture_buf,
             .routing_capture_slot_bytes = routing_capture_slot_bytes,
@@ -9100,12 +9111,35 @@ pub const InferenceEngine = struct {
         // (delta_net RMW) is only read by the NEXT token's delta_net in a different
         // command buffer (cross-CB sync via submission ordering + cycle 5 pipelined
         // waitForCompletion). Follows cycle 21's multi-buffer pattern.
+        // Cycle 101 enablement: when ZINC_A3B_VALIDATE=1 and we are at layer 0,
+        // widen this barrier to cover the upcoming transfer-read that captures
+        // the per-token attn_out_buf slice. Both reads (gnorm compute, capture
+        // transfer) happen after this barrier so a single compute→{compute+
+        // transfer} barrier is sufficient.
+        const a3b_capture_output = self.use_a3b_validate and
+            self.prefill_active and
+            layer == 0 and
+            self.a3b_per_token_delta_out != null and
+            self.prefill_current_token_idx < self.a3b_capture_max_tokens;
         if (!is_dead_tail) {
-            const delta_to_gnorm_ranges = [_]CommandBuffer.BufferRange{
-                .{ .buffer = self.attn_out_buf.handle, .size = z_bytes },
-                .{ .buffer = self.gate_buf.handle, .size = z_bytes },
-            };
-            self.decode_cmd.computeBuffersBarrier(&delta_to_gnorm_ranges);
+            if (a3b_capture_output) {
+                self.decode_cmd.computeAndTransferBarrier();
+            } else {
+                const delta_to_gnorm_ranges = [_]CommandBuffer.BufferRange{
+                    .{ .buffer = self.attn_out_buf.handle, .size = z_bytes },
+                    .{ .buffer = self.gate_buf.handle, .size = z_bytes },
+                };
+                self.decode_cmd.computeBuffersBarrier(&delta_to_gnorm_ranges);
+            }
+        }
+        // A3b cycle-101 capture: snapshot this token's attn_out_buf slice into
+        // the per-token strided slot of a3b_per_token_delta_out for later
+        // comparison against a3b_delta_out (the batched dispatch output).
+        if (a3b_capture_output) {
+            const tok_idx = self.prefill_current_token_idx;
+            const out_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * z_bytes;
+            const r_out = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = out_dst_off, .size = z_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.attn_out_buf.handle, self.a3b_per_token_delta_out.?.handle, 1, &r_out);
         }
         self.endProfilePhase(.ssm_delta, ssm_delta_phase);
 
@@ -9920,21 +9954,85 @@ pub const InferenceEngine = struct {
                     const r_restore = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = state_bytes_a3b };
                     vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_state_backup.?.handle, self.gpu_ssm_states[0].handle, 1, &r_restore);
                 }
-                const peek_size: vk.c.VkDeviceSize = @sizeOf(f32) * 4;
-                if (self.logits_staging.size >= peek_size) {
-                    const r_peek = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = peek_size };
-                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_delta_out.?.handle, self.logits_staging.handle, 1, &r_peek);
+                // Cycle 101 enablement: compare batched output against the
+                // per-token output captured in runSsmLayerGpu. Sample 16 floats
+                // × 3 tokens (first/middle/last) × 2 sources (batched, per-token),
+                // packed contiguously into logits_staging, then CPU-diff each
+                // pair so the loop has a numerical answer to "does n_tok>1
+                // produce the same output as n_tok=1 N times in a row?".
+                // Layout (96 floats, 384 bytes):
+                //   [0..16]:  batched   token 0
+                //   [16..32]: per-token token 0
+                //   [32..48]: batched   token mid
+                //   [48..64]: per-token token mid
+                //   [64..80]: batched   token last
+                //   [80..96]: per-token token last
+                const sample_floats: u32 = 16;
+                const sample_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, sample_floats) * @sizeOf(f32);
+                const sample_total_bytes: vk.c.VkDeviceSize = sample_bytes * 6;
+                const tok_first: u32 = 0;
+                const tok_mid: u32 = if (n_tok_a3b > 2) n_tok_a3b / 2 else 0;
+                const tok_last: u32 = n_tok_a3b - 1;
+                const can_sample = self.a3b_per_token_delta_out != null and
+                    self.logits_staging.size >= sample_total_bytes and
+                    self.logits_staging.mapped != null and
+                    @as(vk.c.VkDeviceSize, d_inner_a3b) >= @as(vk.c.VkDeviceSize, sample_floats);
+                if (can_sample) {
+                    const slot_bytes: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, d_inner_a3b) * @sizeOf(f32);
+                    const tokens = [_]u32{ tok_first, tok_mid, tok_last };
+                    var staging_off: vk.c.VkDeviceSize = 0;
+                    for (tokens) |tok| {
+                        const src_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok) * slot_bytes;
+                        const r_b = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = staging_off, .size = sample_bytes };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_delta_out.?.handle, self.logits_staging.handle, 1, &r_b);
+                        staging_off += sample_bytes;
+                        const r_p = vk.c.VkBufferCopy{ .srcOffset = src_off, .dstOffset = staging_off, .size = sample_bytes };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_per_token_delta_out.?.handle, self.logits_staging.handle, 1, &r_p);
+                        staging_off += sample_bytes;
+                    }
                 }
                 try self.decode_cmd.end();
                 try self.decode_cmd.submitAndWait(self.instance.compute_queue);
 
-                if (self.logits_staging.size >= peek_size and self.logits_staging.mapped != null) {
-                    const ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
-                    log.info("ZINC_A3B_VALIDATE: layer 0 batched ssm_delta_net n_tok={d} dispatched, out[0..4]=[{d:.8},{d:.8},{d:.8},{d:.8}]", .{
-                        n_tok_a3b, ptr[0], ptr[1], ptr[2], ptr[3],
+                if (can_sample) {
+                    const base: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    const tok_idxs = [_]u32{ tok_first, tok_mid, tok_last };
+                    const labels = [_][]const u8{ "first", "mid", "last" };
+                    var max_diff_overall: f64 = 0.0;
+                    for (tok_idxs, labels, 0..) |tok, label, slot| {
+                        const off_b = slot * 2 * sample_floats;
+                        const off_p = off_b + sample_floats;
+                        var sum_sq: f64 = 0.0;
+                        var max_d: f64 = 0.0;
+                        var sum_b: f64 = 0.0;
+                        var sum_p: f64 = 0.0;
+                        for (0..sample_floats) |k| {
+                            const b: f64 = base[off_b + k];
+                            const p: f64 = base[off_p + k];
+                            const d = b - p;
+                            sum_sq += d * d;
+                            const ad = if (d < 0) -d else d;
+                            if (ad > max_d) max_d = ad;
+                            sum_b += b * b;
+                            sum_p += p * p;
+                        }
+                        const l2 = @sqrt(sum_sq);
+                        const norm_b = @sqrt(sum_b);
+                        const norm_p = @sqrt(sum_p);
+                        const rel = if (norm_p > 1e-12) l2 / norm_p else l2;
+                        if (max_d > max_diff_overall) max_diff_overall = max_d;
+                        log.info("ZINC_A3B_VALIDATE: tok[{s}]={d} sample[0..16] L2_diff={e:.6} max_abs={e:.6} rel={e:.6} ||b||={e:.6} ||p||={e:.6} b[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}] p[0..4]=[{d:.6},{d:.6},{d:.6},{d:.6}]", .{
+                            label, tok, l2, max_d, rel, norm_b, norm_p,
+                            base[off_b + 0], base[off_b + 1], base[off_b + 2], base[off_b + 3],
+                            base[off_p + 0], base[off_p + 1], base[off_p + 2], base[off_p + 3],
+                        });
+                    }
+                    const verdict: []const u8 = if (max_diff_overall < 1e-3) "PASS@1e-3" else if (max_diff_overall < 1e-2) "PASS@1e-2" else "FAIL";
+                    log.info("ZINC_A3B_VALIDATE: layer 0 batched vs per-token verdict={s} (max_abs_diff={e:.6}, n_tok={d})", .{
+                        verdict, max_diff_overall, n_tok_a3b,
                     });
                 } else {
-                    log.info("ZINC_A3B_VALIDATE: layer 0 batched ssm_delta_net n_tok={d} dispatched (no peek)", .{n_tok_a3b});
+                    log.info("ZINC_A3B_VALIDATE: layer 0 batched ssm_delta_net n_tok={d} dispatched (sample skipped — no per-token capture or staging too small)", .{n_tok_a3b});
                 }
             }
         }
@@ -10604,6 +10702,7 @@ pub const InferenceEngine = struct {
         if (self.a3b_conv_out_capture) |*b| b.deinit();
         if (self.a3b_state_backup) |*b| b.deinit();
         if (self.a3b_delta_out) |*b| b.deinit();
+        if (self.a3b_per_token_delta_out) |*b| b.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
         self.kv_page_pool.deinit();
