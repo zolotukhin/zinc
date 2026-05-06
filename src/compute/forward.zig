@@ -1147,6 +1147,25 @@ pub const InferenceEngine = struct {
     prefill_embed_big_token_count: u32 = 0,
     prefill_current_token_idx: u32 = 0,
 
+    // Effort-6 cycle 97 (A3b foundation): per-token capture buffers for the
+    // ssm_delta_net inputs at layer 0 only. When `use_a3b_validate` is set,
+    // runSsmLayerGpu copies (alpha, beta, conv_out) into the per-token slots
+    // for layer 0 during the per-token loop, and prefillBatch dispatches a
+    // single batched ssm_delta_net (n_tok=prompt_len) for layer 0 after the
+    // per-token loop drains. Real state is backed up before and restored
+    // after the batched dispatch, so decode after prefill is unaffected.
+    // Output goes to a3b_delta_out for smoke-test readback. Cycle 98 lifts
+    // the layer-0 restriction and adds the per-token reference comparison;
+    // cycle 99 replaces the per-token dispatches with the batched one.
+    // Default-OFF (gated by ZINC_A3B_VALIDATE=1).
+    use_a3b_validate: bool = false,
+    a3b_alpha_capture: ?Buffer = null,
+    a3b_beta_capture: ?Buffer = null,
+    a3b_conv_out_capture: ?Buffer = null,
+    a3b_state_backup: ?Buffer = null,
+    a3b_delta_out: ?Buffer = null,
+    a3b_capture_max_tokens: u32 = 0,
+
     // Scratch buffers for the Vulkan/RDNA batched prefill path (lazy-init,
     // reused across prefill calls). Sized to hold all N prompt tokens at
     // once so dmmv_q4k_batch + rope_batched + flash_attn_batched can each
@@ -2156,6 +2175,68 @@ pub const InferenceEngine = struct {
             log.info("ZINC_CAPTURE_FFN_INPUT=1 requested but prerequisites missing (n_layers or hidden_dim is 0); skipping", .{});
         }
 
+        // Effort-6 cycle 97 (A3b foundation): allocate per-token capture
+        // buffers for ssm_delta_net inputs at layer 0. The shader already
+        // supports n_tok>1 (cycle 77 added the t-loop fold + strides). This
+        // path captures per-token (alpha, beta, conv_out) into strided slots
+        // during the per-token loop, then dispatches one batched delta_net
+        // for layer 0 after the per-token loop drains. State backup/restore
+        // protects the real per-token state from the validation dispatch so
+        // decode keeps producing the correct output. Default-OFF.
+        const a3b_validate_env = std.posix.getenv("ZINC_A3B_VALIDATE");
+        const a3b_validate_flag = a3b_validate_env != null and std.mem.eql(u8, a3b_validate_env.?, "1");
+        const a3b_validate_enabled = a3b_validate_flag and
+            config.ssm_d_inner > 0 and
+            config.ssm_dt_rank > 0 and
+            elementwise.pipeline_ssm_delta_net != null and
+            instance.push_descriptor_fn != null;
+        var a3b_alpha_capture: ?Buffer = null;
+        var a3b_beta_capture: ?Buffer = null;
+        var a3b_conv_out_capture: ?Buffer = null;
+        var a3b_state_backup: ?Buffer = null;
+        var a3b_delta_out: ?Buffer = null;
+        var a3b_capture_max_tokens: u32 = 0;
+        if (a3b_validate_enabled) {
+            const A3B_MAX_TOKENS: u32 = 2048;
+            const dt_rank_a3b = config.ssm_dt_rank;
+            const d_inner_a3b = config.ssm_d_inner;
+            const head_v_dim_a3b = d_inner_a3b / dt_rank_a3b;
+            const conv_ch_a3b = d_inner_a3b + 2 * config.ssm_n_group * config.ssm_d_state;
+            const state_elems_a3b = dt_rank_a3b * head_v_dim_a3b * head_v_dim_a3b;
+            const ab_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, A3B_MAX_TOKENS) *
+                @as(vk.c.VkDeviceSize, dt_rank_a3b) *
+                @sizeOf(f32);
+            const conv_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, A3B_MAX_TOKENS) *
+                @as(vk.c.VkDeviceSize, conv_ch_a3b) *
+                @sizeOf(f32);
+            const state_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, state_elems_a3b) * @sizeOf(f32);
+            const out_bytes_a3b: vk.c.VkDeviceSize =
+                @as(vk.c.VkDeviceSize, A3B_MAX_TOKENS) *
+                @as(vk.c.VkDeviceSize, d_inner_a3b) *
+                @sizeOf(f32);
+            const usage_dst = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            const usage_src_dst = vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            a3b_alpha_capture = try Buffer.initDeviceLocal(instance, ab_bytes_a3b, usage_dst);
+            errdefer if (a3b_alpha_capture) |*b| b.deinit();
+            a3b_beta_capture = try Buffer.initDeviceLocal(instance, ab_bytes_a3b, usage_dst);
+            errdefer if (a3b_beta_capture) |*b| b.deinit();
+            a3b_conv_out_capture = try Buffer.initDeviceLocal(instance, conv_bytes_a3b, usage_dst);
+            errdefer if (a3b_conv_out_capture) |*b| b.deinit();
+            a3b_state_backup = try Buffer.initDeviceLocal(instance, state_bytes_a3b, usage_src_dst);
+            errdefer if (a3b_state_backup) |*b| b.deinit();
+            a3b_delta_out = try Buffer.initDeviceLocal(instance, out_bytes_a3b, usage_src_dst);
+            errdefer if (a3b_delta_out) |*b| b.deinit();
+            a3b_capture_max_tokens = A3B_MAX_TOKENS;
+            log.info("ZINC_A3B_VALIDATE=1: A3b layer-0 capture buffers allocated (max {d} tokens, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems)", .{
+                A3B_MAX_TOKENS, dt_rank_a3b, conv_ch_a3b, d_inner_a3b, state_elems_a3b,
+            });
+        } else if (a3b_validate_flag) {
+            log.info("ZINC_A3B_VALIDATE=1 requested but prerequisites missing (no SSM, missing pipeline, or no push descriptors); skipping", .{});
+        }
+
         return InferenceEngine{
             .model = model,
             .gpu_config = gpu_config,
@@ -2183,6 +2264,13 @@ pub const InferenceEngine = struct {
             .use_mul_mm_lm_head = mul_mm_lm_head_enabled,
             .use_count_experts_prefill = count_experts_enabled,
             .use_capture_ffn_input = ffn_input_capture_flag and prefill_ffn_input_capture_buf.handle != null,
+            .use_a3b_validate = a3b_validate_enabled,
+            .a3b_alpha_capture = a3b_alpha_capture,
+            .a3b_beta_capture = a3b_beta_capture,
+            .a3b_conv_out_capture = a3b_conv_out_capture,
+            .a3b_state_backup = a3b_state_backup,
+            .a3b_delta_out = a3b_delta_out,
+            .a3b_capture_max_tokens = a3b_capture_max_tokens,
             .routing_capture_buf = routing_capture_buf,
             .routing_capture_slot_bytes = routing_capture_slot_bytes,
             .routing_capture_max_tokens = routing_capture_max_tokens,
@@ -8874,13 +8962,50 @@ pub const InferenceEngine = struct {
         // gnorm and that path has its own barrier. gpu_ssm_conv_states is only read by the
         // NEXT token's conv1d in a different command buffer (cross-CB sync via submission
         // ordering + cycle 5 pipeline waitForCompletion).
-        const conv_to_delta_ranges = [_]CommandBuffer.BufferRange{
-            .{ .buffer = self.swiglu_buf.handle, .size = qkv_bytes },
-            .{ .buffer = self.router_logits_buf.handle, .size = ab_bytes },
-            .{ .buffer = self.down_buf.handle, .size = ab_bytes },
-        };
-        self.decode_cmd.computeBuffersBarrier(&conv_to_delta_ranges);
+        // Effort-6 cycle 97 (A3b foundation): when the validation flag is on
+        // and we're in prefill at layer 0, widen the barrier so the same
+        // conv1d/alpha/beta writes are visible to both the delta_net compute
+        // read and the upcoming vkCmdCopyBuffer transfer reads that capture
+        // the per-token slice. Flag-off path keeps the original narrow
+        // compute→compute barrier so non-validate prefills are unaffected.
+        const a3b_capture_this_layer = self.use_a3b_validate and
+            self.prefill_active and
+            layer == 0 and
+            self.a3b_alpha_capture != null and
+            self.a3b_beta_capture != null and
+            self.a3b_conv_out_capture != null and
+            self.prefill_current_token_idx < self.a3b_capture_max_tokens;
+        if (a3b_capture_this_layer) {
+            self.decode_cmd.computeAndTransferBarrier();
+        } else {
+            const conv_to_delta_ranges = [_]CommandBuffer.BufferRange{
+                .{ .buffer = self.swiglu_buf.handle, .size = qkv_bytes },
+                .{ .buffer = self.router_logits_buf.handle, .size = ab_bytes },
+                .{ .buffer = self.down_buf.handle, .size = ab_bytes },
+            };
+            self.decode_cmd.computeBuffersBarrier(&conv_to_delta_ranges);
+        }
         self.endProfilePhase(.ssm_conv, ssm_conv_phase);
+
+        // A3b capture: copy this token's (alpha, beta, conv_out) slices into
+        // the per-token strided slots in the capture buffers. The post-prefill
+        // batched ssm_delta_net dispatch (in prefillBatch, after the per-token
+        // loop drains) reads these via push.{conv,ab}_stride_tok with
+        // n_tok=prompt_len. Captures run on the transfer queue concurrently
+        // with delta_net's compute read of the same source buffers (allowed
+        // because both are reads of writes synchronized by the wider barrier
+        // above). Flag-off and non-layer-0 layers are skipped entirely.
+        if (a3b_capture_this_layer) {
+            const tok_idx = self.prefill_current_token_idx;
+            const ab_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * ab_bytes;
+            const conv_dst_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, tok_idx) * qkv_bytes;
+            const r_alpha = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = ab_dst_off, .size = ab_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.router_logits_buf.handle, self.a3b_alpha_capture.?.handle, 1, &r_alpha);
+            const r_beta = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = ab_dst_off, .size = ab_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.down_buf.handle, self.a3b_beta_capture.?.handle, 1, &r_beta);
+            const r_conv = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = conv_dst_off, .size = qkv_bytes };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.swiglu_buf.handle, self.a3b_conv_out_capture.?.handle, 1, &r_conv);
+        }
 
         // --- GPU SSM diagnostic: readback conv1d output at layer 0 for comparison with CPU SSM_DBG ---
         if (layer == 0 and self.validation_diagnostics_enabled) {
@@ -9688,6 +9813,132 @@ pub const InferenceEngine = struct {
             }
         }
 
+        // Effort-6 cycle 97 (A3b foundation): batched ssm_delta_net dispatch
+        // for layer 0 with n_tok=prompt_len. This exercises the shader's
+        // n_tok>1 path on production data while leaving the per-token forward
+        // pass intact. State[0] is backed up before and restored after so the
+        // real per-token-committed state survives for decode. Output goes to
+        // a3b_delta_out (smoke-tested via 16-byte logits_staging readback).
+        // This path adds a few-millisecond CPU + GPU overhead per prefill;
+        // future cycles will lift the layer-0 cap, add per-token reference
+        // capture for diff comparison, and ultimately replace the per-token
+        // dispatches.
+        if (self.use_a3b_validate and
+            self.a3b_alpha_capture != null and
+            self.a3b_beta_capture != null and
+            self.a3b_conv_out_capture != null and
+            self.a3b_state_backup != null and
+            self.a3b_delta_out != null and
+            self.elementwise.pipeline_ssm_delta_net != null and
+            self.instance.push_descriptor_fn != null and
+            prompt_tokens.len > 0 and
+            prompt_tokens.len <= self.a3b_capture_max_tokens)
+        {
+            const cfg_a3b = &self.model.config;
+            if (cfg_a3b.ssm_d_inner > 0 and cfg_a3b.ssm_dt_rank > 0 and self.gpu_ssm_states.len > 0 and self.gpu_ssm_states[0].handle != null) {
+                const dt_rank_a3b = cfg_a3b.ssm_dt_rank;
+                const d_inner_a3b = cfg_a3b.ssm_d_inner;
+                const head_v_dim_a3b = d_inner_a3b / dt_rank_a3b;
+                const conv_ch_a3b = d_inner_a3b + 2 * cfg_a3b.ssm_n_group * cfg_a3b.ssm_d_state;
+                const state_elems_a3b = dt_rank_a3b * head_v_dim_a3b * head_v_dim_a3b;
+                const state_bytes_a3b: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, state_elems_a3b) * @sizeOf(f32);
+                const n_tok_a3b: u32 = @intCast(prompt_tokens.len);
+
+                const lt_a3b = self.layer_tensors[0];
+                const dt_bias_t = lt_a3b.ssm_dt_bias;
+                const ssm_a_t = lt_a3b.ssm_a;
+                const dt_bias_buf = if (dt_bias_t) |t| t.gpu_buffer.handle else self.down_buf.handle;
+                const dt_bias_size = if (dt_bias_t) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32));
+                const ssm_a_buf = if (ssm_a_t) |t| t.gpu_buffer.handle else self.down_buf.handle;
+                const ssm_a_size = if (ssm_a_t) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32));
+
+                try self.decode_cmd.reset();
+                try self.decode_cmd.begin();
+
+                // Make prior compute writes (state[0] from per-token delta_net)
+                // visible to the upcoming transfer-read backup, and make prior
+                // transfer writes (capture buffers from per-token CBs) visible
+                // for compute reads later.
+                self.decode_cmd.computeToTransferBarrier();
+                {
+                    const r_backup = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = state_bytes_a3b };
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gpu_ssm_states[0].handle, self.a3b_state_backup.?.handle, 1, &r_backup);
+                }
+                // Order the read-from-state copy before the write-to-state fill.
+                self.decode_cmd.transferToTransferBarrier();
+                vk.c.vkCmdFillBuffer(self.decode_cmd.handle, self.gpu_ssm_states[0].handle, 0, state_bytes_a3b, 0);
+                // State + capture buffers: transfer writes → upcoming compute reads.
+                self.decode_cmd.transferToComputeBarrier();
+
+                {
+                    const pip = &(self.elementwise.pipeline_ssm_delta_net.?);
+                    const push = SsmDeltaNetPush{
+                        .d_inner = d_inner_a3b,
+                        .dt_rank = dt_rank_a3b,
+                        .head_v_dim = head_v_dim_a3b,
+                        .d_state = cfg_a3b.ssm_d_state,
+                        .n_group = cfg_a3b.ssm_n_group,
+                        .ssm_a_is_f16 = if (ssm_a_t) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                        .dt_bias_is_f16 = if (dt_bias_t) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                        .has_dt_bias = if (dt_bias_t != null) 1 else 0,
+                        .has_ssm_a = if (ssm_a_t != null) 1 else 0,
+                        .n_tok = n_tok_a3b,
+                        .conv_stride_tok = conv_ch_a3b,
+                        .ab_stride_tok = dt_rank_a3b,
+                        .y_stride_tok = d_inner_a3b,
+                    };
+                    const conv_total: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, conv_ch_a3b) * @sizeOf(f32);
+                    const ab_total: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, dt_rank_a3b) * @sizeOf(f32);
+                    const out_total: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_a3b) * @as(vk.c.VkDeviceSize, d_inner_a3b) * @sizeOf(f32);
+                    self.pushDispatch7(
+                        pip,
+                        std.mem.asBytes(&push),
+                        self.a3b_conv_out_capture.?.handle,
+                        conv_total,
+                        dt_bias_buf,
+                        dt_bias_size,
+                        self.a3b_alpha_capture.?.handle,
+                        ab_total,
+                        self.a3b_beta_capture.?.handle,
+                        ab_total,
+                        ssm_a_buf,
+                        ssm_a_size,
+                        self.gpu_ssm_states[0].handle,
+                        state_bytes_a3b,
+                        self.a3b_delta_out.?.handle,
+                        out_total,
+                        dt_rank_a3b,
+                        head_v_dim_a3b,
+                        1,
+                    );
+                }
+
+                // dispatch wrote state[0] (compute) and delta_out (compute);
+                // upcoming copies read both as transfer.
+                self.decode_cmd.computeToTransferBarrier();
+                {
+                    const r_restore = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = state_bytes_a3b };
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_state_backup.?.handle, self.gpu_ssm_states[0].handle, 1, &r_restore);
+                }
+                const peek_size: vk.c.VkDeviceSize = @sizeOf(f32) * 4;
+                if (self.logits_staging.size >= peek_size) {
+                    const r_peek = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = peek_size };
+                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.a3b_delta_out.?.handle, self.logits_staging.handle, 1, &r_peek);
+                }
+                try self.decode_cmd.end();
+                try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                if (self.logits_staging.size >= peek_size and self.logits_staging.mapped != null) {
+                    const ptr: [*]const f32 = @ptrCast(@alignCast(self.logits_staging.mapped.?));
+                    log.info("ZINC_A3B_VALIDATE: layer 0 batched ssm_delta_net n_tok={d} dispatched, out[0..4]=[{d:.8},{d:.8},{d:.8},{d:.8}]", .{
+                        n_tok_a3b, ptr[0], ptr[1], ptr[2], ptr[3],
+                    });
+                } else {
+                    log.info("ZINC_A3B_VALIDATE: layer 0 batched ssm_delta_net n_tok={d} dispatched (no peek)", .{n_tok_a3b});
+                }
+            }
+        }
+
         if (enable_gpu_phase_timing) {
             // Snapshot accumulated per-phase GPU time into prefill-scoped fields
             // before wiping the decode-oriented sample state.
@@ -10347,6 +10598,12 @@ pub const InferenceEngine = struct {
         if (self.routing_capture_buf.handle != null) self.routing_capture_buf.deinit();
         if (self.prefill_expert_count_buf.handle != null) self.prefill_expert_count_buf.deinit();
         if (self.prefill_ffn_input_capture_buf.handle != null) self.prefill_ffn_input_capture_buf.deinit();
+        // Effort-6 cycle 97 (A3b foundation) capture buffers.
+        if (self.a3b_alpha_capture) |*b| b.deinit();
+        if (self.a3b_beta_capture) |*b| b.deinit();
+        if (self.a3b_conv_out_capture) |*b| b.deinit();
+        if (self.a3b_state_backup) |*b| b.deinit();
+        if (self.a3b_delta_out) |*b| b.deinit();
         // KV cache + page table
         self.freeActiveKvPages();
         self.kv_page_pool.deinit();
