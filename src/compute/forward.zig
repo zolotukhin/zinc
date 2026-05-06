@@ -1159,6 +1159,20 @@ pub const InferenceEngine = struct {
     // cycle 99 replaces the per-token dispatches with the batched one.
     // Default-OFF (gated by ZINC_A3B_VALIDATE=1).
     use_a3b_validate: bool = false,
+    // Cycle 125 (A3b production switch): when set, the per-token delta_net
+    // dispatch + gnorm + ssm_out are skipped in runSsmLayerGpu and the
+    // batched delta_net runs once per SSM layer post-per-token-loop with
+    // n_tok=prompt_len, writing the post-prefill state into gpu_ssm_states[L].
+    // Output is bit-exact to the per-token path for delta_net itself
+    // (validated cycle 123 across all 30 SSM layers), but skipping the
+    // per-token gnorm + ssm_out + residual leaves hidden_buf evolution
+    // missing the SSM contribution at each layer. The pivot doc framing
+    // ("switch flip") underestimates this dependency: the next layer's attn
+    // reads hidden_buf which depends on this layer's SSM contribution. The
+    // first attempt at the production switch is expected to break coherence
+    // until the layer-major restructure also moves gnorm+ssm_out post-loop.
+    // Default-OFF (gated by ZINC_A3B_PRODUCTION=1).
+    use_a3b_production: bool = false,
     a3b_alpha_capture: ?Buffer = null,
     a3b_beta_capture: ?Buffer = null,
     a3b_conv_out_capture: ?Buffer = null,
@@ -2202,11 +2216,22 @@ pub const InferenceEngine = struct {
         // decode keeps producing the correct output. Default-OFF.
         const a3b_validate_env = std.posix.getenv("ZINC_A3B_VALIDATE");
         const a3b_validate_flag = a3b_validate_env != null and std.mem.eql(u8, a3b_validate_env.?, "1");
-        const a3b_validate_enabled = a3b_validate_flag and
+        const a3b_production_env = std.posix.getenv("ZINC_A3B_PRODUCTION");
+        const a3b_production_flag = a3b_production_env != null and std.mem.eql(u8, a3b_production_env.?, "1");
+        // Production mode requires the same buffer setup as validate mode.
+        // If only production is on, we still allocate the capture buffers
+        // (same shape) so runSsmLayerGpu can capture per-(layer, token)
+        // alpha/beta/conv_out/gate inputs and prefillBatch can dispatch the
+        // batched delta_net post-loop. The per-token output capture buffer
+        // (a3b_per_token_delta_out) is unused in production mode (no
+        // comparison) but allocated for code-path simplicity.
+        const a3b_buffers_needed = (a3b_validate_flag or a3b_production_flag) and
             config.ssm_d_inner > 0 and
             config.ssm_dt_rank > 0 and
             elementwise.pipeline_ssm_delta_net != null and
             instance.push_descriptor_fn != null;
+        const a3b_validate_enabled = a3b_validate_flag and a3b_buffers_needed;
+        const a3b_production_enabled = a3b_production_flag and a3b_buffers_needed;
         var a3b_alpha_capture: ?Buffer = null;
         var a3b_beta_capture: ?Buffer = null;
         var a3b_conv_out_capture: ?Buffer = null;
@@ -2215,7 +2240,7 @@ pub const InferenceEngine = struct {
         var a3b_per_token_delta_out: ?Buffer = null;
         var a3b_gate_capture: ?Buffer = null;
         var a3b_capture_max_tokens: u32 = 0;
-        if (a3b_validate_enabled) {
+        if (a3b_buffers_needed) {
             // Cycle 123: extend the layer-0-only validation to ALL SSM layers.
             // The capture/state-backup/output buffers are sized to hold
             // n_layers × max_tokens slots so every SSM layer's per-token
@@ -2270,11 +2295,17 @@ pub const InferenceEngine = struct {
             errdefer if (a3b_gate_capture) |*b| b.deinit();
             a3b_capture_max_tokens = A3B_MAX_TOKENS;
             const total_mb_a3b: u64 = @intCast((ab_bytes_a3b * 2 + conv_bytes_a3b + state_bytes_a3b + out_bytes_a3b * 3) / (1024 * 1024));
-            log.info("ZINC_A3B_VALIDATE=1: A3b ALL-LAYER capture buffers allocated (n_layers={d}, max_tokens={d}, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems, total {d} MB)", .{
-                n_layers_a3b, A3B_MAX_TOKENS, dt_rank_a3b, conv_ch_a3b, d_inner_a3b, state_elems_a3b, total_mb_a3b,
+            const mode_str: []const u8 = if (a3b_production_enabled and a3b_validate_enabled)
+                "VALIDATE+PRODUCTION"
+            else if (a3b_production_enabled)
+                "PRODUCTION"
+            else
+                "VALIDATE";
+            log.info("ZINC_A3B_{s}: A3b ALL-LAYER capture buffers allocated (n_layers={d}, max_tokens={d}, dt_rank={d}, conv_ch={d}, d_inner={d}, state={d} elems, total {d} MB)", .{
+                mode_str, n_layers_a3b, A3B_MAX_TOKENS, dt_rank_a3b, conv_ch_a3b, d_inner_a3b, state_elems_a3b, total_mb_a3b,
             });
-        } else if (a3b_validate_flag) {
-            log.info("ZINC_A3B_VALIDATE=1 requested but prerequisites missing (no SSM, missing pipeline, or no push descriptors); skipping", .{});
+        } else if (a3b_validate_flag or a3b_production_flag) {
+            log.info("ZINC_A3B_VALIDATE/PRODUCTION requested but prerequisites missing (no SSM, missing pipeline, or no push descriptors); skipping", .{});
         }
 
         return InferenceEngine{
@@ -2305,6 +2336,7 @@ pub const InferenceEngine = struct {
             .use_count_experts_prefill = count_experts_enabled,
             .use_capture_ffn_input = ffn_input_capture_flag and prefill_ffn_input_capture_buf.handle != null,
             .use_a3b_validate = a3b_validate_enabled,
+            .use_a3b_production = a3b_production_enabled,
             .a3b_alpha_capture = a3b_alpha_capture,
             .a3b_beta_capture = a3b_beta_capture,
             .a3b_conv_out_capture = a3b_conv_out_capture,
@@ -9013,7 +9045,7 @@ pub const InferenceEngine = struct {
         // (layer × max_tokens + token) absolute offsets in the capture
         // buffers. Flag-off path keeps the original narrow compute→compute
         // barrier so non-validate prefills are unaffected.
-        const a3b_capture_this_layer = self.use_a3b_validate and
+        const a3b_capture_this_layer = (self.use_a3b_validate or self.use_a3b_production) and
             self.prefill_active and
             self.a3b_alpha_capture != null and
             self.a3b_beta_capture != null and
@@ -9092,6 +9124,35 @@ pub const InferenceEngine = struct {
             if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.begin();
+        }
+
+        // Cycle 125 (A3b production switch): when ZINC_A3B_PRODUCTION=1 and
+        // we are inside prefillBatch's per-token loop with valid captures,
+        // skip the per-token delta_net + gnorm + ssm_out and let the
+        // post-per-token-loop batched delta_net (in prefillBatch) do the
+        // state recurrence. The captures above (alpha/beta/conv_out/gate)
+        // are already populated; the batched dispatch consumes them with
+        // n_tok=prompt_len and writes the post-prefill state into
+        // gpu_ssm_states[L]. Important caveat: skipping per-token gnorm +
+        // ssm_out leaves hidden_buf without this layer's SSM contribution,
+        // which corrupts subsequent layers' attn input. The first attempt
+        // here is expected to break coherence; restoring correctness
+        // requires moving gnorm + ssm_out + residual post-loop too (which
+        // requires per-(layer, token) attn_out_buf and a layer-major
+        // restructure). This switch flip is the first step in the
+        // multi-cycle path documented in the 2026-05-06 pivot.
+        const skip_for_production = self.use_a3b_production and
+            self.prefill_active and
+            self.a3b_alpha_capture != null and
+            self.a3b_beta_capture != null and
+            self.a3b_conv_out_capture != null and
+            self.prefill_current_token_idx < self.a3b_capture_max_tokens;
+        if (skip_for_production) {
+            // Captures already happened above (alpha/beta/conv_out/gate).
+            // The post-loop batched delta_net runs once per SSM layer; for
+            // now hidden_buf is left at end-of-attn (missing SSM
+            // contribution).
+            return;
         }
 
         // --- GPU: delta-net state update ---
@@ -10131,6 +10192,147 @@ pub const InferenceEngine = struct {
                             n_tok_a3b, ssm_count, self.logits_staging.size, sample_total_bytes,
                         });
                     }
+                }
+            }
+        }
+
+        // Effort-6 cycle 125 (A3b production switch): when production mode
+        // is on, the per-token delta_net + gnorm + ssm_out were skipped in
+        // runSsmLayerGpu so gpu_ssm_states[L] is at its pre-prefill value
+        // (no per-token recurrence). Run the batched delta_net once per SSM
+        // layer with n_tok=prompt_len; the dispatch consumes the per-(layer,
+        // token) captures (alpha, beta, conv_out) and updates
+        // gpu_ssm_states[L] in place to its post-prefill value, matching
+        // what the per-token loop would have produced (validated bit-exact
+        // in cycle 123). NOTE: this codepath does NOT yet apply the
+        // delta_net output via gnorm + ssm_out + residual to hidden_buf,
+        // so the prefill output is broken until follow-up cycles add the
+        // post-batched per-token gnorm + ssm_out + residual pass.
+        if (self.use_a3b_production and
+            self.a3b_alpha_capture != null and
+            self.a3b_beta_capture != null and
+            self.a3b_conv_out_capture != null and
+            self.elementwise.pipeline_ssm_delta_net != null and
+            self.instance.push_descriptor_fn != null and
+            prompt_tokens.len > 0 and
+            prompt_tokens.len <= self.a3b_capture_max_tokens)
+        {
+            const cfg_p = &self.model.config;
+            if (cfg_p.ssm_d_inner > 0 and cfg_p.ssm_dt_rank > 0 and self.gpu_ssm_states.len > 0) {
+                const dt_rank_p = cfg_p.ssm_dt_rank;
+                const d_inner_p = cfg_p.ssm_d_inner;
+                const head_v_dim_p = d_inner_p / dt_rank_p;
+                const conv_ch_p = d_inner_p + 2 * cfg_p.ssm_n_group * cfg_p.ssm_d_state;
+                const state_elems_p = dt_rank_p * head_v_dim_p * head_v_dim_p;
+                const state_bytes_p: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, state_elems_p) * @sizeOf(f32);
+                const n_tok_p: u32 = @intCast(prompt_tokens.len);
+                const max_tokens_p: vk.c.VkDeviceSize = @intCast(self.a3b_capture_max_tokens);
+                const full_attn_interval_p: u32 = if (cfg_p.full_attn_interval > 0) cfg_p.full_attn_interval else 1;
+
+                const ab_layer_stride_p: vk.c.VkDeviceSize = max_tokens_p * @as(vk.c.VkDeviceSize, dt_rank_p) * @sizeOf(f32);
+                const conv_layer_stride_p: vk.c.VkDeviceSize = max_tokens_p * @as(vk.c.VkDeviceSize, conv_ch_p) * @sizeOf(f32);
+                const conv_total_layer_p: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_p) * @as(vk.c.VkDeviceSize, conv_ch_p) * @sizeOf(f32);
+                const ab_total_layer_p: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_p) * @as(vk.c.VkDeviceSize, dt_rank_p) * @sizeOf(f32);
+
+                // Output goes to a3b_delta_out (when allocated) — the same
+                // per-(layer, token) buffer validate writes to. Production
+                // doesn't consume a3b_delta_out yet; future cycles will
+                // route gnorm input through it.
+                const out_layer_stride_p: vk.c.VkDeviceSize = max_tokens_p * @as(vk.c.VkDeviceSize, d_inner_p) * @sizeOf(f32);
+                const out_total_layer_p: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, n_tok_p) * @as(vk.c.VkDeviceSize, d_inner_p) * @sizeOf(f32);
+
+                var ssm_layer_indices_buf_p: [128]u32 = undefined;
+                var ssm_count_p: usize = 0;
+                {
+                    var L: u32 = 0;
+                    while (L < cfg_p.n_layers and ssm_count_p < ssm_layer_indices_buf_p.len) : (L += 1) {
+                        const is_full_attn = ((L + 1) % full_attn_interval_p) == 0;
+                        if (!is_full_attn and L < self.gpu_ssm_states.len and self.gpu_ssm_states[L].handle != null) {
+                            ssm_layer_indices_buf_p[ssm_count_p] = L;
+                            ssm_count_p += 1;
+                        }
+                    }
+                }
+                const ssm_layers_p = ssm_layer_indices_buf_p[0..ssm_count_p];
+
+                if (ssm_count_p > 0) {
+                    try self.decode_cmd.reset();
+                    try self.decode_cmd.begin();
+
+                    // No state backup needed: in production mode the per-
+                    // token delta_net was skipped so gpu_ssm_states[L] is
+                    // at its pre-prefill value already. The batched dispatch
+                    // updates state[0]..state[N] in place to the post-
+                    // prefill value. The transfer→compute barrier orders
+                    // the prior frame's writes (capture vkCmdCopyBuffers)
+                    // before the batched compute reads.
+                    self.decode_cmd.transferToComputeBarrier();
+
+                    const pip_p = &(self.elementwise.pipeline_ssm_delta_net.?);
+                    for (ssm_layers_p) |L| {
+                        const lt_p = self.layer_tensors[L];
+                        const dt_bias_t_p = lt_p.ssm_dt_bias;
+                        const ssm_a_t_p = lt_p.ssm_a;
+                        const dt_bias_buf_p = if (dt_bias_t_p) |t| t.gpu_buffer.handle else self.down_buf.handle;
+                        const dt_bias_size_p = if (dt_bias_t_p) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_p) * @sizeOf(f32));
+                        const ssm_a_buf_p = if (ssm_a_t_p) |t| t.gpu_buffer.handle else self.down_buf.handle;
+                        const ssm_a_size_p = if (ssm_a_t_p) |t| t.gpu_buffer.size else (@as(vk.c.VkDeviceSize, dt_rank_p) * @sizeOf(f32));
+
+                        const push_p = SsmDeltaNetPush{
+                            .d_inner = d_inner_p,
+                            .dt_rank = dt_rank_p,
+                            .head_v_dim = head_v_dim_p,
+                            .d_state = cfg_p.ssm_d_state,
+                            .n_group = cfg_p.ssm_n_group,
+                            .ssm_a_is_f16 = if (ssm_a_t_p) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                            .dt_bias_is_f16 = if (dt_bias_t_p) |t| (if (t.info.type_ == .f16) @as(u32, 1) else 0) else 0,
+                            .has_dt_bias = if (dt_bias_t_p != null) 1 else 0,
+                            .has_ssm_a = if (ssm_a_t_p != null) 1 else 0,
+                            .n_tok = n_tok_p,
+                            .conv_stride_tok = conv_ch_p,
+                            .ab_stride_tok = dt_rank_p,
+                            .y_stride_tok = d_inner_p,
+                        };
+
+                        const conv_layer_off_p: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, L) * conv_layer_stride_p;
+                        const ab_layer_off_p: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, L) * ab_layer_stride_p;
+                        // a3b_delta_out is optional in production mode (it
+                        // exists when validate path also pre-allocated it).
+                        // If unallocated, fall back to the per-token attn_out_buf
+                        // (small but valid) — output isn't consumed downstream
+                        // yet so the destination doesn't matter.
+                        const out_buf_p = if (self.a3b_delta_out) |b| b.handle else self.attn_out_buf.handle;
+                        const out_buf_size_p = if (self.a3b_delta_out) |b| b.size else self.attn_out_buf.size;
+                        const out_layer_off_p: vk.c.VkDeviceSize = if (self.a3b_delta_out != null) @as(vk.c.VkDeviceSize, L) * out_layer_stride_p else 0;
+                        const out_range_p: vk.c.VkDeviceSize = if (self.a3b_delta_out != null) out_total_layer_p else out_buf_size_p;
+
+                        const infos_p = [7]vk.c.VkDescriptorBufferInfo{
+                            .{ .buffer = self.a3b_conv_out_capture.?.handle, .offset = conv_layer_off_p, .range = conv_total_layer_p },
+                            .{ .buffer = dt_bias_buf_p, .offset = 0, .range = dt_bias_size_p },
+                            .{ .buffer = self.a3b_alpha_capture.?.handle, .offset = ab_layer_off_p, .range = ab_total_layer_p },
+                            .{ .buffer = self.a3b_beta_capture.?.handle, .offset = ab_layer_off_p, .range = ab_total_layer_p },
+                            .{ .buffer = ssm_a_buf_p, .offset = 0, .range = ssm_a_size_p },
+                            .{ .buffer = self.gpu_ssm_states[L].handle, .offset = 0, .range = state_bytes_p },
+                            .{ .buffer = out_buf_p, .offset = out_layer_off_p, .range = out_range_p },
+                        };
+                        self.decode_cmd.pushDescAndDispatch(
+                            pip_p,
+                            self.instance.push_descriptor_fn,
+                            infos_p[0..],
+                            std.mem.asBytes(&push_p),
+                            dt_rank_p,
+                            head_v_dim_p,
+                            1,
+                        );
+                        self.decode_cmd.computeBarrier();
+                    }
+
+                    try self.decode_cmd.end();
+                    try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+
+                    log.info("ZINC_A3B_PRODUCTION: ALL-LAYER batched ssm_delta_net dispatched (n_tok={d}, ssm_layers={d}); state recurrence done. Note: gnorm + ssm_out + residual NOT yet applied — output will be incoherent until follow-up cycle wires post-batched gnorm/ssm_out.", .{
+                        n_tok_p, ssm_count_p,
+                    });
                 }
             }
         }
