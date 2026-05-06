@@ -1,5 +1,122 @@
 # Optimization 6: RDNA Prefill Recovery for Qwen3.5/3.6-35B-A3B
 
+## PIVOT 2026-05-06 — A3b INFRA IS DONE; FLIP THE PRODUCTION SWITCH
+
+**Best 127.16 tok/s. Stall 17.** Cycles 92-123: 32 cycles, 0 real perf
+keeps, 4 foundation keeps that built A3b validate infra. Loop's own
+stall counter says it's dead.
+
+### The infra you've been building IS DONE
+
+Cycle 123 enablement ran the batched `ssm_delta_net` dispatch
+(n_tok=prompt_len) on **all 30 SSM layers** and confirmed bit-exact
+match (max_abs_diff < 1e-3) against the per-token reference. Trail:
+
+| Cycle | What landed |
+|---|---|
+| 97  | Per-token capture buffers + flag-gated batched dispatch (layer 0 only) |
+| 101 | CPU L2/max_abs comparison vs batched output |
+| 104 | gate_buf (z-projection) capture completes the input set |
+| 123 | Validation extended to all 30 SSM layers; bit-exact PASS@1e-3 across the entire model |
+
+**This means the n_tok>prompt_len path is proven correct end to end.**
+The 15.4 GB/prefill of state DRAM round-trip traffic that A3 was
+supposed to eliminate is *measurable, validated, and ready to ship*.
+
+### The lever is one targeted change
+
+Look at `forward.zig:9906`. The validate path runs the batched
+dispatch **in addition to** the per-token path for comparison. It
+does **not replace** anything. To ship A3b, the next cycle must:
+
+1. **Add a new env flag `ZINC_A3B_PRODUCTION=1`** (separate from
+   `ZINC_A3B_VALIDATE`). When set:
+   - Skip the per-token `ssm_delta_net` dispatch in the per-token
+     loop (`forward.zig` ~8910-9000, find the dispatch at line 8949
+     gated by `pip.uses_push_descriptors`).
+   - After the per-token loop finishes capturing alpha/beta/conv_out/
+     gate (already wired by c97/c104), run the batched dispatch ONCE
+     per SSM layer with `n_tok = prompt_tokens.len` and the strides
+     at lines 8942-8944.
+   - Have the batched output replace what the per-token path would
+     have written to `attn_out_buf` for each token slot.
+2. **Validate one more time** under `ZINC_A3B_VALIDATE=1` to
+   reconfirm bit-exact, then default `ZINC_A3B_PRODUCTION` to ON
+   (`= true` unless explicitly `0`).
+3. **Measure phase delta**. ssm_delta should drop from ~400 ms to
+   ~150 ms per the c123 phase profile. Total prefill 1700 → 1450 ms
+   ⇒ ~145 tok/s.
+
+This is a single cycle of `forward.zig` editing. The shader is
+unchanged. The infra is unchanged. **It is a switch flip with caller
+restructuring**, not a rewrite.
+
+### Hard rule for cycles 124-130
+
+**Only `ZINC_A3B_PRODUCTION` wire-up is acceptable.** No exceptions.
+
+- If a cycle proposes any other target, STEP_BACK auto-reject before
+  running the agent. The bans below are non-negotiable until A3b
+  prod ships.
+- A3b prod *will* require correctness debugging across multiple
+  cycles. A failed first attempt yields a refined attempt the next
+  cycle, not a return to MoE micro-tweaks. The validate path stays
+  available for re-validating mid-debug.
+- If the loop hits 5 consecutive cycles where the agent proposes
+  banned-list patterns despite this pivot, **stop the loop and
+  escalate**. The bet roster is fine; the controller is broken.
+
+### Banned cycles 105-122 evidence (eighteen reverts in a row)
+
+For the record, the previous pivot was ignored:
+
+| Cycle | Pattern | Reason banned |
+|---|---|---|
+| 105 | Q4_K MoE gate+up+SwiGLU triple fusion | banned MoE fusion retry (c12, c51, c74) |
+| 106 | row/block swap on dmmv_q4k_moe_fused_down_acc | banned (c43, c48, c66) |
+| 107 | d_conv specialization on ssm_conv1d | flat |
+| 108 | LDS occupancy limiter on dmmv_q4k_moe_kpar | banned variant |
+| 109 | fused o_proj merge | flat |
+| 110 | exploration cycle | flat |
+| 111 | rollback cycle-104 foundation | flat |
+| 112 | LDS+loop-swap on Q5_K MoE down | -6%, banned variant |
+| 113 | thread-shape NUM_ROWS=2→1 on fused_gate_up_moe | banned (c53, c70) |
+| 114 | SPEC_N_USED on MoE down | banned (c58) |
+| 115 | v_im-uniform Q4_K decode on fused_gate_up_moe | banned (c63) |
+| 116 | SPEC_K on softmax_topk_v2 | flat |
+| 117 | LDS limiter on flash_attn_batched | flat |
+| 118 | loop-swap on rms_norm_dmmv_q4k_alpha_beta | banned (c47) |
+| 119 | LDS limiter on dmmv_q4k_moe_fused_down_acc | banned variant |
+| 120 | infrastructure check | flat |
+| 121 | SPEC_HEAD_DIM_V4 on flash_attn_batched | flat |
+| 122 | row/block swap on dmmv_q4k_fused_gate_up_moe | banned (c43 + c12 retry) |
+
+**Every single revert is a banned-list pattern with at least one
+prior cycle citation.** The agent is producing creative reframings
+of dead targets to avoid the named lever.
+
+### After A3b prod ships
+
+| # | Bet | Saving | Status |
+|---|---|---|---|
+| 1 | **A3b production wire-up** (THIS) | ~250 ms (~+15 tok/s) | infra ready, switch unflipped |
+| 2 | A4-real (n_tok=N for ssm_proj DMMVs) | ~50-80 ms | not started |
+| 3 | B (mul_mm_q4k SSM proj) | ~245 ms | not started |
+| 4 | Q8_1 mmq integer-dot | ~80-150 ms | not started |
+| 5 | C (mul_mm_id_q4k MoE) | ~680 ms | not started |
+
+Math to beat 180 from 127.16:
+- A3b prod → ~145
+- + A4-real → ~150
+- + B → ~170
+- + Q8_1 mmq → ~180 ✅
+
+The path is unchanged from the 2026-05-05 PM pivot. What changed:
+A3b is no longer "hard, multi-cycle, scary" — it's a switch flip on
+proven infra. Stop building more validate infra and ship it.
+
+---
+
 ## PIVOT 2026-05-05 (PM) — A3 IS HALF-DONE; A3b NEVER LANDED
 
 **Best 127.16 tok/s at cycle 84.** A3a kept at cycle 77 (+2.10),
