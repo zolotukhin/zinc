@@ -18,7 +18,7 @@
   <a href="https://zolotukhin.ai/zinc">
     <img src="https://img.shields.io/badge/web-zolotukhin.ai%2Fzinc-8B5CF6" alt="Website">
   </a>
-  <a href="https://discord.gg/tNDEgTG5s">
+  <a href="https://discord.gg/QRUgWH2aGV">
     <img src="https://img.shields.io/badge/Discord-Join%20ZINC-5865F2?logo=discord&logoColor=white" alt="ZINC Discord">
   </a>
 </p>
