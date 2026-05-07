@@ -771,6 +771,8 @@ fn probeVulkan(allocator: std.mem.Allocator, preferred_device: u32) !VulkanProbe
     var compute_queue: vk.c.VkQueue = null;
     vk.c.vkGetDeviceQueue(device, compute_queue_family, 0, &compute_queue);
 
+    const device_caps = try @import("vulkan/instance.zig").queryDeviceCapabilities(allocator, physical_device);
+
     var instance = Instance{
         .handle = handle,
         .physical_device = physical_device,
@@ -780,6 +782,7 @@ fn probeVulkan(allocator: std.mem.Allocator, preferred_device: u32) !VulkanProbe
         .device_props = device_props,
         .mem_props = mem_props,
         .selected_device_index = selected_index,
+        .caps = device_caps,
         .allocator = allocator,
     };
 
