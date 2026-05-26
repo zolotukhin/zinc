@@ -551,6 +551,7 @@ fn modelDisplayName(model: *const loader_mod.Model) []const u8 {
 
 test "collectCatalogView marks active managed model" {
     var fake = ModelManager{
+        .io = std.testing.io,
         .allocator = std.testing.allocator,
         .instance = undefined,
         .gpu_config = .{
@@ -637,6 +638,7 @@ test "collectCatalogView marks active managed model" {
 
 test "collectCatalogView preserves qwen36 thinking toggle for raw matched path" {
     var fake = ModelManager{
+        .io = std.testing.io,
         .allocator = std.testing.allocator,
         .instance = undefined,
         .gpu_config = .{
@@ -721,6 +723,7 @@ test "collectCatalogView preserves qwen36 thinking toggle for raw matched path" 
 
 test "currentMemoryUsage reports empty state when no model is loaded" {
     var fake = ModelManager{
+        .io = std.testing.io,
         .allocator = std.testing.allocator,
         .instance = undefined,
         .gpu_config = .{
@@ -759,6 +762,7 @@ test "currentMemoryUsage reports empty state when no model is loaded" {
 
 test "removeManagedModel refuses loaded active model without force" {
     var fake = ModelManager{
+        .io = std.testing.io,
         .allocator = std.testing.allocator,
         .instance = undefined,
         .gpu_config = .{

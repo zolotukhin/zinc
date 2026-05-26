@@ -7,6 +7,6 @@
 const generated = @import(".zig-api-cache/zig-struct-analyzer.generated.zig");
 
 /// Run the generated struct-layout probe used by the site Zig API docs build.
-pub fn main() !void {
-    try generated.main();
+pub fn main(init: @import("std").process.Init) !void {
+    try generated.main(init);
 }

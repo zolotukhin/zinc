@@ -219,7 +219,10 @@ pub const StreamingDetector = struct {
     /// the buffer is freed by deinit.
     pub fn takeContentDelta(self: *StreamingDetector) []const u8 {
         const out = self.content_pending.items;
-        self.content_pending.clearRetainingCapacity();
+        // Reset length without memset so the returned alias remains valid
+        // until the next feed call (Zig 0.16 clearRetainingCapacity writes
+        // undefined over the buffer).
+        self.content_pending.items.len = 0;
         return out;
     }
 

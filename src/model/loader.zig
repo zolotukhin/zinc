@@ -786,7 +786,7 @@ test "extractConfig defaults gemma4 attention scale to 1.0" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -811,7 +811,7 @@ test "extractConfig uses max gemma4 head_count_kv array entry" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -843,7 +843,7 @@ test "extractConfig reads rope attention factor for gpt-oss YaRN models" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };

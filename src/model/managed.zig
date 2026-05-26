@@ -127,11 +127,13 @@ fn readFileAlloc(io: std.Io, file: std.Io.File, allocator: std.mem.Allocator, ma
     var buf = std.ArrayList(u8).empty;
     errdefer buf.deinit(allocator);
     var tmp: [4096]u8 = undefined;
+    var offset: u64 = 0;
     while (true) {
-        const n = try file.readStreaming(io, &.{&tmp});
+        const n = try file.readPositionalAll(io, &tmp, offset);
         if (n == 0) break;
         try buf.appendSlice(allocator, tmp[0..n]);
         if (buf.items.len > max_size) return error.StreamTooLong;
+        offset += n;
     }
     return try buf.toOwnedSlice(allocator);
 }
@@ -759,10 +761,12 @@ fn computeFileSha256Hex(io: std.Io, path: []const u8, allocator: std.mem.Allocat
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [64 * 1024]u8 = undefined;
+    var offset: u64 = 0;
     while (true) {
-        const n = try file.readStreaming(io, &.{&buf});
+        const n = try file.readPositionalAll(io, &buf, offset);
         if (n == 0) break;
         hasher.update(buf[0..n]);
+        offset += n;
     }
 
     var digest: [32]u8 = undefined;
@@ -937,11 +941,11 @@ test "resolve config root uses application support on macos" {
 }
 
 test "active selection roundtrip via explicit config path" {
-    const io = std.Io.default;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const config_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const config_root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(config_root);
     const config_path = try std.fs.path.join(std.testing.allocator, &.{ config_root, "active-model.json" });
     defer std.testing.allocator.free(config_path);
@@ -1034,11 +1038,11 @@ test "preflightCatalogDrift allows size-only drift" {
 }
 
 test "removeInstalledModelAtPaths deletes known artifacts and empty dir" {
-    const io = std.Io.default;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen35-9b-q4k-m" });
     defer std.testing.allocator.free(model_dir);
@@ -1074,11 +1078,11 @@ test "removeInstalledModelAtPaths deletes known artifacts and empty dir" {
 }
 
 test "removeInstalledModelAtPaths keeps non-empty directory" {
-    const io = std.Io.default;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const model_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "models", "qwen35-9b-q4k-m" });
     defer std.testing.allocator.free(model_dir);
@@ -1119,11 +1123,11 @@ test "active selection pointing to non-catalog model is detectable" {
 }
 
 test "active selection roundtrip rejects non-catalog model on validate" {
-    const io = std.Io.default;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const config_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const config_root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(config_root);
     const config_path = try std.fs.path.join(std.testing.allocator, &.{ config_root, "active-model.json" });
     defer std.testing.allocator.free(config_path);
@@ -1154,10 +1158,10 @@ test "active selection roundtrip rejects non-catalog model on validate" {
 }
 
 test "writeManifest then readInstalledManifest round-trips offloadable_vram_bytes" {
-    const io = std.Io.default;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
     const manifest_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "manifest.json" });
     defer std.testing.allocator.free(manifest_path);
@@ -1199,7 +1203,7 @@ test "describeFit uninstalled returns catalog estimate with fit_state populated"
     };
 
     // 16 GiB budget: doesn't fit straight (22 > 16), fits with offload (4 <= 16).
-    const io = std.Io.default;
+    const io = std.testing.io;
     const fit = try describeFit(io, synthetic, 16 * 1024 * 1024 * 1024, std.testing.allocator);
     try std.testing.expectEqual(false, fit.fits_current_gpu);
     try std.testing.expectEqual(false, fit.exact);
@@ -1222,10 +1226,10 @@ test "readInstalledManifest tolerates old format without offloadable_vram_bytes"
     // Backward compat: manifests written before the offload field was added
     // must still parse, with offloadable_vram_bytes = null. describeFit then
     // falls back to the catalog estimate for that model.
-    const io = std.Io.default;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
     const manifest_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "manifest.json" });
     defer std.testing.allocator.free(manifest_path);

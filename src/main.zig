@@ -2222,7 +2222,7 @@ test "parseArgs: chat command rejects model subcommands" {
 
 test "resolveCheckTarget returns general diagnostics target when no model is specified" {
     const config = Config{};
-    var target = try resolveCheckTarget(config, std.testing.allocator);
+    var target = try resolveCheckTarget(std.testing.io, config, std.testing.allocator);
     defer target.deinit(std.testing.allocator);
 
     try std.testing.expect(target.model_path == null);
@@ -2231,7 +2231,7 @@ test "resolveCheckTarget returns general diagnostics target when no model is spe
 
 test "resolveCheckTarget uses raw gguf path when no managed id is provided" {
     const config = Config{ .model_path = "model.gguf" };
-    var target = try resolveCheckTarget(config, std.testing.allocator);
+    var target = try resolveCheckTarget(std.testing.io, config, std.testing.allocator);
     defer target.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("model.gguf", target.model_path.?);
@@ -2243,7 +2243,7 @@ test "resolveCheckTarget prefers managed model id over raw gguf path" {
         .model_id = "qwen35-9b-q4k-m",
         .model_path = "raw.gguf",
     };
-    var target = try resolveCheckTarget(config, std.testing.allocator);
+    var target = try resolveCheckTarget(std.testing.io, config, std.testing.allocator);
     defer target.deinit(std.testing.allocator);
 
     try std.testing.expect(target.managed_model != null);
@@ -2297,8 +2297,8 @@ fn resolveShaderDirFrom(io: std.Io, allocator: std.mem.Allocator, base_dir: std.
 test "resolveShaderDirFrom finds first cwd-relative candidate" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("zig-out/share/zinc/shaders");
-    const result = try resolveShaderDirFrom(std.testing.allocator, tmp.dir, "/nonexistent");
+    try tmp.dir.createDirPath(std.testing.io, "zig-out/share/zinc/shaders");
+    const result = try resolveShaderDirFrom(std.testing.io, std.testing.allocator, tmp.dir, "/nonexistent");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("zig-out/share/zinc/shaders", result);
 }
@@ -2306,8 +2306,8 @@ test "resolveShaderDirFrom finds first cwd-relative candidate" {
 test "resolveShaderDirFrom falls back to second candidate when first missing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("share/zinc/shaders");
-    const result = try resolveShaderDirFrom(std.testing.allocator, tmp.dir, "/nonexistent");
+    try tmp.dir.createDirPath(std.testing.io, "share/zinc/shaders");
+    const result = try resolveShaderDirFrom(std.testing.io, std.testing.allocator, tmp.dir, "/nonexistent");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("share/zinc/shaders", result);
 }
@@ -2319,14 +2319,14 @@ test "resolveShaderDirFrom falls back to exe-relative when cwd has nothing" {
     // <prefix>/share/zinc/shaders. POSIX path resolution requires each
     // component on the way to ".." to exist as a real directory, so create
     // both bin/ and share/zinc/shaders/.
-    try tmp.dir.makePath("install/bin");
-    try tmp.dir.makePath("install/share/zinc/shaders");
-    const bin_dir = try tmp.dir.realpathAlloc(std.testing.allocator, "install/bin");
+    try tmp.dir.createDirPath(std.testing.io, "install/bin");
+    try tmp.dir.createDirPath(std.testing.io, "install/share/zinc/shaders");
+    const bin_dir = try tmp.dir.realPathFileAlloc(std.testing.io, "install/bin", std.testing.allocator);
     defer std.testing.allocator.free(bin_dir);
 
     var empty = std.testing.tmpDir(.{});
     defer empty.cleanup();
-    const result = try resolveShaderDirFrom(std.testing.allocator, empty.dir, bin_dir);
+    const result = try resolveShaderDirFrom(std.testing.io, std.testing.allocator, empty.dir, bin_dir);
     defer std.testing.allocator.free(result);
     // The derived path is bin_dir + ../share/zinc/shaders → install/share/zinc/shaders.
     try std.testing.expect(std.mem.endsWith(u8, result, "share/zinc/shaders"));
@@ -2335,7 +2335,7 @@ test "resolveShaderDirFrom falls back to exe-relative when cwd has nothing" {
 test "resolveShaderDirFrom returns ShaderDirNotFound when no path exists" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try std.testing.expectError(error.ShaderDirNotFound, resolveShaderDirFrom(std.testing.allocator, tmp.dir, "/this/path/has/no/shaders"));
+    try std.testing.expectError(error.ShaderDirNotFound, resolveShaderDirFrom(std.testing.io, std.testing.allocator, tmp.dir, "/this/path/has/no/shaders"));
 }
 
 fn makeTestTokenizer(chat_template: ?[]const u8) tokenizer_mod.Tokenizer {

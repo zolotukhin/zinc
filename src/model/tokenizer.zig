@@ -1181,7 +1181,7 @@ test "initFromGGUF populates merge_ranks cache when merges are present" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1216,7 +1216,7 @@ test "initFromGGUF omits BOS for qwen35 family (no BOS in GGUF)" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1246,7 +1246,7 @@ test "initFromGGUF omits BOS and uses BPE for qwen3_5 aliases" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1283,7 +1283,7 @@ test "initFromGGUF omits BOS for gpt-oss prompts by default" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1313,7 +1313,7 @@ test "initFromGGUF respects gemma4 add_bos_token=false" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1344,7 +1344,7 @@ test "initFromGGUF respects gemma4 add_bos_token=true" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
