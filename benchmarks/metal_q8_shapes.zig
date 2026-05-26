@@ -1,4 +1,10 @@
 const std = @import("std");
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
 const support = @import("zinc_bench_support");
 const metal_device = support.metal_device;
 const metal_loader = support.metal_loader;
@@ -323,7 +329,7 @@ fn parseArgs(args: []const [:0]const u8) !Config {
 fn loadShaderPipeline(ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "src/shaders/metal/{s}.metal", .{name}) catch return error.PathTooLong;
-    const file = std.fs.cwd().openFile(path, .{}) catch return error.ShaderNotFound;
+    const file = std.Io.Dir.cwd().openFile(path, .{}) catch return error.ShaderNotFound;
     defer file.close();
     const stat = try file.stat();
     if (stat.size > 1024 * 1024) return error.ShaderTooLarge;
@@ -1337,9 +1343,9 @@ fn benchmarkVariant(
     try runDispatchBatch(device.ctx, &selection, hot_case.tensor0, model, &input_buf, &output_buf, hot_case.rows0, hot_case.cols, warmup_iterations);
     @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
 
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nanoTimestamp();
     try runDispatchBatch(device.ctx, &selection, hot_case.tensor0, model, &input_buf, &output_buf, hot_case.rows0, hot_case.cols, iterations);
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
     const ms_per_iter = elapsed_ms / @as(f64, @floatFromInt(iterations));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1409,9 +1415,9 @@ fn benchmarkMoeVariant(
     try runMoeDispatchBatch(device.ctx, &selection, hot_case.tensor0, model, &input_buf, &output_buf, &routing_buf, hot_case.rows0, hot_case.cols, hot_case.expert_slots, hot_case.x_expert_stride, warmup_iterations);
     @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
 
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nanoTimestamp();
     try runMoeDispatchBatch(device.ctx, &selection, hot_case.tensor0, model, &input_buf, &output_buf, &routing_buf, hot_case.rows0, hot_case.cols, hot_case.expert_slots, hot_case.x_expert_stride, iterations);
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
     const ms_per_iter = elapsed_ms / @as(f64, @floatFromInt(iterations));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1486,9 +1492,9 @@ fn benchmarkMoeColsVariant(
     try runMoeColsDispatchBatch(device.ctx, &route_pack_pipe, &selection, hot_case.tensor0, model, &input_buf, &output_buf, &routing_buf, &counts_buf, &packed_ids_buf, hot_case.rows0, hot_case.cols, route_tokens, n_experts, k, warmup_iterations);
     @memset(output_buf.cpu_ptr.?[0..output_buf.size], 0);
 
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nanoTimestamp();
     try runMoeColsDispatchBatch(device.ctx, &route_pack_pipe, &selection, hot_case.tensor0, model, &input_buf, &output_buf, &routing_buf, &counts_buf, &packed_ids_buf, hot_case.rows0, hot_case.cols, route_tokens, n_experts, k, iterations);
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
     const ms_per_iter = elapsed_ms / @as(f64, @floatFromInt(iterations));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1548,9 +1554,9 @@ fn benchmarkSeparateDualVariant(
     @memset(output0_buf.cpu_ptr.?[0..output0_buf.size], 0);
     @memset(output1_buf.cpu_ptr.?[0..output1_buf.size], 0);
 
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nanoTimestamp();
     try runSeparateDualDispatchBatch(device.ctx, &selection, hot_case.tensor0, tensor1, model, &input_buf, &output0_buf, &output1_buf, hot_case.rows0, hot_case.rows1, hot_case.cols, iterations);
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
     const ms_per_iter = elapsed_ms / @as(f64, @floatFromInt(iterations));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1612,9 +1618,9 @@ fn benchmarkDualVariant(
     @memset(output0_buf.cpu_ptr.?[0..output0_buf.size], 0);
     @memset(output1_buf.cpu_ptr.?[0..output1_buf.size], 0);
 
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nanoTimestamp();
     try runDualDispatchBatch(device.ctx, &selection, hot_case.tensor0, tensor1, model, &input_buf, &output0_buf, &output1_buf, hot_case.rows0, hot_case.rows1, hot_case.cols, iterations);
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
     const ms_per_iter = elapsed_ms / @as(f64, @floatFromInt(iterations));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1685,9 +1691,9 @@ fn benchmarkRmsNormDualVariant(
     @memset(output0_buf.cpu_ptr.?[0..output0_buf.size], 0);
     @memset(output1_buf.cpu_ptr.?[0..output1_buf.size], 0);
 
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nanoTimestamp();
     try runRmsNormDualDispatchBatch(device.ctx, &rms_norm_pipe, &dual_selection, hot_case.tensor0, tensor1, model, &hidden_buf, &norm_buf, &norm_weight_buf, &output0_buf, &output1_buf, hot_case.rows0, hot_case.rows1, hot_case.cols, iterations);
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
     const ms_per_iter = elapsed_ms / @as(f64, @floatFromInt(iterations));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1752,9 +1758,9 @@ fn benchmarkFusedDualVariant(
     @memset(output0_buf.cpu_ptr.?[0..output0_buf.size], 0);
     @memset(output1_buf.cpu_ptr.?[0..output1_buf.size], 0);
 
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nanoTimestamp();
     try runFusedDualDispatchBatch(device.ctx, &selection, hot_case.tensor0, tensor1, model, &hidden_buf, &norm_weight_buf, &output0_buf, &output1_buf, hot_case.rows0, hot_case.rows1, hot_case.cols, iterations);
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
     const ms_per_iter = elapsed_ms / @as(f64, @floatFromInt(iterations));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
@@ -1844,16 +1850,16 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     const config = parseArgs(args) catch |err| {
-        std.fs.File.stderr().writeAll(helpText()) catch {};
+        std.Io.File.stderr().writeAll(helpText()) catch {};
         return err;
     };
     if (config.show_help) {
-        try std.fs.File.stdout().writeAll(helpText());
+        try std.Io.File.stdout().writeAll(helpText());
         return;
     }
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(&stdout_buffer);
 
     var device = try metal_device.MetalDevice.init(allocator, config.device_index);
     defer device.deinit();

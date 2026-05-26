@@ -407,7 +407,7 @@ fn classifyNode(node: *const Node, hardware: HardwareInfo) struct { kind: Bottle
 /// Static compute graph for a transformer layer or full decode pass.
 pub const Graph = struct {
     /// Graph nodes.
-    nodes: std.ArrayList(Node) = .{},
+    nodes: std.ArrayList(Node) = .empty,
     /// Allocator for owned resources.
     allocator: std.mem.Allocator,
     /// Name identifier.
@@ -575,7 +575,7 @@ pub const Graph = struct {
         }
 
         // Kahn's algorithm
-        var queue: std.ArrayList(u32) = .{};
+        var queue: std.ArrayList(u32) = .empty;
         defer queue.deinit(allocator);
 
         for (0..n) |i| {

@@ -42,7 +42,7 @@ pub const KvPagePool = struct {
     /// @returns A KvPagePool with all pages initially free.
     pub fn init(allocator: std.mem.Allocator, total_pages: u32, page_size: u32) !KvPagePool {
         const pages = try allocator.alloc(KvPage, total_pages);
-        var free_list: std.ArrayList(u32) = .{};
+        var free_list: std.ArrayList(u32) = .empty;
         for (0..total_pages) |i| {
             pages[i] = .{
                 .page_id = @intCast(i),

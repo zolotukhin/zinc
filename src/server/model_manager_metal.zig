@@ -5,6 +5,33 @@
 //! information back into the OpenAI-compatible model-management endpoints.
 //! @section API Server
 const std = @import("std");
+
+const FutexMutex = struct {
+    state: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+
+    fn lock(self: *FutexMutex) void {
+        const linux = std.os.linux;
+        while (@cmpxchgWeak(i32, &self.state.raw, 0, 1, .acquire, .monotonic) != null) {
+            _ = linux.futex_4arg(
+                @ptrCast(&self.state.raw),
+                .{ .cmd = .WAIT, .private = true },
+                1,
+                null,
+            );
+        }
+    }
+
+    fn unlock(self: *FutexMutex) void {
+        const linux = std.os.linux;
+        @atomicStore(i32, &self.state.raw, 0, .release);
+        _ = linux.futex_3arg(
+            @ptrCast(&self.state.raw),
+            .{ .cmd = .WAKE, .private = true },
+            1,
+        );
+    }
+};
+
 const catalog_mod = @import("../model/catalog.zig");
 const config_mod = @import("../model/config.zig");
 const managed_mod = @import("../model/managed.zig");
@@ -98,7 +125,7 @@ pub const ModelManager = struct {
     device: *const MetalDevice,
     profile: []const u8,
     vram_budget_bytes: u64,
-    state_mutex: std.Thread.Mutex = .{},
+    state_mutex: FutexMutex = .{},
     gpu_process_lock: process_lock_mod.ProcessLock = .{},
     requested_context_length: ?u32 = null,
     current: ?*LoadedResources,
@@ -234,7 +261,7 @@ pub const ModelManager = struct {
         const active_display_name = if (self.current) |current| current.display_name else "none";
         const active_supports_thinking_toggle = if (self.current) |current| current.tokenizer.supportsThinkingToggle() else false;
 
-        var list: std.ArrayList(ModelSummary) = .{};
+        var list: std.ArrayList(ModelSummary) = .empty;
         defer list.deinit(allocator);
 
         for (catalog_mod.entries) |entry| {

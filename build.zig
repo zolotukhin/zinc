@@ -19,8 +19,8 @@ fn configureVulkanModule(
             module.linkSystemLibrary("vulkan", .{});
         },
         .windows => {
-            const vulkan_sdk = b.graph.env_map.get("VULKAN_SDK") orelse
-                b.graph.env_map.get("VK_SDK_PATH") orelse
+            const vulkan_sdk = b.graph.environ_map.get("VULKAN_SDK") orelse
+                b.graph.environ_map.get("VK_SDK_PATH") orelse
                 @panic("Windows builds require the LunarG Vulkan SDK. Install it and restart your shell so VULKAN_SDK is available.");
             const lib_dir = if (target.result.cpu.arch == .x86) "Lib32" else "Lib";
 
@@ -35,15 +35,15 @@ fn configureVulkanModule(
 }
 
 fn resolveBunExe(b: *std.Build) []const u8 {
-    if (b.graph.env_map.get("BUN_EXE")) |bun_exe| return bun_exe;
-    if (std.fs.accessAbsolute("/root/.bun/bin/bun", .{})) |_| return "/root/.bun/bin/bun" else |_| {}
+    if (b.graph.environ_map.get("BUN_EXE")) |bun_exe| return bun_exe;
+    if (std.Io.Dir.accessAbsolute(b.graph.io, "/root/.bun/bin/bun", .{})) |_| return "/root/.bun/bin/bun" else |_| {}
     return "bun";
 }
 
 fn addBunDirToPath(b: *std.Build, run: *std.Build.Step.Run, bun_exe: []const u8) void {
     if (!std.fs.path.isAbsolute(bun_exe)) return;
     const bun_dir = std.fs.path.dirname(bun_exe) orelse return;
-    const old_path = b.graph.env_map.get("PATH") orelse "";
+    const old_path = b.graph.environ_map.get("PATH") orelse "";
     const path = if (old_path.len == 0)
         bun_dir
     else
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
     // Rolling Linux distros can ship CRT objects with sections Zig's bundled
     // LLD does not understand yet. Let local builders override libc paths
     // without baking machine-specific files into the repository.
-    if (std.fs.cwd().access(".build-support/libc.conf", .{})) |_| {
+    if (std.Io.Dir.cwd().access(b.graph.io, ".build-support/libc.conf", .{})) |_| {
         b.libc_file = ".build-support/libc.conf";
     } else |_| {}
 

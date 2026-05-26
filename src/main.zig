@@ -54,6 +54,10 @@ const Graph = graph_mod.Graph;
 
 const log = std.log.scoped(.zinc);
 
+fn getenv(name: [*:0]const u8) ?[:0]const u8 {
+    return if (std.c.getenv(name)) |p| std.mem.span(p) else null;
+}
+
 /// Global flag enabling verbose debug log output when `--debug` is passed.
 pub var is_debug_mode: bool = false;
 
@@ -209,15 +213,17 @@ const ConnectionWorker = struct {
     }
 };
 
-fn openBrowser(port: u16) void {
+fn openBrowser(io: std.Io, port: u16) void {
     var url_buf: [64]u8 = undefined;
     const url = std.fmt.bufPrint(&url_buf, "http://localhost:{d}", .{port}) catch return;
     const opener = if (comptime @import("builtin").os.tag == .macos) "open" else "xdg-open";
-    var child = std.process.Child.init(&.{ opener, url }, std.heap.page_allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    _ = child.spawnAndWait() catch {};
+    var child = std.process.spawn(io, .{
+        .argv = &.{ opener, url },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return;
+    _ = child.wait(io) catch {};
 }
 
 fn reportGpuProcessLockError(err: anyerror, backend: process_lock_mod.Backend, device_index: u32) noreturn {
@@ -235,7 +241,7 @@ fn reportGpuProcessLockError(err: anyerror, backend: process_lock_mod.Backend, d
     std.process.exit(1);
 }
 
-fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, allocator: std.mem.Allocator) void {
+fn runHttpServer(io: std.Io, config: Config, manager: *model_manager_mod.ModelManager, allocator: std.mem.Allocator) void {
     if (config.profile) {
         if (manager.currentResources()) |resources| {
             if (comptime server_runtime.supports_runtime_profiling) {
@@ -253,25 +259,25 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
         }
     }
 
-    var server = http_mod.Server.init(allocator, config.port) catch |err| {
+    var server = http_mod.Server.init(allocator, config.port, io) catch |err| {
         log.err("Failed to start HTTP server: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     defer server.deinit();
     log.info("Server listening on 0.0.0.0:{d}", .{config.port});
     if (config.command == .chat) {
-        launchChatUi(config.port);
+        launchChatUi(io, config.port);
     }
     log.info("Press Ctrl+C to stop", .{});
 
     if (config.command == .chat) {
-        openBrowser(config.port);
+        openBrowser(io, config.port);
     }
 
     const posix = std.posix;
     const Handler = struct {
         var shutdown_requested: bool = false;
-        fn handler(_: c_int) callconv(.c) void {
+        fn handler(_: posix.SIG) callconv(.c) void {
             shutdown_requested = true;
         }
     };
@@ -283,9 +289,13 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
     posix.sigaction(posix.SIG.INT, &sa, null);
     posix.sigaction(posix.SIG.TERM, &sa, null);
 
-    var server_state = routes_mod.ServerState.init(std.time.timestamp());
+    var server_state = routes_mod.ServerState.init(blk: {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+        break :blk ts.sec;
+    });
     var poll_fds = [1]posix.pollfd{.{
-        .fd = server.listener.stream.handle,
+        .fd = server.listener.socket.handle,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
@@ -327,24 +337,24 @@ fn runHttpServer(config: Config, manager: *model_manager_mod.ModelManager, alloc
     while (server_state.active_requests.load(.monotonic) != 0 or
         server_state.queued_requests.load(.monotonic) != 0)
     {
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        _ = std.c.nanosleep(&.{ .sec = 0, .nsec = 50 * std.time.ns_per_ms }, null);
     }
     log.info("Shutting down...", .{});
 }
 
-fn launchChatUi(port: u16) void {
+fn launchChatUi(io: std.Io, port: u16) void {
     var url_buf: [128]u8 = undefined;
     const url = std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/chat", .{port}) catch |err| {
         log.warn("Failed to format chat URL: {s}", .{@errorName(err)});
         return;
     };
     log.info("Opening chat UI at {s}", .{url});
-    launchBrowser(url) catch |err| {
+    launchBrowser(io, url) catch |err| {
         log.warn("Failed to open browser for {s}: {s}", .{ url, @errorName(err) });
     };
 }
 
-fn launchBrowser(url: []const u8) !void {
+fn launchBrowser(io: std.Io, url: []const u8) !void {
     const argv: []const []const u8 = switch (builtin.os.tag) {
         .macos => &[_][]const u8{ "open", url },
         .linux => &[_][]const u8{ "xdg-open", url },
@@ -352,14 +362,16 @@ fn launchBrowser(url: []const u8) !void {
         else => return error.BrowserLaunchUnsupported,
     };
 
-    var child = std.process.Child.init(argv, std.heap.page_allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
 
-    const term = try child.spawnAndWait();
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return error.BrowserLauncherFailed;
         },
         else => return error.BrowserLauncherFailed,
@@ -720,12 +732,12 @@ fn trimCliOutputText(text: []const u8, chat: bool) []const u8 {
         return std.mem.trim(u8, body[0..stop_pos], " \t\r\n");
     }
     if (findFirstCliStop(text, cli_chat_stop_strs[0..])) |stop_pos| {
-        return std.mem.trimRight(u8, text[0..stop_pos], " \t\r\n");
+        return std.mem.trimEnd(u8, text[0..stop_pos], " \t\r\n");
     }
     return text;
 }
 
-fn resolveStartupModel(config: Config, allocator: std.mem.Allocator) !ResolvedStartupModel {
+fn resolveStartupModel(io: std.Io, config: Config, allocator: std.mem.Allocator) !ResolvedStartupModel {
     if (config.model_id) |model_id| {
         const path = try managed_mod.resolveInstalledModelPath(model_id, allocator);
         const model_id_copy = try allocator.dupe(u8, model_id);
@@ -747,7 +759,7 @@ fn resolveStartupModel(config: Config, allocator: std.mem.Allocator) !ResolvedSt
         } };
     }
 
-    const active = try managed_mod.readActiveSelection(allocator);
+    const active = try managed_mod.readActiveSelection(io, allocator);
     if (active) |selection| {
         const path = try managed_mod.resolveInstalledModelPath(selection.model_id, allocator);
         return .{
@@ -764,7 +776,7 @@ fn resolveStartupModel(config: Config, allocator: std.mem.Allocator) !ResolvedSt
     return error.NoModelSpecified;
 }
 
-fn resolveCheckTarget(config: Config, allocator: std.mem.Allocator) !ResolvedCheckTarget {
+fn resolveCheckTarget(io: std.Io, config: Config, allocator: std.mem.Allocator) !ResolvedCheckTarget {
     if (config.model_id) |model_id| {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
 
@@ -779,7 +791,7 @@ fn resolveCheckTarget(config: Config, allocator: std.mem.Allocator) !ResolvedChe
             },
         };
 
-        if (managed_mod.isInstalled(model_id, allocator)) {
+        if (managed_mod.isInstalled(io, model_id, allocator)) {
             const path = try managed_mod.resolveInstalledModelPath(model_id, allocator);
             resolved.model_path = path;
             resolved.owned_path = path;
@@ -806,8 +818,8 @@ const ManagedGpuSupport = struct {
     }
 };
 
-fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !ManagedGpuSupport {
-    if (try managed_mod.readCachedGpuProfile(device_index, allocator)) |cached| {
+fn resolveManagedGpuSupport(io: std.Io, device_index: u32, allocator: std.mem.Allocator) !ManagedGpuSupport {
+    if (try managed_mod.readCachedGpuProfile(io, device_index, allocator)) |cached| {
         defer {
             var owned = cached;
             owned.deinit(allocator);
@@ -827,7 +839,7 @@ fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !Ma
         const profile = catalog_mod.profileForGpu(gpu_config);
         const vram_budget_bytes = vk_instance.vramBytes();
 
-        try managed_mod.writeCachedGpuProfile(device_index, profile, gpu_config.nameSlice(), vram_budget_bytes, allocator);
+        try managed_mod.writeCachedGpuProfile(io, device_index, profile, gpu_config.nameSlice(), vram_budget_bytes, allocator);
 
         return .{
             .profile = try allocator.dupe(u8, profile),
@@ -849,7 +861,7 @@ fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !Ma
         };
         const device_name = @tagName(device.chip);
 
-        try managed_mod.writeCachedGpuProfile(device_index, profile, device_name, vram_budget_bytes, allocator);
+        try managed_mod.writeCachedGpuProfile(io, device_index, profile, device_name, vram_budget_bytes, allocator);
 
         return .{
             .profile = try allocator.dupe(u8, profile),
@@ -861,19 +873,19 @@ fn resolveManagedGpuSupport(device_index: u32, allocator: std.mem.Allocator) !Ma
     return error.GpuDetectionUnavailable;
 }
 
-fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
-    var active = try managed_mod.readActiveSelection(allocator);
+fn printManagedModelList(io: std.Io, config: Config, allocator: std.mem.Allocator) !void {
+    var active = try managed_mod.readActiveSelection(io, allocator);
     defer if (active) |*selection| selection.deinit(allocator);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     const active_model_id = if (active) |selection| selection.model_id else null;
     const backend_name = if (gpu.is_metal) "Metal" else if (gpu.is_vulkan) "Vulkan" else "GPU";
 
-    const support = resolveManagedGpuSupport(config.device_index, allocator) catch |err| {
+    const support = resolveManagedGpuSupport(io, config.device_index, allocator) catch |err| {
         if (!config.show_all_models and !config.json_output) {
             var stderr_buffer: [1024]u8 = undefined;
-            var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
+            var stderr = std.Io.File.stderr().writerStreaming(io, &stderr_buffer);
             try stderr.interface.print("Unable to initialize {s} for GPU detection: {s}\n", .{ backend_name, @errorName(err) });
             try stderr.interface.writeAll("Use `zinc model list --all` to inspect the catalog without live fit checks.\n");
             try stderr.interface.flush();
@@ -881,7 +893,7 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
         }
 
         if (config.json_output) {
-            try printManagedModelListJson(&stdout.interface, active_model_id, null, allocator);
+            try printManagedModelListJson(io, &stdout.interface, active_model_id, null, allocator);
             try stdout.interface.flush();
             return;
         }
@@ -889,7 +901,7 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
         try stdout.interface.print("{s} GPU detection unavailable ({s}). Showing the full catalog without live fit checks.\n\n", .{ backend_name, @errorName(err) });
         try stdout.interface.writeAll("ID                             Released     Status      Fit    Installed   Active   Notes\n");
         for (catalog_mod.entries) |entry| {
-            const installed = managed_mod.isInstalled(entry.id, allocator);
+            const installed = managed_mod.isInstalled(io, entry.id, allocator);
             const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
             try stdout.interface.print(
                 "{s: <30} {s: <12} {s: <11} {s: <6} {s: <11} {s: <8} {s}\n",
@@ -913,7 +925,7 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     }
 
     if (config.json_output) {
-        try printManagedModelListJson(&stdout.interface, active_model_id, &support, allocator);
+        try printManagedModelListJson(io, &stdout.interface, active_model_id, &support, allocator);
         try stdout.interface.flush();
         return;
     }
@@ -931,8 +943,8 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
     var any_requires_offload = false;
     for (catalog_mod.entries) |entry| {
         const tested_profile_match = catalog_mod.supportsProfile(entry, support.profile);
-        const installed = managed_mod.isInstalled(entry.id, allocator);
-        const fit = managed_mod.describeFit(entry, support.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
+        const installed = managed_mod.isInstalled(io, entry.id, allocator);
+        const fit = managed_mod.describeFit(io, entry, support.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
             .required_vram_bytes = entry.required_vram_bytes,
             .fits_current_gpu = catalog_mod.fitsGpu(entry, support.vram_budget_bytes),
             .exact = false,
@@ -1026,6 +1038,7 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
 /// Output the full catalog as pretty-printed JSON.
 /// When `support` is null, GPU detection was unavailable and fit fields are omitted.
 fn printManagedModelListJson(
+    io: std.Io,
     w: anytype,
     active_model_id: ?[]const u8,
     support: ?*const ManagedGpuSupport,
@@ -1047,7 +1060,7 @@ fn printManagedModelListJson(
         if (!first) try w.writeAll(",\n");
         first = false;
 
-        const installed = managed_mod.isInstalled(entry.id, allocator);
+        const installed = managed_mod.isInstalled(io, entry.id, allocator);
         const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
 
         var size_buf: [32]u8 = undefined;
@@ -1057,7 +1070,7 @@ fn printManagedModelListJson(
 
         // Compute fits_gpu when GPU support is available.
         const fits_gpu: ?bool = if (support) |s| blk: {
-            const fit = managed_mod.describeFit(entry, s.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
+            const fit = managed_mod.describeFit(io, entry, s.vram_budget_bytes, allocator) catch managed_mod.ModelFit{
                 .required_vram_bytes = entry.required_vram_bytes,
                 .fits_current_gpu = catalog_mod.fitsGpu(entry, s.vram_budget_bytes),
                 .exact = false,
@@ -1202,14 +1215,15 @@ const ManagedRemoveOutcome = struct {
 };
 
 fn tryRemoveManagedModelViaLocalServer(
+    io: std.Io,
     port: u16,
     model_id: []const u8,
     force: bool,
     allocator: std.mem.Allocator,
 ) !?LocalAdminRemoveResponse {
-    const address = try std.net.Address.parseIp4("127.0.0.1", port);
-    var stream = std.net.tcpConnectToAddress(address) catch return null;
-    defer stream.close();
+    var address = std.Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return null;
+    var stream = std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch return null;
+    defer stream.close(io);
 
     const request_body = try std.fmt.allocPrint(
         allocator,
@@ -1224,18 +1238,17 @@ fn tryRemoveManagedModelViaLocalServer(
         .{ port, request_body.len, request_body },
     );
     defer allocator.free(request);
-    try stream.writeAll(request);
+    var write_buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &write_buf);
+    try w.interface.writeAll(request);
+    try w.interface.flush();
 
-    var response: std.ArrayList(u8) = .{};
+    var response: std.ArrayList(u8) = .empty;
     defer response.deinit(allocator);
 
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = try stream.read(&buf);
-        if (n == 0) break;
-        try response.appendSlice(allocator, buf[0..n]);
-        if (response.items.len > 64 * 1024) return error.ResponseTooLarge;
-    }
+    var read_buf: [4096]u8 = undefined;
+    var r = stream.reader(io, &read_buf);
+    try r.interface.appendRemainingUnlimited(allocator, &response);
 
     const header_end = std.mem.indexOf(u8, response.items, "\r\n\r\n") orelse return null;
     const status = parseHttpStatus(response.items[0..header_end]) orelse return null;
@@ -1295,9 +1308,9 @@ fn findJsonStringEnd(s: []const u8) ?usize {
     return null;
 }
 
-fn printManagedRemoveSummary(model_id: []const u8, outcome: ManagedRemoveOutcome) !void {
+fn printManagedRemoveSummary(io: std.Io, model_id: []const u8, outcome: ManagedRemoveOutcome) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     if (outcome.unloaded_from_gpu) {
         try stdout.interface.print("Unloaded {s} from GPU memory\n", .{model_id});
     }
@@ -1317,21 +1330,21 @@ fn printManagedRemoveSummary(model_id: []const u8, outcome: ManagedRemoveOutcome
     try stdout.interface.flush();
 }
 
-fn printCommandError(message: []const u8) !void {
+fn printCommandError(io: std.Io, message: []const u8) !void {
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
+    var stderr = std.Io.File.stderr().writerStreaming(io, &stderr_buffer);
     try stderr.interface.print("{s}\n", .{message});
     try stderr.interface.flush();
 }
 
-fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
+fn runModelCommand(io: std.Io, config: Config, allocator: std.mem.Allocator) !void {
     switch (config.command) {
         .model_active => {
-            var active = try managed_mod.readActiveSelection(allocator);
+            var active = try managed_mod.readActiveSelection(io, allocator);
             defer if (active) |*selection| selection.deinit(allocator);
 
             var stdout_buffer: [1024]u8 = undefined;
-            var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+            var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
             if (active) |selection| {
                 try stdout.interface.print("{s}\n", .{selection.model_id});
             } else {
@@ -1339,31 +1352,31 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
             }
             try stdout.interface.flush();
         },
-        .model_list => try printManagedModelList(config, allocator),
+        .model_list => try printManagedModelList(io, config, allocator),
         .model_pull, .model_use => {
             const model_id = config.command_model_id orelse return error.MissingArgValue;
             const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
 
-            var support = try resolveManagedGpuSupport(config.device_index, allocator);
+            var support = try resolveManagedGpuSupport(io, config.device_index, allocator);
             defer support.deinit(allocator);
 
             if (!catalog_mod.supportsProfile(entry.*, support.profile)) return error.ModelUnsupportedOnThisGpu;
 
             if (config.command == .model_pull) {
                 var stdout_buffer: [4096]u8 = undefined;
-                var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
-                try managed_mod.pullModel(entry.*, allocator, &stdout.interface);
+                var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
+                try managed_mod.pullModel(io, entry.*, allocator, &stdout.interface);
                 try stdout.interface.flush();
                 return;
             }
 
-            if (!managed_mod.isInstalled(model_id, allocator)) return error.ModelNotInstalled;
-            const fit = try managed_mod.verifyActiveSelectionFits(model_id, support.vram_budget_bytes, allocator);
+            if (!managed_mod.isInstalled(io, model_id, allocator)) return error.ModelNotInstalled;
+            const fit = try managed_mod.verifyActiveSelectionFits(io, model_id, support.vram_budget_bytes, allocator);
             if (fit.fit_state == .does_not_fit) return error.ModelDoesNotFit;
-            try managed_mod.writeActiveSelection(model_id, allocator);
+            try managed_mod.writeActiveSelection(io, model_id, allocator);
 
             var stdout_buffer: [1024]u8 = undefined;
-            var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+            var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
             try stdout.interface.print("Active model set to {s}\n", .{model_id});
             if (fit.fit_state == .fits_with_offload) {
                 try stdout.interface.writeAll("Note: this model exceeds your VRAM budget. The loader will automatically\n");
@@ -1375,14 +1388,14 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
             const model_id = config.command_model_id orelse return error.MissingArgValue;
             _ = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
 
-            if (try tryRemoveManagedModelViaLocalServer(config.port, model_id, config.command_force, allocator)) |server_response| {
+            if (try tryRemoveManagedModelViaLocalServer(io, config.port, model_id, config.command_force, allocator)) |server_response| {
                 defer {
                     var owned = server_response;
                     owned.deinit(allocator);
                 }
 
                 if (server_response.status >= 200 and server_response.status < 300) {
-                    try printManagedRemoveSummary(model_id, .{
+                    try printManagedRemoveSummary(io, model_id, .{
                         .unloaded_from_gpu = jsonFieldIsTrue(server_response.body, "unloaded_from_gpu"),
                         .cleared_active_selection = jsonFieldIsTrue(server_response.body, "cleared_active_selection"),
                         .deleted_model = jsonFieldIsTrue(server_response.body, "deleted_model"),
@@ -1392,13 +1405,13 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
                     return;
                 }
 
-                try printCommandError(extractJsonMessage(server_response.body) orelse "Managed model removal failed through the local server.");
+                try printCommandError(io, extractJsonMessage(server_response.body) orelse "Managed model removal failed through the local server.");
                 return error.CommandAlreadyReported;
             }
 
-            const removed = try managed_mod.removeInstalledModel(model_id, allocator);
-            const cleared_active_selection = try managed_mod.clearActiveSelectionIfMatches(model_id, allocator);
-            try printManagedRemoveSummary(model_id, .{
+            const removed = try managed_mod.removeInstalledModel(io, model_id, allocator);
+            const cleared_active_selection = try managed_mod.clearActiveSelectionIfMatches(io, model_id, allocator);
+            try printManagedRemoveSummary(io, model_id, .{
                 .unloaded_from_gpu = false,
                 .cleared_active_selection = cleared_active_selection,
                 .deleted_model = removed.deleted_model,
@@ -1413,7 +1426,7 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
 /// Build the static decode graph from GGUF metadata and write debugging artifacts.
 /// Only available on Vulkan backend (loader.zig depends on Vulkan until T010-T014 refactor).
 const exportDecodeGraphArtifacts = if (gpu.is_vulkan) exportDecodeGraphArtifactsImpl else (struct {
-    fn f(_: []const u8, _: ?[]const u8, _: ?[]const u8, _: std.mem.Allocator) !void {
+    fn f(_: std.Io, _: []const u8, _: ?[]const u8, _: ?[]const u8, _: std.mem.Allocator) !void {
         log.warn("Graph export not yet available on Metal backend", .{});
     }
 }).f;
@@ -1429,23 +1442,24 @@ fn runServer(
 }
 
 fn exportDecodeGraphArtifactsImpl(
+    io: std.Io,
     model_path: []const u8,
     report_path: ?[]const u8,
     dot_path: ?[]const u8,
     allocator: std.mem.Allocator,
 ) !void {
-    const model_config = try loader_mod.inspectConfig(model_path, allocator);
-    const file = try std.fs.cwd().openFile(model_path, .{});
+    const model_config = try loader_mod.inspectConfig(io, model_path, allocator);
+    const file = try std.Io.Dir.cwd().openFile(io, model_path, .{});
     defer {
         var close_file = file;
-        close_file.close();
+        close_file.close(io);
     }
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const mmap_data = try std.posix.mmap(
         null,
         stat.size,
-        std.posix.PROT.READ,
+        std.posix.PROT{ .READ = true },
         .{ .TYPE = .PRIVATE },
         file.handle,
         0,
@@ -1457,38 +1471,39 @@ fn exportDecodeGraphArtifactsImpl(
 
     var decode_graph = try architecture_mod.buildDecodeGraphDetailed(&model_config, allocator, &gguf_file);
     defer decode_graph.deinit();
-    try writeDecodeGraphArtifacts(&decode_graph, report_path, dot_path, allocator);
+    try writeDecodeGraphArtifacts(io, &decode_graph, report_path, dot_path, allocator);
 }
 
 fn writeDecodeGraphArtifacts(
+    io: std.Io,
     decode_graph: *const Graph,
     report_path: ?[]const u8,
     dot_path: ?[]const u8,
     allocator: std.mem.Allocator,
 ) !void {
     if (report_path) |path| {
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
         defer {
             var close_file = file;
-            close_file.close();
+            close_file.close(io);
         }
 
         var file_buffer: [4096]u8 = undefined;
-        var file_writer = file.writer(&file_buffer);
+        var file_writer = file.writerStreaming(io, &file_buffer);
         try decode_graph.writeJsonReport(&file_writer.interface, allocator);
         try file_writer.interface.flush();
         log.info("Wrote decode graph JSON report to {s}", .{path});
     }
 
     if (dot_path) |path| {
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
         defer {
             var close_file = file;
-            close_file.close();
+            close_file.close(io);
         }
 
         var file_buffer: [4096]u8 = undefined;
-        var file_writer = file.writer(&file_buffer);
+        var file_writer = file.writerStreaming(io, &file_buffer);
         try decode_graph.writeDot(&file_writer.interface, allocator);
         try file_writer.interface.flush();
         log.info("Wrote decode graph DOT export to {s}", .{path});
@@ -1532,39 +1547,43 @@ fn writeDecodeGraphArtifacts(
 
 /// Start the ZINC process in prompt mode or server mode.
 /// @note Fatal startup errors are logged and terminate the process rather than bubbling to the caller.
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_list: std.ArrayList([:0]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    var args_it = std.process.Args.Iterator.init(init.minimal.args);
+    while (args_it.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args = args_list.items;
 
     const config = parseArgs(args) catch |err| {
         log.err("Argument error: {s}", .{@errorName(err)});
-        std.fs.File.stderr().writeAll(helpText(false)) catch {};
+        std.Io.File.stderr().writeStreamingAll(io, helpText(false)) catch {};
         std.process.exit(1);
     };
 
     if (config.show_help) {
-        std.fs.File.stdout().writeAll(helpText(config.show_help_all)) catch {};
+        std.Io.File.stdout().writeStreamingAll(io, helpText(config.show_help_all)) catch {};
         return;
     }
 
     if (config.check) {
-        var check_target = resolveCheckTarget(config, allocator) catch |err| {
+        var check_target = resolveCheckTarget(io, config, allocator) catch |err| {
             log.err("Failed to resolve model for diagnostics: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
         defer check_target.deinit(allocator);
 
-        diagnostics_mod.run(.{
+        diagnostics_mod.run(io, .{
             .device_index = config.device_index,
             .model_path = check_target.model_path,
             .requested_context_length = config.context_length,
             .managed_model = check_target.managed_model,
             .shader_dir = if (gpu.is_metal) "src/shaders/metal" else blk: {
-                break :blk resolveShaderDir(allocator) catch "zig-out/share/zinc/shaders";
+                break :blk resolveShaderDir(io, allocator) catch "zig-out/share/zinc/shaders";
             },
         }, allocator) catch |err| {
             log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
@@ -1574,7 +1593,7 @@ pub fn main() !void {
     }
 
     if (config.command != .run and config.command != .chat) {
-        runModelCommand(config, allocator) catch |err| {
+        runModelCommand(io, config, allocator) catch |err| {
             if (err == error.CommandAlreadyReported) {
                 std.process.exit(1);
             }
@@ -1587,10 +1606,10 @@ pub fn main() !void {
         return;
     }
 
-    is_debug_mode = config.debug or std.posix.getenv("ZINC_DEBUG") != null;
+    is_debug_mode = config.debug or getenv("ZINC_DEBUG") != null;
 
     const resolved_model: ?ResolvedStartupModel = blk: {
-        break :blk resolveStartupModel(config, allocator) catch |err| {
+        break :blk resolveStartupModel(io, config, allocator) catch |err| {
             if (err == error.NoModelSpecified) {
                 if (config.command == .chat) {
                     log.info("No startup model specified; starting chat server with no model loaded.", .{});
@@ -1616,7 +1635,7 @@ pub fn main() !void {
     const wants_graph_artifacts = config.graph_report_path != null or config.graph_dot_path != null;
     if (wants_graph_artifacts and config.prompt == null) {
         if (model_path) |path| {
-            exportDecodeGraphArtifacts(path, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
+            exportDecodeGraphArtifacts(io, path, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
                 log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -1774,7 +1793,7 @@ pub fn main() !void {
                 }
 
                 // Decode tokens to text
-                var text_buf: std.ArrayList(u8) = .{};
+                var text_buf: std.ArrayList(u8) = .empty;
                 defer text_buf.deinit(allocator);
                 for (output_tokens) |tid| {
                     var dec_buf: [256]u8 = undefined;
@@ -1800,10 +1819,10 @@ pub fn main() !void {
                     std.process.exit(1);
                 }
             else
-                model_manager_mod.ModelManager.initEmpty(&device, config.context_length, allocator);
+                model_manager_mod.ModelManager.initEmpty(io, &device, config.context_length, allocator);
             defer manager.deinit();
 
-            runHttpServer(config, &manager, allocator);
+            runHttpServer(io, config, &manager, allocator);
         }
         return;
     }
@@ -1822,14 +1841,14 @@ pub fn main() !void {
     // Determine shader directory — probe relative paths first, then fall back
     // to a path relative to the running executable so that installed layouts
     // (e.g. Nix store: $out/bin/zinc → $out/share/zinc/shaders) work correctly.
-    const shader_dir = resolveShaderDir(allocator) catch |err| {
+    const shader_dir = resolveShaderDir(io, allocator) catch |err| {
         log.err("Could not locate shader directory: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     defer allocator.free(shader_dir);
 
     if (config.prompt) |prompt| {
-        var gpu_process_lock = process_lock_mod.acquire(.vulkan, vk_instance.selected_device_index) catch |err| {
+        var gpu_process_lock = process_lock_mod.acquire(io, .vulkan, vk_instance.selected_device_index) catch |err| {
             reportGpuProcessLockError(err, .vulkan, vk_instance.selected_device_index);
         };
         defer gpu_process_lock.deinit();
@@ -1839,21 +1858,21 @@ pub fn main() !void {
         var cmd_pool = try CommandPool.init(&vk_instance);
         defer cmd_pool.deinit();
 
-        var model = loader_mod.load(model_path.?, &vk_instance, &cmd_pool, allocator) catch |err| {
+        var model = loader_mod.load(io, model_path.?, &vk_instance, &cmd_pool, allocator) catch |err| {
             log.err("Failed to load model: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
         defer model.deinit(&vk_instance);
         memory_plan.applyRequestedContextLimit(&model.config, config.context_length);
 
-        var engine = forward_mod.InferenceEngine.init(&model, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
+        var engine = forward_mod.InferenceEngine.init(io, &model, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
             log.err("Failed to init inference engine: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
         defer engine.deinit();
 
         if (wants_graph_artifacts) {
-            writeDecodeGraphArtifacts(&engine.decode_graph, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
+            writeDecodeGraphArtifacts(io, &engine.decode_graph, config.graph_report_path, config.graph_dot_path, allocator) catch |err| {
                 log.err("Failed to export decode graph artifacts: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -1897,7 +1916,7 @@ pub fn main() !void {
         log.info("Prompt tokens ({d}): {any}", .{ prompt_tokens.len, prompt_tokens[0..@min(prompt_tokens.len, 30)] });
         // Decode prompt tokens for verification
         {
-            var pt_buf: std.ArrayList(u8) = .{};
+            var pt_buf: std.ArrayList(u8) = .empty;
             defer pt_buf.deinit(allocator);
             for (prompt_tokens) |tid| {
                 if (tid < tokenizer.vocab.len) {
@@ -1980,7 +1999,7 @@ pub fn main() !void {
 
         // Decode tokens to text using the vocabulary
         {
-            var text_buf: std.ArrayList(u8) = .{};
+            var text_buf: std.ArrayList(u8) = .empty;
             defer text_buf.deinit(allocator);
             for (output_tokens) |tid| {
                 var dec_buf: [256]u8 = undefined;
@@ -2003,7 +2022,7 @@ pub fn main() !void {
         log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
 
         var manager = if (resolved_model) |startup_model|
-            model_manager_mod.ModelManager.init(startup_model.spec, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
+            model_manager_mod.ModelManager.init(io, startup_model.spec, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
                 if (err == error.GpuAlreadyReserved) {
                     reportGpuProcessLockError(err, .vulkan, vk_instance.selected_device_index);
                 }
@@ -2011,9 +2030,9 @@ pub fn main() !void {
                 std.process.exit(1);
             }
         else
-            model_manager_mod.ModelManager.initEmpty(&vk_instance, gpu_config, shader_dir, config.context_length, allocator);
+            model_manager_mod.ModelManager.initEmpty(io, &vk_instance, gpu_config, shader_dir, config.context_length, allocator);
         defer manager.deinit();
-        runHttpServer(config, &manager, allocator);
+        runHttpServer(io, config, &manager, allocator);
     }
 }
 
@@ -2242,35 +2261,36 @@ test "resolveCheckTarget prefers managed model id over raw gguf path" {
 /// 3. `<exe_dir>/../share/zinc/shaders` — installed layout (Nix store, /usr/local, etc.)
 ///
 /// Returns an allocated slice owned by the caller.
-fn resolveShaderDir(allocator: std.mem.Allocator) ![]u8 {
-    return resolveShaderDirFrom(allocator, std.fs.cwd(), null);
+fn resolveShaderDir(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    return resolveShaderDirFrom(io, allocator, std.Io.Dir.cwd(), null);
 }
 
 /// Test-friendly variant: probe `base_dir` for the cwd-relative candidates,
 /// then fall back to `exe_dir_override/../share/zinc/shaders` (or the
 /// running executable's directory when override is null).
-fn resolveShaderDirFrom(allocator: std.mem.Allocator, base_dir: std.fs.Dir, exe_dir_override: ?[]const u8) ![]u8 {
+fn resolveShaderDirFrom(io: std.Io, allocator: std.mem.Allocator, base_dir: std.Io.Dir, exe_dir_override: ?[]const u8) ![]u8 {
     const candidates = [_][]const u8{
         "zig-out/share/zinc/shaders",
         "share/zinc/shaders",
     };
     for (candidates) |candidate| {
-        base_dir.access(candidate, .{}) catch continue;
+        base_dir.access(io, candidate, .{}) catch continue;
         return allocator.dupe(u8, candidate);
     }
     // Derive from the running executable's directory: bin/../share/zinc/shaders
     if (exe_dir_override) |exe_dir| {
         const derived = try std.fs.path.join(allocator, &.{ exe_dir, "..", "share", "zinc", "shaders" });
         errdefer allocator.free(derived);
-        std.fs.cwd().access(derived, .{}) catch return error.ShaderDirNotFound;
+        std.Io.Dir.cwd().access(io, derived, .{}) catch return error.ShaderDirNotFound;
         return derived;
     }
-    const exe_path = try std.fs.selfExePathAlloc(allocator);
-    defer allocator.free(exe_path);
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_len = std.Io.Dir.readLinkAbsolute(io, "/proc/self/exe", &exe_buf) catch return error.ShaderDirNotFound;
+    const exe_path = exe_buf[0..exe_len];
     const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
     const derived = try std.fs.path.join(allocator, &.{ exe_dir, "..", "share", "zinc", "shaders" });
     errdefer allocator.free(derived);
-    std.fs.cwd().access(derived, .{}) catch return error.ShaderDirNotFound;
+    std.Io.Dir.cwd().access(io, derived, .{}) catch return error.ShaderDirNotFound;
     return derived;
 }
 

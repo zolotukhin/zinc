@@ -423,6 +423,7 @@ pub const DmmvDispatch = struct {
     /// @param allocator Allocator used for temporary pipeline creation state.
     /// @returns A DmmvDispatch ready to record projection work.
     pub fn init(
+        io: std.Io,
         /// Vulkan instance.
         instance: *const Instance,
         /// GPU capabilities.
@@ -483,7 +484,7 @@ pub const DmmvDispatch = struct {
         var path_buf: [512]u8 = undefined;
 
         const q4k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k = pipeline_mod.createFromSpirvWithOptions(instance, q4k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q4k = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -493,70 +494,70 @@ pub const DmmvDispatch = struct {
         // default NUM_ROWS=2 would spawn hundreds of thousands of workgroups
         // and thrash the L1 cache with redundant hidden-vector reads.
         const q4k_wide_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_wide.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_wide = pipeline_mod.createFromSpirvWithOptions(instance, q4k_wide_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q4k_wide = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_wide_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K wide shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q8_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0 = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_batch.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_batch = pipeline_mod.createFromSpirvWithOptions(instance, q8_batch_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_batch = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_batch_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q8_0 batch shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_spec64 = [_]pipeline_mod.SpecConst{.{ .id = 2, .value = 64 }};
         const q8_spec64_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_spec64 = pipeline_mod.createFromSpirvWithOptions(instance, q8_spec64_path, 3, push_size, &q8_spec64, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_spec64 = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_spec64_path, 3, push_size, &q8_spec64, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 spec64 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_spec128 = [_]pipeline_mod.SpecConst{.{ .id = 2, .value = 128 }};
         const q8_spec128_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_spec128 = pipeline_mod.createFromSpirvWithOptions(instance, q8_spec128_path, 3, push_size, &q8_spec128, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_spec128 = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_spec128_path, 3, push_size, &q8_spec128, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 spec128 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_wide_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_wide.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_wide = pipeline_mod.createFromSpirvWithOptions(instance, q8_wide_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_wide = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_wide_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 wide shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_q81_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_q8_1.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q8_q81_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_q8_1 = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_q81_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 x Q8_1 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_pair_push_size = @sizeOf(DmmvQ8PairPushConstants);
         const q8_pair_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_fused_pair.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_fused_pair = pipeline_mod.createFromSpirvWithOptions(instance, q8_pair_path, 5, q8_pair_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_fused_pair = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_pair_path, 5, q8_pair_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 fused-pair shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const mxfp4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_mxfp4.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mxfp4 = pipeline_mod.createFromSpirvWithOptions(instance, mxfp4_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mxfp4 = pipeline_mod.createFromSpirvWithOptions(io, instance, mxfp4_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("MXFP4 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5_0_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_0.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_0 = pipeline_mod.createFromSpirvWithOptions(instance, q5_0_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5_0 = pipeline_mod.createFromSpirvWithOptions(io, instance, q5_0_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_0 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5_1_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_1 = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5_1 = pipeline_mod.createFromSpirvWithOptions(io, instance, q5_1_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_1 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q5_1_acc_push_size = @sizeOf(DmmvScaleAccPushConstants);
         const q5_1_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_1_acc = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_acc_path, 3, q5_1_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5_1_acc = pipeline_mod.createFromSpirvWithOptions(io, instance, q5_1_acc_path, 3, q5_1_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_1 scaled-acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -564,30 +565,30 @@ pub const DmmvDispatch = struct {
         const q5k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k.spv", .{shader_dir}) catch unreachable;
         // Q5_K K-parallel shader: cross-subgroup shared-memory reduction handles
         // wave64 (1 subgroup), wave32 (2 subgroups), and SIMD16 (4 subgroups).
-        const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(instance, q5k_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5k = pipeline_mod.createFromSpirvWithOptions(io, instance, q5k_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k = pipeline_mod.createFromSpirvWithOptions(instance, q6k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q6k = pipeline_mod.createFromSpirvWithOptions(io, instance, q6k_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q6_K shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q6k_wide_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_wide.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k_wide = pipeline_mod.createFromSpirvWithOptions(instance, q6k_wide_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q6k_wide = pipeline_mod.createFromSpirvWithOptions(io, instance, q6k_wide_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q6_K wide shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const f16_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f16.spv", .{shader_dir}) catch unreachable;
-        const pipeline_f16 = pipeline_mod.createFromSpirvWithOptions(instance, f16_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_f16 = pipeline_mod.createFromSpirvWithOptions(io, instance, f16_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("F16 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const f32_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f32.spv", .{shader_dir}) catch unreachable;
-        const pipeline_f32 = pipeline_mod.createFromSpirvWithOptions(instance, f32_path, 3, push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_f32 = pipeline_mod.createFromSpirvWithOptions(io, instance, f32_path, 3, push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("F32 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -595,25 +596,25 @@ pub const DmmvDispatch = struct {
         // Batch DMMV for prefill: 3 bindings (A, X_batch, Y_batch), batch push constants
         const batch_push_size = @sizeOf(BatchDmmvPushConstants);
         const q4k_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_batch.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_batch = pipeline_mod.createFromSpirvWithOptions(instance, q4k_batch_path, 3, batch_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q4k_batch = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_batch_path, 3, batch_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K batch shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_batch.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k_batch = pipeline_mod.createFromSpirvWithOptions(instance, q6k_batch_path, 3, batch_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q6k_batch = pipeline_mod.createFromSpirvWithOptions(io, instance, q6k_batch_path, 3, batch_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q6_K batch shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q4k_batch_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_batch_kpar.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_batch_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q4k_batch_kpar_path, 3, batch_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_batch_kpar = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_batch_kpar_path, 3, batch_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K batch kpar shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_batch_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_batch_kpar.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k_batch_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q6k_batch_kpar_path, 3, batch_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q6k_batch_kpar = pipeline_mod.createFromSpirvWithOptions(io, instance, q6k_batch_kpar_path, 3, batch_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q6_K batch kpar shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -622,7 +623,7 @@ pub const DmmvDispatch = struct {
         const moe_push_size = @sizeOf(MoeDmmvPushConstants);
 
         const q4k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q4k_moe = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -630,7 +631,7 @@ pub const DmmvDispatch = struct {
         // K-parallel Q4_K MoE variant: wave64 subgroupAdd reduction, no shared s_x array.
         // Experimental — enabled only when ZINC_MOE_KPAR=1 in forward.zig.
         const q4k_moe_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_kpar.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_kpar_path, 4, moe_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_moe_kpar_path, 4, moe_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE kpar shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -641,7 +642,7 @@ pub const DmmvDispatch = struct {
         // Dispatch grid is (M+1)/2, n_experts_used, n_tokens.
         const moe_batched_push_size = @sizeOf(MoeBatchedDmmvPushConstants);
         const q4k_moe_batched_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_batched.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_moe_batched = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_batched_path, 4, moe_batched_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_moe_batched = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_moe_batched_path, 4, moe_batched_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -653,22 +654,22 @@ pub const DmmvDispatch = struct {
         // writes to both gate_buf and up_buf. 6 bindings (W_gate, W_up, X,
         // Y_gate, Y_up, routing). Same MoeDmmvPushConstants as kpar.
         const q4k_fused_gate_up_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_fused_gate_up_moe = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_path, 6, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_fused_gate_up_moe = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_gate_up_path, 6, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE fused gate+up shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q4k_fused_gate_up_spec8 = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = 8 }};
-        const pipeline_q4k_fused_gate_up_moe_spec8 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_path, 6, moe_push_size, &q4k_fused_gate_up_spec8, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_fused_gate_up_moe_spec8 = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_gate_up_path, 6, moe_push_size, &q4k_fused_gate_up_spec8, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE fused gate+up spec8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q4k_fused_gate_up_swiglu_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_swiglu_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_fused_gate_up_swiglu_moe = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_swiglu_moe_path, 5, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_fused_gate_up_swiglu_moe = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_gate_up_swiglu_moe_path, 5, moe_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE fused gate+up+SwiGLU shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
-        const pipeline_q4k_fused_gate_up_swiglu_moe_spec8 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_swiglu_moe_path, 5, moe_push_size, &q4k_fused_gate_up_spec8, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_fused_gate_up_swiglu_moe_spec8 = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_gate_up_swiglu_moe_path, 5, moe_push_size, &q4k_fused_gate_up_spec8, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE fused gate+up+SwiGLU spec8 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -678,25 +679,25 @@ pub const DmmvDispatch = struct {
         // inline, and writes a single swiglu_buf row. 4 bindings (W_gate,
         // W_up, X, swiglu). Same DmmvPushConstants as pipeline_q4k.
         const q4k_fused_gate_up_swiglu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_swiglu.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_fused_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_swiglu_path, 4, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_fused_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_gate_up_swiglu_path, 4, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K dense fused gate+up+SwiGLU shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q4k_fused_gate_up_swiglu_row1_spec = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = 1 }};
-        const pipeline_q4k_fused_gate_up_swiglu_row1 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_swiglu_path, 4, push_size, &q4k_fused_gate_up_swiglu_row1_spec, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_fused_gate_up_swiglu_row1 = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_gate_up_swiglu_path, 4, push_size, &q4k_fused_gate_up_swiglu_row1_spec, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K dense fused gate+up+SwiGLU row1 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q4k_fused_gate_up_geglu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_geglu.spv", .{shader_dir}) catch unreachable;
         const gate_up_geglu_push_size = @sizeOf(DmmvGateUpGegluPushConstants);
-        const pipeline_q4k_fused_gate_up_geglu = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gate_up_geglu_path, 3, gate_up_geglu_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_fused_gate_up_geglu = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_gate_up_geglu_path, 3, gate_up_geglu_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K Gemma fused gate+up+GEGLU shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q4k_moe_fused_gate_up_geglu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_fused_gate_up_geglu.spv", .{shader_dir}) catch unreachable;
         const moe_gate_up_geglu_push_size = @sizeOf(MoeGateUpGegluPushConstants);
-        const pipeline_q4k_moe_fused_gate_up_geglu = pipeline_mod.createFromSpirvWithOptions(instance, q4k_moe_fused_gate_up_geglu_path, 4, moe_gate_up_geglu_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_moe_fused_gate_up_geglu = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_moe_fused_gate_up_geglu_path, 4, moe_gate_up_geglu_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K Gemma MoE fused gate+up+GEGLU shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -705,12 +706,12 @@ pub const DmmvDispatch = struct {
         // Q4_K variant. Used by the shared expert path on Qwen 3.5 / 3.6
         // MoE packs where shared FFN weights are Q8_0 (rather than Q4_K).
         const q8_0_fused_gate_up_swiglu_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_fused_gate_up_swiglu.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_fused_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(instance, q8_0_fused_gate_up_swiglu_path, 4, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_fused_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_0_fused_gate_up_swiglu_path, 4, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 fused gate+up+SwiGLU shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_0_fused_gate_up_swiglu_gate_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_fused_gate_up_swiglu_gate.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_fused_gate_up_swiglu_gate = pipeline_mod.createFromSpirvWithOptions(instance, q8_0_fused_gate_up_swiglu_gate_path, 6, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_fused_gate_up_swiglu_gate = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_0_fused_gate_up_swiglu_gate_path, 6, push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 fused gate+up+SwiGLU+gate shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -721,7 +722,7 @@ pub const DmmvDispatch = struct {
         // Y=hidden_buf, gate=router_logits_buf). Push: DmmvSigmoidAccPushConstants.
         const sigmoid_acc_push_size = @sizeOf(DmmvSigmoidAccPushConstants);
         const q8_0_sigmoid_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_sigmoid_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_sigmoid_acc = pipeline_mod.createFromSpirvWithOptions(instance, q8_0_sigmoid_acc_path, 4, sigmoid_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_sigmoid_acc = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_0_sigmoid_acc_path, 4, sigmoid_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 fused sigmoid-acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -734,7 +735,7 @@ pub const DmmvDispatch = struct {
         // merge dispatch into o_proj.
         const oproj_merge_push_size = @sizeOf(OprojMergePushConstants);
         const q4k_o_proj_merge_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_o_proj_merge.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_o_proj_merge = pipeline_mod.createFromSpirvWithOptions(instance, q4k_o_proj_merge_path, 4, oproj_merge_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_o_proj_merge = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_o_proj_merge_path, 4, oproj_merge_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K fused o_proj+merge shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -746,7 +747,7 @@ pub const DmmvDispatch = struct {
         // dispatch grid drops the Y dim used by kpar).
         const fused_down_acc_push_size = @sizeOf(MoeFusedDownAccPushConstants);
         const q4k_fused_down_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_moe_fused_down_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q4k_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q4k_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(io, instance, q4k_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K MoE fused down+acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -754,29 +755,29 @@ pub const DmmvDispatch = struct {
         // Q5_K analogue of the fused down+acc shader. Targets Q4_K_M / XL
         // packs whose down projection is Q5_K (Qwen3.6-35B-A3B-UD-Q4_K_XL).
         const q5k_fused_down_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe_fused_down_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(instance, q5k_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5k_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(io, instance, q5k_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_K MoE fused down+acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5_1_fused_down_acc_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1_moe_fused_down_acc.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_1_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5_1_moe_fused_down_acc = pipeline_mod.createFromSpirvWithOptions(io, instance, q5_1_fused_down_acc_path, 4, fused_down_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_1 Gemma MoE fused down+acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q5_1_fused_down_acc_scaled_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1_moe_fused_down_acc_scaled.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_1_moe_fused_down_acc_scaled = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_fused_down_acc_scaled_path, 5, fused_down_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5_1_moe_fused_down_acc_scaled = pipeline_mod.createFromSpirvWithOptions(io, instance, q5_1_fused_down_acc_scaled_path, 5, fused_down_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_1 Gemma MoE scaled fused down+acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
         const q8_0_fused_down_acc_scaled_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q8_0_moe_fused_down_acc_scaled.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q8_0_moe_fused_down_acc_scaled = pipeline_mod.createFromSpirvWithOptions(instance, q8_0_fused_down_acc_scaled_path, 5, fused_down_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q8_0_moe_fused_down_acc_scaled = pipeline_mod.createFromSpirvWithOptions(io, instance, q8_0_fused_down_acc_scaled_path, 5, fused_down_acc_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q8_0 Gemma MoE scaled fused down+acc shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q5k_moe = pipeline_mod.createFromSpirvWithOptions(io, instance, q5k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_K MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -784,25 +785,25 @@ pub const DmmvDispatch = struct {
         // K-parallel Q5_K MoE variant: wave64 subgroupAdd reduction (targets the
         // ~713 ms MoE down bucket in the Qwen3.6-35B flagship prefill).
         const q5k_moe_kpar_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_moe_kpar.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(instance, q5k_moe_kpar_path, 4, moe_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+        const pipeline_q5k_moe_kpar = pipeline_mod.createFromSpirvWithOptions(io, instance, q5k_moe_kpar_path, 4, moe_push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q5_K MoE kpar shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const mxfp4_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_mxfp4_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mxfp4_moe = pipeline_mod.createFromSpirvWithOptions(instance, mxfp4_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_mxfp4_moe = pipeline_mod.createFromSpirvWithOptions(io, instance, mxfp4_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("MXFP4 MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q5_1_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5_1_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q5_1_moe = pipeline_mod.createFromSpirvWithOptions(instance, q5_1_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q5_1_moe = pipeline_mod.createFromSpirvWithOptions(io, instance, q5_1_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q5_1 MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
         const q6k_moe_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_moe.spv", .{shader_dir}) catch unreachable;
-        const pipeline_q6k_moe = pipeline_mod.createFromSpirvWithOptions(instance, q6k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_q6k_moe = pipeline_mod.createFromSpirvWithOptions(io, instance, q6k_moe_path, 4, moe_push_size, &spec_k, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q6_K MoE shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -815,7 +816,7 @@ pub const DmmvDispatch = struct {
         // 2 bindings (A, D), push = QuantizeQ8_1Push {ne, num_blocks}.
         const q81_push_size = @sizeOf(QuantizeQ8_1Push);
         const q81_path = std.fmt.bufPrint(&path_buf, "{s}/quantize_q8_1.spv", .{shader_dir}) catch unreachable;
-        const pipeline_quantize_q8_1 = pipeline_mod.createFromSpirvWithOptions(instance, q81_path, 2, q81_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_quantize_q8_1 = pipeline_mod.createFromSpirvWithOptions(io, instance, q81_path, 2, q81_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("quantize_q8_1 shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -828,7 +829,7 @@ pub const DmmvDispatch = struct {
         // 2 bindings (A routing in, D counts out), push = CountExpertsPush.
         const count_experts_push_size = @sizeOf(CountExpertsPush);
         const count_experts_path = std.fmt.bufPrint(&path_buf, "{s}/count_experts.spv", .{shader_dir}) catch unreachable;
-        const pipeline_count_experts = pipeline_mod.createFromSpirvWithOptions(instance, count_experts_path, 2, count_experts_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+        const pipeline_count_experts = pipeline_mod.createFromSpirvWithOptions(io, instance, count_experts_path, 2, count_experts_push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("count_experts shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -842,7 +843,7 @@ pub const DmmvDispatch = struct {
         // push = MulMmQ4KPush.
         const mul_mm_q4k_push_size = @sizeOf(MulMmQ4KPush);
         const mul_mm_q4k_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q4k = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_path, 3, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k = pipeline_mod.createFromSpirvWithOptions(io, instance, mul_mm_q4k_path, 3, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -850,7 +851,7 @@ pub const DmmvDispatch = struct {
             log.info("mul_mm_q4k pipeline loaded (tiled Q4_K dense GEMM; LM head opt-in via ZINC_MUL_MM_LM_HEAD=1)", .{});
         }
         const mul_mm_q4k_gate_up_swiglu_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k_gate_up_swiglu.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q4k_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gate_up_swiglu_path, 4, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu = pipeline_mod.createFromSpirvWithOptions(io, instance, mul_mm_q4k_gate_up_swiglu_path, 4, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -858,7 +859,7 @@ pub const DmmvDispatch = struct {
             log.info("mul_mm_q4k_gate_up_swiglu pipeline loaded (Qwen3.6-27B batched dense FFN)", .{});
         }
         const mul_mm_q4k_gate_up_swiglu_full_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q4k_gate_up_swiglu_full.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q4k_gate_up_swiglu_full = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q4k_gate_up_swiglu_full_path, 4, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q4k_gate_up_swiglu_full = pipeline_mod.createFromSpirvWithOptions(io, instance, mul_mm_q4k_gate_up_swiglu_full_path, 4, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q4k_gate_up_swiglu_full shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -866,7 +867,7 @@ pub const DmmvDispatch = struct {
             log.info("mul_mm_q4k_gate_up_swiglu_full pipeline loaded (branchless Qwen3.6-27B dense FFN full tiles)", .{});
         }
         const mul_mm_q6k_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q6k.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q6k = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_path, 3, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k = pipeline_mod.createFromSpirvWithOptions(io, instance, mul_mm_q6k_path, 3, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -874,7 +875,7 @@ pub const DmmvDispatch = struct {
             log.info("mul_mm_q6k pipeline loaded (Qwen3.6-27B batched Q6_K prefill projections)", .{});
         }
         const mul_mm_q6k_full_path = std.fmt.bufPrint(&path_buf, "{s}/mul_mm_q6k_full.spv", .{shader_dir}) catch unreachable;
-        const pipeline_mul_mm_q6k_full = pipeline_mod.createFromSpirvWithOptions(instance, mul_mm_q6k_full_path, 3, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
+        const pipeline_mul_mm_q6k_full = pipeline_mod.createFromSpirvWithOptions(io, instance, mul_mm_q6k_full_path, 3, mul_mm_q4k_push_size, &.{}, push_desc_wave64_options, allocator) catch |err| blk: {
             log.warn("mul_mm_q6k_full shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

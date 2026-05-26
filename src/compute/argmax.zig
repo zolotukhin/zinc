@@ -24,6 +24,7 @@ pub const ArgmaxDispatch = struct {
 
     /// Create the argmax compute pipeline and descriptor pool on the given Vulkan instance.
     pub fn init(
+        io: std.Io,
         instance: *const Instance,
         shader_dir: []const u8,
         allocator: std.mem.Allocator,
@@ -50,7 +51,7 @@ pub const ArgmaxDispatch = struct {
             .require_full_subgroups = true,
         };
         const argmax_path = std.fmt.bufPrint(&path_buf, "{s}/argmax.spv", .{shader_dir}) catch unreachable;
-        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, argmax_path, 3, @sizeOf(ArgmaxPush), &.{}, wave64_options, allocator) catch |err| blk: {
+        const pipeline = pipeline_mod.createFromSpirvWithOptions(io, instance, argmax_path, 3, @sizeOf(ArgmaxPush), &.{}, wave64_options, allocator) catch |err| blk: {
             log.warn("argmax shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };

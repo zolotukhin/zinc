@@ -94,26 +94,26 @@ pub const SmokeResult = struct {
 
 /// Run the cheap UMQ preflight against the default render node.
 /// @returns A `ProbeResult` describing whether T2 admission is plausible.
-pub fn probeDefault() ProbeResult {
-    return probePath(default_render_node);
+pub fn probeDefault(io: std.Io) ProbeResult {
+    return probePath(io, default_render_node);
 }
 
 /// One-shot admission helper combining the preflight and the
 /// `kmd.queryComputeUserq` capability query.
 /// @returns True only when the host both passes preflight and reports an
 ///     `available` compute user-queue capability.
-pub fn admissionProbeDefault() bool {
-    const preflight = probeDefault();
+pub fn admissionProbeDefault(io: std.Io) bool {
+    const preflight = probeDefault(io);
     if (!preflight.preflightOk()) return false;
 
-    const query = kmd.queryComputeUserq(default_render_node);
+    const query = kmd.queryComputeUserq(io, default_render_node);
     return query.status == .available;
 }
 
 /// Run the full create/free smoke gate against the default render node.
 /// @returns A `SmokeResult` recording every step that succeeded or failed.
-pub fn createFreeSmokeDefault() SmokeResult {
-    return createFreeSmokePath(default_render_node);
+pub fn createFreeSmokeDefault(io: std.Io) SmokeResult {
+    return createFreeSmokePath(io, default_render_node);
 }
 
 /// Run the full create/free smoke gate against an explicit render node path.
@@ -122,12 +122,12 @@ pub fn createFreeSmokeDefault() SmokeResult {
 /// compute queue, and finally frees it.
 /// @param render_node Absolute path to a DRM render node (e.g. `/dev/dri/renderD128`).
 /// @returns A `SmokeResult`; inspect `status` and `errno` to localize failures.
-pub fn createFreeSmokePath(render_node: []const u8) SmokeResult {
+pub fn createFreeSmokePath(io: std.Io, render_node: []const u8) SmokeResult {
     if (builtin.os.tag != .linux) {
         return .{ .status = .unsupported_os };
     }
 
-    const preflight = probePath(render_node);
+    const preflight = probePath(io, render_node);
     if (!preflight.preflightOk()) {
         return .{
             .status = .preflight_failed,
@@ -135,7 +135,7 @@ pub fn createFreeSmokePath(render_node: []const u8) SmokeResult {
         };
     }
 
-    const query = kmd.queryComputeUserq(render_node);
+    const query = kmd.queryComputeUserq(io, render_node);
     if (query.status != .available) {
         return .{
             .status = .compute_userq_unavailable,
@@ -144,7 +144,7 @@ pub fn createFreeSmokePath(render_node: []const u8) SmokeResult {
         };
     }
 
-    return createFreeSmokeWithInfo(render_node, query.info.?);
+    return createFreeSmokeWithInfo(io, render_node, query.info.?);
 }
 
 /// Cheap preflight that walks the OS, kernel-version, render-node, and
@@ -152,7 +152,7 @@ pub fn createFreeSmokePath(render_node: []const u8) SmokeResult {
 /// @param render_node Path to the DRM render node that would be opened later.
 /// @returns A `ProbeResult` whose `status` pinpoints the earliest failing
 ///     check, or `preflight_ok` when every check passed.
-pub fn probePath(render_node: []const u8) ProbeResult {
+pub fn probePath(io: std.Io, render_node: []const u8) ProbeResult {
     if (builtin.os.tag != .linux) {
         return .{ .status = .unsupported_os, .render_node = render_node };
     }
@@ -164,12 +164,12 @@ pub fn probePath(render_node: []const u8) ProbeResult {
         return .{ .status = .kernel_too_old, .kernel = kernel, .render_node = render_node };
     }
 
-    var file = std.fs.openFileAbsolute(render_node, .{}) catch {
+    var file = std.Io.Dir.openFileAbsolute(io, render_node, .{}) catch {
         return .{ .status = .render_node_missing, .kernel = kernel, .render_node = render_node };
     };
-    file.close();
+    file.close(io);
 
-    const mode = readUserQueueMode() catch {
+    const mode = readUserQueueMode(io) catch {
         return .{ .status = .user_queue_param_missing, .kernel = kernel, .render_node = render_node };
     };
     if (!userQueueModeEnablesUmq(mode)) {
@@ -179,11 +179,11 @@ pub fn probePath(render_node: []const u8) ProbeResult {
     return .{ .status = .preflight_ok, .kernel = kernel, .render_node = render_node, .user_queue_mode = mode };
 }
 
-fn createFreeSmokeWithInfo(render_node: []const u8, info: kmd.ComputeUserqInfo) SmokeResult {
-    var file = std.fs.openFileAbsolute(render_node, .{ .mode = .read_write }) catch {
+fn createFreeSmokeWithInfo(io: std.Io, render_node: []const u8, info: kmd.ComputeUserqInfo) SmokeResult {
+    var file = std.Io.Dir.openFileAbsolute(io, render_node, .{ .mode = .read_write }) catch {
         return smokeFailure(.render_node_open_failed, info);
     };
-    defer file.close();
+    defer file.close(io);
 
     const queue_size: u64 = 0x10000;
     const page_size: u64 = 4096;
@@ -239,19 +239,19 @@ fn createFreeSmokeWithInfo(render_node: []const u8, info: kmd.ComputeUserqInfo) 
         kmd.AMDGPU_GEM_CREATE_VM_ALWAYS_VALID,
     ) catch return smokeIoctlFailure(.gem_create_failed, info);
 
-    const queue_map = kmd.mmapGem(file, queue_bo, std.posix.PROT.READ | std.posix.PROT.WRITE) catch {
+    const queue_map = kmd.mmapGem(file, queue_bo, std.posix.PROT{ .READ = true, .WRITE = true }) catch {
         return smokeIoctlFailure(.gem_mmap_failed, info);
     };
     defer std.posix.munmap(queue_map);
     @memset(queue_map, 0);
 
-    const wptr_map = kmd.mmapGem(file, wptr_bo, std.posix.PROT.READ | std.posix.PROT.WRITE) catch {
+    const wptr_map = kmd.mmapGem(file, wptr_bo, std.posix.PROT{ .READ = true, .WRITE = true }) catch {
         return smokeIoctlFailure(.gem_mmap_failed, info);
     };
     defer std.posix.munmap(wptr_map);
     @memset(wptr_map, 0);
 
-    const doorbell_map = kmd.mmapGem(file, doorbell_bo, std.posix.PROT.WRITE) catch {
+    const doorbell_map = kmd.mmapGem(file, doorbell_bo, std.posix.PROT{ .WRITE = true }) catch {
         return smokeIoctlFailure(.gem_mmap_failed, info);
     };
     defer std.posix.munmap(doorbell_map);
@@ -341,12 +341,12 @@ fn currentKernelVersion() !KernelVersion {
     return parseKernelRelease(release) orelse error.UnsupportedKernelRelease;
 }
 
-fn readUserQueueMode() !i32 {
-    var file = try std.fs.openFileAbsolute(user_queue_param_path, .{});
-    defer file.close();
+fn readUserQueueMode(io: std.Io) !i32 {
+    var file = try std.Io.Dir.openFileAbsolute(io, user_queue_param_path, .{});
+    defer file.close(io);
 
     var buf: [32]u8 = undefined;
-    const n = try file.readAll(&buf);
+    const n = try file.readStreaming(io, &.{&buf});
     const value = std.mem.trim(u8, buf[0..n], " \t\r\n");
     return parseLeadingI32(value) orelse error.InvalidUserQueueMode;
 }

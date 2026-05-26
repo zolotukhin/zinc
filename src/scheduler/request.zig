@@ -4,6 +4,12 @@
 //! through prefill, decode, and completion phases.
 const std = @import("std");
 
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
 const log = std.log.scoped(.request);
 
 /// Request processing state machine.
@@ -77,7 +83,7 @@ pub const Request = struct {
             .generated_tokens = .{},
             .params = params,
             .slot_id = null,
-            .created_at_ns = std.time.nanoTimestamp(),
+            .created_at_ns = nanoTimestamp(),
             .first_token_ns = null,
             .allocator = allocator,
         };
@@ -103,7 +109,7 @@ pub const Request = struct {
     /// @param token Generated token ID to add.
     pub fn appendToken(self: *Request, token: u32) !void {
         if (self.first_token_ns == null) {
-            self.first_token_ns = std.time.nanoTimestamp();
+            self.first_token_ns = nanoTimestamp();
         }
         try self.generated_tokens.append(self.allocator, token);
     }

@@ -263,7 +263,7 @@ const IoctlError = error{IoctlFailed};
 fn ioctlChecked(fd: std.posix.fd_t, request: u32, arg: usize) IoctlError!void {
     last_ioctl_errno = null;
     const rc = linux.ioctl(fd, request, arg);
-    const err = linux.E.init(rc);
+    const err = linux.errno(rc);
     if (err != .SUCCESS) {
         last_ioctl_errno = err;
         return error.IoctlFailed;
@@ -281,11 +281,11 @@ pub fn renderMinorOf(render_node: []const u8) ?u32 {
     return std.fmt.parseInt(u32, tail[0..end], 10) catch null;
 }
 
-fn readSysU32(dir: std.fs.Dir, sub_path: []const u8) ?u32 {
+fn readSysU32(io: std.Io, dir: std.Io.Dir, sub_path: []const u8) ?u32 {
     var buf: [64]u8 = undefined;
-    const file = dir.openFile(sub_path, .{}) catch return null;
-    defer file.close();
-    const n = file.readAll(&buf) catch return null;
+    const file = dir.openFile(io, sub_path, .{}) catch return null;
+    defer file.close(io);
+    const n = file.readStreaming(io, &.{&buf}) catch return null;
     const trimmed = std.mem.trim(u8, buf[0..n], " \t\r\n");
     return std.fmt.parseInt(u32, trimmed, 10) catch null;
 }
@@ -303,21 +303,21 @@ fn readPropertyU32(properties: []const u8, key: []const u8) ?u32 {
 }
 
 /// Scan the KFD topology for the GPU node backing `render_minor`.
-pub fn findTopologyNode(render_minor: u32) ?TopologyNode {
+pub fn findTopologyNode(io: std.Io, render_minor: u32) ?TopologyNode {
     if (builtin.os.tag != .linux) return null;
-    var nodes_dir = std.fs.openDirAbsolute(topology_nodes_dir, .{ .iterate = true }) catch return null;
-    defer nodes_dir.close();
+    var nodes_dir = std.Io.Dir.openDirAbsolute(io, topology_nodes_dir, .{ .iterate = true }) catch return null;
+    defer nodes_dir.close(io);
     var it = nodes_dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(io) catch null) |entry| {
         const node_index = std.fmt.parseInt(u32, entry.name, 10) catch continue;
-        var node_dir = nodes_dir.openDir(entry.name, .{}) catch continue;
-        defer node_dir.close();
-        const gpu_id = readSysU32(node_dir, "gpu_id") orelse 0;
+        var node_dir = nodes_dir.openDir(io, entry.name, .{}) catch continue;
+        defer node_dir.close(io);
+        const gpu_id = readSysU32(io, node_dir, "gpu_id") orelse 0;
         if (gpu_id == 0) continue; // CPU-only topology node.
         var prop_buf: [4096]u8 = undefined;
-        const prop_file = node_dir.openFile("properties", .{}) catch continue;
-        defer prop_file.close();
-        const prop_len = prop_file.readAll(&prop_buf) catch continue;
+        const prop_file = node_dir.openFile(io, "properties", .{}) catch continue;
+        defer prop_file.close(io);
+        const prop_len = prop_file.readStreaming(io, &.{&prop_buf}) catch continue;
         const properties = prop_buf[0..prop_len];
         const drm_render_minor = readPropertyU32(properties, "drm_render_minor") orelse continue;
         if (drm_render_minor != render_minor) continue;
@@ -337,19 +337,19 @@ pub fn findTopologyNode(render_minor: u32) ?TopologyNode {
 }
 
 /// Cheap reachability check used by `engine.autoTier()` — no ioctls, no GPU VM.
-pub fn reachable() bool {
+pub fn reachable(io: std.Io) bool {
     if (builtin.os.tag != .linux) return false;
-    const kfd = std.fs.openFileAbsolute(kfd_device_node, .{ .mode = .read_write }) catch return false;
-    kfd.close();
+    const kfd = std.Io.Dir.openFileAbsolute(io, kfd_device_node, .{ .mode = .read_write }) catch return false;
+    kfd.close(io);
     const minor = renderMinorOf(default_render_node) orelse return false;
-    const node = findTopologyNode(minor) orelse return false;
+    const node = findTopologyNode(io, minor) orelse return false;
     return node.gpu_id != 0;
 }
 
 /// Run `bringUpPath` against `default_render_node` ("/dev/dri/renderD128").
 /// @returns Status + diagnostics for the GPUVM round-trip.
-pub fn bringUpDefault() BringUpResult {
-    return bringUpPath(default_render_node);
+pub fn bringUpDefault(io: std.Io) BringUpResult {
+    return bringUpPath(io, default_render_node);
 }
 
 /// End-to-end KFD bring-up: open `/dev/kfd` and the supplied render node,
@@ -364,7 +364,7 @@ pub fn bringUpDefault() BringUpResult {
 /// @returns A populated `BringUpResult`; `.ok()` is true only on a clean
 /// round-trip.
 /// @note Off Linux this short-circuits to `unsupported_os` and performs no IO.
-pub fn bringUpPath(render_node: []const u8) BringUpResult {
+pub fn bringUpPath(io: std.Io, render_node: []const u8) BringUpResult {
     if (builtin.os.tag != .linux) {
         return .{ .status = .unsupported_os, .render_node = render_node };
     }
@@ -372,17 +372,17 @@ pub fn bringUpPath(render_node: []const u8) BringUpResult {
     var result: BringUpResult = .{ .status = .ok, .render_node = render_node };
 
     const minor = renderMinorOf(render_node) orelse return fail(result, .topology_unreadable);
-    const topo = findTopologyNode(minor) orelse return fail(result, .topology_node_missing);
+    const topo = findTopologyNode(io, minor) orelse return fail(result, .topology_node_missing);
     result.gpu_id = topo.gpu_id;
     result.gfx_target_version = topo.gfx_target_version;
     result.simd_count = topo.simd_count;
     result.cwsr_size = topo.cwsr_size;
     result.ctl_stack_size = topo.ctl_stack_size;
 
-    const kfd = std.fs.openFileAbsolute(kfd_device_node, .{ .mode = .read_write }) catch return fail(result, .kfd_open_failed);
-    defer kfd.close();
-    const drm = std.fs.openFileAbsolute(render_node, .{ .mode = .read_write }) catch return fail(result, .render_node_open_failed);
-    defer drm.close();
+    const kfd = std.Io.Dir.openFileAbsolute(io, kfd_device_node, .{ .mode = .read_write }) catch return fail(result, .kfd_open_failed);
+    defer kfd.close(io);
+    const drm = std.Io.Dir.openFileAbsolute(io, render_node, .{ .mode = .read_write }) catch return fail(result, .render_node_open_failed);
+    defer drm.close(io);
 
     var version: GetVersionArgs = std.mem.zeroes(GetVersionArgs);
     ioctlChecked(kfd.handle, ioc_get_version, @intFromPtr(&version)) catch return failErrno(result, .get_version_failed);
@@ -418,7 +418,7 @@ pub fn bringUpPath(render_node: []const u8) BringUpResult {
     const window = std.posix.mmap(
         null,
         window_size,
-        std.posix.PROT.NONE,
+        .{},
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,
@@ -454,7 +454,7 @@ pub fn bringUpPath(render_node: []const u8) BringUpResult {
     const scratch_map = std.posix.mmap(
         window.ptr,
         scratch_size,
-        std.posix.PROT.READ | std.posix.PROT.WRITE,
+        std.posix.PROT{ .READ = true, .WRITE = true },
         .{ .TYPE = .SHARED, .FIXED = true },
         drm.handle,
         alloc_args.mmap_offset,
@@ -654,8 +654,8 @@ const AllocedBo = struct {
 /// (munmap when done — that also drops the FIXED CPU mapping) and `handle`
 /// (`FREE_MEMORY_OF_GPU` when done).
 fn allocQueueBo(
-    kfd: std.fs.File,
-    drm: std.fs.File,
+    kfd: std.Io.File,
+    drm: std.Io.File,
     gpu_id: u32,
     aperture: ProcessDeviceApertures,
     size: usize,
@@ -664,7 +664,7 @@ fn allocQueueBo(
     const reservation = std.posix.mmap(
         null,
         size,
-        std.posix.PROT.NONE,
+        .{},
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,
@@ -695,7 +695,7 @@ fn allocQueueBo(
         const mapped = std.posix.mmap(
             reservation.ptr,
             size,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            std.posix.PROT{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED, .FIXED = true },
             drm.handle,
             alloc_args.mmap_offset,
@@ -739,8 +739,8 @@ fn cqFromAllocErr(base: ComputeQueueSmokeResult, err: BoAllocError) ComputeQueue
 
 /// Run `createComputeQueueSmokePath` against `default_render_node`.
 /// @returns The compute-queue smoke result; `.ok()` is true on a clean run.
-pub fn createComputeQueueSmokeDefault() ComputeQueueSmokeResult {
-    return createComputeQueueSmokePath(default_render_node);
+pub fn createComputeQueueSmokeDefault(io: std.Io) ComputeQueueSmokeResult {
+    return createComputeQueueSmokePath(io, default_render_node);
 }
 
 /// Stand up a PM4 compute queue end-to-end on the given render node. Allocates
@@ -753,7 +753,7 @@ pub fn createComputeQueueSmokeDefault() ComputeQueueSmokeResult {
 /// @param render_node DRM render node backing the target GPU.
 /// @returns The full smoke report; `.ok()` is true on a clean create/destroy.
 /// @note Off Linux this short-circuits to `unsupported_os` without IO.
-pub fn createComputeQueueSmokePath(render_node: []const u8) ComputeQueueSmokeResult {
+pub fn createComputeQueueSmokePath(io: std.Io, render_node: []const u8) ComputeQueueSmokeResult {
     if (builtin.os.tag != .linux) {
         return .{ .status = .unsupported_os, .render_node = render_node };
     }
@@ -761,16 +761,16 @@ pub fn createComputeQueueSmokePath(render_node: []const u8) ComputeQueueSmokeRes
     var result: ComputeQueueSmokeResult = .{ .status = .ok, .render_node = render_node };
 
     const minor = renderMinorOf(render_node) orelse return cqFail(result, .topology_node_missing);
-    const topo = findTopologyNode(minor) orelse return cqFail(result, .topology_node_missing);
+    const topo = findTopologyNode(io, minor) orelse return cqFail(result, .topology_node_missing);
     result.gpu_id = topo.gpu_id;
     result.gfx_target_version = topo.gfx_target_version;
     result.ctx_save_restore_size = topo.cwsr_size;
     result.ctl_stack_size = topo.ctl_stack_size;
 
-    const kfd = std.fs.openFileAbsolute(kfd_device_node, .{ .mode = .read_write }) catch return cqFail(result, .kfd_open_failed);
-    defer kfd.close();
-    const drm = std.fs.openFileAbsolute(render_node, .{ .mode = .read_write }) catch return cqFail(result, .render_node_open_failed);
-    defer drm.close();
+    const kfd = std.Io.Dir.openFileAbsolute(io, kfd_device_node, .{ .mode = .read_write }) catch return cqFail(result, .kfd_open_failed);
+    defer kfd.close(io);
+    const drm = std.Io.Dir.openFileAbsolute(io, render_node, .{ .mode = .read_write }) catch return cqFail(result, .render_node_open_failed);
+    defer drm.close(io);
 
     var version: GetVersionArgs = std.mem.zeroes(GetVersionArgs);
     ioctlChecked(kfd.handle, ioc_get_version, @intFromPtr(&version)) catch return cqFailErrno(result, .get_version_failed);

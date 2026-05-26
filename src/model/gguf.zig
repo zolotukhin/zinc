@@ -369,7 +369,7 @@ pub fn parseWithOptions(data: []const u8, allocator: std.mem.Allocator, options:
     }
 
     // Parse tensor descriptors
-    var tensors: std.ArrayList(TensorInfo) = .{};
+    var tensors: std.ArrayList(TensorInfo) = .empty;
     errdefer tensors.deinit(allocator);
 
     for (0..tensor_count) |_| {

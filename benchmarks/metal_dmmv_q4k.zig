@@ -9,6 +9,12 @@
 // not the matvec kernel.
 
 const std = @import("std");
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
 const support = @import("zinc_bench_support");
 const metal_device = support.metal_device;
 const metal_command = support.metal_command;
@@ -34,10 +40,10 @@ const DmmvPush = extern struct {
     y_offset: u32,
 };
 
-fn loadShaderPipeline(ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
+fn loadShaderPipeline(io: std.Io, ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "src/shaders/metal/{s}.metal", .{name}) catch return error.PathTooLong;
-    const file = std.fs.cwd().openFile(path, .{}) catch return error.ShaderNotFound;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return error.ShaderNotFound;
     defer file.close();
     const stat = try file.stat();
     if (stat.size > 1024 * 1024) return error.ShaderTooLarge;
@@ -121,21 +127,20 @@ fn benchShape(
     // per-kernel GPU time amortized over the iterations, NOT one
     // commitAndWait per iter. This isolates kernel time from CPU
     // command-buffer overhead.
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestamp();
     var cmd = try metal_command.beginCommand(ctx);
     for (0..iters) |_| {
         cmd.dispatchV2(pipe, grid, block, &bufs, &push, @sizeOf(DmmvPush), 1);
     }
     cmd.commitAndWait();
-    const end = std.time.nanoTimestamp();
+    const end = nanoTimestamp();
 
     return @as(f64, @floatFromInt(end - start)) / @as(f64, @floatFromInt(iters));
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
     var device = try metal_device.MetalDevice.init(allocator, 0);
     defer device.deinit();
@@ -145,7 +150,7 @@ pub fn main() !void {
     };
     defer gpu_lock.deinit();
 
-    var pipe = try loadShaderPipeline(device.ctx, "dmmv_q4k");
+    var pipe = try loadShaderPipeline(io, device.ctx, "dmmv_q4k");
     defer metal_pipeline.freePipeline(&pipe);
 
     // Qwen3-8B Q4_K_M decode shapes (N=1).
@@ -174,7 +179,7 @@ pub fn main() !void {
     defer metal_buffer.freeBuffer(&y_buf);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     try stdout.interface.print(
         "dmmv_q4k decode microbenchmark (N=1) | GPU={s}\n",
         .{@tagName(device.chip)},

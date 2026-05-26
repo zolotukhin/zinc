@@ -3,6 +3,12 @@
 //! This is the Metal equivalent of forward.zig (Vulkan).
 //! Uses MSL compute shaders dispatched via the Metal shim.
 const std = @import("std");
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
 const config_mod = @import("../model/config.zig");
 const ModelConfig = config_mod.ModelConfig;
 const gguf = @import("../model/gguf.zig");
@@ -223,8 +229,12 @@ fn sampleFromLogits(logits: []const f32, history: []const u32, params: SamplingP
     return candidate_ids[keep_count - 1];
 }
 
+fn getenv(name: [*:0]const u8) ?[:0]const u8 {
+    return if (std.c.getenv(name)) |p| std.mem.span(p) else null;
+}
+
 fn readThreadgroupOverride(env_name: [:0]const u8, simd_width: u32, max_threads: u32) ?u32 {
-    const raw = std.posix.getenv(env_name) orelse return null;
+    const raw = getenv(env_name.ptr) orelse return null;
     if (simd_width == 0 or max_threads == 0) return null;
 
     const value = std.fmt.parseUnsigned(u32, raw, 10) catch return null;
@@ -420,14 +430,14 @@ fn shouldDebugAttentionValidation(cfg: ModelConfig, position: u32, layer_idx: us
 }
 
 fn readBoolEnv(env_name: [:0]const u8) ?bool {
-    const raw = std.posix.getenv(env_name) orelse return null;
+    const raw = getenv(env_name.ptr) orelse return null;
     if (std.mem.eql(u8, raw, "1") or std.ascii.eqlIgnoreCase(raw, "true") or std.ascii.eqlIgnoreCase(raw, "yes")) return true;
     if (std.mem.eql(u8, raw, "0") or std.ascii.eqlIgnoreCase(raw, "false") or std.ascii.eqlIgnoreCase(raw, "no")) return false;
     return null;
 }
 
 fn readU32Env(env_name: [:0]const u8) ?u32 {
-    const raw = std.posix.getenv(env_name) orelse return null;
+    const raw = getenv(env_name.ptr) orelse return null;
     return std.fmt.parseUnsigned(u32, raw, 10) catch null;
 }
 
@@ -727,12 +737,12 @@ pub const RuntimeProfile = struct {
 };
 
 fn profileStart(enabled: bool) i128 {
-    return if (enabled) std.time.nanoTimestamp() else -1;
+    return if (enabled) nanoTimestamp() else -1;
 }
 
 fn profileElapsedNs(start_ns: i128) u64 {
     if (start_ns < 0) return 0;
-    const end_ns = std.time.nanoTimestamp();
+    const end_ns = nanoTimestamp();
     if (end_ns <= start_ns) return 0;
     return @intCast(end_ns - start_ns);
 }
@@ -1838,18 +1848,18 @@ fn resolveMoeGateUpLayout(lt: LayerTensors, inter_dim: u32, hidden_dim: u32) !Mo
 const BatchedPrefillMode = enum { off, on, validate };
 
 fn batchedPrefillMode() BatchedPrefillMode {
-    const raw = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse return .off;
+    const raw = getenv("ZINC_BATCHED_PREFILL") orelse return .off;
     if (std.mem.eql(u8, raw, "1")) return .on;
     if (std.mem.eql(u8, raw, "validate")) return .validate;
     return .off;
 }
 
 fn batchedPrefillEnvPresent() bool {
-    return std.posix.getenv("ZINC_BATCHED_PREFILL") != null;
+    return getenv("ZINC_BATCHED_PREFILL") != null;
 }
 
 fn gemmaBatchedPrefillEnabled() bool {
-    const raw = std.posix.getenv("ZINC_GEMMA_BATCHED_PREFILL") orelse return false;
+    const raw = getenv("ZINC_GEMMA_BATCHED_PREFILL") orelse return false;
     return std.mem.eql(u8, raw, "1") or std.mem.eql(u8, raw, "validate");
 }
 
@@ -4587,11 +4597,11 @@ pub const InferenceEngine = struct {
     }
 
     fn canUseQwenLayer0RoutePackedPrefill(self: *const InferenceEngine, prompt_len: usize) bool {
-        const force_f32_shared_gate = if (std.posix.getenv("ZINC_QWEN36_LAYER0_ROUTE_PACK_PREFILL")) |raw|
+        const force_f32_shared_gate = if (getenv("ZINC_QWEN36_LAYER0_ROUTE_PACK_PREFILL")) |raw|
             std.mem.eql(u8, raw, "1") or std.ascii.eqlIgnoreCase(raw, "true") or std.ascii.eqlIgnoreCase(raw, "yes")
         else
             false;
-        if (std.posix.getenv("ZINC_QWEN36_LAYER0_ROUTE_PACK_PREFILL")) |raw| {
+        if (getenv("ZINC_QWEN36_LAYER0_ROUTE_PACK_PREFILL")) |raw| {
             if (std.mem.eql(u8, raw, "0")) return false;
         }
         return self.canUseQwenLayer0RoutePackedPrefillWithSharedGateMode(prompt_len, force_f32_shared_gate);
@@ -4615,7 +4625,7 @@ pub const InferenceEngine = struct {
     fn logQwenLayer0RoutePackedPrefillBlocker(self: *const InferenceEngine, prompt_len: usize) void {
         if (!self.profile_enabled) return;
 
-        if (std.posix.getenv("ZINC_QWEN36_LAYER0_ROUTE_PACK_PREFILL")) |raw| {
+        if (getenv("ZINC_QWEN36_LAYER0_ROUTE_PACK_PREFILL")) |raw| {
             if (std.mem.eql(u8, raw, "0")) {
                 log.info("Metal profile: Qwen route-packed prefill disabled: ZINC_QWEN36_LAYER0_ROUTE_PACK_PREFILL=0", .{});
                 return;
@@ -5642,7 +5652,7 @@ pub const InferenceEngine = struct {
                     }
                     if (self.config.architecture == .qwen2_moe and
                         self.config.ssm_d_inner > 0 and
-                        std.posix.getenv("ZINC_METAL_Q8_TG_SIZE") == null and
+                        getenv("ZINC_METAL_Q8_TG_SIZE") == null and
                         preferLlamaQ8SmallThreadgroupForQwenSsm(tensor, M, K) and
                         self.dmmv_q8_0_pipe.max_threads_per_threadgroup >= 128)
                     {
@@ -5710,7 +5720,7 @@ pub const InferenceEngine = struct {
 fn loadShaderPipeline(ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "src/shaders/metal/{s}.metal", .{name}) catch return error.PathTooLong;
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().openFile(path, .{}) catch |err| {
         log.err("Failed to open shader '{s}': {s}", .{ name, @errorName(err) });
         return error.ShaderNotFound;
     };
@@ -6873,7 +6883,7 @@ fn dispatchDmmvOnCmdWithWeightBuf(
             .y_offset = 0,
         };
         const bufs = [_]*const MetalBuffer{ weight_buf, input_buf, output_buf };
-        if (std.posix.getenv("ZINC_METAL_Q8_TG_SIZE") == null and
+        if (getenv("ZINC_METAL_Q8_TG_SIZE") == null and
             preferLlamaQ8SmallThreadgroupForQwenSsm(tensor, M, K) and
             engine.dmmv_q8_0_repacked_pipe.thread_execution_width == 32 and
             engine.dmmv_q8_0_repacked_pipe.max_threads_per_threadgroup >= 128)
@@ -17646,7 +17656,7 @@ pub fn generateWithMetrics(
     eos_id: u32,
     allocator: std.mem.Allocator,
 ) !GenerateResult {
-    var output: std.ArrayList(u32) = .{};
+    var output: std.ArrayList(u32) = .empty;
     errdefer output.deinit(allocator);
 
     const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
@@ -17659,13 +17669,13 @@ pub fn generateWithMetrics(
     state.requested_context_tokens = request_budget.target_context_tokens;
 
     // Prefill: process each prompt token through all layers
-    const prefill_start = std.time.nanoTimestamp();
+    const prefill_start = nanoTimestamp();
     if (prompt_tokens.len > 0) {
         try engine.prefillBatched(&state, prompt_tokens);
     } else {
         try engine.resetRequestState(state.requested_context_tokens);
     }
-    const prefill_end = std.time.nanoTimestamp();
+    const prefill_end = nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
     if (engine.profile_enabled) {
         engine.prefill_profile = engine.request_profile;
@@ -17700,7 +17710,7 @@ pub fn generateWithMetrics(
     }
 
     // Decode loop
-    const decode_start = std.time.nanoTimestamp();
+    const decode_start = nanoTimestamp();
     var tokens_generated: u32 = @intCast(output.items.len);
     while (tokens_generated < decode_budget and output.items.len > 0) {
         const input_token = output.items[output.items.len - 1];
@@ -17713,7 +17723,7 @@ pub fn generateWithMetrics(
         try state.generated_tokens.append(allocator, next_token);
         tokens_generated += 1;
     }
-    const decode_end = std.time.nanoTimestamp();
+    const decode_end = nanoTimestamp();
     const decode_ns: u64 = @intCast(decode_end - decode_start);
     const decode_tps = if (tokens_generated > 0 and decode_ns > 0)
         @as(f64, @floatFromInt(tokens_generated)) * 1_000_000_000.0 / @as(f64, @floatFromInt(decode_ns))

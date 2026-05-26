@@ -74,6 +74,7 @@ pub const AttentionDispatch = struct {
     /// @param allocator Allocator used for temporary pipeline creation state.
     /// @returns An AttentionDispatch ready to record flash-attention passes.
     pub fn init(
+        io: std.Io,
         /// Vulkan instance.
         instance: *const Instance,
         shader_dir: []const u8,
@@ -107,7 +108,7 @@ pub const AttentionDispatch = struct {
 
         // Flash attention: 6 bindings (Q, K cache, V cache, page table, output, per-head sinks)
         const attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
-        const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, attn_path, 6, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+        const pipeline = pipeline_mod.createFromSpirvWithOptions(io, instance, attn_path, 6, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
             log.warn("flash_attn shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -119,7 +120,7 @@ pub const AttentionDispatch = struct {
         // both the prefill batched path (n_queries=N) and the decode-shape
         // foundation gated by ZINC_BATCH_ATTN=1 (n_queries=1).
         const attn_batched_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_batched.spv", .{shader_dir}) catch unreachable;
-        const pipeline_batched = pipeline_mod.createFromSpirvWithOptions(instance, attn_batched_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+        const pipeline_batched = pipeline_mod.createFromSpirvWithOptions(io, instance, attn_batched_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
             log.warn("flash_attn_batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
@@ -135,7 +136,7 @@ pub const AttentionDispatch = struct {
         var pipeline_split: ?Pipeline = null;
         var pipeline_split_merge: ?Pipeline = null;
         var fa_split_k_active: u32 = 1;
-        const fa_split_k_env = std.posix.getenv("ZINC_FA_SPLIT_K");
+        const fa_split_k_env: ?[:0]const u8 = if (std.c.getenv("ZINC_FA_SPLIT_K")) |p| std.mem.span(p) else null;
         const fa_split_k_request: u32 = blk: {
             if (fa_split_k_env) |raw| {
                 const parsed = std.fmt.parseInt(u32, raw, 10) catch 0;
@@ -149,7 +150,7 @@ pub const AttentionDispatch = struct {
             // the flash_attn.spv path before specializing the split-K variant.
             const split_attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
             const split_specs = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = fa_split_k_request }};
-            pipeline_split = pipeline_mod.createFromSpirvWithOptions(instance, split_attn_path, 6, @sizeOf(FlashAttnPush), &split_specs, wave64_push_options, allocator) catch |err| blk: {
+            pipeline_split = pipeline_mod.createFromSpirvWithOptions(io, instance, split_attn_path, 6, @sizeOf(FlashAttnPush), &split_specs, wave64_push_options, allocator) catch |err| blk: {
                 log.warn("flash_attn split-K specialization not loaded: {s}", .{@errorName(err)});
                 break :blk null;
             };
@@ -159,7 +160,7 @@ pub const AttentionDispatch = struct {
             // The merge shader uses local_size_x=64 but does not require wave64;
             // still pass the same options for consistency with the other
             // wave64 attention pipelines.
-            pipeline_split_merge = pipeline_mod.createFromSpirvWithOptions(instance, merge_path, 3, @sizeOf(FlashAttnSplitMergePush), &merge_specs, wave64_push_options, allocator) catch |err| blk: {
+            pipeline_split_merge = pipeline_mod.createFromSpirvWithOptions(io, instance, merge_path, 3, @sizeOf(FlashAttnSplitMergePush), &merge_specs, wave64_push_options, allocator) catch |err| blk: {
                 log.warn("flash_attn_split_merge shader not loaded: {s}", .{@errorName(err)});
                 break :blk null;
             };

@@ -11,7 +11,9 @@ const log = std.log.scoped(.http);
 /// and writing JSON, error, and SSE responses.
 pub const Connection = struct {
     /// Underlying TCP stream to the client.
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
+    /// I/O interface for stream operations.
+    io: std.Io,
     /// Allocator used for per-connection allocations.
     allocator: std.mem.Allocator,
     /// Internal read buffer for request parsing (64 KiB).
@@ -25,11 +27,14 @@ pub const Connection = struct {
     /// @param self Active connection to read from.
     /// @returns Parsed request with method, path, and body.
     pub fn readRequest(self: *Connection) !Request {
+        var reader_buf: [8192]u8 = undefined;
+        var reader = self.stream.reader(self.io, &reader_buf);
+
         // Read data until we find \r\n\r\n (end of headers)
         var total: usize = 0;
         var header_end: ?usize = null;
         while (total < self.read_buf.len) {
-            const n = self.stream.read(self.read_buf[total..]) catch |err| {
+            const n = reader.interface.readSliceShort(self.read_buf[total..]) catch |err| {
                 if (total > 0) break;
                 return err;
             };
@@ -108,7 +113,9 @@ pub const Connection = struct {
             if (remaining > buf_remaining) return error.RequestTooLarge;
             var read_so_far: usize = 0;
             while (read_so_far < remaining) {
-                const n = try self.stream.read(self.read_buf[total + read_so_far .. total + read_so_far + remaining - read_so_far]);
+                const n = reader.interface.readSliceShort(self.read_buf[total + read_so_far .. total + read_so_far + remaining - read_so_far]) catch {
+                    break;
+                };
                 if (n == 0) break;
                 read_so_far += n;
             }
@@ -117,6 +124,14 @@ pub const Connection = struct {
 
         const body = if (content_length > 0) self.read_buf[hdr_end .. hdr_end + content_length] else "";
         return Request{ .method = method, .path = path, .body = body };
+    }
+
+    /// Helper to write all data to the stream.
+    pub fn streamWriteAll(self: *Connection, data: []const u8) !void {
+        var write_buf: [8192]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        w.interface.writeAll(data) catch return error.WriteFailed;
+        w.interface.flush() catch return error.WriteFailed;
     }
 
     /// Send a JSON response with the given HTTP status code.
@@ -137,8 +152,11 @@ pub const Connection = struct {
             else => "OK",
         };
         const header = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", .{ status, status_text, body.len }) catch return error.HeaderTooLarge;
-        try self.stream.writeAll(header);
-        try self.stream.writeAll(body);
+        var write_buf: [8192]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        w.interface.writeAll(header) catch return error.WriteFailed;
+        w.interface.writeAll(body) catch return error.WriteFailed;
+        w.interface.flush() catch return error.WriteFailed;
     }
 
     /// Send an OpenAI-format JSON error response.
@@ -157,7 +175,7 @@ pub const Connection = struct {
     /// @param self Active connection to write to.
     pub fn sendSseStart(self: *Connection) !void {
         const header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n";
-        try self.stream.writeAll(header);
+        try self.streamWriteAll(header);
     }
 
     /// Write a single SSE event as a chunked transfer-encoding frame.
@@ -171,11 +189,14 @@ pub const Connection = struct {
         const event_suffix = "\n\n";
         const chunk_len = event_prefix.len + data.len + event_suffix.len;
         const size_str = std.fmt.bufPrint(&size_buf, "{x}\r\n", .{chunk_len}) catch unreachable;
-        try self.stream.writeAll(size_str);
-        try self.stream.writeAll(event_prefix);
-        try self.stream.writeAll(data);
-        try self.stream.writeAll(event_suffix);
-        try self.stream.writeAll("\r\n");
+        var write_buf: [8192]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        w.interface.writeAll(size_str) catch return error.WriteFailed;
+        w.interface.writeAll(event_prefix) catch return error.WriteFailed;
+        w.interface.writeAll(data) catch return error.WriteFailed;
+        w.interface.writeAll(event_suffix) catch return error.WriteFailed;
+        w.interface.writeAll("\r\n") catch return error.WriteFailed;
+        w.interface.flush() catch return error.WriteFailed;
     }
 
     /// Write the final SSE `[DONE]` event and send the chunked transfer terminator.
@@ -183,7 +204,7 @@ pub const Connection = struct {
     pub fn writeSseDone(self: *Connection) !void {
         try self.writeSseEvent("[DONE]");
         // Chunked terminator: 0\r\n\r\n
-        try self.stream.writeAll("0\r\n\r\n");
+        try self.streamWriteAll("0\r\n\r\n");
     }
 
     /// Check whether the remote peer has already closed the streaming connection.
@@ -193,22 +214,24 @@ pub const Connection = struct {
     /// @returns True when the peer is gone, false when it still appears connected.
     pub fn isPeerClosed(self: *Connection) bool {
         var probe: [1]u8 = undefined;
-        const peek_flags = std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT;
-        const bytes = std.posix.recv(self.stream.handle, &probe, peek_flags) catch |err| switch (err) {
-            error.WouldBlock => return false,
-            error.ConnectionResetByPeer,
-            error.ConnectionTimedOut,
-            error.SocketNotConnected,
-            => return true,
-            else => return false,
-        };
-        return bytes == 0;
+        const peek_flags = @as(u32, std.os.linux.MSG.PEEK | std.os.linux.MSG.DONTWAIT);
+        const rc = std.os.linux.recvfrom(self.stream.socket.handle, &probe, probe.len, peek_flags, null, null);
+        const signed: isize = @bitCast(rc);
+        if (signed < 0) {
+            const err = std.os.linux.errno(rc);
+            return switch (err) {
+                .AGAIN => false, // EWOULDBLOCK
+                .CONNRESET, .TIMEDOUT, .NOTCONN => true,
+                else => false,
+            };
+        }
+        return rc == 0;
     }
 
     /// Close the underlying TCP stream.
     /// @param self Connection to close.
     pub fn close(self: *Connection) void {
-        self.stream.close();
+        self.stream.close(self.io);
     }
 };
 
@@ -226,32 +249,35 @@ pub const Request = struct {
 /// Accepts connections and wraps them in Connection structs for request handling.
 pub const Server = struct {
     /// Underlying TCP listener.
-    listener: std.net.Server,
+    listener: std.Io.net.Server,
+    /// I/O interface for network operations.
+    io: std.Io,
     /// Allocator passed to accepted connections.
     allocator: std.mem.Allocator,
 
     /// Bind to all interfaces on the given port and start listening.
     /// @param allocator Allocator for connection resources.
     /// @param port TCP port to listen on.
+    /// @param io I/O interface for network operations.
     /// @returns A Server ready to accept connections.
-    pub fn init(allocator: std.mem.Allocator, port: u16) !Server {
-        const address = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-        const listener = try address.listen(.{ .reuse_address = true });
-        return Server{ .listener = listener, .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, port: u16, io: std.Io) !Server {
+        var address = std.Io.net.IpAddress{ .ip4 = .{ .port = port, .bytes = .{ 0, 0, 0, 0 } } };
+        const listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
+        return Server{ .listener = listener, .io = io, .allocator = allocator };
     }
 
     /// Block until a client connects, then return a Connection for that client.
     /// @param self Active server to accept on.
     /// @returns A new Connection wrapping the accepted TCP stream.
     pub fn accept(self: *Server) !Connection {
-        const conn = try self.listener.accept();
-        return Connection{ .stream = conn.stream, .allocator = self.allocator };
+        const stream = try self.listener.accept(self.io);
+        return Connection{ .stream = stream, .io = self.io, .allocator = self.allocator };
     }
 
     /// Stop listening and release the server socket.
     /// @param self Server to tear down.
     pub fn deinit(self: *Server) void {
-        self.listener.deinit();
+        self.listener.deinit(self.io);
     }
 };
 
