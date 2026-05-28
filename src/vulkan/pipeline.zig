@@ -105,12 +105,7 @@ pub fn createFromSpirvWithOptions(
     const stat = try file.stat(io);
     const spirv_code = try allocator.alloc(u8, stat.size);
     defer allocator.free(spirv_code);
-    var total_read: usize = 0;
-    while (total_read < stat.size) {
-        const n = try file.readStreaming(io, &.{spirv_code[total_read..]});
-        if (n == 0) break;
-        total_read += n;
-    }
+    const total_read = try file.readPositionalAll(io, spirv_code, 0);
     if (total_read != stat.size) return error.ShaderReadIncomplete;
 
     // Create shader module

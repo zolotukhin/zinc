@@ -1577,14 +1577,15 @@ pub fn main(init: std.process.Init) !void {
         };
         defer check_target.deinit(allocator);
 
+        const resolved_shader_dir = if (!gpu.is_metal) resolveShaderDir(io, allocator) catch null else null;
+        defer if (resolved_shader_dir) |d| allocator.free(d);
+
         diagnostics_mod.run(io, .{
             .device_index = config.device_index,
             .model_path = check_target.model_path,
             .requested_context_length = config.context_length,
             .managed_model = check_target.managed_model,
-            .shader_dir = if (gpu.is_metal) "src/shaders/metal" else blk: {
-                break :blk resolveShaderDir(io, allocator) catch "zig-out/share/zinc/shaders";
-            },
+            .shader_dir = if (gpu.is_metal) "src/shaders/metal" else resolved_shader_dir orelse "zig-out/share/zinc/shaders",
         }, allocator) catch |err| {
             log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
             std.process.exit(1);
