@@ -181,7 +181,7 @@ fn decodeOutputText(
     chat: bool,
     allocator: std.mem.Allocator,
 ) ![]u8 {
-    var text_buf: std.ArrayList(u8) = .{};
+    var text_buf: std.ArrayList(u8) = .empty;
     defer text_buf.deinit(allocator);
 
     for (output_tokens) |tid| {
@@ -353,26 +353,30 @@ fn printProfileSummary(
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_it = std.process.Args.Iterator.init(init.minimal.args);
+    var args_list = std.ArrayList([:0]const u8).init(allocator);
+    defer args_list.deinit();
+    while (args_it.next()) |arg| {
+        try args_list.append(arg);
+    }
+    const args = args_list.items;
 
     const config = parseArgs(args) catch |err| {
-        std.fs.File.stderr().writeAll(helpText()) catch {};
+        std.Io.File.stderr().writeAll(helpText()) catch {};
         return err;
     };
 
     if (config.show_help) {
-        try std.fs.File.stdout().writeAll(helpText());
+        try std.Io.File.stdout().writeAll(helpText());
         return;
     }
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
 
     var device = try metal_device.MetalDevice.init(allocator, config.device_index);
     defer device.deinit();

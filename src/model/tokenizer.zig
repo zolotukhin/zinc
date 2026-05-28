@@ -114,7 +114,7 @@ pub const Tokenizer = struct {
         }
 
         // Read BPE merges if available
-        var merges_list: std.ArrayListAligned(Merge, null) = .{};
+        var merges_list: std.ArrayListAligned(Merge, null) = .empty;
         errdefer merges_list.deinit(allocator);
 
         if (gf.metadata.get("tokenizer.ggml.merges")) |merges_val| {
@@ -200,7 +200,7 @@ pub const Tokenizer = struct {
             merge_ranks.deinit();
         }
         try merge_ranks.ensureTotalCapacity(@intCast(merges_owned.len));
-        var key_buf: std.ArrayList(u8) = .{};
+        var key_buf: std.ArrayList(u8) = .empty;
         defer key_buf.deinit(allocator);
         for (merges_owned) |merge| {
             key_buf.clearRetainingCapacity();
@@ -281,10 +281,10 @@ pub const Tokenizer = struct {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
 
         // Start with GPT-2 byte-level encoding: each raw byte maps to a Unicode char
-        var symbols: std.ArrayList([]const u8) = .{};
+        var symbols: std.ArrayList([]const u8) = .empty;
         defer symbols.deinit(self.allocator);
 
-        var owned_symbols: std.ArrayList([]u8) = .{};
+        var owned_symbols: std.ArrayList([]u8) = .empty;
         defer {
             for (owned_symbols.items) |sym| self.allocator.free(sym);
             owned_symbols.deinit(self.allocator);
@@ -339,7 +339,7 @@ pub const Tokenizer = struct {
         }
 
         // Convert symbol strings to token IDs
-        var tokens: std.ArrayList(u32) = .{};
+        var tokens: std.ArrayList(u32) = .empty;
         errdefer tokens.deinit(self.allocator);
 
         for (symbols.items) |sym| {
@@ -459,7 +459,7 @@ pub const Tokenizer = struct {
     pub fn encode(self: *const Tokenizer, text: []const u8) ![]u32 {
         if (text.len == 0) return try self.allocator.alloc(u32, 0);
         if (self.pretokenizer == .gemma4_bpe) {
-            var tokens: std.ArrayList(u32) = .{};
+            var tokens: std.ArrayList(u32) = .empty;
             errdefer tokens.deinit(self.allocator);
 
             var pos: usize = 0;
@@ -483,7 +483,7 @@ pub const Tokenizer = struct {
             return self.encodeChunk(text);
         }
 
-        var tokens: std.ArrayList(u32) = .{};
+        var tokens: std.ArrayList(u32) = .empty;
         errdefer tokens.deinit(self.allocator);
 
         var pos: usize = 0;
@@ -547,7 +547,7 @@ pub const Tokenizer = struct {
             return out;
         }
 
-        var tokens: std.ArrayList(u32) = .{};
+        var tokens: std.ArrayList(u32) = .empty;
         errdefer tokens.deinit(allocator);
 
         var pos: usize = 0;
@@ -633,7 +633,7 @@ pub const Tokenizer = struct {
         const ranks_ptr: *const std.StringHashMap(u32) = merge_ranks orelse blk: {
             fallback_ranks = std.StringHashMap(u32).init(self.allocator);
             fallback_owned = true;
-            var kb: std.ArrayList(u8) = .{};
+            var kb: std.ArrayList(u8) = .empty;
             defer kb.deinit(self.allocator);
             for (self.merges) |merge| {
                 kb.clearRetainingCapacity();
@@ -647,7 +647,7 @@ pub const Tokenizer = struct {
         };
 
         // Pre-allocate merge key buffer
-        var key_buf: std.ArrayList(u8) = .{};
+        var key_buf: std.ArrayList(u8) = .empty;
         defer key_buf.deinit(self.allocator);
 
         // Repeatedly find and apply the highest-priority (lowest rank) merge
@@ -879,7 +879,7 @@ pub const Tokenizer = struct {
         var wrote_any = false;
         while (src_pos < text.len) {
             if (std.mem.indexOfPos(u8, text, src_pos, "<|channel>")) |open_idx| {
-                const chunk = if (wrote_any) text[src_pos..open_idx] else std.mem.trimLeft(u8, text[src_pos..open_idx], " \t\r\n");
+                const chunk = if (wrote_any) text[src_pos..open_idx] else std.mem.trimStart(u8, text[src_pos..open_idx], " \t\r\n");
                 if (pos.* + chunk.len > dst.len) return error.BufferTooSmall;
                 @memcpy(dst[pos.*..][0..chunk.len], chunk);
                 pos.* += chunk.len;
@@ -891,7 +891,7 @@ pub const Tokenizer = struct {
                     break;
                 }
             } else {
-                const chunk = if (wrote_any) std.mem.trimRight(u8, text[src_pos..], " \t\r\n") else std.mem.trim(u8, text[src_pos..], " \t\r\n");
+                const chunk = if (wrote_any) std.mem.trimEnd(u8, text[src_pos..], " \t\r\n") else std.mem.trim(u8, text[src_pos..], " \t\r\n");
                 if (pos.* + chunk.len > dst.len) return error.BufferTooSmall;
                 @memcpy(dst[pos.*..][0..chunk.len], chunk);
                 pos.* += chunk.len;
@@ -946,7 +946,7 @@ pub const Tokenizer = struct {
                             pos += open.len;
                         }
 
-                        var trbuf: std.ArrayList(u8) = .{};
+                        var trbuf: std.ArrayList(u8) = .empty;
                         defer trbuf.deinit(tool_alloc);
                         try options.tool_format.?.renderToolResultMessage("", contents[i], &trbuf, tool_alloc);
                         if (pos + trbuf.items.len > buf.len) return error.BufferTooSmall;
@@ -969,7 +969,7 @@ pub const Tokenizer = struct {
                     if (!tools_rendered and options.tools.len > 0 and options.tool_format != null and
                         (std.mem.eql(u8, roles[i], "system") or std.mem.eql(u8, roles[i], "developer")))
                     {
-                        var tool_buf: std.ArrayList(u8) = .{};
+                        var tool_buf: std.ArrayList(u8) = .empty;
                         defer tool_buf.deinit(tool_alloc);
                         try options.tool_format.?.renderToolDefinitions(options.tools, &tool_buf, tool_alloc);
                         if (pos + tool_buf.items.len > buf.len) return error.BufferTooSmall;
@@ -985,7 +985,7 @@ pub const Tokenizer = struct {
                 if (!tools_rendered and options.tools.len > 0 and options.tool_format != null) {
                     const open = std.fmt.bufPrint(buf[pos..], "<|im_start|>system", .{}) catch return error.BufferTooSmall;
                     pos += open.len;
-                    var tool_buf: std.ArrayList(u8) = .{};
+                    var tool_buf: std.ArrayList(u8) = .empty;
                     defer tool_buf.deinit(tool_alloc);
                     try options.tool_format.?.renderToolDefinitions(options.tools, &tool_buf, tool_alloc);
                     if (pos + tool_buf.items.len > buf.len) return error.BufferTooSmall;
@@ -1181,7 +1181,7 @@ test "initFromGGUF populates merge_ranks cache when merges are present" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1216,7 +1216,7 @@ test "initFromGGUF omits BOS for qwen35 family (no BOS in GGUF)" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1246,7 +1246,7 @@ test "initFromGGUF omits BOS and uses BPE for qwen3_5 aliases" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1283,7 +1283,7 @@ test "initFromGGUF omits BOS for gpt-oss prompts by default" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1313,7 +1313,7 @@ test "initFromGGUF respects gemma4 add_bos_token=false" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };
@@ -1344,7 +1344,7 @@ test "initFromGGUF respects gemma4 add_bos_token=true" {
         .version = .v3,
         .tensor_count = 0,
         .metadata = .{},
-        .tensors = .{},
+        .tensors = .empty,
         .tensor_data_offset = 0,
         .allocator = allocator,
     };

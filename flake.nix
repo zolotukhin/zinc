@@ -12,9 +12,9 @@
         pkgs = nixpkgs.legacyPackages.${system};
 
         # zig 0.15.x is currently in nixpkgs as zigpkgs or via the master
-        # overlay; fall back to pkgs.zig if pkgs.zig_0_15 is not yet present.
+        # overlay; fall back to pkgs.zig if pkgs.zig_0_16 is not yet present.
         zigPkg =
-          if pkgs ? zig_0_15 then pkgs.zig_0_15
+          if pkgs ? zig_0_16 then pkgs.zig_0_16
           else if pkgs ? zig then pkgs.zig
           else throw "No suitable Zig package found in nixpkgs. Use an up-to-date nixpkgs-unstable channel.";
 

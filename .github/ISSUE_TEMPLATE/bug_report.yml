@@ -75,7 +75,7 @@ body:
     id: zig
     attributes:
       label: Zig version
-      placeholder: 0.15.2
+      placeholder: 0.16.0
     validations:
       required: true
 

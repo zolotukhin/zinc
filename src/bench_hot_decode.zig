@@ -4,6 +4,12 @@
 //! Run via `zig build hot-bench -Doptimize=ReleaseFast`.
 //! @section Inference Runtime
 const std = @import("std");
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
 const vk = @import("vulkan/vk.zig");
 const Instance = @import("vulkan/instance.zig").Instance;
 const CommandPool = @import("vulkan/command.zig").CommandPool;
@@ -216,7 +222,7 @@ fn printUsage() void {
     , .{});
 }
 
-fn resolveShaderDir(allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
+fn resolveShaderDir(io: std.Io, allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
     if (override) |path| return allocator.dupe(u8, path);
 
     const candidates = [_][]const u8{
@@ -224,7 +230,7 @@ fn resolveShaderDir(allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
         "share/zinc/shaders",
     };
     for (candidates) |candidate| {
-        std.fs.cwd().access(candidate, .{}) catch continue;
+        std.Io.Dir.cwd().access(io, candidate, .{}) catch continue;
         return allocator.dupe(u8, candidate);
     }
 
@@ -233,7 +239,7 @@ fn resolveShaderDir(allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
     const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
     const derived = try std.fs.path.join(allocator, &.{ exe_dir, "..", "share", "zinc", "shaders" });
     errdefer allocator.free(derived);
-    std.fs.cwd().access(derived, .{}) catch return error.ShaderDirNotFound;
+    std.Io.Dir.cwd().access(io, derived, .{}) catch return error.ShaderDirNotFound;
     return derived;
 }
 
@@ -506,9 +512,9 @@ fn runRecorded(
     timer: *const TimestampTimer,
 ) !struct { gpu_ms: f64, wall_ms: f64 } {
     try cmd.end();
-    const wall_start = std.time.nanoTimestamp();
+    const wall_start = nanoTimestamp();
     try cmd.submitAndWait(queue);
-    const wall_end = std.time.nanoTimestamp();
+    const wall_end = nanoTimestamp();
     return .{
         .gpu_ms = try timer.elapsedMs(),
         .wall_ms = @as(f64, @floatFromInt(wall_end - wall_start)) / 1_000_000.0,
@@ -772,10 +778,11 @@ pub fn main() !void {
         if (leaked == .leak) log.err("memory leak detected", .{});
     }
     const allocator = gpa.allocator();
+    const io = std.Io.buffered(std.Io.default);
 
     var args = try parseArgs(allocator);
     defer args.deinit(allocator);
-    const shader_dir = try resolveShaderDir(allocator, args.shader_dir);
+    const shader_dir = try resolveShaderDir(io, allocator, args.shader_dir);
     defer allocator.free(shader_dir);
 
     const model_cfg = try loadBenchModelConfig(args.model_path, allocator);
@@ -792,7 +799,7 @@ pub fn main() !void {
     var timer = try TimestampTimer.init(&instance);
     defer timer.deinit();
 
-    var dmmv = try DmmvDispatch.init(&instance, &gpu_cfg, shader_dir, @max(model_cfg.hidden_dim, model_cfg.ssm_d_inner), allocator);
+    var dmmv = try DmmvDispatch.init(io, &instance, &gpu_cfg, shader_dir, @max(model_cfg.hidden_dim, model_cfg.ssm_d_inner), allocator);
     defer dmmv.deinit();
     var elt = try ElementwiseDispatch.init(&instance, shader_dir, allocator);
     defer elt.deinit();
@@ -805,7 +812,7 @@ pub fn main() !void {
     }
     log.info("Working set: {d} rotating buffer sets", .{args.working_set});
 
-    var results: std.ArrayList(BenchResult) = .{};
+    var results: std.ArrayList(BenchResult) = .empty;
     defer results.deinit(allocator);
 
     for (cases) |case| {
@@ -827,7 +834,7 @@ pub fn main() !void {
     if (results.items.len == 0) return error.NoCasesMatched;
 
     if (args.json) {
-        var stdout = std.fs.File.stdout().writerStreaming(&.{});
+        var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
         defer stdout.end() catch {};
         try std.json.Stringify.value(results.items, .{ .whitespace = .indent_2 }, &stdout.interface);
         try stdout.interface.writeByte('\n');

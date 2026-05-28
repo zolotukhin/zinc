@@ -32,27 +32,34 @@ const CliOptions = struct {
 /// dispatches to the help, probe, prompt, or T-CPU smoke path.
 /// @returns Propagates any allocation, argument, or runtime error; exits
 /// with status 1 on argument or tier-parse failures.
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+
+    var args_it = std.process.Args.Iterator.init(init.minimal.args);
+    var arg_list: std.ArrayList([]const u8) = .empty;
+    defer arg_list.deinit(allocator);
+    while (args_it.next()) |arg| {
+        try arg_list.append(allocator, arg);
+    }
+    const args = arg_list.items;
 
     const options = parseArgs(args) catch |err| {
         var stderr_buffer: [1024]u8 = undefined;
-        var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
+        var stderr = std.Io.File.stderr().writerStreaming(io, &stderr_buffer);
         try stderr.interface.print("error(zinc_rt): argument error: {s}\n", .{@errorName(err)});
         try stderr.interface.flush();
         std.process.exit(1);
     };
 
     if (options.show_help) {
-        try printHelp();
+        try printHelp(io);
         return;
     }
 
-    const tier = engine.tierFromEnv() catch |err| {
+    const tier = engine.tierFromEnv(io) catch |err| {
         var stderr_buffer: [1024]u8 = undefined;
-        var stderr = std.fs.File.stderr().writerStreaming(&stderr_buffer);
+        var stderr = std.Io.File.stderr().writerStreaming(io, &stderr_buffer);
         try stderr.interface.print("error(zinc_rt): invalid ZINC_RT_TIER: {s}\n", .{@errorName(err)});
         try stderr.interface.flush();
         std.process.exit(1);
@@ -62,17 +69,17 @@ pub fn main() !void {
     defer rt.deinit();
 
     if (options.probe_tier) {
-        try runTierProbe(rt.tier);
+        try runTierProbe(io, rt.tier);
         return;
     }
 
     if (options.prompt) |_| {
-        try runPromptMode(&rt, options);
+        try runPromptMode(io, &rt, options);
         return;
     }
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     if (rt.tier == .t_cpu) {
         try stdout.interface.writeAll(
             "info(zinc_rt): M0 runtime initialized (tier=t_cpu); pass --prompt to run the T-CPU packet smoke path.\n",
@@ -139,9 +146,9 @@ fn optionTakesValue(arg: []const u8) bool {
         std.mem.eql(u8, arg, "-d");
 }
 
-fn printHelp() !void {
+fn printHelp(io: std.Io) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     try stdout.interface.writeAll(
         \\Usage: zinc -m model.gguf --prompt "Hello"
         \\       ZINC_RT_TIER=t2_umq zinc --probe-tier
@@ -154,17 +161,17 @@ fn printHelp() !void {
     try stdout.interface.flush();
 }
 
-fn runTierProbe(tier: engine.Tier) !void {
+fn runTierProbe(io: std.Io, tier: engine.Tier) !void {
     var stdout_buffer: [2048]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
-    try printTierStartupAndSmoke(&stdout, tier);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
+    try printTierStartupAndSmoke(io, &stdout, tier);
     try stdout.interface.flush();
 }
 
-fn runPromptMode(rt: *const engine.Engine, options: CliOptions) !void {
+fn runPromptMode(io: std.Io, rt: *const engine.Engine, options: CliOptions) !void {
     var stdout_buffer: [2048]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
-    try printTierStartupAndSmoke(&stdout, rt.tier);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
+    try printTierStartupAndSmoke(io, &stdout, rt.tier);
     if (options.model_path) |model_path| {
         try stdout.interface.print("info(zinc_rt): Model: {s}\n", .{model_path});
     }
@@ -178,7 +185,7 @@ fn runPromptMode(rt: *const engine.Engine, options: CliOptions) !void {
                 "info(zinc_rt): forward_zinc_rt M1 host-assisted path with direct token-boundary gate\n",
             );
             try stdout.interface.flush();
-            try runForwardPrompt(rt.tier, model_path, prompt, options.max_tokens, options.chat);
+            try runForwardPrompt(io, rt.tier, model_path, prompt, options.max_tokens, options.chat);
             return;
         }
     }
@@ -191,18 +198,18 @@ fn runPromptMode(rt: *const engine.Engine, options: CliOptions) !void {
     try stdout.interface.flush();
 }
 
-fn printTierStartupAndSmoke(stdout: anytype, tier: engine.Tier) !void {
+fn printTierStartupAndSmoke(io: std.Io, stdout: anytype, tier: engine.Tier) !void {
     if (tier == .t_cpu) {
         try stdout.interface.writeAll("info(zinc_rt): ZINC_RT M0 runtime initialized (tier=t_cpu)\n");
     } else if (tier == .t2_umq) {
         try stdout.interface.writeAll("info(zinc_rt): ZINC_RT M1 runtime initialized (tier=t2_umq)\n");
-        const smoke = zinc_rt.umq.createFreeSmokeDefault();
+        const smoke = zinc_rt.umq.createFreeSmokeDefault(io);
         try printUmqSmokeResult(stdout, smoke);
     } else if (tier == .t1_pm4) {
         try stdout.interface.writeAll("info(zinc_rt): ZINC_RT M1 runtime initialized (tier=t1_pm4)\n");
-        const smoke = zinc_rt.kfd.createComputeQueueSmokeDefault();
+        const smoke = zinc_rt.kfd.createComputeQueueSmokeDefault(io);
         try printKfdSmokeResult(stdout, smoke);
-        const cs_smoke = zinc_rt.cs.submitNopSmokeDefault();
+        const cs_smoke = zinc_rt.cs.submitNopSmokeDefault(io);
         try printCsSmokeResult(stdout, cs_smoke);
     } else {
         try stdout.interface.print(
@@ -212,10 +219,10 @@ fn printTierStartupAndSmoke(stdout: anytype, tier: engine.Tier) !void {
     }
 }
 
-fn runForwardPrompt(tier: engine.Tier, model_path: []const u8, prompt: []const u8, max_tokens: u32, chat: bool) !void {
+fn runForwardPrompt(io: std.Io, tier: engine.Tier, model_path: []const u8, prompt: []const u8, max_tokens: u32, chat: bool) !void {
     const allocator = std.heap.page_allocator;
 
-    var model = try forward_zinc_rt.Model.load(model_path, allocator);
+    var model = try forward_zinc_rt.Model.load(io, model_path, allocator);
     defer model.deinit();
 
     var tokenizer = try forward_zinc_rt.initTokenizer(&model, allocator);
@@ -233,6 +240,7 @@ fn runForwardPrompt(tier: engine.Tier, model_path: []const u8, prompt: []const u
     defer allocator.free(prompt_tokens);
 
     var result = try forward_zinc_rt.generateWithOptions(
+        io,
         &model,
         prompt_tokens,
         max_tokens,
@@ -243,7 +251,7 @@ fn runForwardPrompt(tier: engine.Tier, model_path: []const u8, prompt: []const u
     defer result.deinit(allocator);
 
     var stdout_buffer: [8192]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
 
     const prefill_tps = tokPerSec(prompt_tokens.len, result.prefill_ns);
     try stdout.interface.print("info(zinc_rt): Prompt tokens ({d}): {any}\n", .{
@@ -268,7 +276,7 @@ fn runForwardPrompt(tier: engine.Tier, model_path: []const u8, prompt: []const u
         ms_per_tok,
     });
 
-    var text_buf: std.ArrayList(u8) = .{};
+    var text_buf: std.ArrayList(u8) = .empty;
     defer text_buf.deinit(allocator);
     for (result.tokens) |token_id| {
         var dec_buf: [256]u8 = undefined;

@@ -5,6 +5,12 @@
 //! managed model fits once runtime allocations and KV reservation are included.
 //! @section Hardware Detection
 const std = @import("std");
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
 const builtin = @import("builtin");
 const metal_c = @import("metal/c.zig").shim;
 const metal_device = @import("metal/device.zig");
@@ -48,16 +54,20 @@ pub const ManagedModelInfo = struct {
     status_label: []const u8,
 };
 
+fn getenv(name: [*:0]const u8) ?[:0]const u8 {
+    return if (std.c.getenv(name)) |p| std.mem.span(p) else null;
+}
+
 const Styles = struct {
     enabled: bool,
 
-    fn detect(stdout_file: std.fs.File) Styles {
-        const no_color = std.posix.getenv("NO_COLOR") != null;
+    fn detect(io: std.Io, stdout_file: std.Io.File) Styles {
+        const no_color = getenv("NO_COLOR") != null;
         const force_color =
-            isTruthy(std.posix.getenv("FORCE_COLOR")) or
-            isTruthy(std.posix.getenv("CLICOLOR_FORCE"));
+            isTruthy(getenv("FORCE_COLOR")) or
+            isTruthy(getenv("CLICOLOR_FORCE"));
         return .{
-            .enabled = shouldUseColor(stdout_file.isTty(), std.posix.getenv("TERM"), no_color, force_color),
+            .enabled = shouldUseColor(stdout_file.isTty(io), getenv("TERM"), no_color, force_color),
         };
     }
 
@@ -187,18 +197,18 @@ const required_shader_files = [_][]const u8{
 };
 
 /// Run Metal system diagnostics and output a readable preflight report to stdout.
-pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
-    const stdout_file = std.fs.File.stdout();
+pub fn run(io: std.Io, opts: Options, allocator: std.mem.Allocator) !void {
+    const stdout_file = std.Io.File.stdout();
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = stdout_file.writerStreaming(&stdout_buffer);
+    var stdout_writer = stdout_file.writerStreaming(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    const styles = Styles.detect(stdout_file);
+    const styles = Styles.detect(io, stdout_file);
     var summary = Summary{};
 
     try stdout.print("\n=== ZINC System Diagnostics ===\n", .{});
     try stdout.flush();
 
-    const step1_start = std.time.nanoTimestamp();
+    const step1_start = nanoTimestamp();
     try printStepHeader(stdout, styles, 1, 4, "Host Environment");
     try printStatusLine(stdout, styles, &summary, if (builtin.os.tag == .macos) .ok else .fail, "OS", "{s}", .{@tagName(builtin.os.tag)});
     try printStatusLine(stdout, styles, &summary, if (builtin.cpu.arch == .aarch64) .ok else .fail, "CPU arch", "{s}", .{@tagName(builtin.cpu.arch)});
@@ -208,7 +218,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     var maybe_device: ?MetalDevice = null;
     defer if (maybe_device) |*device| device.deinit();
 
-    const step2_start = std.time.nanoTimestamp();
+    const step2_start = nanoTimestamp();
     try printStepHeader(stdout, styles, 2, 4, "Metal Device");
     try printCheckingLine(stdout, styles, "Metal device init and capability query");
     if (MetalDevice.init(allocator, opts.device_index)) |device| {
@@ -282,7 +292,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     }
     try printStepDuration(stdout, styles, step2_start);
 
-    const step3_start = std.time.nanoTimestamp();
+    const step3_start = nanoTimestamp();
     try printStepHeader(stdout, styles, 3, 4, "Metal Runtime Assets");
     try printCheckingLine(stdout, styles, "Metal shader sources");
     const shader_dir = if (opts.shader_dir.len == 0) "src/shaders/metal" else opts.shader_dir;
@@ -328,7 +338,7 @@ pub fn run(opts: Options, allocator: std.mem.Allocator) !void {
     }
     try printStepDuration(stdout, styles, step3_start);
 
-    const step4_start = std.time.nanoTimestamp();
+    const step4_start = nanoTimestamp();
     try printStepHeader(stdout, styles, 4, 4, "Model File");
     if (opts.managed_model) |managed| {
         try printStatusLine(stdout, styles, &summary, .ok, "Managed model", "{s} ({s})", .{ managed.id, managed.status_label });
@@ -518,7 +528,7 @@ fn inspectShaderSourcesInDir(dir: std.fs.Dir) ShaderSourceCheck {
 }
 
 fn inspectShaderSources(dir_path: []const u8) !ShaderSourceCheck {
-    var dir = try std.fs.cwd().openDir(dir_path, .{});
+    var dir = try std.Io.Dir.cwd().openDir(dir_path, .{});
     defer dir.close();
     return inspectShaderSourcesInDir(dir);
 }
@@ -587,7 +597,7 @@ fn printDetailLine(writer: anytype, label: []const u8, comptime value_fmt: []con
 }
 
 fn printStepDuration(writer: anytype, styles: Styles, start_ns: i128) !void {
-    const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+    const elapsed_ns = nanoTimestamp() - start_ns;
     try printStyled(writer, styles, "2", "  Step time: ", .{});
     try printDurationValue(writer, elapsed_ns);
     try writer.print("\n", .{});

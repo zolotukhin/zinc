@@ -169,7 +169,7 @@ test "wrapMmap wraps page-aligned memory" {
     const data = try std.posix.mmap(
         null,
         size,
-        std.posix.PROT.READ | std.posix.PROT.WRITE,
+        std.posix.PROT{ .READ = true, .WRITE = true },
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,

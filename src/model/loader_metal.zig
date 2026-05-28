@@ -39,7 +39,7 @@ pub const Model = struct {
     tensors: std.ArrayList(LoadedTensor),
     tensor_arenas: std.ArrayList(MetalBuffer),
     mmap_data: ?[]align(std.heap.page_size_min) const u8,
-    mmap_file: ?std.fs.File,
+    mmap_file: ?std.Io.File,
     allocator: std.mem.Allocator,
     /// Residency set wiring all model weight buffers down on macOS 15+.
     /// Null on older systems or if creation failed (the loader logs and degrades).
@@ -321,8 +321,8 @@ fn shouldPackCopiedTensorArenas(config: ModelConfig) bool {
     return config.architecture == .gemma and config.n_experts == 0 and config.hidden_dim >= 5000;
 }
 
-fn readBoolEnv(env_name: [:0]const u8) ?bool {
-    const raw = std.posix.getenv(env_name) orelse return null;
+fn readBoolEnv(env_name: [*:0]const u8) ?bool {
+    const raw = (if (std.c.getenv(env_name)) |p| @as([:0]const u8, std.mem.span(p)) else null) orelse return null;
     if (std.mem.eql(u8, raw, "1") or std.ascii.eqlIgnoreCase(raw, "true") or std.ascii.eqlIgnoreCase(raw, "yes")) return true;
     if (std.mem.eql(u8, raw, "0") or std.ascii.eqlIgnoreCase(raw, "false") or std.ascii.eqlIgnoreCase(raw, "no")) return false;
     return null;
@@ -394,7 +394,7 @@ fn planCopiedTensorArenas(
     config: ModelConfig,
     allocator: std.mem.Allocator,
 ) !std.ArrayList(usize) {
-    var arena_sizes: std.ArrayList(usize) = .{};
+    var arena_sizes: std.ArrayList(usize) = .empty;
     errdefer arena_sizes.deinit(allocator);
 
     if (!shouldPackCopiedTensorArenas(config)) return arena_sizes;
@@ -431,7 +431,7 @@ fn planCopiedTensorArenas(
 
 /// Inspect a GGUF file and extract only the model configuration (no GPU operations).
 pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfig {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.Io.Dir.cwd().openFile(path, .{});
     defer {
         var close_file = file;
         close_file.close();
@@ -441,7 +441,7 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
     const mmap_data = try std.posix.mmap(
         null,
         stat.size,
-        std.posix.PROT.READ,
+        std.posix.PROT{ .READ = true },
         .{ .TYPE = .PRIVATE },
         file.handle,
         0,
@@ -456,7 +456,7 @@ pub fn inspectConfig(path: []const u8, allocator: std.mem.Allocator) !ModelConfi
 
 /// Inspect a GGUF file and return exact tensor upload bytes plus normalized config.
 pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspection {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.Io.Dir.cwd().openFile(path, .{});
     defer {
         var close_file = file;
         close_file.close();
@@ -466,7 +466,7 @@ pub fn inspectModel(path: []const u8, allocator: std.mem.Allocator) !ModelInspec
     const mmap_data = try std.posix.mmap(
         null,
         stat.size,
-        std.posix.PROT.READ,
+        std.posix.PROT{ .READ = true },
         .{ .TYPE = .PRIVATE },
         file.handle,
         0,
@@ -500,7 +500,7 @@ pub fn load(
 ) !Model {
     log.info("Loading model: {s}", .{path});
 
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.Io.Dir.cwd().openFile(path, .{});
     errdefer file.close();
 
     const stat = try file.stat();
@@ -510,7 +510,7 @@ pub fn load(
     const mmap_data = try std.posix.mmap(
         null,
         file_size,
-        std.posix.PROT.READ,
+        std.posix.PROT{ .READ = true },
         .{ .TYPE = .PRIVATE },
         file.handle,
         0,
@@ -528,7 +528,7 @@ pub fn load(
     }
 
     // Wrap tensor data as Metal shared buffers (zero-copy from mmap)
-    var loaded_tensors: std.ArrayList(LoadedTensor) = .{};
+    var loaded_tensors: std.ArrayList(LoadedTensor) = .empty;
     errdefer {
         for (loaded_tensors.items) |*t| {
             metal_buffer.freeBuffer(&t.gpu_buffer);
@@ -536,7 +536,7 @@ pub fn load(
         loaded_tensors.deinit(allocator);
     }
 
-    var tensor_arenas: std.ArrayList(MetalBuffer) = .{};
+    var tensor_arenas: std.ArrayList(MetalBuffer) = .empty;
     errdefer {
         for (tensor_arenas.items) |*arena| {
             metal_buffer.freeBuffer(arena);
@@ -858,9 +858,9 @@ test "copiedTensorArenasFitBudget rejects dense gemma copies on tight UMA budget
 
 test "residentWeightBytes counts copied arenas without double-counting aliases" {
     const allocator = std.testing.allocator;
-    var tensors: std.ArrayList(LoadedTensor) = .{};
+    var tensors: std.ArrayList(LoadedTensor) = .empty;
     defer tensors.deinit(allocator);
-    var arenas: std.ArrayList(MetalBuffer) = .{};
+    var arenas: std.ArrayList(MetalBuffer) = .empty;
     defer arenas.deinit(allocator);
 
     const mmap_info = gguf.TensorInfo{

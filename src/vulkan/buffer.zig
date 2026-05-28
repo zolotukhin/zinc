@@ -242,7 +242,10 @@ pub fn copyBuffer(
         .pSignalSemaphores = null,
     };
     result = vk.c.vkQueueSubmit(instance.compute_queue, 1, &submit_info, @as(vk.c.VkFence, null));
-    if (result != vk.c.VK_SUCCESS) return error.QueueSubmitFailed;
+    if (result != vk.c.VK_SUCCESS) {
+        log.err("vkQueueSubmit failed: {d}", .{result});
+        return error.QueueSubmitFailed;
+    }
 
     _ = vk.c.vkQueueWaitIdle(instance.compute_queue);
     vk.c.vkFreeCommandBuffers(instance.device, cmd_pool, 1, &cmd_buf);

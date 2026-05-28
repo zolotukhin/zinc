@@ -1,4 +1,10 @@
 const std = @import("std");
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
 const support = @import("zinc_bench_support");
 const metal_device = support.metal_device;
 const metal_command = support.metal_command;
@@ -28,10 +34,10 @@ const GemmPush = extern struct {
     src0_off: u32,
 };
 
-fn loadShaderPipeline(ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
+fn loadShaderPipeline(io: std.Io, ctx: ?*shim.MetalCtx, name: []const u8) !MetalPipeline {
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "src/shaders/metal/{s}.metal", .{name}) catch return error.PathTooLong;
-    const file = std.fs.cwd().openFile(path, .{}) catch return error.ShaderNotFound;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return error.ShaderNotFound;
     defer file.close();
     const stat = try file.stat();
     if (stat.size > 1024 * 1024) return error.ShaderTooLarge;
@@ -112,21 +118,20 @@ fn benchShape(
         cmd.commitAndWait();
     }
 
-    const start = std.time.nanoTimestamp();
+    const start = nanoTimestamp();
     var cmd = try metal_command.beginCommand(ctx);
     for (0..iters) |_| {
         cmd.dispatchV2WithTgMem(pipe, grid, block, &bufs, &push, @sizeOf(GemmPush), 0, tg_mem);
     }
     cmd.commitAndWait();
-    const end = std.time.nanoTimestamp();
+    const end = nanoTimestamp();
 
     return @as(f64, @floatFromInt(end - start)) / @as(f64, @floatFromInt(iters));
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
     var device = try metal_device.MetalDevice.init(allocator, 0);
     defer device.deinit();
@@ -136,7 +141,7 @@ pub fn main() !void {
     };
     defer gpu_lock.deinit();
 
-    var pipe = try loadShaderPipeline(device.ctx, "gemm_q4k");
+    var pipe = try loadShaderPipeline(io, device.ctx, "gemm_q4k");
     defer metal_pipeline.freePipeline(&pipe);
 
     // Qwen3-8B shapes we care about.
@@ -164,7 +169,7 @@ pub fn main() !void {
     defer metal_buffer.freeBuffer(&y_buf);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     try stdout.interface.print(
         "gemm_q4k microbenchmark | GPU={s} | tgmem_max={d} KiB\n\n",
         .{ @tagName(device.chip), device.maxThreadgroupMemoryLength() / 1024 },

@@ -61,6 +61,7 @@ pub const PipelineOptions = struct {
 /// @param allocator Allocator used for shader bytes and temporary Vulkan structs.
 /// @returns A fully created compute pipeline and its associated layouts.
 pub fn createFromSpirv(
+    io: std.Io,
     instance: *const Instance,
     spirv_path: []const u8,
     binding_count: u32,
@@ -69,6 +70,7 @@ pub fn createFromSpirv(
     allocator: std.mem.Allocator,
 ) !Pipeline {
     return createFromSpirvWithOptions(
+        io,
         instance,
         spirv_path,
         binding_count,
@@ -81,6 +83,7 @@ pub fn createFromSpirv(
 
 /// Create a compute pipeline from a SPIR-V file with optional subgroup controls.
 pub fn createFromSpirvWithOptions(
+    io: std.Io,
     instance: *const Instance,
     spirv_path: []const u8,
     binding_count: u32,
@@ -90,17 +93,20 @@ pub fn createFromSpirvWithOptions(
     allocator: std.mem.Allocator,
 ) !Pipeline {
     // Read SPIR-V binary
-    const file = std.fs.cwd().openFile(spirv_path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().openFile(io, spirv_path, .{}) catch |err| {
         log.err("Failed to open SPIR-V file '{s}': {s}", .{ spirv_path, @errorName(err) });
         return error.ShaderFileNotFound;
     };
-    defer file.close();
+    defer {
+        var close_file = file;
+        close_file.close(io);
+    }
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const spirv_code = try allocator.alloc(u8, stat.size);
     defer allocator.free(spirv_code);
-    const bytes_read = try file.readAll(spirv_code);
-    if (bytes_read != stat.size) return error.ShaderReadIncomplete;
+    const total_read = try file.readPositionalAll(io, spirv_code, 0);
+    if (total_read != stat.size) return error.ShaderReadIncomplete;
 
     // Create shader module
     const module_info = vk.c.VkShaderModuleCreateInfo{

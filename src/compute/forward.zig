@@ -3,6 +3,12 @@
 //! This module ties together model state, compute graphs, dispatch helpers,
 //! and greedy token sampling for a single active inference engine.
 const std = @import("std");
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
 const buffer_mod = @import("../vulkan/buffer.zig");
@@ -85,7 +91,7 @@ pub const DecodeState = struct {
     pub fn init(allocator: std.mem.Allocator) DecodeState {
         return .{
             .position = 0,
-            .generated_tokens = .{},
+            .generated_tokens = .empty,
             .requested_context_tokens = 0,
             .allocator = allocator,
         };
@@ -253,6 +259,14 @@ const ProfileCounters = struct {
         }
     }
 };
+
+// ---------------------------------------------------------------------------
+// Environment variable helper
+// ---------------------------------------------------------------------------
+
+fn getenv(name: [*:0]const u8) ?[:0]const u8 {
+    return if (std.c.getenv(name)) |p| std.mem.span(p) else null;
+}
 
 // ---------------------------------------------------------------------------
 // Quantization helpers for CPU-side embedding lookup
@@ -814,7 +828,7 @@ fn canUseBatchedPrefillRdna(engine: *const InferenceEngine) bool {
     const is_intel = isIntelGpuVendor(vendor);
     if (!is_amd and !is_intel) return false;
     if (is_intel) {
-        const intel_batched_env = std.posix.getenv("ZINC_INTEL_BATCHED_PREFILL");
+        const intel_batched_env = getenv("ZINC_INTEL_BATCHED_PREFILL");
         if (intel_batched_env == null or !std.mem.eql(u8, intel_batched_env.?, "1")) return false;
     }
     const cfg = engine.model.config;
@@ -885,7 +899,7 @@ fn isIntelGpuVendor(vendor: GpuVendor) bool {
 
 fn intelBatchedPrefillChunkLimit(vendor: GpuVendor) u32 {
     if (!isIntelGpuVendor(vendor)) return 0;
-    const raw = std.posix.getenv("ZINC_INTEL_BATCHED_PREFILL_CHUNK") orelse return 0;
+    const raw = getenv("ZINC_INTEL_BATCHED_PREFILL_CHUNK") orelse return 0;
     if (std.mem.eql(u8, raw, "0")) return 0;
     return std.fmt.parseInt(u32, raw, 10) catch 16;
 }
@@ -1418,6 +1432,7 @@ pub const InferenceEngine = struct {
     /// @returns An initialized inference engine ready to prefill prompts and run decode steps.
     /// @note This allocates shared descriptor pools, staging buffers, intermediate activations, and dispatch wrappers up front.
     pub fn init(
+        io: std.Io,
         /// Loaded model.
         model: *Model,
         /// Vulkan instance.
@@ -1445,15 +1460,15 @@ pub const InferenceEngine = struct {
         const shexp_val = if (config.shared_expert_intermediate_dim > 0) config.shared_expert_intermediate_dim else inter_val;
         const d_inner_val = if (config.ssm_d_inner > 0) config.ssm_d_inner else config.hidden_dim;
         const max_k = @max(@max(@max(config.hidden_dim, inter_val), @max(q_dim_val, d_inner_val)), shexp_val);
-        var dmmv = try DmmvDispatch.init(instance, &gpu_config, shader_dir, max_k, allocator);
+        var dmmv = try DmmvDispatch.init(io, instance, &gpu_config, shader_dir, max_k, allocator);
         errdefer dmmv.deinit();
 
-        var elementwise = try ElementwiseDispatch.init(instance, shader_dir, allocator);
+        var elementwise = try ElementwiseDispatch.init(io, instance, shader_dir, allocator);
         errdefer elementwise.deinit();
 
-        var attention = try AttentionDispatch.init(instance, shader_dir, allocator);
+        var attention = try AttentionDispatch.init(io, instance, shader_dir, allocator);
         errdefer attention.deinit();
-        var argmax = try ArgmaxDispatch.init(instance, shader_dir, allocator);
+        var argmax = try ArgmaxDispatch.init(io, instance, shader_dir, allocator);
         errdefer argmax.deinit();
 
         const weights_bytes = tensorBytes(model);
@@ -2084,7 +2099,7 @@ pub const InferenceEngine = struct {
         // disabled by setting ZINC_MOE_KPAR=0. Measured on RDNA4 for the
         // Qwen3.6-35B flagship: gate_up 855.6 → 695.4 ms (−18.7%), prefill
         // tok/s 23.16 → 23.72 (+2.4%) with identical output tokens.
-        const moe_kpar_env = std.posix.getenv("ZINC_MOE_KPAR");
+        const moe_kpar_env = getenv("ZINC_MOE_KPAR");
         const moe_kpar_explicitly_off = moe_kpar_env != null and std.mem.eql(u8, moe_kpar_env.?, "0");
         const moe_kpar_enabled = !moe_kpar_explicitly_off and dmmv.pipeline_q4k_moe_kpar != null;
         if (moe_kpar_enabled) {
@@ -2097,7 +2112,7 @@ pub const InferenceEngine = struct {
         // the pipeline is loaded. The shaders merge cross-subgroup partials,
         // so this is valid on RDNA wave64 and Intel wave32/wave16 devices.
         // Disable via ZINC_Q4K_BATCH_KPAR=0 to run the serial shader.
-        const q4k_batch_kpar_env = std.posix.getenv("ZINC_Q4K_BATCH_KPAR");
+        const q4k_batch_kpar_env = getenv("ZINC_Q4K_BATCH_KPAR");
         const q4k_batch_kpar_explicitly_off = q4k_batch_kpar_env != null and std.mem.eql(u8, q4k_batch_kpar_env.?, "0");
         const q4k_batch_kpar_enabled = !q4k_batch_kpar_explicitly_off and dmmv.pipeline_q4k_batch_kpar != null;
         if (q4k_batch_kpar_enabled) {
@@ -2114,7 +2129,7 @@ pub const InferenceEngine = struct {
         // halved dispatch count for this small shape. Kept opt-in because
         // larger expert intermediates (>= 1024) haven't been measured and
         // the shader is otherwise a proven drop-in for kpar.
-        const moe_fused_gate_up_env = std.posix.getenv("ZINC_MOE_FUSED_GATE_UP");
+        const moe_fused_gate_up_env = getenv("ZINC_MOE_FUSED_GATE_UP");
         const moe_fused_gate_up_forced_on = moe_fused_gate_up_env != null and std.mem.eql(u8, moe_fused_gate_up_env.?, "1");
         const moe_fused_gate_up_pipeline_loaded = dmmv.pipeline_q4k_fused_gate_up_moe != null or
             dmmv.pipeline_q4k_fused_gate_up_moe_spec8 != null;
@@ -2128,7 +2143,7 @@ pub const InferenceEngine = struct {
         // loaded. This is the profitable version of the older gate+up-only
         // experiment because it removes the separate MoE SwiGLU dispatch and
         // barrier. Disable with ZINC_MOE_FUSED_GATE_UP_SWIGLU=0 for A/B.
-        const moe_fused_gate_up_swiglu_env = std.posix.getenv("ZINC_MOE_FUSED_GATE_UP_SWIGLU");
+        const moe_fused_gate_up_swiglu_env = getenv("ZINC_MOE_FUSED_GATE_UP_SWIGLU");
         const moe_fused_gate_up_swiglu_explicitly_off = moe_fused_gate_up_swiglu_env != null and
             std.mem.eql(u8, moe_fused_gate_up_swiglu_env.?, "0");
         const moe_fused_gate_up_swiglu_pipeline_loaded = dmmv.pipeline_q4k_fused_gate_up_swiglu_moe != null or
@@ -2149,7 +2164,7 @@ pub const InferenceEngine = struct {
         // as Q5_K so we accept either pipeline being present here;
         // fused_pip_for_qt at the call site selects the right one and
         // falls back when neither is loaded for the current quant.
-        const moe_fused_down_acc_env = std.posix.getenv("ZINC_FUSE_MOE_DOWN_ACC");
+        const moe_fused_down_acc_env = getenv("ZINC_FUSE_MOE_DOWN_ACC");
         const moe_fused_down_acc_explicitly_off = moe_fused_down_acc_env != null and std.mem.eql(u8, moe_fused_down_acc_env.?, "0");
         const moe_fused_down_acc_enabled = !moe_fused_down_acc_explicitly_off and
             (dmmv.pipeline_q4k_moe_fused_down_acc != null or dmmv.pipeline_q5k_moe_fused_down_acc != null);
@@ -2168,7 +2183,7 @@ pub const InferenceEngine = struct {
             const beta0 = layer_tensors[0].ssm_beta orelse break :blk false;
             break :blk alpha0.info.type_ == .f32 and beta0.info.type_ == .f32;
         };
-        const qwen36_topk_env = std.posix.getenv("ZINC_QWEN36_MOE_TOPK");
+        const qwen36_topk_env = getenv("ZINC_QWEN36_MOE_TOPK");
         const qwen36_topk_default: u32 = 3;
         const qwen36_topk_limit: u32 = if (qwen36_like_f32_ssm) blk: {
             if (qwen36_topk_env) |raw| {
@@ -2186,7 +2201,7 @@ pub const InferenceEngine = struct {
         } else if (qwen36_like_f32_ssm and qwen36_topk_env != null) {
             log.info("Qwen 3.6 MoE top-k cap disabled via ZINC_QWEN36_MOE_TOPK={s}", .{qwen36_topk_env.?});
         }
-        const gemma_topk_env = std.posix.getenv("ZINC_GEMMA_MOE_TOPK");
+        const gemma_topk_env = getenv("ZINC_GEMMA_MOE_TOPK");
         const gemma_topk_default: u32 = if (config.architecture == .gemma and isIntelGpuVendor(gpu_config.vendor)) 4 else 0;
         const gemma_topk_limit: u32 = if (config.architecture == .gemma) blk: {
             const requested = if (gemma_topk_env) |raw|
@@ -2202,7 +2217,7 @@ pub const InferenceEngine = struct {
                 config.n_experts_used,
             });
         }
-        const qwen36_prefill_topk_env = std.posix.getenv("ZINC_QWEN36_MOE_PREFILL_TOPK");
+        const qwen36_prefill_topk_env = getenv("ZINC_QWEN36_MOE_PREFILL_TOPK");
         const qwen36_prefill_topk_default: u32 = 1;
         const qwen36_prefill_tail_topk_limit: u32 = if (qwen36_like_f32_ssm) blk: {
             if (qwen36_prefill_topk_env) |raw| {
@@ -2215,7 +2230,7 @@ pub const InferenceEngine = struct {
             if (qwen36_topk_env != null) break :blk 0;
             break :blk qwen36_prefill_topk_default;
         } else 0;
-        const qwen36_prefill_guard_env = std.posix.getenv("ZINC_QWEN36_MOE_PREFILL_TOPK_GUARD");
+        const qwen36_prefill_guard_env = getenv("ZINC_QWEN36_MOE_PREFILL_TOPK_GUARD");
         const qwen36_prefill_guard_default: u32 = 16;
         const qwen36_prefill_tail_topk_guard_tokens: u32 = if (qwen36_prefill_tail_topk_limit > 0) blk: {
             if (qwen36_prefill_guard_env) |raw| {
@@ -2239,7 +2254,7 @@ pub const InferenceEngine = struct {
         // 35B-A3B). Disabled by setting ZINC_FUSED_RMS_ROUTER=0. Per-call
         // gates (architecture, weight type, etc.) are evaluated in the
         // forward path so models that don't fit silently fall back.
-        const fused_rms_router_env = std.posix.getenv("ZINC_FUSED_RMS_ROUTER");
+        const fused_rms_router_env = getenv("ZINC_FUSED_RMS_ROUTER");
         const fused_rms_router_explicitly_off = fused_rms_router_env != null and std.mem.eql(u8, fused_rms_router_env.?, "0");
         const fused_rms_router_enabled = !fused_rms_router_explicitly_off and
             elementwise.pipeline_rms_norm_dmmv_f32 != null;
@@ -2256,7 +2271,7 @@ pub const InferenceEngine = struct {
         // via ZINC_FUSED_SSM_AB=0. Per-call gates (architecture, weight
         // type) are evaluated in the forward path so models that don't
         // fit silently fall back.
-        const fused_ssm_ab_env = std.posix.getenv("ZINC_FUSED_SSM_AB");
+        const fused_ssm_ab_env = getenv("ZINC_FUSED_SSM_AB");
         const fused_ssm_ab_explicitly_off = fused_ssm_ab_env != null and std.mem.eql(u8, fused_ssm_ab_env.?, "0");
         const fused_ssm_ab_enabled = !fused_ssm_ab_explicitly_off and
             elementwise.pipeline_rms_norm_dmmv_q4k_alpha_beta != null and
@@ -2270,7 +2285,7 @@ pub const InferenceEngine = struct {
         // SSM delta cols8: port of llama.cpp's GDN workgroup shape for
         // S=128 (8 output rows per wave64 via subgroupClusteredAdd). Disable
         // via ZINC_SSM_DELTA_COLS8=0 for A/B checks.
-        const ssm_delta_cols8_env = std.posix.getenv("ZINC_SSM_DELTA_COLS8");
+        const ssm_delta_cols8_env = getenv("ZINC_SSM_DELTA_COLS8");
         const ssm_delta_cols8_explicitly_off = ssm_delta_cols8_env != null and std.mem.eql(u8, ssm_delta_cols8_env.?, "0");
         const ssm_delta_cols8_enabled = !ssm_delta_cols8_explicitly_off and
             elementwise.pipeline_ssm_delta_net_cols8 != null;
@@ -2280,7 +2295,7 @@ pub const InferenceEngine = struct {
             log.info("SSM delta cols8 DISABLED via ZINC_SSM_DELTA_COLS8=0", .{});
         }
 
-        const ssm_delta_normed_qk_env = std.posix.getenv("ZINC_SSM_DELTA_NORMED_QK");
+        const ssm_delta_normed_qk_env = getenv("ZINC_SSM_DELTA_NORMED_QK");
         const ssm_delta_normed_qk_flag = ssm_delta_normed_qk_env != null and std.mem.eql(u8, ssm_delta_normed_qk_env.?, "1");
         const ssm_delta_normed_qk_enabled = ssm_delta_normed_qk_flag and
             ssm_delta_cols8_enabled and
@@ -2297,7 +2312,7 @@ pub const InferenceEngine = struct {
         // the pipeline is loaded; disable via ZINC_FUSED_DENSE_FFN=0. The
         // architecture / quant / size gates run per call so non-matching
         // models silently fall back to the gate / up / swiglu trio.
-        const fused_dense_ffn_env = std.posix.getenv("ZINC_FUSED_DENSE_FFN");
+        const fused_dense_ffn_env = getenv("ZINC_FUSED_DENSE_FFN");
         const fused_dense_ffn_explicitly_off = fused_dense_ffn_env != null and std.mem.eql(u8, fused_dense_ffn_env.?, "0");
         const fused_dense_ffn_enabled = !fused_dense_ffn_explicitly_off and
             dmmv.pipeline_q4k_fused_gate_up_swiglu != null and
@@ -2307,7 +2322,7 @@ pub const InferenceEngine = struct {
         } else if (fused_dense_ffn_explicitly_off) {
             log.info("Fused dense gate+up+SwiGLU DISABLED via ZINC_FUSED_DENSE_FFN=0", .{});
         }
-        const qwen36_dense_row1_env = std.posix.getenv("ZINC_QWEN36_27B_DENSE_FUSED_ROW1");
+        const qwen36_dense_row1_env = getenv("ZINC_QWEN36_27B_DENSE_FUSED_ROW1");
         const qwen36_dense_row1_explicitly_off = qwen36_dense_row1_env != null and
             std.mem.eql(u8, qwen36_dense_row1_env.?, "0");
         const qwen36_dense_row1_enabled = !qwen36_dense_row1_explicitly_off and
@@ -2327,7 +2342,7 @@ pub const InferenceEngine = struct {
         // architecture/quant/size gates fall back to the unfused path when
         // the conditions aren't met (e.g., Gemma post_attn_norm,
         // hidden_dim > 4096, validation_diagnostics_enabled).
-        const fused_oproj_merge_env = std.posix.getenv("ZINC_FUSED_OPROJ_MERGE");
+        const fused_oproj_merge_env = getenv("ZINC_FUSED_OPROJ_MERGE");
         const fused_oproj_merge_enabled = fused_oproj_merge_env != null and
             std.mem.eql(u8, fused_oproj_merge_env.?, "1") and
             dmmv.pipeline_q4k_o_proj_merge != null and
@@ -2340,7 +2355,7 @@ pub const InferenceEngine = struct {
         // (effort-11 run-3 enablement). Auto-enables timestamp recording so the
         // benchmark cycle (which does not pass --profile) still emits per-layer
         // ms data. Default OFF to keep the benchmark's hot path zero-overhead.
-        const fa_profile_layer_env = std.posix.getenv("ZINC_FA_PROFILE_LAYER");
+        const fa_profile_layer_env = getenv("ZINC_FA_PROFILE_LAYER");
         const fa_profile_layer_enabled = fa_profile_layer_env != null and
             !std.mem.eql(u8, fa_profile_layer_env.?, "0");
         if (fa_profile_layer_enabled) {
@@ -2351,7 +2366,7 @@ pub const InferenceEngine = struct {
         // ON when the pipeline is loaded; disable via ZINC_FUSED_QK_KV=0.
         // Per-call gates apply (q_norm/k_norm tensors present, push descriptors,
         // !packed_q_gate, !use_k_as_v, !apply_v_unit_norm_early, !diagnostics).
-        const fused_qk_kv_env = std.posix.getenv("ZINC_FUSED_QK_KV");
+        const fused_qk_kv_env = getenv("ZINC_FUSED_QK_KV");
         const fused_qk_kv_explicitly_off = fused_qk_kv_env != null and std.mem.eql(u8, fused_qk_kv_env.?, "0");
         const fused_qk_kv_enabled = !fused_qk_kv_explicitly_off and
             elementwise.pipeline_qk_norm_rope_kv_write != null and
@@ -2367,7 +2382,7 @@ pub const InferenceEngine = struct {
         // disabled by setting ZINC_MOE_Q5K_KPAR=0. Targets the ~713 ms MoE down
         // bucket (Q5_K weights) on the Qwen3.6-35B flagship prefill. Mirrors the
         // Q4_K kpar pattern (16 threads per Q5_K superblock + wave64 subgroupAdd).
-        const moe_q5k_kpar_env = std.posix.getenv("ZINC_MOE_Q5K_KPAR");
+        const moe_q5k_kpar_env = getenv("ZINC_MOE_Q5K_KPAR");
         const moe_q5k_kpar_explicitly_off = moe_q5k_kpar_env != null and std.mem.eql(u8, moe_q5k_kpar_env.?, "0");
         const moe_q5k_kpar_enabled = !moe_q5k_kpar_explicitly_off and dmmv.pipeline_q5k_moe_kpar != null;
         if (moe_q5k_kpar_enabled) {
@@ -2379,7 +2394,7 @@ pub const InferenceEngine = struct {
         // softmax_topk v2 (subgroup-parallel): default ON when the pipeline is
         // loaded, disable via ZINC_TOPK_V1=1 to fall back to the v1 shared-mem
         // single-thread scan shader.
-        const topk_v1_env = std.posix.getenv("ZINC_TOPK_V1");
+        const topk_v1_env = getenv("ZINC_TOPK_V1");
         const topk_v1_forced = topk_v1_env != null and std.mem.eql(u8, topk_v1_env.?, "1");
         const topk_v2_enabled = !topk_v1_forced and elementwise.pipeline_softmax_topk_v2 != null;
         if (topk_v2_enabled) {
@@ -2393,7 +2408,7 @@ pub const InferenceEngine = struct {
         // of pipelines (split, merge); we just mirror the active count here
         // and allocate the partial-output buffer when active.
         const fa_split_k = attention.fa_split_k_active;
-        const fa_split_k_forced = std.posix.getenv("ZINC_FA_SPLIT_K") != null;
+        const fa_split_k_forced = getenv("ZINC_FA_SPLIT_K") != null;
         if (fa_split_k > 1) {
             if (fa_split_k_forced) {
                 log.info("Flash-attn split-K ENABLED: N_I_CHUNKS={d} via ZINC_FA_SPLIT_K", .{fa_split_k});
@@ -2414,7 +2429,7 @@ pub const InferenceEngine = struct {
         // the flash_attn_batched pipeline is loaded, the attention call site
         // routes through the batched shader. Foundation step calls with
         // n_queries=1 for correctness parity with the decode-shape shader.
-        const batch_attn_env = std.posix.getenv("ZINC_BATCH_ATTN");
+        const batch_attn_env = getenv("ZINC_BATCH_ATTN");
         const batch_attn_flag = batch_attn_env != null and std.mem.eql(u8, batch_attn_env.?, "1");
         const batch_attn_enabled = batch_attn_flag and attention.pipeline_batched != null;
         if (batch_attn_enabled) {
@@ -2427,7 +2442,7 @@ pub const InferenceEngine = struct {
         // Enabled by ZINC_CAPTURE_ROUTING=1. Dormant downstream — this cycle only
         // verifies the copy path is correct and measures the flag-on overhead so
         // Step 11b can wire token-permute on top without re-proving the plumbing.
-        const capture_env = std.posix.getenv("ZINC_CAPTURE_ROUTING");
+        const capture_env = getenv("ZINC_CAPTURE_ROUTING");
         const capture_flag = capture_env != null and std.mem.eql(u8, capture_env.?, "1");
         var routing_capture_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
         var routing_capture_slot_bytes: u32 = 0;
@@ -2457,7 +2472,7 @@ pub const InferenceEngine = struct {
         // are available (recordMulMmQ4K uses pushDescAndDispatch). The
         // weight-quant + hidden_dim alignment check happens at the call
         // site since both depend on the resolved LM head tensor.
-        const mul_mm_lm_head_env = std.posix.getenv("ZINC_MUL_MM_LM_HEAD");
+        const mul_mm_lm_head_env = getenv("ZINC_MUL_MM_LM_HEAD");
         const mul_mm_lm_head_flag = mul_mm_lm_head_env != null and std.mem.eql(u8, mul_mm_lm_head_env.?, "1");
         const mul_mm_lm_head_enabled = mul_mm_lm_head_flag and
             dmmv.pipeline_mul_mm_q4k != null and
@@ -2477,7 +2492,7 @@ pub const InferenceEngine = struct {
         // tensors are unaffected because dispatchProjectionBatched gates on
         // tensor type + token count and falls back to the existing path
         // otherwise. Opt out via ZINC_MUL_MM_PROJ=0.
-        const mul_mm_proj_env = std.posix.getenv("ZINC_MUL_MM_PROJ");
+        const mul_mm_proj_env = getenv("ZINC_MUL_MM_PROJ");
         const mul_mm_proj_explicitly_off = mul_mm_proj_env != null and std.mem.eql(u8, mul_mm_proj_env.?, "0");
         const mul_mm_proj_enabled = !mul_mm_proj_explicitly_off and
             dmmv.pipeline_mul_mm_q4k != null and
@@ -2488,7 +2503,7 @@ pub const InferenceEngine = struct {
             log.info("Q4_K projection mul_mm path DISABLED via ZINC_MUL_MM_PROJ=0; using kpar/serial batch shaders", .{});
         }
 
-        const qwen36_batched_gateup_env = std.posix.getenv("ZINC_QWEN36_27B_BATCH_FUSED_GATEUP");
+        const qwen36_batched_gateup_env = getenv("ZINC_QWEN36_27B_BATCH_FUSED_GATEUP");
         const qwen36_batched_gateup_explicitly_off = qwen36_batched_gateup_env != null and
             std.mem.eql(u8, qwen36_batched_gateup_env.?, "0");
         const qwen36_batched_gateup_enabled = !qwen36_batched_gateup_explicitly_off and
@@ -2500,7 +2515,7 @@ pub const InferenceEngine = struct {
             log.info("Qwen3.6-27B batched dense gate+up+SwiGLU path DISABLED via ZINC_QWEN36_27B_BATCH_FUSED_GATEUP=0", .{});
         }
 
-        const qwen36_q6_prefill_mul_mm_env = std.posix.getenv("ZINC_QWEN36_27B_Q6_DOWN_MUL_MM");
+        const qwen36_q6_prefill_mul_mm_env = getenv("ZINC_QWEN36_27B_Q6_DOWN_MUL_MM");
         const qwen36_q6_prefill_mul_mm_explicitly_off = qwen36_q6_prefill_mul_mm_env != null and
             std.mem.eql(u8, qwen36_q6_prefill_mul_mm_env.?, "0");
         const qwen36_q6_prefill_mul_mm_enabled = !qwen36_q6_prefill_mul_mm_explicitly_off and
@@ -2512,7 +2527,7 @@ pub const InferenceEngine = struct {
             log.info("Qwen3.6-27B Q6_K prefill mul_mm path DISABLED via ZINC_QWEN36_27B_Q6_DOWN_MUL_MM=0", .{});
         }
 
-        const q8_wide_lm_env = std.posix.getenv("ZINC_Q8_WIDE_LM_HEAD");
+        const q8_wide_lm_env = getenv("ZINC_Q8_WIDE_LM_HEAD");
         const q8_wide_lm_flag = q8_wide_lm_env != null and std.mem.eql(u8, q8_wide_lm_env.?, "1");
         const q8_wide_lm_enabled = q8_wide_lm_flag and dmmv.pipeline_q8_0_wide != null;
         if (q8_wide_lm_enabled) {
@@ -2521,7 +2536,7 @@ pub const InferenceEngine = struct {
             log.info("ZINC_Q8_WIDE_LM_HEAD=1 requested but the Q8_0 wide pipeline is missing; using generic Q8_0 DMMV", .{});
         }
 
-        const q8_batch_lm_env = std.posix.getenv("ZINC_Q8_BATCH_LM_HEAD");
+        const q8_batch_lm_env = getenv("ZINC_Q8_BATCH_LM_HEAD");
         const q8_batch_lm_flag = q8_batch_lm_env != null and std.mem.eql(u8, q8_batch_lm_env.?, "1");
         const q8_batch_lm_enabled = q8_batch_lm_flag and dmmv.pipeline_q8_0_batch != null;
         if (q8_batch_lm_enabled) {
@@ -2530,7 +2545,7 @@ pub const InferenceEngine = struct {
             log.info("ZINC_Q8_BATCH_LM_HEAD=1 requested but the Q8_0 batch pipeline is missing; using generic Q8_0 DMMV", .{});
         }
 
-        const q8_1_lm_env = std.posix.getenv("ZINC_Q8_1_LM_HEAD");
+        const q8_1_lm_env = getenv("ZINC_Q8_1_LM_HEAD");
         const q8_1_lm_flag = q8_1_lm_env != null and std.mem.eql(u8, q8_1_lm_env.?, "1");
         const q8_1_lm_enabled = q8_1_lm_flag and
             dmmv.pipeline_q8_0_q8_1 != null and
@@ -2543,13 +2558,13 @@ pub const InferenceEngine = struct {
             log.info("ZINC_Q8_1_LM_HEAD=1 requested but prerequisites are missing; using generic Q8_0 DMMV", .{});
         }
 
-        const q8_spec_env = std.posix.getenv("ZINC_Q8_SPEC_DMMV");
+        const q8_spec_env = getenv("ZINC_Q8_SPEC_DMMV");
         const q8_spec_enabled = q8_spec_env != null and std.mem.eql(u8, q8_spec_env.?, "1");
         if (q8_spec_enabled) {
             log.info("Q8_0 K-specialized DMMV path ENABLED via ZINC_Q8_SPEC_DMMV=1", .{});
         }
 
-        const fused_ssm_qkv_z_env = std.posix.getenv("ZINC_FUSED_SSM_QKV_Z");
+        const fused_ssm_qkv_z_env = getenv("ZINC_FUSED_SSM_QKV_Z");
         const fused_ssm_qkv_z_flag = fused_ssm_qkv_z_env != null and std.mem.eql(u8, fused_ssm_qkv_z_env.?, "1");
         const fused_ssm_qkv_z_enabled = fused_ssm_qkv_z_flag and
             dmmv.pipeline_q8_0_fused_pair != null and
@@ -2568,7 +2583,7 @@ pub const InferenceEngine = struct {
         // per-(layer, expert) count buffer. mul_mm_id_q4k binds this buffer
         // for its early-exit path; the next cycle will wire it into the
         // batched MoE FFN dispatch.
-        const count_experts_env = std.posix.getenv("ZINC_COUNT_EXPERTS_PREFILL");
+        const count_experts_env = getenv("ZINC_COUNT_EXPERTS_PREFILL");
         const count_experts_flag = count_experts_env != null and std.mem.eql(u8, count_experts_env.?, "1");
         const count_experts_enabled = count_experts_flag and
             capture_flag and routing_capture_buf.handle != null and
@@ -2601,7 +2616,7 @@ pub const InferenceEngine = struct {
         // routing_capture_buf + prefill_expert_count_buf, this provides the
         // three inputs mul_mm_id_q4k needs to replace per-token MoE FFN
         // dispatches with one batched GEMM per layer. Default-OFF.
-        const ffn_input_capture_env = std.posix.getenv("ZINC_CAPTURE_FFN_INPUT");
+        const ffn_input_capture_env = getenv("ZINC_CAPTURE_FFN_INPUT");
         const ffn_input_capture_flag = ffn_input_capture_env != null and std.mem.eql(u8, ffn_input_capture_env.?, "1");
         var prefill_ffn_input_capture_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
         var prefill_ffn_input_capture_max_tokens: u32 = 0;
@@ -2633,9 +2648,9 @@ pub const InferenceEngine = struct {
         // for layer 0 after the per-token loop drains. State backup/restore
         // protects the real per-token state from the validation dispatch so
         // decode keeps producing the correct output. Default-OFF.
-        const a3b_validate_env = std.posix.getenv("ZINC_A3B_VALIDATE");
+        const a3b_validate_env = getenv("ZINC_A3B_VALIDATE");
         const a3b_validate_flag = a3b_validate_env != null and std.mem.eql(u8, a3b_validate_env.?, "1");
-        const a3b_production_env = std.posix.getenv("ZINC_A3B_PRODUCTION");
+        const a3b_production_env = getenv("ZINC_A3B_PRODUCTION");
         const a3b_production_flag = a3b_production_env != null and std.mem.eql(u8, a3b_production_env.?, "1");
         // Cycle 127: capture buffers allocated only for validate. Cycle 125
         // tied production allocation to the same set, but the production
@@ -2732,7 +2747,7 @@ pub const InferenceEngine = struct {
             log.info("ZINC_A3B_PRODUCTION=1 set but currently a no-op (cycle 125 wire-up reverted in cycle 127; layer-major restructure pending in cycle 128).", .{});
         }
 
-        const dense_prefill_validate_env = std.posix.getenv("ZINC_QWEN36_27B_PREFILL_VALIDATE");
+        const dense_prefill_validate_env = getenv("ZINC_QWEN36_27B_PREFILL_VALIDATE");
         const dense_prefill_validate_requested = dense_prefill_validate_env != null and
             std.mem.eql(u8, dense_prefill_validate_env.?, "1");
         var dense_prefill_validate_enabled = false;
@@ -2753,10 +2768,10 @@ pub const InferenceEngine = struct {
             config.hidden_dim > 0 and
             inter_val > 0)
         {
-            const raw_tokens = std.posix.getenv("ZINC_QWEN36_27B_PREFILL_VALIDATE_TOKENS");
+            const raw_tokens = getenv("ZINC_QWEN36_27B_PREFILL_VALIDATE_TOKENS");
             const parsed_tokens = if (raw_tokens) |raw| std.fmt.parseInt(u32, raw, 10) catch 16 else 16;
             dense_prefill_validate_max_tokens = @min(@max(parsed_tokens, @as(u32, 1)), @as(u32, 16));
-            const raw_layer = std.posix.getenv("ZINC_QWEN36_27B_PREFILL_VALIDATE_LAYER");
+            const raw_layer = getenv("ZINC_QWEN36_27B_PREFILL_VALIDATE_LAYER");
             const parsed_layer = if (raw_layer) |raw| std.fmt.parseInt(u32, raw, 10) catch 0 else 0;
             dense_prefill_validate_layer = @min(parsed_layer, config.n_layers - 1);
 
@@ -3354,7 +3369,7 @@ pub const InferenceEngine = struct {
         if (!self.profile_enabled or self.timestamp_count == 0) return;
         const count = self.timestamp_count;
         var timestamps: [2048]u64 = undefined;
-        const query_read_start = std.time.nanoTimestamp();
+        const query_read_start = nanoTimestamp();
         const qr = vk.c.vkGetQueryPoolResults(
             self.instance.device,
             self.timestamp_query_pool,
@@ -3369,7 +3384,7 @@ pub const InferenceEngine = struct {
             log.warn("Failed to read timestamp queries: {d}", .{qr});
             return;
         }
-        const query_read_end = std.time.nanoTimestamp();
+        const query_read_end = nanoTimestamp();
         self.profile_token_counters.query_read_ns += @intCast(query_read_end - query_read_start);
         if (count >= 2) {
             const first = timestamps[0];
@@ -5099,7 +5114,7 @@ pub const InferenceEngine = struct {
 
         // 1. CPU: dequantize embedding
         const track_decode_timing = self.profile_enabled or self.prefill_active;
-        const cpu_embed_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
+        const cpu_embed_start = if (track_decode_timing) nanoTimestamp() else 0;
         if (!has_partial_hidden_in) {
             try self.embedToken(token_id);
         }
@@ -5118,7 +5133,7 @@ pub const InferenceEngine = struct {
         }
         var prefill_embed_elapsed_ns: u64 = 0;
         if (track_decode_timing) {
-            const cpu_embed_end = std.time.nanoTimestamp();
+            const cpu_embed_end = nanoTimestamp();
             const elapsed: u64 = @intCast(cpu_embed_end - cpu_embed_start);
             if (self.profile_enabled) self.profile_token_counters.cpu_embed_ns += elapsed;
             prefill_embed_elapsed_ns = elapsed;
@@ -5128,7 +5143,7 @@ pub const InferenceEngine = struct {
         var diag_logit5 = [_]f32{0} ** 64;
         var diag_rms_arr = [_]f32{0} ** 64;
 
-        const cpu_record_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
+        const cpu_record_start = if (track_decode_timing) nanoTimestamp() else 0;
 
         // Begin single command buffer for all layers (Phase 3c batching)
         if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
@@ -8788,7 +8803,7 @@ pub const InferenceEngine = struct {
             // No per-layer submit — only submit for MoE expert ID readback (inside MoE block above).
 
             // --- Debug: per-layer hidden_buf diagnostics (BOS token only, gated behind validation diagnostics) ---
-            if ((state.position == 0 and (self.validation_diagnostics_enabled or std.posix.getenv("ZINC_LAYER_DIAG") != null)) or
+            if ((state.position == 0 and (self.validation_diagnostics_enabled or getenv("ZINC_LAYER_DIAG") != null)) or
                 (diag_last_prompt_token and self.validation_diagnostics_enabled))
             {
                 // Flush current batched cmd buffer for diagnostic readback
@@ -9087,12 +9102,12 @@ pub const InferenceEngine = struct {
         try self.decode_cmd.end();
         var prefill_record_elapsed_ns: u64 = 0;
         if (track_decode_timing) {
-            const cpu_record_end = std.time.nanoTimestamp();
+            const cpu_record_end = nanoTimestamp();
             const elapsed: u64 = @intCast(cpu_record_end - cpu_record_start);
             if (self.profile_enabled) self.profile_token_counters.cpu_record_ns += elapsed;
             prefill_record_elapsed_ns = elapsed;
         }
-        const submit_wait_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
+        const submit_wait_start = if (track_decode_timing) nanoTimestamp() else 0;
         if (self.prefill_pipeline_mode) {
             // Pipelined prefill: fire-and-forget. prefillBatch() waits for the
             // corresponding fence before the next reuse of this slot.
@@ -9102,7 +9117,7 @@ pub const InferenceEngine = struct {
         }
         var prefill_submit_wait_elapsed_ns: u64 = 0;
         if (track_decode_timing) {
-            const submit_wait_end = std.time.nanoTimestamp();
+            const submit_wait_end = nanoTimestamp();
             const elapsed: u64 = @intCast(submit_wait_end - submit_wait_start);
             if (self.profile_enabled) self.profile_token_counters.submit_wait_ns += elapsed;
             prefill_submit_wait_elapsed_ns = elapsed;
@@ -12254,7 +12269,7 @@ pub const InferenceEngine = struct {
         if (self.validation_diagnostics_enabled) return false;
         if (!self.isQwen36DenseHybrid27B()) return false;
         if (!self.isAmdRdna()) return false;
-        const mode = std.posix.getenv("ZINC_QWEN36_27B_SSM_PREFILL_PROJ") orelse return false;
+        const mode = getenv("ZINC_QWEN36_27B_SSM_PREFILL_PROJ") orelse return false;
         return std.mem.eql(u8, mode, "1") or
             std.mem.eql(u8, mode, "both") or
             std.mem.eql(u8, mode, "qkv") or
@@ -12287,7 +12302,7 @@ pub const InferenceEngine = struct {
         if (self.use_ssm_delta_normed_qk) return false;
         if (self.elementwise.pipeline_ssm_delta_net == null and self.elementwise.pipeline_ssm_delta_net_cols8 == null) return false;
         if (self.elementwise.pipeline_ssm_gated_norm == null) return false;
-        if (std.posix.getenv("ZINC_QWEN36_27B_SSM_BATCHED_DELTA")) |mode| {
+        if (getenv("ZINC_QWEN36_27B_SSM_BATCHED_DELTA")) |mode| {
             return mode.len > 0 and !std.mem.eql(u8, mode, "0");
         }
         return true;
@@ -12311,7 +12326,7 @@ pub const InferenceEngine = struct {
         if (prompt_len < 2 or self.validation_diagnostics_enabled) return 0;
         if (self.use_qwen36_dense_prefill_validate or self.use_qwen36_ssm_prefill_validate) return 0;
 
-        const mode = std.posix.getenv("ZINC_QWEN36_27B_DENSE_PREFILL");
+        const mode = getenv("ZINC_QWEN36_27B_DENSE_PREFILL");
         if (mode != null and std.mem.eql(u8, mode.?, "0")) return 0;
 
         const cfg = self.model.config;
@@ -12330,7 +12345,7 @@ pub const InferenceEngine = struct {
                 layers = std.fmt.parseInt(u32, raw, 10) catch layers;
             }
         }
-        if (std.posix.getenv("ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS")) |raw| {
+        if (getenv("ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS")) |raw| {
             layers = std.fmt.parseInt(u32, raw, 10) catch layers;
         }
         if (layers == 0) return 0;
@@ -12341,7 +12356,7 @@ pub const InferenceEngine = struct {
         if (n_tokens < 2) return false;
         if (self.validation_diagnostics_enabled or self.profile_enabled) return false;
         if (self.instance.push_descriptor_fn == null) return false;
-        if (std.posix.getenv("ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE")) |mode| {
+        if (getenv("ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE")) |mode| {
             return mode.len > 0 and !std.mem.eql(u8, mode, "0");
         }
         if (!self.isQwen36DenseHybrid27B()) return false;
@@ -12373,7 +12388,7 @@ pub const InferenceEngine = struct {
         if (prefix_layers + 1 >= cfg.n_layers) return 0;
 
         var count: usize = 0;
-        if (std.posix.getenv("ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT")) |raw| {
+        if (getenv("ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT")) |raw| {
             if (raw.len == 0 or std.mem.eql(u8, raw, "0")) return 0;
             if (std.mem.eql(u8, raw, "1")) {
                 const full_attn_interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
@@ -13435,7 +13450,7 @@ pub const InferenceEngine = struct {
         const scratch_swiglu = self.batched_scratch_swiglu.?;
         const scratch_down = self.batched_scratch_down.?;
         const use_ssm_preproj = self.qwen36DensePrefillSsmPreprojEnabled();
-        const ssm_preproj_mode = std.posix.getenv("ZINC_QWEN36_27B_SSM_PREFILL_PROJ") orelse "";
+        const ssm_preproj_mode = getenv("ZINC_QWEN36_27B_SSM_PREFILL_PROJ") orelse "";
         const prebatch_ssm_qkv = std.mem.eql(u8, ssm_preproj_mode, "1") or
             std.mem.eql(u8, ssm_preproj_mode, "both") or
             std.mem.eql(u8, ssm_preproj_mode, "qkv");
@@ -13460,7 +13475,7 @@ pub const InferenceEngine = struct {
         self.prefill_submit_wait_ns = 0;
         self.prefill_gpu_phase_ns = [_]u64{0} ** profile_phase_count;
         self.prefill_gpu_total_ns = 0;
-        const profile_env = std.posix.getenv("ZINC_PREFILL_PROFILE");
+        const profile_env = getenv("ZINC_PREFILL_PROFILE");
         const want_gpu_phases = profile_env != null and profile_env.?.len > 0 and !std.mem.eql(u8, profile_env.?, "0");
         const profile_was_enabled = self.profile_enabled;
         const enable_gpu_phase_timing = self.timestamp_query_pool != null and want_gpu_phases;
@@ -13826,8 +13841,8 @@ pub const InferenceEngine = struct {
     /// callers can migrate to the new name ahead of time — matching the Metal
     /// path where `generateWithMetrics` already routes through `prefillBatched`.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
-        const mode = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse "";
-        const intel_batched_env = std.posix.getenv("ZINC_INTEL_BATCHED_PREFILL");
+        const mode = getenv("ZINC_BATCHED_PREFILL") orelse "";
+        const intel_batched_env = getenv("ZINC_INTEL_BATCHED_PREFILL");
         const intel_batched_requested = isIntelGpuVendor(self.gpu_config.vendor) and
             intel_batched_env != null and std.mem.eql(u8, intel_batched_env.?, "1");
         const chunk_limit = intelBatchedPrefillChunkLimit(self.gpu_config.vendor);
@@ -13855,7 +13870,7 @@ pub const InferenceEngine = struct {
         // `ZINC_BATCHED_PREFILL=0` to force the per-token fallback (escape
         // hatch for debugging / numerical-sensitivity testing); `=validate`
         // runs both paths and diffs the last-token logits.
-        const mode = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse "";
+        const mode = getenv("ZINC_BATCHED_PREFILL") orelse "";
         const batched_disabled = std.mem.eql(u8, mode, "0");
         const validate_mode = std.mem.eql(u8, mode, "validate");
         if (!batched_disabled and !validate_mode) {
@@ -14367,7 +14382,7 @@ pub const InferenceEngine = struct {
         // on — it has zero GPU cost. When the flag is set, the caller also gets
         // a per-phase breakdown (attn/moe/shared/ssm/tail) plus MoE and SSM
         // sub-phase drill-downs, which is exactly what effort-6 Step 2 needs.
-        const profile_env = std.posix.getenv("ZINC_PREFILL_PROFILE");
+        const profile_env = getenv("ZINC_PREFILL_PROFILE");
         const want_gpu_phases = profile_env != null and profile_env.?.len > 0 and !std.mem.eql(u8, profile_env.?, "0");
         const had_profile_pool = self.timestamp_query_pool != null;
         const profile_was_enabled = self.profile_enabled;
@@ -15629,9 +15644,9 @@ pub fn generate(
     // prefillBatched honors ZINC_BATCHED_PREFILL and falls through to
     // prefillBatch (per-token) when the env gate is off or the model
     // isn't on canUseBatchedPrefillRdna's supported slice.
-    const prefill_start = std.time.nanoTimestamp();
+    const prefill_start = nanoTimestamp();
     try engine.prefillBatched(&state, prompt_tokens);
-    const prefill_end = std.time.nanoTimestamp();
+    const prefill_end = nanoTimestamp();
     const prefill_ns: u64 = @intCast(prefill_end - prefill_start);
     const prefill_tok_per_sec = if (prefill_ns > 0 and prompt_tokens.len > 0)
         @as(f64, @floatFromInt(prompt_tokens.len)) * 1_000_000_000.0 / @as(f64, @floatFromInt(prefill_ns))
@@ -15793,7 +15808,7 @@ pub fn generate(
     // those logits instead of reprocessing the last prompt token — that would
     // duplicate its KV cache entry and shift the entire context.
     var generated: u32 = 0;
-    const decode_start = std.time.nanoTimestamp();
+    const decode_start = nanoTimestamp();
 
     // Sample the first output token from prefill logits (no extra decodeStep)
     if (prompt_tokens.len > 0 and effective_max_tokens > 0) {
@@ -15809,7 +15824,7 @@ pub fn generate(
     }
 
     while (generated < effective_max_tokens) : (generated += 1) {
-        const tok_start = std.time.nanoTimestamp();
+        const tok_start = nanoTimestamp();
 
         // Feed the last generated token as input
         const input_token = state.generated_tokens.items[state.generated_tokens.items.len - 1];
@@ -15822,7 +15837,7 @@ pub fn generate(
             if (engine.logits_readback_enabled) dumpTop5Logits(engine, generated);
         }
 
-        const tok_end = std.time.nanoTimestamp();
+        const tok_end = nanoTimestamp();
         const tok_ms = @as(f64, @floatFromInt(@as(u64, @intCast(tok_end - tok_start)))) / 1_000_000.0;
         log.debug("decode[{d}]: token={d} pos={d} ({d:.1} ms)", .{
             generated, token, state.position, tok_ms,
@@ -15831,7 +15846,7 @@ pub fn generate(
         // Check for EOS token (read from GGUF metadata)
         if (token == eos_token_id) break;
     }
-    const decode_end = std.time.nanoTimestamp();
+    const decode_end = nanoTimestamp();
 
     const decode_tokens = state.generated_tokens.items.len;
     const decode_ns: u64 = @intCast(decode_end - decode_start);

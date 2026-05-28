@@ -56,8 +56,8 @@ pub const Engine = struct {
 /// @param value String to parse.
 /// @returns The selected `Tier`, or `error.UnknownZincRtTier` if `value` is
 /// not a recognised name.
-pub fn parseTier(value: []const u8) !Tier {
-    if (std.mem.eql(u8, value, "auto")) return autoTier();
+pub fn parseTier(io: std.Io, value: []const u8) !Tier {
+    if (std.mem.eql(u8, value, "auto")) return autoTier(io);
     if (std.mem.eql(u8, value, "t1") or std.mem.eql(u8, value, "t1_pm4")) return .t1_pm4;
     if (std.mem.eql(u8, value, "t2") or std.mem.eql(u8, value, "t2_umq")) return .t2_umq;
     if (std.mem.eql(u8, value, "t_cpu")) return .t_cpu;
@@ -69,9 +69,9 @@ pub fn parseTier(value: []const u8) !Tier {
 
 /// Read `ZINC_RT_TIER` and parse it, falling back to `autoTier` when unset.
 /// @returns The selected `Tier`, or a parse error from `parseTier`.
-pub fn tierFromEnv() !Tier {
-    const value = std.posix.getenv("ZINC_RT_TIER") orelse return autoTier();
-    return parseTier(value);
+pub fn tierFromEnv(io: std.Io) !Tier {
+    const value = (if (std.c.getenv("ZINC_RT_TIER")) |p| @as([:0]const u8, std.mem.span(p)) else null) orelse return autoTier(io);
+    return parseTier(io, value);
 }
 
 /// Probe the host for direct-execution paths and return the best available
@@ -81,13 +81,13 @@ pub fn tierFromEnv() !Tier {
 /// @returns The best tier the current host can run today.
 /// @note On the bench node the amdgpu firmware rejects compute user queues,
 /// so T2 admission usually fails and we end up on T1 PM4.
-pub fn autoTier() Tier {
+pub fn autoTier(io: std.Io) Tier {
     // T2 UMQ (DRM_IOCTL_AMDGPU_USERQ) is the blessed direct path, but the
     // amdgpu firmware on the bench node rejects compute user queues, so we
     // fall through to the T1 PM4 path on `/dev/kfd` (the ROCm/tinygrad ABI)
     // whenever it is reachable, and only then to the T-CPU reference.
-    if (umq.admissionProbeDefault()) return .t2_umq;
-    if (kfd.reachable()) return .t1_pm4;
+    if (umq.admissionProbeDefault(io)) return .t2_umq;
+    if (kfd.reachable(io)) return .t1_pm4;
     return .t_cpu;
 }
 

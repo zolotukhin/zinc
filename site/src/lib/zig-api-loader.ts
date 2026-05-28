@@ -1117,7 +1117,7 @@ fn dumpStruct(comptime T: type, name: []const u8, first: *bool, w: anytype) !voi
         if (@sizeOf(f.type) > 0 and !f.is_comptime) {
             if (!firstField) try w.print(",", .{});
             try w.print("{{\\"name\\":\\"{s}\\",\\"type\\":\\"{s}\\",\\"size\\":{d},\\"alignment\\":{d},\\"offset\\":{d}}}", .{
-                f.name, @typeName(f.type), @sizeOf(f.type), f.alignment, @offsetOf(T, f.name)
+                f.name, @typeName(f.type), @sizeOf(f.type), f.alignment orelse @alignOf(f.type), @offsetOf(T, f.name)
             });
             firstField = false;
         }
@@ -1125,9 +1125,10 @@ fn dumpStruct(comptime T: type, name: []const u8, first: *bool, w: anytype) !voi
     try w.print("]}}", .{});
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     const out = &stdout.interface;
     try out.print("{{", .{});
     var first = true;

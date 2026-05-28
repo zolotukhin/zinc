@@ -289,15 +289,15 @@ const drm_ioctl_amdgpu_userq = linux.IOCTL.IOWR(
 /// @param render_node Absolute path to the DRI render node (e.g. `/dev/dri/renderD128`).
 /// @returns A `QueryResult` whose `status` field identifies the precise failure mode or `.available` on success, with `info` populated when compute UMQ is ready to use.
 /// @note Returns `.unsupported_os` immediately on non-Linux builds without opening any file.
-pub fn queryComputeUserq(render_node: []const u8) QueryResult {
+pub fn queryComputeUserq(io: std.Io, render_node: []const u8) QueryResult {
     if (builtin.os.tag != .linux) {
         return .{ .status = .unsupported_os };
     }
 
-    var file = std.fs.openFileAbsolute(render_node, .{ .mode = .read_write }) catch {
+    var file = std.Io.Dir.openFileAbsolute(io, render_node, .{ .mode = .read_write }) catch {
         return .{ .status = .render_node_open_failed };
     };
-    defer file.close();
+    defer file.close(io);
 
     const hw_ip = queryHwIp(file, AMDGPU_HW_IP_COMPUTE) catch |err| {
         return .{
@@ -339,7 +339,7 @@ pub fn queryComputeUserq(render_node: []const u8) QueryResult {
 /// @param ip_type IP selector constant such as `AMDGPU_HW_IP_COMPUTE`.
 /// @returns The kernel-filled `DrmAmdgpuInfoHwIp` for IP instance 0.
 /// @note Returns `error.IoctlFailed` on failure; inspect `lastErrno()` for the captured errno.
-pub fn queryHwIp(file: std.fs.File, ip_type: u32) !DrmAmdgpuInfoHwIp {
+pub fn queryHwIp(file: std.Io.File, ip_type: u32) !DrmAmdgpuInfoHwIp {
     var out: DrmAmdgpuInfoHwIp = std.mem.zeroes(DrmAmdgpuInfoHwIp);
     var query: DrmAmdgpuInfo = std.mem.zeroes(DrmAmdgpuInfo);
     query.return_pointer = @intFromPtr(&out);
@@ -353,7 +353,7 @@ pub fn queryHwIp(file: std.fs.File, ip_type: u32) !DrmAmdgpuInfoHwIp {
     return out;
 }
 
-fn queryUqMetadataCompute(file: std.fs.File) !DrmAmdgpuInfoUqMetadata {
+fn queryUqMetadataCompute(file: std.Io.File) !DrmAmdgpuInfoUqMetadata {
     var out: DrmAmdgpuInfoUqMetadata = std.mem.zeroes(DrmAmdgpuInfoUqMetadata);
     var query: DrmAmdgpuInfo = std.mem.zeroes(DrmAmdgpuInfo);
     query.return_pointer = @intFromPtr(&out);
@@ -374,7 +374,7 @@ fn queryUqMetadataCompute(file: std.fs.File) !DrmAmdgpuInfoUqMetadata {
 /// @param domains Bitmask of `AMDGPU_GEM_DOMAIN_*` constants selecting GTT, VRAM, or doorbell aperture.
 /// @param flags Bitmask of `AMDGPU_GEM_CREATE_*` creation flags (e.g. USWC, VRAM-cleared, always-valid).
 /// @returns A `Bo` wrapping the kernel GEM handle and the requested size for later mmap or VA-map calls.
-pub fn createGem(file: std.fs.File, size: u64, alignment: u64, domains: u64, flags: u64) !Bo {
+pub fn createGem(file: std.Io.File, size: u64, alignment: u64, domains: u64, flags: u64) !Bo {
     var create: DrmAmdgpuGemCreate = std.mem.zeroes(DrmAmdgpuGemCreate);
     create.in = .{
         .bo_size = size,
@@ -395,7 +395,7 @@ pub fn createGem(file: std.fs.File, size: u64, alignment: u64, domains: u64, fla
 /// @param bo The buffer object handle and size returned by `createGem`.
 /// @param prot Standard POSIX `PROT_*` page-protection flags.
 /// @returns A page-aligned byte slice covering the BO; the slice length equals `bo.size`.
-pub fn mmapGem(file: std.fs.File, bo: Bo, prot: u32) ![]align(std.heap.page_size_min) u8 {
+pub fn mmapGem(file: std.Io.File, bo: Bo, prot: std.posix.PROT) ![]align(std.heap.page_size_min) u8 {
     var mmap_args: DrmAmdgpuGemMmap = std.mem.zeroes(DrmAmdgpuGemMmap);
     mmap_args.in = .{
         .handle = bo.handle,
@@ -419,7 +419,7 @@ pub fn mmapGem(file: std.fs.File, bo: Bo, prot: u32) ![]align(std.heap.page_size
 /// @param bo The buffer object handle and size returned by `createGem`.
 /// @param va Target GPU virtual address; must satisfy the page alignment the kernel enforces.
 /// @param flags Bitmask of `AMDGPU_VM_PAGE_*` and `AMDGPU_VM_MTYPE_*` permission/cache flags.
-pub fn mapGemVa(file: std.fs.File, bo: Bo, va: u64, flags: u32) !void {
+pub fn mapGemVa(file: std.Io.File, bo: Bo, va: u64, flags: u32) !void {
     var args: DrmAmdgpuGemVa = std.mem.zeroes(DrmAmdgpuGemVa);
     args.handle = bo.handle;
     args.operation = AMDGPU_VA_OP_MAP;
@@ -443,7 +443,7 @@ pub fn mapGemVa(file: std.fs.File, bo: Bo, va: u64, flags: u32) !void {
 /// @param flags Driver-specific creation flags forwarded as-is to the kernel.
 /// @returns The kernel-assigned queue id used in later doorbell rings and the matching `freeUserq` call.
 pub fn createComputeUserq(
-    file: std.fs.File,
+    file: std.Io.File,
     doorbell_handle: u32,
     doorbell_offset: u32,
     queue_va: u64,
@@ -476,7 +476,7 @@ pub fn createComputeUserq(
 /// Release a user-mode queue previously returned by `createComputeUserq` via `AMDGPU_USERQ_OP_FREE`.
 /// @param file Open file handle for the AMDGPU render node that owns the queue.
 /// @param queue_id Kernel-assigned queue id to free.
-pub fn freeUserq(file: std.fs.File, queue_id: u32) !void {
+pub fn freeUserq(file: std.Io.File, queue_id: u32) !void {
     var args: DrmAmdgpuUserq = std.mem.zeroes(DrmAmdgpuUserq);
     args.in = .{
         .op = AMDGPU_USERQ_OP_FREE,
@@ -506,10 +506,10 @@ pub fn lastErrno() ?linux.E {
     return last_ioctl_errno;
 }
 
-fn ioctlRaw(file: std.fs.File, request: u32, arg: usize) IoctlError!void {
+fn ioctlRaw(file: std.Io.File, request: u32, arg: usize) IoctlError!void {
     last_ioctl_errno = null;
     const rc = linux.ioctl(file.handle, request, arg);
-    const err = linux.E.init(rc);
+    const err = linux.errno(rc);
     if (err != .SUCCESS) {
         last_ioctl_errno = err;
         return error.IoctlFailed;

@@ -14,7 +14,7 @@ pub const Backend = enum {
 
 /// Cross-process lock handle that reserves one backend/device pair.
 pub const ProcessLock = struct {
-    file: ?std.fs.File = null,
+    file: ?std.Io.File = null,
 
     /// Return whether the lock currently owns an open lockfile handle.
     pub fn isHeld(self: *const ProcessLock) bool {
@@ -24,14 +24,14 @@ pub const ProcessLock = struct {
     /// Release the held lockfile handle, if any.
     pub fn deinit(self: *ProcessLock) void {
         if (self.file) |file| {
-            file.close();
+            _ = std.os.linux.close(file.handle);
             self.file = null;
         }
     }
 };
 
 /// Errors returned while acquiring a backend/device GPU reservation lock.
-pub const AcquireError = std.fs.File.OpenError || error{
+pub const AcquireError = std.Io.File.OpenError || error{
     GpuAlreadyReserved,
     LockPathTooLong,
 };
@@ -45,10 +45,10 @@ pub fn lockPath(buffer: []u8, backend: Backend, device_index: u32) error{LockPat
 }
 
 /// Acquire the cross-process GPU reservation lock for a backend/device pair.
-pub fn acquire(backend: Backend, device_index: u32) AcquireError!ProcessLock {
+pub fn acquire(io: std.Io, backend: Backend, device_index: u32) AcquireError!ProcessLock {
     var path_buffer: [64]u8 = undefined;
     const path = try lockPath(&path_buffer, backend, device_index);
-    const file = std.fs.createFileAbsolute(path, .{
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
