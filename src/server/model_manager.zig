@@ -364,12 +364,20 @@ pub const ModelManager = struct {
     /// @param persist_active When true, writes the selection to the active-model file so it
     ///   survives process restarts.
     /// @returns `error.UnknownManagedModel` if the ID is not in the catalog,
-    ///   `error.ModelUnsupportedOnThisGpu` if the entry does not match the GPU profile,
     ///   `error.ModelNotInstalled` if the weights file is absent, or
-    ///   `error.ModelDoesNotFit` if the model exceeds the VRAM budget.
+    ///   `error.ModelDoesNotFit` if the model exceeds the VRAM budget. An entry
+    ///   whose tested profiles do not include the detected GPU only logs a
+    ///   warning and proceeds; real capacity limits are enforced by the fit check.
     pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool) !void {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
-        if (!catalog_mod.supportsProfile(entry.*, self.catalogProfile())) return error.ModelUnsupportedOnThisGpu;
+        if (!catalog_mod.supportsProfile(entry.*, self.catalogProfile())) {
+            // Detected-but-untested GPU profile is a soft signal, not a hard
+            // block: the VRAM fit check below still enforces real capacity.
+            std.log.scoped(.model_manager).warn(
+                "{s} is not validated on this GPU profile ({s}); activating anyway",
+                .{ entry.display_name, self.catalogProfile() },
+            );
+        }
         if (!managed_mod.isInstalled(model_id, self.allocator)) return error.ModelNotInstalled;
 
         const fit = try managed_mod.verifyActiveSelectionFits(model_id, self.vram_budget_bytes, self.allocator);

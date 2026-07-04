@@ -5,6 +5,7 @@
 const std = @import("std");
 const vk = @import("vk.zig");
 const Instance = @import("instance.zig").Instance;
+const builtin = @import("builtin");
 
 const log = std.log.scoped(.gpu_detect);
 
@@ -12,11 +13,11 @@ const log = std.log.scoped(.gpu_detect);
 pub const GpuVendor = enum {
     amd_rdna3,
     amd_rdna4,
-    /// AMD RDNA4 iGPU in a unified-memory APU (e.g. Strix Halo / gfx1151).
-    /// Same ISA and cooperative-matrix support as discrete RDNA4, but bandwidth
-    /// is constrained by the shared LPDDR5X system-memory bus (~256 GB/s on
-    /// 128 GB configs) rather than dedicated GDDR6.  Tuning defaults differ
-    /// from amd_rdna4 accordingly.
+    /// AMD Strix Halo APU iGPU (gfx1151). Architecturally RDNA 3.5, not RDNA4,
+    /// but it exposes cooperative matrix like RDNA3/RDNA4, so ZINC buckets it
+    /// with the RDNA4 tuning path (hence the name). Bandwidth is constrained by
+    /// the shared LPDDR5X system-memory bus (~256 GB/s on 128 GB configs)
+    /// rather than dedicated GDDR6, so tuning defaults differ from amd_rdna4.
     amd_rdna4_apu,
     amd_other,
     nvidia,
@@ -147,9 +148,10 @@ pub fn detect(instance: *const Instance) GpuConfig {
                 config.matmul_tile_n = 16;
             },
             .amd_rdna4_apu => {
-                // RDNA4 iGPU in unified-memory APU (gfx1151 / Strix Halo)
-                // Same ISA and CoopMat support as discrete RDNA4, but memory
-                // bandwidth is limited by the shared LPDDR5X-8000/8533 bus.
+                // Strix Halo APU iGPU (gfx1151), architecturally RDNA 3.5.
+                // Exposes cooperative matrix like RDNA3/RDNA4, so it shares the
+                // RDNA4 tuning bucket; memory bandwidth is limited by the
+                // shared LPDDR5X-8000/8533 bus.
                 // Radeon 8060S (32 CUs, 256-bit bus): ~256 GB/s peak.
                 // Higher-end Strix Halo SKUs use the same gfx1151 target.
                 config.l1_cache_kb = 32;
@@ -177,6 +179,19 @@ pub fn detect(instance: *const Instance) GpuConfig {
         // what min_subgroup_size reports (AMD supports both 32 and 64, but 64
         // is the native width and what our shaders are tuned for).
         config.wave_size = 64;
+
+        // Nudge users who forgot the documented RADV tuning flag. ZINC is built
+        // and benchmarked with RADV_PERFTEST=coop_matrix; without it, RADV may
+        // not expose cooperative matrix (some Mesa builds gate it behind this
+        // flag), which on APUs such as Strix Halo can prevent startup entirely.
+        if (builtin.os.tag == .linux) {
+            const perftest = std.posix.getenv("RADV_PERFTEST");
+            const has_coopmat = perftest != null and
+                std.mem.indexOf(u8, perftest.?, "coop_matrix") != null;
+            if (!has_coopmat) {
+                log.warn("RADV_PERFTEST=coop_matrix is not set; ZINC is tuned to run with it. Prefix your command (e.g. `RADV_PERFTEST=coop_matrix zinc ...`) for best performance and RADV compatibility.", .{});
+            }
+        }
     } else if (props.vendorID == 0x10de) {
         // NVIDIA
         config.vendor = .nvidia;
@@ -222,7 +237,7 @@ fn classifyAmd(device_id: u32, name: []const u8) GpuVendor {
     // gfx1100-gfx1103 = RDNA3
     _ = device_id;
 
-    // RDNA4 iGPU: Strix Halo APU (gfx1151)
+    // Strix Halo APU iGPU (gfx1151, architecturally RDNA 3.5).
     // Covers Radeon 8060S / 8050S and any other Strix Halo iGPU variant.
     // Must be checked before the discrete RDNA4 branch because the device
     // name contains neither "9070" nor "R9700".

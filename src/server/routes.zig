@@ -559,7 +559,6 @@ fn handleActivateModel(
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown managed model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
-            error.ModelUnsupportedOnThisGpu => "Model is not marked supported for the current GPU profile",
             error.ModelDoesNotFit => "Model does not fit the current GPU memory budget",
             error.GpuAlreadyReserved => "Another zinc process already owns this GPU. Stop it before activating a second model on the same device.",
             else => "Model activation failed",
@@ -2066,7 +2065,6 @@ fn ensureRequestedModelActive(
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
-            error.ModelUnsupportedOnThisGpu => "Model is not supported on the current GPU",
             error.ModelDoesNotFit => "Model does not fit the current GPU memory budget",
             error.GpuAlreadyReserved => "Another zinc process owns this GPU",
             else => @errorName(err),

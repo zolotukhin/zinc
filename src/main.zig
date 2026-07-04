@@ -1501,7 +1501,27 @@ fn runModelCommand(config: Config, allocator: std.mem.Allocator) !void {
             var support = try resolveManagedGpuSupport(config.gpuDevicePreference(), allocator);
             defer support.deinit(allocator);
 
-            if (!catalog_mod.supportsProfile(entry.*, support.profile)) return error.ModelUnsupportedOnThisGpu;
+            if (!catalog_mod.supportsProfile(entry.*, support.profile)) {
+                // A detected-but-untested GPU profile (e.g. a Strix Halo APU or a
+                // brand-new board) is a soft signal, not a hard incompatibility:
+                // `pull` only downloads weights, and activation is still worth
+                // attempting. Warn instead of refusing; for `use`, require --force
+                // so running an unvalidated path stays an explicit choice.
+                var warn_buffer: [1024]u8 = undefined;
+                var warn_writer = std.fs.File.stderr().writerStreaming(&warn_buffer);
+                const warn = &warn_writer.interface;
+                try warn.print(
+                    "warning: {s} has not been validated on this GPU profile ({s}).\n",
+                    .{ entry.display_name, support.profile },
+                );
+                if (config.command == .model_use and !config.command_force) {
+                    try warn.writeAll("Re-run with --force to activate it anyway, or run the file directly with -m <model.gguf>.\n");
+                    try warn.flush();
+                    return error.ModelUnsupportedOnThisGpu;
+                }
+                try warn.writeAll("Proceeding anyway; performance and correctness are unverified on this GPU.\n");
+                try warn.flush();
+            }
 
             if (config.command == .model_pull) {
                 var stdout_buffer: [4096]u8 = undefined;

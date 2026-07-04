@@ -358,7 +358,14 @@ pub const ModelManager = struct {
     /// @note Caller must already hold the shared generation lock.
     pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool) !void {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
-        if (!catalog_mod.supportsProfile(entry.*, self.profile)) return error.ModelUnsupportedOnThisGpu;
+        if (!catalog_mod.supportsProfile(entry.*, self.profile)) {
+            // Detected-but-untested GPU profile is a soft signal, not a hard
+            // block: the VRAM fit check below still enforces real capacity.
+            std.log.scoped(.model_manager).warn(
+                "{s} is not validated on this GPU profile ({s}); activating anyway",
+                .{ entry.display_name, self.profile },
+            );
+        }
         if (!managed_mod.isInstalled(model_id, self.allocator)) return error.ModelNotInstalled;
 
         const fit = try managed_mod.verifyActiveSelectionFits(model_id, self.vram_budget_bytes, self.allocator);
