@@ -184,6 +184,32 @@ After a first production keep, use the phase budget:
 - Do not keep a flag-gated optimization without paired flag OFF/ON
   measurements in the same cycle.
 
+## 2026-07-04 measured rejects
+
+Fair server-side RDNA proxy runs on `qwen35-9b-q4k-m` / `decode-extended`
+showed the current routing defaults are still better than the obvious
+prefix/segment/projection toggles. Use these as cooldown evidence before
+repeating the same sweep:
+
+| toggle | prefill median | decode median | verdict |
+|---|---:|---:|---|
+| default reference | 1269.23 | 96.79 | keep current defaults |
+| `ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT=0` | 1251.28 | 96.54 | reject |
+| `ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS=1` | 1261.29 | 96.52 | reject |
+| `ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS=2` | 1252.03 | 96.17 | reject |
+| `ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS=4` | 1249.95 | 96.68 | reject |
+| `ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE=0` | 1243.31 | 96.03 | reject |
+| `ZINC_QWEN36_27B_SSM_PREFILL_PROJ=qkv` | 1261.65 | 96.51 | reject |
+| `ZINC_QWEN36_27B_SSM_PREFILL_PROJ=z` | 1246.89 | 96.54 | reject |
+| `ZINC_QWEN36_27B_FULL_ATTN_BATCHED=0` | 1251.19 | 96.47 | reject |
+
+The same session tested a K4096/K12288 exact BM64 gate-up/down experiment
+behind new env flags; the fair server harness regressed from 1269.23 to
+1250.91 prefill, so the engine change was not kept. Existing
+`ZINC_QWEN35_9B_SSM_Q5_BK2` remains useful: disabling it landed at
+1250.93 prefill. The remaining biggest buckets from `ZINC_PREFILL_PROFILE=1`
+are dense FFN gate/up/down and SSM projection internals, not routing depth.
+
 ## Full-matrix follow-up
 
 After any material keep above 150 tok/s on the primary metric, run or
