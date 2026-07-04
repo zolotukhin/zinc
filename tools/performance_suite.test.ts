@@ -102,17 +102,33 @@ test("parseArgs reads Intel suite options", () => {
   expect(args.intelRemoteLibcConf).toBe("/workspace/zinc/.build-support/libc.conf");
 });
 
-test("remote tuning env forwards Q8_1 projection toggles", () => {
+test("remote tuning env forwards tuning toggles", () => {
   const env = collectRemoteZincTuningEnv({
     ZINC_Q8_1_LM_HEAD: "1",
     ZINC_Q8_1_SSM_QKV_Z: "1",
     ZINC_MOE_Q5K_Q8_1_DOWN_ACC: "1",
     ZINC_INTEL_A3B_PRODUCTION: "0",
+    ZINC_QWEN35_9B_BM64_DOWN: "0",
+    ZINC_QWEN35_9B_K12288_BK2: "0",
+    ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS: "4",
+    ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT: "0",
+    ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE: "0",
+    ZINC_QWEN36_27B_SSM_BATCHED_DELTA: "0",
+    ZINC_QWEN36_27B_SSM_PREFILL_PROJ: "both",
+    ZINC_QWEN36_27B_FULL_ATTN_BATCHED: "0",
   });
   expect(env.ZINC_Q8_1_LM_HEAD).toBe("1");
   expect(env.ZINC_Q8_1_SSM_QKV_Z).toBe("1");
   expect(env.ZINC_MOE_Q5K_Q8_1_DOWN_ACC).toBe("1");
   expect(env.ZINC_INTEL_A3B_PRODUCTION).toBe("0");
+  expect(env.ZINC_QWEN35_9B_BM64_DOWN).toBe("0");
+  expect(env.ZINC_QWEN35_9B_K12288_BK2).toBe("0");
+  expect(env.ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS).toBe("4");
+  expect(env.ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT).toBe("0");
+  expect(env.ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE).toBe("0");
+  expect(env.ZINC_QWEN36_27B_SSM_BATCHED_DELTA).toBe("0");
+  expect(env.ZINC_QWEN36_27B_SSM_PREFILL_PROJ).toBe("both");
+  expect(env.ZINC_QWEN36_27B_FULL_ATTN_BATCHED).toBe("0");
 });
 
 test("parseArgs reads RDNA backend and device options", () => {

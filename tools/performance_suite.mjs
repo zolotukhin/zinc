@@ -1088,6 +1088,15 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_PREFILL_TC",
   "ZINC_PREFILL_Q8_TC",
   "ZINC_PREFILL_GATE_UP_SWIGLU",
+  "ZINC_QWEN35_9B_BM64_DOWN",
+  "ZINC_QWEN35_9B_K12288_BK2",
+  "ZINC_QWEN36_27B_DENSE_PREFILL",
+  "ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS",
+  "ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT",
+  "ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE",
+  "ZINC_QWEN36_27B_SSM_BATCHED_DELTA",
+  "ZINC_QWEN36_27B_SSM_PREFILL_PROJ",
+  "ZINC_QWEN36_27B_FULL_ATTN_BATCHED",
   "ZINC_SSM_CHUNKED",
   "ZINC_SSM_WARP",
   "ZINC_CUDA_GRAPH",
@@ -2796,7 +2805,8 @@ async function verifyRemoteVulkanDevice(creds, requireSubstring, options = {}) {
   const targetId = options.targetId ?? "rdna";
   const nodeLabel = options.nodeLabel ?? `${targetId.toUpperCase()} node`;
   const selectorHelp = options.selectorHelp ?? "Pick the discrete GPU with --rdna-vk-device <n> or ZINC_RDNA_VK_DEVICE=<n>.";
-  const cmd = remoteCommand("vulkaninfo --summary 2>/dev/null || true", creds);
+  const envPrefix = remoteEnvPrefix(creds);
+  const cmd = remoteCommand(`${envPrefix ? `${envPrefix} ` : ""}vulkaninfo --summary 2>/dev/null || true`, creds);
   const { stdout } = await runShell(cmd, { cwd: ROOT, timeoutMs: 30000 });
   const blocks = stdout.split(/^GPU(\d+):/m);
   const devices = [];
