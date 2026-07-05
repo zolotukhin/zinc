@@ -2989,6 +2989,12 @@ test "parseArgs: managed model subcommands" {
     try std.testing.expectEqual(Command.model_rm, rm_config.command);
     try std.testing.expect(rm_config.command_force);
     try std.testing.expectEqualStrings("qwen35-9b-q4k-m", rm_config.command_model_id.?);
+
+    const use_args = [_][:0]const u8{ "zinc", "model", "use", "qwen35-9b-q4k-m", "--force" };
+    const use_config = try parseArgs(&use_args);
+    try std.testing.expectEqual(Command.model_use, use_config.command);
+    try std.testing.expect(use_config.command_force);
+    try std.testing.expectEqualStrings("qwen35-9b-q4k-m", use_config.command_model_id.?);
 }
 
 test "parseArgs: chat command" {

@@ -192,7 +192,8 @@ pub fn detect(instance: *const Instance) GpuConfig {
             if (std.posix.getenv("RADV_PERFTEST")) |val| {
                 var flags = std.mem.splitScalar(u8, val, ',');
                 while (flags.next()) |flag| {
-                    if (std.mem.startsWith(u8, std.mem.trim(u8, flag, " "), "coop_matrix")) {
+                    const token = std.mem.trim(u8, flag, " ");
+                    if (std.mem.eql(u8, token, "coop_matrix") or std.mem.eql(u8, token, "coop_matrix2")) {
                         has_coopmat = true;
                         break;
                     }
