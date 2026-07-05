@@ -185,9 +185,19 @@ pub fn detect(instance: *const Instance) GpuConfig {
         // not expose cooperative matrix (some Mesa builds gate it behind this
         // flag), which on APUs such as Strix Halo can prevent startup entirely.
         if (builtin.os.tag == .linux) {
-            const perftest = std.posix.getenv("RADV_PERFTEST");
-            const has_coopmat = perftest != null and
-                std.mem.indexOf(u8, perftest.?, "coop_matrix") != null;
+            // RADV_PERFTEST is a comma-separated flag list; match whole tokens
+            // so coop_matrix / coop_matrix2 count but a substring inside an
+            // unrelated flag name does not.
+            var has_coopmat = false;
+            if (std.posix.getenv("RADV_PERFTEST")) |val| {
+                var flags = std.mem.splitScalar(u8, val, ',');
+                while (flags.next()) |flag| {
+                    if (std.mem.startsWith(u8, std.mem.trim(u8, flag, " "), "coop_matrix")) {
+                        has_coopmat = true;
+                        break;
+                    }
+                }
+            }
             if (!has_coopmat) {
                 log.warn("RADV_PERFTEST=coop_matrix is not set; ZINC is tuned to run with it. Prefix your command (e.g. `RADV_PERFTEST=coop_matrix zinc ...`) for best performance and RADV compatibility.", .{});
             }

@@ -363,18 +363,22 @@ pub const ModelManager = struct {
     /// @param model_id Catalog entry ID to activate; must be installed on disk.
     /// @param persist_active When true, writes the selection to the active-model file so it
     ///   survives process restarts.
+    /// @param force When false, an entry whose tested profiles do not include the
+    ///   detected GPU is rejected with `error.ModelUnsupportedOnThisGpu`; when true,
+    ///   activation proceeds on the untested profile with only a logged warning.
     /// @returns `error.UnknownManagedModel` if the ID is not in the catalog,
-    ///   `error.ModelNotInstalled` if the weights file is absent, or
-    ///   `error.ModelDoesNotFit` if the model exceeds the VRAM budget. An entry
-    ///   whose tested profiles do not include the detected GPU only logs a
-    ///   warning and proceeds; real capacity limits are enforced by the fit check.
-    pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool) !void {
+    ///   `error.ModelUnsupportedOnThisGpu` if the entry is not validated on this GPU
+    ///   and `force` is false, `error.ModelNotInstalled` if the weights file is
+    ///   absent, or `error.ModelDoesNotFit` if the model exceeds the VRAM budget.
+    pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool, force: bool) !void {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
         if (!catalog_mod.supportsProfile(entry.*, self.catalogProfile())) {
-            // Detected-but-untested GPU profile is a soft signal, not a hard
-            // block: the VRAM fit check below still enforces real capacity.
+            // Untested GPU profile: require an explicit opt-in (parity with the
+            // CLI `model use --force`). The VRAM fit check below still enforces
+            // real capacity when the caller does opt in.
+            if (!force) return error.ModelUnsupportedOnThisGpu;
             std.log.scoped(.model_manager).warn(
-                "{s} is not validated on this GPU profile ({s}); activating anyway",
+                "{s} is not validated on this GPU profile ({s}); activating anyway (force)",
                 .{ entry.display_name, self.catalogProfile() },
             );
         }

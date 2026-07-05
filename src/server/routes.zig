@@ -555,10 +555,12 @@ fn handleActivateModel(
     server_state.generation_mutex.lock();
     defer server_state.generation_mutex.unlock();
 
-    _manager.activateManagedModel(parsed.model_id, true) catch |err| {
+    const force_flag = if (parseJsonFields(_body)) |pj| pj.force else |_| false;
+    _manager.activateManagedModel(parsed.model_id, true, force_flag) catch |err| {
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown managed model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
+            error.ModelUnsupportedOnThisGpu => "Model is not validated on the current GPU profile. Retry with \"force\":true to activate it anyway.",
             error.ModelDoesNotFit => "Model does not fit the current GPU memory budget",
             error.GpuAlreadyReserved => "Another zinc process already owns this GPU. Stop it before activating a second model on the same device.",
             else => "Model activation failed",
@@ -2052,7 +2054,7 @@ fn ensureRequestedModelActive(
         return false;
     }
 
-    manager.activateManagedModel(requested_model, true) catch |err| {
+    manager.activateManagedModel(requested_model, true, false) catch |err| {
         const status: u16 = switch (err) {
             error.UnknownManagedModel, error.ModelNotInstalled => 404,
             error.GpuAlreadyReserved => 409,
@@ -2065,6 +2067,7 @@ fn ensureRequestedModelActive(
         const msg = switch (err) {
             error.UnknownManagedModel => "Unknown model id",
             error.ModelNotInstalled => "Model is not installed in the local cache",
+            error.ModelUnsupportedOnThisGpu => "Model is not validated on the current GPU profile. Activate it explicitly with \"force\":true first.",
             error.ModelDoesNotFit => "Model does not fit the current GPU memory budget",
             error.GpuAlreadyReserved => "Another zinc process owns this GPU",
             else => @errorName(err),

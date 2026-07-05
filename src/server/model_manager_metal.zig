@@ -356,13 +356,15 @@ pub const ModelManager = struct {
     /// @param model_id  Catalog identifier of the managed model to activate.
     /// @param persist_active  When true, writes the selection to the active-model config file.
     /// @note Caller must already hold the shared generation lock.
-    pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool) !void {
+    pub fn activateManagedModel(self: *ModelManager, model_id: []const u8, persist_active: bool, force: bool) !void {
         const entry = catalog_mod.find(model_id) orelse return error.UnknownManagedModel;
         if (!catalog_mod.supportsProfile(entry.*, self.profile)) {
-            // Detected-but-untested GPU profile is a soft signal, not a hard
-            // block: the VRAM fit check below still enforces real capacity.
+            // Untested GPU profile: require an explicit opt-in (parity with the
+            // CLI `model use --force`). The VRAM fit check below still enforces
+            // real capacity when the caller does opt in.
+            if (!force) return error.ModelUnsupportedOnThisGpu;
             std.log.scoped(.model_manager).warn(
-                "{s} is not validated on this GPU profile ({s}); activating anyway",
+                "{s} is not validated on this GPU profile ({s}); activating anyway (force)",
                 .{ entry.display_name, self.profile },
             );
         }
