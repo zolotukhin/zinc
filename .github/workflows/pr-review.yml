@@ -19,9 +19,9 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY || secrets.ANTHROPIC_AUTH_TOKEN }}
       ZAI_BASE_URL: https://api.z.ai/api/coding/paas/v4
-      ZAI_MODEL: glm-5.1
+      ZAI_MODEL: glm-5.2
     steps:
-      - name: Review PR with GLM-5.1
+      - name: Review PR with GLM-5.2
         run: |
           python3 <<'PY'
           import json
