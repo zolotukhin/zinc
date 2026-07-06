@@ -2728,6 +2728,199 @@ extern "C" __global__ void gemm_q5_1_experts_grouped_tc(const unsigned char* a, 
     }
 }
 
+// ---- BT=32 grouped-TC variants (padding-waste cut) -------------------------
+// The BT=64 grouped-TC kernels pad each expert's token run up to a 64-token tile
+// and run the full 64-wide wmma even when the expert got far fewer tokens. On MoE
+// models with many experts (gemma-26b 128 exp / top-8 -> ~65 tok/exp; qwen36-a3b
+// 256 exp -> ~33 tok/exp) that wastes 34-49% of the expert-GEMM FLOPs on padding.
+// These BT=32 twins pad to 32 tokens (128 threads, 4 warps = 2 fm x 2 ft) so the
+// partial-tile waste roughly halves. Output is BIT-IDENTICAL to the BT=64 kernels:
+// each dst[token,row] is the same per-element K-reduction; only the token-tiling
+// (which block owns which token) changes. Uses build_expert_order_padded32.
+extern "C" __global__ void build_expert_order_padded32(const unsigned* expert_ids, unsigned* order, unsigned* tile_expert, BuildOrderPadPush pc) {
+    __shared__ unsigned counts[256];
+    __shared__ unsigned poff[256];
+    const unsigned INV = 0xFFFFFFFFu;
+    unsigned tid = threadIdx.x, nthr = blockDim.x;
+    unsigned P = pc.T * pc.n_used;
+    unsigned maxtiles = pc.max_pos >> 5;
+    for (unsigned p = tid; p < pc.max_pos; p += nthr) order[p] = INV;
+    for (unsigned tl = tid; tl < maxtiles; tl += nthr) tile_expert[tl] = INV;
+    for (unsigned e = tid; e < pc.n_experts; e += nthr) counts[e] = 0u;
+    __syncthreads();
+    for (unsigned p = tid; p < P; p += nthr) {
+        unsigned t = p / pc.n_used, slot = p - t * pc.n_used;
+        atomicAdd(&counts[expert_ids[(size_t)t * pc.routing_stride + slot]], 1u);
+    }
+    __syncthreads();
+    if (tid == 0) {
+        unsigned acc = 0u;
+        for (unsigned e = 0; e < pc.n_experts; e++) {
+            poff[e] = acc;
+            unsigned ntile = (counts[e] + 31u) >> 5; // ceil(count/32)
+            for (unsigned k = 0; k < ntile; k++) tile_expert[(acc >> 5) + k] = e;
+            acc += ntile * 32u;
+        }
+    }
+    __syncthreads();
+    for (unsigned e = tid; e < pc.n_experts; e += nthr) counts[e] = 0u; // reuse as cursor
+    __syncthreads();
+    for (unsigned p = tid; p < P; p += nthr) {
+        unsigned t = p / pc.n_used, slot = p - t * pc.n_used;
+        unsigned E = expert_ids[(size_t)t * pc.routing_stride + slot];
+        unsigned within = atomicAdd(&counts[E], 1u);
+        order[poff[E] + within] = (t << 16) | slot;
+    }
+}
+
+extern "C" __global__ void gemm_q4k_experts_grouped_tc32(const unsigned* a_u32, const float* A, const unsigned* order, const unsigned* tile_expert, float* dst, GroupedTCPush pc) {
+    const unsigned BM=64u, BT=32u, BK=32u, INV=0xFFFFFFFFu;
+    __shared__ half Ws[BM*BK];
+    __shared__ half As[BK*BT];
+    __shared__ float Cs[BT*BM];
+    unsigned expert = tile_expert[blockIdx.y];
+    if (expert == INV) return; // unused padded tile
+    unsigned m0 = blockIdx.x*BM, t0 = blockIdx.y*BT;
+    unsigned bpr = pc.K >> 8;
+    unsigned nchunk = pc.K >> 5;
+    unsigned tid = threadIdx.x;
+    unsigned a0 = (unsigned)(((size_t)expert * pc.gu_full + pc.base) >> 2);
+    unsigned warp = tid >> 5, fm = warp >> 1, ft = warp & 1u;
+
+    wmma::fragment<wmma::accumulator,16,16,16,float> c0, c1;
+    wmma::fill_fragment(c0, 0.0f);
+    wmma::fill_fragment(c1, 0.0f);
+
+    for (unsigned c = 0; c < nchunk; c++) {
+        unsigned sbk = c >> 3, sb8 = c & 7u;
+        #pragma unroll
+        for (int u = 0; u < 16; u++) {
+            unsigned idx = tid + (unsigned)u * 128u;
+            unsigned r = idx >> 5, l = idx & 31u;
+            unsigned row = m0 + r;
+            float wv = 0.0f;
+            if (row < pc.M) {
+                unsigned blk = a0 + row * bpr * 36u + sbk * 36u;
+                unsigned dd = a_u32[blk];
+                float d = zinc_half_to_float((unsigned short)(dd & 0xFFFFu));
+                float dmin = zinc_half_to_float((unsigned short)(dd >> 16));
+                const unsigned char* scales = (const unsigned char*)(a_u32 + blk + 1u);
+                const unsigned char* qs = (const unsigned char*)(a_u32 + blk + 4u);
+                unsigned char sc, mn; zinc_q4k_scale_min((int)sb8, scales, &sc, &mn);
+                unsigned char qb = qs[(sb8 >> 1) * 32u + l];
+                unsigned nib = (sb8 & 1u) == 0u ? (qb & 0xFu) : (unsigned)(qb >> 4);
+                wv = d * (float)sc * (float)nib - dmin * (float)mn;
+            }
+            Ws[r * BK + l] = __float2half(wv);
+        }
+        #pragma unroll
+        for (int u = 0; u < 8; u++) {
+            unsigned idx = tid + (unsigned)u * 128u;
+            unsigned t = idx >> 5, l = idx & 31u;
+            unsigned packed = order[t0 + t];
+            As[l * BT + t] = (packed != INV) ? __float2half(A[(size_t)(packed >> 16) * pc.K + c * 32u + l]) : __float2half(0.0f);
+        }
+        __syncthreads();
+        #pragma unroll
+        for (unsigned ks = 0; ks < 2; ks++) {
+            wmma::fragment<wmma::matrix_a,16,16,16,half,wmma::row_major> a0f, a1f;
+            wmma::fragment<wmma::matrix_b,16,16,16,half,wmma::row_major> bf;
+            wmma::load_matrix_sync(a0f, &Ws[(fm * 16u) * BK + ks * 16u], BK);
+            wmma::load_matrix_sync(a1f, &Ws[((fm + 2u) * 16u) * BK + ks * 16u], BK);
+            wmma::load_matrix_sync(bf, &As[(ks * 16u) * BT + ft * 16u], BT);
+            wmma::mma_sync(c0, a0f, bf, c0);
+            wmma::mma_sync(c1, a1f, bf, c1);
+        }
+        __syncthreads();
+    }
+    wmma::store_matrix_sync(&Cs[(ft * 16u) * BM + fm * 16u], c0, BM, wmma::mem_col_major);
+    wmma::store_matrix_sync(&Cs[(ft * 16u) * BM + (fm + 2u) * 16u], c1, BM, wmma::mem_col_major);
+    __syncthreads();
+    #pragma unroll
+    for (int u = 0; u < 16; u++) {
+        unsigned idx = tid + (unsigned)u * 128u;
+        unsigned t = idx >> 6, m = idx & 63u;
+        unsigned row = m0 + m;
+        if (row < pc.M) {
+            unsigned packed = order[t0 + t];
+            if (packed != INV) dst[(size_t)(packed >> 16) * pc.dst_tok_stride + (size_t)(packed & 0xFFFFu) * pc.M + row] = Cs[t * BM + m];
+        }
+    }
+}
+
+extern "C" __global__ void gemm_q5_1_experts_grouped_tc32(const unsigned char* a, const float* A, const unsigned* order, const unsigned* tile_expert, float* dst, GroupedTCDownPush pc) {
+    const unsigned BM=64u, BT=32u, BK=32u, INV=0xFFFFFFFFu;
+    __shared__ half Ws[BM*BK];
+    __shared__ half As[BK*BT];
+    __shared__ float Cs[BT*BM];
+    unsigned expert = tile_expert[blockIdx.y];
+    if (expert == INV) return; // unused padded tile
+    unsigned m0 = blockIdx.x*BM, t0 = blockIdx.y*BT;
+    unsigned bpr = pc.K >> 5;
+    unsigned nchunk = pc.K >> 5;
+    unsigned tid = threadIdx.x;
+    const unsigned char* a_e = a + (size_t)expert * pc.slice;
+    unsigned warp = tid >> 5, fm = warp >> 1, ft = warp & 1u;
+
+    wmma::fragment<wmma::accumulator,16,16,16,float> c0, c1;
+    wmma::fill_fragment(c0, 0.0f);
+    wmma::fill_fragment(c1, 0.0f);
+
+    for (unsigned c = 0; c < nchunk; c++) {
+        #pragma unroll
+        for (int u = 0; u < 16; u++) {
+            unsigned idx = tid + (unsigned)u * 128u;
+            unsigned r = idx >> 5, l = idx & 31u;
+            unsigned row = m0 + r;
+            float wv = 0.0f;
+            if (row < pc.M) {
+                const unsigned char* blkp = a_e + (size_t)row * bpr * 24u + (size_t)c * 24u;
+                float d = zinc_half_to_float((unsigned short)((unsigned)blkp[0] | ((unsigned)blkp[1] << 8)));
+                float m = zinc_half_to_float((unsigned short)((unsigned)blkp[2] | ((unsigned)blkp[3] << 8)));
+                unsigned qh = (unsigned)blkp[4] | ((unsigned)blkp[5] << 8) | ((unsigned)blkp[6] << 16) | ((unsigned)blkp[7] << 24);
+                const unsigned char* qs = blkp + 8;
+                unsigned nib = (l < 16u) ? (unsigned)(qs[l] & 0xFu) : (unsigned)(qs[l - 16u] >> 4);
+                unsigned q5 = nib | (((qh >> l) & 1u) << 4);
+                wv = d * (float)q5 + m;
+            }
+            Ws[r * BK + l] = __float2half(wv);
+        }
+        #pragma unroll
+        for (int u = 0; u < 8; u++) {
+            unsigned idx = tid + (unsigned)u * 128u;
+            unsigned t = idx >> 5, l = idx & 31u;
+            unsigned packed = order[t0 + t];
+            size_t arow = (size_t)(packed >> 16) * pc.n_used + (size_t)(packed & 0xFFFFu);
+            As[l * BT + t] = (packed != INV) ? __float2half(A[arow * pc.K + c * 32u + l]) : __float2half(0.0f);
+        }
+        __syncthreads();
+        #pragma unroll
+        for (unsigned ks = 0; ks < 2; ks++) {
+            wmma::fragment<wmma::matrix_a,16,16,16,half,wmma::row_major> a0f, a1f;
+            wmma::fragment<wmma::matrix_b,16,16,16,half,wmma::row_major> bf;
+            wmma::load_matrix_sync(a0f, &Ws[(fm * 16u) * BK + ks * 16u], BK);
+            wmma::load_matrix_sync(a1f, &Ws[((fm + 2u) * 16u) * BK + ks * 16u], BK);
+            wmma::load_matrix_sync(bf, &As[(ks * 16u) * BT + ft * 16u], BT);
+            wmma::mma_sync(c0, a0f, bf, c0);
+            wmma::mma_sync(c1, a1f, bf, c1);
+        }
+        __syncthreads();
+    }
+    wmma::store_matrix_sync(&Cs[(ft * 16u) * BM + fm * 16u], c0, BM, wmma::mem_col_major);
+    wmma::store_matrix_sync(&Cs[(ft * 16u) * BM + (fm + 2u) * 16u], c1, BM, wmma::mem_col_major);
+    __syncthreads();
+    #pragma unroll
+    for (int u = 0; u < 16; u++) {
+        unsigned idx = tid + (unsigned)u * 128u;
+        unsigned t = idx >> 6, m = idx & 63u;
+        unsigned row = m0 + m;
+        if (row < pc.M) {
+            unsigned packed = order[t0 + t];
+            if (packed != INV) dst[(size_t)(packed >> 16) * pc.dst_tok_stride + (size_t)(packed & 0xFFFFu) * pc.M + row] = Cs[t * BM + m];
+        }
+    }
+}
+
 // ---- T2 qwen MoE-down: grouped TC Q5_K + Q6_K down kernels (harvested; reuse GroupedTCDownPush above) ----
 extern "C" __global__ void gemm_q5k_experts_grouped_tc(const unsigned char* a, const float* A, const unsigned* order, const unsigned* tile_expert, float* dst, GroupedTCDownPush pc) {
     const unsigned BM=64u, BT=64u, BK=32u, INV=0xFFFFFFFFu;

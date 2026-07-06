@@ -226,6 +226,9 @@ const Pipelines = struct {
     build_expert_order_padded: CudaPipeline, // sort + pad runs to 64-tile + per-tile expert id
     gemm_q4k_experts_grouped_tc: CudaPipeline, // one-launch grouped Tensor-core gate/up GEMM
     gemm_q5_1_experts_grouped_tc: CudaPipeline, // one-launch grouped Tensor-core Q5_1 down GEMM
+    build_expert_order_padded32: CudaPipeline, // BT=32 twin: pad expert runs to 32-token tiles
+    gemm_q4k_experts_grouped_tc32: CudaPipeline, // BT=32 twin (128-thread) gate/up
+    gemm_q5_1_experts_grouped_tc32: CudaPipeline, // BT=32 twin (128-thread) Q5_1 down
     // Effort 24: register-blocked prefill GEMMs (Q4_K / Q5_K / Q6_K / Q8_0 weights).
     gemm: [4]CudaPipeline,
     gemm_f32: CudaPipeline, // f32-weight prefill GEMM (gemma4-MoE batched router)
@@ -451,6 +454,7 @@ pub const ForwardGemma = struct {
     use_grouped: bool = false, // cycle 18: ZINC_BATCHED_EXPERTS_GROUPED opts into token-GROUPED routed experts (build_expert_order + grouped matvecs → expert weight L2-resident across its tokens). Byte-identical to the cycle-8 _batched path; opt-in pending a measured win.
     use_tc_experts: bool = false, // T2: ZINC_MOE_TC routes the routed gate/up AND Q5_1 down experts through the fp16 Tensor cores (single-launch padded grouped-TC GEMMs: build_expert_order_padded → gemm_q4k_experts_grouped_tc gate/up + gemm_q5_1_experts_grouped_tc down). fp16 → token-tolerance gate, not bit-identical. DEFAULT-ON (opt out ZINC_MOE_TC=0/off), T-gated by moe_tc_min_t (the grouped TC GEMM pads each expert run to a 64-token tile, so it only beats the matvec once T is large enough to fill the tiles).
     tc_experts_forced: bool = false, // T2: ZINC_MOE_TC was set to an EXPLICIT truthy value (1/on/...) → force the grouped TC experts at ANY T, bypassing moe_tc_min_t. Lets validate_catalog exercise the TC path with a short prompt (set ZINC_MOE_TC=1). Unset env = default-on-but-gated; falsy = off.
+    use_tc_bt32: bool = false, // opt-in ZINC_MOE_TC_BT32: use the BT=32 grouped-TC kernels (pad experts to 32-token tiles, 128-thread) — cuts the partial-tile padding waste ~2× on many-expert MoE (gemma-26b 128 exp/top-8 ~65 tok/exp; qwen36-a3b 256 exp ~33 tok/exp). Bit-identical to BT=64 (same per-element K-reduction). A/B before flipping default.
     moe_tc_min_t: u32 = 256, // T2: only route the routed experts through the grouped TC GEMM when the prefill batch T >= this. RE-MEASURED 2026-06-22 after the FULL expert FFN moved onto TC (gate/up Q4_K + Q5_1 down all grouped-TC) — the crossover dropped well below the old 512 gate because the per-tile fixed cost is now amortized over the whole expert FFN, not just gate/up. 4090 / gemma-26b, single main binary, ZINC_MOE_TC=1 (forced TC) vs =0 (matvec), order-alternated to de-bias the cold-start boost lottery: T=256 tc-first TC/MV=1.556, mv-first 1.202 (TC wins +20% even when matvec gets the order/boost advantage) → geomean +37%; an earlier cold round was +21% tc-first. Gate lowered 512→256: T=256 is the decisive zero-regression crossover (de-biased lower bound +20%); below 256 the padded per-expert tiles are mostly empty (P=n_used*T over n_experts buckets, ~65 tok/expert at T=256 fills the 64-tile) so the proven _batched matvec stays. Earlier (gate/up-only on TC) crossover was T=512. Mirrors cublas_min_t.
     fuse_norm_combine: bool = false, // e27 cycle 17 A/B: ZINC_MOE_NORM_COMBINE fuses the MoE decode post_ffw_norm_2 + combine tail into ONE single-block launch (moe_norm_combine_tail). Byte-identical; off → the two-launch path. Read once in init.
     fuse_attn_moe_norm: bool = false, // e27 cycle 19 A/B: ZINC_ATTN_MOE_NORM fuses the MoE decode attention post-attn norm+residual + the 3 MoE pre-norms (rms_norm_triple) into ONE single-block launch (rms_norm_residual_triple). Byte-identical; off → the two-launch path. Read once in init.
@@ -588,6 +592,9 @@ pub const ForwardGemma = struct {
         pipes.build_expert_order_padded = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded");
         pipes.gemm_q4k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_tc");
         pipes.gemm_q5_1_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5_1_experts_grouped_tc");
+        pipes.build_expert_order_padded32 = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded32");
+        pipes.gemm_q4k_experts_grouped_tc32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_tc32");
+        pipes.gemm_q5_1_experts_grouped_tc32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5_1_experts_grouped_tc32");
         // Effort 24: batched-prefill GEMMs (Q4_K / Q5_K / Q6_K).
         pipes.gemm[0] = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_tiled_v2");
         pipes.gemm[1] = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_tiled_v2");
@@ -934,6 +941,7 @@ pub const ForwardGemma = struct {
         self.use_grouped = std.posix.getenv("ZINC_BATCHED_EXPERTS_GROUPED") != null;
         self.use_tc_experts = moeTcDefaultOn();
         self.tc_experts_forced = moeTcForced();
+        self.use_tc_bt32 = std.posix.getenv("ZINC_MOE_TC_BT32") != null;
         // Cycle 19: ZINC_BATCHED_TC_SHAREA shares one f32→f16 activation recast across
         // the GEMMs that read the SAME input on the TC path (attn Q/K/V all read b.norm;
         // FFN/shared-expert gate+up both read b.ffn_norm). With it on, only the FIRST GEMM
@@ -1602,7 +1610,7 @@ pub const ForwardGemma = struct {
             .expert_offsets = try buffer.createBuffer(ctx, (@max(@as(u32, 1), d.n_experts) + 1) * @sizeOf(u32)),
             // T2 v1: max_pos = P + 64*n_experts bounds the padded order; tiles = max_pos/64.
             .padded_order = try buffer.createBuffer(ctx, @max(@as(u32, 1), T * d.n_experts_used + 64 * d.n_experts) * @sizeOf(u32)),
-            .tile_expert = try buffer.createBuffer(ctx, @max(@as(u32, 1), (T * d.n_experts_used >> 6) + d.n_experts + 2) * @sizeOf(u32)),
+            .tile_expert = try buffer.createBuffer(ctx, @max(@as(u32, 1), (T * d.n_experts_used >> 5) + d.n_experts + 2) * @sizeOf(u32)),
             // fp16 activation scratch: T × largest-activation halves (2 bytes each).
             // TC Q4_K GEMMs read A with K ∈ {n_embd (gate/up,Q/K/V), q_dim (O)};
             // size to the max of those and ff for headroom.
@@ -2187,8 +2195,18 @@ pub const ForwardGemma = struct {
         const n_used = d.n_experts_used;
         const ef = d.n_ff;
         const P = n_used * T;
-        const max_pos = P + 64 * d.n_experts; // bounds the padded order / tiles
-        const max_tiles = max_pos >> 6;
+        // BT=32 opt-in (ZINC_MOE_TC_BT32): pad each expert run to a 32-token tile
+        // (128-thread kernels) instead of 64 → ~halves the partial-tile padding
+        // waste on many-expert MoE. Output bit-identical to BT=64. tile_expert is
+        // sized for the (>>5) BT=32 tile count.
+        const bt32 = self.use_tc_bt32;
+        const tile: u32 = if (bt32) 32 else 64;
+        const thr: u32 = if (bt32) 128 else 256;
+        const max_pos = P + tile * d.n_experts; // bounds the padded order / tiles
+        const max_tiles = if (bt32) (max_pos >> 5) else (max_pos >> 6);
+        const p_order = if (bt32) &self.pipes.build_expert_order_padded32 else &self.pipes.build_expert_order_padded;
+        const p_gu = if (bt32) &self.pipes.gemm_q4k_experts_grouped_tc32 else &self.pipes.gemm_q4k_experts_grouped_tc;
+        const p_down = if (bt32) &self.pipes.gemm_q5_1_experts_grouped_tc32 else &self.pipes.gemm_q5_1_experts_grouped_tc;
         const wpre2 = self.layer(L, "pre_ffw_norm_2.weight");
         const wgu = self.layer(L, "ffn_gate_up_exps.weight");
         const wde = self.layer(L, "ffn_down_exps.weight");
@@ -2203,19 +2221,19 @@ pub const ForwardGemma = struct {
         // Padded counting sort: (token,slot) by expert, each run padded to a 64-tile,
         // with a per-tile expert id — fully GPU-side (no readback).
         const bo = BuildOrderPadPush{ .T = T, .n_used = n_used, .n_experts = d.n_experts, .routing_stride = rt_stride, .max_pos = max_pos };
-        cmd.dispatch(&self.pipes.build_expert_order_padded, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.router_table, &b.padded_order, &b.tile_expert }, &bo, @sizeOf(BuildOrderPadPush), 0);
+        cmd.dispatch(p_order, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.router_table, &b.padded_order, &b.tile_expert }, &bo, @sizeOf(BuildOrderPadPush), 0);
         // Gate (base 0) + up (base gu_half): one grouped TC GEMM each over all tiles.
         const pg = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = gu_full, .dst_tok_stride = n_used * ef };
-        cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedTCPush), 0);
+        cmd.dispatch(p_gu, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ thr, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedTCPush), 0);
         const pu = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = gu_half, .gu_full = gu_full, .dst_tok_stride = n_used * ef };
-        cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedTCPush), 0);
+        cmd.dispatch(p_gu, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ thr, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedTCPush), 0);
         // GeGLU (unchanged), then the Q5_1 down projection ALSO on the Tensor cores:
         // one grouped TC GEMM over the SAME padded order/tile_expert the gate/up used
         // (no extra sort). A = GeGLU output [P, ef] (work-item-major), W = Q5_1 down.
         const sg = SwigluPush{ .N = T * n_used * ef };
         cmd.dispatch(&self.pipes.geglu, .{ ceilDiv(T * n_used * ef, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.gate_e, &b.up_e, &b.geglu_e }, &sg, @sizeOf(SwigluPush), 0);
         const pd = GroupedTCDownPush{ .M = d.n_embd, .K = ef, .slice = down_slice, .n_used = n_used, .dst_tok_stride = n_used * d.n_embd };
-        cmd.dispatch(&self.pipes.gemm_q5_1_experts_grouped_tc, .{ ceilDiv(d.n_embd, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wde.gpu_buffer, &b.geglu_e, &b.padded_order, &b.tile_expert, &b.down_e }, &pd, @sizeOf(GroupedTCDownPush), 0);
+        cmd.dispatch(p_down, .{ ceilDiv(d.n_embd, 64), max_tiles, 1 }, .{ thr, 1, 1 }, &.{ &wde.gpu_buffer, &b.geglu_e, &b.padded_order, &b.tile_expert, &b.down_e }, &pd, @sizeOf(GroupedTCDownPush), 0);
         self.submit(cmd);
     }
 
