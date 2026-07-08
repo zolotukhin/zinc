@@ -140,6 +140,87 @@ const BENCH_CU =
 ;
 const BenchPush = extern struct { iters: i32 };
 
+// Effort-30 int8-MMA feasibility microbench (READ-ONLY, no model). Settles the
+// two gating unknowns the awake-session Q4_K-int8 GEMM depends on:
+//  (1) does NVRTC on sm_120 COMPILE + correctly execute inline-PTX
+//      `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32` (the fp16 *wmma-intrinsic*
+//      lowering miscompiled on sm_120, but inline PTX bypasses intrinsic lowering
+//      → if this works, no multi-day nvcc-CUBIN path is needed = huge de-risk);
+//  (2) is the Blackwell int8 TC rate actually ~2x fp16 wmma (the entire premise —
+//      if not, the int8 lever is dead on arrival regardless of the epilogue).
+// `mma_unit` is a single-warp known-value m16n8k32 s8 matmul checked vs a scalar
+// host reference (proves both compile AND that the PTX-ISA fragment→register map
+// used for the in-register epilogue is correct). `tp_int8`/`tp_f16` issue equal
+// counts of 4096-MAC TC calls (int8 m16n8k32 vs fp16 wmma 16x16x16) so calls/s
+// ratio == effective MAC/s (TC-rate) ratio under identical occupancy.
+const MMA8_CU =
+    \\#include <mma.h>
+    \\using namespace nvcuda;
+    \\// ---- correctness unit: one warp, one m16n8k32 s8 mma, known values --------
+    \\extern "C" __global__ void mma_unit(const signed char* A, const signed char* B, int* D) {
+    \\    int lane = threadIdx.x & 31;
+    \\    int gid = lane >> 2;      // 0..7
+    \\    int tig = lane & 3;       // 0..3
+    \\    // A is 16x32 row-major; pack 4 consecutive s8 (col-contiguous) per reg.
+    \\    int a0=0,a1=0,a2=0,a3=0,b0=0,b1=0;
+    \\    #pragma unroll
+    \\    for (int b = 0; b < 4; b++) {
+    \\        a0 |= ((int)(unsigned char)A[(gid)   *32 + tig*4      + b]) << (8*b);
+    \\        a1 |= ((int)(unsigned char)A[(gid+8) *32 + tig*4      + b]) << (8*b);
+    \\        a2 |= ((int)(unsigned char)A[(gid)   *32 + tig*4 + 16 + b]) << (8*b);
+    \\        a3 |= ((int)(unsigned char)A[(gid+8) *32 + tig*4 + 16 + b]) << (8*b);
+    \\        // B is 32x8 col-major: element (k,n) at B[k + n*32].
+    \\        b0 |= ((int)(unsigned char)B[(tig*4      + b) + gid*32]) << (8*b);
+    \\        b1 |= ((int)(unsigned char)B[(tig*4 + 16 + b) + gid*32]) << (8*b);
+    \\    }
+    \\    int c0=0,c1=0,c2=0,c3=0;
+    \\    asm volatile(
+    \\        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+    \\        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+    \\        : "+r"(c0),"+r"(c1),"+r"(c2),"+r"(c3)
+    \\        : "r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1));
+    \\    // D is 16x8 row-major; accumulator (row,col) map per PTX ISA.
+    \\    D[(gid)  *8 + tig*2    ] = c0;
+    \\    D[(gid)  *8 + tig*2 + 1] = c1;
+    \\    D[(gid+8)*8 + tig*2    ] = c2;
+    \\    D[(gid+8)*8 + tig*2 + 1] = c3;
+    \\}
+    \\struct TpPush { int iters; };
+    \\// ---- int8 throughput: iters independent m16n8k32 s8 mma calls -------------
+    \\extern "C" __global__ void tp_int8(int* out, TpPush pc) {
+    \\    int a0=0x01020304,a1=0x05060708,a2=0x090a0b0c,a3=0x0d0e0f10;
+    \\    int b0=0x11121314,b1=0x15161718;
+    \\    int c0=0,c1=0,c2=0,c3=0, d0=0,d1=0,d2=0,d3=0;
+    \\    for (int i = 0; i < pc.iters; i++) {
+    \\        asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+    \\            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+    \\            : "+r"(c0),"+r"(c1),"+r"(c2),"+r"(c3)
+    \\            : "r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1));
+    \\        asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+    \\            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+    \\            : "+r"(d0),"+r"(d1),"+r"(d2),"+r"(d3)
+    \\            : "r"(a1),"r"(a2),"r"(a3),"r"(a0),"r"(b1),"r"(b0));
+    \\    }
+    \\    if (threadIdx.x == 999) out[blockIdx.x] = c0+c1+c2+c3+d0+d1+d2+d3;
+    \\}
+    \\// ---- fp16 baseline throughput: iters wmma 16x16x16 (same 4096 MAC/call) ---
+    \\extern "C" __global__ void tp_f16(int* out, TpPush pc) {
+    \\    wmma::fragment<wmma::matrix_a,16,16,16,half,wmma::row_major> af;
+    \\    wmma::fragment<wmma::matrix_b,16,16,16,half,wmma::row_major> bf;
+    \\    wmma::fragment<wmma::accumulator,16,16,16,float> cf, df;
+    \\    wmma::fill_fragment(af, __float2half(1.0f));
+    \\    wmma::fill_fragment(bf, __float2half(1.0f));
+    \\    wmma::fill_fragment(cf, 0.0f);
+    \\    wmma::fill_fragment(df, 0.0f);
+    \\    for (int i = 0; i < pc.iters; i++) {
+    \\        wmma::mma_sync(cf, af, bf, cf);
+    \\        wmma::mma_sync(df, af, bf, df);
+    \\    }
+    \\    if (threadIdx.x == 999) out[blockIdx.x] = (int)(cf.x[0] + df.x[0]);
+    \\}
+;
+const TpPush = extern struct { iters: i32 };
+
 fn stats(label: []const u8, v: []const f32) void {
     var ss: f64 = 0;
     var mn: f32 = std.math.inf(f32);
@@ -201,6 +282,9 @@ pub fn main() !void {
         const iters: i32 = std.fmt.parseInt(i32, args.next() orelse "2000", 10) catch 2000;
         const n: u32 = std.fmt.parseInt(u32, args.next() orelse "300", 10) catch 300;
         try benchMode(allocator, iters, n);
+    } else if (std.mem.eql(u8, first, "mma8")) {
+        const iters: u32 = std.fmt.parseInt(u32, args.next() orelse "20000", 10) catch 20000;
+        try mma8Mode(allocator, iters);
     } else if (std.mem.eql(u8, first, "logits")) {
         const token: u32 = std.fmt.parseInt(u32, args.next() orelse "100", 10) catch 100;
         const out_path = args.next() orelse "/tmp/zinc_logits.bin";
@@ -1848,6 +1932,117 @@ fn benchMode(allocator: std.mem.Allocator, iters: i32, n: u32) !void {
     std.debug.print("sync  (commitAndWait each) : {d:>8.2} ms  {d:.4} ms/disp  {d:>8.0} disp/s\n", .{ sync_ms, sync_ms / nf, nf / (sync_ms / 1000.0) });
     std.debug.print("async (commitAsync + drain): {d:>8.2} ms  {d:.4} ms/disp  {d:>8.0} disp/s\n", .{ async_ms, async_ms / nf, nf / (async_ms / 1000.0) });
     std.debug.print("async speedup: {d:.2}x   (per-dispatch saving: {d:.4} ms — the sync round-trip + boost-starvation the ring removes)\n", .{ sync_ms / async_ms, (sync_ms - async_ms) / nf });
+}
+
+/// Effort-30 int8-MMA feasibility microbench (see MMA8_CU). Read-only, no model.
+fn mma8Mode(allocator: std.mem.Allocator, iters: u32) !void {
+    var dev = try device.CudaDevice.initBest(allocator);
+    defer dev.deinit();
+    const ctx = dev.ctx;
+
+    const src = try allocator.dupeZ(u8, MMA8_CU);
+    defer allocator.free(src);
+
+    std.debug.print("=== Effort-30 int8 mma.sync.m16n8k32 feasibility microbench ===\n", .{});
+
+    // (1) COMPILE + CORRECTNESS: does NVRTC/sm_120 accept inline-PTX s8 mma?
+    var pu = pipeline.createPipeline(ctx, src.ptr, "mma_unit") catch |e| {
+        std.debug.print("Q1 NVRTC-COMPILE inline-PTX m16n8k32.s8: FAILED ({}) => needs nvcc-CUBIN path\n", .{e});
+        return;
+    };
+    defer pipeline.freePipeline(&pu);
+    std.debug.print("Q1 NVRTC-COMPILE inline-PTX m16n8k32.s8: OK (no nvcc-CUBIN needed)\n", .{});
+
+    // synthetic A[16x32] row-major, B[32x8] col-major (deterministic patterns).
+    var a_host: [16 * 32]i8 = undefined;
+    var b_host: [32 * 8]i8 = undefined;
+    for (0..16) |m| for (0..32) |k| {
+        a_host[m * 32 + k] = @intCast(@as(i32, @intCast((m * 3 + k * 2) % 13)) - 6);
+    };
+    for (0..32) |k| for (0..8) |n| {
+        b_host[k + n * 32] = @intCast(@as(i32, @intCast((k + n * 5) % 11)) - 5);
+    };
+    var a_buf = try buffer.createBuffer(ctx, a_host.len);
+    defer buffer.freeBuffer(&a_buf);
+    var b_buf = try buffer.createBuffer(ctx, b_host.len);
+    defer buffer.freeBuffer(&b_buf);
+    var d_buf = try buffer.createBuffer(ctx, 16 * 8 * @sizeOf(i32));
+    defer buffer.freeBuffer(&d_buf);
+    buffer.upload(ctx, &a_buf, std.mem.asBytes(&a_host));
+    buffer.upload(ctx, &b_buf, std.mem.asBytes(&b_host));
+    {
+        var cmd = try command.beginCommand(ctx);
+        cmd.dispatch(&pu, .{ 1, 1, 1 }, .{ 32, 1, 1 }, &.{ &a_buf, &b_buf, &d_buf }, null, 0, 0);
+        cmd.commitAndWait();
+    }
+    var d_host: [16 * 8]i32 = undefined;
+    buffer.download(ctx, &d_buf, std.mem.sliceAsBytes(d_host[0..]));
+    var bad: usize = 0;
+    for (0..16) |m| for (0..8) |n| {
+        var acc: i32 = 0;
+        for (0..32) |k| acc += @as(i32, a_host[m * 32 + k]) * @as(i32, b_host[k + n * 32]);
+        if (d_host[m * 8 + n] != acc) bad += 1;
+    };
+    if (bad == 0) {
+        std.debug.print("Q1b MMA CORRECTNESS vs scalar ref: PASS (128/128 elems, fragment map correct)\n", .{});
+    } else {
+        std.debug.print("Q1b MMA CORRECTNESS: FAIL ({d}/128 wrong) => layout/instr bug, ratio below is UNTRUSTWORTHY\n", .{bad});
+    }
+
+    // (2) THROUGHPUT: int8 m16n8k32 vs fp16 wmma 16x16x16 (both 4096 MAC/call).
+    var p8 = try pipeline.createPipeline(ctx, src.ptr, "tp_int8");
+    defer pipeline.freePipeline(&p8);
+    var pf = try pipeline.createPipeline(ctx, src.ptr, "tp_f16");
+    defer pipeline.freePipeline(&pf);
+
+    const grid = [3]u32{ 1056, 1, 1 }; // 132 SM * 8 blocks
+    const block = [3]u32{ 256, 1, 1 }; // 8 warps/block
+    var out_buf = try buffer.createBuffer(ctx, grid[0] * @sizeOf(i32));
+    defer buffer.freeBuffer(&out_buf);
+    const push = TpPush{ .iters = @intCast(iters) };
+
+    const run = struct {
+        fn go(c: anytype, pipe: *pipeline.CudaPipeline, g: [3]u32, bl: [3]u32, ob: *buffer.CudaBuffer, p: *const TpPush, warm: bool) !f64 {
+            const reps: u32 = if (warm) 3 else 5;
+            var r: u32 = 0;
+            if (warm) {
+                while (r < reps) : (r += 1) {
+                    var cm = try command.beginCommand(c);
+                    cm.dispatch(pipe, g, bl, &.{ob}, p, @sizeOf(TpPush), 0);
+                    cm.commitAndWait();
+                }
+                return 0;
+            }
+            var t = try std.time.Timer.start();
+            r = 0;
+            while (r < reps) : (r += 1) {
+                var cm = try command.beginCommand(c);
+                cm.dispatch(pipe, g, bl, &.{ob}, p, @sizeOf(TpPush), 0);
+                cm.commitAndWait();
+            }
+            return @as(f64, @floatFromInt(t.read())) / 1e6 / @as(f64, @floatFromInt(reps));
+        }
+    };
+    _ = try run.go(ctx, &p8, grid, block, &out_buf, &push, true);
+    _ = try run.go(ctx, &pf, grid, block, &out_buf, &push, true);
+    // interleaved to average out boost drift
+    var i8_ms: f64 = 0;
+    var f16_ms: f64 = 0;
+    var rr: u32 = 0;
+    while (rr < 4) : (rr += 1) {
+        i8_ms += try run.go(ctx, &p8, grid, block, &out_buf, &push, false);
+        f16_ms += try run.go(ctx, &pf, grid, block, &out_buf, &push, false);
+    }
+    i8_ms /= 4;
+    f16_ms /= 4;
+    const nwarps: f64 = @floatFromInt(grid[0] * (block[0] / 32));
+    const macs: f64 = nwarps * @as(f64, @floatFromInt(iters)) * 2.0 * 4096.0;
+    const i8_tops = macs / (i8_ms / 1e3) / 1e12;
+    const f16_tops = macs / (f16_ms / 1e3) / 1e12;
+    std.debug.print("Q2 THROUGHPUT (grid=1056x256, iters={d}, 2 chains):\n", .{iters});
+    std.debug.print("   int8 m16n8k32 : {d:>7.2} ms  {d:>7.1} TMAC/s\n", .{ i8_ms, i8_tops });
+    std.debug.print("   fp16 wmma16^3 : {d:>7.2} ms  {d:>7.1} TMAC/s\n", .{ f16_ms, f16_tops });
+    std.debug.print("   int8/fp16 TC-rate ratio = {d:.2}x  (premise wants ~2.0x; <1.3x end-to-end => int8 lever DEAD)\n", .{i8_tops / f16_tops});
 }
 
 /// Decode-bottleneck profile: splits per-token time into embed+tail vs the
