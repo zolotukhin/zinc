@@ -221,6 +221,176 @@ const MMA8_CU =
 ;
 const TpPush = extern struct { iters: i32 };
 
+// Effort-30 THE KILL-BAR microbench: a FULL Q4_K-int8 tensor-core GEMM vs the
+// shipped fp16 `gemm_q4k_tc`, ISOLATED, WITH memory traffic, at gemma shapes
+// (M≈K≈4608, T=512). The mma8 feasibility bench already proved (Q1) NVRTC/sm_120
+// compiles+executes inline-PTX m16n8k32.s8 correctly and (Q2) int8 TC is ~1.9x
+// fp16 register-resident. THIS answers the ONE remaining question mma8 could not:
+// does the 1.9x COMPUTE ceiling survive the real weight/activation traffic + the
+// Q4_K-asymmetric per-subblock epilogue → is int8 ≥1.3x vs gemm_q4k_tc end-to-end?
+//
+// Design (grounded in gemm_q4k_tc, kernels.cu:4250): BM=BT=64, BK=32 == one Q4_K
+// 32-subblock. Weight nibble stays raw s8 (0..15); activation quantized PER-SUBBLOCK
+// (Q8_1-style: sA[t,sb]=max|A|/127, qA=round(A/sA)) so the asymmetric scales fold
+// IN-REGISTER with NO store-s32-to-shared (the tax that killed cycle-8's wmma-k16):
+//   Y[m,t] = Σ_sb sA[t,sb]·( d_sc[m,sb]·P[m,t,sb] − dm_mn[m,sb]·SA[t,sb] )
+// where P = Σ_{k∈sb} nib·qA is the s32 mma accumulator and SA = Σ_{k∈sb} qA.
+// The m16n8k32 fragment→(row,col) register map is PTX-ISA-DEFINED (validated bit-
+// exact by mma8's mma_unit) so d_sc/dm_mn/sA/SA are applied per accumulator element
+// in-register. Correctness = relative error vs gemm_q4k_tc (both quant paths of the
+// SAME synthetic weight; int8-activation adds a few % — plausible token-tolerance).
+const GEMM8_CU =
+    \\#include <mma.h>
+    \\using namespace nvcuda;
+    \\__device__ __forceinline__ float zinc_half_to_float(unsigned short h) {
+    \\    unsigned sign=(unsigned)(h>>15)&1u, exp=(unsigned)(h>>10)&0x1Fu, mant=(unsigned)h&0x3FFu, f;
+    \\    if (exp==0u){ if(mant==0u){f=sign<<31;} else { int e=1; while((mant&0x400u)==0u){mant<<=1;e--;} mant&=0x3FFu; f=(sign<<31)|((unsigned)(127-15+e)<<23)|(mant<<13);} }
+    \\    else if (exp==0x1Fu){ f=(sign<<31)|(0xFFu<<23)|(mant<<13); }
+    \\    else { f=(sign<<31)|((exp-15u+127u)<<23)|(mant<<13); }
+    \\    return __int_as_float((int)f);
+    \\}
+    \\__device__ __forceinline__ void zinc_q4k_scale_min(int j, const unsigned char* q, unsigned char* d, unsigned char* m) {
+    \\    if (j<4){ *d=q[j]&63u; *m=q[j+4]&63u; }
+    \\    else { *d=(q[j+4]&0xFu)|((q[j-4]>>6)<<4); *m=(q[j+4]>>4)|((q[j]>>6)<<4); }
+    \\}
+    \\struct GemmPush { unsigned M,K,T,a_offset,x_offset,y_offset,acc_mode,q8_stride; };
+    \\// ---- fp16 baseline: VERBATIM gemm_q4k_tc (kernels.cu:4250) ----------------
+    \\extern "C" __global__ void gemm_q4k_tc(const unsigned* a_u32, const float* A, float* Y, GemmPush pc) {
+    \\    const unsigned BM=64u, BT=64u, BK=32u;
+    \\    __shared__ half Ws[BM*BK]; __shared__ half As[BK*BT]; __shared__ float Cs[BT*BM];
+    \\    unsigned m0=blockIdx.x*BM, t0=blockIdx.y*BT;
+    \\    unsigned bpr=pc.K>>8, nchunk=pc.K>>5, tid=threadIdx.x, a0=(pc.a_offset>>2);
+    \\    const float* Abase=A+(pc.x_offset>>2);
+    \\    unsigned warp=tid>>5, fm=warp>>2, ft=warp&3u;
+    \\    wmma::fragment<wmma::accumulator,16,16,16,float> c0,c1;
+    \\    wmma::fill_fragment(c0,0.0f); wmma::fill_fragment(c1,0.0f);
+    \\    for (unsigned c=0;c<nchunk;c++){
+    \\        unsigned sbk=c>>3, sb8=c&7u, warp_id=tid>>5, lane=tid&31u;
+    \\        #pragma unroll
+    \\        for (int u=0;u<8;u++){
+    \\            unsigned r=warp_id+(unsigned)u*8u, l=lane, row=m0+r; float wv=0.0f;
+    \\            if (row<pc.M){
+    \\                unsigned blk=a0+row*bpr*36u+sbk*36u; float d_sc,dm_mn;
+    \\                if (lane==0){ unsigned dd=a_u32[blk]; float d=zinc_half_to_float((unsigned short)(dd&0xFFFFu)); float dmin=zinc_half_to_float((unsigned short)(dd>>16)); const unsigned char* scales=(const unsigned char*)(a_u32+blk+1u); unsigned char sc,mn; zinc_q4k_scale_min((int)sb8,scales,&sc,&mn); d_sc=d*(float)sc; dm_mn=dmin*(float)mn; }
+    \\            d_sc=__shfl_sync(0xFFFFFFFFu,d_sc,0); dm_mn=__shfl_sync(0xFFFFFFFFu,dm_mn,0);
+    \\                const unsigned char* qs=(const unsigned char*)(a_u32+blk+4u); unsigned char qb=qs[(sb8>>1)*32u+l]; unsigned nib=(sb8&1u)==0u?(qb&0xFu):(unsigned)(qb>>4); wv=d_sc*(float)nib-dm_mn;
+    \\            }
+    \\            Ws[r*BK+l]=__float2half(wv);
+    \\        }
+    \\        #pragma unroll
+    \\        for (int u=0;u<8;u++){ unsigned idx=tid+(unsigned)u*256u, t=idx>>5, l=idx&31u, tok=t0+t; As[l*BT+t]=(tok<pc.T)?__float2half(Abase[(size_t)tok*pc.K+c*32u+l]):__float2half(0.0f); }
+    \\        __syncthreads();
+    \\        #pragma unroll
+    \\        for (unsigned ks=0;ks<2;ks++){
+    \\            wmma::fragment<wmma::matrix_a,16,16,16,half,wmma::row_major> a0f,a1f;
+    \\            wmma::fragment<wmma::matrix_b,16,16,16,half,wmma::row_major> bf;
+    \\            wmma::load_matrix_sync(a0f,&Ws[(fm*16u)*BK+ks*16u],BK);
+    \\            wmma::load_matrix_sync(a1f,&Ws[((fm+2u)*16u)*BK+ks*16u],BK);
+    \\            wmma::load_matrix_sync(bf,&As[(ks*16u)*BT+ft*16u],BT);
+    \\            wmma::mma_sync(c0,a0f,bf,c0); wmma::mma_sync(c1,a1f,bf,c1);
+    \\        }
+    \\        __syncthreads();
+    \\    }
+    \\    wmma::store_matrix_sync(&Cs[(ft*16u)*BM+fm*16u],c0,BM,wmma::mem_col_major);
+    \\    wmma::store_matrix_sync(&Cs[(ft*16u)*BM+(fm+2u)*16u],c1,BM,wmma::mem_col_major);
+    \\    __syncthreads();
+    \\    #pragma unroll
+    \\    for (int u=0;u<16;u++){ unsigned idx=tid+(unsigned)u*256u, t=idx>>6, m=idx&63u, tok=t0+t, row=m0+m; if(row<pc.M&&tok<pc.T){ unsigned yi=(pc.y_offset>>2)+(size_t)tok*pc.M+row; if(pc.acc_mode!=0u) Y[yi]+=Cs[t*BM+m]; else Y[yi]=Cs[t*BM+m]; } }
+    \\}
+    \\// ---- int8 candidate: raw-nibble s8 * per-subblock-quantized s8 activation ----
+    \\extern "C" __global__ void gemm_q4k_int8(const unsigned* a_u32, const float* A, float* Y, GemmPush pc) {
+    \\    const unsigned BM=64u, BT=64u, BK=32u;
+    \\    __shared__ signed char Wnib[BM*BK];   // m-major raw nibbles (0..15)
+    \\    __shared__ signed char Aq[BK*BT];     // k-major quantized activation
+    \\    __shared__ float dsc[BM], dmn[BM];    // per-row weight scales, current subblock
+    \\    __shared__ float sAs[BT], SAs[BT];    // per-token act scale + qsum, current subblock
+    \\    unsigned m0=blockIdx.x*BM, t0=blockIdx.y*BT;
+    \\    unsigned bpr=pc.K>>8, nchunk=pc.K>>5, tid=threadIdx.x, a0=(pc.a_offset>>2);
+    \\    const float* Abase=A+(pc.x_offset>>2);
+    \\    unsigned warp=tid>>5, lane=tid&31u;
+    \\    unsigned mw=warp&3u, grp=warp>>2;     // this warp: m-tile mw, t-tiles grp*4+{0..3}
+    \\    unsigned gid=lane>>2, tig=lane&3u;
+    \\    float acc[4][4];
+    \\    #pragma unroll
+    \\    for (int i=0;i<4;i++){ acc[i][0]=0;acc[i][1]=0;acc[i][2]=0;acc[i][3]=0; }
+    \\    for (unsigned c=0;c<nchunk;c++){
+    \\        unsigned sbk=c>>3, sb8=c&7u;
+    \\        // stage weight nibbles (m-major) + per-row d_sc/dm_mn (mirror gemm_q4k_tc)
+    \\        #pragma unroll
+    \\        for (int u=0;u<8;u++){
+    \\            unsigned r=warp+(unsigned)u*8u, l=lane, row=m0+r; float d_sc=0.0f,dm_mn=0.0f; signed char nb=0;
+    \\            if (row<pc.M){
+    \\                unsigned blk=a0+row*bpr*36u+sbk*36u;
+    \\                if (lane==0){ unsigned dd=a_u32[blk]; float d=zinc_half_to_float((unsigned short)(dd&0xFFFFu)); float dmin=zinc_half_to_float((unsigned short)(dd>>16)); const unsigned char* scales=(const unsigned char*)(a_u32+blk+1u); unsigned char sc,mn; zinc_q4k_scale_min((int)sb8,scales,&sc,&mn); d_sc=d*(float)sc; dm_mn=dmin*(float)mn; }
+    \\                d_sc=__shfl_sync(0xFFFFFFFFu,d_sc,0); dm_mn=__shfl_sync(0xFFFFFFFFu,dm_mn,0);
+    \\                const unsigned char* qs=(const unsigned char*)(a_u32+blk+4u); unsigned char qb=qs[(sb8>>1)*32u+l]; nb=(signed char)((sb8&1u)==0u?(qb&0xFu):(unsigned)(qb>>4));
+    \\            }
+    \\            Wnib[r*BK+l]=nb;
+    \\            if (l==0){ dsc[r]=d_sc; dmn[r]=dm_mn; }
+    \\        }
+    \\        // stage activation: warp-per-token (warp handles tokens warp,warp+8,...,warp+56)
+    \\        #pragma unroll
+    \\        for (int j=0;j<8;j++){
+    \\            unsigned t=warp+(unsigned)j*8u, tok=t0+t;
+    \\            float v=(tok<pc.T)?Abase[(size_t)tok*pc.K+c*32u+lane]:0.0f;
+    \\            float amax=fabsf(v);
+    \\            #pragma unroll
+    \\            for (int o=16;o>0;o>>=1) amax=fmaxf(amax,__shfl_down_sync(0xFFFFFFFFu,amax,o));
+    \\            amax=__shfl_sync(0xFFFFFFFFu,amax,0);
+    \\            float sA=amax>0.0f?amax/127.0f:1.0f;
+    \\            int q=__float2int_rn(v/sA); q=max(-127,min(127,q));
+    \\            int qsum=q;
+    \\            #pragma unroll
+    \\            for (int o=16;o>0;o>>=1) qsum+=__shfl_down_sync(0xFFFFFFFFu,qsum,o);
+    \\            Aq[lane*BT+t]=(signed char)q;
+    \\            if (lane==0){ sAs[t]=sA; SAs[t]=(float)qsum; }
+    \\        }
+    \\        __syncthreads();
+    \\        // load weight operand for this warp's m-tile (shared across 4 t-tiles)
+    \\        int a0r=0,a1r=0,a2r=0,a3r=0;
+    \\        #pragma unroll
+    \\        for (int b=0;b<4;b++){
+    \\            a0r |= ((int)(unsigned char)Wnib[(mw*16u+gid)*BK+tig*4u+(unsigned)b])<<(8*b);
+    \\            a1r |= ((int)(unsigned char)Wnib[(mw*16u+gid+8u)*BK+tig*4u+(unsigned)b])<<(8*b);
+    \\            a2r |= ((int)(unsigned char)Wnib[(mw*16u+gid)*BK+tig*4u+16u+(unsigned)b])<<(8*b);
+    \\            a3r |= ((int)(unsigned char)Wnib[(mw*16u+gid+8u)*BK+tig*4u+16u+(unsigned)b])<<(8*b);
+    \\        }
+    \\        #pragma unroll
+    \\        for (int tt4=0;tt4<4;tt4++){
+    \\            unsigned tt=grp*4u+(unsigned)tt4;
+    \\            int b0=0,b1=0;
+    \\            #pragma unroll
+    \\            for (int b=0;b<4;b++){
+    \\                b0 |= ((int)(unsigned char)Aq[(tig*4u+(unsigned)b)*BT+tt*8u+gid])<<(8*b);
+    \\                b1 |= ((int)(unsigned char)Aq[(tig*4u+16u+(unsigned)b)*BT+tt*8u+gid])<<(8*b);
+    \\            }
+    \\            int p0=0,p1=0,p2=0,p3=0;
+    \\            asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+    \\                : "+r"(p0),"+r"(p1),"+r"(p2),"+r"(p3)
+    \\                : "r"(a0r),"r"(a1r),"r"(a2r),"r"(a3r),"r"(b0),"r"(b1));
+    \\            unsigned ma=mw*16u+gid, mb=mw*16u+gid+8u, ta=tt*8u+tig*2u, tb=tt*8u+tig*2u+1u;
+    \\            acc[tt4][0]+=sAs[ta]*(dsc[ma]*(float)p0 - dmn[ma]*SAs[ta]);
+    \\            acc[tt4][1]+=sAs[tb]*(dsc[ma]*(float)p1 - dmn[ma]*SAs[tb]);
+    \\            acc[tt4][2]+=sAs[ta]*(dsc[mb]*(float)p2 - dmn[mb]*SAs[ta]);
+    \\            acc[tt4][3]+=sAs[tb]*(dsc[mb]*(float)p3 - dmn[mb]*SAs[tb]);
+    \\        }
+    \\        __syncthreads();
+    \\    }
+    \\    // write Y[T,M] token-major
+    \\    #pragma unroll
+    \\    for (int tt4=0;tt4<4;tt4++){
+    \\        unsigned tt=grp*4u+(unsigned)tt4;
+    \\        unsigned ma=mw*16u+gid, mb=mw*16u+gid+8u, ta=tt*8u+tig*2u, tb=tt*8u+tig*2u+1u;
+    \\        unsigned rma=m0+ma, rmb=m0+mb, tka=t0+ta, tkb=t0+tb;
+    \\        if (rma<pc.M&&tka<pc.T) Y[(size_t)tka*pc.M+rma]=acc[tt4][0];
+    \\        if (rma<pc.M&&tkb<pc.T) Y[(size_t)tkb*pc.M+rma]=acc[tt4][1];
+    \\        if (rmb<pc.M&&tka<pc.T) Y[(size_t)tka*pc.M+rmb]=acc[tt4][2];
+    \\        if (rmb<pc.M&&tkb<pc.T) Y[(size_t)tkb*pc.M+rmb]=acc[tt4][3];
+    \\    }
+    \\}
+;
+const Gemm8Push = extern struct { M: u32, K: u32, T: u32, a_offset: u32, x_offset: u32, y_offset: u32, acc_mode: u32, q8_stride: u32 };
+
 fn stats(label: []const u8, v: []const f32) void {
     var ss: f64 = 0;
     var mn: f32 = std.math.inf(f32);
@@ -285,6 +455,11 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, first, "mma8")) {
         const iters: u32 = std.fmt.parseInt(u32, args.next() orelse "20000", 10) catch 20000;
         try mma8Mode(allocator, iters);
+    } else if (std.mem.eql(u8, first, "gemm8")) {
+        const M: u32 = std.fmt.parseInt(u32, args.next() orelse "4608", 10) catch 4608;
+        const K: u32 = std.fmt.parseInt(u32, args.next() orelse "4608", 10) catch 4608;
+        const T: u32 = std.fmt.parseInt(u32, args.next() orelse "512", 10) catch 512;
+        try gemm8Mode(allocator, M, K, T);
     } else if (std.mem.eql(u8, first, "logits")) {
         const token: u32 = std.fmt.parseInt(u32, args.next() orelse "100", 10) catch 100;
         const out_path = args.next() orelse "/tmp/zinc_logits.bin";
@@ -2043,6 +2218,140 @@ fn mma8Mode(allocator: std.mem.Allocator, iters: u32) !void {
     std.debug.print("   int8 m16n8k32 : {d:>7.2} ms  {d:>7.1} TMAC/s\n", .{ i8_ms, i8_tops });
     std.debug.print("   fp16 wmma16^3 : {d:>7.2} ms  {d:>7.1} TMAC/s\n", .{ f16_ms, f16_tops });
     std.debug.print("   int8/fp16 TC-rate ratio = {d:.2}x  (premise wants ~2.0x; <1.3x end-to-end => int8 lever DEAD)\n", .{i8_tops / f16_tops});
+}
+
+/// Effort-30 THE KILL-BAR: full Q4_K-int8 GEMM vs fp16 gemm_q4k_tc, WITH memory,
+/// at gemma shapes. Read-only (synthetic weight + activation, no model). Answers
+/// the one question mma8 can't: does the 1.9x compute ceiling survive real traffic
+/// + the asymmetric epilogue? PASS bar = int8 ≥1.3x vs gemm_q4k_tc ISOLATED.
+fn gemm8Mode(allocator: std.mem.Allocator, M: u32, K: u32, T: u32) !void {
+    var dev = try device.CudaDevice.initBest(allocator);
+    defer dev.deinit();
+    const ctx = dev.ctx;
+    const src = try allocator.dupeZ(u8, GEMM8_CU);
+    defer allocator.free(src);
+
+    std.debug.print("=== Effort-30 Q4_K int8 GEMM kill-bar (M={d} K={d} T={d}) ===\n", .{ M, K, T });
+    if (K % 256 != 0 or M % 64 != 0 or T % 64 != 0) {
+        std.debug.print("shapes must be K%256==0, M%64==0, T%64==0\n", .{});
+        return;
+    }
+
+    // synthetic Q4_K weight [M,K]: bpr superblocks/row * 36 u32. Deterministic.
+    const bpr = K >> 8;
+    const wu32: usize = @as(usize, M) * bpr * 36;
+    const w_host = try allocator.alloc(u32, wu32);
+    defer allocator.free(w_host);
+    // d=0.03, dmin=0.015 as f16 bits; scales/nibbles pseudo-random but valid.
+    const d_bits: u16 = @bitCast(@as(f16, 0.03));
+    const dmin_bits: u16 = @bitCast(@as(f16, 0.015));
+    const d_dmin: u32 = @as(u32, d_bits) | (@as(u32, dmin_bits) << 16);
+    var seed: u32 = 0x1234567;
+    const rnd = struct {
+        fn next(s: *u32) u32 {
+            s.* = s.* *% 1664525 +% 1013904223;
+            return s.*;
+        }
+    };
+    {
+        var i: usize = 0;
+        while (i < wu32) : (i += 36) {
+            w_host[i] = d_dmin;
+            var j: usize = 1;
+            while (j < 36) : (j += 1) w_host[i + j] = rnd.next(&seed);
+        }
+    }
+    // synthetic activation A[T,K] f32 in a modest range.
+    const a_host = try allocator.alloc(f32, @as(usize, T) * K);
+    defer allocator.free(a_host);
+    for (a_host, 0..) |*x, i| {
+        const r = rnd.next(&seed);
+        x.* = (@as(f32, @floatFromInt(r % 2001)) - 1000.0) / 1000.0; // [-1,1]
+        _ = i;
+    }
+
+    var w_buf = try buffer.createBuffer(ctx, wu32 * @sizeOf(u32));
+    defer buffer.freeBuffer(&w_buf);
+    var a_buf = try buffer.createBuffer(ctx, a_host.len * @sizeOf(f32));
+    defer buffer.freeBuffer(&a_buf);
+    var y_fp16 = try buffer.createBuffer(ctx, @as(usize, T) * M * @sizeOf(f32));
+    defer buffer.freeBuffer(&y_fp16);
+    var y_int8 = try buffer.createBuffer(ctx, @as(usize, T) * M * @sizeOf(f32));
+    defer buffer.freeBuffer(&y_int8);
+    buffer.upload(ctx, &w_buf, std.mem.sliceAsBytes(w_host));
+    buffer.upload(ctx, &a_buf, std.mem.sliceAsBytes(a_host));
+
+    var p_fp16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_tc");
+    defer pipeline.freePipeline(&p_fp16);
+    var p_int8 = pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_int8") catch |e| {
+        std.debug.print("int8 GEMM COMPILE FAILED ({}) => needs nvcc-CUBIN path after all\n", .{e});
+        return;
+    };
+    defer pipeline.freePipeline(&p_int8);
+
+    const push = Gemm8Push{ .M = M, .K = K, .T = T, .a_offset = 0, .x_offset = 0, .y_offset = 0, .acc_mode = 0, .q8_stride = 0 };
+    const grid = [3]u32{ M / 64, T / 64, 1 };
+    const block = [3]u32{ 256, 1, 1 };
+
+    const run = struct {
+        fn go(c: anytype, pipe: *pipeline.CudaPipeline, g: [3]u32, bl: [3]u32, yb: *buffer.CudaBuffer, wb: *buffer.CudaBuffer, ab: *buffer.CudaBuffer, p: *const Gemm8Push, reps: u32) !f64 {
+            var t = try std.time.Timer.start();
+            var r: u32 = 0;
+            while (r < reps) : (r += 1) {
+                var cm = try command.beginCommand(c);
+                cm.dispatch(pipe, g, bl, &.{ wb, ab, yb }, p, @sizeOf(Gemm8Push), 0);
+                cm.commitAndWait();
+            }
+            return @as(f64, @floatFromInt(t.read())) / 1e6 / @as(f64, @floatFromInt(reps));
+        }
+    };
+    // warm + correctness pass
+    _ = try run.go(ctx, &p_fp16, grid, block, &y_fp16, &w_buf, &a_buf, &push, 2);
+    _ = try run.go(ctx, &p_int8, grid, block, &y_int8, &w_buf, &a_buf, &push, 2);
+
+    // CORRECTNESS: relative error int8 vs fp16 gemm_q4k_tc
+    const yf = try allocator.alloc(f32, @as(usize, T) * M);
+    defer allocator.free(yf);
+    const yi = try allocator.alloc(f32, @as(usize, T) * M);
+    defer allocator.free(yi);
+    buffer.download(ctx, &y_fp16, std.mem.sliceAsBytes(yf));
+    buffer.download(ctx, &y_int8, std.mem.sliceAsBytes(yi));
+    var max_rel: f64 = 0;
+    var sum_abs_err: f64 = 0;
+    var sum_abs_ref: f64 = 0;
+    var nfin: usize = 0;
+    for (yf, 0..) |ref, i| {
+        const got = yi[i];
+        if (!std.math.isFinite(got) or !std.math.isFinite(ref)) continue;
+        nfin += 1;
+        const e = @abs(@as(f64, got) - @as(f64, ref));
+        sum_abs_err += e;
+        sum_abs_ref += @abs(@as(f64, ref));
+        const den = @abs(@as(f64, ref)) + 1e-3;
+        const rel = e / den;
+        if (rel > max_rel) max_rel = rel;
+    }
+    const mean_rel = if (sum_abs_ref > 0) sum_abs_err / sum_abs_ref else 0;
+    std.debug.print("CORRECTNESS int8 vs gemm_q4k_tc: mean_rel(L1)={d:.4}  max_rel={d:.4}  finite={d}/{d}\n", .{ mean_rel, max_rel, nfin, yf.len });
+    if (mean_rel > 0.15) {
+        std.debug.print("  => mean rel error too high; int8 kernel LIKELY BUGGY, timing UNTRUSTWORTHY\n", .{});
+    }
+
+    // TIMING: interleaved ABBA, drop nothing (already warmed), 6 rounds
+    var fp16_ms: f64 = 0;
+    var int8_ms: f64 = 0;
+    var rr: u32 = 0;
+    while (rr < 6) : (rr += 1) {
+        fp16_ms += try run.go(ctx, &p_fp16, grid, block, &y_fp16, &w_buf, &a_buf, &push, 3);
+        int8_ms += try run.go(ctx, &p_int8, grid, block, &y_int8, &w_buf, &a_buf, &push, 3);
+    }
+    fp16_ms /= 6;
+    int8_ms /= 6;
+    const speedup = fp16_ms / int8_ms;
+    std.debug.print("TIMING (avg of 6 interleaved rounds, 3 reps each):\n", .{});
+    std.debug.print("   fp16 gemm_q4k_tc : {d:>7.3} ms\n", .{fp16_ms});
+    std.debug.print("   int8 gemm_q4k    : {d:>7.3} ms\n", .{int8_ms});
+    std.debug.print("   int8 speedup = {d:.3}x  (KILL-BAR: >=1.30x => WIRE; <1.30x => ABANDON int8)\n", .{speedup});
 }
 
 /// Decode-bottleneck profile: splits per-token time into embed+tail vs the
