@@ -59,3 +59,18 @@ gemma4-26b MoE 51/157 = **32%** (worst); qwen36-35b-a3b MoE 62/158 = **39%**; ge
 
 ## Cycle log
 (append dated one-liners per cycle: target, verdict, branch)
+- 2026-07-08 C1 — gemma-26b MoE decode, the two un-merged Effort-27 fusion flags
+  (ZINC_MOE_NORM_COMBINE C17 + ZINC_ATTN_MOE_NORM C19; both already implemented &
+  env-gated, both 4/4-variant BIT-IDENTICAL output on the 5090). Since they're
+  env-gated I A/B'd them with the SHIPPED binary (no code change). ABBA 16-run
+  interleaved, gemma-26b -n128 ramble: **NEUTRAL** — warm-round (drop-cold)
+  medians A_default=75.09 / B_both=75.02 tok/s (ratio 0.999), drift-corrected
+  per-loop mean Δ(B−A)≈−0.03. **VERDICT: NEGATIVE, no code landed.** These fusions
+  were +9.8%/+2.9% on the *4090* but are DEAD on the 5090 → cutting single-block
+  norm launch-count buys nothing here. **Refutes the effort's "5090 is MORE
+  launch-bound → fusions help MORE" premise**; instead CORROBORATES the root-cause
+  (5090 decode is compute/latency-bound, NOT launch-bound — same reason graphs are
+  neutral). ⇒ the Effort-27 single-block-norm fusion playbook does NOT transfer to
+  the 5090. Future cycles: any *new* single-launch norm/elementwise adjacency will
+  also be ~neutral; the real 5090 decode lever is matvec efficiency (weight-traffic
+  wall), not launch-count. Not declaring convergence yet (cycle 1, no prior said so).
