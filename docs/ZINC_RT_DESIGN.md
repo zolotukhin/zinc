@@ -148,7 +148,7 @@ This section is the ground truth of what is in tree *today*, ahead of every aspi
 | `ZINC_RT_DIRECT_DECODE_SLICE_CADENCE` | 0 | Full-slice validation cadence when explicitly enabled; setting this var also opts into full-slice validation |
 | `ZINC_RT_DIRECT_PREFILL_MODEL_SLICE` | 0 | Enable final-prompt-token direct model-slice validation; default leaves prefill on the host-assisted path and preserves decode-side M1 evidence |
 | `ZINC_RT_DIRECT_LM_HEAD_DECODE_CADENCE` | 0 | LM-head prefix DMMV proof cadence during decode; 0 = first generated token only, N = first token plus every N generated tokens |
-| `ZINC_RT_DIRECT_LM_HEAD_PREFIX_ROWS` | 64 | Rows in the consumed LM-head prefix proof; set 4096 for broad prefix validation |
+| `ZINC_RT_DIRECT_LM_HEAD_PREFIX_ROWS` | 256 | Rows in the consumed LM-head prefix proof; set 4096 for broad prefix validation |
 | `ZINC_RT_DIRECT_ROUTER_DECODE` | 1 | Enable periodic full-router row-range replacement during decode; set `0` to leave routing fully host-produced |
 | `ZINC_RT_DIRECT_ROUTER_DECODE_CADENCE` | 64 | Router row-range cadence; N = every N generated tokens, 0 = every decode token |
 | `ZINC_RT_DIRECT_ROUTER_TRUST_AFTER_SUCCESSES` | 1 | After this many validated full Q8_0 router row-range successes, later full router replacements finite-check GPU logits instead of re-running selected CPU dot oracles; 0 disables |

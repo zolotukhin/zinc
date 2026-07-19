@@ -2526,10 +2526,10 @@ fn consumeDirectLogitsArgmaxRowRange(
 
 const direct_lm_head_q4_0_best_row_tolerance: f32 = 0.05;
 const direct_lm_head_q4_0_parallel_chunk_rows: u32 = 64;
-// Keep the default consumed LM-head proof to one parallel chunk. Broader
-// prefixes remain opt-in validation; recurring/staged CS slices are already
-// measured-dead for throughput on the RDNA4 node.
-const direct_lm_head_q4_0_argmax_prefix_rows_default: u32 = direct_lm_head_q4_0_parallel_chunk_rows;
+// Exercise the resident grid-over-rows kernel by default on the consumed
+// LM-head proof. This keeps one CS fence/dispatch while proving multi-WG
+// `ttmp9` row selection on a token-affecting model value.
+const direct_lm_head_q4_0_argmax_prefix_rows_default: u32 = 256;
 const direct_lm_head_q4_0_selected_window_rows: u32 = 64;
 const direct_lm_head_q4_0_argmax_max_weight_bytes: usize = 5 * 1024 * 1024;
 
@@ -2619,10 +2619,13 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
 
     var selection: ArgmaxTop2Result = .{};
     var gpu_chunks: u32 = 1;
+    var gpu_dispatch_ops: u32 = 1;
     var cpu_tail_selection: ?ArgmaxTop2Result = null;
     var used_resident_weights = false;
+    var used_resident_grid = false;
     if (gpu_rows % direct_lm_head_q4_0_parallel_chunk_rows == 0 and gpu_rows >= direct_lm_head_q4_0_parallel_chunk_rows) {
         gpu_chunks = gpu_rows / direct_lm_head_q4_0_parallel_chunk_rows;
+        gpu_dispatch_ops = gpu_chunks;
         const gpu_logits = state.row_scratch[0..gpu_rows_usize];
         const pending = if (tracking.lm_head_only and tracking.lm_head_q4_0_resident != null and
             tracking.lm_head_q4_0_resident.?.rows == gpu_rows and
@@ -2631,20 +2634,30 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
             tracking.lm_head_q4_0_resident.?.bytes == gpu_weight_bytes)
         resident_blk: {
             used_resident_weights = true;
-            break :resident_blk tracking.boundary.beginDmmvQ4_0RowRangeParallelChunksResident(
+            used_resident_grid = true;
+            gpu_dispatch_ops = 1;
+            break :resident_blk tracking.boundary.beginDmmvQ4_0ResidentGridResident(
                 state.norm,
                 tracking.lm_head_q4_0_resident.?,
             ) catch |err| {
-                used_resident_weights = false;
-                log.warn("M1 AMDGPU CS direct LM-head Q4_0 resident argmax-prefix unavailable ({s}); retrying staged weights", .{@errorName(err)});
-                break :resident_blk tracking.boundary.beginDmmvQ4_0RowRangeParallelChunks(
+                used_resident_grid = false;
+                gpu_dispatch_ops = gpu_chunks;
+                log.warn("M1 AMDGPU CS direct LM-head Q4_0 resident-grid argmax-prefix unavailable ({s}); retrying resident chunk dispatches", .{@errorName(err)});
+                break :resident_blk tracking.boundary.beginDmmvQ4_0RowRangeParallelChunksResident(
                     state.norm,
-                    q4_0_raw[0..gpu_weight_bytes],
-                    gpu_rows,
-                    cols,
-                ) catch |stage_err| {
-                    log.warn("M1 AMDGPU CS direct LM-head Q4_0 argmax-prefix parallel unavailable ({s}); selected token remains host-computed", .{@errorName(stage_err)});
-                    return null;
+                    tracking.lm_head_q4_0_resident.?,
+                ) catch |chunk_err| {
+                    used_resident_weights = false;
+                    log.warn("M1 AMDGPU CS direct LM-head Q4_0 resident argmax-prefix unavailable ({s}); retrying staged weights", .{@errorName(chunk_err)});
+                    break :resident_blk tracking.boundary.beginDmmvQ4_0RowRangeParallelChunks(
+                        state.norm,
+                        q4_0_raw[0..gpu_weight_bytes],
+                        gpu_rows,
+                        cols,
+                    ) catch |stage_err| {
+                        log.warn("M1 AMDGPU CS direct LM-head Q4_0 argmax-prefix parallel unavailable ({s}); selected token remains host-computed", .{@errorName(stage_err)});
+                        return null;
+                    };
                 };
             };
         } else tracking.boundary.beginDmmvQ4_0RowRangeParallelChunks(
@@ -2656,6 +2669,9 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
             log.warn("M1 AMDGPU CS direct LM-head Q4_0 argmax-prefix parallel unavailable ({s}); selected token remains host-computed", .{@errorName(err)});
             return null;
         };
+        if (!used_resident_grid and !used_resident_weights) {
+            gpu_dispatch_ops = gpu_chunks;
+        }
         if (gpu_rows < lm_head_rows) {
             const cpu_rows = lm_head_rows - gpu_rows;
             const cpu_off = @as(usize, gpu_rows) * row_bytes;
@@ -2681,6 +2697,7 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
             selection.offer(@intCast(i), gpu_value);
         }
     } else {
+        gpu_dispatch_ops = 1;
         const prefix_result = tracking.boundary.dmmvQ4_0ArgmaxRowRange(
             state.norm,
             q4_0_raw[0..gpu_weight_bytes],
@@ -2727,7 +2744,7 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
         "gpu_prefix"
     else
         "cpu_rows";
-    tracking.ops.* += gpu_chunks;
+    tracking.ops.* += gpu_dispatch_ops;
     mergeDirectComputeKind(tracking.kind, .dmmv_row_range);
     tracking.consumed.* = true;
     tracking.real_model_slice.* = true;
@@ -2735,7 +2752,12 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
         if (tracking.decode_model_slices) |slices| slices.* += gpu_chunks;
     }
     if (tracking.selected_token) |token| token.* = selection.best.index;
-    const op_name = if (used_resident_weights) "lm_head_q4_0_argmax_prefix_resident" else "lm_head_q4_0_argmax_prefix";
+    const op_name = if (used_resident_grid)
+        "lm_head_q4_0_argmax_prefix_resident_grid"
+    else if (used_resident_weights)
+        "lm_head_q4_0_argmax_prefix_resident"
+    else
+        "lm_head_q4_0_argmax_prefix";
     log.info("M1 AMDGPU CS direct model slice consumed: direct_compute_ops={d} direct_compute_kind=dmmv_row_range op={s} phase={s} gpu_rows={d} cols={d} chunks={d} selected_source={s} token={d} score={d:.6} gpu_prefix_best=({d},{d:.6}) abs_delta={d:.6}", .{
         tracking.ops.*,
         op_name,
@@ -10306,7 +10328,7 @@ test "direct LM-head Q4_0 prefix stays chunk-aligned and bounded" {
     const row_bytes = rowBytesForType(.q4_0, qwen_hidden_dim);
     try std.testing.expect(@as(usize, direct_lm_head_q4_0_argmax_prefix_rows_default) * row_bytes <= direct_lm_head_q4_0_argmax_max_weight_bytes);
     try std.testing.expectEqual(
-        @as(u32, direct_lm_head_q4_0_parallel_chunk_rows),
+        @as(u32, 256),
         directLmHeadQ4_0ArgmaxPrefixRowsForLimit(4096, row_bytes, 4096, direct_lm_head_q4_0_argmax_prefix_rows_default),
     );
     try std.testing.expectEqual(
