@@ -1566,9 +1566,10 @@ const DirectComputeTracking = struct {
 // default without paying for broad layer or full-vocab validation every run.
 // Full decode slices and the full-resident LM-head sweep are validation-only
 // now that coverage has been proven; they remain opt-in. The default decode
-// proof is one resident LM-head prefix row-range on the first decode step plus
-// a low-cadence full-router row-range replacement, so token selection and MoE
-// routing both consume GPU-produced DMMV values.
+// proof is one resident LM-head prefix row-range on the first decode step. The
+// periodic full-router row-range replacement is still available as opt-in
+// validation coverage, but the default path keeps only the token-affecting
+// LM-head slice to recover throughput while preserving M1 consumed-slice proof.
 // F32 projections validate each row range against the CPU oracle; paired Q8_0
 // projections can use trust-after-success after the first passing pair.
 const direct_decode_model_slice_enabled_default = false;
@@ -1576,7 +1577,7 @@ const direct_decode_model_slice_cadence_default: u32 = 0;
 const direct_prefill_model_slice_enabled_default = false;
 const direct_lm_head_decode_cadence_default: u32 = 0;
 const direct_lm_head_q4_0_full_resident_default = false;
-const direct_router_decode_enabled_default = true;
+const direct_router_decode_enabled_default = false;
 const direct_router_decode_cadence_default: u32 = 64;
 const direct_router_row_range_trust_after_successes_default: u32 = 1;
 const direct_ssm_q8_0_row_range_max_successes_default: u32 = 2;
@@ -1932,7 +1933,7 @@ fn generateScalarHybrid(
                 log.info("M1 AMDGPU CS direct router execution enabled: one full router row-range consumed every {d} decode tokens", .{direct_router_decode_cadence});
             }
         } else {
-            log.info("M1 AMDGPU CS direct router execution disabled by ZINC_RT_DIRECT_ROUTER_DECODE=0", .{});
+            log.info("M1 AMDGPU CS direct router execution disabled by default; set ZINC_RT_DIRECT_ROUTER_DECODE=1 for periodic routing validation", .{});
         }
         log.info("M1 AMDGPU CS direct router Q8_0 row-range trust_after_successes={d}", .{
             state.direct_router_row_range_trust_after_successes,
@@ -10318,7 +10319,7 @@ test "emitDecodeGraphForShape treats dense models as all attention" {
     try std.testing.expectEqual(@as(u32, 0), summary.moe_layers);
 }
 
-test "direct decode model slice policy defaults to LM-head plus router proofs" {
+test "direct decode model slice policy defaults to LM-head proof only" {
     try std.testing.expect(!directDecodeModelSliceEnabledForEnv(null, null));
     try std.testing.expect(directDecodeModelSliceEnabledForEnv("1", null));
     try std.testing.expect(directDecodeModelSliceEnabledForEnv("true", null));
@@ -10348,12 +10349,12 @@ test "direct decode model slice policy defaults to LM-head plus router proofs" {
     try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("0"));
     try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("false"));
     try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("bad"));
-    try std.testing.expect(directRouterDecodeEnabledForEnv(null));
+    try std.testing.expect(!directRouterDecodeEnabledForEnv(null));
     try std.testing.expect(directRouterDecodeEnabledForEnv("1"));
     try std.testing.expect(directRouterDecodeEnabledForEnv("true"));
     try std.testing.expect(!directRouterDecodeEnabledForEnv("0"));
     try std.testing.expect(!directRouterDecodeEnabledForEnv("false"));
-    try std.testing.expect(directRouterDecodeEnabledForEnv("bad"));
+    try std.testing.expect(!directRouterDecodeEnabledForEnv("bad"));
     try std.testing.expectEqual(@as(u32, direct_router_decode_cadence_default), directRouterDecodeCadenceForEnv(null));
     try std.testing.expectEqual(@as(u32, 16), directRouterDecodeCadenceForEnv("16"));
     try std.testing.expectEqual(@as(u32, 0), directRouterDecodeCadenceForEnv("0"));
