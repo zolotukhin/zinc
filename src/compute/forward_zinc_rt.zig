@@ -5788,6 +5788,7 @@ fn directRouterSupportsRowRange(tensor_type: gguf.GGMLType, cols: u32) bool {
 const DirectRouterDispatchResult = struct {
     used_parallel64: bool = false,
     chunks: u32 = 1,
+    ops: u32 = 1,
 };
 
 fn canUseDirectRouterParallel64(tensor_type: gguf.GGMLType, rows: u32) bool {
@@ -5835,25 +5836,33 @@ fn dispatchDirectRouterRowRange(
         },
         .q8_0 => {
             if (canUseDirectRouterQ8_0Parallel64(rows)) {
-                const half_bytes = @as(usize, direct_router_parallel64_half_rows) * row_bytes;
-                var row_start: u32 = 0;
-                while (row_start < rows) : (row_start += direct_router_parallel64_rows) {
-                    const chunk_off = @as(usize, row_start) * row_bytes;
-                    const second_off = chunk_off + half_bytes;
-                    const out_start: usize = @intCast(row_start);
-                    try boundary.dmmvQ8_0TwoRowRangesParallel64(
-                        input,
-                        weights[chunk_off..][0..half_bytes],
-                        direct_router_parallel64_half_rows,
-                        weights[second_off..][0..half_bytes],
-                        direct_router_parallel64_half_rows,
-                        cols,
-                        output[out_start..][0..direct_router_parallel64_rows],
-                    );
-                }
+                boundary.dmmvQ8_0RowRangeParallelChunks(input, weights, rows, cols, output) catch {
+                    const half_bytes = @as(usize, direct_router_parallel64_half_rows) * row_bytes;
+                    var row_start: u32 = 0;
+                    while (row_start < rows) : (row_start += direct_router_parallel64_rows) {
+                        const chunk_off = @as(usize, row_start) * row_bytes;
+                        const second_off = chunk_off + half_bytes;
+                        const out_start: usize = @intCast(row_start);
+                        try boundary.dmmvQ8_0TwoRowRangesParallel64(
+                            input,
+                            weights[chunk_off..][0..half_bytes],
+                            direct_router_parallel64_half_rows,
+                            weights[second_off..][0..half_bytes],
+                            direct_router_parallel64_half_rows,
+                            cols,
+                            output[out_start..][0..direct_router_parallel64_rows],
+                        );
+                    }
+                    return .{
+                        .used_parallel64 = true,
+                        .chunks = rows / direct_router_parallel64_rows,
+                        .ops = rows / direct_router_parallel64_rows,
+                    };
+                };
                 return .{
                     .used_parallel64 = true,
                     .chunks = rows / direct_router_parallel64_rows,
+                    .ops = 1,
                 };
             }
             try boundary.dmmvQ8_0RowRange(input, weights, rows, cols, output);
@@ -5961,7 +5970,7 @@ fn consumeDirectRouterRowRangePrimary(
 
     state.direct_router_row_range_done = true;
     state.direct_router_row_range_successes += 1;
-    tracking.ops.* += dispatch_result.chunks;
+    tracking.ops.* += dispatch_result.ops;
     mergeDirectComputeKind(tracking.kind, .dmmv_row_range);
     tracking.consumed.* = true;
     tracking.real_model_slice.* = true;
@@ -6058,7 +6067,7 @@ fn consumeDirectRouterRowRange(
     @memcpy(state.router_logits[0..rows_usize], gpu_logits);
     state.direct_router_row_range_done = true;
     const full_coverage = directRouterCanOverwriteAllLogits(cfg.n_experts, rows);
-    tracking.ops.* += dispatch_result.chunks;
+    tracking.ops.* += dispatch_result.ops;
     mergeDirectComputeKind(tracking.kind, .dmmv_row_range);
     tracking.consumed.* = true;
     tracking.real_model_slice.* = true;
