@@ -30,6 +30,12 @@ const log = std.log.scoped(.forward);
 /// see this as a soft safety net rather than the primary limit.
 pub const runtime_context_cap: u32 = 262144;
 const queued_prefill_embed_tokens: usize = 256;
+/// Largest per-request batched-prefill scratch (in prompt tokens) kept alive
+/// between requests. Scratch buffers scale with the prompt length, so a
+/// single very long prompt must not pin token-scaled buffers for the
+/// lifetime of the engine; requests above the cap fall back to transient
+/// allocate-and-free, exactly the pre-cache behavior.
+const batched_prefill_scratch_retain_max_tokens: u32 = 512;
 const qwen_ssm_projection_prefill_max_tokens: u32 = 256;
 const qwen_ssm_projection_prefill_min_tokens: usize = 32;
 const qwen35_dense27b_queued_prefill_max_tokens: usize = 40;
@@ -6377,6 +6383,16 @@ fn batchedPrefillAttentionDims(engine: *const InferenceEngine) !BatchedPrefillAt
 /// into `hidden` and read the last-token slice back out at the end.
 const BatchedPrefillScratch = struct {
     n_tokens: u32,
+    /// Allocation-shape inputs recorded for the cache-reuse capacity check in
+    /// `acquireBatchedPrefillScratch`. Every buffer size is monotone
+    /// non-decreasing in (n_tokens, q_dim, kv_dim, inter_dim) except
+    /// `moe_route_input`, whose slot count is NOT monotonic in n_tokens
+    /// (`batchedPrefillMoeRouteInputSlots`: n<32 needs n*k_used rows, n>=32
+    /// needs n), so its allocated capacity is tracked separately.
+    q_dim: u32,
+    kv_dim: u32,
+    inter_dim: u32,
+    route_input_slots: u32,
     hidden: MetalBuffer,
     norm: MetalBuffer,
     q: MetalBuffer,
@@ -6519,6 +6535,10 @@ const BatchedPrefillScratch = struct {
         const moe_down = try metal_buffer.createBuffer(ctx, @max(route_slots * hidden_n * f32_sz, 4));
         return .{
             .n_tokens = n_tokens,
+            .q_dim = q_dim,
+            .kv_dim = kv_dim,
+            .inter_dim = inter_dim,
+            .route_input_slots = @intCast(route_input_slots),
             .hidden = h,
             .norm = nm,
             .q = qb,
@@ -6541,6 +6561,16 @@ const BatchedPrefillScratch = struct {
             .moe_expert_down = moe_down,
             .moe_route_slots = @intCast(route_slots),
         };
+    }
+
+    /// Restore the invariants `init` establishes on buffers that are read
+    /// before being fully written (only `moe_active_block_count`, which is
+    /// zero-filled). Required when a cached scratch is reused for a new
+    /// request instead of being freshly allocated.
+    fn resetForReuse(self: *BatchedPrefillScratch) void {
+        if (self.moe_active_block_count.cpu_ptr) |bytes| {
+            @memset(bytes[0..self.moe_active_block_count.size], 0);
+        }
     }
 
     fn deinit(self: *BatchedPrefillScratch) void {
@@ -6835,6 +6865,19 @@ pub const InferenceEngine = struct {
     argmax_partials_buf: MetalBuffer,
     embed_staging: MetalBuffer,
     prefill_embed_buf: MetalBuffer,
+    /// Cached batched-prefill scratch reused across requests to keep ~20
+    /// Metal buffer allocations/frees out of the per-request prefill path.
+    /// Sized to the largest prompt seen (capped by
+    /// `batched_prefill_scratch_retain_max_tokens`); see
+    /// `acquireBatchedPrefillScratch`. NOTE: `init` builds the engine from
+    /// `undefined`, so this must be assigned there — a declaration default
+    /// would silently not apply.
+    batched_prefill_scratch_cache: ?BatchedPrefillScratch,
+    /// Debug guard: true while an acquired scratch is live. Generation is
+    /// serialized per engine and the prefill paths that acquire scratch
+    /// never nest, so overlapping acquires would be a refactoring bug;
+    /// asserted in `acquireBatchedPrefillScratch`.
+    batched_prefill_scratch_in_use: bool,
     lm_head_private_buf: MetalBuffer,
     expert_ids_buf: MetalBuffer,
 
@@ -7342,6 +7385,10 @@ pub const InferenceEngine = struct {
         self.config = cfg;
         self.allocator = allocator;
         self.position = 0;
+        // `self` starts as `undefined`, so field default values in the struct
+        // declaration do not apply — every field must be assigned here.
+        self.batched_prefill_scratch_cache = null;
+        self.batched_prefill_scratch_in_use = false;
         self.max_context_tokens = max_ctx;
         self.profile_enabled = options.profile_enabled;
         self.logits_readback_enabled = false;
@@ -8613,6 +8660,10 @@ pub const InferenceEngine = struct {
         if (self.scratch_rset) |rs| {
             shim.mtl_rset_free(rs);
             self.scratch_rset = null;
+        }
+        if (self.batched_prefill_scratch_cache) |*scratch| {
+            scratch.deinit();
+            self.batched_prefill_scratch_cache = null;
         }
         metal_buffer.freeBuffer(&self.hidden_buf);
         metal_buffer.freeBuffer(&self.residual_buf);
@@ -9905,6 +9956,60 @@ pub const InferenceEngine = struct {
         state.position = self.position;
     }
 
+    /// Return a batched-prefill scratch sized for at least `n_tokens`,
+    /// reusing the cached one when its capacity suffices. The attention/FFN
+    /// dims are engine constants in practice, but the reuse check still
+    /// requires capacity on every allocation-shape input plus the
+    /// route-input slot count, which is not monotonic in n_tokens (a <32
+    /// token request needs n*k_used rows while a >=32 one needs only n).
+    /// Pair every call with `releaseBatchedPrefillScratch` (via defer).
+    fn acquireBatchedPrefillScratch(
+        self: *InferenceEngine,
+        n_tokens: u32,
+        q_dim: u32,
+        kv_dim: u32,
+        inter_dim: u32,
+    ) !*BatchedPrefillScratch {
+        // The scratch-acquiring prefill paths are alternatives selected per
+        // model architecture (or strictly sequential validation replays);
+        // they never nest. Catch any future refactor that overlaps them.
+        std.debug.assert(!self.batched_prefill_scratch_in_use);
+        if (self.batched_prefill_scratch_cache) |*cached| {
+            const needed_route_input_slots = batchedPrefillMoeRouteInputSlots(
+                n_tokens,
+                self.config.n_experts,
+                self.config.n_experts_used,
+            );
+            if (cached.n_tokens >= n_tokens and
+                cached.q_dim >= q_dim and
+                cached.kv_dim >= kv_dim and
+                cached.inter_dim >= inter_dim and
+                cached.route_input_slots >= needed_route_input_slots)
+            {
+                cached.resetForReuse();
+                self.batched_prefill_scratch_in_use = true;
+                return cached;
+            }
+            cached.deinit();
+            self.batched_prefill_scratch_cache = null;
+        }
+        self.batched_prefill_scratch_cache = try BatchedPrefillScratch.init(self, n_tokens, q_dim, kv_dim, inter_dim);
+        self.batched_prefill_scratch_in_use = true;
+        return &self.batched_prefill_scratch_cache.?;
+    }
+
+    /// Retain the scratch for the next request when it is small enough,
+    /// otherwise free it (see `batched_prefill_scratch_retain_max_tokens`).
+    fn releaseBatchedPrefillScratch(self: *InferenceEngine) void {
+        self.batched_prefill_scratch_in_use = false;
+        if (self.batched_prefill_scratch_cache) |*cached| {
+            if (cached.n_tokens > batched_prefill_scratch_retain_max_tokens) {
+                cached.deinit();
+                self.batched_prefill_scratch_cache = null;
+            }
+        }
+    }
+
     fn prefillBatchQwenLayer0RoutePacked(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         return self.prefillBatchQwenLayer0RoutePackedWithLimit(state, prompt_tokens, qwenRoutePackedPrefixLayerLimit());
     }
@@ -9919,8 +10024,8 @@ pub const InferenceEngine = struct {
         const profile: ?*RuntimeProfile = if (self.profile_enabled) &self.request_profile else null;
 
         const first_attn_dims = qwenFirstPrefixAttentionDims(self) orelse BatchedPrefillAttentionDims{ .max_q_dim = 1, .max_kv_dim = 1 };
-        var scratch = try BatchedPrefillScratch.init(self, n_tokens, first_attn_dims.max_q_dim, first_attn_dims.max_kv_dim, inter_dim);
-        defer scratch.deinit();
+        const scratch = try self.acquireBatchedPrefillScratch(n_tokens, first_attn_dims.max_q_dim, first_attn_dims.max_kv_dim, inter_dim);
+        defer self.releaseBatchedPrefillScratch();
 
         var layer0_cmd = try beginProfiledCommand(self, profile);
         errdefer if (layer0_cmd.handle != null) layer0_cmd.wait();
@@ -9934,7 +10039,7 @@ pub const InferenceEngine = struct {
         dispatchCopyF32OffsetOnCmd(self, &layer0_cmd, &self.prefill_embed_buf, &scratch.hidden, n_tokens * hidden_dim, 0, 0);
         profileBarrier(&layer0_cmd, profile, .embed);
         self.qwen_ssm_prefill_proj_active_tokens = n_tokens;
-        try recordQwenRoutePackedPrefixSsmLayerOnCmd(self, &layer0_cmd, profile, 0, &scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
+        try recordQwenRoutePackedPrefixSsmLayerOnCmd(self, &layer0_cmd, profile, 0, scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
         if (self.profile_enabled) {
             log.info("Metal profile: Qwen route-packed layer0 layer-major SSM active tokens={d}", .{n_tokens});
         }
@@ -9945,13 +10050,13 @@ pub const InferenceEngine = struct {
         const route_packed_prefix_layer_limit = @max(requested_prefix_layer_limit, 1);
         while (route_packed_start_layer < route_packed_prefix_layer_limit) {
             if (canUseQwenRoutePackedPrefixSsmLayer(self, route_packed_start_layer, prompt_tokens.len)) {
-                try recordQwenRoutePackedPrefixSsmLayerOnCmd(self, &layer0_cmd, profile, route_packed_start_layer, &scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
+                try recordQwenRoutePackedPrefixSsmLayerOnCmd(self, &layer0_cmd, profile, route_packed_start_layer, scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
                 route_packed_start_layer += 1;
                 route_packed_prefix_ssm_layers += 1;
                 continue;
             }
             if (canUseQwenRoutePackedPrefixAttentionLayer(self, route_packed_start_layer, prompt_tokens.len)) {
-                try recordQwenRoutePackedPrefixAttentionLayerOnCmd(self, &layer0_cmd, profile, route_packed_start_layer, &scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
+                try recordQwenRoutePackedPrefixAttentionLayerOnCmd(self, &layer0_cmd, profile, route_packed_start_layer, scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
                 route_packed_start_layer += 1;
                 route_packed_prefix_attn_layers += 1;
                 continue;
@@ -10152,8 +10257,8 @@ pub const InferenceEngine = struct {
             state.generated_tokens.clearRetainingCapacity();
         }
 
-        var scratch = try BatchedPrefillScratch.init(self, n_tokens, attn_dims.max_q_dim, attn_dims.max_kv_dim, inter_dim);
-        defer scratch.deinit();
+        const scratch = try self.acquireBatchedPrefillScratch(n_tokens, attn_dims.max_q_dim, attn_dims.max_kv_dim, inter_dim);
+        defer self.releaseBatchedPrefillScratch();
 
         {
             const mmap = self.model.mmap_data orelse return error.NoMmapData;
@@ -10288,7 +10393,7 @@ pub const InferenceEngine = struct {
             profileBarrier(&cmd, profile, .full_attn);
 
             if (is_gemma_moe) {
-                try recordGemmaBatchedPrefillMoeOnCmd(self, &cmd, layer_idx, lt, &scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
+                try recordGemmaBatchedPrefillMoeOnCmd(self, &cmd, layer_idx, lt, scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
             } else {
                 const gate_t = lt.ffn_gate.?;
                 const up_t = lt.ffn_up.?;
@@ -10349,7 +10454,7 @@ pub const InferenceEngine = struct {
 
         if (shouldCpuLmHeadFallback(self)) {
             commitAndWaitProfiled(&cmd, profile);
-            recordRoutePackActualProfile(profile, &scratch, @as(usize, @intCast(cfg.n_layers)));
+            recordRoutePackActualProfile(profile, scratch, @as(usize, @intCast(cfg.n_layers)));
             if (self.private_decode_buffers) return error.PrivateBatchedPrefillCpuLmHeadUnsupported;
             const src_base = @as(usize, n_tokens - 1) * hidden_dim;
             const hidden_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
@@ -10367,7 +10472,7 @@ pub const InferenceEngine = struct {
                 dispatchCopyF32OnCmd(self, &cmd, &self.logits_buf, &self.logits_readback_buf, cfg.vocab_size);
             }
             commitAndWaitProfiled(&cmd, profile);
-            recordRoutePackActualProfile(profile, &scratch, @as(usize, @intCast(cfg.n_layers)));
+            recordRoutePackActualProfile(profile, scratch, @as(usize, @intCast(cfg.n_layers)));
             const src_base = @as(usize, n_tokens - 1) * hidden_dim;
             if (self.hidden_buf.cpu_ptr) |dst_bytes| {
                 const src_ptr: [*]const f32 = @ptrCast(@alignCast(scratch.hidden.cpu_ptr.?));
@@ -38218,6 +38323,101 @@ test "BatchedPrefillScratch allocates Gemma MoE route scratch" {
     try std.testing.expectEqual(scratch.moe_expert_gate.size, scratch.moe_expert_up.size);
     try std.testing.expectEqual(scratch.moe_expert_gate.size, scratch.moe_expert_swiglu.size);
     try std.testing.expectEqual(@as(usize, route_slots * engine.config.hidden_dim * @sizeOf(f32)), scratch.moe_expert_down.size);
+}
+
+test "acquireBatchedPrefillScratch reuses, re-zeroes, grows, and evicts oversized scratch" {
+    var device = try metal_device.MetalDevice.init(std.testing.allocator, 0);
+    defer device.deinit();
+
+    var engine: InferenceEngine = undefined;
+    engine.device = &device;
+    engine.batched_prefill_scratch_cache = null;
+    engine.batched_prefill_scratch_in_use = false;
+    engine.config = .{
+        .architecture = .gemma,
+        .n_layers = 1,
+        .n_heads = 1,
+        .n_kv_heads = 1,
+        .head_dim = 16,
+        .hidden_dim = 32,
+        .intermediate_dim = 16,
+        .vocab_size = 64,
+        .context_length = 128,
+        .rope_freq_base = 10000.0,
+        .n_experts = 6,
+        .n_experts_used = 3,
+        .rope_dim = 16,
+        .ssm_d_conv = 0,
+        .ssm_d_inner = 0,
+        .ssm_d_state = 0,
+        .ssm_dt_rank = 0,
+        .ssm_n_group = 0,
+        .full_attn_interval = 1,
+        .shared_expert_intermediate_dim = 48,
+    };
+    defer if (engine.batched_prefill_scratch_cache) |*s| {
+        s.deinit();
+        engine.batched_prefill_scratch_cache = null;
+    };
+
+    const q_dim: u32 = 32;
+    const kv_dim: u32 = 16;
+    const inter_dim: u32 = 16;
+
+    // First acquire allocates and marks the scratch in use.
+    const first = try engine.acquireBatchedPrefillScratch(2, q_dim, kv_dim, inter_dim);
+    const first_hidden_handle = first.hidden.handle;
+    try std.testing.expect(engine.batched_prefill_scratch_in_use);
+    engine.releaseBatchedPrefillScratch();
+    try std.testing.expect(!engine.batched_prefill_scratch_in_use);
+    // Small scratch is retained across release.
+    try std.testing.expect(engine.batched_prefill_scratch_cache != null);
+
+    // Same-capacity acquire reuses the identical buffers (no reallocation)
+    // and re-zeroes moe_active_block_count, the one init()-zeroed buffer.
+    {
+        const cached = &engine.batched_prefill_scratch_cache.?;
+        const bytes = cached.moe_active_block_count.cpu_ptr.?;
+        bytes[0] = 0xAB; // dirty it, as a prior request's routing profile would
+    }
+    const second = try engine.acquireBatchedPrefillScratch(2, q_dim, kv_dim, inter_dim);
+    try std.testing.expectEqual(first_hidden_handle, second.hidden.handle);
+    try std.testing.expectEqual(@as(u8, 0), second.moe_active_block_count.cpu_ptr.?[0]);
+    engine.releaseBatchedPrefillScratch();
+
+    // A larger request reallocates: capacity grows and buffers change.
+    const third = try engine.acquireBatchedPrefillScratch(4, q_dim, kv_dim, inter_dim);
+    try std.testing.expectEqual(@as(u32, 4), third.n_tokens);
+    engine.releaseBatchedPrefillScratch();
+    try std.testing.expect(engine.batched_prefill_scratch_cache != null);
+
+    // Route-input slots are NOT monotonic in n_tokens: a >=32-token request
+    // allocates n rows of moe_route_input, but a <32-token request needs
+    // n * n_experts_used rows for route-slot gather. A cached 33-token
+    // scratch (33 rows) must NOT be reused for a 12-token request
+    // (12 * 3 = 36 rows) — reuse here would overrun moe_route_input on GPU.
+    const wide = try engine.acquireBatchedPrefillScratch(33, q_dim, kv_dim, inter_dim);
+    try std.testing.expectEqual(@as(u32, 33), wide.route_input_slots);
+    const wide_route_input_handle = wide.moe_route_input.handle;
+    engine.releaseBatchedPrefillScratch();
+    const short = try engine.acquireBatchedPrefillScratch(12, q_dim, kv_dim, inter_dim);
+    try std.testing.expect(wide_route_input_handle != short.moe_route_input.handle);
+    try std.testing.expectEqual(@as(u32, 36), short.route_input_slots);
+    try std.testing.expect(short.moe_route_input.size >= 36 * engine.config.hidden_dim * @sizeOf(f32));
+    engine.releaseBatchedPrefillScratch();
+
+    // A request with larger attention dims must also reallocate even when
+    // the token capacity fits; reuse keys on every allocation-shape input.
+    const wide_q = try engine.acquireBatchedPrefillScratch(2, q_dim * 2, kv_dim, inter_dim);
+    try std.testing.expectEqual(q_dim * 2, wide_q.q_dim);
+    try std.testing.expect(wide_q.q.size >= 2 * q_dim * 2 * @sizeOf(f32));
+    engine.releaseBatchedPrefillScratch();
+
+    // A request over the retention cap is freed at release, restoring the
+    // pre-cache transient behavior so long prompts cannot pin memory.
+    _ = try engine.acquireBatchedPrefillScratch(batched_prefill_scratch_retain_max_tokens + 1, q_dim, kv_dim, inter_dim);
+    engine.releaseBatchedPrefillScratch();
+    try std.testing.expect(engine.batched_prefill_scratch_cache == null);
 }
 
 test "BatchedPrefillScratch sizes active-block shared output scratch by token" {
