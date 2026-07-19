@@ -6365,6 +6365,16 @@ fn batchedPrefillAttentionDims(engine: *const InferenceEngine) !BatchedPrefillAt
 /// into `hidden` and read the last-token slice back out at the end.
 const BatchedPrefillScratch = struct {
     n_tokens: u32,
+    /// Allocation-shape inputs recorded for the cache-reuse capacity check in
+    /// `acquireBatchedPrefillScratch`. Every buffer size is monotone
+    /// non-decreasing in (n_tokens, q_dim, kv_dim, inter_dim) except
+    /// `moe_route_input`, whose slot count is NOT monotonic in n_tokens
+    /// (`batchedPrefillMoeRouteInputSlots`: n<32 needs n*k_used rows, n>=32
+    /// needs n), so its allocated capacity is tracked separately.
+    q_dim: u32,
+    kv_dim: u32,
+    inter_dim: u32,
+    route_input_slots: u32,
     hidden: MetalBuffer,
     norm: MetalBuffer,
     q: MetalBuffer,
@@ -6507,6 +6517,10 @@ const BatchedPrefillScratch = struct {
         const moe_down = try metal_buffer.createBuffer(ctx, @max(route_slots * hidden_n * f32_sz, 4));
         return .{
             .n_tokens = n_tokens,
+            .q_dim = q_dim,
+            .kv_dim = kv_dim,
+            .inter_dim = inter_dim,
+            .route_input_slots = @intCast(route_input_slots),
             .hidden = h,
             .norm = nm,
             .q = qb,
@@ -6837,13 +6851,15 @@ pub const InferenceEngine = struct {
     /// Metal buffer allocations/frees out of the per-request prefill path.
     /// Sized to the largest prompt seen (capped by
     /// `batched_prefill_scratch_retain_max_tokens`); see
-    /// `acquireBatchedPrefillScratch`.
-    batched_prefill_scratch_cache: ?BatchedPrefillScratch = null,
+    /// `acquireBatchedPrefillScratch`. NOTE: `init` builds the engine from
+    /// `undefined`, so this must be assigned there — a declaration default
+    /// would silently not apply.
+    batched_prefill_scratch_cache: ?BatchedPrefillScratch,
     /// Debug guard: true while an acquired scratch is live. Generation is
     /// serialized per engine and the prefill paths that acquire scratch
     /// never nest, so overlapping acquires would be a refactoring bug;
     /// asserted in `acquireBatchedPrefillScratch`.
-    batched_prefill_scratch_in_use: bool = false,
+    batched_prefill_scratch_in_use: bool,
     lm_head_private_buf: MetalBuffer,
     expert_ids_buf: MetalBuffer,
 
@@ -7351,6 +7367,10 @@ pub const InferenceEngine = struct {
         self.config = cfg;
         self.allocator = allocator;
         self.position = 0;
+        // `self` starts as `undefined`, so field default values in the struct
+        // declaration do not apply — every field must be assigned here.
+        self.batched_prefill_scratch_cache = null;
+        self.batched_prefill_scratch_in_use = false;
         self.max_context_tokens = max_ctx;
         self.profile_enabled = options.profile_enabled;
         self.logits_readback_enabled = false;
@@ -9920,7 +9940,10 @@ pub const InferenceEngine = struct {
 
     /// Return a batched-prefill scratch sized for at least `n_tokens`,
     /// reusing the cached one when its capacity suffices. The attention/FFN
-    /// dims are engine constants, so token capacity is the only variable.
+    /// dims are engine constants in practice, but the reuse check still
+    /// requires capacity on every allocation-shape input plus the
+    /// route-input slot count, which is not monotonic in n_tokens (a <32
+    /// token request needs n*k_used rows while a >=32 one needs only n).
     /// Pair every call with `releaseBatchedPrefillScratch` (via defer).
     fn acquireBatchedPrefillScratch(
         self: *InferenceEngine,
@@ -9934,7 +9957,17 @@ pub const InferenceEngine = struct {
         // they never nest. Catch any future refactor that overlaps them.
         std.debug.assert(!self.batched_prefill_scratch_in_use);
         if (self.batched_prefill_scratch_cache) |*cached| {
-            if (cached.n_tokens >= n_tokens) {
+            const needed_route_input_slots = batchedPrefillMoeRouteInputSlots(
+                n_tokens,
+                self.config.n_experts,
+                self.config.n_experts_used,
+            );
+            if (cached.n_tokens >= n_tokens and
+                cached.q_dim >= q_dim and
+                cached.kv_dim >= kv_dim and
+                cached.inter_dim >= inter_dim and
+                cached.route_input_slots >= needed_route_input_slots)
+            {
                 cached.resetForReuse();
                 self.batched_prefill_scratch_in_use = true;
                 return cached;
@@ -38339,6 +38372,28 @@ test "acquireBatchedPrefillScratch reuses, re-zeroes, grows, and evicts oversize
     try std.testing.expectEqual(@as(u32, 4), third.n_tokens);
     engine.releaseBatchedPrefillScratch();
     try std.testing.expect(engine.batched_prefill_scratch_cache != null);
+
+    // Route-input slots are NOT monotonic in n_tokens: a >=32-token request
+    // allocates n rows of moe_route_input, but a <32-token request needs
+    // n * n_experts_used rows for route-slot gather. A cached 33-token
+    // scratch (33 rows) must NOT be reused for a 12-token request
+    // (12 * 3 = 36 rows) — reuse here would overrun moe_route_input on GPU.
+    const wide = try engine.acquireBatchedPrefillScratch(33, q_dim, kv_dim, inter_dim);
+    try std.testing.expectEqual(@as(u32, 33), wide.route_input_slots);
+    const wide_route_input_handle = wide.moe_route_input.handle;
+    engine.releaseBatchedPrefillScratch();
+    const short = try engine.acquireBatchedPrefillScratch(12, q_dim, kv_dim, inter_dim);
+    try std.testing.expect(wide_route_input_handle != short.moe_route_input.handle);
+    try std.testing.expectEqual(@as(u32, 36), short.route_input_slots);
+    try std.testing.expect(short.moe_route_input.size >= 36 * engine.config.hidden_dim * @sizeOf(f32));
+    engine.releaseBatchedPrefillScratch();
+
+    // A request with larger attention dims must also reallocate even when
+    // the token capacity fits; reuse keys on every allocation-shape input.
+    const wide_q = try engine.acquireBatchedPrefillScratch(2, q_dim * 2, kv_dim, inter_dim);
+    try std.testing.expectEqual(q_dim * 2, wide_q.q_dim);
+    try std.testing.expect(wide_q.q.size >= 2 * q_dim * 2 * @sizeOf(f32));
+    engine.releaseBatchedPrefillScratch();
 
     // A request over the retention cap is freed at release, restoring the
     // pre-cache transient behavior so long prompts cannot pin memory.
