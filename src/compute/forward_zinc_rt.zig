@@ -1366,6 +1366,7 @@ const ScalarDecodeState = struct {
     ssm_states: []f32,
     moe_expert_workers: usize,
     moe_topk_active: u32,
+    direct_lm_head_full_argmax_successes: u32 = 0,
     direct_router_row_range_successes: u32 = 0,
     direct_router_row_range_trust_after_successes: u32,
     direct_ssm_q8_row_range_max_successes: u32,
@@ -1573,6 +1574,7 @@ const direct_decode_model_slice_enabled_default = false;
 const direct_decode_model_slice_cadence_default: u32 = 0;
 const direct_prefill_model_slice_enabled_default = false;
 const direct_lm_head_decode_cadence_default: u32 = 0;
+const direct_lm_head_q4_0_full_resident_default = true;
 const direct_router_decode_enabled_default = true;
 const direct_router_decode_cadence_default: u32 = 64;
 const direct_router_row_range_trust_after_successes_default: u32 = 1;
@@ -1634,6 +1636,15 @@ fn directLmHeadDecodeCadenceForEnv(raw_override: ?[]const u8) u32 {
 
 fn directLmHeadDecodeCadence() u32 {
     return directLmHeadDecodeCadenceForEnv(std.posix.getenv("ZINC_RT_DIRECT_LM_HEAD_DECODE_CADENCE"));
+}
+
+fn directLmHeadQ4_0FullResidentEnabledForEnv(raw_override: ?[]const u8) bool {
+    const raw = raw_override orelse return direct_lm_head_q4_0_full_resident_default;
+    return parseBoolEnv(raw, direct_lm_head_q4_0_full_resident_default);
+}
+
+fn directLmHeadQ4_0FullResidentEnabled() bool {
+    return directLmHeadQ4_0FullResidentEnabledForEnv(std.posix.getenv("ZINC_RT_DIRECT_LM_HEAD_FULL_RESIDENT"));
 }
 
 fn directRouterDecodeEnabledForEnv(raw_override: ?[]const u8) bool {
@@ -1857,7 +1868,12 @@ fn generateScalarHybrid(
             const cols: u32 = @intCast(state.norm.len);
             const row_bytes = rowBytesForType(.q4_0, cols);
             const scratch_rows: u32 = @intCast(@min(state.row_scratch.len, @as(usize, std.math.maxInt(u32))));
-            const rows = directLmHeadQ4_0ArgmaxPrefixRows(model.effectiveLmHeadRows(true), row_bytes, scratch_rows);
+            const lm_head_rows = model.effectiveLmHeadRows(true);
+            const full_resident_rows = directLmHeadQ4_0FullResidentRows(boundary, q40.len, lm_head_rows, row_bytes, state.logits.len);
+            const rows = if (full_resident_rows != 0)
+                full_resident_rows
+            else
+                directLmHeadQ4_0ArgmaxPrefixRows(lm_head_rows, row_bytes, scratch_rows);
             if (rows > 0) {
                 const bytes = @as(usize, rows) * row_bytes;
                 if (bytes <= q40.len) {
@@ -1866,11 +1882,13 @@ fn generateScalarHybrid(
                         break :resident_err null;
                     };
                     if (direct_lm_head_q4_0_resident) |resident| {
-                        log.info("M1 AMDGPU CS direct LM-head Q4_0 resident prefix staged: rows={d} cols={d} bytes={d} input_bo_off=0x{x}", .{
+                        log.info("M1 AMDGPU CS direct LM-head Q4_0 resident rows staged: rows={d} cols={d} bytes={d} residency={s} weight_va=0x{x} full_lm_head={d}", .{
                             resident.rows,
                             resident.cols,
                             resident.bytes,
-                            resident.weight_off,
+                            @tagName(resident.memory),
+                            resident.weight_va,
+                            @intFromBool(resident.rows == lm_head_rows),
                         });
                     }
                 }
@@ -1898,6 +1916,14 @@ fn generateScalarHybrid(
             log.info("M1 AMDGPU CS direct LM-head prefix decode cadence: first generated token and every {d} generated tokens", .{direct_lm_head_decode_cadence});
         }
         log.info("M1 AMDGPU CS direct LM-head prefix row cap: {d} rows", .{directLmHeadQ4_0ArgmaxPrefixRowsLimit()});
+        if (direct_lm_head_q4_0_resident) |resident| {
+            if (resident.rows == model.effectiveLmHeadRows(true)) {
+                log.info("M1 AMDGPU CS direct LM-head full-resident validation enabled: first decode token consumes full GPU Q4_0 LM-head rows={d} residency={s}", .{
+                    resident.rows,
+                    @tagName(resident.memory),
+                });
+            }
+        }
         if (direct_router_decode_enabled) {
             if (direct_router_decode_cadence == 0) {
                 log.info("M1 AMDGPU CS direct router execution enabled: one full router row-range consumed per decode token", .{});
@@ -2000,7 +2026,13 @@ fn generateScalarHybrid(
     var position: u32 = @intCast(prompt_tokens.len);
     while (generated.items.len < effective_max_tokens and next_token != eos_token_id) : (position += 1) {
         const track_full_decode_slice = direct_decode_slice_enabled and shouldTrackDirectDecodeModelSlice(generated.items.len, direct_decode_slice_cadence);
-        const track_lm_head_decode_slice = shouldTrackDirectLmHeadDecode(generated.items.len, track_full_decode_slice, direct_lm_head_decode_cadence);
+        const track_full_resident_lm_head = if (direct_lm_head_q4_0_resident) |resident|
+            resident.rows == model.effectiveLmHeadRows(true) and
+                state.direct_lm_head_full_argmax_successes == 0 and
+                !track_full_decode_slice
+        else
+            false;
+        const track_lm_head_decode_slice = track_full_resident_lm_head or shouldTrackDirectLmHeadDecode(generated.items.len, track_full_decode_slice, direct_lm_head_decode_cadence);
         const direct_decode_tracking: ?DirectComputeTracking = if ((track_full_decode_slice or track_lm_head_decode_slice) and token_boundary != null)
             .{
                 .boundary = token_boundary.?,
@@ -2533,6 +2565,24 @@ const direct_lm_head_q4_0_argmax_prefix_rows_default: u32 = 256;
 const direct_lm_head_q4_0_selected_window_rows: u32 = 64;
 const direct_lm_head_q4_0_argmax_max_weight_bytes: usize = 5 * 1024 * 1024;
 
+fn directLmHeadQ4_0FullResidentRows(
+    boundary: *const zinc_rt.cs.TokenBoundary,
+    q4_0_raw_len: usize,
+    lm_head_rows: u32,
+    row_bytes: usize,
+    logits_rows: usize,
+) u32 {
+    if (!directLmHeadQ4_0FullResidentEnabled()) return 0;
+    if (lm_head_rows == 0 or lm_head_rows % direct_lm_head_q4_0_parallel_chunk_rows != 0) return 0;
+    if (row_bytes == 0) return 0;
+    if (logits_rows < lm_head_rows) return 0;
+    if (boundary.dmmvOutputRowsCapacity() < lm_head_rows) return 0;
+    const bytes = @as(usize, lm_head_rows) * row_bytes;
+    if (q4_0_raw_len < bytes) return 0;
+    if (bytes > boundary.residentDmmvQ4_0CapacityBytes()) return 0;
+    return lm_head_rows;
+}
+
 fn offsetScoredToken(token: ScoredToken, offset: u32) ScoredToken {
     return .{
         .index = token.index + offset,
@@ -2610,7 +2660,18 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
     if (row_bytes == 0) return null;
     const max_rows_by_input: u32 = @intCast(direct_lm_head_q4_0_argmax_max_weight_bytes / row_bytes);
     const scratch_rows: u32 = @intCast(@min(state.row_scratch.len, @as(usize, std.math.maxInt(u32))));
-    const gpu_rows = directLmHeadQ4_0ArgmaxPrefixRows(lm_head_rows, row_bytes, scratch_rows);
+    var gpu_rows = directLmHeadQ4_0ArgmaxPrefixRows(lm_head_rows, row_bytes, scratch_rows);
+    var full_resident_argmax = false;
+    if (tracking.lm_head_q4_0_resident) |resident| {
+        if (resident.rows == lm_head_rows and
+            resident.cols == cols and
+            resident.row_bytes == row_bytes and
+            state.logits.len >= @as(usize, lm_head_rows))
+        {
+            gpu_rows = lm_head_rows;
+            full_resident_argmax = true;
+        }
+    }
     if (gpu_rows == 0) return null;
 
     const gpu_rows_usize: usize = @intCast(gpu_rows);
@@ -2621,12 +2682,18 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
     var gpu_chunks: u32 = 1;
     var gpu_dispatch_ops: u32 = 1;
     var cpu_tail_selection: ?ArgmaxTop2Result = null;
+    var cpu_full_selection: ?ArgmaxTop2Result = null;
     var used_resident_weights = false;
     var used_resident_grid = false;
     if (gpu_rows % direct_lm_head_q4_0_parallel_chunk_rows == 0 and gpu_rows >= direct_lm_head_q4_0_parallel_chunk_rows) {
         gpu_chunks = gpu_rows / direct_lm_head_q4_0_parallel_chunk_rows;
         gpu_dispatch_ops = gpu_chunks;
-        const gpu_logits = state.row_scratch[0..gpu_rows_usize];
+        const use_logits_output = full_resident_argmax and gpu_rows_usize > state.row_scratch.len;
+        if (!use_logits_output and state.row_scratch.len < gpu_rows_usize) return null;
+        const gpu_logits = if (use_logits_output)
+            state.logits[0..gpu_rows_usize]
+        else
+            state.row_scratch[0..gpu_rows_usize];
         const pending = if (tracking.lm_head_only and tracking.lm_head_q4_0_resident != null and
             tracking.lm_head_q4_0_resident.?.rows == gpu_rows and
             tracking.lm_head_q4_0_resident.?.cols == cols and
@@ -2684,6 +2751,11 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
                 pending.waitDiscard();
                 return err;
             };
+        } else if (full_resident_argmax and state.direct_lm_head_full_argmax_successes == 0) {
+            cpu_full_selection = argmaxMatvecRawTop2(state.pool, q4_0_raw[0..gpu_weight_bytes], .q4_0, state.norm, gpu_rows, state.row_scratch) catch |err| {
+                pending.waitDiscard();
+                return err;
+            };
         }
         pending.finish(gpu_logits) catch |err| {
             log.warn("M1 AMDGPU CS direct LM-head Q4_0 argmax-prefix parallel unavailable ({s}); selected token remains host-computed", .{@errorName(err)});
@@ -2728,6 +2800,20 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
         });
         return null;
     }
+    if (cpu_full_selection) |cpu_selection| {
+        const cpu_gpu_top_delta = @abs(cpu_selection.best.value - selection.best.value);
+        if (cpu_selection.best.index != selection.best.index or cpu_gpu_top_delta > direct_lm_head_q4_0_best_row_tolerance) {
+            log.warn("M1 AMDGPU CS direct LM-head Q4_0 full-resident argmax mismatch: cpu=({d},{d:.6}) gpu=({d},{d:.6}) abs_delta={d:.6}; selected token remains host-computed", .{
+                cpu_selection.best.index,
+                cpu_selection.best.value,
+                selection.best.index,
+                selection.best.value,
+                cpu_gpu_top_delta,
+            });
+            return null;
+        }
+        state.direct_lm_head_full_argmax_successes += 1;
+    }
 
     if (gpu_rows < lm_head_rows) {
         const cpu_rows = lm_head_rows - gpu_rows;
@@ -2740,7 +2826,9 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
     }
 
     const selected_from_gpu_prefix = selection.best.index < gpu_rows;
-    const selected_source: []const u8 = if (selected_from_gpu_prefix)
+    const selected_source: []const u8 = if (full_resident_argmax and gpu_rows == lm_head_rows)
+        "gpu_full_vocab"
+    else if (selected_from_gpu_prefix)
         "gpu_prefix"
     else
         "cpu_rows";
@@ -2752,7 +2840,9 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
         if (tracking.decode_model_slices) |slices| slices.* += gpu_chunks;
     }
     if (tracking.selected_token) |token| token.* = selection.best.index;
-    const op_name = if (used_resident_grid)
+    const op_name = if (full_resident_argmax and used_resident_grid)
+        "lm_head_q4_0_full_vocab_resident_grid"
+    else if (used_resident_grid)
         "lm_head_q4_0_argmax_prefix_resident_grid"
     else if (used_resident_weights)
         "lm_head_q4_0_argmax_prefix_resident"
@@ -2819,7 +2909,8 @@ fn consumeDirectLmHeadQ4_0ArgmaxPrefix(
 }
 
 fn directLmHeadQ4_0SelectedSourceHasGpuScore(selected_source: []const u8) bool {
-    return std.mem.eql(u8, selected_source, "gpu_prefix") or
+    return std.mem.eql(u8, selected_source, "gpu_full_vocab") or
+        std.mem.eql(u8, selected_source, "gpu_prefix") or
         std.mem.eql(u8, selected_source, "gpu_selected_window");
 }
 
@@ -10250,6 +10341,12 @@ test "direct decode model slice policy defaults to LM-head plus router proofs" {
     try std.testing.expectEqual(@as(u32, 4), directLmHeadDecodeCadenceForEnv("4"));
     try std.testing.expectEqual(@as(u32, 0), directLmHeadDecodeCadenceForEnv("0"));
     try std.testing.expectEqual(@as(u32, direct_lm_head_decode_cadence_default), directLmHeadDecodeCadenceForEnv("bad"));
+    try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv(null));
+    try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv("1"));
+    try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv("true"));
+    try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("0"));
+    try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("false"));
+    try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv("bad"));
     try std.testing.expect(directRouterDecodeEnabledForEnv(null));
     try std.testing.expect(directRouterDecodeEnabledForEnv("1"));
     try std.testing.expect(directRouterDecodeEnabledForEnv("true"));
@@ -10311,6 +10408,7 @@ test "direct LM-head Q4_0 selected window covers sampled row" {
 }
 
 test "direct LM-head Q4_0 selected source identifies GPU scores" {
+    try std.testing.expect(directLmHeadQ4_0SelectedSourceHasGpuScore("gpu_full_vocab"));
     try std.testing.expect(directLmHeadQ4_0SelectedSourceHasGpuScore("gpu_prefix"));
     try std.testing.expect(directLmHeadQ4_0SelectedSourceHasGpuScore("gpu_selected_window"));
     try std.testing.expect(!directLmHeadQ4_0SelectedSourceHasGpuScore("cpu_rows"));
