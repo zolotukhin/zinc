@@ -1563,18 +1563,19 @@ const DirectComputeTracking = struct {
 };
 
 // Keep M1 benchmark runs exercising a consumed decode-phase model value by
-// default without paying for broad layer coverage on every run. Full decode
-// slices are validation-only now that coverage has been proven; they remain
-// opt-in. The default decode proof is one LM-head prefix row-range on the first
-// decode step plus a low-cadence full-router row-range replacement, so token
-// selection and MoE routing both consume GPU-produced DMMV values.
+// default without paying for broad layer or full-vocab validation every run.
+// Full decode slices and the full-resident LM-head sweep are validation-only
+// now that coverage has been proven; they remain opt-in. The default decode
+// proof is one resident LM-head prefix row-range on the first decode step plus
+// a low-cadence full-router row-range replacement, so token selection and MoE
+// routing both consume GPU-produced DMMV values.
 // F32 projections validate each row range against the CPU oracle; paired Q8_0
 // projections can use trust-after-success after the first passing pair.
 const direct_decode_model_slice_enabled_default = false;
 const direct_decode_model_slice_cadence_default: u32 = 0;
 const direct_prefill_model_slice_enabled_default = false;
 const direct_lm_head_decode_cadence_default: u32 = 0;
-const direct_lm_head_q4_0_full_resident_default = true;
+const direct_lm_head_q4_0_full_resident_default = false;
 const direct_router_decode_enabled_default = true;
 const direct_router_decode_cadence_default: u32 = 64;
 const direct_router_row_range_trust_after_successes_default: u32 = 1;
@@ -10341,12 +10342,12 @@ test "direct decode model slice policy defaults to LM-head plus router proofs" {
     try std.testing.expectEqual(@as(u32, 4), directLmHeadDecodeCadenceForEnv("4"));
     try std.testing.expectEqual(@as(u32, 0), directLmHeadDecodeCadenceForEnv("0"));
     try std.testing.expectEqual(@as(u32, direct_lm_head_decode_cadence_default), directLmHeadDecodeCadenceForEnv("bad"));
-    try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv(null));
+    try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv(null));
     try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv("1"));
     try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv("true"));
     try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("0"));
     try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("false"));
-    try std.testing.expect(directLmHeadQ4_0FullResidentEnabledForEnv("bad"));
+    try std.testing.expect(!directLmHeadQ4_0FullResidentEnabledForEnv("bad"));
     try std.testing.expect(directRouterDecodeEnabledForEnv(null));
     try std.testing.expect(directRouterDecodeEnabledForEnv("1"));
     try std.testing.expect(directRouterDecodeEnabledForEnv("true"));
