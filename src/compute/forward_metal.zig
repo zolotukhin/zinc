@@ -38,7 +38,14 @@ const queued_prefill_embed_tokens: usize = 256;
 const batched_prefill_scratch_retain_max_tokens: u32 = 512;
 const qwen_ssm_projection_prefill_max_tokens: u32 = 256;
 const qwen_ssm_projection_prefill_min_tokens: usize = 32;
-const qwen35_dense27b_queued_prefill_max_tokens: usize = 40;
+// 27B layer-major single-shot / chunk ceiling. Was 40 (a conservative
+// validation limit from Effort 28); raised to 192 after verifying the
+// layer-major prefill is byte-identical to the per-token reference at every
+// chunk size up to the 256-token scratch-buffer limit (2026-07-19, greedy
+// output on 45-481 token prompts + cross-chunk recall). Larger chunks mean
+// fewer, wider GEMM batches: ~+28% prefill on the 27B (106 -> 135 tok/s).
+// Overridable via ZINC_QWEN27B_CHUNK_TOKENS; see qwen35Dense27bQueuedPrefillMaxTokens.
+const qwen35_dense27b_queued_prefill_max_tokens: usize = 192;
 const qwen35_dense9b_prefill_prefix_layers: usize = 32;
 const qwen_ssm_projection_validate_default_tokens: u32 = 4;
 // the reference implementation's Metal `ggml_metal_op_mul_mat_id` switches from the small
@@ -1094,11 +1101,39 @@ fn qwen35DensePrefillPrefixLayerLimit(cfg: ModelConfig) usize {
     return 1;
 }
 
+/// The 27B layer-major single-shot / chunk ceiling (default 192). The scratch
+/// buffers are sized to qwen_ssm_projection_prefill_max_tokens (256), so
+/// ZINC_QWEN27B_CHUNK_TOKENS can retune it (e.g. lower on a slower machine, or
+/// sweep to re-confirm correctness). Clamped to [min, 256].
+fn qwen35Dense27bQueuedPrefillMaxTokens() u32 {
+    const default_max: u32 = @intCast(qwen35_dense27b_queued_prefill_max_tokens);
+    const requested = readU32Env("ZINC_QWEN27B_CHUNK_TOKENS") orelse return default_max;
+    const min_tokens: u32 = @intCast(qwen_ssm_projection_prefill_min_tokens);
+    return @min(@max(requested, min_tokens), qwen_ssm_projection_prefill_max_tokens);
+}
+
 fn shouldUseQwen35Dense27bQueuedTokenMajorPrefill(cfg: ModelConfig, prompt_len: usize) bool {
     return defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and
         cfg.full_attn_interval == 4 and
         prompt_len >= qwen_ssm_projection_prefill_min_tokens and
-        prompt_len <= qwen35_dense27b_queued_prefill_max_tokens;
+        prompt_len <= qwen35Dense27bQueuedPrefillMaxTokens();
+}
+
+/// Largest prompt (in tokens) the queued/batched prefill path can process in
+/// a single call for this model, or null if the model has no such path. Used
+/// both to gate multi-chunk continuation prefill and as the chunk size when
+/// a prompt exceeds it.
+///
+/// Each model has its own ceiling: the 9B's is the 256-token embed-buffer cap
+/// (queued_prefill_embed_tokens); the 27B's is qwen35_dense27b_queued_prefill_max_tokens
+/// (192, overridable), the largest chunk verified byte-identical to the
+/// per-token reference. Both stay within the 256-token scratch buffers.
+fn queuedTokenMajorChunkTokens(cfg: ModelConfig) ?u32 {
+    if (defaultQwen35Dense9bQueuedPrefillEnabled(cfg)) return @intCast(queued_prefill_embed_tokens);
+    if (defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and cfg.full_attn_interval == 4) {
+        return qwen35Dense27bQueuedPrefillMaxTokens();
+    }
+    return null;
 }
 
 fn defaultQwen35Dense9bQueuedPrefillEnabled(cfg: ModelConfig) bool {
@@ -9399,6 +9434,43 @@ pub const InferenceEngine = struct {
             return self.prefillBatchQueuedTokenMajor(state, prompt_tokens);
         }
 
+        // Long prompts on the 9B/27B dense-hybrid paths: process the prompt
+        // in sequential batched chunks instead of falling back to the
+        // per-token replay. The SSM delta/conv kernels carry state in the
+        // persistent per-layer buffers, and the full-attention prefix
+        // recorder threads engine.position through RoPE, KV writes, and the
+        // causal window, so each continuation chunk resumes exactly where
+        // the last ended. Chunk size is each model's own validated
+        // single-shot ceiling (see queuedTokenMajorChunkTokens) -- 256 for
+        // the 9B, a much narrower 40 for the 27B.
+        if (queuedTokenMajorChunkTokens(self.config)) |max_chunk_tokens| {
+            if (prompt_tokens.len > max_chunk_tokens) {
+                var offset: usize = 0;
+                while (offset < prompt_tokens.len) {
+                    const chunk_len = @min(max_chunk_tokens, prompt_tokens.len - offset);
+                    const chunk = prompt_tokens[offset .. offset + chunk_len];
+                    // Only the last chunk needs LM-head logits; earlier chunks
+                    // exist purely to populate the KV cache and SSM state.
+                    const is_final_chunk = offset + chunk_len == prompt_tokens.len;
+                    if (self.canUseQueuedTokenMajorPrefill(chunk.len)) {
+                        try self.prefillBatchQueuedTokenMajorEmit(state, chunk, is_final_chunk);
+                    } else {
+                        // A trailing remainder below this model's own
+                        // minimum queued-path size (or a single token)
+                        // cannot take the queued path; finish it through
+                        // the position-correct per-token decode step.
+                        for (chunk, 0..) |token_id, i| {
+                            try self.loadTokenEmbedding(token_id);
+                            try runDecodeStep(self, is_final_chunk and i + 1 == chunk.len, null, 0, null, null, 0);
+                        }
+                        state.position = self.position;
+                    }
+                    offset += chunk_len;
+                }
+                return;
+            }
+        }
+
         for (prompt_tokens, 0..) |token_id, i| {
             try self.loadTokenEmbedding(token_id);
             try runDecodeStep(self, i + 1 == prompt_tokens.len, null, 0, null, null, 0);
@@ -9431,12 +9503,31 @@ pub const InferenceEngine = struct {
     }
 
     fn prefillBatchQueuedTokenMajor(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        return self.prefillBatchQueuedTokenMajorEmit(state, prompt_tokens, true);
+    }
+
+    /// `emit_final_logits` is false for every chunk but the last when a long
+    /// prompt is prefilled in sequential chunks: an intermediate chunk's last
+    /// token still needs its full forward pass (KV write + SSM state carry),
+    /// but its LM-head projection would be thrown away, so it is skipped.
+    /// This removes work that is definitionally discarded (one vocab-sized
+    /// matmul per intermediate chunk); the wall-clock effect is small — a
+    /// single LM head is a fraction of a chunk's per-layer weight reads — and
+    /// measured within run-to-run noise on a bandwidth-rich M-series, but it
+    /// is the correct thing to skip and matters more on memory-constrained
+    /// machines.
+    fn prefillBatchQueuedTokenMajorEmit(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32, emit_final_logits: bool) !void {
         // Mirror the reference implementation's Metal graph submission style: encode/commit the
         // token-major prompt graph ahead of the CPU and synchronize only at the
         // final prompt token. SSM recurrence and MoE routing stay on the existing
         // per-token path; Qwen3.6 can additionally precompute layer-0 SSM
         // projections over the queued prompt embeddings.
         if (self.canUseSingleCommandQueuedTokenMajorPrefill(prompt_tokens.len)) {
+            // Single-command prefill is gated off for every chunked config
+            // (see canUseSingleCommandQueuedTokenMajorPrefill), so a
+            // continuation chunk never reaches it; it only ever runs a whole
+            // prompt in one shot, which always emits final logits.
+            std.debug.assert(emit_final_logits);
             return self.prefillBatchQueuedTokenMajorSingleCommand(state, prompt_tokens);
         }
 
@@ -9517,7 +9608,7 @@ pub const InferenceEngine = struct {
                         @max(@as(usize, 1), @as(usize, @intCast(self.qwen35_dense_prefill_active_layers)))
                     else
                         0;
-                    try runDecodeStep(self, i + 1 == prompt_tokens.len, embed_src, embed_offset, null, &chunk_cmd, start_layer);
+                    try runDecodeStep(self, emit_final_logits and i + 1 == prompt_tokens.len, embed_src, embed_offset, null, &chunk_cmd, start_layer);
                 }
                 recordQueuedPrefillChunkWork(profile, &chunk_cmd, profileElapsedNs(record_start), is_final_chunk);
                 if (is_final_chunk) {
@@ -9562,7 +9653,7 @@ pub const InferenceEngine = struct {
             @intCast(final_wait_start - first_async_submit_ns)
         else
             0;
-        try runDecodeStep(self, true, final_src, final_offset, null, null, final_start_layer);
+        try runDecodeStep(self, emit_final_logits, final_src, final_offset, null, null, final_start_layer);
         recordQueuedPrefillFinalWait(profile, async_to_final_wait_ns, profileElapsedNs(final_wait_start));
         pending_completed_by_final_wait = true;
         state.position = self.position;
@@ -21774,7 +21865,13 @@ fn canUseQwenSsmPrefillProjectionChunk(engine: *const InferenceEngine, prompt_le
     // anyway; keep them on the validated per-token path.
     if (prompt_len < qwen_ssm_projection_prefill_min_tokens) return false;
     if (prompt_len > queued_prefill_embed_tokens) return false;
-    if (engine.position != 0) return false;
+    // Continuation chunks (nonzero position) are supported on the 9B and 27B
+    // dense-hybrid paths, which share the SSM kernels that carry state in
+    // the persistent per-layer buffers and the full-attention recorder that
+    // threads the chunk-start position through RoPE/KV-write/flash
+    // dispatches. The MoE route-packed prefix has not been audited for
+    // nonzero bases.
+    if (engine.position != 0 and queuedTokenMajorChunkTokens(engine.config) == null) return false;
     if (!engine.private_decode_buffers and !qwenSsmPrefillProjectionAllowsSharedDecodeBuffers(engine.config)) return false;
     if (engine.debug_validation_enabled or engine.gemma_moe_validation_enabled or engine.qwen_prefill_validation_enabled) return false;
 
@@ -22342,6 +22439,11 @@ fn recordQwen35Dense9bPrefixFullAttnDensePrefillLayerOnCmd(
     if (!canUseQwen35Dense9bLayer0DensePrefill(engine, lt, layer_idx, hidden_dim, inter_dim, n_tokens)) return false;
 
     const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
+    // Chunk-start absolute position. Zero for a fresh prompt; nonzero when a
+    // long prompt is prefilled in sequential chunks (the SSM state buffers
+    // carry across chunks on their own; RoPE angles, KV write offsets, and
+    // the flash-attention causal window must be told the base explicitly).
+    const pos_base: u32 = engine.position;
     const q_t = lt.attn_q orelse return error.MissingTensor;
     const k_t = lt.attn_k orelse return error.MissingTensor;
     const v_t = lt.attn_v orelse return error.MissingTensor;
@@ -22379,15 +22481,15 @@ fn recordQwen35Dense9bPrefixFullAttnDensePrefillLayerOnCmd(
 
     const rope_freq_buf = selectRopeFreqBuffer(engine, attn.rope_dim, attn.rope_freq_base, attn.use_rope_freq_factors);
     dispatch_before = cmd.dispatch_count;
-    dispatchRopeBatchedOnCmd(engine, cmd, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_qkv_buf, rope_freq_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, 0, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
+    dispatchRopeBatchedOnCmd(engine, cmd, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_qkv_buf, rope_freq_buf, attn.head_dim, attn.rope_dim, attn.n_kv_heads, pos_base, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
     profileFullAttnBarrierBuffers(cmd, profile, .rope, &.{&engine.qwen_ssm_prefill_proj_qkv_buf});
     recordFullAttnDispatchDelta(profile, .rope, dispatch_before, cmd.dispatch_count);
 
     if (engine.kv_cache_q8) {
         const n_blocks = n_tokens * (attn.kv_dim / 32);
-        dispatchKvCacheWriteBatchedQ8OnCmd(engine, cmd, layer_idx, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_z_buf, 0, n_blocks);
+        dispatchKvCacheWriteBatchedQ8OnCmd(engine, cmd, layer_idx, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_z_buf, @intCast(@as(u64, pos_base) * attn.kv_cache_bytes_per_token), n_blocks);
     } else {
-        dispatchKvCacheWriteBatchedOnCmd(engine, cmd, layer_idx, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_z_buf, 0, n_tokens * attn.kv_dim);
+        dispatchKvCacheWriteBatchedOnCmd(engine, cmd, layer_idx, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_z_buf, pos_base * attn.kv_dim, n_tokens * attn.kv_dim);
     }
     if (profile) |p| p.full_attn_kv_write_calls += 1;
     profileFullAttnBarrierBuffers(cmd, profile, .rope, &.{
@@ -22412,7 +22514,7 @@ fn recordQwen35Dense9bPrefixFullAttnDensePrefillLayerOnCmd(
     }
 
     dispatch_before = cmd.dispatch_count;
-    dispatchRopeBatchedOnCmd(engine, cmd, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_qkv_buf, rope_freq_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, 0, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
+    dispatchRopeBatchedOnCmd(engine, cmd, &engine.qwen_ssm_prefill_proj_qkv_buf, &engine.qwen_ssm_prefill_proj_qkv_buf, rope_freq_buf, attn.head_dim, attn.rope_dim, cfg.n_heads, pos_base, n_tokens, attn.rope_freq_base, attn.use_rope_freq_factors, 1.0);
     profileFullAttnBarrierBuffers(cmd, profile, .flash, &.{
         &engine.qwen_ssm_prefill_proj_qkv_buf,
         &engine.kv_k_cache[layer_idx],
@@ -22433,9 +22535,9 @@ fn recordQwen35Dense9bPrefixFullAttnDensePrefillLayerOnCmd(
             attn.head_dim,
             cfg.n_heads,
             attn.n_kv_heads,
+            pos_base + n_tokens,
             n_tokens,
-            n_tokens,
-            0,
+            pos_base,
             attn.sliding_window_size,
             attn.kv_cache_head_stride_bytes,
             attn.kv_cache_bytes_per_token,
@@ -22452,9 +22554,9 @@ fn recordQwen35Dense9bPrefixFullAttnDensePrefillLayerOnCmd(
             attn.head_dim,
             cfg.n_heads,
             attn.n_kv_heads,
+            pos_base + n_tokens,
             n_tokens,
-            n_tokens,
-            0,
+            pos_base,
             attn.sliding_window_size,
         );
     }
@@ -35542,7 +35644,21 @@ test "qwen35 9b dense SSM prefill uses queued token commands only for exact shap
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 33));
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 36));
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 40));
-    try std.testing.expect(!shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 41));
+    try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 192));
+    try std.testing.expect(!shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 193));
+
+    // PR #25 long-prompt chunking: each model's chunk size is its own
+    // validated single-shot ceiling, never a shared constant (a 40-wide
+    // 27B chunk fed to the 9B's 256-token buffers, or vice versa, would be
+    // a real bug). Models without a fast prefill path are not chunked.
+    try std.testing.expectEqual(@as(?u32, @intCast(queued_prefill_embed_tokens)), queuedTokenMajorChunkTokens(qwen35_9b_cfg));
+    try std.testing.expectEqual(@as(?u32, @intCast(qwen35_dense27b_queued_prefill_max_tokens)), queuedTokenMajorChunkTokens(qwen35_27b_cfg));
+    try std.testing.expect(queuedTokenMajorChunkTokens(qwen35_9b_cfg).? != queuedTokenMajorChunkTokens(qwen35_27b_cfg).?);
+    {
+        var no_fast_path = qwen35_27b_cfg;
+        no_fast_path.full_attn_interval = 2; // 27B chunking requires interval == 4
+        try std.testing.expectEqual(@as(?u32, null), queuedTokenMajorChunkTokens(no_fast_path));
+    }
     try std.testing.expect(isQwenSsmConvD4_8192Shape(qwen35_9b_cfg, 8192));
     try std.testing.expect(!isQwenSsmConvD4_8192Shape(qwen35_9b_cfg, 10240));
     try std.testing.expect(!isQwenSsmConvD4_8192Shape(qwen35_27b_cfg, 8192));
