@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0c1b1f"/><stop offset="1" stop-color="#11272b"/></linearGradient>
+<linearGradient id="safe" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f5a524" stop-opacity="0.18"/><stop offset="1" stop-color="#f5a524" stop-opacity="0.03"/></linearGradient>
+<style>.title{fill:#eef7f6;font-size:27px;font-weight:780}.subtitle{fill:#8fb0b2;font-size:14px}.axl{fill:#c9dedd;font-size:13.5px;font-weight:700}.ax{fill:#7fa0a3;font-size:12.5px}.leg{fill:#c9dedd;font-size:13px}.amb{fill:#f5a524;font-size:12.5px;font-weight:740}.ambb{fill:#f5a524;font-size:13px;font-weight:740}.cyn{fill:#3ec9d6;font-size:12.5px;font-weight:740}.mk{fill:#eef7f6;font-size:12.5px;font-weight:700}.mks{fill:#8fb0b2;font-size:11.5px}.note{fill:#dbeceb;font-size:13px;font-weight:620}</style></defs>
+<rect width="1200" height="800" fill="url(#bg)"/>
+<text x="56" y="52" class="title">Every prefill chunk size on an RX 9070 XT gives something up</text>
+<text x="56" y="78" class="subtitle">Admitting one 8,000-token prompt into a batch of 8 sequences already decoding. Qwen3.5-9B Q4_K_M, one RX 9070 XT, 962 tok/s prefill, 25.7 ms decode step.</text>
+<text x="56" y="99" class="subtitle">Small chunks keep the running agents producing tokens. Large chunks admit the newcomer sooner. No chunk size does both.</text>
+<rect x="56" y="126" width="1088" height="596" rx="12" fill="#0f2429" stroke="#1d3d43"/>
+<line x1="90" y1="163" x2="128" y2="163" stroke="#f5a524" stroke-width="3.4"/><circle cx="109" cy="163" r="4.5" fill="#f5a524"/>
+<text x="140" y="168" class="leg">per-sequence decode rate while the newcomer prefills (left axis)</text>
+<line x1="620" y1="163" x2="658" y2="163" stroke="#3ec9d6" stroke-width="3" stroke-dasharray="7 5"/><circle cx="639" cy="163" r="4.5" fill="#3ec9d6" fill-opacity="0"  stroke="#3ec9d6" stroke-width="2.4"/>
+<text x="670" y="168" class="leg">time to admit the 8k prompt, its time to first token (right axis)</text>
+<rect x="210" y="258" width="117.8" height="350" fill="url(#safe)"/>
+<line x1="327.8" y1="258" x2="327.8" y2="608" stroke="#f5a524" stroke-width="1.4" stroke-dasharray="4 4" opacity="0.8"/>
+<g class="ax">
+<line x1="210" y1="608.0" x2="1030" y2="608.0" stroke="#1b383e" stroke-width="1"/>
+<text x="196" y="612.0" text-anchor="end">0</text>
+<line x1="210" y1="552.7" x2="1030" y2="552.7" stroke="#1b383e" stroke-width="1"/>
+<text x="196" y="556.7" text-anchor="end">3</text>
+<line x1="210" y1="497.5" x2="1030" y2="497.5" stroke="#1b383e" stroke-width="1"/>
+<text x="196" y="501.5" text-anchor="end">6</text>
+<line x1="210" y1="442.2" x2="1030" y2="442.2" stroke="#1b383e" stroke-width="1"/>
+<text x="196" y="446.2" text-anchor="end">9</text>
+<line x1="210" y1="386.9" x2="1030" y2="386.9" stroke="#1b383e" stroke-width="1"/>
+<text x="196" y="390.9" text-anchor="end">12</text>
+<line x1="210" y1="331.7" x2="1030" y2="331.7" stroke="#1b383e" stroke-width="1"/>
+<text x="196" y="335.7" text-anchor="end">15</text>
+<line x1="210" y1="276.4" x2="1030" y2="276.4" stroke="#1b383e" stroke-width="1"/>
+<text x="196" y="280.4" text-anchor="end">18</text>
+<text x="1046" y="603.0" text-anchor="start">8</text>
+<text x="1046" y="558.2" text-anchor="start">9</text>
+<text x="1046" y="513.3" text-anchor="start">10</text>
+<text x="1046" y="468.4" text-anchor="start">11</text>
+<text x="1046" y="423.5" text-anchor="start">12</text>
+<text x="1046" y="378.7" text-anchor="start">13</text>
+<text x="1046" y="333.8" text-anchor="start">14</text>
+<text x="1046" y="288.9" text-anchor="start">15</text>
+</g>
+<line x1="210" y1="258" x2="210" y2="608" stroke="#2b555c" stroke-width="1.5"/>
+<line x1="1030" y1="258" x2="1030" y2="608" stroke="#2b555c" stroke-width="1.5"/>
+<line x1="210" y1="608" x2="1030" y2="608" stroke="#2b555c" stroke-width="1.5"/>
+<text x="196" y="242" text-anchor="end" class="ambb">tok/s</text>
+<text x="1046" y="242" text-anchor="start" class="cyn">seconds</text>
+<g class="ax" text-anchor="middle">
+<line x1="210.0" y1="608" x2="210.0" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="210.0" y="634">32</text>
+<line x1="312.5" y1="608" x2="312.5" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="312.5" y="634">64</text>
+<line x1="415.0" y1="608" x2="415.0" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="415.0" y="634">128</text>
+<line x1="517.5" y1="608" x2="517.5" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="517.5" y="634">256</text>
+<line x1="620.0" y1="608" x2="620.0" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="620.0" y="634">512</text>
+<line x1="722.5" y1="608" x2="722.5" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="722.5" y="634">1024</text>
+<line x1="825.0" y1="608" x2="825.0" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="825.0" y="634">2048</text>
+<line x1="927.5" y1="608" x2="927.5" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="927.5" y="634">4096</text>
+<line x1="1030.0" y1="608" x2="1030.0" y2="615" stroke="#2b555c" stroke-width="1.2"/>
+<text x="1030.0" y="634">8192</text>
+</g>
+<text x="620" y="662" text-anchor="middle" class="axl">prefill chunk size, tokens added to each decode step (log scale)</text>
+<line x1="620.0" y1="258" x2="620.0" y2="608" stroke="#eef7f6" stroke-width="1.2" stroke-dasharray="2 6" opacity="0.45"/>
+<text x="620.0" y="226" text-anchor="middle" class="mk">llama.cpp -ub</text>
+<text x="620.0" y="242" text-anchor="middle" class="mks">physical batch default</text>
+<line x1="825.0" y1="258" x2="825.0" y2="608" stroke="#eef7f6" stroke-width="1.2" stroke-dasharray="2 6" opacity="0.45"/>
+<text x="825.0" y="226" text-anchor="middle" class="mk">vLLM chunked prefill</text>
+<text x="825.0" y="242" text-anchor="middle" class="mks">max_num_batched_tokens default</text>
+<polyline points="210.0,296.5 312.5,440.7 415.0,509.2 517.5,539.0 620.0,557.4 722.5,566.7 825.0,571.3 927.5,573.6 1030.0,583.7" fill="none" stroke="#3ec9d6" stroke-width="3" stroke-dasharray="8 5" stroke-linejoin="round"/>
+<polyline points="210.0,295.6 312.5,408.3 415.0,492.0 517.5,544.9 620.0,575.0 722.5,591.1 825.0,599.5 927.5,603.7 1030.0,605.8" fill="none" stroke="#f5a524" stroke-width="3.4" stroke-linejoin="round"/>
+<circle cx="210.0" cy="296.5" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="210.0" cy="295.6" r="5" fill="#f5a524"/>
+<circle cx="312.5" cy="440.7" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="312.5" cy="408.3" r="5" fill="#f5a524"/>
+<circle cx="415.0" cy="509.2" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="415.0" cy="492.0" r="5" fill="#f5a524"/>
+<circle cx="517.5" cy="539.0" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="517.5" cy="544.9" r="5" fill="#f5a524"/>
+<circle cx="620.0" cy="557.4" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="620.0" cy="575.0" r="5" fill="#f5a524"/>
+<circle cx="722.5" cy="566.7" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="722.5" cy="591.1" r="5" fill="#f5a524"/>
+<circle cx="825.0" cy="571.3" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="825.0" cy="599.5" r="5" fill="#f5a524"/>
+<circle cx="927.5" cy="573.6" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="927.5" cy="603.7" r="5" fill="#f5a524"/>
+<circle cx="1030.0" cy="583.7" r="5" fill="#0f2429" stroke="#3ec9d6" stroke-width="2.4"/>
+<circle cx="1030.0" cy="605.8" r="5" fill="#f5a524"/>
+<text x="244.0" y="301.6" text-anchor="middle" class="amb">17.0</text>
+<text x="240.0" y="282.5" text-anchor="middle" class="cyn">14.7s</text>
+<text x="312.5" y="392.3" text-anchor="middle" class="amb">10.8</text>
+<text x="282.5" y="444.7" text-anchor="middle" class="cyn">11.5s</text>
+<text x="417.0" y="476.0" text-anchor="middle" class="amb">6.3</text>
+<text x="517.5" y="568.9" text-anchor="middle" class="amb">3.4</text>
+<text x="521.5" y="515.0" text-anchor="middle" class="cyn">9.3s</text>
+<text x="620.0" y="597.0" text-anchor="middle" class="amb">1.8</text>
+<text x="620.0" y="541.4" text-anchor="middle" class="cyn">8.9s</text>
+<text x="825.0" y="621.5" text-anchor="middle" class="amb">0.5</text>
+<text x="825.0" y="555.3" text-anchor="middle" class="cyn">8.6s</text>
+<text x="1012.0" y="569.7" text-anchor="middle" class="cyn">8.3s</text>
+<text x="341.8" y="282" class="ambb">left of this line every agent stays above 10 tok/s</text>
+<text x="341.8" y="301" class="mks">a 71-token chunk, one seventh of llama.cpp's physical batch default</text>
+<rect x="90" y="646" width="1020" height="56" rx="8" fill="#132f34" stroke="#22484f"/>
+<text x="112" y="670" class="note">At both vendor defaults a running sequence emits under two tokens per second for the whole admission window.</text>
+<text x="112" y="690" class="note">Holding all eight agents above 10 tok/s costs 2.9 extra seconds before the ninth agent sees its first token.</text>
+<text x="56" y="778" class="ax">Model: step = 25.7 ms decode + 1.04 ms per prefill token. Assumes a chunk sustains the full 962 tok/s prefill rate, which small chunks will not. Modeled, not measured.</text>
+</svg>

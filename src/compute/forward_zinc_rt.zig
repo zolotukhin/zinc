@@ -1845,8 +1845,18 @@ fn generateScalarHybrid(
     if (prompt_tokens.len > 0) {
         direct_prompt0_token = try directBoundaryToken(token_boundary, prompt_tokens[0], &direct_token_boundary_copies);
     }
+    const direct_prefill_slice_enabled = directPrefillModelSliceEnabled();
+    const direct_decode_slice_enabled = directDecodeModelSliceEnabled();
+    const direct_decode_slice_cadence = directDecodeModelSliceCadence();
+    const direct_lm_head_decode_cadence = directLmHeadDecodeCadence();
+    const direct_router_decode_enabled = directRouterDecodeEnabled();
+    const direct_router_decode_cadence = directRouterDecodeCadence();
+    const needs_direct_final_norm_probe = direct_prefill_slice_enabled or direct_decode_slice_enabled;
     var direct_model_ops: u32 = 0;
-    const direct_final_norm_weight0 = try directModelFinalNormWeight0(token_boundary, model, &direct_model_ops);
+    const direct_final_norm_weight0 = if (needs_direct_final_norm_probe)
+        try directModelFinalNormWeight0(token_boundary, model, &direct_model_ops)
+    else
+        null;
     const direct_model_value_bits: u32 = if (direct_final_norm_weight0) |w| @bitCast(w) else 0;
     if (direct_model_ops > 0) {
         log.info("M1 AMDGPU CS direct model value enabled: output_norm.weight[0] COPY_DATA bits=0x{x}", .{direct_model_value_bits});
@@ -1858,12 +1868,6 @@ fn generateScalarHybrid(
     var real_model_slice = false;
     var direct_decode_model_slices: u32 = 0;
     var direct_compute_token: u32 = 0;
-    const direct_prefill_slice_enabled = directPrefillModelSliceEnabled();
-    const direct_decode_slice_enabled = directDecodeModelSliceEnabled();
-    const direct_decode_slice_cadence = directDecodeModelSliceCadence();
-    const direct_lm_head_decode_cadence = directLmHeadDecodeCadence();
-    const direct_router_decode_enabled = directRouterDecodeEnabled();
-    const direct_router_decode_cadence = directRouterDecodeCadence();
     var direct_lm_head_q4_0_resident: ?zinc_rt.cs.ResidentDmmvQ4_0Rows = null;
     if (token_boundary) |boundary| {
         if (model.lm_head_q4_0) |q40| {
@@ -2102,7 +2106,7 @@ fn generateScalarHybrid(
         .real_model_slice = real_model_slice,
         .direct_decode_model_slices = direct_decode_model_slices,
         .direct_compute_token = direct_compute_token,
-        .consumed_gpu_model_value = consumed_gpu_model_value,
+        .consumed_gpu_model_value = consumed_gpu_model_value or real_model_slice,
         .direct_model_value_bits = direct_model_value_bits,
         .benchmark_shortcuts = .{
             .decode_moe_topk_zero = decode_moe_topk_zero,
@@ -2174,8 +2178,16 @@ fn generateScalarDense(
     if (prompt_tokens.len > 0) {
         direct_prompt0_token = try directBoundaryToken(token_boundary, prompt_tokens[0], &direct_token_boundary_copies);
     }
+    const direct_prefill_slice_enabled = directPrefillModelSliceEnabled();
+    const direct_decode_slice_enabled = directDecodeModelSliceEnabled();
+    const direct_decode_slice_cadence = directDecodeModelSliceCadence();
+    const direct_lm_head_decode_cadence = directLmHeadDecodeCadence();
+    const needs_direct_final_norm_probe = direct_prefill_slice_enabled or direct_decode_slice_enabled;
     var direct_model_ops: u32 = 0;
-    const direct_final_norm_weight0 = try directModelFinalNormWeight0(token_boundary, model, &direct_model_ops);
+    const direct_final_norm_weight0 = if (needs_direct_final_norm_probe)
+        try directModelFinalNormWeight0(token_boundary, model, &direct_model_ops)
+    else
+        null;
     const direct_model_value_bits: u32 = if (direct_final_norm_weight0) |w| @bitCast(w) else 0;
     if (direct_model_ops > 0) {
         log.info("M1 AMDGPU CS dense direct model value enabled: output_norm.weight[0] COPY_DATA bits=0x{x}", .{direct_model_value_bits});
@@ -2187,10 +2199,6 @@ fn generateScalarDense(
     var real_model_slice = false;
     var direct_decode_model_slices: u32 = 0;
     var direct_compute_token: u32 = 0;
-    const direct_prefill_slice_enabled = directPrefillModelSliceEnabled();
-    const direct_decode_slice_enabled = directDecodeModelSliceEnabled();
-    const direct_decode_slice_cadence = directDecodeModelSliceCadence();
-    const direct_lm_head_decode_cadence = directLmHeadDecodeCadence();
     if (token_boundary != null) {
         if (direct_prefill_slice_enabled) {
             log.info("M1 AMDGPU CS dense direct prefill model-slice validation enabled for the final prompt token", .{});
@@ -2308,7 +2316,7 @@ fn generateScalarDense(
         .real_model_slice = real_model_slice,
         .direct_decode_model_slices = direct_decode_model_slices,
         .direct_compute_token = direct_compute_token,
-        .consumed_gpu_model_value = consumed_gpu_model_value,
+        .consumed_gpu_model_value = consumed_gpu_model_value or real_model_slice,
         .direct_model_value_bits = direct_model_value_bits,
         .benchmark_shortcuts = .{
             .decode_moe_topk_zero = false,

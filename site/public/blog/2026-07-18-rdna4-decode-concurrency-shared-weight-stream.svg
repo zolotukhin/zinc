@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 880" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#141026"/><stop offset="1" stop-color="#1d1330"/></linearGradient>
+<style>
+.title{fill:#f7f2ff;font-size:27px;font-weight:780}
+.subtitle{fill:#b6aacb;font-size:14px}
+.panel{fill:#d5cce6;font-size:16px;font-weight:700}
+.lane{fill:#d5cce6;font-size:13px;font-weight:680}
+.sub{fill:#9287a8;font-size:12.5px}
+.axis{fill:#9287a8;font-size:12px}
+.val{fill:#191233;font-size:12px;font-weight:760}
+.valo{fill:#f7f2ff;font-size:13px;font-weight:740}
+.note{fill:#ffb27a;font-size:12.5px;font-weight:640}
+.mark{fill:#b8e05f;font-size:12.5px;font-weight:680}
+.leg{fill:#b6aacb;font-size:12.5px}
+</style></defs>
+<rect width="1200" height="880" fill="url(#bg)"/>
+<text x="56" y="50" class="title">Weight streaming is the term a concurrent batch stops paying twice</text>
+<text x="56" y="76" class="subtitle">Modeled decode step: Qwen3.5-9B Q4_K_M, one RX 9070 XT, ~2k context per sequence, post-fusion 18.0 ms baseline.</text>
+<text x="56" y="120" class="panel">Where one decode step goes as concurrent sequences are added</text>
+<rect x="56" y="134" width="1088" height="406" rx="10" fill="#1e1838" stroke="#332a52"/>
+<rect x="300" y="160" width="12" height="12" rx="3" fill="#6c8cff"/><text x="318" y="170" class="leg">weight stream (shared)</text>
+<rect x="520" y="160" width="12" height="12" rx="3" fill="#ff8a6b"/><text x="538" y="170" class="leg">KV read</text>
+<rect x="640" y="160" width="12" height="12" rx="3" fill="#b8e05f"/><text x="658" y="170" class="leg">small kernels</text>
+<rect x="790" y="160" width="12" height="12" rx="3" fill="#f2a8b8"/><text x="808" y="170" class="leg">barriers</text>
+<rect x="900" y="160" width="12" height="12" rx="3" fill="#5fd0e0"/><text x="918" y="170" class="leg">LM head + sampling</text>
+<g class="axis" text-anchor="middle">
+<line x1="196.0" y1="188" x2="196.0" y2="470" stroke="#3a3060" stroke-width="1"/>
+<text x="196.0" y="490">0</text>
+<line x1="321.0" y1="188" x2="321.0" y2="470" stroke="#2b2349" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="321.0" y="490">5</text>
+<line x1="446.0" y1="188" x2="446.0" y2="470" stroke="#2b2349" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="446.0" y="490">10</text>
+<line x1="571.0" y1="188" x2="571.0" y2="470" stroke="#2b2349" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="571.0" y="490">15</text>
+<line x1="696.0" y1="188" x2="696.0" y2="470" stroke="#2b2349" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="696.0" y="490">20</text>
+<line x1="821.0" y1="188" x2="821.0" y2="470" stroke="#2b2349" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="821.0" y="490">25</text>
+<line x1="946.0" y1="188" x2="946.0" y2="470" stroke="#2b2349" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="946.0" y="490">30</text>
+<line x1="1071.0" y1="188" x2="1071.0" y2="470" stroke="#3a3060" stroke-width="1"/>
+<text x="1071.0" y="490">35</text>
+<text x="1118" y="490" text-anchor="start">ms</text></g>
+<text x="180" y="222" text-anchor="end" class="lane">1 sequence</text>
+<rect x="196.0" y="200" width="267.5" height="34" rx="3" fill="#6c8cff" fill-opacity="0.95"/>
+<text x="329.8" y="222" text-anchor="middle" class="val">10.7</text>
+<rect x="463.5" y="200" width="15.0" height="34" rx="3" fill="#ff8a6b" fill-opacity="0.95"/>
+<rect x="478.5" y="200" width="80.0" height="34" rx="3" fill="#b8e05f" fill-opacity="0.95"/>
+<text x="518.5" y="222" text-anchor="middle" class="val">3.2</text>
+<rect x="558.5" y="200" width="50.0" height="34" rx="3" fill="#f2a8b8" fill-opacity="0.95"/>
+<text x="583.5" y="222" text-anchor="middle" class="val">2.0</text>
+<rect x="608.5" y="200" width="37.5" height="34" rx="3" fill="#5fd0e0" fill-opacity="0.95"/>
+<text x="660.0" y="222" class="valo">18.0 ms</text>
+<text x="180" y="276" text-anchor="end" class="lane">2 sequences</text>
+<rect x="196.0" y="254" width="267.5" height="34" rx="3" fill="#6c8cff" fill-opacity="0.95"/>
+<text x="329.8" y="276" text-anchor="middle" class="val">10.7</text>
+<rect x="463.5" y="254" width="30.0" height="34" rx="3" fill="#ff8a6b" fill-opacity="0.95"/>
+<rect x="493.5" y="254" width="85.0" height="34" rx="3" fill="#b8e05f" fill-opacity="0.95"/>
+<text x="536.0" y="276" text-anchor="middle" class="val">3.4</text>
+<rect x="578.5" y="254" width="50.0" height="34" rx="3" fill="#f2a8b8" fill-opacity="0.95"/>
+<text x="603.5" y="276" text-anchor="middle" class="val">2.0</text>
+<rect x="628.5" y="254" width="45.0" height="34" rx="3" fill="#5fd0e0" fill-opacity="0.95"/>
+<text x="651.0" y="276" text-anchor="middle" class="val">1.8</text>
+<text x="687.5" y="276" class="valo">19.1 ms</text>
+<text x="180" y="330" text-anchor="end" class="lane">4 sequences</text>
+<rect x="196.0" y="308" width="267.5" height="34" rx="3" fill="#6c8cff" fill-opacity="0.95"/>
+<text x="329.8" y="330" text-anchor="middle" class="val">10.7</text>
+<rect x="463.5" y="308" width="60.0" height="34" rx="3" fill="#ff8a6b" fill-opacity="0.95"/>
+<text x="493.5" y="330" text-anchor="middle" class="val">2.4</text>
+<rect x="523.5" y="308" width="95.0" height="34" rx="3" fill="#b8e05f" fill-opacity="0.95"/>
+<text x="571.0" y="330" text-anchor="middle" class="val">3.8</text>
+<rect x="618.5" y="308" width="50.0" height="34" rx="3" fill="#f2a8b8" fill-opacity="0.95"/>
+<text x="643.5" y="330" text-anchor="middle" class="val">2.0</text>
+<rect x="668.5" y="308" width="60.0" height="34" rx="3" fill="#5fd0e0" fill-opacity="0.95"/>
+<text x="698.5" y="330" text-anchor="middle" class="val">2.4</text>
+<text x="742.5" y="330" class="valo">21.3 ms</text>
+<text x="180" y="384" text-anchor="end" class="lane">8 sequences</text>
+<rect x="196.0" y="362" width="267.5" height="34" rx="3" fill="#6c8cff" fill-opacity="0.95"/>
+<text x="329.8" y="384" text-anchor="middle" class="val">10.7</text>
+<rect x="463.5" y="362" width="120.0" height="34" rx="3" fill="#ff8a6b" fill-opacity="0.95"/>
+<text x="523.5" y="384" text-anchor="middle" class="val">4.8</text>
+<rect x="583.5" y="362" width="115.0" height="34" rx="3" fill="#b8e05f" fill-opacity="0.95"/>
+<text x="641.0" y="384" text-anchor="middle" class="val">4.6</text>
+<rect x="698.5" y="362" width="50.0" height="34" rx="3" fill="#f2a8b8" fill-opacity="0.95"/>
+<text x="723.5" y="384" text-anchor="middle" class="val">2.0</text>
+<rect x="748.5" y="362" width="90.0" height="34" rx="3" fill="#5fd0e0" fill-opacity="0.95"/>
+<text x="793.5" y="384" text-anchor="middle" class="val">3.6</text>
+<text x="852.5" y="384" class="valo">25.7 ms</text>
+<text x="180" y="438" text-anchor="end" class="lane">16 sequences</text>
+<rect x="196.0" y="416" width="267.5" height="34" rx="3" fill="#6c8cff" fill-opacity="0.95"/>
+<text x="329.8" y="438" text-anchor="middle" class="val">10.7</text>
+<rect x="463.5" y="416" width="240.0" height="34" rx="3" fill="#ff8a6b" fill-opacity="0.95"/>
+<text x="583.5" y="438" text-anchor="middle" class="val">9.6</text>
+<rect x="703.5" y="416" width="155.0" height="34" rx="3" fill="#b8e05f" fill-opacity="0.95"/>
+<text x="781.0" y="438" text-anchor="middle" class="val">6.2</text>
+<rect x="858.5" y="416" width="50.0" height="34" rx="3" fill="#f2a8b8" fill-opacity="0.95"/>
+<text x="883.5" y="438" text-anchor="middle" class="val">2.0</text>
+<rect x="908.5" y="416" width="150.0" height="34" rx="3" fill="#5fd0e0" fill-opacity="0.95"/>
+<text x="983.5" y="438" text-anchor="middle" class="val">6.0</text>
+<text x="1072.5" y="438" class="valo">34.5 ms</text>
+<line x1="463.5" y1="196" x2="463.5" y2="454" stroke="#6c8cff" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="474" y="472" class="note">10.7 ms of weight bytes, read once no matter how many sequences read them</text>
+<text x="56" y="568" class="panel">Aggregate throughput rises while each sequence stays above reading speed</text>
+<rect x="56" y="582" width="1088" height="196" rx="10" fill="#1e1838" stroke="#332a52"/>
+<rect x="896" y="602" width="12" height="12" rx="3" fill="#b8e05f"/><text x="914" y="612" class="leg">aggregate tok/s across all sequences</text>
+<text x="180" y="642" text-anchor="end" class="lane">1</text>
+<rect x="196" y="626" width="66.7" height="22" rx="3" fill="#b8e05f" fill-opacity="0.55"/>
+<text x="274.7" y="642" class="valo">56 tok/s</text>
+<text x="370.7" y="642" class="sub">55.6 tok/s per sequence</text>
+<text x="180" y="672" text-anchor="end" class="lane">2</text>
+<rect x="196" y="656" width="125.6" height="22" rx="3" fill="#b8e05f" fill-opacity="0.64"/>
+<text x="333.6" y="672" class="valo">105 tok/s</text>
+<text x="429.6" y="672" class="sub">52.4 tok/s per sequence</text>
+<text x="180" y="702" text-anchor="end" class="lane">4</text>
+<rect x="196" y="686" width="225.4" height="22" rx="3" fill="#b8e05f" fill-opacity="0.73"/>
+<text x="433.4" y="702" class="valo">188 tok/s</text>
+<text x="529.4" y="702" class="sub">46.9 tok/s per sequence</text>
+<text x="180" y="732" text-anchor="end" class="lane">8</text>
+<rect x="196" y="716" width="373.6" height="22" rx="3" fill="#b8e05f" fill-opacity="0.82"/>
+<text x="581.6" y="732" class="valo">311 tok/s</text>
+<text x="677.6" y="732" class="sub">38.9 tok/s per sequence</text>
+<text x="180" y="762" text-anchor="end" class="lane">16</text>
+<rect x="196" y="746" width="556.6" height="22" rx="3" fill="#b8e05f" fill-opacity="0.91"/>
+<text x="764.6" y="762" class="valo">464 tok/s</text>
+<text x="860.6" y="762" class="sub">29.0 tok/s per sequence</text>
+<text x="180" y="612" text-anchor="end" class="sub">sequences</text>
+<text x="56" y="804" class="mark">RDNA4 WMMA tiles are 16x16x16, so batch 1 and batch 16 issue the same matrix instructions. The rows below 16 were padding.</text>
+<text x="56" y="824" class="sub">Modeled from the measured 39.6 tok/s baseline and the post-fusion 18.0 ms budget. KV, LM-head matmul and sampling scale per sequence; weights, barriers and the LM-head weight read do not.</text>
+</svg>

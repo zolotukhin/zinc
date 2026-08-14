@@ -1,0 +1,128 @@
+<svg viewBox="0 0 1120 620" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" role="img" aria-labelledby="t d">
+<title id="t">Paused turns keep their KV resident, so free RDNA4 preemption runs out of VRAM after about two average paused turns</title>
+<desc id="d">A stacked column chart on a deep teal-black background titled 'Every paused turn keeps its KV in VRAM, so free preemption has a ceiling'. The vertical axis is VRAM used on one 16 GB RX 9070 XT running Qwen3.5-9B, from 0 to 18 GiB, with a red dashed ceiling line at 15.5 GiB of usable VRAM. Each column is a swarm state. Every column shares the same fixed base: about 5.2 GiB of Q4 K M model weights and 0.8 GiB of runtime buffers, then 7.5 GiB of key-value cache for eight running decode turns at a 6k-token average context, which brings the running-only column to 13.5 GiB and leaves 2 GiB of headroom. Moving right, one, two, three and four average paused turns are added at about 0.94 GiB each in amber. Two paused turns still fit at 15.4 GiB; three and four pierce the ceiling, and the over-budget slice is drawn in hatched coral labelled forced swap or recompute. A separate rightmost column shows that a single long 16k-token background turn, the kind you actually preempt, adds 2.56 GiB and overflows the ceiling on its own. A dashed teal line low in the chart tracks the same states with q8 key-value cache, which halves every KV term and never approaches the ceiling. A footnote states the KV math: 40 layers, 8 GQA key-value heads, head dim 128, so fp16 KV is about 160 KiB per token, 0.94 GiB for a 6k-token turn.</desc>
+<defs>
+<pattern id="overhatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+<rect width="8" height="8" fill="#e8613c" opacity="0.55"/>
+<line x1="0" y1="0" x2="0" y2="8" stroke="#ffb59e" stroke-width="2.4"/>
+</pattern>
+</defs>
+<rect x="0" y="0" width="1120" height="620" fill="#06201e"/>
+<text x="60" y="48" fill="#eaf6f2" font-size="24" font-weight="700">Every paused turn keeps its KV in VRAM, so preemption has a ceiling</text>
+<text x="60" y="75" fill="#8fb3ac" font-size="15.5">One 16 GB RX 9070 XT, Qwen3.5-9B, eight running decode turns at 6k-token average context. Bars show VRAM used as paused turns pile up.</text>
+
+<!-- y grid + axis -->
+<g stroke="#1c3f3b" stroke-width="1">
+<line x1="150" y1="520" x2="1010" y2="520"/>
+<line x1="150" y1="472.2" x2="1010" y2="472.2"/>
+<line x1="150" y1="424.3" x2="1010" y2="424.3"/>
+<line x1="150" y1="376.7" x2="1010" y2="376.7"/>
+<line x1="150" y1="328.9" x2="1010" y2="328.9"/>
+<line x1="150" y1="281.1" x2="1010" y2="281.1"/>
+<line x1="150" y1="233.3" x2="1010" y2="233.3"/>
+<line x1="150" y1="185.6" x2="1010" y2="185.6"/>
+<line x1="150" y1="137.8" x2="1010" y2="137.8"/>
+<line x1="150" y1="90" x2="1010" y2="90"/>
+</g>
+<g fill="#7fa39c" font-size="14" text-anchor="end">
+<text x="138" y="525">0</text>
+<text x="138" y="429.3">4</text>
+<text x="138" y="333.9">8</text>
+<text x="138" y="238.3">12</text>
+<text x="138" y="142.8">16</text>
+<text x="138" y="95">18</text>
+</g>
+<text x="52" y="300" fill="#9fc2bb" font-size="15" transform="rotate(-90 52 300)" text-anchor="middle">VRAM used (GiB)</text>
+
+<!-- ceiling line at 15.5 GiB -> y=149.7 -->
+<line x1="150" y1="149.7" x2="1010" y2="149.7" stroke="#ff5c5c" stroke-width="2.2" stroke-dasharray="9 6"/>
+<text x="158" y="143" fill="#ff8f8f" font-size="14.5" text-anchor="start">15.5 GiB usable VRAM ceiling</text>
+
+<!-- columns: base weights(0-5.2) runtime(5.2-6.0) running(6.0-13.5) paused(13.5-top) -->
+<!-- y helpers: 520=0, 395.8=5.2, 376.7=6.0, 197.5=13.5, 149.7=15.5 -->
+
+<!-- COLUMN 1: 8 running, 0 paused -->
+<g>
+<rect x="188" y="395.8" width="84" height="124.2" fill="#3f6f8f"/>
+<rect x="188" y="376.7" width="84" height="19.1" fill="#5a7d84"/>
+<rect x="188" y="197.5" width="84" height="179.2" fill="#2ec4a6"/>
+<text x="230" y="540" fill="#cfe4df" font-size="14.5" text-anchor="middle">8 running</text>
+<text x="230" y="558" fill="#7fa39c" font-size="12.5" text-anchor="middle">0 paused</text>
+<text x="230" y="190" fill="#bfe0d8" font-size="13" text-anchor="middle">13.5</text>
+</g>
+
+<!-- COLUMN 2: +1 avg paused (0.94) top 14.44 -> 175.1 -->
+<g>
+<rect x="308" y="395.8" width="84" height="124.2" fill="#3f6f8f"/>
+<rect x="308" y="376.7" width="84" height="19.1" fill="#5a7d84"/>
+<rect x="308" y="197.5" width="84" height="179.2" fill="#2ec4a6"/>
+<rect x="308" y="175.1" width="84" height="22.4" fill="#e8b23a"/>
+<text x="350" y="540" fill="#cfe4df" font-size="14.5" text-anchor="middle">+1 paused</text>
+<text x="350" y="558" fill="#7fa39c" font-size="12.5" text-anchor="middle">14.4 GiB</text>
+</g>
+
+<!-- COLUMN 3: +2 avg paused top 15.38 -> 152.6 (under ceiling) -->
+<g>
+<rect x="428" y="395.8" width="84" height="124.2" fill="#3f6f8f"/>
+<rect x="428" y="376.7" width="84" height="19.1" fill="#5a7d84"/>
+<rect x="428" y="197.5" width="84" height="179.2" fill="#2ec4a6"/>
+<rect x="428" y="152.6" width="84" height="44.9" fill="#e8b23a"/>
+<text x="470" y="540" fill="#cfe4df" font-size="14.5" text-anchor="middle">+2 paused</text>
+<text x="470" y="558" fill="#7fd6a8" font-size="12.5" text-anchor="middle">15.4 GiB, fits</text>
+</g>
+
+<!-- COLUMN 4: +3 avg paused top 16.32 -> 130.1, split at ceiling 149.7 -->
+<g>
+<rect x="548" y="395.8" width="84" height="124.2" fill="#3f6f8f"/>
+<rect x="548" y="376.7" width="84" height="19.1" fill="#5a7d84"/>
+<rect x="548" y="197.5" width="84" height="179.2" fill="#2ec4a6"/>
+<rect x="548" y="149.7" width="84" height="47.8" fill="#e8b23a"/>
+<rect x="548" y="130.1" width="84" height="19.6" fill="url(#overhatch)"/>
+<text x="590" y="540" fill="#cfe4df" font-size="14.5" text-anchor="middle">+3 paused</text>
+<text x="590" y="558" fill="#ff9f86" font-size="12.5" text-anchor="middle">16.3 GiB, over</text>
+</g>
+
+<!-- COLUMN 5: +4 avg paused top 17.26 -> 107.7 -->
+<g>
+<rect x="668" y="395.8" width="84" height="124.2" fill="#3f6f8f"/>
+<rect x="668" y="376.7" width="84" height="19.1" fill="#5a7d84"/>
+<rect x="668" y="197.5" width="84" height="179.2" fill="#2ec4a6"/>
+<rect x="668" y="149.7" width="84" height="47.8" fill="#e8b23a"/>
+<rect x="668" y="107.7" width="84" height="42.0" fill="url(#overhatch)"/>
+<text x="710" y="540" fill="#cfe4df" font-size="14.5" text-anchor="middle">+4 paused</text>
+<text x="710" y="558" fill="#ff9f86" font-size="12.5" text-anchor="middle">17.3 GiB, over</text>
+</g>
+
+<!-- COLUMN 6 (gap): +1 long 16k paused (2.56) top 16.06 -> 136.4 -->
+<g>
+<rect x="858" y="395.8" width="84" height="124.2" fill="#3f6f8f"/>
+<rect x="858" y="376.7" width="84" height="19.1" fill="#5a7d84"/>
+<rect x="858" y="197.5" width="84" height="179.2" fill="#2ec4a6"/>
+<rect x="858" y="149.7" width="84" height="47.8" fill="#e8b23a"/>
+<rect x="858" y="136.4" width="84" height="13.3" fill="url(#overhatch)"/>
+<text x="900" y="540" fill="#cfe4df" font-size="14.5" text-anchor="middle">+1 long turn</text>
+<text x="900" y="558" fill="#ff9f86" font-size="12.5" text-anchor="middle">16k ctx, over</text>
+<text x="900" y="120" fill="#ffb59e" font-size="12.5" text-anchor="middle">one 16k paused</text>
+<text x="900" y="135" fill="#ffb59e" font-size="12.5" text-anchor="middle">turn overflows</text>
+</g>
+
+<!-- separator between avg block and long column -->
+<line x1="800" y1="100" x2="800" y2="520" stroke="#1c3f3b" stroke-width="1" stroke-dasharray="3 5"/>
+
+<!-- q8 dashed total line across the 6 states -->
+<polyline points="230,287.1 350,275.9 470,264.7 590,253.5 710,242.3 900,256.5" fill="none" stroke="#38e0d0" stroke-width="2.4" stroke-dasharray="7 5"/>
+<g fill="#38e0d0">
+<circle cx="230" cy="287.1" r="3.4"/><circle cx="350" cy="275.9" r="3.4"/><circle cx="470" cy="264.7" r="3.4"/><circle cx="590" cy="253.5" r="3.4"/><circle cx="710" cy="242.3" r="3.4"/><circle cx="900" cy="256.5" r="3.4"/>
+</g>
+<text x="470" y="304" fill="#7fe6da" font-size="13.5" text-anchor="middle">q8 KV total, stays well under the ceiling</text>
+
+<!-- legend -->
+<g font-size="13.5" fill="#cfe4df">
+<rect x="150" y="580" width="15" height="15" fill="#3f6f8f"/><text x="171" y="592">weights ~5.2 GiB</text>
+<rect x="305" y="580" width="15" height="15" fill="#5a7d84"/><text x="326" y="592">runtime ~0.8</text>
+<rect x="440" y="580" width="15" height="15" fill="#2ec4a6"/><text x="461" y="592">8 running-turn KV</text>
+<rect x="618" y="580" width="15" height="15" fill="#e8b23a"/><text x="639" y="592">paused KV, resident</text>
+<rect x="792" y="580" width="15" height="15" fill="url(#overhatch)"/><text x="813" y="592">over budget: swap / recompute</text>
+</g>
+<text x="60" y="612" fill="#6f938c" font-size="12.5">KV math: 40 layers, 8 GQA KV heads, head dim 128, fp16 -> ~160 KiB/token, ~0.94 GiB per 6k-token turn. q8 halves every KV term.</text>
+</svg>

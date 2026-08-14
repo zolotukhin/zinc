@@ -1,0 +1,91 @@
+<svg viewBox="0 0 1000 600" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+<rect x="0" y="0" width="1000" height="600" rx="14" fill="#241016"/>
+<text x="34" y="42" fill="#f6e7ea" font-size="21" font-weight="700">Batching the swarm eats the free speculation budget</text>
+<text x="34" y="66" fill="#c08a95" font-size="12.5">Qwen3.5-9B on one RX 9070 XT: a decode step hides ~24 tokens of compute under one weight stream, so a batch of B agents leaves only 24 &#8722; B to draft.</text>
+<line x1="118.0" y1="104" x2="118.0" y2="378" stroke="#3d1c26" stroke-width="1"/>
+<text x="118.0" y="396" fill="#7d4b56" font-size="11" text-anchor="middle">0</text>
+<line x1="206.3" y1="104" x2="206.3" y2="378" stroke="#3d1c26" stroke-width="1"/>
+<text x="206.3" y="396" fill="#7d4b56" font-size="11" text-anchor="middle">4</text>
+<line x1="294.7" y1="104" x2="294.7" y2="378" stroke="#3d1c26" stroke-width="1"/>
+<text x="294.7" y="396" fill="#7d4b56" font-size="11" text-anchor="middle">8</text>
+<line x1="383.0" y1="104" x2="383.0" y2="378" stroke="#3d1c26" stroke-width="1"/>
+<text x="383.0" y="396" fill="#7d4b56" font-size="11" text-anchor="middle">12</text>
+<line x1="471.3" y1="104" x2="471.3" y2="378" stroke="#3d1c26" stroke-width="1"/>
+<text x="471.3" y="396" fill="#7d4b56" font-size="11" text-anchor="middle">16</text>
+<line x1="559.7" y1="104" x2="559.7" y2="378" stroke="#3d1c26" stroke-width="1"/>
+<text x="559.7" y="396" fill="#7d4b56" font-size="11" text-anchor="middle">20</text>
+<line x1="648.0" y1="104" x2="648.0" y2="378" stroke="#3d1c26" stroke-width="1"/>
+<text x="648.0" y="396" fill="#7d4b56" font-size="11" text-anchor="middle">24</text>
+<text x="383.0" y="416" fill="#c08a95" font-size="12.5" text-anchor="middle">tokens of compute per decode step (the 24-token budget under one weight stream)</text>
+<line x1="648.0" y1="98" x2="648.0" y2="382" stroke="#f2a9b8" stroke-width="1.6" stroke-dasharray="5 4"/>
+<text x="648.0" y="92" fill="#f2a9b8" font-size="11" text-anchor="middle" font-weight="600">budget full</text>
+<text x="108" y="145" fill="#f6e7ea" font-size="13" font-weight="600" text-anchor="end">1 agent </text>
+<rect x="118.0" y="124" width="22.1" height="34" fill="#f0a04b" rx="2"/>
+<rect x="140.1" y="124" width="507.9" height="34" fill="#e3607a" opacity="0.55" rx="2"/>
+<text x="394.0" y="145" fill="#f2a9b8" font-size="11.5" text-anchor="middle" font-weight="600">23 draft tokens/agent</text>
+<text x="108" y="195" fill="#f6e7ea" font-size="13" font-weight="600" text-anchor="end">2 agents</text>
+<rect x="118.0" y="174" width="44.2" height="34" fill="#f0a04b" rx="2"/>
+<rect x="162.2" y="174" width="485.8" height="34" fill="#e3607a" opacity="0.55" rx="2"/>
+<text x="405.1" y="195" fill="#f2a9b8" font-size="11.5" text-anchor="middle" font-weight="600">11 draft tokens/agent</text>
+<text x="108" y="245" fill="#f6e7ea" font-size="13" font-weight="600" text-anchor="end">4 agents</text>
+<rect x="118.0" y="224" width="88.3" height="34" fill="#f0a04b" rx="2"/>
+<rect x="206.3" y="224" width="441.7" height="34" fill="#e3607a" opacity="0.55" rx="2"/>
+<text x="427.2" y="245" fill="#f2a9b8" font-size="11.5" text-anchor="middle" font-weight="600">5 draft tokens/agent</text>
+<text x="162.2" y="245" fill="#3a1c10" font-size="11" text-anchor="middle" font-weight="700">4 committed</text>
+<text x="108" y="295" fill="#f6e7ea" font-size="13" font-weight="600" text-anchor="end">8 agents</text>
+<rect x="118.0" y="274" width="176.7" height="34" fill="#f0a04b" rx="2"/>
+<rect x="294.7" y="274" width="353.3" height="34" fill="#e3607a" opacity="0.55" rx="2"/>
+<text x="471.3" y="295" fill="#f2a9b8" font-size="11.5" text-anchor="middle" font-weight="600">2 draft tokens/agent</text>
+<text x="206.3" y="295" fill="#3a1c10" font-size="11" text-anchor="middle" font-weight="700">8 committed</text>
+<text x="108" y="345" fill="#f6e7ea" font-size="13" font-weight="600" text-anchor="end">16 agents</text>
+<rect x="118.0" y="324" width="353.3" height="34" fill="#f0a04b" rx="2"/>
+<rect x="471.3" y="324" width="176.7" height="34" fill="#e3607a" opacity="0.55" rx="2"/>
+<text x="559.7" y="345" fill="#f2a9b8" font-size="11.5" text-anchor="middle" font-weight="600">0.5 draft tokens/agent</text>
+<text x="294.7" y="345" fill="#3a1c10" font-size="11" text-anchor="middle" font-weight="700">16 committed</text>
+<rect x="118.0" y="58" width="0" height="0" fill="none"/>
+<rect x="690" y="112" width="14" height="14" fill="#f0a04b" rx="2"/>
+<text x="710" y="123" fill="#c08a95" font-size="11.5">committed tokens: one per agent</text>
+<rect x="690" y="134" width="14" height="14" fill="#e3607a" opacity="0.55" rx="2"/>
+<text x="710" y="145" fill="#c08a95" font-size="11.5">free to speculate: 24 &#8722; B, shared</text>
+<rect x="690" y="168" width="250" height="86" rx="8" fill="#331621" stroke="#4a2230" stroke-width="1"/>
+<text x="704" y="190" fill="#f6e7ea" font-size="12" font-weight="600">Batch 1: 23 draft tokens each.</text>
+<text x="704" y="210" fill="#f6e7ea" font-size="12" font-weight="600">Batch 8: 2 draft tokens each.</text>
+<text x="704" y="230" fill="#c08a95" font-size="11">The batch and the draft draw on</text>
+<text x="704" y="246" fill="#c08a95" font-size="11">the same 24-token compute slack.</text>
+<line x1="34" y1="428" x2="966" y2="428" stroke="#3d1c26" stroke-width="1"/>
+<text x="34" y="446" fill="#f6e7ea" font-size="14" font-weight="700">And the drafts you can afford desync the batch</text>
+<line x1="516" y1="458" x2="516" y2="559" stroke="#f2a9b8" stroke-width="1.3" stroke-dasharray="4 3"/>
+<text x="524" y="470" fill="#f2a9b8" font-size="10.5">pass width =</text>
+<text x="524" y="484" fill="#f2a9b8" font-size="10.5">slowest agent</text>
+<text x="524" y="508" fill="#c08a95" font-size="10.5">fast agents' slots</text>
+<text x="524" y="522" fill="#c08a95" font-size="10.5">run empty (grey)</text>
+<rect x="360" y="462" width="156" height="9" fill="#e3607a" rx="2"/>
+<rect x="516" y="462" width="0" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="470" fill="#7d4b56" font-size="9.5" text-anchor="end">a1</text>
+<rect x="360" y="474" width="52" height="9" fill="#e3607a" rx="2"/>
+<rect x="412" y="474" width="104" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="482" fill="#7d4b56" font-size="9.5" text-anchor="end">a2</text>
+<rect x="360" y="486" width="104" height="9" fill="#e3607a" rx="2"/>
+<rect x="464" y="486" width="52" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="494" fill="#7d4b56" font-size="9.5" text-anchor="end">a3</text>
+<rect x="360" y="498" width="26" height="9" fill="#e3607a" rx="2"/>
+<rect x="386" y="498" width="130" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="506" fill="#7d4b56" font-size="9.5" text-anchor="end">a4</text>
+<rect x="360" y="510" width="130" height="9" fill="#e3607a" rx="2"/>
+<rect x="490" y="510" width="26" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="518" fill="#7d4b56" font-size="9.5" text-anchor="end">a5</text>
+<rect x="360" y="522" width="78" height="9" fill="#e3607a" rx="2"/>
+<rect x="438" y="522" width="78" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="530" fill="#7d4b56" font-size="9.5" text-anchor="end">a6</text>
+<rect x="360" y="534" width="52" height="9" fill="#e3607a" rx="2"/>
+<rect x="412" y="534" width="104" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="542" fill="#7d4b56" font-size="9.5" text-anchor="end">a7</text>
+<rect x="360" y="546" width="0" height="9" fill="#e3607a" rx="2"/>
+<rect x="360" y="546" width="156" height="9" fill="#5a3a42" rx="2"/>
+<text x="352" y="554" fill="#7d4b56" font-size="9.5" text-anchor="end">a8</text>
+<text x="34" y="476" fill="#c08a95" font-size="11.5">Rose = tokens the model confirmed.</text>
+<text x="34" y="494" fill="#c08a95" font-size="11.5">Grey = padded, wasted slots.</text>
+<text x="34" y="512" fill="#c08a95" font-size="11.5">Realigning position IDs, masks and</text>
+<text x="34" y="530" fill="#c08a95" font-size="11.5">KV state costs up to 40% of the pass.</text>
+<text x="34" y="588" fill="#7d4b56" font-size="10.5">Model: one weight stream sets a 25.2 ms floor (39.6 tok/s); compute runs at the 962 tok/s prefill rate, so B&#215;(1+draft) &#8804; 24 stays hidden. Ragged counts illustrative.</text>
+</svg>

@@ -1,0 +1,54 @@
+<svg viewBox="0 0 1000 600" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+<defs>
+<linearGradient id="budget" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#34d399" stop-opacity="0.18"/>
+<stop offset="1" stop-color="#34d399" stop-opacity="0.03"/>
+</linearGradient>
+</defs>
+<rect x="0" y="0" width="1000" height="600" rx="14" fill="#0b1c1a"/>
+<text x="34" y="42" fill="#e6f5f0" font-size="21" font-weight="700">One RDNA4 verify pass has slack for about two dozen speculative tokens</text>
+<text x="34" y="66" fill="#78b0a2" font-size="13.5">Wall clock of one tree-verification pass vs tokens verified, Qwen3.5-9B on one RX 9070 XT. Rates measured, the curve modeled.</text>
+<rect x="92" y="96" width="354.2" height="416" fill="url(#budget)"/>
+<text x="269.1" y="88" fill="#4ade80" font-size="11.5" font-weight="600" text-anchor="middle">free budget</text>
+<text x="269.1" y="108" fill="#7fae9f" font-size="10.5" text-anchor="middle">one pass &#8776; one decode step</text>
+<line x1="92" y1="512.0" x2="792" y2="512.0" stroke="#123a34" stroke-width="1"/>
+<text x="82" y="516.0" fill="#6f9a8d" font-size="11.5" text-anchor="end">0</text>
+<line x1="92" y1="408.0" x2="792" y2="408.0" stroke="#123a34" stroke-width="1"/>
+<text x="82" y="412.0" fill="#6f9a8d" font-size="11.5" text-anchor="end">20</text>
+<line x1="92" y1="304.0" x2="792" y2="304.0" stroke="#123a34" stroke-width="1"/>
+<text x="82" y="308.0" fill="#6f9a8d" font-size="11.5" text-anchor="end">40</text>
+<line x1="92" y1="200.0" x2="792" y2="200.0" stroke="#123a34" stroke-width="1"/>
+<text x="82" y="204.0" fill="#6f9a8d" font-size="11.5" text-anchor="end">60</text>
+<line x1="92" y1="96.0" x2="792" y2="96.0" stroke="#123a34" stroke-width="1"/>
+<text x="82" y="100.0" fill="#6f9a8d" font-size="11.5" text-anchor="end">80</text>
+<line x1="92.0" y1="96" x2="92.0" y2="512" stroke="#0f302b" stroke-width="1"/>
+<text x="92.0" y="534.0" fill="#6f9a8d" font-size="11.5" text-anchor="middle">0</text>
+<line x1="208.7" y1="96" x2="208.7" y2="512" stroke="#0f302b" stroke-width="1"/>
+<text x="208.7" y="534.0" fill="#6f9a8d" font-size="11.5" text-anchor="middle">8</text>
+<line x1="325.3" y1="96" x2="325.3" y2="512" stroke="#0f302b" stroke-width="1"/>
+<text x="325.3" y="534.0" fill="#6f9a8d" font-size="11.5" text-anchor="middle">16</text>
+<line x1="442.0" y1="96" x2="442.0" y2="512" stroke="#0f302b" stroke-width="1"/>
+<text x="442.0" y="534.0" fill="#6f9a8d" font-size="11.5" text-anchor="middle">24</text>
+<line x1="558.7" y1="96" x2="558.7" y2="512" stroke="#0f302b" stroke-width="1"/>
+<text x="558.7" y="534.0" fill="#6f9a8d" font-size="11.5" text-anchor="middle">32</text>
+<line x1="675.3" y1="96" x2="675.3" y2="512" stroke="#0f302b" stroke-width="1"/>
+<text x="675.3" y="534.0" fill="#6f9a8d" font-size="11.5" text-anchor="middle">40</text>
+<line x1="792.0" y1="96" x2="792.0" y2="512" stroke="#0f302b" stroke-width="1"/>
+<text x="792.0" y="534.0" fill="#6f9a8d" font-size="11.5" text-anchor="middle">48</text>
+<text x="442.0" y="558.0" fill="#9fc7bb" font-size="13" text-anchor="middle">candidate tokens verified in one forward pass (token-tree size)</text>
+<text x="30" y="304.0" fill="#9fc7bb" font-size="13" text-anchor="middle" transform="rotate(-90 30 304.0)">verification pass wall clock (ms)</text>
+<line x1="92.0" y1="512.0" x2="792.0" y2="252.5" stroke="#fbbf24" stroke-width="1.6" stroke-dasharray="5 4"/>
+<text x="786.0" y="244.5" fill="#f5c451" font-size="11" text-anchor="end">compute bound, 962 tok/s prefill</text>
+<line x1="92" y1="380.7" x2="792" y2="380.7" stroke="#5b7c73" stroke-width="1.3" stroke-dasharray="6 4"/>
+<text x="786.0" y="372.7" fill="#9ab8ad" font-size="11" text-anchor="end">one decode step, 39.6 tok/s (25.3 ms)</text>
+<polyline points="92.0,380.7 94.9,380.7 97.8,380.7 100.8,380.7 103.7,380.7 106.6,380.7 109.5,380.7 112.4,380.7 115.3,380.7 118.2,380.7 121.2,380.7 124.1,380.7 127.0,380.7 129.9,380.7 132.8,380.7 135.8,380.7 138.7,380.7 141.6,380.7 144.5,380.7 147.4,380.7 150.3,380.7 153.2,380.7 156.2,380.7 159.1,380.7 162.0,380.7 164.9,380.7 167.8,380.7 170.8,380.7 173.7,380.7 176.6,380.7 179.5,380.7 182.4,380.7 185.3,380.7 188.2,380.7 191.2,380.7 194.1,380.7 197.0,380.7 199.9,380.7 202.8,380.7 205.8,380.7 208.7,380.7 211.6,380.7 214.5,380.7 217.4,380.7 220.3,380.7 223.2,380.7 226.2,380.7 229.1,380.7 232.0,380.7 234.9,380.7 237.8,380.7 240.8,380.7 243.7,380.7 246.6,380.7 249.5,380.7 252.4,380.7 255.3,380.7 258.2,380.7 261.2,380.7 264.1,380.7 267.0,380.7 269.9,380.7 272.8,380.7 275.8,380.7 278.7,380.7 281.6,380.7 284.5,380.7 287.4,380.7 290.3,380.7 293.2,380.7 296.2,380.7 299.1,380.7 302.0,380.7 304.9,380.7 307.8,380.7 310.8,380.7 313.7,380.7 316.6,380.7 319.5,380.7 322.4,380.7 325.3,380.7 328.2,380.7 331.2,380.7 334.1,380.7 337.0,380.7 339.9,380.7 342.8,380.7 345.8,380.7 348.7,380.7 351.6,380.7 354.5,380.7 357.4,380.7 360.3,380.7 363.2,380.7 366.2,380.7 369.1,380.7 372.0,380.7 374.9,380.7 377.8,380.7 380.8,380.7 383.7,380.7 386.6,380.7 389.5,380.7 392.4,380.7 395.3,380.7 398.2,380.7 401.2,380.7 404.1,380.7 407.0,380.7 409.9,380.7 412.8,380.7 415.8,380.7 418.7,380.7 421.6,380.7 424.5,380.7 427.4,380.7 430.3,380.7 433.2,380.7 436.2,380.7 439.1,380.7 442.0,380.7 444.9,380.7 447.8,380.1 450.8,379.0 453.7,377.9 456.6,376.9 459.5,375.8 462.4,374.7 465.3,373.6 468.2,372.5 471.2,371.5 474.1,370.4 477.0,369.3 479.9,368.2 482.8,367.1 485.8,366.1 488.7,365.0 491.6,363.9 494.5,362.8 497.4,361.7 500.3,360.6 503.2,359.6 506.2,358.5 509.1,357.4 512.0,356.3 514.9,355.2 517.8,354.2 520.8,353.1 523.7,352.0 526.6,350.9 529.5,349.8 532.4,348.8 535.3,347.7 538.2,346.6 541.2,345.5 544.1,344.4 547.0,343.4 549.9,342.3 552.8,341.2 555.8,340.1 558.7,339.0 561.6,337.9 564.5,336.9 567.4,335.8 570.3,334.7 573.2,333.6 576.2,332.5 579.1,331.5 582.0,330.4 584.9,329.3 587.8,328.2 590.8,327.1 593.7,326.1 596.6,325.0 599.5,323.9 602.4,322.8 605.3,321.7 608.2,320.6 611.2,319.6 614.1,318.5 617.0,317.4 619.9,316.3 622.8,315.2 625.8,314.2 628.7,313.1 631.6,312.0 634.5,310.9 637.4,309.8 640.3,308.8 643.2,307.7 646.2,306.6 649.1,305.5 652.0,304.4 654.9,303.4 657.8,302.3 660.8,301.2 663.7,300.1 666.6,299.0 669.5,297.9 672.4,296.9 675.3,295.8 678.2,294.7 681.2,293.6 684.1,292.5 687.0,291.5 689.9,290.4 692.8,289.3 695.8,288.2 698.7,287.1 701.6,286.1 704.5,285.0 707.4,283.9 710.3,282.8 713.2,281.7 716.2,280.6 719.1,279.6 722.0,278.5 724.9,277.4 727.8,276.3 730.8,275.2 733.7,274.2 736.6,273.1 739.5,272.0 742.4,270.9 745.3,269.8 748.2,268.8 751.2,267.7 754.1,266.6 757.0,265.5 759.9,264.4 762.8,263.4 765.8,262.3 768.7,261.2 771.6,260.1 774.5,259.0 777.4,257.9 780.3,256.9 783.2,255.8 786.2,254.7 789.1,253.6 792.0,252.5" fill="none" stroke="#fb7185" stroke-width="3"/>
+<circle cx="446.2" cy="380.7" r="4.2" fill="#fb7185" stroke="#0b1c1a" stroke-width="1.4"/>
+<text x="446.2" y="364.7" fill="#fda4af" font-size="11.5" font-weight="600" text-anchor="middle">knee &#8776; 24 tokens</text>
+<text x="446.2" y="400.7" fill="#c98a92" font-size="10.5" text-anchor="middle">tree stops being free past here</text>
+<text x="675.3" y="285.8" fill="#fb7185" font-size="11.5" font-weight="600" text-anchor="middle">single verify pass = max(weight stream, compute)</text>
+<rect x="560" y="150" width="220" height="70" rx="8" fill="#10302b" stroke="#1c4a41" stroke-width="1"/>
+<text x="574" y="174" fill="#dff3ec" font-size="12" font-weight="600">24 tokens, one pass: ~25 ms</text>
+<text x="574" y="194" fill="#8fbcae" font-size="11.5">24 tokens, one at a time: ~606 ms</text>
+<text x="574" y="211" fill="#f5c451" font-size="11" font-weight="600">~24 fewer launches for the same tokens</text>
+<text x="92" y="584" fill="#5a7a71" font-size="10.5">Roofline model: a pass streams the weights once (the decode floor) and does compute proportional to tree size; below the knee the compute hides under the weight stream.</text>
+</svg>

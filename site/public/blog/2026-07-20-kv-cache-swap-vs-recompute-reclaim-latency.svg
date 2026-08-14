@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 752" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#17150e"/><stop offset="1" stop-color="#211d14"/></linearGradient>
+<linearGradient id="band" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c76a" stop-opacity="0.16"/><stop offset="1" stop-color="#e8c76a" stop-opacity="0.03"/></linearGradient>
+<linearGradient id="vram" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fb7185"/><stop offset="1" stop-color="#e0566c"/></linearGradient>
+<linearGradient id="host" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#a3e635"/><stop offset="1" stop-color="#7fbe22"/></linearGradient>
+<style>.title{fill:#f6f1e4;font-size:25px;font-weight:780}.sub{fill:#a9a186;font-size:14px}.tick{fill:#8f8770;font-size:12.5px}.rose{fill:#fb7185;font-size:13px;font-weight:740}.roseb{fill:#fb7185;font-size:20px;font-weight:800}.lime{fill:#a3e635;font-size:13px;font-weight:740}.limeb{fill:#a3e635;font-size:20px;font-weight:800}.gold{fill:#e8c76a;font-size:13px;font-weight:720}.lab{fill:#e6dfcd;font-size:13.5px;font-weight:660}.labs{fill:#a9a186;font-size:12px}.hd{fill:#f6f1e4;font-size:16px;font-weight:760}.big{fill:#f6f1e4;font-size:22px;font-weight:800}.note{fill:#ded6c2;font-size:13px;font-weight:620}</style>
+</defs>
+<rect width="1200" height="752" fill="url(#bg)"/>
+<text x="56" y="52" class="title">Reclaiming an idle agent&#8217;s KV cache: 41 ms over PCIe, or 7.2 s of prefill</text>
+<text x="56" y="78" class="sub">One agent holding 6,900 tokens of fp16 KV cache (1.01 GB) on an RX 9070 XT running Qwen3.5-9B Q4_K_M. Modeled, not measured.</text>
+<text x="56" y="99" class="sub">Swap assumes 50 GB/s of pinned-memory copy over PCIe 5.0 x16, both directions. Recompute assumes ZINC&#8217;s measured 962 tok/s prefill.</text>
+<rect x="56" y="124" width="1088" height="336" rx="12" fill="#1d1a12" stroke="#332e1f"/>
+<text x="86" y="158" class="hd">How long it takes to get that gigabyte back</text>
+<rect x="491.5" y="186" width="529.0" height="206.0" fill="url(#band)"/>
+<line x1="491.5" y1="186" x2="491.5" y2="392.0" stroke="#e8c76a" stroke-width="1.3" stroke-dasharray="4 4" opacity="0.75"/>
+<line x1="1020.4" y1="186" x2="1020.4" y2="392.0" stroke="#e8c76a" stroke-width="1.3" stroke-dasharray="4 4" opacity="0.75"/>
+<text x="756.0" y="206" text-anchor="middle" class="gold">where an agent blocked on a tool call typically sits</text>
+<text x="756.0" y="224" text-anchor="middle" class="labs">a file read, a grep, a test run, a web request: 50 ms to 30 s of no GPU work</text>
+<line x1="168.0" y1="392.0" x2="1120.0" y2="392.0" stroke="#4a4330" stroke-width="1.6"/>
+<line x1="168.0" y1="392.0" x2="168.0" y2="400.0" stroke="#4a4330" stroke-width="1.4"/>
+<text x="168.0" y="420.0" text-anchor="middle" class="tick">1 ms</text>
+<line x1="358.4" y1="392.0" x2="358.4" y2="400.0" stroke="#4a4330" stroke-width="1.4"/>
+<text x="358.4" y="420.0" text-anchor="middle" class="tick">10 ms</text>
+<line x1="548.8" y1="392.0" x2="548.8" y2="400.0" stroke="#4a4330" stroke-width="1.4"/>
+<text x="548.8" y="420.0" text-anchor="middle" class="tick">100 ms</text>
+<line x1="739.2" y1="392.0" x2="739.2" y2="400.0" stroke="#4a4330" stroke-width="1.4"/>
+<text x="739.2" y="420.0" text-anchor="middle" class="tick">1 s</text>
+<line x1="929.6" y1="392.0" x2="929.6" y2="400.0" stroke="#4a4330" stroke-width="1.4"/>
+<text x="929.6" y="420.0" text-anchor="middle" class="tick">10 s</text>
+<line x1="1120.0" y1="392.0" x2="1120.0" y2="400.0" stroke="#4a4330" stroke-width="1.4"/>
+<text x="1120.0" y="420.0" text-anchor="middle" class="tick">100 s</text>
+<line x1="225.3" y1="392.0" x2="225.3" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="258.8" y1="392.0" x2="258.8" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="282.6" y1="392.0" x2="282.6" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="301.1" y1="392.0" x2="301.1" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="316.2" y1="392.0" x2="316.2" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="328.9" y1="392.0" x2="328.9" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="339.9" y1="392.0" x2="339.9" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="349.7" y1="392.0" x2="349.7" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="415.7" y1="392.0" x2="415.7" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="449.2" y1="392.0" x2="449.2" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="473.0" y1="392.0" x2="473.0" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="491.5" y1="392.0" x2="491.5" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="506.6" y1="392.0" x2="506.6" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="519.3" y1="392.0" x2="519.3" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="530.3" y1="392.0" x2="530.3" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="540.1" y1="392.0" x2="540.1" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="606.1" y1="392.0" x2="606.1" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="639.6" y1="392.0" x2="639.6" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="663.4" y1="392.0" x2="663.4" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="681.9" y1="392.0" x2="681.9" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="697.0" y1="392.0" x2="697.0" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="709.7" y1="392.0" x2="709.7" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="720.7" y1="392.0" x2="720.7" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="730.5" y1="392.0" x2="730.5" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="796.5" y1="392.0" x2="796.5" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="830.0" y1="392.0" x2="830.0" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="853.8" y1="392.0" x2="853.8" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="872.3" y1="392.0" x2="872.3" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="887.4" y1="392.0" x2="887.4" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="900.1" y1="392.0" x2="900.1" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="911.1" y1="392.0" x2="911.1" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="920.9" y1="392.0" x2="920.9" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="986.9" y1="392.0" x2="986.9" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="1020.4" y1="392.0" x2="1020.4" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="1044.2" y1="392.0" x2="1044.2" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="1062.7" y1="392.0" x2="1062.7" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="1077.8" y1="392.0" x2="1077.8" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="1090.5" y1="392.0" x2="1090.5" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="1101.5" y1="392.0" x2="1101.5" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<line x1="1111.3" y1="392.0" x2="1111.3" y2="396.0" stroke="#3a3524" stroke-width="1"/>
+<text x="168.0" y="444.0" text-anchor="start" class="labs">log scale. Every gridline step to the right is ten times longer.</text>
+<line x1="474.3" y1="240" x2="474.3" y2="392.0" stroke="#fb7185" stroke-width="3.2"/>
+<circle cx="474.3" cy="240" r="7" fill="#fb7185"/>
+<text x="460.3" y="268" text-anchor="end" class="roseb">41 ms</text>
+<text x="460.3" y="288" text-anchor="end" class="rose">swap out + swap back</text>
+<text x="460.3" y="306" text-anchor="end" class="labs">1.01 GB each way over PCIe 5.0 x16</text>
+<text x="460.3" y="323" text-anchor="end" class="labs">host RAM keeps the tokens verbatim</text>
+<line x1="902.1" y1="240" x2="902.1" y2="392.0" stroke="#a3e635" stroke-width="3.2"/>
+<circle cx="902.1" cy="240" r="7" fill="#a3e635"/>
+<text x="888.1" y="268" text-anchor="end" class="limeb">7.2 s</text>
+<text x="888.1" y="288" text-anchor="end" class="lime">recompute from the prompt</text>
+<text x="888.1" y="306" text-anchor="end" class="labs">6,900 tokens of prefill at 962 tok/s</text>
+<text x="888.1" y="323" text-anchor="end" class="labs">vLLM V1&#8217;s default preemption mode</text>
+<line x1="478.3" y1="356" x2="898.1" y2="356" stroke="#8f8770" stroke-width="1.4" stroke-dasharray="6 5"/>
+<text x="688.2" y="349" text-anchor="middle" class="lab">177x</text>
+<rect x="56" y="476" width="1088" height="246" rx="12" fill="#1d1a12" stroke="#332e1f"/>
+<text x="86" y="510" class="hd">And host RAM is the larger tier</text>
+<rect x="300.0" y="536" width="136.0" height="46" rx="6" fill="url(#vram)"/>
+<text x="284.0" y="558" text-anchor="end" class="lab">on the card</text>
+<text x="284.0" y="576" text-anchor="end" class="labs">8.1 GB of VRAM left after weights</text>
+<text x="450.0" y="566" class="big">55,000 tokens</text>
+<rect x="300.0" y="606" width="806.0" height="46" rx="6" fill="url(#host)"/>
+<text x="284.0" y="628" text-anchor="end" class="lab">in host DDR5</text>
+<text x="284.0" y="646" text-anchor="end" class="labs">48 GB pinned out of a 96 GB kit</text>
+<text x="318.0" y="636" class="big" fill="#17150e">326,000 tokens</text>
+<text x="86" y="690" class="note">At 147 KB per fp16 KV token, the DDR5 already in this machine holds six times the KV cache the card can. It is one PCIe hop away,</text>
+<text x="86" y="710" class="note">and today ZINC uses none of it: an agent that stops to run a shell command keeps its full gigabyte resident in VRAM until it comes back.</text>
+</svg>

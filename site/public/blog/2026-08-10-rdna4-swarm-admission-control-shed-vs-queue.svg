@@ -1,0 +1,60 @@
+<svg viewBox="0 0 1120 600" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" role="img" aria-labelledby="ttl dsc">
+<title id="ttl">Past the twelve-agent knee, an unbounded queue turns every added agent into pure waiting; admission control bounds it by shedding</title>
+<desc id="dsc">A line chart on a dark plum background. The horizontal axis is the number of concurrent coding agents from 8 to 24 on one RX 9070 XT with eight decode slots. The vertical axis is the 99th-percentile queue wait in seconds before a turn starts decoding, from 0 to 30. A vertical guide marks the saturation knee at twelve agents, where measured goodput plateaus at 0.88 turns per second. The cyan curve is an unbounded queue: its p99 wait climbs almost linearly from about 9 seconds at twelve agents to 27 seconds at twenty-four agents, even though goodput is already pinned. The gold curve is a fixed concurrency cap of twelve: its p99 wait stays flat near 12 seconds, but it defers a rising share of submissions, from 6 percent at fourteen agents to 37 percent at twenty-four. The coral curve is a delay-targeted CoDel-style policy with an 8 second target: its p99 wait tracks the unbounded curve until it starts binding, and it defers far less than the fixed cap, 23 percent versus 37 percent at twenty-four agents, for a wait only a few seconds longer.</desc>
+<rect x="0" y="0" width="1120" height="600" rx="14" fill="#1b1426"/>
+<text x="34" y="42" fill="#f3ecff" font-size="21" font-weight="700">Past the knee, an unbounded queue is pure waiting; admission control trades it for deferral</text>
+<text x="34" y="66" fill="#b3a2c9" font-size="12.5">One RX 9070 XT: 8 decode slots, ~39 tok/s per slot, mean turn 354 tokens, agent think ~4.5 s. Goodput plateaus at 0.88 turns/s past N=12; the y-axis is the wait before a turn starts.</text>
+<rect x="92.0" y="108.0" width="954.0" height="412.0" fill="none" stroke="#3a2f4d" stroke-width="1"/>
+<line x1="92.0" y1="520.0" x2="1046.0" y2="520.0" stroke="#2f2740" stroke-width="1"/>
+<text x="84.0" y="524.0" fill="#9a8bb3" font-size="11.5" text-anchor="end">0s</text>
+<line x1="92.0" y1="451.3" x2="1046.0" y2="451.3" stroke="#2f2740" stroke-width="1" stroke-dasharray="5 5"/>
+<text x="84.0" y="455.3" fill="#9a8bb3" font-size="11.5" text-anchor="end">5s</text>
+<line x1="92.0" y1="382.7" x2="1046.0" y2="382.7" stroke="#2f2740" stroke-width="1" stroke-dasharray="5 5"/>
+<text x="84.0" y="386.7" fill="#9a8bb3" font-size="11.5" text-anchor="end">10s</text>
+<line x1="92.0" y1="314.0" x2="1046.0" y2="314.0" stroke="#2f2740" stroke-width="1" stroke-dasharray="5 5"/>
+<text x="84.0" y="318.0" fill="#9a8bb3" font-size="11.5" text-anchor="end">15s</text>
+<line x1="92.0" y1="245.3" x2="1046.0" y2="245.3" stroke="#2f2740" stroke-width="1" stroke-dasharray="5 5"/>
+<text x="84.0" y="249.3" fill="#9a8bb3" font-size="11.5" text-anchor="end">20s</text>
+<line x1="92.0" y1="176.7" x2="1046.0" y2="176.7" stroke="#2f2740" stroke-width="1" stroke-dasharray="5 5"/>
+<text x="84.0" y="180.7" fill="#9a8bb3" font-size="11.5" text-anchor="end">25s</text>
+<line x1="92.0" y1="108.0" x2="1046.0" y2="108.0" stroke="#2f2740" stroke-width="1" stroke-dasharray="5 5"/>
+<text x="84.0" y="112.0" fill="#9a8bb3" font-size="11.5" text-anchor="end">30s</text>
+<line x1="92.0" y1="520.0" x2="92.0" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="92.0" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">8</text>
+<line x1="211.2" y1="520.0" x2="211.2" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="211.2" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">10</text>
+<line x1="330.5" y1="520.0" x2="330.5" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="330.5" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">12</text>
+<line x1="449.8" y1="520.0" x2="449.8" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="449.8" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">14</text>
+<line x1="569.0" y1="520.0" x2="569.0" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="569.0" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">16</text>
+<line x1="688.2" y1="520.0" x2="688.2" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="688.2" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">18</text>
+<line x1="807.5" y1="520.0" x2="807.5" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="807.5" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">20</text>
+<line x1="926.8" y1="520.0" x2="926.8" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="926.8" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">22</text>
+<line x1="1046.0" y1="520.0" x2="1046.0" y2="525.0" stroke="#6f5f88" stroke-width="1"/>
+<text x="1046.0" y="540.0" fill="#9a8bb3" font-size="11.5" text-anchor="middle">24</text>
+<text x="569" y="562" fill="#b3a2c9" font-size="12.5" text-anchor="middle">concurrent coding agents on one card</text>
+<text x="26" y="314" fill="#b3a2c9" font-size="12.5" text-anchor="middle" transform="rotate(-90 26 314)">p99 queue wait before a turn starts (seconds)</text>
+<line x1="330.5" y1="108.0" x2="330.5" y2="520.0" stroke="#8a6fb0" stroke-width="1.3" stroke-dasharray="3 4"/>
+<text x="336.5" y="124.0" fill="#b79cd8" font-size="11.5">knee N*=12: goodput saturates</text>
+<polyline points="92.0,520.0 211.2,471.4 330.5,399.7 449.8,352.1 569.0,307.1 688.2,261.7 807.5,227.7 926.8,191.9 1046.0,149.2" fill="none" stroke="#5fb6d8" stroke-width="2.8" stroke-linejoin="round"/>
+<circle cx="92.0" cy="520.0" r="3.4" fill="#5fb6d8"/><circle cx="211.2" cy="471.4" r="3.4" fill="#5fb6d8"/><circle cx="330.5" cy="399.7" r="3.4" fill="#5fb6d8"/><circle cx="449.8" cy="352.1" r="3.4" fill="#5fb6d8"/><circle cx="569.0" cy="307.1" r="3.4" fill="#5fb6d8"/><circle cx="688.2" cy="261.7" r="3.4" fill="#5fb6d8"/><circle cx="807.5" cy="227.7" r="3.4" fill="#5fb6d8"/><circle cx="926.8" cy="191.9" r="3.4" fill="#5fb6d8"/><circle cx="1046.0" cy="149.2" r="3.4" fill="#5fb6d8"/>
+<polyline points="92.0,520.0 211.2,471.4 330.5,399.7 449.8,367.1 569.0,358.8 688.2,356.2 807.5,349.3 926.8,343.5 1046.0,346.0" fill="none" stroke="#e9b24a" stroke-width="2.8" stroke-linejoin="round"/>
+<circle cx="92.0" cy="520.0" r="3.4" fill="#e9b24a"/><circle cx="211.2" cy="471.4" r="3.4" fill="#e9b24a"/><circle cx="330.5" cy="399.7" r="3.4" fill="#e9b24a"/><circle cx="449.8" cy="367.1" r="3.4" fill="#e9b24a"/><circle cx="569.0" cy="358.8" r="3.4" fill="#e9b24a"/><circle cx="688.2" cy="356.2" r="3.4" fill="#e9b24a"/><circle cx="807.5" cy="349.3" r="3.4" fill="#e9b24a"/><circle cx="926.8" cy="343.5" r="3.4" fill="#e9b24a"/><circle cx="1046.0" cy="346.0" r="3.4" fill="#e9b24a"/>
+<polyline points="92.0,520.0 211.2,471.4 330.5,402.8 449.8,352.7 569.0,306.5 688.2,271.0 807.5,237.8 926.8,202.8 1046.0,180.2" fill="none" stroke="#ef6f61" stroke-width="2.8" stroke-linejoin="round"/>
+<circle cx="92.0" cy="520.0" r="3.4" fill="#ef6f61"/><circle cx="211.2" cy="471.4" r="3.4" fill="#ef6f61"/><circle cx="330.5" cy="402.8" r="3.4" fill="#ef6f61"/><circle cx="449.8" cy="352.7" r="3.4" fill="#ef6f61"/><circle cx="569.0" cy="306.5" r="3.4" fill="#ef6f61"/><circle cx="688.2" cy="271.0" r="3.4" fill="#ef6f61"/><circle cx="807.5" cy="237.8" r="3.4" fill="#ef6f61"/><circle cx="926.8" cy="202.8" r="3.4" fill="#ef6f61"/><circle cx="1046.0" cy="180.2" r="3.4" fill="#ef6f61"/>
+<text x="807.5" y="109.2" fill="#5fb6d8" font-size="11.5" text-anchor="middle">unbounded &amp; CoDel wait keep climbing</text>
+<text x="1040.0" y="364.0" fill="#e9b24a" font-size="11.5" text-anchor="end">fixed cap holds ~13s wait, but defers 37%</text>
+<rect x="690" y="126" width="356" height="86" rx="8" fill="#241a31" stroke="#3a2f4d"/>
+<line x1="704" y1="146" x2="730" y2="146" stroke="#5fb6d8" stroke-width="3.2"/>
+<text x="738" y="150" fill="#d8ccea" font-size="11.5">unbounded queue (no admission control)</text>
+<line x1="704" y1="170" x2="730" y2="170" stroke="#e9b24a" stroke-width="3.2"/>
+<text x="738" y="174" fill="#d8ccea" font-size="11.5">fixed concurrency cap of 12 (vLLM max_num_seqs)</text>
+<line x1="704" y1="194" x2="730" y2="194" stroke="#ef6f61" stroke-width="3.2"/>
+<text x="738" y="198" fill="#d8ccea" font-size="11.5">CoDel-style delay target of 8 s (RFC 8289)</text>
+<text x="34" y="588" fill="#8f80a8" font-size="11">Closed-loop discrete-event simulation, 60k s per point, warmup discarded; same arrival process and service mixture across policies. Only the admission rule changes.</text>
+</svg>

@@ -1,0 +1,163 @@
+<svg viewBox="0 0 1000 620" width="1000" height="620" xmlns="http://www.w3.org/2000/svg" font-family="'Inter','Segoe UI',system-ui,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f141a"/>
+      <stop offset="1" stop-color="#0b1116"/>
+    </linearGradient>
+    <pattern id="empty" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="#141c25"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#33414f" stroke-width="1.4"/>
+    </pattern>
+  </defs>
+
+  <rect x="0" y="0" width="1000" height="620" fill="url(#bg)"/>
+
+  <text x="40" y="46" fill="#e7eef5" font-size="23" font-weight="700">Contiguous reserve-for-max vs paged KV cache on a 16 GB RX 9070 XT</text>
+  <text x="40" y="73" fill="#8ea0b2" font-size="15">Eight agents, Qwen3.5-9B Q4_K_M. Both schemes hold the same 3.4 GB of live KV at a 3k-token average.</text>
+
+  <!-- scale key -->
+  <g font-size="12.5">
+    <rect x="40" y="92" width="15" height="15" rx="2" fill="#f0913c"/>
+    <text x="61" y="104" fill="#9fb0c0">resident weights 5.5 GB</text>
+    <rect x="215" y="92" width="15" height="15" rx="2" fill="#4ec97a"/>
+    <text x="236" y="104" fill="#9fb0c0">live KV (3k tokens)</text>
+    <rect x="355" y="92" width="15" height="15" rx="2" fill="url(#empty)" stroke="#33414f"/>
+    <text x="376" y="104" fill="#9fb0c0">reserved but empty</text>
+    <rect x="520" y="92" width="15" height="15" rx="2" fill="#8b6cf0"/>
+    <text x="541" y="104" fill="#9fb0c0">paged block, committed on demand</text>
+  </g>
+
+  <!-- ================= TOP BAR: CONTIGUOUS ================= -->
+  <text x="40" y="150" fill="#c4d0dc" font-size="15.5" font-weight="600">Contiguous, reserve 16k per agent</text>
+  <text x="40" y="171" fill="#e5757a" font-size="13.5">8 requested, 4 admitted — the 5th agent needs 2.24 GB, only ~1.0 GB is left</text>
+
+  <!-- weights -->
+  <rect x="60" y="182" width="302.5" height="86" rx="5" fill="#f0913c"/>
+  <text x="211" y="230" fill="#3a2410" font-size="14" font-weight="700" text-anchor="middle">weights</text>
+  <text x="211" y="249" fill="#5a3714" font-size="12.5" text-anchor="middle">5.5 GB</text>
+
+  <!-- 4 reserved slots, each 2.24 GB = 123.2px, green 0.42 GB = 23.1px -->
+  <!-- slot 1 -->
+  <rect x="362.5" y="182" width="123.2" height="86" rx="5" fill="url(#empty)" stroke="#4a5a6a" stroke-width="1.4"/>
+  <rect x="362.5" y="182" width="23.1" height="86" rx="0" fill="#4ec97a"/>
+  <text x="424" y="290" fill="#8ea0b2" font-size="12" text-anchor="middle">a1</text>
+  <!-- slot 2 -->
+  <rect x="485.7" y="182" width="123.2" height="86" fill="url(#empty)" stroke="#4a5a6a" stroke-width="1.4"/>
+  <rect x="485.7" y="182" width="23.1" height="86" fill="#4ec97a"/>
+  <text x="547" y="290" fill="#8ea0b2" font-size="12" text-anchor="middle">a2</text>
+  <!-- slot 3 -->
+  <rect x="608.9" y="182" width="123.2" height="86" fill="url(#empty)" stroke="#4a5a6a" stroke-width="1.4"/>
+  <rect x="608.9" y="182" width="23.1" height="86" fill="#4ec97a"/>
+  <text x="670" y="290" fill="#8ea0b2" font-size="12" text-anchor="middle">a3</text>
+  <!-- slot 4 -->
+  <rect x="732.1" y="182" width="123.2" height="86" rx="5" fill="url(#empty)" stroke="#4a5a6a" stroke-width="1.4"/>
+  <rect x="732.1" y="182" width="23.1" height="86" fill="#4ec97a"/>
+  <text x="793" y="290" fill="#8ea0b2" font-size="12" text-anchor="middle">a4</text>
+
+  <!-- admission wall -->
+  <line x1="855.3" y1="172" x2="855.3" y2="278" stroke="#e5484d" stroke-width="3" stroke-dasharray="6 4"/>
+  <text x="861" y="200" fill="#e5484d" font-size="12.5" font-weight="700">admission</text>
+  <text x="861" y="216" fill="#e5484d" font-size="12.5" font-weight="700">wall</text>
+
+  <!-- ghost agents 5-8 -->
+  <rect x="862" y="182" width="76" height="86" rx="5" fill="none" stroke="#3a4652" stroke-width="1.3" stroke-dasharray="4 4"/>
+  <text x="900" y="230" fill="#5a6674" font-size="12.5" text-anchor="middle">a5–a8</text>
+  <text x="900" y="248" fill="#5a6674" font-size="11.5" text-anchor="middle">no room</text>
+
+  <!-- budget bracket top -->
+  <line x1="362.5" y1="305" x2="912.5" y2="305" stroke="#4a5a6a" stroke-width="1.2"/>
+  <text x="637" y="322" fill="#8ea0b2" font-size="12.5" text-anchor="middle">10 GB KV budget · reserved 9.0 GB, live 3.4 GB — 63% wasted</text>
+
+  <!-- ================= BOTTOM BAR: PAGED ================= -->
+  <text x="40" y="380" fill="#c4d0dc" font-size="15.5" font-weight="600">Paged, 16-token blocks committed on demand</text>
+  <text x="40" y="401" fill="#7dc79a" font-size="13.5">all 8 agents admitted — memory grows with real use, not worst case</text>
+
+  <!-- weights -->
+  <rect x="60" y="412" width="302.5" height="86" rx="5" fill="#f0913c"/>
+  <text x="211" y="460" fill="#3a2410" font-size="14" font-weight="700" text-anchor="middle">weights</text>
+  <text x="211" y="479" fill="#5a3714" font-size="12.5" text-anchor="middle">5.5 GB</text>
+
+  <!-- 8 paged stacks, each 0.42 GB = 23.1px, gap 3px, blocks as horizontal segments -->
+  <g>
+    <!-- a1 -->
+    <g>
+      <rect x="365" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="367" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="367" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="367" y="444" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="367" y="458" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="367" y="472" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+    <!-- a2 -->
+    <g>
+      <rect x="391" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="393" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="393" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="393" y="444" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="393" y="458" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="393" y="472" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+    <!-- a3 -->
+    <g>
+      <rect x="417" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="419" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="419" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="419" y="444" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="419" y="458" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+    <!-- a4 -->
+    <g>
+      <rect x="443" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="445" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="445" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="445" y="444" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="445" y="458" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="445" y="472" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+    <!-- a5 -->
+    <g>
+      <rect x="469" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="471" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="471" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="471" y="444" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+    <!-- a6 -->
+    <g>
+      <rect x="495" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="497" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="497" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="497" y="444" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="497" y="458" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="497" y="472" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+    <!-- a7 -->
+    <g>
+      <rect x="521" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="523" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="523" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="523" y="444" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="523" y="458" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+    <!-- a8 -->
+    <g>
+      <rect x="547" y="412" width="20" height="86" rx="2" fill="#241d3f" stroke="#4a3f75" stroke-width="1"/>
+      <rect x="549" y="416" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="549" y="430" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="549" y="444" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="549" y="458" width="16" height="12" fill="#8b6cf0"/>
+      <rect x="549" y="472" width="16" height="12" fill="#8b6cf0"/>
+    </g>
+  </g>
+  <text x="466" y="516" fill="#8ea0b2" font-size="12" text-anchor="middle">a1 … a8 · one partial block of slack each</text>
+
+  <!-- free headroom -->
+  <rect x="570" y="412" width="342.5" height="86" rx="5" fill="#123021" stroke="#2f6f4a" stroke-width="1.4"/>
+  <text x="741" y="452" fill="#4ec97a" font-size="15" font-weight="700" text-anchor="middle">≈ 6.6 GB still free</text>
+  <text x="741" y="472" fill="#7dc79a" font-size="12.5" text-anchor="middle">available to any agent that grows</text>
+
+  <!-- budget bracket bottom -->
+  <line x1="362.5" y1="535" x2="912.5" y2="535" stroke="#2f6f4a" stroke-width="1.2"/>
+  <text x="637" y="552" fill="#8ea0b2" font-size="12.5" text-anchor="middle">10 GB KV budget · committed 3.4 GB, live 3.4 GB — under 1% wasted</text>
+
+  <text x="40" y="600" fill="#6f8093" font-size="12">FP16 KV at 0.14 MB per token per agent · 16 GB VRAM, 5.5 GB weights resident, ~10 GB for KV · modeled from the measured decode step</text>
+</svg>
