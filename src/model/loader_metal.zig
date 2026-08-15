@@ -203,7 +203,11 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
     const ssm_dt_rank = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.time_step_rank", .{prefix}) catch "") orelse 0;
     const ssm_n_group = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.ssm.group_count", .{prefix}) catch "") orelse 0;
     const full_attn_interval = gf.getU32(std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{prefix}) catch "") orelse
-        if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
+        // Muse Glimmer declares a per-layer `sliding_window_pattern` bool array
+        // (true=SWA, false=global) instead of an interval scalar. The pattern is
+        // regular — global attention every 4th layer (layers 3,7,...,51; a 3:1
+        // SWA:global ratio) — so the interval is 4.
+        if (arch == .muse_glimmer) @as(u32, 4) else if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
 
     const rope_freq_base: f32 = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);
@@ -271,6 +275,10 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         .final_logit_softcapping = blk: {
             const key4 = std.fmt.bufPrint(&key_buf, "{s}.final_logit_softcapping", .{prefix}) catch break :blk @as(f32, 0.0);
             break :blk gf.getF32(key4) orelse 0.0;
+        },
+        .logit_scale = blk: {
+            const lsk = std.fmt.bufPrint(&key_buf, "{s}.logit_scale", .{prefix}) catch break :blk @as(f32, 0.0);
+            break :blk gf.getF32(lsk) orelse 0.0;
         },
         .attn_scale = blk: {
             const key5 = std.fmt.bufPrint(&key_buf, "{s}.attention.scale", .{prefix}) catch break :blk @as(f32, 0.0);
