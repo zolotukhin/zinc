@@ -26483,7 +26483,7 @@ fn acquireLayerCommand(
 fn canUseDenseSharedDecodeCommand(engine: *const InferenceEngine) bool {
     const cfg = engine.config;
     switch (cfg.architecture) {
-        .gemma, .qwen2 => {},
+        .gemma, .qwen2, .muse_glimmer => {},
         else => return false,
     }
     if (cfg.n_experts != 0) return false;
@@ -26493,7 +26493,10 @@ fn canUseDenseSharedDecodeCommand(engine: *const InferenceEngine) bool {
         engine.dense_gemma_q4k_geglu_validation_enabled) return false;
 
     for (engine.layer_tensors) |lt| {
-        if (lt.attn_gate != null) return false;
+        // Muse Glimmer legitimately carries a per-layer attn_gate; its gate +
+        // QK-norm dispatches are recorded into the grouped command buffer with
+        // full barrier coverage, so grouping stays math-identical for it.
+        if (lt.attn_gate != null and cfg.architecture != .muse_glimmer) return false;
         if (lt.attn_q_bias != null or lt.attn_k_bias != null or
             lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
     }
