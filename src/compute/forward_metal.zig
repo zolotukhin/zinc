@@ -6268,7 +6268,51 @@ fn shouldDefaultDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
     // dim guard — we drop the dim guard for .qwen2 dense and keep it for
     // Gemma where the kernel was originally tuned for hidden_dim=5376.
     if (cfg.architecture == .qwen2 and cfg.n_experts == 0) return true;
+    if (cfg.architecture == .muse_glimmer and cfg.n_experts == 0) return true;
     return cfg.architecture == .gemma and cfg.n_experts == 0 and cfg.hidden_dim >= 5000;
+}
+
+/// Muse Glimmer's batched prefill slice. Unlike the generic dense path it
+/// permits the per-layer attention gate, QK-norm, post-attn/post-FFN norms, and
+/// the RoPE-on-SWA / NoPE-on-global window pattern — all applied in-batch by the
+/// prefillBatched layer body. Every unsupported case falls back to per-token.
+fn canUseMuseGlimmerBatchedPrefill(engine: *const InferenceEngine) bool {
+    const cfg = engine.config;
+    if (cfg.architecture != .muse_glimmer or cfg.n_experts != 0) return false;
+    if (cfg.ssm_d_inner > 0) return false;
+    if (engine.private_decode_buffers) return false;
+    if (engine.attn_sink_values != null) return false;
+    if (engine.gemm_q4k_pipe.handle == null or
+        engine.gemm_q6k_pipe.handle == null or
+        engine.swiglu_batched_pipe.handle == null or
+        engine.sigmoid_mul_pipe.handle == null)
+    {
+        return false;
+    }
+    // The batched path drives the LM head through dispatchLmHeadWithInputOffset
+    // (same as decode), so its quant (muse: Q5_K) need not be a batched-GEMM type.
+
+    for (0..cfg.n_layers) |i| {
+        const lt = engine.layer_tensors[i];
+        const gate = lt.attn_gate orelse return false; // muse gates every layer
+        if (lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+        const q = lt.attn_q orelse return false;
+        const k = lt.attn_k orelse return false;
+        const o = lt.attn_output orelse return false;
+        const ffn_gate = lt.ffn_gate orelse return false;
+        const up = lt.ffn_up orelse return false;
+        const down = lt.ffn_down orelse return false;
+        const attn = resolveLayerAttentionParams(cfg, lt, cfg.hidden_dim, engine.kv_cache_q8) catch return false;
+        for ([_]*const metal_loader.LoadedTensor{ q, k, o, gate, ffn_gate, up, down }) |t| {
+            if (!supportsBatchedGemmQuant(engine, t.info.type_)) return false;
+        }
+        if (!attn.use_k_as_v) {
+            const v = lt.attn_v orelse return false;
+            if (!supportsBatchedGemmQuant(engine, v.info.type_)) return false;
+        }
+    }
+    return true;
 }
 
 fn canUseDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
@@ -6343,6 +6387,7 @@ fn canUseBatchedPrefill(engine: *const InferenceEngine) bool {
         if (cfg.n_experts > 0) return canUseGemmaBatchedPrefill(engine);
         return canUseDenseGemmaBatchedPrefill(engine);
     }
+    if (cfg.architecture == .muse_glimmer) return canUseMuseGlimmerBatchedPrefill(engine);
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gpt_oss) return false;
@@ -10366,6 +10411,14 @@ pub const InferenceEngine = struct {
                 if (embedding_scale != 1.0) {
                     for (out_slice) |*value| value.* *= embedding_scale;
                 }
+                // Muse Glimmer: weightless RMSNorm on embeddings before the
+                // residual stream (mirrors loadTokenEmbeddingInto for the batched path).
+                if (cfg.architecture == .muse_glimmer) {
+                    var sum_sq: f64 = 0;
+                    for (out_slice) |v| sum_sq += @as(f64, v) * @as(f64, v);
+                    const inv_rms: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + @as(f64, cfg.rms_norm_eps)));
+                    for (out_slice) |*value| value.* *= inv_rms;
+                }
             }
         }
 
@@ -10376,7 +10429,17 @@ pub const InferenceEngine = struct {
 
         for (0..cfg.n_layers) |layer_idx| {
             const lt = self.layer_tensors[layer_idx];
-            const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, self.kv_cache_q8);
+            var attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, self.kv_cache_q8);
+            if (cfg.architecture == .muse_glimmer) {
+                // Global layers (every 4th) use NoPE + full attention; SWA layers
+                // keep RoPE + the sliding window. Matches runDecodeStep.
+                if ((layer_idx + 1) % 4 == 0) {
+                    attn.rope_dim = 0;
+                    attn.sliding_window_size = 0;
+                } else {
+                    attn.sliding_window_size = cfg.sliding_window_size;
+                }
+            }
             const q_t = lt.attn_q.?;
             const k_t = lt.attn_k.?;
             const v_t = if (attn.use_k_as_v) k_t else lt.attn_v.?;
@@ -10390,6 +10453,14 @@ pub const InferenceEngine = struct {
             dispatchGemmBatchedOnCmd(self, &cmd, k_t, &scratch.norm, &scratch.k, attn.kv_dim, hidden_dim, n_tokens);
             if (!attn.use_k_as_v) {
                 dispatchGemmBatchedOnCmd(self, &cmd, v_t, &scratch.norm, &scratch.v, attn.kv_dim, hidden_dim, n_tokens);
+            }
+            // Muse Glimmer attention gate: project sigmoid gate from attn_norm output
+            // now (scratch.norm is fresh), apply it to attn_out after flash. Mirrors
+            // the Qwen route-packed prefix path; scratch.gate is free until the FFN.
+            if (cfg.architecture == .muse_glimmer) {
+                if (lt.attn_gate) |gate_t| {
+                    dispatchGemmBatchedOnCmd(self, &cmd, gate_t, &scratch.norm, &scratch.gate, attn.q_dim, hidden_dim, n_tokens);
+                }
             }
             profileBarrier(&cmd, profile, .full_attn);
 
@@ -10468,6 +10539,15 @@ pub const InferenceEngine = struct {
                 );
             }
             profileBarrier(&cmd, profile, .full_attn);
+
+            // Muse Glimmer attention output gate: attn_out *= sigmoid(gate) where
+            // gate = attn_gate @ attn_norm_out was projected above into scratch.gate.
+            if (cfg.architecture == .muse_glimmer) {
+                if (lt.attn_gate != null) {
+                    dispatchSigmoidMulOnCmd(self, &cmd, &scratch.gate, &scratch.attn_out, n_tokens * attn.q_dim);
+                    profileBarrier(&cmd, profile, .full_attn);
+                }
+            }
 
             dispatchGemmBatchedOnCmd(self, &cmd, o_t, &scratch.attn_out, &scratch.down, hidden_dim, attn.q_dim, n_tokens);
             profileBarrier(&cmd, profile, .full_attn);
