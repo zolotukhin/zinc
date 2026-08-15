@@ -1,0 +1,67 @@
+<svg viewBox="0 0 1080 620" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" role="img" aria-labelledby="t d">
+<title id="t">The foreground agent decodes far faster than a human reads, so a small duty cycle keeps its stream ahead of the reader</title>
+<desc id="d">Left panel: the reading buffer for a foreground coding agent on one RX 9070 XT running Qwen3.5-9B, measured in seconds of reading the user is ahead, over a 30-second window. The agent decodes at 39 tokens per second per slot while the reader consumes about 5.3 tokens per second, so one second of residency buffers about 6.4 seconds of reading. Holding a decode slot for one second and releasing it for six, a 14 percent duty cycle, the buffer sawtooths between roughly 0.4 and 6.7 seconds of reading and never reaches the stall line at zero. Right panel: delivered decode rate for three policies, dedicated slot at 39, fair-share VTC at 26, and read-paced Andes at 5.4 tokens per second, against the dashed reading need of 5.3 tokens per second; the first two tower far above what the user can read, and that surplus is freed for background throughput.</desc>
+<rect x="0" y="0" width="1080" height="620" rx="14" fill="#141a2e"/>
+<defs><linearGradient id="buf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4fd0a6" stop-opacity="0.40"/><stop offset="1" stop-color="#4fd0a6" stop-opacity="0.06"/></linearGradient></defs>
+<text x="34" y="42" fill="#eaf0ff" font-size="22" font-weight="700">Reading speed, not throughput, is the ceiling the foreground agent needs</text>
+<text x="34" y="66" fill="#8aa0c0" font-size="12.5">One RX 9070 XT, Qwen3.5-9B. A resident decode slot emits ~39 tok/s; an adult reads non-fiction at ~5.3 tok/s (238 wpm, Brysbaert 2019).</text>
+<text x="34" y="83" fill="#8aa0c0" font-size="12.5">So 1 second of decode buffers ~6.4 seconds of reading, and the foreground agent needs only ~14% of a slot to never let the reader wait.</text>
+
+<text x="95" y="112" fill="#eaf0ff" font-size="13.5" font-weight="600">Reading buffer of the foreground agent (seconds of reading the user is ahead)</text>
+<line x1="95" y1="430.0" x2="655" y2="430.0" stroke="#222a49" stroke-width="1"/>
+<text x="87" y="433.5" fill="#66789e" font-size="10" text-anchor="end">0</text>
+<line x1="95" y1="367.5" x2="655" y2="367.5" stroke="#222a49" stroke-width="1"/>
+<text x="87" y="371.0" fill="#66789e" font-size="10" text-anchor="end">2</text>
+<line x1="95" y1="305.0" x2="655" y2="305.0" stroke="#222a49" stroke-width="1"/>
+<text x="87" y="308.5" fill="#66789e" font-size="10" text-anchor="end">4</text>
+<line x1="95" y1="242.5" x2="655" y2="242.5" stroke="#222a49" stroke-width="1"/>
+<text x="87" y="246.0" fill="#66789e" font-size="10" text-anchor="end">6</text>
+<line x1="95" y1="180.0" x2="655" y2="180.0" stroke="#222a49" stroke-width="1"/>
+<text x="87" y="183.5" fill="#66789e" font-size="10" text-anchor="end">8</text>
+
+<line x1="95" y1="430" x2="95" y2="180.0" stroke="#33406a" stroke-width="1.2"/>
+<line x1="95" y1="430" x2="655" y2="430" stroke="#33406a" stroke-width="1.2"/>
+<line x1="95" y1="430" x2="655" y2="430" stroke="#ef7361" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="655" y="424.0" fill="#ef7361" font-size="10.5" text-anchor="end">stall line (buffer empty, reader waits)</text>
+<polygon points="95.0,430.0 95.0,430.0 113.7,230.8 225.7,418.3 244.3,219.1 356.3,406.6 375.0,207.4 487.0,394.9 505.7,195.8 617.7,383.3 636.3,184.1 655.0,215.3 655.0,430.0" fill="url(#buf)"/>
+<polyline points="95.0,430.0 113.7,230.8 225.7,418.3 244.3,219.1 356.3,406.6 375.0,207.4 487.0,394.9 505.7,195.8 617.7,383.3 636.3,184.1 655.0,215.3" fill="none" stroke="#4fd0a6" stroke-width="2.6" stroke-linejoin="round"/>
+<text x="95.0" y="448.0" fill="#66789e" font-size="10" text-anchor="middle">0s</text>
+<text x="281.7" y="448.0" fill="#66789e" font-size="10" text-anchor="middle">10s</text>
+<text x="468.3" y="448.0" fill="#66789e" font-size="10" text-anchor="middle">20s</text>
+<text x="655.0" y="448.0" fill="#66789e" font-size="10" text-anchor="middle">30s</text>
+
+<text x="375" y="464" fill="#8aa0c0" font-size="10.5" text-anchor="middle">wall-clock seconds</text>
+<text x="95" y="470" fill="#66789e" font-size="10">decode slot held:</text>
+<rect x="95.0" y="476" width="18.7" height="10" rx="2" fill="#e8b84b"/>
+<rect x="225.7" y="476" width="18.7" height="10" rx="2" fill="#e8b84b"/>
+<rect x="356.3" y="476" width="18.7" height="10" rx="2" fill="#e8b84b"/>
+<rect x="487.0" y="476" width="18.7" height="10" rx="2" fill="#e8b84b"/>
+<rect x="617.7" y="476" width="18.7" height="10" rx="2" fill="#e8b84b"/>
+<text x="661.0" y="485" fill="#66789e" font-size="9.5">1s on / 6s off</text>
+<text x="236.9" y="208.1" fill="#4fd0a6" font-size="10.5" font-weight="600">buffer refills to ~6.4s in one 1s burst</text>
+<text x="750" y="112" fill="#eaf0ff" font-size="13.5" font-weight="600">Delivered rate vs what the reader needs</text>
+<line x1="750" y1="430" x2="1024" y2="430" stroke="#33406a" stroke-width="1.2"/>
+<rect x="760" y="197.9" width="62" height="232.1" rx="4" fill="#e8b84b"/>
+<text x="791.0" y="189.9" fill="#e8b84b" font-size="12.5" text-anchor="middle" font-weight="700">39</text>
+<text x="791.0" y="446.0" fill="#8aa0c0" font-size="10.5" text-anchor="middle">Dedicated</text>
+<text x="791.0" y="459.0" fill="#8aa0c0" font-size="10.5" text-anchor="middle">slot</text>
+<rect x="856" y="275.2" width="62" height="154.8" rx="4" fill="#7f9cf5"/>
+<text x="887.0" y="267.2" fill="#7f9cf5" font-size="12.5" text-anchor="middle" font-weight="700">26</text>
+<text x="887.0" y="446.0" fill="#8aa0c0" font-size="10.5" text-anchor="middle">Fair-share</text>
+<text x="887.0" y="459.0" fill="#8aa0c0" font-size="10.5" text-anchor="middle">(VTC)</text>
+<rect x="952" y="397.9" width="62" height="32.1" rx="4" fill="#4fd0a6"/>
+<text x="983.0" y="389.9" fill="#4fd0a6" font-size="12.5" text-anchor="middle" font-weight="700">5.4</text>
+<text x="983.0" y="446.0" fill="#8aa0c0" font-size="10.5" text-anchor="middle">Read-paced</text>
+<text x="983.0" y="459.0" fill="#8aa0c0" font-size="10.5" text-anchor="middle">(Andes)</text>
+<line x1="750" y1="398.5" x2="1022" y2="398.5" stroke="#ef7361" stroke-width="2" stroke-dasharray="6 4"/>
+<line x1="750" y1="130" x2="774" y2="130" stroke="#ef7361" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="780" y="133.5" fill="#ef7361" font-size="10.5">reading need ~5.3 tok/s (238 wpm)</text>
+<text x="730" y="286.0" fill="#8aa0c0" font-size="10.5" text-anchor="end">surplus above the</text>
+<text x="730" y="299.0" fill="#8aa0c0" font-size="10.5" text-anchor="end">dashed reading line</text>
+<text x="730" y="312.0" fill="#8aa0c0" font-size="10.5" text-anchor="end">is buffer the reader</text>
+<text x="730" y="325.0" fill="#8aa0c0" font-size="10.5" text-anchor="end">cannot use yet, so it</text>
+<text x="730" y="338.0" fill="#8aa0c0" font-size="10.5" text-anchor="end">is free for background</text>
+<text x="730" y="351.0" fill="#8aa0c0" font-size="10.5" text-anchor="end">throughput</text>
+<line x1="34" y1="556" x2="1046" y2="556" stroke="#2a3358" stroke-width="1"/>
+<text x="540" y="580" fill="#66789e" font-size="10" text-anchor="middle">The foreground stream only has to stay ahead of the eye. Every token delivered faster than ~5.3 tok/s is buffer the reader has not reached, and on one card that surplus is decode time a background agent could use.</text>
+</svg>

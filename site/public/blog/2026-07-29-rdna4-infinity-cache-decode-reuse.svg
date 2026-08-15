@@ -1,0 +1,95 @@
+<svg viewBox="0 0 1000 620" width="1000" height="620" xmlns="http://www.w3.org/2000/svg" font-family="'Inter','Segoe UI',system-ui,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f141a"/>
+      <stop offset="1" stop-color="#0b1116"/>
+    </linearGradient>
+    <marker id="arrAmber" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 Z" fill="#f0913c"/>
+    </marker>
+    <marker id="arrCyan" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 Z" fill="#35d0e0"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1000" height="620" fill="url(#bg)"/>
+
+  <text x="40" y="46" fill="#e7eef5" font-size="27" font-weight="700">A 64 MB Infinity Cache against a 5.5 GB decode read</text>
+  <text x="40" y="74" fill="#8ea0b2" font-size="15.5">RDNA4 (RX 9070 XT) memory path during Qwen3.5-9B decode: what the on-die cache can and cannot hold</text>
+
+  <!-- LEFT: memory hierarchy schematic -->
+  <g>
+    <text x="40" y="118" fill="#c4d0dc" font-size="14.5" font-weight="600" letter-spacing="0.5">THE READ PATH</text>
+
+    <!-- Compute tier -->
+    <rect x="40" y="135" width="470" height="66" rx="9" fill="#18212b" stroke="#2c3a48" stroke-width="1.5"/>
+    <text x="60" y="166" fill="#e7eef5" font-size="17" font-weight="600">Compute units + WMMA</text>
+    <text x="60" y="189" fill="#8ea0b2" font-size="13.5">consume weights and KV, then discard them</text>
+
+    <!-- Infinity Cache tier -->
+    <rect x="40" y="270" width="470" height="66" rx="9" fill="#0e2b30" stroke="#35d0e0" stroke-width="1.8"/>
+    <text x="60" y="301" fill="#35d0e0" font-size="17" font-weight="700">Infinity Cache · 64 MB SRAM</text>
+    <text x="60" y="324" fill="#7bc6d2" font-size="13.5">only pays off on bytes read more than once</text>
+
+    <!-- GDDR tier -->
+    <rect x="40" y="405" width="470" height="66" rx="9" fill="#2a1c10" stroke="#f0913c" stroke-width="1.8"/>
+    <text x="60" y="436" fill="#f0913c" font-size="17" font-weight="700">GDDR6 · 16 GB · 640 GB/s</text>
+    <text x="60" y="459" fill="#d6a877" font-size="13.5">every weight byte lives here, read once per token</text>
+
+    <!-- Weight stream: straight through, bypassing cache -->
+    <line x1="120" y1="405" x2="120" y2="201" stroke="#f0913c" stroke-width="3.2" marker-end="url(#arrAmber)"/>
+    <rect x="138" y="350" width="156" height="46" rx="7" fill="#1a1207" stroke="#8a5a2c" stroke-width="1"/>
+    <text x="216" y="370" fill="#f0913c" font-size="13" font-weight="600" text-anchor="middle">weight stream 5.5 GB</text>
+    <text x="216" y="388" fill="#d6a877" font-size="12" text-anchor="middle">no reuse, cache skipped</text>
+
+    <!-- Shared-prefix KV: loops through cache -->
+    <line x1="430" y1="405" x2="430" y2="338" stroke="#35d0e0" stroke-width="3.2" marker-end="url(#arrCyan)"/>
+    <line x1="430" y1="270" x2="430" y2="203" stroke="#35d0e0" stroke-width="3.2" marker-end="url(#arrCyan)"/>
+    <path d="M462 300 q40 0 40 -34 q0 -34 -40 -34" fill="none" stroke="#35d0e0" stroke-width="2.6" marker-end="url(#arrCyan)" stroke-dasharray="5 4"/>
+    <text x="512" y="270" fill="#7ee0a8" font-size="12.5" font-weight="600">8 agents,</text>
+    <text x="512" y="287" fill="#7ee0a8" font-size="12.5" font-weight="600">1 GDDR read</text>
+    <text x="360" y="392" fill="#35d0e0" font-size="12.5" text-anchor="middle" font-weight="600">shared-prefix KV</text>
+  </g>
+
+  <!-- RIGHT: working set vs cache capacity -->
+  <g>
+    <text x="560" y="118" fill="#c4d0dc" font-size="14.5" font-weight="600" letter-spacing="0.5">WORKING SET vs THE 64 MB LINE</text>
+
+    <!-- reference line for 64 MB -->
+    <line x1="560" y1="150" x2="560" y2="455" stroke="#35d0e0" stroke-width="2" stroke-dasharray="4 4"/>
+    <text x="566" y="146" fill="#35d0e0" font-size="12.5" font-weight="600">64 MB cache</text>
+
+    <!-- bars: log-ish scale, hand-placed widths -->
+    <!-- weight stream -->
+    <text x="560" y="182" fill="#e7eef5" font-size="14" font-weight="600">Weight stream</text>
+    <rect x="560" y="190" width="392" height="26" rx="4" fill="#f0913c"/>
+    <text x="944" y="208" fill="#1a1207" font-size="13" font-weight="700" text-anchor="end">5.5 GB · 88x the cache</text>
+
+    <!-- private KV -->
+    <text x="560" y="246" fill="#e7eef5" font-size="14" font-weight="600">Private KV, one agent at 6,900 tokens</text>
+    <rect x="560" y="254" width="300" height="26" rx="4" fill="#5b6b7d"/>
+    <text x="852" y="272" fill="#0f141a" font-size="13" font-weight="700" text-anchor="end">1.0 GB · 16x</text>
+
+    <!-- shared prefix 400 -->
+    <text x="560" y="310" fill="#e7eef5" font-size="14" font-weight="600">Shared prompt KV, 400 tokens</text>
+    <rect x="560" y="318" width="54" height="26" rx="4" fill="#7ee0a8"/>
+    <text x="624" y="337" fill="#7ee0a8" font-size="13" font-weight="700">59 MB · fits</text>
+
+    <!-- shared prefix 2000 -->
+    <text x="560" y="374" fill="#e7eef5" font-size="14" font-weight="600">Shared prompt KV, 2,000 tokens</text>
+    <rect x="560" y="382" width="150" height="26" rx="4" fill="#356b5a"/>
+    <rect x="560" y="382" width="54" height="26" rx="4" fill="#7ee0a8"/>
+    <text x="718" y="401" fill="#9fb0c0" font-size="13" font-weight="700">294 MB · spills, ~445 tok stay hot</text>
+
+    <!-- capacity callout -->
+    <rect x="560" y="428" width="392" height="52" rx="8" fill="#0e2b30" stroke="#35d0e0" stroke-width="1.3"/>
+    <text x="576" y="450" fill="#35d0e0" font-size="14" font-weight="700">64 MB &#247; 147 KB per KV token &#8776; 445 tokens</text>
+    <text x="576" y="470" fill="#7bc6d2" font-size="12.5">the longest shared prefix the cache can keep resident</text>
+  </g>
+
+  <!-- footnote -->
+  <line x1="40" y1="520" x2="960" y2="520" stroke="#24303c" stroke-width="1"/>
+  <text x="40" y="546" fill="#7f92a4" font-size="12.5">Modeled for Qwen3.5-9B Q4_K_M on one RX 9070 XT: 5.5 GB weight stream per decode step, 147 KB per fp16 KV token, 640 GB/s GDDR6, 64 MB</text>
+  <text x="40" y="566" fill="#7f92a4" font-size="12.5">3rd-gen Infinity Cache. Streaming reads with no reuse gain nothing from a last-level cache; only the shared-prefix KV, read once per agent</text>
+  <text x="40" y="586" fill="#7f92a4" font-size="12.5">in a batched step, has the reuse a 64 MB cache can capture, and only while it stays under 64 MB.</text>
+</svg>

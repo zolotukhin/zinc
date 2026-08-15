@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#161829"/><stop offset="1" stop-color="#232338"/></linearGradient>
+<linearGradient id="coral" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f0766e"/><stop offset="1" stop-color="#d95a53"/></linearGradient>
+<linearGradient id="mint" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#5fd6a0"/><stop offset="1" stop-color="#3fb783"/></linearGradient>
+<linearGradient id="slate" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8a93b8"/><stop offset="1" stop-color="#6f79a0"/></linearGradient>
+<pattern id="cells" width="16" height="25" patternUnits="userSpaceOnUse">
+  <rect x="1" y="1.5" width="14" height="22" rx="2" fill="#2c3050" stroke="#3a3f64" stroke-width="1"/>
+</pattern>
+<style>
+.title{fill:#f2f0fa;font-size:25px;font-weight:780}
+.sub{fill:#a2a6c4;font-size:14px}
+.hd{fill:#f2f0fa;font-size:16.5px;font-weight:760}
+.tick{fill:#8a8fb0;font-size:12.5px}
+.lab{fill:#e4e2f2;font-size:13.5px;font-weight:640}
+.labs{fill:#a2a6c4;font-size:12px}
+.gold{fill:#e8b84b;font-size:13px;font-weight:720}
+.goldb{fill:#e8b84b;font-size:17px;font-weight:800}
+.coral{fill:#f0766e;font-size:13px;font-weight:740}
+.coralb{fill:#f0766e;font-size:18px;font-weight:820}
+.mint{fill:#5fd6a0;font-size:13px;font-weight:740}
+.mintb{fill:#5fd6a0;font-size:18px;font-weight:820}
+.slate{fill:#9aa2c6;font-size:13px;font-weight:740}
+.slateb{fill:#9aa2c6;font-size:18px;font-weight:820}
+.note{fill:#cfd0e4;font-size:13px;font-weight:620}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+</style>
+</defs>
+<rect width="1200" height="760" fill="url(#bg)"/>
+<text x="56" y="52" class="title">Constrained decoding masks the whole vocabulary on every token</text>
+<text x="56" y="78" class="sub">Qwen3.5-9B, 151,936 tokens. The model is mid tool call; the grammar decides which tokens may legally come next.</text>
+<text x="56" y="99" class="sub">Naive engines ask the grammar about every token, each step, on the CPU. Costs are modeled for one RX 9070 XT.</text>
+
+<!-- LEFT PANEL -->
+<rect x="56" y="124" width="536" height="452" rx="12" fill="#1b1d30" stroke="#31344f"/>
+<text x="86" y="158" class="hd">Every decode step, the grammar masks the vocabulary</text>
+
+<rect x="86" y="176" width="476" height="40" rx="8" fill="#262a49" stroke="#3a3f64"/>
+<text x="100" y="201" class="lab mono" fill="#e8b84b">{ &#8220;</text>
+<text x="150" y="201" class="labs">emitted so far &#183; grammar state: expecting a JSON key</text>
+
+<text x="140" y="244" class="labs">the 151,936-token vocabulary, one cell &#8776; 630 tokens</text>
+<rect x="86" y="256" width="480" height="125" fill="url(#cells)"/>
+<rect x="87" y="257.5" width="14" height="22" rx="2" fill="#e8b84b"/>
+<text x="110" y="405" class="gold">legal now: about 12 tokens that continue a quoted key</text>
+<text x="110" y="423" class="labs">less than one cell at this scale &#183; everything grey is forced to minus infinity</text>
+
+<line x1="86" y1="452" x2="566" y2="452" stroke="#4a4e70" stroke-width="1.4"/>
+<line x1="86" y1="452" x2="86" y2="446" stroke="#4a4e70" stroke-width="1.4"/>
+<line x1="566" y1="452" x2="566" y2="446" stroke="#4a4e70" stroke-width="1.4"/>
+<text x="326" y="474" text-anchor="middle" class="note">the naive engine walks all 151,936 tokens, one at a time,</text>
+<text x="326" y="493" text-anchor="middle" class="note">on the CPU, while the GPU waits for the mask</text>
+<text x="86" y="540" class="labs">A context-free grammar tracks a stack, so deciding one token</text>
+<text x="86" y="558" class="labs">can mean walking several stack states. Times 151,936, every token.</text>
+
+<!-- RIGHT PANEL -->
+<rect x="612" y="124" width="532" height="452" rx="12" fill="#1b1d30" stroke="#31344f"/>
+<text x="642" y="158" class="hd">Modeled grammar cost per decode token</text>
+
+<!-- axis 0..3 ms, x0=742 scale 118 px/ms -->
+<line x1="742" y1="440" x2="1112" y2="440" stroke="#4a4e70" stroke-width="1.5"/>
+<line x1="742" y1="440" x2="742" y2="446" stroke="#4a4e70" stroke-width="1.3"/>
+<text x="742" y="464" text-anchor="middle" class="tick">0</text>
+<line x1="860" y1="440" x2="860" y2="446" stroke="#4a4e70" stroke-width="1.3"/>
+<text x="860" y="464" text-anchor="middle" class="tick">1 ms</text>
+<line x1="978" y1="440" x2="978" y2="446" stroke="#4a4e70" stroke-width="1.3"/>
+<text x="978" y="464" text-anchor="middle" class="tick">2 ms</text>
+<line x1="1096" y1="440" x2="1096" y2="446" stroke="#4a4e70" stroke-width="1.3"/>
+<text x="1096" y="464" text-anchor="middle" class="tick">3 ms</text>
+
+<!-- faint off-axis pointer for full decode token -->
+<line x1="1120" y1="180" x2="1120" y2="440" stroke="#8a8fb0" stroke-width="1.2" stroke-dasharray="4 5" opacity="0.6"/>
+<text x="1113" y="176" text-anchor="end" class="labs">whole decode token 25.2 ms, off-axis &#8594;</text>
+
+<!-- Row 1: LM head measured, 1.5 ms -> 177px -->
+<text x="742" y="204" class="lab">LM head + sampling</text>
+<text x="1112" y="204" text-anchor="end" class="slate">measured</text>
+<rect x="742" y="212" width="177" height="30" rx="4" fill="url(#slate)"/>
+<text x="932" y="233" class="slateb">1.5 ms</text>
+<text x="742" y="260" class="labs">one dense GPU pass over the 151,936-row output embedding</text>
+
+<!-- Row 2: naive walk, 2.4 ms -> 283px -->
+<text x="742" y="292" class="lab">naive full-vocabulary walk</text>
+<rect x="742" y="300" width="283" height="30" rx="4" fill="url(#coral)"/>
+<text x="1038" y="321" class="coralb">2.4 ms</text>
+<text x="742" y="348" class="labs"><tspan class="coral">checks all 151,936 tokens</tspan> &#183; same width as the LM head</text>
+
+<!-- Row 3: xgrammar, 0.05 ms -> 6px -->
+<text x="742" y="380" class="lab">XGrammar context-split</text>
+<rect x="742" y="388" width="7" height="30" rx="3" fill="url(#mint)"/>
+<text x="760" y="409" class="mintb">0.05 ms</text>
+<text x="742" y="428" class="labs"><tspan class="mint">most tokens cached</tspan> &#183; a small context-dependent set checked live</text>
+
+<!-- compile note, off per-token path -->
+<rect x="642" y="492" width="472" height="66" rx="8" fill="#222540" stroke="#3a3f64"/>
+<rect x="656" y="504" width="134" height="20" rx="3" fill="none" stroke="#e8b84b" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="723" y="519" text-anchor="middle" class="gold">grammar compile</text>
+<text x="802" y="519" class="labs">~9 ms, paid once per schema</text>
+<text x="656" y="544" class="note">Off the per-token axis. Build the mask cache once, then share it</text>
+<text x="656" y="562" class="note" opacity="0"> </text>
+
+<!-- FOOTER -->
+<text x="56" y="618" class="note">Context-independent tokens, whose legality does not depend on the grammar&#8217;s stack state, are precomputed into a mask cache at compile time.</text>
+<text x="56" y="640" class="note">Only the small context-dependent set is walked at runtime, which is why XGrammar reports up to a 100x speedup and near-zero end-to-end overhead.</text>
+<text x="56" y="662" class="note">In a swarm the eight agents usually share one tool schema, so they share one compiled grammar and one cache: the expensive part is paid once.</text>
+</svg>

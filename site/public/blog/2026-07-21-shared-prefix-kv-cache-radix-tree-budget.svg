@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0c1b1f"/><stop offset="1" stop-color="#11272b"/></linearGradient>
+<linearGradient id="freeband" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#34d399" stop-opacity="0.16"/><stop offset="1" stop-color="#34d399" stop-opacity="0.03"/></linearGradient>
+<style>
+.title{fill:#eef7f6;font-size:27px;font-weight:780}
+.subtitle{fill:#8fb0b2;font-size:14px}
+.leg{fill:#c9dedd;font-size:13px}
+.axl{fill:#c9dedd;font-size:13.5px;font-weight:700}
+.ax{fill:#7fa0a3;font-size:12.5px}
+.emr{fill:#34d399;font-size:12.5px;font-weight:740}
+.vio{fill:#a78bfa;font-size:12.5px;font-weight:740}
+.mut{fill:#9fb4b5;font-size:12px}
+.mk{fill:#eef7f6;font-size:12.5px;font-weight:700}
+.mks{fill:#8fb0b2;font-size:11.5px}
+.note{fill:#dbeceb;font-size:13px;font-weight:620}
+.big{fill:#eef7f6;font-size:15px;font-weight:760}
+</style>
+</defs>
+<rect width="1200" height="800" fill="url(#bg)"/>
+<text x="56" y="52" class="title">Eight coding agents launch with the same 4,000-token prompt</text>
+<text x="56" y="78" class="subtitle">A local swarm on one RX 9070 XT. Each agent boots with an identical system prompt and tool schema, then diverges into its own context.</text>
+<text x="56" y="99" class="subtitle">Store that shared prefix eight times and it eats half the KV budget. Store it once and the card holds the whole swarm with room to spare.</text>
+
+<rect x="56" y="126" width="1088" height="596" rx="12" fill="#0f2429" stroke="#1d3d43"/>
+
+<!-- left legend -->
+<circle cx="96" cy="162" r="6" fill="#34d399"/>
+<text x="110" y="167" class="leg">shared prefix, cached once</text>
+<circle cx="360" cy="162" r="6" fill="#a78bfa"/>
+<text x="374" y="167" class="leg">same prefix duplicated per agent</text>
+<circle cx="700" cy="162" r="6" fill="#9fb4b5"/>
+<text x="714" y="167" class="leg">per-agent unique context</text>
+
+<!-- ===== LEFT: radix tree ===== -->
+<text x="96" y="206" class="axl">What the swarm actually shares</text>
+
+<!-- trunk band -->
+<rect x="96" y="384" width="250" height="52" rx="9" fill="#34d399" fill-opacity="0.18" stroke="#34d399" stroke-width="1.8"/>
+<text x="221" y="408" text-anchor="middle" class="emr">system prompt +</text>
+<text x="221" y="426" text-anchor="middle" class="emr">tool schemas</text>
+<text x="221" y="462" text-anchor="middle" class="mks">4,000 tokens, one copy</text>
+
+<!-- branch node -->
+<circle cx="346" cy="410" r="7" fill="#e7fbf3" stroke="#34d399" stroke-width="2.4"/>
+
+<!-- 8 branches -->
+<g stroke="#9fb4b5" stroke-width="2.2" fill="none" opacity="0.9">
+<path d="M353 410 C 410 410, 420 250, 486 250"/>
+<path d="M353 410 C 410 410, 420 296, 486 296"/>
+<path d="M353 410 C 410 410, 420 341, 486 341"/>
+<path d="M353 410 C 412 410, 430 387, 486 387"/>
+<path d="M353 410 C 412 410, 430 433, 486 433"/>
+<path d="M353 410 C 410 410, 420 479, 486 479"/>
+<path d="M353 410 C 410 410, 420 524, 486 524"/>
+<path d="M353 410 C 410 410, 420 570, 486 570"/>
+</g>
+<!-- suffix caps -->
+<g>
+<rect x="486" y="242" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<rect x="486" y="288" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<rect x="486" y="333" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<rect x="486" y="379" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<rect x="486" y="425" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<rect x="486" y="471" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<rect x="486" y="516" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<rect x="486" y="562" width="86" height="16" rx="4" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+</g>
+<text x="586" y="416" class="mut">8 agents, each about</text>
+<text x="586" y="434" class="mut">2,900 unique tokens</text>
+<text x="96" y="610" class="note">One trunk, eight leaves. A radix tree stores the trunk exactly once.</text>
+
+<!-- divider -->
+<line x1="700" y1="150" x2="700" y2="700" stroke="#1d3d43" stroke-width="1.4"/>
+
+<!-- ===== RIGHT: budget bars ===== -->
+<text x="744" y="206" class="axl">KV budget on a 16 GB card (about 55,000 tokens)</text>
+
+<!-- scale baseline -->
+<line x1="784" y1="660" x2="1120" y2="660" stroke="#2b555c" stroke-width="1.4"/>
+<!-- full-budget reference line at 55,000 tokens -->
+<line x1="784" y1="180" x2="1120" y2="180" stroke="#3a5f65" stroke-width="1.1" stroke-dasharray="5 5"/>
+<text x="1120" y="176" text-anchor="end" class="mks">card full, 8.09 GB</text>
+
+<!-- Bar A: store 8 copies -->
+<!-- suffix 23,200 tok = 202.5px : y 660 -> 457.5 -->
+<rect x="812" y="457.5" width="96" height="202.5" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<!-- duplicated prefix 32,000 tok = 279.3px : y 457.5 -> 178.2 -->
+<rect x="812" y="178.2" width="96" height="279.3" fill="#a78bfa" fill-opacity="0.30" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="860" y="318" text-anchor="middle" class="vio">prefix</text>
+<text x="860" y="336" text-anchor="middle" class="vio">x 8</text>
+<text x="860" y="556" text-anchor="middle" class="mut">suffixes</text>
+<text x="860" y="686" text-anchor="middle" class="mk">store it 8 times</text>
+<text x="860" y="704" text-anchor="middle" class="mks">55,200 tokens, card full</text>
+
+<!-- Bar B: share 1 copy -->
+<!-- suffix 23,200 tok = 202.5px : y 660 -> 457.5 -->
+<rect x="996" y="457.5" width="96" height="202.5" fill="#9fb4b5" fill-opacity="0.32" stroke="#9fb4b5" stroke-width="1.1"/>
+<!-- shared prefix 4,000 tok = 34.9px : y 457.5 -> 422.6 -->
+<rect x="996" y="422.6" width="96" height="34.9" fill="#34d399" fill-opacity="0.34" stroke="#34d399" stroke-width="1.8"/>
+<!-- free 27,800 tok = 242.6px : y 422.6 -> 180 -->
+<rect x="996" y="180" width="96" height="242.6" fill="url(#freeband)" stroke="#34d399" stroke-width="1.3" stroke-dasharray="6 5"/>
+<text x="1044" y="306" text-anchor="middle" class="emr">27,800 tokens</text>
+<text x="1044" y="324" text-anchor="middle" class="emr">free</text>
+<text x="1044" y="446" text-anchor="middle" class="mks" fill="#34d399">prefix x1</text>
+<text x="1044" y="556" text-anchor="middle" class="mut">suffixes</text>
+<text x="1044" y="686" text-anchor="middle" class="mk">share it once</text>
+<text x="1044" y="704" text-anchor="middle" class="mks">27,200 tokens, half the card</text>
+
+<!-- reclaim bracket between bar tops -->
+<path d="M908 178.2 C 946 178.2, 946 300, 984 300" fill="none" stroke="#34d399" stroke-width="1.4" opacity="0.7"/>
+<text x="946" y="250" text-anchor="middle" class="emr" font-size="13.5">reclaimed</text>
+<text x="946" y="268" text-anchor="middle" class="emr" font-size="13.5">4.1 GB</text>
+</svg>
