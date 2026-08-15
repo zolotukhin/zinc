@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" role="img" aria-labelledby="title desc" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial">
+  <title id="title">Why the key cache is quantized per-channel and the value cache per-token</title>
+  <desc id="desc">Two matrices with tokens as rows and channels as columns. The key cache on the left has a few amber outlier channels that must be grouped per-channel; a per-token grouping fails because the outlier sets the range. The value cache on the right is uniform, so per-token grouping is fine.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#101827"/>
+      <stop offset="100%" stop-color="#0a0f1a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="900" height="560" fill="url(#bg)"/>
+
+  <text x="40" y="46" fill="#e8edf5" font-size="21" font-weight="700">The KV cache is two distributions, not one</text>
+  <text x="40" y="70" fill="#8ea0b8" font-size="13">Rows are tokens, columns are channels. Amber columns are the large-magnitude outlier channels.</text>
+
+  <!-- KEY CACHE header -->
+  <text x="70" y="116" fill="#f0a830" font-size="15" font-weight="700">Key cache</text>
+  <text x="70" y="136" fill="#9aacbf" font-size="12">a few channels carry huge magnitudes</text>
+  <text x="190.0" y="170" fill="#6b7d97" font-size="11" text-anchor="middle">channels &#8594;</text>
+  <text x="52" y="268.0" fill="#6b7d97" font-size="11" text-anchor="middle" transform="rotate(-90 52 268.0)">tokens &#8595;</text>
+  <rect x="70" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="100" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="130" y="178" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="160" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="190" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="220" y="178" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="250" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="280" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="70" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="100" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="130" y="208" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="160" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="190" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="220" y="208" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="250" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="280" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="70" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="100" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="130" y="238" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="160" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="190" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="220" y="238" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="250" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="280" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="70" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="100" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="130" y="268" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="160" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="190" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="220" y="268" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="250" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="280" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="70" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="100" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="130" y="298" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="160" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="190" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="220" y="298" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="250" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="280" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="70" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="100" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="130" y="328" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="160" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="190" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="220" y="328" width="27" height="27" rx="3" fill="#f0a830" opacity="0.92"/>
+    <rect x="250" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="280" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+
+  <!-- per-channel bracket (vertical, over outlier column index 2) -->
+  <g stroke="#5dd6a0" stroke-width="2" fill="none">
+    <path d="M 123 174 q -8 0 -8 8 v 172 q 0 8 8 8"/>
+  </g>
+  <text x="110" y="382" fill="#5dd6a0" font-size="12" font-weight="600" text-anchor="middle">quantize per-channel &#10003;</text>
+  <text x="110" y="400" fill="#8ea0b8" font-size="11" text-anchor="middle">each channel gets its own scale</text>
+
+  <!-- per-token fails (horizontal bracket over row 1, X to the right) -->
+  <g stroke="#e5544b" stroke-width="2" fill="none">
+    <path d="M 66 206.5 q 0 -8 8 -8 h 232 q 8 0 8 8"/>
+    <line x1="330" y1="205" x2="346" y2="221"/>
+    <line x1="346" y1="205" x2="330" y2="221"/>
+  </g>
+  <text x="340" y="248" fill="#e5544b" font-size="12" font-weight="600" text-anchor="middle">per-token &#10007;</text>
+  <text x="340" y="266" fill="#8ea0b8" font-size="10.5" text-anchor="middle">outlier sets</text>
+  <text x="340" y="280" fill="#8ea0b8" font-size="10.5" text-anchor="middle">the range</text>
+
+  <!-- VALUE CACHE header -->
+  <text x="500" y="116" fill="#6fb6e8" font-size="15" font-weight="700">Value cache</text>
+  <text x="500" y="136" fill="#9aacbf" font-size="12">uniform across channels</text>
+  <text x="620.0" y="170" fill="#6b7d97" font-size="11" text-anchor="middle">channels &#8594;</text>
+  <rect x="500" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="530" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="560" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="590" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="620" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="650" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="680" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="710" y="178" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="500" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="530" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="560" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="590" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="620" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="650" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="680" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="710" y="208" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="500" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="530" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="560" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="590" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="620" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="650" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="680" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="710" y="238" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="500" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="530" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="560" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="590" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="620" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="650" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="680" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="710" y="268" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="500" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="530" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="560" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="590" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="620" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="650" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="680" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="710" y="298" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="500" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="530" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="560" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="590" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="620" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="650" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="680" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+    <rect x="710" y="328" width="27" height="27" rx="3" fill="#3f6690" opacity="0.42"/>
+
+  <!-- per-token bracket on value (horizontal, over row 3) -->
+  <g stroke="#5dd6a0" stroke-width="2" fill="none">
+    <path d="M 496 266.5 q 0 -8 8 -8 h 232 q 8 0 8 8"/>
+  </g>
+  <text x="620.0" y="382" fill="#5dd6a0" font-size="12" font-weight="600" text-anchor="middle">quantize per-token &#10003;</text>
+  <text x="620.0" y="400" fill="#8ea0b8" font-size="11" text-anchor="middle">no outlier channels to protect</text>
+
+  <!-- footer -->
+  <line x1="40" y1="508" x2="860" y2="508" stroke="#233047" stroke-width="1"/>
+  <text x="40" y="530" fill="#8ea0b8" font-size="11.5">Keys carry per-channel outliers, so they group along channels; values are uniform, so per-token grouping works.</text>
+  <text x="40" y="546" fill="#8ea0b8" font-size="11.5">This asymmetry, measured by KIVI, is why a single uniform low-bit knob falls off a quality cliff.</text>
+</svg>
