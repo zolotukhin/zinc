@@ -76,6 +76,25 @@ dashboard: [zolotukhin.ai/zinc/benchmarks](https://zolotukhin.ai/zinc/benchmarks
 
 ## Start Here
 
+### Install a prebuilt binary
+
+Prebuilt binaries are installed from GitHub Releases. Until the first release is
+published, build from source below. After a release exists, one command works on
+Linux x86_64 (Vulkan) or Apple Silicon macOS (Metal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zolotukhin/zinc/main/scripts/install.sh | bash
+```
+
+The installer downloads the latest published release for your platform, verifies
+its SHA-256 checksum, installs under `~/.local/share/zinc`, and links the binary
+into `~/.local/bin/zinc`. Pin a version with `ZINC_VERSION=vX.Y.Z`. Prefer
+manual? Grab a tarball and `SHA256SUMS.txt` from the
+[releases page](https://github.com/zolotukhin/zinc/releases), or read
+[`scripts/install.sh`](scripts/install.sh) before piping it into `bash`.
+
+### Or build from source
+
 Works the same on Linux (AMD or Intel GPU) and macOS (Apple Silicon):
 
 ```bash

@@ -78,6 +78,41 @@ jobs:
           if truncated:
               diff = diff[:diff_limit]
 
+          # Look up any existing review comment before calling GLM (not just
+          # before posting, as before) so its prior findings can be handed
+          # back to the model: each new push re-reviews the whole current
+          # diff from scratch, so without this the bot has no memory of what
+          # it already flagged and can't say whether a fix actually landed.
+          gh_headers = {
+              "Authorization": f"Bearer {github_token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "zinc-glm-review",
+          }
+          comments_url = f"{github_api}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
+          comments = request_json(comments_url, headers=gh_headers)
+
+          existing = None
+          for comment in comments:
+              if marker in comment.get("body", "") and comment.get("user", {}).get("login") == "github-actions[bot]":
+                  existing = comment
+                  break
+
+          def extract_previous_findings(body):
+              # The posted body is "{marker}\n\n## GLM Review\n\n{content}\n\n
+              # **Verdict:** ...\n". Pull out just the "## Findings" section of
+              # {content} -- never any "## Since Last Review" section that may
+              # precede it, since that is this round's own narrative output,
+              # not a finding, and must not be fed back in as one.
+              match = re.search(r"## Findings\n(.*?)\n\n\*\*Verdict:\*\*", body, re.S)
+              if not match:
+                  return None
+              findings = match.group(1).strip()
+              if not findings or findings == "No issues found":
+                  return None
+              return findings
+
+          previous_findings = extract_previous_findings(existing["body"]) if existing else None
+
           system_prompt = (
               "You are a senior engineer reviewing a GitHub pull request.\n"
               "Return concise, well-formatted markdown.\n"
@@ -91,14 +126,33 @@ jobs:
               "- Fix: <one sentence>\n"
               "Keep each finding tight and actionable.\n"
               "Do not include self-corrections, meta commentary, or chain-of-thought.\n"
-              "If there are no actionable issues, reply exactly: No issues found.\n"
+              "Always include the '## Findings' heading, even when empty. If there are no "
+              "current actionable issues, its body must be exactly: No issues found.\n"
               "At the end, include `Verdict: BLOCK` if any finding is High or Critical.\n"
               "Otherwise include `Verdict: PASS`."
           )
+          if previous_findings:
+              system_prompt += (
+                  "\n\nYou are also given the findings from the previous review round below "
+                  "the diff. Before the '## Findings' section, add:\n"
+                  "## Since Last Review\n"
+                  "- ✅ Resolved: <short title> — <one sentence citing what changed>\n"
+                  "- ❌ Still Open: <short title> — <one sentence on why it is still present>\n"
+                  "One line per previous finding. Be conservative: only mark something Resolved "
+                  "if the current diff clearly shows the issue no longer applies; default to "
+                  "Still Open otherwise. This section is informational only -- it does not "
+                  "replace '## Findings', which must still independently describe the full "
+                  "current state of the code (including anything still open)."
+              )
 
           user_prompt = "Review the following pull request diff.\n\n"
           if truncated:
               user_prompt += f"(Diff truncated to {diff_limit} characters for context limits.)\n\n"
+          if previous_findings:
+              user_prompt += (
+                  "Findings from the previous review round, to check against the current diff:\n\n"
+                  f"{previous_findings}\n\n---\n\n"
+              )
           user_prompt += diff
 
           review_request = {
@@ -134,28 +188,8 @@ jobs:
               verdict = "BLOCK" if re.search(r"(?i)\bcritical\b|\bhigh severity\b|🔴|🟠", content) else "PASS"
 
           body = f"{marker}\n\n## GLM Review\n\n{content}\n\n**Verdict:** {verdict}\n"
-          comments_url = f"{github_api}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
-          comments = request_json(
-              comments_url,
-              headers={
-                  "Authorization": f"Bearer {github_token}",
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "zinc-glm-review",
-              },
-          )
 
-          existing = None
-          for comment in comments:
-              if marker in comment.get("body", "") and comment.get("user", {}).get("login") == "github-actions[bot]":
-                  existing = comment
-                  break
-
-          write_headers = {
-              "Authorization": f"Bearer {github_token}",
-              "Accept": "application/vnd.github+json",
-              "Content-Type": "application/json",
-              "User-Agent": "zinc-glm-review",
-          }
+          write_headers = {**gh_headers, "Content-Type": "application/json"}
 
           if existing is None:
               request_json(comments_url.rsplit("?", 1)[0], method="POST", headers=write_headers, payload={"body": body})

@@ -2854,9 +2854,14 @@ async function runMetalTarget(args) {
     methodology: {
       runner: "ZINC CLI vs llama.cpp on the same Apple Silicon machine",
       benchmark_style: "Four-scenario matrix with same-file baselines",
+      zinc_backend: "Metal",
+      zinc_build: "zig build -Doptimize=ReleaseFast",
+      llama_backend: "Metal",
+      llama_device: "-ngl 999",
       notes: [
         "Hardware: the local Apple Silicon target shown above. ZINC and llama.cpp run on the same machine and use the same GGUF file for each model.",
         "ZINC path: build the current workspace with zig build -Doptimize=ReleaseFast, then measure generation through the ZINC CLI.",
+        "Baseline backend: llama.cpp Metal (-ngl 999) on the same Apple Silicon machine — the same backend as ZINC.",
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
         "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
@@ -3260,10 +3265,15 @@ async function runRdnaTarget(args) {
     methodology: {
       runner: "ZINC server vs llama.cpp server on the same RDNA node",
       benchmark_style: "Four-scenario matrix with same-file baselines",
+      zinc_backend: args.rdnaBackend === "vulkan" ? "Vulkan (RADV, coop_matrix)" : args.rdnaBackend,
+      zinc_build: "zig build -Doptimize=ReleaseFast",
+      llama_backend: /rocm/i.test(args.rdnaLlamaDevice ?? "") ? "ROCm" : "Vulkan",
+      llama_device: args.rdnaLlamaDevice ?? "--device Vulkan1",
       notes: [
         "Hardware: one AMD Radeon AI PRO R9700 benchmark node with 32 GB VRAM and 576 GB/s memory bandwidth. ZINC and llama.cpp run on the same Ubuntu host and use the same GGUF file for each model.",
         "ZINC path: sync the current source tree to the RDNA node, build with zig build -Doptimize=ReleaseFast, then measure generation through one reusable ZINC server per model with RADV cooperative matrix support enabled.",
         `ZINC RDNA backend: ${args.rdnaBackend}. Published RDNA runs default to Vulkan; zinc_rt is opt-in because it is a separate bring-up runtime.`,
+        `Baseline backend: llama.cpp ${/rocm/i.test(args.rdnaLlamaDevice ?? "") ? "ROCm" : "Vulkan"} (${args.rdnaLlamaDevice ?? "--device Vulkan1"}) on the same node — the same backend as ZINC, for an apples-to-apples Vulkan-vs-Vulkan comparison. A separate llama.cpp ROCm reference sweep (llama-bench, -dev ROCm0) is published in the ROCm reference section, not mixed into these server-vs-server numbers.`,
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
         "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
@@ -3577,10 +3587,15 @@ async function runCudaTarget(args) {
     methodology: {
       runner: "ZINC CLI vs llama.cpp on the same CUDA node",
       benchmark_style: "Four-scenario matrix with same-file baselines",
+      zinc_backend: "CUDA (-Dbackend=cuda, NVRTC)",
+      zinc_build: "zig build -Doptimize=ReleaseFast -Dbackend=cuda",
+      llama_backend: "CUDA",
+      llama_device: "CUDA_VISIBLE_DEVICES (UUID-pinned)",
       notes: [
         "Hardware: one NVIDIA GeForce RTX 5090 (32 GB VRAM, 1792 GB/s) benchmark node. ZINC and llama.cpp run on the same host and use the same GGUF file for each model.",
         "ZINC path: sync the current source tree to the CUDA node, build with zig build -Doptimize=ReleaseFast -Dbackend=cuda, then measure generation through the ZINC CLI. CUDA kernels are NVRTC-compiled at runtime for the visible GPU.",
         "GPU selection: the target GPU is pinned by UUID via CUDA_VISIBLE_DEVICES for both engines, because nvidia-smi indices are unreliable on the WSL2 passthrough.",
+        "Baseline backend: llama.cpp CUDA on the same host, the same UUID-pinned GPU as ZINC.",
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
         "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
@@ -3776,9 +3791,14 @@ async function runIntelTarget(args) {
     methodology: {
       runner: "ZINC CLI vs llama.cpp on the same Intel Arc node",
       benchmark_style: "Four-scenario matrix with same-file baselines",
+      zinc_backend: "Vulkan",
+      zinc_build: "zig build -Doptimize=ReleaseFast",
+      llama_backend: "Vulkan",
+      llama_device: "--device Vulkan0",
       notes: [
         "Hardware: one Intel Arc Vulkan benchmark node. ZINC and llama.cpp run on the same Ubuntu host and use the same GGUF file for each model.",
         "ZINC path: optionally sync the current source tree to the Intel node, build with zig build -Doptimize=ReleaseFast, then measure generation through the ZINC CLI.",
+        "Baseline backend: llama.cpp Vulkan (--device Vulkan0) on the same node — the same backend as ZINC.",
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable or fails to start.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
         "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",

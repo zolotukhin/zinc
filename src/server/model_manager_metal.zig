@@ -548,6 +548,7 @@ fn fallbackModelName(model: *const loader_mod.Model) []const u8 {
         .jamba => "jamba",
         .gemma => "gemma",
         .gpt_oss => "gpt-oss-20b",
+        .muse_glimmer => "muse-glimmer",
         .unknown => "zinc-model",
     };
 }

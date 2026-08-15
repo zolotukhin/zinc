@@ -885,6 +885,12 @@ const jsonLd = {
     const provenance = target.provenance ?? {};
     const zincProvenance = provenance.zinc ?? {};
     const llamaCppProvenance = provenance.llama_cpp ?? {};
+    const methodology = target.methodology ?? {};
+    const zincBackend = methodology.zinc_backend ?? null;
+    const llamaBackend = methodology.llama_backend
+      ? `${methodology.llama_backend}${methodology.llama_device ? ` (${methodology.llama_device})` : ''}`
+      : null;
+    const configNotes = Array.isArray(methodology.notes) ? methodology.notes : [];
     const sourceRef = zincProvenance.commit ?? 'main';
     const suiteSourceHref = githubBlobUrl(sourceRef, 'tools/performance_suite.mjs');
     const promptSourceHref = githubBlobUrl(sourceRef, 'tools/performance_suite.mjs', 1502, 1640);
@@ -914,7 +920,7 @@ const jsonLd = {
             )}
           </div>
           <details class="machine-details">
-            <summary>Run info</summary>
+            <summary>Exact configuration</summary>
             <dl class="machine-card">
               <div>
                 <dt>GPU</dt>
@@ -929,22 +935,54 @@ const jsonLd = {
                 <dd>{target.machine.memory ?? 'n/a'}</dd>
               </div>
               <div>
-                <dt>Artifact</dt>
-                <dd>{formatDate(target.generated_at)}</dd>
+                <dt>OS</dt>
+                <dd>{target.machine.os ?? 'n/a'}</dd>
               </div>
+              {zincBackend && (
+                <div>
+                  <dt>ZINC backend</dt>
+                  <dd>{zincBackend}</dd>
+                </div>
+              )}
+              {llamaBackend && (
+                <div>
+                  <dt>llama.cpp backend</dt>
+                  <dd>{llamaBackend}</dd>
+                </div>
+              )}
+              {methodology.zinc_build && (
+                <div class="config-wide">
+                  <dt>Build</dt>
+                  <dd><code>{methodology.zinc_build}</code></dd>
+                </div>
+              )}
               <div>
-                <dt>ZINC</dt>
+                <dt>ZINC commit</dt>
                 <dd title={zincProvenance.version ?? zincProvenance.commit ?? 'n/a'}>
                   {zincProvenance.version ?? formatCommit(zincProvenance.commit)}
                 </dd>
               </div>
               <div>
-                <dt>llama.cpp</dt>
+                <dt>llama.cpp build</dt>
                 <dd title={llamaCppProvenance.version ?? llamaCppProvenance.commit ?? 'n/a'}>
                   {llamaCppProvenance.version ?? formatCommit(llamaCppProvenance.commit)}
                 </dd>
               </div>
+              <div>
+                <dt>Artifact</dt>
+                <dd>{formatDate(target.generated_at)}</dd>
+              </div>
             </dl>
+            {configNotes.length > 0 && (
+              <div class="config-notes">
+                <p class="config-notes-title">Methodology &amp; reproducibility</p>
+                <ul>
+                  {configNotes.map((noteLine) => (
+                    <li>{noteLine}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </details>
         </header>
 
@@ -2070,6 +2108,46 @@ const jsonLd = {
     margin-top: 0.12rem;
     font-size: 0.92rem;
     line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .machine-card .config-wide {
+    grid-column: 1 / -1;
+  }
+
+  .machine-card dd code {
+    font-weight: 600;
+    font-size: 0.82rem;
+    background: color-mix(in srgb, var(--color-border) 30%, transparent);
+    padding: 0.12rem 0.4rem;
+    border-radius: 5px;
+    overflow-wrap: anywhere;
+  }
+
+  .config-notes {
+    margin-top: 0.9rem;
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+    padding-top: 0.7rem;
+  }
+
+  .config-notes-title {
+    margin: 0 0 0.4rem;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .config-notes ul {
+    margin: 0;
+    padding-left: 1.1rem;
+    display: grid;
+    gap: 0.35rem;
+  }
+
+  .config-notes li {
+    font-size: 0.85rem;
+    line-height: 1.45;
     overflow-wrap: anywhere;
   }
 

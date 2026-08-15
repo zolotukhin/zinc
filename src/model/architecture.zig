@@ -189,6 +189,10 @@ pub fn buildDecodeGraphDetailed(config: *const ModelConfig, allocator: std.mem.A
         .qwen2_moe, .gpt_oss => try buildMoeDecodeGraph(config, allocator, gf),
         .qwen35, .mamba, .jamba => try buildMambaDecodeGraph(config, allocator, gf),
         .gemma => if (config.n_experts > 0) try buildGemmaMoeDecodeGraph(config, allocator, gf) else try buildGemmaDecodeGraph(config, allocator, gf),
+        // Muse Glimmer is a dense Gemma-shaped transformer (pre/post norms, SWA,
+        // SwiGLU) with extra gated-attention + QK-norm tensors; the dense Gemma
+        // graph is the closest weight-size model for the profiling report.
+        .muse_glimmer => try buildGemmaDecodeGraph(config, allocator, gf),
         .unknown => error.UnsupportedArchitecture,
     };
 }
