@@ -20,11 +20,12 @@ the batched prefill is validated byte-identical vs the per-token path
 | correctness only (baseline) | 12.8 | 11.9 | generic per-token path |
 | + decode cmd grouping (`36109d3c`) | 16.6 | 16.7 | math-identical; 52 layers → ~1 cmd buffer |
 | + Q6_K fast kernel (cycle 1, `1ed6407d`) | 22.2 | 20.5 | math-identical; down-proj was #1 slow kernel |
-| + batched prefill (cycle 2-3, `239155c8`) | **~125** | 20.5 | layer-major GEMM; weights read once/prompt |
+| + batched prefill (cycle 2-3, `239155c8`) | **125-153** | 20-22 | layer-major GEMM; weights read once/prompt |
 | **reference (llama.cpp)** | **76.5** | **29.3** | target |
 
-Prefill now **exceeds** the reference on batchable prompts (short <~8-token prompts stay
-on the per-token path, where there's little to gain). Decode ≈ 70% of reference.
+Prefill now **exceeds** the reference ~2× on batchable prompts (125 t/s @27 tok, 153 t/s
+@54 tok; short <~8-token prompts stay on the per-token path, where there's little to gain).
+Decode ≈ 75% of reference. Net vs the correctness-only baseline: **prefill ~12×, decode ~1.85×.**
 
 ## Diagnosis (per-kernel profile, `ZINC_METAL_KERNEL_TIMING=1` + byte buckets)
 
