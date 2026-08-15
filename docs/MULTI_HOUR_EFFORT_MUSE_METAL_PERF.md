@@ -72,14 +72,36 @@ small QKV/gate/norm dispatches behind the bandwidth-bound FFN matmuls, so reduci
 count is not the decode lever. Same logic applies to fused gate+up and the Q5_K lm-head
 (`dmmv_q5k_native` is loaded but intentionally unused).
 
+## cycle 4 — speculative decode (`713029fc`) ✅
+
+DFlash (the intended drafter) is infeasible here: it's an EAGLE-style method whose drafter
+is a separate DeepSeek-V4 "DSpark" research model (MoE + hyper-connections + Sinkhorn + LoRA)
+consuming the target's per-layer hidden states — and no such drafter GGUF exists on the box.
+So shipped **model-free prompt-lookup (n-gram) speculative decode** instead, default-on for
+Muse (ZINC_SPEC_DECODE=0 to disable):
+
+- Draft = copy what followed the most recent earlier occurrence of the last 3 tokens.
+- Verify K+1 tokens in ONE batched forward (`InferenceEngine.verifyTokens` → a per-position
+  Q5_K `gemm_q5k` lm-head + CPU argmax tail on the batched-prefill body, gated on the new
+  `verify_argmax_out` field — no change to prefillBatched's signature so the regression tests
+  hold, only the KvStateNotAvailable window widened 2000→2400).
+- Accept the longest confirmed prefix; overwrite rejected-draft KV on the next step.
+- **Greedy speculative decoding is exact** — output byte-identical to per-token (validated on
+  diverse prompts + long gens).
+
+Key finding: a verify is a full batched forward whose cost is ~fixed regardless of small N
+(the batched GEMM's per-pass overhead dominates), so it only pays above ~3 accepted tokens.
+Guarded by an **acceptance-EMA gate + adaptive draft length**: no draft / low recent
+acceptance → the cheap single-token `decodeStep`, so low-repetition text isn't penalized
+(bounded to ~1 startup verify). Measured: copy-heavy (structured / long-context) **1.52×**
+(22.6→34.6 tok/s, 6.8 accepted/verify), open-ended ~1.07×, adversarial short code ~-5.6%.
+
 ## Remaining levers (next)
 
-- **D-struct — speculative decode** is the ONLY structural decode lever left (amortizes the
-  ~15 GiB/token weight read across accepted draft tokens). Blocked: no drafter model present
-  and no spec-decode infrastructure in ZINC — a large, separate feature.
 - **D-kernel — bandwidth:** close the 378→440 GB/s effective gap by reducing barriers that
   prevent independent matmul overlap (delicate; sub-noise per change; ~15% run-to-run
   variance makes iteration unreliable).
+- Batched lm-head verify uses CPU argmax; a GPU per-column argmax would trim a few ms/verify.
 - **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token
   (minor; little to gain).
 - logit_scale before softcap (greedy-invariant; needed only for exact logits / sampling).
