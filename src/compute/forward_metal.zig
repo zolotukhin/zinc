@@ -27191,9 +27191,20 @@ fn runDecodeStep(
             break :blk &hybrid_group_cmd_storage;
         } else null;
 
-        if (is_full_attn) {
+        if (!isSsmLayer(cfg, layer_idx)) {
             if (profile) |p| p.full_attn_layers += 1;
-            const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
+            var attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
+            if (cfg.architecture == .muse_glimmer) {
+                // Muse Glimmer applies RoPE + the sliding window only on
+                // its non-global (SWA) layers; global layers (every 4th,
+                // the full-attention layers) use NoPE and full attention.
+                if (is_full_attn) {
+                    attn.rope_dim = 0;
+                    attn.sliding_window_size = 0;
+                } else {
+                    attn.sliding_window_size = cfg.sliding_window_size;
+                }
+            }
             var local_cmd_storage: MetalCommand = undefined;
             var using_local_cmd = false;
             var cmd = try acquireLayerCommand(engine, layer_shared_cmd, &local_cmd_storage, &using_local_cmd, profile);
