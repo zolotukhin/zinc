@@ -32,7 +32,9 @@ pub const runtime_context_cap: u32 = 262144;
 const queued_prefill_embed_tokens: usize = 256;
 /// Max tokens verified in one speculative-decode batched pass (1 seed + drafts).
 /// Sizes `verify_logits_buf` (vocab x this). Draft length is capped below it.
-const spec_max_verify_tokens: u32 = 16;
+/// A verify is a ~fixed-cost batched forward, so a longer accepted draft
+/// amortizes it better — the adaptive draft cap shrinks it when acceptance drops.
+const spec_max_verify_tokens: u32 = 32;
 /// Largest per-request batched-prefill scratch (in prompt tokens) kept alive
 /// between requests. Scratch buffers scale with the prompt length, so a
 /// single very long prompt must not pin token-scaled buffers for the
@@ -30517,7 +30519,7 @@ fn specDecodeEnabled() bool {
 
 /// n-gram match length and max draft length for prompt-lookup drafting.
 const spec_ngram: usize = 3;
-const spec_max_draft: usize = @min(8, spec_max_verify_tokens - 1);
+const spec_max_draft: usize = @min(24, spec_max_verify_tokens - 1);
 
 /// Draft the likely continuation after `seq[last]` by finding the most recent
 /// earlier occurrence of the last `spec_ngram` tokens and copying up to `max_k`
