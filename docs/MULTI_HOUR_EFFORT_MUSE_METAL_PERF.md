@@ -96,12 +96,31 @@ acceptance → the cheap single-token `decodeStep`, so low-repetition text isn't
 (bounded to ~1 startup verify). Measured: copy-heavy (structured / long-context) **1.52×**
 (22.6→34.6 tok/s, 6.8 accepted/verify), open-ended ~1.07×, adversarial short code ~-5.6%.
 
+## cycle 5 — spec-decode profiling (draft ceiling 8→24, `9a6e99a8`)
+
+Measured the verify cost directly (ms/verify log): **a verify is ~193 ms FIXED, independent
+of N** — 192.6 ms @ N=2, 192.9 ms @ N=3, 195.9 ms @ N=8. The batched GEMM reads the 15 GB
+model at only **~78 GB/s** vs decode's matvec **~349 GB/s** — the fixed cost is that
+bandwidth inefficiency at small N (the GEMM's large-N tiling wastes bandwidth for a handful
+of columns). Consequences:
+- Break-even ≈ 193/44 ≈ **4.4 accepted tokens/verify**. Copy-heavy (7/verify) → 1.56×
+  (35.5 vs 22.7 tok/s); short-repeat/open-ended fall below it → the EMA gate keeps them on
+  the per-token path (neutral).
+- Because the cost is fixed, **longer accepted drafts amortize it** — hence the 8→24 ceiling
+  (24 accepted → ~8 ms/token). Adaptive-capped, so short-repeat is unaffected.
+
 ## Remaining levers (next)
 
-- **D-kernel — bandwidth:** close the 378→440 GB/s effective gap by reducing barriers that
-  prevent independent matmul overlap (delicate; sub-noise per change; ~15% run-to-run
-  variance makes iteration unreliable).
-- Batched lm-head verify uses CPU argmax; a GPU per-column argmax would trim a few ms/verify.
-- **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token
-  (minor; little to gain).
+- **THE spec lever — bandwidth-efficient small-N batched matvec** for the verify forward.
+  A kernel that reads each weight once (like the GEMM) but at the dmmv's ~349 GB/s (instead
+  of 78) would cut a verify from ~193 ms to ~44 ms → break-even ~1 token → spec universally
+  beneficial (not just copy-heavy). This is a fresh multi-hour kernel cycle (write + microbench
+  a small-N Q4_K/Q6_K column-batched matvec vs `gemm_q4k`); needs a quiet GPU to measure.
+- **D-kernel — decode bandwidth:** close the 378→440 GB/s effective gap by reducing barriers
+  that prevent independent matmul overlap (delicate; sub-noise per change).
+- **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token.
 - logit_scale before softcap (greedy-invariant; needed only for exact logits / sampling).
+
+NOTE: measurement is currently confounded by CPU contention (parallel agents, load ~12) — the
+per-dispatch command encoding is CPU-side, so decode throughput swings 22↔35 tok/s. Back-to-back
+spec-vs-nonspec comparisons stay valid; absolute micro-numbers do not.

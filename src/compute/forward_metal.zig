@@ -30629,6 +30629,8 @@ pub fn generateWithMetrics(
         var spec_verifies: u64 = 0;
         var spec_accepted: u64 = 0;
         var spec_fallbacks: u64 = 0;
+        var spec_verify_ns: u64 = 0;
+        var spec_verify_tokens: u64 = 0;
         // Adaptive draft length + acceptance gate. A verify costs a full batched
         // forward (~fixed, independent of small N), so it only pays off above
         // ~spec_min_accept accepted tokens. Track an EMA of accepted-per-verify;
@@ -30658,7 +30660,10 @@ pub fn generateWithMetrics(
             verify_toks[0] = seed;
             for (0..ndraft) |k| verify_toks[1 + k] = draft_buf[k];
             const pos_before = engine.position;
+            const vt0 = std.time.nanoTimestamp();
             try engine.verifyTokens(&state, verify_toks[0 .. 1 + ndraft], verify_out[0 .. 1 + ndraft]);
+            spec_verify_ns += @intCast(std.time.nanoTimestamp() - vt0);
+            spec_verify_tokens += 1 + ndraft;
             // Longest confirmed draft prefix.
             var j: usize = 0;
             while (j < ndraft and verify_out[j] == draft_buf[j]) : (j += 1) {}
@@ -30695,7 +30700,15 @@ pub fn generateWithMetrics(
                 @as(f64, @floatFromInt(spec_accepted)) / @as(f64, @floatFromInt(spec_verifies))
             else
                 0;
-            log.info("spec-decode: {d} verifies ({d:.2} accepted/verify), {d} fallbacks", .{ spec_verifies, avg, spec_fallbacks });
+            const ms_per_verify: f64 = if (spec_verifies > 0)
+                @as(f64, @floatFromInt(spec_verify_ns)) / 1_000_000.0 / @as(f64, @floatFromInt(spec_verifies))
+            else
+                0;
+            const verify_tok: f64 = if (spec_verifies > 0)
+                @as(f64, @floatFromInt(spec_verify_tokens)) / @as(f64, @floatFromInt(spec_verifies))
+            else
+                0;
+            log.info("spec-decode: {d} verifies ({d:.2} accepted/verify), {d} fallbacks | {d:.1} ms/verify over {d:.1} tok/verify", .{ spec_verifies, avg, spec_fallbacks, ms_per_verify, verify_tok });
         }
     } else {
         while (tokens_generated < decode_budget and output.items.len > 0) {
