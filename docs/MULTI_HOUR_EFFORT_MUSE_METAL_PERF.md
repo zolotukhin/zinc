@@ -56,12 +56,30 @@ Decode ≈ 75% of reference. Net vs the correctness-only baseline: **prefill ~12
   path drives the head through dispatchLmHeadWithInputOffset). Prefill 27→125 tok/s (4.6×),
   byte-identical vs per-token over 18 tokens.
 
+## Decode is bandwidth-bound — dispatch fusion does NOT help (tested)
+
+Clean profile at 22.5 tok/s: 1 command buffer/token (grouping optimal), ~732 dispatches +
+523 barriers/step, ~15 GiB/token weights at ~378 GB/s effective vs the reference's ~470.
+The FFN matmul *kernels* already run at the reference-style ~440 GB/s (per the
+`dmmv_q4k` base-kernel note). The ~6 ms/step gap is per-layer non-matmul latency, but it is
+**hidden by the concurrent encoder**, not exposed as extra dispatches.
+
+**Tested & reverted (DEAD END — do not re-litigate):** admitting muse to the fused QKV
+kernels (`canUseDenseQ4KQKQ6KV` / `canUseDenseQ4KQKV`) so all 52 layers fuse Q+K+V into one
+dispatch (+ separate gate) — path evidence confirmed `separate 0`, output byte-identical —
+gave **zero** wall-clock change (22.5→22.5). The concurrent encoder already overlaps the
+small QKV/gate/norm dispatches behind the bandwidth-bound FFN matmuls, so reducing dispatch
+count is not the decode lever. Same logic applies to fused gate+up and the Q5_K lm-head
+(`dmmv_q5k_native` is loaded but intentionally unused).
+
 ## Remaining levers (next)
 
-- **D1 — decode overhead / Q6_K:** ~1.4× decode gap remains. Reduce per-layer non-matmul
-  overhead; a K=19968-specialized Q6_K variant if a microbench beats generic
-  `dmmv_q6k_llama`. Fused QKV+gate is blocked by muse's separate attn_gate.
+- **D-struct — speculative decode** is the ONLY structural decode lever left (amortizes the
+  ~15 GiB/token weight read across accepted draft tokens). Blocked: no drafter model present
+  and no spec-decode infrastructure in ZINC — a large, separate feature.
+- **D-kernel — bandwidth:** close the 378→440 GB/s effective gap by reducing barriers that
+  prevent independent matmul overlap (delicate; sub-noise per change; ~15% run-to-run
+  variance makes iteration unreliable).
 - **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token
   (minor; little to gain).
 - logit_scale before softcap (greedy-invariant; needed only for exact logits / sampling).
-- DFlash speculative decode (dflash-*.gguf drafter).
