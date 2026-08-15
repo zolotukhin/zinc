@@ -1,0 +1,66 @@
+# Multi-Hour Effort — Muse Glimmer 30B Metal Perf
+
+**Goal:** close ZINC's Muse Glimmer prefill+decode throughput gap vs a locally-built
+llama.cpp with merged muse-glimmer support (PR #26841). Apple Silicon Metal, Q4_K_M.
+
+**Reference oracle:** `~/llama-muse-ref/build/bin/llama-cli` (llama.cpp worktree, ref
+`muse-ref` = pull/26841/head, `-DGGML_METAL=ON`). Reference on this machine:
+**prefill 76.5 t/s, decode 29.3 t/s**.
+
+**Benchmark:** `zinc -m <muse-q4k-m.gguf> --prompt <p> -n <n>` (greedy). Correctness gate
+every cycle: coherent + factually-correct completions ("capital of France"→" Paris",
+"chemical symbol for iron is"→" Fe"). Math-preserving cycles must stay byte-identical;
+the batched prefill is validated byte-identical vs the per-token path
+(`ZINC_BATCHED_PREFILL=off`) over 18+ tokens on discriminating prompts.
+
+## Progress
+
+| stage | prefill t/s | decode t/s | note |
+|---|--:|--:|---|
+| correctness only (baseline) | 12.8 | 11.9 | generic per-token path |
+| + decode cmd grouping (`36109d3c`) | 16.6 | 16.7 | math-identical; 52 layers → ~1 cmd buffer |
+| + Q6_K fast kernel (cycle 1, `1ed6407d`) | 22.2 | 20.5 | math-identical; down-proj was #1 slow kernel |
+| + batched prefill (cycle 2-3, `239155c8`) | **~125** | 20.5 | layer-major GEMM; weights read once/prompt |
+| **reference (llama.cpp)** | **76.5** | **29.3** | target |
+
+Prefill now **exceeds** the reference on batchable prompts (short <~8-token prompts stay
+on the per-token path, where there's little to gain). Decode ≈ 70% of reference.
+
+## Diagnosis (per-kernel profile, `ZINC_METAL_KERNEL_TIMING=1` + byte buckets)
+
+- **Decode is bandwidth-bound on the dense FFN** (66-78% of decode traffic): gate/up
+  (M=19968,K=6656 Q4_K) + down (K=19968; ~half Q4_K, ~half Q6_K).
+  - Q4_K gate/up already on the reference-style 2-simdgroup base kernel (~440 GB/s) — no
+    easy win.
+  - Q6_K down/KV was on the legacy SPIRV-Cross `dmmv_q6k` → cycle 1 routed it to the fast
+    `dmmv_q6k_llama` port.
+  - Remaining decode gap = per-layer non-matmul overhead (~20%/step) + Q6_K's ~1.4× bytes.
+- **Prefill was 100% token-major-replay** (weights re-read once *per token*) → cycle 2-3
+  routed it to the layer-major batched GEMM path.
+
+## Cycle log
+
+- **cycle 1** (`1ed6407d`): `supportsDenseQ6kSimdgroupDmmvArch` += muse. Muse's Q6_K
+  ffn_down (K=19968) + KV projections were on the legacy SPIRV-Cross kernel; the simdgroup
+  gate (dense, M%4==0, K%256==0) is satisfied, so they now use `dmmv_q6k_llama`.
+  Decode +23% (16.7→20.5), prefill +34% (16.6→22.2). Byte-identical.
+- **cycle 2-3** (`239155c8`): batched (layer-major) prefill. Added
+  `canUseMuseGlimmerBatchedPrefill` (admits the per-layer attn_gate / QK-norm / post-norms /
+  SWA+NoPE the generic gate bars), the weightless embed norm in the batched embed load, the
+  per-layer NoPE/window conditioning, and the attention gate (project sigmoid gate into
+  scratch.gate before flash, apply after — mirrors the Qwen route-packed path). *Gotcha:*
+  first cut projected the gate into scratch.q AFTER flash → WAR hazard vs flash's read of
+  scratch.q → visibly wrong tokens; fixed by projecting into scratch.gate before flash.
+  Also had to drop the lm_head batched-GEMM-quant gate (muse lm_head is Q5_K but the batched
+  path drives the head through dispatchLmHeadWithInputOffset). Prefill 27→125 tok/s (4.6×),
+  byte-identical vs per-token over 18 tokens.
+
+## Remaining levers (next)
+
+- **D1 — decode overhead / Q6_K:** ~1.4× decode gap remains. Reduce per-layer non-matmul
+  overhead; a K=19968-specialized Q6_K variant if a microbench beats generic
+  `dmmv_q6k_llama`. Fused QKV+gate is blocked by muse's separate attn_gate.
+- **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token
+  (minor; little to gain).
+- logit_scale before softcap (greedy-invariant; needed only for exact logits / sampling).
+- DFlash speculative decode (dflash-*.gguf drafter).
