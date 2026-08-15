@@ -153,7 +153,7 @@ pub fn ensureModel(spec_text: []const u8, allocator: std.mem.Allocator, writer: 
         defer allocator.free(arch_str);
         if (config.parseArchitecture(arch_str) == .unknown) {
             try writer.print(
-                "Model architecture '{s}' is not supported by zinc. Supported architectures: llama/mistral, qwen2/qwen3 (dense and MoE), qwen3.5/3.6 (dense and MoE), gemma, gpt-oss, mamba, jamba.\n",
+                "Model architecture '{s}' is not supported by zinc. Supported architectures: llama/mistral, qwen2/qwen3 (dense and MoE), qwen3.5/3.6/3.8 (dense and MoE), gemma, gpt-oss, mamba, jamba.\n",
                 .{arch_str},
             );
             try writer.flush();

@@ -106,10 +106,16 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
 
     var key_buf: [128]u8 = undefined;
 
-    const n_layers = blk: {
+    const block_count = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.block_count", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
     };
+    const declared_nextn_layers = blk: {
+        const key = std.fmt.bufPrint(&key_buf, "{s}.nextn_predict_layers", .{prefix}) catch break :blk @as(u32, 0);
+        break :blk gf.getU32(key) orelse 0;
+    };
+    const layer_counts = config_mod.normalizeLayerCounts(block_count, declared_nextn_layers);
+    const n_layers = layer_counts.decoder;
     const n_heads = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.attention.head_count", .{prefix}) catch break :blk @as(u32, 0);
         break :blk gf.getU32(key) orelse 0;
@@ -222,6 +228,11 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         log.info("Architecture: {s} | {d} layers | {d} heads ({d} KV) | dim {d} | vocab {d}", .{
             arch_str, n_layers, n_heads, n_kv_heads, hidden_dim, vocab_size,
         });
+        if (layer_counts.nextn > 0) {
+            log.info("NextN/MTP: {d} appended block(s) retained but excluded from ordinary inference", .{layer_counts.nextn});
+        } else if (declared_nextn_layers > 0) {
+            log.warn("Ignoring invalid NextN/MTP layer count {d} for block_count {d}", .{ declared_nextn_layers, block_count });
+        }
         if (n_experts > 0) {
             log.info("MoE: {d} experts, {d} active | intermediate {d} | shared expert {d}", .{
                 n_experts, n_experts_used, intermediate_dim, shared_expert_intermediate_dim,
@@ -237,6 +248,7 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
     return ModelConfig{
         .architecture = arch,
         .n_layers = n_layers,
+        .n_nextn_layers = layer_counts.nextn,
         .n_heads = n_heads,
         .n_kv_heads = n_kv_heads,
         .head_dim = head_dim,
@@ -715,6 +727,28 @@ test "extractConfig defaults gemma4 attention scale to 1.0" {
 
     const cfg = extractConfigWithLogging(&gf, false);
     try std.testing.expectEqual(@as(f32, 1.0), cfg.attn_scale);
+}
+
+test "extractConfig excludes appended NextN blocks from decoder layers" {
+    const allocator = std.testing.allocator;
+
+    var gf = gguf.GGUFFile{
+        .version = .v3,
+        .tensor_count = 0,
+        .metadata = .{},
+        .tensors = .{},
+        .tensor_data_offset = 0,
+        .allocator = allocator,
+    };
+    defer gf.deinit();
+
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "general.architecture"), .{ .string = try allocator.dupe(u8, "qwen35") });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "qwen35.block_count"), .{ .uint32 = 65 });
+    try gf.metadata.put(allocator, try allocator.dupe(u8, "qwen35.nextn_predict_layers"), .{ .uint32 = 1 });
+
+    const cfg = extractConfigWithLogging(&gf, false);
+    try std.testing.expectEqual(@as(u32, 64), cfg.n_layers);
+    try std.testing.expectEqual(@as(u32, 1), cfg.n_nextn_layers);
 }
 
 test "extractConfig uses max gemma4 head_count_kv array entry" {

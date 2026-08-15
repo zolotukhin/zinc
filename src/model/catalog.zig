@@ -62,6 +62,30 @@ pub const apple_silicon_profile = "apple-silicon";
 /// The complete list of ZINC-validated managed models available for download.
 pub const entries = [_]CatalogEntry{
     .{
+        .id = "qwen38-27b-q4k-m",
+        .display_name = "Qwen3.8 27B Dense Q4_K_M",
+        .release_date = "2026-08-14",
+        .family = "qwen3.8",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "Qwen3.8-27B-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF",
+        .download_url = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf?download=true",
+        .sha256 = "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
+        .size_bytes = 17_106_775_008,
+        // Qwen3.8-27B retains Qwen3.6-27B's qwen35 text architecture and
+        // dimensions. The 32 GB R9700 has enough headroom for weights, the
+        // capped runtime context, and Vulkan scratch allocations.
+        .required_vram_bytes = 20 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .supported,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+        },
+    },
+    .{
         .id = "qwen36-35b-a3b-q4k-xl",
         .display_name = "Qwen3.6 35B-A3B UD Q4_K_XL",
         .release_date = "2026-04-15",
@@ -340,12 +364,13 @@ pub fn supportedOnCurrentGpu(entry: CatalogEntry, profile: []const u8, vram_budg
 /// Map a catalog family string to the GGUF architecture string that models in
 /// that family use. Returns null for unrecognized families — the caller should
 /// treat that as an error (a catalog entry with no known architecture mapping).
-/// Note that `"qwen3.5"` and `"qwen3.6"` both map to `"qwen35"` because the
-/// GGUF file declares the SSM+attention hybrid architecture under that name.
+/// Note that Qwen 3.5, 3.6, and 3.8 all map to `"qwen35"` because their GGUFs
+/// declare the SSM+attention hybrid text architecture under that name.
 /// @param family Value of `CatalogEntry.family` (e.g. `"gemma4"`, `"qwen3.6"`).
 /// @returns GGUF architecture identifier, or null if the family is not recognized.
 pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
     const families = .{
+        .{ "qwen3.8", "qwen35" },
         .{ "qwen3.6", "qwen35" },
         // Qwen 3.5 is a dense SSM+attention hybrid (the GGUF declares the
         // "qwen35" architecture), the same family ZINC drives for Qwen 3.6 —
@@ -424,8 +449,27 @@ test "find returns qwen3.6 27b dense entry" {
     try std.testing.expect(entry.status == .experimental);
 }
 
+test "find returns qwen3.8 27b dense entry" {
+    const entry = find("qwen38-27b-q4k-m") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("Qwen3.8 27B Dense Q4_K_M", entry.display_name);
+    try std.testing.expectEqualStrings("2026-08-14", entry.release_date);
+    try std.testing.expectEqualStrings("qwen3.8", entry.family);
+    try std.testing.expectEqualStrings("Qwen3.8-27B-Q4_K_M.gguf", entry.file_name);
+    try std.testing.expectEqualStrings("7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169", entry.sha256);
+    try std.testing.expectEqual(@as(u64, 17_106_775_008), entry.size_bytes);
+    try std.testing.expect(entry.recommended_for_chat);
+    try std.testing.expect(entry.thinking_stable);
+    try std.testing.expect(entry.status == .supported);
+    try std.testing.expect(supportsProfile(entry.*, "amd-rdna4-32gb"));
+    try std.testing.expect(!supportsProfile(entry.*, apple_silicon_profile));
+}
+
 test "qwen3.6 family reuses qwen35 gguf architecture mapping" {
     try std.testing.expectEqualStrings("qwen35", ggufArchForFamily("qwen3.6") orelse return error.TestExpectedEqual);
+}
+
+test "qwen3.8 family reuses qwen35 gguf architecture mapping" {
+    try std.testing.expectEqualStrings("qwen35", ggufArchForFamily("qwen3.8") orelse return error.TestExpectedEqual);
 }
 
 test "findForLoadedModel matches managed-cache qwen36 path" {
@@ -453,6 +497,15 @@ test "findForLoadedModel matches qwen36 27b dense filename" {
         "Qwen3.6 27B Q4 K M",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("qwen36-27b-q4k-m", entry.id);
+}
+
+test "findForLoadedModel matches qwen38 27b dense filename" {
+    const entry = findForLoadedModel(
+        null,
+        "/root/models/Qwen3.8-27B-Q4_K_M.gguf",
+        "Qwen3.8 27B Q4 K M",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("qwen38-27b-q4k-m", entry.id);
 }
 
 test "profileForGpu maps RDNA4 32 GB boards" {
@@ -530,6 +583,14 @@ test "supportedOnCurrentGpu requires both tested profile and fit" {
     try std.testing.expect(supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 24 * 1024 * 1024 * 1024));
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-16gb", 24 * 1024 * 1024 * 1024));
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 20 * 1024 * 1024 * 1024));
+}
+
+test "qwen3.8 27b is visible as supported on the validated RDNA profile" {
+    const entry = find("qwen38-27b-q4k-m") orelse return error.TestExpectedEqual;
+    try std.testing.expect(entry.status == .supported);
+    try std.testing.expect(supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 32 * 1024 * 1024 * 1024));
+    try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-16gb", 32 * 1024 * 1024 * 1024));
+    try std.testing.expect(!supportedOnCurrentGpu(entry.*, apple_silicon_profile, 32 * 1024 * 1024 * 1024));
 }
 
 test "qwen thinking stability flags track validated chat behavior" {

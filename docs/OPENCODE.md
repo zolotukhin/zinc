@@ -52,7 +52,7 @@ Good starting points:
 
 - `qwen36-35b-a3b-q4k-xl`: best fit for a large local coding assistant on a 32 GB-class GPU or enough unified memory.
 - `qwen35-9b-q4k-m`: smaller, easier to run, and useful for validating OpenCode tool calls before moving to a larger model.
-- `qwen36-27b-q4k-m`: experimental dense target; useful when you specifically want to compare dense Qwen behavior.
+- `qwen38-27b-q4k-m`: supported dense Qwen target on validated AMD RDNA4 32 GB systems.
 
 The model you put in OpenCode's `model` field should match an installed ZINC managed model id. Check available and installed models with:
 

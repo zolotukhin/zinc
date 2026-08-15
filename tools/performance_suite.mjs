@@ -2130,6 +2130,10 @@ export function canonicalModelIdFromPath(modelFile) {
     .replace(/^bartowski[_-]/, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
+    .replace(/^qwen-qwen3-8-/, "qwen38-")
+    .replace(/^qwen-qwen-3-8-/, "qwen38-")
+    .replace(/^qwen3-8-/, "qwen38-")
+    .replace(/^qwen-3-8-/, "qwen38-")
     .replace(/^qwen-qwen3-6-/, "qwen36-")
     .replace(/^qwen-qwen-3-6-/, "qwen36-")
     .replace(/^qwen3-6-/, "qwen36-")
@@ -2149,6 +2153,7 @@ export function canonicalModelIdFromPath(modelFile) {
 export function guessFamily(id) {
   if (id.startsWith("gemma4")) return "Gemma 4";
   if (id.startsWith("gemma")) return "Gemma";
+  if (id.startsWith("qwen38")) return "Qwen 3.8";
   if (id.startsWith("qwen36")) return "Qwen 3.6";
   if (id.startsWith("qwen35")) return "Qwen 3.5";
   if (id.startsWith("qwen3")) return "Qwen 3";
@@ -2366,6 +2371,17 @@ async function discoverMetalCases(modelRoot) {
 
 export function defaultRdnaCases(modelRoot) {
   return [
+    {
+      id: "qwen38-27b-q4k-m",
+      label: "Qwen 3.8 27B Dense Q4_K_M",
+      family: "Qwen 3.8",
+      quant: "Q4_K_M",
+      model_path: path.join(modelRoot, "Qwen3.8-27B-Q4_K_M.gguf"),
+      prompt_mode: "raw",
+      prompt: defaultPromptForModelId("qwen38-27b-q4k-m"),
+      max_tokens: defaultMaxTokensForModelId("qwen38-27b-q4k-m"),
+      notes: ["RDNA4 dense Qwen 3.8 comparison against llama.cpp server"],
+    },
     {
       id: "gemma4-26b-a4b-q4k-m",
       label: "Gemma 4 26B-A4B MoE Q4_K_M",

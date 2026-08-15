@@ -46,8 +46,8 @@ This list is intentionally narrow. It shows the exact GGUFs that have been valid
 | **Qwen 3.5 9B** | `qwen35-9b-q4k-m` | [Qwen3.5-9B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | 8+ GB VRAM or unified | supported on AMD, Intel Arc, Metal |
 | **Gemma 4 26B-A4B MoE** | `gemma4-26b-a4b-q4k-m` | [gemma-4-26B-A4B-it-UD-Q4_K_M.gguf](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | 16+ GB VRAM or unified | supported on AMD, Intel Arc, Metal |
 | **Gemma 4 31B** | `gemma4-31b-q4k-m` | [gemma-4-31B-it-Q4_K_M.gguf](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF) | 24+ GB VRAM or unified | supported on AMD, Intel Arc, Metal |
-| **Qwen3.6 27B Dense** | `qwen36-27b-q4k-m` | [Qwen3.6-27B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) | 24+ GB VRAM or unified | experimental model on AMD, Intel Arc, Metal |
 | **Qwen3.6 35B-A3B UD** | `qwen36-35b-a3b-q4k-xl` | [Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | 24+ GB VRAM or unified | supported on AMD, Intel Arc, Metal |
+| **Qwen3.8 27B Dense** | `qwen38-27b-q4k-m` | [Qwen3.8-27B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 24+ GB VRAM | supported on AMD RDNA4 32 GB |
 
 ## Install dependencies
 

@@ -201,7 +201,7 @@ Hot-swapping models is supported, but swaps are serialized with generation becau
 
 The current runtime is designed around the model families ZINC is actively validating:
 
-- **Qwen3 / Qwen3.5 / Qwen3.6**
+- **Qwen3 / Qwen3.5 / Qwen3.6 / Qwen3.8**
 - **Gemma 4**
 
 At the execution-model level, that means ZINC handles:
@@ -210,6 +210,11 @@ At the execution-model level, that means ZINC handles:
 - MoE feed-forward blocks
 - SSM-hybrid paths used by Qwen3.5-style models and related experimental families
 - model-specific MoE routing rules such as per-expert scale weighting
+
+GGUFs may append NextN/MTP draft blocks to `block_count`. ZINC retains those
+tensors when loading the model but excludes the declared
+`nextn_predict_layers` from ordinary autoregressive inference; speculative MTP
+decoding is not enabled yet.
 
 The architecture-normalization layer is in `src/model/architecture.zig` and `src/model/config.zig`.
 

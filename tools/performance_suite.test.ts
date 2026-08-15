@@ -257,6 +257,7 @@ test("default RDNA cases include Gemma and current Qwen rows", () => {
   const cases = defaultRdnaCases("/root/models");
   const gemma26 = cases.find((entry) => entry.id === "gemma4-26b-a4b-q4k-m");
   const gemma31 = cases.find((entry) => entry.id === "gemma4-31b-q4k-m");
+  const qwen38Dense = cases.find((entry) => entry.id === "qwen38-27b-q4k-m");
   const qwen36Dense = cases.find((entry) => entry.id === "qwen36-27b-q4k-m");
   const qwen35 = cases.find((entry) => entry.id === "qwen35-9b-q4k-m");
 
@@ -269,6 +270,11 @@ test("default RDNA cases include Gemma and current Qwen rows", () => {
   expect(gemma31?.prompt_mode).toBe("chat");
   expect(gemma31?.prompt).toContain("benchmark screenshots");
   expect(gemma31?.max_tokens).toBe(96);
+
+  expect(qwen38Dense?.model_path).toBe("/root/models/Qwen3.8-27B-Q4_K_M.gguf");
+  expect(qwen38Dense?.prompt_mode).toBe("raw");
+  expect(qwen38Dense?.prompt).toContain("Developer question");
+  expect(qwen38Dense?.max_tokens).toBe(96);
 
   expect(qwen36Dense?.model_path).toBe("/root/models/Qwen3.6-27B-Q4_K_M.gguf");
   expect(qwen36Dense?.prompt_mode).toBe("raw");
@@ -307,11 +313,14 @@ test("llama device args support Intel Vulkan0 and no-device modes", () => {
   expect(llamaDeviceArgs(null)).toEqual([]);
 });
 
-test("performance suite canonicalizes and labels Qwen 3.6 GGUFs", () => {
+test("performance suite canonicalizes and labels current Qwen GGUFs", () => {
+  expect(canonicalModelIdFromPath("/tmp/Qwen3.8-27B-Q4_K_M.gguf")).toBe("qwen38-27b-q4k-m");
+  expect(canonicalModelIdFromPath("/tmp/Qwen_Qwen3.8-27B-Q4_K_M.gguf")).toBe("qwen38-27b-q4k-m");
   expect(canonicalModelIdFromPath("/tmp/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")).toBe("qwen36-35b-a3b-q4k-xl");
   expect(canonicalModelIdFromPath("/tmp/Qwen3.6-27B-Q4_K_M.gguf")).toBe("qwen36-27b-q4k-m");
   expect(canonicalModelIdFromPath("/tmp/Qwen_Qwen3.6-27B-Q4_K_M.gguf")).toBe("qwen36-27b-q4k-m");
   expect(canonicalModelIdFromPath("/tmp/models/qwen36-35b-a3b-q4k-xl/model.gguf")).toBe("qwen36-35b-a3b-q4k-xl");
+  expect(guessFamily("qwen38-27b-q4k-m")).toBe("Qwen 3.8");
   expect(guessFamily("qwen36-35b-a3b-q4k-xl")).toBe("Qwen 3.6");
   expect(guessFamily("qwen36-27b-q4k-m")).toBe("Qwen 3.6");
 });

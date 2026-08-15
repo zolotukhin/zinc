@@ -41,7 +41,7 @@ Same GPU. Same GGUF files. Same prompts. Same server-vs-server harness.
 |-------|-------:|--------:|--------:|
 | Qwen 3.6 35B A3B UD Q4_K_XL | **166.8** vs 108.5 tok/s (**1.54x**) | **540** vs 397 tok/s (**1.36x**) | **151%** |
 | Qwen 3.5 9B Q4_K_M | **97.5** vs 85.5 tok/s (**1.14x**) | **739** vs 549 tok/s (**1.35x**) | **115%** |
-| Qwen 3.6 27B Dense Q4_K_M | **32.0** vs 30.7 tok/s (**1.04x**) | **213** vs 184 tok/s (**1.16x**) | **105%** |
+| Qwen 3.8 27B Dense Q4_K_M | **32.0** vs 30.8 tok/s (**1.04x**) | **215** vs 169 tok/s (**1.27x**) | **105%** |
 | Gemma 4 26B-A4B MoE Q4_K_M | **113.7** vs 102.1 tok/s (**1.11x**) | **809** vs 497 tok/s (**1.63x**) | **115%** |
 | Gemma 4 31B Q4_K_M | **28.8** vs 28.5 tok/s (**1.01x**) | **249** vs 200 tok/s (**1.25x**) | **103%** |
 
@@ -57,7 +57,7 @@ The closest row is Gemma 4 31B decode at `1.01x`. We are still cooking: the next
 | **macOS** | Apple Silicon (M1, M2, M3, M4, M5) | Metal | Supported — native MSL shaders |
 
 ZINC focuses on current local-inference models people are actively running:
-Qwen 3.5/3.6 and Gemma 4 today, with a managed catalog that stays narrow on
+Qwen 3.5/3.6/3.8 and Gemma 4 today, with a managed catalog that stays narrow on
 purpose. Older Llama/Mistral/Gemma generations may work eventually, but broad
 legacy-model coverage is not the main optimization target.
 
@@ -154,7 +154,7 @@ The list below matches the current managed model catalog, not a broader wishlist
 
 - [Qwen 3.5 9B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) — supported on AMD RDNA4 16/32 GB, Intel Arc, and Apple Silicon
 - [Qwen3.6 35B-A3B UD Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
-- [Qwen3.6 27B Dense Q4_K_M](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) — experimental on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
+- [Qwen3.8 27B Dense Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) — supported on AMD RDNA4 32 GB
 - [Gemma 4 31B Q4_K_M](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
 - [Gemma 4 26B-A4B MoE Q4_K_M](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
 
@@ -287,7 +287,7 @@ See also: [CONTRIBUTING.md](./CONTRIBUTING.md) · [Code of Conduct](./CODE_OF_CO
 
 ## Benchmarks
 
-The tables below are pulled directly from the published benchmark data at [zolotukhin.ai/zinc/benchmarks](https://zolotukhin.ai/zinc/benchmarks). Latest refreshes: RDNA 2026-07-01 UTC, Intel Arc 2026-07-07 UTC, Metal 2026-06-13 UTC. Numbers are median tok/s across the suite's runs, with ZINC and llama.cpp on the same hardware, weights, and prompt.
+The tables below are pulled directly from the published benchmark data at [zolotukhin.ai/zinc/benchmarks](https://zolotukhin.ai/zinc/benchmarks). Latest refreshes: RDNA 2026-08-15 UTC, Intel Arc 2026-07-07 UTC, Metal 2026-06-13 UTC. Numbers are median tok/s across the suite's runs, with ZINC and llama.cpp on the same hardware, weights, and prompt.
 
 ### AMD RDNA4 — Radeon AI PRO R9700 (Vulkan)
 
@@ -295,7 +295,7 @@ The tables below are pulled directly from the published benchmark data at [zolot
 |---|---:|---:|---:|---:|---:|---:|
 | Qwen 3.6 35B A3B UD Q4_K_XL | **540.33** | 397.08 | **136%** | **166.80** | 108.54 | **154%** |
 | Qwen 3.5 9B Q4_K_M | **738.97** | 549.04 | **135%** | **97.46** | 85.47 | **114%** |
-| Qwen 3.6 27B Dense Q4_K_M | **212.79** | 183.76 | **116%** | **31.97** | 30.65 | **104%** |
+| Qwen 3.8 27B Dense Q4_K_M | **215.39** | 169.38 | **127%** | **32.04** | 30.81 | **104%** |
 | Gemma 4 26B-A4B MoE Q4_K_M | **809.16** | 496.83 | **163%** | **113.74** | 102.08 | **111%** |
 | Gemma 4 31B Q4_K_M | **248.58** | 199.58 | **125%** | **28.81** | 28.54 | **101%** |
 

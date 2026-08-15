@@ -1130,9 +1130,14 @@ fn printManagedModelList(config: Config, allocator: std.mem.Allocator) !void {
         if (supported_with_offload) any_requires_offload = true;
         const is_active = active_model_id != null and std.mem.eql(u8, active_model_id.?, entry.id);
         const status_label = if (supported_now)
-            "supported"
+            @tagName(entry.status)
         else if (supported_with_offload)
-            "supported (offload)"
+            switch (entry.status) {
+                .supported => "supported (offload)",
+                .experimental => "experimental (offload)",
+                .hidden => "hidden (offload)",
+                .deprecated => "deprecated (offload)",
+            }
         else if (tested_profile_match)
             "too-large"
         else
