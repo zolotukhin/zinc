@@ -273,7 +273,7 @@ fn defaultQ8DualThreadgroup(chip: metal_device.GpuFamily, simd_width: u32, max_t
 }
 
 fn supportsDenseQ6kSimdgroupDmmvArch(arch: config_mod.Architecture) bool {
-    return arch == .gemma or arch == .qwen2;
+    return arch == .gemma or arch == .qwen2 or arch == .muse_glimmer;
 }
 
 const qwen35_27b_dense_down_q6k_blocks: u32 = 68; // 17408 / QK_K
