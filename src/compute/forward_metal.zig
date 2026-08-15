@@ -30,6 +30,9 @@ const log = std.log.scoped(.forward);
 /// see this as a soft safety net rather than the primary limit.
 pub const runtime_context_cap: u32 = 262144;
 const queued_prefill_embed_tokens: usize = 256;
+/// Max tokens verified in one speculative-decode batched pass (1 seed + drafts).
+/// Sizes `verify_logits_buf` (vocab x this). Draft length is capped below it.
+const spec_max_verify_tokens: u32 = 16;
 /// Largest per-request batched-prefill scratch (in prompt tokens) kept alive
 /// between requests. Scratch buffers scale with the prompt length, so a
 /// single very long prompt must not pin token-scaled buffers for the
@@ -6943,6 +6946,12 @@ pub const InferenceEngine = struct {
     logits_readback_buf: MetalBuffer,
     argmax_buf: MetalBuffer,
     argmax_partials_buf: MetalBuffer,
+    // Speculative-decode verify: when non-null, the batched forward's tail
+    // projects every position through the LM head and writes per-position argmax
+    // here instead of the last-token-only tail. `verify_logits_buf` holds the
+    // batched [n_tokens x vocab] logits for CPU argmax.
+    verify_argmax_out: ?[]u32 = null,
+    verify_logits_buf: MetalBuffer,
     embed_staging: MetalBuffer,
     prefill_embed_buf: MetalBuffer,
     /// Cached batched-prefill scratch reused across requests to keep ~20
@@ -7658,6 +7667,8 @@ pub const InferenceEngine = struct {
             .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
         self.argmax_buf = try metal_buffer.createBuffer(ctx, 2 * @sizeOf(u32));
         self.argmax_partials_buf = try createMetalBufferForMode(ctx, argmax_pairs_size, self.private_decode_buffers);
+        self.verify_argmax_out = null;
+        self.verify_logits_buf = try metal_buffer.createBuffer(ctx, vocab_size * spec_max_verify_tokens);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
         self.prefill_embed_buf = try metal_buffer.createBuffer(ctx, hidden_size * queued_prefill_embed_tokens);
         self.qwen_ssm_prefill_proj_norm_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * hidden_size, 4));
@@ -8763,6 +8774,7 @@ pub const InferenceEngine = struct {
         metal_buffer.freeBuffer(&self.logits_readback_buf);
         metal_buffer.freeBuffer(&self.argmax_buf);
         metal_buffer.freeBuffer(&self.argmax_partials_buf);
+        metal_buffer.freeBuffer(&self.verify_logits_buf);
         metal_buffer.freeBuffer(&self.embed_staging);
         metal_buffer.freeBuffer(&self.prefill_embed_buf);
         metal_buffer.freeBuffer(&self.lm_head_private_buf);
@@ -10342,7 +10354,9 @@ pub const InferenceEngine = struct {
             }
             break :blk .off;
         } else .off;
-        const mode: BatchedPrefillMode = if (is_gemma_moe_prefill and gemma_env_present and gemma_mode == .off)
+        const mode: BatchedPrefillMode = if (self.verify_argmax_out != null)
+            .on // speculative-decode verify always forces the batched forward
+        else if (is_gemma_moe_prefill and gemma_env_present and gemma_mode == .off)
             .off
         else if (gemma_mode != .off)
             gemma_mode
@@ -10623,6 +10637,35 @@ pub const InferenceEngine = struct {
         dispatchRmsNormOnCmd(self, &cmd, &scratch.hidden, &scratch.norm, &self.final_norm_gpu, hidden_dim, n_tokens);
         profileBarrier(&cmd, profile, .final);
 
+        // Speculative-decode verify tail: project EVERY position through the LM
+        // head in one batched Q5_K GEMM (weight read once), then argmax each
+        // position's vocab row on the CPU into `verify_argmax_out`. Skips the
+        // last-token-only tail + validate below.
+        if (self.verify_argmax_out) |out_argmax| {
+            const n_out: u32 = @min(n_tokens, spec_max_verify_tokens);
+            dispatchGemmQ5KOnCmd(self, &cmd, self.lm_head, &scratch.norm, &self.verify_logits_buf, cfg.vocab_size, hidden_dim, n_out);
+            commitAndWaitProfiled(&cmd, profile);
+            self.position = position_base + n_tokens;
+            state.position = self.position;
+            const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.verify_logits_buf.cpu_ptr.?));
+            const vocab: usize = cfg.vocab_size;
+            var t: usize = 0;
+            while (t < n_out) : (t += 1) {
+                const base = t * vocab;
+                var best_idx: u32 = 0;
+                var best_val: f32 = logits_ptr[base];
+                var v: usize = 1;
+                while (v < vocab) : (v += 1) {
+                    if (logits_ptr[base + v] > best_val) {
+                        best_val = logits_ptr[base + v];
+                        best_idx = @intCast(v);
+                    }
+                }
+                if (t < out_argmax.len) out_argmax[t] = best_idx;
+            }
+            return;
+        }
+
         if (shouldCpuLmHeadFallback(self)) {
             commitAndWaitProfiled(&cmd, profile);
             recordRoutePackActualProfile(profile, scratch, @as(usize, @intCast(cfg.n_layers)));
@@ -10712,6 +10755,17 @@ pub const InferenceEngine = struct {
                 });
             }
         }
+    }
+
+    /// Speculative-decode verify: run the batched forward over `tokens` starting
+    /// at the current KV position and write the greedy argmax at EACH position
+    /// into `out_argmax[0..tokens.len]`. Extends the KV cache for all tokens (the
+    /// caller overwrites rejected positions on the next step). Requires the model
+    /// to support the batched prefill path (canUseBatchedPrefill).
+    pub fn verifyTokens(self: *InferenceEngine, state: *DecodeState, tokens: []const u32, out_argmax: []u32) !void {
+        self.verify_argmax_out = out_argmax;
+        defer self.verify_argmax_out = null;
+        try self.prefillBatched(state, tokens);
     }
 
     /// Advance one autoregressive decode step from the given input token.
@@ -30454,6 +30508,46 @@ fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, i
 /// @param eos_id Token id that terminates generation early when sampled.
 /// @param allocator Used to allocate the returned `output_tokens` slice; caller must free via `GenerateResult.deinit`.
 /// @returns `GenerateResult` with the generated token slice and per-phase timing metrics.
+/// Prompt-lookup (n-gram) speculative decoding: default-on for models on the
+/// batched-forward path, opt out with ZINC_SPEC_DECODE=0. Greedy speculative
+/// decoding is exact — output is byte-identical to the per-token path.
+fn specDecodeEnabled() bool {
+    return readBoolEnv("ZINC_SPEC_DECODE") orelse true;
+}
+
+/// n-gram match length and max draft length for prompt-lookup drafting.
+const spec_ngram: usize = 3;
+const spec_max_draft: usize = @min(8, spec_max_verify_tokens - 1);
+
+/// Draft the likely continuation after `seq[last]` by finding the most recent
+/// earlier occurrence of the last `spec_ngram` tokens and copying up to `max_k`
+/// of what followed. Returns the number of draft tokens written to `out`.
+fn draftFromNgram(seq: []const u32, out: []u32, max_k: usize) usize {
+    const ngram = spec_ngram;
+    if (max_k == 0 or seq.len < ngram + 1) return 0;
+    const suffix = seq[seq.len - ngram ..];
+    // Scan earlier start positions from most-recent to oldest.
+    var i: usize = seq.len - ngram; // exclusive upper bound for an earlier match start
+    while (i > 0) {
+        i -= 1;
+        var match = true;
+        for (0..ngram) |g| {
+            if (seq[i + g] != suffix[g]) {
+                match = false;
+                break;
+            }
+        }
+        if (!match) continue;
+        const start = i + ngram;
+        var n: usize = 0;
+        while (n < out.len and n < max_k and start + n < seq.len) : (n += 1) {
+            out[n] = seq[start + n];
+        }
+        return n;
+    }
+    return 0;
+}
+
 pub fn generateWithMetrics(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
@@ -30517,16 +30611,102 @@ pub fn generateWithMetrics(
     // Decode loop
     const decode_start = std.time.nanoTimestamp();
     var tokens_generated: u32 = @intCast(output.items.len);
-    while (tokens_generated < decode_budget and output.items.len > 0) {
-        const input_token = output.items[output.items.len - 1];
-        try engine.decodeStep(&state, input_token);
+    const use_spec = specDecodeEnabled() and output.items.len > 0 and
+        engine.config.architecture == .muse_glimmer and canUseBatchedPrefill(engine);
+    if (use_spec) {
+        // Prompt-lookup speculative decode: draft a continuation from the token
+        // history, verify K+1 tokens in ONE batched forward pass, accept the
+        // longest prefix the target confirms. Exact for greedy.
+        var full_seq: std.ArrayList(u32) = .{};
+        defer full_seq.deinit(allocator);
+        try full_seq.appendSlice(allocator, prompt_tokens);
+        try full_seq.appendSlice(allocator, output.items);
+        var draft_buf: [spec_max_draft]u32 = undefined;
+        var verify_toks: [1 + spec_max_draft]u32 = undefined;
+        var verify_out: [1 + spec_max_draft]u32 = undefined;
+        var spec_verifies: u64 = 0;
+        var spec_accepted: u64 = 0;
+        var spec_fallbacks: u64 = 0;
+        // Adaptive draft length + acceptance gate. A verify costs a full batched
+        // forward (~fixed, independent of small N), so it only pays off above
+        // ~spec_min_accept accepted tokens. Track an EMA of accepted-per-verify;
+        // when it drops, fall back to the cheap per-token path and only probe
+        // occasionally to detect a workload that has become copy-friendly again.
+        var draft_cap: usize = 4;
+        // Start with a couple of startup chances, then let the EMA gate settle.
+        var accept_ema: f32 = 4.0;
+        const spec_min_accept: f32 = 3.0;
+        outer: while (tokens_generated < decode_budget) {
+            const seed = output.items[output.items.len - 1];
+            const ndraft = draftFromNgram(full_seq.items, &draft_buf, draft_cap);
+            const do_verify = ndraft > 0 and accept_ema >= spec_min_accept;
+            if (!do_verify) {
+                // Cheap single-token decode: no draft, or acceptance has dropped
+                // below the point where a full verify forward pays for itself.
+                try engine.decodeStep(&state, seed);
+                const next_token = engine.sampleGreedy();
+                if (next_token == eos_id) break :outer;
+                try output.append(allocator, next_token);
+                try state.generated_tokens.append(allocator, next_token);
+                try full_seq.append(allocator, next_token);
+                tokens_generated += 1;
+                spec_fallbacks += 1;
+                continue;
+            }
+            verify_toks[0] = seed;
+            for (0..ndraft) |k| verify_toks[1 + k] = draft_buf[k];
+            const pos_before = engine.position;
+            try engine.verifyTokens(&state, verify_toks[0 .. 1 + ndraft], verify_out[0 .. 1 + ndraft]);
+            // Longest confirmed draft prefix.
+            var j: usize = 0;
+            while (j < ndraft and verify_out[j] == draft_buf[j]) : (j += 1) {}
+            spec_verifies += 1;
+            spec_accepted += j;
+            accept_ema = 0.5 * accept_ema + 0.5 * @as(f32, @floatFromInt(j));
+            // Adapt draft length toward the accepted count.
+            if (j == ndraft) {
+                draft_cap = @min(draft_cap + 2, spec_max_draft);
+            } else {
+                draft_cap = @max(j + 1, 1);
+            }
+            // Roll KV/position back to just past the accepted prefix.
+            engine.position = pos_before + 1 + @as(u32, @intCast(j));
+            state.position = engine.position;
+            for (0..j) |k| {
+                const tok = draft_buf[k];
+                if (tok == eos_id) break :outer;
+                try output.append(allocator, tok);
+                try state.generated_tokens.append(allocator, tok);
+                try full_seq.append(allocator, tok);
+                tokens_generated += 1;
+                if (tokens_generated >= decode_budget) break :outer;
+            }
+            const correction = verify_out[j];
+            if (correction == eos_id) break :outer;
+            try output.append(allocator, correction);
+            try state.generated_tokens.append(allocator, correction);
+            try full_seq.append(allocator, correction);
+            tokens_generated += 1;
+        }
+        if (spec_verifies > 0 or spec_fallbacks > 0) {
+            const avg: f64 = if (spec_verifies > 0)
+                @as(f64, @floatFromInt(spec_accepted)) / @as(f64, @floatFromInt(spec_verifies))
+            else
+                0;
+            log.info("spec-decode: {d} verifies ({d:.2} accepted/verify), {d} fallbacks", .{ spec_verifies, avg, spec_fallbacks });
+        }
+    } else {
+        while (tokens_generated < decode_budget and output.items.len > 0) {
+            const input_token = output.items[output.items.len - 1];
+            try engine.decodeStep(&state, input_token);
 
-        const next_token = engine.sampleGreedy();
-        if (next_token == eos_id) break;
+            const next_token = engine.sampleGreedy();
+            if (next_token == eos_id) break;
 
-        try output.append(allocator, next_token);
-        try state.generated_tokens.append(allocator, next_token);
-        tokens_generated += 1;
+            try output.append(allocator, next_token);
+            try state.generated_tokens.append(allocator, next_token);
+            tokens_generated += 1;
+        }
     }
     const decode_end = std.time.nanoTimestamp();
     const decode_ns: u64 = @intCast(decode_end - decode_start);
