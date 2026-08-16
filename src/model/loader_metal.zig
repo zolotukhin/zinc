@@ -213,7 +213,7 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
         // (true=SWA, false=global) instead of an interval scalar. The pattern is
         // regular — global attention every 4th layer (layers 3,7,...,51; a 3:1
         // SWA:global ratio) — so the interval is 4.
-        if (arch == .muse_glimmer) @as(u32, 4) else if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
+        if (ssm_d_inner > 0) @as(u32, 4) else @as(u32, 1);
 
     const rope_freq_base: f32 = blk: {
         const key = std.fmt.bufPrint(&key_buf, "{s}.rope.freq_base", .{prefix}) catch break :blk @as(f32, 10000.0);

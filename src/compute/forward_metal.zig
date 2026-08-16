@@ -30,6 +30,11 @@ const log = std.log.scoped(.forward);
 /// see this as a soft safety net rather than the primary limit.
 pub const runtime_context_cap: u32 = 262144;
 const queued_prefill_embed_tokens: usize = 256;
+/// Max tokens verified in one speculative-decode batched pass (1 seed + drafts).
+/// Sizes `verify_logits_buf` (vocab x this). Draft length is capped below it.
+/// A verify is a ~fixed-cost batched forward, so a longer accepted draft
+/// amortizes it better — the adaptive draft cap shrinks it when acceptance drops.
+const spec_max_verify_tokens: u32 = 32;
 /// Largest per-request batched-prefill scratch (in prompt tokens) kept alive
 /// between requests. Scratch buffers scale with the prompt length, so a
 /// single very long prompt must not pin token-scaled buffers for the
@@ -273,7 +278,7 @@ fn defaultQ8DualThreadgroup(chip: metal_device.GpuFamily, simd_width: u32, max_t
 }
 
 fn supportsDenseQ6kSimdgroupDmmvArch(arch: config_mod.Architecture) bool {
-    return arch == .gemma or arch == .qwen2;
+    return arch == .gemma or arch == .qwen2 or arch == .muse_glimmer;
 }
 
 const qwen35_27b_dense_down_q6k_blocks: u32 = 68; // 17408 / QK_K
@@ -6268,7 +6273,51 @@ fn shouldDefaultDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
     // dim guard — we drop the dim guard for .qwen2 dense and keep it for
     // Gemma where the kernel was originally tuned for hidden_dim=5376.
     if (cfg.architecture == .qwen2 and cfg.n_experts == 0) return true;
+    if (cfg.architecture == .muse_glimmer and cfg.n_experts == 0) return true;
     return cfg.architecture == .gemma and cfg.n_experts == 0 and cfg.hidden_dim >= 5000;
+}
+
+/// Muse Glimmer's batched prefill slice. Unlike the generic dense path it
+/// permits the per-layer attention gate, QK-norm, post-attn/post-FFN norms, and
+/// the RoPE-on-SWA / NoPE-on-global window pattern — all applied in-batch by the
+/// prefillBatched layer body. Every unsupported case falls back to per-token.
+fn canUseMuseGlimmerBatchedPrefill(engine: *const InferenceEngine) bool {
+    const cfg = engine.config;
+    if (cfg.architecture != .muse_glimmer or cfg.n_experts != 0) return false;
+    if (cfg.ssm_d_inner > 0) return false;
+    if (engine.private_decode_buffers) return false;
+    if (engine.attn_sink_values != null) return false;
+    if (engine.gemm_q4k_pipe.handle == null or
+        engine.gemm_q6k_pipe.handle == null or
+        engine.swiglu_batched_pipe.handle == null or
+        engine.sigmoid_mul_pipe.handle == null)
+    {
+        return false;
+    }
+    // The batched path drives the LM head through dispatchLmHeadWithInputOffset
+    // (same as decode), so its quant (muse: Q5_K) need not be a batched-GEMM type.
+
+    for (0..cfg.n_layers) |i| {
+        const lt = engine.layer_tensors[i];
+        const gate = lt.attn_gate orelse return false; // muse gates every layer
+        if (lt.attn_q_bias != null or lt.attn_k_bias != null or
+            lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
+        const q = lt.attn_q orelse return false;
+        const k = lt.attn_k orelse return false;
+        const o = lt.attn_output orelse return false;
+        const ffn_gate = lt.ffn_gate orelse return false;
+        const up = lt.ffn_up orelse return false;
+        const down = lt.ffn_down orelse return false;
+        const attn = resolveLayerAttentionParams(cfg, lt, cfg.hidden_dim, engine.kv_cache_q8) catch return false;
+        for ([_]*const metal_loader.LoadedTensor{ q, k, o, gate, ffn_gate, up, down }) |t| {
+            if (!supportsBatchedGemmQuant(engine, t.info.type_)) return false;
+        }
+        if (!attn.use_k_as_v) {
+            const v = lt.attn_v orelse return false;
+            if (!supportsBatchedGemmQuant(engine, v.info.type_)) return false;
+        }
+    }
+    return true;
 }
 
 fn canUseDenseGemmaBatchedPrefill(engine: *const InferenceEngine) bool {
@@ -6343,6 +6392,7 @@ fn canUseBatchedPrefill(engine: *const InferenceEngine) bool {
         if (cfg.n_experts > 0) return canUseGemmaBatchedPrefill(engine);
         return canUseDenseGemmaBatchedPrefill(engine);
     }
+    if (cfg.architecture == .muse_glimmer) return canUseMuseGlimmerBatchedPrefill(engine);
     if (cfg.n_experts > 0) return false;
     if (cfg.ssm_d_inner > 0) return false;
     if (cfg.architecture == .gpt_oss) return false;
@@ -6898,6 +6948,12 @@ pub const InferenceEngine = struct {
     logits_readback_buf: MetalBuffer,
     argmax_buf: MetalBuffer,
     argmax_partials_buf: MetalBuffer,
+    // Speculative-decode verify: when non-null, the batched forward's tail
+    // projects every position through the LM head and writes per-position argmax
+    // here instead of the last-token-only tail. `verify_logits_buf` holds the
+    // batched [n_tokens x vocab] logits for CPU argmax.
+    verify_argmax_out: ?[]u32 = null,
+    verify_logits_buf: MetalBuffer,
     embed_staging: MetalBuffer,
     prefill_embed_buf: MetalBuffer,
     /// Cached batched-prefill scratch reused across requests to keep ~20
@@ -7613,6 +7669,8 @@ pub const InferenceEngine = struct {
             .{ .handle = null, .size = 0, .cpu_ptr = null, .is_mmap_wrapped = false };
         self.argmax_buf = try metal_buffer.createBuffer(ctx, 2 * @sizeOf(u32));
         self.argmax_partials_buf = try createMetalBufferForMode(ctx, argmax_pairs_size, self.private_decode_buffers);
+        self.verify_argmax_out = null;
+        self.verify_logits_buf = try metal_buffer.createBuffer(ctx, vocab_size * spec_max_verify_tokens);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
         self.prefill_embed_buf = try metal_buffer.createBuffer(ctx, hidden_size * queued_prefill_embed_tokens);
         self.qwen_ssm_prefill_proj_norm_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * hidden_size, 4));
@@ -8718,6 +8776,7 @@ pub const InferenceEngine = struct {
         metal_buffer.freeBuffer(&self.logits_readback_buf);
         metal_buffer.freeBuffer(&self.argmax_buf);
         metal_buffer.freeBuffer(&self.argmax_partials_buf);
+        metal_buffer.freeBuffer(&self.verify_logits_buf);
         metal_buffer.freeBuffer(&self.embed_staging);
         metal_buffer.freeBuffer(&self.prefill_embed_buf);
         metal_buffer.freeBuffer(&self.lm_head_private_buf);
@@ -10297,7 +10356,9 @@ pub const InferenceEngine = struct {
             }
             break :blk .off;
         } else .off;
-        const mode: BatchedPrefillMode = if (is_gemma_moe_prefill and gemma_env_present and gemma_mode == .off)
+        const mode: BatchedPrefillMode = if (self.verify_argmax_out != null)
+            .on // speculative-decode verify always forces the batched forward
+        else if (is_gemma_moe_prefill and gemma_env_present and gemma_mode == .off)
             .off
         else if (gemma_mode != .off)
             gemma_mode
@@ -10366,6 +10427,14 @@ pub const InferenceEngine = struct {
                 if (embedding_scale != 1.0) {
                     for (out_slice) |*value| value.* *= embedding_scale;
                 }
+                // Muse Glimmer: weightless RMSNorm on embeddings before the
+                // residual stream (mirrors loadTokenEmbeddingInto for the batched path).
+                if (cfg.architecture == .muse_glimmer) {
+                    var sum_sq: f64 = 0;
+                    for (out_slice) |v| sum_sq += @as(f64, v) * @as(f64, v);
+                    const inv_rms: f32 = @floatCast(1.0 / @sqrt(sum_sq / @as(f64, @floatFromInt(hidden_dim)) + @as(f64, cfg.rms_norm_eps)));
+                    for (out_slice) |*value| value.* *= inv_rms;
+                }
             }
         }
 
@@ -10376,7 +10445,17 @@ pub const InferenceEngine = struct {
 
         for (0..cfg.n_layers) |layer_idx| {
             const lt = self.layer_tensors[layer_idx];
-            const attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, self.kv_cache_q8);
+            var attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, self.kv_cache_q8);
+            if (cfg.architecture == .muse_glimmer) {
+                // Global layers (every 4th) use NoPE + full attention; SWA layers
+                // keep RoPE + the sliding window. Matches runDecodeStep.
+                if ((layer_idx + 1) % 4 == 0) {
+                    attn.rope_dim = 0;
+                    attn.sliding_window_size = 0;
+                } else {
+                    attn.sliding_window_size = cfg.sliding_window_size;
+                }
+            }
             const q_t = lt.attn_q.?;
             const k_t = lt.attn_k.?;
             const v_t = if (attn.use_k_as_v) k_t else lt.attn_v.?;
@@ -10390,6 +10469,14 @@ pub const InferenceEngine = struct {
             dispatchGemmBatchedOnCmd(self, &cmd, k_t, &scratch.norm, &scratch.k, attn.kv_dim, hidden_dim, n_tokens);
             if (!attn.use_k_as_v) {
                 dispatchGemmBatchedOnCmd(self, &cmd, v_t, &scratch.norm, &scratch.v, attn.kv_dim, hidden_dim, n_tokens);
+            }
+            // Muse Glimmer attention gate: project sigmoid gate from attn_norm output
+            // now (scratch.norm is fresh), apply it to attn_out after flash. Mirrors
+            // the Qwen route-packed prefix path; scratch.gate is free until the FFN.
+            if (cfg.architecture == .muse_glimmer) {
+                if (lt.attn_gate) |gate_t| {
+                    dispatchGemmBatchedOnCmd(self, &cmd, gate_t, &scratch.norm, &scratch.gate, attn.q_dim, hidden_dim, n_tokens);
+                }
             }
             profileBarrier(&cmd, profile, .full_attn);
 
@@ -10469,6 +10556,15 @@ pub const InferenceEngine = struct {
             }
             profileBarrier(&cmd, profile, .full_attn);
 
+            // Muse Glimmer attention output gate: attn_out *= sigmoid(gate) where
+            // gate = attn_gate @ attn_norm_out was projected above into scratch.gate.
+            if (cfg.architecture == .muse_glimmer) {
+                if (lt.attn_gate != null) {
+                    dispatchSigmoidMulOnCmd(self, &cmd, &scratch.gate, &scratch.attn_out, n_tokens * attn.q_dim);
+                    profileBarrier(&cmd, profile, .full_attn);
+                }
+            }
+
             dispatchGemmBatchedOnCmd(self, &cmd, o_t, &scratch.attn_out, &scratch.down, hidden_dim, attn.q_dim, n_tokens);
             profileBarrier(&cmd, profile, .full_attn);
             if (self.post_attn_norm_present[layer_idx]) {
@@ -10542,6 +10638,35 @@ pub const InferenceEngine = struct {
 
         dispatchRmsNormOnCmd(self, &cmd, &scratch.hidden, &scratch.norm, &self.final_norm_gpu, hidden_dim, n_tokens);
         profileBarrier(&cmd, profile, .final);
+
+        // Speculative-decode verify tail: project EVERY position through the LM
+        // head in one batched Q5_K GEMM (weight read once), then argmax each
+        // position's vocab row on the CPU into `verify_argmax_out`. Skips the
+        // last-token-only tail + validate below.
+        if (self.verify_argmax_out) |out_argmax| {
+            const n_out: u32 = @min(n_tokens, spec_max_verify_tokens);
+            dispatchGemmQ5KOnCmd(self, &cmd, self.lm_head, &scratch.norm, &self.verify_logits_buf, cfg.vocab_size, hidden_dim, n_out);
+            commitAndWaitProfiled(&cmd, profile);
+            self.position = position_base + n_tokens;
+            state.position = self.position;
+            const logits_ptr: [*]const f32 = @ptrCast(@alignCast(self.verify_logits_buf.cpu_ptr.?));
+            const vocab: usize = cfg.vocab_size;
+            var t: usize = 0;
+            while (t < n_out) : (t += 1) {
+                const base = t * vocab;
+                var best_idx: u32 = 0;
+                var best_val: f32 = logits_ptr[base];
+                var v: usize = 1;
+                while (v < vocab) : (v += 1) {
+                    if (logits_ptr[base + v] > best_val) {
+                        best_val = logits_ptr[base + v];
+                        best_idx = @intCast(v);
+                    }
+                }
+                if (t < out_argmax.len) out_argmax[t] = best_idx;
+            }
+            return;
+        }
 
         if (shouldCpuLmHeadFallback(self)) {
             commitAndWaitProfiled(&cmd, profile);
@@ -10632,6 +10757,17 @@ pub const InferenceEngine = struct {
                 });
             }
         }
+    }
+
+    /// Speculative-decode verify: run the batched forward over `tokens` starting
+    /// at the current KV position and write the greedy argmax at EACH position
+    /// into `out_argmax[0..tokens.len]`. Extends the KV cache for all tokens (the
+    /// caller overwrites rejected positions on the next step). Requires the model
+    /// to support the batched prefill path (canUseBatchedPrefill).
+    pub fn verifyTokens(self: *InferenceEngine, state: *DecodeState, tokens: []const u32, out_argmax: []u32) !void {
+        self.verify_argmax_out = out_argmax;
+        defer self.verify_argmax_out = null;
+        try self.prefillBatched(state, tokens);
     }
 
     /// Advance one autoregressive decode step from the given input token.
@@ -11171,6 +11307,16 @@ pub const InferenceEngine = struct {
         if (self.config.architecture == .gemma) {
             const scale = @as(f32, @floatCast(@sqrt(@as(f64, @floatFromInt(self.config.hidden_dim)))));
             for (dst) |*value| value.* *= scale;
+        }
+        // Muse Glimmer applies a weightless RMSNorm to the embeddings before they
+        // enter the residual stream (muse-glimmer.cpp: build_norm(inpL, null, RMS)).
+        // Do it per-token here (CPU, race-free) so the residual base is unit-RMS.
+        if (self.config.architecture == .muse_glimmer) {
+            var sum_sq: f64 = 0;
+            for (dst) |v| sum_sq += @as(f64, v) * @as(f64, v);
+            const mean_sq = sum_sq / @as(f64, @floatFromInt(hidden_dim_usize));
+            const inv_rms: f32 = @floatCast(1.0 / @sqrt(mean_sq + @as(f64, self.config.rms_norm_eps)));
+            for (dst) |*value| value.* *= inv_rms;
         }
     }
 
@@ -26473,7 +26619,7 @@ fn acquireLayerCommand(
 fn canUseDenseSharedDecodeCommand(engine: *const InferenceEngine) bool {
     const cfg = engine.config;
     switch (cfg.architecture) {
-        .gemma, .qwen2 => {},
+        .gemma, .qwen2, .muse_glimmer => {},
         else => return false,
     }
     if (cfg.n_experts != 0) return false;
@@ -26483,7 +26629,10 @@ fn canUseDenseSharedDecodeCommand(engine: *const InferenceEngine) bool {
         engine.dense_gemma_q4k_geglu_validation_enabled) return false;
 
     for (engine.layer_tensors) |lt| {
-        if (lt.attn_gate != null) return false;
+        // Muse Glimmer legitimately carries a per-layer attn_gate; its gate +
+        // QK-norm dispatches are recorded into the grouped command buffer with
+        // full barrier coverage, so grouping stays math-identical for it.
+        if (lt.attn_gate != null and cfg.architecture != .muse_glimmer) return false;
         if (lt.attn_q_bias != null or lt.attn_k_bias != null or
             lt.attn_v_bias != null or lt.attn_output_bias != null) return false;
     }
@@ -30364,6 +30513,46 @@ fn logLayerDiagnostics(engine: *InferenceEngine, lt: LayerTensors, layer: u32, i
 /// @param eos_id Token id that terminates generation early when sampled.
 /// @param allocator Used to allocate the returned `output_tokens` slice; caller must free via `GenerateResult.deinit`.
 /// @returns `GenerateResult` with the generated token slice and per-phase timing metrics.
+/// Prompt-lookup (n-gram) speculative decoding: default-on for models on the
+/// batched-forward path, opt out with ZINC_SPEC_DECODE=0. Greedy speculative
+/// decoding is exact — output is byte-identical to the per-token path.
+fn specDecodeEnabled() bool {
+    return readBoolEnv("ZINC_SPEC_DECODE") orelse true;
+}
+
+/// n-gram match length and max draft length for prompt-lookup drafting.
+const spec_ngram: usize = 3;
+const spec_max_draft: usize = @min(24, spec_max_verify_tokens - 1);
+
+/// Draft the likely continuation after `seq[last]` by finding the most recent
+/// earlier occurrence of the last `spec_ngram` tokens and copying up to `max_k`
+/// of what followed. Returns the number of draft tokens written to `out`.
+fn draftFromNgram(seq: []const u32, out: []u32, max_k: usize) usize {
+    const ngram = spec_ngram;
+    if (max_k == 0 or seq.len < ngram + 1) return 0;
+    const suffix = seq[seq.len - ngram ..];
+    // Scan earlier start positions from most-recent to oldest.
+    var i: usize = seq.len - ngram; // exclusive upper bound for an earlier match start
+    while (i > 0) {
+        i -= 1;
+        var match = true;
+        for (0..ngram) |g| {
+            if (seq[i + g] != suffix[g]) {
+                match = false;
+                break;
+            }
+        }
+        if (!match) continue;
+        const start = i + ngram;
+        var n: usize = 0;
+        while (n < out.len and n < max_k and start + n < seq.len) : (n += 1) {
+            out[n] = seq[start + n];
+        }
+        return n;
+    }
+    return 0;
+}
+
 pub fn generateWithMetrics(
     engine: *InferenceEngine,
     prompt_tokens: []const u32,
@@ -30427,16 +30616,115 @@ pub fn generateWithMetrics(
     // Decode loop
     const decode_start = std.time.nanoTimestamp();
     var tokens_generated: u32 = @intCast(output.items.len);
-    while (tokens_generated < decode_budget and output.items.len > 0) {
-        const input_token = output.items[output.items.len - 1];
-        try engine.decodeStep(&state, input_token);
+    const use_spec = specDecodeEnabled() and output.items.len > 0 and
+        engine.config.architecture == .muse_glimmer and canUseBatchedPrefill(engine);
+    if (use_spec) {
+        // Prompt-lookup speculative decode: draft a continuation from the token
+        // history, verify K+1 tokens in ONE batched forward pass, accept the
+        // longest prefix the target confirms. Exact for greedy.
+        var full_seq: std.ArrayList(u32) = .{};
+        defer full_seq.deinit(allocator);
+        try full_seq.appendSlice(allocator, prompt_tokens);
+        try full_seq.appendSlice(allocator, output.items);
+        var draft_buf: [spec_max_draft]u32 = undefined;
+        var verify_toks: [1 + spec_max_draft]u32 = undefined;
+        var verify_out: [1 + spec_max_draft]u32 = undefined;
+        var spec_verifies: u64 = 0;
+        var spec_accepted: u64 = 0;
+        var spec_fallbacks: u64 = 0;
+        var spec_verify_ns: u64 = 0;
+        var spec_verify_tokens: u64 = 0;
+        // Adaptive draft length + acceptance gate. A verify costs a full batched
+        // forward (~fixed, independent of small N), so it only pays off above
+        // ~spec_min_accept accepted tokens. Track an EMA of accepted-per-verify;
+        // when it drops, fall back to the cheap per-token path and only probe
+        // occasionally to detect a workload that has become copy-friendly again.
+        var draft_cap: usize = 4;
+        // Start with a couple of startup chances, then let the EMA gate settle.
+        var accept_ema: f32 = 4.0;
+        const spec_min_accept: f32 = 3.0;
+        outer: while (tokens_generated < decode_budget) {
+            const seed = output.items[output.items.len - 1];
+            const ndraft = draftFromNgram(full_seq.items, &draft_buf, draft_cap);
+            const do_verify = ndraft > 0 and accept_ema >= spec_min_accept;
+            if (!do_verify) {
+                // Cheap single-token decode: no draft, or acceptance has dropped
+                // below the point where a full verify forward pays for itself.
+                try engine.decodeStep(&state, seed);
+                const next_token = engine.sampleGreedy();
+                if (next_token == eos_id) break :outer;
+                try output.append(allocator, next_token);
+                try state.generated_tokens.append(allocator, next_token);
+                try full_seq.append(allocator, next_token);
+                tokens_generated += 1;
+                spec_fallbacks += 1;
+                continue;
+            }
+            verify_toks[0] = seed;
+            for (0..ndraft) |k| verify_toks[1 + k] = draft_buf[k];
+            const pos_before = engine.position;
+            const vt0 = std.time.nanoTimestamp();
+            try engine.verifyTokens(&state, verify_toks[0 .. 1 + ndraft], verify_out[0 .. 1 + ndraft]);
+            spec_verify_ns += @intCast(std.time.nanoTimestamp() - vt0);
+            spec_verify_tokens += 1 + ndraft;
+            // Longest confirmed draft prefix.
+            var j: usize = 0;
+            while (j < ndraft and verify_out[j] == draft_buf[j]) : (j += 1) {}
+            spec_verifies += 1;
+            spec_accepted += j;
+            accept_ema = 0.5 * accept_ema + 0.5 * @as(f32, @floatFromInt(j));
+            // Adapt draft length toward the accepted count.
+            if (j == ndraft) {
+                draft_cap = @min(draft_cap + 2, spec_max_draft);
+            } else {
+                draft_cap = @max(j + 1, 1);
+            }
+            // Roll KV/position back to just past the accepted prefix.
+            engine.position = pos_before + 1 + @as(u32, @intCast(j));
+            state.position = engine.position;
+            for (0..j) |k| {
+                const tok = draft_buf[k];
+                if (tok == eos_id) break :outer;
+                try output.append(allocator, tok);
+                try state.generated_tokens.append(allocator, tok);
+                try full_seq.append(allocator, tok);
+                tokens_generated += 1;
+                if (tokens_generated >= decode_budget) break :outer;
+            }
+            const correction = verify_out[j];
+            if (correction == eos_id) break :outer;
+            try output.append(allocator, correction);
+            try state.generated_tokens.append(allocator, correction);
+            try full_seq.append(allocator, correction);
+            tokens_generated += 1;
+        }
+        if (spec_verifies > 0 or spec_fallbacks > 0) {
+            const avg: f64 = if (spec_verifies > 0)
+                @as(f64, @floatFromInt(spec_accepted)) / @as(f64, @floatFromInt(spec_verifies))
+            else
+                0;
+            const ms_per_verify: f64 = if (spec_verifies > 0)
+                @as(f64, @floatFromInt(spec_verify_ns)) / 1_000_000.0 / @as(f64, @floatFromInt(spec_verifies))
+            else
+                0;
+            const verify_tok: f64 = if (spec_verifies > 0)
+                @as(f64, @floatFromInt(spec_verify_tokens)) / @as(f64, @floatFromInt(spec_verifies))
+            else
+                0;
+            log.info("spec-decode: {d} verifies ({d:.2} accepted/verify), {d} fallbacks | {d:.1} ms/verify over {d:.1} tok/verify", .{ spec_verifies, avg, spec_fallbacks, ms_per_verify, verify_tok });
+        }
+    } else {
+        while (tokens_generated < decode_budget and output.items.len > 0) {
+            const input_token = output.items[output.items.len - 1];
+            try engine.decodeStep(&state, input_token);
 
-        const next_token = engine.sampleGreedy();
-        if (next_token == eos_id) break;
+            const next_token = engine.sampleGreedy();
+            if (next_token == eos_id) break;
 
-        try output.append(allocator, next_token);
-        try state.generated_tokens.append(allocator, next_token);
-        tokens_generated += 1;
+            try output.append(allocator, next_token);
+            try state.generated_tokens.append(allocator, next_token);
+            tokens_generated += 1;
+        }
     }
     const decode_end = std.time.nanoTimestamp();
     const decode_ns: u64 = @intCast(decode_end - decode_start);
