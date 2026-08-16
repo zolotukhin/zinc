@@ -109,13 +109,32 @@ of columns). Consequences:
 - Because the cost is fixed, **longer accepted drafts amortize it** — hence the 8→24 ceiling
   (24 accepted → ~8 ms/token). Adaptive-capped, so short-repeat is unaffected.
 
-## Remaining levers (next)
+## cycle 6 — verify kernel dead end + runtime break-even gate (`11ff18f1`)
 
-- **THE spec lever — bandwidth-efficient small-N batched matvec** for the verify forward.
-  A kernel that reads each weight once (like the GEMM) but at the dmmv's ~349 GB/s (instead
-  of 78) would cut a verify from ~193 ms to ~44 ms → break-even ~1 token → spec universally
-  beneficial (not just copy-heavy). This is a fresh multi-hour kernel cycle (write + microbench
-  a small-N Q4_K/Q6_K column-batched matvec vs `gemm_q4k`); needs a quiet GPU to measure.
+Attempted the "bandwidth-efficient small-N matvec" lever and it's a **DEAD END** (measured):
+- Wrote a dense Q4_K multi-column matvec (`dmmv_q4k_cols.metal`, adapted from moe_cols) to
+  replace gemm_q4k at small N. **Slower: 233 vs 196 ms.** Scalar float dots lose to gemm's
+  hardware simdgroup matrix units. Reverted.
+- Small-NR1 gemm variant (compute only the real columns) is **structurally locked**: the
+  shader's A-load needs ≥128 threads and the tiling ties NR1 = 16·(THREADS/64), so THREADS≥128
+  forces NR1≥32. Not a define change.
+- Root measurement: verify is ~flat ~193–200 ms at N=2 **and** N=8 — the gemm always computes
+  a **fixed 32-column tile** regardless of N. So the gemm is near-optimal; the real lever is
+  **filling that 32-col tile** with longer accepted drafts, not a new kernel.
+
+Two shipped changes from that:
+1. **Full-tile drafting** — drop the adaptive draft-cap (it was throttling on a false
+   "cost scales with N" premise); always draft the tile width (ceiling 24→31). Long verbatim
+   copies now amortize the fixed verify cost immediately.
+2. **Runtime break-even gate** — spec's break-even is `verify_ms / per-token-decode_ms`, and
+   decode is **load-dependent** (24 ms/tok quiet ↔ 44 ms/tok loaded; command encoding is
+   CPU-side) while verify is GPU-bound (~flat). A static threshold loses on a quiet machine.
+   Now the gate MEASURES both live (first 2 tokens calibrate decode; verifies measure verify)
+   and only fires when acceptance clears the measured ratio +15%. **Never nets a loss on any
+   load; the win scales up automatically when decode is slow or acceptance is high.** Quiet
+   machine + ~8/verify ≈ neutral-to-1.05×; loaded or long-copy → up to ~1.8×.
+
+## Remaining levers (next)
 - **D-kernel — decode bandwidth:** close the 378→440 GB/s effective gap by reducing barriers
   that prevent independent matmul overlap (delicate; sub-noise per change).
 - **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token.
