@@ -30521,8 +30521,11 @@ fn specDecodeEnabled() bool {
 }
 
 /// n-gram match length and max draft length for prompt-lookup drafting.
+/// A verify is a fixed-cost batched forward whose GEMM computes a 32-column tile
+/// regardless of N, so drafting up to the tile width is free — always draft as
+/// much as the history offers (the EMA gate decides *whether* to verify at all).
 const spec_ngram: usize = 3;
-const spec_max_draft: usize = @min(24, spec_max_verify_tokens - 1);
+const spec_max_draft: usize = @min(31, spec_max_verify_tokens - 1);
 
 /// Draft the likely continuation after `seq[last]` by finding the most recent
 /// earlier occurrence of the last `spec_ngram` tokens and copying up to `max_k`
@@ -30634,24 +30637,34 @@ pub fn generateWithMetrics(
         var spec_fallbacks: u64 = 0;
         var spec_verify_ns: u64 = 0;
         var spec_verify_tokens: u64 = 0;
-        // Adaptive draft length + acceptance gate. A verify costs a full batched
-        // forward (~fixed, independent of small N), so it only pays off above
-        // ~spec_min_accept accepted tokens. Track an EMA of accepted-per-verify;
-        // when it drops, fall back to the cheap per-token path and only probe
-        // occasionally to detect a workload that has become copy-friendly again.
-        var draft_cap: usize = 4;
-        // Start with a couple of startup chances, then let the EMA gate settle.
-        var accept_ema: f32 = 4.0;
-        const spec_min_accept: f32 = 3.0;
+        var spec_fallback_ns: u64 = 0;
+        // Runtime break-even gate. A verify is a fixed-cost batched forward, so it
+        // only pays when the accepted run exceeds verify_ms / per-token-decode_ms.
+        // Both costs are load/hardware dependent (decode's command encoding is
+        // CPU-side and swings with load), so measure them live: the first two
+        // tokens take the per-token path to sample decode cost, then the gate uses
+        // the measured ratio (+15% margin). An acceptance EMA tracks the run length.
+        var accept_ema: f32 = 8.0;
+        const spec_default_break_even: f32 = 8.0;
         outer: while (tokens_generated < decode_budget) {
             const seed = output.items[output.items.len - 1];
-            const ndraft = draftFromNgram(full_seq.items, &draft_buf, draft_cap);
-            const do_verify = ndraft > 0 and accept_ema >= spec_min_accept;
+            // Always draft the full tile width — the verify GEMM computes a fixed
+            // 32-column tile, so a longer draft costs the same and captures longer
+            // accepted runs. The gate below decides *whether* to verify.
+            const ndraft = draftFromNgram(full_seq.items, &draft_buf, spec_max_draft);
+            const break_even: f32 = if (spec_verifies > 0 and spec_fallbacks > 0)
+                @as(f32, @floatFromInt(spec_verify_ns / spec_verifies)) /
+                    @as(f32, @floatFromInt(@max(spec_fallback_ns / spec_fallbacks, 1))) * 1.15
+            else
+                spec_default_break_even;
+            const do_verify = ndraft > 0 and spec_fallbacks >= 2 and accept_ema >= break_even;
             if (!do_verify) {
-                // Cheap single-token decode: no draft, or acceptance has dropped
+                // Cheap single-token decode: no draft, calibration, or acceptance
                 // below the point where a full verify forward pays for itself.
+                const ft0 = std.time.nanoTimestamp();
                 try engine.decodeStep(&state, seed);
                 const next_token = engine.sampleGreedy();
+                spec_fallback_ns += @intCast(std.time.nanoTimestamp() - ft0);
                 if (next_token == eos_id) break :outer;
                 try output.append(allocator, next_token);
                 try state.generated_tokens.append(allocator, next_token);
@@ -30673,12 +30686,6 @@ pub fn generateWithMetrics(
             spec_verifies += 1;
             spec_accepted += j;
             accept_ema = 0.5 * accept_ema + 0.5 * @as(f32, @floatFromInt(j));
-            // Adapt draft length toward the accepted count.
-            if (j == ndraft) {
-                draft_cap = @min(draft_cap + 2, spec_max_draft);
-            } else {
-                draft_cap = @max(j + 1, 1);
-            }
             // Roll KV/position back to just past the accepted prefix.
             engine.position = pos_before + 1 + @as(u32, @intCast(j));
             state.position = engine.position;
