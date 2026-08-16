@@ -47,11 +47,10 @@ The important inference split is not "gaming card versus pro card"; it is memory
 
 ## ZINC Support Status
 
-Intel Arc is a supported Linux Vulkan target in ZINC. The current public Intel benchmark artifact validates the same five managed catalog rows used on RDNA, Metal, and CUDA:
+Intel Arc is a supported Linux Vulkan target in ZINC. The current public Intel benchmark artifact validates four managed catalog rows:
 
 - Qwen 3.5 9B Q4_K_M
 - Qwen3.6 35B-A3B UD Q4_K_XL
-- Qwen3.6 27B Dense Q4_K_M (catalog status remains experimental as a model target)
 - Gemma 4 31B Q4_K_M
 - Gemma 4 26B-A4B MoE Q4_K_M
 

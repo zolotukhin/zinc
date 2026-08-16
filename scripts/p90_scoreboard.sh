@@ -18,10 +18,10 @@ ONLY=${ONLY:-}
 SENT="The memory hierarchy of a modern graphics processor determines how quickly a large language model can process its prompt and generate new tokens during inference. "
 PROMPT=""; for i in $(seq 1 40); do PROMPT="$PROMPT$SENT"; done
 
-NAMES=(qwen35-9b qwen36-27b qwen36-35b-a3b gemma4-31b gemma4-26b)
+NAMES=(qwen35-9b qwen38-27b qwen36-35b-a3b gemma4-31b gemma4-26b)
 declare -A GGUF=(
   [qwen35-9b]="$MD/Qwen3.5-9B-Q4_K_M.gguf"
-  [qwen36-27b]="$MD/Qwen3.6-27B-Q4_K_M.gguf"
+  [qwen38-27b]="$MD/Qwen3.8-27B-Q4_K_M.gguf"
   [qwen36-35b-a3b]="$MD/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
   [gemma4-31b]="$MD/gemma-4-31B-it-Q4_K_M.gguf"
   [gemma4-26b]="$MD/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"

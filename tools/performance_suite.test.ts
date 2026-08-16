@@ -12,6 +12,7 @@ import {
   compareModelsByName,
   detectRdnaServerStartupFailure,
   DEFAULT_LOCAL_MODEL_ROOT,
+  defaultCudaCases,
   defaultIntelCases,
   defaultMetalCases,
   defaultMaxTokensForModelId,
@@ -239,18 +240,21 @@ test("Gemma uses the chat prompt path in the performance suite", () => {
   expect(prefersChatPrompt("qwen35-9b-q4k-m")).toBe(false);
   expect(defaultPromptForModelId("qwen35-9b-q4k-m")).toContain("Developer question");
   expect(defaultMaxTokensForModelId("qwen35-9b-q4k-m")).toBe(96);
+  expect(prefersChatPrompt("qwen38-27b-q4k-m")).toBe(true);
 });
 
-test("default Metal cases use managed cache ids and include Qwen 3.6", () => {
+test("default Metal cases use managed cache ids and replace Qwen 3.6 27B with Qwen 3.8", () => {
   const cases = defaultMetalCases("/tmp/models");
 
   const qwen36 = cases.find((entry) => entry.id === "qwen36-35b-a3b-q4k-xl");
   expect(qwen36?.model_id).toBe("qwen36-35b-a3b-q4k-xl");
   expect(qwen36?.model_path).toBe("/tmp/models/qwen36-35b-a3b-q4k-xl/model.gguf");
 
-  const qwen36Dense = cases.find((entry) => entry.id === "qwen36-27b-q4k-m");
-  expect(qwen36Dense?.model_id).toBe("qwen36-27b-q4k-m");
-  expect(qwen36Dense?.model_path).toBe("/tmp/models/qwen36-27b-q4k-m/model.gguf");
+  const qwen38Dense = cases.find((entry) => entry.id === "qwen38-27b-q4k-m");
+  expect(qwen38Dense?.model_id).toBe("qwen38-27b-q4k-m");
+  expect(qwen38Dense?.model_path).toBe("/tmp/models/qwen38-27b-q4k-m/model.gguf");
+  expect(qwen38Dense?.prompt_mode).toBe("chat");
+  expect(cases.some((entry) => entry.id === "qwen36-27b-q4k-m")).toBe(false);
 });
 
 test("default RDNA cases include Gemma and current Qwen rows", () => {
@@ -258,7 +262,6 @@ test("default RDNA cases include Gemma and current Qwen rows", () => {
   const gemma26 = cases.find((entry) => entry.id === "gemma4-26b-a4b-q4k-m");
   const gemma31 = cases.find((entry) => entry.id === "gemma4-31b-q4k-m");
   const qwen38Dense = cases.find((entry) => entry.id === "qwen38-27b-q4k-m");
-  const qwen36Dense = cases.find((entry) => entry.id === "qwen36-27b-q4k-m");
   const qwen35 = cases.find((entry) => entry.id === "qwen35-9b-q4k-m");
 
   expect(gemma26?.model_path).toBe("/root/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf");
@@ -272,14 +275,11 @@ test("default RDNA cases include Gemma and current Qwen rows", () => {
   expect(gemma31?.max_tokens).toBe(96);
 
   expect(qwen38Dense?.model_path).toBe("/root/models/Qwen3.8-27B-Q4_K_M.gguf");
-  expect(qwen38Dense?.prompt_mode).toBe("raw");
-  expect(qwen38Dense?.prompt).toContain("Developer question");
+  expect(qwen38Dense?.prompt_mode).toBe("chat");
+  expect(qwen38Dense?.prompt).toContain("benchmark screenshots");
   expect(qwen38Dense?.max_tokens).toBe(96);
 
-  expect(qwen36Dense?.model_path).toBe("/root/models/Qwen3.6-27B-Q4_K_M.gguf");
-  expect(qwen36Dense?.prompt_mode).toBe("raw");
-  expect(qwen36Dense?.prompt).toContain("Developer question");
-  expect(qwen36Dense?.max_tokens).toBe(96);
+  expect(cases.some((entry) => entry.id === "qwen36-27b-q4k-m")).toBe(false);
 
   expect(qwen35?.model_path).toBe("/root/models/Qwen3.5-9B-Q4_K_M.gguf");
   expect(qwen35?.prompt_mode).toBe("raw");
@@ -294,8 +294,8 @@ test("default Intel cases use the remote managed cache layout", () => {
     "gemma4-31b-q4k-m",
     "qwen35-9b-q4k-m",
     "qwen36-35b-a3b-q4k-xl",
-    "qwen36-27b-q4k-m",
   ]);
+  expect(cases.some((entry) => entry.id === "qwen38-27b-q4k-m")).toBe(false);
   const qwen = cases.find((entry) => entry.id === "qwen35-9b-q4k-m");
   const gemma = cases.find((entry) => entry.id === "gemma4-26b-a4b-q4k-m");
 
@@ -305,6 +305,12 @@ test("default Intel cases use the remote managed cache layout", () => {
   expect(gemma?.model_path).toBe("/remote/cache/gemma4-26b-a4b-q4k-m/model.gguf");
   expect(gemma?.prompt_mode).toBe("chat");
   expect(gemma?.notes).toEqual(["Intel Arc Vulkan comparison against llama.cpp on the same host"]);
+});
+
+test("default CUDA cases exclude unvalidated Qwen 3.8 and retired Qwen 3.6 27B rows", () => {
+  const ids = defaultCudaCases("/remote/models").map((entry) => entry.id);
+  expect(ids).not.toContain("qwen38-27b-q4k-m");
+  expect(ids).not.toContain("qwen36-27b-q4k-m");
 });
 
 test("llama device args support Intel Vulkan0 and no-device modes", () => {
@@ -444,6 +450,8 @@ main: exiting due to model loading error
 `);
 
   expect(failure).toBe("unknown model architecture: 'gemma4'");
+  expect(detectRdnaServerStartupFailure('error while handling argument "--device": invalid device: Vulkan1'))
+    .toBe('error while handling argument "--device": invalid device: Vulkan1');
   expect(detectRdnaServerStartupFailure("server ready")).toBeNull();
 });
 

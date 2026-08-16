@@ -69,7 +69,7 @@ Same box throughout: an RTX 5090 (Blackwell, sm_120, 170 SMs, 32 GB, 1792 GB/s) 
 | **Qwen3.6-35B-A3B** (MoE) | 16.3 | **37.4** | **2.3x** | per-expert dispatch + router readback |
 | **Qwen3.5-9B** (dense) | 92 | **118** | 1.3x | sync-bound boost starvation |
 | **Gemma-4-31B** (dense) | 34 | **39** | 1.15x | launch-latency (fusion, not async) |
-| Qwen3.6-27B (dense) | 48 | 42 | flat | — within 5090 boost variance |
+| 27B Qwen (dense) | 48 | 42 | flat | — within 5090 boost variance |
 
   <figcaption>Decode throughput, tok/s, RTX 5090. "before" is the correctness-first / pre-lever build; "after" is the current build. The catalog average moved from 39.6 to 55.4 tok/s — from 51% to 59% of llama.cpp on the same hardware. The two MoE models, the worst performers, improved the most.</figcaption>
 </figure>

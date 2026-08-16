@@ -180,6 +180,8 @@ pub const Config = struct {
     max_parallel: u32 = 4,
     /// CLI prompt text.
     prompt: ?[]const u8 = null,
+    /// Optional system turn prepended when an explicit CLI chat prompt is used.
+    system_prompt: ?[]const u8 = null,
     /// Maximum CLI decode tokens.
     max_tokens: u32 = 256,
     /// Wrap CLI prompt in the model's chat template before tokenization.
@@ -462,6 +464,7 @@ const banner =
     \\  -hf, --hf-repo <spec>    Hugging Face repo (owner/model[:quant]) to download and load
     \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
     \\  --chat                   Apply the model chat template to --prompt
+    \\  --system-prompt <text>   Add an explicit system turn (requires --chat)
     \\  --raw                    Do not auto-apply chat templates to --prompt
     \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
     \\  -d, --device <id>        GPU device index (default: auto, prefers discrete Vulkan GPU)
@@ -508,6 +511,7 @@ const banner_full =
     \\  -hf, --hf-repo <spec>    Hugging Face repo (owner/model[:quant]) to download and load
     \\  --prompt <text>          Run one prompt in CLI mode instead of starting the server
     \\  --chat                   Apply the model chat template to --prompt
+    \\  --system-prompt <text>   Add an explicit system turn (requires --chat)
     \\  --raw                    Do not auto-apply chat templates to --prompt
     \\  -n, --max-tokens <n>     Max generated tokens in CLI mode (default: 256)
     \\  -d, --device <id>        GPU device index (default: auto, prefers discrete Vulkan GPU)
@@ -636,6 +640,10 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
             config.prompt = args[i];
+        } else if (std.mem.eql(u8, arg, "--system-prompt")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            config.system_prompt = args[i];
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-tokens")) {
             i += 1;
             if (i >= args.len) return error.MissingArgValue;
@@ -689,6 +697,9 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
     if (config.chat and config.raw_prompt) {
         return error.ConflictingPromptModes;
     }
+    if (config.system_prompt != null and (!config.chat or config.prompt == null)) {
+        return error.SystemPromptRequiresChat;
+    }
 
     return config;
 }
@@ -735,22 +746,29 @@ fn promptFingerprint(text: []const u8) u64 {
     return std.hash.Wyhash.hash(0, text);
 }
 
-fn prepareCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8, chat: bool, allocator: std.mem.Allocator) !PreparedPrompt {
+fn prepareCliPrompt(
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    prompt: []const u8,
+    chat: bool,
+    system_prompt: ?[]const u8,
+    allocator: std.mem.Allocator,
+) !PreparedPrompt {
     if (!chat) {
         return .{ .text = prompt };
     }
 
     // Llama 3 instruct models need a system prompt for best results.
     // Detect Llama-style templates (start_header_id) and prepend system message.
-    const needs_system = if (tokenizer.chat_template) |tmpl|
+    const template_needs_system = if (tokenizer.chat_template) |tmpl|
         std.mem.indexOf(u8, tmpl, "start_header_id") != null
     else
         false;
 
-    if (needs_system) {
+    if (system_prompt != null or template_needs_system) {
         const roles = [_][]const u8{ "system", "user" };
-        const contents = [_][]const u8{ "You are a helpful assistant.", prompt };
-        const chat_capacity = prompt.len + 512;
+        const system_content = system_prompt orelse "You are a helpful assistant.";
+        const contents = [_][]const u8{ system_content, prompt };
+        const chat_capacity = prompt.len + system_content.len + 512;
         const chat_buf = try allocator.alloc(u8, chat_capacity);
         errdefer allocator.free(chat_buf);
         const formatted = try tokenizer.applyChatTemplate(&roles, &contents, chat_buf);
@@ -1830,7 +1848,7 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
 
     const auto_chat = !config.chat and !config.raw_prompt and shouldAutoChatCliPrompt(&tokenizer, prompt);
     const use_chat_prompt = config.chat or auto_chat;
-    var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, allocator);
+    var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, config.system_prompt, allocator);
     defer prepared_prompt.deinit(allocator);
 
     const prompt_tokens = try tokenizer.encodePrompt(prepared_prompt.text, allocator);
@@ -2521,7 +2539,7 @@ pub fn main() !void {
 
             const auto_chat = !config.chat and !config.raw_prompt and shouldAutoChatCliPrompt(&tokenizer, prompt);
             const use_chat_prompt = config.chat or auto_chat;
-            var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, allocator);
+            var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, config.system_prompt, allocator);
             defer prepared_prompt.deinit(allocator);
             if (use_chat_prompt) {
                 log.info("Prompt mode: {s}chat template ({d} chars)", .{
@@ -2724,7 +2742,7 @@ pub fn main() !void {
 
         const auto_chat = !config.chat and !config.raw_prompt and shouldAutoChatCliPrompt(&tokenizer, prompt);
         const use_chat_prompt = config.chat or auto_chat;
-        var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, allocator);
+        var prepared_prompt = try prepareCliPrompt(&tokenizer, prompt, use_chat_prompt, config.system_prompt, allocator);
         defer prepared_prompt.deinit(allocator);
         if (use_chat_prompt) {
             log.debug("Prompt mode: {s}chat template ({d} chars)", .{
@@ -2888,6 +2906,7 @@ test "parseArgs: defaults" {
         try std.testing.expectEqual(@as(u32, 0), config.gpuDevicePreference());
     }
     try std.testing.expect(config.prompt == null);
+    try std.testing.expect(config.system_prompt == null);
     try std.testing.expect(!config.chat);
     try std.testing.expect(!config.raw_prompt);
     try std.testing.expectEqual(Command.run, config.command);
@@ -2895,11 +2914,12 @@ test "parseArgs: defaults" {
 
 test "parseArgs: full args" {
     const args = [_][:0]const u8{
-        "zinc",           "-m",         "model.gguf",  "--model-id", "qwen35-9b-q4k-m",
-        "-p",             "9090",       "-d",          "1",          "-c",
-        "8192",           "--parallel", "8",           "--prompt",   "hello",
-        "--max-tokens",   "32",         "--chat",      "--kv-quant", "3",
-        "--graph-report", "graph.json", "--graph-dot", "graph.dot",
+        "zinc",         "-m",         "model.gguf",     "--model-id",      "qwen35-9b-q4k-m",
+        "-p",           "9090",       "-d",             "1",               "-c",
+        "8192",         "--parallel", "8",              "--prompt",        "hello",
+        "--max-tokens", "32",         "--chat",         "--system-prompt", "system guidance",
+        "--kv-quant",   "3",          "--graph-report", "graph.json",      "--graph-dot",
+        "graph.dot",
     };
     const config = try parseArgs(&args);
     try std.testing.expectEqualStrings("model.gguf", config.model_path.?);
@@ -2911,6 +2931,7 @@ test "parseArgs: full args" {
     try std.testing.expectEqual(@as(?u32, 8192), config.context_length);
     try std.testing.expectEqual(@as(u32, 8), config.max_parallel);
     try std.testing.expectEqualStrings("hello", config.prompt.?);
+    try std.testing.expectEqualStrings("system guidance", config.system_prompt.?);
     try std.testing.expectEqual(@as(u32, 32), config.max_tokens);
     try std.testing.expect(config.chat);
     try std.testing.expect(!config.raw_prompt);
@@ -3011,6 +3032,18 @@ test "parseArgs: raw flag" {
 test "parseArgs: raw and chat conflict" {
     const args = [_][:0]const u8{ "zinc", "--prompt", "hi", "--chat", "--raw" };
     try std.testing.expectError(error.ConflictingPromptModes, parseArgs(&args));
+}
+
+test "parseArgs: system prompt requires explicit CLI chat mode" {
+    const valid_args = [_][:0]const u8{ "zinc", "--prompt", "hi", "--chat", "--system-prompt", "be direct" };
+    const valid = try parseArgs(&valid_args);
+    try std.testing.expectEqualStrings("be direct", valid.system_prompt.?);
+
+    const no_chat = [_][:0]const u8{ "zinc", "--prompt", "hi", "--system-prompt", "be direct" };
+    try std.testing.expectError(error.SystemPromptRequiresChat, parseArgs(&no_chat));
+
+    const no_prompt = [_][:0]const u8{ "zinc", "--chat", "--system-prompt", "be direct" };
+    try std.testing.expectError(error.SystemPromptRequiresChat, parseArgs(&no_prompt));
 }
 
 test "helpText: short help hides developer-only flags" {
@@ -3198,7 +3231,7 @@ test "prepareCliPrompt leaves non-chat prompts unowned" {
     var tok = makeTestTokenizer(null);
     defer tok.token_to_id.deinit();
 
-    var prepared = try prepareCliPrompt(&tok, "hello", false, std.testing.allocator);
+    var prepared = try prepareCliPrompt(&tok, "hello", false, null, std.testing.allocator);
     defer prepared.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("hello", prepared.text);
@@ -3209,7 +3242,7 @@ test "prepareCliPrompt returns full owned chat buffer" {
     var tok = makeTestTokenizer(null);
     defer tok.token_to_id.deinit();
 
-    var prepared = try prepareCliPrompt(&tok, "Hello", true, std.testing.allocator);
+    var prepared = try prepareCliPrompt(&tok, "Hello", true, null, std.testing.allocator);
     defer prepared.deinit(std.testing.allocator);
 
     try std.testing.expect(prepared.owned_buf != null);
@@ -3231,11 +3264,31 @@ test "prepareCliPrompt uses closed think scaffold for qwen chatml templates" {
     );
     defer tok.token_to_id.deinit();
 
-    var prepared = try prepareCliPrompt(&tok, "Hello", true, std.testing.allocator);
+    var prepared = try prepareCliPrompt(&tok, "Hello", true, null, std.testing.allocator);
     defer prepared.deinit(std.testing.allocator);
 
     try std.testing.expect(std.mem.indexOf(u8, prepared.text, "<|im_start|>user\nHello<|im_end|>\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, prepared.text, "<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+}
+
+test "prepareCliPrompt prepends an explicit system turn" {
+    var tok = makeTestTokenizer(null);
+    defer tok.token_to_id.deinit();
+
+    var prepared = try prepareCliPrompt(
+        &tok,
+        "Review this code.",
+        true,
+        "You are a helpful assistant. Answer directly. Do not show analysis.",
+        std.testing.allocator,
+    );
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(
+        "<|im_start|>system\nYou are a helpful assistant. Answer directly. Do not show analysis.<|im_end|>\n" ++
+            "<|im_start|>user\nReview this code.<|im_end|>\n<|im_start|>assistant\n",
+        prepared.text,
+    );
 }
 
 test "prepareCliPrompt uses gemma4 default closed-thought prompt in chat mode" {
@@ -3246,7 +3299,7 @@ test "prepareCliPrompt uses gemma4 default closed-thought prompt in chat mode" {
     tok.prepend_bos = true;
     tok.bos_id = 2;
 
-    var prepared = try prepareCliPrompt(&tok, "Hello", true, std.testing.allocator);
+    var prepared = try prepareCliPrompt(&tok, "Hello", true, null, std.testing.allocator);
     defer prepared.deinit(std.testing.allocator);
 
     try std.testing.expect(std.mem.indexOf(u8, prepared.text, "<bos><|turn>system\n<|think|><turn|>\n") == null);
@@ -3271,6 +3324,7 @@ test "prepareCliPrompt frontloads gemma4 include-word constraint in user turn" {
         &tok,
         "Write an implementation plan. Include the word benchmark.",
         true,
+        null,
         std.testing.allocator,
     );
     defer prepared.deinit(std.testing.allocator);

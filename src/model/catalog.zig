@@ -74,8 +74,8 @@ pub const entries = [_]CatalogEntry{
         .sha256 = "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169",
         .size_bytes = 17_106_775_008,
         // Qwen3.8-27B retains Qwen3.6-27B's qwen35 text architecture and
-        // dimensions. The 32 GB R9700 has enough headroom for weights, the
-        // capped runtime context, and Vulkan scratch allocations.
+        // dimensions. Validated 32 GB-class RDNA4 and Apple Silicon systems
+        // have enough headroom for weights, the capped context, and scratch.
         .required_vram_bytes = 20 * 1024 * 1024 * 1024,
         .default_context_length = 4096,
         .recommended_for_chat = true,
@@ -83,6 +83,7 @@ pub const entries = [_]CatalogEntry{
         .status = .supported,
         .tested_profiles = &.{
             "amd-rdna4-32gb",
+            apple_silicon_profile,
         },
     },
     .{
@@ -461,7 +462,7 @@ test "find returns qwen3.8 27b dense entry" {
     try std.testing.expect(entry.thinking_stable);
     try std.testing.expect(entry.status == .supported);
     try std.testing.expect(supportsProfile(entry.*, "amd-rdna4-32gb"));
-    try std.testing.expect(!supportsProfile(entry.*, apple_silicon_profile));
+    try std.testing.expect(supportsProfile(entry.*, apple_silicon_profile));
 }
 
 test "qwen3.6 family reuses qwen35 gguf architecture mapping" {
@@ -585,12 +586,12 @@ test "supportedOnCurrentGpu requires both tested profile and fit" {
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 20 * 1024 * 1024 * 1024));
 }
 
-test "qwen3.8 27b is visible as supported on the validated RDNA profile" {
+test "qwen3.8 27b is visible on validated RDNA and Apple Silicon profiles" {
     const entry = find("qwen38-27b-q4k-m") orelse return error.TestExpectedEqual;
     try std.testing.expect(entry.status == .supported);
     try std.testing.expect(supportedOnCurrentGpu(entry.*, "amd-rdna4-32gb", 32 * 1024 * 1024 * 1024));
     try std.testing.expect(!supportedOnCurrentGpu(entry.*, "amd-rdna4-16gb", 32 * 1024 * 1024 * 1024));
-    try std.testing.expect(!supportedOnCurrentGpu(entry.*, apple_silicon_profile, 32 * 1024 * 1024 * 1024));
+    try std.testing.expect(supportedOnCurrentGpu(entry.*, apple_silicon_profile, 32 * 1024 * 1024 * 1024));
 }
 
 test "qwen thinking stability flags track validated chat behavior" {

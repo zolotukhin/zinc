@@ -723,8 +723,9 @@ pub fn build(b: *std.Build) void {
     const run_zinc_rt_unit_tests = b.addRunArtifact(zinc_rt_unit_tests);
     // In partial mode (`full_tests = false`) restrict `bun test` to the
     // fast unit-test files. The slow `tests/test_qwen_smoke.test.ts`
-    // file launches multiple managed servers and loads three GGUFs
-    // (qwen3.5-9b + 35b + 36b), which together run ~225s on this Mac
+    // file launches multiple managed servers and loads four GGUFs
+    // (Qwen 3.5 9B, Qwen 3.6 35B, Qwen 3.8 27B, plus the API model),
+    // which together run several minutes on this Mac
     // Studio — well past the harness's 120s `runCommand` timeout for
     // `zig build test`, so even though the smoke tests themselves pass
     // the parent spawn was being killed and `testExitCode` came back

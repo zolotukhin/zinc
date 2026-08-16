@@ -41,7 +41,7 @@ faqs:
   - question: "Why did fast kernels not immediately make decode fast?"
     answer: "The matvecs hit 72 to 90 percent of the 5090's 1792 GB/s bandwidth, but decode stayed bimodal at roughly 66 or 22 tok/s. The per-token sync gaps starved the GPU clock: the SM ran at a 525 MHz median during sync-bound decode versus 2520 MHz during sustained prefill. The async ring fixed the throughput and the clock starvation at once."
   - question: "Which models run coherently on the NVIDIA backend?"
-    answer: "All five of the catalog: Qwen3.5-9B, Qwen3.6-27B, Qwen3.6-35B-A3B (MoE), Gemma-4-31B (dense), and Gemma-4-26B-A4B (MoE). The qwen family came first; the gemma family needed the baked (1+weight) RMSNorm convention, per-layer mixed attention geometry, K-as-V global layers, and a shared-plus-routed MoE FFN."
+    answer: "All five rows of that historical catalog: Qwen3.5-9B, a 27B dense Qwen checkpoint, Qwen3.6-35B-A3B (MoE), Gemma-4-31B (dense), and Gemma-4-26B-A4B (MoE). The qwen family came first; the gemma family needed the baked (1+weight) RMSNorm convention, per-layer mixed attention geometry, K-as-V global layers, and a shared-plus-routed MoE FFN."
 excerpt: "ZINC is a Vulkan and Metal inference engine. On the WSL2 NVIDIA box the only Vulkan device is llvmpipe on the CPU, so ZINC could not touch the RTX 4090 or 5090 at all. This is how we wrote a CUDA backend by mirroring the Metal shim, found a per-head attention-gate bug by diffing residuals against llama.cpp, discovered that per-token sync gaps were starving the GPU boost clock, and shipped an async stream/event ring that pushed Qwen3.5-9B decode past llama.cpp."
 seoDescription: "How ZINC added a native CUDA backend on WSL2 RTX 4090/5090: mirroring the Metal shim, NVRTC kernels, a per-head attention-gate bug, a sync-bound boost-clock discovery, and an async stream ring that beat llama.cpp decode."
 ---
@@ -141,7 +141,7 @@ There is one more lever, and it is honest about its ceiling. Dequantizing the we
 
 ## Five of five, and the model family that keeps ZINC honest
 
-The foundation made the qwen family token-correct: Qwen3.5-9B and Qwen3.6-27B both answer "Paris," and Qwen3.6-35B-A3B — a hybrid MoE-plus-SSM model — runs coherently through its delta-net SSM layers, sigmoid-gated shared expert, and top-k routing.
+The foundation made the qwen family token-correct: Qwen3.5-9B and the 27B dense Qwen checkpoint both answer "Paris," and Qwen3.6-35B-A3B — a hybrid MoE-plus-SSM model — runs coherently through its delta-net SSM layers, sigmoid-gated shared expert, and top-k routing.
 
 Gemma was the family that, as ever, [keeps ZINC honest](/blog/2026-06-02-gemma-is-the-model-family-that-keeps-zinc-honest/). The gemma-4 forward needed a pile of things qwen never punished: the RMSNorm `(1 + weight)` offset is **baked into the GGUF weights**, so the norm reuses the standard `×weight` kernel rather than re-adding the one — and the small post-attention norm weights make that the difference between coherent and garbage. It needed per-layer mixed attention geometry (local sliding-window layers at head_dim 256, global layers at 512 every sixth layer, sharing K as V), proportional RoPE on the global layers, scaled embeddings, and a shared-dense-plus-128-routed-expert MoE FFN for the 26B-A4B.
 

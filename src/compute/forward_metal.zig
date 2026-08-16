@@ -7457,7 +7457,7 @@ pub const InferenceEngine = struct {
         self.qwen35_dense_q4k_swiglu_validation_ok_mask = 0;
         self.qwen35_dense_q4k_swiglu_validation_fail_mask = 0;
         if (self.qwen35_dense_q4k_swiglu_validation_enabled) {
-            log.info("Metal validation: Qwen3.6 27B dense Q4_K gate/up+SwiGLU validator enabled at layer {d} scan={s} tokens={d}; optional token filter ZINC_METAL_QWEN27B_Q4K_SWIGLU_VALIDATE_TOKEN", .{
+            log.info("Metal validation: Qwen dense-hybrid 27B Q4_K gate/up+SwiGLU validator enabled at layer {d} scan={s} tokens={d}; optional token filter ZINC_METAL_QWEN27B_Q4K_SWIGLU_VALIDATE_TOKEN", .{
                 qwen35DenseQ4KSwiGLUValidateLayer(&self),
                 if (self.qwen35_dense_q4k_swiglu_validation_scan_layers) "yes" else "no",
                 self.qwen35_dense_q4k_swiglu_validation_token_limit,

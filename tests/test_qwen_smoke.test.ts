@@ -14,6 +14,7 @@ const SERVER_MODEL_IDS = [
 ];
 const QWEN_CHAT_MODEL_IDS = [
   "qwen36-35b-a3b-q4k-xl",
+  "qwen38-27b-q4k-m",
 ];
 
 const binary = process.env.ZINC_CLI_BIN ?? "./zig-out/bin/zinc";

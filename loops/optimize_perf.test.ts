@@ -65,6 +65,26 @@ describe("zincCliArgs", () => {
 
     expect(args).toContain("-d 1 --chat");
   });
+
+  test("adds the server-equivalent system turn for chat targets that declare one", () => {
+    const args = zincCliArgs({
+      path: "/root/models/model.gguf",
+      promptMode: "chat",
+      systemPrompt: "You are a helpful assistant. Answer directly. Do not show analysis.",
+    }, "hello", 8);
+
+    expect(args).toContain("--chat --system-prompt 'You are a helpful assistant. Answer directly. Do not show analysis.'");
+  });
+
+  test("does not apply a chat system turn to raw benchmark overrides", () => {
+    const args = zincCliArgs({
+      path: "/root/models/model.gguf",
+      promptMode: "chat",
+      systemPrompt: "be direct",
+    }, "hello", 8, "raw");
+
+    expect(args).not.toContain("--system-prompt");
+  });
 });
 
 describe("formatCodexStreamLine", () => {
@@ -507,19 +527,21 @@ describe("controller helpers", () => {
     expect(spec?.structuralSwingIdeas?.join("\n")).toContain("Cross-scenario guard");
   });
 
-  test("RDNA Qwen36 27B effort uses the site context-medium benchmark contract", () => {
+  test("RDNA Qwen38 27B effort uses the site context-medium benchmark contract", () => {
     const spec = getEffortSpec(15);
     expect(spec).not.toBeNull();
     expect(spec?.doc).toBe("MULTI_HOUR_EFFORT_15_RDNA_QWEN36_27B_PREFILL_DECODE.md");
-    expect(spec?.primaryMetricLabel).toBe("Qwen3.6-27B prefill tok/s");
-    expect(spec?.defaultModel).toBe("qwen3627b");
+    expect(spec?.primaryMetricLabel).toBe("Qwen3.8-27B prefill tok/s");
+    expect(spec?.defaultModel).toBe("qwen3827b");
     expect(spec?.benchmarkMethod).toContain("context-medium Coding Review");
-    expect(spec?.benchmarkPrompt).toContain("Code review request");
+    expect(spec?.benchmarkPrompt).toContain("You are reviewing a small TypeScript helper");
     expect(spec?.benchmarkPrompt).toContain("src/cache.ts");
     expect(spec?.benchmarkPrompt).not.toContain("capital of France");
-    expect(spec?.minHealthyTokPerSec).toBe(10);
+    expect(spec?.minHealthyTokPerSec).toBe(100);
     expect(spec?.knownFlatCategories?.join("\n")).toContain("PARTIAL_ATTN_NORM_STORE");
     expect(spec?.structuralSwingIdeas?.join("\n")).toContain("shaderstats");
+    expect(spec?.llamaCppBaselines?.find((b) => b.isPrimary)?.prefillTokPerSec).toBe(308.38);
+    expect(spec?.llamaCppSuccessRule).toContain("context-medium 402.92/31.86");
   });
 
   test("RDNA Qwen35 9B effort targets the largest published prefill gap", () => {
@@ -613,7 +635,7 @@ describe("controller helpers", () => {
     const saved = {
       effort: 15,
       planDoc: "MULTI_HOUR_EFFORT_15_RDNA_QWEN36_27B_PREFILL_DECODE.md",
-      benchmarkSignature: benchmarkSignatureForSpec(spec!, "qwen3627b", "/root/models/Qwen3.6-27B-Q4_K_M.gguf"),
+      benchmarkSignature: benchmarkSignatureForSpec(spec!, "qwen3827b", "/root/models/Qwen3.8-27B-Q4_K_M.gguf"),
       runStartedAt: "2026-05-20T00:00:00.000Z",
       lastUpdatedAt: "2026-05-20T00:00:00.000Z",
       lastCycle: 16,
@@ -629,9 +651,16 @@ describe("controller helpers", () => {
       reviewSummaries: [],
     };
 
-    expect(isResumeStateCompatible(saved, spec!, "qwen3627b", "/root/models/Qwen3.6-27B-Q4_K_M.gguf")).toBe(true);
+    expect(isResumeStateCompatible(saved, spec!, "qwen3827b", "/root/models/Qwen3.8-27B-Q4_K_M.gguf")).toBe(true);
     expect(isResumeStateCompatible(saved, spec!, "qwen36b", "/root/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")).toBe(false);
-    expect(isResumeStateCompatible(saved, spec!, "qwen3627b", "/root/models/other.gguf")).toBe(false);
+    expect(isResumeStateCompatible(saved, spec!, "qwen3827b", "/root/models/other.gguf")).toBe(false);
+
+    const legacySignature = JSON.parse(saved.benchmarkSignature);
+    delete legacySignature.benchmarkSystemPrompt;
+    expect(isResumeStateCompatible({
+      ...saved,
+      benchmarkSignature: JSON.stringify(legacySignature),
+    }, spec!, "qwen3827b", "/root/models/Qwen3.8-27B-Q4_K_M.gguf")).toBe(false);
   });
 });
 
@@ -971,7 +1000,7 @@ describe("config", () => {
     expect(src).toContain("ZINC_PORT");
     expect(src).toContain("ZINC_USER");
     expect(src).toContain("ZINC_RDNA_QWEN36_35B_MODEL");
-    expect(src).toContain("ZINC_RDNA_QWEN36_27B_MODEL");
+    expect(src).toContain("ZINC_RDNA_QWEN38_27B_MODEL");
     expect(src).toContain("ZINC_RDNA_QWEN3_8B_MODEL");
     expect(src).toContain("ZINC_RDNA_GEMMA4_31B_MODEL");
     expect(src).toContain("ZINC_RDNA_GEMMA4_12B_MODEL");
@@ -987,10 +1016,23 @@ describe("config", () => {
   test("all five models are listed for coherence", async () => {
     const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
     expect(src).toContain("Qwen3.6-35B");
-    expect(src).toContain("Qwen3.6-27B");
+    expect(src).toContain("Qwen3.8-27B");
     expect(src).toContain("Qwen3-8B");
     expect(src).toContain("Gemma4-31B");
     expect(src).toContain("Gemma4-26B-A4B");
+  });
+
+  test("Qwen3.8 27B optimization target uses chat and the canonical RDNA GGUF", async () => {
+    const src = await Bun.file(import.meta.dir + "/optimize_perf.ts").text();
+    const routes = await Bun.file(import.meta.dir + "/../src/server/routes.zig").text();
+    const start = src.indexOf("qwen3827b: {");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const block = src.slice(start, start + 500);
+    expect(block).toContain('path: envOrDefault("ZINC_RDNA_QWEN38_27B_MODEL", "/root/models/Qwen3.8-27B-Q4_K_M.gguf")');
+    expect(block).toContain('promptMode: "chat"');
+    expect(block).toContain('systemPrompt: "You are a helpful assistant. Answer directly. Do not show analysis."');
+    expect(block).not.toContain("QWEN36_27B_MODEL");
+    expect(routes).toContain('"You are a helpful assistant. Answer directly. Do not show analysis."');
   });
 
   test("coherence sweep supports a per-model token budget", async () => {
@@ -1165,7 +1207,7 @@ describe("buildAgentPrompt — effort-6 controller hints", () => {
         phaseBudgetCycle: 20,
       },
       {
-        primaryMetricLabel: "Qwen3.6-27B prefill tok/s",
+        primaryMetricLabel: "Qwen3.8-27B prefill tok/s",
         benchmarkMethod: "long-context prefill on RDNA",
         knownFlatCategories: ["narrowing compute→compute barriers is flat on RDNA4"],
         structuralSwingIdeas: ["wire recordBatchDispatch into SSM proj with num_cols=2"],
@@ -1224,7 +1266,7 @@ describe("buildAgentPrompt — effort-6 controller hints", () => {
       baseline,
       37,
       "",
-      "qwen3627b",
+      "qwen3827b",
       {
         cycles: [],
         failedApproaches: [],
@@ -1244,7 +1286,7 @@ describe("buildAgentPrompt — effort-6 controller hints", () => {
         phaseBudgetCycle: 34,
       },
       {
-        primaryMetricLabel: "Qwen3.6-27B prefill tok/s",
+        primaryMetricLabel: "Qwen3.8-27B prefill tok/s",
         benchmarkMethod: "site-aligned context-medium Coding Review",
         structuralSwingIdeas: ["dense down+acc fusion"],
       },
@@ -1996,7 +2038,7 @@ describe("buildAgentPrompt pivot mode", () => {
         phaseBudgetCycle: 8,
       },
       {
-        primaryMetricLabel: "Qwen3.6-27B prefill tok/s",
+        primaryMetricLabel: "Qwen3.8-27B prefill tok/s",
         benchmarkMethod: "long-context prefill on RDNA",
         knownFlatCategories: ["barrier narrowing is flat"],
         structuralSwingIdeas: ["port llama.cpp 8-variant DMMV"],
@@ -2028,7 +2070,7 @@ describe("formatLlamaCppComparison", () => {
   ];
 
   test("shows primary ratio, gap-to-beat, and the other-scenario block", () => {
-    const out = formatLlamaCppComparison(baselines, "Qwen3.6-27B prefill tok/s", "prefill", 150.95);
+    const out = formatLlamaCppComparison(baselines, "Qwen3.8-27B prefill tok/s", "prefill", 150.95);
     expect(out).toContain("150.95");
     expect(out).toContain("195.01");
     expect(out).toContain("77.4%"); // 150.95/195.01
@@ -2093,10 +2135,10 @@ describe("formatLlamaCppComparison", () => {
 
 describe("extractOptimizePerfPidsFromPs", () => {
   const sample = [
-    " 47142 /Users/zolotukhin/.bun/bin/bun loops/optimize_perf.ts --effort 15 --model qwen3627b --agent claude --cycles 50",
-    " 47140 zsh -lc bun loops/optimize_perf.ts --effort 15 --model qwen3627b --agent claude --cycles 50 2>&1 | tee log",
+    " 47142 /Users/zolotukhin/.bun/bin/bun loops/optimize_perf.ts --effort 15 --model qwen3827b --agent claude --cycles 50",
+    " 47140 zsh -lc bun loops/optimize_perf.ts --effort 15 --model qwen3827b --agent claude --cycles 50 2>&1 | tee log",
     " 47139 login -pflq zolotukhin /bin/zsh -lc bun loops/optimize_perf.ts",
-    " 47137 SCREEN -dmS zinc_effort15_50 zsh -lc bun loops/optimize_perf.ts --effort 15 --model qwen3627b",
+    " 47137 SCREEN -dmS zinc_effort15_50 zsh -lc bun loops/optimize_perf.ts --effort 15 --model qwen3827b",
     "  1234 some other process",
   ].join("\n");
 

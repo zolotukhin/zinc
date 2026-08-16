@@ -109,6 +109,16 @@ describe("optimize_gpu args and model resolution", () => {
     expect(target.prompt).toContain("Important fact: Paris is the capital of France.");
   });
 
+  test("uses Qwen3.8 for the active dense 27B preset", () => {
+    const opts = parseArgsFrom(["--model", "qwen38-27b-q4k-m"], env);
+    const target = resolveModelTarget(opts);
+
+    expect(target.label).toBe("Qwen3.8 27B Dense Q4_K_M");
+    expect(target.modelId).toBe("qwen38-27b-q4k-m");
+    expect(target.modelPath).toBe("/home/tempuser/.cache/zinc/models/models/qwen38-27b-q4k-m/model.gguf");
+    expect(target.promptMode).toBe("chat");
+  });
+
   test("prefers Intel env defaults for the generic GPU loop", () => {
     const opts = parseArgsFrom([], {
       ZINC_HOST: "rdna.local",

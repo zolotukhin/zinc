@@ -47,7 +47,7 @@ This list is intentionally narrow. It shows the exact GGUFs that have been valid
 | **Gemma 4 26B-A4B MoE** | `gemma4-26b-a4b-q4k-m` | [gemma-4-26B-A4B-it-UD-Q4_K_M.gguf](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | 16+ GB VRAM or unified | supported on AMD, Intel Arc, Metal |
 | **Gemma 4 31B** | `gemma4-31b-q4k-m` | [gemma-4-31B-it-Q4_K_M.gguf](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF) | 24+ GB VRAM or unified | supported on AMD, Intel Arc, Metal |
 | **Qwen3.6 35B-A3B UD** | `qwen36-35b-a3b-q4k-xl` | [Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | 24+ GB VRAM or unified | supported on AMD, Intel Arc, Metal |
-| **Qwen3.8 27B Dense** | `qwen38-27b-q4k-m` | [Qwen3.8-27B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 24+ GB VRAM | supported on AMD RDNA4 32 GB |
+| **Qwen3.8 27B Dense** | `qwen38-27b-q4k-m` | [Qwen3.8-27B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 24+ GB VRAM or 32+ GB unified | supported on AMD RDNA4 and Apple Silicon |
 
 ## Install dependencies
 
@@ -119,6 +119,17 @@ This downloads the model into a local cache and verifies the SHA-256 hash.
 ## Run your first prompt
 
 The `--chat` flag wraps your prompt in the model's chat template (system prompt, role tags, etc.), which is required for instruct-tuned models to produce proper answers. Without `--chat`, the model treats the input as raw text completion, which still works but produces less focused output.
+
+To reproduce an API chat workload exactly from the CLI, pass its system turn explicitly:
+
+```bash
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m \
+  --chat \
+  --system-prompt "You are a helpful assistant. Answer directly. Do not show analysis." \
+  --prompt "Review this code for concurrency bugs."
+```
+
+`--system-prompt` requires both `--chat` and `--prompt`. It is useful for benchmarks because system-turn tokens are part of prefill.
 
 **On RDNA4 Linux, the env var below is required** — cooperative matrix is the fast path, and without it you may see slow or incorrect output. Intel Arc and macOS users skip the `export` line.
 

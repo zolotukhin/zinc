@@ -144,6 +144,17 @@ export RADV_PERFTEST=coop_matrix
 ./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "hi" --chat
 ```
 
+Use `--system-prompt <text>` with `--chat` when CLI prompt construction must
+match an API request that contains a system turn. Those tokens are included in
+prefill timing:
+
+```bash
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m \
+  --chat \
+  --system-prompt "You are a helpful assistant. Answer directly. Do not show analysis." \
+  --prompt "Review this code."
+```
+
 `--check` prints `RADV_PERFTEST: coop_matrix [OK]` when this is right.
 
 ### 2. "no Vulkan device found" / "loader init failed"

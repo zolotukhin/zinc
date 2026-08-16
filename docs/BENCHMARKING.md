@@ -46,7 +46,7 @@ RDNA suite runs sync into `/root/zinc-bench` by default. Keep that checkout isol
 
 For password-auth Intel nodes, the suite reads `ZINC_INTEL_SSH_PASSWORD`, `ZINC_INTEL_SSH_PASSWORD_ENV`, or `ZINC_INTEL_SSH_PASSWORD_FILE` and drives `ssh`/`rsync` through `SSH_ASKPASS`. The generic `loops/optimize_gpu.ts` loop accepts the same variables, plus the `ZINC_GPU_*` equivalents. The generated benchmark commands reference only the env-var name or file path, not the password itself. Remove the temporary secret after the node is converted to key-based SSH.
 
-The default RDNA suite covers Gemma 4 26B-A4B Q4_K_M, Gemma 4 31B Q4_K_M, Qwen 3.5 9B Q4_K_M, Qwen 3.6 27B Q4_K_M, Qwen 3.6 35B-A3B UD Q4_K_XL, and Qwen 3.8 27B Q4_K_M. The small-Qwen row is `Qwen3.5-9B-Q4_K_M.gguf`, not the older Qwen 3 8B GGUF.
+The default RDNA suite covers Gemma 4 26B-A4B Q4_K_M, Gemma 4 31B Q4_K_M, Qwen 3.5 9B Q4_K_M, Qwen 3.6 35B-A3B UD Q4_K_XL, and Qwen 3.8 27B Q4_K_M. The small-Qwen row is `Qwen3.5-9B-Q4_K_M.gguf`, not the older Qwen 3 8B GGUF.
 
 ## Ad-hoc llama.cpp baseline on the RDNA4 node
 
@@ -158,12 +158,11 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST '
 '
 ```
 
-Latest five-model ROCm reference on the R9700:
+Latest four-model ROCm reference on the R9700:
 
 | Model                       |            ROCm prefill |          ROCm decode |
 | --------------------------- | ----------------------: | -------------------: |
 | Qwen 3.5 9B Q4_K_M          | 3406.02 +/- 13.83 tok/s | 79.36 +/- 0.31 tok/s |
-| Qwen 3.6 27B Dense Q4_K_M   |  1006.31 +/- 2.43 tok/s | 27.07 +/- 0.07 tok/s |
 | Qwen 3.6 35B A3B UD Q4_K_XL | 4046.91 +/- 11.65 tok/s | 76.33 +/- 1.04 tok/s |
 | Gemma 4 26B-A4B MoE Q4_K_M  | 3892.66 +/- 18.79 tok/s | 80.32 +/- 1.15 tok/s |
 | Gemma 4 31B Q4_K_M          |   750.25 +/- 0.78 tok/s | 24.83 +/- 0.06 tok/s |

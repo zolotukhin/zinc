@@ -709,7 +709,7 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
         if (pipeline_ssm_gated_norm_batch_tok != null) {
-            log.info("ssm_gated_norm_batch_tok pipeline loaded (Qwen3.6-27B SSM gated norm token-batched dispatch)", .{});
+            log.info("ssm_gated_norm_batch_tok pipeline loaded (Qwen dense-hybrid 27B SSM gated norm token-batched dispatch)", .{});
         }
         // Fused token-loop variant: one WG per head, all tokens processed
         // internally via n_tok push constant.
@@ -839,7 +839,7 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
         if (pipeline_residual_rms_norm_quant_q8_1 != null) {
-            log.info("residual_rms_norm_quant_q8_1 pipeline loaded (Qwen3.6-27B dense FFN DP4a input fusion)", .{});
+            log.info("residual_rms_norm_quant_q8_1 pipeline loaded (Qwen dense-hybrid 27B FFN DP4a input fusion)", .{});
         }
 
         // norm_rope: fused RMS norm + RoPE, 3 bindings (data, weight, freq)

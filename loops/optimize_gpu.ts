@@ -10,7 +10,7 @@
  * Examples:
  *   bun loops/optimize_gpu.ts --agent codex --cycles 20
  *   bun loops/optimize_gpu.ts --model qwen35-9b-q4k-m --agent codex --cycles 20
- *   bun loops/optimize_gpu.ts --model-id qwen36-27b-q4k-m --metric prefill --resume
+ *   bun loops/optimize_gpu.ts --model-id qwen38-27b-q4k-m --metric prefill --resume
  *   bun loops/optimize_gpu.ts --model-path /models/foo.gguf --skip-llama --dry-run
  */
 
@@ -83,10 +83,10 @@ const MODEL_PRESETS: Record<string, ModelPreset> = {
     maxTokens: 128,
     expect: ["Paris"],
   },
-  "qwen36-27b-q4k-m": {
-    key: "qwen36-27b-q4k-m",
-    label: "Qwen3.6 27B Dense Q4_K_M",
-    modelId: "qwen36-27b-q4k-m",
+  "qwen38-27b-q4k-m": {
+    key: "qwen38-27b-q4k-m",
+    label: "Qwen3.8 27B Dense Q4_K_M",
+    modelId: "qwen38-27b-q4k-m",
     promptMode: "chat",
     prompt: "What is the capital of France? Answer in one word.",
     maxTokens: 32,

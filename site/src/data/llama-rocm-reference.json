@@ -43,15 +43,6 @@
       "decode_stdev": 0.31
     },
     {
-      "id": "qwen36-27b-dense-q4k-m",
-      "label": "Qwen 3.6 27B Dense Q4_K_M",
-      "model_file": "Qwen3.6-27B-Q4_K_M.gguf",
-      "prefill_tps": 1006.31,
-      "prefill_stdev": 2.43,
-      "decode_tps": 27.07,
-      "decode_stdev": 0.07
-    },
-    {
       "id": "qwen36-35b-a3b-q4k-xl",
       "label": "Qwen 3.6 35B A3B UD Q4_K_XL",
       "model_file": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",

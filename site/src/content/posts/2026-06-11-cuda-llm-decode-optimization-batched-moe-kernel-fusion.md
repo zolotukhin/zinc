@@ -59,7 +59,7 @@ ZINC is a from-scratch inference engine written in Zig. On the NVIDIA box it has
 The bar is a **five-model catalog**, validated **token-for-token against llama.cpp** on every change:
 
 - `qwen35-9b` — dense hybrid-SSM
-- `qwen36-27b` — dense
+- retired 27B Qwen row — dense
 - `qwen36-35b-a3b` — mixture-of-experts (128 experts, 8 active)
 - `gemma4-31b` — dense, sliding-window attention
 - `gemma4-26b-a4b` — mixture-of-experts
@@ -118,7 +118,7 @@ Decode benchmarking on a boosting GPU is a minefield, and most of our early "win
 - **Interleaved A/B, never sequential.** We build both binaries and run them **back-to-back in the same thermal state**, alternating rounds. A win has to take the majority of rounds. One boosted run proves nothing — a single qwen-35b-a3b run once flashed 60 tok/s against a steady-state of 40, and only the re-runs caught it.
 - **The build-cache gotcha.** Zig's cache — *and especially its global cache* — will happily hand you a stale binary that silently measures your *old* code as a no-op. Every benchmark forces a fresh build with isolated cache dirs and **verifies the binary hash actually changed**. This one cost us a confusing afternoon before it went into the runbook.
 
-<img class="diagram-visual" src="/blog/2026-06-11-cuda-catalog-decode.svg" alt="Bar chart of decode throughput in tokens per second on an RTX 4090 for the five-model ZINC CUDA catalog after optimization. Qwen3.5-9B dense is highest near 90, Gemma-4-26B mixture-of-experts about 52, Qwen3.6-35B-A3B mixture-of-experts about 40, Qwen3.6-27B dense about 36, and Gemma-4-31B dense about 30. The two mixture-of-experts models sit above the larger dense 27B and 31B. All five are five out of five token-correct versus llama.cpp." loading="lazy" />
+<img class="diagram-visual" src="/blog/2026-06-11-cuda-catalog-decode.svg" alt="Bar chart of decode throughput in tokens per second on an RTX 4090 for the five-model ZINC CUDA catalog after optimization. Qwen3.5-9B dense is highest near 90, Gemma-4-26B mixture-of-experts about 52, Qwen3.6-35B-A3B mixture-of-experts about 40, the retired 27B dense Qwen row about 36, and Gemma-4-31B dense about 30. The two mixture-of-experts models sit above the larger dense 27B and 31B. All five are five out of five token-correct versus llama.cpp." loading="lazy" />
 
 ## The part where the loop optimizes itself
 

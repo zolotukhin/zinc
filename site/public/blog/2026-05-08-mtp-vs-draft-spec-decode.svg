@@ -186,7 +186,7 @@
     <text x="14" y="60" fill="#8ea0b8" font-size="11">c = 0.04 (one layer, no rewind)</text>
     <text x="14" y="76" fill="#8ea0b8" font-size="11">γ = 3 lookahead</text>
     <text x="14" y="100" fill="#5dbb89" font-size="22" font-weight="700">2.5×</text>
-    <text x="100" y="100" fill="#5dbb89" font-size="11">measured on Qwen3.6 27B (PR 22673)</text>
+    <text x="100" y="100" fill="#5dbb89" font-size="11">measured on a 27B dense Qwen (PR 22673)</text>
     <!-- bar -->
     <rect x="14" y="112" width="384" height="10" rx="3" fill="#1d2b48"/>
     <rect x="14" y="112" width="240" height="10" rx="3" fill="url(#goodBar)"/>

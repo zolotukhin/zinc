@@ -1532,6 +1532,7 @@ export function detectRdnaServerStartupFailure(logText) {
     /srv load_model:\s*failed to load model/i,
     /main:\s*exiting due to model loading error/i,
     /error loading model:/i,
+    /error while handling argument "--device":\s*invalid device:[^\n]+/i,
   ];
 
   for (const pattern of patterns) {
@@ -2094,16 +2095,16 @@ export function defaultMetalCases(modelRoot) {
       notes: ["Managed-cache local Qwen 3.6 case on Apple Silicon"],
     },
     {
-      id: "qwen36-27b-q4k-m",
-      model_id: "qwen36-27b-q4k-m",
-      label: "Qwen 3.6 27B Dense Q4_K_M",
-      family: "Qwen 3.6",
+      id: "qwen38-27b-q4k-m",
+      model_id: "qwen38-27b-q4k-m",
+      label: "Qwen 3.8 27B Dense Q4_K_M",
+      family: "Qwen 3.8",
       quant: "Q4_K_M",
-      model_path: modelPath(modelRoot, "qwen36-27b-q4k-m"),
-      prompt_mode: "raw",
-      prompt: defaultPromptForModelId("qwen36-27b-q4k-m"),
-      max_tokens: defaultMaxTokensForModelId("qwen36-27b-q4k-m"),
-      notes: ["Dense hybrid Qwen 3.6 case on Apple Silicon"],
+      model_path: modelPath(modelRoot, "qwen38-27b-q4k-m"),
+      prompt_mode: "chat",
+      prompt: defaultPromptForModelId("qwen38-27b-q4k-m"),
+      max_tokens: defaultMaxTokensForModelId("qwen38-27b-q4k-m"),
+      notes: ["Dense hybrid Qwen 3.8 case on Apple Silicon"],
     },
   ];
 }
@@ -2167,7 +2168,7 @@ function guessQuant(id) {
 }
 
 export function prefersChatPrompt(id) {
-  return id.startsWith("gemma");
+  return id.startsWith("gemma") || id.startsWith("qwen38");
 }
 
 export function defaultPromptForModelId(id) {
@@ -2377,7 +2378,7 @@ export function defaultRdnaCases(modelRoot) {
       family: "Qwen 3.8",
       quant: "Q4_K_M",
       model_path: path.join(modelRoot, "Qwen3.8-27B-Q4_K_M.gguf"),
-      prompt_mode: "raw",
+      prompt_mode: "chat",
       prompt: defaultPromptForModelId("qwen38-27b-q4k-m"),
       max_tokens: defaultMaxTokensForModelId("qwen38-27b-q4k-m"),
       notes: ["RDNA4 dense Qwen 3.8 comparison against llama.cpp server"],
@@ -2416,17 +2417,6 @@ export function defaultRdnaCases(modelRoot) {
       notes: ["RDNA4 flagship comparison against llama.cpp server"],
     },
     {
-      id: "qwen36-27b-q4k-m",
-      label: "Qwen 3.6 27B Dense Q4_K_M",
-      family: "Qwen 3.6",
-      quant: "Q4_K_M",
-      model_path: path.join(modelRoot, "Qwen3.6-27B-Q4_K_M.gguf"),
-      prompt_mode: "raw",
-      prompt: defaultPromptForModelId("qwen36-27b-q4k-m"),
-      max_tokens: defaultMaxTokensForModelId("qwen36-27b-q4k-m"),
-      notes: ["RDNA4 dense Qwen 3.6 comparison against llama.cpp server"],
-    },
-    {
       id: "qwen35-9b-q4k-m",
       label: "Qwen 3.5 9B Q4_K_M",
       family: "Qwen 3.5",
@@ -2441,12 +2431,14 @@ export function defaultRdnaCases(modelRoot) {
 }
 
 export function defaultIntelCases(modelRoot) {
-  return defaultMetalCases(modelRoot).map((entry) => ({
-    ...entry,
-    model_path: modelPath(modelRoot, entry.id),
-    context_tokens: defaultIntelContextTokensForModel(entry.id),
-    notes: ["Intel Arc Vulkan comparison against llama.cpp on the same host"],
-  }));
+  return defaultMetalCases(modelRoot)
+    .filter((entry) => entry.id !== "qwen38-27b-q4k-m")
+    .map((entry) => ({
+      ...entry,
+      model_path: modelPath(modelRoot, entry.id),
+      context_tokens: defaultIntelContextTokensForModel(entry.id),
+      notes: ["Intel Arc Vulkan comparison against llama.cpp on the same host"],
+    }));
 }
 
 function defaultIntelContextTokensForModel(_id) {
@@ -3347,10 +3339,12 @@ async function buildCudaCreds(args) {
 }
 
 export function defaultCudaCases(modelRoot) {
-  return defaultRdnaCases(modelRoot).map((entry) => ({
-    ...entry,
-    notes: ["RTX 5090 (CUDA) comparison against llama.cpp server on the same host"],
-  }));
+  return defaultRdnaCases(modelRoot)
+    .filter((entry) => entry.id !== "qwen38-27b-q4k-m")
+    .map((entry) => ({
+      ...entry,
+      notes: ["RTX 5090 (CUDA) comparison against llama.cpp server on the same host"],
+    }));
 }
 
 async function prepareCuda(args, creds) {

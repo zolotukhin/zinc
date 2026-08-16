@@ -2754,9 +2754,9 @@ pub const InferenceEngine = struct {
             dmmv.pipeline_q4k_fused_gate_up_swiglu_row1 != null and
             instance.push_descriptor_fn != null;
         if (qwen36_dense_row1_enabled) {
-            log.info("Qwen3.6-27B dense fused gate+up+SwiGLU row1 path ENABLED (default for matching shape, set ZINC_QWEN36_27B_DENSE_FUSED_ROW1=0 to disable)", .{});
+            log.info("Qwen dense-hybrid 27B fused gate+up+SwiGLU row1 path ENABLED (default for matching shape, set ZINC_QWEN36_27B_DENSE_FUSED_ROW1=0 to disable)", .{});
         } else if (qwen36_dense_row1_explicitly_off) {
-            log.info("Qwen3.6-27B dense fused gate+up+SwiGLU row1 path DISABLED via ZINC_QWEN36_27B_DENSE_FUSED_ROW1=0", .{});
+            log.info("Qwen dense-hybrid 27B fused gate+up+SwiGLU row1 path DISABLED via ZINC_QWEN36_27B_DENSE_FUSED_ROW1=0", .{});
         }
         const gemma_dense_decode_dp4a_env = std.posix.getenv("ZINC_GEMMA_DENSE_DECODE_DP4A");
         const gemma_dense_decode_dp4a_requested = gemma_dense_decode_dp4a_env != null and
@@ -2977,9 +2977,9 @@ pub const InferenceEngine = struct {
             dmmv.pipeline_mul_mm_q4k_gate_up_swiglu != null and
             instance.push_descriptor_fn != null;
         if (qwen36_batched_gateup_enabled) {
-            log.info("Qwen3.6-27B batched dense gate+up+SwiGLU path ENABLED (default, set ZINC_QWEN36_27B_BATCH_FUSED_GATEUP=0 to disable)", .{});
+            log.info("Qwen dense-hybrid 27B batched gate+up+SwiGLU path ENABLED (default, set ZINC_QWEN36_27B_BATCH_FUSED_GATEUP=0 to disable)", .{});
         } else if (qwen36_batched_gateup_explicitly_off) {
-            log.info("Qwen3.6-27B batched dense gate+up+SwiGLU path DISABLED via ZINC_QWEN36_27B_BATCH_FUSED_GATEUP=0", .{});
+            log.info("Qwen dense-hybrid 27B batched gate+up+SwiGLU path DISABLED via ZINC_QWEN36_27B_BATCH_FUSED_GATEUP=0", .{});
         }
 
         const qwen36_q6_prefill_mul_mm_env = std.posix.getenv("ZINC_QWEN36_27B_Q6_DOWN_MUL_MM");
@@ -2989,9 +2989,9 @@ pub const InferenceEngine = struct {
             dmmv.pipeline_mul_mm_q6k != null and
             instance.push_descriptor_fn != null;
         if (qwen36_q6_prefill_mul_mm_enabled) {
-            log.info("Qwen3.6-27B Q6_K prefill mul_mm path ENABLED for dense-down/SSM-wqkv (default, set ZINC_QWEN36_27B_Q6_DOWN_MUL_MM=0 to disable)", .{});
+            log.info("Qwen dense-hybrid 27B Q6_K prefill mul_mm path ENABLED for dense-down/SSM-wqkv (default, set ZINC_QWEN36_27B_Q6_DOWN_MUL_MM=0 to disable)", .{});
         } else if (qwen36_q6_prefill_mul_mm_explicitly_off) {
-            log.info("Qwen3.6-27B Q6_K prefill mul_mm path DISABLED via ZINC_QWEN36_27B_Q6_DOWN_MUL_MM=0", .{});
+            log.info("Qwen dense-hybrid 27B Q6_K prefill mul_mm path DISABLED via ZINC_QWEN36_27B_Q6_DOWN_MUL_MM=0", .{});
         }
 
         const qwen36_q5_ssm_out_mul_mm_env = std.posix.getenv("ZINC_QWEN36_27B_Q5_SSM_OUT_MUL_MM");
@@ -3001,9 +3001,9 @@ pub const InferenceEngine = struct {
             dmmv.pipeline_mul_mm_q5k != null and
             instance.push_descriptor_fn != null;
         if (qwen36_q5_ssm_out_mul_mm_enabled) {
-            log.info("Qwen3.6-27B Q5_K prefill mul_mm path ENABLED for SSM-out (default, set ZINC_QWEN36_27B_Q5_SSM_OUT_MUL_MM=0 to disable)", .{});
+            log.info("Qwen dense-hybrid 27B Q5_K prefill mul_mm path ENABLED for SSM-out (default, set ZINC_QWEN36_27B_Q5_SSM_OUT_MUL_MM=0 to disable)", .{});
         } else if (qwen36_q5_ssm_out_mul_mm_explicitly_off) {
-            log.info("Qwen3.6-27B Q5_K prefill mul_mm path DISABLED via ZINC_QWEN36_27B_Q5_SSM_OUT_MUL_MM=0", .{});
+            log.info("Qwen dense-hybrid 27B Q5_K prefill mul_mm path DISABLED via ZINC_QWEN36_27B_Q5_SSM_OUT_MUL_MM=0", .{});
         }
 
         const q8_wide_lm_env = std.posix.getenv("ZINC_Q8_WIDE_LM_HEAD");

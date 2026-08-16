@@ -23,7 +23,7 @@
   </a>
 </p>
 
-> Fastest measured local LLM inference for AMD GPUs. ZINC beats llama.cpp across the current five-model RDNA4 headline sweep — decode, prefill, end-to-end, and model-level overall — with no ROCm.
+> Fastest measured local LLM inference for AMD GPUs. ZINC beats llama.cpp across the current five-model RDNA4 headline sweep on decode, prefill, and model-level overall — with no ROCm.
 
 <p align="center">
   <img src="assets/amd-rdna4-benchmark-sweep.svg" alt="AMD RDNA4 benchmark sweep chart showing ZINC ahead of llama.cpp across five models" width="860">
@@ -32,8 +32,9 @@
 ## AMD RDNA4: ZINC Beats llama.cpp
 
 ZINC is the fastest measured local AI engine for AMD GPUs in our current suite.
-On the Radeon AI PRO R9700, it beats llama.cpp on all five published models:
-decode, prefill, end-to-end, and overall.
+On the Radeon AI PRO R9700, it beats llama.cpp on all five published models for
+decode, prefill, and overall. Qwen 3.8 quick-chat end-to-end throughput is the
+closest exception at 98% of llama.cpp.
 
 Same GPU. Same GGUF files. Same prompts. Same server-vs-server harness.
 
@@ -41,7 +42,7 @@ Same GPU. Same GGUF files. Same prompts. Same server-vs-server harness.
 |-------|-------:|--------:|--------:|
 | Qwen 3.6 35B A3B UD Q4_K_XL | **166.8** vs 108.5 tok/s (**1.54x**) | **540** vs 397 tok/s (**1.36x**) | **151%** |
 | Qwen 3.5 9B Q4_K_M | **97.5** vs 85.5 tok/s (**1.14x**) | **739** vs 549 tok/s (**1.35x**) | **115%** |
-| Qwen 3.8 27B Dense Q4_K_M | **32.0** vs 30.8 tok/s (**1.04x**) | **215** vs 169 tok/s (**1.27x**) | **105%** |
+| Qwen 3.8 27B Dense Q4_K_M | **32.2** vs 30.9 tok/s (**1.04x**) | **242** vs 198 tok/s (**1.22x**) | **109%** |
 | Gemma 4 26B-A4B MoE Q4_K_M | **113.7** vs 102.1 tok/s (**1.11x**) | **809** vs 497 tok/s (**1.63x**) | **115%** |
 | Gemma 4 31B Q4_K_M | **28.8** vs 28.5 tok/s (**1.01x**) | **249** vs 200 tok/s (**1.25x**) | **103%** |
 
@@ -173,7 +174,7 @@ The list below matches the current managed model catalog, not a broader wishlist
 
 - [Qwen 3.5 9B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) — supported on AMD RDNA4 16/32 GB, Intel Arc, and Apple Silicon
 - [Qwen3.6 35B-A3B UD Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
-- [Qwen3.8 27B Dense Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) — supported on AMD RDNA4 32 GB
+- [Qwen3.8 27B Dense Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) — supported on AMD RDNA4 32 GB and Apple Silicon with 32+ GB unified memory
 - [Gemma 4 31B Q4_K_M](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
 - [Gemma 4 26B-A4B MoE Q4_K_M](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
 
@@ -314,7 +315,7 @@ The tables below are pulled directly from the published benchmark data at [zolot
 |---|---:|---:|---:|---:|---:|---:|
 | Qwen 3.6 35B A3B UD Q4_K_XL | **540.33** | 397.08 | **136%** | **166.80** | 108.54 | **154%** |
 | Qwen 3.5 9B Q4_K_M | **738.97** | 549.04 | **135%** | **97.46** | 85.47 | **114%** |
-| Qwen 3.8 27B Dense Q4_K_M | **215.39** | 169.38 | **127%** | **32.04** | 30.81 | **104%** |
+| Qwen 3.8 27B Dense Q4_K_M | **241.61** | 198.04 | **122%** | **32.17** | 30.86 | **104%** |
 | Gemma 4 26B-A4B MoE Q4_K_M | **809.16** | 496.83 | **163%** | **113.74** | 102.08 | **111%** |
 | Gemma 4 31B Q4_K_M | **248.58** | 199.58 | **125%** | **28.81** | 28.54 | **101%** |
 
@@ -325,7 +326,6 @@ The tables below are pulled directly from the published benchmark data at [zolot
 | Gemma 4 26B-A4B MoE Q4_K_M | 327.87 | 407.46 | 81% | 69.51 | 82.81 | 83% |
 | Gemma 4 31B Q4_K_M | **131.07** | 102.28 | **128%** | 22.68 | 22.70 | 100% |
 | Qwen 3.5 9B Q4_K_M | 36.53 | 332.65 | 11% | 29.42 | 57.87 | 52% |
-| Qwen 3.6 27B Dense Q4_K_M | 15.87 | 104.34 | 15% | 15.44 | 21.93 | 70% |
 | Qwen 3.6 35B A3B UD Q4_K_XL | 97.17 | 300.71 | 33% | **81.64** | 63.09 | **131%** |
 
 ### Intel Arc — Intel(R) Graphics BMG G31 (Vulkan)
@@ -334,16 +334,15 @@ The tables below are pulled directly from the published benchmark data at [zolot
 |---|---:|---:|---:|---:|---:|---:|
 | Qwen 3.6 35B A3B UD Q4_K_XL | **191.18** | 135.39 | **141%** | **75.26** | 75.07 | **100%** |
 | Qwen 3.5 9B Q4_K_M | **191.06** | 141.98 | **135%** | **55.98** | 54.00 | **104%** |
-| Qwen 3.6 27B Dense Q4_K_M | **92.21** | 37.07 | **249%** | **20.01** | 19.23 | **104%** |
 | Gemma 4 26B-A4B MoE Q4_K_M | **492.97** | 247.57 | **199%** | **64.98** | 62.43 | **104%** |
 | Gemma 4 31B Q4_K_M | **120.83** | 67.23 | **180%** | **18.01** | 17.37 | **104%** |
 
 ### Where we stand vs llama.cpp
 
 - **Ahead of llama.cpp on RDNA4**: aggregate prefill and decode are ahead for all five published RDNA models in the latest suite. Qwen 3.6 35B-A3B decode is `1.54x`, Gemma 4 26B MoE decode is `1.11x`, and Gemma 4 31B dense decode is narrowly ahead at `1.01x`.
-- **Intel Arc is official now**: the current Intel Arc Vulkan matrix completes all five catalog rows, with ZINC ahead on both prefill and decode for every headline model. The margins are smaller than RDNA4 on decode and the path is still younger operationally, but it is now a supported target.
+- **Intel Arc is official now**: the current Intel Arc Vulkan matrix completes all four published catalog rows, with ZINC ahead on both prefill and decode for every headline model. The margins are smaller than RDNA4 on decode and the path is still younger operationally, but it is now a supported target.
 - **Still close**: Gemma 4 31B long-context decode remains a tight row even though the model-level RDNA result is ahead overall.
-- **Metal is mixed by model**: Gemma 4 31B prefill and Qwen 3.6 35B decode are ahead of llama.cpp, Gemma 4 31B decode is essentially tied, and the smaller Qwen dense rows still need backend-specific tuning.
+- **Metal is mixed by model**: Gemma 4 31B prefill and Qwen 3.6 35B decode are ahead of llama.cpp, Gemma 4 31B decode is essentially tied, and the Qwen 3.5 dense row still needs backend-specific tuning.
 
 For local benchmark commands, harnesses, and methodology, see:
 

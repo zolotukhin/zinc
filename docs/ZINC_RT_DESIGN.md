@@ -110,7 +110,7 @@ This section is the ground truth of what is in tree *today*, ahead of every aspi
 * **`src/zinc_rt/isa/cpu_zig/`** — 14 CPU kernels: `embed`, `rms_norm`, `residual_rms_norm`, `rope`, `flash_attn`, `swiglu`, `sigmoid_mul`, `vadd`, `moe_gate_topk`, `lm_head`, `argmax`, `dequant` (shared GGML row + Q4_0/Q8_0 dot loops), `matvec`, plus the `mod.zig` glue.
 * **`src/zinc_rt/fast_pool.zig`** — persistent worker pool for decode matvec fan-out. Atomic-only dispatch, no heap/mutex traffic. Measured worth ~2–5 tok/s vs `std.Thread.Pool` on the scalar path; `ZINC_RT_FAST_POOL=0` disables.
 * **`src/zinc_rt/batching.zig`** — tenant-aware admission and batch-selection primitives. Every request must name an explicitly registered tenant; there is no anonymous default-tenant admission path. The planner enforces per-tenant active-request limits, per-batch prefill-token limits, and per-batch decode-slot limits, then round-robins prefill and decode rows across tenants. This is planner groundwork only; it is not wired into `forward_zinc_rt` or the HTTP server yet.
-* **`src/compute/forward_zinc_rt.zig`** — ~5 600 lines. Bridges `forward.zig`'s model loading and tokenizer into ZINC_RT. **First-class models today:** Qwen 3.6 35B-A3B (MoE + F32 SSM hybrid), Qwen 3.6 27B (dense), Qwen 3 8B / 14B / 32B (dense), Gemma 4 (MoE + GELU activation, per-layer output scales, SWA RoPE).
+* **`src/compute/forward_zinc_rt.zig`** — ~5 600 lines. Bridges `forward.zig`'s model loading and tokenizer into ZINC_RT. **First-class models today:** Qwen 3.6 35B-A3B (MoE + F32 SSM hybrid), Qwen 3 8B / 14B / 32B (dense), Gemma 4 (MoE + GELU activation, per-layer output scales, SWA RoPE).
 
 ### 1.A.2 What is scaffolded but not on the model-value hot path
 
@@ -131,7 +131,6 @@ This section is the ground truth of what is in tree *today*, ahead of every aspi
 ### 1.A.4 Recent changes worth knowing about (since 2026-05-18)
 
 * **Gemma 4 MoE enablement (`aac5ded`, `dc9f758`, `5049157`, `7c06b65`).** GELU activation plumbed through `runMoeLayer`, `runMoeExpert`, `runSharedExpertOnly`, `runMoeExpertsParallel`, `MoeExpertWorker`, `runMoeExpertsParallelPhased`. `cfg.is_gemma` carries the flag; non-Gemma archs continue to use SwiGLU. Per-layer `layer_output_scale`, `rope_freqs.weight` proportional RoPE, `ZINC_GEMMA4_ATTN_SCALE_DEFAULT` escape hatch. BOS handling and `encodeGemmaChat` chat templating (`<start_of_turn>`/`<end_of_turn>` for Gemma 2/3, `<|turn>`/`<turn|>` for Gemma 4).
-* **Qwen 3.6 27B dense (`28ca228`).** Dense (non-MoE) variant landed alongside the hybrid MoE+SSM 35B-A3B path.
 * **Decode-budget escape hatch.** `m0_max_decode_tokens` now reads `ZINC_RT_MAX_DECODE_TOKENS`. Default remains 8 so existing perf A/B comparisons stay valid; coherence smoke runs can request the full prompt budget.
 * **API docs (`398671f`).** Every public top-level symbol and method across `src/zinc_rt/` + the `src/compute/forward_zinc_rt.zig` bridge now carries Zig docgen comment blocks under `@section "Inference Runtime"` / `"CLI & Entrypoints"`. Used by the `zig-docgen` skill / `tools/` to produce HTML/JSON/text/llms exports.
 
@@ -1852,7 +1851,7 @@ The autopilot loop should keep the state as MIGRATE / M1 until **both** conditio
 
 ### 25.4 Currently shippable beyond R9700 / RDNA4
 
-* **Multi-model support.** Qwen 3 (8B, 14B, 32B dense), Qwen 3.6 (27B dense, 35B-A3B hybrid MoE+SSM), Gemma 4 (MoE with GELU, per-layer output scales, SWA RoPE) all run through `forward_zinc_rt.zig` on the host-assisted path. Gemma 4 chat templating (`encodeGemmaChat`) handles both Gemma 2/3 and Gemma 4 instruction-tuned scaffolds.
+* **Multi-model support.** Qwen 3 (8B, 14B, 32B dense), Qwen 3.6 35B-A3B hybrid MoE+SSM, and Gemma 4 (MoE with GELU, per-layer output scales, SWA RoPE) all run through `forward_zinc_rt.zig` on the host-assisted path. Gemma 4 chat templating (`encodeGemmaChat`) handles both Gemma 2/3 and Gemma 4 instruction-tuned scaffolds.
 * **Apple Silicon dev path.** T-CPU runs on macOS / aarch64 today, slow but functional. The Apple production path is still the standalone Metal backend in `src/metal/` — T-Metal fold-in (§16) is M2 work and has not started.
 * **CLI surface.** `zig build -Dbackend=zinc_rt run -- --prompt "..." --model path/to.gguf [--max-tokens N] [--chat] [--probe-tier]` is the canonical entrypoint for dev and bring-up; it builds `src/zinc_rt/main.zig` and exercises the same code path the autopilot uses.
 

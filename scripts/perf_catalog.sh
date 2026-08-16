@@ -45,10 +45,10 @@ ONLY=${ZINC_ONLY:-}
 cd "$HOME/workspace/zinc" || { echo "no ~/workspace/zinc"; exit 1; }
 
 # --- catalog ---
-NAMES=(qwen35-9b      qwen36-27b      qwen36-35b-a3b  gemma4-31b      gemma4-26b)
+NAMES=(qwen35-9b      qwen38-27b      qwen36-35b-a3b  gemma4-31b      gemma4-26b)
 PATHS=(
   "$HOME/workspace/Qwen3.5-9B-Q4_K_M.gguf"
-  "$MD/Qwen3.6-27B-Q4_K_M.gguf"
+  "$MD/Qwen3.8-27B-Q4_K_M.gguf"
   "$MD/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
   "$MD/gemma-4-31B-it-Q4_K_M.gguf"
   "$MD/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"

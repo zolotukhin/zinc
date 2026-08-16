@@ -40,7 +40,7 @@ faqs:
   - question: "Does moving the per-token embedding lookup onto the GPU speed up decode?"
     answer: "On its own, no — and that null result is the interesting part. Dequantizing the token's embedding row on the GPU instead of the CPU, and shrinking the host-to-device copy from a full row to four bytes, is bit-for-bit correct but measured perf-neutral on Qwen3.5-9B, because decode there is bound by GPU launch latency, not host work. Removing host work cannot move a wall clock the host is not on. Its value is as a building block: with the token id and embedding already GPU-resident, multiple decode steps can eventually be chained into one CUDA graph with no per-token host round-trip."
   - question: "Where does ZINC's RTX 5090 decode stand against llama.cpp now?"
-    answer: "Across the five-model catalog it averages about 70 percent of llama.cpp decode, up from 51 percent on the previously published snapshot. The dense models are close — Qwen3.6-27B at 91 percent, Gemma-4-31B at 82 percent, Qwen3.5-9B at 75 percent — while the Mixture-of-Experts models still trail at 31 to 42 percent, where llama.cpp's years-tuned expert kernels keep the lead."
+    answer: "Across the five-model catalog it averages about 70 percent of llama.cpp decode, up from 51 percent on the previously published snapshot. The dense models are close — the 27B Qwen row at 91 percent, Gemma-4-31B at 82 percent, Qwen3.5-9B at 75 percent — while the Mixture-of-Experts models still trail at 31 to 42 percent, where llama.cpp's years-tuned expert kernels keep the lead."
   - question: "Why were the published benchmark numbers so much lower than the current ones?"
     answer: "The published catalog snapshot was a correctness-first build from before the optimization work landed — no batched MoE experts, no kernel fusion, no tensor-core prefill. This post is the first full re-measurement after merging two parallel optimization lines, so the dashboard now reflects the engine as it actually runs rather than as it first booted. The merge was gated on a 5-of-5 token-for-token correctness check against llama.cpp before any number was trusted."
 excerpt: "A day of NVIDIA work on ZINC's CUDA backend — and a correction. Decode went from 51 to 70 percent of llama.cpp; prefill got a real ~2.5x on Gemma-31B from batching plus a tensor-core/cuBLAS GEMM (prefill is compute-bound, not launch-bound as first reported). The honest ceiling: measured the standard way, ZINC is still ~6.5-26x behind llama's MMQ prefill GEMM, and the earlier 'beats llama on Qwen prefill' was a short-prompt measurement artifact. Plus CUDA-graph decode and a correct-but-no-op GPU embed."
@@ -70,7 +70,7 @@ First, the headline the to-do list was really about — **prefill**:
 | **Qwen3.6-35B-A3B** (MoE) | 14.8 | **45.5** | 3.1x | 0.94x |
 | **Gemma-4-31B** (dense) | 29.9 | **57.3** | 1.9x | 0.15x |
 | **Qwen3.5-9B** (dense) | 64.6 | **97.6** | 1.5x | **1.14x** |
-| **Qwen3.6-27B** (dense) | 39.2 | **47.8** | 1.2x | **1.66x** |
+| **27B Qwen** (dense) | 39.2 | **47.8** | 1.2x | **1.66x** |
 
   <figcaption>Prefill throughput, RTX 5090. "published" → "today" is a real self-improvement (batching + a better GEMM). <strong>But the "vs llama.cpp" column uses the perf-suite's short-prompt metric, which compresses the gap and undermeasures llama by ~9–135×</strong> — measured the standard way (llama-bench pp512) the real gaps are ~6× (Gemma-31B), ~23× (Gemma-26B MoE), and <strong>~62–158× on the hybrid-SSM Qwen models</strong> (no "wins"). The dashboard now shows these real pp512 throughput numbers. See the correction below.</figcaption>
 </figure>
@@ -85,12 +85,12 @@ And decode, the metric this series tracks, with the catalog now reflecting reali
 | **Qwen3.6-35B-A3B** (MoE) | 16.3 | **52.9** | 3.2x | 42% |
 | **Gemma-4-31B** (dense) | 33.9 | **46.9** | 1.4x | 82% |
 | **Qwen3.5-9B** (dense) | 92.0 | **120.8** | 1.3x | 75% |
-| Qwen3.6-27B (dense) | 47.7 | **50.5** | 1.06x | 91% |
+| 27B Qwen (dense) | 47.7 | **50.5** | 1.06x | 91% |
 
   <figcaption>Decode throughput, RTX 5090. The catalog average moved from 39.6 to 63.7 tok/s — from 51% to 70% of llama.cpp on the same hardware. Read the multiples as <em>cumulative</em>: the published snapshot predated batched MoE experts and kernel fusion, so this is the gap between "as it first booted, correctly" and "as it runs today," not a single day's decode delta.</figcaption>
 </figure>
 
-<img class="diagram-visual" src="/blog/2026-06-13-rtx-5090-prefill-decode.svg" alt="Two stacked horizontal bar charts for the RTX 5090. Top, prefill tok/s published versus today: Gemma-4-26B MoE 8.3 to 106.3 (12.8x), Qwen3.6-35B-A3B 14.8 to 45.5, Gemma-4-31B 29.9 to 57.3, Qwen3.5-9B 64.6 to 97.6, Qwen3.6-27B 39.2 to 47.8. Bottom, decode tok/s published versus today: Gemma-4-26B 8.3 to 47.5, Qwen3.6-35B-A3B 16.3 to 52.9, Gemma-4-31B 33.9 to 46.9, Qwen3.5-9B 92 to 120.8, Qwen3.6-27B 47.7 to 50.5." loading="lazy" />
+<img class="diagram-visual" src="/blog/2026-06-13-rtx-5090-prefill-decode.svg" alt="Two stacked horizontal bar charts for the RTX 5090. Top, prefill tok/s published versus today: Gemma-4-26B MoE 8.3 to 106.3 (12.8x), Qwen3.6-35B-A3B 14.8 to 45.5, Gemma-4-31B 29.9 to 57.3, Qwen3.5-9B 64.6 to 97.6, and a 27B dense Qwen row at 39.2 to 47.8. Bottom, decode tok/s published versus today: Gemma-4-26B 8.3 to 47.5, Qwen3.6-35B-A3B 16.3 to 52.9, Gemma-4-31B 33.9 to 46.9, Qwen3.5-9B 92 to 120.8, and the 27B dense Qwen row at 47.7 to 50.5." loading="lazy" />
 
 Two honest framings on top of that. The win: prefill and decode both improved a lot over the stale snapshot, and the dense *decode* models are all within striking distance of llama.cpp. The gap: the MoE models still decode at 31–42% of llama.cpp, and **prefill is much further behind than the table suggests** — measured at pp512, Gemma prefill is ~6.5–26× behind llama's MMQ GEMM (the "vs llama.cpp" prefill column is a flattering short-prompt metric; see the correction below). A faster GEMM has closed part of it — tensor cores + cuBLAS, ~2.5× on the 31B — and the rest is fusing the dequant into the GEMM.
 

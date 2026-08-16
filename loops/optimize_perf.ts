@@ -126,6 +126,7 @@ type ModelTarget = {
   name: string;
   path: string;
   promptMode: PromptMode;
+  systemPrompt?: string;
   coherencePromptMode?: PromptMode;
   envVar: string;
   coherenceMaxTokens?: number;
@@ -149,13 +150,17 @@ const MODELS: Record<string, ModelTarget> = {
     coherencePromptMode: "chat",
     envVar: "ZINC_RDNA_QWEN36_35B_MODEL",
   },
-  qwen3627b: {
-    key: "qwen3627b",
-    name: "Qwen3.6-27B",
-    path: envOrDefault("ZINC_RDNA_QWEN36_27B_MODEL", "/root/models/Qwen3.6-27B-Q4_K_M.gguf"),
-    promptMode: "raw",
+  qwen3827b: {
+    key: "qwen3827b",
+    name: "Qwen3.8-27B",
+    path: envOrDefault("ZINC_RDNA_QWEN38_27B_MODEL", "/root/models/Qwen3.8-27B-Q4_K_M.gguf"),
+    promptMode: "chat",
+    // Match the default system turn injected by POST /v1/chat/completions so
+    // the optimizer and the published reusable-server scenario tokenize the
+    // same workload.
+    systemPrompt: "You are a helpful assistant. Answer directly. Do not show analysis.",
     coherencePromptMode: "chat",
-    envVar: "ZINC_RDNA_QWEN36_27B_MODEL",
+    envVar: "ZINC_RDNA_QWEN38_27B_MODEL",
   },
   qwen359b: {
     key: "qwen359b",
@@ -248,12 +253,11 @@ const CODING_REVIEW_SNIPPET = [
   "```",
 ].join("\n");
 
-const QWEN36_27B_CONTEXT_MEDIUM_PREFILL_PROMPT = [
-  "Code review request: identify the bug, explain why it appears under concurrent requests, and provide a corrected version.",
+const QWEN38_27B_CONTEXT_MEDIUM_PREFILL_PROMPT = [
+  "You are reviewing a small TypeScript helper in a production service.",
+  "Identify the bug, explain why it appears under concurrent requests, and provide a corrected version.",
   "",
   CODING_REVIEW_SNIPPET,
-  "",
-  "Review:",
 ].join("\n");
 
 // Long-context decode benchmark for Effort 11. The prompt is a single
@@ -342,7 +346,7 @@ export type LlamaCppBaseline = {
   promptTokens?: number;
   // Which baseline corresponds to the loop's primaryMetric. Matched
   // case-insensitively against primaryMetricLabel (e.g. a label of
-  // "Qwen3.6-27B prefill tok/s" matches isPrimary when metricMode is
+  // "Qwen3.8-27B prefill tok/s" matches isPrimary when metricMode is
   // "prefill" and scenario contains "context-medium" — the controller's
   // benchmark prompt is the site-aligned context-medium prefill).
   isPrimary?: boolean;
@@ -625,18 +629,18 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
   },
   15: {
     doc: "MULTI_HOUR_EFFORT_15_RDNA_QWEN36_27B_PREFILL_DECODE.md",
-    summary: "RDNA4 Qwen 3.6 27B dense-hybrid prefill/decode recovery",
+    summary: "RDNA4 Qwen 3.8 27B dense-hybrid prefill/decode optimization",
     metricMode: "prefill",
-    primaryMetricLabel: "Qwen3.6-27B prefill tok/s",
-    defaultModel: "qwen3627b",
-    benchmarkPrompt: QWEN36_27B_CONTEXT_MEDIUM_PREFILL_PROMPT,
+    primaryMetricLabel: "Qwen3.8-27B prefill tok/s",
+    defaultModel: "qwen3827b",
+    benchmarkPrompt: QWEN38_27B_CONTEXT_MEDIUM_PREFILL_PROMPT,
     benchmarkMaxTokens: 8,
-    benchmarkMethod: "site-aligned context-medium Coding Review prefill benchmark on RDNA for Qwen3.6-27B dense Q4_K_M; run with --model qwen3627b",
-    minHealthyTokPerSec: 10,
+    benchmarkMethod: "site-aligned 212-token context-medium Coding Review chat prefill benchmark on RDNA for Qwen3.8-27B dense Q4_K_M, including the server-default system turn; run with --model qwen3827b",
+    minHealthyTokPerSec: 100,
     knownFlatCategories: [
-      "Do not optimize against the old synthetic Paris prefill prompt for effort 15. It reported ~148 tok/s but does not match the site context-medium workload that exposes the real ~29 tok/s 27B prefill gap.",
+      "Do not optimize against the old synthetic Paris prompt or raw prompt mode. The current Qwen3.8 contract is the site context-medium chat workload: published ZINC prefill is 402.92 tok/s and decode is 31.86 tok/s, versus llama.cpp 308.38 and 30.79 respectively.",
       "Do not relax canUseBatchedPrefillRdna for cfg.ssm_d_inner > 0 as a first step. A prior SSM batched prefill attempt caused QueueSubmitFailed / GPU resets and had a real hidden-state dependency bug.",
-      "Do not repeat the widened dense fused gate+up+SwiGLU path for inter_dim=17408. On Qwen3.6-27B it was mixed or negative across the four-scenario matrix.",
+      "Do not repeat the widened dense fused gate+up+SwiGLU path for inter_dim=17408. It was mixed or negative on the same-shape dense 27B predecessor across the four-scenario matrix.",
       "Do not repeat Q6_K+Q4_K fused SSM qkv+z pair dispatch. It engaged but regressed the SSM projection bucket.",
       "Do not flip ZINC_SSM_DELTA_COLS8=0 or retry ZINC_SSM_DELTA_NORMED_QK=1 without new evidence. Both were mixed or negative on the full 27B matrix.",
       "Do not retry Q6_K K=17408 dense-down specialization or broad Q4/Q6 wide variants. They were flat or negative on the 27B matrix.",
@@ -651,10 +655,11 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
       "Do not repeat fusing the partial hidden scratch copy with the first attention-layer RMS norm at full-attention segment handoff. Measured with ZINC_QWEN36_27B_PARTIAL_ATTN_NORM_STORE: OFF median 49.96 tok/s [51.32, 49.82, 49.96] vs ON median 49.53 tok/s [49.53, 49.42, 49.62]; reverted. It also moved attention RMS work outside the normal phase timer, making profiles less trustworthy.",
     ],
     structuralSwingIdeas: [
-      "[TOP PRIORITY — UNSPENT STRUCTURAL LEVER, prefer this when stalled in the 100-105 tok/s band] The DP4a fusion neighborhood is saturated: cycle-23 (Q6_K dense-down DP4a + per-32-block activation quantizer) and run-2 cycle-2 (Q4_K dense gate+up+SwiGLU DP4a) landed wins; subsequent run-2 cycles 3-10 produced 8 reverts at 101.5-102.9 trying further fusions (residual fold-in, fuse_q8 dense+down chain, Q5_K SSM out DP4a). The unspent structural lever is the effort doc's Tracks 1-3 — a default-off ZINC_QWEN36_27B_PREFILL_VALIDATE harness that captures per-layer reference tensors against the per-token path, then ONE layer's batched dense FFN in chunks (4/8/16, validated, then production-on), then SSM projection batching (wqkv/z/alpha/beta) with exact token-order recurrence preserved. Expect the validator to be its own cycle (foundation keep); subsequent cycles wire one layer/chunk at a time. Do NOT propose another DP4a/quantize-activation/fuse-residual variant on the dense FFN unless paired RADV_DEBUG=shaderstats proves a specific VGPR/SGPR/occupancy/LDS/spill problem in the accepted path. The phase budget at run-2 baseline 97.83 was dense_ffn ~1309 ms with down ~766 ms — the wall-time win path is now structural batching across tokens, not more single-shader cleverness.",
+      "[TOP PRIORITY] Capture a fresh Qwen3.8 phase profile before editing. The predecessor's DP4a fusion neighborhood is saturated, but Qwen3.8 must be profiled on its own GGUF and chat token shape. Only reuse an old dense-27B conclusion when the tensor type, M/K shape, and active production path match the new profile.",
+      "The unspent structural lever from the predecessor effort is its validator-first Tracks 1-3: capture per-layer reference tensors against the per-token path, then batch one layer's dense FFN in validated chunks, then batch SSM projections while preserving exact token-order recurrence. Do not propose another DP4a/quantize-activation/fuse-residual variant unless paired shaderstats proves a specific occupancy or memory-instruction problem in the accepted path.",
       "At the current 64.87 tok/s checkpoint, the profile is balanced rather than single-hot: dense_ffn ~=1848 ms, ssm ~=1498 ms, dense gateup ~=934 ms, dense down ~=916 ms, and SSM proj ~=1095 ms. A next jump probably needs a structural change that moves a whole bucket by multiple percent, not another sub-1% tile/barrier variant.",
       "Before more dense kernel rewrites, collect paired RADV_DEBUG=shaderstats for the accepted fused Q4_K gate/up/SwiGLU path and Q6_K tiled dense-down path. Only edit the shader if shaderstats shows a concrete VGPR/SGPR, occupancy, LDS, spill, or memory-instruction problem that maps to the currently largest dense subphase.",
-      "Treat the current Qwen3.6-27B layer-major segment and barrier schedule as provisionally settled. Segment or barrier work now requires a paired old-vs-new control in the same cycle and a profile-backed reason; otherwise switch buckets.",
+      "Treat the current dense 27B layer-major segment and barrier schedule as provisionally settled. Segment or barrier work now requires a paired old-vs-new control in the same cycle and a profile-backed reason; otherwise switch buckets.",
       "If dense gateup and down remain tied, pivot to SSM projection as the largest single subphase. Revisit batched SSM qkv/z/alpha/beta only as a validated layer-major dataflow step, not the old descriptor-offset replay path, and measure flag OFF/ON in the same cycle.",
       "If pursuing dense down, do not retune the existing Q6_K tile shape again. Either remove the separate residual accumulation with a correctly validated down+acc design, or collect shaderstats proving why the accepted tiled path is leaving occupancy/bandwidth on the table.",
       "After any new keep above 65 tok/s, run the full four-scenario matrix before treating the win as broadly useful. The site-aligned Coding Review prefill benchmark is the controller metric, but the 27B work has already produced changes that helped one scenario while hurting context-long/decode.",
@@ -674,15 +679,15 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
         focus: "Historical RDNA Qwen prefill attempts, especially dormant tiled-GEMM lessons and SSM capture/validation failures.",
       },
     ],
-    // llama.cpp baselines from the effort-doc measurement contract (R9700,
-    // RADV gfx1201, RADV_PERFTEST=coop_matrix). Stable per llama.cpp version;
-    // the project-success criterion is to beat these on at least 3 of 4
-    // scenarios across {prefill, decode}.
+    llamaCppSuccessRule: "Qwen3.8 already beats the validated Vulkan llama.cpp baseline in prefill and decode on all four RDNA scenarios. Optimize beyond the published ZINC medians without giving back correctness or any scenario: core 241.61/32.17, context-medium 402.92/31.86, context-long 431.16/31.79, and decode-extended 300.18/31.69 tok/s (prefill/decode).",
+    // Qwen3.8 baselines from the fair reusable-server measurement contract
+    // (R9700, RADV gfx1201, RADV_PERFTEST=coop_matrix, current Vulkan
+    // llama.cpp build). Refresh whenever the baseline binary changes.
     llamaCppBaselines: [
-      { scenario: "core",              promptTokens: 36,  prefillTokPerSec: 61.12,  decodeTokPerSec: 34.43 },
-      { scenario: "context-medium",    promptTokens: 174, prefillTokPerSec: 195.01, decodeTokPerSec: 34.40, isPrimary: true },
-      { scenario: "context-long",      promptTokens: 322, prefillTokPerSec: 69.89,  decodeTokPerSec: 44.33 },
-      { scenario: "decode-extended",   promptTokens: 64,  prefillTokPerSec: 97.29,  decodeTokPerSec: 31.29 },
+      { scenario: "core",              promptTokens: 87,  prefillTokPerSec: 198.04, decodeTokPerSec: 30.86 },
+      { scenario: "context-medium",    promptTokens: 212, prefillTokPerSec: 308.38, decodeTokPerSec: 30.79, isPrimary: true },
+      { scenario: "context-long",      promptTokens: 378, prefillTokPerSec: 367.50, decodeTokPerSec: 30.75 },
+      { scenario: "decode-extended",   promptTokens: 109, prefillTokPerSec: 232.26, decodeTokPerSec: 30.73 },
     ],
   },
   17: {
@@ -699,7 +704,7 @@ const EFFORT_SPECS: Record<number, EffortSpec> = {
       "Do not chase decode first. Qwen3.5-9B decode is already ahead of llama.cpp on all four published RDNA scenarios (~95-97 tok/s ZINC vs ~85 tok/s llama). The gap is prompt prefill.",
       "Do not optimize a synthetic Paris prompt. The biggest published RDNA gap is the site long-draft raw prompt: 105.91 tok/s ZINC vs 855.82 tok/s llama.cpp. Core prefill is also poor (100.79 vs 548.94).",
       "Do not blindly flip canUseBatchedPrefillRdna for cfg.ssm_d_inner > 0. Qwen3.5 is an SSM+attention hybrid, and earlier SSM batched-prefill attempts on the Qwen3.6 dense hybrid produced GPU resets or hidden-state dependency bugs when validation was skipped.",
-      "Do not reuse the Qwen3.6-27B predicate as-is. isQwen36DenseHybrid27B is shape-locked to hidden_dim=5120/intermediate_dim=17408, so every accepted 27B layer-major prefill path is currently disabled on Qwen3.5-9B.",
+      "Do not reuse the legacy isQwen36DenseHybrid27B predicate as-is. It is shape-locked to hidden_dim=5120/intermediate_dim=17408, so every accepted 27B layer-major prefill path is currently disabled on Qwen3.5-9B.",
       "Do not add another single-token DMMV micro-fusion before proving the prefill path is layer-major on this model. A 5-8x prefill gap is a batching/dataflow problem, not a 1% shader clean-up problem.",
     ],
     structuralSwingIdeas: [
@@ -1017,7 +1022,7 @@ const COHERENCE_CHECKS: CoherenceCheck[] = [
 // The primary model (--model flag) is benchmarked; these are correctness-only.
 const COHERENCE_MODELS: ModelTarget[] = [
   MODELS.qwen36b,
-  MODELS.qwen3627b,
+  MODELS.qwen3827b,
   MODELS.qwen8b,
   MODELS.gemma431b,
   MODELS.gemma426ba4b,
@@ -2620,9 +2625,12 @@ function coherenceMaxTokensForModel(modelTarget: ModelTarget): number {
   return modelTarget.coherenceMaxTokens ?? 30;
 }
 
-export function zincCliArgs(modelTarget: Pick<ModelTarget, "path" | "promptMode">, prompt: string, maxTokens: number, promptMode = modelTarget.promptMode): string {
+export function zincCliArgs(modelTarget: Pick<ModelTarget, "path" | "promptMode" | "systemPrompt">, prompt: string, maxTokens: number, promptMode = modelTarget.promptMode): string {
   const chatFlag = promptMode === "chat" ? " --chat" : "";
-  return `-m ${shellQuote(modelTarget.path)} -d ${REMOTE_VULKAN_DEVICE_INDEX}${chatFlag} --prompt ${shellQuote(prompt)} -n ${maxTokens}`;
+  const systemPromptFlag = promptMode === "chat" && modelTarget.systemPrompt
+    ? ` --system-prompt ${shellQuote(modelTarget.systemPrompt)}`
+    : "";
+  return `-m ${shellQuote(modelTarget.path)} -d ${REMOTE_VULKAN_DEVICE_INDEX}${chatFlag}${systemPromptFlag} --prompt ${shellQuote(prompt)} -n ${maxTokens}`;
 }
 
 function zincRemoteCommand(modelTarget: ModelTarget, prompt: string, maxTokens: number, promptMode = modelTarget.promptMode): string {
@@ -3498,6 +3506,7 @@ async function saveLoopState(state: LoopState): Promise<void> {
 
 export function benchmarkSignatureForSpec(spec: EffortSpec, modelKey?: string, modelPath?: string): string {
   const selectedModelKey = modelKey ?? spec.defaultModel ?? null;
+  const selectedModel = selectedModelKey ? MODELS[selectedModelKey] : null;
   return JSON.stringify({
     doc: spec.doc,
     metricMode: spec.metricMode,
@@ -3507,6 +3516,7 @@ export function benchmarkSignatureForSpec(spec: EffortSpec, modelKey?: string, m
     benchmarkPrompt: spec.benchmarkPrompt,
     benchmarkMaxTokens: spec.benchmarkMaxTokens,
     benchmarkMethod: spec.benchmarkMethod,
+    ...(selectedModel?.systemPrompt ? { benchmarkSystemPrompt: selectedModel.systemPrompt } : {}),
   });
 }
 

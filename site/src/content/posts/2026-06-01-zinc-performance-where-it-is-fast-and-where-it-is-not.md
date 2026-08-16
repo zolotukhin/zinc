@@ -115,7 +115,7 @@ The current RDNA dashboard summary:
 | Qwen 3.6 35B A3B UD Q4_K_XL | `127.9` | `108.5` | `154.27` | `398.82` |
 | Qwen 3.5 9B Q4_K_M | `95.39` | `85.51` | `100.79` | `548.94` |
 | Gemma 4 26B-A4B MoE Q4_K_M | `89.73` | `102.0` | `89.1` | `497.08` |
-| Qwen 3.6 27B Dense Q4_K_M | `28.47` | `30.65` | `49.0` | `185.14` |
+| 27B Dense Qwen Q4_K_M | `28.47` | `30.65` | `49.0` | `185.14` |
 | Gemma 4 31B Q4_K_M | `24.65` | `28.55` | `41.64` | `201.97` |
 
 The pattern is clear. ZINC is already competitive or ahead on decode for the Qwen paths it has targeted hardest. It is still behind on prompt processing across every listed RDNA model. The difference between those columns is the roadmap.
@@ -138,7 +138,7 @@ The full Metal table is more uneven:
 | Gemma 4 31B Q4_K_M | `21.86` | `23.30` | `132.6` | `84.47` |
 | Gemma 4 26B-A4B MoE Q4_K_M | `30.01` | `88.44` | `34.0` | `365.45` |
 | Qwen 3.5 9B Q4_K_M | `23.21` | `66.52` | `23.2` | `90.65` |
-| Qwen 3.6 27B Dense Q4_K_M | `8.93` | `23.32` | `9.6` | `27.87` |
+| 27B Dense Qwen Q4_K_M | `8.93` | `23.32` | `9.6` | `27.87` |
 
 Two things are true at the same time. The flagship row is promising. The average backend is still behind. That is normal for a young backend. It usually means a handful of exact hot shapes have been optimized and the broad catalog still runs through generic or older paths.
 

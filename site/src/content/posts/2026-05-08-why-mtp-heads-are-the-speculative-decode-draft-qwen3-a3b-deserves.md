@@ -23,9 +23,9 @@ keywords:
   - qwen3_next_mtp vllm speculative-config
   - Leviathan speedup formula MTP
   - draft-model vs MTP cost ratio
-  - Qwen3.6 27B mtp 2.5x decode
+  - 27B dense Qwen MTP 2.5x decode
   - SSM rewind tax speculative decode
-excerpt: "The April 28 argument that draft-model speculative decoding does not net out on Qwen 35B-A3B was the right read at the time. Two pieces moved in the next ten days. PR 22400 made gated DeltaNet rollback partial instead of full, eliminating the SSM rewind tax. PR 22673 wired MTP heads into llama.cpp as a built-in draft, and the measured speedup on Qwen3.6 27B is 2.5x at γ=3 with a 0.72 acceptance rate. The cost ratio that ruined the 0.8B draft drops by an order of magnitude when the draft is one transformer layer attached to the verifier's last hidden state, and on a 32 GB RDNA4 card the only thing standing between local Qwen3 and that 2.5x is a Vulkan kernel that has not landed yet."
+excerpt: "The April 28 argument that draft-model speculative decoding does not net out on Qwen 35B-A3B was the right read at the time. Two pieces moved in the next ten days. PR 22400 made gated DeltaNet rollback partial instead of full, eliminating the SSM rewind tax. PR 22673 wired MTP heads into llama.cpp as a built-in draft, and the measured speedup on a 27B dense Qwen checkpoint is 2.5x at γ=3 with a 0.72 acceptance rate. The cost ratio that ruined the 0.8B draft drops by an order of magnitude when the draft is one transformer layer attached to the verifier's last hidden state, and on a 32 GB RDNA4 card the only thing standing between local Qwen3 and that 2.5x is a Vulkan kernel that has not landed yet."
 seoDescription: "Why MTP heads are the right speculative decoding draft for Qwen3: hidden-state alignment, low cost ratio, and partial Gated DeltaNet rollback."
 ---
 
@@ -35,7 +35,7 @@ The [argument we made on April 28](/blog/2026-04-28-why-speculative-decoding-doe
 
 Two things moved in the ten days that followed. The first was [PR 22400 by am17an in llama.cpp](https://github.com/ggml-org/llama.cpp/pull/22400), which kept gated DeltaNet intermediates per token so a rejected draft only triggers a partial rollback instead of a checkpoint restore. On a 5090 with a Q4_K_M Qwen3.5-27B target and a Q8_0 Qwen3.5-0.8B draft, the same configuration that lost on master shipped a `1.78×` speedup, going from 70.95 to 126.06 tok/s on a doubly-linked-list code prompt. The SSM rewind tax was real, but it was structurally fixable.
 
-The second was [PR 22673 by the same author](https://github.com/ggml-org/llama.cpp/pull/22673), opened May 4, which wired Multi-Token Prediction heads into the speculative path as a built-in draft. The measured aggregate on Qwen3.6 27B at Q8 across nine prompt categories was `2.5×` over baseline at γ=3 with a 0.72 acceptance rate, and `2.4×` at γ=2 with a 0.83 acceptance rate. Neither configuration shipped a separate draft model file; the draft was the MTP head loaded from the same GGUF.
+The second was [PR 22673 by the same author](https://github.com/ggml-org/llama.cpp/pull/22673), opened May 4, which wired Multi-Token Prediction heads into the speculative path as a built-in draft. The measured aggregate on a 27B dense Qwen checkpoint at Q8 across nine prompt categories was `2.5×` over baseline at γ=3 with a 0.72 acceptance rate, and `2.4×` at γ=2 with a 0.83 acceptance rate. Neither configuration shipped a separate draft model file; the draft was the MTP head loaded from the same GGUF.
 
 Together those two changes inverted the conclusion of the April 28 post. Speculative decoding does net out on this family of models. It just does not net out with the draft you reach for first.
 
@@ -53,7 +53,7 @@ The mechanical part of the design is what matters here. The MTP head is one tran
 
 The April 28 post worked the cost ratio in one direction: `c` is verifier work over draft work, so a verifier that activates only 3B parameters at a step makes a 0.8B draft expensive on a relative basis. With MoE active weights at 2 GB and a 0.8B draft at 0.36 GB, `c` lands near 0.20 before any rewind taxes are added. That stayed honest.
 
-What changes with an MTP head is the draft itself. The MTP head reads the verifier's last hidden state and emits logits through a single transformer block, so its compute cost is `1/L` of the verifier's. On Qwen3.6 27B at Q8 the verifier reads about 27 GB of weights per step and the head reads roughly 0.43 GB, putting `c` near 0.016 even before any cache reuse. On Qwen3-Next-80B-A3B with one MTP layer the same arithmetic puts active `c` near 0.13, four times better than the 0.8B-draft case in the prior post.
+What changes with an MTP head is the draft itself. The MTP head reads the verifier's last hidden state and emits logits through a single transformer block, so its compute cost is `1/L` of the verifier's. On the 27B dense Qwen checkpoint at Q8 the verifier reads about 27 GB of weights per step and the head reads roughly 0.43 GB, putting `c` near 0.016 even before any cache reuse. On Qwen3-Next-80B-A3B with one MTP layer the same arithmetic puts active `c` near 0.13, four times better than the 0.8B-draft case in the prior post.
 
 The acceptance rate moves the other way at the same time. A 0.8B draft from a different family approximates the verifier's distribution; an MTP head was trained against the verifier's hidden state at exactly the offsets it has to predict. The PR 22673 numbers measure 0.72 to 0.83 acceptance depending on `γ`, which is roughly the range DeepSeek-V3 reports for [its own MTP-1 configuration at "above 80%" acceptance per the V3 technical report](https://huggingface.co/deepseek-ai/DeepSeek-V3). The April 28 post's central estimate of `α = 0.55` for a cross-family draft holds for cross-family drafts. It does not hold for hidden-state-aligned heads.
 
@@ -65,11 +65,11 @@ PR 22400's contribution is small in lines of code and large in implication. The 
 
 The PR widens the GDN tensor by `1 + n_rs_seq` groups and writes the per-token intermediate state into a sliding ring, so that on rejection the engine can index directly to the position of the last accepted token. The rolled-back work shrinks from `O(γ)` to `O(γ − k)` where `k` is the number of accepted tokens, and the verifier's re-decode happens only over the rejected suffix. The 1.78x measurement on Qwen3.5-27B with the legacy 0.8B draft is what `c = 0.20` actually buys when the rewind tax is paid only for what was rejected, not for the entire draft window.
 
-The same primitive is what PR 22673 leans on. The MTP head emits its three candidates against the verifier's per-token GDN intermediates, so when one is rejected the engine resumes from the corresponding intermediate and the verifier produces the right hidden state for the next round without re-prefilling. Without partial rollback the MTP path would still net out on dense Qwen3.6 27B, where there is no GDN, but it would not net out on Qwen3-Next or Qwen3.6 35B-A3B where half the layers are linear. The two PRs are not independent; the second one needs the first.
+The same primitive is what PR 22673 leans on. The MTP head emits its three candidates against the verifier's per-token GDN intermediates, so when one is rejected the engine resumes from the corresponding intermediate and the verifier produces the right hidden state for the next round without re-prefilling. Without partial rollback the MTP path would still net out on the 27B dense Qwen checkpoint, where there is no GDN, but it would not net out on Qwen3-Next or Qwen3.6 35B-A3B where half the layers are linear. The two PRs are not independent; the second one needs the first.
 
 ## What the numbers actually look like
 
-The benchmark grid in PR 22673 measures Qwen3.6 27B at Q8 on a DGX Spark across nine prompt categories, with the same prompts run under three configurations.
+The benchmark grid in PR 22673 measures the 27B dense Qwen checkpoint at Q8 on a DGX Spark across nine prompt categories, with the same prompts run under three configurations.
 
 | Configuration | Aggregate tok/s | Speedup vs baseline | Aggregate acceptance |
 | --- | ---: | ---: | ---: |

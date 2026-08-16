@@ -90,19 +90,19 @@
     </g>
 
     <g transform="translate(28 344)">
-      <text x="0" y="25" class="label">Qwen 3.6 27B Dense</text>
+      <text x="0" y="25" class="label">Qwen 3.8 27B Dense</text>
       <text x="0" y="47" class="small">Q4_K_M - larger dense Qwen row</text>
       <rect x="430" y="0" width="132" height="58" rx="8" fill="url(#cell)"/>
-      <text x="496" y="25" class="cellText">116%</text>
-      <text x="496" y="44" class="cellSub">213 vs 184</text>
+      <text x="496" y="25" class="cellText">122%</text>
+      <text x="496" y="44" class="cellSub">242 vs 198</text>
       <rect x="610" y="0" width="132" height="58" rx="8" fill="url(#cell)"/>
       <text x="676" y="25" class="cellText">104%</text>
-      <text x="676" y="44" class="cellSub">32.0 vs 30.7</text>
+      <text x="676" y="44" class="cellSub">32.2 vs 30.9</text>
       <rect x="790" y="0" width="132" height="58" rx="8" fill="url(#cell)"/>
-      <text x="856" y="25" class="cellText">106%</text>
-      <text x="856" y="44" class="cellSub">39.2 vs 36.9</text>
+      <text x="856" y="25" class="cellText">98%</text>
+      <text x="856" y="44" class="cellSub">48.2 vs 49.0</text>
       <rect x="970" y="0" width="72" height="58" rx="8" fill="url(#cell)"/>
-      <text x="1006" y="30" class="cellText" font-size="18">105%</text>
+      <text x="1006" y="30" class="cellText" font-size="18">109%</text>
     </g>
 
     <g transform="translate(28 426)">

@@ -9,7 +9,6 @@
 | model | ZINC prefill p90 (t/s) | llama pp1041 | gap | shape |
 |---|--:|--:|--:|---|
 | gemma4-31b      | 415 | 2542 | **6.1×**  | dense |
-| qwen36-27b      | 281 | 2488 | **8.9×**  | dense (hybrid-SSM) |
 | qwen35-9b       | 482 | 7814 | **16×**   | dense (hybrid-SSM) |
 | gemma4-26b-a4b  | 296 | 6371 | **21.5×** | MoE |
 | qwen36-35b-a3b  | 190 | 5471 | **29×**   | MoE |

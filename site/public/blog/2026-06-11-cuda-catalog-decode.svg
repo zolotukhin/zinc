@@ -56,7 +56,7 @@
     <rect x="380" y="328" width="329" height="40" rx="6" fill="url(#zinc)"/>
     <text x="697" y="355" text-anchor="end" class="val" fill="#0c1a16">40</text>
 
-    <text x="364" y="426" text-anchor="end" class="lab">Qwen3.6-27B</text>
+    <text x="364" y="426" text-anchor="end" class="lab">27B Qwen</text>
     <text x="364" y="444" text-anchor="end" class="sub">dense</text>
     <rect x="380" y="408" width="296" height="40" rx="6" fill="url(#zincmute)"/>
     <text x="688" y="435" class="val">36</text>

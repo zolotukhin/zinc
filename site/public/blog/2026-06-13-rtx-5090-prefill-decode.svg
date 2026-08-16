@@ -55,7 +55,7 @@
     <rect x="0" y="296" width="216" height="46" rx="6" fill="url(#mute)"/>
     <rect x="216" y="296" width="47" height="46" rx="6" fill="url(#zinc)"/>
     <text x="277" y="326" class="gain">1.22x</text>
-    <text x="-16" y="320" text-anchor="end" class="label">Qwen3.6-27B <tspan class="dn">dense</tspan></text>
+    <text x="-16" y="320" text-anchor="end" class="label">27B Qwen <tspan class="dn">dense</tspan></text>
     <text x="-16" y="338" text-anchor="end" class="sub">39.2 &#8594; 47.8</text>
   </g>
   <text x="56" y="534" class="ptitle">Decode — 51% → 70% of llama.cpp</text>
@@ -90,7 +90,7 @@
     <rect x="0" y="296" width="242" height="46" rx="6" fill="url(#mute)"/>
     <rect x="242" y="296" width="14" height="46" rx="6" fill="url(#zinc)"/>
     <text x="270" y="326" class="gain">1.06x</text>
-    <text x="-16" y="320" text-anchor="end" class="label">Qwen3.6-27B <tspan class="dn">dense</tspan></text>
+    <text x="-16" y="320" text-anchor="end" class="label">27B Qwen <tspan class="dn">dense</tspan></text>
     <text x="-16" y="338" text-anchor="end" class="sub">47.7 &#8594; 50.5</text>
   </g>
 </svg>

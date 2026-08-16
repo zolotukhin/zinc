@@ -9,7 +9,7 @@ Current priorities:
 - make the core Linux AMD path more stable on real hardware
 - improve Windows and cross-platform build reliability
 - harden the OpenAI-compatible server path
-- recover Qwen 3.6 27B dense-FFN and SSM-projection prefill on RDNA4 (the active effort behind the 27B prefill gap vs llama.cpp)
+- keep Qwen 3.8 27B correctness and performance coverage stable across RDNA4 and Metal
 - harden Intel Arc as an official Linux Vulkan target now that the full catalog matrix is published
 - improve test coverage for scheduler, API, tokenizer, graph, and model loading code
 - make bug reports and regressions easier to reproduce
