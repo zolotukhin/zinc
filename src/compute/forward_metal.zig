@@ -27344,10 +27344,13 @@ fn runDecodeStep(
             if (profile) |p| p.full_attn_layers += 1;
             var attn = try resolveLayerAttentionParams(cfg, lt, hidden_dim, engine.kv_cache_q8);
             if (cfg.architecture == .muse_glimmer) {
-                // Muse Glimmer applies RoPE + the sliding window only on
-                // its non-global (SWA) layers; global layers (every 4th,
-                // the full-attention layers) use NoPE and full attention.
-                if (is_full_attn) {
+                // Muse Glimmer applies RoPE + the sliding window only on its
+                // non-global (SWA) layers; global layers (every 4th) use NoPE +
+                // full attention. NB: `is_full_attn` is the attention-vs-SSM
+                // split and is ALWAYS true for dense Muse (interval=1), so it
+                // must NOT be used here — key off the layer index directly
+                // (matches the batched-prefill path).
+                if ((layer_idx + 1) % 4 == 0) {
                     attn.rope_dim = 0;
                     attn.sliding_window_size = 0;
                 } else {
