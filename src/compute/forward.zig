@@ -19522,6 +19522,19 @@ pub const InferenceEngine = struct {
         return @min(layers, cfg.n_layers - 1);
     }
 
+    // A3B tail pipelining was measured slower/noisier on the ~154-token
+    // no-profile diagnostic (median 557 vs 768 tok/s off), which is why it
+    // was made opt-in in the first place (see MULTI_HOUR_EFFORT_6). That
+    // change also silently regressed the much shorter published "core"
+    // scenario (36 tokens): before, A3B got tail pipelining for free through
+    // a blanket isAmdRdna() branch; after, it lost it entirely, dropping
+    // measured prefill ~450 -> ~260 tok/s with byte-identical output.
+    // Longer scenarios (context-medium/-long, decode-extended, 64-322
+    // tokens) are already fast without this — the win is specific to very
+    // short prompts. Gate on token count so short-prompt publishing gets it
+    // back without touching the longer regime where it measured slower.
+    const qwen36_a3b_tail_pipeline_max_tokens: u32 = 64;
+
     fn qwen36DensePrefillTailPipelineEnabled(self: *const InferenceEngine, n_tokens: u32) bool {
         if (n_tokens < 2) return false;
         if (self.validation_diagnostics_enabled or self.profile_enabled) return false;
@@ -19529,13 +19542,20 @@ pub const InferenceEngine = struct {
         if (std.posix.getenv("ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE")) |mode| {
             return mode.len > 0 and !std.mem.eql(u8, mode, "0");
         }
-        if (!self.isQwenDenseHybridLayerMajorPrefillModel()) return false;
-        if (!self.isQwenDensePrefillAccelGpu()) return false;
-        // A3B tail pipelining is not a stable win on the diagnostic prefill
-        // harness; keep it opt-in until its boundary dependency and perf are
-        // validated together.
-        if (self.isQwen36A3bMoePrefillModel()) return false;
-        return n_tokens >= 16;
+        if (self.isQwenDenseHybridLayerMajorPrefillModel()) {
+            if (!self.isQwenDensePrefillAccelGpu()) return false;
+            return n_tokens >= 16;
+        }
+        if (self.isQwen36A3bMoePrefillModel()) {
+            // isQwenDenseHybridLayerMajorPrefillModel() never covers A3B (it's
+            // MoE, not one of the dense 9B/27B checks), so this branch is the
+            // only path that can enable it for A3B — narrowly scoped to RDNA,
+            // where the short-prompt win and byte-identical output were
+            // actually measured.
+            if (!self.isAmdRdna()) return false;
+            return n_tokens >= 16 and n_tokens <= qwen36_a3b_tail_pipeline_max_tokens;
+        }
+        return false;
     }
 
     const qwen36_dense_prefill_max_segments = 64;

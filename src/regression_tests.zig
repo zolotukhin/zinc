@@ -567,9 +567,9 @@ test "Vulkan Qwen A3B SSM Q8 DP4a keeps RDNA crossover and no-padding policy" {
     try expectNotContains(prep_src, "qwenA3bPrefillPaddedTokenCount");
 }
 
-test "Vulkan Qwen A3B production tail pipeline remains opt-in" {
+test "Vulkan Qwen A3B production tail pipeline is short-prompt gated" {
     const src = @embedFile("compute/forward.zig");
-    try expectContainsNear(src, "fn qwen36DensePrefillTailPipelineEnabled", "if (self.isQwen36A3bMoePrefillModel()) return false;", 1000);
+    try expectContainsNear(src, "fn qwen36DensePrefillTailPipelineEnabled", "return n_tokens >= 16 and n_tokens <= qwen36_a3b_tail_pipeline_max_tokens;", 1200);
     try expectContainsNear(src, "fn prefillA3bProduction", "const pipeline_tail = self.qwen36DensePrefillTailPipelineEnabled(n_tokens);", 9000);
 
     const start = std.mem.indexOf(u8, src, "fn prefillA3bProduction") orelse return error.TestExpectedEqual;
