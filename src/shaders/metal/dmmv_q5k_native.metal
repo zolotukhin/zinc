@@ -34,8 +34,9 @@ kernel void main0(
     uint lane [[thread_index_in_simdgroup]],
     uint simdgroups_per_tg [[simdgroups_per_threadgroup]]
 ) {
-    // Stage input as half4 — K≤4096 → max 1024 entries = 8 KiB threadgroup memory.
-    threadgroup half4 x_cache4[1024];
+    // Stage input as half4 — K≤8192 → max 2048 entries = 16 KiB threadgroup memory
+    // (covers Muse Glimmer's K=6656 lm-head as well as K≤4096 models).
+    threadgroup half4 x_cache4[2048];
 
     const uint tg_size = simdgroups_per_tg * 32u;
     device const float* input = X + (p.x_offset >> 2);

@@ -11439,7 +11439,18 @@ pub const InferenceEngine = struct {
             .q5_0 => .{ .pipe = &self.dmmv_q5_0_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
             .q5_1 => .{ .pipe = &self.dmmv_q5_1_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
             .mxfp4 => .{ .pipe = &self.dmmv_mxfp4_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
-            .q5_k => .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
+            .q5_k => blk: {
+                // Native Q5_K matvec (simdgroup-per-row, threadgroup input cache,
+                // coalesced weight reads) beats the SPIRV-Cross byte-at-a-time
+                // shader on the big Q5_K lm-head. Its input cache holds K/4 half4
+                // (<=2048), so gate on K<=8192 (covers Muse's K=6656 lm-head).
+                if (K <= 8192 and K % 256 == 0 and self.dmmv_q5k_native_pipe.handle != null and
+                    self.dmmv_q5k_native_pipe.max_threads_per_threadgroup >= 256)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q5k_native_pipe, .push_idx = 0, .rows_per_wg = 8, .block_size = 256 };
+                }
+                break :blk .{ .pipe = &self.dmmv_q5k_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 };
+            },
             .q6_k => blk: {
                 // dmmv_q6k_llama is a faithful reference implementation port (N_SG=2, N_R0=2,
                 // simdgroup-parallel). The legacy dmmv_q6k_pipe is a SPIRV-Cross
