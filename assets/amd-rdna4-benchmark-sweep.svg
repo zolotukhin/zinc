@@ -63,12 +63,12 @@
     <g transform="translate(113 315)">
       <text x="0" y="18" fill="#f7f7f8" font-size="25" font-weight="850">Qwen 3.6 35B A3B UD Q4K XL</text>
       <rect x="0" y="36" width="254" height="36" rx="18" fill="#082f17" stroke="#1f7a3d" stroke-width="1.4"/>
-      <text x="21" y="61" fill="#21e36a" font-size="20" font-weight="850">1.48x llama.cpp</text>
-      <rect x="400" y="9" width="535" height="18" rx="9" fill="url(#zincBar)"/>
+      <text x="21" y="61" fill="#21e36a" font-size="20" font-weight="850">1.51x llama.cpp</text>
+      <rect x="400" y="9" width="545" height="18" rx="9" fill="url(#zincBar)"/>
       <rect x="400" y="45" width="361" height="18" rx="9" fill="url(#llamaBar)"/>
-      <text x="1077" y="27" fill="#ffffff" font-size="20" font-weight="850" text-anchor="end">162.8</text>
+      <text x="1077" y="27" fill="#ffffff" font-size="20" font-weight="850" text-anchor="end">165.9</text>
       <text x="1077" y="63" fill="#b1b1bc" font-size="20" font-weight="500" text-anchor="end">109.8</text>
-      <text x="400" y="92" fill="#a8a8b3" font-size="18" font-weight="500">Prefill 263 ZINC · 358 llama.cpp (0.73x) · Overall 134%</text>
+      <text x="400" y="92" fill="#a8a8b3" font-size="18" font-weight="500">Prefill 415 ZINC · 354 llama.cpp · Overall 146%</text>
     </g>
 
     <g transform="translate(113 434)">

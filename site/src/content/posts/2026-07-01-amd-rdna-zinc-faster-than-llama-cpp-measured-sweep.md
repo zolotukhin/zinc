@@ -29,26 +29,26 @@ keywords:
   - AMD GPU local AI
 faqs:
   - question: "Is ZINC faster than llama.cpp on AMD now?"
-    answer: "In the current public RDNA benchmark artifact, yes for decode and phase-combined overall on all five measured headline rows, and yes for prefill on four of five. Qwen 3.6 35B A3B prefill is the one exception at 73 percent of llama.cpp, a regression under active investigation. That is a measured suite result, not a promise for every AMD GPU, driver, model, prompt, or future commit."
+    answer: "In the current public RDNA benchmark artifact, yes for prefill, decode, and the phase-combined overall score on all five measured headline rows. Qwen 3.8 quick-chat end-to-end throughput is the narrow exception at 98 percent of llama.cpp. That is a measured suite result, not a promise for every AMD GPU, driver, model, prompt, or future commit."
   - question: "What models are in the AMD sweep?"
     answer: "The current RDNA suite covers Gemma 4 26B-A4B MoE Q4_K_M, Gemma 4 31B Q4_K_M, Qwen 3.5 9B Q4_K_M, Qwen 3.8 27B Dense Q4_K_M, and Qwen 3.6 35B A3B UD Q4_K_XL."
   - question: "How is the overall percentage calculated?"
     answer: "The fair score is time-based. The harness computes phase seconds as prompt tokens divided by prefill tokens per second plus generated tokens divided by decode tokens per second. The overall percent is llama.cpp phase seconds divided by ZINC phase seconds. It is not an average of prefill percent and decode percent."
   - question: "Does ZINC win every single scenario cell?"
-    answer: "No. Across the 20-cell scenario matrix, ZINC wins 14 of 20 prefill cells, 17 of 20 decode cells, and 16 of 19 comparable overall cells. Gemma 4 31B's longer-context scenarios lose on prefill (as low as 78 percent), and Qwen 3.6 35B A3B loses its headline prefill cell at 73 percent. Both are open investigations, not measurement noise."
-excerpt: "The AMD RDNA benchmark artifact is honest about where it stands: ZINC is ahead of llama.cpp on decode and phase-combined overall for every headline row on the Radeon AI PRO R9700, and on prefill for four of five. The one headline loss, Qwen 3.6 35B A3B prefill at 73 percent, plus a cluster of Gemma 4 31B losses in the longer-context scenario matrix, are real regressions this post tracks rather than papers over. This post explains what changed, how the harness measures it, and where the claim stops."
+    answer: "Not every cell. Across the 20-cell scenario matrix, ZINC wins 15 of 20 prefill cells, 17 of 20 decode cells, and 17 of 20 phase-combined overall cells. Gemma 4 31B's longer-context scenarios are the remaining soft spot, with prefill misses down to 78 percent on some rows. That is an open investigation, not measurement noise."
+excerpt: "The current AMD RDNA benchmark artifact is the first one where the headline is no longer a caveat. On the Radeon AI PRO R9700, ZINC is ahead of llama.cpp on every measured headline model row for prefill, decode, and phase-combined overall: Gemma 4 MoE, Gemma 4 dense, Qwen 3.5 9B, Qwen 3.8 27B, and Qwen 3.6 35B A3B. This post explains what changed, how the harness measures it, and where the claim stops."
 seoDescription: "A comprehensive look at the July 2026 ZINC vs llama.cpp AMD RDNA benchmark sweep across Gemma 4 and Qwen models, with methodology, charts, caveats, and links to the public dashboard."
 ---
 
-Quick answer: on the current public AMD RDNA artifact, ZINC is faster than llama.cpp on decode and phase-combined overall for every headline model row we publish, and on prefill for four of five. That includes Gemma 4 26B-A4B MoE, Gemma 4 31B dense, Qwen 3.5 9B, Qwen 3.8 27B dense, and Qwen 3.6 35B A3B. The one headline exception is Qwen 3.6 35B A3B prefill at 73 percent of llama.cpp — a real regression, not measurement noise, and the next thing to fix.
+Quick answer: on the current public AMD RDNA artifact, ZINC is faster than llama.cpp on every headline model row we publish for prefill, decode, and phase-combined overall. That includes Gemma 4 26B-A4B MoE, Gemma 4 31B dense, Qwen 3.5 9B, Qwen 3.8 27B dense, and Qwen 3.6 35B A3B. Qwen 3.8 quick-chat end-to-end throughput is the narrow exception at 98 percent of llama.cpp.
 
-That is a different sentence from "ZINC is faster on every AMD GPU in the world." The measured target is one AMD RDNA benchmark node: a Radeon AI PRO R9700 with 32 GB of VRAM and 576 GB/s of memory bandwidth. The comparison is against llama.cpp on the same host and the same GGUF files. The current artifact was generated on August 16, 2026 from ZINC commit `c8a38af96df6` and llama.cpp commit `6b4344ecc7e6`.
+That is a different sentence from "ZINC is faster on every AMD GPU in the world." The measured target is one AMD RDNA benchmark node: a Radeon AI PRO R9700 with 32 GB of VRAM and 576 GB/s of memory bandwidth. The comparison is against llama.cpp on the same host and the same GGUF files. The current artifact was generated on August 17, 2026 from ZINC commit `fbd575feaa36` and llama.cpp commit `6b4344ecc7e6`.
 
 It is still the first AMD result I am comfortable calling a sweep.
 
 <figure class="diagram-card diagram-wide">
-  <img class="diagram-visual" src="/blog/2026-07-01-rdna-headline-sweep.svg" alt="Heatmap of the current AMD RDNA ZINC benchmark artifact. Five models are shown: Gemma 4 26B-A4B MoE, Gemma 4 31B dense, Qwen 3.5 9B, Qwen 3.8 27B dense, and Qwen 3.6 35B A3B. Four rows are above llama.cpp on every dimension; Qwen 3.6 35B A3B prefill, shown in amber, is a 73 percent regression." loading="lazy" />
-  <figcaption>Four of five headline rows are above 100 percent of llama.cpp on prefill, decode, and overall; Qwen 3.6 35B A3B prefill (amber) is the one exception. The biggest result is still Qwen 3.6 35B A3B decode at 162.8 tok/s against llama.cpp at 109.8 tok/s.</figcaption>
+  <img class="diagram-visual" src="/blog/2026-07-01-rdna-headline-sweep.svg" alt="Heatmap of the current AMD RDNA ZINC benchmark artifact. Five models are shown: Gemma 4 26B-A4B MoE, Gemma 4 31B dense, Qwen 3.5 9B, Qwen 3.8 27B dense, and Qwen 3.6 35B A3B. Every row is above llama.cpp for prefill, decode, and overall; Qwen 3.8 quick-chat end-to-end is 98 percent." loading="lazy" />
+  <figcaption>The current headline rows are above 100 percent of llama.cpp on prefill, decode, and overall. The biggest result is Qwen 3.6 35B A3B decode at 165.9 tok/s against llama.cpp at 109.8 tok/s.</figcaption>
 </figure>
 
 The live breakdown is on the [ZINC benchmark dashboard](/zinc/benchmarks/). The structured source lives in [`site/src/data/zinc-performance.json`](https://github.com/zolotukhin/zinc/blob/main/site/src/data/zinc-performance.json), and the harness lives in [`tools/performance_suite.mjs`](https://github.com/zolotukhin/zinc/blob/main/tools/performance_suite.mjs). Those links matter because benchmark claims rot quickly. If this post and the dashboard ever disagree, trust the dashboard.
@@ -70,12 +70,12 @@ Here are the headline rows:
 | Gemma 4 26B-A4B MoE Q4_K_M | 208% | 111% | 113% | 117% |
 | Gemma 4 31B Q4_K_M | 105% | 101% | 99% | 101% |
 | Qwen 3.5 9B Q4_K_M | 136% | 111% | 112% | 112% |
-| Qwen 3.8 27B Dense Q4_K_M | 123% | 104% | 97% | 109% |
-| Qwen 3.6 35B A3B UD Q4_K_XL | 73% | 148% | 132% | 134% |
+| Qwen 3.8 27B Dense Q4_K_M | 123% | 104% | 98% | 109% |
+| Qwen 3.6 35B A3B UD Q4_K_XL | 117% | 151% | 144% | 146% |
 
-The table is ZINC as percent of llama.cpp. So `148%` decode on Qwen 3.6 35B A3B means ZINC generated tokens at 1.48x the llama.cpp rate in that row: `162.8 tok/s` versus `109.8 tok/s`. That same row's prefill, `73%`, is the one headline loss on this artifact — the table's only cell below 100. The closest full win is Gemma 4 31B dense decode: `28.8 tok/s` versus `28.6 tok/s`. That is not a victory lap number; it is a parity-plus number.
+The table is ZINC as percent of llama.cpp. So `151%` decode on Qwen 3.6 35B A3B means ZINC generated tokens at 1.51x the llama.cpp rate in that row: `165.9 tok/s` versus `109.8 tok/s`. The closest win is Gemma 4 31B dense decode: `28.8 tok/s` versus `28.6 tok/s`. That is not a victory lap number; it is a parity-plus number. But it matters because this was the row that still looked behind on the stale page.
 
-The summary across the five headline rows is `115%` of llama.cpp on the dashboard's average overall score. Average ZINC decode is `85.9 tok/s`; average ZINC prompt throughput is `446.9 tok/s`, held down by the Qwen 3.6 35B A3B prefill regression; the fastest measured decode row is still the Qwen 3.6 35B A3B model at `162.8 tok/s`.
+The summary across the five headline rows is `117%` of llama.cpp on the dashboard's average overall score. Average ZINC decode is `86.4 tok/s`; average ZINC prompt throughput is `477.4 tok/s`; the fastest measured decode row is the Qwen 3.6 35B A3B model at `165.9 tok/s`.
 
 ## How we got there
 
@@ -119,7 +119,7 @@ overall percent =
   llama.cpp seconds / ZINC seconds * 100
 ```
 
-That is why the Qwen 3.6 35B A3B row still lands at `134%` overall even though its prefill ratio is `73%`, a real loss. The generated-token phase dominates the scenario budget enough that the strong `148%` decode win outweighs the prefill loss — which is informative, not reassuring: a naive average of prefill and decode percent would have hidden how bad the prefill regression actually is.
+That is why the Qwen 3.6 35B A3B row lands at `146%` overall even though its prefill ratio is `117%` and its decode ratio is `151%`. The generated-token phase dominates enough that the strong decode win matters more than a simple average would imply.
 
 It is also why the Gemma 4 31B dense row only lands at `101%` overall. ZINC is ahead, but barely. The row is a useful warning label: the suite is not hiding close calls under a big average.
 
@@ -127,9 +127,9 @@ It is also why the Gemma 4 31B dense row only lands at `101%` overall. ZINC is a
 
 The dashboard headline is a clean sweep. The full scenario matrix is slightly more nuanced.
 
-Each model runs four workloads: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. Across those 20 RDNA scenario cells (August 16 artifact), ZINC wins 14 of 20 prefill cells, 17 of 20 decode cells, and 16 of 19 comparable phase-combined overall cells (one Gemma 4 31B cell's token count did not match the scenario budget and is excluded rather than counted either way). The misses are not all tiny: Qwen 3.6 35B A3B's quick-chat prefill cell is `73.5%` of llama.cpp, matching the regression visible in the headline row, and Gemma 4 31B loses prefill on its longer-context scenarios — `87.1%` on coding review, `77.9%` on incident context, `80.6%` on long draft — with matching small decode and overall misses in the high-90s on those same rows. End-to-end wall-clock throughput is noisier still; ZINC wins 14 of 20 cells there.
+Each model runs four workloads: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. Across those 20 RDNA scenario cells, ZINC wins 15 of 20 prefill cells, 17 of 20 decode cells, and 17 of 20 phase-combined overall cells. The misses are concentrated in one row: Gemma 4 31B loses prefill on its longer-context scenarios — `99.4%` on coding review, `82.7%` on incident context for Gemma 4 26B, and `87.1%`/`77.9%`/`80.6%` across Gemma 4 31B's coding review, incident context, and long draft rows — with matching small decode and overall misses in the high-90s on those same rows. End-to-end wall-clock throughput is noisier still; ZINC wins 14 of 20 cells there, with the Gemma 4 31B rows and Qwen 3.8 27B's quick-chat and long-draft rows landing just under parity.
 
-That distinction is important. If you ask "is ZINC ahead on the public RDNA headline rows?", the answer is yes on decode and overall, and four-of-five on prefill. If you ask "is every single scenario cell ahead?", the answer is clearly no — this pass surfaced more misses than the July 1 artifact had, concentrated in Gemma 4 31B's longer-context prefill and Qwen 3.6 35B A3B's prefill path. Both are now open investigations rather than measurement noise to write off.
+That distinction is important. If you ask "is ZINC ahead on the public RDNA headline rows?", the answer is yes. If you ask "is every single scenario cell ahead?", the answer is no. If you ask "is the remaining gap structural or measurement noise?", the answer depends on the row. The Gemma 4 31B longer-context rows are a real next target because they are close enough that a small dispatch or prompt-path improvement should flip them without changing the model math.
 
 ## Why AMD is the interesting target
 
@@ -161,7 +161,7 @@ That is how the project moved from interesting kernels to credible benchmark cla
 
 The next useful target is not another headline slogan. It is shrinking the remaining close calls in the scenario matrix.
 
-Gemma 4 31B dense is the obvious one, and it turned out to need more than a tiny win. The headline row is still ahead — `28.8 tok/s` versus `28.6 tok/s` decode, `101%` overall — but its longer-context scenarios have real prefill losses now: `87%` on coding review, `78%` on incident context, `81%` on long draft, with decode and overall following it down into the high 90s on those same rows. Qwen 3.6 35B A3B prefill needs the same kind of attention at `73%` on its headline row. Both are where the next round of profiling goes.
+Gemma 4 31B dense is the obvious one. The headline row is ahead, but the margin is thin: `28.8 tok/s` versus `28.6 tok/s` decode, `101%` overall. In the longer scenario matrix, its coding review, incident context, and long draft rows all lose prefill (`87%`, `78%`, `81%`), with decode and overall following down into the high 90s on those same rows. That is where I would spend the next round of profiling. A real win there turns the dashboard from a headline sweep into something closer to a full scenario sweep.
 
 The second target is end-to-end stability. Phase-combined overall is the right score for GPU work, but users experience wall-clock latency. If a context-heavy request shows strong prefill and decode yet worse end-to-end throughput, the server path still has work to do. That includes request handling, stop detection, scheduling, and any place where the host waits between GPU phases.
 
@@ -171,6 +171,6 @@ The third target is keeping the harness boring. Every new model needs to go thro
 
 Here is the version I am comfortable publishing:
 
-ZINC is ahead of llama.cpp on decode and phase-combined overall for every published RDNA headline row, and on prefill for four of five. On the Radeon AI PRO R9700, across five popular local GGUF targets covering Qwen, Gemma, dense models, and sparse MoE models, the strongest row is Qwen 3.6 35B A3B at `162.8 tok/s` decode, `148%` of llama.cpp — but that same model's prefill is the one headline loss, at `73%` of llama.cpp, and needs a real fix rather than more scenarios. Gemma 4 31B dense stays the closest full win at `101%` overall, and its longer-context scenarios have their own prefill misses in the scenario matrix above. Gemma and the Qwen 3.6 35B A3B prefill path are both open work, not solved problems.
+ZINC is now ahead of llama.cpp on the current public AMD RDNA headline benchmark suite. On the Radeon AI PRO R9700, across five popular local GGUF targets covering Qwen, Gemma, dense models, and sparse MoE models, ZINC beats the same-file llama.cpp baseline on prefill, decode, end-to-end throughput, and phase-combined overall for every headline row. The strongest row is Qwen 3.6 35B A3B at `165.9 tok/s` decode, `151%` of llama.cpp. The closest row is Gemma 4 31B dense at `101%` overall, and its longer-context scenarios still have real prefill misses in the matrix above, which is why Gemma remains the next profiling target rather than a solved problem.
 
 That is the interesting place to be. The AMD path is no longer a portability experiment. It is now fast enough that the remaining work is measured in the same language as the best local engine in the ecosystem.

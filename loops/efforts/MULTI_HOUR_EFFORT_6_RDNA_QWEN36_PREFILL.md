@@ -11,6 +11,41 @@ Current overnight runs should use the Codex agent explicitly:
 bun loops/optimize_perf.ts --effort 6 --resume --cycles 100 --agent codex
 ```
 
+### 2026-08-17: short-prompt tail pipelining restored, published "core" regression fixed
+
+`f62986ff` (2026-07-05, "Keep A3B tail pipeline opt-in") removed a blanket
+`pipeline_tail = ... or (n_tokens >= 16 and ... and self.isAmdRdna())`
+condition, replacing it with a call to `qwen36DensePrefillTailPipelineEnabled()`
+that explicitly excludes A3B. That was correct for the 154-token diagnostic in
+this doc (default-off measured 768.1 median vs 557.3 forced-on), but it
+silently regressed the much shorter published "core" site scenario (36
+tokens): before, A3B got tail pipelining for free through the removed blanket
+branch; after, it lost it entirely. The site's RDNA data went unmeasured for
+six weeks (no `--rdna-sync` runs between 2026-07-07 and 2026-08-15), so this
+sat unpublished until a full remeasure surfaced it as `core` prefill 540 -> 261
+tok/s and, once bisected, as `f62986ff` specifically (verified with 2 samples
+on each side of the boundary directly on rdna1).
+
+Fix (`fbd575fe`): gave A3B its own branch in
+`qwen36DensePrefillTailPipelineEnabled()` — the dense-hybrid entry gate
+(`isQwenDenseHybridLayerMajorPrefillModel()`) never covers A3B (MoE, not one
+of the dense 9B/27B checks), so the original fix attempt of adding a
+token-count condition inside the A3B-specific early-return was dead code and
+had zero effect; it had to be a separate branch to actually run. Scoped to
+RDNA specifically and capped at 64 tokens — safely below the 154-token point
+where forcing it on measured slower, with margin. Verified byte-identical
+output at both the 36-token core prompt and a 174-token code-review prompt
+(forced-on vs default-off), then verified through the real harness: core
+253.9 -> 449.3 tok/s (back in the pre-regression range), context-medium/
+-long/decode-extended unaffected or slightly improved.
+
+This does not supersede the rest of this effort — 154+ token prefill is
+still where `f10a910c`'s Q8_0 DP4a crossover policy is the kept default, and
+the historical rejects below (wider row tiling, padded Q8 columns, SPEC_K
+pipelines, BN=64 SSM-out) remain rejected regardless of prompt length. The
+64-token cap is deliberately conservative; raising it needs the same
+per-length correctness-plus-speed evidence, not a guess.
+
 The historical plateau marker below is kept for continuity: best 759.18
 prefill tok/s on the old 154-token harness after 109 cycles; do not compare
 that number directly to the newer 111p/2971p continuation probes.
