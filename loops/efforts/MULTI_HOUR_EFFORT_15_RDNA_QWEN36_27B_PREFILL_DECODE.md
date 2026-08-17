@@ -1147,6 +1147,56 @@ before the code when two measurement paths disagree); one more structural
 lever (SSM prefill-proj batching) re-confirmed rejected with a concrete
 lead (the extra buffer copy) instead of just "still opt-in, unclear why."
 
+### 2026-08-17 (cont'd): dense-FFN 64-alignment padding tried, rejected on interleaved re-measure
+
+Follow-up idea from the shaderstats gap above: before wiring new tooling,
+checked whether the *existing* dense-FFN DP4a padding was even choosing the
+best available kernel variant for the site's own benchmark shape.
+`qwen36DensePrefillPaddedTokenCount` (forward.zig:17647) pads n_tokens to
+the next multiple of 32. For the 212-token context-medium prompt that's
+224 — an odd multiple of 32, so `recordMulMmQ4KGateUpSwigluFullDp4aQ8`
+(dmmv.zig:4973) picks the boundary-checked "ragged n64" pipeline variant
+instead of the plain aligned one, even though both dispatch the same
+`ceil(N/64) = 4` GEMM tiles. Hypothesis: round to 64 instead of 32 (still
+4 tiles, same weight-matrix reads) to get the simpler aligned kernel for
+free.
+
+Implemented (`(n_tokens + 63) & ~63` instead of `+31 & ~31`), rebuilt in
+the isolated `/root/zinc-claude-effort15` copy, confirmed byte-identical
+output vs. baseline for the 212-token prompt. First single-sample
+measurement looked like a big win (277 vs 242 tok/s) — but that was
+first-run-after-launch noise. Redid it properly: built both binaries,
+ran them **interleaved** (baseline, fixed, baseline, fixed, ...) back to
+back so both see identical thermal/DPM conditions. Result across 5
+interleaved rounds: baseline held steady at 227-230 tok/s from round 2
+on; the 64-pad version was *consistently slower*, 217-224 tok/s. Net: a
+real ~3-6% regression, not a win. Reverted immediately (git stash, then
+dropped); no code change landed.
+
+Root cause of the wrong hypothesis: the tile-count reasoning only
+accounts for how the GEMM re-reads the weight matrix (M/m_tile x N/n_tile
+workgroups). It ignores that every downstream per-column stage —
+`recordQuantizeActQ8_1` on the input, the SwiGLU elementwise, the fused
+Q8 output write — does real work proportional to N, not to tile count.
+Padding 212 -> 256 instead of 212 -> 224 is a genuine +14.3% more columns
+of activation to quantize and elementwise-process, computed for real
+(not masked out) since the aligned kernel doesn't know which columns are
+padding. The ragged kernel's per-tile boundary check is apparently
+cheaper than that extra real work — i.e. the existing 32-alignment
+padding is already the better tradeoff, and the multiple existing
+"ragged n64" pipeline variants (dmmv.zig, several per model shape) exist
+specifically because someone already worked this out. Do not retry
+64-alignment padding without first isolating quantize/SwiGLU cost from
+GEMM cost (e.g. via the still-unbuilt hot-bench case) — guessing from
+tile-dispatch counts alone is not enough, as this attempt shows.
+
+Practical lesson for future sessions: a single-sample "it got faster"
+result from a back-to-back CLI comparison is not trustworthy on this
+node — GPU clock/thermal state visibly drifts between the first and
+subsequent runs of a tight loop. Always interleave baseline and
+candidate builds within the same run, not sequentially, before believing
+a delta.
+
 ## Final decision rule
 
 This effort is successful when one of these is true:
