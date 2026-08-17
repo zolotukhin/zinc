@@ -2585,6 +2585,11 @@ pub fn defaultKvCacheQ8Enabled(config: ModelConfig, debug_validation_enabled: bo
     // implement that path yet, so keep Gemma4 on the unquantized cache for
     // correctness.
     if (config.architecture == .gemma and config.rope_freq_base_swa > 0) return false;
+    // Muse Glimmer: the Q8 KV cache dequant in the batched-flash path scales with
+    // context and costs ~15-22% decode at moderate context vs the unquantized
+    // cache (which is what llama.cpp uses). Default to the fast unquantized cache;
+    // opt back into Q8 with ZINC_METAL_KV_Q8=1 on memory-constrained setups.
+    if (config.architecture == .muse_glimmer) return false;
     const kv_dim = kvDim(config);
     return kv_dim > 0 and config.head_dim > 0 and kv_dim % 32 == 0 and config.head_dim % 32 == 0;
 }
