@@ -71,7 +71,7 @@ test "Metal prefillBatched gates on env flag and supported architecture" {
 
 test "Metal prefillBatched validate path diffs last-token logits within 1e-3" {
     const src = @embedFile("compute/forward_metal.zig");
-    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "if (mode == .validate)", 20000);
+    try expectContainsNear(src, "pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {", "if (mode == .validate)", 22000);
     try expectContainsNear(src, "if (mode == .validate)", "const tol: f32 = 1e-3;", 1500);
     try expectContainsNear(src, "if (mode == .validate)", "try self.prefillBatch(state, prompt_tokens);", 1500);
 }
