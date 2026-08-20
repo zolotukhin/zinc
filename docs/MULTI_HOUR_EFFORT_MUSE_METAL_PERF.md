@@ -134,9 +134,44 @@ Two shipped changes from that:
    load; the win scales up automatically when decode is slow or acceptance is high.** Quiet
    machine + ~8/verify ≈ neutral-to-1.05×; loaded or long-copy → up to ~1.8×.
 
+## cycle 7 — wide fused-norm tail for decode (`54d78ab7`) ✅ +5.4% decode
+
+Overnight re-diagnosis at LOW load (2.7–4.7, not the earlier ~12) with isolated microbenches
+settled the "where is the gap" question:
+- **Matmuls are at hardware peak.** dmmv microbench at Muse's exact shapes: attn/ffn Q4_K
+  matvecs 497–527 GB/s (91–96% of M4 Max 546), Q6_K down 465 (85%). gemm_q4k prefill 12.2
+  TFLOP/s at every Muse shape. Recomputing llama's pp256 with the *matmul'd* param count
+  (27.85B − 1.34B embed − 1.34B lm-head) gives **12.2 TFLOP/s = exactly ZINC's GEMM ceiling** —
+  llama is at the ceiling, ZINC prefill is ~10.2 (≈17% exposed overhead).
+- **The decode graph is already tight:** both epilogues are fused (attn: post_attn_norm +
+  residual + pre_ffn_norm via `dispatchPostNormResidualRmsNormOnCmd`; ffn tail: post_ffn_norm +
+  residual + next-input-norm), QK-norm is fused into RoPE (`rope_qk_norm_inplace`). QKV-fusion
+  is a confirmed dead end (see above). So the diffuse gap is NOT missing fusion.
+
+**The win** (`54d78ab7`): the two triple-fused epilogue norms run 104 dispatches/token, and for
+Muse (hidden_dim=6656) they used the **256-thread** narrow `post_norm_residual_rms_norm` — a
+single threadgroup whose two sequential reductions underutilize the core's latency-hiding. 6656
+is vec4-aligned and fits the existing **1024-thread** `post_norm_residual_rms_norm_wide`
+kernel's MAX_VEC_PER_THREAD=2 register cache exactly, so route Muse's n=6656 tail through it
+(was gated to Gemma n=5376 only — a one-condition gate change at `dispatchPostNormResidualRmsNormOnCmd`).
+- **decode 24.09 → 25.40 tok/s (+5.4%)** short ctx, **23.68 → 24.6 (+3.9%)** at 256 ctx.
+- Greedy byte-identical; batched==per-token byte-identical; factual gate (Paris/Fe/oxygen) intact.
+- 9× my pre-estimate — the single-threadgroup reductions were a real bottleneck, not sub-noise.
+- Decode gap vs llama: ~10% → **~7.6% at 256 ctx, ~4.5% short**. llama tg48=26.63, pp256=242.
+
+Prefill barely moved (+1%): in the batched path the norms are one-threadgroup-per-token
+(N threadgroups already saturate 40 cores), so widening the per-threadgroup count is moot there.
+Prefill still does 5 SEPARATE `rms_norm_mul`/layer (262 calls @257-tok) instead of the fused
+epilogue decode uses — a possible (marginal ~1-2%, risky) prefill lever, deferred.
+
 ## Remaining levers (next)
-- **D-kernel — decode bandwidth:** close the 378→440 GB/s effective gap by reducing barriers
-  that prevent independent matmul overlap (delicate; sub-noise per change).
+- **Decode context drop:** 25.4 short → 24.6 @256 ctx (llama flat). ~1.3 ms/tok over 256 ctx is
+  the scalar decode-flash per-key overhead (NOT KV bytes — KV read is ~0.07 ms/tok). Not
+  byte-identical to touch (softmax order). Fixing it → ~+3% at benchmark ctx.
+- **Q6_K down matvec:** 465 GB/s (85%, lowest of the matmuls); biggest single decode contributor
+  (down = 102 GiB/decode). Config tuning (rows_per_wg) could recover ~1.7% if headroom exists.
+- **Prefill epilogue fusion:** replace 5 separate `rms_norm_mul`/layer with the fused epilogue
+  kernels (batched grid {N,1,1}) — marginal, batched-path risk.
 - **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token.
 - logit_scale before softcap (greedy-invariant; needed only for exact logits / sampling).
 
