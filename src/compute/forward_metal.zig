@@ -10573,16 +10573,23 @@ pub const InferenceEngine = struct {
             dispatchGemmBatchedOnCmd(self, &cmd, o_t, &scratch.attn_out, &scratch.down, hidden_dim, attn.q_dim, n_tokens);
             profileBarrier(&cmd, profile, .full_attn);
             if (self.post_attn_norm_present[layer_idx]) {
-                dispatchRmsNormOnCmd(self, &cmd, &scratch.down, &scratch.down, &self.post_attn_norm_bufs[layer_idx], hidden_dim, n_tokens);
+                // Fuse post_attn_norm + residual-add + pre-FFN norm into ONE batched
+                // dispatch (the same triple-fused kernel the per-token/decode path uses
+                // at dispatchPostNormResidualRmsNormOnCmd), grid {n_tokens,1,1}. Drops
+                // the separate post_attn_norm rms_norm dispatch + its barrier per layer,
+                // and converges the batched prefill onto the per-token path's exact math.
+                // Narrow (256-thread) pipe: n_tokens threadgroups already saturate the
+                // cores in batched mode, so no over-subscription from the wide variant.
+                const push = PostNormResidualRmsNormPush{ .n = hidden_dim, .eps = cfg.rms_norm_eps, .hidden_scale = 1.0 };
+                const bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down, &self.post_attn_norm_bufs[layer_idx], &scratch.norm, &self.ffn_norm_bufs[layer_idx] };
+                cmd.dispatchV2(&self.post_norm_residual_rms_norm_pipe, .{ n_tokens, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(PostNormResidualRmsNormPush), 0);
                 profileBarrier(&cmd, profile, .full_attn);
-            }
-
-            {
+            } else {
                 const push = ResidualRmsNormPush{ .n = hidden_dim, .eps = cfg.rms_norm_eps, .scale = 1.0, .residual_offset = 0, .hidden_scale = 1.0 };
                 const bufs = [_]*const MetalBuffer{ &scratch.hidden, &scratch.down, &scratch.norm, &self.ffn_norm_bufs[layer_idx] };
                 cmd.dispatchV2(&self.residual_rms_norm_pipe, .{ n_tokens, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(ResidualRmsNormPush), 0);
+                profileBarrier(&cmd, profile, .full_attn);
             }
-            profileBarrier(&cmd, profile, .full_attn);
 
             if (is_gemma_moe) {
                 try recordGemmaBatchedPrefillMoeOnCmd(self, &cmd, layer_idx, lt, scratch, hidden_dim, inter_dim, shexp_inter_dim, n_tokens);
