@@ -16439,10 +16439,16 @@ fn dispatchPostNormResidualRmsNormOnCmd(
     };
     const bufs = [_]*const MetalBuffer{ hidden, residual, residual_w, norm_out, output_w };
     const use_wide =
-        engine.config.architecture == .gemma and
-        engine.config.n_experts == 0 and
-        n == 5376 and
-        (!engine.in_prefill_phase or engine.dense_gemma_wide_post_norm_prefill_enabled) and
+        ((engine.config.architecture == .gemma and
+            engine.config.n_experts == 0 and
+            n == 5376 and
+            (!engine.in_prefill_phase or engine.dense_gemma_wide_post_norm_prefill_enabled)) or
+            // Muse Glimmer dense tail: hidden_dim=6656 is vec4-aligned and fits the
+            // wide kernel's MAX_VEC_PER_THREAD=2 register cache (1664 vec4 / 1024 thr).
+            // 1024 threads expose more latency-hiding on the two single-threadgroup
+            // reductions than the 256-thread narrow kernel. Math-equivalent (reduction
+            // order differs); validated greedy-identical.
+            (engine.config.architecture == .muse_glimmer and n == 6656)) and
         engine.post_norm_residual_rms_norm_wide_pipe.handle != null and
         engine.post_norm_residual_rms_norm_wide_pipe.max_threads_per_threadgroup >= 1024;
     const pipe = if (use_wide) &engine.post_norm_residual_rms_norm_wide_pipe else &engine.post_norm_residual_rms_norm_pipe;
