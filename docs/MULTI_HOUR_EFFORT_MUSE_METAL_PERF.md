@@ -170,10 +170,59 @@ epilogue decode uses — a possible (marginal ~1-2%, risky) prefill lever, defer
   byte-identical to touch (softmax order). Fixing it → ~+3% at benchmark ctx.
 - **Q6_K down matvec:** 465 GB/s (85%, lowest of the matmuls); biggest single decode contributor
   (down = 102 GiB/decode). Config tuning (rows_per_wg) could recover ~1.7% if headroom exists.
-- **Prefill epilogue fusion:** replace 5 separate `rms_norm_mul`/layer with the fused epilogue
-  kernels (batched grid {N,1,1}) — marginal, batched-path risk.
 - **P2 — short-prompt batching threshold:** prompts below ~8 tokens still replay per-token.
 - logit_scale before softcap (greedy-invariant; needed only for exact logits / sampling).
+
+## cycle 8 — prefill attention-epilogue fusion (`170dbad8`) ✅ +~2% prefill; FFN fusion = DEAD END
+
+`prefillBatched` (the batched layer-major path) applied post_attention_norm as a SEPARATE
+`rms_norm_mul` then a fused residual+ffn_norm — 2 dispatches for the attn epilogue, where
+decode does 1 (triple-fused `post_norm_residual_rms_norm`). Routed the batched prefill's attn
+epilogue through the same triple-fused kernel (batched grid {n_tokens,1,1}, narrow 256-thread
+pipe), gated on post_attn_norm_present. **Byte-identical (batched==per-token), dispatches
+1096→1044 / barriers 783→731 @289tok, prefill ~198→~202 (+~2%).** Converges the batched path
+onto the per-token path's exact math (a genuine simplification).
+
+**DEAD ENDS this cycle (tested, reverted — do not re-litigate):**
+- **Prefill FFN-tail fusion** (post_ffn_norm+residual+next-norm, incl. the full option-A that
+  skips the top-of-loop input norm + final norm via cross-layer scratch.norm reuse): byte-
+  identical, removed 104 MORE barriers (dispatch 1044→940), but **prefill stayed at 204 —
+  ZERO speed gain.** Confirms prefill's norm barriers are already hidden behind the GEMMs; the
+  17% prefill gap is **in-context GEMM efficiency** (llama runs its GEMM near the isolated
+  12.2 TFLOP/s ceiling with ~0 exposed overhead; ZINC ~10.3), NOT the norms/barriers. Removing
+  barriers beyond the first (attn) fusion buys nothing. Reverted (complexity w/o benefit).
+- **lm-head Q5_K native rows_per_wg 8→16** (512-thread WG): 25.41→25.44, noise. The lm-head is
+  weight-bandwidth-bound (~360 GB/s); rows_per_wg only amortizes the tiny shared input cache.
+  A real lm-head win needs a better Q5_K *weight-read* pattern (the 176-byte block qh/qs are
+  strided), not a config change. Reverted.
+- **QK-norm widening:** N/A — `rope_qk_norm_inplace` is already well-parallelized (34 head-
+  threadgroups × 64 thr, head_dim=128 reduction). The wide-norm gift was UNIQUE to the 6656-wide
+  single-threadgroup epilogue reduction.
+
+## Standing after cycles 7-8 (M4 Max, Q4_K_M, low load)
+- **decode 25.4 short / 24.6 @257ctx** vs llama tg48 **26.6** → gap ~4.5% short, ~7.5% @ctx (was ~10%).
+- **prefill ~202** vs llama pp256 **242** → ~17% (GEMM-capped; unmoved by fusion).
+- Net cycle 7-8: decode +5.4% short / +3.9% @ctx, prefill +2%. Both byte-identical, on main.
+
+## Highest-EV remaining levers (all NON-trivial — need review, not blind commits)
+- **f16 KV cache + flash_attn_f16 (biggest decode lever):** ZINC has only f32 + Q8 KV/flash; llama
+  uses f16. The decode **context drop** (25.4 short→24.6 @257ctx; llama is FLAT) is the scalar
+  decode-flash per-key f32 compute (NOT KV bytes — those are ~0.07 ms/tok). f16 halves flash
+  compute+bytes, matches llama, ~+3% @benchmark ctx and more at long ctx. NON-byte-identical
+  (precision change, llama-standard); needs new flash_attn_f16 + f16 kv_cache_write + dtype plumb.
+- **Gate-fusion (Q4_K gated o-proj):** fold the attn_gate sigmoid_mul into the o-proj dmmv X-load
+  (byte-identical, ~1 barrier/layer). BUT prefill's FFN barrier-removal was neutral, so this is
+  likely neutral in decode too (est. ~0.6% EV); needs a hot-loop change to the tuned dmmv_q4k.
+- **Q6_K down matvec** (465 GB/s, 85%, lowest matmul): a K=19968-specialized dmmv_q6k_llama
+  variant (like the existing k4096/k5120/k17408) might recover ~0.9%. New kernel.
+- **Prefill in-context GEMM efficiency:** the real 17% prefill gap — llama keeps the GPU fed
+  across the whole graph; ZINC drains between dependent GEMMs. No lever found; likely needs a
+  whole-graph scheduling refactor. NOT a single-kernel fix.
+
+NOTE: measurement is currently confounded by CPU contention (parallel agents, load ~12) — the
+per-dispatch command encoding is CPU-side, so decode throughput swings 22↔35 tok/s. Back-to-back
+spec-vs-nonspec comparisons stay valid; absolute micro-numbers do not. (Cycle 7-8 measured at
+low load 2.7–4.7, where the harness `<scratchpad>/muse_ab.sh` gives ±0.01 tok/s repeatability.)
 
 NOTE: measurement is currently confounded by CPU contention (parallel agents, load ~12) — the
 per-dispatch command encoding is CPU-side, so decode throughput swings 22↔35 tok/s. Back-to-back
