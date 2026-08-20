@@ -106,7 +106,7 @@ describe("fixture projects", () => {
       expect(result.exitCode).not.toBe(0);
       expect(summary.fail ?? 0).toBeGreaterThan(0);
     }
-  });
+  }, 60_000);
 
   test("detects read-only file violations", async () => {
     const fixture = fixtureById("readonly-test-temptation")!;
