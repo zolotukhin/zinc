@@ -7016,6 +7016,7 @@ pub const InferenceEngine = struct {
     dmmv_q4k_lmhead_norm_pipe: MetalPipeline,
     dmmv_q5k_pipe: MetalPipeline,
     dmmv_q5k_native_pipe: MetalPipeline,
+    dmmv_q5k_llama_pipe: MetalPipeline,
     dmmv_q6k_pipe: MetalPipeline,
     dmmv_q6k_llama_pipe: MetalPipeline,
     dmmv_q6k_llama_k4096_pipe: MetalPipeline,
@@ -7829,6 +7830,7 @@ pub const InferenceEngine = struct {
         self.dmmv_q4k_lmhead_norm_pipe = try loadShaderPipeline(ctx, "dmmv_q4k_lmhead_norm");
         self.dmmv_q5k_pipe = try loadShaderPipeline(ctx, "dmmv_q5k");
         self.dmmv_q5k_native_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_native");
+        self.dmmv_q5k_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q5k_llama");
         self.dmmv_q6k_pipe = try loadShaderPipeline(ctx, "dmmv_q6k");
         self.dmmv_q6k_llama_pipe = try loadShaderPipeline(ctx, "dmmv_q6k_llama");
         self.dmmv_q6k_llama_k4096_pipe = try loadShaderPipelineWithPrefix(
@@ -8860,6 +8862,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.dmmv_q4k_lmhead_norm_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q5k_native_pipe);
+        metal_pipeline.freePipeline(&self.dmmv_q5k_llama_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_llama_pipe);
         metal_pipeline.freePipeline(&self.dmmv_q6k_llama_k4096_pipe);
@@ -11452,10 +11455,19 @@ pub const InferenceEngine = struct {
             .q5_1 => .{ .pipe = &self.dmmv_q5_1_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
             .mxfp4 => .{ .pipe = &self.dmmv_mxfp4_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q5_k => blk: {
-                // Native Q5_K matvec (simdgroup-per-row, threadgroup input cache,
-                // coalesced weight reads) beats the SPIRV-Cross byte-at-a-time
-                // shader on the big Q5_K lm-head. Its input cache holds K/4 half4
-                // (<=2048), so gate on K<=8192 (covers Muse's K=6656 lm-head).
+                // llama.cpp Q5_K matvec port (N_SG=2, N_R0=1, 4-way lane split over
+                // the 256-elem block, register-cached input + sumy dmin correction):
+                // ~373 GB/s on the lm-head (M=202048, K=6656) vs dmmv_q5k_native's
+                // ~188 — the native kernel's 16 KiB threadgroup input cache +
+                // byte-wise weight reads cap it at ~34% of peak. Handles any
+                // K%256==0 and any M (uniform per-simdgroup bounds guard).
+                if (K % 256 == 0 and self.dmmv_q5k_llama_pipe.handle != null and
+                    self.dmmv_q5k_llama_pipe.max_threads_per_threadgroup >= 64)
+                {
+                    break :blk .{ .pipe = &self.dmmv_q5k_llama_pipe, .push_idx = 1, .rows_per_wg = 2, .block_size = 64 };
+                }
+                // Native Q5_K matvec (simdgroup-per-row, threadgroup input cache).
+                // Its input cache holds K/4 half4 (<=2048), so gate on K<=8192.
                 if (K <= 8192 and K % 256 == 0 and self.dmmv_q5k_native_pipe.handle != null and
                     self.dmmv_q5k_native_pipe.max_threads_per_threadgroup >= 256)
                 {
