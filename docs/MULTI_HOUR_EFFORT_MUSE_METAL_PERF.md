@@ -226,7 +226,39 @@ Two comparison errors were inflating the perceived gaps:
 flash. The context drop (25.4→22 @512, llama flat) is the scalar-f32 decode flash reading the
 growing f32 KV. f16 halves the KV bytes AND enables f16 flash compute → should flatten the curve
 like llama, closing the 7-17% @-context gap and helping real long-context use most. NON-byte-
-identical (precision change, llama-standard) — being built in cycle 10.
+identical (precision change, llama-standard).
+
+## cycle 10 — llama Q5_K matvec port for the lm-head (`df9788fe`) ✅✅ DECODE NOW BEATS LLAMA
+
+**The hidden bottleneck.** Microbenched the lm-head shape (Q5_K, M=202048, K=6656 = 881 MB/token,
+computed EVERY decode step) in isolation: the in-use `dmmv_q5k_native` ran at only **187.9 GB/s =
+34% of M4 Max peak** — ~4.9 ms/token, ~13% of decode. Its 16 KiB threadgroup input cache
+(`half4 x_cache4[2048]`) caps occupancy at ~2 tg/core, and its byte-wise weight reads
+(`block[16+lane]`, `block[48+..]`) are far less efficient than the fast FFN `dmmv_q4k`'s float4
+reads (~500 GB/s). A no-cache variant confirmed occupancy wasn't the whole story (195 GB/s) — the
+kernel STRUCTURE was wrong.
+
+**Fix:** ported llama.cpp's `kernel_mul_mv_q5_K_f32_impl` (N_R0_Q5_K=1, N_SG=2) into ZINC's
+convention (W[0]/p[1]/X[2]/Y[3], `dmmv_q5k_llama.metal`) — 4-way lane split over the 256-elem
+block (`ix=tiisg%4`), register-cached input with the `sumy` dmin correction, packed weight reads;
+same shape as the in-tree `dmmv_q6k_llama`. Uniform per-simdgroup bounds guard → safe for any M.
+Routed the Q5_K dmmv to it. **Isolated 188 → 373 GB/s (~2×)**; lm-head ~4.9 → ~2.5 ms/token.
+
+**Result (M4 Max, Q4_K_M, low load):**
+| | before cyc10 | after cyc10 | llama |
+|---|--:|--:|--:|
+| decode short ctx | 26.06 | **28.08** | 26.69 |
+| decode @256 ctx | 24.9 | **26.54** | 26.57 |
+- **ZINC decode BEATS llama at the benchmark: +5.2% short-ctx, tied @256.** Greedy byte-identical
+  to prior output on factual/long prompts; batched==per-token. This flipped decode from ~4.5%
+  BEHIND to ~5% AHEAD.
+- Prefill unaffected (lm-head is once/prefill): still ~226 @256 = 6.5% behind (GEMM at peak;
+  llama runs at 99% of the pipelined-gemm ceiling, ZINC ~93% — can at best TIE, not beat).
+- Decode context-scaling (500+ ctx) still drops (the flash; f16-KV lever remains for long-context).
+
+Follow-up headroom: the Q6_K llama port hits 465 GB/s via vectorized/packed-load micro-opts
+(cycles 33-83); the Q5_K port is llama's base impl at 373 — applying the same opts could reach
+~450 for more decode margin. Deferred (decode already wins).
 
 ## Highest-EV remaining levers (all NON-trivial — need review, not blind commits)
 - **f16 KV cache + flash_attn_f16 (biggest decode lever):** ZINC has only f32 + Q8 KV/flash; llama
