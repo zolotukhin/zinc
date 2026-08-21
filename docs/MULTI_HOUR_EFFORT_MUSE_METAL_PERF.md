@@ -204,6 +204,30 @@ onto the per-token path's exact math (a genuine simplification).
 - **prefill ~202** vs llama pp256 **242** → ~17% (GEMM-capped; unmoved by fusion).
 - Net cycle 7-8: decode +5.4% short / +3.9% @ctx, prefill +2%. Both byte-identical, on main.
 
+## cycle 9 — MEASUREMENT-FAIRNESS CORRECTION (the "17%/10%" gaps were partly artifacts)
+
+Two comparison errors were inflating the perceived gaps:
+1. **Prefill N-tile quantization.** The gemm_q4k column tile is 32 wide, so N-not-a-multiple-of-32
+   wastes the last tile. **llama is EQUALLY sensitive:** llama pp256=242 but **pp257=216 (−11%)**,
+   pp288=241 but pp289=219. My ZINC prefill test used a 257-289 token prompt vs llama-bench's clean
+   256 → unfair. At the SAME N: **ZINC pp256=226 vs llama 242 → 6.7%** (steady-state, not 17%).
+   FLOP math: llama runs prefill at 12.19 TFLOP/s = 99% of the pipelined-gemm_q4k peak (12.29);
+   ZINC at 11.37 = ~7.5% exposed overhead. Barrier microbench: a barrier between two gemm_q4k
+   dispatches costs ~2-5% (lost ramp/drain overlap), resource-scoped ≈ scope-scoped for the
+   DEPENDENT chain. profileBarrier() uses cmd.barrier() (full MTLBarrierScopeBuffers).
+2. **Decode context depth.** llama-bench tg48 generates from ~empty context, so the fair compare
+   is ZINC decode at SHORT ctx (25.4), not @257ctx. **llama decode is FLAT** (tg48 @d0/256/512 =
+   26.60/26.57/26.55); **ZINC DROPS** (25.4 / 24.6 / ~22). So at the benchmark point decode gap is
+   **4.5%**, but it GROWS with context to ~17% @512 — ZINC's biggest real weakness.
+
+**Corrected benchmark standing: prefill 6.7% (pp256), decode 4.5% (tg48).** Both ~5-7%, not 10-17%.
+
+**The real high-value lever = f16 KV cache + f16 flash** (what llama uses). ZINC only has f32 + Q8
+flash. The context drop (25.4→22 @512, llama flat) is the scalar-f32 decode flash reading the
+growing f32 KV. f16 halves the KV bytes AND enables f16 flash compute → should flatten the curve
+like llama, closing the 7-17% @-context gap and helping real long-context use most. NON-byte-
+identical (precision change, llama-standard) — being built in cycle 10.
+
 ## Highest-EV remaining levers (all NON-trivial — need review, not blind commits)
 - **f16 KV cache + flash_attn_f16 (biggest decode lever):** ZINC has only f32 + Q8 KV/flash; llama
   uses f16. The decode **context drop** (25.4 short→24.6 @257ctx; llama is FLAT) is the scalar
