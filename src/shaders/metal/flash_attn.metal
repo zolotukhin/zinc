@@ -190,6 +190,15 @@ kernel void main0(
 
     for (uint block_start = 0u; block_start < p.seq_len; block_start += FLASH_BLOCK_TOKENS) {
         const uint block_tokens = min(FLASH_BLOCK_TOKENS, p.seq_len - block_start);
+        // Skip blocks entirely below the sliding window. Besides saving the
+        // masked-token loop, this fixes a NaN poisoning bug: a fully-masked
+        // block yields block_max = -INF while running_max is still -INF, so
+        // the softmax computes exp(-INF - (-INF)) = exp(NaN) — the NaN weight
+        // contaminates the V accumulator and the final output becomes NaN
+        // (garbage tokens) for every seq_len > sliding_window_size + 256.
+        if (use_sliding_window && block_start + block_tokens <= sliding_start) {
+            continue;
+        }
         const uint block_base = (block_start * token_stride) + kv_head * kv_head_stride;
         float local_max = -INFINITY;
 

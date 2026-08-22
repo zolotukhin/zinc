@@ -7091,6 +7091,13 @@ pub const InferenceEngine = struct {
     deinterleave_pipe: MetalPipeline,
     deinterleave_batched_pipe: MetalPipeline,
     flash_attn_pipe: MetalPipeline,
+    // Split-simdgroup decode flash for long context (f32 KV, contiguous).
+    // 8 simdgroups/head each scan interleaved key blocks with their own online
+    // softmax, then merge — fixes the 32-thread/head latency-bound decay at
+    // depth (287us/dispatch @1000 ctx while touching ~2 MB). ZINC_FLASH_SPLIT=0
+    // disables (kill-switch; cached here so the per-dispatch check is a bool).
+    flash_attn_split_pipe: MetalPipeline,
+    flash_split_enabled: bool = true,
     flash_attn_q8_pipe: MetalPipeline,
     kv_cache_write_pipe: MetalPipeline,
     kv_cache_write_q8_pipe: MetalPipeline,
@@ -7930,6 +7937,8 @@ pub const InferenceEngine = struct {
         self.deinterleave_pipe = try loadShaderPipeline(ctx, "deinterleave");
         self.deinterleave_batched_pipe = try loadShaderPipeline(ctx, "deinterleave_batched");
         self.flash_attn_pipe = try loadShaderPipeline(ctx, "flash_attn");
+        self.flash_attn_split_pipe = try loadShaderPipeline(ctx, "flash_attn_split");
+        self.flash_split_enabled = readBoolEnv("ZINC_FLASH_SPLIT") orelse true;
         self.flash_attn_q8_pipe = try loadShaderPipeline(ctx, "flash_attn_q8");
         self.kv_cache_write_pipe = try loadShaderPipeline(ctx, "kv_cache_write");
         self.kv_cache_write_q8_pipe = try loadShaderPipeline(ctx, "kv_cache_write_q8");
@@ -8935,6 +8944,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.deinterleave_pipe);
         metal_pipeline.freePipeline(&self.deinterleave_batched_pipe);
         metal_pipeline.freePipeline(&self.flash_attn_pipe);
+        metal_pipeline.freePipeline(&self.flash_attn_split_pipe);
         metal_pipeline.freePipeline(&self.flash_attn_q8_pipe);
         metal_pipeline.freePipeline(&self.kv_cache_write_pipe);
         metal_pipeline.freePipeline(&self.kv_cache_write_q8_pipe);
@@ -17047,6 +17057,24 @@ fn dispatchFlashAttnOnCmd(
         &engine.attn_out_buf,
         &engine.attn_sinks_buf,
     };
+    // Long-context split path: the single-simdgroup-per-head kernel is
+    // LATENCY-bound at depth (32 tg x 32 threads ~ 3% occupancy; measured
+    // 287us/dispatch @1000 ctx touching only ~2 MB of KV). The split kernel
+    // runs 8 simdgroups/head over interleaved 64-token blocks with a split-K
+    // online-softmax merge — same f32 math, different FP reduction order, so
+    // it is gated to seq_len >= 384 (benchmark-range decode stays on the
+    // byte-identical serial kernel) and validated by greedy-match.
+    const flash_split_min_seq_len: u32 = 384;
+    if (!engine.kv_cache_q8 and
+        engine.flash_split_enabled and
+        seq_len >= flash_split_min_seq_len and
+        head_dim <= 256 and
+        engine.flash_attn_split_pipe.handle != null and
+        engine.flash_attn_split_pipe.max_threads_per_threadgroup >= 256)
+    {
+        cmd.dispatchV2(&engine.flash_attn_split_pipe, .{ n_heads, 1, 1 }, .{ 256, 1, 1 }, &bufs, &push, @sizeOf(FlashAttnPush), 0);
+        return;
+    }
     const pipe = if (engine.kv_cache_q8) &engine.flash_attn_q8_pipe else &engine.flash_attn_pipe;
     // Cycle 99: flash_attn.metal FLASH_TG_SIZE halved 64 → 32 (single
     // simdgroup) to unblock V-loop utilization at Qwen3-8B vec4_dim=32 and
