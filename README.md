@@ -52,7 +52,7 @@ ROCm results, run dates, and build details.
 | Platform | GPU | Backend | Status |
 |----------|-----|---------|--------|
 | **Linux** | AMD RDNA4 (RX 9070, AI PRO R9700) | Vulkan | Supported and tuned |
-| **Linux** | AMD RDNA4 (validated on AI PRO R9700) | ROCm/HIP | Qwen 3.5/3.6/3.8 and Gemma 31B complete; Gemma 26B in progress |
+| **Linux** | AMD RDNA4 (validated on AI PRO R9700) | ROCm/HIP | Supported — five-model server matrix complete on `gfx1201` |
 | **Linux** | AMD RDNA3 (RX 7900 XTX, etc.) | Vulkan | Supported |
 | **Linux** | Intel Arc Xe2 / Battlemage | Vulkan | Supported — validated benchmark target |
 | **macOS** | Apple Silicon (M1, M2, M3, M4, M5) | Metal | Supported — native MSL shaders |
@@ -68,7 +68,7 @@ uses the same machine, model file, prompt, and run count for ZINC and llama.cpp.
 | Platform | Compared models | Decode vs llama.cpp | Prefill vs llama.cpp | Read this as |
 |----------|----------------:|--------------------:|---------------------:|--------------|
 | AMD RDNA4 / Vulkan | 5 | 115% avg, 5/5 model wins | 138% avg, 5/5 model wins | Ahead on every published row |
-| AMD RDNA4 / ROCm | 4 of 5 completed | 3/4 completed rows ahead | 2/4 completed rows ahead | All Qwen rows and Gemma 31B complete; Gemma 26B is still being fixed |
+| AMD RDNA4 / ROCm | 5 | 3/5 model wins | 2/5 model wins | All five models complete; the Qwen rows lead while Gemma needs more tuning |
 | Intel Arc / Vulkan | 4 | 103% avg, 4/4 model wins | 181% avg, 4/4 model wins | Supported; tuning is newer than RDNA4 |
 | Apple Silicon / Metal | 5 | 87% avg, 1 model win | 54% avg, 1 model win | Performance varies by model |
 
@@ -148,7 +148,7 @@ validated models listed below.
 
 - Continuous batching and multi-tenant serving are still roadmap work
 - The supported-model list is intentionally narrow
-- ROCm currently completes the three Qwen models and Gemma 31B; Gemma 26B serving is still being fixed
+- ROCm Gemma 26B MoE serving currently uses one request slot; multi-request batching for that model is still being developed
 - Apple Silicon and Intel Arc performance tuning are ongoing (RDNA4 path is more mature)
 
 ## Why ZINC
@@ -324,27 +324,28 @@ The tables below come from the data used by [the benchmark dashboard](https://zo
 
 ### AMD RDNA4 — Radeon AI PRO R9700 (ROCm/HIP)
 
-The ROCm suite covers five models and four scenarios per model. All three Qwen
-models and Gemma 31B complete with single-slot reusable servers. Gemma 26B still
-fails at its first GPU prefill step. The failed row remains visible on the
-dashboard and is excluded from averages.
+The ROCm suite covers five models and four scenarios per model. Every model now
+completes the reusable-server matrix with coherent output. Gemma 26B uses its
+single-sequence MoE path for serving; it works reliably, but its prefill path is
+the clearest remaining tuning opportunity.
 
-| Completed model | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
+| Model | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
 |---|---:|---:|---:|---:|---:|
-| Qwen 3.5 9B Q4_K_M | **883.42** | 607.61 | **75.09** | 69.17 | **109.6%** |
-| Qwen 3.6 35B A3B Q4_K_XL | 234.37 | **443.95** | **75.93** | 65.07 | **109.6%** |
-| Qwen 3.8 27B Q4_K_M | **376.79** | 279.67 | **27.88** | 24.49 | **118.5%** |
-| Gemma 4 31B Q4_K_M | 19.61 | **180.16** | 19.26 | **22.84** | 59.9% |
+| Gemma 4 26B-A4B MoE Q4_K_M | 56.50 | **607.01** | 55.03 | **68.60** | 56.8% |
+| Qwen 3.5 9B Q4_K_M | **880.73** | 605.78 | **75.02** | 69.18 | **109.5%** |
+| Qwen 3.6 35B A3B Q4_K_XL | 232.94 | **446.20** | **77.35** | 65.07 | **111.3%** |
+| Qwen 3.8 27B Q4_K_M | **377.29** | 276.91 | **27.86** | 24.49 | **118.5%** |
+| Gemma 4 31B Q4_K_M | 19.65 | **180.21** | 19.30 | **22.84** | 60.1% |
 
 Qwen 3.8 also completed every scenario ahead of the ROCm llama.cpp server on
 both prefill and decode:
 
 | Scenario | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode |
 |---|---:|---:|---:|---:|
-| Quick Chat | **376.79** | 279.67 | **27.88** | 24.49 |
-| Coding Review | **590.55** | 464.60 | **27.49** | 24.32 |
-| Incident Context | **655.99** | 597.94 | **27.35** | 24.39 |
-| Long Coding Draft | **418.93** | 331.70 | **27.55** | 24.31 |
+| Quick Chat | **377.29** | 276.91 | **27.86** | 24.49 |
+| Coding Review | **591.34** | 464.99 | **27.49** | 24.33 |
+| Incident Context | **657.12** | 595.75 | **27.35** | 24.39 |
+| Long Coding Draft | **421.07** | 329.32 | **27.57** | 24.29 |
 
 See the [ROCm backend guide](docs/ROCM.md) for the validated software stack and
 the exact benchmark command.
@@ -370,7 +371,7 @@ the exact benchmark command.
 ### Current comparison with llama.cpp
 
 - **AMD Vulkan:** all five published RDNA4 models are ahead on prefill and decode. Gemma 4 31B decode is the closest result at `1.01x`.
-- **AMD ROCm:** the three Qwen models and Gemma 31B complete. All three Qwen rows are ahead on decode; Qwen 3.5 and 3.8 are also ahead on prefill. Gemma 31B trails llama.cpp, and Gemma 26B still fails during prefill.
+- **AMD ROCm:** all five models complete. All three Qwen rows are ahead on decode; Qwen 3.5 and 3.8 are also ahead on prefill. Both Gemma rows trail llama.cpp and remain the main ROCm tuning work.
 - **Intel Arc:** all published Vulkan rows complete and are ahead on prefill and decode, though most decode margins are small.
 - **Apple Metal:** results vary by model. Qwen 3.6 35B decode is ahead, while several other rows trail llama.cpp.
 
@@ -402,7 +403,7 @@ Validated on AMD Radeon AI PRO R9700 (RDNA4) and Intel Arc BMG G31-class hardwar
 
 The next engineering work is:
 
-1. Fix ROCm serving for Gemma 26B and tune Gemma 31B prefill and decode.
+1. Tune ROCm prefill and decode for Gemma 26B and Gemma 31B; both models now complete the full server suite.
 2. Improve Qwen 3.6 prefill on ROCm; decode is ahead, but prefill is currently behind llama.cpp.
 3. Keep testing longer prompts and outputs with the same reusable-server method.
 4. Continue tuning Intel Arc and Metal model by model.

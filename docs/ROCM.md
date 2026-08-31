@@ -13,7 +13,8 @@ The current reference configuration is:
 - ROCm userspace `7.2.4`
 - Radeon AI PRO R9700 (`gfx1201`, wave32)
 - Zig `0.15.2` or newer
-- Qwen 3.8 27B Dense `Q4_K_M`
+- Qwen 3.5 9B, Qwen 3.6 35B-A3B, and Qwen 3.8 27B
+- Gemma 4 26B-A4B MoE and Gemma 4 31B
 
 Kernel `7.2.2` is the validated reference, not a build-time requirement. The
 running `amdgpu` driver, ROCr runtime, and ROCm userspace must agree well enough
@@ -50,6 +51,10 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
   --parallel 1 --context 2048 --port 9090
 ```
 
+Gemma 4 26B-A4B currently serves through its single-sequence MoE path, so ZINC
+uses one request slot for that model even if a larger `--parallel` value is
+given. The other validated models keep the requested slot count.
+
 The ROCm-tuned prefill and decode fusions are default-on. These switches remain
 available as correctness/performance A/B opt-outs:
 
@@ -58,6 +63,7 @@ available as correctness/performance A/B opt-outs:
 - `ZINC_PREFILL_Q8_REUSE=0`
 - `ZINC_PREFILL_WMMA_TILES=0`
 - `ZINC_PREFILL_WMMA_T80=0`
+- `ZINC_QWEN_MOE_BATCHED=0`
 - `ZINC_ATTN_V2=0`
 - `ZINC_SSM_PREPARED=0`
 - `ZINC_SSM_COL_WARP=0`
@@ -86,6 +92,10 @@ prepared wave32 column scan for the recurrent SSM state, and a two-stage GPU
 argmax. The 80-column WMMA tile covers the long-draft prompt shape without
 padding it to a substantially larger tile. All are ROCm defaults only; setting
 the corresponding variable to `0` restores the preceding path for comparison.
+
+Qwen 3.6 MoE prefill uses the native token-batched Q4_K/Q5_K/Q6_K expert
+kernels. CUDA's grouped tensor-core expert path is not dispatched by the ROCm
+build; its compatibility symbols are intentionally inert.
 
 ## Fair llama.cpp comparison
 

@@ -1641,8 +1641,13 @@ pub const ForwardCuda = struct {
         // Effort 29 T2: token-batched MoE FFN (qwen36). DEFAULT-ON; opt out to the
         // proven per-token loop via ZINC_QWEN_MOE_BATCHED=0 (for the A/B baseline).
         const moe_batched = qwenMoeBatchedOn();
-        // T2 (qwen MoE port): grouped Tensor-core routed gate/up experts (ZINC_MOE_TC).
-        self.use_tc_experts = moeTcDefaultOn();
+        // T2 (qwen MoE port): grouped Tensor-core routed gate/up experts
+        // (ZINC_MOE_TC). The grouped expert kernels are still inert compatibility
+        // symbols in the ROCm module, so dispatch the exact token-batched matvec
+        // path there until native gfx12 grouped kernels exist. Calling the stubs
+        // leaves routed-output scratch stale across requests and corrupts a reused
+        // server after its first prompt.
+        self.use_tc_experts = !is_rocm and moeTcDefaultOn();
         self.tc_experts_forced = moeTcForced();
 
         const b = try self.ensureBatch(T);

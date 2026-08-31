@@ -1214,7 +1214,7 @@ pub const ForwardGemma = struct {
 
     // ---- Effort 28 increment 1 sub-step 1b: batched DECODE ------------------
 
-    /// Batched DECODE step (DENSE gemma only): advance B independent sequences by
+    /// Batched DECODE step: advance B independent sequences by
     /// ONE token each in a SINGLE B-row forward. The projections + FFN reuse the
     /// batched-prefill GEMM path — `gemmDispatch`/`ffnBlockBatched` read each
     /// weight ONCE for all B rows (the launch / weight-bandwidth amortization that
@@ -1240,7 +1240,19 @@ pub const ForwardGemma = struct {
         const d = self.d;
         const ctx = self.ctx;
         const f4 = @sizeOf(f32);
-        if (d.n_experts > 0) return error.Unsupported; // increment 1 = dense gemma only
+        // Gemma MoE does not yet have a multi-row serving kernel. A one-slot
+        // server can still use the established single-sequence forward, which
+        // owns its normal KV cache and is the same path used by the CLI. The
+        // server clamps Gemma MoE to one slot, so request reuse simply overwrites
+        // KV positions from zero on the next request.
+        if (d.n_experts > 0) {
+            if (tokens.len != 1 or positions.len != 1 or slots.len != 1 or out_tokens.len != 1) {
+                return error.Unsupported;
+            }
+            if (self.n_slots != 1 or slots[0] != 0) return error.Unsupported;
+            out_tokens[0] = try self.decodeStep(tokens[0], positions[0], true);
+            return;
+        }
         if (self.kv_k_slots == null) return error.SlotKvNotAllocated;
         const B: u32 = @intCast(tokens.len);
         std.debug.assert(positions.len == B and slots.len == B and out_tokens.len == B);

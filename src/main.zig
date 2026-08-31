@@ -1990,6 +1990,11 @@ const ServeConnCtx = struct {
 /// `ServeEngine`, then accept connections and hand each to a detached handler.
 /// `fwd` is a `cuda_serve.Forward` so the server drives EITHER the gemma4 dense or
 /// the qwen35/36 hybrid-SSM+MoE forward (Effort 28 increment 4 — qwen serving).
+fn cudaServeSlotCount(requested: u32, gemma_moe: bool) u32 {
+    const clamped = std.math.clamp(requested, 1, 64);
+    return if (gemma_moe) 1 else clamped;
+}
+
 fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, config: Config, max_ctx: u32, allocator: std.mem.Allocator) !void {
     var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
         log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
@@ -2006,7 +2011,11 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
         eos = std.fmt.parseInt(u32, std.mem.trim(u8, v, " \n\r\t"), 10) catch eos;
     }
 
-    const nslots = std.math.clamp(config.max_parallel, 1, 64);
+    const gemma_moe = model.config.architecture == .gemma and model.config.n_experts > 0;
+    const nslots = cudaServeSlotCount(config.max_parallel, gemma_moe);
+    if (gemma_moe and config.max_parallel != 1) {
+        log.warn("Gemma MoE serving currently uses one request slot; ignoring --parallel {d}", .{config.max_parallel});
+    }
     const slot_ctx = max_ctx;
 
     var engine = cuda_serve_mod.ServeEngine.init(allocator, fwd, nslots, slot_ctx, eos) catch |err| {
@@ -3061,6 +3070,13 @@ test "parseArgs: -hf conflicts with -m and --model-id" {
     try std.testing.expectError(error.ConflictingModelSources, parseArgs(&with_model));
     const with_id = [_][:0]const u8{ "zinc", "-hf", "a/b", "--model-id", "qwen35-9b-q4k-m" };
     try std.testing.expectError(error.ConflictingModelSources, parseArgs(&with_id));
+}
+
+test "CUDA serving clamps Gemma MoE to one slot" {
+    try std.testing.expectEqual(@as(u32, 1), cudaServeSlotCount(4, true));
+    try std.testing.expectEqual(@as(u32, 8), cudaServeSlotCount(8, false));
+    try std.testing.expectEqual(@as(u32, 1), cudaServeSlotCount(0, false));
+    try std.testing.expectEqual(@as(u32, 64), cudaServeSlotCount(128, false));
 }
 
 test "parseArgs: allows large context requests" {

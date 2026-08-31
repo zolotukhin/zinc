@@ -111,6 +111,10 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_Q8_1_SSM_QKV_Z: "1",
     ZINC_MOE_Q5K_Q8_1_DOWN_ACC: "1",
     ZINC_MOE_Q6K_COLS: "1",
+    ZINC_QWEN_MOE_BATCHED: "0",
+    ZINC_MOE_TC: "0",
+    ZINC_MOE_DOWN_TC: "0",
+    ZINC_MOE_DOWN_Q6K_TC: "0",
     ZINC_MOE_PREFIX_SHARED_EXACT: "1",
     ZINC_MOE_SINGLETON_TAIL_SPLIT: "1",
     ZINC_INTEL_A3B_PRODUCTION: "0",
@@ -149,6 +153,10 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_Q8_1_SSM_QKV_Z).toBe("1");
   expect(env.ZINC_MOE_Q5K_Q8_1_DOWN_ACC).toBe("1");
   expect(env.ZINC_MOE_Q6K_COLS).toBe("1");
+  expect(env.ZINC_QWEN_MOE_BATCHED).toBe("0");
+  expect(env.ZINC_MOE_TC).toBe("0");
+  expect(env.ZINC_MOE_DOWN_TC).toBe("0");
+  expect(env.ZINC_MOE_DOWN_Q6K_TC).toBe("0");
   expect(env.ZINC_MOE_PREFIX_SHARED_EXACT).toBe("1");
   expect(env.ZINC_MOE_SINGLETON_TAIL_SPLIT).toBe("1");
   expect(env.ZINC_INTEL_A3B_PRODUCTION).toBe("0");
