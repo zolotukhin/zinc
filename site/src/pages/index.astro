@@ -10,8 +10,8 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
 
 <BaseLayout
   title="Stepan Zolotukhin"
-  description="Building ZINC — a local LLM inference engine for consumer GPUs. Writing about local AI, GPU programming, and systems engineering."
-  keywords="Stepan Zolotukhin, ZINC, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, NVIDIA RTX, Intel Arc, Vulkan compute, Metal, CUDA, Zig, TurboQuant, local AI, GPU programming"
+  description="I build ZINC, a local LLM inference engine for consumer GPUs, and write about GPU programming and systems engineering."
+  keywords="Stepan Zolotukhin, ZINC, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, NVIDIA RTX, Intel Arc, Vulkan compute, ROCm, Metal, CUDA, Zig, TurboQuant, local AI, GPU programming"
   jsonLd={{
     '@context': 'https://schema.org',
     '@type': 'WebSite',
@@ -22,14 +22,14 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
 >
   <section class="hero">
     <h1>Stepan Zolotukhin</h1>
-    <p>I'm building <a href="/zinc/">ZINC</a>, a local LLM inference engine for consumer GPUs. This site is where I write about the work — GPU kernels, Vulkan, Metal, CUDA, quantization, and the systems engineering underneath.</p>
+    <p>I'm building <a href="/zinc/">ZINC</a>, a program for running local language models on consumer GPUs. I use this site to publish benchmarks, documentation, and notes about the GPU and systems work behind it.</p>
   </section>
 
   <section class="project-highlight">
     <a href="/zinc/" class="project-card">
       <h2>ZINC</h2>
-      <p>Local LLM inference for consumer GPUs — AMD Radeon via Vulkan, Intel Arc via Vulkan, Apple Silicon via Metal, and NVIDIA RTX via CUDA experiments. The current strongest measured path is AMD RDNA4, and Intel Arc is now an official Linux Vulkan support target.</p>
-      <span class="project-link">Learn more &rarr;</span>
+      <p>Run GGUF models on AMD Radeon with Vulkan or ROCm, Intel Arc with Vulkan, or Apple Silicon with Metal. NVIDIA CUDA support is experimental.</p>
+      <span class="project-link">Read about ZINC &rarr;</span>
     </a>
   </section>
 

@@ -108,9 +108,19 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST '
 # medians in site/src/data/zinc-performance.json and on /zinc/benchmarks.
 ```
 
-## llama.cpp ROCm reference sweep
+## ROCm server comparison and llama.cpp reference sweep
 
-Use this when you want to answer "what does llama.cpp do on HIP/ROCm on the same AMD card?" This is a reference sweep, not the canonical ZINC-vs-baseline score. The published score still comes from `tools/performance_suite.mjs`, which runs reusable ZINC and llama.cpp servers through the same scenario matrix. The ROCm rows below are `llama-bench` pp/tg microbenchmarks, so keep them labeled separately until the suite can run a ROCm server baseline through the same harness.
+The canonical ZINC ROCm comparison uses `tools/performance_suite.mjs` with
+`--rdna-backend rocm` and a ROCm llama-server selected by
+`--rdna-llama-device ROCm0`. This keeps both sides on reusable servers, the same
+GGUF, and the same scenario matrix. See [ROCm backend](ROCM.md) for the complete
+command and the current Qwen 3.8 27B result. The 2026-08-31 full matrix has ZINC
+ahead in all four prefill and all four decode comparisons; its summed phase
+time is 24.385 s versus 28.016 s for llama.cpp.
+
+The `llama-bench` rows below answer the narrower question "what does llama.cpp
+do on HIP/ROCm for pp/tg microbench shapes?" Keep them labeled as reference
+microbenchmarks rather than mixing them into the server score.
 
 On the RDNA4 node, install only the minimal ROCm/HIP stack needed for llama.cpp. Avoid the full `rocm` meta-package unless you have checked the apt plan; it can pull DKMS and newer Mesa packages that invalidate the Vulkan baseline.
 

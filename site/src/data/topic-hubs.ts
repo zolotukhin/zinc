@@ -552,15 +552,15 @@ export const topicHubs: TopicHub[] = [
     slug: 'amd-rdna4-llm-inference',
     title: 'AMD RDNA4 LLM Inference',
     shortTitle: 'AMD RDNA4',
-    description: 'A practical guide to local LLM inference on AMD RDNA4 GPUs: R9700, RX 9070 XT, Vulkan, llama.cpp comparisons, prefill, decode, and ZINC.',
-    keywords: 'AMD RDNA4 LLM inference, Radeon AI PRO R9700 inference, RX 9070 XT LLM, AMD GPU local LLM, Vulkan LLM inference, llama.cpp RDNA4, ROCm alternative',
-    summary: 'RDNA4 is the default hardware story for ZINC: useful consumer and workstation AMD GPUs, strong memory bandwidth, Vulkan support, and no dependence on ROCm for local LLM inference.',
-    practicalAnswer: 'If you want local LLM inference on AMD RDNA4, use Vulkan-first software and treat ROCm as optional rather than required. ZINC targets Radeon AI PRO R9700 and RX 9070-class hardware directly with Vulkan compute. The important performance split is decode versus prefill: decode is mostly memory and scheduling; prefill needs batched kernels, command-buffer discipline, and model-aware routing.',
+    description: 'A practical guide to local LLM inference on AMD RDNA4 GPUs: R9700, RX 9070 XT, Vulkan, ROCm, llama.cpp comparisons, prefill, decode, and ZINC.',
+    keywords: 'AMD RDNA4 LLM inference, Radeon AI PRO R9700 inference, RX 9070 XT LLM, AMD GPU local LLM, Vulkan LLM inference, ROCm HIP inference, llama.cpp RDNA4',
+    summary: 'ZINC supports RDNA4 consumer and workstation GPUs through both Vulkan and ROCm.',
+    practicalAnswer: 'If you want local LLM inference on AMD RDNA4, ZINC offers independently tuned Vulkan and ROCm paths. Vulkan is the broad compatibility route; ROCm uses HIP and dedicated gfx1201 kernels. The important performance split is decode versus prefill: decode is mostly memory and scheduling, while prefill needs batched kernels and model-aware tiling.',
     bestUse: 'Use this page for readers choosing AMD hardware or validating whether Vulkan local inference is real on RDNA4. The page should answer the hardware, driver, benchmark, and baseline questions before sending them to deep posts.',
     status: [
       {
         label: 'Best current answer',
-        detail: 'RDNA4 local inference is real through Vulkan. The practical question is not "can AMD run LLMs" but which memory class and driver setup make the run useful.',
+        detail: 'RDNA4 local inference is real through both Vulkan and ROCm. The practical question is which backend, memory class, and driver stack best fit the workload.',
       },
       {
         label: 'Reader problem',
@@ -614,7 +614,7 @@ export const topicHubs: TopicHub[] = [
       },
       {
         label: 'Decode tok/s',
-        detail: 'The headline number, but only meaningful with model, quantization, and context attached.',
+        detail: 'Useful only when the model, quantization, prompt, and output length are included.',
       },
       {
         label: 'Latency distribution',
@@ -641,8 +641,8 @@ export const topicHubs: TopicHub[] = [
     ],
     pitfalls: [
       {
-        label: 'Making ROCm the story',
-        detail: 'The useful ZINC angle is Vulkan-first AMD inference. Mention ROCm only to clarify that this path does not require it.',
+        label: 'Blending backend results',
+        detail: 'Vulkan and ROCm have different runtime and kernel behavior. Publish them as separate datasets instead of mixing their best numbers.',
       },
       {
         label: 'Comparing dirty runs',
@@ -654,10 +654,10 @@ export const topicHubs: TopicHub[] = [
       },
     ],
     whatMatters: [
-      'RDNA4 can run useful local LLMs without ROCm when the engine uses Vulkan compute directly.',
+      'RDNA4 can run useful local LLMs through either ZINC Vulkan or ZINC ROCm, with each backend measured independently.',
       'The R9700 is the strongest ZINC tuning target because 32 GB VRAM changes which Qwen and Gemma models fit.',
       'Prefill and decode are different workloads; a fast decode loop does not imply fast time-to-first-token.',
-      'llama.cpp is the right baseline, but ZINC is deliberately optimizing the AMD path as a first-class target.',
+      'llama.cpp is the comparison baseline, while ZINC maintains dedicated AMD kernels for its supported backends.',
     ],
     readNext: [
       {
@@ -688,7 +688,7 @@ export const topicHubs: TopicHub[] = [
     ],
     docs: [
       {
-        title: 'Run LLMs on AMD GPUs Without ROCm',
+        title: 'Run LLMs on AMD GPUs with Vulkan or ROCm',
         href: '/zinc/docs/getting-started/',
         description: 'The fastest path from clone to local AMD, Intel Arc, or Apple Silicon inference.',
       },
@@ -711,8 +711,8 @@ export const topicHubs: TopicHub[] = [
     related: ['qwen3-6-local-inference', 'gemma-local-inference', 'kv-cache-quantization'],
     faqs: [
       {
-        question: 'Can AMD RDNA4 run local LLMs without ROCm?',
-        answer: 'Yes. ZINC uses Vulkan compute on AMD RDNA4, so the local inference path does not depend on ROCm support for consumer cards.',
+        question: 'Should I use Vulkan or ROCm on AMD RDNA4?',
+        answer: 'Both are supported ZINC backends. Vulkan offers broad driver compatibility, while ROCm uses HIP and dedicated gfx1201 kernels. Compare the separate backend tabs for the model and phase you care about.',
       },
       {
         question: 'Which RDNA4 GPU is the best target for ZINC?',

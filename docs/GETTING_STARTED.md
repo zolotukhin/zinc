@@ -2,7 +2,7 @@
 
 > **Experimental software**: ZINC is under active development. The CLI path is the best-supported way to start. Server mode, model coverage, and performance tuning are still moving quickly.
 
-ZINC runs local LLMs on Linux Vulkan GPUs without ROCm by using native Vulkan paths for AMD Radeon and Intel Arc, and it runs the same managed GGUF model flow on Apple Silicon through Metal. The fastest way to check if it works on your machine is:
+ZINC runs local LLMs through Vulkan or ROCm on AMD Radeon, Vulkan on Intel Arc, and Metal on Apple Silicon. The fastest way to check if it works on your machine is:
 
 1. Install Zig.
 2. Build the binary.

@@ -101,6 +101,14 @@ void cuda_device_name(CudaCtx* c, char* out, size_t cap) {
     if (cuDeviceGetName(out, (int)cap, c->dev) != CUDA_SUCCESS) out[0] = 0;
     out[cap - 1] = 0;
 }
+void cuda_device_arch(CudaCtx* c, char* out, size_t cap) {
+    if (cap == 0) return;
+    if (!c) { out[0] = 0; return; }
+    int mj = dev_attr(c->dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR);
+    int mn = dev_attr(c->dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR);
+    snprintf(out, cap, "sm_%d%d", mj, mn);
+    out[cap - 1] = 0;
+}
 
 // ---- Buffer management -------------------------------------------------------
 CudaBuf* cuda_create_buffer(CudaCtx* c, size_t size) {
@@ -291,6 +299,7 @@ void cuda_release_completed(CudaCmd* m) { if (!m) return; if (m->event) cuEventD
 // step's parameters and is bit-identical to the un-captured chain.
 struct CudaGraph { CUgraphExec exec; int have_exec; };
 
+int cuda_graph_supported(void) { return 1; }
 CudaGraph* cuda_graph_create(void) {
     CudaGraph* g = (CudaGraph*)calloc(1, sizeof *g);
     if (!g) { set_err("cuda_graph_create", "oom"); return NULL; }

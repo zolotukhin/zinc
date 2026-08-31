@@ -14,7 +14,7 @@ ZINC runs on consumer GPUs (Linux, Vulkan) and Apple Silicon (macOS, Metal). Thi
 
 ## AMD GPUs (Linux)
 
-ZINC targets AMD consumer and workstation GPUs that the ROCm stack does not support.
+ZINC supports AMD consumer and workstation GPUs through Vulkan and, on validated RDNA4 stacks, ROCm/HIP.
 
 | Family | Examples | Notes |
 | --- | --- | --- |
@@ -85,7 +85,7 @@ If that command does not show your Intel Arc GPU, ZINC will not use it.
 
 See [Intel GPU Reference](/zinc/docs/intel-gpu-reference/) for the full B-series card table, device IDs, memory bandwidth, Xe2 opcode notes, and ZINC tuning guidance.
 
-The public benchmark matrix currently validates all five managed catalog models on an Intel Arc BMG G31-class node. Decode and prefill both beat the same-machine llama.cpp baseline on the headline rows, while end-to-end server latency and deeper Arc-specific tuning are still active work.
+The public benchmark matrix currently validates four managed catalog models on an Intel Arc BMG G31-class node. Decode and prefill beat the same-machine llama.cpp baseline on those rows. End-to-end server latency and Arc-specific tuning are still ongoing.
 
 ## Other Vulkan GPUs
 
@@ -109,7 +109,7 @@ ZINC has a native Metal backend with 31 MSL compute shaders, zero-copy model loa
 
 - **OS**: macOS
 - **Tools**: Xcode Command Line Tools (`xcode-select --install`)
-- No Vulkan, no ROCm, no MLX, no Python needed
+- Native Metal runtime; no external GPU framework or Python environment required
 
 ### Apple Silicon memory guide
 

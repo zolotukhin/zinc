@@ -129,4 +129,15 @@ pub const CudaDevice = struct {
         }
         return "";
     }
+
+    /// Copy the native kernel compilation target (for example `sm_120` or
+    /// `gfx1201`) into `buf` and return the NUL-trimmed slice.
+    pub fn arch(self: *const CudaDevice, buf: []u8) []const u8 {
+        if (self.ctx) |ctx| {
+            shim.cuda_device_arch(ctx, buf.ptr, buf.len);
+            const len = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+            return buf[0..len];
+        }
+        return "";
+    }
 };

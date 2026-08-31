@@ -55,19 +55,23 @@ function displayModelLabel(label: string) {
 }
 
 const rdnaTarget = targetById('rdna');
+const rdnaRocmTarget = targetById('rdna-rocm');
 const cudaTarget = targetById('cuda');
 const intelTarget = targetById('intel');
 const metalTarget = targetById('metal');
 const rdna35 = modelById(rdnaTarget, 'qwen36-35b-a3b-q4k-xl');
+const rdnaRocm38 = modelById(rdnaRocmTarget, 'qwen38-27b-q4k-m');
 const metal35 = modelById(metalTarget, 'qwen36-35b-a3b-q4k-xl');
 
 const rdna35Decode = metricMedian(rdna35?.zinc?.decode_tps);
 const rdna35BaselineDecode = metricMedian(rdna35?.baseline?.decode_tps);
+const rdnaRocm38Decode = metricMedian(rdnaRocm38?.zinc?.decode_tps);
+const rdnaRocm38BaselineDecode = metricMedian(rdnaRocm38?.baseline?.decode_tps);
 const metal35Decode = metricMedian(metal35?.zinc?.decode_tps);
 
-const homeDescription = `Local LLM inference for consumer GPUs: AMD Radeon, Intel Arc, Apple Silicon, and NVIDIA RTX CUDA experiments. The current strongest measured path is AMD RDNA4, while Intel Arc is now an official Linux Vulkan support target.`;
-const appDescription = `LLM inference engine for consumer GPUs, built with Zig and native GPU backends: Vulkan for AMD Radeon and Intel Arc, Metal for Apple Silicon, and an experimental CUDA path for NVIDIA RTX.`;
-const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 576 GB/s), the current validated ZINC plain-decode number is ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B-UD-Q4_K_XL - ${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp on the same machine. The current RDNA4 suite is ahead of llama.cpp on decode, prefill, end-to-end, and model-level overall across all five published models. On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B-UD-Q4_K_XL measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
+const homeDescription = `Run GGUF models locally with ZINC. Use Vulkan or ROCm on AMD Radeon, Vulkan on Intel Arc, Metal on Apple Silicon, or the experimental CUDA backend on NVIDIA RTX.`;
+const appDescription = `A Zig inference engine for running GGUF models on consumer GPUs, with Vulkan, ROCm, Metal, and experimental CUDA backends.`;
+const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 640 GB/s), ZINC publishes independent Vulkan and ROCm server comparisons against llama.cpp. Vulkan reaches ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B (${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp), while ROCm reaches ${formatTokNumber(rdnaRocm38Decode)} tok/s on Qwen3.8-27B (${formatMultiplier(rdnaRocm38Decode, rdnaRocm38BaselineDecode)} llama.cpp). On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
 
 function ratioX(zinc: number | null | undefined, baseline: number | null | undefined) {
   if (zinc == null || baseline == null || Number.isNaN(zinc) || Number.isNaN(baseline) || baseline <= 0) return null;
@@ -129,14 +133,23 @@ const rdnaModelCount = rdnaBoard.rows.length;
 const rdnaDecodeWins = rdnaBoard.rows.filter((row) => (ratioX(row.zincDecode, row.baselineDecode) ?? 0) >= 1).length;
 const rdnaPrefillWins = rdnaBoard.rows.filter((row) => (ratioX(row.zincPrefill, row.baselinePrefill) ?? 0) >= 1).length;
 const rdnaOverallWins = rdnaBoard.rows.filter((row) => (row.overallPct ?? 0) >= 100).length;
+const rdnaRocmModelCount = rdnaRocmTarget?.summary?.benchmarked_models ?? rdnaRocmTarget?.models?.length ?? 0;
+const rdnaRocmSuccessfulCount = rdnaRocmTarget?.summary?.successful_models ?? 0;
 
 const platformCards = [
   {
     title: 'AMD Radeon',
     backend: 'Vulkan',
-    status: 'Best measured path today',
+    status: 'Supported',
     metric: `${rdnaDecodeWins}/${rdnaModelCount} decode wins`,
-    note: 'RDNA4 sweep beats llama.cpp on all headline rows.',
+    note: 'Five RDNA4 models measured against llama.cpp.',
+  },
+  {
+    title: 'AMD Radeon',
+    backend: 'ROCm',
+    status: 'Supported',
+    metric: `${rdnaRocmSuccessfulCount}/${rdnaRocmModelCount} models complete`,
+    note: 'Qwen and Gemma 31B complete on gfx1201; Gemma 26B is in progress.',
   },
   {
     title: 'Apple Silicon',
@@ -157,7 +170,7 @@ const platformCards = [
     backend: 'Vulkan',
     status: 'Supported',
     metric: `${formatTokNumber(intelTarget?.summary?.fastest_decode_tps, 1)} tok/s top decode`,
-    note: 'Official Linux Vulkan target with all five catalog rows published.',
+    note: 'Official Linux Vulkan target with four model rows published.',
   },
 ];
 
@@ -177,7 +190,7 @@ const jsonLd = {
         name: 'Stepan Zolotukhin',
         url: `${siteUrl}/about`,
       },
-      keywords: 'consumer GPU LLM inference, local LLM inference engine, AMD GPU LLM inference, Apple Silicon LLM inference, NVIDIA CUDA LLM inference, Intel Arc LLM inference, Radeon LLM inference, RDNA4 inference, Vulkan compute, Metal inference, CUDA backend, Zig, TurboQuant, KV cache compression, OpenAI API, local AI, vLLM alternative, llama.cpp alternative, ROCm alternative',
+      keywords: 'consumer GPU LLM inference, local LLM inference engine, AMD GPU LLM inference, Apple Silicon LLM inference, NVIDIA CUDA LLM inference, Intel Arc LLM inference, Radeon LLM inference, RDNA4 inference, Vulkan compute, ROCm HIP inference, Metal inference, CUDA backend, Zig, TurboQuant, KV cache compression, OpenAI API, local AI, vLLM alternative, llama.cpp alternative',
     },
     {
       '@type': 'FAQPage',
@@ -187,15 +200,15 @@ const jsonLd = {
           name: 'Which consumer GPUs does ZINC target?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'ZINC targets consumer and prosumer GPUs for local LLM inference: AMD Radeon RDNA3/RDNA4 through Vulkan, Intel Arc Xe2/Battlemage through Vulkan, Apple Silicon through Metal, and NVIDIA RTX through an experimental CUDA backend. AMD RDNA4 is the strongest measured backend today; Intel Arc is an official Linux Vulkan support target.',
+            text: 'ZINC runs local models on AMD Radeon through Vulkan or ROCm, Intel Arc through Vulkan, Apple Silicon through Metal, and NVIDIA RTX through an experimental CUDA backend.',
           },
         },
         {
           '@type': 'Question',
-          name: 'How do I run LLM inference on an AMD Radeon GPU without ROCm?',
+          name: 'Should I use Vulkan or ROCm on AMD Radeon?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'ZINC runs LLM inference on AMD Radeon GPUs through Vulkan compute, so you do not need ROCm at all. Install a Vulkan 1.3 driver (RADV or AMDVLK), build ZINC with zig build -Doptimize=ReleaseFast, and point it at a GGUF model. In the current public benchmark sweep, this is the fastest measured path to local LLM inference on RDNA3 and RDNA4 cards such as the RX 7900 XTX, RX 9070 XT, and Radeon AI PRO R9700.',
+            text: 'ZINC supports AMD Radeon through both Vulkan and ROCm. Use the default Vulkan build for broad RDNA3/RDNA4 compatibility, or select the ROCm build for the HIP runtime and its dedicated gfx1201 kernels. The public dashboard publishes the two backends independently on the same Radeon AI PRO R9700.',
           },
         },
         {
@@ -203,7 +216,7 @@ const jsonLd = {
           name: 'Which GPUs are fastest for local LLM inference with ZINC?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: `The Radeon AI PRO R9700 (32 GB, 576 GB/s) is the primary RDNA4 tuning target and the fastest validated card in the public landing-page sweep: ${formatTokNumber(rdna35Decode)} tok/s decode on Qwen3.6-35B-A3B, ${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp on the same machine. The dashboard also tracks official Intel Arc Vulkan results, Apple Silicon Metal results, and NVIDIA RTX CUDA experiments.`,
+            text: `The Radeon AI PRO R9700 (32 GB, 640 GB/s) is the primary RDNA4 tuning target. The dashboard publishes both Vulkan and ROCm runs on that card, alongside Intel Arc Vulkan results, Apple Silicon Metal results, and NVIDIA RTX CUDA experiments.`,
           },
         },
         {
@@ -211,7 +224,7 @@ const jsonLd = {
           name: 'How does ZINC compare to llama.cpp and vLLM?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'vLLM is strongest in datacenter-style CUDA/ROCm deployments, while many consumer GPUs need lower-level native backend work. llama.cpp is the broad local baseline. ZINC is built from scratch around consumer GPU backends: hand-tuned Vulkan for AMD and Intel, native Metal for Apple Silicon, and an experimental CUDA path for NVIDIA RTX, plus an OpenAI-compatible API and built-in chat UI.',
+            text: 'llama.cpp is the broad local baseline and vLLM is commonly used for larger CUDA and ROCm servers. ZINC focuses on consumer GPUs, with dedicated Vulkan, ROCm, Metal, and experimental CUDA code plus an OpenAI-compatible API and built-in chat UI.',
           },
         },
         {
@@ -240,16 +253,16 @@ const jsonLd = {
 <BaseLayout
   title="ZINC — Local LLM Inference for Consumer GPUs"
   description={homeDescription}
-  keywords="ZINC, consumer GPU LLM inference, local LLM inference engine, AMD GPU LLM inference, Apple Silicon Metal inference, NVIDIA CUDA LLM inference, Intel Arc LLM inference, Radeon LLM inference, RDNA4 inference, RDNA3 inference, run LLM on AMD GPU without ROCm, RX 9070 XT, RTX 5090, Intel Arc, Vulkan compute, Metal, CUDA, Zig, TurboQuant, KV cache compression, vLLM alternative, llama.cpp alternative, OpenAI compatible API, local AI, GGUF, Qwen, Gemma"
+  keywords="ZINC, consumer GPU LLM inference, local LLM inference engine, AMD GPU LLM inference, Apple Silicon Metal inference, NVIDIA CUDA LLM inference, Intel Arc LLM inference, Radeon LLM inference, RDNA4 inference, RDNA3 inference, ROCm HIP inference, RX 9070 XT, RTX 5090, Intel Arc, Vulkan compute, Metal, CUDA, Zig, TurboQuant, KV cache compression, vLLM alternative, llama.cpp alternative, OpenAI compatible API, local AI, GGUF, Qwen, Gemma"
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
   <section class="hero">
     <img src="/zinc-logo.png" alt="ZINC inference engine logo — lightning bolt on circuit board" class="logo" width="120" height="120" />
-    <p class="hero-eyebrow">Consumer GPU local LLM inference</p>
-    <h1>Inference for the GPUs people actually own</h1>
-    <p class="tagline">ZINC is a Zig inference engine for GGUF models across consumer GPU backends: AMD Radeon via Vulkan, Intel Arc via Vulkan, Apple Silicon via Metal, and NVIDIA RTX via CUDA experiments.</p>
-    <p class="hero-platforms"><strong>Current strongest measured path:</strong> AMD RDNA4 beats llama.cpp across the five-model headline sweep. <strong>Official support:</strong> AMD Radeon, Intel Arc, and Apple Silicon. <strong>Also measured:</strong> RTX 5090 CUDA experiments.</p>
+    <p class="hero-eyebrow">Local LLM inference</p>
+    <h1>Run local models on your own GPU</h1>
+    <p class="tagline">ZINC is a Zig program for running GGUF models. It includes a command-line tool, a browser chat UI, and an OpenAI-compatible API.</p>
+    <p class="hero-platforms">Use <strong>Vulkan or ROCm</strong> on AMD Radeon, <strong>Vulkan</strong> on Intel Arc, or <strong>Metal</strong> on Apple Silicon. The NVIDIA CUDA backend is experimental.</p>
     <div class="hero-links">
       <a href="https://github.com/zolotukhin/zinc" class="hero-link">
         <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -283,10 +296,10 @@ const jsonLd = {
   <section class="amd-sweep" aria-labelledby="amd-sweep-heading">
     <div class="sweep-header">
       <div>
-        <p class="section-kicker">Current public sweep</p>
+        <p class="section-kicker">Vulkan results</p>
         <h2 id="amd-sweep-heading">AMD RDNA4 — Radeon AI PRO R9700</h2>
       </div>
-      <span class="sweep-machine">32 GB VRAM · 576 GB/s · {formatRefreshDate(rdnaTarget?.generated_at)}</span>
+      <span class="sweep-machine">Vulkan · 32 GB VRAM · 640 GB/s · {formatRefreshDate(rdnaTarget?.generated_at)}</span>
     </div>
 
     <div class="perf-stats">
@@ -298,12 +311,12 @@ const jsonLd = {
       <article class="perf-stat">
         <strong>{rdnaPrefillWins}/{rdnaModelCount}</strong>
         <span>prefill wins</span>
-        <small>same prompts, same weights</small>
+        <small>same prompts and model files</small>
       </article>
       <article class="perf-stat">
         <strong>{rdnaOverallWins}/{rdnaModelCount}</strong>
         <span>overall wins</span>
-        <small>phase wall-time basis</small>
+        <small>combined prefill and decode</small>
       </article>
       <article class="perf-stat">
         <strong>{formatTokNumber(rdna35Decode, 1)}</strong>
@@ -340,7 +353,7 @@ const jsonLd = {
         </article>
       ))}
     </div>
-    <p class="perf-caption">Measured with the fair server-vs-server suite: one reusable ZINC server per model, one reusable llama.cpp server per model, same GGUF files, same scenario matrix, same warmup/run count, and server-side timing. We are still cooking: the next work is widening the narrow Gemma 31B margin and extending the sweep across more scenarios.</p>
+    <p class="perf-caption">Each result uses reusable ZINC and llama.cpp servers on the same GPU, with the same GGUF file, prompts, warmup count, and measured run count. The <a href="/zinc/benchmarks/">benchmark page</a> includes every scenario and the exact run configuration.</p>
   </section>
 
   <section class="start-panel" aria-label="ZINC documentation links">
@@ -353,13 +366,9 @@ const jsonLd = {
   </section>
 
   <section>
-    <p>ZINC is an inference engine for consumer GPUs, not a single-vendor demo. The bet is that local LLMs should run well on the hardware people can actually put in a workstation: AMD Radeon, Apple Silicon, NVIDIA RTX, and Intel Arc. Each backend gets native GPU code instead of being treated as a generic fallback.</p>
+    <p>ZINC loads GGUF files directly and runs them on a local GPU. AMD users can choose Vulkan or ROCm; the two builds and their benchmark results are kept separate. Intel Arc uses Vulkan, Apple Silicon uses Metal, and NVIDIA support is being developed through CUDA.</p>
 
-    <p>The AMD board is the headline today because it is the most mature and currently the fastest measured path in the public suite. Intel Arc is now an official Linux Vulkan target, and the same project keeps Apple Silicon and NVIDIA CUDA in the benchmark data so backend gaps stay visible instead of hidden.</p>
-
-    <p><strong>ZINC is not finished productized infrastructure yet.</strong> It is an engine under active development, and the best current performance is still RDNA4-first and CLI-first. Intel Arc is supported, but it has less tuning history than RDNA4. The point of the docs is to make those paths explicit instead of making you reverse-engineer them from technical specs.</p>
-
-    <p>ZINC takes a different approach. It is written in <strong>Zig</strong>, loads GGUF directly, and uses backend-specific GPU code: <strong>Vulkan compute</strong> for AMD and Intel, <strong>Metal</strong> for Apple Silicon, and an experimental <strong>CUDA</strong> path for NVIDIA RTX.</p>
+    <p>The project is under active development. The command-line path and the listed models receive the most testing. Model coverage and performance are not yet equal across every backend, so the benchmark page shows incomplete and failed rows as well as successful ones.</p>
 
     <h2>Why another engine?</h2>
 
@@ -368,9 +377,9 @@ const jsonLd = {
         <tr><th></th><th>ZINC</th><th>Typical datacenter stack</th><th>General local stack</th></tr>
       </thead>
       <tbody>
-        <tr><td><strong>Design center</strong></td><td>Consumer GPU inference</td><td>CUDA/ROCm servers</td><td>Broad portability</td></tr>
-        <tr><td><strong>Backends</strong></td><td>Vulkan, Metal, CUDA experiments</td><td>CUDA/ROCm first</td><td>CPU plus many GPU backends</td></tr>
-        <tr><td><strong>AMD RDNA</strong></td><td>Primary measured path</td><td>ROCm support boundary</td><td>Works, less RDNA-specific tuning</td></tr>
+        <tr><td><strong>Main use</strong></td><td>Local inference on consumer GPUs</td><td>Larger CUDA/ROCm servers</td><td>Local inference on many kinds of hardware</td></tr>
+        <tr><td><strong>Backends</strong></td><td>Vulkan, ROCm, Metal, CUDA experiments</td><td>CUDA/ROCm first</td><td>CPU plus many GPU backends</td></tr>
+        <tr><td><strong>AMD RDNA</strong></td><td>Vulkan and ROCm</td><td>ROCm</td><td>Several available backends</td></tr>
         <tr><td><strong>Apple Silicon</strong></td><td>Native Metal backend</td><td>Not the target</td><td>Mature Metal path</td></tr>
         <tr><td><strong>NVIDIA RTX</strong></td><td>Experimental CUDA path</td><td>Primary target</td><td>Mature CUDA path</td></tr>
         <tr><td><strong>KV cache compression</strong></td><td>TurboQuant roadmap / experimental path</td><td>No</td><td>No</td></tr>
@@ -380,7 +389,7 @@ const jsonLd = {
 
     <h2>Other measured targets</h2>
 
-    <p>The AMD board above is the headline path. We also keep publishing Intel Arc, Apple Silicon, and NVIDIA CUDA measurements with the same benchmark data format, so the gaps are visible instead of hidden. Full breakdown with scenarios and run provenance lives on <a href="/zinc/benchmarks/">the benchmarks dashboard</a>.</p>
+    <p>The AMD board above shows the Vulkan sweep. The <a href="/zinc/benchmarks/#rdna-rocm">benchmarks dashboard</a> adds the independently measured ROCm suite and lets you switch between the two AMD backends, alongside Intel Arc, Apple Silicon, and NVIDIA CUDA data.</p>
 
     <h3 class="perf-heading">Apple Silicon — Mac Studio (M4 Max) <span class="perf-sub">40-core GPU · 64 GB unified · {formatRefreshDate(metalTarget?.generated_at)}</span></h3>
     <div class="perf-board" role="img" aria-label="ZINC vs llama.cpp decode throughput on Apple M4 Max">
@@ -409,34 +418,34 @@ const jsonLd = {
         </article>
       ))}
     </div>
-    <p class="perf-caption">Exact machine above, native Metal backend ({formatRefreshDate(metalTarget?.generated_at)} refresh) — not a generic "Apple Silicon" average. The Metal path is younger than the RDNA4 one: decode still trails llama.cpp on most models, but ZINC prefill already leads on Qwen3-8B and Gemma 4 31B. Closing the A3B decode gap is the active Metal target.</p>
+    <p class="perf-caption">These results come from the Mac Studio listed above; they are not an average across Apple devices. Metal performance still varies by model, and the complete rows are available on the benchmark page.</p>
 
     <h2>What ZINC does</h2>
 
-    <p><strong>Native GPU backends, one engine.</strong> On AMD and Intel: Vulkan compute, with the mature RDNA path using <a href="/zinc/docs/rdna4-tuning/">wave64, cooperative matrix, and architecture-aware tiling</a>. On Apple Silicon: <a href="/zinc/docs/apple-metal-reference/">native MSL kernels</a> with simdgroup ops, zero-copy mmap, and Metal pipeline tuning. On NVIDIA RTX: experimental CUDA kernels are tracked in the same benchmark matrix. ZINC picks the right backend at build time where that backend is supported.</p>
+    <p>ZINC has separate GPU implementations for Vulkan, ROCm/HIP, Metal, and CUDA. On AMD, choose the backend when you build. Intel uses Vulkan, Apple Silicon uses <a href="/zinc/docs/apple-metal-reference/">Metal</a>, and NVIDIA uses the experimental CUDA build.</p>
 
-    <p>The API is OpenAI-compatible: <code>POST /v1/chat/completions</code> with SSE streaming, plus a built-in chat UI with thinking mode support. Point your existing client at ZINC and it works. <a href="/zinc/docs/api/">API reference</a>.</p>
+    <p>The server provides <code>POST /v1/chat/completions</code>, streaming responses, and a built-in chat page. Existing clients can use the <a href="/zinc/docs/api/">OpenAI-compatible API</a>.</p>
 
-    <p>Models load from GGUF files via direct memory-map — DMA to GPU VRAM on Vulkan, zero-copy <code>newBufferWithBytesNoCopy</code> on Metal. Supports Q4_K, Q5_K, Q6_K, Q8_0, and F16 quantization. Architectures: Qwen 3 / 3.5 / 3.6 (dense and A3B MoE), Gemma 4, and SSM-hybrid paths.</p>
+    <p>Models load from memory-mapped GGUF files. Current quantization support includes Q4_K, Q5_K, Q6_K, Q8_0, and F16. The tested model families are listed in the <a href="/zinc/docs/running-zinc/">model guide</a>.</p>
 
-    <p>The whole thing is written in Zig (with a thin Objective-C shim for Metal). No hidden allocations, direct GPU API calls, comptime dispatch tables, single binary.</p>
+    <p>ZINC is written in Zig and builds as one binary. The Metal backend uses a small Objective-C shim.</p>
 
     <h2>Architecture</h2>
 
     <div class="arch-diagram">
-      <img src="/zinc-architecture.svg" alt="ZINC LLM inference engine architecture with native GPU backends for Vulkan, Metal, and CUDA" width="680" />
+      <img src="/zinc-architecture.svg" alt="ZINC LLM inference engine architecture with native GPU backends for Vulkan, ROCm, Metal, and CUDA" width="680" />
     </div>
 
     <h2>Supported hardware: consumer GPU targets</h2>
 
-    <p>ZINC targets consumer and prosumer GPUs with native backends. AMD RDNA is the strongest measured path today; Intel Arc and Apple Silicon are supported; NVIDIA CUDA is an active experimental track.</p>
+    <p>AMD Radeon, Intel Arc, and Apple Silicon are supported. NVIDIA CUDA is experimental. The cards below are the models currently used for development and testing.</p>
 
     <h3>AMD Radeon GPUs — RDNA4 &amp; RDNA3 (Linux)</h3>
     <ul>
       <li><strong>RDNA4</strong>: RX 9070, RX 9070 XT, Radeon AI PRO R9700 (primary tuning target)</li>
       <li><strong>RDNA3</strong>: RX 7900 XTX, RX 7900 XT, RX 7800 XT, RX 7700 XT, RX 7600</li>
     </ul>
-    <p>Any AMD GPU with Vulkan 1.3 and RADV or AMDVLK drivers should work.</p>
+    <p>Use Vulkan 1.3 with RADV/AMDVLK for the broad AMD path, or build with <code>-Dbackend=rocm</code> on a supported ROCm installation. The current ROCm reference stack is validated on RDNA4 <code>gfx1201</code>.</p>
 
     <h3>Apple Silicon (macOS)</h3>
     <ul>
@@ -456,7 +465,7 @@ const jsonLd = {
     <h3>Intel Arc — Xe2 / Battlemage (Linux Vulkan)</h3>
     <ul>
       <li>Official support target: Arc B-series / Battlemage class GPUs</li>
-      <li>Current public benchmark node completes all five managed catalog rows</li>
+      <li>Current public benchmark node completes four managed catalog rows</li>
       <li>Arc-specific performance tuning is still younger than the RDNA4 path</li>
     </ul>
 
@@ -561,7 +570,7 @@ const jsonLd = {
 
   .platform-strip {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: var(--space-sm);
     margin: 0 0 var(--space-xl);
   }

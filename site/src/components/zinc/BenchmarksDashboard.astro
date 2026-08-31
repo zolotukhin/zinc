@@ -448,6 +448,13 @@ function outputQualityStatus(scenario: any) {
   const preview = `${scenario?.zinc?.output_preview ?? ''}`.trim();
   const generatedTokens = scenario?.zinc?.generated_tokens ?? null;
   if (!preview) {
+    if (generatedTokens != null && generatedTokens <= 0) {
+      return {
+        tone: 'caution',
+        label: 'Generation failed',
+        note: 'The request returned without generating a token.',
+      };
+    }
     return {
       tone: 'neutral',
       label: 'No Preview',
@@ -545,8 +552,10 @@ function selectPrimaryScenario(scenarios: any[]) {
 }
 
 function scenarioStatus(scenario: any) {
-  const zincOk = promptValue(scenario) != null || decodeValue(scenario) != null || endToEndValue(scenario) != null;
-  const baselineOk = baselinePromptValue(scenario) != null || baselineDecodeValue(scenario) != null;
+  const zincOk = [promptValue(scenario), decodeValue(scenario), endToEndValue(scenario)]
+    .some((value) => value != null && value > 0);
+  const baselineOk = [baselinePromptValue(scenario), baselineDecodeValue(scenario)]
+    .some((value) => value != null && value > 0);
   const reason = compactReason(warningText(scenario));
 
   if (zincOk && baselineOk) {
@@ -587,7 +596,10 @@ function normalizeTarget(target: any) {
       return primary ? { model, scenario: primary } : null;
     })
     .filter(Boolean);
-  const successful = primaryRows.filter((row: any) => row.scenario?.zinc?.decode_tps);
+  const successful = primaryRows.filter((row: any) => {
+    const decode = row.scenario?.zinc?.decode_tps?.median ?? row.scenario?.zinc?.decode_tps?.avg ?? null;
+    return decode != null && decode > 0;
+  });
   const allScenarios = visibleModels.flatMap((model: any) => ensureScenarios(model));
   const summaryScenarios = allScenarios.filter((scenario: any) => !isReviewOutputScenario(scenario));
   const compared = visibleModels.filter((model: any) => ensureScenarios(model).some((scenario: any) => !isReviewOutputScenario(scenario) && overallRatioValue(scenario) != null));
@@ -621,10 +633,32 @@ function scenarioIdsForTarget(target: any) {
   return scenarioOrder.filter((id) => ids.has(id));
 }
 
-const targetOrder = ['rdna', 'metal', 'intel'];
+const targetOrder = ['rdna', 'rdna-rocm', 'intel', 'metal', 'cuda'];
 function targetRank(id: string) {
   const index = targetOrder.indexOf(id);
   return index === -1 ? targetOrder.length : index;
+}
+
+function targetBackendLabel(target: any) {
+  const configured = `${target?.methodology?.zinc_backend ?? ''}`.trim();
+  if (target?.id === 'rdna-rocm' || /^rocm$/i.test(configured)) return 'ROCm';
+  if (target?.id === 'rdna-zinc-rt' || /zinc_rt/i.test(configured)) return 'ZINC_RT';
+  if (/vulkan/i.test(configured) || target?.id === 'rdna' || target?.id === 'intel') return 'Vulkan';
+  if (/metal/i.test(configured) || target?.id === 'metal') return 'Metal';
+  if (/cuda/i.test(configured) || target?.id === 'cuda') return 'CUDA';
+  return configured || 'Backend';
+}
+
+function targetBackendKey(target: any) {
+  return targetBackendLabel(target).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+}
+
+function targetPlatformLabel(target: any) {
+  if (`${target?.id ?? ''}`.startsWith('rdna')) return 'AMD Radeon';
+  if (target?.id === 'intel') return 'Intel Arc';
+  if (target?.id === 'metal') return 'Apple Silicon';
+  if (target?.id === 'cuda') return 'NVIDIA RTX';
+  return target?.label ?? target?.machine?.gpu ?? 'GPU target';
 }
 
 const targets = [...benchmarkData.targets]
@@ -773,7 +807,7 @@ const jsonLd = {
     {
       '@type': 'CollectionPage',
       name: 'ZINC Benchmarks vs llama.cpp',
-      description: 'ZINC benchmark dashboard for AMD RDNA, Intel Arc, and Apple Silicon, including prompt throughput, prefill latency, decode throughput, total latency, same-machine comparison against llama.cpp, and a separate llama.cpp ROCm reference sweep.',
+      description: 'ZINC benchmark dashboard for Vulkan and ROCm on AMD RDNA, plus Intel Arc, Apple Silicon, and NVIDIA CUDA measurements with same-machine llama.cpp comparisons.',
       url: pageUrl,
       about: {
         '@type': 'SoftwareApplication',
@@ -810,7 +844,7 @@ const jsonLd = {
 
 <BaseLayout
   title="ZINC Benchmarks vs llama.cpp"
-  description="ZINC benchmark dashboard for AMD RDNA, Intel Arc, and Apple Silicon, with scenario-based prompt throughput, decode throughput, same-machine comparison against llama.cpp, and a separate llama.cpp ROCm reference sweep."
+  description="ZINC benchmark dashboard for Vulkan and ROCm on AMD RDNA, plus Intel Arc, Apple Silicon, and NVIDIA CUDA measurements with same-machine llama.cpp comparisons."
   keywords="ZINC benchmarks, llama.cpp comparison, llama.cpp ROCm benchmark, Apple Silicon Metal benchmark, AMD RDNA benchmark, Intel Arc benchmark, local LLM benchmark, prefill throughput, decode throughput, latency benchmark"
   canonicalUrl={canonicalUrl}
   jsonLd={jsonLd}
@@ -821,11 +855,11 @@ const jsonLd = {
     <div class="hero-copy">
       <p class="eyebrow">ZINC</p>
       <h1>Benchmarks</h1>
-      <p class="intro">ZINC vs llama.cpp on the same machines, plus a separate ROCm reference for llama.cpp on AMD.</p>
+      <p class="intro">Choose a platform and backend, then compare ZINC with llama.cpp on the same GPU, model, prompts, and reusable-server protocol.</p>
     </div>
     <div class="hero-stats">
       <article class="stat-card">
-        <span>Targets</span>
+        <span>Backend runs</span>
         <strong>{targets.length}</strong>
       </article>
       <article class="stat-card">
@@ -843,41 +877,51 @@ const jsonLd = {
     </div>
   </section>
 
-  <nav class="target-tabs" aria-label="Benchmark targets" role="tablist">
-    {targets.map((target, index) => (
-      <button
-        type="button"
-        role="tab"
-        id={`tab-${target.id}`}
-        aria-controls={`panel-${target.id}`}
-        aria-selected={index === 0 ? 'true' : 'false'}
-        class:list={['target-tab', { active: index === 0 }]}
-        data-bench-target-tab={target.id}
-      >
-        <div class="target-tab-head">
-          <span>
-            {target.label}
-            {isPartialTarget(target) && <em>partial</em>}
-          </span>
-          <small>{target.machine.gpu}</small>
-        </div>
-        <div class="target-tab-stats">
-          <div>
-            <strong>{formatNumber(target.summary?.average_decode_tps)}</strong>
-            <small>tok/s</small>
+  <section class="target-selector" aria-labelledby="backend-selector-heading">
+    <header class="selector-head">
+      <div>
+        <p class="eyebrow">Published runs</p>
+        <h2 id="backend-selector-heading">Platform &amp; backend</h2>
+      </div>
+      <p>Vulkan and ROCm have separate builds and results. Choose either AMD backend to see its models, run details, and llama.cpp comparison.</p>
+    </header>
+    <nav class="target-tabs" aria-label="Benchmark platform and backend" role="tablist">
+      {targets.map((target, index) => (
+        <button
+          type="button"
+          role="tab"
+          id={`tab-${target.id}`}
+          aria-controls={`panel-${target.id}`}
+          aria-selected={index === 0 ? 'true' : 'false'}
+          class:list={['target-tab', `backend-${targetBackendKey(target)}`, { active: index === 0 }]}
+          data-bench-target-tab={target.id}
+        >
+          <div class="target-tab-head">
+            <div class="target-tab-identity">
+              <span>{targetPlatformLabel(target)}</span>
+              <b class:list={['backend-badge', `backend-${targetBackendKey(target)}`]}>{targetBackendLabel(target)}</b>
+              {isPartialTarget(target) && <em>partial</em>}
+            </div>
+            <small>{target.machine.gpu}</small>
           </div>
-          <div>
-            <strong>{formatPercent(target.summary?.average_pct_of_llama)}</strong>
-            <small>overall</small>
+          <div class="target-tab-stats">
+            <div>
+              <strong>{formatNumber(target.summary?.average_decode_tps)}</strong>
+              <small>tok/s</small>
+            </div>
+            <div>
+              <strong>{formatPercent(target.summary?.average_pct_of_llama)}</strong>
+              <small>overall</small>
+            </div>
+            <div>
+              <strong>{successfulCount(target)}/{benchmarkedCount(target)}</strong>
+              <small>complete</small>
+            </div>
           </div>
-          <div>
-            <strong>{successfulCount(target)}/{benchmarkedCount(target)}</strong>
-            <small>complete</small>
-          </div>
-        </div>
-      </button>
-    ))}
-  </nav>
+        </button>
+      ))}
+    </nav>
+  </section>
 
   {targets.map((target, index) => {
     const scenarioIds = scenarioIdsForTarget(target);
@@ -909,13 +953,13 @@ const jsonLd = {
       >
         <header class="panel-header">
           <div>
-            <p class="eyebrow">{target.machine.label}</p>
-            <h2>{target.label}</h2>
+            <p class="eyebrow">{targetPlatformLabel(target)} · {target.machine.label}</p>
+            <h2>{targetBackendLabel(target)} backend</h2>
             <p class="panel-copy">{target.machine.gpu} · {target.machine.memory ?? 'n/a'} · {formatRuns(target.methodology?.runs, target.methodology?.warmup_runs)}</p>
             {(target.summary?.successful_models ?? 0) < (target.summary?.benchmarked_models ?? 0) && (
               <p class="panel-banner" role="note">
-                <strong>Partial benchmark run.</strong>{' '}
-                Only {(target.summary?.successful_models ?? 0)} of {(target.summary?.benchmarked_models ?? 0)} ZINC runs completed on this node in the current artifact ({formatShortDate(target.generated_at)}); the rest currently fail (see each row's status for the underlying reason). Numbers and averages shown reflect only the rows that completed — treat them as a partial signal, not a head-to-head verdict.
+                <strong>Some models did not complete.</strong>{' '}
+                ZINC completed {(target.summary?.successful_models ?? 0)} of {(target.summary?.benchmarked_models ?? 0)} models in this run ({formatShortDate(target.generated_at)}). The averages use completed rows only; open a failed row for its recorded reason.
               </p>
             )}
           </div>
@@ -1467,11 +1511,10 @@ const jsonLd = {
     <header class="rocm-head">
       <div>
         <p class="eyebrow">{rocmReference.label}</p>
-        <h2 id="rocm-reference-heading">ROCm reference sweep</h2>
+        <h2 id="rocm-reference-heading">llama.cpp ROCm microbench archive</h2>
         <p>
-          These are llama.cpp HIP/ROCm <code>llama-bench</code> rows on the same R9700 class node.
-          They are intentionally separate from the headline ZINC score, which remains a reusable
-          server-vs-server scenario matrix.
+          These older <code>llama-bench</code> pp/tg rows remain available for low-level context and
+          are separate from the ZINC ROCm server comparison selected above.
         </p>
       </div>
       <div class="rocm-summary" aria-label="ROCm reference summary">
@@ -1746,6 +1789,38 @@ const jsonLd = {
     padding: 0.2rem 0 1rem;
   }
 
+  .target-selector {
+    display: grid;
+    gap: 0.8rem;
+    margin-bottom: 1rem;
+    padding: 0.9rem;
+    border: 1px solid color-mix(in srgb, var(--color-border) 82%, #d97706 18%);
+    border-radius: 10px;
+    background: var(--bench-surface-plain);
+    box-shadow: var(--bench-shadow);
+  }
+
+  .selector-head {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1.2rem;
+  }
+
+  .selector-head h2 {
+    margin: 0;
+    font-size: clamp(1.25rem, 2.2vw, 1.7rem);
+    letter-spacing: -0.03em;
+  }
+
+  .selector-head p:last-child {
+    max-width: 650px;
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: 0.88rem;
+    line-height: 1.5;
+  }
+
   .eyebrow {
     margin: 0 0 0.45rem;
     text-transform: uppercase;
@@ -1931,7 +2006,7 @@ const jsonLd = {
 
   .target-tabs {
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    margin-bottom: 0.9rem;
+    margin: 0;
   }
 
   .scenario-tabs {
@@ -2002,6 +2077,75 @@ const jsonLd = {
     display: grid;
     gap: 0.1rem;
     margin-bottom: 0.55rem;
+  }
+
+  .target-tab-identity {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .backend-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.35rem;
+    padding: 0.1rem 0.42rem;
+    border: 1px solid color-mix(in srgb, #d97706 38%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, #d97706 11%, transparent);
+    color: #b45309;
+    font-size: 0.64rem;
+    font-weight: 850;
+    letter-spacing: 0.065em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .backend-badge.backend-rocm {
+    border-color: color-mix(in srgb, #0891b2 44%, transparent);
+    background: color-mix(in srgb, #06b6d4 13%, transparent);
+    color: #0e7490;
+  }
+
+  .backend-badge.backend-metal {
+    border-color: color-mix(in srgb, #7c3aed 38%, transparent);
+    background: color-mix(in srgb, #8b5cf6 11%, transparent);
+    color: #6d28d9;
+  }
+
+  .backend-badge.backend-cuda {
+    border-color: color-mix(in srgb, #16a34a 38%, transparent);
+    background: color-mix(in srgb, #22c55e 11%, transparent);
+    color: #15803d;
+  }
+
+  .target-tab.backend-rocm.active {
+    border-color: #0891b2;
+    background: color-mix(in srgb, #06b6d4 10%, var(--bench-surface-soft) 90%);
+  }
+
+  .target-tab.backend-rocm.active::before {
+    border-color: #0891b2;
+    background: radial-gradient(circle at center, #0891b2 0 42%, transparent 45%);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .backend-badge {
+      color: #fdba74;
+    }
+
+    .backend-badge.backend-rocm {
+      color: #67e8f9;
+    }
+
+    .backend-badge.backend-metal {
+      color: #c4b5fd;
+    }
+
+    .backend-badge.backend-cuda {
+      color: #86efac;
+    }
   }
 
   .scenario-tab-head {
@@ -3868,6 +4012,33 @@ const jsonLd = {
 
     .rocm-method {
       display: block;
+    }
+  }
+
+  /* Backend selector is the primary navigation for published measurements. */
+  .target-selector .target-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    padding: 0;
+  }
+
+  @media (max-width: 760px) {
+    .target-selector {
+      gap: 0.6rem;
+      margin-bottom: 0.8rem;
+      padding: 0.65rem;
+    }
+
+    .selector-head {
+      display: block;
+    }
+
+    .selector-head p:last-child {
+      display: none;
+    }
+
+    .target-selector .target-tabs {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin: 0;
     }
   }
 </style>

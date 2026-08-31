@@ -48,6 +48,10 @@ uint32_t cuda_max_shared_mem_per_block(CudaCtx* ctx);
 uint32_t cuda_warp_size(CudaCtx* ctx);             // 32 on all NVIDIA
 // Fills name_out (NUL-terminated, up to cap bytes) with the device name.
 void     cuda_device_name(CudaCtx* ctx, char* name_out, size_t cap);
+// Fills arch_out with the native compilation target (for example sm_120 or
+// gfx1201). This is diagnostic metadata; callers must not infer capabilities
+// from the string.
+void     cuda_device_arch(CudaCtx* ctx, char* arch_out, size_t cap);
 
 // ---- Buffer management -------------------------------------------------------
 // Device-local buffer (the common case for weights/activations/state).
@@ -134,6 +138,7 @@ void cuda_cublas_hgemm(CudaCtx* ctx, unsigned M, unsigned N, unsigned K,
 // exec always matches the current step's parameters (bit-identical to the
 // un-captured chain). MUST NOT be used around a chain that synchronizes or reads
 // back mid-capture (e.g. the MoE router host readback).
+int        cuda_graph_supported(void);                    // 1 when capture/replay is implemented
 CudaGraph* cuda_graph_create(void);
 int        cuda_graph_begin(CudaCtx* ctx);                 // 1 on success, 0 on failure
 int        cuda_graph_end_launch(CudaCtx* ctx, CudaGraph* graph); // 1 on success
