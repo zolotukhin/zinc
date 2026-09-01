@@ -95,6 +95,12 @@ pub const ReqChannel = struct {
     done: bool = false,
     /// True if generation errored on the worker (GPU/alloc failure).
     failed: bool = false,
+    /// Per-request device timings. The worker records these before publishing
+    /// completion; the HTTP handler reads them after `finished` is observed.
+    prefill_tokens: u64 = 0,
+    prefill_wall_ns: u64 = 0,
+    decode_tokens: u64 = 0,
+    decode_wall_ns: u64 = 0,
 };
 
 /// Result of `nextChunk`: how many fresh tokens were copied into the caller's
@@ -245,6 +251,24 @@ pub const ServeEngine = struct {
         self.cond.broadcast();
     }
 
+    fn recordPrefillTiming(self: *ServeEngine, id: u64, tokens: usize, wall_ns: u64) void {
+        self.mutex.lock();
+        if (self.registry.get(id)) |chan| {
+            chan.prefill_tokens += @intCast(tokens);
+            chan.prefill_wall_ns += wall_ns;
+        }
+        self.mutex.unlock();
+    }
+
+    fn recordDecodeTiming(self: *ServeEngine, id: u64, wall_ns: u64) void {
+        self.mutex.lock();
+        if (self.registry.get(id)) |chan| {
+            chan.decode_tokens += 1;
+            chan.decode_wall_ns += wall_ns;
+        }
+        self.mutex.unlock();
+    }
+
     /// Mark a request finished (worker-only): flip its channel `done`, free the slot.
     fn finishSlot(self: *ServeEngine, slot_id: u32) void {
         const req = &self.sched.slots[slot_id].?;
@@ -307,7 +331,8 @@ pub const ServeEngine = struct {
                 // Clear any accumulated state from this slot's previous request
                 // BEFORE prefilling the new one from pos=0 (qwen SSM recurrent state;
                 // no-op for gemma). Slots are reused when nslots < concurrent clients.
-                fwd.resetSlot(slot_id) catch {
+                fwd.resetSlot(slot_id) catch |err| {
+                    log.err("request {d} slot reset failed: {s}", .{ req.id, @errorName(err) });
                     self.failSlot(slot_id);
                     continue;
                 };
@@ -319,15 +344,17 @@ pub const ServeEngine = struct {
                 // A/B toggle: ZINC_BATCHED_PREFILL=0 disables (uses per-token fallback).
                 const use_batched = np >= 32 and
                     (std.posix.getenv("ZINC_BATCHED_PREFILL") == null or
-                    !std.mem.eql(u8, std.posix.getenv("ZINC_BATCHED_PREFILL").?, "0"));
+                        !std.mem.eql(u8, std.posix.getenv("ZINC_BATCHED_PREFILL").?, "0"));
                 const batched_tok = if (use_batched)
                     (fwd.prefillSlot(req.prompt_tokens, slot_id) catch null)
                 else
                     null;
                 if (batched_tok) |tok| {
                     if (timer_opt) |*tm| {
-                        _ = self.prefill_wall_ns.fetchAdd(tm.read() - pf_t0, .monotonic);
+                        const elapsed = tm.read() - pf_t0;
+                        _ = self.prefill_wall_ns.fetchAdd(elapsed, .monotonic);
                         _ = self.prefill_tokens.fetchAdd(np, .monotonic);
+                        self.recordPrefillTiming(req.id, np, elapsed);
                     }
                     req.appendToken(tok) catch {
                         self.failSlot(slot_id);
@@ -346,7 +373,8 @@ pub const ServeEngine = struct {
                         var ps = [_]u32{pos};
                         var sl = [_]u32{slot_id};
                         var ot = [_]u32{0};
-                        fwd.decodeBatch(&tk, &ps, &sl, &ot) catch {
+                        fwd.decodeBatch(&tk, &ps, &sl, &ot) catch |err| {
+                            log.err("request {d} prefill failed at token {d}/{d}: {s}", .{ req.id, k + 1, np, @errorName(err) });
                             self.failSlot(slot_id);
                             break;
                         };
@@ -354,8 +382,10 @@ pub const ServeEngine = struct {
                         pos += 1;
                     } else {
                         if (timer_opt) |*tm| {
-                            _ = self.prefill_wall_ns.fetchAdd(tm.read() - pf_t0, .monotonic);
+                            const elapsed = tm.read() - pf_t0;
+                            _ = self.prefill_wall_ns.fetchAdd(elapsed, .monotonic);
                             _ = self.prefill_tokens.fetchAdd(np, .monotonic);
+                            self.recordPrefillTiming(req.id, np, elapsed);
                         }
                         req.appendToken(tok) catch {
                             self.failSlot(slot_id);
@@ -382,14 +412,17 @@ pub const ServeEngine = struct {
                     sls[i] = slot_id;
                 }
                 const dec_t0 = if (timer_opt) |*tm| tm.read() else 0;
-                fwd.decodeBatch(tks[0..ndec], pss[0..ndec], sls[0..ndec], out[0..ndec]) catch {
+                fwd.decodeBatch(tks[0..ndec], pss[0..ndec], sls[0..ndec], out[0..ndec]) catch |err| {
+                    log.err("batched decode failed for {d} active request(s): {s}", .{ ndec, @errorName(err) });
                     for (dec_buf[0..ndec]) |slot_id| {
                         if (self.sched.slots[slot_id] != null) self.failSlot(slot_id);
                     }
                     continue;
                 };
+                var dec_elapsed: u64 = 0;
                 if (timer_opt) |*tm| {
-                    _ = self.decode_wall_ns.fetchAdd(tm.read() - dec_t0, .monotonic);
+                    dec_elapsed = tm.read() - dec_t0;
+                    _ = self.decode_wall_ns.fetchAdd(dec_elapsed, .monotonic);
                     _ = self.decode_tokens.fetchAdd(ndec, .monotonic);
                     _ = self.decode_steps.fetchAdd(1, .monotonic);
                     if (ndec > self.peak_batch.load(.monotonic))
@@ -397,6 +430,7 @@ pub const ServeEngine = struct {
                 }
                 for (dec_buf[0..ndec], 0..) |slot_id, i| {
                     const req = &self.sched.slots[slot_id].?;
+                    if (dec_elapsed != 0) self.recordDecodeTiming(req.id, dec_elapsed);
                     req.appendToken(out[i]) catch {
                         self.failSlot(slot_id);
                         continue;

@@ -7,6 +7,7 @@ tags:
   - architecture
   - zig
   - vulkan
+  - rocm
   - metal
   - design
   - llm-inference
@@ -20,6 +21,7 @@ keywords:
   - why build from scratch
   - Zig inference engine
   - Vulkan inference engine
+  - ROCm inference engine
   - Metal inference engine
   - GGUF parser Zig
   - static compute graph
@@ -35,11 +37,11 @@ keywords:
   - Apple Silicon inference design
   - OpenAI compatible server architecture
   - zero dependency inference engine
-excerpt: "ZINC is a from-scratch LLM inference engine in Zig targeting Vulkan and Metal. This post walks through every major design decision — from 'why not fork llama.cpp' to static compute graphs, hand-tuned shaders, paged KV cache, and a zero-dependency architecture — and explains what we learned, what surprised us, and what we would do again."
-seoDescription: "Architecture decisions behind a local LLM inference engine: Zig, Vulkan, Metal, GGUF parsing, static graphs, GPU shaders, and KV cache design."
+excerpt: "ZINC is a from-scratch LLM inference engine in Zig with Vulkan, ROCm, and Metal backends. This post walks through the major design decisions — from 'why not fork llama.cpp' to static compute graphs, tuned kernels, paged KV cache, and explicit memory ownership — and explains what we learned."
+seoDescription: "Architecture decisions behind a local LLM inference engine: Zig, Vulkan, ROCm, Metal, GGUF parsing, static graphs, GPU kernels, and KV cache design."
 ---
 
-Quick answer: ZINC is a from-scratch local LLM inference engine because the design center is not generic model coverage; it is predictable GPU execution on AMD RDNA, Apple Silicon, and eventually other consumer hardware. The core bets are Zig, GGUF-native loading, static decode graphs, hand-tuned Vulkan/Metal kernels, explicit memory ownership, and an OpenAI-compatible serving layer.
+Quick answer: ZINC is a from-scratch local LLM inference engine because the design center is not generic model coverage; it is predictable GPU execution on AMD RDNA, Apple Silicon, and eventually other consumer hardware. The core bets are Zig, GGUF-native loading, static decode graphs, tuned Vulkan, ROCm, and Metal kernels, explicit memory ownership, and an OpenAI-compatible serving layer.
 
 There is a meme format where step one is "draw two circles" and step two is "draw the rest of the owl." Building an inference engine from scratch follows the same pattern, except step one is "parse a GGUF file" and step two is "implement the entire forward pass of a 35-billion-parameter model on two different GPU architectures."
 
@@ -88,7 +90,7 @@ llama.cpp supports CUDA, Vulkan, Metal, OpenCL, SYCL, and CPU backends through a
 APPROVE
 [ build ZINC from scratch ]
 - parser + kernels + KV cache
-- Metal + Vulkan on native terms
+- Metal, Vulkan, and ROCm on native terms
 - more work, more control</pre>
   <figcaption>The decision that turned a weekend project into something much larger.</figcaption>
 </figure>
@@ -104,47 +106,49 @@ The language choice deserves its own post (and [it got one](/blog/2026-04-02-why
 But the deeper reason is cultural. Zig's design philosophy is "no hidden control flow, no hidden allocations, no hidden anything." In GPU programming, hidden things kill you. A silent allocation in a hot path. An exception that unwinds through a command buffer recording. A default constructor that secretly initializes a 4 GB buffer. Zig makes all of that structurally impossible.
 
 ```zig
-// This is the entire GPU backend abstraction. Six lines.
+// Backend selection is resolved at compile time.
 const builtin = @import("builtin");
+const std = @import("std");
+const build_options = @import("build_options");
 
 pub const is_metal = builtin.os.tag == .macos;
-pub const is_vulkan = builtin.os.tag == .linux;
+pub const is_rocm = builtin.os.tag == .linux and
+    std.mem.eql(u8, build_options.backend, "rocm");
+pub const is_vulkan = builtin.os.tag == .linux and !is_rocm;
 
 pub const backend = if (is_metal)
     @import("../metal/device.zig")
+else if (is_rocm)
+    @import("../cuda/device.zig")
 else
     @import("../vulkan/instance.zig");
 ```
 
-When you compile on macOS, the Vulkan code does not exist. When you compile on Linux, Metal does not exist. No `#ifdef`. No runtime dispatch. No vtable. The compiler eliminates the dead path entirely. We got a cross-platform inference engine with the codegen of a single-platform one.
+When you compile, only the selected backend exists in the binary. No `#ifdef`. No runtime dispatch. No vtable. The compiler eliminates the dead paths, so Vulkan, ROCm, and Metal can use different implementations without adding runtime abstraction overhead.
 
 Rust was the other serious contender. We chose Zig over Rust because Zig's C FFI is frictionless (critical for Vulkan and Metal interop), the borrow checker would have fought us constantly on GPU buffer lifetimes that do not fit Rust's ownership model, and `build.zig` is dramatically simpler than `build.rs` + CMake + bindgen for a project that compiles both GLSL and Objective-C.
 
-## Decision 3: Vulkan and Metal, not ROCm, not OpenCL
+## Decision 3: Vulkan, ROCm, and Metal on their own terms
 
-This is the decision that defines the project.
+This is one of the decisions that defines the project, and it changed as the available AMD stack improved.
 
-AMD's official compute stack for AI is [ROCm](https://rocm.docs.amd.com/). It supports HIP (a CUDA-like API), a mature compiler toolchain, and broad library support. But ROCm does not support consumer RDNA3 and RDNA4 GPUs as first-class targets. The cards people actually buy — RX 7900 XTX, RX 9070 XT, Radeon AI PRO R9700 — are second-class citizens in the ROCm ecosystem.
+AMD's official compute stack for AI is [ROCm](https://rocm.docs.amd.com/). It provides HIP, a mature compiler toolchain, and broad library support. ZINC originally led with Vulkan because it reached consumer RDNA hardware through the drivers people already had. Once the current ROCm stack proved reliable on our RDNA4 node, we added it as a first-class backend rather than forcing one API to cover every installation and performance goal.
 
-Vulkan, on the other hand, works on every AMD GPU with a driver. The [RADV](https://docs.mesa3d.org/drivers/radv.html) Mesa driver is open-source, actively maintained, and exposes compute shader features that map directly to what inference needs: large workgroups, shared memory, subgroup operations, and (on RDNA4) cooperative matrix.
+Vulkan remains the broad-compatibility path. The [RADV](https://docs.mesa3d.org/drivers/radv.html) Mesa driver is open-source, actively maintained, and exposes compute features that map directly to inference: large workgroups, shared memory, subgroup operations, and cooperative matrices on supported hardware. ROCm is the native HIP path, where ZINC can compile and tune kernels directly for AMD's compute stack.
 
 ```mermaid
 flowchart LR
-    subgraph "The ROCm path"
-        R1["Install ROCm 6.x"] --> R2["Discover your GPU<br/>is not supported"]
-        R2 --> R3["Try HSA_OVERRIDE_GFX_VERSION"]
-        R3 --> R4["Debug random segfaults"]
-        R4 --> R5["Give up and buy NVIDIA"]
-    end
-    subgraph "The ZINC path"
-        Z1["Install Mesa driver"] --> Z2["zig build run"]
-        Z2 --> Z3["Inference works"]
-    end
-    style R5 fill:#2d1117,stroke:#f85149,color:#fff
-    style Z3 fill:#0d1117,stroke:#3fb950,color:#c9d1d9
+    A["AMD GPU"] --> B{"Choose the backend<br/>for this machine"}
+    B -->|"Broad driver availability"| V["Vulkan + RADV"]
+    B -->|"Native AMD compute"| R["ROCm + HIP"]
+    V --> Z["ZINC model + server"]
+    R --> Z
+    M["Apple Silicon"] --> T["Metal"]
+    T --> Z
+    style Z fill:#0d1117,stroke:#3fb950,color:#c9d1d9
 ```
 
-The same logic applied to Apple Silicon. Apple has no CUDA. Apple has no ROCm. Apple has Metal. And Metal on Apple Silicon is *excellent* — unified memory means zero-copy model loading, simdgroup operations map cleanly to inference workloads, and the M-series chips have absurd memory bandwidth for their power envelope. Ignoring Metal would mean ignoring a massive installed base of capable hardware.
+Apple Silicon has its own native answer: Metal. Unified memory enables zero-copy model loading, simdgroup operations map cleanly to inference workloads, and the M-series chips offer unusually high memory bandwidth for their power envelope. Ignoring Metal would mean ignoring a massive installed base of capable hardware.
 
 OpenCL was never seriously considered. It is too thin, too poorly maintained on modern hardware, and lacks the features (subgroup operations, cooperative matrix, explicit memory management) that make high-performance inference possible.
 

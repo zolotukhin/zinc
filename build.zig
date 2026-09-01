@@ -5,6 +5,7 @@ const Backend = enum {
     vulkan,
     metal,
     cuda,
+    rocm,
     zinc_rt,
 };
 
@@ -65,6 +66,30 @@ fn configureCudaModule(
     module.linkSystemLibrary("cudart", .{}); // cublas runtime dependency
 }
 
+fn configureRocmModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    module: *std.Build.Module,
+) void {
+    // ROCm backend — Linux + AMD only. The Zig compute/model layers reuse the
+    // mature CUDA-side orchestration through its stable C ABI, while this shim
+    // implements that ABI with HIP, hipRTC, and hipBLAS.
+    _ = target;
+    const rocm_home = b.graph.env_map.get("ROCM_PATH") orelse
+        b.graph.env_map.get("ROCM_HOME") orelse
+        "/opt/rocm";
+    module.addCSourceFile(.{
+        .file = b.path("src/rocm/rocm_shim.c"),
+        .flags = &.{ "-std=c11", "-D__HIP_PLATFORM_AMD__=1" },
+    });
+    module.addIncludePath(b.path("src/cuda"));
+    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "include" }) });
+    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ rocm_home, "lib" }) });
+    module.linkSystemLibrary("amdhip64", .{});
+    module.linkSystemLibrary("hiprtc", .{});
+    module.linkSystemLibrary("hipblas", .{});
+}
+
 fn resolveBunExe(b: *std.Build) []const u8 {
     if (b.graph.env_map.get("BUN_EXE")) |bun_exe| return bun_exe;
     if (std.fs.accessAbsolute("/root/.bun/bin/bun", .{})) |_| return "/root/.bun/bin/bun" else |_| {}
@@ -83,7 +108,7 @@ fn addBunDirToPath(b: *std.Build, run: *std.Build.Step.Run, bun_exe: []const u8)
 }
 
 pub fn build(b: *std.Build) void {
-    const requested_backend = b.option(Backend, "backend", "Select inference backend: auto, vulkan, metal, cuda, zinc_rt") orelse .auto;
+    const requested_backend = b.option(Backend, "backend", "Select inference backend: auto, vulkan, metal, cuda, rocm, zinc_rt") orelse .auto;
     const target = b.standardTargetOptions(.{
         .default_target = if (requested_backend == .zinc_rt)
             .{ .cpu_model = .native }
@@ -126,6 +151,9 @@ pub fn build(b: *std.Build) void {
     }
     if (selected_backend == .cuda and !is_linux) {
         @panic("-Dbackend=cuda currently requires a Linux target (NVIDIA + CUDA toolkit)");
+    }
+    if (selected_backend == .rocm and !is_linux) {
+        @panic("-Dbackend=rocm currently requires a Linux target (AMD + ROCm toolkit)");
     }
 
     const build_options = b.addOptions();
@@ -410,6 +438,8 @@ pub fn build(b: *std.Build) void {
         exe_mod.linkFramework("Foundation", .{});
     } else if (selected_backend == .cuda) {
         configureCudaModule(b, target, exe_mod);
+    } else if (selected_backend == .rocm) {
+        configureRocmModule(b, target, exe_mod);
     } else {
         configureVulkanModule(b, target, exe_mod);
     }
@@ -699,6 +729,10 @@ pub fn build(b: *std.Build) void {
         test_mod.addIncludePath(b.path("src/metal"));
         test_mod.linkFramework("Metal", .{});
         test_mod.linkFramework("Foundation", .{});
+    } else if (selected_backend == .cuda) {
+        configureCudaModule(b, target, test_mod);
+    } else if (selected_backend == .rocm) {
+        configureRocmModule(b, target, test_mod);
     } else {
         configureVulkanModule(b, target, test_mod);
     }

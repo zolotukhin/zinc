@@ -1,6 +1,6 @@
 //! GPU backend abstraction — comptime-resolved, zero runtime overhead.
-//! macOS → Metal. Linux → Vulkan by default, or CUDA with `-Dbackend=cuda`
-//! (NVIDIA / WSL2, where Vulkan is CPU-only). See docs/cuda-backend.md.
+//! macOS → Metal. Linux → Vulkan by default, CUDA with `-Dbackend=cuda`,
+//! or ROCm/HIP with `-Dbackend=rocm`.
 //! @section Inference Runtime
 const builtin = @import("builtin");
 const std = @import("std");
@@ -8,8 +8,11 @@ const build_options = @import("build_options");
 
 /// True when compiling for macOS (Metal backend).
 pub const is_metal = builtin.os.tag == .macos;
-/// True when compiling for Linux with `-Dbackend=cuda` (NVIDIA / WSL2).
-pub const is_cuda = builtin.os.tag == .linux and std.mem.eql(u8, build_options.backend, "cuda");
+/// True when compiling for Linux with `-Dbackend=rocm` (AMD + HIP).
+pub const is_rocm = builtin.os.tag == .linux and std.mem.eql(u8, build_options.backend, "rocm");
+/// True for the CUDA-family orchestration shared by native CUDA and ROCm/HIP.
+pub const is_cuda = builtin.os.tag == .linux and
+    (std.mem.eql(u8, build_options.backend, "cuda") or is_rocm);
 /// True when compiling for Linux with the Vulkan backend (the Linux default).
 pub const is_vulkan = builtin.os.tag == .linux and !is_cuda;
 
@@ -54,7 +57,7 @@ test "backend selection is correct for this platform" {
         try std.testing.expect(is_metal);
         try std.testing.expect(!is_vulkan);
     } else if (builtin.os.tag == .linux) {
-        try std.testing.expect(is_vulkan);
+        try std.testing.expect(is_vulkan != is_cuda);
         try std.testing.expect(!is_metal);
     }
 }

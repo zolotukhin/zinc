@@ -64,6 +64,8 @@ const CommandPool = if (gpu.is_vulkan) @import("vulkan/command.zig").CommandPool
 const Graph = graph_mod.Graph;
 
 const log = std.log.scoped(.zinc);
+const inference_timing_log = std.log.scoped(.forward);
+const accelerator_name = if (gpu.is_rocm) "ROCm" else "CUDA";
 
 /// Global flag enabling verbose debug log output when `--debug` is passed or the `ZINC_DEBUG` env var is set.
 pub var is_debug_mode: bool = false;
@@ -1775,8 +1777,8 @@ fn writeDecodeGraphArtifacts(
     }
 }
 
-// CUDA: prompt-mode entrypoint for the NVIDIA backend. Only referenced (and
-// therefore only analyzed) under -Dbackend=cuda. Does a real greedy decode:
+// Accelerator prompt/server entrypoint shared by the CUDA and ROCm backends.
+// Only referenced (and therefore only analyzed) for those backends. Does a real greedy decode:
 // load → forward init → tokenize → prefill (one decodeStep per prompt token) →
 // greedy generate (feed argmax back) → detokenize → print. Server mode is not
 // yet supported on CUDA.
@@ -1784,16 +1786,20 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     const model_path = config.model_path orelse {
         // model_id resolution flows through resolveStartupModel in main(); on
         // the CUDA path we only support an explicit -m/--model for now.
-        log.err("CUDA backend requires an explicit model path: zinc -m <model.gguf> --prompt \"...\"", .{});
+        log.err("{s} backend requires an explicit model path: zinc -m <model.gguf> --prompt \"...\"", .{accelerator_name});
         return error.NoModelSpecified;
     };
 
     var device = try cuda_device_mod.CudaDevice.initBest(allocator);
     defer device.deinit();
     var name_buf: [256]u8 = undefined;
-    log.info("ZINC CUDA backend — {s} (sm_{d}, {d} SMs)", .{
-        device.name(&name_buf), device.computeCapability(), device.smCount(),
-    });
+    if (comptime gpu.is_rocm) {
+        log.info("ZINC ROCm backend — {s} ({d} CUs)", .{ device.name(&name_buf), device.smCount() });
+    } else {
+        log.info("ZINC CUDA backend — {s} (sm_{d}, {d} SMs)", .{
+            device.name(&name_buf), device.computeCapability(), device.smCount(),
+        });
+    }
 
     // Load the model onto the GPU (weights uploaded verbatim-quantized).
     var model = loader_cuda_mod.Model.load(allocator, device.ctx, model_path) catch |err| {
@@ -1814,24 +1820,24 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     const max_ctx: u32 = if (config.context_length) |c| c else 2048;
     if (model.config.architecture == .gemma) {
         var fwd = forward_cuda_gemma_mod.ForwardGemma.init(allocator, &model, max_ctx) catch |err| {
-            log.err("Failed to init CUDA forward pass: {s}", .{@errorName(err)});
+            log.err("Failed to init {s} forward pass: {s}", .{ accelerator_name, @errorName(err) });
             return err;
         };
         defer fwd.deinit();
-        log.info("CUDA gemma4 forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
-            fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
+        log.info("{s} gemma4 forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
+            accelerator_name, fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
         });
         if (server_mode) return runCudaServe(.{ .gemma = &fwd }, &model, config, max_ctx, allocator);
         return runCudaDecode(&fwd, &model, config, max_ctx, allocator);
     }
 
     var fwd = forward_cuda_mod.ForwardCuda.init(allocator, &model, max_ctx) catch |err| {
-        log.err("Failed to init CUDA forward pass: {s}", .{@errorName(err)});
+        log.err("Failed to init {s} forward pass: {s}", .{ accelerator_name, @errorName(err) });
         return err;
     };
     defer fwd.deinit();
-    log.info("CUDA forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
-        fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
+    log.info("{s} forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
+        accelerator_name, fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
     });
     if (server_mode) return runCudaServe(.{ .qwen = &fwd }, &model, config, max_ctx, allocator);
     return runCudaDecode(&fwd, &model, config, max_ctx, allocator);
@@ -1999,6 +2005,11 @@ const ServeConnCtx = struct {
 /// `ServeEngine`, then accept connections and hand each to a detached handler.
 /// `fwd` is a `cuda_serve.Forward` so the server drives EITHER the gemma4 dense or
 /// the qwen35/36 hybrid-SSM+MoE forward (Effort 28 increment 4 — qwen serving).
+fn cudaServeSlotCount(requested: u32, gemma_moe: bool) u32 {
+    const clamped = std.math.clamp(requested, 1, 64);
+    return if (gemma_moe) 1 else clamped;
+}
+
 fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, config: Config, max_ctx: u32, allocator: std.mem.Allocator) !void {
     var tokenizer = tokenizer_mod.Tokenizer.initFromGGUF(&model.gguf_file, allocator) catch |err| {
         log.err("Failed to init tokenizer from GGUF: {s}", .{@errorName(err)});
@@ -2015,11 +2026,15 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
         eos = std.fmt.parseInt(u32, std.mem.trim(u8, v, " \n\r\t"), 10) catch eos;
     }
 
-    const nslots = std.math.clamp(config.max_parallel, 1, 64);
+    const gemma_moe = model.config.architecture == .gemma and model.config.n_experts > 0;
+    const nslots = cudaServeSlotCount(config.max_parallel, gemma_moe);
+    if (gemma_moe and config.max_parallel != 1) {
+        log.warn("Gemma MoE serving currently uses one request slot; ignoring --parallel {d}", .{config.max_parallel});
+    }
     const slot_ctx = max_ctx;
 
     var engine = cuda_serve_mod.ServeEngine.init(allocator, fwd, nslots, slot_ctx, eos) catch |err| {
-        log.err("Failed to init CUDA serve engine: {s}", .{@errorName(err)});
+        log.err("Failed to init {s} serve engine: {s}", .{ accelerator_name, @errorName(err) });
         return err;
     };
     defer engine.deinit();
@@ -2032,8 +2047,8 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
     };
     defer server.deinit();
 
-    log.info("ZINC CUDA server listening on :{d} (slots={d}, ctx={d}, eos={d}, debug_ids={})", .{
-        config.port, nslots, slot_ctx, eos, debug_ids,
+    log.info("ZINC {s} server listening on :{d} (slots={d}, ctx={d}, eos={d}, debug_ids={})", .{
+        accelerator_name, config.port, nslots, slot_ctx, eos, debug_ids,
     });
 
     while (true) {
@@ -2070,6 +2085,9 @@ const ServeReqBody = struct {
     messages: ?[]struct { role: []const u8 = "user", content: []const u8 = "" } = null,
     max_tokens: ?u32 = null,
     n_predict: ?u32 = null,
+    /// Preserve the original SSE default when omitted; explicit false selects
+    /// the OpenAI-compatible non-streaming response used by benchmark clients.
+    stream: ?bool = null,
 };
 
 fn handleServeConn(ctx: *ServeConnCtx) void {
@@ -2084,7 +2102,10 @@ fn handleServeConn(ctx: *ServeConnCtx) void {
         return;
     }
     if (req.method == .GET and std.mem.eql(u8, req.path, "/health")) {
-        conn.sendJson(200, "{\"status\":\"ok\",\"backend\":\"cuda\"}") catch {};
+        conn.sendJson(200, if (gpu.is_rocm)
+            "{\"status\":\"ok\",\"backend\":\"rocm\"}"
+        else
+            "{\"status\":\"ok\",\"backend\":\"cuda\"}") catch {};
         return;
     }
     // 3c throughput gate: cumulative decode/prefill counters. Diff two snapshots
@@ -2114,6 +2135,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var prompt_tokens: []u32 = undefined;
     var max_tokens: u32 = ctx.default_max;
     var owns_tokens = false;
+    var stream_response = true;
 
     if (ctx.debug_ids) {
         // Gate contract: body is JSON {"prompt":"t0,t1,...","max_tokens":N}; the
@@ -2125,6 +2147,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         };
         defer parsed.deinit();
         if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
+        stream_response = parsed.value.stream orelse true;
         const ptxt = parsed.value.prompt orelse {
             try conn.sendError(400, "invalid_request_error", "missing prompt");
             return;
@@ -2138,6 +2161,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         };
         defer parsed.deinit();
         if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
+        stream_response = parsed.value.stream orelse true;
 
         var prompt_text: []const u8 = "";
         var chat_buf: ?[]u8 = null;
@@ -2195,23 +2219,45 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     // draining to `finished` (so the worker is done touching them) then `finish`.
     defer ctx.engine.finish(id, &chan);
 
-    conn.sendSseStart() catch {
-        // Client gone before headers — still drain the engine so it frees the slot.
-        drainQuietly(ctx.engine, &chan);
-        return;
-    };
+    if (stream_response) {
+        conn.sendSseStart() catch {
+            // Client gone before headers — still drain the engine so it frees the slot.
+            drainQuietly(ctx.engine, &chan);
+            return;
+        };
+    }
 
     var buf: [32]u32 = undefined;
     var dec_buf: [256]u8 = undefined;
     var json_buf: [1024]u8 = undefined;
+    var output: std.ArrayList(u8) = .{};
+    defer output.deinit(allocator);
     var write_failed = false;
+    var generation_failed = false;
     while (true) {
         const ch = ctx.engine.nextChunk(&chan, &buf);
+        generation_failed = generation_failed or ch.failed;
         var i: usize = 0;
         while (i < ch.n) : (i += 1) {
             const tok = buf[i];
             if (write_failed) continue; // keep draining the engine, stop writing
-            if (ctx.debug_ids) {
+            if (!stream_response) {
+                if (ctx.debug_ids) {
+                    if (output.items.len != 0) output.append(allocator, ',') catch {
+                        write_failed = true;
+                        continue;
+                    };
+                    output.writer(allocator).print("{d}", .{tok}) catch {
+                        write_failed = true;
+                        continue;
+                    };
+                } else {
+                    output.appendSlice(allocator, ctx.tokenizer.decodeToken(tok, &dec_buf)) catch {
+                        write_failed = true;
+                        continue;
+                    };
+                }
+            } else if (ctx.debug_ids) {
                 const payload = std.fmt.bufPrint(&json_buf, "{d}", .{tok}) catch continue;
                 conn.writeSseEvent(payload) catch {
                     write_failed = true;
@@ -2226,7 +2272,56 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         }
         if (ch.finished) break;
     }
-    if (!write_failed) conn.writeSseDone() catch {};
+    const generated_tokens = chan.consumed;
+    logServeTimings(prompt_tokens.len, generated_tokens, chan.prefill_wall_ns, chan.decode_wall_ns);
+    if (generation_failed) {
+        log.warn("request {d} failed during GPU generation", .{id});
+        if (stream_response) {
+            if (!write_failed) {
+                conn.writeSseEvent("{\"error\":{\"type\":\"server_error\",\"message\":\"GPU generation failed\"}}") catch {};
+                conn.writeSseDone() catch {};
+            }
+        } else {
+            try conn.sendError(500, "server_error", "GPU generation failed");
+        }
+        return;
+    }
+    if (stream_response) {
+        if (!write_failed) conn.writeSseDone() catch {};
+        return;
+    }
+    if (write_failed) {
+        try conn.sendError(500, "server_error", "response buffering failed");
+        return;
+    }
+
+    const escaped = try jsonEscapeAlloc(allocator, output.items);
+    defer allocator.free(escaped);
+    var response: std.ArrayList(u8) = .{};
+    defer response.deinit(allocator);
+    const finish_reason: []const u8 = if (generated_tokens >= @as(usize, max_tokens)) "length" else "stop";
+    if (is_chat) {
+        try response.writer(allocator).print(
+            "{{\"id\":\"chatcmpl-zinc\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{s}\"}},\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}",
+            .{ escaped, finish_reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens },
+        );
+    } else {
+        try response.writer(allocator).print(
+            "{{\"id\":\"cmpl-zinc\",\"object\":\"text_completion\",\"choices\":[{{\"index\":0,\"text\":\"{s}\",\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}}}}",
+            .{ escaped, finish_reason, prompt_tokens.len, generated_tokens, prompt_tokens.len + generated_tokens },
+        );
+    }
+    try conn.sendJson(200, response.items);
+}
+
+fn logServeTimings(prompt_tokens: usize, generated_tokens: usize, prefill_ns: u64, decode_ns: u64) void {
+    const prefill_ms = @as(f64, @floatFromInt(prefill_ns)) / 1_000_000.0;
+    const decode_ms = @as(f64, @floatFromInt(decode_ns)) / 1_000_000.0;
+    const prefill_tps = if (prefill_ns == 0) 0.0 else @as(f64, @floatFromInt(prompt_tokens)) * 1_000_000_000.0 / @as(f64, @floatFromInt(prefill_ns));
+    const decode_tps = if (decode_ns == 0) 0.0 else @as(f64, @floatFromInt(generated_tokens)) * 1_000_000_000.0 / @as(f64, @floatFromInt(decode_ns));
+    const ms_per_token = if (generated_tokens == 0) 0.0 else decode_ms / @as(f64, @floatFromInt(generated_tokens));
+    inference_timing_log.info("Prefill: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{ prompt_tokens, prefill_ms, prefill_tps });
+    inference_timing_log.info("Generated {d} tokens in {d:.1} ms — {d:.2} tok/s ({d:.1} ms/tok)", .{ generated_tokens, decode_ms, decode_tps, ms_per_token });
 }
 
 /// Drain a request's stream without writing (client disconnected) so the worker
@@ -2281,6 +2376,23 @@ fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
     return buf[0..n];
 }
 
+fn jsonEscapeAlloc(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+    for (s) |c| {
+        const rep: []const u8 = switch (c) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            else => &[_]u8{c},
+        };
+        try out.appendSlice(allocator, rep);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// True if an env var is set to an "on" value (1/true/yes/on).
 fn envIsOn(name: []const u8) bool {
     const v = std.posix.getenv(name) orelse return false;
@@ -2301,11 +2413,11 @@ fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: st
     try w.print("\n[1/2] Host Environment\n", .{});
     try w.print("  OS: {s} [OK]\n", .{@tagName(builtin.os.tag)});
     try w.print("  CPU arch: {s} [OK]\n", .{@tagName(builtin.cpu.arch)});
-    try w.print("  Backend: cuda [OK]\n", .{});
+    try w.print("  Backend: {s} [OK]\n", .{if (gpu.is_rocm) "rocm" else "cuda"});
 
-    try w.print("\n[2/2] CUDA Device\n", .{});
+    try w.print("\n[2/2] {s} Device\n", .{accelerator_name});
     var device = cuda_device_mod.CudaDevice.initBest(allocator) catch |err| {
-        try w.print("  CUDA init: FAILED ({s}) [FAIL]\n", .{@errorName(err)});
+        try w.print("  {s} init: FAILED ({s}) [FAIL]\n", .{ accelerator_name, @errorName(err) });
         try w.print("\nVerdict: NOT READY [FAIL]\n", .{});
         try w.flush();
         return error.DiagnosticsFailed;
@@ -2317,11 +2429,18 @@ fn runCudaCheck(config: Config, check_target: ResolvedCheckTarget, allocator: st
     const cc = device.computeCapability();
     const total = device.totalMemory();
     const free = device.freeMemory();
-    try w.print("  CUDA init: Initialized best device (index {d}) [OK]\n", .{device.device_index});
+    try w.print("  {s} init: Initialized best device (index {d}) [OK]\n", .{ accelerator_name, device.device_index });
     try w.print("  Device: {s} [OK]\n", .{name});
-    try w.print("  Compute capability: sm_{d} [OK]\n", .{cc});
-    try w.print("  SM count: {d} [OK]\n", .{device.smCount()});
-    try w.print("  Warp size: {d}\n", .{device.warpSize()});
+    if (comptime gpu.is_rocm) {
+        var arch_buf: [64]u8 = undefined;
+        try w.print("  Compute target: {s} [OK]\n", .{device.arch(&arch_buf)});
+        try w.print("  CU count: {d} [OK]\n", .{device.smCount()});
+        try w.print("  Wavefront size: {d}\n", .{device.warpSize()});
+    } else {
+        try w.print("  Compute capability: sm_{d} [OK]\n", .{cc});
+        try w.print("  SM count: {d} [OK]\n", .{device.smCount()});
+        try w.print("  Warp size: {d}\n", .{device.warpSize()});
+    }
     try w.print("  Total VRAM: {d:.2} GiB [OK]\n", .{bytesToGiBf(total)});
     try w.print("  Free VRAM: {d:.2} GiB [OK]\n", .{bytesToGiBf(free)});
 
@@ -2395,6 +2514,16 @@ pub fn main() !void {
         };
         defer check_target.deinit(allocator);
 
+        if (comptime gpu.is_cuda) {
+            // CUDA-family backends compile kernels at runtime and do not need a
+            // Vulkan/Metal shader directory for their preflight.
+            runCudaCheck(config, check_target, allocator) catch |err| {
+                log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        }
+
         const check_shader_dir_owned = runtime_assets.resolveShaderDir(allocator, if (gpu.is_metal) .metal else .spirv) catch |err| blk: {
             log.warn("Could not resolve shader directory before diagnostics: {s}", .{@errorName(err)});
             break :blk null;
@@ -2404,16 +2533,6 @@ pub fn main() !void {
             "src/shaders/metal"
         else
             "zig-out/share/zinc/shaders";
-
-        if (comptime gpu.is_cuda) {
-            // CUDA: diagnostics_mod is the no-op stub on this backend, so run a
-            // dedicated NVIDIA preflight (detect device + report + OK).
-            runCudaCheck(config, check_target, allocator) catch |err| {
-                log.err("Diagnostics completed with error: {s}", .{@errorName(err)});
-                std.process.exit(1);
-            };
-            return;
-        }
 
         diagnostics_mod.run(.{
             .device_index = config.gpuDevicePreference(),
@@ -2679,7 +2798,7 @@ pub fn main() !void {
     // pattern as the Metal block above), so it is never analyzed here.
     if (comptime gpu.is_cuda) {
         runCuda(config, allocator) catch |err| {
-            log.err("CUDA run failed: {s}", .{@errorName(err)});
+            log.err("{s} run failed: {s}", .{ accelerator_name, @errorName(err) });
             std.process.exit(1);
         };
         return;
@@ -2966,6 +3085,13 @@ test "parseArgs: -hf conflicts with -m and --model-id" {
     try std.testing.expectError(error.ConflictingModelSources, parseArgs(&with_model));
     const with_id = [_][:0]const u8{ "zinc", "-hf", "a/b", "--model-id", "qwen35-9b-q4k-m" };
     try std.testing.expectError(error.ConflictingModelSources, parseArgs(&with_id));
+}
+
+test "CUDA serving clamps Gemma MoE to one slot" {
+    try std.testing.expectEqual(@as(u32, 1), cudaServeSlotCount(4, true));
+    try std.testing.expectEqual(@as(u32, 8), cudaServeSlotCount(8, false));
+    try std.testing.expectEqual(@as(u32, 1), cudaServeSlotCount(0, false));
+    try std.testing.expectEqual(@as(u32, 64), cudaServeSlotCount(128, false));
 }
 
 test "parseArgs: allows large context requests" {

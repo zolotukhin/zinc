@@ -257,7 +257,7 @@ Risk class: high. Two reasons. First, Xe2 PM4 equivalent documentation is thinne
 
 The reason T-Intel for the Intel Arc Pro B70 is M7 and not M2 is not about importance. It is about leverage. The ZINC_RT bring-up sequence on RDNA4 builds the IR, the scheduler, the paged KV layout, the megakernel, and the cross-backend validation. By the time M7 lands, every one of those pieces is shipped, debugged, and benchmarked on the harder vendor. The T-Intel work on the Intel Arc Pro B70 then reuses ~80% of the runtime, ships in 8 engineer-weeks, and lands on a card class where AMD does not yet have a direct competitor at this MSRP.
 
-That timing also matches what the consumer market is doing. Intel shipped the Arc Pro B-series, including the Intel Arc Pro B70, at a price point that takes the 32 GB ECC tier from "for datacenter buyers" to "for self-hosted teams". The Intel Arc Pro B70 is on the market today. ZINC's job is to be the first inference engine that gives Intel Arc Pro B70 buyers a path to peak performance without ROCm, without HIP, without Triton, and without a Python sidecar.
+That timing also matches what the consumer market is doing. Intel shipped the Arc Pro B-series, including the Intel Arc Pro B70, at a price point that takes the 32 GB ECC tier from "for datacenter buyers" to "for self-hosted teams". The Intel Arc Pro B70 is on the market today. ZINC's job is to give Intel Arc Pro B70 buyers a native Intel path to peak performance, using the same model loader and scheduler without routing the work through another vendor's compute stack or a Python sidecar.
 
 ## What T-Intel success on the Intel Arc Pro B70 looks like
 

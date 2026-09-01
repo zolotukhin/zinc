@@ -199,11 +199,11 @@ Vulkan was designed for a use case ZINC does not have:
 
 Numerically, the cost is small *per call*. Architecturally, it is enormous: every one of these primitives forces an API edge between ZINC and the GPU, and every edge limits how much ZINC can know about its own workload. We can't fuse two dispatches across a pipeline boundary. We can't keep a kernel resident across user requests. We can't even know whether two consecutive dispatches' barriers can be merged without re-parsing our own command stream.
 
-### 2.3 Why "just replace Vulkan with Vulkan again" doesn't help
+### 2.3 Why peer runtimes do not replace ZINC_RT
 
-Two adjacent options exist and are explicitly rejected:
+Two adjacent options solve different deployment problems:
 
-* **ROCm + HIP.** ROCm 7.0 supports RDNA4 (gfx1201). Using HIP would replace SPIR-V with HSAIL and the Mesa stack with ROCr. *But:* (a) HIP brings the entire ROCm runtime (~600 MB) and a C++ dependency we don't want in a Zig project; (b) HIP Graphs functionally match CUDA Graphs but do not yet expose persistent-kernel control on RDNA4; (c) ROCm has a worse track record on consumer cards than RADV — Mesa is faster *and* more compatible. The README's "no ROCm, no MLX" promise is part of the project's identity.
+* **ROCm + HIP.** ROCm is now a first-class ZINC backend on validated RDNA4 stacks. It provides a productive native kernel runtime and strong WMMA access, but HIP Graphs still do not provide the persistent, workload-owned queue and scheduler semantics ZINC_RT is designed to explore. ROCm is a peer production backend, not a substitute for the direct-runtime research goal.
 * **A second SPIR-V compiler.** Swap glslc → DXC → glslang etc. We tried this. Newer toolchains regressed RADV performance by **5×**. The toolchain is fragile precisely *because* the API is a portability surface we don't need.
 
 ### 2.4 What we actually want
@@ -1170,7 +1170,7 @@ For Q4_K weights we dequantize into LDS at the inner loop start, then run WMMA o
 
 This is the section the rest of the document exists to support. The single-stream tok/s targets in §3.1 are necessary but not sufficient: the reason to own the runtime, the reason to walk away from Vulkan, is to serve **multiple concurrent tenants** at near-bandwidth-saturating aggregate throughput on a single consumer GPU. Continuous batching is how that throughput is unlocked; multitenancy is the policy layer that decides whose token gets generated next, with isolation strong enough to host independent users.
 
-The design target: **outperform vLLM and SGLang on a single RDNA4 node**, while running as one Zig binary with no Python, no ROCm, no Triton, and a fallback to the Vulkan backend if anything regresses.
+The design target: **outperform vLLM and SGLang on a single RDNA4 node**, while running as one Zig binary with no Python or Triton and retaining Vulkan and ROCm as production fallback backends if anything regresses.
 
 ### 18.1 Why multitenancy is a first-class concern
 
@@ -2022,8 +2022,8 @@ ZINC_RT is the ZINC Runtime — ZINC's own userspace GPU layer, in the same OS-l
 
 The single feature that justifies all this work is the multitenant continuous-batching architecture in §18: one engine, one process, one GPU, hosting an interactive chat client, an OpenAI-compatible API tenant, an agent runtime, and a batch eval job — concurrently, fairly, with per-tenant quotas and prefix-shared KV, at near-bandwidth-saturating aggregate throughput. The single-stream decode tok/s targets are the easy part; the hard part is the policy and isolation layer, and the reason it lives in ZINC_RT rather than in a Python sidecar is that every part of the policy reads state the GPU is already touching — slot table, KV pages, sampling RNGs — and pushing that state across a process boundary defeats the point.
 
-**The Vulkan backend is not going away.** It remains a peer of ZINC_RT, selected via `-Dbackend=vulkan`, tested in CI on every PR, and shipped to every user. ZINC ships *two* GPU paths long-term: ZINC_RT for the lowest-overhead route to peak single-tenant performance *and* the multi-tenant scheduler; Vulkan as the broadly compatible, well-trodden single-tenant fallback that every Linux GPU user has worked with for a decade. The two share GGUF parsing, tokenizer, server, model catalog — only the GPU dispatch, kernels, and scheduler differ. The cost of keeping both is modest; the benefit (always a working fallback when ZINC_RT regresses or hits new hardware) is permanent.
+**The Vulkan and ROCm backends are not going away.** They remain production peers of ZINC_RT, selected via `-Dbackend=vulkan` or `-Dbackend=rocm` and sharing GGUF parsing, tokenizer, server, and model catalog. ZINC_RT explores the lowest-overhead route to peak single-tenant performance and multitenant scheduling; Vulkan provides broad compatibility; ROCm provides a native HIP path with dedicated AMD kernels. Only GPU dispatch, kernels, and scheduler policy differ.
 
-The current ZINC + Vulkan stack peaks at 117 tok/s decode and 31 % bandwidth utilization on R9700, with no multitenant batching. ZINC_RT, fully realized, targets 240 tok/s decode and 65 % bandwidth utilization at the single-stream level, with continuous-batching aggregate throughput approaching 1 000 tok/s on 4 concurrent slots and ~2 800 tok/s on 16 — outperforming vLLM on this hardware class while running in a single Zig binary with no Python and no ROCm.
+The current ZINC + Vulkan stack peaks at 117 tok/s decode and 31 % bandwidth utilization on R9700, with no multitenant batching. ZINC_RT, fully realized, targets 240 tok/s decode and 65 % bandwidth utilization at the single-stream level, with continuous-batching aggregate throughput approaching 1 000 tok/s on 4 concurrent slots and ~2 800 tok/s on 16 — outperforming vLLM on this hardware class while running in a single Zig binary with no Python or Triton.
 
-This document is the contract. The agent should follow §25 milestone-by-milestone, annotating this file as each gate is cleared. Open questions in §27 are decisions the agent should escalate, not invent. **A milestone is not "complete" unless both `-Dbackend=zinc_rt` AND `-Dbackend=vulkan` build cleanly and pass CI.**
+This document is the contract. The agent should follow §25 milestone-by-milestone, annotating this file as each gate is cleared. Open questions in §27 are decisions the agent should escalate, not invent. **A milestone is not "complete" unless `-Dbackend=zinc_rt`, `-Dbackend=vulkan`, and `-Dbackend=rocm` build cleanly and pass their applicable CI or hardware gates.**

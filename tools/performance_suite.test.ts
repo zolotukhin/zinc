@@ -36,6 +36,7 @@ import {
   remoteSshFailureSummary,
   rdnaEnvValue,
   rdnaNodeEnvKey,
+  rdnaTargetIdentity,
   intelZincCommand,
   rdnaZincCommand,
   resolveLocalLlamaServer,
@@ -110,6 +111,10 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_Q8_1_SSM_QKV_Z: "1",
     ZINC_MOE_Q5K_Q8_1_DOWN_ACC: "1",
     ZINC_MOE_Q6K_COLS: "1",
+    ZINC_QWEN_MOE_BATCHED: "0",
+    ZINC_MOE_TC: "0",
+    ZINC_MOE_DOWN_TC: "0",
+    ZINC_MOE_DOWN_Q6K_TC: "0",
     ZINC_MOE_PREFIX_SHARED_EXACT: "1",
     ZINC_MOE_SINGLETON_TAIL_SPLIT: "1",
     ZINC_INTEL_A3B_PRODUCTION: "0",
@@ -118,6 +123,27 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_QWEN35_9B_BM64_DOWN: "0",
     ZINC_QWEN35_9B_K12288_BK2: "0",
     ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS: "4",
+    ZINC_SSM_PROFILE: "1",
+    ZINC_ROCM_DECODE_PAIR_REDUCE: "1",
+    ZINC_ROCM_Q4_PAIR_REDUCE: "1",
+    ZINC_ROCM_DECODE_Q8_FFN: "1",
+    ZINC_ROCM_DECODE_Q8_Q6: "1",
+    ZINC_ROCM_DECODE_Q8_LM: "1",
+    ZINC_ROCM_DECODE_Q8_Q4: "1",
+    ZINC_ROCM_DECODE_Q8_Q6_PROJ: "1",
+    ZINC_ROCM_DECODE_Q8_Q5: "1",
+    ZINC_ROCM_DECODE_Q8_Q4_PAIR: "1",
+    ZINC_ROCM_RMS_Q8: "1",
+    ZINC_ROCM_ARGMAX_V2: "1",
+    ZINC_ROCM_DECODE_SSM_COL_WARP: "1",
+    ZINC_ROCM_DECODE_SSM_FAST: "1",
+    ZINC_SSM_PREPARED: "1",
+    ZINC_SSM_COL_WARP: "1",
+    ZINC_SSM_COL_WARP_FAST: "1",
+    ZINC_PREFILL_Q8_REUSE: "1",
+    ZINC_PREFILL_WMMA_TILES: "1",
+    ZINC_PREFILL_WMMA_T80: "1",
+    ZINC_ATTN_V2: "1",
     ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT: "0",
     ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE: "0",
     ZINC_QWEN36_27B_SSM_BATCHED_DELTA: "0",
@@ -128,6 +154,10 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_Q8_1_SSM_QKV_Z).toBe("1");
   expect(env.ZINC_MOE_Q5K_Q8_1_DOWN_ACC).toBe("1");
   expect(env.ZINC_MOE_Q6K_COLS).toBe("1");
+  expect(env.ZINC_QWEN_MOE_BATCHED).toBe("0");
+  expect(env.ZINC_MOE_TC).toBe("0");
+  expect(env.ZINC_MOE_DOWN_TC).toBe("0");
+  expect(env.ZINC_MOE_DOWN_Q6K_TC).toBe("0");
   expect(env.ZINC_MOE_PREFIX_SHARED_EXACT).toBe("1");
   expect(env.ZINC_MOE_SINGLETON_TAIL_SPLIT).toBe("1");
   expect(env.ZINC_INTEL_A3B_PRODUCTION).toBe("0");
@@ -136,6 +166,27 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_QWEN35_9B_BM64_DOWN).toBe("0");
   expect(env.ZINC_QWEN35_9B_K12288_BK2).toBe("0");
   expect(env.ZINC_QWEN36_27B_DENSE_PREFILL_LAYERS).toBe("4");
+  expect(env.ZINC_SSM_PROFILE).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_PAIR_REDUCE).toBe("1");
+  expect(env.ZINC_ROCM_Q4_PAIR_REDUCE).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_Q8_FFN).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_Q8_Q6).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_Q8_LM).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_Q8_Q4).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_Q8_Q6_PROJ).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_Q8_Q5).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_Q8_Q4_PAIR).toBe("1");
+  expect(env.ZINC_ROCM_RMS_Q8).toBe("1");
+  expect(env.ZINC_ROCM_ARGMAX_V2).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_SSM_COL_WARP).toBe("1");
+  expect(env.ZINC_ROCM_DECODE_SSM_FAST).toBe("1");
+  expect(env.ZINC_SSM_PREPARED).toBe("1");
+  expect(env.ZINC_SSM_COL_WARP).toBe("1");
+  expect(env.ZINC_SSM_COL_WARP_FAST).toBe("1");
+  expect(env.ZINC_PREFILL_Q8_REUSE).toBe("1");
+  expect(env.ZINC_PREFILL_WMMA_TILES).toBe("1");
+  expect(env.ZINC_PREFILL_WMMA_T80).toBe("1");
+  expect(env.ZINC_ATTN_V2).toBe("1");
   expect(env.ZINC_QWEN36_27B_DENSE_PREFILL_SEGMENT).toBe("0");
   expect(env.ZINC_QWEN36_27B_PREFIX_TAIL_PIPELINE).toBe("0");
   expect(env.ZINC_QWEN36_27B_SSM_BATCHED_DELTA).toBe("0");
@@ -189,6 +240,17 @@ test("parseArgs rejects invalid RDNA backend", () => {
   expect(() => parseArgs(["--target", "rdna", "--rdna-backend", "metal"])).toThrow(
     "Invalid --rdna-backend 'metal'",
   );
+});
+
+test("parseArgs accepts the ROCm RDNA backend", () => {
+  expect(parseArgs(["--target", "rdna", "--rdna-backend", "rocm"]).rdnaBackend).toBe("rocm");
+});
+
+test("RDNA benchmark identities keep Vulkan and ROCm publications separate", () => {
+  expect(rdnaTargetIdentity("vulkan")).toEqual({ id: "rdna", label: "AMD RDNA · Vulkan" });
+  expect(rdnaTargetIdentity("auto")).toEqual({ id: "rdna", label: "AMD RDNA · Vulkan" });
+  expect(rdnaTargetIdentity("rocm")).toEqual({ id: "rdna-rocm", label: "AMD RDNA · ROCm" });
+  expect(rdnaTargetIdentity("zinc_rt")).toEqual({ id: "rdna-zinc-rt", label: "AMD RDNA · ZINC_RT" });
 });
 
 test("parseZincVersionOutput extracts the compiled backend", () => {
@@ -631,6 +693,14 @@ info(forward): Generated 32 tokens in 977.9 ms — 32.72 tok/s (30.6 ms/tok)
   expect(parsed.outputPreview).toBe("Command shape");
 });
 
+test("parseZincServerOutput rejects an empty generation", () => {
+  expect(() => parseZincServerOutput(`{"choices":[{"text":""}],"usage":{"prompt_tokens":49,"completion_tokens":0}}
+__ZINC_TIMING__
+info(forward): Prefill: 49 tokens in 0.0 ms (0.00 tok/s)
+info(forward): Generated 0 tokens in 0.0 ms — 0.00 tok/s (0.0 ms/tok)
+`)).toThrow("no generated tokens");
+});
+
 test("RDNA ZINC server payload keeps the preloaded GGUF active", () => {
   const raw = buildZincOpenAiPayload({
     prompt_mode: "raw",
@@ -665,6 +735,14 @@ test("remote llama-server baselines disable prompt cache for prefill timing", ()
   expect(launchStart).toBeGreaterThanOrEqual(0);
   const launchBody = src.slice(launchStart, launchStart + 4000);
   expect(launchBody).toContain("\"--no-cache-prompt\"");
+});
+
+test("remote ZINC benchmark server uses one slot for single-request comparisons", () => {
+  const src = readFileSync(new URL("./performance_suite.mjs", import.meta.url), "utf8");
+  const launchStart = src.indexOf("async function launchRdnaZincServer");
+  expect(launchStart).toBeGreaterThanOrEqual(0);
+  const launchBody = src.slice(launchStart, launchStart + 2500);
+  expect(launchBody).toContain('"--parallel", "1"');
 });
 
 test("RDNA ZINC timing wait is bounded after the API response", () => {
@@ -1128,6 +1206,7 @@ test("buildArtifact writes only the incoming targets", () => {
 });
 
 test("output quality status flags malformed benchmark previews", () => {
+  expect(outputQualityStatus("", 0).tone).toBe("caution");
   expect(outputQualityStatus("<|im_end|>", 2).tone).toBe("caution");
   expect(outputQualityStatus("2\n</think>\n<|im_start|>0.\n<|im_end|>", 96).tone).toBe("caution");
   expect(outputQualityStatus("##\n<think>first</think>\n<think>second", 128).tone).toBe("caution");
