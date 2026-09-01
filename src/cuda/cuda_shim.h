@@ -134,6 +134,13 @@ void cuda_cublas_hgemm_strided_batched(CudaCtx* ctx, unsigned trans_a, unsigned 
                                        CudaBuf* C, size_t c_offset, unsigned ldc, int64_t stride_c,
                                        unsigned batch_count, float beta);
 
+void cuda_cublas_sgemm_strided_batched(CudaCtx* ctx, unsigned trans_a, unsigned trans_b,
+                                       unsigned M, unsigned N, unsigned K,
+                                       CudaBuf* A, size_t a_offset, unsigned lda, int64_t stride_a,
+                                       CudaBuf* B, size_t b_offset, unsigned ldb, int64_t stride_b,
+                                       CudaBuf* C, size_t c_offset, unsigned ldc, int64_t stride_c,
+                                       unsigned batch_count, float beta);
+
 // ---- CUDA Graphs (decode replay, Effort 25) ----------------------------------
 // Capture the per-decode-step kernel chain once and replay it as a SINGLE graph
 // launch, collapsing the ~480 per-kernel launches + inter-kernel GPU bubbles of

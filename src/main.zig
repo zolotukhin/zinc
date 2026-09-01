@@ -2207,7 +2207,11 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
 
     const template_kind = ctx.tokenizer.detectTemplateKind();
     const structured_chat = is_chat and !ctx.debug_ids and (template_kind == .atem or template_kind == .openai_moe);
-    const thinking_enabled = structured_chat and (enable_thinking orelse false) and
+    // ATEM models always begin on their private reasoning channel. Expose that
+    // channel by default (callers can still request enable_thinking=false), or a
+    // short completion that has not reached the final channel serializes as an
+    // empty assistant message even though the model generated valid tokens.
+    const thinking_enabled = structured_chat and (enable_thinking orelse (template_kind == .atem)) and
         (ctx.tokenizer.supportsThinkingToggle() or template_kind == .atem);
 
     if (prompt_tokens.len == 0) {

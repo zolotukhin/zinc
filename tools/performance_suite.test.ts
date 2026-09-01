@@ -148,6 +148,21 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_BATCHED_EXPERTS_GROUPED: "1",
     ZINC_MOE_NORM_COMBINE: "1",
     ZINC_ATTN_MOE_NORM: "1",
+    ZINC_MOE_EXACT_Q8: "1",
+    ZINC_MOE_M64: "1",
+    ZINC_MOE_T8: "1",
+    ZINC_MOE_T16: "1",
+    ZINC_ROCM_TIME_KERNEL: "grouped_i8",
+    ZINC_Q8_M32: "1",
+    ZINC_Q8_FFN_BLOCK64: "1",
+    ZINC_Q8_FFN_BLOCK128: "1",
+    ZINC_Q8_Q6_BLOCK64: "1",
+    ZINC_Q8_Q6_BLOCK128: "1",
+    ZINC_ROCM_MOE_SHARED_Q8: "1",
+    ZINC_ROCM_MOE_DOWN_Q8: "1",
+    ZINC_MOE_DOWN_Q8_M16: "1",
+    ZINC_MOE_DOWN_Q8_M8: "1",
+    ZINC_MOE_DOWN_Q8_M64: "1",
     ZINC_SSM_PREPARED: "1",
     ZINC_SSM_COL_WARP: "1",
     ZINC_SSM_COL_WARP_FAST: "1",
@@ -202,6 +217,21 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_BATCHED_EXPERTS_GROUPED).toBe("1");
   expect(env.ZINC_MOE_NORM_COMBINE).toBe("1");
   expect(env.ZINC_ATTN_MOE_NORM).toBe("1");
+  expect(env.ZINC_MOE_EXACT_Q8).toBe("1");
+  expect(env.ZINC_MOE_M64).toBe("1");
+  expect(env.ZINC_MOE_T8).toBe("1");
+  expect(env.ZINC_MOE_T16).toBe("1");
+  expect(env.ZINC_ROCM_TIME_KERNEL).toBe("grouped_i8");
+  expect(env.ZINC_Q8_M32).toBe("1");
+  expect(env.ZINC_Q8_FFN_BLOCK64).toBe("1");
+  expect(env.ZINC_Q8_FFN_BLOCK128).toBe("1");
+  expect(env.ZINC_Q8_Q6_BLOCK64).toBe("1");
+  expect(env.ZINC_Q8_Q6_BLOCK128).toBe("1");
+  expect(env.ZINC_ROCM_MOE_SHARED_Q8).toBe("1");
+  expect(env.ZINC_ROCM_MOE_DOWN_Q8).toBe("1");
+  expect(env.ZINC_MOE_DOWN_Q8_M16).toBe("1");
+  expect(env.ZINC_MOE_DOWN_Q8_M8).toBe("1");
+  expect(env.ZINC_MOE_DOWN_Q8_M64).toBe("1");
   expect(env.ZINC_SSM_PREPARED).toBe("1");
   expect(env.ZINC_SSM_COL_WARP).toBe("1");
   expect(env.ZINC_SSM_COL_WARP_FAST).toBe("1");
@@ -317,12 +347,12 @@ test("resolveLocalLlamaServer prefers explicit path, then PATH, then docker fall
   expect(resolveLocalLlamaServer({ llamaServer: null }, null, "/tmp/docker")).toBe("/tmp/docker");
 });
 
-test("Gemma and Muse use the chat prompt path in the performance suite", () => {
+test("Gemma, Muse, and current Qwen models use the chat prompt path", () => {
   expect(prefersChatPrompt("gemma4-26b-a4b-q4k-m")).toBe(true);
   expect(defaultPromptForModelId("gemma4-26b-a4b-q4k-m")).toContain("benchmark screenshots");
   expect(defaultMaxTokensForModelId("gemma4-26b-a4b-q4k-m")).toBe(96);
-  expect(prefersChatPrompt("qwen35-9b-q4k-m")).toBe(false);
-  expect(defaultPromptForModelId("qwen35-9b-q4k-m")).toContain("Developer question");
+  expect(prefersChatPrompt("qwen35-9b-q4k-m")).toBe(true);
+  expect(defaultPromptForModelId("qwen35-9b-q4k-m")).toContain("teammate sent");
   expect(defaultMaxTokensForModelId("qwen35-9b-q4k-m")).toBe(96);
   expect(prefersChatPrompt("qwen38-27b-q4k-m")).toBe(true);
   expect(prefersChatPrompt("muse-glimmer-30b-q4k-m")).toBe(true);
@@ -373,8 +403,8 @@ test("default RDNA cases include Muse, Gemma, and current Qwen rows", () => {
   expect(cases.some((entry) => entry.id === "qwen36-27b-q4k-m")).toBe(false);
 
   expect(qwen35?.model_path).toBe("/root/models/Qwen3.5-9B-Q4_K_M.gguf");
-  expect(qwen35?.prompt_mode).toBe("raw");
-  expect(qwen35?.prompt).toContain("Developer question");
+  expect(qwen35?.prompt_mode).toBe("chat");
+  expect(qwen35?.prompt).toContain("teammate sent");
   expect(qwen35?.max_tokens).toBe(96);
 });
 
@@ -391,7 +421,7 @@ test("default Intel cases use the remote managed cache layout", () => {
   const gemma = cases.find((entry) => entry.id === "gemma4-26b-a4b-q4k-m");
 
   expect(qwen?.model_path).toBe("/remote/cache/qwen35-9b-q4k-m/model.gguf");
-  expect(qwen?.prompt_mode).toBe("raw");
+  expect(qwen?.prompt_mode).toBe("chat");
   expect(qwen?.context_tokens).toBe(512);
   expect(gemma?.model_path).toBe("/remote/cache/gemma4-26b-a4b-q4k-m/model.gguf");
   expect(gemma?.prompt_mode).toBe("chat");
@@ -722,6 +752,16 @@ info(forward): Generated 32 tokens in 977.9 ms — 32.72 tok/s (30.6 ms/tok)
   expect(parsed.outputPreview).toBe("Command shape");
 });
 
+test("parseZincServerOutput captures reasoning-only chat responses", () => {
+  const parsed = parseZincServerOutput(`{"choices":[{"message":{"content":"","reasoning_content":"Use identical prompts and warmups."}}],"usage":{"prompt_tokens":49,"completion_tokens":16}}
+__ZINC_TIMING__
+info(forward): Prefill: 49 tokens in 100.0 ms (490.00 tok/s)
+info(forward): Generated 16 tokens in 200.0 ms — 80.00 tok/s (12.5 ms/tok)
+`);
+
+  expect(parsed.outputPreview).toBe("Use identical prompts and warmups.");
+});
+
 test("parseZincServerOutput rejects an empty generation", () => {
   expect(() => parseZincServerOutput(`{"choices":[{"text":""}],"usage":{"prompt_tokens":49,"completion_tokens":0}}
 __ZINC_TIMING__
@@ -802,6 +842,10 @@ built with AppleClang 17.0.0.17000604 for Darwin arm64
 
   expect(parsed?.version).toBe("8610");
   expect(parsed?.commit).toBe("2b86e5cae");
+
+  const latest = parseLlamaCppVersionOutput("version: 0.3.0-dev (build 2325, commit 8887a48f0)");
+  expect(latest?.version).toBe("0.3.0-dev");
+  expect(latest?.commit).toBe("8887a48f0");
 });
 
 test("parseOpenAiCompletionOutput extracts throughput from server JSON", () => {
@@ -848,6 +892,16 @@ test("parseOpenAiCompletionOutput uses llama-server timing token counts for cach
   expect(parsed.prefillTps).toBeCloseTo(113.59763716914688, 6);
   expect(parsed.decodeMs).toBeCloseTo((256 / 60.9357832057173) * 1000, 6);
   expect(parsed.outputPreview).toBe("Implementation plan");
+});
+
+test("parseOpenAiCompletionOutput captures llama-server reasoning output", () => {
+  const parsed = parseOpenAiCompletionOutput(JSON.stringify({
+    usage: { prompt_tokens: 32, completion_tokens: 16 },
+    timings: { prompt_per_second: 200, predicted_per_second: 50 },
+    choices: [{ message: { content: "", reasoning_content: "Compare the two runs fairly." } }],
+  }));
+
+  expect(parsed.outputPreview).toBe("Compare the two runs fairly.");
 });
 
 test("summarizeValues includes median, p95, and stddev", () => {
@@ -1240,6 +1294,8 @@ test("output quality status flags malformed benchmark previews", () => {
   expect(outputQualityStatus("2\n</think>\n<|im_start|>0.\n<|im_end|>", 96).tone).toBe("caution");
   expect(outputQualityStatus("##\n<think>first</think>\n<think>second", 128).tone).toBe("caution");
   expect(outputQualityStatus("1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.", 128).tone).toBe("caution");
+  expect(outputQualityStatus("<pad><pad><pad>", 96).tone).toBe("caution");
+  expect(outputQualityStatus("42 , 17 ; 42 , 17 ; 42 , 17 ; 42 , 17 ; 42 , 17 ; 42 , 17 ;", 96).tone).toBe("caution");
   expect(outputQualityStatus(
     "1. What is the most important thing to remember about the relationship between the brain and the body? " +
     "2. What is the most important thing to remember about the relationship between the brain and the body? " +

@@ -397,7 +397,9 @@ export function parseZincServerOutput(text) {
   }
 
   const parsed = parseZincCliOutput(text.slice(markerIndex + marker.length));
-  const content = body.choices?.[0]?.text ?? body.choices?.[0]?.message?.content ?? "";
+  const choice = body.choices?.[0] ?? {};
+  const content = [choice.text, choice.message?.content, choice.message?.reasoning_content]
+    .find((value) => typeof value === "string" && value.trim()) ?? "";
   const promptTokens = body.usage?.prompt_tokens ?? parsed.promptTokens;
   const generatedTokens = body.usage?.completion_tokens ?? parsed.generatedTokens;
   if (!Number.isFinite(generatedTokens) || generatedTokens <= 0) {
@@ -446,12 +448,15 @@ export function parseLlamaCppVersionOutput(text) {
 
   if (!versionLine) return null;
 
-  const match = versionLine.match(/^version:\s*([^\s]+)\s+\(([0-9a-f]+)\)/i);
-  if (!match) return null;
+  const version = versionLine.match(/^version:\s*([^\s]+)/i)?.[1] ?? null;
+  const commit = versionLine.match(/\bcommit\s+([0-9a-f]{7,40})\b/i)?.[1]
+    ?? versionLine.match(/\(([0-9a-f]{7,40})\)/i)?.[1]
+    ?? null;
+  if (!version || !commit) return null;
 
   return {
-    version: match[1],
-    commit: match[2],
+    version,
+    commit,
   };
 }
 
@@ -486,7 +491,9 @@ export function validateZincBackend(versionText, expectedBackend) {
 
 export function parseOpenAiCompletionOutput(text) {
   const body = JSON.parse(text);
-  const content = body.choices?.[0]?.text ?? body.choices?.[0]?.message?.content ?? "";
+  const choice = body.choices?.[0] ?? {};
+  const content = [choice.text, choice.message?.content, choice.message?.reasoning_content]
+    .find((value) => typeof value === "string" && value.trim()) ?? "";
   const promptTokens = body.usage?.prompt_tokens ?? null;
   const generatedTokens = body.usage?.completion_tokens ?? 0;
   const timings = body.timings ?? {};
@@ -604,6 +611,14 @@ export function outputQualityStatus(preview, generatedTokens = null) {
     };
   }
 
+  if (/<pad>/i.test(text)) {
+    return {
+      tone: "caution",
+      label: "Preview flagged",
+      note: "ZINC completed numerically, but the preview contains raw padding tokens.",
+    };
+  }
+
   if ((text.match(/<think>/g) ?? []).length > 1 || /<\/?parameter>/.test(text)) {
     return {
       tone: "caution",
@@ -618,6 +633,7 @@ export function outputQualityStatus(preview, generatedTokens = null) {
     hasRepeatedNumberedItemText(text) ||
     hasRepeatedLineText(text) ||
     /([#*_=-])\1{31,}/.test(text) ||
+    hasRepeatedTokenPattern(text) ||
     /\b([A-Za-z]{3,})\1{8,}\b/.test(text)
   ) {
     return {
@@ -632,6 +648,23 @@ export function outputQualityStatus(preview, generatedTokens = null) {
     label: "Preview OK",
     note: "The captured preview does not show an obvious stop-token, control-token, or repetition failure.",
   };
+}
+
+function hasRepeatedTokenPattern(text) {
+  const tokens = text.toLowerCase().match(/[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu) ?? [];
+  for (let width = 1; width <= 8; width += 1) {
+    if (tokens.length < width * 6) continue;
+    for (let start = 0; start + width * 6 <= tokens.length; start += 1) {
+      const pattern = tokens.slice(start, start + width).join("\u0000");
+      let repeats = 1;
+      while (
+        start + (repeats + 1) * width <= tokens.length &&
+        tokens.slice(start + repeats * width, start + (repeats + 1) * width).join("\u0000") === pattern
+      ) repeats += 1;
+      if (repeats >= 6) return true;
+    }
+  }
+  return false;
 }
 
 function hasRepeatedNumberedItemText(text) {
@@ -1201,9 +1234,29 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_Q8_SPEC_DMMV",
   "ZINC_Q8_1_SSM_QKV_Z",
   "ZINC_GEMMA_MOE_TOPK",
+  "ZINC_GEMMA_MOE_PREFILL_SERIAL",
+  "ZINC_GEMMA_ATTN_PREFILL_SERIAL",
+  "ZINC_ROCM_GEMMA_Q8_PREFILL",
   "ZINC_GEMMA_MOE_PREFILL_TOPK",
   "ZINC_TOPK_V1",
   "ZINC_PREFILL_PROFILE",
+  "ZINC_ROCM_TIME_KERNEL",
+  "ZINC_Q8_M32",
+  "ZINC_Q8_FFN_BLOCK64",
+  "ZINC_Q8_FFN_BLOCK128",
+  "ZINC_Q8_Q6_BLOCK64",
+  "ZINC_Q8_Q6_BLOCK128",
+  "ZINC_ROCM_Q8_MROW2",
+  "ZINC_ROCM_Q8_BLOCK32",
+  "ZINC_ROCM_Q8_FUSED",
+  "ZINC_ROCM_MOE_SHARED_Q8",
+  "ZINC_ROCM_MOE_DOWN_Q8",
+  "ZINC_MOE_DOWN_Q8_M16",
+  "ZINC_MOE_DOWN_Q8_M8",
+  "ZINC_MOE_DOWN_Q8_M64",
+  "ZINC_MOE_DIRECT_A",
+  "ZINC_MOE_ROUTE64",
+  "ZINC_MOE_Q51_DIRECT",
   "ZINC_SSM_PROFILE",
   "ZINC_ROCM_DECODE_PAIR_REDUCE",
   "ZINC_ROCM_Q4_PAIR_REDUCE",
@@ -1211,6 +1264,7 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_ROCM_DECODE_Q8_Q6",
   "ZINC_ROCM_DECODE_Q8_LM",
   "ZINC_ROCM_DECODE_Q8_Q4",
+  "ZINC_ROCM_DECODE_Q8_Q8",
   "ZINC_ROCM_DECODE_Q8_Q6_PROJ",
   "ZINC_ROCM_DECODE_Q8_Q5",
   "ZINC_ROCM_DECODE_Q8_Q4_PAIR",
@@ -1218,9 +1272,13 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_ROCM_ARGMAX_V2",
   "ZINC_ROCM_MUSE_ATTN_BLAS",
   "ZINC_ROCM_MUSE_ATTN_BLAS_MIN",
+  "ZINC_ROCM_GEMMA_GQA2",
+  "ZINC_ROCM_GEMMA_ATTN_BLAS",
   "ZINC_ROCM_MUSE_NORM_CHAIN",
   "ZINC_ROCM_DECODE_SSM_COL_WARP",
   "ZINC_ROCM_DECODE_SSM_FAST",
+  "ZINC_ROCM_FUSED_SSM_F32",
+  "ZINC_ROCM_FUSED_Q4_PAIRS",
   "ZINC_BATCHED_TC",
   "ZINC_BATCHED_CUBLAS",
   "ZINC_BATCHED_CUBLAS_NOQ4",
@@ -1239,6 +1297,11 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_BATCHED_EXPERTS_GROUPED",
   "ZINC_MOE_NORM_COMBINE",
   "ZINC_ATTN_MOE_NORM",
+  "ZINC_MOE_EXACT_Q8",
+  "ZINC_MOE_M64",
+  "ZINC_MOE_M32",
+  "ZINC_MOE_T8",
+  "ZINC_MOE_T16",
   "ZINC_SSM_PREPARED",
   "ZINC_SSM_COL_WARP",
   "ZINC_SSM_COL_WARP_FAST",
@@ -1249,6 +1312,7 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_ATTN_V2",
   "ZINC_PREFILL_DP4A",
   "ZINC_PREFILL_F16",
+  "ZINC_PRE_DEQUANT",
   "ZINC_PREFILL_LOWSMEM",
   "ZINC_PREFILL_TC",
   "ZINC_PREFILL_Q8_TC",
@@ -2161,10 +2225,10 @@ export function defaultMetalCases(modelRoot) {
       family: "Qwen 3.5",
       quant: "Q4_K_M",
       model_path: modelPath(modelRoot, "qwen35-9b-q4k-m"),
-      prompt_mode: "raw",
+      prompt_mode: "chat",
       prompt: defaultPromptForModelId("qwen35-9b-q4k-m"),
       max_tokens: defaultMaxTokensForModelId("qwen35-9b-q4k-m"),
-      notes: ["Raw decode path to avoid visible think blocks in CLI output"],
+      notes: ["Chat-template path; reasoning content is captured by the benchmark parser"],
     },
     {
       id: "qwen36-35b-a3b-q4k-xl",
@@ -2253,7 +2317,7 @@ function guessQuant(id) {
 }
 
 export function prefersChatPrompt(id) {
-  return id.startsWith("gemma") || id.startsWith("muse-glimmer") || id.startsWith("qwen38");
+  return id.startsWith("gemma") || id.startsWith("muse-glimmer") || id.startsWith("qwen35") || id.startsWith("qwen38");
 }
 
 export function defaultPromptForModelId(id) {
@@ -2518,7 +2582,7 @@ export function defaultRdnaCases(modelRoot) {
       family: "Qwen 3.5",
       quant: "Q4_K_M",
       model_path: path.join(modelRoot, "Qwen3.5-9B-Q4_K_M.gguf"),
-      prompt_mode: "raw",
+      prompt_mode: "chat",
       prompt: defaultPromptForModelId("qwen35-9b-q4k-m"),
       max_tokens: defaultMaxTokensForModelId("qwen35-9b-q4k-m"),
       notes: ["RDNA4 small Qwen comparison against llama.cpp server"],

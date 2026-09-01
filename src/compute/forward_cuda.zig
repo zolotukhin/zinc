@@ -231,7 +231,7 @@ const MatvecBatchPush = extern struct { M: u32, K: u32, x_tok_stride: u32, y_tok
 // (build_expert_order_padded + gemm_q4k_experts_grouped_tc) serve both paths.
 const BuildOrderPadPush = extern struct { T: u32, n_used: u32, n_experts: u32, routing_stride: u32, max_pos: u32 };
 const GroupedTCPush = extern struct { M: u32, K: u32, base: u32, gu_full: u32, dst_tok_stride: u32 };
-const GroupedI8Push = extern struct { M: u32, K: u32, T: u32, base: u32, expert_stride: u32, dst_tok_stride: u32 };
+const GroupedI8Push = extern struct { M: u32, K: u32, T: u32, base: u32, expert_stride: u32, dst_tok_stride: u32, route_stride: u32 };
 // Down-projection grouped-TC (Q5_K): A is the SwiGLU output indexed per work-item
 // (token*n_used + slot), so it carries `slice`/`n_used` instead of `base`/`gu_full`.
 const GroupedTCDownPush = extern struct { M: u32, K: u32, slice: u32, n_used: u32, dst_tok_stride: u32 };
@@ -370,9 +370,17 @@ const Pipelines = struct {
     gemm_q4k_wmma_i8_t48: CudaPipeline, // exact 48-token short-prompt tile
     gemm_q5k_wmma_i8_t48: CudaPipeline,
     gemm_q6k_wmma_i8_t48: CudaPipeline,
+    gemm_q4k_wmma_i8_t64: CudaPipeline, // exact 64-token prompt tile
+    gemm_q5k_wmma_i8_t64: CudaPipeline,
+    gemm_q6k_wmma_i8_t64: CudaPipeline,
     gemm_q4k_wmma_i8_t80: CudaPipeline, // experimental 80-token prompt tile
     gemm_q5k_wmma_i8_t80: CudaPipeline,
     gemm_q6k_wmma_i8_t80: CudaPipeline,
+    gemm_q8_0_wmma_i8: CudaPipeline,
+    gemm_q8_0_wmma_i8_t48: CudaPipeline,
+    gemm_q8_0_wmma_i8_t64: CudaPipeline,
+    gemm_q8_0_wmma_i8_t80: CudaPipeline,
+    gemm_q8_0_wmma_i8_t16: CudaPipeline,
     gemm_q4k_wmma_i8_t16: CudaPipeline, // short remainder tile after full 112-token tiles
     gemm_q5k_wmma_i8_t16: CudaPipeline,
     gemm_q6k_wmma_i8_t16: CudaPipeline,
@@ -437,7 +445,17 @@ const Pipelines = struct {
     build_expert_order_padded_16: CudaPipeline,
     gemm_q4k_experts_grouped_tc: CudaPipeline,
     gemm_q4k_experts_grouped_i8: CudaPipeline,
+    gemm_q4k_experts_grouped_i8_direct: CudaPipeline,
     gemm_q4k_experts_grouped_i8_t16: CudaPipeline,
+    gemm_q4k_experts_grouped_i8_t16_direct: CudaPipeline,
+    gemm_q4k_experts_grouped_i8_t16_m64: CudaPipeline,
+    gemm_q4k_experts_grouped_i8_t16_m32: CudaPipeline,
+    gemm_q5k_experts_grouped_i8: CudaPipeline,
+    gemm_q5k_experts_grouped_i8_t16: CudaPipeline,
+    gemm_q5k_experts_grouped_i8_t16_m32: CudaPipeline,
+    gemm_q6k_experts_grouped_i8: CudaPipeline,
+    gemm_q6k_experts_grouped_i8_t16: CudaPipeline,
+    gemm_q6k_experts_grouped_i8_t16_m32: CudaPipeline,
     gemm_q5k_experts_grouped_tc: CudaPipeline,
     gemm_q6k_experts_grouped_tc: CudaPipeline, // down twin for the 4 Q6_K layers
     // Effort 26 T0: batched-prefill GEMM + SSM kernels (qwen prefillBatched).
@@ -806,8 +824,12 @@ pub const ForwardCuda = struct {
     // cached. Subsequent calls hit the cache → skip the dequant kernel entirely
     // → cuBLAS runs at full fp16 TC throughput (no DRAM round-trip).
     // Decode path is unaffected (uses original Q4_K weights for dmmv).
-    // Opt-in via ZINC_PRE_DEQUANT=1. VRAM cost: ~3.5× the Q4_K weight bytes.
+    // Default-on for ROCm MoE when at least 6 GiB remains after loading the
+    // model; opt out with ZINC_PRE_DEQUANT=0. Dense models and tighter devices
+    // retain the quantized path. VRAM cost is bounded by the tensors reached.
     w_f16_cache: ?std.AutoHashMap(usize, buffer.CudaBuffer) = null,
+    w_f16_cache_bytes: usize = 0,
+    w_f16_cache_cap: usize = 8 * 1024 * 1024 * 1024,
     serve_wcache_cap: usize = 24 * 1024 * 1024 * 1024,
 
     // Effort 28 inc 4 — per-SEQUENCE slot state for batched decode (null until
@@ -932,7 +954,17 @@ pub const ForwardCuda = struct {
         pipes.build_expert_order_padded_16 = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded_16");
         pipes.gemm_q4k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_tc");
         pipes.gemm_q4k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8");
+        pipes.gemm_q4k_experts_grouped_i8_direct = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_direct");
         pipes.gemm_q4k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16");
+        pipes.gemm_q4k_experts_grouped_i8_t16_direct = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16_direct");
+        pipes.gemm_q4k_experts_grouped_i8_t16_m64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16_m64");
+        pipes.gemm_q4k_experts_grouped_i8_t16_m32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16_m32");
+        pipes.gemm_q5k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_i8");
+        pipes.gemm_q5k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_i8_t16");
+        pipes.gemm_q5k_experts_grouped_i8_t16_m32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_i8_t16_m32");
+        pipes.gemm_q6k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_i8");
+        pipes.gemm_q6k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_i8_t16");
+        pipes.gemm_q6k_experts_grouped_i8_t16_m32 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_i8_t16_m32");
         pipes.gemm_q5k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_tc");
         pipes.gemm_q6k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_tc");
         // Effort 26 T0: batched-prefill GEMM + SSM kernels.
@@ -963,9 +995,17 @@ pub const ForwardCuda = struct {
         pipes.gemm_q4k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t48");
         pipes.gemm_q5k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t48");
         pipes.gemm_q6k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t48");
+        pipes.gemm_q4k_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t64");
+        pipes.gemm_q5k_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t64");
+        pipes.gemm_q6k_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t64");
         pipes.gemm_q4k_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t80");
         pipes.gemm_q5k_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t80");
         pipes.gemm_q6k_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t80");
+        pipes.gemm_q8_0_wmma_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8");
+        pipes.gemm_q8_0_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t48");
+        pipes.gemm_q8_0_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t64");
+        pipes.gemm_q8_0_wmma_i8_t80 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t80");
+        pipes.gemm_q8_0_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q8_0_wmma_i8_t16");
         pipes.gemm_q4k_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t16");
         pipes.gemm_q5k_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t16");
         pipes.gemm_q6k_wmma_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t16");
@@ -1114,7 +1154,7 @@ pub const ForwardCuda = struct {
             const decode_ssm_fast = std.posix.getenv("ZINC_ROCM_DECODE_SSM_FAST");
             self.use_decode_ssm_fast = if (decode_ssm_fast) |v| !(std.mem.eql(u8, v, "0") or
                 std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or
-                std.ascii.eqlIgnoreCase(v, "no")) else true;
+                std.ascii.eqlIgnoreCase(v, "no")) else d.n_experts > 0;
             const fused_ssm_f32 = std.posix.getenv("ZINC_ROCM_FUSED_SSM_F32");
             self.use_fused_ssm_f32 = if (fused_ssm_f32) |v| !(std.mem.eql(u8, v, "0") or
                 std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or
@@ -1295,15 +1335,22 @@ pub const ForwardCuda = struct {
             log.info("ZINC_BATCH_GRAPH: batched decode will replay via per-B captured CUDA graphs (moe_capturable={})", .{self.moe_graph_capturable});
         }
 
-        if (std.posix.getenv("ZINC_PRE_DEQUANT") != null or std.posix.getenv("ZINC_PREFILL_F16") != null) {
+        // Qwen MoE's resident Q8 shared weights are a proven prefill win. Let
+        // each lazy allocation decide whether it fits instead of sampling free
+        // VRAM once during init: after a sequence of large benchmark processes,
+        // ROCm can report temporarily fragmented free space at that instant.
+        const pre_dequant_default = is_rocm and d.n_experts > 0;
+        if (envFlag("ZINC_PRE_DEQUANT", pre_dequant_default) or envFlag("ZINC_PREFILL_F16", false)) {
             self.w_f16_cache = std.AutoHashMap(usize, buffer.CudaBuffer).init(allocator);
-            log.info("fp16 weight cache enabled (ZINC_PRE_DEQUANT or ZINC_PREFILL_F16)", .{});
+            self.w_f16_cache_cap = @as(usize, envU32("ZINC_PRE_DEQUANT_MB", 8 * 1024)) * 1024 * 1024;
+            log.info("persistent fp16 prefill weight cache enabled (cap {d} MiB)", .{self.w_f16_cache_cap / (1024 * 1024)});
         }
 
         return self;
     }
 
     pub fn deinit(self: *ForwardCuda) void {
+        @setEvalBranchQuota(2000);
         const a = self.allocator;
         self.freeBatch();
         if (self.graph) |g| shim.cuda_graph_free(g);
@@ -1317,6 +1364,11 @@ pub const ForwardCuda = struct {
         for (self.ssm_state) |*b| buffer.freeBuffer(b);
         if (self.decode_batch) |*db| db.free();
         if (self.serve_wcache) |*cache| {
+            var it = cache.valueIterator();
+            while (it.next()) |buf| buffer.freeBuffer(buf);
+            cache.deinit();
+        }
+        if (self.w_f16_cache) |*cache| {
             var it = cache.valueIterator();
             while (it.next()) |buf| buffer.freeBuffer(buf);
             cache.deinit();
@@ -1667,6 +1719,10 @@ pub const ForwardCuda = struct {
         // server after its first prompt.
         self.use_tc_experts = moeTcDefaultOn();
         self.tc_experts_forced = moeTcForced();
+        if (is_rocm) self.moe_tc_min_t = 16;
+        if (profile and d.n_experts > 0) {
+            log.info("MoE prefill policy: T={d} enabled={} forced={} min_t={d}", .{ T, self.use_tc_experts, self.tc_experts_forced, self.moe_tc_min_t });
+        }
 
         const b = try self.ensureBatch(T);
 
@@ -2184,11 +2240,19 @@ pub const ForwardCuda = struct {
         // matvec. fp16 → token-tolerance, not bit-identical.
         const use_tc = self.use_tc_experts and (self.tc_experts_forced or T >= self.moe_tc_min_t) and
             wge.info.type_ == .q4_k and wue.info.type_ == .q4_k;
+        if (std.posix.getenv("ZINC_PREFILL_PROFILE") != null and L < 2) {
+            log.info("MoE layer {d}: gate={} up={} grouped={}", .{ L, wge.info.type_, wue.info.type_, use_tc });
+        }
         if (use_tc) {
             const P = n_used * T;
             // gfx12 integer WMMA consumes native 16-route fragments. Avoid padding
             // every short-prompt expert bucket to the CUDA path's 64-route tile.
-            const route_tile: u32 = if (is_rocm and T < 256) 16 else 64;
+            // With 256 experts and eight routes/token, even a 322-token prompt
+            // averages only ten rows per expert. Keep the native 16-route tile
+            // through this sparse range; switching to 64 at T=256 padded most
+            // long-context buckets with zeros and halved useful throughput.
+            const rocm_route16 = is_rocm and T < 512;
+            const route_tile: u32 = if (rocm_route16) 16 else 64;
             const max_pos = P + route_tile * d.n_experts;
             const max_tiles = max_pos / route_tile;
             // Padded counting sort of the (token,slot) work-items by expert, each run
@@ -2203,11 +2267,27 @@ pub const ForwardCuda = struct {
             // gate (wge) + up (wue) are SEPARATE tensors (gemma fuses them) → per-expert
             // stride = the whole slice, base 0. A = the per-token ffn_norm row.
             if (comptime is_rocm) {
-                const grouped_pipe = if (route_tile == 16) &self.pipes.gemm_q4k_experts_grouped_i8_t16 else &self.pipes.gemm_q4k_experts_grouped_i8;
-                const pg = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = gate_slice, .dst_tok_stride = n_used * ef };
-                cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, 128), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wge.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedI8Push), 0);
-                const pu = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = up_slice, .dst_tok_stride = n_used * ef };
-                cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, 128), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wue.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedI8Push), 0);
+                const use_m32 = route_tile == 16 and std.posix.getenv("ZINC_MOE_M32") != null;
+                const use_m64 = route_tile == 16 and !use_m32 and std.posix.getenv("ZINC_MOE_M64") != null;
+                const use_direct = route_tile == 16 and !use_m32 and !use_m64 and envFlag("ZINC_MOE_DIRECT_A", is_rocm);
+                const grouped_pipe = if (use_m32)
+                    &self.pipes.gemm_q4k_experts_grouped_i8_t16_m32
+                else if (use_m64)
+                    &self.pipes.gemm_q4k_experts_grouped_i8_t16_m64
+                else if (use_direct)
+                    &self.pipes.gemm_q4k_experts_grouped_i8_t16_direct
+                else if (envFlag("ZINC_MOE_DIRECT_A", is_rocm))
+                    &self.pipes.gemm_q4k_experts_grouped_i8_direct
+                else if (route_tile == 16)
+                    &self.pipes.gemm_q4k_experts_grouped_i8_t16
+                else
+                    &self.pipes.gemm_q4k_experts_grouped_i8;
+                const grouped_rows: u32 = if (use_m32) 32 else if (use_m64) 64 else 128;
+                const grouped_threads: u32 = if (use_m32) 64 else if (use_m64) 128 else 256;
+                const pg = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = gate_slice, .dst_tok_stride = n_used * ef, .route_stride = 0 };
+                cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, grouped_rows), max_tiles, 1 }, .{ grouped_threads, 1, 1 }, &.{ &wge.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedI8Push), 0);
+                const pu = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = up_slice, .dst_tok_stride = n_used * ef, .route_stride = 0 };
+                cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, grouped_rows), max_tiles, 1 }, .{ grouped_threads, 1, 1 }, &.{ &wue.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedI8Push), 0);
             } else {
                 const pg = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = gate_slice, .dst_tok_stride = n_used * ef };
                 cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wge.gpu_buffer, &b.ffn_norm, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedTCPush), 0);
@@ -2234,7 +2314,40 @@ pub const ForwardCuda = struct {
             .q6_k => if (moeDownQ6kTcOn()) &self.pipes.gemm_q6k_experts_grouped_tc else null, // the 4 Q6_K layers
             else => null,
         } else null;
-        if (down_tc_pipe) |dpipe| {
+        const rocm_route16 = is_rocm and T < 512;
+        const rocm_down_m32 = rocm_route16 and std.posix.getenv("ZINC_MOE_M32") != null;
+        const rocm_down_pipe: ?*CudaPipeline = if (is_rocm and use_tc and moeDownTcOn()) switch (wde.info.type_) {
+            .q5_k => if (rocm_down_m32)
+                &self.pipes.gemm_q5k_experts_grouped_i8_t16_m32
+            else if (rocm_route16)
+                &self.pipes.gemm_q5k_experts_grouped_i8_t16
+            else
+                &self.pipes.gemm_q5k_experts_grouped_i8,
+            .q6_k => if (moeDownQ6kTcOn())
+                if (rocm_down_m32)
+                    &self.pipes.gemm_q6k_experts_grouped_i8_t16_m32
+                else if (rocm_route16)
+                    &self.pipes.gemm_q6k_experts_grouped_i8_t16
+                else
+                    &self.pipes.gemm_q6k_experts_grouped_i8
+            else
+                null,
+            else => null,
+        } else null;
+        if (rocm_down_pipe) |dpipe| {
+            const Pd = n_used * T;
+            const route_tile: u32 = if (rocm_route16) 16 else 64;
+            const max_pos_d = Pd + route_tile * d.n_experts;
+            const max_tiles_d = max_pos_d / route_tile;
+            // Reuse act_q8 after gate/up: each routed SwiGLU row is now its own
+            // activation row, addressed through (token,slot) in padded_order.
+            const qp = QuantActPush{ .K = ef, .T = Pd };
+            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(ef, 256), Pd, 1 }, .{ 256, 1, 1 }, &.{ &b.swiglu_e, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            const pd = GroupedI8Push{ .M = d.n_embd, .K = ef, .T = Pd, .base = 0, .expert_stride = down_slice, .dst_tok_stride = n_used * d.n_embd, .route_stride = n_used };
+            const down_rows: u32 = if (rocm_down_m32) 32 else 128;
+            const down_threads: u32 = if (rocm_down_m32) 64 else 256;
+            cmd.dispatch(dpipe, .{ ceilDiv(d.n_embd, down_rows), max_tiles_d, 1 }, .{ down_threads, 1, 1 }, &.{ &wde.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.down_e }, &pd, @sizeOf(GroupedI8Push), 0);
+        } else if (down_tc_pipe) |dpipe| {
             const Pd = n_used * T;
             const max_pos_d = Pd + 64 * d.n_experts;
             const max_tiles_d = max_pos_d >> 6;
@@ -2297,7 +2410,7 @@ pub const ForwardCuda = struct {
         const use_mma = !use_f16 and idx == 0 and std.posix.getenv("ZINC_PREFILL_MMA") != null;
         const use_dp4a = !use_f16 and !use_mma and idx == 0 and std.posix.getenv("ZINC_PREFILL_DP4A") != null;
         return self.batch != null and T >= 32 and M >= 64 and !use_f16 and !use_mma and !use_dp4a and
-            (idx == 0 or (is_rocm and (idx == 1 or idx == 2))) and prefillQ8On();
+            (idx == 0 or (is_rocm and (idx == 1 or idx == 2 or idx == 3))) and prefillQ8On();
     }
 
     fn gemmDispatchPrefillImpl(self: *ForwardCuda, cmd: *command.CudaCommand, w: *const LoadedTensor, x: *const CudaBuffer, y: *const CudaBuffer, M: u32, K: u32, T: u32, reuse_q8: bool) void {
@@ -2333,9 +2446,17 @@ pub const ForwardCuda = struct {
                     // Cache HIT: use persistent fp16 weight, skip dequant
                     w_f16_handle = cached.handle;
                     need_dequant = false;
-                } else {
+                } else cache_fill: {
                     // Cache MISS: try to allocate persistent buffer + dequant into it
-                    const new_buf = buffer.createBuffer(self.ctx, @as(usize, M) * K * @sizeOf(u16)) catch null;
+                    const bytes = @as(usize, M) * K * @sizeOf(u16);
+                    const reserve: u64 = 512 * 1024 * 1024;
+                    if (self.w_f16_cache_bytes + bytes > self.w_f16_cache_cap or
+                        shim.cuda_free_memory(self.ctx) < @as(u64, bytes) + reserve)
+                    {
+                        break :cache_fill;
+                    }
+                    cache.ensureUnusedCapacity(1) catch break :cache_fill;
+                    const new_buf = buffer.createBuffer(self.ctx, bytes) catch null;
                     if (new_buf) |dq_buf| {
                         if (idx == 0) {
                             const dq = DequantQ4KPush{ .M = M, .K = K };
@@ -2350,11 +2471,10 @@ pub const ForwardCuda = struct {
                             const dq = DequantQ8_0Push{ .M = M, .K = K };
                             cmd.dispatch(&self.pipes.dequant_q8_0_to_f16, .{ ceilDiv(M * K, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &w.gpu_buffer, &dq_buf }, &dq, @sizeOf(DequantQ8_0Push), 0);
                         }
-                        cache.put(key, dq_buf) catch {};
-                        if (cache.getPtr(key)) |cached| {
-                            w_f16_handle = cached.handle;
-                            need_dequant = false;
-                        }
+                        cache.putAssumeCapacity(key, dq_buf);
+                        self.w_f16_cache_bytes += bytes;
+                        w_f16_handle = dq_buf.handle;
+                        need_dequant = false;
                     }
                     // else: alloc failed → fall through to scratch dequant below
                 }
@@ -2442,29 +2562,39 @@ pub const ForwardCuda = struct {
                     if (comptime is_rocm) {
                         const tuned_tiles = prefillWmmaTilesOn();
                         const use_t48 = tuned_tiles and T <= 48;
-                        const use_t80 = !use_t48 and prefillWmmaT80On() and T <= 80;
+                        const use_t64 = !use_t48 and tuned_tiles and T <= 64;
+                        const use_t80 = !use_t48 and !use_t64 and prefillWmmaT80On() and T <= 80;
                         const qpipe = if (use_t48) switch (idx) {
                             0 => &self.pipes.gemm_q4k_wmma_i8_t48,
                             1 => &self.pipes.gemm_q5k_wmma_i8_t48,
-                            else => &self.pipes.gemm_q6k_wmma_i8_t48,
+                            2 => &self.pipes.gemm_q6k_wmma_i8_t48,
+                            else => &self.pipes.gemm_q8_0_wmma_i8_t48,
+                        } else if (use_t64) switch (idx) {
+                            0 => &self.pipes.gemm_q4k_wmma_i8_t64,
+                            1 => &self.pipes.gemm_q5k_wmma_i8_t64,
+                            2 => &self.pipes.gemm_q6k_wmma_i8_t64,
+                            else => &self.pipes.gemm_q8_0_wmma_i8_t64,
                         } else if (use_t80) switch (idx) {
                             0 => &self.pipes.gemm_q4k_wmma_i8_t80,
                             1 => &self.pipes.gemm_q5k_wmma_i8_t80,
-                            else => &self.pipes.gemm_q6k_wmma_i8_t80,
+                            2 => &self.pipes.gemm_q6k_wmma_i8_t80,
+                            else => &self.pipes.gemm_q8_0_wmma_i8_t80,
                         } else switch (idx) {
                             0 => &self.pipes.gemm_q4k_wmma_i8,
                             1 => &self.pipes.gemm_q5k_wmma_i8,
-                            else => &self.pipes.gemm_q6k_wmma_i8,
+                            2 => &self.pipes.gemm_q6k_wmma_i8,
+                            else => &self.pipes.gemm_q8_0_wmma_i8,
                         };
                         const tail = T % 112;
-                        const use_t16_tail = tuned_tiles and !use_t48 and !use_t80 and T > 112 and tail > 0 and tail <= 16;
+                        const use_t16_tail = tuned_tiles and !use_t48 and !use_t64 and !use_t80 and T > 112 and tail > 0 and tail <= 16;
                         const main_tiles = if (use_t16_tail) T / 112 else ceilDiv(T, 112);
                         cmd.dispatch(qpipe, .{ ceilDiv(M, 128), main_tiles, 1 }, .{ 256, 1, 1 }, &.{ &w.gpu_buffer, x, &b.act_q8, y }, &q8push, @sizeOf(GemmPush), 0);
                         if (use_t16_tail) {
                             const tail_pipe = switch (idx) {
                                 0 => &self.pipes.gemm_q4k_wmma_i8_t16,
                                 1 => &self.pipes.gemm_q5k_wmma_i8_t16,
-                                else => &self.pipes.gemm_q6k_wmma_i8_t16,
+                                2 => &self.pipes.gemm_q6k_wmma_i8_t16,
+                                else => &self.pipes.gemm_q8_0_wmma_i8_t16,
                             };
                             var tail_push = q8push;
                             tail_push.x_offset = (T - tail) * K * 4;
@@ -2549,7 +2679,7 @@ pub const ForwardCuda = struct {
             .swiglu_ff = try buffer.createBuffer(ctx, T * max_ff * f4),
             .act_f16 = try buffer.createBuffer(ctx, T * max_k * @sizeOf(u16)),
             .w_f16 = try buffer.createBuffer(ctx, max_w * @sizeOf(u16)),
-            .act_q8 = try buffer.createBuffer(ctx, T * (max_k / 32) * 36),
+            .act_q8 = try buffer.createBuffer(ctx, T * (@max(max_k, nu * d.n_ff) / 32) * 36),
             .router_logits_e = try buffer.createBuffer(ctx, if (moe) T * d.n_experts * f4 else f4),
             .router_table_e = try buffer.createBuffer(ctx, if (moe) T * 2 * nu * f4 else f4),
             .gate_e = try buffer.createBuffer(ctx, e_gu),
@@ -4441,6 +4571,17 @@ fn qwenMoeBatchedOn() bool {
 
 fn ceilDiv(a: u32, b: u32) u32 {
     return (a + b - 1) / b;
+}
+
+fn envFlag(name: []const u8, default: bool) bool {
+    const value = std.posix.getenv(name) orelse return default;
+    return !(std.mem.eql(u8, value, "0") or std.ascii.eqlIgnoreCase(value, "off") or
+        std.ascii.eqlIgnoreCase(value, "false") or std.ascii.eqlIgnoreCase(value, "no"));
+}
+
+fn envU32(name: []const u8, default: u32) u32 {
+    const value = std.posix.getenv(name) orelse return default;
+    return std.fmt.parseUnsigned(u32, std.mem.trim(u8, value, " \t\r\n"), 10) catch default;
 }
 
 /// T2 (qwen MoE port): grouped Tensor-core routed gate/up experts. DEFAULT-ON;
