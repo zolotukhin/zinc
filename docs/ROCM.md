@@ -81,6 +81,7 @@ available as correctness/performance A/B opt-outs:
 - `ZINC_ROCM_DECODE_Q8_Q6_PROJ=0`
 - `ZINC_ROCM_DECODE_Q8_Q5=0`
 - `ZINC_ROCM_DECODE_Q8_Q4_PAIR=0`
+- `ZINC_ROCM_RMS_Q8=0`
 - `ZINC_ROCM_ARGMAX_V2=0`
 - `ZINC_ROCM_DECODE_SSM_COL_WARP=0`
 - `ZINC_ROCM_DECODE_SSM_FAST=0`
@@ -89,9 +90,11 @@ available as correctness/performance A/B opt-outs:
 The Qwen 3.8 decode path uses packed Q8 activations for the hot Q4_K, Q5_K,
 and Q6_K projections, paired projection kernels where the shapes permit it, a
 prepared wave32 column scan for the recurrent SSM state, and a two-stage GPU
-argmax. The 80-column WMMA tile covers the long-draft prompt shape without
-padding it to a substantially larger tile. All are ROCm defaults only; setting
-the corresponding variable to `0` restores the preceding path for comparison.
+argmax. RMS normalization and Q8 activation packing share one wide per-token
+kernel in prefill and decode, avoiding a second activation read and launch. The
+80-column WMMA tile covers the long-draft prompt shape without padding it to a
+substantially larger tile. All are ROCm defaults only; setting the corresponding
+variable to `0` restores the preceding path for comparison.
 
 Qwen 3.6 MoE prefill uses the native token-batched Q4_K/Q5_K/Q6_K expert
 kernels. CUDA's grouped tensor-core expert path is not dispatched by the ROCm

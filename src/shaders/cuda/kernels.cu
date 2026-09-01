@@ -202,6 +202,7 @@ __device__ __forceinline__ float zinc_block_reduce_sum_all(float v) {
 // ---- rms_norm (port of rms_norm_mul.comp) -----------------------------------
 // y = weight * (x / sqrt(mean(x^2) + eps)). One block per token.
 struct RmsPush { unsigned N; float eps; };
+struct RmsQ8Push { unsigned N; float eps; unsigned T; };
 
 extern "C" __global__ void rms_norm(const float* x, const float* w, float* y, RmsPush pc) {
     unsigned token = blockIdx.x;
@@ -222,6 +223,81 @@ extern "C" __global__ void rms_norm(const float* x, const float* w, float* y, Rm
 
     for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x) {
         yt[i] = w[i] * (xt[i] * rinv);
+    }
+}
+
+// RMS norm + Q8_1 activation packing. The hot ROCm dense path used
+// to write the normalized f32 row, then launch quantize_act_q8_0 to read it back
+// and pack it. A wider RMS reduction feeds the same equation while each packed
+// Q8 group keeps the quantizer's wave32 reduction order. Both views leave in
+// one launch.
+// Grid: one block per token (decode uses one; prefill launches all prompt rows).
+extern "C" __global__ void rms_norm_quant_q8_0(
+    const float* __restrict__ x, const float* __restrict__ w,
+    float* __restrict__ y, unsigned char* __restrict__ out, RmsQ8Push pc)
+{
+    const unsigned token = blockIdx.x;
+    const float* xt = x + (size_t)token * pc.N;
+    float* yt = y + (size_t)token * pc.N;
+
+    float ss = 0.0f;
+    for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x) {
+        const float v = xt[i];
+        ss += v * v;
+    }
+    ss = zinc_block_reduce_sum(ss);
+
+    __shared__ float rms_inv_sh;
+    if (threadIdx.x == 0u) rms_inv_sh = rsqrtf(ss / (float)pc.N + pc.eps);
+    __syncthreads();
+    const float rinv = rms_inv_sh;
+
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned warp = threadIdx.x >> 5;
+    const unsigned nwarps = blockDim.x >> 5;
+    const unsigned groups = (pc.N + 31u) >> 5;
+    for (unsigned c = warp; c < groups; c += nwarps) {
+        const unsigned idx = c * 32u + lane;
+        const float val = idx < pc.N ? w[idx] * (xt[idx] * rinv) : 0.0f;
+        if (idx < pc.N) yt[idx] = val;
+
+        float av = fabsf(val);
+        float sv = val;
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            av = fmaxf(av, __shfl_xor_sync(0xffffffffu, av, o));
+            sv += __shfl_xor_sync(0xffffffffu, sv, o);
+        }
+        const float d = av / 127.0f;
+        const float scale = 127.0f / fmaxf(av, 1e-5f);
+        const int q = max(-127, min(127, __float2int_rn(val * scale)));
+
+#ifdef ZINC_ROCM
+        // MMQ layout for T=1: four Q8_1 groups share one 144-byte tile.
+        const unsigned h = c >> 2;
+        const unsigned g = c & 3u;
+        unsigned char* out_base = out + ((size_t)h * pc.T + token) * 144u;
+        if (lane == 0u && idx < pc.N) {
+            const unsigned short dh = zinc_float_to_half(d);
+            const unsigned short sh = zinc_float_to_half(sv);
+            out_base[g * 4u] = (unsigned char)(dh & 0xffu);
+            out_base[g * 4u + 1u] = (unsigned char)(dh >> 8);
+            out_base[g * 4u + 2u] = (unsigned char)(sh & 0xffu);
+            out_base[g * 4u + 3u] = (unsigned char)(sh >> 8);
+        }
+        out_base[16u + g * 32u + lane] = (unsigned char)q;
+#else
+        unsigned char* out_base = out + (size_t)token * groups * 36u + (size_t)c * 36u;
+        if (lane == 0u && idx < pc.N) {
+            const unsigned short dh = zinc_float_to_half(d);
+            const unsigned short sh = zinc_float_to_half(sv);
+            out_base[0] = (unsigned char)(dh & 0xffu);
+            out_base[1] = (unsigned char)(dh >> 8);
+            out_base[2] = (unsigned char)(sh & 0xffu);
+            out_base[3] = (unsigned char)(sh >> 8);
+        }
+        out_base[4u + lane] = (unsigned char)q;
+#endif
     }
 }
 

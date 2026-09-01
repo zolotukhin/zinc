@@ -133,6 +133,7 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_ROCM_DECODE_Q8_Q6_PROJ: "1",
     ZINC_ROCM_DECODE_Q8_Q5: "1",
     ZINC_ROCM_DECODE_Q8_Q4_PAIR: "1",
+    ZINC_ROCM_RMS_Q8: "1",
     ZINC_ROCM_ARGMAX_V2: "1",
     ZINC_ROCM_DECODE_SSM_COL_WARP: "1",
     ZINC_ROCM_DECODE_SSM_FAST: "1",
@@ -175,6 +176,7 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_ROCM_DECODE_Q8_Q6_PROJ).toBe("1");
   expect(env.ZINC_ROCM_DECODE_Q8_Q5).toBe("1");
   expect(env.ZINC_ROCM_DECODE_Q8_Q4_PAIR).toBe("1");
+  expect(env.ZINC_ROCM_RMS_Q8).toBe("1");
   expect(env.ZINC_ROCM_ARGMAX_V2).toBe("1");
   expect(env.ZINC_ROCM_DECODE_SSM_COL_WARP).toBe("1");
   expect(env.ZINC_ROCM_DECODE_SSM_FAST).toBe("1");

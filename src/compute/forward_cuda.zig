@@ -34,6 +34,7 @@ const KERNELS_CU = @embedFile("../shaders/cuda/kernels.cu");
 
 // ---- kernel push-constant structs (must byte-match kernels.cu) --------------
 const RmsPush = extern struct { N: u32, eps: f32 };
+const RmsQ8Push = extern struct { N: u32, eps: f32, T: u32 };
 const DmmvPush = extern struct {
     M: u32,
     K: u32,
@@ -346,6 +347,7 @@ const Derived = struct {
 /// All NVRTC-compiled kernels used by the decode path.
 const Pipelines = struct {
     rms_norm: CudaPipeline,
+    rms_norm_quant_q8: CudaPipeline, // RMS norm + packed Q8_1 activation
     dmmv: [5]CudaPipeline, // q4k, q5k, q6k, q8_0, f32
     dmmv_fast: [4]CudaPipeline, // q4k_fast, q5k_fast, q6k_fast, q8_0_fast (block=64)
     dmmv_q4k_q8_fast: CudaPipeline, // experimental Q4_K x Q8_1 decode matvec
@@ -609,6 +611,7 @@ pub const ForwardCuda = struct {
     use_fused_ssm_f32: bool = false,
     use_fused_q4_pairs: bool = false,
     use_fused_attn_frontend: bool = false,
+    use_rocm_rms_q8: bool = false,
     // async decode command ring (dense path): commitAsync'd layer commands are
     // stashed here and freed after the tail commitAndWait drains the shared
     // CUstream. Defaults so the init literal need not list them.
@@ -862,6 +865,7 @@ pub const ForwardCuda = struct {
 
         var pipes: Pipelines = undefined;
         pipes.rms_norm = try pipeline.createPipeline(ctx, src.ptr, "rms_norm");
+        pipes.rms_norm_quant_q8 = try pipeline.createPipeline(ctx, src.ptr, "rms_norm_quant_q8_0");
         pipes.dmmv[0] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k");
         pipes.dmmv[1] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k");
         pipes.dmmv[2] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k");
@@ -996,7 +1000,7 @@ pub const ForwardCuda = struct {
             pipes.dmmv_q5k_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_btok" ++ suf);
             pipes.dmmv_q8_0_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0_btok" ++ suf);
         }
-        log.info("nvrtc: compiled {d} kernel pipelines", .{172});
+        log.info("nvrtc: compiled {d} kernel pipelines", .{173});
 
         const f4 = @sizeOf(f32);
         const max_act = @max(d.n_ff, d.conv_channels); // 12288 vs 8192 → 12288
@@ -1124,6 +1128,13 @@ pub const ForwardCuda = struct {
                 std.ascii.eqlIgnoreCase(v, "no")) else true;
             if (self.use_fused_attn_frontend) {
                 log.info("ROCm fused attention front-end: deinterleave, norm, RoPE, and KV write share one kernel", .{});
+            }
+            const rms_q8 = std.posix.getenv("ZINC_ROCM_RMS_Q8");
+            self.use_rocm_rms_q8 = if (rms_q8) |v| !(std.mem.eql(u8, v, "0") or
+                std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or
+                std.ascii.eqlIgnoreCase(v, "no")) else true;
+            if (self.use_rocm_rms_q8) {
+                log.info("ROCm fused RMS + Q8 activation packing enabled", .{});
             }
             self.cublas_min_t = 1;
         }
@@ -1731,9 +1742,9 @@ pub const ForwardCuda = struct {
         defer buffer.freeBuffer(&hid_last);
 
         var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hid_last, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
-        self.lmHeadDispatch(&cmd, &lm_head.gpu_buffer, lm_head.info.type_);
+        const want_q8 = self.use_decode_q8_lm and lm_head.info.type_ == .q6_k;
+        const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &hid_last, &out_norm.gpu_buffer, &self.norm_buf, d.n_embd, want_q8);
+        self.lmHeadDispatch(&cmd, &lm_head.gpu_buffer, lm_head.info.type_, norm_q8_ready);
         self.argmaxDispatch(&cmd, &self.argmax_buf);
         cmd.commitAndWait();
 
@@ -1844,11 +1855,11 @@ pub const ForwardCuda = struct {
         const wan = self.layer(L, "attn_norm.weight");
 
         var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &wan.gpu_buffer, &b.norm }, &rms, @sizeOf(RmsPush), 0);
-        self.gemmDispatchPrefill(&cmd, wq, &b.norm, &b.qfull, 2 * d.q_dim, d.n_embd, T);
+        const wq_uses_q8 = self.prefillUsesQ8(wq, 2 * d.q_dim, T);
+        const norm_q8_ready = self.rmsNormPrefillDispatch(&cmd, &b.hidden, &wan.gpu_buffer, &b.norm, d.n_embd, T, wq_uses_q8);
+        self.gemmDispatchPrefillImpl(&cmd, wq, &b.norm, &b.qfull, 2 * d.q_dim, d.n_embd, T, norm_q8_ready);
         const reuse_q8_qk = prefillQ8ReuseOn() and
-            self.prefillUsesQ8(wq, 2 * d.q_dim, T) and self.prefillUsesQ8(wk, d.kv_dim, T);
+            wq_uses_q8 and self.prefillUsesQ8(wk, d.kv_dim, T);
         self.gemmDispatchPrefillImpl(&cmd, wk, &b.norm, &b.k, d.kv_dim, d.n_embd, T, reuse_q8_qk);
         const reuse_q8_qkv = reuse_q8_qk and self.prefillUsesQ8(wv, d.kv_dim, T);
         self.gemmDispatchPrefillImpl(&cmd, wv, &b.norm, &b.v, d.kv_dim, d.n_embd, T, reuse_q8_qkv);
@@ -1917,11 +1928,11 @@ pub const ForwardCuda = struct {
         var cmd = try command.beginCommand(ctx);
 
         // === Pre-scan: RMS norm + GEMMs + conv1d ===
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &wan.gpu_buffer, &b.norm }, &rms, @sizeOf(RmsPush), 0);
-        self.gemmDispatchPrefill(&cmd, wqkv, &b.norm, &b.qkv, d.conv_channels, d.n_embd, T);
+        const wqkv_uses_q8 = self.prefillUsesQ8(wqkv, d.conv_channels, T);
+        const norm_q8_ready = self.rmsNormPrefillDispatch(&cmd, &b.hidden, &wan.gpu_buffer, &b.norm, d.n_embd, T, wqkv_uses_q8);
+        self.gemmDispatchPrefillImpl(&cmd, wqkv, &b.norm, &b.qkv, d.conv_channels, d.n_embd, T, norm_q8_ready);
         const reuse_q8_qkv_z = prefillQ8ReuseOn() and
-            self.prefillUsesQ8(wqkv, d.conv_channels, T) and self.prefillUsesQ8(wz, d.d_inner, T);
+            wqkv_uses_q8 and self.prefillUsesQ8(wz, d.d_inner, T);
         self.gemmDispatchPrefillImpl(&cmd, wz, &b.norm, &b.z, d.d_inner, d.n_embd, T, reuse_q8_qkv_z);
         self.gemmDispatchPrefill(&cmd, walpha, &b.norm, &b.alpha, d.dt_rank, d.n_embd, T);
         self.gemmDispatchPrefill(&cmd, wbeta, &b.norm, &b.beta, d.dt_rank, d.n_embd, T);
@@ -2070,22 +2081,22 @@ pub const ForwardCuda = struct {
         const wup = self.layer(L, "ffn_up.weight");
         const wdown = self.layer(L, "ffn_down.weight");
 
-        var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &wfn.gpu_buffer, &b.ffn_norm }, &rms, @sizeOf(RmsPush), 0);
-
         // Fused gate+up+SwiGLU when both are Q4_K and the tile is big enough
         const fuse_gate_up_swiglu = prefillGateUpSwigluOn();
         const dense_gate_up_uses_cublas = self.use_cublas and T >= self.cublas_min_t;
         const can_fuse_gate_up = wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k and
             T >= 32 and d.n_ff >= 64 and !dense_gate_up_uses_cublas and fuse_gate_up_swiglu;
+
+        var cmd = try command.beginCommand(ctx);
+        const wgate_uses_q8 = !can_fuse_gate_up and self.prefillUsesQ8(wgate, d.n_ff, T);
+        const norm_q8_ready = self.rmsNormPrefillDispatch(&cmd, &b.hidden, &wfn.gpu_buffer, &b.ffn_norm, d.n_embd, T, wgate_uses_q8);
         if (can_fuse_gate_up) {
             const gp = GateUpSwigluPush{ .M = d.n_ff, .K = d.n_embd, .T = T };
             cmd.dispatch(&self.pipes.gemm_q4k_gate_up_swiglu, .{ ceilDiv(d.n_ff, 64), ceilDiv(T, 64), 1 }, .{ 256, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &b.ffn_norm, &b.swiglu_ff }, &gp, @sizeOf(GateUpSwigluPush), 0);
         } else {
-            self.gemmDispatchPrefill(&cmd, wgate, &b.ffn_norm, &b.gate_ff, d.n_ff, d.n_embd, T);
+            self.gemmDispatchPrefillImpl(&cmd, wgate, &b.ffn_norm, &b.gate_ff, d.n_ff, d.n_embd, T, norm_q8_ready);
             const reuse_q8_gate_up = prefillQ8ReuseOn() and
-                self.prefillUsesQ8(wgate, d.n_ff, T) and self.prefillUsesQ8(wup, d.n_ff, T);
+                wgate_uses_q8 and self.prefillUsesQ8(wup, d.n_ff, T);
             self.gemmDispatchPrefillImpl(&cmd, wup, &b.ffn_norm, &b.up_ff, d.n_ff, d.n_embd, T, reuse_q8_gate_up);
             const sg = SwigluPush{ .N = T * d.n_ff };
             cmd.dispatch(&self.pipes.swiglu, .{ ceilDiv(T * d.n_ff, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.gate_ff, &b.up_ff, &b.swiglu_ff }, &sg, @sizeOf(SwigluPush), 0);
@@ -2706,7 +2717,7 @@ pub const ForwardCuda = struct {
             defer buffer.freeBuffer(&am_slot);
             const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
             cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hrow, &out_norm.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
-            self.lmHeadDispatch(&cmd, &lm_head.gpu_buffer, lm_head.info.type_);
+            self.lmHeadDispatch(&cmd, &lm_head.gpu_buffer, lm_head.info.type_, false);
             self.argmaxDispatch(&cmd, &am_slot);
         }
         cmd.commitAndWait();
@@ -2810,7 +2821,7 @@ pub const ForwardCuda = struct {
             defer buffer.freeBuffer(&am_slot);
             const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
             cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &hrow, out_norm, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
-            self.lmHeadDispatch(&cmd, lm_head, lm_type);
+            self.lmHeadDispatch(&cmd, lm_head, lm_type, false);
             self.argmaxDispatch(&cmd, &am_slot);
         }
         cmd.releaseCompleted(); // captured onto the stream; no event record / no sync
@@ -3416,14 +3427,13 @@ pub const ForwardCuda = struct {
         }
 
         var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wan.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
-        self.dmmvDispatch(&cmd, wq, &self.norm_buf, &self.qfull_buf, 2 * d.q_dim, d.n_embd, 0, 0);
+        const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &wan.gpu_buffer, &self.norm_buf, d.n_embd, self.use_decode_q8_q4 and d.n_experts == 0 and wq.info.type_ == .q4_k);
+        self.dmmvPreparedQ8Dispatch(&cmd, wq, &self.norm_buf, &self.qfull_buf, 2 * d.q_dim, d.n_embd, 0, 0, norm_q8_ready);
         if (self.use_fused_q4_pairs and wk.info.type_ == .q4_k and wv.info.type_ == .q4_k) {
-            self.dmmvQ4PairDispatch(&cmd, &wk.gpu_buffer, &wv.gpu_buffer, &self.norm_buf, &self.k_buf, &self.v_buf, d.kv_dim, d.kv_dim, d.n_embd);
+            self.dmmvQ4PairDispatch(&cmd, &wk.gpu_buffer, &wv.gpu_buffer, &self.norm_buf, &self.k_buf, &self.v_buf, d.kv_dim, d.kv_dim, d.n_embd, norm_q8_ready);
         } else {
-            self.dmmvDispatch(&cmd, wk, &self.norm_buf, &self.k_buf, d.kv_dim, d.n_embd, 0, 0);
-            self.dmmvDispatch(&cmd, wv, &self.norm_buf, &self.v_buf, d.kv_dim, d.n_embd, 0, 0);
+            self.dmmvPreparedQ8Dispatch(&cmd, wk, &self.norm_buf, &self.k_buf, d.kv_dim, d.n_embd, 0, 0, norm_q8_ready);
+            self.dmmvPreparedQ8Dispatch(&cmd, wv, &self.norm_buf, &self.v_buf, d.kv_dim, d.n_embd, 0, 0, norm_q8_ready);
         }
         self.attentionFrontendDispatch(&cmd, &wqn.gpu_buffer, &wkn.gpu_buffer, &kk, &vv, pos);
         const seq_len = pos + 1;
@@ -3468,13 +3478,12 @@ pub const ForwardCuda = struct {
         const conv_off = pos % (d.d_conv - 1);
 
         var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wan.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+        const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &wan.gpu_buffer, &self.norm_buf, d.n_embd, self.use_decode_q8_q4_pair and d.n_experts == 0 and wqkv.info.type_ == .q4_k and wz.info.type_ == .q4_k);
         if (self.use_fused_q4_pairs and wqkv.info.type_ == .q4_k and wz.info.type_ == .q4_k) {
-            self.dmmvQ4PairDispatch(&cmd, &wqkv.gpu_buffer, &wz.gpu_buffer, &self.norm_buf, &self.attn_out_buf, &self.gate_buf, d.conv_channels, d.d_inner, d.n_embd);
+            self.dmmvQ4PairDispatch(&cmd, &wqkv.gpu_buffer, &wz.gpu_buffer, &self.norm_buf, &self.attn_out_buf, &self.gate_buf, d.conv_channels, d.d_inner, d.n_embd, norm_q8_ready);
         } else {
-            self.dmmvDispatch(&cmd, wqkv, &self.norm_buf, &self.attn_out_buf, d.conv_channels, d.n_embd, 0, 0);
-            self.dmmvDispatch(&cmd, wz, &self.norm_buf, &self.gate_buf, d.d_inner, d.n_embd, 0, 0);
+            self.dmmvPreparedQ8Dispatch(&cmd, wqkv, &self.norm_buf, &self.attn_out_buf, d.conv_channels, d.n_embd, 0, 0, norm_q8_ready);
+            self.dmmvPreparedQ8Dispatch(&cmd, wz, &self.norm_buf, &self.gate_buf, d.d_inner, d.n_embd, 0, 0, norm_q8_ready);
         }
         if (self.use_fused_ssm_f32 and walpha.info.type_ == .f32 and wbeta.info.type_ == .f32) {
             const ab = DmmvPush{ .M = d.dt_rank, .K = d.n_embd };
@@ -3556,13 +3565,15 @@ pub const ForwardCuda = struct {
         self.submit(cmd);
     }
 
-    fn lmHeadDispatch(self: *ForwardCuda, cmd: *command.CudaCommand, lm_head: *const CudaBuffer, lm_type: gguf.GGMLType) void {
+    fn lmHeadDispatch(self: *ForwardCuda, cmd: *command.CudaCommand, lm_head: *const CudaBuffer, lm_type: gguf.GGMLType, q8_ready: bool) void {
         const d = self.d;
         const lm = DmmvPush{ .M = d.vocab, .K = d.n_embd };
         const lm_idx = dmmvIdx(lm_type);
         if (self.use_decode_q8_lm and lm_type == .q6_k and self.batch != null and (d.n_embd & 255) == 0) {
-            const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
-            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            if (!q8_ready) {
+                const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
+                cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            }
             cmd.dispatch(&self.pipes.dmmv_q6k_q8_fast, .{ d.vocab, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ lm_head, &self.batch.?.act_q8, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
         } else if (lm_idx < 4) {
             cmd.dispatch(&self.pipes.dmmv_fast[lm_idx], .{ d.vocab, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ lm_head, &self.norm_buf, &self.logits_buf }, &lm, @sizeOf(DmmvPush), 0);
@@ -3575,9 +3586,9 @@ pub const ForwardCuda = struct {
     /// `cmd`. Shared by the async and graph-capture paths.
     fn tailDispatch(self: *ForwardCuda, cmd: *command.CudaCommand, out_norm: *const CudaBuffer, lm_head: *const CudaBuffer, lm_type: gguf.GGMLType) void {
         const d = self.d;
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, out_norm, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
-        self.lmHeadDispatch(cmd, lm_head, lm_type);
+        const want_q8 = self.use_decode_q8_lm and lm_type == .q6_k;
+        const norm_q8_ready = self.rmsNormDecodeDispatch(cmd, &self.hidden, out_norm, &self.norm_buf, d.n_embd, want_q8);
+        self.lmHeadDispatch(cmd, lm_head, lm_type, norm_q8_ready);
         self.argmaxDispatch(cmd, &self.argmax_buf);
     }
 
@@ -3643,19 +3654,18 @@ pub const ForwardCuda = struct {
         const wan = self.layer(L, "attn_norm.weight");
 
         var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wan.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+        const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &wan.gpu_buffer, &self.norm_buf, d.n_embd, self.use_decode_q8_q4 and d.n_experts == 0 and wq.info.type_ == .q4_k);
         // Q+gate, K, V projections from norm_buf.
         // qwen35 packs the attention gate INTO attn_q: wq outputs 2*q_dim, laid out
         // per head as [Q(head_dim) | gate(head_dim)] interleaved across heads
         // ([Q0,g0,Q1,g1,...]). Project the full 2*q_dim, then deinterleave into
         // contiguous q_buf (the Q halves) and gate_buf (the gate halves).
-        self.dmmvDispatch(&cmd, wq, &self.norm_buf, &self.qfull_buf, 2 * d.q_dim, d.n_embd, 0, 0);
+        self.dmmvPreparedQ8Dispatch(&cmd, wq, &self.norm_buf, &self.qfull_buf, 2 * d.q_dim, d.n_embd, 0, 0, norm_q8_ready);
         if (self.use_fused_q4_pairs and wk.info.type_ == .q4_k and wv.info.type_ == .q4_k) {
-            self.dmmvQ4PairDispatch(&cmd, &wk.gpu_buffer, &wv.gpu_buffer, &self.norm_buf, &self.k_buf, &self.v_buf, d.kv_dim, d.kv_dim, d.n_embd);
+            self.dmmvQ4PairDispatch(&cmd, &wk.gpu_buffer, &wv.gpu_buffer, &self.norm_buf, &self.k_buf, &self.v_buf, d.kv_dim, d.kv_dim, d.n_embd, norm_q8_ready);
         } else {
-            self.dmmvDispatch(&cmd, wk, &self.norm_buf, &self.k_buf, d.kv_dim, d.n_embd, 0, 0);
-            self.dmmvDispatch(&cmd, wv, &self.norm_buf, &self.v_buf, d.kv_dim, d.n_embd, 0, 0);
+            self.dmmvPreparedQ8Dispatch(&cmd, wk, &self.norm_buf, &self.k_buf, d.kv_dim, d.n_embd, 0, 0, norm_q8_ready);
+            self.dmmvPreparedQ8Dispatch(&cmd, wv, &self.norm_buf, &self.v_buf, d.kv_dim, d.n_embd, 0, 0, norm_q8_ready);
         }
         self.attentionFrontendDispatch(&cmd, &wqn.gpu_buffer, &wkn.gpu_buffer, &self.kv_k[L], &self.kv_v[L], pos);
         // attention: out → attn_out_buf
@@ -3691,14 +3701,13 @@ pub const ForwardCuda = struct {
         const wout = self.layer(L, "ssm_out.weight");
 
         var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wan.gpu_buffer, &self.norm_buf }, &rms, @sizeOf(RmsPush), 0);
+        const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &wan.gpu_buffer, &self.norm_buf, d.n_embd, self.use_decode_q8_q4_pair and d.n_experts == 0 and wqkv.info.type_ == .q4_k and wz.info.type_ == .q4_k);
         // qkv (conv_channels) and z-gate (d_inner)
         if (self.use_fused_q4_pairs and wqkv.info.type_ == .q4_k and wz.info.type_ == .q4_k) {
-            self.dmmvQ4PairDispatch(&cmd, &wqkv.gpu_buffer, &wz.gpu_buffer, &self.norm_buf, &self.attn_out_buf, &self.gate_buf, d.conv_channels, d.d_inner, d.n_embd);
+            self.dmmvQ4PairDispatch(&cmd, &wqkv.gpu_buffer, &wz.gpu_buffer, &self.norm_buf, &self.attn_out_buf, &self.gate_buf, d.conv_channels, d.d_inner, d.n_embd, norm_q8_ready);
         } else {
-            self.dmmvDispatch(&cmd, wqkv, &self.norm_buf, &self.attn_out_buf, d.conv_channels, d.n_embd, 0, 0);
-            self.dmmvDispatch(&cmd, wz, &self.norm_buf, &self.gate_buf, d.d_inner, d.n_embd, 0, 0);
+            self.dmmvPreparedQ8Dispatch(&cmd, wqkv, &self.norm_buf, &self.attn_out_buf, d.conv_channels, d.n_embd, 0, 0, norm_q8_ready);
+            self.dmmvPreparedQ8Dispatch(&cmd, wz, &self.norm_buf, &self.gate_buf, d.d_inner, d.n_embd, 0, 0, norm_q8_ready);
         }
         // alpha, beta (dt_rank)
         if (self.use_fused_ssm_f32 and walpha.info.type_ == .f32 and wbeta.info.type_ == .f32) {
@@ -3735,13 +3744,17 @@ pub const ForwardCuda = struct {
         const wdown = self.layer(L, "ffn_down.weight");
 
         var cmd = try command.beginCommand(ctx);
-        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
-        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf }, &rms, @sizeOf(RmsPush), 0);
+        const ffn_q8 = self.use_fused_decode_ffn and self.use_decode_q8_ffn and
+            wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k and
+            self.batch != null and (d.n_embd & 255) == 0;
+        const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &wfn.gpu_buffer, &self.ffn_norm_buf, d.n_embd, ffn_q8);
         if (self.use_fused_decode_ffn and wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k and (d.n_embd & 255) == 0) {
             const gu = DmmvPush{ .M = d.n_ff, .K = d.n_embd, .acc_mode = boolU32(self.use_decode_pair_reduce) };
             if (self.use_decode_q8_ffn and self.batch != null) {
-                const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
-                cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.ffn_norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+                if (!norm_q8_ready) {
+                    const qp = QuantActPush{ .K = d.n_embd, .T = 1 };
+                    cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.ffn_norm_buf, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+                }
                 cmd.dispatch(&self.pipes.dmmv_q4k_gate_up_swiglu_q8, .{ d.n_ff, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &self.batch.?.act_q8, &self.swiglu_buf }, &gu, @sizeOf(DmmvPush), 0);
             } else {
                 cmd.dispatch(&self.pipes.dmmv_q4k_gate_up_swiglu, .{ d.n_ff, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &self.ffn_norm_buf, &self.swiglu_buf }, &gu, @sizeOf(DmmvPush), 0);
@@ -4024,6 +4037,79 @@ pub const ForwardCuda = struct {
 
     // ---- helpers ------------------------------------------------------------
 
+    /// Decode-only normalization helper. When the next projection consumes the
+    /// ROCm packed-Q8 activation, produce the normalized f32 row and that packed
+    /// view together. Returns true when `batch.act_q8` is ready for immediate
+    /// reuse by one or more same-input matvecs.
+    fn rmsNormDecodeDispatch(
+        self: *ForwardCuda,
+        cmd: *command.CudaCommand,
+        x: *const CudaBuffer,
+        w: *const CudaBuffer,
+        y: *const CudaBuffer,
+        N: u32,
+        want_q8: bool,
+    ) bool {
+        const fuse = self.use_rocm_rms_q8 and want_q8 and self.batch != null and (N & 255) == 0;
+        if (fuse) {
+            const rms_q8 = RmsQ8Push{ .N = N, .eps = self.d.rms_eps, .T = 1 };
+            cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, &.{ x, w, y, &self.batch.?.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
+        } else {
+            const rms = RmsPush{ .N = N, .eps = self.d.rms_eps };
+            cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ x, w, y }, &rms, @sizeOf(RmsPush), 0);
+        }
+        return fuse;
+    }
+
+    /// Batched-prefill twin of `rmsNormDecodeDispatch`. One 1024-thread block
+    /// owns each token, so all prompt rows remain independent while Q8 packing
+    /// is folded into the normalization pass used by the first projection.
+    fn rmsNormPrefillDispatch(
+        self: *ForwardCuda,
+        cmd: *command.CudaCommand,
+        x: *const CudaBuffer,
+        w: *const CudaBuffer,
+        y: *const CudaBuffer,
+        N: u32,
+        T: u32,
+        want_q8: bool,
+    ) bool {
+        const fuse = self.use_rocm_rms_q8 and want_q8 and self.batch != null and (N & 255) == 0;
+        if (fuse) {
+            const rms_q8 = RmsQ8Push{ .N = N, .eps = self.d.rms_eps, .T = T };
+            cmd.dispatch(&self.pipes.rms_norm_quant_q8, .{ T, 1, 1 }, .{ 1024, 1, 1 }, &.{ x, w, y, &self.batch.?.act_q8 }, &rms_q8, @sizeOf(RmsQ8Push), 0);
+        } else {
+            const rms = RmsPush{ .N = N, .eps = self.d.rms_eps };
+            cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ x, w, y }, &rms, @sizeOf(RmsPush), 0);
+        }
+        return fuse;
+    }
+
+    /// Matvec dispatch when a preceding fused RMS kernel has already packed the
+    /// activation into `batch.act_q8`. Falls back to the ordinary dispatcher for
+    /// unsupported quant/shape combinations.
+    fn dmmvPreparedQ8Dispatch(
+        self: *ForwardCuda,
+        cmd: *command.CudaCommand,
+        w: *const LoadedTensor,
+        x: *const CudaBuffer,
+        y: *const CudaBuffer,
+        M: u32,
+        K: u32,
+        acc_mode: u32,
+        a_offset: u32,
+        q8_ready: bool,
+    ) void {
+        if (q8_ready and self.use_decode_q8_q4 and self.d.n_experts == 0 and
+            w.info.type_ == .q4_k and self.batch != null and (K & 255) == 0)
+        {
+            const push = DmmvPush{ .M = M, .K = K, .acc_mode = acc_mode, .a_offset = a_offset };
+            cmd.dispatch(&self.pipes.dmmv_q4k_q8_fast, .{ M, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &w.gpu_buffer, &self.batch.?.act_q8, y }, &push, @sizeOf(DmmvPush), 0);
+            return;
+        }
+        self.dmmvDispatch(cmd, w, x, y, M, K, acc_mode, a_offset);
+    }
+
     fn layer(self: *ForwardCuda, L: u32, suffix: []const u8) *const LoadedTensor {
         return self.model.getLayer(L, suffix) orelse {
             log.err("missing tensor blk.{d}.{s}", .{ L, suffix });
@@ -4139,11 +4225,14 @@ pub const ForwardCuda = struct {
         M0: u32,
         M1: u32,
         K: u32,
+        q8_ready: bool,
     ) void {
         const push = DmmvPairPush{ .M0 = M0, .M1 = M1, .K = K, .pair_reduce = boolU32(self.use_q4_pair_reduce) };
         if (self.use_decode_q8_q4_pair and M0 >= 4096 and self.batch != null and (K & 255) == 0) {
-            const qp = QuantActPush{ .K = K, .T = 1 };
-            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ x, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            if (!q8_ready) {
+                const qp = QuantActPush{ .K = K, .T = 1 };
+                cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ x, &self.batch.?.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            }
             cmd.dispatch(&self.pipes.dmmv_q4k_pair_q8, .{ @max(M0, M1), 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ w0, w1, &self.batch.?.act_q8, y0, y1 }, &push, @sizeOf(DmmvPairPush), 0);
         } else {
             cmd.dispatch(&self.pipes.dmmv_q4k_pair, .{ @max(M0, M1), 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ w0, w1, x, y0, y1 }, &push, @sizeOf(DmmvPairPush), 0);
