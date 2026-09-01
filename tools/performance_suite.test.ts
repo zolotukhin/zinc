@@ -140,6 +140,14 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_ROCM_MUSE_NORM_CHAIN: "1",
     ZINC_ROCM_DECODE_SSM_COL_WARP: "1",
     ZINC_ROCM_DECODE_SSM_FAST: "1",
+    ZINC_BATCHED_TC: "1",
+    ZINC_BATCHED_CUBLAS: "1",
+    ZINC_CUBLAS_MIN_T: "64",
+    ZINC_BATCHED_TC_SHAREA: "1",
+    ZINC_BATCHED_TC_NORMF16: "1",
+    ZINC_BATCHED_EXPERTS_GROUPED: "1",
+    ZINC_MOE_NORM_COMBINE: "1",
+    ZINC_ATTN_MOE_NORM: "1",
     ZINC_SSM_PREPARED: "1",
     ZINC_SSM_COL_WARP: "1",
     ZINC_SSM_COL_WARP_FAST: "1",
@@ -186,6 +194,14 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_ROCM_MUSE_NORM_CHAIN).toBe("1");
   expect(env.ZINC_ROCM_DECODE_SSM_COL_WARP).toBe("1");
   expect(env.ZINC_ROCM_DECODE_SSM_FAST).toBe("1");
+  expect(env.ZINC_BATCHED_TC).toBe("1");
+  expect(env.ZINC_BATCHED_CUBLAS).toBe("1");
+  expect(env.ZINC_CUBLAS_MIN_T).toBe("64");
+  expect(env.ZINC_BATCHED_TC_SHAREA).toBe("1");
+  expect(env.ZINC_BATCHED_TC_NORMF16).toBe("1");
+  expect(env.ZINC_BATCHED_EXPERTS_GROUPED).toBe("1");
+  expect(env.ZINC_MOE_NORM_COMBINE).toBe("1");
+  expect(env.ZINC_ATTN_MOE_NORM).toBe("1");
   expect(env.ZINC_SSM_PREPARED).toBe("1");
   expect(env.ZINC_SSM_COL_WARP).toBe("1");
   expect(env.ZINC_SSM_COL_WARP_FAST).toBe("1");

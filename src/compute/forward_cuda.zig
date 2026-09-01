@@ -231,6 +231,7 @@ const MatvecBatchPush = extern struct { M: u32, K: u32, x_tok_stride: u32, y_tok
 // (build_expert_order_padded + gemm_q4k_experts_grouped_tc) serve both paths.
 const BuildOrderPadPush = extern struct { T: u32, n_used: u32, n_experts: u32, routing_stride: u32, max_pos: u32 };
 const GroupedTCPush = extern struct { M: u32, K: u32, base: u32, gu_full: u32, dst_tok_stride: u32 };
+const GroupedI8Push = extern struct { M: u32, K: u32, T: u32, base: u32, expert_stride: u32, dst_tok_stride: u32 };
 // Down-projection grouped-TC (Q5_K): A is the SwiGLU output indexed per work-item
 // (token*n_used + slot), so it carries `slice`/`n_used` instead of `base`/`gu_full`.
 const GroupedTCDownPush = extern struct { M: u32, K: u32, slice: u32, n_used: u32, dst_tok_stride: u32 };
@@ -433,7 +434,10 @@ const Pipelines = struct {
     // T2 (qwen MoE port): single-launch padded grouped Tensor-core gate/up GEMM
     // over the routed experts (ZINC_MOE_TC). Same kernels as the gemma path.
     build_expert_order_padded: CudaPipeline,
+    build_expert_order_padded_16: CudaPipeline,
     gemm_q4k_experts_grouped_tc: CudaPipeline,
+    gemm_q4k_experts_grouped_i8: CudaPipeline,
+    gemm_q4k_experts_grouped_i8_t16: CudaPipeline,
     gemm_q5k_experts_grouped_tc: CudaPipeline,
     gemm_q6k_experts_grouped_tc: CudaPipeline, // down twin for the 4 Q6_K layers
     // Effort 26 T0: batched-prefill GEMM + SSM kernels (qwen prefillBatched).
@@ -925,7 +929,10 @@ pub const ForwardCuda = struct {
         pipes.sigmoid_scale_acc_batched = try pipeline.createPipeline(ctx, src.ptr, "sigmoid_scale_acc_batched");
         // T2 (qwen MoE port): grouped Tensor-core routed gate/up experts.
         pipes.build_expert_order_padded = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded");
+        pipes.build_expert_order_padded_16 = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded_16");
         pipes.gemm_q4k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_tc");
+        pipes.gemm_q4k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8");
+        pipes.gemm_q4k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16");
         pipes.gemm_q5k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_experts_grouped_tc");
         pipes.gemm_q6k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_experts_grouped_tc");
         // Effort 26 T0: batched-prefill GEMM + SSM kernels.
@@ -1658,7 +1665,7 @@ pub const ForwardCuda = struct {
         // path there until native gfx12 grouped kernels exist. Calling the stubs
         // leaves routed-output scratch stale across requests and corrupts a reused
         // server after its first prompt.
-        self.use_tc_experts = !is_rocm and moeTcDefaultOn();
+        self.use_tc_experts = moeTcDefaultOn();
         self.tc_experts_forced = moeTcForced();
 
         const b = try self.ensureBatch(T);
@@ -2179,18 +2186,34 @@ pub const ForwardCuda = struct {
             wge.info.type_ == .q4_k and wue.info.type_ == .q4_k;
         if (use_tc) {
             const P = n_used * T;
-            const max_pos = P + 64 * d.n_experts; // bounds the padded order / tiles
-            const max_tiles = max_pos >> 6;
+            // gfx12 integer WMMA consumes native 16-route fragments. Avoid padding
+            // every short-prompt expert bucket to the CUDA path's 64-route tile.
+            const route_tile: u32 = if (is_rocm and T < 256) 16 else 64;
+            const max_pos = P + route_tile * d.n_experts;
+            const max_tiles = max_pos / route_tile;
             // Padded counting sort of the (token,slot) work-items by expert, each run
-            // padded to a 64-tile with a per-tile expert id — GPU-side, no readback.
+            // padded to one route tile with a per-tile expert id — GPU-side, no readback.
             const bo = BuildOrderPadPush{ .T = T, .n_used = n_used, .n_experts = d.n_experts, .routing_stride = rt_stride, .max_pos = max_pos };
-            cmd.dispatch(&self.pipes.build_expert_order_padded, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.router_table_e, &b.padded_order, &b.tile_expert }, &bo, @sizeOf(BuildOrderPadPush), 0);
+            const order_pipe = if (route_tile == 16) &self.pipes.build_expert_order_padded_16 else &self.pipes.build_expert_order_padded;
+            cmd.dispatch(order_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.router_table_e, &b.padded_order, &b.tile_expert }, &bo, @sizeOf(BuildOrderPadPush), 0);
+            if (comptime is_rocm) {
+                const qp = QuantActPush{ .K = d.n_embd, .T = T };
+                cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), T, 1 }, .{ 256, 1, 1 }, &.{ &b.ffn_norm, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            }
             // gate (wge) + up (wue) are SEPARATE tensors (gemma fuses them) → per-expert
             // stride = the whole slice, base 0. A = the per-token ffn_norm row.
-            const pg = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = gate_slice, .dst_tok_stride = n_used * ef };
-            cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wge.gpu_buffer, &b.ffn_norm, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedTCPush), 0);
-            const pu = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = up_slice, .dst_tok_stride = n_used * ef };
-            cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wue.gpu_buffer, &b.ffn_norm, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedTCPush), 0);
+            if (comptime is_rocm) {
+                const grouped_pipe = if (route_tile == 16) &self.pipes.gemm_q4k_experts_grouped_i8_t16 else &self.pipes.gemm_q4k_experts_grouped_i8;
+                const pg = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = gate_slice, .dst_tok_stride = n_used * ef };
+                cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, 128), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wge.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedI8Push), 0);
+                const pu = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = up_slice, .dst_tok_stride = n_used * ef };
+                cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, 128), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wue.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedI8Push), 0);
+            } else {
+                const pg = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = gate_slice, .dst_tok_stride = n_used * ef };
+                cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wge.gpu_buffer, &b.ffn_norm, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedTCPush), 0);
+                const pu = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = up_slice, .dst_tok_stride = n_used * ef };
+                cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wue.gpu_buffer, &b.ffn_norm, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedTCPush), 0);
+            }
         } else {
             const pg = ExpertsBatchPush{ .M = ef, .K = d.n_embd, .slice = gate_slice, .x_stride = 0, .n_used = n_used, .base = 0, .routing_stride = rt_stride, .x_tok_stride = d.n_embd, .y_tok_stride = n_used * ef };
             cmd.dispatch(gate_pipe, .{ n_used * ef, T, 1 }, .{ 64, 1, 1 }, &.{ &wge.gpu_buffer, &b.ffn_norm, &b.gate_e, &b.router_table_e }, &pg, @sizeOf(ExpertsBatchPush), 0);
@@ -2206,7 +2229,7 @@ pub const ForwardCuda = struct {
         // routed token. qwen36-35b-a3b down = Q5_K ×36 + Q6_K ×4 — a per-quant kernel
         // each (the Q6_K matvec is the heaviest, 6-bit weight traffic). Any other
         // quant falls back to the matvec.
-        const down_tc_pipe: ?*CudaPipeline = if (use_tc and moeDownTcOn()) switch (wde.info.type_) {
+        const down_tc_pipe: ?*CudaPipeline = if (!is_rocm and use_tc and moeDownTcOn()) switch (wde.info.type_) {
             .q5_k => &self.pipes.gemm_q5k_experts_grouped_tc,
             .q6_k => if (moeDownQ6kTcOn()) &self.pipes.gemm_q6k_experts_grouped_tc else null, // the 4 Q6_K layers
             else => null,
@@ -2535,7 +2558,7 @@ pub const ForwardCuda = struct {
             .down_e = try buffer.createBuffer(ctx, e_dn),
             .gate_scalar_e = try buffer.createBuffer(ctx, if (moe) T * f4 else f4),
             .padded_order = try buffer.createBuffer(ctx, if (moe) @max(@as(u32, 1), T * nu + 64 * d.n_experts) * @sizeOf(u32) else f4),
-            .tile_expert = try buffer.createBuffer(ctx, if (moe) @max(@as(u32, 1), (T * nu >> 6) + d.n_experts + 2) * @sizeOf(u32) else f4),
+            .tile_expert = try buffer.createBuffer(ctx, if (moe) @max(@as(u32, 1), (T * nu >> 4) + d.n_experts + 2) * @sizeOf(u32) else f4),
         };
         return &self.batch.?;
     }

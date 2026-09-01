@@ -118,6 +118,7 @@ const ScatterOrderPush = extern struct { P: u32, M: u32, dst_tok_stride: u32 };
 // T2 v1: single-launch padded grouped TC GEMM (match kernels.cu).
 const BuildOrderPadPush = extern struct { T: u32, n_used: u32, n_experts: u32, routing_stride: u32, max_pos: u32 };
 const GroupedTCPush = extern struct { M: u32, K: u32, base: u32, gu_full: u32, dst_tok_stride: u32 };
+const GroupedI8Push = extern struct { M: u32, K: u32, T: u32, base: u32, expert_stride: u32, dst_tok_stride: u32 };
 const GroupedTCDownPush = extern struct { M: u32, K: u32, slice: u32, n_used: u32, dst_tok_stride: u32 };
 // Batched prefill GEMM (Effort 24): Y[T,M] = A[T,K]·W[M,K]^T over all T prompt
 // tokens at once (the gemm_*_tiled_v2 kernels). Must byte-match `struct GemmPush`
@@ -260,7 +261,10 @@ const Pipelines = struct {
     scatter_by_order: CudaPipeline, // scatter grouped GEMM output back to (token,slot)
     // T2 v1: single-launch padded grouped TC GEMM.
     build_expert_order_padded: CudaPipeline, // sort + pad runs to 64-tile + per-tile expert id
+    build_expert_order_padded_16: CudaPipeline, // gfx12 short-prompt sort + pad runs to 16-route tiles
     gemm_q4k_experts_grouped_tc: CudaPipeline, // one-launch grouped Tensor-core gate/up GEMM
+    gemm_q4k_experts_grouped_i8: CudaPipeline, // gfx12 grouped Q4_K x Q8 expert GEMM
+    gemm_q4k_experts_grouped_i8_t16: CudaPipeline, // gfx12 short-prompt 16-route twin
     gemm_q5_1_experts_grouped_tc: CudaPipeline, // one-launch grouped Tensor-core Q5_1 down GEMM
     // Effort 24: register-blocked prefill GEMMs (Q4_K / Q5_K / Q6_K / Q8_0 weights).
     gemm: [4]CudaPipeline,
@@ -689,7 +693,10 @@ pub const ForwardGemma = struct {
         pipes.gather_by_order = try pipeline.createPipeline(ctx, src.ptr, "gather_by_order");
         pipes.scatter_by_order = try pipeline.createPipeline(ctx, src.ptr, "scatter_by_order");
         pipes.build_expert_order_padded = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded");
+        pipes.build_expert_order_padded_16 = try pipeline.createPipeline(ctx, src.ptr, "build_expert_order_padded_16");
         pipes.gemm_q4k_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_tc");
+        pipes.gemm_q4k_experts_grouped_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8");
+        pipes.gemm_q4k_experts_grouped_i8_t16 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_experts_grouped_i8_t16");
         pipes.gemm_q5_1_experts_grouped_tc = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5_1_experts_grouped_tc");
         // Effort 24: batched-prefill GEMMs (Q4_K / Q5_K / Q6_K).
         pipes.gemm[0] = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_tiled_v2");
@@ -1106,7 +1113,7 @@ pub const ForwardGemma = struct {
                 std.ascii.eqlIgnoreCase(e, "no"));
             break :blk true;
         };
-        self.use_tc_experts = !is_rocm and moeTcDefaultOn();
+        self.use_tc_experts = moeTcDefaultOn();
         self.tc_experts_forced = moeTcForced();
         // Cycle 19: ZINC_BATCHED_TC_SHAREA shares one f32→f16 activation recast across
         // the GEMMs that read the SAME input on the TC path (attn Q/K/V all read b.norm;
@@ -2218,7 +2225,7 @@ pub const ForwardGemma = struct {
             .expert_offsets = try buffer.createBuffer(ctx, (@max(@as(u32, 1), d.n_experts) + 1) * @sizeOf(u32)),
             // T2 v1: max_pos = P + 64*n_experts bounds the padded order; tiles = max_pos/64.
             .padded_order = try buffer.createBuffer(ctx, @max(@as(u32, 1), T * d.n_experts_used + 64 * d.n_experts) * @sizeOf(u32)),
-            .tile_expert = try buffer.createBuffer(ctx, @max(@as(u32, 1), (T * d.n_experts_used >> 6) + d.n_experts + 2) * @sizeOf(u32)),
+            .tile_expert = try buffer.createBuffer(ctx, @max(@as(u32, 1), (T * d.n_experts_used >> 4) + d.n_experts + 2) * @sizeOf(u32)),
             // fp16 activation scratch: T × largest-activation halves (2 bytes each).
             // TC Q4_K GEMMs read A with K ∈ {n_embd (gate/up,Q/K/V), q_dim (O)};
             // size to the max of those and ff for headroom.
@@ -2950,8 +2957,11 @@ pub const ForwardGemma = struct {
         const n_used = d.n_experts_used;
         const ef = d.n_ff;
         const P = n_used * T;
-        const max_pos = P + 64 * d.n_experts; // bounds the padded order / tiles
-        const max_tiles = max_pos >> 6;
+        // gfx12 integer WMMA consumes a native 16-route fragment. Short prompts
+        // therefore use 16-route expert buckets instead of doing four padded fragments.
+        const route_tile: u32 = if (is_rocm and T < 256) 16 else 64;
+        const max_pos = P + route_tile * d.n_experts;
+        const max_tiles = max_pos / route_tile;
         const wpre2 = self.layer(L, "pre_ffw_norm_2.weight");
         const wgu = self.layer(L, "ffn_gate_up_exps.weight");
         const wde = self.layer(L, "ffn_down_exps.weight");
@@ -2963,22 +2973,40 @@ pub const ForwardGemma = struct {
         var cmd = try command.beginCommand(ctx);
         const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
         cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &wpre2.gpu_buffer, &b.moe_norm_e }, &rms, @sizeOf(RmsPush), 0);
-        // Padded counting sort: (token,slot) by expert, each run padded to a 64-tile,
+        // Padded counting sort: (token,slot) by expert, each run padded to a route tile,
         // with a per-tile expert id — fully GPU-side (no readback).
         const bo = BuildOrderPadPush{ .T = T, .n_used = n_used, .n_experts = d.n_experts, .routing_stride = rt_stride, .max_pos = max_pos };
-        cmd.dispatch(&self.pipes.build_expert_order_padded, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.router_table, &b.padded_order, &b.tile_expert }, &bo, @sizeOf(BuildOrderPadPush), 0);
+        const order_pipe = if (route_tile == 16) &self.pipes.build_expert_order_padded_16 else &self.pipes.build_expert_order_padded;
+        cmd.dispatch(order_pipe, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.router_table, &b.padded_order, &b.tile_expert }, &bo, @sizeOf(BuildOrderPadPush), 0);
+        if (comptime is_rocm) {
+            const qp = QuantActPush{ .K = d.n_embd, .T = T };
+            cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), T, 1 }, .{ 256, 1, 1 }, &.{ &b.moe_norm_e, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+        }
         // Gate (base 0) + up (base gu_half): one grouped TC GEMM each over all tiles.
-        const pg = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = gu_full, .dst_tok_stride = n_used * ef };
-        cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedTCPush), 0);
-        const pu = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = gu_half, .gu_full = gu_full, .dst_tok_stride = n_used * ef };
-        cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedTCPush), 0);
+        if (comptime is_rocm) {
+            const grouped_pipe = if (route_tile == 16) &self.pipes.gemm_q4k_experts_grouped_i8_t16 else &self.pipes.gemm_q4k_experts_grouped_i8;
+            const pg = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = 0, .expert_stride = gu_full, .dst_tok_stride = n_used * ef };
+            cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, 128), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedI8Push), 0);
+            const pu = GroupedI8Push{ .M = ef, .K = d.n_embd, .T = T, .base = gu_half, .expert_stride = gu_full, .dst_tok_stride = n_used * ef };
+            cmd.dispatch(grouped_pipe, .{ ceilDiv(ef, 128), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.act_q8, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedI8Push), 0);
+        } else {
+            const pg = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = 0, .gu_full = gu_full, .dst_tok_stride = n_used * ef };
+            cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.gate_e }, &pg, @sizeOf(GroupedTCPush), 0);
+            const pu = GroupedTCPush{ .M = ef, .K = d.n_embd, .base = gu_half, .gu_full = gu_full, .dst_tok_stride = n_used * ef };
+            cmd.dispatch(&self.pipes.gemm_q4k_experts_grouped_tc, .{ ceilDiv(ef, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wgu.gpu_buffer, &b.moe_norm_e, &b.padded_order, &b.tile_expert, &b.up_e }, &pu, @sizeOf(GroupedTCPush), 0);
+        }
         // GeGLU (unchanged), then the Q5_1 down projection ALSO on the Tensor cores:
         // one grouped TC GEMM over the SAME padded order/tile_expert the gate/up used
         // (no extra sort). A = GeGLU output [P, ef] (work-item-major), W = Q5_1 down.
         const sg = SwigluPush{ .N = T * n_used * ef };
         cmd.dispatch(&self.pipes.geglu, .{ ceilDiv(T * n_used * ef, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.gate_e, &b.up_e, &b.geglu_e }, &sg, @sizeOf(SwigluPush), 0);
-        const pd = GroupedTCDownPush{ .M = d.n_embd, .K = ef, .slice = down_slice, .n_used = n_used, .dst_tok_stride = n_used * d.n_embd };
-        cmd.dispatch(&self.pipes.gemm_q5_1_experts_grouped_tc, .{ ceilDiv(d.n_embd, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wde.gpu_buffer, &b.geglu_e, &b.padded_order, &b.tile_expert, &b.down_e }, &pd, @sizeOf(GroupedTCDownPush), 0);
+        if (comptime is_rocm) {
+            const pd = ExpertsBatchPush{ .M = d.n_embd, .K = ef, .slice = down_slice, .x_stride = ef, .n_used = n_used, .base = 0, .routing_stride = rt_stride, .x_tok_stride = n_used * ef, .y_tok_stride = n_used * d.n_embd };
+            cmd.dispatch(&self.pipes.dmmv_q5_1_experts_batched, .{ n_used * d.n_embd, T, 1 }, .{ 64, 1, 1 }, &.{ &wde.gpu_buffer, &b.geglu_e, &b.down_e, &b.router_table }, &pd, @sizeOf(ExpertsBatchPush), 0);
+        } else {
+            const pd = GroupedTCDownPush{ .M = d.n_embd, .K = ef, .slice = down_slice, .n_used = n_used, .dst_tok_stride = n_used * d.n_embd };
+            cmd.dispatch(&self.pipes.gemm_q5_1_experts_grouped_tc, .{ ceilDiv(d.n_embd, 64), max_tiles, 1 }, .{ 256, 1, 1 }, &.{ &wde.gpu_buffer, &b.geglu_e, &b.padded_order, &b.tile_expert, &b.down_e }, &pd, @sizeOf(GroupedTCDownPush), 0);
+        }
         self.submit(cmd);
     }
 
