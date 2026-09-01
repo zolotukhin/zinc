@@ -706,9 +706,24 @@ pub fn parseArgs(args: []const [:0]const u8) !Config {
 
 fn shouldAutoChatCliPrompt(tokenizer: *const tokenizer_mod.Tokenizer, prompt: []const u8) bool {
     const tmpl = tokenizer.chat_template orelse return false;
+    // ATEM (Muse Glimmer): a reasoning-tuned model that degenerates badly on
+    // raw completion — auto-apply its chat template unless the caller already
+    // wrote the turn markers themselves.
+    if (std.mem.indexOf(u8, tmpl, "<atem:") != null) {
+        return std.mem.indexOf(u8, prompt, "<|start|>") == null;
+    }
     if (std.mem.indexOf(u8, tmpl, "<|turn>") == null) return false;
     if (std.mem.indexOf(u8, prompt, "<|turn>") != null) return false;
     return true;
+}
+
+/// Engine-level stop id for CLI generation: ATEM chats end their turn with
+/// `<|eot|>` (distinct from EOS), so templated Muse prompts stop there.
+fn cliGenerationStopId(tokenizer: *const tokenizer_mod.Tokenizer, use_chat_prompt: bool) u32 {
+    if (use_chat_prompt and tokenizer.detectTemplateKind() == .atem) {
+        if (tokenizer.eot_id) |eot| return eot;
+    }
+    return tokenizer.eosId();
 }
 
 fn indexOfAsciiIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
@@ -2569,7 +2584,7 @@ pub fn main() !void {
             };
             defer engine.deinit();
 
-            const eos_id = if (envIsOn("ZINC_BENCH_IGNORE_EOS")) std.math.maxInt(u32) else tokenizer.eosId();
+            const eos_id = if (envIsOn("ZINC_BENCH_IGNORE_EOS")) std.math.maxInt(u32) else cliGenerationStopId(&tokenizer, use_chat_prompt);
             if (eos_id == std.math.maxInt(u32)) {
                 log.info("Benchmark mode: ignoring EOS until max_tokens", .{});
             }
@@ -2777,7 +2792,7 @@ pub fn main() !void {
             log.debug("Prompt decoded: \"{s}\"", .{pt_buf.items});
         }
 
-        const eos_id = if (envIsOn("ZINC_BENCH_IGNORE_EOS")) std.math.maxInt(u32) else tokenizer.eosId();
+        const eos_id = if (envIsOn("ZINC_BENCH_IGNORE_EOS")) std.math.maxInt(u32) else cliGenerationStopId(&tokenizer, use_chat_prompt);
         if (eos_id == std.math.maxInt(u32)) {
             log.info("Benchmark mode: ignoring EOS until max_tokens", .{});
         }
@@ -3341,6 +3356,19 @@ test "shouldAutoChatCliPrompt enables gemma4 turn templates" {
 
     try std.testing.expect(shouldAutoChatCliPrompt(&tok, "Hello"));
     try std.testing.expect(!shouldAutoChatCliPrompt(&tok, "<|turn>user\nHello<turn|>"));
+}
+
+test "Muse Glimmer CLI auto-chat uses ATEM end-of-turn token" {
+    var tok = makeTestTokenizer(
+        "<atem:tool_call><|start|>{{ role }}<|message|>{{ content }}<|eot|>",
+    );
+    defer tok.token_to_id.deinit();
+    tok.eot_id = 200021;
+
+    try std.testing.expect(shouldAutoChatCliPrompt(&tok, "Hello"));
+    try std.testing.expect(!shouldAutoChatCliPrompt(&tok, "<|start|>user<|message|>Hello<|eot|>"));
+    try std.testing.expectEqual(@as(u32, 200021), cliGenerationStopId(&tok, true));
+    try std.testing.expectEqual(tok.eosId(), cliGenerationStopId(&tok, false));
 }
 
 test "shouldAutoChatCliPrompt leaves non-gemma templates raw" {

@@ -28,6 +28,10 @@ pub const Tokenizer = struct {
     /// Special token IDs
     bos_id: ?u32,
     eos_id: u32,
+    /// End-of-turn token id (`tokenizer.ggml.eot_token_id`), when declared.
+    /// ATEM (Muse Glimmer) chats terminate turns with `<|eot|>`, which is
+    /// distinct from the EOS `<|endoftext|>`-style id.
+    eot_id: ?u32 = null,
     /// Whether prompts should be prefixed with BOS automatically.
     prepend_bos: bool,
     /// Whether prompt construction should append EOS.
@@ -60,6 +64,10 @@ pub const Tokenizer = struct {
         legacy,
         gpt2_ascii,
         gemma4_bpe,
+        /// llama.cpp `llama4` pretokenizer regex (Muse Glimmer). Differs from
+        /// gpt2_ascii in newline-absorbing punctuation runs, 3-digit caps,
+        /// symbol-prefixed words, suffix contractions, and case splitting.
+        llama4,
     };
 
     /// Initialize a Tokenizer from an open GGUF file.
@@ -149,6 +157,7 @@ pub const Tokenizer = struct {
         // Read special token IDs.
         const bos_id = gf.getU32("tokenizer.ggml.bos_token_id");
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
+        const eot_id = gf.getU32("tokenizer.ggml.eot_token_id");
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
         const architecture = gf.getString("general.architecture") orelse "";
         const pre_name = gf.getString("tokenizer.ggml.pre") orelse "";
@@ -183,6 +192,8 @@ pub const Tokenizer = struct {
         if (chat_template) |tmpl| log.debug("Chat template: {d} chars", .{tmpl.len});
         const pretokenizer: Pretokenizer = if (std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, pre_name, "gemma4"))
             .gemma4_bpe
+        else if (std.mem.eql(u8, pre_name, "llama4") and merges_list.items.len > 0)
+            .llama4
         else if (scores == null and merges_list.items.len > 0 and
             (std.mem.eql(u8, model_type, "gpt2") or
                 std.mem.eql(u8, pre_name, "qwen2") or
@@ -223,6 +234,7 @@ pub const Tokenizer = struct {
             .scores = scores,
             .bos_id = bos_id,
             .eos_id = eos_id,
+            .eot_id = eot_id,
             .prepend_bos = prepend_bos,
             .add_eos_token = add_eos_token,
             .chat_template = chat_template,
@@ -381,6 +393,119 @@ pub const Tokenizer = struct {
         return 0;
     }
 
+    fn isAsciiUpper(byte: u8) bool {
+        return byte >= 'A' and byte <= 'Z';
+    }
+
+    fn isAsciiLower(byte: u8) bool {
+        return byte >= 'a' and byte <= 'z';
+    }
+
+    /// ASCII implementation of the llama.cpp `llama4` pretokenizer regex
+    /// (Muse Glimmer et al.):
+    ///   [^\r\n\p{L}\p{N}]?[upper]*[lower]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+    /// | [^\r\n\p{L}\p{N}]?[upper]+[lower]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+    /// | \p{N}{1,3}
+    /// |  ?[^\s\p{L}\p{N}]+[\r\n/]*
+    /// | \s*[\r\n]+
+    /// | \s+(?!\S)
+    /// | \s+
+    /// Key differences from the GPT-2 chunker: an optional single leading
+    /// symbol glues to the following word, contractions are a SUFFIX of the
+    /// word chunk (not a separate chunk), letter runs split at interior
+    /// case boundaries (camelCase -> 'camel','Case'), digit runs cap at 3,
+    /// and punctuation runs absorb trailing newlines/slashes (".\n" is ONE
+    /// pretoken -> BPE 335, where the GPT-2 chunker yields '.'+'\n').
+    /// Non-ASCII bytes (>= 0x80) are treated as word characters so UTF-8
+    /// letters stay in one chunk (approximation; exact for ASCII text).
+    fn nextLlama4PretokenChunk(text: []const u8, pos: *usize) []const u8 {
+        if (pos.* >= text.len) return text[text.len..text.len];
+
+        const start = pos.*;
+        var i = start;
+        const c0 = text[i];
+
+        const isWordByte = struct {
+            fn f(b: u8) bool {
+                return isAsciiLetter(b) or b >= 0x80;
+            }
+        }.f;
+
+        // Word alternatives: optional single non-newline symbol prefix, then
+        // upper*lower+ | upper+lower* (ASCII case split), then optional
+        // contraction suffix.
+        const has_prefix = !isWordByte(c0) and !isAsciiDigit(c0) and c0 != '\r' and c0 != '\n' and
+            i + 1 < text.len and isWordByte(text[i + 1]);
+        if (isWordByte(c0) or has_prefix) {
+            if (has_prefix) i += 1;
+            // upper run, then lower/other-word run (non-ASCII bytes count as
+            // lowercase-ish continuation so multi-byte letters don't split).
+            var j = i;
+            while (j < text.len and isAsciiUpper(text[j])) : (j += 1) {}
+            var k = j;
+            while (k < text.len and (isAsciiLower(text[k]) or text[k] >= 0x80)) : (k += 1) {}
+            if (k == i) {
+                // No letters after the prefix (can't happen: guarded above).
+                i += 1;
+                pos.* = i;
+                return text[start..i];
+            }
+            // upper*lower+ preferred; if no lowers followed, keep the upper run.
+            i = if (k > j) k else j;
+            const suffix_len = matchAsciiContraction(text, i);
+            i += suffix_len;
+            pos.* = i;
+            return text[start..i];
+        }
+
+        // \p{N}{1,3}
+        if (isAsciiDigit(c0)) {
+            i += 1;
+            var count: usize = 1;
+            while (i < text.len and count < 3 and isAsciiDigit(text[i])) : (i += 1) {
+                count += 1;
+            }
+            pos.* = i;
+            return text[start..i];
+        }
+
+        const isSym = struct {
+            fn f(b: u8) bool {
+                return !isAsciiSpace(b) and !isAsciiLetter(b) and !isAsciiDigit(b) and b < 0x80;
+            }
+        }.f;
+
+        //  ?[^\s\p{L}\p{N}]+[\r\n/]*
+        if (isSym(c0) or (c0 == ' ' and i + 1 < text.len and isSym(text[i + 1]))) {
+            if (c0 == ' ') i += 1;
+            while (i < text.len and isSym(text[i])) : (i += 1) {}
+            while (i < text.len and (text[i] == '\r' or text[i] == '\n' or text[i] == '/')) : (i += 1) {}
+            pos.* = i;
+            return text[start..i];
+        }
+
+        // Whitespace classes. Scan the maximal run first.
+        var j = i;
+        var last_nl: ?usize = null;
+        while (j < text.len and isAsciiSpace(text[j])) : (j += 1) {
+            if (text[j] == '\r' or text[j] == '\n') last_nl = j;
+        }
+        if (last_nl) |nl| {
+            // \s*[\r\n]+ : consume through the last newline of the run.
+            pos.* = nl + 1;
+            return text[start .. nl + 1];
+        }
+        if (j == text.len or j - i == 1) {
+            // \s+(?!\S) at end-of-text, or a single space/tab before a
+            // non-space (the word/punct alternatives above didn't want it).
+            pos.* = j;
+            return text[start..j];
+        }
+        // \s+(?!\S): leave the final space for the next chunk.
+        pos.* = j - 1;
+        return text[start .. j - 1];
+    }
+
     fn nextGpt2PretokenChunk(text: []const u8, pos: *usize) []const u8 {
         if (pos.* >= text.len) return text[text.len..text.len];
 
@@ -493,7 +618,10 @@ pub const Tokenizer = struct {
 
         var pos: usize = 0;
         while (pos < text.len) {
-            const chunk = nextGpt2PretokenChunk(text, &pos);
+            const chunk = if (self.pretokenizer == .llama4)
+                nextLlama4PretokenChunk(text, &pos)
+            else
+                nextGpt2PretokenChunk(text, &pos);
             if (chunk.len == 0) break;
             const chunk_tokens = try self.encodeChunk(chunk);
             defer self.allocator.free(chunk_tokens);
@@ -764,6 +892,12 @@ pub const Tokenizer = struct {
         const tmpl = self.chat_template orelse return false;
         const is_gemma4 = std.mem.indexOf(u8, tmpl, "<|turn>") != null;
         if (is_gemma4 and (token == 1 or token == 212)) return true;
+        // ATEM (Muse Glimmer) turns end with <|eot|>, distinct from EOS.
+        // (<|eom|> is NOT end-of-generation: the reasoning channel continues
+        // with the final `to=user` message after it.)
+        if (self.eot_id) |eot| {
+            if (token == eot and std.mem.indexOf(u8, tmpl, "<atem:") != null) return true;
+        }
         return false;
     }
 
@@ -1144,6 +1278,56 @@ pub const Tokenizer = struct {
                     pos += suffix.len;
                 }
             },
+            .atem => {
+                // ATEM (Muse Glimmer): <|start|>role<|message|>content<|eot|>,
+                // assistant turns carry a `to=` recipient, reasoning streams on
+                // the `to=self` channel ending with <|eom|>. Mirrors the GGUF
+                // Jinja for the no-tools path; the Current-date line is omitted
+                // exactly as the Jinja does when no date variable is defined.
+                const meta_tail = "\n\n# Valid recipients: \"self\", \"user\".<|eot|>";
+                const reasoning_line = "\n\nReasoning strength: high.";
+                var has_system = false;
+                for (0..n) |i| {
+                    if (std.mem.eql(u8, roles[i], "system")) has_system = true;
+                }
+                if (!has_system) {
+                    const written = std.fmt.bufPrint(
+                        buf[pos..],
+                        "<|start|>system<|message|>You are a helpful AI assistant.\nKnowledge cutoff: 2026-01-04.{s}{s}",
+                        .{ reasoning_line, meta_tail },
+                    ) catch return error.BufferTooSmall;
+                    pos += written.len;
+                }
+                for (0..n) |i| {
+                    if (std.mem.eql(u8, roles[i], "system")) {
+                        // Skip the injected reasoning directive when the caller
+                        // already wrote one (either spelling), like the Jinja's
+                        // "Reasoning effort" -> "Reasoning strength" normalize +
+                        // containment check.
+                        const has_reasoning_directive =
+                            std.ascii.indexOfIgnoreCase(contents[i], "reasoning strength") != null or
+                            std.ascii.indexOfIgnoreCase(contents[i], "reasoning effort") != null;
+                        const written = std.fmt.bufPrint(
+                            buf[pos..],
+                            "<|start|>system<|message|>{s}{s}{s}",
+                            .{ contents[i], if (has_reasoning_directive) "" else reasoning_line, meta_tail },
+                        ) catch return error.BufferTooSmall;
+                        pos += written.len;
+                    } else if (std.mem.eql(u8, roles[i], "assistant")) {
+                        const written = std.fmt.bufPrint(buf[pos..], "<|start|>assistant to=user<|message|>{s}<|eot|>", .{contents[i]}) catch return error.BufferTooSmall;
+                        pos += written.len;
+                    } else {
+                        const written = std.fmt.bufPrint(buf[pos..], "<|start|>{s}<|message|>{s}<|eot|>", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
+                        pos += written.len;
+                    }
+                }
+                if (options.add_generation_prompt) {
+                    const suffix = "<|start|>assistant";
+                    if (pos + suffix.len > buf.len) return error.BufferTooSmall;
+                    @memcpy(buf[pos..][0..suffix.len], suffix);
+                    pos += suffix.len;
+                }
+            },
             .generic => {
                 for (0..n) |i| {
                     const written = std.fmt.bufPrint(buf[pos..], "[{s}]: {s}\n", .{ roles[i], contents[i] }) catch return error.BufferTooSmall;
@@ -1156,7 +1340,7 @@ pub const Tokenizer = struct {
 
     /// Enumeration of recognized chat-template families used for prompt formatting.
     /// `generic` is the fallback for templates that do not match any known pattern.
-    pub const TemplateKind = enum { chatml, llama3, gemma, openai_moe, generic };
+    pub const TemplateKind = enum { chatml, llama3, gemma, openai_moe, atem, generic };
 
     /// Return the detected chat template kind as a human-readable string (e.g. "chatml", "openai_moe").
     pub fn detectTemplateKindName(self: *const Tokenizer) []const u8 {
@@ -1173,6 +1357,9 @@ pub const Tokenizer = struct {
         if (std.mem.indexOf(u8, tmpl, "start_header_id") != null) return .llama3;
         if (std.mem.indexOf(u8, tmpl, "start_of_turn") != null or
             std.mem.indexOf(u8, tmpl, "<|turn>") != null) return .gemma;
+        // ATEM (Muse Glimmer) also uses <|start|>/<|message|>, so match its
+        // unique tool-call marker before the gpt-oss harmony check.
+        if (std.mem.indexOf(u8, tmpl, "<atem:") != null) return .atem;
         if (std.mem.indexOf(u8, tmpl, "<|start|>") != null and
             std.mem.indexOf(u8, tmpl, "<|message|>") != null) return .openai_moe;
         return .generic;
@@ -1622,6 +1809,48 @@ test "applyChatTemplate openai_moe can request analysis channel" {
         "<|start|>user<|message|>Hello<|end|><|start|>assistant<|channel|>analysis<|message|>",
         result,
     );
+}
+
+test "llama4 pretokenizer matches Muse Glimmer ASCII chunk boundaries" {
+    const input = "camelCase 1234 can't.\n";
+    const expected = [_][]const u8{ "camel", "Case", " ", "123", "4", " can't", ".\n" };
+    var pos: usize = 0;
+    for (expected) |want| {
+        try std.testing.expectEqualStrings(want, Tokenizer.nextLlama4PretokenChunk(input, &pos));
+    }
+    try std.testing.expectEqual(input.len, pos);
+}
+
+test "applyChatTemplate ATEM emits Muse Glimmer turn protocol" {
+    var tok = Tokenizer{
+        .vocab = &.{},
+        .token_to_id = std.StringHashMap(u32).init(std.testing.allocator),
+        .merges = &.{},
+        .scores = null,
+        .bos_id = null,
+        .eos_id = 200020,
+        .eot_id = 200021,
+        .prepend_bos = false,
+        .chat_template = "<atem:tool_call><|start|>{{ role }}<|message|>{{ content }}<|eot|>",
+        .allocator = std.testing.allocator,
+    };
+    defer tok.token_to_id.deinit();
+
+    var buf: [1024]u8 = undefined;
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"Hello"};
+    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+
+    try std.testing.expectEqual(Tokenizer.TemplateKind.atem, tok.detectTemplateKind());
+    try std.testing.expectEqualStrings(
+        "<|start|>system<|message|>You are a helpful AI assistant.\n" ++
+            "Knowledge cutoff: 2026-01-04.\n\nReasoning strength: high.\n\n" ++
+            "# Valid recipients: \"self\", \"user\".<|eot|>" ++
+            "<|start|>user<|message|>Hello<|eot|><|start|>assistant",
+        result,
+    );
+    try std.testing.expect(tok.isEndOfGeneration(200021));
+    try std.testing.expect(!tok.isEndOfGeneration(200022));
 }
 
 test "applyChatTemplate gemma4 defaults to closed thought channel prompt" {
