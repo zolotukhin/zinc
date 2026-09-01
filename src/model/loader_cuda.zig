@@ -435,6 +435,10 @@ fn extractConfigWithLogging(gf: *const gguf.GGUFFile, log_metadata: bool) ModelC
             const key4 = std.fmt.bufPrint(&key_buf, "{s}.final_logit_softcapping", .{prefix}) catch break :blk @as(f32, 0.0);
             break :blk gf.getF32(key4) orelse 0.0;
         },
+        .logit_scale = blk: {
+            const lsk = std.fmt.bufPrint(&key_buf, "{s}.logit_scale", .{prefix}) catch break :blk @as(f32, 0.0);
+            break :blk gf.getF32(lsk) orelse 0.0;
+        },
         .attn_scale = blk: {
             const key5 = std.fmt.bufPrint(&key_buf, "{s}.attention.scale", .{prefix}) catch break :blk @as(f32, 0.0);
             if (gf.getF32(key5)) |v| break :blk v;

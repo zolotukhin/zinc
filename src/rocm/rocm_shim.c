@@ -540,6 +540,32 @@ void cuda_cublas_hgemm(CudaCtx* ctx, unsigned M, unsigned N, unsigned K,
     if (status != HIPBLAS_STATUS_SUCCESS) set_err("hipblasGemmEx", "failed");
 }
 
+void cuda_cublas_hgemm_strided_batched(CudaCtx* ctx, unsigned trans_a, unsigned trans_b,
+                                       unsigned M, unsigned N, unsigned K,
+                                       CudaBuf* A, size_t a_offset, unsigned lda, int64_t stride_a,
+                                       CudaBuf* B, size_t b_offset, unsigned ldb, int64_t stride_b,
+                                       CudaBuf* C, size_t c_offset, unsigned ldc, int64_t stride_c,
+                                       unsigned batch_count, float beta) {
+    if (!ctx || !ctx->hipblas || !A || !B || !C) {
+        set_err("cuda_cublas_hgemm_strided_batched", "hipBLAS unavailable");
+        return;
+    }
+    const float alpha = 1.0f;
+    const void* ap = (const void*)((const char*)A->dptr + a_offset);
+    const void* bp = (const void*)((const char*)B->dptr + b_offset);
+    void* cp = (void*)((char*)C->dptr + c_offset);
+    hipblasStatus_t status = hipblasGemmStridedBatchedEx(
+        ctx->hipblas,
+        trans_a ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+        trans_b ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+        (int)M, (int)N, (int)K,
+        &alpha, ap, HIP_R_16F, (int)lda, (hipblasStride)stride_a,
+        bp, HIP_R_16F, (int)ldb, (hipblasStride)stride_b,
+        &beta, cp, HIP_R_32F, (int)ldc, (hipblasStride)stride_c,
+        (int)batch_count, HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
+    if (status != HIPBLAS_STATUS_SUCCESS) set_err("hipblasGemmStridedBatchedEx", "failed");
+}
+
 // ---- HIP graphs (decode capture/replay) -------------------------------------
 // The CUDA scheduler records an invariant per-token kernel chain and updates
 // only its node parameters on subsequent tokens. HIP exposes the same capture,

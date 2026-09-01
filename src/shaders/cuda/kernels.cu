@@ -330,6 +330,90 @@ extern "C" __global__ void rms_norm_residual(const float* x, const float* w, flo
     }
 }
 
+// Muse decode chains each post-norm residual directly into the following
+// pre-norm + Q8 pack. Both operations own the same one-token residual row, so a
+// block barrier is sufficient between them and removes a launch plus a complete
+// hidden-row reload at every attention/FFN boundary.
+struct RmsResidualQ8Push { unsigned N; float post_eps; float pre_eps; unsigned T; };
+extern "C" __global__ void rms_norm_residual_norm_quant_q8_0(
+    const float* __restrict__ x, const float* __restrict__ w_post,
+    float* __restrict__ hidden, const float* __restrict__ w_pre,
+    float* __restrict__ pre_out, unsigned char* __restrict__ out,
+    RmsResidualQ8Push pc)
+{
+    const unsigned token = blockIdx.x;
+    const float* xt = x + (size_t)token * pc.N;
+    float* ht = hidden + (size_t)token * pc.N;
+    float* pt = pre_out + (size_t)token * pc.N;
+
+    float ss = 0.0f;
+    for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x) {
+        const float value = xt[i];
+        ss += value * value;
+    }
+    ss = zinc_block_reduce_sum(ss);
+    __shared__ float post_inv, pre_inv;
+    if (threadIdx.x == 0u) post_inv = rsqrtf(ss / (float)pc.N + pc.post_eps);
+    __syncthreads();
+    for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x)
+        ht[i] += w_post[i] * (xt[i] * post_inv);
+    __syncthreads();
+
+    float ss2 = 0.0f;
+    for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x) {
+        const float value = ht[i];
+        ss2 += value * value;
+    }
+    ss2 = zinc_block_reduce_sum(ss2);
+    if (threadIdx.x == 0u) pre_inv = rsqrtf(ss2 / (float)pc.N + pc.pre_eps);
+    __syncthreads();
+
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned warp = threadIdx.x >> 5;
+    const unsigned nwarps = blockDim.x >> 5;
+    const unsigned groups = (pc.N + 31u) >> 5;
+    for (unsigned c = warp; c < groups; c += nwarps) {
+        const unsigned idx = c * 32u + lane;
+        const float value = idx < pc.N ? w_pre[idx] * (ht[idx] * pre_inv) : 0.0f;
+        if (idx < pc.N) pt[idx] = value;
+        float av = fabsf(value);
+        float sv = value;
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            av = fmaxf(av, __shfl_xor_sync(0xffffffffu, av, offset));
+            sv += __shfl_xor_sync(0xffffffffu, sv, offset);
+        }
+        const float d = av / 127.0f;
+        const float scale = 127.0f / fmaxf(av, 1e-5f);
+        const int q = max(-127, min(127, __float2int_rn(value * scale)));
+#ifdef ZINC_ROCM
+        const unsigned h = c >> 2;
+        const unsigned g = c & 3u;
+        unsigned char* out_base = out + ((size_t)h * pc.T + token) * 144u;
+        if (lane == 0u && idx < pc.N) {
+            const unsigned short dh = zinc_float_to_half(d);
+            const unsigned short sh = zinc_float_to_half(sv);
+            out_base[g * 4u] = (unsigned char)(dh & 0xffu);
+            out_base[g * 4u + 1u] = (unsigned char)(dh >> 8);
+            out_base[g * 4u + 2u] = (unsigned char)(sh & 0xffu);
+            out_base[g * 4u + 3u] = (unsigned char)(sh >> 8);
+        }
+        out_base[16u + g * 32u + lane] = (unsigned char)q;
+#else
+        unsigned char* out_base = out + (size_t)token * groups * 36u + (size_t)c * 36u;
+        if (lane == 0u && idx < pc.N) {
+            const unsigned short dh = zinc_float_to_half(d);
+            const unsigned short sh = zinc_float_to_half(sv);
+            out_base[0] = (unsigned char)(dh & 0xffu);
+            out_base[1] = (unsigned char)(dh >> 8);
+            out_base[2] = (unsigned char)(sh & 0xffu);
+            out_base[3] = (unsigned char)(sh >> 8);
+        }
+        out_base[4u + lane] = (unsigned char)q;
+#endif
+    }
+}
+
 // ---- rms_norm_residual_scale ------------------------------------------------
 // rms_norm_residual that also applies the gemma per-layer output scale s[0] to
 // the whole residual stream: hidden[i] = s[0] * (hidden[i] + w[i]*x[i]/rms(x)).
@@ -6820,6 +6904,67 @@ extern "C" __global__ void sigmoid_mul(const float* a, const float* gate, float*
     out[idx] = a[idx] * (1.0f / (1.0f + expf(-g)));
 }
 
+// Attention gate + Q8_1 packing for the single-token ROCm O projection. The
+// unfused path first overwrites the f32 attention row with a*sigmoid(gate), then
+// reads the row again in quantize_act_q8_0. O only consumes the packed view, so
+// compute the gated values in registers and write Q8_1 directly.
+extern "C" __global__ void sigmoid_mul_quant_q8_0(
+    const float* __restrict__ a, const float* __restrict__ gate,
+    unsigned char* __restrict__ out, QuantActPush pc)
+{
+    const unsigned tok = blockIdx.y;
+    const unsigned chunk_base = blockIdx.x * 256u;
+    const unsigned tid = threadIdx.x;
+    const unsigned k_idx = chunk_base + tid;
+    const unsigned wblk = tid >> 5;
+    const unsigned wlane = tid & 31u;
+    const float* at = a + (size_t)tok * pc.K;
+    const float* gt = gate + (size_t)tok * pc.K;
+    float val = 0.0f;
+    if (k_idx < pc.K) {
+        const float g = gt[k_idx];
+        val = at[k_idx] * (1.0f / (1.0f + expf(-g)));
+    }
+
+    float av = fabsf(val), sv = val;
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        av = fmaxf(av, __shfl_xor_sync(0xffffffffu, av, o));
+        sv += __shfl_xor_sync(0xffffffffu, sv, o);
+    }
+    const float d = av / 127.0f;
+    const float scale = 127.0f / fmaxf(av, 1e-5f);
+    const int q = max(-127, min(127, __float2int_rn(val * scale)));
+
+#ifdef ZINC_ROCM
+    const unsigned c = (chunk_base >> 5) + wblk;
+    const unsigned h = c >> 2;
+    const unsigned g = c & 3u;
+    unsigned char* out_base = out + ((size_t)h * pc.T + tok) * 144u;
+    if (wlane == 0u && k_idx < pc.K) {
+        const unsigned short dh = zinc_float_to_half(d);
+        const unsigned short sh = zinc_float_to_half(sv);
+        out_base[g * 4u] = (unsigned char)(dh & 0xffu);
+        out_base[g * 4u + 1u] = (unsigned char)(dh >> 8);
+        out_base[g * 4u + 2u] = (unsigned char)(sh & 0xffu);
+        out_base[g * 4u + 3u] = (unsigned char)(sh >> 8);
+    }
+    out_base[16u + g * 32u + wlane] = (unsigned char)q;
+#else
+    unsigned char* out_base = out + (size_t)tok * (pc.K / 32u) * 36u +
+        ((size_t)(chunk_base >> 5) + wblk) * 36u;
+    if (wlane == 0u && k_idx < pc.K) {
+        const unsigned short dh = zinc_float_to_half(d);
+        const unsigned short sh = zinc_float_to_half(sv);
+        out_base[0] = (unsigned char)(dh & 0xffu);
+        out_base[1] = (unsigned char)(dh >> 8);
+        out_base[2] = (unsigned char)(sh & 0xffu);
+        out_base[3] = (unsigned char)(sh >> 8);
+    }
+    out_base[4u + wlane] = (unsigned char)q;
+#endif
+}
+
 // ===========================================================================
 // Gemma 4 kernels (additive — never used by the qwen35/qwen36 path).
 // ===========================================================================
@@ -7150,6 +7295,263 @@ extern "C" __global__ void rms_norm_rope_qkv_seq(
         yt[i] = sh[i];
 }
 
+// ---- Muse Glimmer QKV normalization / positional encoding -----------------
+// Muse differs from Gemma in three important details: V is written to the KV
+// cache without unit normalization, global-attention layers use NoPE, and every
+// layer still applies learned per-head Q/K RMSNorm. Keep separate kernels so the
+// established Gemma path and ABI remain unchanged.
+struct MuseQkvPush {
+    unsigned head_dim; float eps; unsigned rope_dim; unsigned position;
+    unsigned n_head; unsigned n_kv_head; unsigned kv_offset; unsigned use_rope;
+};
+extern "C" __global__ void muse_norm_qkv(
+    const float* q_in, const float* k_in, const float* v_in,
+    const float* wq, const float* wk, const float* inv_freq,
+    float* q_out, float* k_out, float* v_out, MuseQkvPush pc)
+{
+    unsigned bx = blockIdx.x;
+    unsigned hd = pc.head_dim;
+    extern __shared__ float sh[];
+
+    const float* xt;
+    float* yt;
+    const float* w;
+    if (bx < pc.n_head) {
+        unsigned head = bx;
+        xt = q_in + (size_t)head * hd;
+        yt = q_out + (size_t)head * hd;
+        w = wq;
+    } else if (bx < pc.n_head + pc.n_kv_head) {
+        unsigned head = bx - pc.n_head;
+        xt = k_in + (size_t)head * hd;
+        yt = k_out + (size_t)pc.kv_offset + (size_t)head * hd;
+        w = wk;
+    } else {
+        unsigned head = bx - pc.n_head - pc.n_kv_head;
+        xt = v_in + (size_t)head * hd;
+        yt = v_out + (size_t)pc.kv_offset + (size_t)head * hd;
+        for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) yt[i] = xt[i];
+        return;
+    }
+
+    float ss = 0.0f;
+    for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) {
+        float v = xt[i];
+        ss += v * v;
+    }
+    ss = zinc_block_reduce_sum(ss);
+    __shared__ float rms_inv_sh;
+    if (threadIdx.x == 0) rms_inv_sh = rsqrtf(ss / (float)hd + pc.eps);
+    __syncthreads();
+    float rinv = rms_inv_sh;
+    for (unsigned i = threadIdx.x; i < hd; i += blockDim.x)
+        sh[i] = w[i] * (xt[i] * rinv);
+    __syncthreads();
+
+    if (pc.use_rope == 0u) {
+        for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) yt[i] = sh[i];
+        return;
+    }
+    // Muse/Llama-4 uses normal RoPE: rotate consecutive pairs (2i, 2i+1),
+    // unlike Gemma's NEOX half-split layout.
+    unsigned pairs = pc.rope_dim >> 1;
+    for (unsigned i = threadIdx.x; i < pairs; i += blockDim.x) {
+        unsigned i0 = i << 1;
+        unsigned i1 = i0 + 1;
+        float x0 = sh[i0];
+        float x1 = sh[i1];
+        float theta = (float)pc.position * inv_freq[i];
+        float ct = cosf(theta);
+        float st = sinf(theta);
+        yt[i0] = x0 * ct - x1 * st;
+        yt[i1] = x0 * st + x1 * ct;
+    }
+    for (unsigned i = pc.rope_dim + threadIdx.x; i < hd; i += blockDim.x) yt[i] = sh[i];
+}
+
+struct MuseQkvBatchPush {
+    unsigned head_dim; float eps; unsigned rope_dim; unsigned base_position;
+    unsigned n_head; unsigned n_kv_head; unsigned use_rope;
+};
+extern "C" __global__ void muse_norm_qkv_batched(
+    const float* q_in, const float* k_in, const float* v_in,
+    const float* wq, const float* wk, const float* inv_freq,
+    float* q_out, float* k_out, float* v_out, MuseQkvBatchPush pc)
+{
+    unsigned bx = blockIdx.x;
+    unsigned t = blockIdx.y;
+    unsigned hd = pc.head_dim;
+    unsigned q_dim = pc.n_head * hd;
+    unsigned kv_dim = pc.n_kv_head * hd;
+    extern __shared__ float sh[];
+
+    const float* xt;
+    float* yt;
+    const float* w;
+    if (bx < pc.n_head) {
+        unsigned head = bx;
+        xt = q_in + (size_t)t * q_dim + (size_t)head * hd;
+        yt = q_out + (size_t)t * q_dim + (size_t)head * hd;
+        w = wq;
+    } else if (bx < pc.n_head + pc.n_kv_head) {
+        unsigned head = bx - pc.n_head;
+        xt = k_in + (size_t)t * kv_dim + (size_t)head * hd;
+        yt = k_out + (size_t)t * kv_dim + (size_t)head * hd;
+        w = wk;
+    } else {
+        unsigned head = bx - pc.n_head - pc.n_kv_head;
+        xt = v_in + (size_t)t * kv_dim + (size_t)head * hd;
+        yt = v_out + (size_t)t * kv_dim + (size_t)head * hd;
+        for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) yt[i] = xt[i];
+        return;
+    }
+
+    float ss = 0.0f;
+    for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) {
+        float v = xt[i];
+        ss += v * v;
+    }
+    ss = zinc_block_reduce_sum(ss);
+    __shared__ float rms_inv_sh;
+    if (threadIdx.x == 0) rms_inv_sh = rsqrtf(ss / (float)hd + pc.eps);
+    __syncthreads();
+    float rinv = rms_inv_sh;
+    for (unsigned i = threadIdx.x; i < hd; i += blockDim.x)
+        sh[i] = w[i] * (xt[i] * rinv);
+    __syncthreads();
+
+    if (pc.use_rope == 0u) {
+        for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) yt[i] = sh[i];
+        return;
+    }
+    unsigned position = pc.base_position + t;
+    unsigned pairs = pc.rope_dim >> 1;
+    for (unsigned i = threadIdx.x; i < pairs; i += blockDim.x) {
+        unsigned i0 = i << 1;
+        unsigned i1 = i0 + 1;
+        float x0 = sh[i0];
+        float x1 = sh[i1];
+        float theta = (float)position * inv_freq[i];
+        float ct = cosf(theta);
+        float st = sinf(theta);
+        yt[i0] = x0 * ct - x1 * st;
+        yt[i1] = x0 * st + x1 * ct;
+    }
+    for (unsigned i = pc.rope_dim + threadIdx.x; i < hd; i += blockDim.x) yt[i] = sh[i];
+}
+
+struct MuseQkvSeqPush {
+    unsigned head_dim; float eps; unsigned rope_dim;
+    unsigned n_head; unsigned n_kv_head; unsigned slot_ctx; unsigned use_rope;
+    unsigned write_f16;
+};
+extern "C" __global__ void muse_norm_qkv_seq(
+    const float* q_in, const float* k_in, const float* v_in,
+    const float* wq, const float* wk, const float* inv_freq,
+    float* q_out, float* k_out, float* v_out,
+    half* q_f16, half* k_f16, half* v_f16,
+    const unsigned* positions, const unsigned* slots, MuseQkvSeqPush pc)
+{
+    unsigned bx = blockIdx.x;
+    unsigned b = blockIdx.y;
+    unsigned hd = pc.head_dim;
+    unsigned q_dim = pc.n_head * hd;
+    unsigned kv_dim = pc.n_kv_head * hd;
+    unsigned pos = positions[b];
+    unsigned slot = slots[b];
+    size_t kv_base = ((size_t)slot * pc.slot_ctx + pos) * kv_dim;
+    extern __shared__ float sh[];
+
+    const float* xt;
+    float* yt;
+    half* yt16;
+    const float* w;
+    if (bx < pc.n_head) {
+        unsigned head = bx;
+        xt = q_in + (size_t)b * q_dim + (size_t)head * hd;
+        yt = q_out + (size_t)b * q_dim + (size_t)head * hd;
+        yt16 = q_f16 + (size_t)b * q_dim + (size_t)head * hd;
+        w = wq;
+    } else if (bx < pc.n_head + pc.n_kv_head) {
+        unsigned head = bx - pc.n_head;
+        xt = k_in + (size_t)b * kv_dim + (size_t)head * hd;
+        yt = k_out + kv_base + (size_t)head * hd;
+        yt16 = k_f16 + kv_base + (size_t)head * hd;
+        w = wk;
+    } else {
+        unsigned head = bx - pc.n_head - pc.n_kv_head;
+        xt = v_in + (size_t)b * kv_dim + (size_t)head * hd;
+        yt = v_out + kv_base + (size_t)head * hd;
+        yt16 = v_f16 + kv_base + (size_t)head * hd;
+        for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) {
+            const float value = xt[i];
+            yt[i] = value;
+            if (pc.write_f16 != 0u) yt16[i] = __float2half(value);
+        }
+        return;
+    }
+
+    float ss = 0.0f;
+    for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) {
+        float v = xt[i];
+        ss += v * v;
+    }
+    ss = zinc_block_reduce_sum(ss);
+    __shared__ float rms_inv_sh;
+    if (threadIdx.x == 0) rms_inv_sh = rsqrtf(ss / (float)hd + pc.eps);
+    __syncthreads();
+    float rinv = rms_inv_sh;
+    for (unsigned i = threadIdx.x; i < hd; i += blockDim.x)
+        sh[i] = w[i] * (xt[i] * rinv);
+    __syncthreads();
+
+    if (pc.use_rope == 0u) {
+        for (unsigned i = threadIdx.x; i < hd; i += blockDim.x) {
+            const float value = sh[i];
+            yt[i] = value;
+            if (pc.write_f16 != 0u) yt16[i] = __float2half(value);
+        }
+        return;
+    }
+    unsigned pairs = pc.rope_dim >> 1;
+    for (unsigned i = threadIdx.x; i < pairs; i += blockDim.x) {
+        unsigned i0 = i << 1;
+        unsigned i1 = i0 + 1;
+        float x0 = sh[i0];
+        float x1 = sh[i1];
+        float theta = (float)pos * inv_freq[i];
+        float ct = cosf(theta);
+        float st = sinf(theta);
+        const float y0 = x0 * ct - x1 * st;
+        const float y1 = x0 * st + x1 * ct;
+        yt[i0] = y0;
+        yt[i1] = y1;
+        if (pc.write_f16 != 0u) {
+            yt16[i0] = __float2half(y0);
+            yt16[i1] = __float2half(y1);
+        }
+    }
+    for (unsigned i = pc.rope_dim + threadIdx.x; i < hd; i += blockDim.x) {
+        const float value = sh[i];
+        yt[i] = value;
+        if (pc.write_f16 != 0u) yt16[i] = __float2half(value);
+    }
+}
+
+// Seed the persistent half KV mirror after batched prefill. Decode appends one
+// row at a time directly in muse_norm_qkv_seq, so this O(prompt) conversion is
+// paid once per request rather than once per generated token.
+struct KvF16Push { unsigned N, offset; };
+extern "C" __global__ void muse_kv_f32_to_f16(
+    const float* k, const float* v, half* k16, half* v16, KvF16Push pc)
+{
+    const unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= pc.N) return;
+    const size_t at = (size_t)pc.offset + idx;
+    k16[at] = __float2half(k[at]);
+    v16[at] = __float2half(v[at]);
+}
+
 // ---- geglu (gemma FFN activation: gelu(gate) * up) -------------------------
 // Matches ggml LLM_FFN_GELU (tanh approximation). gemma norm weights already
 // carry the +1 offset (baked at GGUF conversion), so the surrounding norms use
@@ -7465,6 +7867,125 @@ extern "C" __global__ void gemma_attention_batched_seq(
             acc += s_scores[i] * vbase[(size_t)i * kv_dim + (size_t)kv_head * hd + d];
         out[((size_t)b * pc.n_heads + head) * hd + d] = acc * inv;
     }
+}
+
+// Softmax for the grouped-BLAS Muse decode path. hipBLAS writes one contiguous
+// score row per query head; normalize those rows in place before the second
+// grouped GEMM multiplies probabilities by V. The score scale is applied here
+// so both GEMMs remain plain fp32 operations.
+struct MuseAttnSoftmaxPush { unsigned seq_len, stride, n_heads, scale_bits; };
+extern "C" __global__ void muse_attention_softmax_inplace(float* scores, half* probs, MuseAttnSoftmaxPush pc) {
+    const unsigned head = blockIdx.x;
+    if (head >= pc.n_heads) return;
+    const unsigned tid = threadIdx.x;
+    float* row = scores + (size_t)head * pc.stride;
+    const float scale = __uint_as_float(pc.scale_bits);
+
+    float lmax = -3.4e38f;
+    for (unsigned i = tid; i < pc.seq_len; i += blockDim.x)
+        lmax = fmaxf(lmax, row[i] * scale);
+    lmax = zinc_block_reduce_max(lmax);
+    __shared__ float s_max, s_inv;
+    if (tid == 0u) s_max = lmax;
+    __syncthreads();
+
+    float lsum = 0.0f;
+    for (unsigned i = tid; i < pc.seq_len; i += blockDim.x) {
+        const float e = expf(row[i] * scale - s_max);
+        row[i] = e;
+        lsum += e;
+    }
+    lsum = zinc_block_reduce_sum(lsum);
+    if (tid == 0u) s_inv = lsum > 0.0f ? 1.0f / lsum : 0.0f;
+    __syncthreads();
+    half* out = probs + (size_t)head * pc.stride;
+    for (unsigned i = tid; i < pc.seq_len; i += blockDim.x)
+        out[i] = __float2half(row[i] * s_inv);
+}
+
+// Muse single-client decode specialization: fold the post-attention sigmoid
+// gate and Q8_1 packing into attention's output pass. The following O projection
+// consumes only Q8_1, so the intermediate f32 attention row and a full extra
+// kernel launch are unnecessary. Grid/block/shared sizing matches
+// gemma_attention_batched_seq; q8 uses quantize_act_q8_0's ROCm MMQ layout.
+extern "C" __global__ void muse_attention_batched_seq_q8(
+    const float* q, const float* k, const float* v, const float* gate,
+    unsigned char* q8, const unsigned* positions, const unsigned* slots,
+    GemmaAttnSlotPush pc)
+{
+    extern __shared__ float s_scores[];
+    __shared__ float s_m, s_inv;
+    const unsigned head = blockIdx.x;
+    const unsigned b = blockIdx.y;
+    const unsigned pos = positions[b];
+    const unsigned slot = slots[b];
+    const unsigned seq_len = pos + 1u;
+    const unsigned tid = threadIdx.x;
+    const unsigned hd = pc.head_dim;
+    const unsigned kv_head = head / (pc.n_heads / pc.n_kv_heads);
+    const size_t kv_dim = (size_t)pc.n_kv_heads * hd;
+    const size_t slot_off = (size_t)slot * pc.slot_ctx * kv_dim;
+    const float* qh = q + ((size_t)b * pc.n_heads + head) * hd;
+    const float* kbase = k + slot_off;
+    const float* vbase = v + slot_off;
+    const float scale = pc.scale_bits != 0u ? __uint_as_float(pc.scale_bits) : rsqrtf((float)hd);
+    unsigned start = 0u;
+    if (pc.window != 0u && seq_len > pc.window) start = seq_len - pc.window;
+
+    float lmax = -3.4e38f;
+    for (unsigned i = start + tid; i < seq_len; i += blockDim.x) {
+        const float* ki = kbase + (size_t)i * kv_dim + (size_t)kv_head * hd;
+        float dot = 0.0f;
+        for (unsigned di = 0; di < hd; di++) dot += qh[di] * ki[di];
+        const float score = dot * scale;
+        s_scores[i] = score;
+        lmax = fmaxf(lmax, score);
+    }
+    lmax = zinc_block_reduce_max(lmax);
+    if (tid == 0u) s_m = lmax;
+    __syncthreads();
+
+    float lsum = 0.0f;
+    for (unsigned i = start + tid; i < seq_len; i += blockDim.x) {
+        const float e = expf(s_scores[i] - s_m);
+        s_scores[i] = e;
+        lsum += e;
+    }
+    lsum = zinc_block_reduce_sum(lsum);
+    if (tid == 0u) s_inv = lsum > 0.0f ? 1.0f / lsum : 0.0f;
+    __syncthreads();
+    if (tid >= hd) return;
+
+    float acc = 0.0f;
+    for (unsigned i = start; i < seq_len; i++)
+        acc += s_scores[i] * vbase[(size_t)i * kv_dim + (size_t)kv_head * hd + tid];
+    const size_t out_idx = ((size_t)b * pc.n_heads + head) * hd + tid;
+    const float gval = gate[out_idx];
+    const float val = (acc * s_inv) * (1.0f / (1.0f + expf(-gval)));
+
+    float av = fabsf(val), sv = val;
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        av = fmaxf(av, __shfl_xor_sync(0xffffffffu, av, o));
+        sv += __shfl_xor_sync(0xffffffffu, sv, o);
+    }
+    const float d = av / 127.0f;
+    const float qscale = 127.0f / fmaxf(av, 1e-5f);
+    const int qv = max(-127, min(127, __float2int_rn(val * qscale)));
+    const unsigned lane = tid & 31u;
+    const unsigned c = (head * hd + tid) >> 5;
+    const unsigned tile = c >> 2;
+    const unsigned group = c & 3u;
+    unsigned char* out = q8 + ((size_t)tile * gridDim.y + b) * 144u;
+    if (lane == 0u) {
+        const unsigned short dh = zinc_float_to_half(d);
+        const unsigned short sh = zinc_float_to_half(sv);
+        out[group * 4u] = (unsigned char)(dh & 0xffu);
+        out[group * 4u + 1u] = (unsigned char)(dh >> 8);
+        out[group * 4u + 2u] = (unsigned char)(sh & 0xffu);
+        out[group * 4u + 3u] = (unsigned char)(sh >> 8);
+    }
+    out[16u + group * 32u + lane] = (unsigned char)qv;
 }
 
 // ---- deinterleave_qgate (qwen35 packed Q+gate projection) ----

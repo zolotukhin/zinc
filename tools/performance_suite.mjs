@@ -1216,6 +1216,9 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_ROCM_DECODE_Q8_Q4_PAIR",
   "ZINC_ROCM_RMS_Q8",
   "ZINC_ROCM_ARGMAX_V2",
+  "ZINC_ROCM_MUSE_ATTN_BLAS",
+  "ZINC_ROCM_MUSE_ATTN_BLAS_MIN",
+  "ZINC_ROCM_MUSE_NORM_CHAIN",
   "ZINC_ROCM_DECODE_SSM_COL_WARP",
   "ZINC_ROCM_DECODE_SSM_FAST",
   "ZINC_SSM_PREPARED",
@@ -2215,6 +2218,7 @@ export function canonicalModelIdFromPath(modelFile) {
 }
 
 export function guessFamily(id) {
+  if (id.startsWith("muse-glimmer")) return "Muse Glimmer";
   if (id.startsWith("gemma4")) return "Gemma 4";
   if (id.startsWith("gemma")) return "Gemma";
   if (id.startsWith("qwen38")) return "Qwen 3.8";
@@ -2231,7 +2235,7 @@ function guessQuant(id) {
 }
 
 export function prefersChatPrompt(id) {
-  return id.startsWith("gemma") || id.startsWith("qwen38");
+  return id.startsWith("gemma") || id.startsWith("muse-glimmer") || id.startsWith("qwen38");
 }
 
 export function defaultPromptForModelId(id) {
@@ -2435,6 +2439,17 @@ async function discoverMetalCases(modelRoot) {
 
 export function defaultRdnaCases(modelRoot) {
   return [
+    {
+      id: "muse-glimmer-30b-q4k-m",
+      label: "Muse Glimmer 30B Q4_K_M",
+      family: "Muse Glimmer",
+      quant: "Q4_K_M",
+      model_path: path.join(modelRoot, "muse-glimmer", "Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf"),
+      prompt_mode: "chat",
+      prompt: defaultPromptForModelId("muse-glimmer-30b-q4k-m"),
+      max_tokens: defaultMaxTokensForModelId("muse-glimmer-30b-q4k-m"),
+      notes: ["RDNA4 Muse Glimmer comparison against llama.cpp server"],
+    },
     {
       id: "qwen38-27b-q4k-m",
       label: "Qwen 3.8 27B Dense Q4_K_M",
@@ -3953,7 +3968,10 @@ async function main() {
   if (args.writeSiteData) {
     const existing = await loadExistingArtifact(args.siteData);
     const merged = mergeArtifacts(existing, incoming, {
-      preserveMissingPhases: args.phase !== "all",
+      // A filtered run is a partial target snapshot even when it measures both
+      // engines. Keep models/scenarios outside the filter while replacing the
+      // selected rows with the new measurements.
+      preserveMissingPhases: args.phase !== "all" || args.models != null || args.scenarios != null,
     });
     // Guard: never publish host/network info into the public site data. Scan for
     // ACTUAL host indicators (hostnames, tailscale IPs, tailnet domains) — not a

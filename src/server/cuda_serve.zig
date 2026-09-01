@@ -74,7 +74,7 @@ pub const Forward = union(enum) {
     /// Falls back to per-token decodeBatch when unavailable (gemma or old build).
     fn prefillSlot(self: Forward, tokens: []const u32, slot: u32) !u32 {
         switch (self) {
-            .gemma => return error.PrefillSlotUnsupported,
+            .gemma => |g| return try g.prefillBatchedSlot(tokens, slot),
             .qwen => |q| return try q.prefillBatchedSlot(tokens, slot),
         }
     }
@@ -117,6 +117,8 @@ pub const ServeEngine = struct {
     sched: scheduler.Scheduler,
     /// Stop token id (the tokenizer's EOS for real serving; overridable for the gate).
     eos: u32,
+    /// Optional model-specific end-of-turn token (ATEM `<|eot|>`).
+    eot: ?u32,
 
     mutex: std.Thread.Mutex = .{},
     cond: std.Thread.Condition = .{},
@@ -148,12 +150,13 @@ pub const ServeEngine = struct {
         nslots: u32,
         slot_ctx: u32,
         eos: u32,
+        eot: ?u32,
     ) !ServeEngine {
         try fwd.allocSlots(nslots, slot_ctx);
         errdefer fwd.freeSlots();
         const sched = try scheduler.Scheduler.init(allocator, nslots);
-        log.info("CUDA serve engine ready: {d} slots × {d} ctx, eos={d}", .{ nslots, slot_ctx, eos });
-        return .{ .allocator = allocator, .fwd = fwd, .sched = sched, .eos = eos };
+        log.info("CUDA serve engine ready: {d} slots × {d} ctx, eos={d}, eot={?d}", .{ nslots, slot_ctx, eos, eot });
+        return .{ .allocator = allocator, .fwd = fwd, .sched = sched, .eos = eos, .eot = eot };
     }
 
     pub fn deinit(self: *ServeEngine) void {
@@ -293,6 +296,13 @@ pub const ServeEngine = struct {
         self.sched.release(slot_id);
     }
 
+    fn requestShouldStop(self: *const ServeEngine, req: anytype) bool {
+        if (req.shouldStop(self.eos)) return true;
+        const eot = self.eot orelse return false;
+        if (req.generated_tokens.items.len == 0) return false;
+        return req.generated_tokens.items[req.generated_tokens.items.len - 1] == eot;
+    }
+
     fn workerLoop(self: *ServeEngine) void {
         const fwd = self.fwd;
         // Local copies of the scratch slot-id slices (scratch is reused across
@@ -362,7 +372,7 @@ pub const ServeEngine = struct {
                     };
                     req.transition(.decoding) catch {};
                     self.publish(req.id, tok);
-                    if (req.shouldStop(self.eos)) self.finishSlot(slot_id);
+                    if (self.requestShouldStop(req)) self.finishSlot(slot_id);
                 } else {
                     // Fallback: per-token B=1 decodeBatch prefill (gemma or error).
                     var pos: u32 = 0;
@@ -393,7 +403,7 @@ pub const ServeEngine = struct {
                         };
                         req.transition(.decoding) catch {};
                         self.publish(req.id, tok);
-                        if (req.shouldStop(self.eos)) self.finishSlot(slot_id);
+                        if (self.requestShouldStop(req)) self.finishSlot(slot_id);
                     }
                 }
             }
@@ -436,7 +446,7 @@ pub const ServeEngine = struct {
                         continue;
                     };
                     self.publish(req.id, out[i]);
-                    if (req.shouldStop(self.eos)) self.finishSlot(slot_id);
+                    if (self.requestShouldStop(req)) self.finishSlot(slot_id);
                 }
             }
         }

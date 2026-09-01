@@ -135,6 +135,9 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_ROCM_DECODE_Q8_Q4_PAIR: "1",
     ZINC_ROCM_RMS_Q8: "1",
     ZINC_ROCM_ARGMAX_V2: "1",
+    ZINC_ROCM_MUSE_ATTN_BLAS: "1",
+    ZINC_ROCM_MUSE_ATTN_BLAS_MIN: "0",
+    ZINC_ROCM_MUSE_NORM_CHAIN: "1",
     ZINC_ROCM_DECODE_SSM_COL_WARP: "1",
     ZINC_ROCM_DECODE_SSM_FAST: "1",
     ZINC_SSM_PREPARED: "1",
@@ -178,6 +181,9 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_ROCM_DECODE_Q8_Q4_PAIR).toBe("1");
   expect(env.ZINC_ROCM_RMS_Q8).toBe("1");
   expect(env.ZINC_ROCM_ARGMAX_V2).toBe("1");
+  expect(env.ZINC_ROCM_MUSE_ATTN_BLAS).toBe("1");
+  expect(env.ZINC_ROCM_MUSE_ATTN_BLAS_MIN).toBe("0");
+  expect(env.ZINC_ROCM_MUSE_NORM_CHAIN).toBe("1");
   expect(env.ZINC_ROCM_DECODE_SSM_COL_WARP).toBe("1");
   expect(env.ZINC_ROCM_DECODE_SSM_FAST).toBe("1");
   expect(env.ZINC_SSM_PREPARED).toBe("1");
@@ -295,7 +301,7 @@ test("resolveLocalLlamaServer prefers explicit path, then PATH, then docker fall
   expect(resolveLocalLlamaServer({ llamaServer: null }, null, "/tmp/docker")).toBe("/tmp/docker");
 });
 
-test("Gemma uses the chat prompt path in the performance suite", () => {
+test("Gemma and Muse use the chat prompt path in the performance suite", () => {
   expect(prefersChatPrompt("gemma4-26b-a4b-q4k-m")).toBe(true);
   expect(defaultPromptForModelId("gemma4-26b-a4b-q4k-m")).toContain("benchmark screenshots");
   expect(defaultMaxTokensForModelId("gemma4-26b-a4b-q4k-m")).toBe(96);
@@ -303,6 +309,7 @@ test("Gemma uses the chat prompt path in the performance suite", () => {
   expect(defaultPromptForModelId("qwen35-9b-q4k-m")).toContain("Developer question");
   expect(defaultMaxTokensForModelId("qwen35-9b-q4k-m")).toBe(96);
   expect(prefersChatPrompt("qwen38-27b-q4k-m")).toBe(true);
+  expect(prefersChatPrompt("muse-glimmer-30b-q4k-m")).toBe(true);
 });
 
 test("default Metal cases use managed cache ids and replace Qwen 3.6 27B with Qwen 3.8", () => {
@@ -319,12 +326,18 @@ test("default Metal cases use managed cache ids and replace Qwen 3.6 27B with Qw
   expect(cases.some((entry) => entry.id === "qwen36-27b-q4k-m")).toBe(false);
 });
 
-test("default RDNA cases include Gemma and current Qwen rows", () => {
+test("default RDNA cases include Muse, Gemma, and current Qwen rows", () => {
   const cases = defaultRdnaCases("/root/models");
+  const muse = cases.find((entry) => entry.id === "muse-glimmer-30b-q4k-m");
   const gemma26 = cases.find((entry) => entry.id === "gemma4-26b-a4b-q4k-m");
   const gemma31 = cases.find((entry) => entry.id === "gemma4-31b-q4k-m");
   const qwen38Dense = cases.find((entry) => entry.id === "qwen38-27b-q4k-m");
   const qwen35 = cases.find((entry) => entry.id === "qwen35-9b-q4k-m");
+
+  expect(muse?.model_path).toBe("/root/models/muse-glimmer/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf");
+  expect(muse?.prompt_mode).toBe("chat");
+  expect(muse?.prompt).toContain("benchmark screenshots");
+  expect(muse?.max_tokens).toBe(96);
 
   expect(gemma26?.model_path).toBe("/root/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf");
   expect(gemma26?.prompt_mode).toBe("chat");

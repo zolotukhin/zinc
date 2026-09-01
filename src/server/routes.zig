@@ -810,6 +810,13 @@ const harmony_stop_strs = [_][]const u8{
     "<|start|>",
     "<|channel|>",
 };
+const atem_analysis_prefix = "to=self<|message|>";
+const atem_final_prefix = "to=user<|message|>";
+const atem_stop_strs = [_][]const u8{
+    "<|eom|>",
+    "<|eot|>",
+    "<|start|>",
+};
 const chat_history_answer_limit_bytes: usize = 640;
 const default_chat_system_prompt =
     "You are a helpful assistant. Answer directly. Do not show analysis.";
@@ -1736,13 +1743,92 @@ fn extractHarmonyMessage(text: []const u8, prefix: []const u8) []const u8 {
     return std.mem.trim(u8, body[0..end], " \t\r\n");
 }
 
-fn normalizeStructuredAssistantOutput(
+const AtemMessage = struct {
+    body: []const u8 = "",
+    found: bool = false,
+    complete: bool = false,
+};
+
+fn extractAtemMessage(text: []const u8, prefix: []const u8) AtemMessage {
+    const start = std.mem.indexOf(u8, text, prefix) orelse return .{};
+    const body = text[start + prefix.len ..];
+    const end = findFirstStop(body, atem_stop_strs[0..]);
+    return .{
+        // Keep the right edge byte-for-byte while a response is streaming so
+        // every normalized update remains an extension of the previous one.
+        .body = std.mem.trimLeft(u8, body[0 .. end orelse body.len], " \t\r\n"),
+        .found = true,
+        .complete = end != null,
+    };
+}
+
+fn isPartialAtemEnvelope(text: []const u8) bool {
+    const trimmed = std.mem.trimLeft(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return true;
+    const envelopes = [_][]const u8{
+        atem_analysis_prefix,
+        atem_final_prefix,
+        "<|start|>assistant to=self<|message|>",
+        "<|start|>assistant to=user<|message|>",
+    };
+    for (envelopes) |envelope| {
+        if (trimmed.len <= envelope.len and std.mem.startsWith(u8, envelope, trimmed)) return true;
+    }
+    return false;
+}
+
+fn normalizeAtemAssistantOutput(text: []const u8, thinking_enabled: bool, buf: []u8) ![]const u8 {
+    const analysis = extractAtemMessage(text, atem_analysis_prefix);
+    const final = extractAtemMessage(text, atem_final_prefix);
+
+    if (!thinking_enabled) {
+        if (final.found) return final.body;
+        // Muse always reasons on the private `self` channel. An incomplete
+        // turn therefore has no user-visible content yet.
+        if (analysis.found or isPartialAtemEnvelope(text)) return "";
+        return text;
+    }
+
+    if (!analysis.found) {
+        if (final.found) return final.body;
+        if (isPartialAtemEnvelope(text)) return "";
+        return text;
+    }
+
+    const close = if (analysis.complete) "\n</think>" else "";
+    const joiner = if (analysis.complete and final.found) "\n" else "";
+    const final_body = if (final.found) final.body else "";
+    const total_len = thinking_prefix.len + analysis.body.len + close.len + joiner.len + final_body.len;
+    if (total_len > buf.len) return error.BufferTooSmall;
+
+    @memcpy(buf[0..thinking_prefix.len], thinking_prefix);
+    var pos = thinking_prefix.len;
+    @memcpy(buf[pos .. pos + analysis.body.len], analysis.body);
+    pos += analysis.body.len;
+    if (close.len > 0) {
+        @memcpy(buf[pos .. pos + close.len], close);
+        pos += close.len;
+    }
+    if (joiner.len > 0) {
+        @memcpy(buf[pos .. pos + joiner.len], joiner);
+        pos += joiner.len;
+    }
+    if (final_body.len > 0) {
+        @memcpy(buf[pos .. pos + final_body.len], final_body);
+        pos += final_body.len;
+    }
+    return buf[0..pos];
+}
+
+pub fn normalizeStructuredAssistantOutput(
     tokenizer: *const tokenizer_mod.Tokenizer,
     text: []const u8,
     thinking_enabled: bool,
     buf: []u8,
 ) ![]const u8 {
-    if (!std.mem.eql(u8, tokenizer.detectTemplateKindName(), "openai_moe")) return text;
+    const template_kind = tokenizer.detectTemplateKind();
+    if (template_kind == .atem) return normalizeAtemAssistantOutput(text, thinking_enabled, buf);
+    if (template_kind != .openai_moe) return text;
 
     const analysis = extractHarmonyMessage(text, harmony_analysis_prefix);
     const final = extractHarmonyMessage(text, harmony_final_prefix);
@@ -1871,7 +1957,8 @@ fn trimLeadingStandaloneQuote(text: []const u8) []const u8 {
 }
 
 fn supportsEnabledThinking(tokenizer: *const tokenizer_mod.Tokenizer, enable_thinking: ?bool) bool {
-    return tokenizer.supportsThinkingToggle() and (enable_thinking orelse false);
+    const exposes_internal_reasoning = tokenizer.supportsThinkingToggle() or tokenizer.detectTemplateKind() == .atem;
+    return exposes_internal_reasoning and (enable_thinking orelse false);
 }
 
 fn prefixThinkingEnvelope(text: []const u8, enabled: bool, buf: []u8) ![]const u8 {
@@ -2299,6 +2386,7 @@ fn handleChatCompletions(
     var req_id_buf: [32]u8 = undefined;
     const req_id = std.fmt.bufPrint(&req_id_buf, "chatcmpl-{x}", .{@as(u64, @truncate(@as(u128, @bitCast(seed_ns))))}) catch "chatcmpl-0";
     const thinking_enabled = supportsEnabledThinking(tokenizer, parsed.enable_thinking);
+    const is_atem = tokenizer.detectTemplateKind() == .atem;
     const tools_for_choice = if (parsed.tool_choice == .none) @as([]const tool_format.ToolDefinition, &.{}) else parsed.tools;
     const forced_tool_name = forcedSingleToolName(tools_for_choice, parsed.tool_choice);
     const forced_tool_first_arg_name = forcedSingleToolFirstArgumentName(tools_for_choice, parsed.tool_choice);
@@ -2429,8 +2517,9 @@ fn handleChatCompletions(
         var gen_text_buf: [32768]u8 = undefined; // accumulated decoded text for stop check
         var gen_text_len: usize = 0;
         var sent_text_len: usize = 0; // how much of gen_text has been confirmed safe to send
-        var sent_visible_len: usize = 0; // cleaned visible bytes already streamed when thinking is disabled
+        var sent_visible_len: usize = if (is_atem and thinking_enabled and forced_tool_name == null) thinking_prefix.len else 0;
         var visible_buf: [4096]u8 = undefined;
+        var structured_stream_buf: [32768]u8 = undefined;
         var stopped = false;
         var finish_reason: FinishReason = if (max_tokens == 0 and parsed.max_tokens > 0) .length else .stop;
 
@@ -2529,8 +2618,17 @@ fn handleChatCompletions(
                     const pending_text = gen_text_buf[sent_text_len..gen_text_len];
                     const cleaned_pending = trimTrailingChatArtifacts(pending_text);
                     gen_text_len = sent_text_len + cleaned_pending.len;
-                    if (cleaned_pending.len > 0 and forced_tool_name == null) {
-                        streamTextViaDetector(conn, cleaned_pending, req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
+                    if (forced_tool_name == null) {
+                        if (is_atem) {
+                            const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
+                            const cleaned_structured = trimTrailingChatArtifacts(structured);
+                            if (cleaned_structured.len > sent_visible_len) {
+                                streamTextViaDetector(conn, cleaned_structured[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
+                                sent_visible_len = cleaned_structured.len;
+                            }
+                        } else if (cleaned_pending.len > 0) {
+                            streamTextViaDetector(conn, cleaned_pending, req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
+                        }
                     }
                     sent_text_len = gen_text_len;
                     stopped = true;
@@ -2557,6 +2655,14 @@ fn handleChatCompletions(
 
                 if (!is_partial) {
                     if (forced_tool_name != null) {
+                        sent_text_len = gen_text_len;
+                    } else if (is_atem) {
+                        const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
+                        const safe_visible = lastCompleteUtf8End(structured);
+                        if (safe_visible > sent_visible_len) {
+                            streamTextViaDetector(conn, structured[sent_visible_len..safe_visible], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
+                            sent_visible_len = safe_visible;
+                        }
                         sent_text_len = gen_text_len;
                     } else if (thinking_enabled) {
                         // Stream the accumulated bytes since the last safe send,
@@ -2599,7 +2705,14 @@ fn handleChatCompletions(
 
             // Flush any remaining pending tokens (only if we didn't hit stop)
             if (!stopped) {
-                if (thinking_enabled) {
+                if (is_atem) {
+                    const structured = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_stream_buf) catch "";
+                    const cleaned_structured = trimTrailingChatArtifacts(structured);
+                    if (cleaned_structured.len > sent_visible_len and forced_tool_name == null) {
+                        streamTextViaDetector(conn, cleaned_structured[sent_visible_len..], req_id, ts, model_name, stream_detector, &any_tool_call_emitted, &tool_call_index, allocator, tools_active) catch return;
+                        sent_visible_len = cleaned_structured.len;
+                    }
+                } else if (thinking_enabled) {
                     const pending_text = gen_text_buf[sent_text_len..gen_text_len];
                     const cleaned_pending = trimTrailingChatArtifacts(pending_text);
                     if (cleaned_pending.len > 0 and forced_tool_name == null) {
@@ -2650,7 +2763,9 @@ fn handleChatCompletions(
 
         conn.writeSseDone() catch return;
         if (cacheable_session and forced_tool_name == null) {
-            const trimmed_stream_text = sanitizeAssistantHistoryContent(gen_text_buf[0..gen_text_len]);
+            var structured_history_buf: [32768]u8 = undefined;
+            const structured_history_text = normalizeStructuredAssistantOutput(tokenizer, gen_text_buf[0..gen_text_len], thinking_enabled, &structured_history_buf) catch gen_text_buf[0..gen_text_len];
+            const trimmed_stream_text = sanitizeAssistantHistoryContent(structured_history_text);
             var transport_buf: [32768]u8 = undefined;
             var tool_history_buf: std.ArrayList(u8) = .{};
             defer tool_history_buf.deinit(allocator);
@@ -3954,6 +4069,40 @@ test "normalizeStructuredAssistantOutput preserves Harmony analysis when thinkin
     var buf: [512]u8 = undefined;
     const cleaned = try normalizeStructuredAssistantOutput(&tok, raw, true, &buf);
     try std.testing.expectEqualStrings("<think>\nWe need to answer briefly.\n</think>\nParis", cleaned);
+}
+
+test "normalizeStructuredAssistantOutput strips ATEM self channel" {
+    var tok = makeTestTokenizer("<atem:tool_call><|start|>{{ role }}<|message|>{{ content }}<|eot|>");
+    defer tok.token_to_id.deinit();
+
+    const raw =
+        " to=self<|message|>We need to answer briefly.<|eom|>" ++
+        "<|start|>assistant to=user<|message|>Paris<|eot|>";
+    var buf: [512]u8 = undefined;
+    const cleaned = try normalizeStructuredAssistantOutput(&tok, raw, false, &buf);
+    try std.testing.expectEqualStrings("Paris", cleaned);
+}
+
+test "normalizeStructuredAssistantOutput exposes ATEM self channel only when requested" {
+    var tok = makeTestTokenizer("<atem:tool_call><|start|>{{ role }}<|message|>{{ content }}<|eot|>");
+    defer tok.token_to_id.deinit();
+
+    const raw =
+        " to=self<|message|>We need to answer briefly.<|eom|>" ++
+        "<|start|>assistant to=user<|message|>Paris<|eot|>";
+    var buf: [512]u8 = undefined;
+    const cleaned = try normalizeStructuredAssistantOutput(&tok, raw, true, &buf);
+    try std.testing.expectEqualStrings("<think>\nWe need to answer briefly.\n</think>\nParis", cleaned);
+}
+
+test "normalizeStructuredAssistantOutput buffers partial ATEM envelopes" {
+    var tok = makeTestTokenizer("<atem:tool_call><|start|>{{ role }}<|message|>{{ content }}<|eot|>");
+    defer tok.token_to_id.deinit();
+
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("", try normalizeStructuredAssistantOutput(&tok, " to=sel", false, &buf));
+    try std.testing.expectEqualStrings("", try normalizeStructuredAssistantOutput(&tok, " to=self<|message|>Private reasoning", false, &buf));
+    try std.testing.expectEqualStrings("<think>\nPrivate reasoning", try normalizeStructuredAssistantOutput(&tok, " to=self<|message|>Private reasoning", true, &buf));
 }
 
 test "sanitizeStreamingThinkingOutput strips reopened think block from answer tail" {

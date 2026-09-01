@@ -17,6 +17,10 @@ fn isQwen35LikeName(name: []const u8) bool {
         std.mem.eql(u8, name, "qwen3_6_text");
 }
 
+fn resolveSpecialTokenId(declared_id: ?u32, token_to_id: *const std.StringHashMap(u32), token: []const u8) ?u32 {
+    return declared_id orelse token_to_id.get(token);
+}
+
 /// A native BPE tokenizer backed by vocabulary and merge tables from GGUF metadata.
 pub const Tokenizer = struct {
     /// Vocabulary: token ID → token bytes
@@ -157,7 +161,14 @@ pub const Tokenizer = struct {
         // Read special token IDs.
         const bos_id = gf.getU32("tokenizer.ggml.bos_token_id");
         const eos_id = gf.getU32("tokenizer.ggml.eos_token_id") orelse 2;
-        const eot_id = gf.getU32("tokenizer.ggml.eot_token_id");
+        // Some ATEM GGUFs carry <|eot|> in the vocabulary but omit the
+        // optional eot_token_id metadata field. Resolve it from the reverse
+        // vocabulary in that case so generation still stops after one turn.
+        const eot_id = resolveSpecialTokenId(
+            gf.getU32("tokenizer.ggml.eot_token_id"),
+            &token_to_id,
+            "<|eot|>",
+        );
         const model_type = gf.getString("tokenizer.ggml.model") orelse "unknown";
         const architecture = gf.getString("general.architecture") orelse "";
         const pre_name = gf.getString("tokenizer.ggml.pre") orelse "";
@@ -1005,6 +1016,9 @@ pub const Tokenizer = struct {
     pub const ChatTemplateOptions = struct {
         enable_thinking: ?bool = null,
         add_generation_prompt: bool = true,
+        /// Date exposed to templates that request `strftime_now`, in ISO form.
+        /// Null uses the current UTC date, matching llama.cpp's Jinja runtime.
+        current_date: ?[]const u8 = null,
         /// When true, skip the thinking template entirely even if the tokenizer supports it.
         skip_thinking_template: bool = false,
         /// Tool definitions to render into the system message. Empty slice = no tools.
@@ -1031,6 +1045,18 @@ pub const Tokenizer = struct {
         if (pos.* + trimmed.len > dst.len) return error.BufferTooSmall;
         @memcpy(dst[pos.*..][0..trimmed.len], trimmed);
         pos.* += trimmed.len;
+    }
+
+    fn currentUtcDate(buf: *[10]u8) []const u8 {
+        const now: i64 = std.time.timestamp();
+        const seconds: u64 = @intCast(@max(now, 0));
+        const year_day = (std.time.epoch.EpochSeconds{ .secs = seconds }).getEpochDay().calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        return std.fmt.bufPrint(
+            buf,
+            "{d:0>4}-{d:0>2}-{d:0>2}",
+            .{ year_day.year, month_day.month.numeric(), month_day.day_index + 1 },
+        ) catch unreachable;
     }
 
     fn appendGemma4ThinkingStripped(dst: []u8, pos: *usize, text: []const u8) !void {
@@ -1282,8 +1308,8 @@ pub const Tokenizer = struct {
                 // ATEM (Muse Glimmer): <|start|>role<|message|>content<|eot|>,
                 // assistant turns carry a `to=` recipient, reasoning streams on
                 // the `to=self` channel ending with <|eom|>. Mirrors the GGUF
-                // Jinja for the no-tools path; the Current-date line is omitted
-                // exactly as the Jinja does when no date variable is defined.
+                // Jinja for the no-tools path, including its `strftime_now`
+                // current-date line.
                 const meta_tail = "\n\n# Valid recipients: \"self\", \"user\".<|eot|>";
                 const reasoning_line = "\n\nReasoning strength: high.";
                 var has_system = false;
@@ -1291,10 +1317,12 @@ pub const Tokenizer = struct {
                     if (std.mem.eql(u8, roles[i], "system")) has_system = true;
                 }
                 if (!has_system) {
+                    var date_buf: [10]u8 = undefined;
+                    const current_date = options.current_date orelse currentUtcDate(&date_buf);
                     const written = std.fmt.bufPrint(
                         buf[pos..],
-                        "<|start|>system<|message|>You are a helpful AI assistant.\nKnowledge cutoff: 2026-01-04.{s}{s}",
-                        .{ reasoning_line, meta_tail },
+                        "<|start|>system<|message|>You are a helpful AI assistant.\nKnowledge cutoff: 2026-01-04.\nCurrent date: {s}.{s}{s}",
+                        .{ current_date, reasoning_line, meta_tail },
                     ) catch return error.BufferTooSmall;
                     pos += written.len;
                 }
@@ -1821,6 +1849,16 @@ test "llama4 pretokenizer matches Muse Glimmer ASCII chunk boundaries" {
     try std.testing.expectEqual(input.len, pos);
 }
 
+test "special token id falls back to the vocabulary" {
+    var token_to_id = std.StringHashMap(u32).init(std.testing.allocator);
+    defer token_to_id.deinit();
+    try token_to_id.put("<|eot|>", 200021);
+
+    try std.testing.expectEqual(@as(?u32, 7), resolveSpecialTokenId(7, &token_to_id, "<|eot|>"));
+    try std.testing.expectEqual(@as(?u32, 200021), resolveSpecialTokenId(null, &token_to_id, "<|eot|>"));
+    try std.testing.expectEqual(@as(?u32, null), resolveSpecialTokenId(null, &token_to_id, "<|missing|>"));
+}
+
 test "applyChatTemplate ATEM emits Muse Glimmer turn protocol" {
     var tok = Tokenizer{
         .vocab = &.{},
@@ -1839,12 +1877,13 @@ test "applyChatTemplate ATEM emits Muse Glimmer turn protocol" {
     var buf: [1024]u8 = undefined;
     const roles = [_][]const u8{"user"};
     const contents = [_][]const u8{"Hello"};
-    const result = try tok.applyChatTemplate(&roles, &contents, &buf);
+    const result = try tok.applyChatTemplateWithOptions(&roles, &contents, .{ .current_date = "2026-09-01" }, &buf);
 
     try std.testing.expectEqual(Tokenizer.TemplateKind.atem, tok.detectTemplateKind());
     try std.testing.expectEqualStrings(
         "<|start|>system<|message|>You are a helpful AI assistant.\n" ++
-            "Knowledge cutoff: 2026-01-04.\n\nReasoning strength: high.\n\n" ++
+            "Knowledge cutoff: 2026-01-04.\n" ++
+            "Current date: 2026-09-01.\n\nReasoning strength: high.\n\n" ++
             "# Valid recipients: \"self\", \"user\".<|eot|>" ++
             "<|start|>user<|message|>Hello<|eot|><|start|>assistant",
         result,

@@ -1815,17 +1815,18 @@ fn runCuda(config: Config, allocator: std.mem.Allocator) !void {
     const server_mode = config.prompt == null;
 
     // Build the forward state. max_ctx must cover prompt + generated tokens.
-    // gemma4 is a separate forward path (forward_cuda_gemma.zig); the
+    // gemma4 and Muse Glimmer use the dense transformer forward path
+    // (forward_cuda_gemma.zig); the
     // qwen35/qwen36 hybrid-SSM family uses forward_cuda.zig.
     const max_ctx: u32 = if (config.context_length) |c| c else 2048;
-    if (model.config.architecture == .gemma) {
+    if (model.config.architecture == .gemma or model.config.architecture == .muse_glimmer) {
         var fwd = forward_cuda_gemma_mod.ForwardGemma.init(allocator, &model, max_ctx) catch |err| {
             log.err("Failed to init {s} forward pass: {s}", .{ accelerator_name, @errorName(err) });
             return err;
         };
         defer fwd.deinit();
-        log.info("{s} gemma4 forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
-            accelerator_name, fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
+        log.info("{s} {s} forward init OK (n_embd={d}, n_layers={d}, vocab={d}, max_ctx={d})", .{
+            accelerator_name, @tagName(model.config.architecture), fwd.d.n_embd, fwd.d.n_layers, fwd.d.vocab, max_ctx,
         });
         if (server_mode) return runCudaServe(.{ .gemma = &fwd }, &model, config, max_ctx, allocator);
         return runCudaDecode(&fwd, &model, config, max_ctx, allocator);
@@ -2025,6 +2026,7 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
     if (std.posix.getenv("ZINC_SCHED_EOS")) |v| {
         eos = std.fmt.parseInt(u32, std.mem.trim(u8, v, " \n\r\t"), 10) catch eos;
     }
+    const eot = if (!debug_ids and tokenizer.detectTemplateKind() == .atem) tokenizer.eot_id else null;
 
     const gemma_moe = model.config.architecture == .gemma and model.config.n_experts > 0;
     const nslots = cudaServeSlotCount(config.max_parallel, gemma_moe);
@@ -2033,7 +2035,7 @@ fn runCudaServe(fwd: cuda_serve_mod.Forward, model: *loader_cuda_mod.Model, conf
     }
     const slot_ctx = max_ctx;
 
-    var engine = cuda_serve_mod.ServeEngine.init(allocator, fwd, nslots, slot_ctx, eos) catch |err| {
+    var engine = cuda_serve_mod.ServeEngine.init(allocator, fwd, nslots, slot_ctx, eos, eot) catch |err| {
         log.err("Failed to init {s} serve engine: {s}", .{ accelerator_name, @errorName(err) });
         return err;
     };
@@ -2088,6 +2090,9 @@ const ServeReqBody = struct {
     /// Preserve the original SSE default when omitted; explicit false selects
     /// the OpenAI-compatible non-streaming response used by benchmark clients.
     stream: ?bool = null,
+    /// Expose model reasoning in a `<think>` envelope when the template has a
+    /// structured internal channel (including Muse Glimmer's ATEM protocol).
+    enable_thinking: ?bool = null,
 };
 
 fn handleServeConn(ctx: *ServeConnCtx) void {
@@ -2136,6 +2141,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var max_tokens: u32 = ctx.default_max;
     var owns_tokens = false;
     var stream_response = true;
+    var enable_thinking: ?bool = null;
 
     if (ctx.debug_ids) {
         // Gate contract: body is JSON {"prompt":"t0,t1,...","max_tokens":N}; the
@@ -2148,6 +2154,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         defer parsed.deinit();
         if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
         stream_response = parsed.value.stream orelse true;
+        enable_thinking = parsed.value.enable_thinking;
         const ptxt = parsed.value.prompt orelse {
             try conn.sendError(400, "invalid_request_error", "missing prompt");
             return;
@@ -2162,6 +2169,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         defer parsed.deinit();
         if (parsed.value.max_tokens orelse parsed.value.n_predict) |m| max_tokens = m;
         stream_response = parsed.value.stream orelse true;
+        enable_thinking = parsed.value.enable_thinking;
 
         var prompt_text: []const u8 = "";
         var chat_buf: ?[]u8 = null;
@@ -2181,7 +2189,7 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
             }
             const buf = try allocator.alloc(u8, 64 * 1024);
             chat_buf = buf;
-            prompt_text = ctx.tokenizer.applyChatTemplate(roles, contents, buf) catch |err| {
+            prompt_text = ctx.tokenizer.applyChatTemplateWithOptions(roles, contents, .{ .enable_thinking = enable_thinking }, buf) catch |err| {
                 try conn.sendError(400, "invalid_request_error", "chat template failed");
                 log.warn("chat template: {s}", .{@errorName(err)});
                 return;
@@ -2196,6 +2204,11 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         owns_tokens = true;
     }
     defer if (owns_tokens) allocator.free(prompt_tokens);
+
+    const template_kind = ctx.tokenizer.detectTemplateKind();
+    const structured_chat = is_chat and !ctx.debug_ids and (template_kind == .atem or template_kind == .openai_moe);
+    const thinking_enabled = structured_chat and (enable_thinking orelse false) and
+        (ctx.tokenizer.supportsThinkingToggle() or template_kind == .atem);
 
     if (prompt_tokens.len == 0) {
         try conn.sendError(400, "invalid_request_error", "empty prompt");
@@ -2232,6 +2245,10 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
     var json_buf: [1024]u8 = undefined;
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(allocator);
+    const structured_capacity = @max(@as(usize, 64 * 1024), @as(usize, ctx.slot_ctx) * 32 + 256);
+    const structured_buf: ?[]u8 = if (structured_chat) try allocator.alloc(u8, structured_capacity) else null;
+    defer if (structured_buf) |buf_to_free| allocator.free(buf_to_free);
+    var sent_structured_len: usize = 0;
     var write_failed = false;
     var generation_failed = false;
     while (true) {
@@ -2262,6 +2279,26 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
                 conn.writeSseEvent(payload) catch {
                     write_failed = true;
                 };
+            } else if (structured_chat) {
+                const text = ctx.tokenizer.decodeToken(tok, &dec_buf);
+                output.appendSlice(allocator, text) catch {
+                    write_failed = true;
+                    continue;
+                };
+                const normalized = routes_mod.normalizeStructuredAssistantOutput(
+                    ctx.tokenizer,
+                    output.items,
+                    thinking_enabled,
+                    structured_buf.?,
+                ) catch "";
+                if (normalized.len > sent_structured_len) {
+                    const payload = formatChunkJson(&json_buf, normalized[sent_structured_len..], is_chat) catch continue;
+                    conn.writeSseEvent(payload) catch {
+                        write_failed = true;
+                        continue;
+                    };
+                    sent_structured_len = normalized.len;
+                }
             } else {
                 const text = ctx.tokenizer.decodeToken(tok, &dec_buf);
                 const payload = formatChunkJson(&json_buf, text, is_chat) catch continue;
@@ -2295,7 +2332,11 @@ fn handleServeGenerate(ctx: *ServeConnCtx, conn: *http_mod.Connection, body: []c
         return;
     }
 
-    const escaped = try jsonEscapeAlloc(allocator, output.items);
+    const response_output = if (structured_chat)
+        routes_mod.normalizeStructuredAssistantOutput(ctx.tokenizer, output.items, thinking_enabled, structured_buf.?) catch ""
+    else
+        output.items;
+    const escaped = try jsonEscapeAlloc(allocator, response_output);
     defer allocator.free(escaped);
     var response: std.ArrayList(u8) = .{};
     defer response.deinit(allocator);

@@ -82,6 +82,32 @@ void cuda_cublas_hgemm(CudaCtx* c, unsigned M, unsigned N, unsigned K,
         CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     if (s != CUBLAS_STATUS_SUCCESS) set_err("cuda_cublas_hgemm", "cublasGemmEx failed");
 }
+
+void cuda_cublas_hgemm_strided_batched(CudaCtx* c, unsigned trans_a, unsigned trans_b,
+                                       unsigned M, unsigned N, unsigned K,
+                                       CudaBuf* A, size_t a_offset, unsigned lda, int64_t stride_a,
+                                       CudaBuf* B, size_t b_offset, unsigned ldb, int64_t stride_b,
+                                       CudaBuf* C, size_t c_offset, unsigned ldc, int64_t stride_c,
+                                       unsigned batch_count, float beta) {
+    if (!c || !c->cublas || !A || !B || !C) {
+        set_err("cuda_cublas_hgemm_strided_batched", "cuBLAS unavailable");
+        return;
+    }
+    const float alpha = 1.0f;
+    const void* ap = (const void*)(uintptr_t)(A->dptr + a_offset);
+    const void* bp = (const void*)(uintptr_t)(B->dptr + b_offset);
+    void* cp = (void*)(uintptr_t)(C->dptr + c_offset);
+    cublasStatus_t s = cublasGemmStridedBatchedEx(
+        c->cublas,
+        trans_a ? CUBLAS_OP_T : CUBLAS_OP_N,
+        trans_b ? CUBLAS_OP_T : CUBLAS_OP_N,
+        (int)M, (int)N, (int)K,
+        &alpha, ap, CUDA_R_16F, (int)lda, (long long int)stride_a,
+        bp, CUDA_R_16F, (int)ldb, (long long int)stride_b,
+        &beta, cp, CUDA_R_32F, (int)ldc, (long long int)stride_c,
+        (int)batch_count, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    if (s != CUBLAS_STATUS_SUCCESS) set_err("cuda_cublas_hgemm_strided_batched", "cublasGemmStridedBatchedEx failed");
+}
 static int dev_attr(CUdevice d, CUdevice_attribute a) {
     int v = 0; cuDeviceGetAttribute(&v, a, d); return v;
 }
