@@ -10,6 +10,7 @@ tags:
   - rdna4
   - apple-silicon
   - metal
+  - rocm
   - benchmarks
   - llm-inference
 keywords:
@@ -19,21 +20,33 @@ keywords:
   - ZINC model bringup
   - Qwen 3.8 27B Apple Silicon
   - Qwen 3.8 27B RDNA4
+  - Qwen 3.8 27B ROCm
   - Metal decode stall
   - local LLM day one support
-excerpt: "Qwen 3.8 27B landed on Hugging Face on August 14. By the next day it was running through ZINC on both AMD RDNA4 and Apple Silicon, ahead of llama.cpp on decode on RDNA4, with no kernel code touched. The reason it was that fast: Qwen 3.8 27B has the same established dense-hybrid architecture and dimensions as the prior 27B checkpoint underneath, just retrained weights. The reason it wasn't a clean sweep: the Metal backend's dense-hybrid decode stall, first found on the earlier checkpoint back in June, showed up again on 3.8 unchanged, while Metal prefill for this model shape is now 7x faster than it was in June. Same weights shape, two very different outcomes."
+excerpt: "Qwen 3.8 27B landed on Hugging Face on August 14 and ran through ZINC the next day. Two weeks later, the tuned ROCm path beats llama.cpp ROCm across all four published workloads. This is what architecture reuse bought us, what the new fused RMS-norm and Q8 path changed, and why Metal decode still needs work."
 seoDescription: "How ZINC added day-one support for Qwen 3.8 27B by reusing the existing qwen35 architecture kernels with zero kernel changes, plus real RDNA4 and Apple Silicon Metal benchmark numbers against llama.cpp, including a decode stall that survived two model generations."
 faqs:
   - question: "Why did Qwen 3.8 27B support ship so fast on ZINC?"
     answer: "Because it didn't require new kernel work. Qwen 3.8 27B keeps the same text architecture and tensor dimensions as the prior dense-hybrid 27B checkpoint, which ZINC already supported. The catalog entry, the GGUF download URL, and the VRAM budget are new; the CUDA and Metal kernels underneath are not, because ZINC's kernel-selection logic keys off tensor shape (embedding dimension, expert count, and so on), not off a model name string. A model that keeps the same shape as something already tuned inherits that tuning automatically."
   - question: "Is ZINC faster than llama.cpp on Qwen 3.8 27B?"
-    answer: "It depends on the backend. On AMD RDNA4 (Radeon AI PRO R9700), ZINC is ahead on prefill (122%), decode (104%), and phase-combined overall (109%), with one disclosed exception: quick-chat end-to-end throughput lands at 98% of llama.cpp. On Apple Silicon (Metal, M4 Max), prefill is now solidly ahead at 111%, but decode is behind at 66% of llama.cpp, and the phase-combined overall is 69%. CUDA and Intel Arc haven't been benchmarked against this model yet."
+    answer: "On the current ROCm suite, yes: ZINC beats llama.cpp ROCm in all four published workloads. The quick-chat result is 135% of llama.cpp prefill, 117% of its decode speed, and 122% overall. Results remain backend-specific: the day-one Vulkan snapshot also led overall, while Metal prefill leads and Metal decode still trails."
   - question: "What's still unresolved for Qwen 3.8 27B on ZINC?"
     answer: "The Metal decode stall for this model's dense-hybrid architecture, first documented on the prior dense-hybrid checkpoint in June, is still present on 3.8: 15.55 tok/s against llama.cpp's 23.38 tok/s. It reproduced almost exactly, which is useful evidence that it's a shape-level bug in the Metal decode path rather than something specific to one checkpoint's weights. CUDA and Intel Arc results for this model are also still outstanding — the catalog currently lists only AMD RDNA4 32GB and Apple Silicon as validated profiles."
 draft: false
 ---
 
 Qwen 3.8 27B went up on Hugging Face on August 14. This post is being written on August 15. In between, it got a ZINC catalog entry, a verified download, a fresh AMD RDNA4 benchmark run, and a fresh Apple Silicon benchmark run — and on RDNA4, it's already ahead of llama.cpp on decode.
+
+> **Update, August 31:** ROCm is now a first-class ZINC backend, and the 27B path has moved again. A fused RMS-norm plus Q8 activation-packing kernel improved decode by about 2.9% in the same-binary A/B test. In the final five-run, same-GGUF comparison, ZINC beat llama.cpp ROCm across all four workloads. The original day-one Vulkan and Metal measurements remain below as a snapshot of bring-up.
+
+| ROCm workload | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
+|---|---:|---:|---:|---:|---:|
+| Quick Chat | **380.69** | 281.44 | **28.68** | 24.47 | **121.83%** |
+| Coding Review | **592.79** | 465.13 | **28.30** | 24.31 | **117.71%** |
+| Incident Context | **659.32** | 596.21 | **28.15** | 24.37 | **116.07%** |
+| Long Coding Draft | **422.58** | 330.21 | **28.36** | 24.29 | **118.27%** |
+
+These are median tokens per second from two discarded warmups and five measured runs on the same Radeon AI PRO R9700, with both engines loading the same Q4_K_M file. Output previews passed all four coherence checks. The [benchmark page](/zinc/benchmarks/) keeps ROCm separate from Vulkan so results from different driver stacks are not blended together.
 
 That turnaround is the whole story, and it's worth being honest about why it happened: not because bring-up got faster, but because for this specific model, there was barely any bring-up to do.
 

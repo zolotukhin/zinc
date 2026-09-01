@@ -26,8 +26,8 @@ faqs:
       "answer": "Not yet. The early coherent path is intentionally CPU-backed and validates the full model path at roughly 21 tok/s on the RDNA4 node, while the Vulkan backend is around 116 tok/s in the same loop.",
     },
     {
-      "question": "Why not just use ROCm?",
-      "answer": "ZINC targets consumer and workstation AMD systems where Vulkan is broadly available and ROCm support is often not the default path. ZINC_RT keeps that philosophy: no new kernel driver and no ROCm dependency.",
+      "question": "Where does ROCm fit next to ZINC_RT?",
+      "answer": "ROCm and Vulkan are ZINC's production AMD backends. ZINC_RT is a separate experiment in model-aware submission and scheduling below a general-purpose API; it complements those backends rather than replacing either one.",
     },
   ]
 ---
@@ -36,7 +36,7 @@ We did not start ZINC_RT because Vulkan failed.
 
 We started it because Vulkan worked.
 
-That distinction matters. Vulkan got ZINC to the first serious milestone: an inference engine we could run on AMD hardware without asking users to install ROCm, without narrowing the project to datacenter GPUs, and without pretending local inference only matters on one vendor stack. It let us build real kernels, load real GGUF models, run real Qwen prompts, and compare against llama.cpp on the same Radeon AI PRO R9700 node.
+That distinction matters. Vulkan got ZINC to the first serious milestone: an inference engine that reached AMD hardware through a broadly available driver stack, without narrowing the project to datacenter GPUs or one vendor API. It let us build real kernels, load real GGUF models, run real Qwen prompts, and compare against llama.cpp on the same Radeon AI PRO R9700 node. ROCm later joined it as a first-class production backend.
 
 It also made the next problem impossible to ignore.
 
@@ -107,7 +107,7 @@ Not because Vulkan is bad. Because Vulkan is a universal tool, and token generat
 
 The phrase "direct runtime" can sound more dramatic than it is.
 
-ZINC_RT is not a new kernel driver. It is not a ROCm fork. It is not a plan to make users boot a custom kernel so a chatbot can be slightly faster.
+ZINC_RT is not a new kernel driver or a ROCm fork. ROCm remains a peer production backend. ZINC_RT is also not a plan to make users boot a custom kernel so a chatbot can be slightly faster.
 
 The goal is narrower and more useful: build a ZINC-owned runtime layer for AMD GPUs that sits below Vulkan as an inference backend, while still using the normal Linux amdgpu stack. The runtime should know what ZINC knows: model topology, token cadence, KV cache layout, MoE routing, SSM state, buffer lifetime, and what actually changes from one token to the next.
 

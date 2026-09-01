@@ -9,14 +9,14 @@ tags:
   - rdna4
   - zig
   - turboquant
-excerpt: "ZINC is a purpose-built LLM inference engine for AMD RDNA3 and RDNA4 consumer GPUs — RX 9070 XT, RX 7900 XTX, Radeon AI PRO R9700. Hand-tuned Vulkan compute shaders, continuous batching, paged KV cache, TurboQuant compression. Built with Zig. OpenAI-compatible API. No ROCm required."
+excerpt: "ZINC is a purpose-built LLM inference engine for AMD RDNA3 and RDNA4 consumer GPUs — RX 9070 XT, RX 7900 XTX, Radeon AI PRO R9700. Tuned Vulkan and ROCm kernels, continuous batching, paged KV cache, TurboQuant compression, and an OpenAI-compatible API. Built with Zig."
 ---
 
 If you want to run serious local AI on an AMD consumer GPU today, the story is still far worse than it should be. The hardware is real. The demand is real. The open models are finally good enough to matter. But the software stack still feels fragmented, fragile, and too often built around the assumption that NVIDIA is the only platform worth taking seriously.
 
 That gap is why I decided to build [ZINC](https://github.com/zolotukhin/zinc).
 
-ZINC is an inference engine for AMD RDNA3 and RDNA4 GPUs, built with [Zig](https://ziglang.org/) and [Vulkan](https://www.vulkan.org/) compute. At a technical level, it is about hand-tuned GPU kernels, [GGUF](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md) model loading, paged KV cache, continuous batching, and [TurboQuant](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) KV compression. At a higher level, the mission is simpler: make AMD consumer GPUs genuinely useful for local LLM inference, not as a second-best fallback, but as a first-class target.
+ZINC is an inference engine for AMD RDNA3 and RDNA4 GPUs, built with [Zig](https://ziglang.org/) and first-class [Vulkan](https://www.vulkan.org/) and [ROCm](https://rocm.docs.amd.com/) backends. At a technical level, it is about tuned GPU kernels, [GGUF](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md) model loading, paged KV cache, continuous batching, and [TurboQuant](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) KV compression. At a higher level, the mission is simpler: make AMD consumer GPUs genuinely useful for local LLM inference, not as a second-best fallback, but as a first-class target.
 
 I think this matters much more than it may appear at first. Local AI is moving out of the demo phase and into real daily use. Developers want private inference, lower cost, predictable latency, and control over the full stack. Teams want an OpenAI-compatible API they can run on their own hardware. Hobbyists want to do meaningful work without buying datacenter gear. And there are a lot of capable AMD GPUs sitting in desktops right now that should be able to do far more than the current software allows.
 
@@ -34,7 +34,7 @@ That is the opening. When a platform is strong enough in hardware but weak in so
 
 The timing is unusually good.
 
-First, local LLM inference has become a real workload instead of a niche curiosity. Open models are improving fast, quantization is getting better, and more developers want to run models close to their data and workflows. Second, AMD consumer GPUs remain underserved by the dominant AI software ecosystem. [ROCm](https://rocm.docs.amd.com/) still does not treat RDNA3 and RDNA4 consumer cards as the primary target, while Vulkan works across the hardware people actually own. Third, the algorithmic side is finally catching up to the hardware side. Techniques like [TurboQuant](https://arxiv.org/abs/2504.19874) can cut KV cache memory by around 5x at 3-bit while preserving attention quality, which directly changes what fits on a 16 GB or 32 GB card.
+First, local LLM inference has become a real workload instead of a niche curiosity. Open models are improving fast, quantization is getting better, and more developers want to run models close to their data and workflows. Second, AMD consumer GPUs still deserve software tuned around their actual architecture. Vulkan gives ZINC broad driver coverage, while ROCm gives it a native HIP compute path; supporting both lets measurements, not platform politics, decide which backend to use. Third, the algorithmic side is finally catching up to the hardware side. Techniques like [TurboQuant](https://arxiv.org/abs/2504.19874) can cut KV cache memory by around 5x at 3-bit while preserving attention quality, which directly changes what fits on a 16 GB or 32 GB card.
 
 ZINC is not the only project that sees this opening. [tinygrad](https://github.com/tinygrad/tinygrad) and the [tinybox](https://tinygrad.org/#tinybox) have been proving the same core thesis from the training side: AMD consumer GPUs can compete when paired with the right software, and George Hotz's team has gone as far as rewriting drivers from scratch to bypass CUDA lock-in. Their work helps validate the premise. ZINC approaches the same gap from the inference side — purpose-built for serving open models locally.
 
@@ -42,7 +42,7 @@ Those three things together create a very unusual window. There is now enough de
 
 ```mermaid
 flowchart TD
-    A[GGUF models] --> B[Vulkan kernels tuned for RDNA3/RDNA4]
+    A[GGUF models] --> B[Vulkan or ROCm kernels tuned for RDNA3/RDNA4]
     B --> C[Continuous batching + paged KV cache]
     C --> D[TurboQuant KV compression]
     D --> E[OpenAI-compatible local inference server]
@@ -57,7 +57,7 @@ What matters in this diagram is the shape of the ambition. I am not interested i
 
 The mission of ZINC is to make local LLM inference on AMD consumer GPUs fast, correct, and deployable.
 
-Fast means the kernels need to be tuned for the actual architecture, not abstracted into something so generic that all performance disappears. That is why ZINC is being built around [Vulkan compute](https://www.vulkan.org/), hand-written GLSL shaders, and RDNA-specific tuning choices like wave64 and architecture-aware memory behavior.
+Fast means the kernels need to be tuned for the actual architecture, not abstracted into something so generic that all performance disappears. That is why ZINC has both [Vulkan](https://www.vulkan.org/) and [ROCm](https://rocm.docs.amd.com/) paths, with backend-specific kernels and RDNA-aware choices such as wave size and memory access patterns.
 
 Correct means the outputs need to line up with trusted references, the memory system needs to hold up under pressure, and optimizations cannot quietly break model quality. If ZINC says a kernel is working, that should be backed by cosine similarity checks against reference implementations, not wishful thinking.
 
@@ -77,7 +77,7 @@ I do not think ZINC will succeed because the branding is good or because local A
 
 | Problem today | Why it matters | ZINC response |
 | --- | --- | --- |
-| AMD consumer GPUs are underserved by mainstream AI stacks | A lot of real hardware is left underused | Build directly for RDNA3 and RDNA4 with Vulkan |
+| AMD consumer GPUs are underserved by mainstream AI stacks | A lot of real hardware is left underused | Build directly for RDNA3 and RDNA4 with Vulkan and ROCm |
 | Local inference tools often optimize for single-user demos | Real usage needs concurrent serving | Make continuous batching and paged KV core features |
 | VRAM becomes the limit long before interest does | 16 GB and 32 GB cards hit context and concurrency walls fast | Use TurboQuant to reduce KV cache footprint by around 5x at 3-bit |
 | Integration friction kills adoption | Teams already have clients that speak the OpenAI API | Expose an OpenAI-compatible server from day one |
@@ -94,7 +94,7 @@ ZINC is the kind of project where contributions can have outsized leverage.
 
 If you improve a kernel, you are not shaving a few milliseconds off a synthetic number for bragging rights. You are helping a real class of GPUs become more useful for real workloads. If you improve the scheduler, memory management, model support, docs, validation, or deployment path, you are helping move AMD local AI from "interesting if you are stubborn enough" to "practical by default."
 
-There is also a lot of room here for different kinds of contributors. Some people will care about Vulkan kernels and GPU tuning. Some will care about Zig systems work, GGUF parsing, testing, or API compatibility. Some will care about quantization research, especially around KV compression and inference quality. Some will care about docs, packaging, and turning a sharp system into something more people can actually use. All of that work matters.
+There is also a lot of room here for different kinds of contributors. Some people will care about Vulkan or ROCm kernels and GPU tuning. Some will care about Zig systems work, GGUF parsing, testing, or API compatibility. Some will care about quantization research, especially around KV compression and inference quality. Some will care about docs, packaging, and turning a sharp system into something more people can actually use. All of that work matters.
 
 The best open-source projects tend to win when the technical challenge is real, the user need is obvious, and contributors can see how their work compounds. ZINC has that shape.
 
@@ -112,6 +112,6 @@ I am building ZINC because I think the next wave of local AI infrastructure will
 
 That is the bet here. If you want to see what the actual hardware looks like, I wrote about [building the home AI rig](/blog/2026-03-26-building-a-local-ai-rig/) that serves as the ZINC development and benchmark node — including why it started as a trading workstation and how a single GPU changed its purpose entirely.
 
-If you care about local LLM inference, AMD GPUs, Vulkan compute, Zig, KV cache compression, or building serious open infrastructure around open models, I want your help. ZINC has a clear mission, a hard technical core, and a real reason to exist right now. That combination is rare.
+If you care about local LLM inference, AMD GPUs, Vulkan or ROCm compute, Zig, KV cache compression, or building serious open infrastructure around open models, I want your help. ZINC has a clear mission, a hard technical core, and a real reason to exist right now. That combination is rare.
 
 I think it can become a huge success because it is aimed at a real gap, not an invented one. And if we get this right, a lot more people will be able to do meaningful AI work on hardware they can actually afford.

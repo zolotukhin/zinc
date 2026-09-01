@@ -1,7 +1,7 @@
 ---
 title: "ROCm vs Vulkan vs ZINC_RT: inside the decision to write our own GPU runtime for local LLM inference on AMD RDNA4"
 date: "2026-05-18"
-excerpt: "We hit 117 tok/s decode on Qwen3.6-35B-A3B on a Radeon AI PRO R9700 through the Vulkan backend, ahead of llama.cpp at 104. That is 31 percent of the card's DRAM bandwidth. This is the long technical case for why we are leaving Vulkan in place and writing ZINC_RT alongside it, instead of switching to ROCm or HIP, and what the three stacks actually look like under the hood."
+excerpt: "We hit 117 tok/s decode on Qwen3.6-35B-A3B on a Radeon AI PRO R9700 through Vulkan, then added a first-class ROCm backend and kept ZINC_RT as the lower-level experiment. This is the technical case for what each path is good at and how the three stacks fit together."
 tags:
   [
     "ZINC",
@@ -46,15 +46,15 @@ faqs:
   [
     {
       "question": "What is the difference between ROCm, Vulkan, and ZINC_RT for AMD GPU inference?",
-      "answer": "ROCm is AMD's CUDA-shaped userspace stack (HIP runtime, HSA, kernel modules) and is the standard path for datacenter cards. Vulkan is a portable graphics-and-compute API that runs through Mesa RADV on Linux and reaches AMD consumer cards without a separate driver install. ZINC_RT is ZINC's own userspace inference runtime that submits PM4 packets directly through the existing amdgpu kernel driver, bypassing both Vulkan and ROCm. The three sit at different layers, not at the same layer."
+      "answer": "ROCm is AMD's native compute stack, built around HIP and HSA. Vulkan is a portable graphics-and-compute API that runs through Mesa RADV on Linux and often arrives with the system graphics drivers. ZINC_RT is ZINC's experimental userspace inference runtime, designed to submit work through the existing amdgpu kernel driver. The three sit at different layers and solve different deployment or runtime problems."
     },
     {
       "question": "Is ROCm faster than Vulkan for LLM inference on RDNA4?",
-      "answer": "On consumer RDNA4 cards in practice, no. On our Radeon AI PRO R9700 the Vulkan backend through RADV reaches 117 tok/s decode on Qwen3.6-35B-A3B, ahead of llama.cpp at 104 tok/s on the same hardware. ROCm consumer-card support has historically been slower-arriving and less reliable than RADV, and the 600 MB-class HIP runtime is not the path most consumer AMD users have installed."
+      "answer": "It depends on the model and kernel path. ZINC supports both as production backends and publishes their results separately, so the useful answer comes from the benchmark for your model and card rather than a blanket claim about either API."
     },
     {
-      "question": "Why does ZINC not use ROCm or HIP?",
-      "answer": "ROCm brings a roughly 600 MB userspace stack, a C++ build dependency, and worse consumer-card history than Mesa RADV. The README's no-ROCm and no-MLX promise is part of the project's identity. ZINC_RT goes one layer lower than Vulkan rather than one layer to the side, so we keep the no-ROCm posture while still removing the submission overhead that a graphics API cannot hide."
+      "question": "How does ROCm fit alongside Vulkan and ZINC_RT?",
+      "answer": "ROCm and Vulkan are first-class production backends. ROCm gives ZINC native HIP kernels and a mature compute toolchain; Vulkan gives users a broadly available path through Mesa. ZINC_RT remains a separate lower-level experiment aimed at submission and scheduling costs that neither general-purpose API is designed around."
     },
     {
       "question": "What is the actual Vulkan overhead on the LLM decode hot path?",
@@ -77,9 +77,11 @@ faqs:
 
 We hit 117 tok/s decode on Qwen3.6-35B-A3B on a Radeon AI PRO R9700 through ZINC's Vulkan backend. llama.cpp on the same card and same model sits at 104. That is the part that looks like a win.
 
+> **Update, August 2026:** this article began as the rationale for keeping Vulkan while exploring ZINC_RT. Since then, ROCm support on our RDNA4 node became reliable enough to measure, optimize, and ship. ZINC now treats Vulkan and ROCm as first-class production backends. The historical tradeoffs below still explain why both paths exist; they are no longer an argument for excluding ROCm.
+
 The part that does not look like a win is the bandwidth utilization. 117 tok/s is 31 percent of the R9700's 576 GB/s of DRAM throughput. The remaining two-thirds is not hidden inside any single shader. It is sitting in the runtime layer above the shaders, and the runtime we are using is Vulkan, which was designed to keep a 144 Hz game running with a swapchain and a thousand draw calls. None of that is shaped like one decode loop replayed thousands of times for the next token.
 
-For AMD consumer GPU inference today, there are exactly three real choices. Vulkan through Mesa RADV. ROCm with HIP. Or write your own. We picked the third option, kept the first one in tree as a permanent peer, and explicitly rejected the second. This post is the long version of that decision, with the numbers we used to make it.
+For AMD consumer GPU inference, the useful choices are Vulkan through Mesa RADV, ROCm with HIP, or a workload-specific runtime. ZINC now ships the first two as production peers and keeps ZINC_RT as the third, experimental path. This post is the long version of how those choices differ under the hood.
 
 ## The three AMD GPU runtimes, side by side
 
@@ -88,17 +90,17 @@ Before the deep dive on each, here is the comparison the rest of the post suppor
 | Surface | ROCm + HIP | Vulkan + RADV | ZINC_RT |
 | --- | --- | --- | --- |
 | Layer | Userspace runtime + drivers | Userspace graphics-and-compute API | Userspace inference runtime |
-| Kernel side | `amdgpu` plus ROCk modules | `amdgpu` | `amdgpu` only, no extra modules |
-| Userspace size | About 600 MB on disk | A few MB plus Mesa | Single Zig binary |
+| Kernel side | `amdgpu` plus KFD/HSA support | `amdgpu` | `amdgpu` |
+| Userspace install | ROCm runtime and compiler toolkit | Mesa/RADV graphics stack | Built with ZINC |
 | Default on consumer AMD Linux? | No, opt-in install | Yes, ships with the distro | Built into ZINC |
 | Compiler | LLVM HIP plus HSAIL | `glslc` to SPIR-V then ACO to PM4 | Our IR to PM4 directly, hand-tuned ISA at M4 |
 | Submission cost per call | Tens of microseconds via HSA queues | About 33 µs `vkQueueSubmit` + fence on RADV | About 200 ns ring write plus doorbell |
 | Multitenant batching | External (vLLM, sidecars) | Not in the API | Native, in the engine |
-| Persistent kernel support | HIP Graphs, no persistent control on RDNA4 | None | M5 megakernel target |
-| Consumer RDNA4 maturity | Late, fragile, often missing | Mature, broadly used, our current production path | Bring-up, M0 in tree |
-| What it is good at | NVIDIA-shaped datacenter workflows | Portable, mature, ships everywhere | One model, one GPU, one decode loop |
+| Persistent kernel support | Native HIP kernels and graph tooling | Compute dispatches through the Vulkan model | M5 megakernel target |
+| Consumer RDNA4 maturity | Validated on our RDNA4 benchmark node; opt-in toolkit | Mature, broadly available production path | Bring-up, M0 in tree |
+| What it is good at | Native HIP kernels and AMD's compute toolchain | Portable deployment through widely available drivers | One model, one GPU, one decode loop |
 
-This table is the post in one frame. Vulkan is winning today because it is mature and present. ROCm is not winning on consumer AMD because the assumptions ROCm makes about how a user got their stack installed do not match the consumer reality. ZINC_RT is not winning yet because it is M0. But the long-term reason to write it lives in the bottom three rows: multitenant batching, persistent kernels, and a runtime that knows it is running LLM inference rather than treating the workload as generic compute.
+This table is the post in one frame. Vulkan is the broadly available path. ROCm is the native compute path and now has its own tuned kernels and published results. ZINC_RT is still an experiment. The long-term reason to build it lives in the bottom three rows: multitenant batching, persistent kernels, and a runtime that knows it is running LLM inference rather than treating the workload as generic compute.
 
 ## What Vulkan plus RADV actually does on the decode hot path
 
@@ -126,23 +128,21 @@ Then there is the shader toolchain. We documented a 5x performance cliff on the 
 
 Outside the API itself, the stack has firmware-shaped landmines too. Turning off ECC on the R9700 gives 9 percent more decode tok/s on Qwen35B, taking the same code from 101 to 110. The bench node has to stay on a Mesa version that is not too new, because Mesa 25.2.8 introduces a 14 percent RADV regression we cannot patch from userspace. Kernel 6.17 clamps the GPU clock to 2200 MHz when older kernels allowed 2350 MHz. None of these are Vulkan's fault. They are what owning the runtime through a graphics API gets you. You inherit every decision of every layer underneath, and a regression three layers down is yours to work around.
 
-Vulkan is still the right place to be today. It is mature, it is in CI, it runs faster than llama.cpp on the same hardware, and it does not need a separate driver install. None of that is changing. But the path from 117 to 240 tok/s does not go through `vkQueueSubmit`.
+Vulkan remains a strong production path. It is mature, it stays in CI, and it commonly works with the system graphics stack. ROCm now stands beside it for native HIP execution. ZINC_RT asks a narrower question: whether the path from 117 to 240 tok/s requires owning more than either general-purpose submission model exposes.
 
-## What ROCm with HIP would have given us, and why we did not take it
+## What ROCm with HIP gives ZINC
 
-ROCm is the closest analog to CUDA on AMD. The userspace stack has a HIP runtime, the HSA Runtime, math libraries (rocBLAS, MIOpen, hipBLASLt), and the Composable Kernel templates that the upstream inference engines build against. On a supported card with a supported kernel, ROCm 7.0 will run gfx1201 RDNA4 just fine, and on datacenter MI300X parts it is the right answer.
+ROCm is the closest analog to CUDA on AMD. The userspace stack has a HIP runtime, the HSA Runtime, math libraries such as rocBLAS and hipBLASLt, and the Composable Kernel templates that upstream inference engines build against. On a supported card and kernel, it gives ZINC a direct path to native RDNA kernels and AMD's compute tooling.
 
-For consumer RDNA4 boxes, the calculus is different.
+For consumer RDNA4 boxes, that comes with real tradeoffs.
 
-The first issue is install weight. ROCm 7 occupies about 600 MB of disk before any application links against it, and the HIP runtime brings a C++ build dependency the rest of ZINC does not need. ZINC is one Zig binary that loads a GGUF and serves HTTP. Adding 600 MB of libraries and a C++ toolchain to get an alternative submission path is a non-trivial cost we would have to amortize against a measurable win.
+The first is installation. ROCm is an additional toolkit, while Vulkan support commonly arrives with the Linux graphics stack. That distinction still matters for a local engine: a user should be able to choose the native HIP path when it helps without making it the price of entry for everyone else.
 
-The second issue is consumer-card history. ROCm support for the Radeon RX 9070 family on day one was incomplete, the ROCk kernel modules historically diverged from upstream amdgpu, and Mesa RADV has been the more compatible and often faster path on consumer Radeons for years. Our own tuning documentation reflects this. Every measurement we have made on the bench node uses RADV. None uses ROCm. That is not an oversight. That is what the consumer software stack looks like in practice.
+The second is consumer-card history. Early support on new Radeon generations was uneven, which is why ZINC originally treated RADV as the safer production path. That changed when the current ROCm stack ran reliably on our Radeon AI PRO R9700 and the measurements justified maintaining a real backend. The site now reports Vulkan and ROCm separately instead of treating one result as a proxy for the other.
 
-The third issue is the persistent-kernel target. The long-term ZINC_RT plan ends at a megakernel that holds the GPU for the duration of a serving session. HIP Graphs functionally match CUDA Graphs but, on RDNA4 today, do not expose the persistent-kernel control surface that the Hazy Research Llama-1B megakernel relies on. We would be writing ZINC_RT-shaped code anyway, except wrapping HIP would mean staying inside the abstraction and hoping it grows the features we need on the right timeline.
+The third is scope. ROCm solves native kernel compilation and execution; it does not remove the reason to study a model-aware runtime. ZINC_RT still explores queue submission, request scheduling, and persistent execution below a general-purpose API. The ROCm backend and ZINC_RT answer different questions.
 
-The fourth issue is identity. The ZINC README's no-ROCm and no-MLX promise is a deliberate position about what local inference should look like on consumer hardware. A user who buys a Radeon RX 9070 should be able to clone the repo, run `zig build`, and serve Qwen3 within minutes. Asking that user to install ROCm first contradicts the point of the project.
-
-ROCm is the right answer on H100-shaped infrastructure where someone else maintains the userspace stack. It is not the right answer for one Zig binary that runs on the box under the user's desk. That decision has been load-bearing since the project started.
+The product decision is therefore simple: Vulkan and ROCm are peers. Vulkan keeps the broadly available route; ROCm provides the native HIP route. Neither backend is branding, and neither has to pretend the other does not exist. Users can pick the path that is best supported and fastest on their own machine.
 
 ## What ZINC_RT is, layer by layer
 
@@ -229,8 +229,8 @@ We have published these targets exactly so they can be checked. The point of wri
 
 ## What this changes for AMD consumer GPU inference
 
-The story for AMD inference for the last five years has been a binary. Either install ROCm and join the datacenter software stack, or use llama.cpp through Vulkan and accept the ceiling that comes with a graphics API. The first option does not match the consumer reality. The second option is where ZINC has been, and it took us to 117 tok/s decode and 12 percent ahead of llama.cpp.
+The AMD inference story used to be framed as a binary: install ROCm and use the compute stack, or use Vulkan for wider compatibility. ZINC no longer asks users to accept that framing. Both are supported, benchmarked backends, with the same model loader and serving surface above them.
 
-The third option is a workload-specific runtime that runs through the same `amdgpu` driver every consumer Linux user already has, in one Zig binary, with no ROCm install and no toolchain landmines. That is what ZINC_RT is. The decision to write it was not about disliking Vulkan. It was about the long arc of local inference moving past kernels into batching, multitenancy, paged KV reservation, and persistent execution. The runtime is the next thing worth owning.
+The third option is a workload-specific runtime that runs through the existing `amdgpu` driver. That is what ZINC_RT is. The decision to write it was not about disliking Vulkan or ROCm. It was about the long arc of local inference moving past kernels into batching, multitenancy, paged KV reservation, and persistent execution. The runtime is the next thing worth owning.
 
 If you want the formal version, the design document is in `docs/ZINC_RT_DESIGN.md`. The Vulkan backend stays in tree, the cross-backend tests stay in CI, and the M1 number is the next gate. We will publish the result either way.
