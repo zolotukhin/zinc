@@ -2,10 +2,20 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 import PostCard from '../components/PostCard.astro';
 import { getCollection } from 'astro:content';
+import benchmarkData from '../data/zinc-performance.json';
 
 const posts = (await getCollection('posts', ({ data }) => !data.draft))
   .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
   .slice(0, 5);
+
+const rocmTarget = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
+const muse = rocmTarget?.models?.find((model: any) => model.id === 'muse-glimmer-30b-q4k-m');
+const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
+const formatRate = (value: number | null) => value == null ? 'n/a' : value.toFixed(1);
+const museDecode = median(muse?.zinc?.decode_tps);
+const museLlamaDecode = median(muse?.baseline?.decode_tps);
+const musePrefill = median(muse?.zinc?.prefill_tps);
+const museLlamaPrefill = median(muse?.baseline?.prefill_tps);
 ---
 
 <BaseLayout
@@ -26,11 +36,19 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
   </section>
 
   <section class="project-highlight">
-    <a href="/zinc/" class="project-card">
+    <article class="project-card">
       <h2>ZINC</h2>
       <p>Run GGUF models on AMD Radeon with Vulkan or ROCm, Intel Arc with Vulkan, or Apple Silicon with Metal. NVIDIA CUDA support is experimental.</p>
-      <span class="project-link">Read about ZINC &rarr;</span>
-    </a>
+      <div class="latest-result">
+        <span>Latest ROCm result · Radeon AI PRO R9700</span>
+        <strong>Muse Glimmer 30B leads llama.cpp in all four workloads</strong>
+        <p>{formatRate(museDecode)} vs {formatRate(museLlamaDecode)} tok/s decode · {formatRate(musePrefill)} vs {formatRate(museLlamaPrefill)} tok/s prefill</p>
+      </div>
+      <div class="project-links">
+        <a href="/zinc/">Read about ZINC &rarr;</a>
+        <a href="/zinc/benchmarks/#rdna-rocm">See the benchmark &rarr;</a>
+      </div>
+    </article>
   </section>
 
   <section class="recent-posts">
@@ -71,17 +89,10 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
   }
 
   .project-card {
-    display: block;
     padding: var(--space-lg);
     border: 1px solid var(--color-border);
     border-radius: 8px;
     color: var(--color-text);
-    transition: border-color 0.15s;
-  }
-
-  .project-card:hover {
-    border-color: var(--color-accent);
-    text-decoration: none;
   }
 
   .project-card h2 {
@@ -95,7 +106,39 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
     margin-bottom: var(--space-sm);
   }
 
-  .project-link {
+  .latest-result {
+    display: grid;
+    gap: 0.3rem;
+    margin: var(--space-md) 0;
+    padding: 0.9rem 1rem;
+    border-left: 3px solid var(--color-accent);
+    background: var(--color-bg-alt);
+  }
+
+  .latest-result span {
+    color: var(--color-accent);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .latest-result strong {
+    font-size: 1rem;
+  }
+
+  .latest-result p {
+    margin: 0;
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .project-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+  }
+
+  .project-links a {
     color: var(--color-accent);
     font-size: 0.9rem;
   }

@@ -661,7 +661,7 @@ ${markdownTable(["Country", "Clicks", "Impressions", "CTR", "Position"], countri
 ### Getting Started Docs
 
 - Current problem: good average position, poor CTR.
-- Rewrite title target: \`Run Local LLMs on AMD GPUs Without ROCm\`.
+- Rewrite title target: \`Run Local LLMs on AMD GPUs with Vulkan or ROCm\`.
 - Keep the ZINC brand in the H1/subtitle, but put the search intent first.
 - Add a "fast path" code block above longer explanation.
 - Link to benchmarks and hardware requirements from the first screen.

@@ -68,7 +68,7 @@ Use `title` for the article headline. Use `seoTitle` and `seoDescription` for Go
 | Cluster | Target queries | Pages |
 |---------|---------------|-------|
 | **AMD GPU inference** | "LLM inference AMD GPU", "AMD consumer GPU AI", "RDNA4 LLM", "RDNA3 inference", "RX 9070 XT LLM", "Radeon AI PRO R9700 inference" | /zinc, /blog posts |
-| **ROCm alternatives** | "ROCm alternative consumer GPU", "vLLM without ROCm", "llama.cpp alternative AMD", "Vulkan LLM inference" | /zinc |
+| **AMD backends** | "ROCm consumer GPU inference", "Vulkan or ROCm LLM inference", "llama.cpp alternative AMD", "Vulkan LLM inference" | /zinc |
 | **TurboQuant** | "TurboQuant KV cache compression", "KV cache quantization LLM", "Lloyd-Max quantization GPU", "QJL residual correction" | /zinc/docs/turboquant-spec |
 | **Gemma local inference** | "Gemma 4 local inference", "Gemma 4 AMD GPU", "Gemma 4 RDNA4", "Gemma flash attention", "Gemma MoE inference" | /blog posts, /zinc |
 | **RDNA4 tuning** | "RDNA4 tuning LLM", "RADV cooperative matrix", "AMD GPU ECC disable", "SPIR-V RADV performance" | /zinc/docs/rdna4-tuning |

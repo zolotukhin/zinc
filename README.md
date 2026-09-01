@@ -47,12 +47,31 @@ The closest row is Gemma 4 31B decode at `1.01x`. See the
 [benchmark dashboard](https://zolotukhin.ai/zinc/benchmarks) for all scenarios,
 ROCm results, run dates, and build details.
 
+### Muse Glimmer 30B on ROCm
+
+Muse Glimmer runs through the ROCm backend with its ATEM chat format, hidden
+reasoning channel, end-of-turn handling, and OpenAI-compatible streaming API.
+In the final R9700 run, ZINC was ahead of llama.cpp in prefill, decode, and
+combined throughput in every workload.
+
+| Workload | Prefill, ZINC vs llama.cpp | Decode, ZINC vs llama.cpp | Overall |
+|----------|----------------------------:|---------------------------:|--------:|
+| Quick chat | **626.4** vs 386.7 tok/s | **29.71** vs 27.90 tok/s | **108.8%** |
+| Coding review | **735.8** vs 561.9 tok/s | **29.52** vs 27.88 tok/s | **107.0%** |
+| Incident context | **703.9** vs 654.3 tok/s | **29.49** vs 27.91 tok/s | **105.9%** |
+| Long coding draft | **759.8** vs 452.1 tok/s | **29.50** vs 27.90 tok/s | **106.8%** |
+
+These are medians of three measured server runs after one discarded warmup,
+using the same 17 GB Q4_K_M GGUF on both engines. The complete samples and
+provenance are in
+[`benchmarks/muse-glimmer-rocm-r9700.json`](benchmarks/muse-glimmer-rocm-r9700.json).
+
 ## Supported Platforms
 
 | Platform | GPU | Backend | Status |
 |----------|-----|---------|--------|
 | **Linux** | AMD RDNA4 (RX 9070, AI PRO R9700) | Vulkan | Supported and tuned |
-| **Linux** | AMD RDNA4 (validated on AI PRO R9700) | ROCm/HIP | Supported — five-model server matrix complete on `gfx1201` |
+| **Linux** | AMD RDNA4 (validated on AI PRO R9700) | ROCm/HIP | Supported — six-model server matrix complete on `gfx1201` |
 | **Linux** | AMD RDNA3 (RX 7900 XTX, etc.) | Vulkan | Supported |
 | **Linux** | Intel Arc Xe2 / Battlemage | Vulkan | Supported — validated benchmark target |
 | **macOS** | Apple Silicon (M1, M2, M3, M4, M5) | Metal | Supported — native MSL shaders |
@@ -68,7 +87,7 @@ uses the same machine, model file, prompt, and run count for ZINC and llama.cpp.
 | Platform | Compared models | Decode vs llama.cpp | Prefill vs llama.cpp | Read this as |
 |----------|----------------:|--------------------:|---------------------:|--------------|
 | AMD RDNA4 / Vulkan | 5 | 115% avg, 5/5 model wins | 138% avg, 5/5 model wins | Ahead on every published row |
-| AMD RDNA4 / ROCm | 5 | 3/5 model wins | 2/5 model wins | All five models complete; the Qwen rows lead while Gemma needs more tuning |
+| AMD RDNA4 / ROCm | 6 | 4/6 model wins | 3/6 model wins | Muse wins all four workloads; all six model rows are complete |
 | Intel Arc / Vulkan | 4 | 103% avg, 4/4 model wins | 181% avg, 4/4 model wins | Supported; tuning is newer than RDNA4 |
 | Apple Silicon / Metal | 5 | 87% avg, 1 model win | 54% avg, 1 model win | Performance varies by model |
 
@@ -163,11 +182,12 @@ the kernel shapes and memory behavior that work well on that hardware.
 
 ## Supported Models
 
-The list below matches the current managed model catalog, not a broader wishlist.
+The list below is the model set currently validated on real hardware, not a broader wishlist.
 
 - [Qwen 3.5 9B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) — supported on AMD RDNA4 16/32 GB, Intel Arc, and Apple Silicon
 - [Qwen3.6 35B-A3B UD Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
 - [Qwen3.8 27B Dense Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) — supported on AMD RDNA4 32 GB and Apple Silicon with 32+ GB unified memory
+- Muse Glimmer 30B Q4_K_M — validated on the AMD ROCm backend with a 32 GB Radeon AI PRO R9700
 - [Gemma 4 31B Q4_K_M](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
 - [Gemma 4 26B-A4B MoE Q4_K_M](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) — supported on AMD RDNA4 32 GB, Intel Arc 32 GB, and Apple Silicon
 
