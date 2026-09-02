@@ -51,18 +51,18 @@ ROCm results, run dates, and build details.
 
 Qwen 3.8 now runs ahead of the latest upstream llama.cpp build used for the
 comparison in every workload in our R9700 suite. The short-prompt row reaches
-30.23 tok/s decode while more than doubling llama.cpp prefill throughput.
+32.27 tok/s decode while more than doubling llama.cpp prefill throughput.
 
 | Workload | Prefill, ZINC vs llama.cpp | Decode, ZINC vs llama.cpp | Overall |
 |----------|----------------------------:|---------------------------:|--------:|
-| Quick chat | **387.2** vs 150.3 tok/s | **30.23** vs 29.85 tok/s | **115.0%** |
-| Coding review | **610.4** vs 252.2 tok/s | **29.95** vs 29.83 tok/s | **109.6%** |
-| Incident context | **678.3** vs 308.1 tok/s | **29.89** vs 29.83 tok/s | **115.2%** |
-| Long coding draft | **426.1** vs 186.1 tok/s | **29.96** vs 29.85 tok/s | **105.2%** |
+| Quick chat | **391.8** vs 150.5 tok/s | **32.27** vs 29.83 tok/s | **122.5%** |
+| Coding review | **612.7** vs 253.1 tok/s | **31.97** vs 29.83 tok/s | **116.6%** |
+| Incident context | **680.4** vs 308.6 tok/s | **31.88** vs 29.83 tok/s | **122.0%** |
+| Long coding draft | **426.0** vs 186.7 tok/s | **31.97** vs 29.84 tok/s | **112.1%** |
 
 These are medians of five measured server runs after one discarded warmup,
 using the same Q4_K_M GGUF on both engines. The run used llama.cpp commit
-`b81c99b47`, the tip of upstream `master` when the suite started. Muse Glimmer
+`9400c8946`, the tip of upstream `master` when the suite started. Muse Glimmer
 30B also remains ahead in all four workloads. Complete samples and provenance
 are in [`benchmarks/rocm-r9700.json`](benchmarks/rocm-r9700.json).
 
@@ -354,7 +354,7 @@ Gemma 26B currently uses its single-sequence MoE path for serving.
 | Qwen 3.6 35B A3B Q4_K_XL | **581.18** | 506.12 | **80.89** | 66.34 | **121.4%** |
 | Gemma 4 26B-A4B MoE Q4_K_M | **1166.49** | 623.75 | **80.28** | 70.08 | **117.3%** |
 | Qwen 3.5 9B Q4_K_M | **1135.87** | 779.92 | **78.76** | 69.99 | **113.3%** |
-| Qwen 3.8 27B Q4_K_M | **387.24** | 150.29 | **30.23** | 29.85 | **115.0%** |
+| Qwen 3.8 27B Q4_K_M | **391.76** | 150.51 | **32.27** | 29.83 | **122.5%** |
 | Muse Glimmer 30B Q4_K_M | **629.33** | 386.32 | **30.15** | 27.90 | **110.4%** |
 | Gemma 4 31B Q4_K_M | **423.03** | 189.39 | **24.95** | 23.06 | **111.8%** |
 
@@ -363,10 +363,10 @@ server used for this run, on both prefill and decode:
 
 | Scenario | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
 |---|---:|---:|---:|---:|---:|
-| Quick Chat | **387.24** | 150.29 | **30.23** | 29.85 | **115.0%** |
-| Coding Review | **610.35** | 252.18 | **29.95** | 29.83 | **109.6%** |
-| Incident Context | **678.27** | 308.06 | **29.89** | 29.83 | **115.2%** |
-| Long Coding Draft | **426.07** | 186.12 | **29.96** | 29.85 | **105.2%** |
+| Quick Chat | **391.76** | 150.51 | **32.27** | 29.83 | **122.5%** |
+| Coding Review | **612.68** | 253.09 | **31.97** | 29.83 | **116.6%** |
+| Incident Context | **680.43** | 308.56 | **31.88** | 29.83 | **122.0%** |
+| Long Coding Draft | **426.03** | 186.73 | **31.97** | 29.84 | **112.1%** |
 
 See the [ROCm backend guide](docs/ROCM.md) for the validated software stack and
 the exact benchmark command.
