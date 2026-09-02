@@ -1713,8 +1713,24 @@ test "ROCm dense Qwen decode keeps the measured Q4 and attention fast paths" {
     // gate/up path, while decode attention carries independent score and value
     // accumulators to hide RDNA4 FMA latency.
     try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu_q8(", "gate_meta = *(const uint4*)(gate + blk);", 1800);
+    try expectContainsNear(forward, "var gu_silu = gu;", "gu_silu.acc_mode = 0;", 120);
     try expectContainsNear(kernels, "void naive_attention(", "float acc4[8] = {};", 1800);
     try expectContainsNear(kernels, "void naive_attention(", "acc7 = 0.0f;", 4200);
+
+    // Dense ROCm decode keeps normalized activations packed across compatible
+    // projections, and folds attention/SSM activation work into those packs.
+    try expectContains(forward, "fn decodePreparedQ8Eligible(");
+    try expectContainsNear(forward, "fn attentionLayerSlot(", "self.pipes.sigmoid_mul_quant_q8", 8500);
+    try expectContainsNear(forward, "fn ssmLayerSlot(", "self.pipes.ssm_gated_norm_quant_q8", 8500);
+    try expectContains(kernels, "void sigmoid_mul_quant_q8_0(");
+    try expectContains(kernels, "void ssm_gated_norm_quant_q8_0(");
+
+    // HIP's native half conversions avoid the integer normalization sequence
+    // in every quantized matvec, and one-wave Q6 down projections avoid the
+    // generic shared-memory block reduction.
+    try expectContainsNear(kernels, "float zinc_half_to_float", "return __half2float(__ushort_as_half(h));", 500);
+    try expectContainsNear(kernels, "unsigned short zinc_float_to_half", "return __half_as_ushort(__float2half_rn(x));", 500);
+    try expectContainsNear(kernels, "void dmmv_q6k_q8_fast(", "blockDim.x == 32u ? zinc_warp_reduce_sum(sum)", 3200);
 
     // The measured single-reduction state scan is the ROCm default, with the
     // environment variable above it retaining the explicit diagnostic opt-out.

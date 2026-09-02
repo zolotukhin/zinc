@@ -39,6 +39,13 @@ using namespace nvcuda;
 
 // IEEE half -> float, no <cuda_fp16.h> dependency (keeps NVRTC self-contained).
 __device__ __forceinline__ float zinc_half_to_float(unsigned short h) {
+#ifdef ZINC_ROCM
+    // HIP exposes a native bit-cast plus hardware half conversion. The portable
+    // fallback below expands to a sizeable integer normalization sequence, which
+    // is especially costly in the decode matvecs where every lane converts scale
+    // metadata for every superblock.
+    return __half2float(__ushort_as_half(h));
+#else
     unsigned sign = (unsigned)(h >> 15) & 1u;
     unsigned exp = (unsigned)(h >> 10) & 0x1Fu;
     unsigned mant = (unsigned)h & 0x3FFu;
@@ -59,6 +66,7 @@ __device__ __forceinline__ float zinc_half_to_float(unsigned short h) {
         f = (sign << 31) | ((exp - 15u + 127u) << 23) | (mant << 13);
     }
     return __int_as_float((int)f);
+#endif
 }
 
 __device__ __forceinline__ float zinc_float4_dot(float4 a, float4 b) {
@@ -67,6 +75,9 @@ __device__ __forceinline__ float zinc_float4_dot(float4 a, float4 b) {
 
 // Float -> IEEE half bit pattern (no cuda_fp16.h dependency).
 __device__ __forceinline__ unsigned short zinc_float_to_half(float x) {
+#ifdef ZINC_ROCM
+    return __half_as_ushort(__float2half_rn(x));
+#else
     unsigned ux = __float_as_int(x);
     unsigned sign = (ux >> 16) & 0x8000u;
     unsigned abs = ux & 0x7FFFFFFFu;
@@ -102,6 +113,7 @@ __device__ __forceinline__ unsigned short zinc_float_to_half(float x) {
         // Underflow → zero
         return (unsigned short)sign;
     }
+#endif
 }
 
 // GGML Q4_K 6-bit scale/min unpack (j in 0..7), canonical the reference implementation form.
@@ -1377,6 +1389,75 @@ extern "C" __global__ void ssm_gated_norm(const float* o, const float* z, const 
         float zv = z[base + i];
         out[base + i] = nv * (zv / (1.0f + expf(-zv)));
     }
+}
+
+// Decode-only fused twin for a Q8-consuming SSM output projection. Qwen's
+// 128-value SSM heads map exactly to four Q8_1 groups, so the normalization and
+// gate result can be reduced and packed in the same block without a temporary
+// f32 write followed by a separate quantizer launch.
+extern "C" __global__ void ssm_gated_norm_quant_q8_0(
+    const float* __restrict__ o, const float* __restrict__ z,
+    const float* __restrict__ norm_weight, unsigned char* __restrict__ out,
+    GatedNormPush pc)
+{
+    const unsigned h = blockIdx.x;
+    const unsigned i = threadIdx.x;
+    const unsigned base = h * pc.head_v_dim;
+    float ss = 0.0f;
+    if (i < pc.head_v_dim) {
+        const float v = o[base + i];
+        ss = v * v;
+    }
+    ss = zinc_block_reduce_sum(ss);
+    __shared__ float rms_inv_sh;
+    if (i == 0u) rms_inv_sh = rsqrtf(ss / (float)pc.head_v_dim + 1e-6f);
+    __syncthreads();
+
+    float val = 0.0f;
+    if (i < pc.head_v_dim) {
+        const unsigned norm_idx = pc.norm_per_head != 0u ? base + i : i % pc.d_state;
+        float nv = o[base + i] * rms_inv_sh;
+        nv *= norm_weight[norm_idx];
+        const float zv = z[base + i];
+        val = nv * (zv / (1.0f + expf(-zv)));
+    }
+
+    float av = fabsf(val), sv = val;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        av = fmaxf(av, __shfl_xor_sync(0xffffffffu, av, off));
+        sv += __shfl_xor_sync(0xffffffffu, sv, off);
+    }
+    const float d = av / 127.0f;
+    const float scale = 127.0f / fmaxf(av, 1e-5f);
+    const int q = max(-127, min(127, __float2int_rn(val * scale)));
+    const unsigned lane = i & 31u;
+    const unsigned c = (base + i) >> 5;
+#ifdef ZINC_ROCM
+    const unsigned tile = c >> 2;
+    const unsigned group = c & 3u;
+    unsigned char* out_base = out + (size_t)tile * 144u;
+    if (lane == 0u) {
+        const unsigned short dh = zinc_float_to_half(d);
+        const unsigned short sh = zinc_float_to_half(sv);
+        out_base[group * 4u] = (unsigned char)(dh & 0xffu);
+        out_base[group * 4u + 1u] = (unsigned char)(dh >> 8);
+        out_base[group * 4u + 2u] = (unsigned char)(sh & 0xffu);
+        out_base[group * 4u + 3u] = (unsigned char)(sh >> 8);
+    }
+    out_base[16u + group * 32u + lane] = (unsigned char)q;
+#else
+    unsigned char* out_base = out + (size_t)c * 36u;
+    if (lane == 0u) {
+        const unsigned short dh = zinc_float_to_half(d);
+        const unsigned short sh = zinc_float_to_half(sv);
+        out_base[0] = (unsigned char)(dh & 0xffu);
+        out_base[1] = (unsigned char)(dh >> 8);
+        out_base[2] = (unsigned char)(sh & 0xffu);
+        out_base[3] = (unsigned char)(sh >> 8);
+    }
+    out_base[4u + lane] = (unsigned char)q;
+#endif
 }
 
 // ---- Effort 26 T0: BATCHED qwen prefill kernels ----------------------------
@@ -3143,7 +3224,10 @@ extern "C" __global__ void dmmv_q6k_q8_fast(
         sum += d * (float)sc[is + 6u] * d3 * (float)__dp4a(v3, q3, 0);
     }
 
-    sum = zinc_block_reduce_sum(sum);
+    // The dense FFN down projection is dispatched as one native wave. Avoid
+    // the generic block reducer's shared-memory rendezvous and second shuffle
+    // tree in that case; the larger LM-head dispatch still takes the old path.
+    sum = blockDim.x == 32u ? zinc_warp_reduce_sum(sum) : zinc_block_reduce_sum(sum);
     if (tid == 0u) {
         const unsigned yi = pc.y_offset >> 2;
         if (pc.acc_mode != 0u) y[yi + row] += sum;
