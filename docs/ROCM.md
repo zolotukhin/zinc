@@ -141,16 +141,16 @@ prefill and decode rates below are the server-reported phase rates.
 
 | Scenario | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
 |---|---:|---:|---:|---:|---:|
-| Quick Chat | **387.11 tok/s** | 149.69 tok/s | **30.22 tok/s** | 29.85 tok/s | **115.04%** |
-| Coding Review | **611.24 tok/s** | 252.50 tok/s | **29.94 tok/s** | 29.83 tok/s | **109.60%** |
-| Incident Context | **677.97 tok/s** | 308.52 tok/s | **29.89 tok/s** | 29.82 tok/s | **115.15%** |
-| Long Coding Draft | **424.03 tok/s** | 185.61 tok/s | **29.96 tok/s** | 29.85 tok/s | **105.22%** |
+| Quick Chat | **387.24 tok/s** | 150.29 tok/s | **30.23 tok/s** | 29.85 tok/s | **115.02%** |
+| Coding Review | **610.35 tok/s** | 252.18 tok/s | **29.95 tok/s** | 29.83 tok/s | **109.64%** |
+| Incident Context | **678.27 tok/s** | 308.06 tok/s | **29.89 tok/s** | 29.83 tok/s | **115.19%** |
+| Long Coding Draft | **426.07 tok/s** | 186.12 tok/s | **29.96 tok/s** | 29.85 tok/s | **105.21%** |
 
 ZINC won prefill, decode, and end-to-end phase time in all four scenarios and
-reached **109.89%** of llama.cpp on the summed full-matrix phase-wall-time score
-(22.462 s versus 24.682 s), or **9.00% less phase wall time**. Across the four
-scenarios, the prefill lead ranged from 119.75% to 158.60% and the decode lead
-from 0.22% to 1.24%. All four captured ZINC previews passed the suite's output
+reached **109.90%** of llama.cpp on the summed full-matrix phase-wall-time score
+(22.458 s versus 24.680 s), or **9.00% less phase wall time**. Across the four
+scenarios, the prefill lead ranged from 120.18% to 157.67% and the decode lead
+from 0.21% to 1.28%. All four captured ZINC previews passed the suite's output
 quality checks.
 
 ## Troubleshooting

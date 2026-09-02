@@ -24,6 +24,7 @@ import {
   llamaDeviceArgs,
   localZincCommand,
   mergeArtifacts,
+  measuredRunRange,
   outputQualityStatus,
   parseArgs,
   parseDotEnv,
@@ -52,6 +53,30 @@ test("benchmark methodology reports the configured sample counts", () => {
     "Statistics: one warmup pass is discarded, then 5 measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
   );
   expect(benchmarkStatisticsNote(1, 2)).toContain("2 warmup passes are discarded, then one measured run is collected");
+});
+
+test("published methodology reports mixed run counts after a partial model refresh", () => {
+  const range = measuredRunRange([
+    { scenarios: [{ zinc: { decode_tps: { samples: [1, 2, 3] } } }] },
+    { scenarios: [{ zinc: { decode_tps: { samples: [1, 2, 3, 4, 5] } } }] },
+  ]);
+  expect(range).toEqual({ min: 3, max: 5 });
+
+  const merged = mergeArtifacts({ targets: [] }, [{
+    id: "rdna-rocm",
+    methodology: {
+      runs: 5,
+      warmup_runs: 1,
+      notes: [benchmarkStatisticsNote(5, 1)],
+    },
+    models: [
+      { id: "three", scenarios: [{ id: "core", zinc: { decode_tps: { median: 3, samples: [3, 3, 3] } } }] },
+      { id: "five", scenarios: [{ id: "core", zinc: { decode_tps: { median: 5, samples: [5, 5, 5, 5, 5] } } }] },
+    ],
+  }]);
+  expect(merged.targets[0]?.methodology.runs_min).toBe(3);
+  expect(merged.targets[0]?.methodology.runs_max).toBe(5);
+  expect(merged.targets[0]?.methodology.notes[0]).toContain("3–5 measured runs");
 });
 
 test("parseArgs reads suite options", () => {

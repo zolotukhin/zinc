@@ -67,6 +67,48 @@ export function benchmarkStatisticsNote(runs, warmupRuns) {
   return `Statistics: ${warmupText} discarded, then ${runText} collected. Published prefill, decode, end-to-end throughput, and latency values are medians.`;
 }
 
+export function measuredRunRange(models) {
+  const counts = [];
+  for (const model of models ?? []) {
+    const scenarios = Array.isArray(model?.scenarios) && model.scenarios.length > 0
+      ? model.scenarios
+      : [model];
+    for (const scenario of scenarios) {
+      for (const engine of [scenario?.zinc, scenario?.baseline]) {
+        const samples = engine?.decode_tps?.samples
+          ?? engine?.prefill_tps?.samples
+          ?? engine?.total_latency_ms?.samples;
+        if (Array.isArray(samples) && samples.length > 0) counts.push(samples.length);
+      }
+    }
+  }
+  if (counts.length === 0) return null;
+  return { min: Math.min(...counts), max: Math.max(...counts) };
+}
+
+function normalizeMethodologyRunRange(methodology, models) {
+  if (!methodology) return methodology;
+  const range = measuredRunRange(models);
+  if (!range) return methodology;
+
+  const warmupRuns = methodology.warmup_runs ?? 0;
+  const statisticsNote = range.min === range.max
+    ? benchmarkStatisticsNote(range.max, warmupRuns)
+    : `Statistics: ${warmupRuns === 1 ? "one warmup pass is" : `${warmupRuns} warmup passes are`} discarded for every row, then ${range.min}–${range.max} measured runs are collected depending on the model. Published prefill, decode, end-to-end throughput, and latency values are medians.`;
+  const notes = Array.isArray(methodology.notes) ? [...methodology.notes] : [];
+  const statisticsIndex = notes.findIndex((note) => note.startsWith("Statistics:"));
+  if (statisticsIndex >= 0) notes[statisticsIndex] = statisticsNote;
+  else notes.push(statisticsNote);
+
+  return {
+    ...methodology,
+    runs: range.max,
+    runs_min: range.min,
+    runs_max: range.max,
+    notes,
+  };
+}
+
 async function readDotEnv(dotEnvPath) {
   try {
     return parseDotEnv(await fs.readFile(dotEnvPath, "utf8"));
@@ -930,6 +972,7 @@ export function mergeArtifacts(existing, incomingTargets, options = {}) {
     return {
       ...target,
       models,
+      methodology: normalizeMethodologyRunRange(target?.methodology, models),
       summary: targetSummary(models),
     };
   };

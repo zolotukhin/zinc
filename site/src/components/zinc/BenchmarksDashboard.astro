@@ -701,9 +701,17 @@ function formatLatencyDelta(value: number | null | undefined) {
   return value > 0 ? `${amount} ms slower` : `${amount} ms faster`;
 }
 
-function formatRuns(runs: number | null | undefined, warmupRuns: number | null | undefined) {
+function formatRuns(
+  runs: number | null | undefined,
+  warmupRuns: number | null | undefined,
+  runsMin: number | null | undefined = runs,
+  runsMax: number | null | undefined = runs,
+) {
   if (runs == null && warmupRuns == null) return 'n/a';
-  return `${runs ?? 0} measured · ${warmupRuns ?? 0} warmup`;
+  const measured = runsMin != null && runsMax != null && runsMin !== runsMax
+    ? `${runsMin}–${runsMax}`
+    : `${runs ?? runsMax ?? runsMin ?? 0}`;
+  return `${measured} measured · ${warmupRuns ?? 0} warmup`;
 }
 
 function githubBlobUrl(ref: string | null | undefined, filePath: string, startLine?: number, endLine?: number) {
@@ -955,7 +963,7 @@ const jsonLd = {
           <div>
             <p class="eyebrow">{targetPlatformLabel(target)} · {target.machine.label}</p>
             <h2>{targetBackendLabel(target)} backend</h2>
-            <p class="panel-copy">{target.machine.gpu} · {target.machine.memory ?? 'n/a'} · {formatRuns(target.methodology?.runs, target.methodology?.warmup_runs)}</p>
+            <p class="panel-copy">{target.machine.gpu} · {target.machine.memory ?? 'n/a'} · {formatRuns(target.methodology?.runs, target.methodology?.warmup_runs, target.methodology?.runs_min, target.methodology?.runs_max)}</p>
             {(target.summary?.successful_models ?? 0) < (target.summary?.benchmarked_models ?? 0) && (
               <p class="panel-banner" role="note">
                 <strong>Some models did not complete.</strong>{' '}
@@ -1491,7 +1499,7 @@ const jsonLd = {
               <strong>Methodology</strong>
               <small>{target.methodology.runner} · {target.methodology.benchmark_style}</small>
             </div>
-            <span>{formatRuns(target.methodology?.runs, target.methodology?.warmup_runs)}</span>
+            <span>{formatRuns(target.methodology?.runs, target.methodology?.warmup_runs, target.methodology?.runs_min, target.methodology?.runs_max)}</span>
           </summary>
           <div class="method-links">
             <a href={suiteSourceHref} target="_blank" rel="noreferrer">Benchmark runner</a>

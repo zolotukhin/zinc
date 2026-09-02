@@ -40,6 +40,15 @@ function formatRefreshDate(iso: string | null | undefined) {
   return iso?.slice(0, 10) ?? 'latest';
 }
 
+function formatMeasuredRuns(methodology: any) {
+  const runs = methodology?.runs ?? 3;
+  const min = methodology?.runs_min ?? runs;
+  const max = methodology?.runs_max ?? runs;
+  const measured = min === max ? `${runs}` : `${min}–${max}`;
+  const warmups = methodology?.warmup_runs ?? 1;
+  return `median of ${measured} measured runs after ${warmups} warmup`;
+}
+
 function targetById(id: string) {
   return benchmarkData.targets.find((target: any) => target.id === id) ?? null;
 }
@@ -388,7 +397,7 @@ const jsonLd = {
 
         <div class="backend-runline">
           <strong>{backend.label}</strong>
-          <span>{formatRefreshDate(backend.target?.generated_at)} · reusable servers · median of {backend.target?.methodology?.runs ?? 3} runs after {backend.target?.methodology?.warmup_runs ?? 1} warmup</span>
+          <span>{formatRefreshDate(backend.target?.generated_at)} · reusable servers · {formatMeasuredRuns(backend.target?.methodology)}</span>
         </div>
 
         <div class="perf-stats">
