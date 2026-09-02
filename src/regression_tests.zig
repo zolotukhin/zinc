@@ -1724,6 +1724,9 @@ test "ROCm dense Qwen decode keeps the measured Q4 and attention fast paths" {
     try expectContainsNear(forward, "fn ssmLayerSlot(", "self.pipes.ssm_gated_norm_quant_q8", 8500);
     try expectContains(kernels, "void sigmoid_mul_quant_q8_0(");
     try expectContains(kernels, "void ssm_gated_norm_quant_q8_0(");
+    try expectContainsNear(forward, "fn ssmLayerSlot(", "self.pipes.ssm_conv1d_prepare", 7000);
+    try expectContainsNear(forward, "fn deltaNetDecodeDispatch(", "if (!prepared)", 1200);
+    try expectContains(kernels, "void ssm_conv1d_prepare(");
 
     // HIP's native half conversions avoid the integer normalization sequence
     // in every quantized matvec, and one-wave Q6 down projections avoid the

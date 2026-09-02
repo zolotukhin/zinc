@@ -1367,6 +1367,95 @@ extern "C" __global__ void ssm_conv1d(const float* current_input, const unsigned
     state[(size_t)pc.state_offset * pc.conv_channels + ch] = ci;
 }
 
+// Decode fusion for the Qwen gated-delta-net path. The scan preparation needs
+// every convolution result before it can normalize Q/K, but a single workgroup
+// can produce one complete Q/K group, perform the identical reductions, and
+// activate that group's alpha/beta scalars. The same grid also covers V. This
+// preserves the standalone math while removing one launch and a Q/K round trip
+// for every SSM layer.
+struct ConvPreparePush {
+    unsigned conv_channels, d_conv, kernel_is_f16, state_offset;
+    unsigned dt_rank, d_inner, d_state, n_group;
+    unsigned ssm_a_is_f16, dt_bias_is_f16;
+};
+
+__device__ __forceinline__ float zinc_ssm_conv_silu(
+    unsigned ch, const float* current_input, const unsigned char* conv_kernel,
+    float* state, ConvPreparePush pc)
+{
+    const unsigned d_conv_1 = pc.d_conv - 1u;
+    const float ci = current_input[ch];
+    float sum = 0.0f;
+    #pragma unroll
+    for (unsigned ki = 0u; ki < pc.d_conv; ++ki) {
+        const unsigned k_idx = ch * pc.d_conv + ki;
+        const float kw = pc.kernel_is_f16 != 0u
+            ? zinc_half_to_float(((const unsigned short*)conv_kernel)[k_idx])
+            : ((const float*)conv_kernel)[k_idx];
+        float sv = ci;
+        if (ki < d_conv_1) {
+            unsigned slot = pc.state_offset + ki;
+            if (slot >= d_conv_1) slot -= d_conv_1;
+            sv = state[(size_t)slot * pc.conv_channels + ch];
+        }
+        sum += kw * sv;
+    }
+    state[(size_t)pc.state_offset * pc.conv_channels + ch] = ci;
+    return sum / (1.0f + expf(-sum));
+}
+
+extern "C" __global__ void ssm_conv1d_prepare(
+    const float* __restrict__ current_input,
+    const unsigned char* __restrict__ conv_kernel,
+    float* __restrict__ state, float* __restrict__ out_data,
+    const unsigned char* __restrict__ dt_bias,
+    float* __restrict__ alpha, float* __restrict__ beta,
+    const unsigned char* __restrict__ ssm_a, ConvPreparePush pc)
+{
+    const unsigned group = blockIdx.x;
+    const unsigned lane = threadIdx.x;
+    const unsigned qk_dim = pc.d_state * pc.n_group;
+
+    if (group < pc.n_group) {
+        const unsigned q_ch = group * pc.d_state + lane;
+        const unsigned k_ch = qk_dim + group * pc.d_state + lane;
+        const float q_val = lane < pc.d_state
+            ? zinc_ssm_conv_silu(q_ch, current_input, conv_kernel, state, pc)
+            : 0.0f;
+        const float k_val = lane < pc.d_state
+            ? zinc_ssm_conv_silu(k_ch, current_input, conv_kernel, state, pc)
+            : 0.0f;
+        const float sumq = zinc_block_reduce_sum_all(q_val * q_val);
+        const float sumk = zinc_block_reduce_sum_all(k_val * k_val);
+        const float q_rinv = rsqrtf(fmaxf(sumq, 1e-12f)) / sqrtf((float)pc.d_state);
+        const float k_rinv = rsqrtf(fmaxf(sumk, 1e-12f));
+        if (lane < pc.d_state) {
+            out_data[q_ch] = q_val * q_rinv;
+            out_data[k_ch] = k_val * k_rinv;
+        }
+
+        if (lane == 0u) {
+            for (unsigned h = group; h < pc.dt_rank; h += pc.n_group) {
+                const float dt_bias_val = pc.dt_bias_is_f16 != 0u
+                    ? zinc_half_to_float(((const unsigned short*)dt_bias)[h])
+                    : ((const float*)dt_bias)[h];
+                const float ssm_a_val = pc.ssm_a_is_f16 != 0u
+                    ? zinc_half_to_float(((const unsigned short*)ssm_a)[h])
+                    : ((const float*)ssm_a)[h];
+                const float sp = logf(1.0f + expf(alpha[h] + dt_bias_val));
+                alpha[h] = expf(sp * ssm_a_val);
+                beta[h] = 1.0f / (1.0f + expf(-beta[h]));
+            }
+        }
+    }
+
+    const unsigned v = group * blockDim.x + lane;
+    if (v < pc.d_inner) {
+        const unsigned v_ch = 2u * qk_dim + v;
+        out_data[v_ch] = zinc_ssm_conv_silu(v_ch, current_input, conv_kernel, state, pc);
+    }
+}
+
 // ---- ssm_gated_norm (port of ssm_gated_norm.comp) ---------------------------
 // Per head: out = (o / rms(o)) * norm_weight * silu(z). One block per head.
 struct GatedNormPush { unsigned d_inner, dt_rank, head_v_dim, d_state, norm_per_head; };

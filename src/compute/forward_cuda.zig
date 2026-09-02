@@ -67,6 +67,18 @@ const ConvPush = extern struct {
     kernel_is_f16: u32,
     state_offset: u32,
 };
+const ConvPreparePush = extern struct {
+    conv_channels: u32,
+    d_conv: u32,
+    kernel_is_f16: u32,
+    state_offset: u32,
+    dt_rank: u32,
+    d_inner: u32,
+    d_state: u32,
+    n_group: u32,
+    ssm_a_is_f16: u32,
+    dt_bias_is_f16: u32,
+};
 const DeltaNetPush = extern struct {
     d_inner: u32,
     dt_rank: u32,
@@ -415,6 +427,7 @@ const Pipelines = struct {
     sigmoid_mul_quant_q8: CudaPipeline,
     deinterleave: CudaPipeline,
     ssm_conv1d: CudaPipeline,
+    ssm_conv1d_prepare: CudaPipeline,
     ssm_delta_net: CudaPipeline,
     ssm_delta_net_prepare: CudaPipeline, // normalize Q/K + activate gate/beta once per token/head
     ssm_delta_net_col_warp: CudaPipeline, // block-compatible state scan using four wave32 columns
@@ -928,6 +941,7 @@ pub const ForwardCuda = struct {
         pipes.sigmoid_mul_quant_q8 = try pipeline.createPipeline(ctx, src.ptr, "sigmoid_mul_quant_q8_0");
         pipes.deinterleave = try pipeline.createPipeline(ctx, src.ptr, "deinterleave_qgate");
         pipes.ssm_conv1d = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d");
+        pipes.ssm_conv1d_prepare = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d_prepare");
         pipes.ssm_delta_net = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net");
         pipes.ssm_delta_net_prepare = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_prepare");
         pipes.ssm_delta_net_col_warp = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_col_warp");
@@ -3700,9 +3714,27 @@ pub const ForwardCuda = struct {
             self.dmmvDispatch(&cmd, walpha, &self.norm_buf, &self.router_buf, d.dt_rank, d.n_embd, 0, 0);
             self.dmmvDispatch(&cmd, wbeta, &self.norm_buf, &self.down_buf, d.dt_rank, d.n_embd, 0, 0);
         }
-        const conv = ConvPush{ .conv_channels = d.conv_channels, .d_conv = d.d_conv, .kernel_is_f16 = boolU32(wconv.info.type_ == .f16), .state_offset = conv_off };
-        cmd.dispatch(&self.pipes.ssm_conv1d, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.attn_out_buf, &wconv.gpu_buffer, &convst, &self.swiglu_buf }, &conv, @sizeOf(ConvPush), 0);
-        self.deltaNetDecodeDispatch(&cmd, wdt, wa, &recst);
+        const conv_prepared = is_rocm and self.use_decode_ssm_col_warp and
+            d.d_state == d.head_v_dim and d.d_state <= 128 and (d.d_state & 31) == 0;
+        if (conv_prepared) {
+            const cp = ConvPreparePush{
+                .conv_channels = d.conv_channels,
+                .d_conv = d.d_conv,
+                .kernel_is_f16 = boolU32(wconv.info.type_ == .f16),
+                .state_offset = conv_off,
+                .dt_rank = d.dt_rank,
+                .d_inner = d.d_inner,
+                .d_state = d.d_state,
+                .n_group = d.n_group,
+                .ssm_a_is_f16 = boolU32(wa.info.type_ == .f16),
+                .dt_bias_is_f16 = boolU32(wdt.info.type_ == .f16),
+            };
+            cmd.dispatch(&self.pipes.ssm_conv1d_prepare, .{ @max(d.n_group, ceilDiv(d.d_inner, d.d_state)), 1, 1 }, .{ d.d_state, 1, 1 }, &.{ &self.attn_out_buf, &wconv.gpu_buffer, &convst, &self.swiglu_buf, &wdt.gpu_buffer, &self.router_buf, &self.down_buf, &wa.gpu_buffer }, &cp, @sizeOf(ConvPreparePush), 0);
+        } else {
+            const conv = ConvPush{ .conv_channels = d.conv_channels, .d_conv = d.d_conv, .kernel_is_f16 = boolU32(wconv.info.type_ == .f16), .state_offset = conv_off };
+            cmd.dispatch(&self.pipes.ssm_conv1d, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.attn_out_buf, &wconv.gpu_buffer, &convst, &self.swiglu_buf }, &conv, @sizeOf(ConvPush), 0);
+        }
+        self.deltaNetDecodeDispatch(&cmd, wdt, wa, &recst, conv_prepared);
         const norm_per_head: u32 = if (wnorm.info.numElements() == d.d_inner) 1 else 0;
         const gn = GatedNormPush{ .d_inner = d.d_inner, .dt_rank = d.dt_rank, .head_v_dim = d.head_v_dim, .d_state = d.d_state, .norm_per_head = norm_per_head };
         const out_q8_ready = (d.head_v_dim & 31) == 0 and self.decodePreparedQ8Eligible(wout.info.type_, d.n_embd, d.d_inner);
@@ -3944,10 +3976,28 @@ pub const ForwardCuda = struct {
             self.dmmvDispatch(&cmd, wbeta, &self.norm_buf, &self.down_buf, d.dt_rank, d.n_embd, 0, 0);
         }
         // conv1d (+ SiLU) over the qkv stream → swiglu_buf (conv_out)
-        const conv = ConvPush{ .conv_channels = d.conv_channels, .d_conv = d.d_conv, .kernel_is_f16 = boolU32(wconv.info.type_ == .f16), .state_offset = self.conv_off[L] };
-        cmd.dispatch(&self.pipes.ssm_conv1d, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.attn_out_buf, &wconv.gpu_buffer, &self.ssm_conv_state[L], &self.swiglu_buf }, &conv, @sizeOf(ConvPush), 0);
+        const conv_prepared = is_rocm and self.use_decode_ssm_col_warp and
+            d.d_state == d.head_v_dim and d.d_state <= 128 and (d.d_state & 31) == 0;
+        if (conv_prepared) {
+            const cp = ConvPreparePush{
+                .conv_channels = d.conv_channels,
+                .d_conv = d.d_conv,
+                .kernel_is_f16 = boolU32(wconv.info.type_ == .f16),
+                .state_offset = self.conv_off[L],
+                .dt_rank = d.dt_rank,
+                .d_inner = d.d_inner,
+                .d_state = d.d_state,
+                .n_group = d.n_group,
+                .ssm_a_is_f16 = boolU32(wa.info.type_ == .f16),
+                .dt_bias_is_f16 = boolU32(wdt.info.type_ == .f16),
+            };
+            cmd.dispatch(&self.pipes.ssm_conv1d_prepare, .{ @max(d.n_group, ceilDiv(d.d_inner, d.d_state)), 1, 1 }, .{ d.d_state, 1, 1 }, &.{ &self.attn_out_buf, &wconv.gpu_buffer, &self.ssm_conv_state[L], &self.swiglu_buf, &wdt.gpu_buffer, &self.router_buf, &self.down_buf, &wa.gpu_buffer }, &cp, @sizeOf(ConvPreparePush), 0);
+        } else {
+            const conv = ConvPush{ .conv_channels = d.conv_channels, .d_conv = d.d_conv, .kernel_is_f16 = boolU32(wconv.info.type_ == .f16), .state_offset = self.conv_off[L] };
+            cmd.dispatch(&self.pipes.ssm_conv1d, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.attn_out_buf, &wconv.gpu_buffer, &self.ssm_conv_state[L], &self.swiglu_buf }, &conv, @sizeOf(ConvPush), 0);
+        }
         // delta-net scan: conv_out + dt_bias + alpha + beta + ssm_a + state → attn_out_buf (delta_out)
-        self.deltaNetDecodeDispatch(&cmd, wdt, wa, &self.ssm_state[L]);
+        self.deltaNetDecodeDispatch(&cmd, wdt, wa, &self.ssm_state[L], conv_prepared);
         // gated norm: (delta_out, z) → swiglu_buf, or directly into the
         // packed activation consumed by the output projection.
         const norm_per_head: u32 = if (wnorm.info.numElements() == d.d_inner) 1 else 0;
@@ -4434,22 +4484,25 @@ pub const ForwardCuda = struct {
         wdt: *const LoadedTensor,
         wa: *const LoadedTensor,
         state: *const CudaBuffer,
+        prepared: bool,
     ) void {
         const d = self.d;
         if (self.use_decode_ssm_col_warp and d.d_state == d.head_v_dim and d.d_state <= 128) {
-            const prep = DeltaNetPreparePush{
-                .dt_rank = d.dt_rank,
-                .d_state = d.d_state,
-                .n_group = d.n_group,
-                .ssm_a_is_f16 = boolU32(wa.info.type_ == .f16),
-                .dt_bias_is_f16 = boolU32(wdt.info.type_ == .f16),
-                .has_dt_bias = 1,
-                .has_ssm_a = 1,
-                .n_tok = 1,
-                .conv_stride_tok = d.conv_channels,
-                .ab_stride_tok = d.dt_rank,
-            };
-            cmd.dispatch(&self.pipes.ssm_delta_net_prepare, .{ d.n_group, 1, 1 }, .{ d.d_state, 1, 1 }, &.{ &self.swiglu_buf, &wdt.gpu_buffer, &self.router_buf, &self.down_buf, &wa.gpu_buffer }, &prep, @sizeOf(DeltaNetPreparePush), 0);
+            if (!prepared) {
+                const prep = DeltaNetPreparePush{
+                    .dt_rank = d.dt_rank,
+                    .d_state = d.d_state,
+                    .n_group = d.n_group,
+                    .ssm_a_is_f16 = boolU32(wa.info.type_ == .f16),
+                    .dt_bias_is_f16 = boolU32(wdt.info.type_ == .f16),
+                    .has_dt_bias = 1,
+                    .has_ssm_a = 1,
+                    .n_tok = 1,
+                    .conv_stride_tok = d.conv_channels,
+                    .ab_stride_tok = d.dt_rank,
+                };
+                cmd.dispatch(&self.pipes.ssm_delta_net_prepare, .{ d.n_group, 1, 1 }, .{ d.d_state, 1, 1 }, &.{ &self.swiglu_buf, &wdt.gpu_buffer, &self.router_buf, &self.down_buf, &wa.gpu_buffer }, &prep, @sizeOf(DeltaNetPreparePush), 0);
+            }
             const scan = DeltaNetColWarpPush{
                 .dt_rank = d.dt_rank,
                 .head_v_dim = d.head_v_dim,
