@@ -754,14 +754,20 @@ extern "C" __global__ void moe_combine_tail(float* hidden, const float* shared,
 // forms t = shared + w_pn2*(moe*rinv1) and reduces ss2 (== moe_combine_tail's
 // reduction over the post_ffw_norm_2 output); phase 3 writes hidden += w_post*
 // (t*rinv2). BYTE-IDENTITY: the normed-moe value w_pn2[i]*(moe[i]*rinv1) is
-// recomputed (never written back) so it matches rms_norm's f32 output exactly, and
-// t / ss2 / rinv2 / the hidden update are byte-for-byte moe_combine_tail's. Removes
-// one launch + the moe_out_buf store/reload round-trip. One block (grid {1,1,1}),
+// materialized in f32 shared memory, preserving the standalone kernel's store/load
+// rounding boundary. The second norm and hidden update retain their original
+// operation order. Removes one launch + the global moe_out_buf round trip. One
+// block (grid {1,1,1}),
 // block-count PRESERVED (both originals were single-block). Intervening
 // __syncthreads make the zinc_block_reduce_sum scratch reuse race-free.
 extern "C" __global__ void moe_norm_combine_tail(float* hidden, const float* shared,
                                                  const float* moe, const float* w_pn2,
                                                  const float* w_post, RmsPush pc) {
+    // Materialize the first norm exactly once at f32 precision. The standalone
+    // path writes this value to moe_out_buf before the combine kernel reads it;
+    // shared memory preserves that rounding boundary without the global-memory
+    // round trip or a second launch.
+    extern __shared__ float normed_moe[];
     // phase 1: post_ffw_norm_2 over the raw weighted-acc moe (== rms_norm(moe,w_pn2))
     float ss = 0.0f;
     for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x) {
@@ -773,11 +779,14 @@ extern "C" __global__ void moe_norm_combine_tail(float* hidden, const float* sha
     if (threadIdx.x == 0) rms_inv_sh = rsqrtf(ss / (float)pc.N + pc.eps);
     __syncthreads();
     float rinv1 = rms_inv_sh;
+    for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x)
+        normed_moe[i] = w_pn2[i] * (moe[i] * rinv1);
+    __syncthreads();
 
     // phase 2: t = shared + post_ffw_norm_2(moe); reduce ss2 (== moe_combine_tail)
     float ss2 = 0.0f;
     for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x) {
-        float t = shared[i] + w_pn2[i] * (moe[i] * rinv1);
+        float t = shared[i] + normed_moe[i];
         ss2 += t * t;
     }
     ss2 = zinc_block_reduce_sum(ss2);
@@ -788,7 +797,7 @@ extern "C" __global__ void moe_norm_combine_tail(float* hidden, const float* sha
 
     // phase 3: hidden += post_ffw_norm(t)
     for (unsigned i = threadIdx.x; i < pc.N; i += blockDim.x) {
-        float t = shared[i] + w_pn2[i] * (moe[i] * rinv1);
+        float t = shared[i] + normed_moe[i];
         hidden[i] += w_post[i] * (t * rinv2);
     }
 }
@@ -3126,7 +3135,7 @@ extern "C" __global__ void dmmv_q5k_fast(const unsigned* a_u32, const float* x, 
 // busy enough to leave its idle clock. Per-expert weight slice = id*slice; x is
 // shared across experts for gate/up (x_stride=0) or per-expert for down
 // (x_stride=K, i.e. swiglu[e*K..]). Output is slot-major: y[e*M + row].
-struct ExpertsPush { unsigned M, K, slice, x_stride, n_used, base; };
+struct ExpertsPush { unsigned M, K, slice, x_stride, n_used, base, fuse_activation; };
 
 extern "C" __global__ void dmmv_q4k_experts(const unsigned* a_u32, const float* x, float* y, const unsigned* expert_ids, ExpertsPush pc) {
     unsigned g = blockIdx.x;
@@ -3235,7 +3244,18 @@ extern "C" __global__ void dmmv_q4k_experts_dual(const unsigned* a_u32, const fl
     sg = zinc_block_reduce_sum(sg);
     __syncthreads(); // sh[] reuse between the two reductions
     su = zinc_block_reduce_sum(su);
-    if (tid == 0) { unsigned o = (size_t)e * pc.M + row; y_gate[o] = sg; y_up[o] = su; }
+    if (tid == 0) {
+        const unsigned o = (size_t)e * pc.M + row;
+        if (pc.fuse_activation != 0u) {
+            const float k = 0.7978845608028654f;
+            const float gelu = 0.5f * sg *
+                (1.0f + tanhf(k * (sg + 0.044715f * sg * sg * sg)));
+            y_gate[o] = gelu * su;
+        } else {
+            y_gate[o] = sg;
+            y_up[o] = su;
+        }
+    }
 }
 
 extern "C" __global__ void dmmv_q5k_experts(const unsigned* a_u32, const float* x, float* y, const unsigned* expert_ids, ExpertsPush pc) {

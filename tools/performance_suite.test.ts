@@ -160,6 +160,8 @@ test("remote tuning env forwards tuning toggles", () => {
     ZINC_Q8_Q6_BLOCK128: "1",
     ZINC_ROCM_MOE_SHARED_Q8: "1",
     ZINC_ROCM_MOE_DOWN_Q8: "1",
+    ZINC_ROCM_MOE_GATE_GEGLU: "0",
+    ZINC_ROCM_LIGHT_COMMANDS: "0",
     ZINC_MOE_DOWN_Q8_M16: "1",
     ZINC_MOE_DOWN_Q8_M8: "1",
     ZINC_MOE_DOWN_Q8_M64: "1",
@@ -229,6 +231,8 @@ test("remote tuning env forwards tuning toggles", () => {
   expect(env.ZINC_Q8_Q6_BLOCK128).toBe("1");
   expect(env.ZINC_ROCM_MOE_SHARED_Q8).toBe("1");
   expect(env.ZINC_ROCM_MOE_DOWN_Q8).toBe("1");
+  expect(env.ZINC_ROCM_MOE_GATE_GEGLU).toBe("0");
+  expect(env.ZINC_ROCM_LIGHT_COMMANDS).toBe("0");
   expect(env.ZINC_MOE_DOWN_Q8_M16).toBe("1");
   expect(env.ZINC_MOE_DOWN_Q8_M8).toBe("1");
   expect(env.ZINC_MOE_DOWN_Q8_M64).toBe("1");

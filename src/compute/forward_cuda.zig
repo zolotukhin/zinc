@@ -220,7 +220,7 @@ const TopkPush = extern struct { n_experts: u32, k: u32 };
 const MoeAccPush = extern struct { N: u32, n_used: u32, src_stride: u32 };
 const SigmoidAccPush = extern struct { N: u32 };
 // Batched MoE expert matvec: one launch over all n_used experts, GPU-side ids.
-const ExpertsPush = extern struct { M: u32, K: u32, slice: u32, x_stride: u32, n_used: u32, base: u32 = 0 };
+const ExpertsPush = extern struct { M: u32, K: u32, slice: u32, x_stride: u32, n_used: u32, base: u32 = 0, fuse_activation: u32 = 0 };
 // Effort 29 T2: token-batched (grid.y = T) MoE prefill twins — process ALL T
 // prompt tokens' routed/shared experts in one launch each (vs the per-token loop).
 const ExpertsBatchPush = extern struct { M: u32, K: u32, slice: u32, x_stride: u32, n_used: u32, base: u32, routing_stride: u32, x_tok_stride: u32, y_tok_stride: u32 };
@@ -634,6 +634,7 @@ pub const ForwardCuda = struct {
     use_fused_q4_pairs: bool = false,
     use_fused_attn_frontend: bool = false,
     use_rocm_rms_q8: bool = false,
+    lightweight_rocm_commands: bool = false,
     // async decode command ring (dense path): commitAsync'd layer commands are
     // stashed here and freed after the tail commitAndWait drains the shared
     // CUstream. Defaults so the init literal need not list them.
@@ -1183,6 +1184,12 @@ pub const ForwardCuda = struct {
             if (self.use_rocm_rms_q8) {
                 log.info("ROCm fused RMS + Q8 activation packing enabled", .{});
             }
+            // A single ordered HIP stream does not require a completion event for
+            // every asynchronously submitted command group. The final tail or an
+            // explicit waitPending fence drains all prior launches. This is a
+            // measured win across dense, hybrid, and MoE Qwen on the R9700; retain
+            // an explicit `=0` fallback for diagnosis.
+            self.lightweight_rocm_commands = envFlag("ZINC_ROCM_LIGHT_COMMANDS", true);
             self.cublas_min_t = 1;
         }
 
@@ -4153,6 +4160,13 @@ pub const ForwardCuda = struct {
             c.releaseCompleted();
             return;
         }
+        if (self.lightweight_rocm_commands) {
+            // cuda_dispatch has already enqueued each launch on the context's
+            // ordered stream. Release the unused event now; the decode tail or
+            // waitPending fence remains the sole synchronization point.
+            c.releaseCompleted();
+            return;
+        }
         if (self.n_pending < self.pending.len) {
             c.commitAsync();
             self.pending[self.n_pending] = c;
@@ -4173,6 +4187,11 @@ pub const ForwardCuda = struct {
     /// Wait on + free the stashed async commands, for callers that read GPU
     /// results before any tail sync (the per-block Pub wrappers).
     fn waitPending(self: *ForwardCuda) void {
+        if (self.lightweight_rocm_commands) {
+            var fence = command.beginCommand(self.ctx) catch return;
+            fence.commitAndWait();
+            return;
+        }
         var i: u32 = 0;
         while (i < self.n_pending) : (i += 1) self.pending[i].wait();
         self.n_pending = 0;

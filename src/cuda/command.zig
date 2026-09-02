@@ -1,7 +1,7 @@
 //! CUDA command wrapper — kernel dispatch and stream/event synchronization
 //! (mirrors src/metal/command.zig). A CudaCommand wraps the context's CUstream
-//! plus a per-command CUevent; `commitAsync`/`wait`/`releaseCompleted` give the
-//! same overlap the Metal backend gets, backed by CUDA streams + events.
+//! plus a backend-owned completion event. ROCm creates that event lazily in
+//! `commitAsync`, while CUDA may allocate it when the command begins.
 //! @section CUDA Runtime
 const std = @import("std");
 const shim = @import("c.zig").shim;
@@ -96,11 +96,12 @@ pub const CudaCommand = struct {
     }
 };
 
-/// Begin a new command (stream batch + completion event) on the given context.
+/// Begin a new command batch on the given context. The backend controls whether
+/// its completion event is allocated now or lazily by `commitAsync`.
 /// @param ctx    Active CUDA context that owns the stream; must not be null.
 /// @returns      A fresh `CudaCommand` ready for kernel dispatches.
 /// @note         Returns `error.CudaCommandFailed` if the shim cannot allocate
-///               the underlying stream/event resources.
+///               the underlying command resources.
 pub fn beginCommand(ctx: ?*shim.CudaCtx) !CudaCommand {
     const handle = shim.cuda_begin_command(ctx);
     if (handle == null) return error.CudaCommandFailed;

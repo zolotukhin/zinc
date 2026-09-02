@@ -441,10 +441,6 @@ CudaCmd* cuda_begin_command(CudaCtx* ctx) {
         return NULL;
     }
     cmd->stream = ctx->stream;
-    if (!hip_ok(hipEventCreateWithFlags(&cmd->event, hipEventDisableTiming), "hipEventCreateWithFlags")) {
-        free(cmd);
-        return NULL;
-    }
     return cmd;
 }
 
@@ -498,20 +494,28 @@ void cuda_barrier(CudaCmd* cmd) {
 
 void cuda_commit_and_wait(CudaCmd* cmd) {
     if (!cmd) return;
-    hipEventRecord(cmd->event, cmd->stream);
     hipStreamSynchronize(cmd->stream);
-    hipEventDestroy(cmd->event);
+    if (cmd->event) hipEventDestroy(cmd->event);
     free(cmd);
 }
 
 void cuda_commit_async(CudaCmd* cmd) {
-    if (cmd) hipEventRecord(cmd->event, cmd->stream);
+    if (!cmd) return;
+    if (!cmd->event &&
+        !hip_ok(hipEventCreateWithFlags(&cmd->event, hipEventDisableTiming), "hipEventCreateWithFlags"))
+        return;
+    hipEventRecord(cmd->event, cmd->stream);
 }
 
 void cuda_wait(CudaCmd* cmd) {
     if (!cmd) return;
-    hipEventSynchronize(cmd->event);
-    hipEventDestroy(cmd->event);
+    if (cmd->event) {
+        hipEventSynchronize(cmd->event);
+        hipEventDestroy(cmd->event);
+    } else {
+        // Preserve correctness if event creation failed in commit_async.
+        hipStreamSynchronize(cmd->stream);
+    }
     free(cmd);
 }
 

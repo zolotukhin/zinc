@@ -106,7 +106,7 @@ const MulVecPush = extern struct { N: u32, scale: f32 };
 const MulVecBatchPush = extern struct { row: u32, total: u32, scale: f32 };
 const ZeroPush = extern struct { N: u32 };
 // Batched MoE expert matvec (one launch over all experts; ids read GPU-side).
-const ExpertsPush = extern struct { M: u32, K: u32, slice: u32, x_stride: u32, n_used: u32, base: u32 = 0 };
+const ExpertsPush = extern struct { M: u32, K: u32, slice: u32, x_stride: u32, n_used: u32, base: u32 = 0, fuse_activation: u32 = 0 };
 // Token-batched routed-expert matvec (Effort 24 cycle 8): adds per-token strides
 // so one launch (grid.y = T) covers all prompt tokens' routed experts.
 const ExpertsBatchPush = extern struct { M: u32, K: u32, slice: u32, x_stride: u32, n_used: u32, base: u32 = 0, routing_stride: u32, x_tok_stride: u32, y_tok_stride: u32 };
@@ -465,6 +465,7 @@ pub const ForwardGemma = struct {
     batch_graph: [9]?*shim.CudaGraph = .{null} ** 9,
     batch_graph_on: bool = false,
     capturing: bool = false,
+    lightweight_rocm_commands: bool = false,
 
     // MoE scratch (only used when n_experts > 0)
     shared_buf: CudaBuffer, // [n_embd] shared-expert output (post_ffw_norm_1)
@@ -574,8 +575,8 @@ pub const ForwardGemma = struct {
     use_tc_experts: bool = false, // T2: ZINC_MOE_TC routes the routed gate/up AND Q5_1 down experts through the fp16 Tensor cores (single-launch padded grouped-TC GEMMs: build_expert_order_padded → gemm_q4k_experts_grouped_tc gate/up + gemm_q5_1_experts_grouped_tc down). fp16 → token-tolerance gate, not bit-identical. DEFAULT-ON (opt out ZINC_MOE_TC=0/off), T-gated by moe_tc_min_t (the grouped TC GEMM pads each expert run to a 64-token tile, so it only beats the matvec once T is large enough to fill the tiles).
     tc_experts_forced: bool = false, // T2: ZINC_MOE_TC was set to an EXPLICIT truthy value (1/on/...) → force the grouped TC experts at ANY T, bypassing moe_tc_min_t. Lets validate_catalog exercise the TC path with a short prompt (set ZINC_MOE_TC=1). Unset env = default-on-but-gated; falsy = off.
     moe_tc_min_t: u32 = 256, // T2: only route the routed experts through the grouped TC GEMM when the prefill batch T >= this. RE-MEASURED 2026-06-22 after the FULL expert FFN moved onto TC (gate/up Q4_K + Q5_1 down all grouped-TC) — the crossover dropped well below the old 512 gate because the per-tile fixed cost is now amortized over the whole expert FFN, not just gate/up. 4090 / gemma-26b, single main binary, ZINC_MOE_TC=1 (forced TC) vs =0 (matvec), order-alternated to de-bias the cold-start boost lottery: T=256 tc-first TC/MV=1.556, mv-first 1.202 (TC wins +20% even when matvec gets the order/boost advantage) → geomean +37%; an earlier cold round was +21% tc-first. Gate lowered 512→256: T=256 is the decisive zero-regression crossover (de-biased lower bound +20%); below 256 the padded per-expert tiles are mostly empty (P=n_used*T over n_experts buckets, ~65 tok/expert at T=256 fills the 64-tile) so the proven _batched matvec stays. Earlier (gate/up-only on TC) crossover was T=512. Mirrors cublas_min_t.
-    fuse_norm_combine: bool = false, // e27 cycle 17 A/B: ZINC_MOE_NORM_COMBINE fuses the MoE decode post_ffw_norm_2 + combine tail into ONE single-block launch (moe_norm_combine_tail). Byte-identical; off → the two-launch path. Read once in init.
-    fuse_attn_moe_norm: bool = false, // e27 cycle 19 A/B: ZINC_ATTN_MOE_NORM fuses the MoE decode attention post-attn norm+residual + the 3 MoE pre-norms (rms_norm_triple) into ONE single-block launch (rms_norm_residual_triple). Byte-identical; off → the two-launch path. Read once in init.
+    fuse_norm_combine: bool = false, // ZINC_MOE_NORM_COMBINE fuses the MoE decode post_ffw_norm_2 + combine tail into ONE single-block launch (moe_norm_combine_tail). Byte-identical; default-on for ROCm Gemma MoE, explicit 0 restores the two-launch path.
+    fuse_attn_moe_norm: bool = false, // ZINC_ATTN_MOE_NORM fuses the MoE decode attention post-attn norm+residual + the 3 MoE pre-norms (rms_norm_triple) into ONE single-block launch (rms_norm_residual_triple). Byte-identical; default-on for ROCm Gemma MoE, explicit 0 restores the two-launch path.
     use_tc_m128_lowsmem: bool = false, // cycle 17 A/B: ZINC_BATCHED_TC_M128_LOWSMEM opts INTO the 12 KB-shared wider 128x64 M-tile Q4_K TC kernel (gemm_q4k_tc_f16a_m128_lowsmem) — synthesis of cycle 14's wider tile (halves the dominant f16-A read) + cycle 15's two-phase Cs (12 KB shared → ~6 blocks/SM, NOT m128's 44 KB→1 block/SM that lost -11.8%). Byte-identical to the m64/lowsmem default; measured this cycle to decide if it becomes the default.
     use_tc_sharea: bool = false, // cycle 19: ZINC_BATCHED_TC_SHAREA shares ONE f32→f16 activation recast across GEMMs that read the SAME input (attn Q/K/V from b.norm; FFN gate/up from b.ffn_norm) — skips the redundant per-GEMM f32_to_f16 launch + read for the 2nd/3rd GEMM of each group. Byte-identical (same __float2half bits, same act_f16 contents reused stream-ordered). Off → each GEMM recasts independently (cycle 12 behavior).
     use_tc_normf16: bool = false, // cycle 21: ZINC_BATCHED_TC_NORMF16 has the norm/GeGLU PRODUCERS emit fp16 directly into act_f16 (rms_norm_f16/geglu_f16) so ALL the dense TC GEMMs reading a produced activation (attn Q/K/V from the pre-attn norm; FFN gate/up from the pre-FFN norm; ffn_down from GeGLU) skip their per-GEMM f32→fp16 recast launch ENTIRELY — not just the shared-A dedup. Byte-identical to the per-GEMM-recast TC path (the producer __float2half's the SAME f32 value f32_to_f16 would). Off → cycle-12 per-GEMM recast.
@@ -920,10 +921,13 @@ pub const ForwardGemma = struct {
             }
         }
 
-        // e27 cycle 17 A/B: fuse the MoE decode post_ffw_norm_2 + combine tail.
-        self.fuse_norm_combine = std.posix.getenv("ZINC_MOE_NORM_COMBINE") != null;
-        // e27 cycle 19 A/B: fuse the MoE decode post-attn norm+residual + 3 pre-norms.
-        self.fuse_attn_moe_norm = std.posix.getenv("ZINC_ATTN_MOE_NORM") != null;
+        // Both fusions are byte-identical and remove one single-block launch per
+        // MoE layer. Back-to-back R9700 medians show the pair improving sustained
+        // Gemma 26B decode by 2.3%, so ROCm Gemma MoE enables them by default while
+        // retaining explicit `=0` fallbacks for diagnosis.
+        const rocm_gemma_moe = is_rocm and d.n_experts > 0 and !d.is_muse;
+        self.fuse_norm_combine = envFlag("ZINC_MOE_NORM_COMBINE", rocm_gemma_moe);
+        self.fuse_attn_moe_norm = envFlag("ZINC_ATTN_MOE_NORM", rocm_gemma_moe);
 
         // Muse and dense Gemma decode reuse the packed-Q8 ROCm matvec path proven
         // by the Qwen backend. Same-GGUF quality checks established these
@@ -956,6 +960,13 @@ pub const ForwardGemma = struct {
             }
         }
         self.batch_graph_on = shim.cuda_graph_supported() != 0 and envFlag("ZINC_BATCH_GRAPH", false);
+        // ROCm launches are submitted immediately to one ordered stream. Gemma
+        // MoE does not need a completion event after every small command group:
+        // the decode tail (or waitPending fence) drains the entire stream. Avoiding
+        // those per-group event records removes queue traffic without reordering a
+        // single kernel. Keep an opt-out while this path remains ROCm-specific.
+        self.lightweight_rocm_commands = is_rocm and
+            envFlag("ZINC_ROCM_LIGHT_COMMANDS", true);
         const cache_default = is_rocm and d.n_experts > 0 and !d.is_muse and
             shim.cuda_free_memory(ctx) >= 6 * 1024 * 1024 * 1024;
         if (is_rocm and envFlag("ZINC_PRE_DEQUANT", cache_default)) {
@@ -3226,12 +3237,19 @@ pub const ForwardGemma = struct {
                 const nrows = n_used * ef;
                 const down_q8 = is_rocm and self.batch != null and
                     envFlag("ZINC_ROCM_MOE_DOWN_Q8", !d.is_muse and d.n_experts > 0);
+                const fused_gate_geglu = is_rocm and
+                    envFlag("ZINC_ROCM_MOE_GATE_GEGLU", true);
                 // Fuse gate (base 0) + up (base gu_half) into ONE launch sharing the
-                // x-reads — bit-identical to the two dmmv_q4k_experts launches.
-                const pgu = ExpertsPush{ .M = ef, .K = d.n_embd, .slice = gu_full, .x_stride = 0, .n_used = n_used, .base = gu_half };
-                cmd.dispatch(&self.pipes.dmmv_q4k_experts_dual, .{ nrows, 1, 1 }, .{ 64, 1, 1 }, &.{ &wgu.gpu_buffer, &self.moe_norm_buf, &self.gate_buf, &self.up_buf, &self.router_out_buf }, &pgu, @sizeOf(ExpertsPush), 0);
-                const sgb = SwigluPush{ .N = nrows };
-                cmd.dispatch(&self.pipes.geglu, .{ ceilDiv(nrows, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.gate_buf, &self.up_buf, &self.geglu_buf }, &sgb, @sizeOf(SwigluPush), 0);
+                // x-reads. On ROCm the same kernel also applies GeGLU from its two
+                // reduced f32 accumulators and writes the down-projection input
+                // directly, removing one launch plus the gate/up round trip.
+                const pgu = ExpertsPush{ .M = ef, .K = d.n_embd, .slice = gu_full, .x_stride = 0, .n_used = n_used, .base = gu_half, .fuse_activation = @intFromBool(fused_gate_geglu) };
+                const gate_dst = if (fused_gate_geglu) &self.geglu_buf else &self.gate_buf;
+                cmd.dispatch(&self.pipes.dmmv_q4k_experts_dual, .{ nrows, 1, 1 }, .{ 64, 1, 1 }, &.{ &wgu.gpu_buffer, &self.moe_norm_buf, gate_dst, &self.up_buf, &self.router_out_buf }, &pgu, @sizeOf(ExpertsPush), 0);
+                if (!fused_gate_geglu) {
+                    const sgb = SwigluPush{ .N = nrows };
+                    cmd.dispatch(&self.pipes.geglu, .{ ceilDiv(nrows, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &self.gate_buf, &self.up_buf, &self.geglu_buf }, &sgb, @sizeOf(SwigluPush), 0);
+                }
                 if (down_q8) {
                     const bb = &self.batch.?;
                     const qp = QuantActPush{ .K = ef, .T = n_used };
@@ -3296,7 +3314,7 @@ pub const ForwardGemma = struct {
             if (self.fuse_norm_combine) {
                 // Cycle 17: also fold post_ffw_norm_2 (above) into the combine — reads
                 // moe_out_buf RAW, norms it internally. Two single-block launches → one.
-                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), d.n_embd * @sizeOf(f32));
             } else {
                 cmd.dispatch(&self.pipes.moe_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
             }
@@ -3838,7 +3856,7 @@ pub const ForwardGemma = struct {
             if (self.fuse_norm_combine) {
                 // Cycle 17: also fold post_ffw_norm_2 (above) into the combine — reads
                 // moe_out_buf RAW, norms it internally. Two single-block launches → one.
-                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
+                cmd.dispatch(&self.pipes.moe_norm_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpn2.gpu_buffer, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), d.n_embd * @sizeOf(f32));
             } else {
                 cmd.dispatch(&self.pipes.moe_combine_tail, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &self.shared_buf, &self.moe_out_buf, &wpost.gpu_buffer }, &rms, @sizeOf(RmsPush), 0);
             }
@@ -3950,6 +3968,14 @@ pub const ForwardGemma = struct {
             c.releaseCompleted();
             return;
         }
+        if (self.lightweight_rocm_commands) {
+            // cuda_dispatch/hipModuleLaunchKernel has already enqueued every
+            // launch on the context's single stream. The command owns only its
+            // unused completion event, so it can be released immediately; the
+            // later tail/fence provides the sole required stream synchronization.
+            c.releaseCompleted();
+            return;
+        }
         // Async whenever the ring has room. The batched MoE path (gate_up Q4_K +
         // down Q5_1) folds the down scale GPU-side, so it no longer reads ids back
         // mid-block — its commands chain on the same auto-ordered stream like the
@@ -3975,6 +4001,13 @@ pub const ForwardGemma = struct {
     /// Wait on + free the stashed async commands, for callers that read a GPU
     /// result before any tail sync (the per-block Pub wrappers).
     fn waitPending(self: *ForwardGemma) void {
+        if (self.lightweight_rocm_commands) {
+            // Some prefill/public helper paths do not have a synchronous tail.
+            // An empty command still synchronizes the same ordered ROCm stream.
+            var fence = command.beginCommand(self.ctx) catch return;
+            fence.commitAndWait();
+            return;
+        }
         var i: u32 = 0;
         while (i < self.n_pending) : (i += 1) self.pending[i].wait();
         self.n_pending = 0;

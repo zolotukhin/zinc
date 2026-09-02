@@ -1689,6 +1689,40 @@ test "Vulkan forward uses GEGLU activation for Gemma architecture" {
     try expectNotContains(src, "try self.dispatchSwiglu(");
 }
 
+test "ROCm lightweight commands are default-on and retain an explicit fence" {
+    const dense = @embedFile("compute/forward_cuda.zig");
+    const gemma = @embedFile("compute/forward_cuda_gemma.zig");
+    inline for (.{ dense, gemma }) |src| {
+        try expectContains(src, "ZINC_ROCM_LIGHT_COMMANDS");
+        try expectContains(src, "envFlag(\"ZINC_ROCM_LIGHT_COMMANDS\", true)");
+        try expectContainsNear(src, "if (self.lightweight_rocm_commands)", "c.releaseCompleted();", 700);
+        try expectContainsNear(src, "fn waitPending", "fence.commitAndWait();", 700);
+    }
+}
+
+test "ROCm command completion events are allocated only for async waits" {
+    const src = @embedFile("rocm/rocm_shim.c");
+    const begin = std.mem.indexOf(u8, src, "CudaCmd* cuda_begin_command") orelse return error.TestExpectedEqual;
+    const begin_end = std.mem.indexOfPos(u8, src, begin, "void cuda_dispatch") orelse return error.TestExpectedEqual;
+    try expectNotContains(src[begin..begin_end], "hipEventCreateWithFlags");
+    try expectContainsNear(src, "void cuda_commit_async", "hipEventCreateWithFlags", 500);
+    try expectContainsNear(src, "void cuda_commit_and_wait", "hipStreamSynchronize", 400);
+}
+
+test "ROCm Gemma MoE fusions preserve activation and norm ABI boundaries" {
+    const dense = @embedFile("compute/forward_cuda.zig");
+    const gemma = @embedFile("compute/forward_cuda_gemma.zig");
+    const kernels = @embedFile("shaders/cuda/kernels.cu");
+    const experts_abi = "n_used: u32, base: u32 = 0, fuse_activation: u32 = 0";
+    try expectContains(dense, experts_abi);
+    try expectContains(gemma, experts_abi);
+    try expectContains(kernels, "n_used, base, fuse_activation;");
+    try expectContainsNear(gemma, "cmd.dispatch(&self.pipes.moe_norm_combine_tail", "d.n_embd * @sizeOf(f32)", 600);
+    try expectContainsNear(kernels, "extern \"C\" __global__ void moe_norm_combine_tail", "extern __shared__ float normed_moe[];", 700);
+    try expectContainsNear(kernels, "extern __shared__ float normed_moe[];", "normed_moe[i] = w_pn2[i] * (moe[i] * rinv1);", 900);
+    try expectContains(kernels, "if (pc.fuse_activation != 0u)");
+}
+
 test "Gemma 4 26B-A4B MoE catalog entry has correct download URL with UD prefix" {
     const src = @embedFile("model/catalog.zig");
     // The Unsloth Dynamic quantization uses UD- prefix in filenames
