@@ -281,8 +281,10 @@ test("parseArgs reads RDNA backend and device options", () => {
   expect(args.rdnaWorkdir).toBe("/root/zinc-bench");
 });
 
-test("RDNA DPM high script targets AMD memory-clock controls safely", () => {
+test("RDNA performance script stabilizes PCIe and AMD memory clocks safely", () => {
   const script = rdnaDpmHighScript();
+  expect(script).toContain("/sys/module/pcie_aspm/parameters/policy");
+  expect(script).toContain("echo performance");
   expect(script).toContain("/sys/class/drm/card*/device");
   expect(script).toContain("pp_dpm_mclk");
   expect(script).toContain("power_dpm_force_performance_level");

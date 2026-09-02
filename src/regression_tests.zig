@@ -1700,6 +1700,27 @@ test "ROCm lightweight commands are default-on and retain an explicit fence" {
     }
 }
 
+test "ROCm dense Qwen decode keeps the measured Q4 and attention fast paths" {
+    const forward = @embedFile("compute/forward_cuda.zig");
+    const kernels = @embedFile("shaders/cuda/kernels.cu");
+
+    // A fused FFN block owns exactly one output row. Splitting a block across
+    // rows while retaining a block-wide reduction silently mixes those rows.
+    try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu(", "const unsigned row = blockIdx.x;", 500);
+    try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu(", "for (unsigned sb = grp; sb < bpr; sb += ngrp)", 1100);
+
+    // Q4_K headers are loaded once per 16-lane group in the packed-Q8 fused
+    // gate/up path, while decode attention carries independent score and value
+    // accumulators to hide RDNA4 FMA latency.
+    try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu_q8(", "gate_meta = *(const uint4*)(gate + blk);", 1800);
+    try expectContainsNear(kernels, "void naive_attention(", "float acc4[8] = {};", 1800);
+    try expectContainsNear(kernels, "void naive_attention(", "acc7 = 0.0f;", 4200);
+
+    // The measured single-reduction state scan is the ROCm default, with the
+    // environment variable above it retaining the explicit diagnostic opt-out.
+    try expectContainsNear(forward, "const decode_ssm_fast = std.posix.getenv(\"ZINC_ROCM_DECODE_SSM_FAST\")", "else true;", 500);
+}
+
 test "ROCm command completion events are allocated only for async waits" {
     const src = @embedFile("rocm/rocm_shim.c");
     const begin = std.mem.indexOf(u8, src, "CudaCmd* cuda_begin_command") orelse return error.TestExpectedEqual;

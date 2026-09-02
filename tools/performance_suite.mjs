@@ -1239,6 +1239,8 @@ const REMOTE_ZINC_TUNING_ENV_KEYS = [
   "ZINC_ROCM_GEMMA_Q8_PREFILL",
   "ZINC_GEMMA_MOE_PREFILL_TOPK",
   "ZINC_TOPK_V1",
+  "ZINC_PREFILL_WMMA_TAIL",
+  "ZINC_PREFILL_WMMA_Q4_DIRECT",
   "ZINC_PREFILL_PROFILE",
   "ZINC_ROCM_TIME_KERNEL",
   "ZINC_Q8_M32",
@@ -1608,7 +1610,7 @@ async function stopProcess(child, graceMs = 5000) {
 }
 
 export function rdnaDpmHighScript() {
-  return "for c in /sys/class/drm/card*/device; do if [ -f \"$c/pp_dpm_mclk\" ] && grep -q amdgpu \"$c/uevent\" 2>/dev/null; then levels=$(awk 'END { print NR }' \"$c/pp_dpm_mclk\" 2>/dev/null || printf 0); if [ \"${levels:-0}\" -ge 5 ]; then echo high > \"$c/power_dpm_force_performance_level\" 2>/dev/null || true; fi; fi; done; true";
+  return "if [ -w /sys/module/pcie_aspm/parameters/policy ]; then echo performance > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true; fi; for c in /sys/class/drm/card*/device; do if [ -f \"$c/pp_dpm_mclk\" ] && grep -q amdgpu \"$c/uevent\" 2>/dev/null; then levels=$(awk 'END { print NR }' \"$c/pp_dpm_mclk\" 2>/dev/null || printf 0); if [ \"${levels:-0}\" -ge 5 ]; then echo high > \"$c/power_dpm_force_performance_level\" 2>/dev/null || true; fi; fi; done; true";
 }
 
 async function lockRdnaDpmHigh(creds, timeoutMs = 30000) {
@@ -3436,6 +3438,7 @@ async function runRdnaTarget(args) {
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
         "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
         "Execution order: the harness records the full ZINC scenario matrix before starting the llama.cpp baseline phase, so only one inference engine owns the GPU during measurement.",
+        "Power policy: before either engine starts, the harness selects PCIe ASPM performance mode and locks the discrete AMD GPU's memory DPM policy high to prevent idle-clock drift between runs.",
         "Run hygiene: published RDNA runs assume a clean node with no competing ZINC, llama.cpp, or other GPU workloads.",
       ],
       runs: args.runs,

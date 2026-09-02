@@ -368,6 +368,7 @@ const Pipelines = struct {
     gemm_q5k_wmma_i8: CudaPipeline, // gfx12 int8-WMMA Q5_K x Q8_1 GEMM
     gemm_q6k_wmma_i8: CudaPipeline, // gfx12 int8-WMMA Q6_K x Q8_1 GEMM
     gemm_q4k_wmma_i8_t48: CudaPipeline, // exact 48-token short-prompt tile
+    gemm_q4k_wmma_i8_t48_direct: CudaPipeline, // register-direct Q4_K short-prompt tile
     gemm_q5k_wmma_i8_t48: CudaPipeline,
     gemm_q6k_wmma_i8_t48: CudaPipeline,
     gemm_q4k_wmma_i8_t64: CudaPipeline, // exact 64-token prompt tile
@@ -994,6 +995,7 @@ pub const ForwardCuda = struct {
         pipes.gemm_q5k_wmma_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8");
         pipes.gemm_q6k_wmma_i8 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8");
         pipes.gemm_q4k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t48");
+        pipes.gemm_q4k_wmma_i8_t48_direct = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t48_direct");
         pipes.gemm_q5k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q5k_wmma_i8_t48");
         pipes.gemm_q6k_wmma_i8_t48 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q6k_wmma_i8_t48");
         pipes.gemm_q4k_wmma_i8_t64 = try pipeline.createPipeline(ctx, src.ptr, "gemm_q4k_wmma_i8_t64");
@@ -1155,7 +1157,7 @@ pub const ForwardCuda = struct {
             const decode_ssm_fast = std.posix.getenv("ZINC_ROCM_DECODE_SSM_FAST");
             self.use_decode_ssm_fast = if (decode_ssm_fast) |v| !(std.mem.eql(u8, v, "0") or
                 std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or
-                std.ascii.eqlIgnoreCase(v, "no")) else d.n_experts > 0;
+                std.ascii.eqlIgnoreCase(v, "no")) else true;
             const fused_ssm_f32 = std.posix.getenv("ZINC_ROCM_FUSED_SSM_F32");
             self.use_fused_ssm_f32 = if (fused_ssm_f32) |v| !(std.mem.eql(u8, v, "0") or
                 std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or
@@ -2572,7 +2574,7 @@ pub const ForwardCuda = struct {
                         const use_t64 = !use_t48 and tuned_tiles and T <= 64;
                         const use_t80 = !use_t48 and !use_t64 and prefillWmmaT80On() and T <= 80;
                         const qpipe = if (use_t48) switch (idx) {
-                            0 => &self.pipes.gemm_q4k_wmma_i8_t48,
+                            0 => if (prefillWmmaQ4DirectOn()) &self.pipes.gemm_q4k_wmma_i8_t48_direct else &self.pipes.gemm_q4k_wmma_i8_t48,
                             1 => &self.pipes.gemm_q5k_wmma_i8_t48,
                             2 => &self.pipes.gemm_q6k_wmma_i8_t48,
                             else => &self.pipes.gemm_q8_0_wmma_i8_t48,
@@ -2593,15 +2595,45 @@ pub const ForwardCuda = struct {
                             else => &self.pipes.gemm_q8_0_wmma_i8,
                         };
                         const tail = T % 112;
-                        const use_t16_tail = tuned_tiles and !use_t48 and !use_t64 and !use_t80 and T > 112 and tail > 0 and tail <= 16;
-                        const main_tiles = if (use_t16_tail) T / 112 else ceilDiv(T, 112);
+                        // Long prompts usually end in a partial 112-column tile.
+                        // Reuse the already-compiled short-prompt kernels for that
+                        // remainder instead of making the generic seven-fragment
+                        // kernel compute as many as 96 throwaway columns.
+                        const tail_tile: u32 = if (prefillWmmaTailOn() and tuned_tiles and
+                            !use_t48 and !use_t64 and !use_t80 and T > 112 and tail > 0)
+                            if (tail <= 16) 16 else if (tail <= 48) 48 else if (tail <= 64) 64 else if (tail <= 80 and prefillWmmaT80On()) 80 else 0
+                        else
+                            0;
+                        const use_specialized_tail = tail_tile != 0;
+                        const main_tiles = if (use_specialized_tail) T / 112 else ceilDiv(T, 112);
                         cmd.dispatch(qpipe, .{ ceilDiv(M, 128), main_tiles, 1 }, .{ 256, 1, 1 }, &.{ &w.gpu_buffer, x, &b.act_q8, y }, &q8push, @sizeOf(GemmPush), 0);
-                        if (use_t16_tail) {
-                            const tail_pipe = switch (idx) {
-                                0 => &self.pipes.gemm_q4k_wmma_i8_t16,
-                                1 => &self.pipes.gemm_q5k_wmma_i8_t16,
-                                2 => &self.pipes.gemm_q6k_wmma_i8_t16,
-                                else => &self.pipes.gemm_q8_0_wmma_i8_t16,
+                        if (use_specialized_tail) {
+                            const tail_pipe = switch (tail_tile) {
+                                16 => switch (idx) {
+                                    0 => &self.pipes.gemm_q4k_wmma_i8_t16,
+                                    1 => &self.pipes.gemm_q5k_wmma_i8_t16,
+                                    2 => &self.pipes.gemm_q6k_wmma_i8_t16,
+                                    else => &self.pipes.gemm_q8_0_wmma_i8_t16,
+                                },
+                                48 => switch (idx) {
+                                    0 => if (prefillWmmaQ4DirectOn()) &self.pipes.gemm_q4k_wmma_i8_t48_direct else &self.pipes.gemm_q4k_wmma_i8_t48,
+                                    1 => &self.pipes.gemm_q5k_wmma_i8_t48,
+                                    2 => &self.pipes.gemm_q6k_wmma_i8_t48,
+                                    else => &self.pipes.gemm_q8_0_wmma_i8_t48,
+                                },
+                                64 => switch (idx) {
+                                    0 => &self.pipes.gemm_q4k_wmma_i8_t64,
+                                    1 => &self.pipes.gemm_q5k_wmma_i8_t64,
+                                    2 => &self.pipes.gemm_q6k_wmma_i8_t64,
+                                    else => &self.pipes.gemm_q8_0_wmma_i8_t64,
+                                },
+                                80 => switch (idx) {
+                                    0 => &self.pipes.gemm_q4k_wmma_i8_t80,
+                                    1 => &self.pipes.gemm_q5k_wmma_i8_t80,
+                                    2 => &self.pipes.gemm_q6k_wmma_i8_t80,
+                                    else => &self.pipes.gemm_q8_0_wmma_i8_t80,
+                                },
+                                else => unreachable,
                             };
                             var tail_push = q8push;
                             tail_push.x_offset = (T - tail) * K * 4;
@@ -4543,6 +4575,19 @@ fn prefillWmmaT80On() bool {
     const v = std.posix.getenv("ZINC_PREFILL_WMMA_T80") orelse return is_rocm;
     return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
         std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no"));
+}
+
+/// Reuse exact short-prompt WMMA shapes for the final partial tile of a long
+/// prompt. Measured ROCm default; retain an opt-out for other gfx12 revisions.
+fn prefillWmmaTailOn() bool {
+    const v = std.posix.getenv("ZINC_PREFILL_WMMA_TAIL") orelse return is_rocm;
+    return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
+        std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no"));
+}
+
+/// Direct Q4_K fragment loads reduce LDS pressure for the 48-column tile.
+fn prefillWmmaQ4DirectOn() bool {
+    return envFlag("ZINC_PREFILL_WMMA_Q4_DIRECT", is_rocm);
 }
 
 /// Q8_0 prefill tensor-core GEMM for shared-expert dense projections. DEFAULT-ON;

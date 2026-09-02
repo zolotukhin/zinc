@@ -63,6 +63,8 @@ available as correctness/performance A/B opt-outs:
 - `ZINC_PREFILL_Q8_REUSE=0`
 - `ZINC_PREFILL_WMMA_TILES=0`
 - `ZINC_PREFILL_WMMA_T80=0`
+- `ZINC_PREFILL_WMMA_TAIL=0`
+- `ZINC_PREFILL_WMMA_Q4_DIRECT=0`
 - `ZINC_QWEN_MOE_BATCHED=0`
 - `ZINC_ATTN_V2=0`
 - `ZINC_SSM_PREPARED=0`
@@ -89,12 +91,13 @@ available as correctness/performance A/B opt-outs:
 
 The Qwen 3.8 decode path uses packed Q8 activations for the hot Q4_K, Q5_K,
 and Q6_K projections, paired projection kernels where the shapes permit it, a
-prepared wave32 column scan for the recurrent SSM state, and a two-stage GPU
-argmax. RMS normalization and Q8 activation packing share one wide per-token
-kernel in prefill and decode, avoiding a second activation read and launch. The
-80-column WMMA tile covers the long-draft prompt shape without padding it to a
-substantially larger tile. All are ROCm defaults only; setting the corresponding
-variable to `0` restores the preceding path for comparison.
+prepared wave32 column scan for the recurrent SSM state, an ILP-unrolled
+single-query attention kernel, and a two-stage GPU argmax. RMS normalization
+and Q8 activation packing share one wide per-token kernel in prefill and decode,
+avoiding a second activation read and launch. Shape-specific WMMA tiles cover
+short prompts and long-prompt tails without padding them to a substantially
+larger tile. All are ROCm defaults only; setting the corresponding variable to
+`0` restores the preceding path for comparison.
 
 Qwen 3.6 MoE prefill uses the native token-batched Q4_K/Q5_K/Q6_K expert
 kernels. CUDA's grouped tensor-core expert path is not dispatched by the ROCm
@@ -105,6 +108,10 @@ build; its compatibility symbols are intentionally inert.
 Use the reusable-server performance suite for claims. It runs one engine at a
 time, uses the same GGUF and scenario matrix, discards a warmup, and reports the
 median of measured runs:
+
+The RDNA runner applies the same stable host policy before either engine: PCIe
+ASPM is set to performance and the discrete GPU's memory DPM policy is locked
+high. This prevents an idle server from changing clocks between phases.
 
 ```bash
 source .env
