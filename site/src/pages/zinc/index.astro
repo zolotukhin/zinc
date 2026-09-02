@@ -60,20 +60,20 @@ const cudaTarget = targetById('cuda');
 const intelTarget = targetById('intel');
 const metalTarget = targetById('metal');
 const rdna35 = modelById(rdnaTarget, 'qwen36-35b-a3b-q4k-xl');
-const rdnaRocmMuse = modelById(rdnaRocmTarget, 'muse-glimmer-30b-q4k-m');
+const rdnaRocmQwen38 = modelById(rdnaRocmTarget, 'qwen38-27b-q4k-m');
 const metal35 = modelById(metalTarget, 'qwen36-35b-a3b-q4k-xl');
 
 const rdna35Decode = metricMedian(rdna35?.zinc?.decode_tps);
 const rdna35BaselineDecode = metricMedian(rdna35?.baseline?.decode_tps);
-const rdnaRocmMuseDecode = metricMedian(rdnaRocmMuse?.zinc?.decode_tps);
-const rdnaRocmMuseBaselineDecode = metricMedian(rdnaRocmMuse?.baseline?.decode_tps);
-const rdnaRocmMusePrefill = metricMedian(rdnaRocmMuse?.zinc?.prefill_tps);
-const rdnaRocmMuseBaselinePrefill = metricMedian(rdnaRocmMuse?.baseline?.prefill_tps);
+const rdnaRocmQwen38Decode = metricMedian(rdnaRocmQwen38?.zinc?.decode_tps);
+const rdnaRocmQwen38BaselineDecode = metricMedian(rdnaRocmQwen38?.baseline?.decode_tps);
+const rdnaRocmQwen38Prefill = metricMedian(rdnaRocmQwen38?.zinc?.prefill_tps);
+const rdnaRocmQwen38BaselinePrefill = metricMedian(rdnaRocmQwen38?.baseline?.prefill_tps);
 const metal35Decode = metricMedian(metal35?.zinc?.decode_tps);
 
 const homeDescription = `Run GGUF models locally with ZINC. Use Vulkan or ROCm on AMD Radeon, Vulkan on Intel Arc, Metal on Apple Silicon, or the experimental CUDA backend on NVIDIA RTX.`;
 const appDescription = `A Zig inference engine for running GGUF models on consumer GPUs, with Vulkan, ROCm, Metal, and experimental CUDA backends.`;
-const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 640 GB/s), ZINC publishes independent Vulkan and ROCm server comparisons against llama.cpp. Vulkan reaches ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B (${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp). The ROCm Muse Glimmer 30B run reaches ${formatTokNumber(rdnaRocmMuseDecode)} tok/s decode (${formatMultiplier(rdnaRocmMuseDecode, rdnaRocmMuseBaselineDecode)}) and ${formatTokNumber(rdnaRocmMusePrefill)} tok/s prefill (${formatMultiplier(rdnaRocmMusePrefill, rdnaRocmMuseBaselinePrefill)}), with ZINC ahead in all four published workloads. On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
+const performanceAnswer = `On the Radeon AI PRO R9700 (32GB, 640 GB/s), ZINC publishes independent Vulkan and ROCm server comparisons against llama.cpp. Vulkan reaches ${formatTokNumber(rdna35Decode)} tok/s on Qwen3.6-35B-A3B (${formatMultiplier(rdna35Decode, rdna35BaselineDecode)} llama.cpp). On ROCm, Qwen 3.8 27B reaches ${formatTokNumber(rdnaRocmQwen38Decode)} tok/s decode versus ${formatTokNumber(rdnaRocmQwen38BaselineDecode)}, and ${formatTokNumber(rdnaRocmQwen38Prefill)} tok/s prefill versus ${formatTokNumber(rdnaRocmQwen38BaselinePrefill)}, with ZINC ahead in all four workloads against the latest upstream llama.cpp build used for the run. On the current Apple Silicon validation box, a Mac Studio (Mac16,9) with Apple M4 Max, 40-core GPU, and 64 GB unified memory, Qwen3.6-35B-A3B measures ${formatTokNumber(metal35Decode)} tok/s decode in the Metal benchmark.`;
 
 function ratioX(zinc: number | null | undefined, baseline: number | null | undefined) {
   if (zinc == null || baseline == null || Number.isNaN(zinc) || Number.isNaN(baseline) || baseline <= 0) return null;
@@ -149,7 +149,7 @@ const rdnaRocmSuccessfulCount = rdnaRocmTarget?.summary?.successful_models ?? 0;
 const rdnaRocmDecodeWins = rdnaRocmBoard.rows.filter((row) => (ratioX(row.zincDecode, row.baselineDecode) ?? 0) >= 1).length;
 const rdnaRocmPrefillWins = rdnaRocmBoard.rows.filter((row) => (ratioX(row.zincPrefill, row.baselinePrefill) ?? 0) >= 1).length;
 const rdnaRocmOverallWins = rdnaRocmBoard.rows.filter((row) => (row.overallPct ?? 0) >= 100).length;
-const rdnaRocmMuseScenarioWins = (rdnaRocmMuse?.scenarios ?? []).filter((scenario: any) =>
+const rdnaRocmQwen38ScenarioWins = (rdnaRocmQwen38?.scenarios ?? []).filter((scenario: any) =>
   (metricMedian(scenario.zinc?.decode_tps) ?? 0) > (metricMedian(scenario.baseline?.decode_tps) ?? Number.POSITIVE_INFINITY)
   && (metricMedian(scenario.zinc?.prefill_tps) ?? 0) > (metricMedian(scenario.baseline?.prefill_tps) ?? Number.POSITIVE_INFINITY)
 ).length;
@@ -177,9 +177,9 @@ const amdBackends = [
     decodeWins: rdnaRocmDecodeWins,
     prefillWins: rdnaRocmPrefillWins,
     overallWins: rdnaRocmOverallWins,
-    headline: formatTokNumber(rdnaRocmMuseDecode, 1),
-    headlineLabel: 'Muse decode tok/s',
-    headlineNote: `${formatTokNumber(rdnaRocmMuseBaselineDecode, 1)} in llama.cpp`,
+    headline: formatTokNumber(rdnaRocmQwen38Decode, 1),
+    headlineLabel: 'Qwen 3.8 decode tok/s',
+    headlineNote: `${formatTokNumber(rdnaRocmQwen38BaselineDecode, 1)} in latest llama.cpp`,
   },
 ];
 
@@ -195,8 +195,8 @@ const platformCards = [
     title: 'AMD Radeon',
     backend: 'ROCm',
     status: 'Supported',
-    metric: `Muse wins ${rdnaRocmMuseScenarioWins}/4 workloads`,
-    note: `${rdnaRocmSuccessfulCount}/${rdnaRocmModelCount} model rows complete on gfx1201.`,
+    metric: `${rdnaRocmDecodeWins}/${rdnaRocmModelCount} decode wins`,
+    note: `${rdnaRocmSuccessfulCount}/${rdnaRocmModelCount} model rows complete; Qwen 3.8 wins ${rdnaRocmQwen38ScenarioWins}/4 workloads.`,
   },
   {
     title: 'Apple Silicon',
@@ -377,18 +377,18 @@ const jsonLd = {
         hidden={index !== 0}
       >
         {backend.id === 'rocm' && (
-          <aside class="muse-callout">
+          <aside class="result-callout">
             <div>
-              <p class="section-kicker">New: Muse Glimmer 30B</p>
-              <strong>ZINC is ahead in all four ROCm workloads.</strong>
+              <p class="section-kicker">Latest: Qwen 3.8 27B</p>
+              <strong>ZINC is ahead of the latest upstream llama.cpp build in all four workloads.</strong>
             </div>
-            <p><b>{formatTok(rdnaRocmMuseDecode, 2)}</b> decode vs {formatTok(rdnaRocmMuseBaselineDecode, 2)} · <b>{formatTok(rdnaRocmMusePrefill, 1)}</b> prefill vs {formatTok(rdnaRocmMuseBaselinePrefill, 1)}</p>
+            <p><b>{formatTok(rdnaRocmQwen38Decode, 2)}</b> decode vs {formatTok(rdnaRocmQwen38BaselineDecode, 2)} · <b>{formatTok(rdnaRocmQwen38Prefill, 1)}</b> prefill vs {formatTok(rdnaRocmQwen38BaselinePrefill, 1)}</p>
           </aside>
         )}
 
         <div class="backend-runline">
           <strong>{backend.label}</strong>
-          <span>{formatRefreshDate(backend.target?.generated_at)} · reusable servers · median of 3 runs after warmup</span>
+          <span>{formatRefreshDate(backend.target?.generated_at)} · reusable servers · median of {backend.target?.methodology?.runs ?? 3} runs after {backend.target?.methodology?.warmup_runs ?? 1} warmup</span>
         </div>
 
         <div class="perf-stats">
@@ -806,7 +806,7 @@ const jsonLd = {
     margin: 0 0 var(--space-sm);
   }
 
-  .muse-callout {
+  .result-callout {
     display: grid;
     grid-template-columns: minmax(220px, 0.85fr) minmax(300px, 1.15fr);
     align-items: center;
@@ -818,17 +818,17 @@ const jsonLd = {
     background: color-mix(in srgb, var(--color-accent) 8%, var(--color-bg-alt));
   }
 
-  .muse-callout strong {
+  .result-callout strong {
     font-size: 1.05rem;
   }
 
-  .muse-callout p {
+  .result-callout p {
     margin: 0;
     color: var(--color-text-muted);
     font-size: 0.88rem;
   }
 
-  .muse-callout p b {
+  .result-callout p b {
     color: var(--color-text);
   }
 
@@ -1171,7 +1171,7 @@ const jsonLd = {
     }
 
     .amd-backend-tabs,
-    .muse-callout {
+    .result-callout {
       grid-template-columns: 1fr;
     }
 

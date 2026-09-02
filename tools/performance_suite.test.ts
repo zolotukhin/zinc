@@ -6,6 +6,7 @@ import {
   buildComparison,
   buildMeasurementPhases,
   buildZincOpenAiPayload,
+  benchmarkStatisticsNote,
   benchmarkFailureReason,
   canonicalModelIdFromPath,
   collectRemoteZincTuningEnv,
@@ -45,6 +46,13 @@ import {
   validateZincBackend,
   zincServerTimingWaitSeconds,
 } from "./performance_suite.mjs";
+
+test("benchmark methodology reports the configured sample counts", () => {
+  expect(benchmarkStatisticsNote(5, 1)).toBe(
+    "Statistics: one warmup pass is discarded, then 5 measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
+  );
+  expect(benchmarkStatisticsNote(1, 2)).toContain("2 warmup passes are discarded, then one measured run is collected");
+});
 
 test("parseArgs reads suite options", () => {
   const args = parseArgs([

@@ -57,6 +57,16 @@ export function parseDotEnv(text) {
   return env;
 }
 
+export function benchmarkStatisticsNote(runs, warmupRuns) {
+  const warmupText = warmupRuns === 1
+    ? "one warmup pass is"
+    : `${warmupRuns} warmup passes are`;
+  const runText = runs === 1
+    ? "one measured run is"
+    : `${runs} measured runs are`;
+  return `Statistics: ${warmupText} discarded, then ${runText} collected. Published prefill, decode, end-to-end throughput, and latency values are medians.`;
+}
+
 async function readDotEnv(dotEnvPath) {
   try {
     return parseDotEnv(await fs.readFile(dotEnvPath, "utf8"));
@@ -3020,7 +3030,7 @@ async function runMetalTarget(args) {
         "Baseline backend: llama.cpp Metal (-ngl 999) on the same Apple Silicon machine — the same backend as ZINC.",
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
-        "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
+        benchmarkStatisticsNote(args.runs, args.warmupRuns),
         "Model resolution: managed catalog models are loaded from the ZINC model cache when available; explicit GGUF paths are preserved when provided.",
         "Run hygiene: published local runs assume no competing workload is saturating CPU, memory bandwidth, or GPU.",
       ],
@@ -3436,7 +3446,7 @@ async function runRdnaTarget(args) {
         `Baseline backend: llama.cpp ${/rocm/i.test(args.rdnaLlamaDevice ?? "") ? "ROCm" : "Vulkan"} (${args.rdnaLlamaDevice ?? "--device Vulkan1"}) on the same node and the same model file.`,
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable single-slot llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
-        "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
+        benchmarkStatisticsNote(args.runs, args.warmupRuns),
         "Execution order: the harness records the full ZINC scenario matrix before starting the llama.cpp baseline phase, so only one inference engine owns the GPU during measurement.",
         "Power policy: before either engine starts, the harness selects PCIe ASPM performance mode and locks the discrete AMD GPU's memory DPM policy high to prevent idle-clock drift between runs.",
         "Run hygiene: published RDNA runs assume a clean node with no competing ZINC, llama.cpp, or other GPU workloads.",
@@ -3761,7 +3771,7 @@ async function runCudaTarget(args) {
         "Baseline backend: llama.cpp CUDA on the same host, the same UUID-pinned GPU as ZINC.",
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
-        "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
+        benchmarkStatisticsNote(args.runs, args.warmupRuns),
         "Execution order: the harness records the full ZINC scenario matrix before starting the llama.cpp baseline phase, so only one inference engine owns the GPU during measurement.",
         "Run hygiene: published CUDA runs assume a clean node with no competing ZINC, llama.cpp, or other GPU workloads.",
       ],
@@ -3964,7 +3974,7 @@ async function runIntelTarget(args) {
         "Baseline backend: llama.cpp Vulkan (--device Vulkan0) on the same node — the same backend as ZINC.",
         "Baseline path: launch llama.cpp against the same model file, preferring one reusable llama-server per model across the full scenario matrix and falling back to llama-cli when the server path is unavailable or fails to start.",
         "Scenarios: Quick Chat, Coding Review, Incident Context, and Long Coding Draft. The prompts are real-world chat, code-review, support-context, and coding-plan workloads instead of synthetic factual completions.",
-        "Statistics: one warmup pass is discarded, then three measured runs are collected. Published prefill, decode, end-to-end throughput, and latency values are medians.",
+        benchmarkStatisticsNote(args.runs, args.warmupRuns),
         "Execution order: the harness records the full ZINC scenario matrix before starting the llama.cpp baseline phase, so only one inference engine owns the GPU during measurement.",
         "Run hygiene: published Intel runs assume a clean node with no competing ZINC, llama.cpp, or other GPU workloads.",
       ],

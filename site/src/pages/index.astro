@@ -9,13 +9,17 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
   .slice(0, 5);
 
 const rocmTarget = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
-const muse = rocmTarget?.models?.find((model: any) => model.id === 'muse-glimmer-30b-q4k-m');
+const qwen38 = rocmTarget?.models?.find((model: any) => model.id === 'qwen38-27b-q4k-m');
 const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
 const formatRate = (value: number | null) => value == null ? 'n/a' : value.toFixed(1);
-const museDecode = median(muse?.zinc?.decode_tps);
-const museLlamaDecode = median(muse?.baseline?.decode_tps);
-const musePrefill = median(muse?.zinc?.prefill_tps);
-const museLlamaPrefill = median(muse?.baseline?.prefill_tps);
+const qwenDecode = median(qwen38?.zinc?.decode_tps);
+const qwenLlamaDecode = median(qwen38?.baseline?.decode_tps);
+const qwenPrefill = median(qwen38?.zinc?.prefill_tps);
+const qwenLlamaPrefill = median(qwen38?.baseline?.prefill_tps);
+const qwenWorkloads = qwen38?.scenarios?.length ?? 0;
+const qwenWins = (qwen38?.scenarios ?? []).filter((scenario: any) =>
+  (scenario.comparison?.overall_pct_of_baseline ?? 0) >= 100
+).length;
 ---
 
 <BaseLayout
@@ -41,8 +45,8 @@ const museLlamaPrefill = median(muse?.baseline?.prefill_tps);
       <p>Run GGUF models on AMD Radeon with Vulkan or ROCm, Intel Arc with Vulkan, or Apple Silicon with Metal. NVIDIA CUDA support is experimental.</p>
       <div class="latest-result">
         <span>Latest ROCm result · Radeon AI PRO R9700</span>
-        <strong>Muse Glimmer 30B leads llama.cpp in all four workloads</strong>
-        <p>{formatRate(museDecode)} vs {formatRate(museLlamaDecode)} tok/s decode · {formatRate(musePrefill)} vs {formatRate(museLlamaPrefill)} tok/s prefill</p>
+        <strong>Qwen 3.8 27B leads the latest upstream llama.cpp build in {qwenWins}/{qwenWorkloads} workloads</strong>
+        <p>{formatRate(qwenDecode)} vs {formatRate(qwenLlamaDecode)} tok/s decode · {formatRate(qwenPrefill)} vs {formatRate(qwenLlamaPrefill)} tok/s prefill</p>
       </div>
       <div class="project-links">
         <a href="/zinc/">Read about ZINC &rarr;</a>

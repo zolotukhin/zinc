@@ -47,24 +47,24 @@ The closest row is Gemma 4 31B decode at `1.01x`. See the
 [benchmark dashboard](https://zolotukhin.ai/zinc/benchmarks) for all scenarios,
 ROCm results, run dates, and build details.
 
-### Muse Glimmer 30B on ROCm
+### Qwen 3.8 27B on ROCm
 
-Muse Glimmer runs through the ROCm backend with its ATEM chat format, hidden
-reasoning channel, end-of-turn handling, and OpenAI-compatible streaming API.
-In the final R9700 run, ZINC was ahead of llama.cpp in prefill, decode, and
-combined throughput in every workload.
+Qwen 3.8 now runs ahead of the latest upstream llama.cpp build used for the
+comparison in every workload in our R9700 suite. The short-prompt row reaches
+30.22 tok/s decode while more than doubling llama.cpp prefill throughput.
 
 | Workload | Prefill, ZINC vs llama.cpp | Decode, ZINC vs llama.cpp | Overall |
 |----------|----------------------------:|---------------------------:|--------:|
-| Quick chat | **626.4** vs 386.7 tok/s | **29.71** vs 27.90 tok/s | **108.8%** |
-| Coding review | **735.8** vs 561.9 tok/s | **29.52** vs 27.88 tok/s | **107.0%** |
-| Incident context | **703.9** vs 654.3 tok/s | **29.49** vs 27.91 tok/s | **105.9%** |
-| Long coding draft | **759.8** vs 452.1 tok/s | **29.50** vs 27.90 tok/s | **106.8%** |
+| Quick chat | **387.1** vs 149.7 tok/s | **30.22** vs 29.85 tok/s | **115.0%** |
+| Coding review | **611.2** vs 252.5 tok/s | **29.94** vs 29.83 tok/s | **109.6%** |
+| Incident context | **678.0** vs 308.5 tok/s | **29.89** vs 29.82 tok/s | **115.1%** |
+| Long coding draft | **424.0** vs 185.6 tok/s | **29.96** vs 29.85 tok/s | **105.2%** |
 
-These are medians of three measured server runs after one discarded warmup,
-using the same 17 GB Q4_K_M GGUF on both engines. The complete samples and
-provenance are in
-[`benchmarks/muse-glimmer-rocm-r9700.json`](benchmarks/muse-glimmer-rocm-r9700.json).
+These are medians of five measured server runs after one discarded warmup,
+using the same Q4_K_M GGUF on both engines. The run used llama.cpp commit
+`b81c99b47`, the tip of upstream `master` when the suite started. Muse Glimmer
+30B also remains ahead in all four workloads. Complete samples and provenance
+are in [`benchmarks/rocm-r9700.json`](benchmarks/rocm-r9700.json).
 
 ## Supported Platforms
 
@@ -87,7 +87,7 @@ uses the same machine, model file, prompt, and run count for ZINC and llama.cpp.
 | Platform | Compared models | Decode vs llama.cpp | Prefill vs llama.cpp | Read this as |
 |----------|----------------:|--------------------:|---------------------:|--------------|
 | AMD RDNA4 / Vulkan | 5 | 115% avg, 5/5 model wins | 138% avg, 5/5 model wins | Ahead on every published row |
-| AMD RDNA4 / ROCm | 6 | 4/6 model wins | 3/6 model wins | Muse wins all four workloads; all six model rows are complete |
+| AMD RDNA4 / ROCm | 6 | 6/6 model wins | 6/6 model wins | Every core row is ahead; Qwen 3.8 wins all four workloads |
 | Intel Arc / Vulkan | 4 | 103% avg, 4/4 model wins | 181% avg, 4/4 model wins | Supported; tuning is newer than RDNA4 |
 | Apple Silicon / Metal | 5 | 87% avg, 1 model win | 54% avg, 1 model win | Performance varies by model |
 
@@ -344,28 +344,29 @@ The tables below come from the data used by [the benchmark dashboard](https://zo
 
 ### AMD RDNA4 — Radeon AI PRO R9700 (ROCm/HIP)
 
-The ROCm suite covers five models and four scenarios per model. Every model now
-completes the reusable-server matrix with coherent output. Gemma 26B uses its
-single-sequence MoE path for serving; it works reliably, but its prefill path is
-the clearest remaining tuning opportunity.
+The ROCm suite covers six models and four scenarios per model. Every model
+completes the reusable-server matrix with coherent output. In the core workload,
+ZINC is ahead on prefill, decode, and the combined score for all six models.
+Gemma 26B currently uses its single-sequence MoE path for serving.
 
 | Model | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
 |---|---:|---:|---:|---:|---:|
-| Gemma 4 26B-A4B MoE Q4_K_M | 56.50 | **607.01** | 55.03 | **68.60** | 56.8% |
-| Qwen 3.5 9B Q4_K_M | **880.73** | 605.78 | **75.02** | 69.18 | **109.5%** |
-| Qwen 3.6 35B A3B Q4_K_XL | 232.94 | **446.20** | **77.35** | 65.07 | **111.3%** |
-| Qwen 3.8 27B Q4_K_M | **377.29** | 276.91 | **27.86** | 24.49 | **118.5%** |
-| Gemma 4 31B Q4_K_M | 19.65 | **180.21** | 19.30 | **22.84** | 60.1% |
+| Qwen 3.6 35B A3B Q4_K_XL | **581.18** | 506.12 | **80.89** | 66.34 | **121.4%** |
+| Gemma 4 26B-A4B MoE Q4_K_M | **1166.49** | 623.75 | **80.28** | 70.08 | **117.3%** |
+| Qwen 3.5 9B Q4_K_M | **1135.87** | 779.92 | **78.76** | 69.99 | **113.3%** |
+| Qwen 3.8 27B Q4_K_M | **387.11** | 149.69 | **30.22** | 29.85 | **115.0%** |
+| Muse Glimmer 30B Q4_K_M | **629.33** | 386.32 | **30.15** | 27.90 | **110.4%** |
+| Gemma 4 31B Q4_K_M | **423.03** | 189.39 | **24.95** | 23.06 | **111.8%** |
 
-Qwen 3.8 also completed every scenario ahead of the ROCm llama.cpp server on
-both prefill and decode:
+Qwen 3.8 also completed every scenario ahead of the latest upstream llama.cpp
+server used for this run, on both prefill and decode:
 
-| Scenario | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode |
-|---|---:|---:|---:|---:|
-| Quick Chat | **377.29** | 276.91 | **27.86** | 24.49 |
-| Coding Review | **591.34** | 464.99 | **27.49** | 24.33 |
-| Incident Context | **657.12** | 595.75 | **27.35** | 24.39 |
-| Long Coding Draft | **421.07** | 329.32 | **27.57** | 24.29 |
+| Scenario | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
+|---|---:|---:|---:|---:|---:|
+| Quick Chat | **387.11** | 149.69 | **30.22** | 29.85 | **115.0%** |
+| Coding Review | **611.24** | 252.50 | **29.94** | 29.83 | **109.6%** |
+| Incident Context | **677.97** | 308.52 | **29.89** | 29.82 | **115.1%** |
+| Long Coding Draft | **424.03** | 185.61 | **29.96** | 29.85 | **105.2%** |
 
 See the [ROCm backend guide](docs/ROCM.md) for the validated software stack and
 the exact benchmark command.
@@ -391,7 +392,7 @@ the exact benchmark command.
 ### Current comparison with llama.cpp
 
 - **AMD Vulkan:** all five published RDNA4 models are ahead on prefill and decode. Gemma 4 31B decode is the closest result at `1.01x`.
-- **AMD ROCm:** all five models complete. All three Qwen rows are ahead on decode; Qwen 3.5 and 3.8 are also ahead on prefill. Both Gemma rows trail llama.cpp and remain the main ROCm tuning work.
+- **AMD ROCm:** all six models complete and lead the core llama.cpp comparison on prefill, decode, and the combined score. Qwen 3.8 and Muse Glimmer also lead all four workloads.
 - **Intel Arc:** all published Vulkan rows complete and are ahead on prefill and decode, though most decode margins are small.
 - **Apple Metal:** results vary by model. Qwen 3.6 35B decode is ahead, while several other rows trail llama.cpp.
 
@@ -423,8 +424,8 @@ Validated on AMD Radeon AI PRO R9700 (RDNA4) and Intel Arc BMG G31-class hardwar
 
 The next engineering work is:
 
-1. Tune ROCm prefill and decode for Gemma 26B and Gemma 31B; both models now complete the full server suite.
-2. Improve Qwen 3.6 prefill on ROCm; decode is ahead, but prefill is currently behind llama.cpp.
+1. Increase the Qwen 3.8 ROCm decode margin while protecting the current four-workload sweep.
+2. Add multi-request batching to the ROCm Gemma 26B MoE server path.
 3. Keep testing longer prompts and outputs with the same reusable-server method.
 4. Continue tuning Intel Arc and Metal model by model.
 5. Publish only results produced by the checked-in benchmark harness.

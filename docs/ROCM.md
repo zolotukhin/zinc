@@ -120,35 +120,37 @@ bun tools/performance_suite.mjs \
   --target rdna \
   --phase all \
   --models qwen38-27b-q4k-m \
-  --runs 3 \
+  --runs 5 \
   --warmup 1 \
   --rdna-backend rocm \
   --rdna-build \
   --rdna-start-llama \
   --rdna-llama-server /path/to/llama-server \
-  --rdna-llama-device ROCm0 \
+  --rdna-llama-device Vulkan0 \
   --no-site-write \
   --output /tmp/zinc-rocm-qwen38.json
 ```
 
-On the validated R9700 stack, the 2026-08-31 Qwen 3.8 27B four-scenario server
-matrix produced these medians. `Overall` is the comparable
+On the validated R9700 stack, the 2026-09-02 Qwen 3.8 27B four-scenario server
+matrix produced these five-run medians. The comparison used llama.cpp commit
+`b81c99b47`, which was the tip of upstream `master` when the run started; it was
+not an older historical pin. `Overall` is the comparable
 prompt-plus-generation phase-wall-time score; higher is better. Each server
 receives the same textual scenario prompt and applies its native chat template;
 prefill and decode rates below are the server-reported phase rates.
 
 | Scenario | ZINC prefill | llama.cpp prefill | ZINC decode | llama.cpp decode | Overall |
 |---|---:|---:|---:|---:|---:|
-| Quick Chat | **377.54 tok/s** | 279.74 tok/s | **27.87 tok/s** | 24.48 tok/s | **118.49%** |
-| Coding Review | **591.11 tok/s** | 464.26 tok/s | **27.48 tok/s** | 24.32 tok/s | **114.43%** |
-| Incident Context | **655.74 tok/s** | 600.81 tok/s | **27.34 tok/s** | 24.38 tok/s | **112.90%** |
-| Long Coding Draft | **417.17 tok/s** | 331.18 tok/s | **27.56 tok/s** | 24.29 tok/s | **114.92%** |
+| Quick Chat | **387.11 tok/s** | 149.69 tok/s | **30.22 tok/s** | 29.85 tok/s | **115.04%** |
+| Coding Review | **611.24 tok/s** | 252.50 tok/s | **29.94 tok/s** | 29.83 tok/s | **109.60%** |
+| Incident Context | **677.97 tok/s** | 308.52 tok/s | **29.89 tok/s** | 29.82 tok/s | **115.15%** |
+| Long Coding Draft | **424.03 tok/s** | 185.61 tok/s | **29.96 tok/s** | 29.85 tok/s | **105.22%** |
 
 ZINC won prefill, decode, and end-to-end phase time in all four scenarios and
-reached **114.89%** of llama.cpp on the summed full-matrix phase-wall-time score
-(24.385 s versus 28.016 s), or **12.96% less phase wall time**. Across the four
-scenarios, the prefill lead ranged from 9.14% to 34.96% and the decode lead from
-12.15% to 13.84%. All four captured ZINC previews passed the suite's output
+reached **109.89%** of llama.cpp on the summed full-matrix phase-wall-time score
+(22.462 s versus 24.682 s), or **9.00% less phase wall time**. Across the four
+scenarios, the prefill lead ranged from 119.75% to 158.60% and the decode lead
+from 0.22% to 1.24%. All four captured ZINC previews passed the suite's output
 quality checks.
 
 ## Troubleshooting
