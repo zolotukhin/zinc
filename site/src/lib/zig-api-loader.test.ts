@@ -77,6 +77,25 @@ describe('loadZigApi', () => {
     expect(api.modules.some(module => module.href === '/zinc/docs/zig-api/loader/')).toBe(true);
   }, 30000);
 
+  it('gives every generated module and symbol a unique stable route', async () => {
+    const api = await loadZigApi();
+    const moduleHrefs = api.modules.map(module => module.href);
+
+    expect(new Set(moduleHrefs).size).toBe(api.moduleCount);
+    expect(api.modules.find(module => module.sourcePath === 'src/cuda/buffer.zig')?.href)
+      .toBe('/zinc/docs/zig-api/buffer/');
+    expect(api.modules.find(module => module.sourcePath === 'src/metal/buffer.zig')?.href)
+      .toBe('/zinc/docs/zig-api/metal-buffer/');
+    expect(api.modules.find(module => module.sourcePath === 'src/vulkan/buffer.zig')?.href)
+      .toBe('/zinc/docs/zig-api/vulkan-buffer/');
+
+    for (const module of api.modules) {
+      expect(module.symbols.every(symbol => symbol.href.startsWith(`${module.href}#`))).toBe(true);
+      expect(module.symbols.flatMap(symbol => symbol.members)
+        .every(member => member.href.startsWith(`${module.href}#`))).toBe(true);
+    }
+  }, 30000);
+
   it('extracts struct layout metadata for rendered API docs', async () => {
     const api = await loadZigApi();
     const gguf = api.modules.find(module => module.slug === 'gguf');

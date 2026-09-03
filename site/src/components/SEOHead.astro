@@ -4,6 +4,7 @@ interface Props {
   description: string;
   keywords?: string;
   canonicalUrl?: string;
+  robots?: string;
   ogType?: string;
   ogImage?: string;
   ogImageAlt?: string;
@@ -19,7 +20,8 @@ const {
   title,
   description,
   keywords,
-  canonicalUrl = Astro.url.href,
+  canonicalUrl,
+  robots = 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1',
   ogType = 'website',
   ogImage = '/og-image-v2.png',
   ogImageAlt,
@@ -31,10 +33,14 @@ const {
   jsonLd,
 } = Astro.props;
 
+const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
+const canonicalPath = Astro.url.pathname === '/'
+  ? '/'
+  : `${Astro.url.pathname.replace(/\/$/, '')}/`;
+const resolvedCanonicalUrl = canonicalUrl ?? `${siteUrl}${canonicalPath}`;
 const fullTitle = title === 'Stepan Zolotukhin'
   ? 'Stepan Zolotukhin — zolotukhin.ai'
   : title.includes('zolotukhin') ? title : `${title} — zolotukhin.ai`;
-const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
 const ogImageUrl = ogImage.startsWith('http') ? ogImage : `${siteUrl}${ogImage}`;
 const defaultOgImagePath = '/og-image-v2.png';
 const usingDefaultOgImage = ogImage === defaultOgImagePath || ogImageUrl === `${siteUrl}${defaultOgImagePath}`;
@@ -51,12 +57,13 @@ const resolvedOgImageHeight = ogImageHeight ?? (usingDefaultOgImage ? 442 : unde
 <title>{fullTitle}</title>
 <meta name="description" content={description} />
 {keywords && <meta name="keywords" content={keywords} />}
-<link rel="canonical" href={canonicalUrl} />
+<meta name="robots" content={robots} />
+<link rel="canonical" href={resolvedCanonicalUrl} />
 
 <!-- Open Graph -->
 <meta property="og:title" content={title} />
 <meta property="og:description" content={description} />
-<meta property="og:url" content={canonicalUrl} />
+<meta property="og:url" content={resolvedCanonicalUrl} />
 <meta property="og:type" content={ogType} />
 <meta property="og:image" content={ogImageUrl} />
 <meta property="og:image:secure_url" content={ogImageUrl} />
@@ -70,7 +77,7 @@ const resolvedOgImageHeight = ogImageHeight ?? (usingDefaultOgImage ? 442 : unde
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:site" content="@zolotukhin_ai" />
 <meta name="twitter:creator" content="@zolotukhin_ai" />
-<meta name="twitter:url" content={canonicalUrl} />
+<meta name="twitter:url" content={resolvedCanonicalUrl} />
 <meta name="twitter:title" content={title} />
 <meta name="twitter:description" content={description} />
 <meta name="twitter:image" content={ogImageUrl} />

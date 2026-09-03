@@ -29,6 +29,16 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /zinc/docs/gpu-reference/    /zinc/docs/amd-gpu-reference/            301
 
 # Removed docs (planning/debug/renamed) -> nearest relevant live page
+/zinc/docs/TURBOQUANT_SPEC           /zinc/docs/turboquant-spec/ 301
+/zinc/docs/TURBOQUANT_SPEC/          /zinc/docs/turboquant-spec/ 301
+/zinc/docs/RDNA4_TUNING              /zinc/docs/rdna4-tuning/    301
+/zinc/docs/RDNA4_TUNING/             /zinc/docs/rdna4-tuning/    301
+/zinc/docs/apple-silicon-metal-enablement/APPLE_METAL_REFERENCE.md   /zinc/docs/apple-metal-reference/   301
+/zinc/docs/apple-silicon-metal-enablement/APPLE_SILICON_REFERENCE.md /zinc/docs/apple-silicon-reference/ 301
+/zinc/docs/rdna4-batched-prefill-2x  /blog/2026-06-05-how-zinc-rdna4-batched-prefill-went-from-42-to-208-tok-s/ 301
+/zinc/docs/rdna4-batched-prefill-2x/ /blog/2026-06-05-how-zinc-rdna4-batched-prefill-went-from-42-to-208-tok-s/ 301
+/zinc/docs/rdna4-performance-journey  /blog/2026-05-09-how-we-made-amd-qwen-inference-faster-than-llama-cpp-in-six-weeks-on-the-radeon-ai-pro-r9700/ 301
+/zinc/docs/rdna4-performance-journey/ /blog/2026-05-09-how-we-made-amd-qwen-inference-faster-than-llama-cpp-in-six-weeks-on-the-radeon-ai-pro-r9700/ 301
 /zinc/docs/zig-api/session          /zinc/docs/zig-api/        301
 /zinc/docs/zig-api/session/         /zinc/docs/zig-api/        301
 /zinc/docs/rdna4-performance-plan   /zinc/docs/rdna4-tuning/   301
@@ -39,3 +49,12 @@ https://www.zolotukhin.ai/*  https://zolotukhin.ai/:splat             301
 /zinc/docs/decode-throughput-plan/  /zinc/benchmarks/          301
 /zinc/docs/qwen35-debug             /zinc/docs/                301
 /zinc/docs/qwen35-debug/            /zinc/docs/                301
+
+# Old relative source links -> the exact source file
+/zinc/docs/build.zig                 https://github.com/zolotukhin/zinc/blob/main/build.zig 301
+/zinc/docs/src/*                     https://github.com/zolotukhin/zinc/blob/main/src/:splat 301
+/zinc/docs/benchmarks/*              https://github.com/zolotukhin/zinc/blob/main/benchmarks/:splat 301
+/zinc/docs/tools/*                   https://github.com/zolotukhin/zinc/blob/main/tools/:splat 301
+
+# Cloudflare email-address obfuscation used to expose this crawlable URL.
+/cdn-cgi/l/email-protection          /about/                    301

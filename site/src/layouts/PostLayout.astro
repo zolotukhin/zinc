@@ -2,6 +2,8 @@
 import BaseLayout from './BaseLayout.astro';
 import Breadcrumbs from '../components/Breadcrumbs.astro';
 import { buildBreadcrumbList } from '../lib/structured-data';
+import { topicHubs } from '../data/topic-hubs';
+import { getTopicSlugsForTags } from '../lib/topic-posts';
 
 interface PostLink {
   slug: string;
@@ -41,7 +43,9 @@ const metaTitle = seoTitle ?? title;
 const metaDescription = seoDescription ?? excerpt;
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, '') ?? 'https://zolotukhin.ai';
-const canonicalUrl = Astro.url.href;
+const canonicalUrl = `${siteUrl}${Astro.url.pathname}`;
+const topicSlugs = getTopicSlugsForTags(tags);
+const relatedTopics = topicHubs.filter((hub) => topicSlugs.includes(hub.slug));
 const xStarters = [
   `Interesting read:`,
   `Worth a look:`,
@@ -75,9 +79,9 @@ const jsonLd = {
         url: siteUrl,
       },
       description: metaDescription,
-      url: Astro.url.href,
+      url: canonicalUrl,
       keywords: keywordList,
-      mainEntityOfPage: Astro.url.href,
+      mainEntityOfPage: canonicalUrl,
     },
     ...(faqs && faqs.length > 0 ? [{
       '@type': 'FAQPage',
@@ -102,6 +106,7 @@ const jsonLd = {
   ogType="article"
   publishedDate={isoDate}
   tags={tags}
+  canonicalUrl={canonicalUrl}
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
@@ -113,6 +118,14 @@ const jsonLd = {
         <div class="tags">
           {tags.map(tag => <span class="tag">{tag}</span>)}
         </div>
+      )}
+      {relatedTopics.length > 0 && (
+        <nav class="post-topics" aria-label="Related topic guides">
+          <span>Topic {relatedTopics.length > 1 ? 'guides' : 'guide'}:</span>
+          {relatedTopics.map((topic) => (
+            <a href={`/topics/${topic.slug}/`}>{topic.shortTitle}</a>
+          ))}
+        </nav>
       )}
       <a
         href={xIntentUrl}
@@ -233,6 +246,22 @@ const jsonLd = {
     color: var(--color-tag-text);
     padding: 0.1em 0.5em;
     border-radius: 3px;
+  }
+
+  .post-topics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.7rem;
+    margin-top: var(--space-sm);
+    font-size: 0.82rem;
+  }
+
+  .post-topics span {
+    color: var(--color-text-muted);
+  }
+
+  .post-topics a {
+    font-weight: 700;
   }
 
   .post-content {

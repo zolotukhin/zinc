@@ -41,7 +41,7 @@ faqs:
 draft: false
 ---
 
-Yesterday's int8 port took every quantized projection in Qwen3.5-9B onto RDNA4's integer matrix core and left one matmul behind. Attention still runs on fp16 WMMA at half the rate of everything around it, which is why it went from 35 percent of ZINC's prefill profile to [43 percent](https://zolotukhin.ai/blog/2026-07-12-int8-wmma-doubles-rdna4-matrix-rate-q4-k-block-scales-take-half-back) without anyone touching it. The obvious next move is to quantize attention too.
+Yesterday's int8 port took every quantized projection in Qwen3.5-9B onto RDNA4's integer matrix core and left one matmul behind. Attention still runs on fp16 WMMA at half the rate of everything around it, which is why it went from 35 percent of ZINC's prefill profile to [43 percent](https://zolotukhin.ai/blog/2026-07-12-int8-wmma-doubles-rdna4-matrix-rate-q4-k-block-scales-take-half-back/) without anyone touching it. The obvious next move is to quantize attention too.
 
 It is not one move. Flash attention has two matmuls, and they want different number formats.
 
@@ -49,7 +49,7 @@ The QK-transpose product takes int8 without much argument, once you deal with a 
 
 ## The scale P needs is already sitting in a register
 
-Start with the part that looks hard and is not. Quantizing an activation tensor normally means a calibration pass: find the max, derive a scale, and pay for a reduction you did not previously need. In an inner loop on RDNA4, where WMMA and vector instructions [share an issue port](https://zolotukhin.ai/blog/2026-07-11-softmax-steals-rdna4-wmma-issue-slots-flash-attention), an extra reduction is not a rounding error in the cost model. It is the cost model.
+Start with the part that looks hard and is not. Quantizing an activation tensor normally means a calibration pass: find the max, derive a scale, and pay for a reduction you did not previously need. In an inner loop on RDNA4, where WMMA and vector instructions [share an issue port](https://zolotukhin.ai/blog/2026-07-11-softmax-steals-rdna4-wmma-issue-slots-flash-attention/), an extra reduction is not a rounding error in the cost model. It is the cost model.
 
 Flash attention hands you the reduction for free. The kernel already tracks a running row maximum `m` and already computes `exp(s - m)` for every score, which means every entry of P is bounded above by 1 by construction. There is no max to find. The scale is a compile-time constant, 127, and the conversion folds into the multiply the softmax was going to issue anyway.
 
@@ -104,7 +104,7 @@ RDNA4 can do this. The matrix core exposes fp8 WMMA variants, and AMD's [WMMA gu
 
 None of the above touches decode, and it is worth being blunt about why. At batch one, both attention matmuls are matrix-vector products. They are limited by how fast the KV cache streams out of VRAM, not by the rate of the matrix core, and doubling a rate that was never the constraint buys nothing. Decode stayed at 39.6 tok/s at short context, exactly as it did after yesterday's int8 GEMM.
 
-What decode gets is a side effect. The int8 K the QK kernel wants is the same int8 K the cache can store. Once the kernel consumes integers, the cache holds integers, and Qwen3.5-9B's 147 KB per token of fp16 KV becomes 74 KB. Against roughly 5.5 GB of Q4_K_M weights, that is nothing at a 2k context and a great deal at 32k, where the cache was 4.8 GB and is now 2.4. Decode at 32k went from about 21 tok/s to about 27, a 1.3x that comes entirely from bytes not read, and it lands right where the [KV-versus-weights crossover post](https://zolotukhin.ai/blog/2026-04-27-the-16k-crossover-where-kv-reads-outweigh-active-weights-on-rdna4-decode) said it would.
+What decode gets is a side effect. The int8 K the QK kernel wants is the same int8 K the cache can store. Once the kernel consumes integers, the cache holds integers, and Qwen3.5-9B's 147 KB per token of fp16 KV becomes 74 KB. Against roughly 5.5 GB of Q4_K_M weights, that is nothing at a 2k context and a great deal at 32k, where the cache was 4.8 GB and is now 2.4. Decode at 32k went from about 21 tok/s to about 27, a 1.3x that comes entirely from bytes not read, and it lands right where the [KV-versus-weights crossover post](https://zolotukhin.ai/blog/2026-04-27-the-16k-crossover-where-kv-reads-outweigh-active-weights-on-rdna4-decode/) said it would.
 
 ## Where the series lands
 

@@ -380,6 +380,95 @@ function moduleHref(slug: string): string {
   return `/zinc/docs/zig-api/${slug}/`;
 }
 
+function sourcePathSlug(sourcePath: string): string {
+  const pathWithoutExtension = sourcePath
+    .replace(/^src\//, '')
+    .replace(/\.zig$/, '');
+  const slug = toSlugPart(pathWithoutExtension);
+  if (!pathWithoutExtension.includes('/')) return `root-${slug || 'module'}`;
+  return slug || 'module';
+}
+
+function qualifiedModuleTitle(module: ZigApiModule): string {
+  const pathParts = module.sourcePath
+    .replace(/^src\//, '')
+    .replace(/\.zig$/, '')
+    .split('/');
+  const parentParts = pathParts.slice(0, -1);
+
+  if (parentParts.length === 0) return `ZINC ${module.title}`;
+
+  const labels = new Map([
+    ['zinc_rt', 'ZINC_RT'],
+    ['cpu_zig', 'T-CPU'],
+    ['ir', 'IR'],
+    ['isa', 'ISA'],
+    ['cuda', 'CUDA'],
+    ['gpu', 'GPU'],
+  ]);
+  const qualifier = parentParts
+    .map(part => labels.get(part) ?? prettyToken(part))
+    .join(' ');
+  const baseTitle = module.title === 'Mod' ? 'Module' : module.title;
+  return `${qualifier} ${baseTitle}`;
+}
+
+function updateModuleRoute(module: ZigApiModule, slug: string): void {
+  module.slug = slug;
+  module.href = moduleHref(slug);
+  for (const symbol of module.symbols) {
+    symbol.href = `${module.href}#${symbol.anchor}`;
+    for (const member of symbol.members) {
+      member.href = `${module.href}#${member.anchor}`;
+    }
+  }
+}
+
+/**
+ * Basename-only routes are pleasant for the common case, but several backends
+ * intentionally use the same filename (buffer.zig, command.zig, graph.zig,
+ * and so on). Keep the already-published basename route attached to the same
+ * deterministic last module while giving every other colliding source file a
+ * path-qualified route. This prevents getStaticPaths() entries from silently
+ * overwriting each other and keeps module, symbol, search, and agent URLs in
+ * agreement.
+ */
+function disambiguateModuleRoutes(modules: ZigApiModule[]): void {
+  const modulesBySlug = new Map<string, ZigApiModule[]>();
+  for (const module of modules) {
+    const matches = modulesBySlug.get(module.slug) ?? [];
+    matches.push(module);
+    modulesBySlug.set(module.slug, matches);
+  }
+
+  const claimedSlugs = new Set(modules.map(module => module.slug));
+
+  for (const [legacySlug, matches] of modulesBySlug) {
+    if (matches.length < 2) continue;
+
+    // Before this fix Astro's duplicate static paths resolved to the last
+    // module in the sorted list. Preserve that public URL to avoid moving the
+    // page Google and existing users already know.
+    const legacyModule = matches[matches.length - 1];
+
+    for (const module of matches) {
+      module.title = qualifiedModuleTitle(module);
+      if (module === legacyModule) continue;
+
+      const routeSlug = sourcePathSlug(module.sourcePath);
+      if (claimedSlugs.has(routeSlug)) {
+        throw new Error(
+          `Unable to create a unique Zig API route for ${module.sourcePath}: ${routeSlug}`
+        );
+      }
+      claimedSlugs.add(routeSlug);
+      updateModuleRoute(module, routeSlug);
+    }
+
+    updateModuleRoute(legacyModule, legacySlug);
+  }
+}
+
 function sourceHref(sourcePath: string, line: number): string {
   return `https://github.com/zolotukhin/zinc/blob/main/${sourcePath}#L${line}`;
 }
@@ -1246,6 +1335,7 @@ ${structModulePaths.map((path, idx) => `const mod${idx} = @import("../${path.rep
     if (a.sectionOrder !== b.sectionOrder) return a.sectionOrder - b.sectionOrder;
     return a.sourcePath.localeCompare(b.sourcePath);
   });
+  disambiguateModuleRoutes(modules);
 
   const sections = modules.reduce<Map<string, ZigApiSection>>((groups, module) => {
     const existing = groups.get(module.sectionSlug);

@@ -4,6 +4,7 @@ const navItems = [
   { href: '/zinc/', label: 'ZINC' },
   { href: '/zinc/benchmarks/', label: 'Benchmarks' },
   { href: '/blog/', label: 'Blog' },
+  { href: '/topics/', label: 'Topics' },
   { href: '/zinc/docs/', label: 'Docs' },
   { href: '/about/', label: 'About' },
 ];
@@ -28,7 +29,7 @@ const isActive = (href: string) => href === '/zinc/'
         </li>
       ))}
       <li class="nav-icons">
-        <a href="mailto:stepan@zolotukhin.ai" aria-label="Email" title="stepan@zolotukhin.ai">
+        <a href="/about/" data-email-link aria-label="Email Stepan" title="Email Stepan">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
         </a>
         <a href="https://x.com/zolotukhin_ai" aria-label="X (Twitter)" title="@zolotukhin_ai on X">
@@ -41,6 +42,13 @@ const isActive = (href: string) => href === '/zinc/'
     </ul>
   </nav>
 </header>
+
+<script is:inline>
+  const emailLink = document.querySelector('[data-email-link]');
+  if (emailLink instanceof HTMLAnchorElement) {
+    emailLink.href = ['mailto:stepan', 'zolotukhin.ai'].join('@');
+  }
+</script>
 
 <style>
   .site-header {

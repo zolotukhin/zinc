@@ -45,9 +45,9 @@ draft: false
 
 The RX 9070 XT is specified at [195 TFLOPS of FP16 matrix throughput and 389 TOPS of INT8](https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070xt.html). ZINC's prefill GEMM reads Q4_K weights, unpacks them to fp16 in registers, and multiplies on the fp16 half of that number. The weights arrive as integers and leave as integers. Nothing in the model requires them to become floats in between, and the card will multiply integers twice as fast.
 
-So the port looked like free money. Take the fused dequant GEMM from [four days ago](https://zolotukhin.ai/blog/2026-07-08-the-dequant-scratch-round-trip-is-zincs-last-rdna4-prefill-tax), unpack Q4_K into int8 instead of fp16, quantize the activations to Q8_1, swap `wmma_f32_16x16x16_f16` for `wmma_i32_16x16x16_iu8`, and collect the doubling.
+So the port looked like free money. Take the fused dequant GEMM from [four days ago](https://zolotukhin.ai/blog/2026-07-08-the-dequant-scratch-round-trip-is-zincs-last-rdna4-prefill-tax/), unpack Q4_K into int8 instead of fp16, quantize the activations to Q8_1, swap `wmma_f32_16x16x16_f16` for `wmma_i32_16x16x16_iu8`, and collect the doubling.
 
-It returned 1.2x. Prefill on Qwen3.5-9B went from 665 tok/s to about 700, which is nowhere near the 2x the spec sheet promises. The missing half is not in the matmul. It is in the sixteen bytes of scale metadata that a Q4_K super-block carries around, and in a fact from [yesterday's post](https://zolotukhin.ai/blog/2026-07-11-softmax-steals-rdna4-wmma-issue-slots-flash-attention) that keeps turning out to be the whole story on this architecture: on RDNA4, WMMA and ordinary vector instructions issue down the same pipe.
+It returned 1.2x. Prefill on Qwen3.5-9B went from 665 tok/s to about 700, which is nowhere near the 2x the spec sheet promises. The missing half is not in the matmul. It is in the sixteen bytes of scale metadata that a Q4_K super-block carries around, and in a fact from [yesterday's post](https://zolotukhin.ai/blog/2026-07-11-softmax-steals-rdna4-wmma-issue-slots-flash-attention/) that keeps turning out to be the whole story on this architecture: on RDNA4, WMMA and ordinary vector instructions issue down the same pipe.
 
 ## The int8 rate is the number worth caring about on RDNA4
 
@@ -97,7 +97,7 @@ Two more instruction-count trims come straight from AMD's own guide. RDNA4's WMM
 | int8 WMMA, integer sub-scale accumulation | 0.031 | 0.016 | 0.020 | 0.066 | 1.42x |
 | + wide-K WMMA, packed unpack | 0.031 | 0.008 | 0.020 | 0.058 | 1.61x |
 
-Cycles per output element, 16x64 tile, one CU. The model assumes the tile is resident and ignores DRAM, which the [fused dequant work](https://zolotukhin.ai/blog/2026-07-08-the-dequant-scratch-round-trip-is-zincs-last-rdna4-prefill-tax) already took off the critical path. What it tells you is that the matmul column shrinks by half and then stops mattering: after the port, less than a third of the kernel's cycles are spent in the matrix core, and every further gain has to come from deleting vector instructions.
+Cycles per output element, 16x64 tile, one CU. The model assumes the tile is resident and ignores DRAM, which the [fused dequant work](https://zolotukhin.ai/blog/2026-07-08-the-dequant-scratch-round-trip-is-zincs-last-rdna4-prefill-tax/) already took off the critical path. What it tells you is that the matmul column shrinks by half and then stops mattering: after the port, less than a third of the kernel's cycles are spent in the matrix core, and every further gain has to come from deleting vector instructions.
 
 ## What it measured
 
@@ -121,7 +121,7 @@ Decode did not move, at 39.6 tok/s, and this is worth stating because it is the 
 
 The spec sheet says 389 TOPS. The kernel got 1.6x on a path where the arithmetic said 2x, and the difference is entirely accounted for by twenty-odd vector instructions per tile that exist only because the weight format changes its scale every 32 elements.
 
-That is the same finding as the [softmax post](https://zolotukhin.ai/blog/2026-07-11-softmax-steals-rdna4-wmma-issue-slots-flash-attention) and the same finding as the [VGPR post](https://zolotukhin.ai/blog/2026-07-09-vgpr-pressure-caps-fused-rdna4-prefill-gemm-at-nine-waves), wearing a third costume. RDNA4 gives you an enormous matrix rate through a single issue port shared with a comparatively tiny vector unit. Every non-matmul instruction in an inner loop is not overhead in the usual sense of a few percent. It is a direct subtraction from the matrix throughput, at a 32-to-1 exchange rate, and the quantization format you chose for disk-space reasons in 2023 is now writing instructions into that loop on your behalf.
+That is the same finding as the [softmax post](https://zolotukhin.ai/blog/2026-07-11-softmax-steals-rdna4-wmma-issue-slots-flash-attention/) and the same finding as the [VGPR post](https://zolotukhin.ai/blog/2026-07-09-vgpr-pressure-caps-fused-rdna4-prefill-gemm-at-nine-waves/), wearing a third costume. RDNA4 gives you an enormous matrix rate through a single issue port shared with a comparatively tiny vector unit. Every non-matmul instruction in an inner loop is not overhead in the usual sense of a few percent. It is a direct subtraction from the matrix throughput, at a 32-to-1 exchange rate, and the quantization format you chose for disk-space reasons in 2023 is now writing instructions into that loop on your behalf.
 
 The practical conclusion for anyone porting a quantized inference kernel to RDNA4 is narrow and worth stating plainly. Switch the matmul to int8, because the rate is really there. Then go find every float that touches the accumulator and ask whether it could have been an integer, because that is where the other half of the 2x is hiding.
 

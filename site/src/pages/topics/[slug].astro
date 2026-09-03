@@ -3,6 +3,8 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
 import Breadcrumbs from '../../components/Breadcrumbs.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
 import { getTopicHub, topicHubs, type TopicHub } from '../../data/topic-hubs';
+import { getCollection } from 'astro:content';
+import { postMatchesTopic } from '../../lib/topic-posts';
 
 export function getStaticPaths() {
   return topicHubs.map((hub) => ({
@@ -21,6 +23,9 @@ const breadcrumbItems = [
 const relatedHubs = hub.related
   .map((slug) => getTopicHub(slug))
   .filter(Boolean) as TopicHub[];
+const latestPosts = (await getCollection('posts', ({ data }) => !data.draft && postMatchesTopic(hub.slug, data.tags)))
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
+  .slice(0, 12);
 
 const jsonLd = {
   '@context': 'https://schema.org',
@@ -175,6 +180,27 @@ const jsonLd = {
       </div>
     </section>
 
+    {latestPosts.length > 0 && (
+      <section aria-labelledby="latest-posts">
+        <h2 id="latest-posts">Latest Research Notes</h2>
+        <ol class="latest-posts">
+          {latestPosts.map((post) => (
+            <li>
+              <time datetime={post.data.date.toISOString().split('T')[0]}>
+                {new Intl.DateTimeFormat('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                  timeZone: 'UTC',
+                }).format(post.data.date)}
+              </time>
+              <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+            </li>
+          ))}
+        </ol>
+      </section>
+    )}
+
     <section aria-labelledby="docs">
       <h2 id="docs">Run It</h2>
       <div class="link-grid compact">
@@ -256,6 +282,32 @@ const jsonLd = {
   .section-note {
     max-width: 48rem;
     color: var(--color-text-muted);
+  }
+
+  .latest-posts {
+    display: grid;
+    gap: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .latest-posts li {
+    display: grid;
+    grid-template-columns: 7.5rem minmax(0, 1fr);
+    gap: var(--space-md);
+    padding: var(--space-sm) 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .latest-posts time {
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+  }
+
+  .latest-posts a {
+    font-weight: 700;
   }
 
   .detail-list {
@@ -414,6 +466,11 @@ const jsonLd = {
   }
 
   @media (max-width: 640px) {
+    .latest-posts li {
+      grid-template-columns: 1fr;
+      gap: 0.2rem;
+    }
+
     .detail-list div {
       grid-template-columns: 1fr;
       gap: 0.2rem;

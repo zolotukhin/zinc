@@ -60,14 +60,14 @@ What the figure is meant to show is that the two panels are measuring different 
 
 ZINC's Metal backend carries the batched flash-attention kernel in two versions. The unquantized one reads a key vector like this, once per four elements of head dimension:
 
-```cpp
+```metal
 const float4 kv = *(device const float4*)(k_cache + kv_base + (i << 2));
 score += dot(qv, kv);
 ```
 
 One aligned 16-byte load, one dot product. The Q8_0 version has to unpack a [ggml Q8_0 block](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-common.h), which is a 2-byte half-precision scale followed by 32 signed bytes, 34 bytes for 32 values:
 
-```cpp
+```metal
 inline float4 loadQ8_0Vec4(device const uchar* base, uint vec4_idx) {
     const uint block_idx = vec4_idx >> 3u;          // 8 vec4s per 32-element block
     device const uchar* block = base + block_idx * 34u;

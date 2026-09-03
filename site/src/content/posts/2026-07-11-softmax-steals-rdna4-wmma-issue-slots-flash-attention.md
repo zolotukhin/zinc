@@ -43,7 +43,7 @@ faqs:
 draft: false
 ---
 
-The MLP is no longer the story. Fusing the [SwiGLU intermediate into the down projection](https://zolotukhin.ai/blog/2026-07-10-down-projection-reads-back-a-swiglu-tensor-wider-than-the-hidden-state) took Qwen3.5-9B prefill on the RX 9070 XT to about 615 tok/s and dropped the MLP block to 22 percent of the profile. Attention inherited the top slot at roughly 41 percent, which is exactly what the last three posts predicted would happen.
+The MLP is no longer the story. Fusing the [SwiGLU intermediate into the down projection](https://zolotukhin.ai/blog/2026-07-10-down-projection-reads-back-a-swiglu-tensor-wider-than-the-hidden-state/) took Qwen3.5-9B prefill on the RX 9070 XT to about 615 tok/s and dropped the MLP block to 22 percent of the profile. Attention inherited the top slot at roughly 41 percent, which is exactly what the last three posts predicted would happen.
 
 So I opened the flash attention kernel expecting the two GEMMs to be the problem, and they were not. The QK-transpose and PV matmuls run on WMMA and behave. The time is going to the softmax between them, and the first instinct about which part of the softmax is a trap.
 
@@ -91,7 +91,7 @@ Together those take the vector-pipe cost from 0.094 cycles per element to about 
 
 ## The other half of the answer is occupancy again
 
-The exp is only free if there is another wave with a WMMA ready to issue while the transcendental unit is busy. That is the same sentence as [yesterday's occupancy post](https://zolotukhin.ai/blog/2026-07-09-vgpr-pressure-caps-fused-rdna4-prefill-gemm-at-nine-waves), pointed at a different kernel. ZINC's flash attention kernel holds the QK accumulator, the PV accumulator, the running max, and the running sum per query row, and the first honest version came in around 136 VGPRs, which puts it on the ten-wave step of the [RDNA4 occupancy staircase](https://zolotukhin.ai/zinc/docs/amd-gpu-reference/). Ten waves is not much of a shadow to hide an exp in.
+The exp is only free if there is another wave with a WMMA ready to issue while the transcendental unit is busy. That is the same sentence as [yesterday's occupancy post](https://zolotukhin.ai/blog/2026-07-09-vgpr-pressure-caps-fused-rdna4-prefill-gemm-at-nine-waves/), pointed at a different kernel. ZINC's flash attention kernel holds the QK accumulator, the PV accumulator, the running max, and the running sum per query row, and the first honest version came in around 136 VGPRs, which puts it on the ten-wave step of the [RDNA4 occupancy staircase](https://zolotukhin.ai/zinc/docs/amd-gpu-reference/). Ten waves is not much of a shadow to hide an exp in.
 
 Shrinking the query tile so the kernel fits under 96 VGPRs restores all sixteen waves. That costs arithmetic intensity on the QK matmul, which is the usual trade, and here it is worth taking, because the thing being hidden is not just the transcendental but the KV loads too.
 
