@@ -62,6 +62,10 @@ const formattedDate = new Intl.DateTimeFormat('en-US', {
   p {
     color: var(--color-text-muted);
     margin: 0;
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
   }
 
   .tags {

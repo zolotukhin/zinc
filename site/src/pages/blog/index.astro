@@ -6,10 +6,33 @@ import { getCollection } from 'astro:content';
 const posts = (await getCollection('posts', ({ data }) => !data.draft))
   .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
 
-const topicLinks = [
+const latestPosts = posts.slice(0, 8);
+const archiveGroups: Array<{ label: string; posts: typeof posts }> = [];
+
+for (const post of posts.slice(8)) {
+  const label = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'long',
+    timeZone: 'UTC',
+  }).format(post.data.date);
+  const current = archiveGroups.at(-1);
+  if (current?.label === label) current.posts.push(post);
+  else archiveGroups.push({ label, posts: [post] });
+}
+
+const modelLinks = [
   {
-    label: 'Qwen3.6',
-    href: '/topics/qwen3-6-local-inference/',
+    label: 'Qwen 3.8',
+    href: '/blog/2026-08-15-qwen-3-8-27b-day-one-bringup-prefill-fixed-decode-still-stalled/',
+  },
+  {
+    label: 'Muse Glimmer',
+    href: '/blog/2026-09-01-the-fast-q5k-lm-head-kernel-was-gated-off-by-one-constant/',
+  },
+  {
+    label: 'Muse Spark 1.3',
+    href: 'https://research.meta.ai/blog/introducing-muse-spark-1-3',
+    external: true,
   },
   {
     label: 'Gemma 4',
@@ -23,83 +46,228 @@ const topicLinks = [
     label: 'KV cache',
     href: '/topics/kv-cache-quantization/',
   },
-  {
-    label: 'OpenCode',
-    href: '/topics/opencode-local-coding/',
-  },
 ];
+
+const formatDate = (date: Date) => new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  timeZone: 'UTC',
+}).format(date);
 ---
 
 <BaseLayout
-  title="Local LLM Inference Blog"
-  description="Technical posts on ZINC, Qwen3.6, Gemma 4, AMD RDNA4, Vulkan and Metal local LLM inference, KV cache quantization, and GPU performance."
-  keywords="ZINC blog, local LLM inference, Qwen3.6, Gemma 4, AMD GPU, RDNA4, Vulkan compute, Metal inference, TurboQuant, GPU optimization, local AI, systems engineering"
+  title="GPU Inference Field Notes"
+  description="Field notes from building ZINC: local model bring-up, Vulkan, ROCm, Metal, GPU kernels, benchmarks, and the wider model landscape."
+  keywords="ZINC blog, local LLM inference, Qwen 3.8, Muse Glimmer, Muse Spark, Gemma 4, AMD GPU, RDNA4, Vulkan, ROCm, Metal, GPU optimization, systems engineering"
 >
-  <h1>Local LLM Inference Blog</h1>
-  <p class="intro">Technical notes on building ZINC, GPU programming, and making local AI work on hardware people actually own.</p>
+  <section class="blog-head">
+    <p class="eyebrow">{posts.length} published notes</p>
+    <h1>GPU inference field notes</h1>
+    <p class="intro">What worked, what did not, and what the measurements actually said while building ZINC. The newest entries are shown in full; the rest are grouped into a compact archive.</p>
 
-  <nav class="guide-links" aria-label="Related topic guides">
-    <span class="guide-links-label">Related guides</span>
-    {topicLinks.map((topic, index) => (
-      <>
-        <a href={topic.href}>{topic.label}</a>
-        {index < topicLinks.length - 1 && <span class="guide-separator" aria-hidden="true">/</span>}
-      </>
-    ))}
-  </nav>
+    <nav class="model-links" aria-label="Models and topics">
+      {modelLinks.map((item) => (
+        <a
+          href={item.href}
+          target={item.external ? '_blank' : undefined}
+          rel={item.external ? 'noreferrer' : undefined}
+        >
+          {item.label}{item.external ? ' ↗' : ''}
+        </a>
+      ))}
+    </nav>
+  </section>
 
-  <section>
-    {posts.map(post => (
+  <section class="latest-posts" aria-labelledby="latest-posts-heading">
+    <h2 id="latest-posts-heading">Latest</h2>
+    {latestPosts.map(post => (
       <PostCard
         title={post.data.title}
         date={post.data.date}
         excerpt={post.data.excerpt}
         slug={post.id}
-        tags={post.data.tags}
+        tags={post.data.tags.slice(0, 4)}
       />
     ))}
   </section>
+
+  {archiveGroups.length > 0 && (
+    <section class="archive" aria-labelledby="archive-heading">
+      <div class="archive-heading">
+        <h2 id="archive-heading">Archive</h2>
+        <span>{posts.length - latestPosts.length} more posts</span>
+      </div>
+      <div class="archive-groups">
+        {archiveGroups.map((group, index) => (
+          <details open={index === 0}>
+            <summary>
+              <strong>{group.label}</strong>
+              <span>{group.posts.length} {group.posts.length === 1 ? 'post' : 'posts'}</span>
+            </summary>
+            <ol>
+              {group.posts.map((post) => (
+                <li>
+                  <time datetime={post.data.date.toISOString().split('T')[0]}>{formatDate(post.data.date)}</time>
+                  <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+                </li>
+              ))}
+            </ol>
+          </details>
+        ))}
+      </div>
+    </section>
+  )}
 </BaseLayout>
 
 <style>
-  .intro {
-    color: var(--color-text-muted);
-    margin-bottom: var(--space-sm);
+  .blog-head {
+    padding: 2rem 0 2.5rem;
+    border-bottom: 1px solid var(--color-border);
   }
 
-  .guide-links {
+  .eyebrow {
+    margin: 0 0 0.45rem;
+    color: var(--color-accent);
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+
+  .blog-head h1 {
+    margin-bottom: 0.75rem;
+    font-size: clamp(2.2rem, 7vw, 3.5rem);
+    letter-spacing: -0.04em;
+  }
+
+  .intro {
+    max-width: 40rem;
+    color: var(--color-text-muted);
+    font-size: 1rem;
+    line-height: 1.65;
+  }
+
+  .model-links {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 0.35rem 0.55rem;
-    padding-bottom: var(--space-lg);
-    border-bottom: 1px solid var(--color-border);
-    color: var(--color-text-muted);
-    font-size: 0.86rem;
+    gap: 0.45rem;
+    margin-top: 1.35rem;
   }
 
-  .guide-links-label {
+  .model-links a {
+    padding: 0.28rem 0.58rem;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
     color: var(--color-text-muted);
-    font-weight: 700;
-  }
-
-  .guide-links a {
-    color: var(--color-text);
+    font-size: 0.74rem;
     font-weight: 700;
     text-decoration: none;
   }
 
-  .guide-links a:hover {
+  .model-links a:hover {
+    border-color: var(--color-accent);
     color: var(--color-accent);
   }
 
-  .guide-separator {
-    color: var(--color-border);
+  .latest-posts {
+    padding-top: 1.25rem;
   }
 
-  @media (max-width: 600px) {
-    .guide-links-label {
-      width: 100%;
+  .latest-posts > h2,
+  .archive h2 {
+    margin-bottom: 0;
+    font-size: 1.35rem;
+  }
+
+  .archive {
+    margin-top: 2.5rem;
+    padding-top: 2.5rem;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .archive-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .archive-heading span {
+    color: var(--color-text-muted);
+    font-size: 0.78rem;
+  }
+
+  .archive-groups {
+    border-top: 1px solid var(--color-border);
+  }
+
+  details {
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 0;
+    cursor: pointer;
+    list-style-position: inside;
+  }
+
+  summary strong {
+    font-size: 0.9rem;
+  }
+
+  summary span {
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+  }
+
+  details ol {
+    margin: 0;
+    padding: 0 0 1rem;
+    list-style: none;
+  }
+
+  details li {
+    display: grid;
+    grid-template-columns: 3.6rem minmax(0, 1fr);
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0.38rem 0;
+    line-height: 1.4;
+  }
+
+  details time {
+    color: var(--color-text-muted);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  details a {
+    color: var(--color-text);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  details a:hover {
+    color: var(--color-accent);
+  }
+
+  @media (max-width: 560px) {
+    .blog-head {
+      padding-top: 1rem;
+    }
+
+    .archive-heading {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    details li {
+      grid-template-columns: 3.2rem minmax(0, 1fr);
+      gap: 0.5rem;
     }
   }
 </style>

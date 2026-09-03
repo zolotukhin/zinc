@@ -2,10 +2,14 @@
 const pathname = Astro.url.pathname;
 const navItems = [
   { href: '/zinc/', label: 'ZINC' },
+  { href: '/zinc/benchmarks/', label: 'Benchmarks' },
   { href: '/blog/', label: 'Blog' },
   { href: '/zinc/docs/', label: 'Docs' },
   { href: '/about/', label: 'About' },
 ];
+const isActive = (href: string) => href === '/zinc/'
+  ? pathname === href
+  : pathname === href || pathname.startsWith(href);
 ---
 
 <header class="site-header">
@@ -18,7 +22,7 @@ const navItems = [
     <ul class="nav-links">
       {navItems.map(item => (
         <li>
-          <a href={item.href} class:list={[{ active: pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href)) }]}>
+          <a href={item.href} class:list={[{ active: isActive(item.href) }]}>
             {item.label}
           </a>
         </li>
@@ -88,7 +92,7 @@ const navItems = [
   .nav-links {
     display: flex;
     list-style: none;
-    gap: var(--space-lg);
+    gap: 1.35rem;
     padding: 0;
     margin: 0;
   }

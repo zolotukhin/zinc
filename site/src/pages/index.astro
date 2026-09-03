@@ -10,8 +10,9 @@ const posts = (await getCollection('posts', ({ data }) => !data.draft))
 
 const rocmTarget = benchmarkData.targets.find((target: any) => target.id === 'rdna-rocm');
 const qwen38 = rocmTarget?.models?.find((model: any) => model.id === 'qwen38-27b-q4k-m');
+const museGlimmer = rocmTarget?.models?.find((model: any) => model.id === 'muse-glimmer-30b-q4k-m');
 const median = (metric: any) => metric?.median ?? metric?.avg ?? null;
-const formatRate = (value: number | null) => value == null ? 'n/a' : value.toFixed(1);
+const formatRate = (value: number | null, digits = 1) => value == null ? 'n/a' : value.toFixed(digits);
 const qwenDecode = median(qwen38?.zinc?.decode_tps);
 const qwenLlamaDecode = median(qwen38?.baseline?.decode_tps);
 const qwenPrefill = median(qwen38?.zinc?.prefill_tps);
@@ -20,138 +21,385 @@ const qwenWorkloads = qwen38?.scenarios?.length ?? 0;
 const qwenWins = (qwen38?.scenarios ?? []).filter((scenario: any) =>
   (scenario.comparison?.overall_pct_of_baseline ?? 0) >= 100
 ).length;
+
+const modelWork = [
+  {
+    name: 'Qwen 3.8 27B',
+    kind: 'Local · dense',
+    note: 'The current ROCm decode and speculative-decoding target.',
+    href: '/zinc/benchmarks/#rdna-rocm',
+  },
+  {
+    name: 'Muse Glimmer 30B',
+    kind: 'Local · dense',
+    note: `${formatRate(median(museGlimmer?.zinc?.decode_tps))} tok/s decode in the published ROCm suite.`,
+    href: '/zinc/benchmarks/#rdna-rocm',
+  },
+  {
+    name: 'Muse Spark 1.3',
+    kind: 'Hosted · multimodal',
+    note: 'Meta’s current coding and agent model, followed alongside the local model work.',
+    href: 'https://research.meta.ai/blog/introducing-muse-spark-1-3',
+    external: true,
+  },
+  {
+    name: 'Gemma 4',
+    kind: 'Local · dense + MoE',
+    note: 'Dense and sparse checkpoints used to test very different GPU paths.',
+    href: '/topics/gemma-local-inference/',
+  },
+];
+
+const platformNotes = [
+  'AMD · Vulkan',
+  'AMD · ROCm',
+  'Apple · Metal',
+  'Intel · Vulkan',
+];
 ---
 
 <BaseLayout
-  title="Stepan Zolotukhin"
-  description="I build ZINC, a local LLM inference engine for consumer GPUs, and write about GPU programming and systems engineering."
-  keywords="Stepan Zolotukhin, ZINC, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, NVIDIA RTX, Intel Arc, Vulkan compute, ROCm, Metal, CUDA, Zig, TurboQuant, local AI, GPU programming"
+  title="Stepan Zolotukhin — ZINC and GPU Inference"
+  description="I build ZINC, a local LLM inference engine for consumer GPUs, and publish reproducible benchmarks and engineering notes about the work."
+  keywords="Stepan Zolotukhin, ZINC, LLM inference, consumer GPU inference, AMD GPU, Apple Silicon, Intel Arc, Vulkan, ROCm, Metal, Zig, Qwen 3.8, Muse Glimmer, Muse Spark, Gemma 4, GPU programming"
   jsonLd={{
     '@context': 'https://schema.org',
     '@type': 'WebSite',
     name: 'Stepan Zolotukhin',
     url: 'https://zolotukhin.ai',
-    description: 'Building ZINC — a local LLM inference engine for consumer GPUs.',
+    description: 'ZINC, reproducible local LLM benchmarks, and notes from the GPU engineering work behind them.',
   }}
 >
   <section class="hero">
-    <h1>Stepan Zolotukhin</h1>
-    <p>I'm building <a href="/zinc/">ZINC</a>, a program for running local language models on consumer GPUs. I use this site to publish benchmarks, documentation, and notes about the GPU and systems work behind it.</p>
+    <p class="eyebrow">GPU inference · systems engineering</p>
+    <h1>Making local models faster on the hardware people already own.</h1>
+    <p class="lede">I’m Stepan Zolotukhin. I build <a href="/zinc/">ZINC</a>, a small inference engine for running GGUF models on consumer GPUs, and publish the measurements and engineering notes behind it.</p>
+    <div class="hero-actions">
+      <a class="primary-action" href="/zinc/">Explore ZINC</a>
+      <a href="/zinc/benchmarks/">View benchmarks</a>
+      <a href="/blog/">Read the field notes</a>
+    </div>
+    <ul class="platform-list" aria-label="Supported ZINC platforms">
+      {platformNotes.map((platform) => <li>{platform}</li>)}
+    </ul>
   </section>
 
-  <section class="project-highlight">
-    <article class="project-card">
-      <h2>ZINC</h2>
-      <p>Run GGUF models on AMD Radeon with Vulkan or ROCm, Intel Arc with Vulkan, or Apple Silicon with Metal. NVIDIA CUDA support is experimental.</p>
-      <div class="latest-result">
-        <span>Latest ROCm result · Radeon AI PRO R9700</span>
-        <strong>Qwen 3.8 27B leads the latest upstream llama.cpp build in {qwenWins}/{qwenWorkloads} workloads</strong>
-        <p>{formatRate(qwenDecode)} vs {formatRate(qwenLlamaDecode)} tok/s decode · {formatRate(qwenPrefill)} vs {formatRate(qwenLlamaPrefill)} tok/s prefill</p>
+  <section class="result-section" aria-labelledby="latest-result-heading">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Latest measured work</p>
+        <h2 id="latest-result-heading">Qwen 3.8 on ROCm</h2>
       </div>
-      <div class="project-links">
-        <a href="/zinc/">Read about ZINC &rarr;</a>
-        <a href="/zinc/benchmarks/#rdna-rocm">See the benchmark &rarr;</a>
-      </div>
-    </article>
+      <span>Radeon AI PRO R9700</span>
+    </div>
+
+    <div class="result-grid">
+      <article class="result-card primary-result">
+        <span>Decode</span>
+        <strong>{formatRate(qwenDecode, 2)} <small>tok/s</small></strong>
+        <p>llama.cpp: {formatRate(qwenLlamaDecode, 2)} tok/s</p>
+      </article>
+      <article class="result-card">
+        <span>Prefill</span>
+        <strong>{formatRate(qwenPrefill, 1)} <small>tok/s</small></strong>
+        <p>llama.cpp: {formatRate(qwenLlamaPrefill, 1)} tok/s</p>
+      </article>
+      <article class="result-card">
+        <span>Workloads ahead</span>
+        <strong>{qwenWins}/{qwenWorkloads}</strong>
+        <p>Same model, prompts, and reusable servers.</p>
+      </article>
+    </div>
+    <p class="result-footnote">These are checked-in medians, not a best run. The <a href="/zinc/benchmarks/#rdna-rocm">full benchmark</a> includes the samples, run configuration, and current llama.cpp revision.</p>
   </section>
 
-  <section class="recent-posts">
-    <h2>Recent posts</h2>
+  <section class="models-section" aria-labelledby="models-heading">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Models in the work</p>
+        <h2 id="models-heading">Local runtimes and the wider model landscape</h2>
+      </div>
+    </div>
+    <p class="section-intro">These are the models I’m tuning, testing, or following now. Local GGUF targets and hosted models live in one list, with the runtime made explicit on each card.</p>
+    <div class="model-grid">
+      {modelWork.map((model) => (
+        <a
+          class="model-card"
+          href={model.href}
+          target={model.external ? '_blank' : undefined}
+          rel={model.external ? 'noreferrer' : undefined}
+        >
+          <span>{model.kind}</span>
+          <strong>{model.name}</strong>
+          <p>{model.note}</p>
+          <small>{model.external ? 'Official release ↗' : 'Read more →'}</small>
+        </a>
+      ))}
+    </div>
+  </section>
+
+  <section class="recent-posts" aria-labelledby="recent-posts-heading">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">From the workbench</p>
+        <h2 id="recent-posts-heading">Recent writing</h2>
+      </div>
+      <a href="/blog/">All posts →</a>
+    </div>
     {posts.map(post => (
       <PostCard
         title={post.data.title}
         date={post.data.date}
         excerpt={post.data.excerpt}
         slug={post.id}
-        tags={post.data.tags}
+        tags={post.data.tags.slice(0, 3)}
       />
     ))}
-    <p class="all-posts"><a href="/blog/">All posts &rarr;</a></p>
   </section>
 </BaseLayout>
 
 <style>
   .hero {
-    padding: var(--space-xl) 0;
-  }
-
-  .hero h1 {
-    font-size: 2.5rem;
-    margin-bottom: var(--space-sm);
-  }
-
-  .hero p {
-    font-size: 1.1rem;
-    color: var(--color-text-muted);
-    line-height: 1.7;
-    max-width: 600px;
-  }
-
-  .project-highlight {
-    padding-bottom: var(--space-lg);
+    padding: 4.5rem 0 3.5rem;
     border-bottom: 1px solid var(--color-border);
   }
 
-  .project-card {
-    padding: var(--space-lg);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    color: var(--color-text);
-  }
-
-  .project-card h2 {
-    font-size: 1.3rem;
-    margin: 0 0 var(--space-sm);
-  }
-
-  .project-card p {
-    color: var(--color-text-muted);
-    font-size: 0.95rem;
-    margin-bottom: var(--space-sm);
-  }
-
-  .latest-result {
-    display: grid;
-    gap: 0.3rem;
-    margin: var(--space-md) 0;
-    padding: 0.9rem 1rem;
-    border-left: 3px solid var(--color-accent);
-    background: var(--color-bg-alt);
-  }
-
-  .latest-result span {
+  .eyebrow {
+    margin: 0 0 0.55rem;
     color: var(--color-accent);
-    font-size: 0.75rem;
-    font-weight: 700;
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
   }
 
-  .latest-result strong {
-    font-size: 1rem;
+  .hero h1 {
+    max-width: 42rem;
+    margin: 0;
+    font-size: clamp(2.35rem, 8vw, 4.25rem);
+    line-height: 1.03;
+    letter-spacing: -0.045em;
   }
 
-  .latest-result p {
+  .lede {
+    max-width: 39rem;
+    margin: 1.4rem 0 0;
+    color: var(--color-text-muted);
+    font-size: 1.08rem;
+    line-height: 1.65;
+  }
+
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.8rem 1.25rem;
+    margin-top: 1.75rem;
+  }
+
+  .hero-actions a {
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+
+  .hero-actions .primary-action {
+    padding: 0.62rem 0.9rem;
+    border-radius: 6px;
+    background: var(--color-accent);
+    color: white;
+  }
+
+  .hero-actions .primary-action:hover {
+    text-decoration: none;
+    filter: brightness(1.08);
+  }
+
+  .platform-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin: 2rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .platform-list li {
     margin: 0;
-    font-size: 0.85rem;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    color: var(--color-text-muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+
+  .result-section,
+  .models-section,
+  .recent-posts {
+    padding: 3rem 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .recent-posts {
+    border-bottom: 0;
+  }
+
+  .section-heading {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .section-heading h2 {
+    margin: 0;
+    font-size: 1.55rem;
+    letter-spacing: -0.02em;
+  }
+
+  .section-heading > span,
+  .section-heading > a {
+    color: var(--color-text-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  .section-heading > a:hover {
+    color: var(--color-accent);
+  }
+
+  .result-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.7rem;
+  }
+
+  .result-card {
+    min-height: 8rem;
+    padding: 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-alt);
+  }
+
+  .result-card > span {
+    color: var(--color-text-muted);
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .result-card > strong {
+    display: block;
+    margin-top: 0.45rem;
+    font-size: 1.65rem;
+    line-height: 1.1;
     font-variant-numeric: tabular-nums;
   }
 
-  .project-links {
+  .result-card > strong small {
+    color: var(--color-text-muted);
+    font-size: 0.72rem;
+  }
+
+  .result-card p {
+    margin: 0.65rem 0 0;
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+
+  .primary-result {
+    border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-border));
+  }
+
+  .result-footnote,
+  .section-intro {
+    margin: 1rem 0 0;
+    color: var(--color-text-muted);
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+
+  .section-intro {
+    max-width: 39rem;
+    margin-top: -0.4rem;
+  }
+
+  .model-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.7rem;
+    margin-top: 1.25rem;
+  }
+
+  .model-card {
     display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-md);
+    min-height: 10.2rem;
+    flex-direction: column;
+    padding: 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    color: var(--color-text);
+    text-decoration: none;
   }
 
-  .project-links a {
+  .model-card:hover {
+    border-color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  .model-card > span {
     color: var(--color-accent);
-    font-size: 0.9rem;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 
-  .recent-posts h2 {
-    margin-top: var(--space-xl);
+  .model-card > strong {
+    margin-top: 0.4rem;
+    font-size: 1.05rem;
   }
 
-  .all-posts {
-    margin-top: var(--space-md);
+  .model-card p {
+    margin: 0.5rem 0 0;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
+
+  .model-card small {
+    margin-top: auto;
+    padding-top: 0.75rem;
+    color: var(--color-accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 640px) {
+    .hero {
+      padding: 3rem 0 2.5rem;
+    }
+
+    .hero h1 {
+      font-size: clamp(2.2rem, 12vw, 3.25rem);
+    }
+
+    .section-heading {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .result-grid,
+    .model-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .result-card,
+    .model-card {
+      min-height: 0;
+    }
   }
 </style>

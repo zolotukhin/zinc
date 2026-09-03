@@ -113,7 +113,7 @@ ssh -p $ZINC_PORT $ZINC_USER@$ZINC_HOST '
 The canonical ZINC ROCm comparison uses `tools/performance_suite.mjs` with
 `--rdna-backend rocm` and a ROCm llama-server selected by
 `--rdna-llama-device ROCm0`. This keeps both sides on reusable servers, the same
-GGUF, and the same scenario matrix. See [ROCm backend](ROCM.md) for the complete
+GGUF, and the same scenario matrix. See [ROCm backend](https://zolotukhin.ai/zinc/docs/rocm/) for the complete
 command and the current Qwen 3.8 27B result. The 2026-08-31 full matrix has ZINC
 ahead in all four prefill and all four decode comparisons; its summed phase
 time is 24.385 s versus 28.016 s for llama.cpp.

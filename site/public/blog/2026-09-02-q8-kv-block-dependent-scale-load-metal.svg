@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" role="img" aria-labelledby="title desc" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial">
+  <title id="title">The smaller KV cache costs more to read</title>
+  <desc id="desc">Byte strips drawn to scale show the Q8_0 key/value block is about a quarter the width of the unquantized f32 block, while an exploded view shows the Q8_0 path needs a second dependent load of the block scale plus four conversions per four elements. Bottom bars show Q8_0 decoding 17 percent slower while reserving 10.3 GB less cache.</desc>
+
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f4f6fa"/>
+      <stop offset="100%" stop-color="#e4eaf2"/>
+    </linearGradient>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f6f78"/>
+    </marker>
+    <marker id="arrowPlum" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9c3f74"/>
+    </marker>
+  </defs>
+
+  <rect width="900" height="640" fill="url(#paper)"/>
+
+  <text x="40" y="42" fill="#1b2735" font-size="21" font-weight="700">The smaller KV cache costs more to read</text>
+  <text x="40" y="66" fill="#5b6b80" font-size="13">Muse Glimmer 30B at Q4_K_M on ZINC's Metal backend, M4 Max, 257 tokens of context.</text>
+  <text x="40" y="84" fill="#5b6b80" font-size="13">One 32-value slice of the key or value cache, as the batched flash-attention kernel consumes it.</text>
+
+  <line x1="40" y1="102" x2="860" y2="102" stroke="#c3cede" stroke-width="1"/>
+  <line x1="482" y1="118" x2="482" y2="472" stroke="#c3cede" stroke-width="1"/>
+
+  <!-- ============ LEFT: byte strips to scale ============ -->
+  <text x="40" y="136" fill="#1b2735" font-size="14" font-weight="700">Bytes on the wire, drawn to scale</text>
+
+  <text x="40" y="164" fill="#1f6f78" font-size="13" font-weight="700">unquantized f32, 128 bytes per 32 values</text>
+  <rect x="40" y="174" width="400" height="38" rx="4" fill="#cfe3e6" stroke="#1f6f78" stroke-width="1.5"/>
+  <line x1="90" y1="174" x2="90" y2="212" stroke="#1f6f78" stroke-width="1" opacity="0.55"/>
+  <line x1="140" y1="174" x2="140" y2="212" stroke="#1f6f78" stroke-width="1" opacity="0.55"/>
+  <line x1="190" y1="174" x2="190" y2="212" stroke="#1f6f78" stroke-width="1" opacity="0.55"/>
+  <line x1="240" y1="174" x2="240" y2="212" stroke="#1f6f78" stroke-width="1" opacity="0.55"/>
+  <line x1="290" y1="174" x2="290" y2="212" stroke="#1f6f78" stroke-width="1" opacity="0.55"/>
+  <line x1="340" y1="174" x2="340" y2="212" stroke="#1f6f78" stroke-width="1" opacity="0.55"/>
+  <line x1="390" y1="174" x2="390" y2="212" stroke="#1f6f78" stroke-width="1" opacity="0.55"/>
+  <text x="40" y="230" fill="#14545b" font-size="11.5">8 x float4, 16 bytes each. One aligned vector load per float4.</text>
+
+  <text x="40" y="272" fill="#9c3f74" font-size="13" font-weight="700">Q8_0, 34 bytes per 32 values</text>
+  <rect x="40" y="282" width="6.25" height="38" rx="1.5" fill="#9c3f74"/>
+  <rect x="46.25" y="282" width="100" height="38" rx="1.5" fill="#f0d9e6" stroke="#9c3f74" stroke-width="1.5"/>
+  <line x1="58.75" y1="282" x2="58.75" y2="320" stroke="#9c3f74" stroke-width="0.8" opacity="0.5"/>
+  <line x1="71.25" y1="282" x2="71.25" y2="320" stroke="#9c3f74" stroke-width="0.8" opacity="0.5"/>
+  <line x1="83.75" y1="282" x2="83.75" y2="320" stroke="#9c3f74" stroke-width="0.8" opacity="0.5"/>
+  <line x1="96.25" y1="282" x2="96.25" y2="320" stroke="#9c3f74" stroke-width="0.8" opacity="0.5"/>
+  <line x1="108.75" y1="282" x2="108.75" y2="320" stroke="#9c3f74" stroke-width="0.8" opacity="0.5"/>
+  <line x1="121.25" y1="282" x2="121.25" y2="320" stroke="#9c3f74" stroke-width="0.8" opacity="0.5"/>
+  <line x1="133.75" y1="282" x2="133.75" y2="320" stroke="#9c3f74" stroke-width="0.8" opacity="0.5"/>
+  <text x="40" y="346" fill="#7d2f5c" font-size="11.5">2-byte block scale, then 32 x int8. Two loads per float4, the second dependent.</text>
+
+  <path d="M 152 301 L 434 301" stroke="#4b5b70" stroke-width="1" stroke-dasharray="4 4"/>
+  <line x1="152" y1="294" x2="152" y2="308" stroke="#4b5b70" stroke-width="1"/>
+  <line x1="434" y1="294" x2="434" y2="308" stroke="#4b5b70" stroke-width="1"/>
+  <rect x="228" y="288" width="130" height="20" rx="3" fill="#eaeef5"/>
+  <text x="293" y="303" fill="#334155" font-size="13" font-weight="700" text-anchor="middle">3.8x fewer bytes</text>
+  <text x="40" y="378" fill="#6b7b8f" font-size="11">Both strips are drawn at one pixel per 0.32 bytes, so the widths are the real ratio.</text>
+
+  <rect x="40" y="400" width="420" height="70" rx="6" fill="#dde5f0" stroke="#c3cede" stroke-width="1"/>
+  <text x="58" y="424" fill="#334155" font-size="12" font-weight="700">Why the byte saving cannot be the story</text>
+  <text x="58" y="443" fill="#4b5b70" font-size="11.5">At 257 tokens the whole cache is roughly 27 MB, against about</text>
+  <text x="58" y="459" fill="#4b5b70" font-size="11.5">15 GiB of weights read per decode token. The bytes saved are noise.</text>
+
+  <!-- ============ RIGHT: exploded work ============ -->
+  <text x="505" y="136" fill="#1b2735" font-size="14" font-weight="700">Work per float4, exploded</text>
+
+  <rect x="505" y="152" width="355" height="88" rx="7" fill="#ffffff" fill-opacity="0.6" stroke="#1f6f78" stroke-width="1.2"/>
+  <text x="519" y="172" fill="#1f6f78" font-size="12" font-weight="700">f32 path</text>
+  <rect x="519" y="184" width="196" height="30" rx="5" fill="#cfe3e6" stroke="#1f6f78" stroke-width="1"/>
+  <text x="617" y="204" fill="#14545b" font-size="11.5" text-anchor="middle">one 16-byte vector load</text>
+  <line x1="719" y1="199" x2="753" y2="199" stroke="#1f6f78" stroke-width="1.4" marker-end="url(#arrowTeal)"/>
+  <rect x="757" y="184" width="88" height="30" rx="5" fill="#cfe3e6" stroke="#1f6f78" stroke-width="1"/>
+  <text x="801" y="204" fill="#14545b" font-size="12" text-anchor="middle">dot()</text>
+
+  <rect x="505" y="258" width="355" height="212" rx="7" fill="#ffffff" fill-opacity="0.6" stroke="#9c3f74" stroke-width="1.2"/>
+  <text x="519" y="278" fill="#9c3f74" font-size="12" font-weight="700">Q8_0 path</text>
+
+  <rect x="519" y="290" width="196" height="30" rx="5" fill="#f0d9e6" stroke="#9c3f74" stroke-width="1"/>
+  <text x="617" y="310" fill="#7d2f5c" font-size="11.5" text-anchor="middle">4-byte packed char4 load</text>
+
+  <line x1="617" y1="322" x2="617" y2="336" stroke="#9c3f74" stroke-width="1.4" marker-end="url(#arrowPlum)"/>
+
+  <rect x="519" y="340" width="196" height="30" rx="5" fill="#f0d9e6" stroke="#9c3f74" stroke-width="1"/>
+  <text x="617" y="360" fill="#7d2f5c" font-size="11.5" text-anchor="middle">2-byte block scale load</text>
+
+  <path d="M 715 355 C 745 355 745 315 719 305" fill="none" stroke="#9c3f74" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#arrowPlum)"/>
+  <text x="752" y="332" fill="#7d2f5c" font-size="10.5">dependent,</text>
+  <text x="752" y="346" fill="#7d2f5c" font-size="10.5">re-read for all</text>
+  <text x="752" y="360" fill="#7d2f5c" font-size="10.5">8 vectors in</text>
+  <text x="752" y="374" fill="#7d2f5c" font-size="10.5">the block</text>
+
+  <line x1="617" y1="372" x2="617" y2="386" stroke="#9c3f74" stroke-width="1.4" marker-end="url(#arrowPlum)"/>
+
+  <rect x="519" y="390" width="196" height="30" rx="5" fill="#f0d9e6" stroke="#9c3f74" stroke-width="1"/>
+  <text x="617" y="410" fill="#7d2f5c" font-size="11.5" text-anchor="middle">4 int to float, 4 multiplies</text>
+
+  <line x1="617" y1="422" x2="617" y2="436" stroke="#9c3f74" stroke-width="1.4" marker-end="url(#arrowPlum)"/>
+
+  <rect x="573" y="440" width="88" height="30" rx="5" fill="#f0d9e6" stroke="#9c3f74" stroke-width="1"/>
+  <text x="617" y="460" fill="#7d2f5c" font-size="12" text-anchor="middle">dot()</text>
+
+  <!-- ============ BOTTOM: the two axes ============ -->
+  <line x1="40" y1="492" x2="860" y2="492" stroke="#c3cede" stroke-width="1"/>
+  <text x="40" y="516" fill="#1b2735" font-size="14" font-weight="700">The two axes disagree</text>
+
+  <text x="40" y="542" fill="#5b6b80" font-size="12">Decode rate, 257 tokens of context</text>
+  <rect x="40" y="550" width="178" height="19" rx="3" fill="#1f6f78"/>
+  <text x="226" y="565" fill="#14545b" font-size="12" font-weight="700">22.3 tok/s</text>
+  <text x="300" y="565" fill="#6b7b8f" font-size="11">f32</text>
+  <rect x="40" y="576" width="147" height="19" rx="3" fill="#9c3f74"/>
+  <text x="226" y="591" fill="#7d2f5c" font-size="12" font-weight="700">18.4 tok/s</text>
+  <text x="300" y="591" fill="#6b7b8f" font-size="11">Q8_0, 17% slower</text>
+
+  <text x="500" y="542" fill="#5b6b80" font-size="12">KV cache reserved at the 131,072-token maximum</text>
+  <rect x="500" y="550" width="196" height="19" rx="3" fill="#1f6f78"/>
+  <text x="704" y="565" fill="#14545b" font-size="12" font-weight="700">14 GB</text>
+  <text x="762" y="565" fill="#6b7b8f" font-size="11">f32</text>
+  <rect x="500" y="576" width="52" height="19" rx="3" fill="#9c3f74"/>
+  <text x="704" y="591" fill="#7d2f5c" font-size="12" font-weight="700">3.7 GB</text>
+  <text x="762" y="591" fill="#6b7b8f" font-size="11">Q8_0, 10.3 GB smaller</text>
+
+  <text x="40" y="620" fill="#7a8798" font-size="10.5">Measured: both decode rates, back to back on the same prompt, and both cache sizes. The byte strips and the load</text>
+  <text x="40" y="634" fill="#7a8798" font-size="10.5">counts are read off the Q8_0 block layout in ggml, 34 bytes per 32 values.</text>
+</svg>

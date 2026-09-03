@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" role="img" aria-labelledby="t d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial">
+<title id="t">Where 2.5 ms per decode token went after routing the lm-head to the native Metal kernel</title>
+<desc id="d">Two panels on cream paper. Top: before and after decode-token bars showing the lm-head slice shrinking from 4.9 to 2.4 milliseconds. Bottom: effective read bandwidth ladder from the old lm-head kernel up to the M4 Max peak.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#faf6ec"/><stop offset="100%" stop-color="#efe5d3"/></linearGradient>
+<pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#f4e2d8"/><line x1="0" y1="0" x2="0" y2="7" stroke="#c1502e" stroke-width="2.4" opacity="0.75"/></pattern>
+</defs>
+<rect width="900" height="620" fill="url(#bg)"/>
+<text x="44" y="48" fill="#2f2a22" font-size="20" font-weight="700">A two-line routing change, in milliseconds and gigabytes per second</text>
+<text x="44" y="72" fill="#7a6f5e" font-size="13">Muse Glimmer 30B at Q4_K_M, ZINC Metal backend, M4 Max 40-core GPU. The Q5_K lm-head is 202,048 x 6,656, about 925 MB per token.</text>
+<text x="44" y="118" fill="#2f2a22" font-size="15" font-weight="700">One decode token on an M4 Max, before and after routing the lm-head</text>
+<line x1="228.0" y1="140" x2="228.0" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="228.0" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">0</text>
+<line x1="283.9" y1="140" x2="283.9" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="283.9" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">5</text>
+<line x1="339.7" y1="140" x2="339.7" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="339.7" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">10</text>
+<line x1="395.6" y1="140" x2="395.6" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="395.6" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">15</text>
+<line x1="451.5" y1="140" x2="451.5" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="451.5" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">20</text>
+<line x1="507.3" y1="140" x2="507.3" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="507.3" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">25</text>
+<line x1="563.2" y1="140" x2="563.2" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="563.2" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">30</text>
+<line x1="619.1" y1="140" x2="619.1" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="619.1" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">35</text>
+<line x1="675.0" y1="140" x2="675.0" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="675.0" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">40</text>
+<line x1="730.8" y1="140" x2="730.8" y2="272" stroke="#a99b85" stroke-width="1" opacity="0.3"/>
+<text x="730.8" y="290" fill="#7a6f5e" font-size="11" text-anchor="middle">45</text>
+<line x1="228" y1="272" x2="742" y2="272" stroke="#a99b85" stroke-width="1.4"/>
+<text x="742" y="308" fill="#7a6f5e" font-size="11" text-anchor="end">milliseconds per token</text>
+<text x="214" y="165" fill="#2f2a22" font-size="12" font-weight="700" text-anchor="end">before</text>
+<text x="214" y="180" fill="#7a6f5e" font-size="10.5" text-anchor="end">SPIRV-Cross dmmv_q5k</text>
+<rect x="228" y="150" width="431.3" height="36" fill="#35506b" rx="3"/>
+<rect x="659.3" y="150" width="54.8" height="36" fill="url(#hatch)" stroke="#c1502e" stroke-width="1.6" rx="3"/>
+<text x="242" y="173" fill="#e9eef4" font-size="12">rest of the decode step, 38.6 ms</text>
+<text x="728.1" y="166" fill="#c1502e" font-size="11.5" font-weight="700">4.9 ms lm-head</text>
+<text x="728.1" y="181" fill="#7a6f5e" font-size="10.5">23.0 tok/s</text>
+<text x="214" y="219" fill="#2f2a22" font-size="12" font-weight="700" text-anchor="end">after</text>
+<text x="214" y="234" fill="#7a6f5e" font-size="10.5" text-anchor="end">dmmv_q5k_native</text>
+<rect x="228" y="204" width="431.3" height="36" fill="#35506b" rx="3"/>
+<rect x="659.3" y="204" width="26.8" height="36" fill="#c1502e" stroke="#c1502e" stroke-width="1.6" rx="3"/>
+<text x="242" y="227" fill="#e9eef4" font-size="12">rest of the decode step, 38.6 ms</text>
+<text x="728.1" y="220" fill="#c1502e" font-size="11.5" font-weight="700">2.4 ms lm-head</text>
+<text x="728.1" y="235" fill="#7a6f5e" font-size="10.5">24.4 tok/s</text>
+<path d="M 686.1 240 L 686.1 254 M 714.1 186 L 714.1 254 M 686.1 254 L 714.1 254" stroke="#c1502e" stroke-width="1.5" fill="none"/>
+<text x="676.1" y="258" fill="#c1502e" font-size="11.5" font-weight="700" text-anchor="end">2.5 ms per token recovered</text>
+<text x="44" y="350" fill="#2f2a22" font-size="15" font-weight="700">Effective read bandwidth on the same machine</text>
+<text x="286" y="385" fill="#2f2a22" font-size="12" font-weight="600" text-anchor="end">old lm-head kernel</text>
+<text x="286" y="398" fill="#7a6f5e" font-size="10" text-anchor="end">inferred from the 2.5 ms saving</text>
+<rect x="300" y="372" width="156.1" height="28" fill="url(#hatch)" stroke="#c1502e" stroke-width="1.6" rx="3"/>
+<text x="466.1" y="391" fill="#c1502e" font-size="12" font-weight="700">190 GB/s</text>
+<text x="286" y="431" fill="#2f2a22" font-size="12" font-weight="600" text-anchor="end">ZINC decode step</text>
+<text x="286" y="444" fill="#7a6f5e" font-size="10" text-anchor="end">measured, about 15 GiB/token</text>
+<rect x="300" y="418" width="310.5" height="28" fill="#35506b" stroke="#35506b" stroke-width="1.6" rx="3"/>
+<text x="598.5" y="437" fill="#e9eef4" font-size="12" font-weight="700" text-anchor="end">378 GB/s</text>
+<text x="286" y="477" fill="#2f2a22" font-size="12" font-weight="600" text-anchor="end">llama.cpp reference</text>
+<text x="286" y="490" fill="#7a6f5e" font-size="10" text-anchor="end">measured on this box</text>
+<rect x="300" y="464" width="386.1" height="28" fill="#2f7f70" stroke="#2f7f70" stroke-width="1.6" rx="3"/>
+<text x="674.1" y="483" fill="#eaf5f1" font-size="12" font-weight="700" text-anchor="end">470 GB/s</text>
+<text x="286" y="523" fill="#2f2a22" font-size="12" font-weight="600" text-anchor="end">M4 Max peak</text>
+<text x="286" y="536" fill="#7a6f5e" font-size="10" text-anchor="end">Apple published spec</text>
+<rect x="300" y="510" width="448.5" height="28" fill="none" stroke="#c9bca4" stroke-width="1.6" rx="3" stroke-dasharray="5 4"/>
+<text x="758.5" y="529" fill="#7a6f5e" font-size="12" font-weight="700">546 GB/s</text>
+<line x1="300" y1="364" x2="300" y2="546" stroke="#a99b85" stroke-width="1.4"/>
+<line x1="44" y1="562" x2="856" y2="562" stroke="#a99b85" stroke-width="1" opacity="0.6"/>
+<text x="44" y="583" fill="#7a6f5e" font-size="11">Measured: the two decode rates, the 925 MB Q5_K lm-head, and the 378 and 470 GB/s step bandwidths. Output was byte-identical across the change.</text>
+<text x="44" y="599" fill="#7a6f5e" font-size="11">Derived (drawn hatched): the 4.9 ms, 2.4 ms and 190 GB/s figures, computed from the tok/s delta and the tensor size.</text>
+</svg>
