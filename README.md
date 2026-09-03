@@ -83,9 +83,6 @@ work covers Qwen 3.5, Qwen 3.6, Qwen 3.8, Gemma 4, and Muse Glimmer.
 - The Muse checkpoint used in ZINC measurements is the exact
   [Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf)
   file published by Meta.
-- [Muse Spark 1.3](https://research.meta.ai/blog/introducing-muse-spark-1-3)
-  is part of the wider Muse work. It is currently hosted; Meta says the open
-  weights are forthcoming. Muse Glimmer is its local distilled counterpart.
 
 You can also point directly at a file or Hugging Face repository:
 

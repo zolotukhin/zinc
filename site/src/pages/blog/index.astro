@@ -30,11 +30,6 @@ const modelLinks = [
     href: '/blog/2026-09-01-the-fast-q5k-lm-head-kernel-was-gated-off-by-one-constant/',
   },
   {
-    label: 'Muse Spark 1.3',
-    href: 'https://research.meta.ai/blog/introducing-muse-spark-1-3',
-    external: true,
-  },
-  {
     label: 'Gemma 4',
     href: '/topics/gemma-local-inference/',
   },
@@ -58,7 +53,7 @@ const formatDate = (date: Date) => new Intl.DateTimeFormat('en-US', {
 <BaseLayout
   title="GPU Inference Field Notes"
   description="Field notes from building ZINC: local model bring-up, Vulkan, ROCm, Metal, GPU kernels, benchmarks, and the wider model landscape."
-  keywords="ZINC blog, local LLM inference, Qwen 3.8, Muse Glimmer, Muse Spark, Gemma 4, AMD GPU, RDNA4, Vulkan, ROCm, Metal, GPU optimization, systems engineering"
+  keywords="ZINC blog, local LLM inference, Qwen 3.8, Muse Glimmer, Gemma 4, AMD GPU, RDNA4, Vulkan, ROCm, Metal, GPU optimization, systems engineering"
 >
   <section class="blog-head">
     <p class="eyebrow">{posts.length} published notes</p>
@@ -67,13 +62,7 @@ const formatDate = (date: Date) => new Intl.DateTimeFormat('en-US', {
 
     <nav class="model-links" aria-label="Models and topics">
       {modelLinks.map((item) => (
-        <a
-          href={item.href}
-          target={item.external ? '_blank' : undefined}
-          rel={item.external ? 'noreferrer' : undefined}
-        >
-          {item.label}{item.external ? ' ↗' : ''}
-        </a>
+        <a href={item.href}>{item.label}</a>
       ))}
     </nav>
   </section>

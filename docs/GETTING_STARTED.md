@@ -41,7 +41,7 @@ ZINC currently targets:
 
 ### Models in current work
 
-This list keeps the local ZINC models and the wider model work in one place. A model ID is present only when `zinc model pull` can install that checkpoint. Muse Spark is a hosted model, not a ZINC GGUF compatibility claim.
+This list keeps the local ZINC models in one place. A model ID is present only when `zinc model pull` can install that checkpoint.
 
 | Model | Runtime | Model ID or access | Fits on | Current status |
 |------|------|------------|---------|--------|
@@ -49,7 +49,6 @@ This list keeps the local ZINC models and the wider model work in one place. A m
 | **Qwen 3.6 35B-A3B Q4_K_XL** | Local GGUF | `qwen36-35b-a3b-q4k-xl` · [checkpoint](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | 24+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Qwen 3.8 27B Q4_K_M** | Local GGUF | `qwen38-27b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 24+ GB VRAM or 32+ GB unified | AMD RDNA4 ROCm and Apple Metal |
 | **Muse Glimmer 30B Q4_K_M** | Local GGUF | Direct file · [exact 17 GB GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf) | 24+ GB VRAM or unified | AMD ROCm and Apple Metal validation target |
-| **Muse Spark 1.3** | Hosted/API | [Meta release](https://research.meta.ai/blog/introducing-muse-spark-1-3) · local Muse checkpoint: [exact Glimmer GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf) | Hosted | Spark open weights are forthcoming; ZINC runs its distilled Glimmer model locally |
 | **Gemma 4 26B-A4B Q4_K_M** | Local GGUF | `gemma4-26b-a4b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | 16+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Gemma 4 31B Q4_K_M** | Local GGUF | `gemma4-31b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF) | 24+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 
