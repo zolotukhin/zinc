@@ -9,4 +9,5 @@
 # This JSON search endpoint is fetched by the docs UI. It is not a standalone
 # search result, so keep crawlers from treating it as a thin indexable page.
 /zinc/docs/search
+  Content-Type: application/json; charset=utf-8
   X-Robots-Tag: noindex, nofollow

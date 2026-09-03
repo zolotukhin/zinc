@@ -12,6 +12,7 @@ import { resolve } from 'node:path';
 const siteRoot = fileURLToPath(new URL('.', import.meta.url));
 const repoRoot = resolve(siteRoot, '..');
 const postDirectory = resolve(siteRoot, 'src/content/posts');
+const docsDirectory = resolve(repoRoot, 'docs');
 
 function gitLastmod(relativeSourcePath, fallback) {
   try {
@@ -42,6 +43,15 @@ const postLastmods = new Map(
 );
 
 const latestPostLastmod = [...postLastmods.values()].sort().at(-1);
+const docLastmods = new Map(
+  readdirSync(docsDirectory)
+    .filter((filename) => filename.endsWith('.md'))
+    .map((filename) => {
+      const slug = filename.slice(0, -3).toLowerCase().replaceAll('_', '-');
+      return [slug, gitLastmod(`docs/${filename}`, undefined)];
+    }),
+);
+const latestDocLastmod = [...docLastmods.values()].filter(Boolean).sort().at(-1);
 
 export default defineConfig({
   site: 'https://zolotukhin.ai',
@@ -54,6 +64,15 @@ export default defineConfig({
 
         if (postMatch) {
           return { ...item, lastmod: postLastmods.get(postMatch[1]) };
+        }
+
+        const docMatch = pathname.match(/^\/zinc\/docs\/([^/]+)\/$/);
+        if (docMatch && docLastmods.has(docMatch[1])) {
+          return { ...item, lastmod: docLastmods.get(docMatch[1]) };
+        }
+
+        if (latestDocLastmod && pathname === '/zinc/docs/') {
+          return { ...item, lastmod: latestDocLastmod };
         }
 
         if (latestPostLastmod && (pathname === '/' || pathname === '/blog/' || pathname.startsWith('/topics/'))) {
