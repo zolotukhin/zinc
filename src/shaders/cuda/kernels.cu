@@ -2621,6 +2621,41 @@ __device__ __forceinline__ float zinc_q4k_q8_block_dot(
         q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane);
 }
 
+__device__ __forceinline__ void zinc_q4k_q8_scale_factors(
+    uint4 meta, unsigned shift,
+    float& f0, float& f1, float& f2, float& f3,
+    float& b0, float& b1, float& b2, float& b3)
+{
+    const float d = zinc_half_to_float((unsigned short)(meta.x & 0xffffu));
+    const float dm = zinc_half_to_float((unsigned short)(meta.x >> 16));
+    const unsigned s0 = meta.y >> shift;
+    const unsigned s1 = meta.z >> shift;
+    const unsigned s2 = meta.w >> shift;
+    f0 = d * (float)(s0 & 0x3fu);
+    b0 = dm * (float)(s1 & 0x3fu);
+    f1 = d * (float)((s0 >> 8) & 0x3fu);
+    b1 = dm * (float)((s1 >> 8) & 0x3fu);
+    f2 = d * (float)((s2 & 0xfu) | ((s0 & 0xc0u) >> 2));
+    b2 = dm * (float)(((s2 & 0xf0u) >> 4) | ((s1 & 0xc0u) >> 2));
+    f3 = d * (float)(((s2 >> 8) & 0xfu) | (((s0 >> 8) & 0xc0u) >> 2));
+    b3 = dm * (float)((((s2 >> 8) & 0xf0u) >> 4) | (((s1 >> 8) & 0xc0u) >> 2));
+}
+
+__device__ __forceinline__ float zinc_q4k_q8_block_dot_scaled(
+    unsigned qs0, unsigned qs1,
+    int q0, int q1, int q2, int q3,
+    float2 ds0, float2 ds1, float2 ds2, float2 ds3, bool min_lane,
+    float f0, float f1, float f2, float f3,
+    float b0, float b1, float b2, float b3)
+{
+    float sum = f0 * ds0.x * (float)__dp4a((int)(qs0 & 0x0f0f0f0fu), q0, 0);
+    sum += f1 * ds1.x * (float)__dp4a((int)((qs0 >> 4) & 0x0f0f0f0fu), q1, 0);
+    sum += f2 * ds2.x * (float)__dp4a((int)(qs1 & 0x0f0f0f0fu), q2, 0);
+    sum += f3 * ds3.x * (float)__dp4a((int)((qs1 >> 4) & 0x0f0f0f0fu), q3, 0);
+    if (min_lane) sum -= b0 * ds0.y + b1 * ds1.y + b2 * ds2.y + b3 * ds3.y;
+    return sum;
+}
+
 extern "C" __global__ void dmmv_q4k_q8_fast(
     const unsigned* __restrict__ a,
     const unsigned char* __restrict__ xq,
@@ -2756,6 +2791,7 @@ extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8(
     const unsigned row_base = row * bpr * 36u;
     float sum_gate = 0.0f, sum_up = 0.0f;
 
+    #pragma unroll 5
     for (unsigned sb = grp; sb < bpr; sb += ngrp) {
         const unsigned char* h0 = xq + (size_t)(2u * sb) * 144u;
         const unsigned char* h1 = h0 + 144u;
@@ -2770,26 +2806,43 @@ extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8(
         const float2 ds3 = __half22float2(*(const half2*)(h1 + (g + 1u) * 4u));
         const bool min_lane = l0 == 0u;
         const unsigned blk = row_base + sb * 36u;
-        uint4 gate_meta = {}, up_meta = {};
-        if (itid == 0u) {
-            gate_meta = *(const uint4*)(gate + blk);
-            up_meta = *(const uint4*)(up + blk);
-        }
-        const unsigned src_lane = (grp & 1u) * 16u;
-        gate_meta.x = __shfl_sync(0xffffffffu, gate_meta.x, src_lane);
-        gate_meta.y = __shfl_sync(0xffffffffu, gate_meta.y, src_lane);
-        gate_meta.z = __shfl_sync(0xffffffffu, gate_meta.z, src_lane);
-        gate_meta.w = __shfl_sync(0xffffffffu, gate_meta.w, src_lane);
-        up_meta.x = __shfl_sync(0xffffffffu, up_meta.x, src_lane);
-        up_meta.y = __shfl_sync(0xffffffffu, up_meta.y, src_lane);
-        up_meta.z = __shfl_sync(0xffffffffu, up_meta.z, src_lane);
-        up_meta.w = __shfl_sync(0xffffffffu, up_meta.w, src_lane);
-        sum_gate += zinc_q4k_q8_block_dot_meta(gate, blk, q_off, shift,
-            gate_meta.x, gate_meta.y, gate_meta.z, gate_meta.w,
-            q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane);
-        sum_up += zinc_q4k_q8_block_dot_meta(up, blk, q_off, shift,
-            up_meta.x, up_meta.y, up_meta.z, up_meta.w,
-            q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane);
+        const unsigned q_word = 4u + (q_off >> 2);
+        const unsigned gate_qs0 = gate[blk + q_word];
+        const unsigned gate_qs1 = gate[blk + q_word + 16u];
+        const unsigned up_qs0 = up[blk + q_word];
+        const unsigned up_qs1 = up[blk + q_word + 16u];
+        uint4 scale_meta = {};
+        const bool scale_lane = (itid & 3u) == 0u;
+        const unsigned* scale_matrix = (itid & 4u) != 0u ? up : gate;
+        if (scale_lane) scale_meta = *(const uint4*)(scale_matrix + blk);
+        float f0 = 0.0f, f1 = 0.0f, f2 = 0.0f, f3 = 0.0f;
+        float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+        if (scale_lane)
+            zinc_q4k_q8_scale_factors(scale_meta, shift, f0, f1, f2, f3, b0, b1, b2, b3);
+        const unsigned gate_scale_src = (grp & 1u) * 16u + v_im * 8u;
+        const float gf0 = __shfl_sync(0xffffffffu, f0, gate_scale_src);
+        const float gf1 = __shfl_sync(0xffffffffu, f1, gate_scale_src);
+        const float gf2 = __shfl_sync(0xffffffffu, f2, gate_scale_src);
+        const float gf3 = __shfl_sync(0xffffffffu, f3, gate_scale_src);
+        const float gb0 = __shfl_sync(0xffffffffu, b0, gate_scale_src);
+        const float gb1 = __shfl_sync(0xffffffffu, b1, gate_scale_src);
+        const float gb2 = __shfl_sync(0xffffffffu, b2, gate_scale_src);
+        const float gb3 = __shfl_sync(0xffffffffu, b3, gate_scale_src);
+        sum_gate += zinc_q4k_q8_block_dot_scaled(gate_qs0, gate_qs1,
+            q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane,
+            gf0, gf1, gf2, gf3, gb0, gb1, gb2, gb3);
+        const unsigned up_scale_src = gate_scale_src + 4u;
+        const float uf0 = __shfl_sync(0xffffffffu, f0, up_scale_src);
+        const float uf1 = __shfl_sync(0xffffffffu, f1, up_scale_src);
+        const float uf2 = __shfl_sync(0xffffffffu, f2, up_scale_src);
+        const float uf3 = __shfl_sync(0xffffffffu, f3, up_scale_src);
+        const float ub0 = __shfl_sync(0xffffffffu, b0, up_scale_src);
+        const float ub1 = __shfl_sync(0xffffffffu, b1, up_scale_src);
+        const float ub2 = __shfl_sync(0xffffffffu, b2, up_scale_src);
+        const float ub3 = __shfl_sync(0xffffffffu, b3, up_scale_src);
+        sum_up += zinc_q4k_q8_block_dot_scaled(up_qs0, up_qs1,
+            q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane,
+            uf0, uf1, uf2, uf3, ub0, ub1, ub2, ub3);
     }
 
     zinc_block_reduce_sum_pair(sum_gate, sum_up);

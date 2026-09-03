@@ -1709,10 +1709,12 @@ test "ROCm dense Qwen decode keeps the measured Q4 and attention fast paths" {
     try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu(", "const unsigned row = blockIdx.x;", 500);
     try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu(", "for (unsigned sb = grp; sb < bpr; sb += ngrp)", 1100);
 
-    // Q4_K headers are loaded once per 16-lane group in the packed-Q8 fused
-    // gate/up path, while decode attention carries independent score and value
-    // accumulators to hide RDNA4 FMA latency.
-    try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu_q8(", "gate_meta = *(const uint4*)(gate + blk);", 1800);
+    // Q4_K metadata work is split across gate/up lanes in the packed-Q8 fused
+    // path, with quant words prefetched before the metadata load. Decode
+    // attention carries independent score and value accumulators to hide RDNA4
+    // FMA latency.
+    try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu_q8(", "const unsigned gate_qs0 = gate[blk + q_word];", 1800);
+    try expectContainsNear(kernels, "void dmmv_q4k_gate_up_swiglu_q8(", "const unsigned* scale_matrix = (itid & 4u) != 0u ? up : gate;", 2300);
     try expectContainsNear(forward, "var gu_silu = gu;", "gu_silu.acc_mode = 0;", 120);
     try expectContainsNear(kernels, "void naive_attention(", "float acc4[8] = {};", 1800);
     try expectContainsNear(kernels, "void naive_attention(", "acc7 = 0.0f;", 4200);
