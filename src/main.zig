@@ -1895,6 +1895,16 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
     var generated: std.ArrayList(u32) = .{};
     defer generated.deinit(allocator);
 
+    // MTP rollback/history buffers are execution-context setup, so allocate
+    // them before prompt timing just as a separate draft context would be.
+    var mtp_prepared = false;
+    if (comptime @hasDecl(@TypeOf(fwd.*), "mtpPrepare")) {
+        mtp_prepared = fwd.mtpPrepare() catch |err| blk: {
+            log.warn("NextN/MTP context setup failed ({s}); using ordinary greedy decode", .{@errorName(err)});
+            break :blk false;
+        };
+    }
+
     // PREFILL: build the KV cache for every prompt token, but only the LAST
     // prompt token needs logits — its argmax is the first generated token.
     // Prompt-internal tokens use prefillStep, which skips the vocab-sized LM
@@ -1936,6 +1946,15 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
             }
         }
     }
+    var mtp_active = false;
+    if (comptime @hasDecl(@TypeOf(fwd.*), "mtpPrime")) {
+        if (mtp_prepared and used_batched) {
+            mtp_active = fwd.mtpPrime(prompt_tokens) catch |err| blk: {
+                log.warn("NextN/MTP initialization failed ({s}); using ordinary greedy decode", .{@errorName(err)});
+                break :blk false;
+            };
+        }
+    }
     const prefill_ms = @as(f64, @floatFromInt(prefill_timer.read())) / 1_000_000.0;
     const prefill_tps = if (prefill_ms > 0) @as(f64, @floatFromInt(prompt_tokens.len)) / (prefill_ms / 1000.0) else 0;
     log.info("Prefill complete: {d} tokens in {d:.1} ms ({d:.2} tok/s)", .{ prompt_tokens.len, prefill_ms, prefill_tps });
@@ -1944,14 +1963,67 @@ fn runCudaDecode(fwd: anytype, model: *loader_cuda_mod.Model, config: Config, ma
     // context limit is reached.
     var produced: u32 = 0;
     var decode_timer = try std.time.Timer.start();
-    while (produced < max_new and pos < max_ctx) {
-        if (next_tok == eos_id) break;
-        try generated.append(allocator, next_tok);
-        produced += 1;
-        if (produced >= max_new or pos >= max_ctx) break;
-        const fed = next_tok;
-        next_tok = try fwd.decodeStep(fed, pos, true);
-        pos += 1;
+    var generated_with_mtp = false;
+    var mtp_drafted: u32 = 0;
+    var mtp_accepted: u32 = 0;
+    if (comptime @hasDecl(@TypeOf(fwd.*), "mtpCycle")) {
+        if (mtp_active) {
+            generated_with_mtp = true;
+            mtp_loop: while (produced < max_new and pos < max_ctx) {
+                if (next_tok == eos_id) break;
+
+                const token_room = max_new - produced;
+                const context_room = max_ctx - pos;
+                const max_drafts = @min(@as(u32, 3), @min(token_room - 1, context_room - 1));
+                if (max_drafts == 0) {
+                    try generated.append(allocator, next_tok);
+                    produced += 1;
+                    break;
+                }
+
+                const result = try fwd.mtpCycle(next_tok, pos, max_drafts, eos_id);
+                mtp_drafted += result.n_drafted;
+                mtp_accepted += result.n_accepted;
+
+                // The target always consumed and committed the seed token.
+                try generated.append(allocator, next_tok);
+                produced += 1;
+                pos += 1;
+
+                var i: u32 = 0;
+                while (i < result.n_accepted) : (i += 1) {
+                    const accepted = result.drafts[i];
+                    if (accepted == eos_id) break :mtp_loop;
+                    try generated.append(allocator, accepted);
+                    produced += 1;
+                    pos += 1;
+                }
+                next_tok = result.next_token;
+            }
+        }
+    }
+    if (!generated_with_mtp) {
+        while (produced < max_new and pos < max_ctx) {
+            if (next_tok == eos_id) break;
+            try generated.append(allocator, next_tok);
+            produced += 1;
+            if (produced >= max_new or pos >= max_ctx) break;
+            const fed = next_tok;
+            next_tok = try fwd.decodeStep(fed, pos, true);
+            pos += 1;
+        }
+    } else {
+        const acceptance = if (mtp_drafted > 0)
+            100.0 * @as(f64, @floatFromInt(mtp_accepted)) / @as(f64, @floatFromInt(mtp_drafted))
+        else
+            0.0;
+        log.info("NextN/MTP: accepted {d}/{d} draft tokens ({d:.1}%)", .{ mtp_accepted, mtp_drafted, acceptance });
+        if (comptime @hasDecl(@TypeOf(fwd.*), "mtpPerf")) {
+            const perf = fwd.mtpPerf();
+            log.info("NextN/MTP phases ({d} cycles): draft={d:.1} ms target={d:.1} ms restore={d:.1} ms catch-up={d:.1} ms", .{
+                perf.cycles, perf.draft_ms, perf.target_ms, perf.restore_ms, perf.catchup_ms,
+            });
+        }
     }
     const decode_ms = @as(f64, @floatFromInt(decode_timer.read())) / 1_000_000.0;
     const decode_tps = if (decode_ms > 0) @as(f64, @floatFromInt(produced)) / (decode_ms / 1000.0) else 0;

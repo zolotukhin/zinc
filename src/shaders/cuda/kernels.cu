@@ -1563,6 +1563,28 @@ extern "C" __global__ void add_inplace(float* y, const float* x, AddPush pc) {
     if (i < pc.N) y[i] += x[i];
 }
 
+// Device-side copies keep speculative recurrent-state checkpoints on the GPU
+// instead of staging hundreds of MiB through host memory.
+struct CopyPush { unsigned N, src_offset, dst_offset; };
+extern "C" __global__ void copy_f32(const float* src, float* dst, CopyPush pc) {
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < pc.N) dst[(size_t)pc.dst_offset + i] = src[(size_t)pc.src_offset + i];
+}
+
+// Concatenate token-major [T,N] rows into compact [T,2N] rows. Qwen3.8's
+// NextN projection consumes [normalized token embedding | normalized trunk h].
+struct ConcatRowsPush { unsigned N, T; };
+extern "C" __global__ void concat_rows(const float* a, const float* b, float* out, ConcatRowsPush pc) {
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned total = pc.T * pc.N;
+    if (i >= total) return;
+    unsigned t = i / pc.N;
+    unsigned col = i - t * pc.N;
+    size_t dst = (size_t)t * (2u * pc.N) + col;
+    out[dst] = a[i];
+    out[dst + pc.N] = b[i];
+}
+
 // Batched ssm_conv1d: one block-row per channel, loop t = 0..n_tok internally
 // so the circular conv-state advances exactly as the per-token launches did.
 // input/out are token-major [n_tok, conv_channels]; state is the shared circular
@@ -1594,6 +1616,46 @@ extern "C" __global__ void ssm_conv1d_batched(const float* input, const unsigned
         }
         out_data[(size_t)t * pc.conv_channels + ch] = sum / (1.0f + expf(-sum)); // SiLU
         state[(size_t)off * pc.conv_channels + ch] = ci;
+        off += 1u;
+        if (off >= d_conv_1) off -= d_conv_1;
+    }
+}
+
+// Verification twin: in addition to advancing the live ring, retain its exact
+// contents after each of the (at most four) candidate rows. This turns a draft
+// rejection into one selected device copy instead of a full target replay.
+extern "C" __global__ void ssm_conv1d_batched_history(
+    const float* input, const unsigned char* conv_kernel, float* state,
+    float* out_data, float* history, ConvBatchPush pc) {
+    unsigned ch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ch >= pc.conv_channels) return;
+    unsigned d_conv_1 = pc.d_conv - 1u;
+    unsigned off = pc.state_offset;
+    const size_t state_len = (size_t)d_conv_1 * pc.conv_channels;
+    for (unsigned t = 0; t < pc.n_tok; t++) {
+        float ci = input[(size_t)t * pc.conv_channels + ch];
+        float sum = 0.0f;
+        for (unsigned ki = 0; ki < pc.d_conv; ki++) {
+            unsigned k_idx = ch * pc.d_conv + ki;
+            float kw = (pc.kernel_is_f16 != 0u)
+                           ? zinc_half_to_float(((const unsigned short*)conv_kernel)[k_idx])
+                           : ((const float*)conv_kernel)[k_idx];
+            float sv;
+            if (ki < d_conv_1) {
+                unsigned slot = off + ki;
+                if (slot >= d_conv_1) slot -= d_conv_1;
+                sv = state[(size_t)slot * pc.conv_channels + ch];
+            } else {
+                sv = ci;
+            }
+            sum += kw * sv;
+        }
+        out_data[(size_t)t * pc.conv_channels + ch] = sum / (1.0f + expf(-sum));
+        state[(size_t)off * pc.conv_channels + ch] = ci;
+        for (unsigned slot = 0; slot < d_conv_1; ++slot) {
+            const size_t i = (size_t)slot * pc.conv_channels + ch;
+            history[(size_t)t * state_len + i] = state[i];
+        }
         off += 1u;
         if (off >= d_conv_1) off -= d_conv_1;
     }
@@ -1927,9 +1989,10 @@ __device__ __forceinline__ float zinc_warp_reduce_128_exact(float v0, float v1, 
     return __shfl_sync(0xffffffffu, total, 0);
 }
 
-extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_col_warp(
+template <bool SAVE_HISTORY>
+__device__ __forceinline__ void ssm_delta_net_col_warp_impl(
     const float* conv_out, const float* gate, const float* beta,
-    float* state, float* out_data, DeltaNetColWarpPush pc)
+    float* state, float* out_data, float* history, DeltaNetColWarpPush pc)
 {
     const unsigned h = blockIdx.x;
     const unsigned col = blockIdx.y * 4u + threadIdx.y;
@@ -1977,6 +2040,14 @@ extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_col_warp(
             ? zinc_warp_reduce_sum_all(((s0 * q0 + s1 * q1) + s2 * q2) + s3 * q3)
             : zinc_warp_reduce_128_exact(s0 * q0, s1 * q1, s2 * q2, s3 * q3);
         if (lane == 0) out_data[t * pc.y_stride_tok + h * hv + col] = o;
+        if constexpr (SAVE_HISTORY) {
+            const size_t hist_base = (size_t)t * pc.dt_rank * hv * hv;
+            const size_t state_base = hist_base + ((size_t)h * hv + col) * hv;
+            history[state_base + lane] = s0;
+            if (lane + 32u < hv) history[state_base + lane + 32u] = s1;
+            if (lane + 64u < hv) history[state_base + lane + 64u] = s2;
+            if (lane + 96u < hv) history[state_base + lane + 96u] = s3;
+        }
     }
 
     state[((size_t)h * hv + col) * hv + lane] = s0;
@@ -1985,10 +2056,25 @@ extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_col_warp(
     if (lane + 96u < hv) state[((size_t)h * hv + col) * hv + lane + 96u] = s3;
 }
 
-extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_warp(
+extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_col_warp(
+    const float* conv_out, const float* gate, const float* beta,
+    float* state, float* out_data, DeltaNetColWarpPush pc)
+{
+    ssm_delta_net_col_warp_impl<false>(conv_out, gate, beta, state, out_data, nullptr, pc);
+}
+
+extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_col_warp_history(
+    const float* conv_out, const float* gate, const float* beta,
+    float* state, float* out_data, float* history, DeltaNetColWarpPush pc)
+{
+    ssm_delta_net_col_warp_impl<true>(conv_out, gate, beta, state, out_data, history, pc);
+}
+
+template <bool SAVE_HISTORY>
+__device__ __forceinline__ void ssm_delta_net_warp_impl(
     const float* conv_out, const unsigned char* dt_bias, const float* alpha,
     const float* beta, const unsigned char* ssm_a, float* state, float* out_data,
-    DeltaNetWarpPush pc)
+    float* history, DeltaNetWarpPush pc)
 {
     const unsigned h = blockIdx.x;
     const unsigned row = blockIdx.y * DN_N_WARPS + threadIdx.y;
@@ -2103,6 +2189,14 @@ extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_warp(
         // Write output (one value per warp — lane 0 writes)
         if (lane == 0)
             out_data[t * pc.y_stride_tok + h * hv + row] = o;
+        if constexpr (SAVE_HISTORY) {
+            const size_t hist_base = (size_t)t * pc.dt_rank * hv * hv;
+            #pragma unroll
+            for (int r = 0; r < cols_per_lane; r++) {
+                const unsigned col_idx = r * DN_WARP_SIZE + lane;
+                history[hist_base + ((size_t)h * hv + row) * hv + col_idx] = s_shard[r];
+            }
+        }
     }
 
     // Write final state
@@ -2111,6 +2205,22 @@ extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_warp(
         unsigned col_idx = r * DN_WARP_SIZE + lane;
         state[((size_t)h * hv + row) * hv + col_idx] = s_shard[r];
     }
+}
+
+extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_warp(
+    const float* conv_out, const unsigned char* dt_bias, const float* alpha,
+    const float* beta, const unsigned char* ssm_a, float* state, float* out_data,
+    DeltaNetWarpPush pc)
+{
+    ssm_delta_net_warp_impl<false>(conv_out, dt_bias, alpha, beta, ssm_a, state, out_data, nullptr, pc);
+}
+
+extern "C" __global__ __launch_bounds__(128, 8) void ssm_delta_net_warp_history(
+    const float* conv_out, const unsigned char* dt_bias, const float* alpha,
+    const float* beta, const unsigned char* ssm_a, float* state, float* out_data,
+    float* history, DeltaNetWarpPush pc)
+{
+    ssm_delta_net_warp_impl<true>(conv_out, dt_bias, alpha, beta, ssm_a, state, out_data, history, pc);
 }
 
 // ---- ssm_conv1d_seq (Effort 28 4c-2b: batched DECODE per-seq conv1d) ---------
@@ -2698,6 +2808,73 @@ extern "C" __global__ void dmmv_q4k_q8_fast(
     }
 }
 
+// Two-token verification twin of the packed-Q8 decode matvec. The activation
+// buffer uses the ROCm MMQ layout [K/128][T][144], so both independently
+// quantized rows share each weight load while preserving the single-token
+// accumulation and reduction order.
+template <unsigned B>
+__device__ __forceinline__ void zinc_dmmv_q4k_q8_btok(
+    const unsigned* __restrict__ a,
+    const unsigned char* __restrict__ xq,
+    float* __restrict__ y, DmmvPush pc)
+{
+    const unsigned row = blockIdx.x;
+    if (row >= pc.M) return;
+    const unsigned tid = threadIdx.x, itid = tid & 15u, grp = tid >> 4;
+    const unsigned il = itid >> 2, ir = itid & 3u;
+    const unsigned v_im = il >> 1, v_in = il & 1u;
+    const unsigned l0 = 4u * (2u * ir + v_in);
+    const unsigned q_off = 32u * v_im + l0;
+    const unsigned shift = v_im * 16u;
+    const unsigned ngrp = blockDim.x >> 4;
+    const unsigned bpr = pc.K >> 8;
+    const unsigned row_base = (pc.a_offset >> 2) + row * bpr * 36u;
+    float sum[B] = {};
+
+    for (unsigned sb = grp; sb < bpr; sb += ngrp) {
+        const unsigned blk = row_base + sb * 36u;
+        const unsigned g = 2u * v_im;
+        const unsigned q_word = 4u + (q_off >> 2);
+        const unsigned qs0 = a[blk + q_word];
+        const unsigned qs1 = a[blk + q_word + 16u];
+        float f0, f1, f2, f3, b0, b1, b2, b3;
+        zinc_q4k_q8_scale_factors(*(const uint4*)(a + blk), shift,
+            f0, f1, f2, f3, b0, b1, b2, b3);
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const unsigned char* h0 = xq + ((size_t)(2u * sb) * B + tok) * 144u;
+            const unsigned char* h1 = xq + ((size_t)(2u * sb + 1u) * B + tok) * 144u;
+            const int q0 = *(const int*)(h0 + 16u + g * 32u + l0);
+            const int q1 = *(const int*)(h0 + 16u + (g + 1u) * 32u + l0);
+            const int q2 = *(const int*)(h1 + 16u + g * 32u + l0);
+            const int q3 = *(const int*)(h1 + 16u + (g + 1u) * 32u + l0);
+            const float2 ds0 = __half22float2(*(const half2*)(h0 + g * 4u));
+            const float2 ds1 = __half22float2(*(const half2*)(h0 + (g + 1u) * 4u));
+            const float2 ds2 = __half22float2(*(const half2*)(h1 + g * 4u));
+            const float2 ds3 = __half22float2(*(const half2*)(h1 + (g + 1u) * 4u));
+            sum[tok] += zinc_q4k_q8_block_dot_scaled(qs0, qs1,
+                q0, q1, q2, q3, ds0, ds1, ds2, ds3, l0 == 0u,
+                f0, f1, f2, f3, b0, b1, b2, b3);
+        }
+    }
+
+    #pragma unroll
+    for (unsigned tok = 0u; tok < B; ++tok) {
+        const float total = zinc_block_reduce_sum(sum[tok]);
+        if (tid == 0u) {
+            const unsigned yi = (pc.y_offset >> 2) + tok * pc.M + row;
+            if (pc.acc_mode != 0u) y[yi] += total;
+            else y[yi] = total;
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void dmmv_q4k_q8_btok2(
+    const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) {
+    zinc_dmmv_q4k_q8_btok<2u>(a, xq, y, pc);
+}
+
 __device__ __forceinline__ float zinc_q5k_q8_block_dot(
     const unsigned* a, unsigned blk, unsigned q_off, unsigned l0, unsigned shift,
     int q0, int q1, int q2, int q3,
@@ -2857,6 +3034,107 @@ extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8(
             y[row] = silu * sum_up;
         }
     }
+}
+
+// Two-token verifier variant of the fused dense FFN. Gate and up share each
+// packed activation load, their reductions share one rendezvous, and SwiGLU is
+// written directly so the verifier avoids two full intermediate tensors.
+template <unsigned B>
+__device__ __forceinline__ void zinc_dmmv_q4k_gate_up_swiglu_q8_btok(
+    const unsigned* __restrict__ gate,
+    const unsigned* __restrict__ up,
+    const unsigned char* __restrict__ xq,
+    float* __restrict__ y, DmmvPush pc)
+{
+    const unsigned row = blockIdx.x;
+    if (row >= pc.M) return;
+    const unsigned tid = threadIdx.x, itid = tid & 15u, grp = tid >> 4;
+    const unsigned il = itid >> 2, ir = itid & 3u;
+    const unsigned v_im = il >> 1, v_in = il & 1u;
+    const unsigned l0 = 4u * (2u * ir + v_in);
+    const unsigned q_off = 32u * v_im + l0;
+    const unsigned shift = v_im * 16u;
+    const unsigned ngrp = blockDim.x >> 4;
+    const unsigned bpr = pc.K >> 8;
+    const unsigned row_base = row * bpr * 36u;
+    float sum_gate[B] = {};
+    float sum_up[B] = {};
+
+    #pragma unroll 5
+    for (unsigned sb = grp; sb < bpr; sb += ngrp) {
+        const unsigned blk = row_base + sb * 36u;
+        const unsigned q_word = 4u + (q_off >> 2);
+        const unsigned gate_qs0 = gate[blk + q_word];
+        const unsigned gate_qs1 = gate[blk + q_word + 16u];
+        const unsigned up_qs0 = up[blk + q_word];
+        const unsigned up_qs1 = up[blk + q_word + 16u];
+        uint4 scale_meta = {};
+        const bool scale_lane = (itid & 3u) == 0u;
+        const unsigned* scale_matrix = (itid & 4u) != 0u ? up : gate;
+        if (scale_lane) scale_meta = *(const uint4*)(scale_matrix + blk);
+        float f0 = 0.0f, f1 = 0.0f, f2 = 0.0f, f3 = 0.0f;
+        float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+        if (scale_lane)
+            zinc_q4k_q8_scale_factors(scale_meta, shift, f0, f1, f2, f3, b0, b1, b2, b3);
+        const unsigned gate_scale_src = (grp & 1u) * 16u + v_im * 8u;
+        const float gf0 = __shfl_sync(0xffffffffu, f0, gate_scale_src);
+        const float gf1 = __shfl_sync(0xffffffffu, f1, gate_scale_src);
+        const float gf2 = __shfl_sync(0xffffffffu, f2, gate_scale_src);
+        const float gf3 = __shfl_sync(0xffffffffu, f3, gate_scale_src);
+        const float gb0 = __shfl_sync(0xffffffffu, b0, gate_scale_src);
+        const float gb1 = __shfl_sync(0xffffffffu, b1, gate_scale_src);
+        const float gb2 = __shfl_sync(0xffffffffu, b2, gate_scale_src);
+        const float gb3 = __shfl_sync(0xffffffffu, b3, gate_scale_src);
+        const unsigned up_scale_src = gate_scale_src + 4u;
+        const float uf0 = __shfl_sync(0xffffffffu, f0, up_scale_src);
+        const float uf1 = __shfl_sync(0xffffffffu, f1, up_scale_src);
+        const float uf2 = __shfl_sync(0xffffffffu, f2, up_scale_src);
+        const float uf3 = __shfl_sync(0xffffffffu, f3, up_scale_src);
+        const float ub0 = __shfl_sync(0xffffffffu, b0, up_scale_src);
+        const float ub1 = __shfl_sync(0xffffffffu, b1, up_scale_src);
+        const float ub2 = __shfl_sync(0xffffffffu, b2, up_scale_src);
+        const float ub3 = __shfl_sync(0xffffffffu, b3, up_scale_src);
+        const unsigned g = 2u * v_im;
+        const bool min_lane = l0 == 0u;
+
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const unsigned char* h0 = xq + ((size_t)(2u * sb) * B + tok) * 144u;
+            const unsigned char* h1 = xq + ((size_t)(2u * sb + 1u) * B + tok) * 144u;
+            const int q0 = *(const int*)(h0 + 16u + g * 32u + l0);
+            const int q1 = *(const int*)(h0 + 16u + (g + 1u) * 32u + l0);
+            const int q2 = *(const int*)(h1 + 16u + g * 32u + l0);
+            const int q3 = *(const int*)(h1 + 16u + (g + 1u) * 32u + l0);
+            const float2 ds0 = __half22float2(*(const half2*)(h0 + g * 4u));
+            const float2 ds1 = __half22float2(*(const half2*)(h0 + (g + 1u) * 4u));
+            const float2 ds2 = __half22float2(*(const half2*)(h1 + g * 4u));
+            const float2 ds3 = __half22float2(*(const half2*)(h1 + (g + 1u) * 4u));
+            sum_gate[tok] += zinc_q4k_q8_block_dot_scaled(gate_qs0, gate_qs1,
+                q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane,
+                gf0, gf1, gf2, gf3, gb0, gb1, gb2, gb3);
+            sum_up[tok] += zinc_q4k_q8_block_dot_scaled(up_qs0, up_qs1,
+                q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane,
+                uf0, uf1, uf2, uf3, ub0, ub1, ub2, ub3);
+        }
+    }
+
+    #pragma unroll
+    for (unsigned tok = 0u; tok < B; ++tok) {
+        float gate_total = sum_gate[tok];
+        float up_total = sum_up[tok];
+        zinc_block_reduce_sum_pair(gate_total, up_total);
+        if (tid == 0u) {
+            const float silu = gate_total / (1.0f + expf(-gate_total));
+            y[(size_t)tok * pc.M + row] = silu * up_total;
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok2(
+    const unsigned* gate, const unsigned* up, const unsigned char* xq,
+    float* y, DmmvPush pc) {
+    zinc_dmmv_q4k_gate_up_swiglu_q8_btok<2u>(gate, up, xq, y, pc);
 }
 
 // Exact-route MoE twin of the Q8 gate/up matvec. Unlike padded grouped WMMA,
@@ -3134,10 +3412,13 @@ extern "C" __global__ void dmmv_q8_0_q8_fast(
     sum = zinc_block_reduce_sum(sum);
     if (tid == 0u) y[(pc.y_offset >> 2) + row] = sum;
 }
+
 #else
 extern "C" __global__ void dmmv_q4k_q8_fast() {}
 extern "C" __global__ void dmmv_q5k_q8_fast() {}
+extern "C" __global__ void dmmv_q4k_q8_btok2() {}
 extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8() {}
+extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok2() {}
 extern "C" __global__ void dmmv_q4k_experts_grouped_q8_dual() {}
 extern "C" __global__ void dmmv_q5_1_experts_grouped_q8() {}
 extern "C" __global__ void dmmv_q5_1_experts_grouped_q8_m8() {}
@@ -3376,8 +3657,74 @@ extern "C" __global__ void dmmv_q6k_q8_fast(
         else y[yi + row] = sum;
     }
 }
+
+template <unsigned B>
+__device__ __forceinline__ void zinc_dmmv_q6k_q8_btok(
+    const unsigned char* __restrict__ a,
+    const unsigned char* __restrict__ xq,
+    float* __restrict__ y, DmmvPush pc)
+{
+    const unsigned row = blockIdx.x;
+    if (row >= pc.M) return;
+    const unsigned bpr = pc.K >> 8;
+    const unsigned char* arow = a + pc.a_offset + (size_t)row * bpr * 210u;
+    const unsigned tid = threadIdx.x, itid = tid & 15u, grp = tid >> 4;
+    const unsigned half_id = itid >> 3;
+    const unsigned local_id = itid & 7u;
+    const unsigned e_start = local_id * 4u;
+    const unsigned is = e_start >> 4;
+    const unsigned ngrp = blockDim.x >> 4;
+    float sum[B] = {};
+
+    for (unsigned sb = grp; sb < bpr; sb += ngrp) {
+        const unsigned char* bb = arow + (size_t)sb * 210u;
+        const float d = zinc_half_to_float((unsigned short)((unsigned)bb[208] | ((unsigned)bb[209] << 8)));
+        const unsigned ql0 = *(const unsigned*)(bb + half_id * 64u + e_start);
+        const unsigned ql1 = *(const unsigned*)(bb + half_id * 64u + 32u + e_start);
+        const unsigned qh = *(const unsigned*)(bb + 128u + half_id * 32u + e_start);
+        const int v0 = (int)zinc_q6_decode_signed4((ql0 & 0x0f0f0f0fu) | ((qh << 4) & 0x30303030u));
+        const int v1 = (int)zinc_q6_decode_signed4((ql1 & 0x0f0f0f0fu) | ((qh << 2) & 0x30303030u));
+        const int v2 = (int)zinc_q6_decode_signed4(((ql0 >> 4) & 0x0f0f0f0fu) | (qh & 0x30303030u));
+        const int v3 = (int)zinc_q6_decode_signed4(((ql1 >> 4) & 0x0f0f0f0fu) | ((qh >> 2) & 0x30303030u));
+        const signed char* sc = (const signed char*)(bb + 192u + half_id * 8u);
+
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const unsigned char* xh = xq + ((size_t)(2u * sb + half_id) * B + tok) * 144u;
+            const int q0 = *(const int*)(xh + 16u + 0u * 32u + e_start);
+            const int q1 = *(const int*)(xh + 16u + 1u * 32u + e_start);
+            const int q2 = *(const int*)(xh + 16u + 2u * 32u + e_start);
+            const int q3 = *(const int*)(xh + 16u + 3u * 32u + e_start);
+            const float d0 = __half2float(*(const half*)(xh + 0u * 4u));
+            const float d1 = __half2float(*(const half*)(xh + 1u * 4u));
+            const float d2 = __half2float(*(const half*)(xh + 2u * 4u));
+            const float d3 = __half2float(*(const half*)(xh + 3u * 4u));
+            sum[tok] += d * (float)sc[is] * d0 * (float)__dp4a(v0, q0, 0);
+            sum[tok] += d * (float)sc[is + 2u] * d1 * (float)__dp4a(v1, q1, 0);
+            sum[tok] += d * (float)sc[is + 4u] * d2 * (float)__dp4a(v2, q2, 0);
+            sum[tok] += d * (float)sc[is + 6u] * d3 * (float)__dp4a(v3, q3, 0);
+        }
+    }
+
+    #pragma unroll
+    for (unsigned tok = 0u; tok < B; ++tok) {
+        const float total = blockDim.x == 32u ? zinc_warp_reduce_sum(sum[tok]) : zinc_block_reduce_sum(sum[tok]);
+        if (tid == 0u) {
+            const unsigned yi = (pc.y_offset >> 2) + tok * pc.M + row;
+            if (pc.acc_mode != 0u) y[yi] += total;
+            else y[yi] = total;
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void dmmv_q6k_q8_btok2(
+    const unsigned char* a, const unsigned char* xq, float* y, DmmvPush pc) {
+    zinc_dmmv_q6k_q8_btok<2u>(a, xq, y, pc);
+}
 #else
 extern "C" __global__ void dmmv_q6k_q8_fast() {}
+extern "C" __global__ void dmmv_q6k_q8_btok2() {}
 #endif
 
 // ---- dmmv_q5k_fast (perf research) — q4k_fast + Q5_K qh high-bit promote -----
@@ -10529,9 +10876,11 @@ extern "C" __global__ void naive_attention_batched_seq(
 // Prefill processes T prompt tokens at once. naive_attention is single-query
 // (grid=n_heads, one query over [0..seq_len)). This batches all T queries: block
 // (head=blockIdx.x, t=blockIdx.y) computes attention for query position t, head h,
-// CAUSALLY masked to keys [0..t]. Same 3-pass softmax(QK^T)V + GQA + sink logic.
+// CAUSALLY masked to keys [0..base_position+t]. Same 3-pass softmax(QK^T)V +
+// GQA + sink logic. base_position=0 is ordinary prompt prefill; a non-zero base
+// lets speculative verification reuse the already-populated prefix KV cache.
 // Q/K/V are [T, n_kv_heads-or-n_heads, head_dim]; out is [T, n_heads, head_dim].
-struct AttnBatchPush { unsigned head_dim, n_heads, n_kv_heads, T, attn_scale_bits, sink_offset; };
+struct AttnBatchPush { unsigned head_dim, n_heads, n_kv_heads, T, attn_scale_bits, sink_offset, base_position; };
 
 extern "C" __global__ void attention_causal_batched(const float* q, const float* k, const float* v,
                                                     const float* sinks, float* out, AttnBatchPush pc) {
@@ -10540,7 +10889,7 @@ extern "C" __global__ void attention_causal_batched(const float* q, const float*
     unsigned head = blockIdx.x;
     unsigned t = blockIdx.y;                      // query position
     if (t >= pc.T) return;
-    unsigned seq_len = t + 1u;                    // causal: query t attends keys [0..t]
+    unsigned seq_len = pc.base_position + t + 1u;
     unsigned tid = threadIdx.x;
     unsigned hd = pc.head_dim;
     unsigned kv_head = head / (pc.n_heads / pc.n_kv_heads);
@@ -10603,13 +10952,13 @@ extern "C" __global__ void attention_causal_batched(const float* q, const float*
 extern "C" __global__ void attention_causal_batched_v2(const float* q, const float* k, const float* v,
                                                        const float* sinks, float* out, AttnBatchPush pc) {
     extern __shared__ float smem2[];
-    float* s_scores = smem2;              // [T]
-    float* qsh = smem2 + pc.T;            // [head_dim]
+    float* s_scores = smem2;              // [base_position + T]
+    float* qsh = smem2 + pc.base_position + pc.T; // [head_dim]
     __shared__ float s_m, s_rescale, s_inv;
     unsigned head = blockIdx.x;
     unsigned t = blockIdx.y;
     if (t >= pc.T) return;
-    unsigned seq_len = t + 1u;
+    unsigned seq_len = pc.base_position + t + 1u;
     unsigned tid = threadIdx.x, hd = pc.head_dim, nthr = blockDim.x;
     unsigned kv_head = head / (pc.n_heads / pc.n_kv_heads);
     const float* qh = q + ((size_t)t * pc.n_heads + head) * hd;

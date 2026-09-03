@@ -66,6 +66,11 @@ using the same Q4_K_M GGUF on both engines. The run used llama.cpp commit
 30B also remains ahead in all four workloads. Complete samples and provenance
 are in [`benchmarks/rocm-r9700.json`](benchmarks/rocm-r9700.json).
 
+For interactive CLI use, Qwen 3.8 models with an appended NextN block now use
+model-native speculative decoding by default on ROCm. Drafts are checked by the
+full model before they are emitted. This is separate from the server results
+above; use `ZINC_MTP=0` to compare the ordinary greedy path.
+
 ## Supported Platforms
 
 | Platform | GPU | Backend | Status |
@@ -154,7 +159,7 @@ validated models listed below.
 
 | Area | What you can do today |
 |------|------------------------|
-| Run models | Use the CLI for single-stream inference on supported GGUF models |
+| Run models | Use the CLI for single-stream inference on supported GGUF models; Qwen 3.8 NextN drafting is automatic on ROCm when the GGUF contains it |
 | Chat | Start the built-in browser UI with `zinc chat`, including streaming and thinking-mode display |
 | API | Serve OpenAI-compatible `/v1` endpoints with streaming responses |
 | Models | Manage catalog models with `list`, `pull`, `use`, `active`, and `rm` |

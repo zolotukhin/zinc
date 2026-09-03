@@ -258,13 +258,15 @@ const DequantQ5KPush = extern struct { M: u32, K: u32, a_offset: u32 = 0 };
 const DequantQ6KPush = extern struct { M: u32, K: u32, a_offset: u32 = 0 };
 const DequantQ8_0Push = extern struct { M: u32, K: u32, a_offset: u32 = 0 };
 const AddPush = extern struct { N: u32 };
+const CopyPush = extern struct { N: u32, src_offset: u32 = 0, dst_offset: u32 = 0 };
+const ConcatRowsPush = extern struct { N: u32, T: u32 };
 const ConvBatchPush = extern struct { conv_channels: u32, d_conv: u32, kernel_is_f16: u32, n_tok: u32, state_offset: u32 };
 const GatedNormBatchPush = extern struct { d_inner: u32, dt_rank: u32, head_v_dim: u32, d_state: u32, norm_per_head: u32, n_tok: u32 };
 // Effort 26 T0: batched attention-inner twins (grid.y = T).
 const DeintBatchPush = extern struct { head_dim: u32, n_head: u32, T: u32 };
 const RopeBatchPush = extern struct { stride: u32, rope_dim: u32, n_heads: u32, base_position: u32, freq_base_bits: u32, attn_scale_bits: u32 };
 const KvWriteBatchPush = extern struct { kv_dim: u32, dst_base: u32, T: u32 };
-const AttnBatchPush = extern struct { head_dim: u32, n_heads: u32, n_kv_heads: u32, T: u32, attn_scale_bits: u32, sink_offset: u32 };
+const AttnBatchPush = extern struct { head_dim: u32, n_heads: u32, n_kv_heads: u32, T: u32, attn_scale_bits: u32, sink_offset: u32, base_position: u32 };
 
 /// Map a GGUF quant type to its DMMV kernel pipeline (indexes ForwardCuda.dmmv).
 fn dmmvIdx(t: gguf.GGMLType) usize {
@@ -365,8 +367,11 @@ const Pipelines = struct {
     dmmv_fast: [4]CudaPipeline, // q4k_fast, q5k_fast, q6k_fast, q8_0_fast (block=64)
     dmmv_q4k_q8_fast: CudaPipeline, // experimental Q4_K x Q8_1 decode matvec
     dmmv_q5k_q8_fast: CudaPipeline, // experimental Q5_K x Q8_1 decode matvec
+    dmmv_q4k_q8_btok2: CudaPipeline, // two-token Q4_K x packed-Q8 verifier
+    dmmv_q6k_q8_btok2: CudaPipeline, // two-token Q6_K x packed-Q8 verifier
     dmmv_q4k_gate_up_swiglu: CudaPipeline, // fused dense-decode FFN gate/up/SwiGLU
     dmmv_q4k_gate_up_swiglu_q8: CudaPipeline, // experimental Q8_1 activation decode FFN
+    dmmv_q4k_gate_up_swiglu_q8_btok2: CudaPipeline, // two-token packed-Q8 FFN
     dmmv_q6k_q8_fast: CudaPipeline, // experimental Q6_K x Q8_1 decode matvec
     dmmv_f32_dual: CudaPipeline, // fused SSM alpha/beta projection
     dmmv_q4k_pair: CudaPipeline, // true same-input Q4_K projection pair
@@ -431,7 +436,9 @@ const Pipelines = struct {
     ssm_delta_net: CudaPipeline,
     ssm_delta_net_prepare: CudaPipeline, // normalize Q/K + activate gate/beta once per token/head
     ssm_delta_net_col_warp: CudaPipeline, // block-compatible state scan using four wave32 columns
+    ssm_delta_net_col_warp_history: CudaPipeline, // speculative state after each row
     ssm_delta_net_warp: CudaPipeline, // warp-level scan (no __syncthreads in hot loop)
+    ssm_delta_net_warp_history: CudaPipeline, // speculative state after each row
     ssm_delta_net_chunked: CudaPipeline, // chunked parallel delta-net (ZINC_SSM_CHUNKED)
     ssm_gated_norm: CudaPipeline,
     ssm_gated_norm_quant_q8: CudaPipeline,
@@ -481,7 +488,10 @@ const Pipelines = struct {
     dequant_q8_0_to_f16: CudaPipeline, // full Q8_0 weight [M,K] → fp16 for cuBLAS (shexp)
     f32_to_f16: CudaPipeline, // activation downcast [T,K] → fp16 for cuBLAS
     add_inplace: CudaPipeline, // residual fold: hidden += projection
+    copy_f32: CudaPipeline, // device-local state checkpoint / row copy
+    concat_rows: CudaPipeline, // NextN [token embedding | trunk hidden] input
     ssm_conv1d_batched: CudaPipeline, // one launch over all T (circular state)
+    ssm_conv1d_batched_history: CudaPipeline, // speculative state after each row
     ssm_gated_norm_batched: CudaPipeline, // grid.y = T (stateless per token)
     // Effort 26 T0: batched attention-inner kernels (collapse the per-token loop).
     deinterleave_batched: CudaPipeline,
@@ -603,6 +613,63 @@ const DecodeBatch = struct {
             buffer.freeBuffer(b);
         }
     }
+};
+
+const mtp_max_draft: u32 = 3;
+const mtp_max_verify: u32 = mtp_max_draft + 1;
+
+/// Lazily allocated state for Qwen3.8's appended NextN block. The target's
+/// attention KV remains in ForwardCuda's ordinary layer arrays; this owns only
+/// rollback copies for recurrent layers and the small host/device staging used
+/// by draft/verify cycles.
+const MtpState = struct {
+    recurrent_snapshot: []CudaBuffer,
+    conv_snapshot: []CudaBuffer,
+    conv_off_snapshot: []u32,
+    verify_logits: CudaBuffer, // [mtp_max_verify, vocab]
+    verify_argmax: CudaBuffer, // [mtp_max_verify] u32
+    h_input: CudaBuffer, // one target/MTP hidden row for single-token drafting
+    pending_h: []f32, // normalized target hidden preceding the next seed token
+    target_h: []f32, // downloaded verification h rows
+    pair_h: []f32, // shifted h rows paired with accepted target tokens
+    primed: bool = false,
+    cycles: u32 = 0,
+    drafted: u32 = 0,
+    accepted: u32 = 0,
+    draft_ns: u64 = 0,
+    target_ns: u64 = 0,
+    restore_ns: u64 = 0,
+    catchup_ns: u64 = 0,
+
+    fn deinit(self: *MtpState, allocator: std.mem.Allocator) void {
+        for (self.recurrent_snapshot) |*b| buffer.freeBuffer(b);
+        for (self.conv_snapshot) |*b| buffer.freeBuffer(b);
+        allocator.free(self.recurrent_snapshot);
+        allocator.free(self.conv_snapshot);
+        allocator.free(self.conv_off_snapshot);
+        buffer.freeBuffer(&self.verify_logits);
+        buffer.freeBuffer(&self.verify_argmax);
+        buffer.freeBuffer(&self.h_input);
+        allocator.free(self.pending_h);
+        allocator.free(self.target_h);
+        allocator.free(self.pair_h);
+        self.* = undefined;
+    }
+};
+
+pub const MtpCycleResult = struct {
+    next_token: u32,
+    n_drafted: u32,
+    n_accepted: u32,
+    drafts: [mtp_max_draft]u32,
+};
+
+pub const MtpPerf = struct {
+    cycles: u32,
+    draft_ms: f64,
+    target_ms: f64,
+    restore_ms: f64,
+    catchup_ms: f64,
 };
 
 /// Per-token GPU forward state for qwen35 greedy decode.
@@ -773,6 +840,12 @@ pub const ForwardCuda = struct {
     // Effort 26 T0: batched prefill (qwen). Lazily-allocated token-major scratch
     // + the cuBLAS dense-GEMM toggles (mirrors the gemma prefillBatched path).
     batch: ?BatchScratch = null,
+    // Qwen3.8 model-native speculative decode. Allocated only for CLI requests
+    // that actually opt into/use the appended NextN layer, so ordinary serving
+    // keeps its existing memory footprint.
+    mtp: ?MtpState = null,
+    use_spec_btok: bool = false,
+    capture_spec_state: bool = false,
     use_attn_v2: bool = false, // ZINC_ATTN_V2: coalesced warp-per-key qwen prefill attention (token-tolerance)
     use_cublas: bool = false, // dense Q4_K/Q6_K prefill GEMMs via cuBLAS fp16 TC
     use_cublas_q4: bool = false, // route Q4_K dense GEMMs through cuBLAS
@@ -922,8 +995,11 @@ pub const ForwardCuda = struct {
         pipes.dmmv_fast[3] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0_fast");
         pipes.dmmv_q4k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_fast");
         pipes.dmmv_q5k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_fast");
+        pipes.dmmv_q4k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok2");
+        pipes.dmmv_q6k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok2");
         pipes.dmmv_q4k_gate_up_swiglu = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu");
         pipes.dmmv_q4k_gate_up_swiglu_q8 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok2");
         pipes.dmmv_q6k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_fast");
         pipes.dmmv_f32_dual = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual");
         pipes.dmmv_q4k_pair = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair");
@@ -945,7 +1021,9 @@ pub const ForwardCuda = struct {
         pipes.ssm_delta_net = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net");
         pipes.ssm_delta_net_prepare = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_prepare");
         pipes.ssm_delta_net_col_warp = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_col_warp");
+        pipes.ssm_delta_net_col_warp_history = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_col_warp_history");
         pipes.ssm_delta_net_warp = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_warp");
+        pipes.ssm_delta_net_warp_history = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_warp_history");
         pipes.ssm_delta_net_chunked = try pipeline.createPipeline(ctx, src.ptr, "ssm_delta_net_chunked");
         // Chunked kernel needs ~49KB shared memory (k_norm[32KB] + M[16KB] + misc)
         pipeline.setMaxDynamicShared(&pipes.ssm_delta_net_chunked, 64 * 128 * @sizeOf(f32) + 64 * 64 * @sizeOf(f32) + 2 * 64 * @sizeOf(f32));
@@ -994,7 +1072,10 @@ pub const ForwardCuda = struct {
         pipes.dequant_q8_0_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "dequant_q8_0_to_f16");
         pipes.f32_to_f16 = try pipeline.createPipeline(ctx, src.ptr, "f32_to_f16");
         pipes.add_inplace = try pipeline.createPipeline(ctx, src.ptr, "add_inplace");
+        pipes.copy_f32 = try pipeline.createPipeline(ctx, src.ptr, "copy_f32");
+        pipes.concat_rows = try pipeline.createPipeline(ctx, src.ptr, "concat_rows");
         pipes.ssm_conv1d_batched = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d_batched");
+        pipes.ssm_conv1d_batched_history = try pipeline.createPipeline(ctx, src.ptr, "ssm_conv1d_batched_history");
         pipes.ssm_gated_norm_batched = try pipeline.createPipeline(ctx, src.ptr, "ssm_gated_norm_batched");
         pipes.deinterleave_batched = try pipeline.createPipeline(ctx, src.ptr, "deinterleave_qgate_batched");
         pipes.rope_batched = try pipeline.createPipeline(ctx, src.ptr, "rope_batched");
@@ -1068,7 +1149,7 @@ pub const ForwardCuda = struct {
             pipes.dmmv_q5k_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_btok" ++ suf);
             pipes.dmmv_q8_0_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0_btok" ++ suf);
         }
-        log.info("nvrtc: compiled {d} kernel pipelines", .{173});
+        log.info("nvrtc: compiled {d} kernel pipelines", .{181});
 
         const f4 = @sizeOf(f32);
         const max_act = @max(d.n_ff, d.conv_channels); // 12288 vs 8192 → 12288
@@ -1079,6 +1160,7 @@ pub const ForwardCuda = struct {
         // Tiny-but-nonzero stubs so the dense path (n_experts==0) still allocates/free uniformly.
         const router_logits_elems = @max(@as(u32, 1), d.n_experts);
         const router_out_elems = @max(@as(u32, 1), 2 * d.n_experts_used);
+        const state_layers = d.n_layers + model.config.n_nextn_layers;
         var self = ForwardCuda{
             .allocator = allocator,
             .ctx = ctx,
@@ -1111,13 +1193,13 @@ pub const ForwardCuda = struct {
             .host_tok_in = try buffer.allocHost(u32, 1),
             .host_router_ids = try allocator.alloc(u32, @max(@as(u32, 1), d.n_experts_used)),
             .inv_freq = try buffer.createBuffer(ctx, (d.rope_dim / 2) * f4),
-            .sinks = try buffer.createBuffer(ctx, d.n_layers * d.n_head * f4),
-            .kv_k = try allocator.alloc(CudaBuffer, d.n_layers),
-            .kv_v = try allocator.alloc(CudaBuffer, d.n_layers),
-            .ssm_conv_state = try allocator.alloc(CudaBuffer, d.n_layers),
-            .ssm_state = try allocator.alloc(CudaBuffer, d.n_layers),
-            .conv_off = try allocator.alloc(u32, d.n_layers),
-            .layer_is_attn = try allocator.alloc(bool, d.n_layers),
+            .sinks = try buffer.createBuffer(ctx, state_layers * d.n_head * f4),
+            .kv_k = try allocator.alloc(CudaBuffer, state_layers),
+            .kv_v = try allocator.alloc(CudaBuffer, state_layers),
+            .ssm_conv_state = try allocator.alloc(CudaBuffer, state_layers),
+            .ssm_state = try allocator.alloc(CudaBuffer, state_layers),
+            .conv_off = try allocator.alloc(u32, state_layers),
+            .layer_is_attn = try allocator.alloc(bool, state_layers),
         };
 
         if (comptime is_rocm) {
@@ -1224,13 +1306,13 @@ pub const ForwardCuda = struct {
 
         // Per-layer KV / SSM state, sized only for the layer type. We still
         // allocate a tiny stub for the "wrong" type so deinit is uniform.
-        for (0..d.n_layers) |li| {
+        for (0..state_layers) |li| {
             const L: u32 = @intCast(li);
             self.conv_off[li] = 0;
             // Detect layer type from tensor presence: attention layers have
             // attn_q.weight, SSM layers have attn_qkv.weight.
             self.layer_is_attn[li] = model.getLayer(L, "attn_q.weight") != null;
-            if (li < 8) log.info("  layer {d}: {s}", .{ li, if (self.layer_is_attn[li]) "attention" else "SSM" });
+            if (li < 8 or li >= d.n_layers) log.info("  layer {d}: {s}", .{ li, if (self.layer_is_attn[li]) "attention" else "SSM" });
             if (li == 0 and d.n_experts > 0) {
                 if (model.getLayer(L, "ffn_gate_exps.weight")) |w| log.info("  ffn_gate_exps: type={} dims={any}", .{ w.info.type_, w.info.dims[0..@min(w.info.n_dims, 3)] });
                 if (model.getLayer(L, "ffn_down_exps.weight")) |w| log.info("  ffn_down_exps: type={} dims={any}", .{ w.info.type_, w.info.dims[0..@min(w.info.n_dims, 3)] });
@@ -1268,7 +1350,7 @@ pub const ForwardCuda = struct {
 
         // sinks: all NaN → attention sink disabled.
         {
-            const n = d.n_layers * d.n_head;
+            const n = state_layers * d.n_head;
             const sk = try allocator.alloc(f32, n);
             defer allocator.free(sk);
             @memset(sk, std.math.nan(f32));
@@ -1380,6 +1462,7 @@ pub const ForwardCuda = struct {
         @setEvalBranchQuota(2000);
         const a = self.allocator;
         self.freeBatch();
+        if (self.mtp) |*state| state.deinit(a);
         if (self.graph) |g| shim.cuda_graph_free(g);
         for (&self.batch_graph) |*bg| if (bg.*) |g| shim.cuda_graph_free(g);
         inline for (.{ &self.hidden, &self.norm_buf, &self.qfull_buf, &self.q_buf, &self.k_buf, &self.v_buf, &self.gate_buf, &self.attn_out_buf, &self.ffn_norm_buf, &self.up_buf, &self.swiglu_buf, &self.router_buf, &self.down_buf, &self.logits_buf, &self.argmax_buf, &self.argmax_partial_buf, &self.tok_in_buf, &self.router_logits_buf, &self.router_out_buf, &self.gate_scalar_buf, &self.inv_freq, &self.sinks }) |b| {
@@ -1765,7 +1848,7 @@ pub const ForwardCuda = struct {
                 self.waitPending();
                 const t0 = std.time.milliTimestamp();
                 if (self.layer_is_attn[L]) {
-                    try self.attentionLayerBatched(L, T, b);
+                    try self.attentionLayerBatched(L, T, b, 0);
                 } else {
                     try self.ssmLayerBatched(L, T, b);
                 }
@@ -1793,7 +1876,7 @@ pub const ForwardCuda = struct {
                 prof_ffn += std.time.milliTimestamp() - t1;
             } else {
                 if (self.layer_is_attn[L]) {
-                    try self.attentionLayerBatched(L, T, b);
+                    try self.attentionLayerBatched(L, T, b, 0);
                 } else {
                     try self.ssmLayerBatched(L, T, b);
                 }
@@ -1841,6 +1924,417 @@ pub const ForwardCuda = struct {
         var tok: u32 = 0;
         buffer.download(ctx, &self.argmax_buf, std.mem.asBytes(&tok));
         return tok;
+    }
+
+    /// Whether this model/runtime can use its appended Qwen3.8 NextN block.
+    /// ROCm enables it by default; ZINC_MTP=0 is the explicit compatibility
+    /// escape hatch. CUDA can opt in with ZINC_MTP=1 while that path matures.
+    pub fn mtpEnabled(self: *const ForwardCuda) bool {
+        if (!envFlag("ZINC_MTP", is_rocm)) return false;
+        if (self.model.config.n_nextn_layers != 1 or self.d.n_experts != 0) return false;
+        const L = self.d.n_layers;
+        return self.model.getLayer(L, "nextn.eh_proj.weight") != null and
+            self.model.getLayer(L, "nextn.enorm.weight") != null and
+            self.model.getLayer(L, "nextn.hnorm.weight") != null and
+            self.model.getLayer(L, "attn_q.weight") != null and
+            self.model.getLayer(L, "ffn_gate.weight") != null;
+    }
+
+    fn ensureMtpState(self: *ForwardCuda) !*MtpState {
+        if (self.mtp) |*state| return state;
+
+        const d = self.d;
+        const a = self.allocator;
+        const f4 = @sizeOf(f32);
+        const n_layers: usize = @intCast(d.n_layers);
+
+        const recurrent = try a.alloc(CudaBuffer, n_layers);
+        var n_recurrent: usize = 0;
+        errdefer {
+            for (recurrent[0..n_recurrent]) |*b| buffer.freeBuffer(b);
+            a.free(recurrent);
+        }
+        const conv = try a.alloc(CudaBuffer, n_layers);
+        var n_conv: usize = 0;
+        errdefer {
+            for (conv[0..n_conv]) |*b| buffer.freeBuffer(b);
+            a.free(conv);
+        }
+        for (0..n_layers) |li| {
+            const rec_elems: u32 = if (self.layer_is_attn[li]) 1 else d.ssm_state_len;
+            const conv_elems: u32 = if (self.layer_is_attn[li]) 1 else d.conv_state_len;
+            recurrent[li] = try buffer.createBuffer(self.ctx, @as(usize, rec_elems) * mtp_max_verify * f4);
+            n_recurrent += 1;
+            conv[li] = try buffer.createBuffer(self.ctx, @as(usize, conv_elems) * mtp_max_verify * f4);
+            n_conv += 1;
+        }
+
+        const conv_off = try a.alloc(u32, n_layers);
+        errdefer a.free(conv_off);
+        const verify_logits = try buffer.createBuffer(self.ctx, @as(usize, mtp_max_verify) * d.vocab * f4);
+        errdefer {
+            var b = verify_logits;
+            buffer.freeBuffer(&b);
+        }
+        const verify_argmax = try buffer.createBuffer(self.ctx, @as(usize, mtp_max_verify) * @sizeOf(u32));
+        errdefer {
+            var b = verify_argmax;
+            buffer.freeBuffer(&b);
+        }
+        const h_input = try buffer.createBuffer(self.ctx, @as(usize, d.n_embd) * f4);
+        errdefer {
+            var b = h_input;
+            buffer.freeBuffer(&b);
+        }
+        const pending_h = try a.alloc(f32, d.n_embd);
+        errdefer a.free(pending_h);
+        const target_h = try a.alloc(f32, @as(usize, mtp_max_verify) * d.n_embd);
+        errdefer a.free(target_h);
+        const pair_h = try a.alloc(f32, @as(usize, mtp_max_verify) * d.n_embd);
+        errdefer a.free(pair_h);
+
+        @memset(pending_h, 0);
+        self.mtp = .{
+            .recurrent_snapshot = recurrent,
+            .conv_snapshot = conv,
+            .conv_off_snapshot = conv_off,
+            .verify_logits = verify_logits,
+            .verify_argmax = verify_argmax,
+            .h_input = h_input,
+            .pending_h = pending_h,
+            .target_h = target_h,
+            .pair_h = pair_h,
+        };
+        return &self.mtp.?;
+    }
+
+    fn mtpHeadNorm(self: *ForwardCuda) ?*const LoadedTensor {
+        const L = self.d.n_layers;
+        return self.model.getLayer(L, "nextn.shared_head_norm.weight") orelse
+            self.model.get("output_norm.weight");
+    }
+
+    fn mtpHead(self: *ForwardCuda) ?*const LoadedTensor {
+        const L = self.d.n_layers;
+        return self.model.getLayer(L, "nextn.shared_head_head.weight") orelse
+            self.model.get("output.weight");
+    }
+
+    /// Allocate the speculative context before prompt timing begins. This is
+    /// model/runtime setup (equivalent to creating llama.cpp's draft context),
+    /// not prompt processing, and can involve hundreds of MiB of rollback rows.
+    pub fn mtpPrepare(self: *ForwardCuda) !bool {
+        if (!self.mtpEnabled()) return false;
+        _ = try self.ensureMtpState();
+        return true;
+    }
+
+    /// Save the target's pre-verification circular offsets. The speculative SSM
+    /// kernels record the full recurrent/conv state after each candidate row,
+    /// so rejection can select an exact accepted boundary without replay.
+    fn mtpCheckpointTarget(self: *ForwardCuda) !void {
+        self.waitPending();
+        const state = &self.mtp.?;
+        @memcpy(state.conv_off_snapshot, self.conv_off[0..self.d.n_layers]);
+    }
+
+    fn mtpRestoreTarget(self: *ForwardCuda, committed: u32) !void {
+        self.waitPending();
+        const state = &self.mtp.?;
+        std.debug.assert(committed >= 1 and committed <= mtp_max_verify);
+
+        var cmd = try command.beginCommand(self.ctx);
+        for (0..self.d.n_layers) |li| {
+            if (self.layer_is_attn[li]) continue;
+            self.conv_off[li] = (state.conv_off_snapshot[li] + committed) % (self.d.d_conv - 1);
+            const rec = CopyPush{ .N = self.d.ssm_state_len, .src_offset = (committed - 1) * self.d.ssm_state_len };
+            cmd.dispatch(&self.pipes.copy_f32, .{ ceilDiv(rec.N, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &state.recurrent_snapshot[li], &self.ssm_state[li] }, &rec, @sizeOf(CopyPush), 0);
+            const cv = CopyPush{ .N = self.d.conv_state_len, .src_offset = (committed - 1) * self.d.conv_state_len };
+            cmd.dispatch(&self.pipes.copy_f32, .{ ceilDiv(cv.N, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &state.conv_snapshot[li], &self.ssm_conv_state[li] }, &cv, @sizeOf(CopyPush), 0);
+        }
+        cmd.commitAndWait();
+    }
+
+    /// Run the appended NextN block over already-committed target tokens. The
+    /// shifted target hidden rows are supplied by the caller: token at p pairs
+    /// with target h at p-1. This fills/repairs the draft head's own KV cache.
+    fn mtpCatchup(self: *ForwardCuda, tokens: []const u32, h_pairs: []const f32, base_position: u32) !void {
+        const T: u32 = @intCast(tokens.len);
+        if (T == 0) return;
+        const d = self.d;
+        const rows: usize = @intCast(T);
+        const width: usize = @intCast(d.n_embd);
+        std.debug.assert(h_pairs.len == rows * width);
+
+        const b = try self.ensureBatch(T);
+        const embeddings = try self.allocator.alloc(f32, rows * width);
+        defer self.allocator.free(embeddings);
+        for (0..rows) |t| self.model.dequantEmbeddingRow(tokens[t], embeddings[t * width ..][0..width]);
+        buffer.upload(self.ctx, &b.hidden, std.mem.sliceAsBytes(embeddings));
+        buffer.upload(self.ctx, &b.o, std.mem.sliceAsBytes(h_pairs));
+
+        const L = d.n_layers;
+        const enorm = self.layer(L, "nextn.enorm.weight");
+        const hnorm = self.layer(L, "nextn.hnorm.weight");
+        const eh = self.layer(L, "nextn.eh_proj.weight");
+        const wan = self.layer(L, "attn_norm.weight");
+        const wk = self.layer(L, "attn_k.weight");
+        const wv = self.layer(L, "attn_v.weight");
+        const wkn = self.layer(L, "attn_k_norm.weight");
+        const saved_spec_btok = self.use_spec_btok;
+        const saved_cublas_q8 = self.use_cublas_q8;
+        self.use_spec_btok = T >= 2;
+        // The Q8_0 EH projection is the only large Q8 matrix here. ROCm's
+        // native tile avoids a per-call fp16 dequant plus hipBLAS setup and is
+        // dramatically faster for both the 48-row prime and 1–2-row repair.
+        if (is_rocm) self.use_cublas_q8 = false;
+        defer {
+            self.use_spec_btok = saved_spec_btok;
+            self.use_cublas_q8 = saved_cublas_q8;
+        }
+
+        var cmd = try command.beginCommand(self.ctx);
+        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
+        cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &enorm.gpu_buffer, &b.norm }, &rms, @sizeOf(RmsPush), 0);
+        cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.o, &hnorm.gpu_buffer, &b.ffn_norm }, &rms, @sizeOf(RmsPush), 0);
+        const concat = ConcatRowsPush{ .N = d.n_embd, .T = T };
+        cmd.dispatch(&self.pipes.concat_rows, .{ ceilDiv(T * d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &b.norm, &b.ffn_norm, &b.gate_ff }, &concat, @sizeOf(ConcatRowsPush), 0);
+        self.gemmDispatchPrefill(&cmd, eh, &b.gate_ff, &b.hidden, d.n_embd, 2 * d.n_embd, T);
+
+        // Catch-up persists only this block's K/V. Its attention result, output
+        // projection and FFN are discarded because committed rows use target
+        // h as the next cycle's cross-input. Skipping them removes roughly an
+        // entire draft block of dead work per verification cycle.
+        cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &wan.gpu_buffer, &b.norm }, &rms, @sizeOf(RmsPush), 0);
+        self.gemmDispatchPrefill(&cmd, wk, &b.norm, &b.k, d.kv_dim, d.n_embd, T);
+        self.gemmDispatchPrefill(&cmd, wv, &b.norm, &b.v, d.kv_dim, d.n_embd, T);
+        const rms_h = RmsPush{ .N = d.head_dim, .eps = d.rms_eps };
+        cmd.dispatch(&self.pipes.rms_norm, .{ d.n_kv_head * T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.k, &wkn.gpu_buffer, &b.k }, &rms_h, @sizeOf(RmsPush), 0);
+        const rope_k = RopeBatchPush{ .stride = d.head_dim, .rope_dim = d.rope_dim, .n_heads = d.n_kv_head, .base_position = base_position, .freq_base_bits = 0, .attn_scale_bits = 0 };
+        cmd.dispatch(&self.pipes.rope_batched, .{ d.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.k, &b.k, &self.inv_freq }, &rope_k, @sizeOf(RopeBatchPush), 0);
+        const kvw = KvWriteBatchPush{ .kv_dim = d.kv_dim, .dst_base = base_position, .T = T };
+        cmd.dispatch(&self.pipes.kv_cache_write_batched, .{ ceilDiv(d.kv_dim, 64), T, 1 }, .{ 64, 1, 1 }, &.{ &b.k, &self.kv_k[L], &b.v, &self.kv_v[L] }, &kvw, @sizeOf(KvWriteBatchPush), 0);
+        self.submit(cmd);
+        self.waitPending();
+    }
+
+    /// One autoregressive call to the single NextN head. h_input holds either
+    /// the preceding target hidden row or the prior draft head's normalized row;
+    /// the latter is copied back in-place for recursive draft steps.
+    fn mtpDraftStep(self: *ForwardCuda, token: u32, pos: u32) !u32 {
+        const d = self.d;
+        const L = d.n_layers;
+        const state = &self.mtp.?;
+        const enorm = self.layer(L, "nextn.enorm.weight");
+        const hnorm = self.layer(L, "nextn.hnorm.weight");
+        const eh = self.layer(L, "nextn.eh_proj.weight");
+        const head_norm = self.mtpHeadNorm() orelse return error.MissingTensor;
+        const head = self.mtpHead() orelse return error.MissingTensor;
+
+        self.model.dequantEmbeddingRow(token, self.host_embed);
+        buffer.upload(self.ctx, &self.hidden, std.mem.sliceAsBytes(self.host_embed));
+
+        var cmd = try command.beginCommand(self.ctx);
+        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
+        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.hidden, &enorm.gpu_buffer, &self.ffn_norm_buf }, &rms, @sizeOf(RmsPush), 0);
+        cmd.dispatch(&self.pipes.rms_norm, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &state.h_input, &hnorm.gpu_buffer, &self.up_buf }, &rms, @sizeOf(RmsPush), 0);
+        const concat = ConcatRowsPush{ .N = d.n_embd, .T = 1 };
+        cmd.dispatch(&self.pipes.concat_rows, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.ffn_norm_buf, &self.up_buf, &self.gate_buf }, &concat, @sizeOf(ConcatRowsPush), 0);
+        self.dmmvDispatch(&cmd, eh, &self.gate_buf, &self.hidden, d.n_embd, 2 * d.n_embd, 0, 0);
+        self.submit(cmd);
+
+        try self.attentionLayer(L, pos);
+        try self.ffnBlock(L);
+
+        cmd = try command.beginCommand(self.ctx);
+        const want_q8 = self.use_decode_q8_lm and head.info.type_ == .q6_k;
+        const norm_q8_ready = self.rmsNormDecodeDispatch(&cmd, &self.hidden, &head_norm.gpu_buffer, &self.norm_buf, d.n_embd, want_q8);
+        const save_h = CopyPush{ .N = d.n_embd };
+        cmd.dispatch(&self.pipes.copy_f32, .{ ceilDiv(d.n_embd, 256), 1, 1 }, .{ 256, 1, 1 }, &.{ &self.norm_buf, &state.h_input }, &save_h, @sizeOf(CopyPush), 0);
+        self.lmHeadDispatch(&cmd, &head.gpu_buffer, head.info.type_, norm_q8_ready);
+        self.argmaxDispatch(&cmd, &self.argmax_buf);
+        cmd.commitAndWait();
+        self.drainPending();
+
+        var tok: u32 = 0;
+        buffer.download(self.ctx, &self.argmax_buf, std.mem.asBytes(&tok));
+        return tok;
+    }
+
+    /// Run 1..4 proposed tokens through the real target in one weight-amortized
+    /// batch. Every normalized final hidden row is retained for NextN catch-up;
+    /// when `predictions` is non-null, each row's greedy next token is returned.
+    fn mtpTargetBatch(self: *ForwardCuda, tokens: []const u32, base_position: u32, predictions: ?*[mtp_max_verify]u32) !void {
+        const T: u32 = @intCast(tokens.len);
+        std.debug.assert(T >= 1 and T <= mtp_max_verify);
+        const d = self.d;
+        const rows: usize = @intCast(T);
+        const width: usize = @intCast(d.n_embd);
+        const b = try self.ensureBatch(T);
+
+        const embeddings = try self.allocator.alloc(f32, rows * width);
+        defer self.allocator.free(embeddings);
+        for (0..rows) |t| self.model.dequantEmbeddingRow(tokens[t], embeddings[t * width ..][0..width]);
+        buffer.upload(self.ctx, &b.hidden, std.mem.sliceAsBytes(embeddings));
+
+        const saved_spec_btok = self.use_spec_btok;
+        const saved_capture = self.capture_spec_state;
+        self.use_spec_btok = T >= 2;
+        self.capture_spec_state = predictions != null;
+        defer {
+            self.use_spec_btok = saved_spec_btok;
+            self.capture_spec_state = saved_capture;
+        }
+
+        var L: u32 = 0;
+        while (L < d.n_layers) : (L += 1) {
+            if (self.layer_is_attn[L]) {
+                try self.attentionLayerBatched(L, T, b, base_position);
+            } else {
+                try self.ssmLayerBatched(L, T, b);
+            }
+            try self.ffnBlockBatched(L, T, b);
+        }
+        self.waitPending();
+
+        const out_norm = self.model.get("output_norm.weight") orelse return error.MissingTensor;
+        var cmd = try command.beginCommand(self.ctx);
+
+        var logits_rows: [mtp_max_verify]CudaBuffer = undefined;
+        var argmax_rows: [mtp_max_verify]CudaBuffer = undefined;
+        var n_alias: usize = 0;
+        defer {
+            for (0..n_alias) |i| {
+                buffer.freeBuffer(&logits_rows[i]);
+                buffer.freeBuffer(&argmax_rows[i]);
+            }
+        }
+        if (predictions != null) {
+            const head = self.model.get("output.weight") orelse return error.MissingTensor;
+            const head_uses_q8 = self.prefillUsesQ8(head, d.vocab, T);
+            const norm_q8_ready = self.rmsNormPrefillDispatch(&cmd, &b.hidden, &out_norm.gpu_buffer, &b.norm, d.n_embd, T, head_uses_q8);
+            self.gemmDispatchPrefillImpl(&cmd, head, &b.norm, &self.mtp.?.verify_logits, d.vocab, d.n_embd, T, norm_q8_ready);
+            for (0..rows) |t| {
+                logits_rows[t] = try buffer.aliasBuffer(&self.mtp.?.verify_logits, t * d.vocab * @sizeOf(f32), d.vocab * @sizeOf(f32));
+                argmax_rows[t] = try buffer.aliasBuffer(&self.mtp.?.verify_argmax, t * @sizeOf(u32), @sizeOf(u32));
+                n_alias += 1;
+                self.argmaxDispatchFrom(&cmd, &logits_rows[t], &argmax_rows[t]);
+            }
+        } else {
+            const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
+            cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &out_norm.gpu_buffer, &b.norm }, &rms, @sizeOf(RmsPush), 0);
+        }
+        cmd.commitAndWait();
+
+        buffer.download(self.ctx, &b.norm, std.mem.sliceAsBytes(self.mtp.?.target_h[0 .. rows * width]));
+        if (predictions) |out| {
+            buffer.download(self.ctx, &self.mtp.?.verify_argmax, std.mem.sliceAsBytes(out[0..rows]));
+        }
+    }
+
+    /// Prime the draft head from the target prompt hidden rows left by
+    /// prefillBatched. Initialization is charged to prefill, matching llama.cpp.
+    pub fn mtpPrime(self: *ForwardCuda, prompt_tokens: []const u32) !bool {
+        if (!self.mtpEnabled() or prompt_tokens.len == 0 or self.batch == null) return false;
+        const d = self.d;
+        const T: u32 = @intCast(prompt_tokens.len);
+        const rows: usize = prompt_tokens.len;
+        const width: usize = @intCast(d.n_embd);
+        const b = &self.batch.?;
+        if (b.t_cap < T) return false;
+        _ = try self.ensureMtpState();
+
+        const out_norm = self.model.get("output_norm.weight") orelse return error.MissingTensor;
+        var cmd = try command.beginCommand(self.ctx);
+        const rms = RmsPush{ .N = d.n_embd, .eps = d.rms_eps };
+        cmd.dispatch(&self.pipes.rms_norm, .{ T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.hidden, &out_norm.gpu_buffer, &b.norm }, &rms, @sizeOf(RmsPush), 0);
+        cmd.commitAndWait();
+
+        const target_h = try self.allocator.alloc(f32, rows * width);
+        defer self.allocator.free(target_h);
+        const pairs = try self.allocator.alloc(f32, rows * width);
+        defer self.allocator.free(pairs);
+        buffer.download(self.ctx, &b.norm, std.mem.sliceAsBytes(target_h));
+        @memset(pairs, 0);
+        if (rows > 1) @memcpy(pairs[width..], target_h[0 .. (rows - 1) * width]);
+        @memcpy(self.mtp.?.pending_h, target_h[(rows - 1) * width ..][0..width]);
+
+        try self.mtpCatchup(prompt_tokens, pairs, 0);
+        self.mtp.?.primed = true;
+        log.info("Qwen NextN/MTP enabled: {d} prompt rows primed, draft window={d}", .{ T, @min(mtp_max_draft, envU32("ZINC_MTP_DRAFTS", 1)) });
+        return true;
+    }
+
+    pub fn mtpPerf(self: *const ForwardCuda) MtpPerf {
+        const state = &self.mtp.?;
+        return .{
+            .cycles = state.cycles,
+            .draft_ms = @as(f64, @floatFromInt(state.draft_ns)) / 1_000_000.0,
+            .target_ms = @as(f64, @floatFromInt(state.target_ns)) / 1_000_000.0,
+            .restore_ms = @as(f64, @floatFromInt(state.restore_ns)) / 1_000_000.0,
+            .catchup_ms = @as(f64, @floatFromInt(state.catchup_ns)) / 1_000_000.0,
+        };
+    }
+
+    /// Draft up to three tokens, verify them in one real-target batch, restore
+    /// the recurrent state at the accepted boundary, then repair the NextN KV.
+    /// The caller commits `seed` plus the returned accepted draft prefix only.
+    pub fn mtpCycle(self: *ForwardCuda, seed: u32, pos: u32, max_drafts: u32, eos_id: u32) !MtpCycleResult {
+        if (self.mtp == null or !self.mtp.?.primed) return error.MtpNotPrimed;
+        const n_limit = @min(max_drafts, @min(mtp_max_draft, @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", 1))));
+        std.debug.assert(n_limit > 0);
+
+        var phase_timer = try std.time.Timer.start();
+        buffer.upload(self.ctx, &self.mtp.?.h_input, std.mem.sliceAsBytes(self.mtp.?.pending_h));
+        var drafts: [mtp_max_draft]u32 = @splat(0);
+        var n_drafted: u32 = 0;
+        var fed = seed;
+        while (n_drafted < n_limit) : (n_drafted += 1) {
+            const draft = try self.mtpDraftStep(fed, pos + n_drafted);
+            drafts[n_drafted] = draft;
+            fed = draft;
+            if (draft == eos_id) {
+                n_drafted += 1;
+                break;
+            }
+        }
+        self.mtp.?.draft_ns += phase_timer.lap();
+
+        var target_tokens: [mtp_max_verify]u32 = @splat(0);
+        target_tokens[0] = seed;
+        @memcpy(target_tokens[1 .. 1 + n_drafted], drafts[0..n_drafted]);
+        try self.mtpCheckpointTarget();
+        var predictions: [mtp_max_verify]u32 = @splat(0);
+        try self.mtpTargetBatch(target_tokens[0 .. n_drafted + 1], pos, &predictions);
+        self.mtp.?.target_ns += phase_timer.lap();
+
+        var accepted: u32 = 0;
+        while (accepted < n_drafted and predictions[accepted] == drafts[accepted]) : (accepted += 1) {}
+        const committed = accepted + 1;
+        if (accepted < n_drafted) {
+            try self.mtpRestoreTarget(committed);
+        }
+        self.mtp.?.restore_ns += phase_timer.lap();
+
+        const width: usize = @intCast(self.d.n_embd);
+        @memcpy(self.mtp.?.pair_h[0..width], self.mtp.?.pending_h);
+        var row: usize = 1;
+        while (row < committed) : (row += 1) {
+            @memcpy(self.mtp.?.pair_h[row * width ..][0..width], self.mtp.?.target_h[(row - 1) * width ..][0..width]);
+        }
+        @memcpy(self.mtp.?.pending_h, self.mtp.?.target_h[(committed - 1) * width ..][0..width]);
+        try self.mtpCatchup(target_tokens[0..committed], self.mtp.?.pair_h[0 .. @as(usize, committed) * width], pos);
+        self.mtp.?.catchup_ns += phase_timer.lap();
+
+        self.mtp.?.cycles += 1;
+        self.mtp.?.drafted += n_drafted;
+        self.mtp.?.accepted += accepted;
+        return .{
+            .next_token = predictions[accepted],
+            .n_drafted = n_drafted,
+            .n_accepted = accepted,
+            .drafts = drafts,
+        };
     }
 
     /// Batched prefill that writes KV cache + SSM state into the given slot's
@@ -1933,7 +2427,7 @@ pub const ForwardCuda = struct {
     /// KV-write, causal attention and sigmoid-gate are each ONE batched launch
     /// over all T tokens (Effort 26 T0), bit-identical to the old per-token loop
     /// (token t at sequence position t). qwen35-9b pp512 +32% vs per-token.
-    fn attentionLayerBatched(self: *ForwardCuda, L: u32, T: u32, b: *BatchScratch) !void {
+    fn attentionLayerBatched(self: *ForwardCuda, L: u32, T: u32, b: *BatchScratch, base_position: u32) !void {
         const d = self.d;
         const ctx = self.ctx;
         const wq = self.layer(L, "attn_q.weight");
@@ -1966,20 +2460,20 @@ pub const ForwardCuda = struct {
         const rms_h = RmsPush{ .N = d.head_dim, .eps = d.rms_eps };
         cmd.dispatch(&self.pipes.rms_norm, .{ d.n_head * T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &wqn.gpu_buffer, &b.q }, &rms_h, @sizeOf(RmsPush), 0);
         cmd.dispatch(&self.pipes.rms_norm, .{ d.n_kv_head * T, 1, 1 }, .{ 256, 1, 1 }, &.{ &b.k, &wkn.gpu_buffer, &b.k }, &rms_h, @sizeOf(RmsPush), 0);
-        // RoPE q/k over all T (position = token index, base 0).
-        const rope_q = RopeBatchPush{ .stride = d.head_dim, .rope_dim = d.rope_dim, .n_heads = d.n_head, .base_position = 0, .freq_base_bits = 0, .attn_scale_bits = 0 };
+        // RoPE q/k over all T at their absolute positions.
+        const rope_q = RopeBatchPush{ .stride = d.head_dim, .rope_dim = d.rope_dim, .n_heads = d.n_head, .base_position = base_position, .freq_base_bits = 0, .attn_scale_bits = 0 };
         cmd.dispatch(&self.pipes.rope_batched, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &b.q, &self.inv_freq }, &rope_q, @sizeOf(RopeBatchPush), 0);
-        const rope_k = RopeBatchPush{ .stride = d.head_dim, .rope_dim = d.rope_dim, .n_heads = d.n_kv_head, .base_position = 0, .freq_base_bits = 0, .attn_scale_bits = 0 };
+        const rope_k = RopeBatchPush{ .stride = d.head_dim, .rope_dim = d.rope_dim, .n_heads = d.n_kv_head, .base_position = base_position, .freq_base_bits = 0, .attn_scale_bits = 0 };
         cmd.dispatch(&self.pipes.rope_batched, .{ d.n_kv_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.k, &b.k, &self.inv_freq }, &rope_k, @sizeOf(RopeBatchPush), 0);
         // Write all T tokens' K/V into the cache at positions 0..T-1.
-        const kvw = KvWriteBatchPush{ .kv_dim = d.kv_dim, .dst_base = 0, .T = T };
+        const kvw = KvWriteBatchPush{ .kv_dim = d.kv_dim, .dst_base = base_position, .T = T };
         cmd.dispatch(&self.pipes.kv_cache_write_batched, .{ ceilDiv(d.kv_dim, 64), T, 1 }, .{ 64, 1, 1 }, &.{ &b.k, &self.kv_k[L], &b.v, &self.kv_v[L] }, &kvw, @sizeOf(KvWriteBatchPush), 0);
         // Causal attention for all T queries (block (head, t), seq_len = t+1).
-        const attn = AttnBatchPush{ .head_dim = d.head_dim, .n_heads = d.n_head, .n_kv_heads = d.n_kv_head, .T = T, .attn_scale_bits = 0, .sink_offset = L * d.n_head };
+        const attn = AttnBatchPush{ .head_dim = d.head_dim, .n_heads = d.n_head, .n_kv_heads = d.n_kv_head, .T = T, .attn_scale_bits = 0, .sink_offset = L * d.n_head, .base_position = base_position };
         if (self.use_attn_v2) {
-            cmd.dispatch(&self.pipes.attention_causal_v2, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &self.sinks, &b.attn_out }, &attn, @sizeOf(AttnBatchPush), (T + d.head_dim) * 4);
+            cmd.dispatch(&self.pipes.attention_causal_v2, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &self.sinks, &b.attn_out }, &attn, @sizeOf(AttnBatchPush), (base_position + T + d.head_dim) * 4);
         } else {
-            cmd.dispatch(&self.pipes.attention_causal_batched, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &self.sinks, &b.attn_out }, &attn, @sizeOf(AttnBatchPush), T * 4);
+            cmd.dispatch(&self.pipes.attention_causal_batched, .{ d.n_head, T, 1 }, .{ 256, 1, 1 }, &.{ &b.q, &self.kv_k[L], &self.kv_v[L], &self.sinks, &b.attn_out }, &attn, @sizeOf(AttnBatchPush), (base_position + T) * 4);
         }
         // Sigmoid attention gate, element-wise over all [T, q_dim].
         const sm = SigmoidMulPush{ .N = T * d.q_dim };
@@ -2027,7 +2521,11 @@ pub const ForwardCuda = struct {
         self.gemmDispatchPrefill(&cmd, walpha, &b.norm, &b.alpha, d.dt_rank, d.n_embd, T);
         self.gemmDispatchPrefill(&cmd, wbeta, &b.norm, &b.beta, d.dt_rank, d.n_embd, T);
         const conv = ConvBatchPush{ .conv_channels = d.conv_channels, .d_conv = d.d_conv, .kernel_is_f16 = boolU32(wconv.info.type_ == .f16), .n_tok = T, .state_offset = self.conv_off[L] };
-        cmd.dispatch(&self.pipes.ssm_conv1d_batched, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.qkv, &wconv.gpu_buffer, &self.ssm_conv_state[L], &b.conv_out }, &conv, @sizeOf(ConvBatchPush), 0);
+        if (self.capture_spec_state) {
+            cmd.dispatch(&self.pipes.ssm_conv1d_batched_history, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.qkv, &wconv.gpu_buffer, &self.ssm_conv_state[L], &b.conv_out, &self.mtp.?.conv_snapshot[L] }, &conv, @sizeOf(ConvBatchPush), 0);
+        } else {
+            cmd.dispatch(&self.pipes.ssm_conv1d_batched, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.qkv, &wconv.gpu_buffer, &self.ssm_conv_state[L], &b.conv_out }, &conv, @sizeOf(ConvBatchPush), 0);
+        }
         self.conv_off[L] = (self.conv_off[L] + T) % (d.d_conv - 1);
 
         if (ssm_profile) {
@@ -2039,15 +2537,16 @@ pub const ForwardCuda = struct {
 
         // === Delta-net scan ===
         if (ssm_profile) cmd = try command.beginCommand(ctx);
-        const use_chunked = std.posix.getenv("ZINC_SSM_CHUNKED") != null and
+        const use_chunked = !self.capture_spec_state and std.posix.getenv("ZINC_SSM_CHUNKED") != null and
             std.mem.eql(u8, std.posix.getenv("ZINC_SSM_CHUNKED").?, "1");
         // Delta-net scan: warp-level kernel (no __syncthreads in hot loop).
         // FIXED (2026-06-30): warp kernel now computes S@k (row-wise) matching
         // the block kernel. Safe for all T values.
         // A/B toggle: ZINC_SSM_WARP=0 falls back to the block-reduce kernel.
-        const use_warp = !self.force_block_ssm and !use_chunked and
-            (std.posix.getenv("ZINC_SSM_WARP") == null or
-                !std.mem.eql(u8, std.posix.getenv("ZINC_SSM_WARP").?, "0"));
+        const use_warp = (self.capture_spec_state and !is_rocm) or
+            (!self.capture_spec_state and !self.force_block_ssm and !use_chunked and
+                (std.posix.getenv("ZINC_SSM_WARP") == null or
+                    !std.mem.eql(u8, std.posix.getenv("ZINC_SSM_WARP").?, "0")));
         const use_preprocessed = !use_chunked and !use_warp and d.d_state == d.head_v_dim and d.d_state <= 128 and ssmPreparedOn();
         const use_col_warp = use_preprocessed and ssmColWarpOn();
         if (ssm_profile and L == 0) log.info("SSM_PROFILE L0: prepared={}", .{use_preprocessed});
@@ -2099,7 +2598,11 @@ pub const ForwardCuda = struct {
                 .ab_stride_tok = d.dt_rank,
                 .y_stride_tok = d.d_inner,
             };
-            cmd.dispatch(&self.pipes.ssm_delta_net_warp, .{ d.dt_rank, ceilDiv(d.head_v_dim, 4), 1 }, .{ 32, 4, 1 }, &.{ &b.conv_out, &wdt.gpu_buffer, &b.alpha, &b.beta, &wa.gpu_buffer, &self.ssm_state[L], &b.delta_out }, &dn_warp, @sizeOf(DeltaNetWarpPush), 2 * T * @sizeOf(f32));
+            if (self.capture_spec_state) {
+                cmd.dispatch(&self.pipes.ssm_delta_net_warp_history, .{ d.dt_rank, ceilDiv(d.head_v_dim, 4), 1 }, .{ 32, 4, 1 }, &.{ &b.conv_out, &wdt.gpu_buffer, &b.alpha, &b.beta, &wa.gpu_buffer, &self.ssm_state[L], &b.delta_out, &self.mtp.?.recurrent_snapshot[L] }, &dn_warp, @sizeOf(DeltaNetWarpPush), 2 * T * @sizeOf(f32));
+            } else {
+                cmd.dispatch(&self.pipes.ssm_delta_net_warp, .{ d.dt_rank, ceilDiv(d.head_v_dim, 4), 1 }, .{ 32, 4, 1 }, &.{ &b.conv_out, &wdt.gpu_buffer, &b.alpha, &b.beta, &wa.gpu_buffer, &self.ssm_state[L], &b.delta_out }, &dn_warp, @sizeOf(DeltaNetWarpPush), 2 * T * @sizeOf(f32));
+            }
         } else if (use_col_warp) {
             const dn_col = DeltaNetColWarpPush{
                 .dt_rank = d.dt_rank,
@@ -2110,9 +2613,13 @@ pub const ForwardCuda = struct {
                 .conv_stride_tok = d.conv_channels,
                 .ab_stride_tok = d.dt_rank,
                 .y_stride_tok = d.d_inner,
-                .fast_reduce = boolU32(ssmColWarpFastOn()),
+                .fast_reduce = boolU32(if (self.capture_spec_state) self.use_decode_ssm_fast else ssmColWarpFastOn()),
             };
-            cmd.dispatch(&self.pipes.ssm_delta_net_col_warp, .{ d.dt_rank, ceilDiv(d.head_v_dim, 4), 1 }, .{ 32, 4, 1 }, &.{ &b.conv_out, &b.alpha, &b.beta, &self.ssm_state[L], &b.delta_out }, &dn_col, @sizeOf(DeltaNetColWarpPush), 0);
+            if (self.capture_spec_state) {
+                cmd.dispatch(&self.pipes.ssm_delta_net_col_warp_history, .{ d.dt_rank, ceilDiv(d.head_v_dim, 4), 1 }, .{ 32, 4, 1 }, &.{ &b.conv_out, &b.alpha, &b.beta, &self.ssm_state[L], &b.delta_out, &self.mtp.?.recurrent_snapshot[L] }, &dn_col, @sizeOf(DeltaNetColWarpPush), 0);
+            } else {
+                cmd.dispatch(&self.pipes.ssm_delta_net_col_warp, .{ d.dt_rank, ceilDiv(d.head_v_dim, 4), 1 }, .{ 32, 4, 1 }, &.{ &b.conv_out, &b.alpha, &b.beta, &self.ssm_state[L], &b.delta_out }, &dn_col, @sizeOf(DeltaNetColWarpPush), 0);
+            }
         } else {
             const dn = DeltaNetPush{
                 .d_inner = d.d_inner,
@@ -2176,11 +2683,20 @@ pub const ForwardCuda = struct {
         const dense_gate_up_uses_cublas = self.use_cublas and T >= self.cublas_min_t;
         const can_fuse_gate_up = wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k and
             T >= 32 and d.n_ff >= 64 and !dense_gate_up_uses_cublas and fuse_gate_up_swiglu;
+        const can_fuse_spec_gate_up = is_rocm and self.use_spec_btok and T == 2 and mtpQ8TypeOn(0) and
+            wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k;
 
         var cmd = try command.beginCommand(ctx);
-        const wgate_uses_q8 = !can_fuse_gate_up and self.prefillUsesQ8(wgate, d.n_ff, T);
+        const wgate_uses_q8 = can_fuse_spec_gate_up or (!can_fuse_gate_up and self.prefillUsesQ8(wgate, d.n_ff, T));
         const norm_q8_ready = self.rmsNormPrefillDispatch(&cmd, &b.hidden, &wfn.gpu_buffer, &b.ffn_norm, d.n_embd, T, wgate_uses_q8);
-        if (can_fuse_gate_up) {
+        if (can_fuse_spec_gate_up) {
+            if (!norm_q8_ready) {
+                const qp = QuantActPush{ .K = d.n_embd, .T = T };
+                cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), T, 1 }, .{ 256, 1, 1 }, &.{ &b.ffn_norm, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            }
+            const gp = DmmvPush{ .M = d.n_ff, .K = d.n_embd };
+            cmd.dispatch(&self.pipes.dmmv_q4k_gate_up_swiglu_q8_btok2, .{ d.n_ff, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &b.act_q8, &b.swiglu_ff }, &gp, @sizeOf(DmmvPush), 0);
+        } else if (can_fuse_gate_up) {
             const gp = GateUpSwigluPush{ .M = d.n_ff, .K = d.n_embd, .T = T };
             cmd.dispatch(&self.pipes.gemm_q4k_gate_up_swiglu, .{ ceilDiv(d.n_ff, 64), ceilDiv(T, 64), 1 }, .{ 256, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &b.ffn_norm, &b.swiglu_ff }, &gp, @sizeOf(GateUpSwigluPush), 0);
         } else {
@@ -2430,6 +2946,12 @@ pub const ForwardCuda = struct {
     /// projections can use this to safely retain the quantized activation tile.
     fn prefillUsesQ8(self: *ForwardCuda, w: *const LoadedTensor, M: u32, T: u32) bool {
         const idx = dmmvIdx(w.info.type_);
+        // The two-row speculative verifier mirrors decode's packed-Q8 matvecs.
+        // Besides halving activation bandwidth versus f32 btok, using the same
+        // quantization and reduction path keeps verification logits closely
+        // aligned with ordinary greedy decode.
+        if (is_rocm and self.use_spec_btok and T == 2 and self.batch != null and
+            (idx == 0 or idx == 2) and M >= 1 and mtpQ8TypeOn(idx)) return true;
         if (self.use_cublas and T >= self.cublas_min_t and
             ((idx == 0 and self.use_cublas_q4) or (idx == 1 and self.use_cublas_q5) or
                 (idx == 2 and self.use_cublas_q6) or (idx == 3 and self.use_cublas_q8))) return false;
@@ -2456,6 +2978,42 @@ pub const ForwardCuda = struct {
                 .y_tok_stride = M,
             };
             cmd.dispatch(&self.pipes.dmmv_f32_batched, .{ M, T, 1 }, .{ 256, 1, 1 }, &.{ &w.gpu_buffer, x, y }, &bp, @sizeOf(MatvecBatchPush), 0);
+            return;
+        }
+        if (is_rocm and self.use_spec_btok and T == 2 and (idx == 0 or idx == 2) and self.batch != null and mtpQ8TypeOn(idx)) {
+            const b = &self.batch.?;
+            if (!reuse_q8) {
+                const qp = QuantActPush{ .K = K, .T = T };
+                cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), T, 1 }, .{ 256, 1, 1 }, &.{ x, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
+            }
+            const pipe: *CudaPipeline = switch (idx) {
+                0 => &self.pipes.dmmv_q4k_q8_btok2,
+                2 => &self.pipes.dmmv_q6k_q8_btok2,
+                else => unreachable,
+            };
+            const push = DmmvPush{ .M = M, .K = K };
+            // Decode's Q6_K dense FFN down projection deliberately uses one
+            // wave; mirror that work partition so each verifier row follows
+            // the same accumulation tree. Other projections use two waves.
+            const block: u32 = if (idx == 2 and M == self.d.n_embd and K == self.d.n_ff) 32 else dmmv_fast_block;
+            cmd.dispatch(pipe, .{ M, 1, 1 }, .{ block, 1, 1 }, &.{ &w.gpu_buffer, &b.act_q8, y }, &push, @sizeOf(DmmvPush), 0);
+            return;
+        }
+        // Speculative target verification and MTP catch-up operate on 2..4
+        // consecutive rows. The ordinary short-prefill fallback launches one
+        // independent matvec per row and rereads every weight T times. Reuse the
+        // serving btok kernels here: each weight row is decoded once and dotted
+        // against every token, which is the key amortization behind verification.
+        if (self.use_spec_btok and T >= 2 and T <= 27 and idx < 4) {
+            const pipe: *CudaPipeline = switch (idx) {
+                0 => &self.pipes.dmmv_q4k_btok[T - 2],
+                1 => &self.pipes.dmmv_q5k_btok[T - 2],
+                2 => &self.pipes.dmmv_q6k_btok[T - 2],
+                3 => &self.pipes.dmmv_q8_0_btok[T - 2],
+                else => unreachable,
+            };
+            const push = DmmvPush{ .M = M, .K = K };
+            cmd.dispatch(pipe, .{ M, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &w.gpu_buffer, x, y }, &push, @sizeOf(DmmvPush), 0);
             return;
         }
         if (self.use_cublas and T >= self.cublas_min_t and ((idx == 0 and self.use_cublas_q4) or (idx == 1 and self.use_cublas_q5) or (idx == 2 and self.use_cublas_q6) or (idx == 3 and self.use_cublas_q8))) {
@@ -4468,13 +5026,17 @@ pub const ForwardCuda = struct {
     }
 
     fn argmaxDispatch(self: *ForwardCuda, cmd: *command.CudaCommand, out: *const CudaBuffer) void {
+        self.argmaxDispatchFrom(cmd, &self.logits_buf, out);
+    }
+
+    fn argmaxDispatchFrom(self: *ForwardCuda, cmd: *command.CudaCommand, logits: *const CudaBuffer, out: *const CudaBuffer) void {
         if (self.use_argmax_v2) {
             const push = ArgmaxV2Push{ .N = self.d.vocab, .partials = 128 };
-            cmd.dispatch(&self.pipes.argmax_partials, .{ 128, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.logits_buf, &self.argmax_partial_buf }, &push, @sizeOf(ArgmaxV2Push), 0);
+            cmd.dispatch(&self.pipes.argmax_partials, .{ 128, 1, 1 }, .{ 256, 1, 1 }, &.{ logits, &self.argmax_partial_buf }, &push, @sizeOf(ArgmaxV2Push), 0);
             cmd.dispatch(&self.pipes.argmax_finalize, .{ 1, 1, 1 }, .{ 128, 1, 1 }, &.{ &self.argmax_partial_buf, out }, &push, @sizeOf(ArgmaxV2Push), 0);
         } else {
             const push = ArgmaxPush{ .N = self.d.vocab };
-            cmd.dispatch(&self.pipes.argmax, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ &self.logits_buf, out }, &push, @sizeOf(ArgmaxPush), 0);
+            cmd.dispatch(&self.pipes.argmax, .{ 1, 1, 1 }, .{ 256, 1, 1 }, &.{ logits, out }, &push, @sizeOf(ArgmaxPush), 0);
         }
     }
 
@@ -4636,6 +5198,21 @@ fn prefillQ8On() bool {
     const v = std.posix.getenv("ZINC_PREFILL_Q8") orelse return is_rocm;
     return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
         std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no"));
+}
+
+/// Packed-Q8 two-token verifier. Q4_K and Q6_K are the measured/default pair
+/// for Qwen3.8 Q4_K_M: they preserve greedy decode's arithmetic partition and
+/// beat the float btok verifier. The knobs remain available for clean A/Bs.
+fn mtpQ8On() bool {
+    const v = std.posix.getenv("ZINC_MTP_Q8") orelse return is_rocm;
+    return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
+        std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no"));
+}
+
+fn mtpQ8TypeOn(idx: usize) bool {
+    if (!mtpQ8On() or idx >= 4) return false;
+    const enabled = std.posix.getenv("ZINC_MTP_Q8_TYPES") orelse "02";
+    return std.mem.indexOfScalar(u8, enabled, @as(u8, '0') + @as(u8, @intCast(idx))) != null;
 }
 
 /// Precompute the Q/K normalization and activated gate/beta values once per
