@@ -1,4 +1,4 @@
-# Effort 30 — Qwen 3.8 27B: beat latest llama.cpp on decode AND prefill (Metal, M4 Max) — STATUS: IN PROGRESS
+# Effort 30 — Qwen 3.8 27B: beat latest llama.cpp on decode AND prefill (Metal, M4 Max) — STATUS: DECODE + SHORT PREFILL AHEAD, LONG PREFILL 7–10% BEHIND
 
 Model `qwen38-27b-q4k-m` (Qwen3.8-27B Q4_K_M, `qwen35` dense hybrid: 64 layers,
 48 DeltaNet SSM layers + 16 full-attention layers, dense FFN 5120→17408,
@@ -124,6 +124,24 @@ kernels, not in dispatch structure.
   rest of the slot would exceed the DRAM ceiling). Treat that case's byte
   accounting as suspect, not the kernel.
 
+## Where it stands (2026-09-02 late, three commits on `perf/metal-qwen27b-decode`)
+
+Interleaved same-conditions comparison, llama.cpp b67a17c1 `llama-bench -fa 1`
+vs ZINC CLI, two rounds each within ±1% (box loaded by WindowServer + a Codex
+service at ~30% CPU each, which costs both engines ~25% vs the quiet numbers
+quoted above — the ratios are what to read):
+
+| | llama.cpp | ZINC | ZINC/llama |
+|---|---:|---:|---:|
+| decode tg96 | 16.1–16.4 | 17.5 | +7–9% |
+| prefill 48 tok | 132–133 | 138–139 | +4.5% |
+| prefill ~300 tok | 194 | 180 | −7% |
+| prefill ~500 tok | 213 | 192 | −10% |
+
+Quiet-box reference from earlier in the session: decode 24.0 vs 21.2
+(+13%), pp48 159 vs 152 (+4.5%), pp512 209 vs 226 (−8%, before the
+single-pass change).
+
 ## Still open
 
 - Prefill vs raw llama.cpp after the delta-net route: **159 vs 152 tok/s at
@@ -135,6 +153,17 @@ kernels, not in dispatch structure.
   wasted MMA); (b) the fused gate/up GEMM sits at ~10.8 TFLOPS effective while
   llama.cpp's pp512 implies ~11.6 end-to-end — measure its mul_mm on the exact
   shape before touching the kernel.
-- Official numbers: run `tools/performance_suite.mjs --target metal --models
-  qwen38-27b-q4k-m --llama-server /private/tmp/llama-latest-67a17c/build/bin/llama-server`
-  from this worktree once the tree is clean.
+- Long-prompt prefill (≥~250 tokens) is the one place llama.cpp is still
+  ahead, by 7–10%. Its `mul_mm` gains ~17% going from N=165 to N=512 on the
+  exact gate shape; ZINC's N48-tile `gemm_q4k_gate_up_swiglu` / `gemm_q4k` /
+  `gemm_q6k` do not scale with N the same way (496-token single pass only
+  bought +4.7%). The next lever is a wide-N GEMM tile (or a port of the
+  current ggml mul_mm tiling) for N ≥ 128 — a kernel effort, not a routing
+  one. Use `ggml_mm_bench <N>` (scratchpad) vs
+  `zinc-bench-metal-shapes --case qwen27b_prefill_tail_hot` for the paired
+  microbench.
+- Official numbers: `tools/performance_suite.mjs --target metal --models
+  qwen38-27b-q4k-m --llama-server /private/tmp/llama-latest-67a17c/build/bin/llama-server --skip-local-build`
+  from this worktree, on a quiet box (the 23:27 run is invalid on the
+  llama.cpp side for the prompt-cache reason above; the suite fix is in
+  `c9256b04`).
