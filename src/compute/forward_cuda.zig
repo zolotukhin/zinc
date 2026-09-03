@@ -376,6 +376,7 @@ const Pipelines = struct {
     dmmv_f32_dual: CudaPipeline, // fused SSM alpha/beta projection
     dmmv_q4k_pair: CudaPipeline, // true same-input Q4_K projection pair
     dmmv_q4k_pair_q8: CudaPipeline, // experimental paired Q4_K x Q8_1 matvec
+    dmmv_q4k_pair_q8_btok2: CudaPipeline, // two-token packed-Q8 projection pair
     // Effort 28 4c: batched-decode GEMM (one weight read amortized over B rows).
     gemm: [4]CudaPipeline, // q4k, q5k, q6k, q8_0 tiled_v2
     gemm_f32: CudaPipeline, // f32 weights (e.g. some ssm projections)
@@ -1004,6 +1005,7 @@ pub const ForwardCuda = struct {
         pipes.dmmv_f32_dual = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual");
         pipes.dmmv_q4k_pair = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair");
         pipes.dmmv_q4k_pair_q8 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8");
+        pipes.dmmv_q4k_pair_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok2");
         pipes.rope = try pipeline.createPipeline(ctx, src.ptr, "rope");
         pipes.kv_cache_write = try pipeline.createPipeline(ctx, src.ptr, "kv_cache_write");
         pipes.naive_attention = try pipeline.createPipeline(ctx, src.ptr, "naive_attention");
@@ -1149,7 +1151,7 @@ pub const ForwardCuda = struct {
             pipes.dmmv_q5k_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_btok" ++ suf);
             pipes.dmmv_q8_0_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0_btok" ++ suf);
         }
-        log.info("nvrtc: compiled {d} kernel pipelines", .{181});
+        log.info("nvrtc: compiled {d} kernel pipelines", .{182});
 
         const f4 = @sizeOf(f32);
         const max_act = @max(d.n_ff, d.conv_channels); // 12288 vs 8192 → 12288
@@ -2444,9 +2446,15 @@ pub const ForwardCuda = struct {
         self.gemmDispatchPrefillImpl(&cmd, wq, &b.norm, &b.qfull, 2 * d.q_dim, d.n_embd, T, norm_q8_ready);
         const reuse_q8_qk = prefillQ8ReuseOn() and
             wq_uses_q8 and self.prefillUsesQ8(wk, d.kv_dim, T);
-        self.gemmDispatchPrefillImpl(&cmd, wk, &b.norm, &b.k, d.kv_dim, d.n_embd, T, reuse_q8_qk);
-        const reuse_q8_qkv = reuse_q8_qk and self.prefillUsesQ8(wv, d.kv_dim, T);
-        self.gemmDispatchPrefillImpl(&cmd, wv, &b.norm, &b.v, d.kv_dim, d.n_embd, T, reuse_q8_qkv);
+        const use_spec_kv_pair = self.use_spec_btok and T == 2 and mtpQ8TypeOn(0) and reuse_q8_qk and
+            wk.info.type_ == .q4_k and wv.info.type_ == .q4_k;
+        if (use_spec_kv_pair) {
+            self.dmmvQ4PairQ8Btok2(&cmd, &wk.gpu_buffer, &wv.gpu_buffer, &b.k, &b.v, d.kv_dim, d.kv_dim, d.n_embd);
+        } else {
+            self.gemmDispatchPrefillImpl(&cmd, wk, &b.norm, &b.k, d.kv_dim, d.n_embd, T, reuse_q8_qk);
+            const reuse_q8_qkv = reuse_q8_qk and self.prefillUsesQ8(wv, d.kv_dim, T);
+            self.gemmDispatchPrefillImpl(&cmd, wv, &b.norm, &b.v, d.kv_dim, d.n_embd, T, reuse_q8_qkv);
+        }
 
         // Effort 26 T0: batched attention inner — each of the per-token ops below
         // is collapsed into ONE launch over all T tokens (grid.y = T, or grid.x
@@ -2514,10 +2522,16 @@ pub const ForwardCuda = struct {
         // === Pre-scan: RMS norm + GEMMs + conv1d ===
         const wqkv_uses_q8 = self.prefillUsesQ8(wqkv, d.conv_channels, T);
         const norm_q8_ready = self.rmsNormPrefillDispatch(&cmd, &b.hidden, &wan.gpu_buffer, &b.norm, d.n_embd, T, wqkv_uses_q8);
-        self.gemmDispatchPrefillImpl(&cmd, wqkv, &b.norm, &b.qkv, d.conv_channels, d.n_embd, T, norm_q8_ready);
         const reuse_q8_qkv_z = prefillQ8ReuseOn() and
             wqkv_uses_q8 and self.prefillUsesQ8(wz, d.d_inner, T);
-        self.gemmDispatchPrefillImpl(&cmd, wz, &b.norm, &b.z, d.d_inner, d.n_embd, T, reuse_q8_qkv_z);
+        const use_spec_qkv_z_pair = self.use_spec_btok and T == 2 and mtpQ8TypeOn(0) and reuse_q8_qkv_z and
+            wqkv.info.type_ == .q4_k and wz.info.type_ == .q4_k;
+        if (use_spec_qkv_z_pair) {
+            self.dmmvQ4PairQ8Btok2(&cmd, &wqkv.gpu_buffer, &wz.gpu_buffer, &b.qkv, &b.z, d.conv_channels, d.d_inner, d.n_embd);
+        } else {
+            self.gemmDispatchPrefillImpl(&cmd, wqkv, &b.norm, &b.qkv, d.conv_channels, d.n_embd, T, norm_q8_ready);
+            self.gemmDispatchPrefillImpl(&cmd, wz, &b.norm, &b.z, d.d_inner, d.n_embd, T, reuse_q8_qkv_z);
+        }
         self.gemmDispatchPrefill(&cmd, walpha, &b.norm, &b.alpha, d.dt_rank, d.n_embd, T);
         self.gemmDispatchPrefill(&cmd, wbeta, &b.norm, &b.beta, d.dt_rank, d.n_embd, T);
         const conv = ConvBatchPush{ .conv_channels = d.conv_channels, .d_conv = d.d_conv, .kernel_is_f16 = boolU32(wconv.info.type_ == .f16), .n_tok = T, .state_offset = self.conv_off[L] };
@@ -5121,6 +5135,24 @@ pub const ForwardCuda = struct {
         } else {
             cmd.dispatch(&self.pipes.dmmv_q4k_pair, .{ @max(M0, M1), 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ w0, w1, x, y0, y1 }, &push, @sizeOf(DmmvPairPush), 0);
         }
+    }
+
+    /// Two-token verifier projection pair using the packed Q8 activation that
+    /// rmsNormPrefillDispatch already produced. The paired kernel shares each
+    /// activation load between the two Q4_K matrices and both speculative rows.
+    fn dmmvQ4PairQ8Btok2(
+        self: *ForwardCuda,
+        cmd: *command.CudaCommand,
+        w0: *const CudaBuffer,
+        w1: *const CudaBuffer,
+        y0: *const CudaBuffer,
+        y1: *const CudaBuffer,
+        M0: u32,
+        M1: u32,
+        K: u32,
+    ) void {
+        const push = DmmvPairPush{ .M0 = M0, .M1 = M1, .K = K, .pair_reduce = boolU32(self.use_q4_pair_reduce) };
+        cmd.dispatch(&self.pipes.dmmv_q4k_pair_q8_btok2, .{ @max(M0, M1), 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ w0, w1, &self.batch.?.act_q8, y0, y1 }, &push, @sizeOf(DmmvPairPush), 0);
     }
 
     /// Effort 28: GPU-side stacked-MoE expert matvec over all `n_used` experts in

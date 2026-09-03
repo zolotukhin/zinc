@@ -3553,8 +3553,119 @@ extern "C" __global__ void dmmv_q4k_pair_q8(
         if (paired) y1[row] = sum1;
     }
 }
+
+// Two-token verifier twin of the same-row projection pair. Both matrices share
+// each packed activation load, while each matrix's scale metadata is decoded
+// once per superblock and reused for both tokens.
+template <unsigned B>
+__device__ __forceinline__ void zinc_dmmv_q4k_pair_q8_btok(
+    const unsigned* __restrict__ a0, const unsigned* __restrict__ a1,
+    const unsigned char* __restrict__ xq, float* __restrict__ y0,
+    float* __restrict__ y1, Dmmv2Push pc)
+{
+    const unsigned row = blockIdx.x;
+    if (row >= pc.M0) return;
+    const bool paired = row < pc.M1;
+    const unsigned tid = threadIdx.x, itid = tid & 15u, grp = tid >> 4;
+    const unsigned il = itid >> 2, ir = itid & 3u;
+    const unsigned v_im = il >> 1, v_in = il & 1u;
+    const unsigned l0 = 4u * (2u * ir + v_in);
+    const unsigned q_off = 32u * v_im + l0;
+    const unsigned shift = v_im * 16u;
+    const unsigned ngrp = blockDim.x >> 4;
+    const unsigned bpr = pc.K >> 8;
+    const unsigned row_base = row * bpr * 36u;
+    float sum0[B] = {};
+    float sum1[B] = {};
+
+    for (unsigned sb = grp; sb < bpr; sb += ngrp) {
+        const unsigned blk = row_base + sb * 36u;
+        const unsigned q_word = 4u + (q_off >> 2);
+        const unsigned a0_qs0 = a0[blk + q_word];
+        const unsigned a0_qs1 = a0[blk + q_word + 16u];
+        const unsigned a1_qs0 = paired ? a1[blk + q_word] : 0u;
+        const unsigned a1_qs1 = paired ? a1[blk + q_word + 16u] : 0u;
+        uint4 scale_meta = {};
+        const bool scale_lane = (itid & 3u) == 0u;
+        const unsigned* scale_matrix = (itid & 4u) != 0u ? a1 : a0;
+        if (scale_lane && (paired || scale_matrix == a0))
+            scale_meta = *(const uint4*)(scale_matrix + blk);
+        float f0 = 0.0f, f1 = 0.0f, f2 = 0.0f, f3 = 0.0f;
+        float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+        if (scale_lane)
+            zinc_q4k_q8_scale_factors(scale_meta, shift, f0, f1, f2, f3, b0, b1, b2, b3);
+        const unsigned a0_scale_src = (grp & 1u) * 16u + v_im * 8u;
+        const float a0f0 = __shfl_sync(0xffffffffu, f0, a0_scale_src);
+        const float a0f1 = __shfl_sync(0xffffffffu, f1, a0_scale_src);
+        const float a0f2 = __shfl_sync(0xffffffffu, f2, a0_scale_src);
+        const float a0f3 = __shfl_sync(0xffffffffu, f3, a0_scale_src);
+        const float a0b0 = __shfl_sync(0xffffffffu, b0, a0_scale_src);
+        const float a0b1 = __shfl_sync(0xffffffffu, b1, a0_scale_src);
+        const float a0b2 = __shfl_sync(0xffffffffu, b2, a0_scale_src);
+        const float a0b3 = __shfl_sync(0xffffffffu, b3, a0_scale_src);
+        const unsigned a1_scale_src = a0_scale_src + 4u;
+        const float a1f0 = __shfl_sync(0xffffffffu, f0, a1_scale_src);
+        const float a1f1 = __shfl_sync(0xffffffffu, f1, a1_scale_src);
+        const float a1f2 = __shfl_sync(0xffffffffu, f2, a1_scale_src);
+        const float a1f3 = __shfl_sync(0xffffffffu, f3, a1_scale_src);
+        const float a1b0 = __shfl_sync(0xffffffffu, b0, a1_scale_src);
+        const float a1b1 = __shfl_sync(0xffffffffu, b1, a1_scale_src);
+        const float a1b2 = __shfl_sync(0xffffffffu, b2, a1_scale_src);
+        const float a1b3 = __shfl_sync(0xffffffffu, b3, a1_scale_src);
+        const unsigned g = 2u * v_im;
+        const bool min_lane = l0 == 0u;
+
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const unsigned char* h0 = xq + ((size_t)(2u * sb) * B + tok) * 144u;
+            const unsigned char* h1 = xq + ((size_t)(2u * sb + 1u) * B + tok) * 144u;
+            const int q0 = *(const int*)(h0 + 16u + g * 32u + l0);
+            const int q1 = *(const int*)(h0 + 16u + (g + 1u) * 32u + l0);
+            const int q2 = *(const int*)(h1 + 16u + g * 32u + l0);
+            const int q3 = *(const int*)(h1 + 16u + (g + 1u) * 32u + l0);
+            const float2 ds0 = __half22float2(*(const half2*)(h0 + g * 4u));
+            const float2 ds1 = __half22float2(*(const half2*)(h0 + (g + 1u) * 4u));
+            const float2 ds2 = __half22float2(*(const half2*)(h1 + g * 4u));
+            const float2 ds3 = __half22float2(*(const half2*)(h1 + (g + 1u) * 4u));
+            sum0[tok] += zinc_q4k_q8_block_dot_scaled(a0_qs0, a0_qs1,
+                q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane,
+                a0f0, a0f1, a0f2, a0f3, a0b0, a0b1, a0b2, a0b3);
+            if (paired)
+                sum1[tok] += zinc_q4k_q8_block_dot_scaled(a1_qs0, a1_qs1,
+                    q0, q1, q2, q3, ds0, ds1, ds2, ds3, min_lane,
+                    a1f0, a1f1, a1f2, a1f3, a1b0, a1b1, a1b2, a1b3);
+        }
+    }
+
+    #pragma unroll
+    for (unsigned tok = 0u; tok < B; ++tok) {
+        float total0 = sum0[tok];
+        float total1 = sum1[tok];
+        if (paired && pc.pair_reduce != 0u) {
+            zinc_block_reduce_sum_pair(total0, total1);
+        } else {
+            total0 = zinc_block_reduce_sum(total0);
+            if (paired) {
+                __syncthreads();
+                total1 = zinc_block_reduce_sum(total1);
+            }
+        }
+        if (tid == 0u) {
+            y0[(size_t)tok * pc.M0 + row] = total0;
+            if (paired) y1[(size_t)tok * pc.M1 + row] = total1;
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void dmmv_q4k_pair_q8_btok2(
+    const unsigned* a0, const unsigned* a1, const unsigned char* xq,
+    float* y0, float* y1, Dmmv2Push pc) {
+    zinc_dmmv_q4k_pair_q8_btok<2u>(a0, a1, xq, y0, y1, pc);
+}
 #else
 extern "C" __global__ void dmmv_q4k_pair_q8() {}
+extern "C" __global__ void dmmv_q4k_pair_q8_btok2() {}
 #endif
 
 // ---- dmmv_q6k_fast (perf research) — port of tuned Vulkan dmmv_q6k -----------
