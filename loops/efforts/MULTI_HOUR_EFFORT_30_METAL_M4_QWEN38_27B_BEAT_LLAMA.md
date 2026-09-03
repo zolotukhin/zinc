@@ -66,6 +66,39 @@ server-mode artifact — raw llama.cpp prefill is much faster than that.
   `gemm_q4k_gate_up_swiglu` 192 × 5.43 ms (58.8 GFLOP/call → 10.8 TFLOPS),
   `gemm_q4k` 480 × 1.53 ms, `gemm_q6k` 192 × 2.15 ms, `gemm_q5k` 144 × 1.12 ms.
 
+- Long prompts as one pass: `qwen35_dense27b_queued_prefill_max_tokens`
+  192 → 512, scratch buffers and the layer-major materialization capacity
+  (`qwen_ssm_projection_prefill_max_tokens`) 256 → 512 via
+  `batched_prefill_scratch_tokens`; 9B/MoE single-pass ceilings stay at 256
+  (`queuedPrefillSinglePassMaxTokens`). First attempt raised only the scratch
+  size: a 496-token pass then materialized 256 tokens and token-major-
+  replayed the other 240 (211k dispatches, 14.7 s vs 2.7 s) — the
+  materialization capacity is the real limit. With both raised, paired A/B
+  on a loaded box (env override 192 vs default 512): 292 tokens 1687 → 1632 ms
+  (+3.4%), 496 tokens 2696 → 2576 ms (+4.7%), 48 tokens unchanged; greedy
+  output identical on all three, top-5 logits agree to 2 decimals. Smaller
+  than the ggml N-scaling suggested: ZINC's N48-tile GEMMs gain little from
+  wider N, so the win is mostly the saved weight re-streams.
+
+## Suite methodology fix: llama-server prompt cache
+
+The first official run (`tools/performance_suite.mjs --target metal --models
+qwen38-27b-q4k-m --llama-server <b67a17c1>`, artifact
+`/tmp/zinc-perf/zinc-performance-metal-qwen38-20260902-232703.json`) recorded
+llama.cpp at 23.4 tok/s prefill on the 48-token core prompt with
+`prefill_tokens: 4` of 87: the local launcher never passed
+`--no-cache-prompt` (the remote RDNA launcher does), so after the warmup
+request llama-server reused the cached KV prefix and only the trailing
+template tokens were prefetched. The Aug-15 publication had the same
+artifact in milder form (45 of 87 tokens). ZINC's CLI runs always prefill
+the whole prompt, so the published prefill ratio was not a comparison.
+Fixed in `launchLocalLlamaServer` (mirrors the remote launch: `-b 4096 -ub
+1024 --flash-attn on --no-cache-prompt`) with a guard test. Decode in that
+run: ZINC 22.5 vs llama-server 18.7 tok/s (core), 20.0 vs 18.7
+(context-medium), 19.7 vs 18.7 (context-long), 19.2 vs 18.8
+(decode-extended) — server-mode llama.cpp decodes ~12% slower than its own
+`llama-bench` (21.2), which is the suite's established method.
+
 ## Kernel parity vs llama.cpp b67a17c1 (exact 27B shapes, GB/s, serialized)
 
 | shape | ZINC | ggml Metal |

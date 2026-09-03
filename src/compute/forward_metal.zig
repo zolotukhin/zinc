@@ -30,6 +30,11 @@ const log = std.log.scoped(.forward);
 /// see this as a soft safety net rather than the primary limit.
 pub const runtime_context_cap: u32 = 262144;
 const queued_prefill_embed_tokens: usize = 256;
+/// Prompt tokens the batched-prefill scratch buffers (`prefill_embed_buf`,
+/// `qwen_ssm_prefill_proj_*`, the dense inter buffer) are sized for. The
+/// 9B/MoE single-pass ceilings stay at `queued_prefill_embed_tokens`; the 27B
+/// dense hybrid uses the full size (see `queuedPrefillSinglePassMaxTokens`).
+const batched_prefill_scratch_tokens: usize = 512;
 /// Max tokens verified in one speculative-decode batched pass (1 seed + drafts).
 /// Sizes `verify_logits_buf` (vocab x this). Draft length is capped below it.
 /// A verify is a ~fixed-cost batched forward, so a longer accepted draft
@@ -41,16 +46,23 @@ const spec_max_verify_tokens: u32 = 32;
 /// lifetime of the engine; requests above the cap fall back to transient
 /// allocate-and-free, exactly the pre-cache behavior.
 const batched_prefill_scratch_retain_max_tokens: u32 = 512;
-const qwen_ssm_projection_prefill_max_tokens: u32 = 256;
+// Layer-major materialization capacity of the SSM prefill projection path
+// (tokens per pass). Tied to the scratch size: with the 27B's 512-token
+// single pass, a prompt beyond this would silently fall to token-major
+// replay for the remainder (observed 2026-09-02: 496 tokens = 256
+// materialized + 240 replayed one at a time, 5x slower than three passes).
+const qwen_ssm_projection_prefill_max_tokens: u32 = @intCast(batched_prefill_scratch_tokens);
 const qwen_ssm_projection_prefill_min_tokens: usize = 32;
 // 27B layer-major single-shot / chunk ceiling. Was 40 (a conservative
-// validation limit from Effort 28); raised to 192 after verifying the
-// layer-major prefill is byte-identical to the per-token reference at every
-// chunk size up to the 256-token scratch-buffer limit (2026-07-19, greedy
-// output on 45-481 token prompts + cross-chunk recall). Larger chunks mean
-// fewer, wider GEMM batches: ~+28% prefill on the 27B (106 -> 135 tok/s).
+// validation limit from Effort 28), then 192 (2026-07-19, verified
+// byte-identical to the per-token reference at every chunk size up to the
+// then-256-token scratch limit). Raised to 512 with the scratch buffers
+// (Effort 30): a 496-token prompt ran as three ~165-token passes, each
+// re-streaming all weights and padding N to 4x48 GEMM tile columns; one
+// pass lifts the fused gate/up GEMM from ~10.8 to ~12.4 TFLOPS. Verified
+// greedy-identical against the 192 cap on 48/496-token prompts.
 // Overridable via ZINC_QWEN27B_CHUNK_TOKENS; see qwen35Dense27bQueuedPrefillMaxTokens.
-const qwen35_dense27b_queued_prefill_max_tokens: usize = 192;
+const qwen35_dense27b_queued_prefill_max_tokens: usize = 512;
 const qwen35_dense9b_prefill_prefix_layers: usize = 32;
 const qwen_ssm_projection_validate_default_tokens: u32 = 4;
 // the reference implementation's Metal `ggml_metal_op_mul_mat_id` switches from the small
@@ -1106,15 +1118,15 @@ fn qwen35DensePrefillPrefixLayerLimit(cfg: ModelConfig) usize {
     return 1;
 }
 
-/// The 27B layer-major single-shot / chunk ceiling (default 192). The scratch
-/// buffers are sized to qwen_ssm_projection_prefill_max_tokens (256), so
+/// The 27B layer-major single-shot / chunk ceiling (default 512). The scratch
+/// buffers are sized to batched_prefill_scratch_tokens (512), so
 /// ZINC_QWEN27B_CHUNK_TOKENS can retune it (e.g. lower on a slower machine, or
-/// sweep to re-confirm correctness). Clamped to [min, 256].
+/// sweep to re-confirm correctness). Clamped to [min, 512].
 fn qwen35Dense27bQueuedPrefillMaxTokens() u32 {
     const default_max: u32 = @intCast(qwen35_dense27b_queued_prefill_max_tokens);
     const requested = readU32Env("ZINC_QWEN27B_CHUNK_TOKENS") orelse return default_max;
     const min_tokens: u32 = @intCast(qwen_ssm_projection_prefill_min_tokens);
-    return @min(@max(requested, min_tokens), qwen_ssm_projection_prefill_max_tokens);
+    return @min(@max(requested, min_tokens), @as(u32, @intCast(batched_prefill_scratch_tokens)));
 }
 
 fn shouldUseQwen35Dense27bQueuedTokenMajorPrefill(cfg: ModelConfig, prompt_len: usize) bool {
@@ -1124,6 +1136,16 @@ fn shouldUseQwen35Dense27bQueuedTokenMajorPrefill(cfg: ModelConfig, prompt_len: 
         prompt_len <= qwen35Dense27bQueuedPrefillMaxTokens();
 }
 
+/// Largest prompt (in tokens) a single queued/batched prefill pass may carry
+/// for this model: the 27B dense hybrid gets the full scratch size, every
+/// other path keeps the 256-token embed cap it was validated at.
+fn queuedPrefillSinglePassMaxTokens(cfg: ModelConfig) usize {
+    if (defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and cfg.full_attn_interval == 4) {
+        return batched_prefill_scratch_tokens;
+    }
+    return queued_prefill_embed_tokens;
+}
+
 /// Largest prompt (in tokens) the queued/batched prefill path can process in
 /// a single call for this model, or null if the model has no such path. Used
 /// both to gate multi-chunk continuation prefill and as the chunk size when
@@ -1131,8 +1153,8 @@ fn shouldUseQwen35Dense27bQueuedTokenMajorPrefill(cfg: ModelConfig, prompt_len: 
 ///
 /// Each model has its own ceiling: the 9B's is the 256-token embed-buffer cap
 /// (queued_prefill_embed_tokens); the 27B's is qwen35_dense27b_queued_prefill_max_tokens
-/// (192, overridable), the largest chunk verified byte-identical to the
-/// per-token reference. Both stay within the 256-token scratch buffers.
+/// (512, overridable), the largest chunk verified byte-identical to the
+/// per-token reference. Both stay within the scratch buffers.
 fn queuedTokenMajorChunkTokens(cfg: ModelConfig) ?u32 {
     if (defaultQwen35Dense9bQueuedPrefillEnabled(cfg)) return @intCast(queued_prefill_embed_tokens);
     if (defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and cfg.full_attn_interval == 4) {
@@ -7756,16 +7778,16 @@ pub const InferenceEngine = struct {
         self.verify_argmax_out = null;
         self.verify_logits_buf = try metal_buffer.createBuffer(ctx, vocab_size * spec_max_verify_tokens);
         self.embed_staging = try metal_buffer.createBuffer(ctx, hidden_size);
-        self.prefill_embed_buf = try metal_buffer.createBuffer(ctx, hidden_size * queued_prefill_embed_tokens);
-        self.qwen_ssm_prefill_proj_norm_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * hidden_size, 4));
-        self.qwen_ssm_prefill_proj_qkv_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, conv_channels) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_proj_z_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, d_inner) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_proj_alpha_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_proj_beta_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_shared_gate_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @sizeOf(f32), 4));
-        self.qwen_ssm_prefill_branch_buf = try metal_buffer.createBuffer(ctx, @max(@as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, d_inner) * @sizeOf(f32), 4));
+        self.prefill_embed_buf = try metal_buffer.createBuffer(ctx, hidden_size * batched_prefill_scratch_tokens);
+        self.qwen_ssm_prefill_proj_norm_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * hidden_size, 4));
+        self.qwen_ssm_prefill_proj_qkv_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, conv_channels) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_proj_z_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, d_inner) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_proj_alpha_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_proj_beta_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, cfg.ssm_dt_rank) * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_shared_gate_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @sizeOf(f32), 4));
+        self.qwen_ssm_prefill_branch_buf = try metal_buffer.createBuffer(ctx, @max(batched_prefill_scratch_tokens * @as(usize, d_inner) * @sizeOf(f32), 4));
         const qwen35_dense_prefill_inter_bytes: usize = if (qwen35DenseLayerMajorQueuedPrefillEnabled(cfg))
-            @as(usize, qwen_ssm_projection_prefill_max_tokens) * @as(usize, inter_dim) * @sizeOf(f32)
+            batched_prefill_scratch_tokens * @as(usize, inter_dim) * @sizeOf(f32)
         else
             4;
         const qwen35_dense_prefill_hidden_bytes: usize = if (qwen35DenseLayerMajorQueuedPrefillEnabled(cfg))
@@ -9592,7 +9614,7 @@ pub const InferenceEngine = struct {
         // causal window, so each continuation chunk resumes exactly where
         // the last ended. Chunk size is each model's own validated
         // single-shot ceiling (see queuedTokenMajorChunkTokens) -- 256 for
-        // the 9B, a much narrower 40 for the 27B.
+        // the 9B, 512 for the 27B.
         if (queuedTokenMajorChunkTokens(self.config)) |max_chunk_tokens| {
             if (prompt_tokens.len > max_chunk_tokens) {
                 var offset: usize = 0;
@@ -9629,7 +9651,7 @@ pub const InferenceEngine = struct {
     }
 
     fn canUseQueuedTokenMajorPrefill(self: *const InferenceEngine, prompt_len: usize) bool {
-        if (prompt_len <= 1 or prompt_len > queued_prefill_embed_tokens) return false;
+        if (prompt_len <= 1 or prompt_len > queuedPrefillSinglePassMaxTokens(self.config)) return false;
         const can_queue_qwen35_dense =
             defaultQwen35Dense9bQueuedPrefillEnabled(self.config) or
             shouldUseQwen35Dense27bQueuedTokenMajorPrefill(self.config, prompt_len);
@@ -22151,7 +22173,7 @@ fn canUseQwenSsmPrefillProjectionChunk(engine: *const InferenceEngine, prompt_le
     // raw prompts are coherence-sensitive and do not amortize the extra graph
     // anyway; keep them on the validated per-token path.
     if (prompt_len < qwen_ssm_projection_prefill_min_tokens) return false;
-    if (prompt_len > queued_prefill_embed_tokens) return false;
+    if (prompt_len > queuedPrefillSinglePassMaxTokens(engine.config)) return false;
     // Continuation chunks (nonzero position) are supported on the 9B and 27B
     // dense-hybrid paths, which share the SSM kernels that carry state in
     // the persistent per-layer buffers and the full-attention recorder that
@@ -22189,11 +22211,11 @@ fn logQwenSsmPrefillProjectionChunkBlocker(engine: *const InferenceEngine, promp
         log.info("Metal profile: Qwen SSM prefill projection disabled: feature flag off", .{});
         return;
     }
-    if (prompt_len < qwen_ssm_projection_prefill_min_tokens or prompt_len > queued_prefill_embed_tokens) {
+    if (prompt_len < qwen_ssm_projection_prefill_min_tokens or prompt_len > queuedPrefillSinglePassMaxTokens(engine.config)) {
         log.info("Metal profile: Qwen SSM prefill projection disabled: prompt_len={d} outside [{d},{d}]", .{
             prompt_len,
             qwen_ssm_projection_prefill_min_tokens,
-            queued_prefill_embed_tokens,
+            queuedPrefillSinglePassMaxTokens(engine.config),
         });
         return;
     }
@@ -36236,7 +36258,8 @@ test "qwen35 9b dense SSM prefill uses queued token commands only for exact shap
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 36));
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 40));
     try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 192));
-    try std.testing.expect(!shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 193));
+    try std.testing.expect(shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 512));
+    try std.testing.expect(!shouldUseQwen35Dense27bQueuedTokenMajorPrefill(qwen35_27b_cfg, 513));
 
     // PR #25 long-prompt chunking: each model's chunk size is its own
     // validated single-shot ceiling, never a shared constant (a 40-wide
