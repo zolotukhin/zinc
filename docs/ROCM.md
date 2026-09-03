@@ -44,12 +44,12 @@ ROCR_VISIBLE_DEVICES=0 ./zig-out/bin/zinc \
 ```
 
 Qwen 3.8 GGUFs that include the model's appended NextN block use it
-automatically for CLI generation. ZINC drafts one token, verifies the seed and
-draft together with the full 64-layer model, and restores the recurrent state
+automatically for CLI generation. ZINC drafts two tokens, verifies the seed and
+drafts together with the full 64-layer model, and restores the recurrent state
 at the accepted boundary when a draft is rejected. `ZINC_MTP=0` returns to
-ordinary greedy decode. `ZINC_MTP_DRAFTS=1`, the measured default, can be raised
-to `2` or `3` for experiments; the best value depends on draft acceptance and
-the GPU. This path is currently CLI-only, so the reusable-server benchmark
+ordinary greedy decode. `ZINC_MTP_DRAFTS=2` is the measured R9700 default;
+`1` and `3` remain available for GPUs or workloads with a different acceptance
+profile. This path is currently CLI-only, so the reusable-server benchmark
 table below does not include its speedup.
 
 Start the OpenAI-compatible server:
@@ -98,7 +98,7 @@ available as correctness/performance A/B opt-outs:
 - `ZINC_ROCM_DECODE_SSM_FAST=0`
 - `ZINC_BATCH_B1_MATVEC=0`
 - `ZINC_MTP=0` (Qwen 3.8 CLI: disable model-native NextN drafting)
-- `ZINC_MTP_Q8=0` (Qwen 3.8 CLI: use the float two-token verifier)
+- `ZINC_MTP_Q8=0` (Qwen 3.8 CLI: use the float multi-token verifier)
 
 The Qwen 3.8 decode path uses packed Q8 activations for the hot Q4_K, Q5_K,
 and Q6_K projections, paired projection kernels where the shapes permit it, a

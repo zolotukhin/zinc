@@ -68,8 +68,9 @@ are in [`benchmarks/rocm-r9700.json`](benchmarks/rocm-r9700.json).
 
 For interactive CLI use, Qwen 3.8 models with an appended NextN block now use
 model-native speculative decoding by default on ROCm. Drafts are checked by the
-full model before they are emitted. This is separate from the server results
-above; use `ZINC_MTP=0` to compare the ordinary greedy path.
+full model before they are emitted. The measured R9700 default drafts two tokens
+at a time. This is separate from the server results above; use `ZINC_MTP=0` to
+compare the ordinary greedy path.
 
 ## Supported Platforms
 

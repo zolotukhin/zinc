@@ -368,15 +368,26 @@ const Pipelines = struct {
     dmmv_q4k_q8_fast: CudaPipeline, // experimental Q4_K x Q8_1 decode matvec
     dmmv_q5k_q8_fast: CudaPipeline, // experimental Q5_K x Q8_1 decode matvec
     dmmv_q4k_q8_btok2: CudaPipeline, // two-token Q4_K x packed-Q8 verifier
+    dmmv_q4k_q8_btok3: CudaPipeline, // three-token Q4_K x packed-Q8 verifier
+    dmmv_q4k_q8_btok4: CudaPipeline, // four-token Q4_K x packed-Q8 verifier
     dmmv_q6k_q8_btok2: CudaPipeline, // two-token Q6_K x packed-Q8 verifier
+    dmmv_q6k_q8_btok3: CudaPipeline, // three-token Q6_K x packed-Q8 verifier
+    dmmv_q6k_q8_btok4: CudaPipeline, // four-token Q6_K x packed-Q8 verifier
     dmmv_q4k_gate_up_swiglu: CudaPipeline, // fused dense-decode FFN gate/up/SwiGLU
     dmmv_q4k_gate_up_swiglu_q8: CudaPipeline, // experimental Q8_1 activation decode FFN
     dmmv_q4k_gate_up_swiglu_q8_btok2: CudaPipeline, // two-token packed-Q8 FFN
+    dmmv_q4k_gate_up_swiglu_q8_btok3: CudaPipeline, // three-token packed-Q8 FFN
+    dmmv_q4k_gate_up_swiglu_q8_btok4: CudaPipeline, // four-token packed-Q8 FFN
     dmmv_q6k_q8_fast: CudaPipeline, // experimental Q6_K x Q8_1 decode matvec
     dmmv_f32_dual: CudaPipeline, // fused SSM alpha/beta projection
+    dmmv_f32_dual_btok2: CudaPipeline, // packed two-token SSM alpha/beta projection
+    dmmv_f32_dual_btok3: CudaPipeline, // packed three-token SSM alpha/beta projection
+    dmmv_f32_dual_btok4: CudaPipeline, // packed four-token SSM alpha/beta projection
     dmmv_q4k_pair: CudaPipeline, // true same-input Q4_K projection pair
     dmmv_q4k_pair_q8: CudaPipeline, // experimental paired Q4_K x Q8_1 matvec
     dmmv_q4k_pair_q8_btok2: CudaPipeline, // two-token packed-Q8 projection pair
+    dmmv_q4k_pair_q8_btok3: CudaPipeline, // three-token packed-Q8 projection pair
+    dmmv_q4k_pair_q8_btok4: CudaPipeline, // four-token packed-Q8 projection pair
     // Effort 28 4c: batched-decode GEMM (one weight read amortized over B rows).
     gemm: [4]CudaPipeline, // q4k, q5k, q6k, q8_0 tiled_v2
     gemm_f32: CudaPipeline, // f32 weights (e.g. some ssm projections)
@@ -997,15 +1008,26 @@ pub const ForwardCuda = struct {
         pipes.dmmv_q4k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_fast");
         pipes.dmmv_q5k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_q8_fast");
         pipes.dmmv_q4k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok2");
+        pipes.dmmv_q4k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok3");
+        pipes.dmmv_q4k_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_q8_btok4");
         pipes.dmmv_q6k_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok2");
+        pipes.dmmv_q6k_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok3");
+        pipes.dmmv_q6k_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_btok4");
         pipes.dmmv_q4k_gate_up_swiglu = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu");
         pipes.dmmv_q4k_gate_up_swiglu_q8 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8");
         pipes.dmmv_q4k_gate_up_swiglu_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok2");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok3");
+        pipes.dmmv_q4k_gate_up_swiglu_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_gate_up_swiglu_q8_btok4");
         pipes.dmmv_q6k_q8_fast = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q6k_q8_fast");
         pipes.dmmv_f32_dual = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual");
+        pipes.dmmv_f32_dual_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual_btok2");
+        pipes.dmmv_f32_dual_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual_btok3");
+        pipes.dmmv_f32_dual_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_f32_dual_btok4");
         pipes.dmmv_q4k_pair = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair");
         pipes.dmmv_q4k_pair_q8 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8");
         pipes.dmmv_q4k_pair_q8_btok2 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok2");
+        pipes.dmmv_q4k_pair_q8_btok3 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok3");
+        pipes.dmmv_q4k_pair_q8_btok4 = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q4k_pair_q8_btok4");
         pipes.rope = try pipeline.createPipeline(ctx, src.ptr, "rope");
         pipes.kv_cache_write = try pipeline.createPipeline(ctx, src.ptr, "kv_cache_write");
         pipes.naive_attention = try pipeline.createPipeline(ctx, src.ptr, "naive_attention");
@@ -1151,7 +1173,7 @@ pub const ForwardCuda = struct {
             pipes.dmmv_q5k_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q5k_btok" ++ suf);
             pipes.dmmv_q8_0_btok[i] = try pipeline.createPipeline(ctx, src.ptr, "dmmv_q8_0_btok" ++ suf);
         }
-        log.info("nvrtc: compiled {d} kernel pipelines", .{182});
+        log.info("nvrtc: compiled {d} kernel pipelines", .{193});
 
         const f4 = @sizeOf(f32);
         const max_act = @max(d.n_ff, d.conv_channels); // 12288 vs 8192 → 12288
@@ -2263,7 +2285,7 @@ pub const ForwardCuda = struct {
 
         try self.mtpCatchup(prompt_tokens, pairs, 0);
         self.mtp.?.primed = true;
-        log.info("Qwen NextN/MTP enabled: {d} prompt rows primed, draft window={d}", .{ T, @min(mtp_max_draft, envU32("ZINC_MTP_DRAFTS", 1)) });
+        log.info("Qwen NextN/MTP enabled: {d} prompt rows primed, draft window={d}", .{ T, @min(mtp_max_draft, envU32("ZINC_MTP_DRAFTS", 2)) });
         return true;
     }
 
@@ -2283,7 +2305,7 @@ pub const ForwardCuda = struct {
     /// The caller commits `seed` plus the returned accepted draft prefix only.
     pub fn mtpCycle(self: *ForwardCuda, seed: u32, pos: u32, max_drafts: u32, eos_id: u32) !MtpCycleResult {
         if (self.mtp == null or !self.mtp.?.primed) return error.MtpNotPrimed;
-        const n_limit = @min(max_drafts, @min(mtp_max_draft, @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", 1))));
+        const n_limit = @min(max_drafts, @min(mtp_max_draft, @max(@as(u32, 1), envU32("ZINC_MTP_DRAFTS", 2))));
         std.debug.assert(n_limit > 0);
 
         var phase_timer = try std.time.Timer.start();
@@ -2446,10 +2468,10 @@ pub const ForwardCuda = struct {
         self.gemmDispatchPrefillImpl(&cmd, wq, &b.norm, &b.qfull, 2 * d.q_dim, d.n_embd, T, norm_q8_ready);
         const reuse_q8_qk = prefillQ8ReuseOn() and
             wq_uses_q8 and self.prefillUsesQ8(wk, d.kv_dim, T);
-        const use_spec_kv_pair = self.use_spec_btok and T == 2 and mtpQ8TypeOn(0) and reuse_q8_qk and
+        const use_spec_kv_pair = self.use_spec_btok and T >= 2 and T <= mtp_max_verify and mtpQ8TypeOn(0) and reuse_q8_qk and
             wk.info.type_ == .q4_k and wv.info.type_ == .q4_k;
         if (use_spec_kv_pair) {
-            self.dmmvQ4PairQ8Btok2(&cmd, &wk.gpu_buffer, &wv.gpu_buffer, &b.k, &b.v, d.kv_dim, d.kv_dim, d.n_embd);
+            self.dmmvQ4PairQ8Spec(&cmd, &wk.gpu_buffer, &wv.gpu_buffer, &b.k, &b.v, d.kv_dim, d.kv_dim, d.n_embd, T);
         } else {
             self.gemmDispatchPrefillImpl(&cmd, wk, &b.norm, &b.k, d.kv_dim, d.n_embd, T, reuse_q8_qk);
             const reuse_q8_qkv = reuse_q8_qk and self.prefillUsesQ8(wv, d.kv_dim, T);
@@ -2524,16 +2546,29 @@ pub const ForwardCuda = struct {
         const norm_q8_ready = self.rmsNormPrefillDispatch(&cmd, &b.hidden, &wan.gpu_buffer, &b.norm, d.n_embd, T, wqkv_uses_q8);
         const reuse_q8_qkv_z = prefillQ8ReuseOn() and
             wqkv_uses_q8 and self.prefillUsesQ8(wz, d.d_inner, T);
-        const use_spec_qkv_z_pair = self.use_spec_btok and T == 2 and mtpQ8TypeOn(0) and reuse_q8_qkv_z and
+        const use_spec_qkv_z_pair = self.use_spec_btok and T >= 2 and T <= mtp_max_verify and mtpQ8TypeOn(0) and reuse_q8_qkv_z and
             wqkv.info.type_ == .q4_k and wz.info.type_ == .q4_k;
         if (use_spec_qkv_z_pair) {
-            self.dmmvQ4PairQ8Btok2(&cmd, &wqkv.gpu_buffer, &wz.gpu_buffer, &b.qkv, &b.z, d.conv_channels, d.d_inner, d.n_embd);
+            self.dmmvQ4PairQ8Spec(&cmd, &wqkv.gpu_buffer, &wz.gpu_buffer, &b.qkv, &b.z, d.conv_channels, d.d_inner, d.n_embd, T);
         } else {
             self.gemmDispatchPrefillImpl(&cmd, wqkv, &b.norm, &b.qkv, d.conv_channels, d.n_embd, T, norm_q8_ready);
             self.gemmDispatchPrefillImpl(&cmd, wz, &b.norm, &b.z, d.d_inner, d.n_embd, T, reuse_q8_qkv_z);
         }
-        self.gemmDispatchPrefill(&cmd, walpha, &b.norm, &b.alpha, d.dt_rank, d.n_embd, T);
-        self.gemmDispatchPrefill(&cmd, wbeta, &b.norm, &b.beta, d.dt_rank, d.n_embd, T);
+        const use_spec_ab_pair = self.use_spec_btok and T >= 2 and T <= mtp_max_verify and
+            self.use_fused_ssm_f32 and walpha.info.type_ == .f32 and wbeta.info.type_ == .f32;
+        if (use_spec_ab_pair) {
+            const pipe: *CudaPipeline = switch (T) {
+                2 => &self.pipes.dmmv_f32_dual_btok2,
+                3 => &self.pipes.dmmv_f32_dual_btok3,
+                4 => &self.pipes.dmmv_f32_dual_btok4,
+                else => unreachable,
+            };
+            const ab = DmmvPush{ .M = d.dt_rank, .K = d.n_embd };
+            cmd.dispatch(pipe, .{ d.dt_rank, 1, 1 }, .{ 256, 1, 1 }, &.{ &walpha.gpu_buffer, &wbeta.gpu_buffer, &b.norm, &b.alpha, &b.beta }, &ab, @sizeOf(DmmvPush), 0);
+        } else {
+            self.gemmDispatchPrefill(&cmd, walpha, &b.norm, &b.alpha, d.dt_rank, d.n_embd, T);
+            self.gemmDispatchPrefill(&cmd, wbeta, &b.norm, &b.beta, d.dt_rank, d.n_embd, T);
+        }
         const conv = ConvBatchPush{ .conv_channels = d.conv_channels, .d_conv = d.d_conv, .kernel_is_f16 = boolU32(wconv.info.type_ == .f16), .n_tok = T, .state_offset = self.conv_off[L] };
         if (self.capture_spec_state) {
             cmd.dispatch(&self.pipes.ssm_conv1d_batched_history, .{ ceilDiv(d.conv_channels, 64), 1, 1 }, .{ 64, 1, 1 }, &.{ &b.qkv, &wconv.gpu_buffer, &self.ssm_conv_state[L], &b.conv_out, &self.mtp.?.conv_snapshot[L] }, &conv, @sizeOf(ConvBatchPush), 0);
@@ -2697,7 +2732,7 @@ pub const ForwardCuda = struct {
         const dense_gate_up_uses_cublas = self.use_cublas and T >= self.cublas_min_t;
         const can_fuse_gate_up = wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k and
             T >= 32 and d.n_ff >= 64 and !dense_gate_up_uses_cublas and fuse_gate_up_swiglu;
-        const can_fuse_spec_gate_up = is_rocm and self.use_spec_btok and T == 2 and mtpQ8TypeOn(0) and
+        const can_fuse_spec_gate_up = is_rocm and self.use_spec_btok and T >= 2 and T <= mtp_max_verify and mtpQ8TypeOn(0) and
             wgate.info.type_ == .q4_k and wup.info.type_ == .q4_k;
 
         var cmd = try command.beginCommand(ctx);
@@ -2709,7 +2744,13 @@ pub const ForwardCuda = struct {
                 cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(d.n_embd, 256), T, 1 }, .{ 256, 1, 1 }, &.{ &b.ffn_norm, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             }
             const gp = DmmvPush{ .M = d.n_ff, .K = d.n_embd };
-            cmd.dispatch(&self.pipes.dmmv_q4k_gate_up_swiglu_q8_btok2, .{ d.n_ff, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &b.act_q8, &b.swiglu_ff }, &gp, @sizeOf(DmmvPush), 0);
+            const pipe: *CudaPipeline = switch (T) {
+                2 => &self.pipes.dmmv_q4k_gate_up_swiglu_q8_btok2,
+                3 => &self.pipes.dmmv_q4k_gate_up_swiglu_q8_btok3,
+                4 => &self.pipes.dmmv_q4k_gate_up_swiglu_q8_btok4,
+                else => unreachable,
+            };
+            cmd.dispatch(pipe, .{ d.n_ff, 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &b.act_q8, &b.swiglu_ff }, &gp, @sizeOf(DmmvPush), 0);
         } else if (can_fuse_gate_up) {
             const gp = GateUpSwigluPush{ .M = d.n_ff, .K = d.n_embd, .T = T };
             cmd.dispatch(&self.pipes.gemm_q4k_gate_up_swiglu, .{ ceilDiv(d.n_ff, 64), ceilDiv(T, 64), 1 }, .{ 256, 1, 1 }, &.{ &wgate.gpu_buffer, &wup.gpu_buffer, &b.ffn_norm, &b.swiglu_ff }, &gp, @sizeOf(GateUpSwigluPush), 0);
@@ -2964,7 +3005,7 @@ pub const ForwardCuda = struct {
         // Besides halving activation bandwidth versus f32 btok, using the same
         // quantization and reduction path keeps verification logits closely
         // aligned with ordinary greedy decode.
-        if (is_rocm and self.use_spec_btok and T == 2 and self.batch != null and
+        if (is_rocm and self.use_spec_btok and T >= 2 and T <= mtp_max_verify and self.batch != null and
             (idx == 0 or idx == 2) and M >= 1 and mtpQ8TypeOn(idx)) return true;
         if (self.use_cublas and T >= self.cublas_min_t and
             ((idx == 0 and self.use_cublas_q4) or (idx == 1 and self.use_cublas_q5) or
@@ -2994,15 +3035,25 @@ pub const ForwardCuda = struct {
             cmd.dispatch(&self.pipes.dmmv_f32_batched, .{ M, T, 1 }, .{ 256, 1, 1 }, &.{ &w.gpu_buffer, x, y }, &bp, @sizeOf(MatvecBatchPush), 0);
             return;
         }
-        if (is_rocm and self.use_spec_btok and T == 2 and (idx == 0 or idx == 2) and self.batch != null and mtpQ8TypeOn(idx)) {
+        if (is_rocm and self.use_spec_btok and T >= 2 and T <= mtp_max_verify and (idx == 0 or idx == 2) and self.batch != null and mtpQ8TypeOn(idx)) {
             const b = &self.batch.?;
             if (!reuse_q8) {
                 const qp = QuantActPush{ .K = K, .T = T };
                 cmd.dispatch(&self.pipes.quantize_act_q8, .{ ceilDiv(K, 256), T, 1 }, .{ 256, 1, 1 }, &.{ x, &b.act_q8 }, &qp, @sizeOf(QuantActPush), 0);
             }
             const pipe: *CudaPipeline = switch (idx) {
-                0 => &self.pipes.dmmv_q4k_q8_btok2,
-                2 => &self.pipes.dmmv_q6k_q8_btok2,
+                0 => switch (T) {
+                    2 => &self.pipes.dmmv_q4k_q8_btok2,
+                    3 => &self.pipes.dmmv_q4k_q8_btok3,
+                    4 => &self.pipes.dmmv_q4k_q8_btok4,
+                    else => unreachable,
+                },
+                2 => switch (T) {
+                    2 => &self.pipes.dmmv_q6k_q8_btok2,
+                    3 => &self.pipes.dmmv_q6k_q8_btok3,
+                    4 => &self.pipes.dmmv_q6k_q8_btok4,
+                    else => unreachable,
+                },
                 else => unreachable,
             };
             const push = DmmvPush{ .M = M, .K = K };
@@ -5137,10 +5188,10 @@ pub const ForwardCuda = struct {
         }
     }
 
-    /// Two-token verifier projection pair using the packed Q8 activation that
+    /// Multi-row verifier projection pair using the packed Q8 activation that
     /// rmsNormPrefillDispatch already produced. The paired kernel shares each
-    /// activation load between the two Q4_K matrices and both speculative rows.
-    fn dmmvQ4PairQ8Btok2(
+    /// activation load between the two Q4_K matrices and all speculative rows.
+    fn dmmvQ4PairQ8Spec(
         self: *ForwardCuda,
         cmd: *command.CudaCommand,
         w0: *const CudaBuffer,
@@ -5150,9 +5201,16 @@ pub const ForwardCuda = struct {
         M0: u32,
         M1: u32,
         K: u32,
+        T: u32,
     ) void {
         const push = DmmvPairPush{ .M0 = M0, .M1 = M1, .K = K, .pair_reduce = boolU32(self.use_q4_pair_reduce) };
-        cmd.dispatch(&self.pipes.dmmv_q4k_pair_q8_btok2, .{ @max(M0, M1), 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ w0, w1, &self.batch.?.act_q8, y0, y1 }, &push, @sizeOf(DmmvPairPush), 0);
+        const pipe: *CudaPipeline = switch (T) {
+            2 => &self.pipes.dmmv_q4k_pair_q8_btok2,
+            3 => &self.pipes.dmmv_q4k_pair_q8_btok3,
+            4 => &self.pipes.dmmv_q4k_pair_q8_btok4,
+            else => unreachable,
+        };
+        cmd.dispatch(pipe, .{ @max(M0, M1), 1, 1 }, .{ dmmv_fast_block, 1, 1 }, &.{ w0, w1, &self.batch.?.act_q8, y0, y1 }, &push, @sizeOf(DmmvPairPush), 0);
     }
 
     /// Effort 28: GPU-side stacked-MoE expert matvec over all `n_used` experts in

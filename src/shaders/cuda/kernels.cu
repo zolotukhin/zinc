@@ -873,6 +873,60 @@ extern "C" __global__ void dmmv_f32_dual(
     }
 }
 
+// Multi-token SSM alpha/beta projection. The two small f32 matrices and every
+// token row share one launch; each weight value is loaded once and reused for
+// all verifier rows while each accumulator keeps the ordinary reduction order.
+template <unsigned B>
+__device__ __forceinline__ void zinc_dmmv_f32_dual_btok(
+    const float* __restrict__ wa, const float* __restrict__ wb,
+    const float* __restrict__ x, float* __restrict__ ya,
+    float* __restrict__ yb, DmmvPush pc)
+{
+    const unsigned row = blockIdx.x;
+    if (row >= pc.M) return;
+    const float* arow = wa + (size_t)row * pc.K;
+    const float* brow = wb + (size_t)row * pc.K;
+    float sa[B] = {};
+    float sb[B] = {};
+    for (unsigned k = threadIdx.x; k < pc.K; k += blockDim.x) {
+        const float av = arow[k];
+        const float bv = brow[k];
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const float xv = x[(size_t)tok * pc.K + k];
+            sa[tok] += av * xv;
+            sb[tok] += bv * xv;
+        }
+    }
+    #pragma unroll
+    for (unsigned tok = 0u; tok < B; ++tok) {
+        float at = sa[tok];
+        float bt = sb[tok];
+        zinc_block_reduce_sum_pair(at, bt);
+        if (threadIdx.x == 0u) {
+            ya[(size_t)tok * pc.M + row] = at;
+            yb[(size_t)tok * pc.M + row] = bt;
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void dmmv_f32_dual_btok2(
+    const float* wa, const float* wb, const float* x,
+    float* ya, float* yb, DmmvPush pc) {
+    zinc_dmmv_f32_dual_btok<2u>(wa, wb, x, ya, yb, pc);
+}
+extern "C" __global__ void dmmv_f32_dual_btok3(
+    const float* wa, const float* wb, const float* x,
+    float* ya, float* yb, DmmvPush pc) {
+    zinc_dmmv_f32_dual_btok<3u>(wa, wb, x, ya, yb, pc);
+}
+extern "C" __global__ void dmmv_f32_dual_btok4(
+    const float* wa, const float* wb, const float* x,
+    float* ya, float* yb, DmmvPush pc) {
+    zinc_dmmv_f32_dual_btok<4u>(wa, wb, x, ya, yb, pc);
+}
+
 // ---- dmmv_q8_0 (port of dmmv_q8_0.comp) -------------------------------------
 // y[row] = sum_k dequant(W[row][k]) * x[k], W in Q8_0 (34-byte blocks: f16 d +
 // 32 int8). dequant: d * qs[i]. (SSM in/out proj, shared-expert weights.)
@@ -2874,6 +2928,14 @@ extern "C" __global__ void dmmv_q4k_q8_btok2(
     const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) {
     zinc_dmmv_q4k_q8_btok<2u>(a, xq, y, pc);
 }
+extern "C" __global__ void dmmv_q4k_q8_btok3(
+    const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) {
+    zinc_dmmv_q4k_q8_btok<3u>(a, xq, y, pc);
+}
+extern "C" __global__ void dmmv_q4k_q8_btok4(
+    const unsigned* a, const unsigned char* xq, float* y, DmmvPush pc) {
+    zinc_dmmv_q4k_q8_btok<4u>(a, xq, y, pc);
+}
 
 __device__ __forceinline__ float zinc_q5k_q8_block_dot(
     const unsigned* a, unsigned blk, unsigned q_off, unsigned l0, unsigned shift,
@@ -3135,6 +3197,16 @@ extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok2(
     const unsigned* gate, const unsigned* up, const unsigned char* xq,
     float* y, DmmvPush pc) {
     zinc_dmmv_q4k_gate_up_swiglu_q8_btok<2u>(gate, up, xq, y, pc);
+}
+extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok3(
+    const unsigned* gate, const unsigned* up, const unsigned char* xq,
+    float* y, DmmvPush pc) {
+    zinc_dmmv_q4k_gate_up_swiglu_q8_btok<3u>(gate, up, xq, y, pc);
+}
+extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok4(
+    const unsigned* gate, const unsigned* up, const unsigned char* xq,
+    float* y, DmmvPush pc) {
+    zinc_dmmv_q4k_gate_up_swiglu_q8_btok<4u>(gate, up, xq, y, pc);
 }
 
 // Exact-route MoE twin of the Q8 gate/up matvec. Unlike padded grouped WMMA,
@@ -3417,8 +3489,12 @@ extern "C" __global__ void dmmv_q8_0_q8_fast(
 extern "C" __global__ void dmmv_q4k_q8_fast() {}
 extern "C" __global__ void dmmv_q5k_q8_fast() {}
 extern "C" __global__ void dmmv_q4k_q8_btok2() {}
+extern "C" __global__ void dmmv_q4k_q8_btok3() {}
+extern "C" __global__ void dmmv_q4k_q8_btok4() {}
 extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8() {}
 extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok2() {}
+extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok3() {}
+extern "C" __global__ void dmmv_q4k_gate_up_swiglu_q8_btok4() {}
 extern "C" __global__ void dmmv_q4k_experts_grouped_q8_dual() {}
 extern "C" __global__ void dmmv_q5_1_experts_grouped_q8() {}
 extern "C" __global__ void dmmv_q5_1_experts_grouped_q8_m8() {}
@@ -3663,9 +3739,21 @@ extern "C" __global__ void dmmv_q4k_pair_q8_btok2(
     float* y0, float* y1, Dmmv2Push pc) {
     zinc_dmmv_q4k_pair_q8_btok<2u>(a0, a1, xq, y0, y1, pc);
 }
+extern "C" __global__ void dmmv_q4k_pair_q8_btok3(
+    const unsigned* a0, const unsigned* a1, const unsigned char* xq,
+    float* y0, float* y1, Dmmv2Push pc) {
+    zinc_dmmv_q4k_pair_q8_btok<3u>(a0, a1, xq, y0, y1, pc);
+}
+extern "C" __global__ void dmmv_q4k_pair_q8_btok4(
+    const unsigned* a0, const unsigned* a1, const unsigned char* xq,
+    float* y0, float* y1, Dmmv2Push pc) {
+    zinc_dmmv_q4k_pair_q8_btok<4u>(a0, a1, xq, y0, y1, pc);
+}
 #else
 extern "C" __global__ void dmmv_q4k_pair_q8() {}
 extern "C" __global__ void dmmv_q4k_pair_q8_btok2() {}
+extern "C" __global__ void dmmv_q4k_pair_q8_btok3() {}
+extern "C" __global__ void dmmv_q4k_pair_q8_btok4() {}
 #endif
 
 // ---- dmmv_q6k_fast (perf research) — port of tuned Vulkan dmmv_q6k -----------
@@ -3833,9 +3921,19 @@ extern "C" __global__ void dmmv_q6k_q8_btok2(
     const unsigned char* a, const unsigned char* xq, float* y, DmmvPush pc) {
     zinc_dmmv_q6k_q8_btok<2u>(a, xq, y, pc);
 }
+extern "C" __global__ void dmmv_q6k_q8_btok3(
+    const unsigned char* a, const unsigned char* xq, float* y, DmmvPush pc) {
+    zinc_dmmv_q6k_q8_btok<3u>(a, xq, y, pc);
+}
+extern "C" __global__ void dmmv_q6k_q8_btok4(
+    const unsigned char* a, const unsigned char* xq, float* y, DmmvPush pc) {
+    zinc_dmmv_q6k_q8_btok<4u>(a, xq, y, pc);
+}
 #else
 extern "C" __global__ void dmmv_q6k_q8_fast() {}
 extern "C" __global__ void dmmv_q6k_q8_btok2() {}
+extern "C" __global__ void dmmv_q6k_q8_btok3() {}
+extern "C" __global__ void dmmv_q6k_q8_btok4() {}
 #endif
 
 // ---- dmmv_q5k_fast (perf research) — q4k_fast + Q5_K qh high-bit promote -----
