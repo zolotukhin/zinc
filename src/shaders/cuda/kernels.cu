@@ -178,6 +178,60 @@ __device__ __forceinline__ void zinc_block_reduce_sum_pair(float& a, float& b) {
     }
 }
 
+// Reduce all token accumulators with one block rendezvous. Every accumulator
+// keeps zinc_block_reduce_sum's warp/shuffle tree; only duplicate barriers are
+// removed. The pair form covers twin projections such as gate/up and alpha/beta.
+template <unsigned N>
+__device__ __forceinline__ void zinc_block_reduce_sum_many(float (&v)[N]) {
+    __shared__ float sh[N][32];
+    const int lane = threadIdx.x & 31;
+    const int wid = threadIdx.x >> 5;
+    #pragma unroll
+    for (unsigned i = 0u; i < N; ++i) v[i] = zinc_warp_reduce_sum(v[i]);
+    if (lane == 0) {
+        #pragma unroll
+        for (unsigned i = 0u; i < N; ++i) sh[i][wid] = v[i];
+    }
+    __syncthreads();
+    const int nwarps = (blockDim.x + 31) >> 5;
+    #pragma unroll
+    for (unsigned i = 0u; i < N; ++i) {
+        v[i] = (threadIdx.x < nwarps) ? sh[i][lane] : 0.0f;
+        if (wid == 0) v[i] = zinc_warp_reduce_sum(v[i]);
+    }
+}
+
+template <unsigned N>
+__device__ __forceinline__ void zinc_block_reduce_sum_many_pair(float (&a)[N], float (&b)[N]) {
+    __shared__ float sha[N][32];
+    __shared__ float shb[N][32];
+    const int lane = threadIdx.x & 31;
+    const int wid = threadIdx.x >> 5;
+    #pragma unroll
+    for (unsigned i = 0u; i < N; ++i) {
+        a[i] = zinc_warp_reduce_sum(a[i]);
+        b[i] = zinc_warp_reduce_sum(b[i]);
+    }
+    if (lane == 0) {
+        #pragma unroll
+        for (unsigned i = 0u; i < N; ++i) {
+            sha[i][wid] = a[i];
+            shb[i][wid] = b[i];
+        }
+    }
+    __syncthreads();
+    const int nwarps = (blockDim.x + 31) >> 5;
+    #pragma unroll
+    for (unsigned i = 0u; i < N; ++i) {
+        a[i] = (threadIdx.x < nwarps) ? sha[i][lane] : 0.0f;
+        b[i] = (threadIdx.x < nwarps) ? shb[i][lane] : 0.0f;
+        if (wid == 0) {
+            a[i] = zinc_warp_reduce_sum(a[i]);
+            b[i] = zinc_warp_reduce_sum(b[i]);
+        }
+    }
+}
+
 __device__ __forceinline__ float zinc_warp_reduce_max(float v) {
     #pragma unroll
     for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_down_sync(0xffffffffu, v, o));
@@ -898,16 +952,13 @@ __device__ __forceinline__ void zinc_dmmv_f32_dual_btok(
             sb[tok] += bv * xv;
         }
     }
-    #pragma unroll
-    for (unsigned tok = 0u; tok < B; ++tok) {
-        float at = sa[tok];
-        float bt = sb[tok];
-        zinc_block_reduce_sum_pair(at, bt);
-        if (threadIdx.x == 0u) {
-            ya[(size_t)tok * pc.M + row] = at;
-            yb[(size_t)tok * pc.M + row] = bt;
+    zinc_block_reduce_sum_many_pair<B>(sa, sb);
+    if (threadIdx.x == 0u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            ya[(size_t)tok * pc.M + row] = sa[tok];
+            yb[(size_t)tok * pc.M + row] = sb[tok];
         }
-        __syncthreads();
     }
 }
 
@@ -2912,15 +2963,14 @@ __device__ __forceinline__ void zinc_dmmv_q4k_q8_btok(
         }
     }
 
-    #pragma unroll
-    for (unsigned tok = 0u; tok < B; ++tok) {
-        const float total = zinc_block_reduce_sum(sum[tok]);
-        if (tid == 0u) {
+    zinc_block_reduce_sum_many<B>(sum);
+    if (tid == 0u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
             const unsigned yi = (pc.y_offset >> 2) + tok * pc.M + row;
-            if (pc.acc_mode != 0u) y[yi] += total;
-            else y[yi] = total;
+            if (pc.acc_mode != 0u) y[yi] += sum[tok];
+            else y[yi] = sum[tok];
         }
-        __syncthreads();
     }
 }
 
@@ -3180,16 +3230,13 @@ __device__ __forceinline__ void zinc_dmmv_q4k_gate_up_swiglu_q8_btok(
         }
     }
 
-    #pragma unroll
-    for (unsigned tok = 0u; tok < B; ++tok) {
-        float gate_total = sum_gate[tok];
-        float up_total = sum_up[tok];
-        zinc_block_reduce_sum_pair(gate_total, up_total);
-        if (tid == 0u) {
-            const float silu = gate_total / (1.0f + expf(-gate_total));
-            y[(size_t)tok * pc.M + row] = silu * up_total;
+    zinc_block_reduce_sum_many_pair<B>(sum_gate, sum_up);
+    if (tid == 0u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            const float silu = sum_gate[tok] / (1.0f + expf(-sum_gate[tok]));
+            y[(size_t)tok * pc.M + row] = silu * sum_up[tok];
         }
-        __syncthreads();
     }
 }
 
@@ -3713,24 +3760,21 @@ __device__ __forceinline__ void zinc_dmmv_q4k_pair_q8_btok(
         }
     }
 
-    #pragma unroll
-    for (unsigned tok = 0u; tok < B; ++tok) {
-        float total0 = sum0[tok];
-        float total1 = sum1[tok];
-        if (paired && pc.pair_reduce != 0u) {
-            zinc_block_reduce_sum_pair(total0, total1);
-        } else {
-            total0 = zinc_block_reduce_sum(total0);
-            if (paired) {
-                __syncthreads();
-                total1 = zinc_block_reduce_sum(total1);
-            }
+    if (paired && pc.pair_reduce != 0u) {
+        zinc_block_reduce_sum_many_pair<B>(sum0, sum1);
+    } else {
+        zinc_block_reduce_sum_many<B>(sum0);
+        if (paired) {
+            __syncthreads();
+            zinc_block_reduce_sum_many<B>(sum1);
         }
-        if (tid == 0u) {
-            y0[(size_t)tok * pc.M0 + row] = total0;
-            if (paired) y1[(size_t)tok * pc.M1 + row] = total1;
+    }
+    if (tid == 0u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
+            y0[(size_t)tok * pc.M0 + row] = sum0[tok];
+            if (paired) y1[(size_t)tok * pc.M1 + row] = sum1[tok];
         }
-        __syncthreads();
     }
 }
 
@@ -3905,15 +3949,19 @@ __device__ __forceinline__ void zinc_dmmv_q6k_q8_btok(
         }
     }
 
-    #pragma unroll
-    for (unsigned tok = 0u; tok < B; ++tok) {
-        const float total = blockDim.x == 32u ? zinc_warp_reduce_sum(sum[tok]) : zinc_block_reduce_sum(sum[tok]);
-        if (tid == 0u) {
+    if (blockDim.x == 32u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) sum[tok] = zinc_warp_reduce_sum(sum[tok]);
+    } else {
+        zinc_block_reduce_sum_many<B>(sum);
+    }
+    if (tid == 0u) {
+        #pragma unroll
+        for (unsigned tok = 0u; tok < B; ++tok) {
             const unsigned yi = (pc.y_offset >> 2) + tok * pc.M + row;
-            if (pc.acc_mode != 0u) y[yi] += total;
-            else y[yi] = total;
+            if (pc.acc_mode != 0u) y[yi] += sum[tok];
+            else y[yi] = sum[tok];
         }
-        __syncthreads();
     }
 }
 
@@ -5477,14 +5525,25 @@ __device__ __forceinline__ void dmmv_q5k_btok_impl(const unsigned* a_u32, const 
             sum[t] += s;
         }
     }
-    #pragma unroll
-    for (int t = 0; t < B; t++) {
-        float r = zinc_block_reduce_sum(sum[t]);
+    if constexpr (B <= 4) {
+        zinc_block_reduce_sum_many<B>(sum);
         if (tid == 0) {
-            unsigned yi = (pc.y_offset >> 2) + (unsigned)t * pc.M + row;
-            if (pc.acc_mode != 0u) y[yi] += r; else y[yi] = r;
+            #pragma unroll
+            for (int t = 0; t < B; t++) {
+                unsigned yi = (pc.y_offset >> 2) + (unsigned)t * pc.M + row;
+                if (pc.acc_mode != 0u) y[yi] += sum[t]; else y[yi] = sum[t];
+            }
         }
-        __syncthreads();
+    } else {
+        #pragma unroll
+        for (int t = 0; t < B; t++) {
+            float r = zinc_block_reduce_sum(sum[t]);
+            if (tid == 0) {
+                unsigned yi = (pc.y_offset >> 2) + (unsigned)t * pc.M + row;
+                if (pc.acc_mode != 0u) y[yi] += r; else y[yi] = r;
+            }
+            __syncthreads();
+        }
     }
 }
 extern "C" __global__ void dmmv_q5k_btok2(const unsigned* a_u32, const float* x, float* y, DmmvPush pc) { dmmv_q5k_btok_impl<2>(a_u32, x, y, pc); }
