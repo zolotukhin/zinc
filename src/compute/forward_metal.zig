@@ -6823,12 +6823,22 @@ fn canUseQwenSsmF32AlphaBetaDual(
     cols: u32,
 ) bool {
     const cfg = engine.config;
-    return cfg.architecture == .qwen2_moe and
+    // Qwen3.6 35B-A3B: the 32x2048 alpha/beta tails the kernel was written for.
+    const qwen36_moe_shape = cfg.architecture == .qwen2_moe and
         cfg.hidden_dim == 2048 and
         cfg.ssm_d_inner == 4096 and
-        rows == cfg.ssm_dt_rank and
         rows == 32 and
-        cols == 2048 and
+        cols == 2048;
+    // Qwen3.6/3.8 27B dense hybrid: 48x5120 F32 alpha/beta tails. Before this
+    // shape was admitted, decode fell through to the generic one-thread-per-row
+    // `dmmv_f32` — a single 64-thread threadgroup walking K=5120 serially
+    // (~0.5 ms per launch, twice per SSM layer, 96 launches per token).
+    const qwen35_dense27b_shape = defaultQwen35Dense27bSsmDeltaGatedNormEnabled(cfg) and
+        qwen35Dense27bSsmTailF32DualEnabled() and
+        rows == 48 and
+        cols == 5120;
+    return (qwen36_moe_shape or qwen35_dense27b_shape) and
+        rows == cfg.ssm_dt_rank and
         alpha_t.info.type_ == .f32 and
         beta_t.info.type_ == .f32 and
         alpha_t.info.numElements() == @as(u64, rows) * @as(u64, cols) and
@@ -6838,6 +6848,13 @@ fn canUseQwenSsmF32AlphaBetaDual(
         engine.dmmv_f32_dual_small_pipe.handle != null and
         engine.dmmv_f32_dual_small_pipe.thread_execution_width == 32 and
         engine.dmmv_f32_dual_small_pipe.max_threads_per_threadgroup >= 1024;
+}
+
+/// `ZINC_METAL_QWEN27B_SSM_TAIL_F32_DUAL` (default on): route the Qwen 27B dense
+/// hybrid's F32 alpha/beta SSM tail projections through `dmmv_f32_dual_small`
+/// instead of the generic serial-K `dmmv_f32`.
+fn qwen35Dense27bSsmTailF32DualEnabled() bool {
+    return readBoolEnv("ZINC_METAL_QWEN27B_SSM_TAIL_F32_DUAL") orelse true;
 }
 
 fn canUseQwen35Dense9bSsmQ8AlphaBetaPair(
