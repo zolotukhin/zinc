@@ -24,9 +24,9 @@ Build a clean, modern, static microblog at zolotukhin.ai for daily ZINC developm
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
 - [x] **Performance-First (I)**: Static site with zero JS — maximum performance by design
-- [x] **RDNA4-Native (II)**: N/A — this is a website, not GPU code
+- [x] **Architecture-Native (II)**: N/A — this is a website, not GPU code
 - [x] **Zig Systems Correctness (III)**: N/A — site is TypeScript/Astro, lives alongside Zig code in monorepo
-- [x] **Vulkan-First (IV)**: N/A
+- [x] **First-Class GPU Backends (IV)**: N/A
 - [x] **Production Serving (V)**: Static hosting = production-ready by default (CDN, HTTPS, global edge)
 - [x] **Correctness Validation (VI)**: Lighthouse CI + HTML validation + feed validation ensure correctness
 

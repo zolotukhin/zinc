@@ -26,9 +26,9 @@ Add a Metal compute backend to ZINC enabling inference on Apple Silicon Macs (M1
 | Principle | Status | Notes |
 |-----------|--------|-------|
 | I. Performance-First | **PASS** | 80+ tok/s target, 75%+ bandwidth utilization, profiling-driven optimization phases |
-| II. RDNA4-Native | **VIOLATION** | Metal is not RDNA4. See Complexity Tracking. |
+| II. Architecture-Native | **PASS** | Native MSL kernels follow Apple GPU SIMD, memory, and submission behavior. |
 | III. Zig Systems Correctness | **PASS** | All host code in Zig, ObjC shim is thin C API only, comptime backend selection, explicit buffer management |
-| IV. Vulkan-First | **VIOLATION** | Adding Metal as a second GPU backend. See Complexity Tracking. |
+| IV. First-Class GPU Backends | **PASS** | Metal is an isolated native backend under the shared Zig frontend. |
 | V. Production Serving | **PASS** | Continuous batching, paged KV cache, OpenAI API, 16 concurrent requests, SSE streaming |
 | VI. Correctness Validation | **PASS** | Cross-backend greedy-sampled token matching, llama.cpp reference validation |
 
@@ -36,8 +36,8 @@ Add a Metal compute backend to ZINC enabling inference on Apple Silicon Macs (M1
 
 | Principle | Status | Notes |
 |-----------|--------|-------|
-| II. RDNA4-Native | **JUSTIFIED** | Metal backend is additive — zero changes to Vulkan path, comptime isolation ensures no RDNA4 regression |
-| IV. Vulkan-First | **JUSTIFIED** | Metal is a second first-class backend, not a replacement. Vulkan remains primary on Linux. Constitution principle governs not adding ROCm (which doesn't support consumer RDNA); Metal serves a different hardware family entirely |
+| II. Architecture-Native | **PASS** | Metal backend is additive; comptime isolation preserves the tuned AMD paths while using native Apple GPU kernels. |
+| IV. First-Class GPU Backends | **PASS** | Metal joins Vulkan and ROCm as a supported native backend rather than replacing either one. |
 
 ## Project Structure
 
@@ -118,10 +118,10 @@ src/
 
 ## Complexity Tracking
 
-| Violation | Why Needed | Simpler Alternative Rejected Because |
+| Added complexity | Why needed | Simpler alternative rejected because |
 |-----------|------------|-------------------------------------|
-| II. RDNA4-Native — Metal is not RDNA4 | Apple Silicon has 30%+ of developer market; local dev/test without SSH to remote node; competitive opportunity (current engines underperform) | "RDNA4-only" would permanently exclude macOS users. Metal backend is fully additive — comptime isolation means zero changes to any Vulkan code path. RDNA4 remains first-class. |
-| IV. Vulkan-First — Metal is a second GPU backend | Vulkan does not exist on macOS (MoltenVK has prohibitive overhead for compute). Metal is the only viable GPU API on Apple Silicon. | Running Vulkan-over-MoltenVK measured 40-60% slower than native Metal in llama.cpp benchmarks. The Vulkan-First principle was designed to reject ROCm (no consumer RDNA support), not to prevent supporting additional hardware families. |
+| A native Metal backend alongside the AMD and Intel paths | Apple Silicon needs native MSL kernels, unified-memory handling, and Metal command submission. | A lowest-common-denominator abstraction would leave substantial performance on the table and make backend-specific failures harder to diagnose. |
+| A thin Objective-C shim | Zig needs a stable C ABI for Metal and Foundation objects. | Reimplementing Objective-C message dispatch in each call site is more fragile and less auditable. |
 
 ## Phase 0: Research (Completed)
 

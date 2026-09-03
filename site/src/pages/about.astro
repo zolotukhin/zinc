@@ -20,7 +20,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
     <p>I spent seven years building infrastructure for storage systems. For the past six years, I&apos;ve worked at AWS on low-level systems problems across Linux kernels, userland, cross-compilation, glibc, and adjacent platform work.</p>
 
-    <p>I&apos;m building <a href="/zinc/">ZINC</a>, an inference engine for consumer GPUs. It uses Zig with native backend code for each platform: Vulkan on AMD and Intel, Metal on Apple Silicon, and an experimental CUDA path on NVIDIA RTX. The goal is to make the hardware people already own useful for local LLM inference.</p>
+    <p>I&apos;m building <a href="/zinc/">ZINC</a>, an inference engine for consumer GPUs. It uses Zig with native backend code for each platform: Vulkan or ROCm on AMD, Vulkan on Intel, Metal on Apple Silicon, and an experimental CUDA path on NVIDIA RTX. The goal is to make the hardware people already own useful for local LLM inference.</p>
 
     <p>I write about the work here: how the GPU kernels are tuned, what the quantization tradeoffs look like, and the systems engineering decisions behind ZINC.</p>
 

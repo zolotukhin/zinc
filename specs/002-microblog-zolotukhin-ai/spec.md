@@ -58,7 +58,7 @@ The site includes a full documentation section for the ZINC project, generated a
 
 ### User Story 4 - Project Vision and Narrative Pages (Priority: P4)
 
-The site has static pages explaining ZINC's mission: why AMD consumer GPUs are underserved, why Vulkan over ROCm, why Zig, why now (TurboQuant timing), and the end goal (making $500 GPUs useful for LLM inference). These pages tell the story and give context to the daily posts.
+The site has static pages explaining ZINC's mission: why AMD consumer GPUs are underserved, how Vulkan and ROCm serve different AMD paths, why Zig, why now (TurboQuant timing), and the end goal (making consumer GPUs useful for LLM inference). These pages tell the story and give context to the daily posts.
 
 **Why this priority**: Provides the "why" framing that gives the daily "what" posts meaning. Important for first-time visitors and journalists/bloggers who might write about ZINC.
 

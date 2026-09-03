@@ -133,7 +133,7 @@ That distinction is important. If you ask "is ZINC ahead on the public RDNA head
 
 ## Why AMD is the interesting target
 
-AMD local inference used to be framed as a compromise: you could get VRAM, but you had to accept rough software and weaker LLM tooling. The R9700-class result changes the useful question. It is no longer "can a 32 GB AMD card run these models?" It can. The question is whether a Vulkan-first engine can make that card competitive on the model families people actually want to run locally.
+AMD local inference used to be framed as a compromise: you could get VRAM, but you had to accept rough software and weaker LLM tooling. The R9700-class result changes the useful question. It is no longer "can a 32 GB AMD card run these models?" It can. The question is whether an AMD-native engine with Vulkan and ROCm paths can make that card competitive on the model families people actually want to run locally.
 
 That is why this sweep is meaningful. The matrix is not five copies of the same model:
 

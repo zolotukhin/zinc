@@ -2,7 +2,6 @@
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import Breadcrumbs from '../../components/Breadcrumbs.astro';
 import { buildBreadcrumbList } from '../../lib/structured-data';
-import rocmReference from '../../data/llama-rocm-reference.json';
 import benchmarkData from '../../data/zinc-performance.json';
 
 interface Props {
@@ -72,17 +71,6 @@ function formatMetric(value: number | null | undefined, suffix: string, digits =
   return `${value.toFixed(digits)} ${suffix}`;
 }
 
-function formatMetricSpread(
-  value: number | null | undefined,
-  spread: number | null | undefined,
-  suffix: string,
-  digits = 1,
-) {
-  if (value == null || Number.isNaN(value)) return 'n/a';
-  const spreadText = spread != null && !Number.isNaN(spread) ? ` +/- ${spread.toFixed(digits)}` : '';
-  return `${value.toFixed(digits)}${spreadText} ${suffix}`;
-}
-
 function formatPercent(value: number | null | undefined, digits = 0) {
   if (value == null || Number.isNaN(value)) return 'n/a';
   return `${value.toFixed(digits)}%`;
@@ -104,15 +92,6 @@ function formatShortDate(iso: string | null | undefined) {
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
-  }).format(new Date(iso));
-}
-
-function formatUtcShortDate(iso: string | null | undefined) {
-  if (!iso) return 'n/a';
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    timeZone: 'UTC',
   }).format(new Date(iso));
 }
 
@@ -754,19 +733,6 @@ function compareModels(a: any, b: any) {
   });
 }
 
-const rocmRows = [...(rocmReference.rows ?? [])].sort(compareModels);
-const rocmDepthRows = rocmReference.qwen35_depth_sweep ?? [];
-const rocmAvgPrefill = mean(rocmRows.map((row: any) => row.prefill_tps));
-const rocmAvgDecode = mean(rocmRows.map((row: any) => row.decode_tps));
-const rocmMaxPrefill = maxMetric(rocmRows, (row: any) => row.prefill_tps);
-const rocmMaxDecode = maxMetric(rocmRows, (row: any) => row.decode_tps);
-const rocmFastestPrefill = rocmRows.length > 0
-  ? [...rocmRows].sort((a: any, b: any) => (b.prefill_tps ?? 0) - (a.prefill_tps ?? 0))[0]
-  : null;
-const rocmFastestDecode = rocmRows.length > 0
-  ? [...rocmRows].sort((a: any, b: any) => (b.decode_tps ?? 0) - (a.decode_tps ?? 0))[0]
-  : null;
-
 function scenarioRows(target: any, scenarioId: string) {
   return [...target.models]
     .map((model: any) => ({
@@ -836,14 +802,6 @@ const jsonLd = {
         encodingFormat: 'application/json',
         contentUrl: canonicalUrl,
       },
-    },
-    {
-      '@type': 'Dataset',
-      name: rocmReference.label,
-      description: rocmReference.description,
-      dateModified: rocmReference.generated_at,
-      measurementTechnique: rocmReference.methodology.tool,
-      variableMeasured: ['llama.cpp ROCm prefill throughput', 'llama.cpp ROCm decode throughput'],
     },
     buildBreadcrumbList(siteUrl, breadcrumbItems),
   ],
@@ -1525,172 +1483,6 @@ const jsonLd = {
       </section>
     );
   })}
-
-  <section class="rocm-reference" aria-labelledby="rocm-reference-heading">
-    <header class="rocm-head">
-      <div>
-        <p class="eyebrow">{rocmReference.label}</p>
-        <h2 id="rocm-reference-heading">llama.cpp ROCm microbench archive</h2>
-        <p>
-          These older <code>llama-bench</code> pp/tg rows remain available for low-level context and
-          are separate from the ZINC ROCm server comparison selected above.
-        </p>
-      </div>
-      <div class="rocm-summary" aria-label="ROCm reference summary">
-        <article class="summary-card">
-          <span>Backend</span>
-          <strong>{rocmReference.llama_cpp.backend}</strong>
-          <small>{rocmReference.machine.gpu}</small>
-        </article>
-        <article class="summary-card">
-          <span>Prefill</span>
-          <strong>{formatMetric(rocmAvgPrefill, 'tok/s')}</strong>
-          <small>average pp2048</small>
-        </article>
-        <article class="summary-card">
-          <span>Decode</span>
-          <strong>{formatMetric(rocmAvgDecode, 'tok/s')}</strong>
-          <small>average tg32</small>
-        </article>
-        <article class="summary-card">
-          <span>Measured</span>
-          <strong>{formatUtcShortDate(rocmReference.generated_at)}</strong>
-          <small>{rocmReference.methodology.shape} · UTC</small>
-        </article>
-      </div>
-    </header>
-
-    <article class="board-card rocm-board">
-      <header class="board-head">
-        <div>
-          <h3>llama.cpp ROCm, five models</h3>
-          <p>{rocmReference.methodology.shape} · {rocmReference.methodology.runs} measured runs · f16 KV</p>
-        </div>
-        <div class="legend">
-          <span><i class="legend-swatch rocm"></i>ROCm/HIP</span>
-        </div>
-      </header>
-
-      <div class="decode-rank rocm-rank" aria-label="llama.cpp ROCm reference rows">
-        {rocmRows.map((row: any) => (
-          <article class="rank-row rocm-rank-row">
-            <div class="rank-model">
-              <div>
-                <strong>{displayModelLabel(row.label)}</strong>
-                <small>{row.model_file}</small>
-              </div>
-            </div>
-            <div class="rank-bars">
-              <div class="rank-metric-group">
-                <div class="rank-metric-title">
-                  <span>Prefill</span>
-                </div>
-                <div class="bar-line rocm">
-                  <span>ROCm</span>
-                  <div class="bar-track" aria-hidden="true">
-                    <i class="bar-fill rocm" style={`width: ${barWidth(row.prefill_tps, rocmMaxPrefill)}%;`}></i>
-                  </div>
-                  <strong>{formatMetricSpread(row.prefill_tps, row.prefill_stdev, 'tok/s')}</strong>
-                </div>
-              </div>
-              <div class="rank-metric-group">
-                <div class="rank-metric-title">
-                  <span>Decode</span>
-                </div>
-                <div class="bar-line rocm">
-                  <span>ROCm</span>
-                  <div class="bar-track" aria-hidden="true">
-                    <i class="bar-fill rocm" style={`width: ${barWidth(row.decode_tps, rocmMaxDecode)}%;`}></i>
-                  </div>
-                  <strong>{formatMetricSpread(row.decode_tps, row.decode_stdev, 'tok/s')}</strong>
-                </div>
-              </div>
-            </div>
-            <div class="rank-ratio">
-              <strong>{row.id === rocmFastestPrefill?.id ? 'Fastest prefill' : row.id === rocmFastestDecode?.id ? 'Fastest decode' : 'Reference'}</strong>
-              <small>llama-bench</small>
-            </div>
-          </article>
-        ))}
-      </div>
-
-      <details class="raw-table-details">
-        <summary>
-          <strong>Qwen 35B context sweep</strong>
-          <small>{displayModelLabel(rocmReference.vulkan_crosscheck.model_label)} · pp2048 + tg32</small>
-        </summary>
-        <div class="table-wrap">
-          <table class="bench-table rocm-table">
-            <thead>
-              <tr>
-                <th>Depth</th>
-                <th>ROCm prefill</th>
-                <th>ROCm decode</th>
-                <th>Vulkan cross-check</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rocmDepthRows.map((row: any, index: number) => (
-                <tr>
-                  <th scope="row" class="model-cell">
-                    <div class="model-row">
-                      <div>
-                        <strong>d{formatNumber(row.depth, 0)}</strong>
-                        <small>{index === 0 ? rocmReference.vulkan_crosscheck.shape : 'same pp/tg shape'}</small>
-                      </div>
-                    </div>
-                  </th>
-                  <td>{formatMetricSpread(row.prefill_tps, row.prefill_stdev, 'tok/s')}</td>
-                  <td>{formatMetricSpread(row.decode_tps, row.decode_stdev, 'tok/s')}</td>
-                  <td>
-                    {index === 0 ? (
-                      <div class="metric-stack">
-                        <div class="backend-line baseline">
-                          <span class="backend-pill baseline">V</span>
-                          <div>
-                            <strong>{formatMetricSpread(rocmReference.vulkan_crosscheck.prefill_tps, rocmReference.vulkan_crosscheck.prefill_stdev, 'tok/s')}</strong>
-                            <small>prefill, {rocmReference.vulkan_crosscheck.device}</small>
-                          </div>
-                        </div>
-                        <div class="backend-line baseline">
-                          <span class="backend-pill baseline">V</span>
-                          <div>
-                            <strong>{formatMetricSpread(rocmReference.vulkan_crosscheck.decode_tps, rocmReference.vulkan_crosscheck.decode_stdev, 'tok/s')}</strong>
-                            <small>decode, {rocmReference.vulkan_crosscheck.device}</small>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div class="metric-missing">
-                        <strong>Not measured</strong>
-                        <small>ROCm-only row for this depth.</small>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </details>
-    </article>
-
-    <details class="method-card rocm-method">
-      <summary class="method-summary">
-        <div>
-          <strong>ROCm methodology</strong>
-          <small>{rocmReference.methodology.tool} · {rocmReference.llama_cpp.commit} · ROCm {rocmReference.machine.rocm}</small>
-        </div>
-        <span>{rocmReference.methodology.shape}</span>
-      </summary>
-      <ul class="method-list">
-        {rocmReference.methodology.notes.map((note: string) => <li>{note}</li>)}
-        <li>Build flags: {rocmReference.llama_cpp.build_flags.join(', ')}.</li>
-        <li>Run flags: <code>{rocmReference.methodology.flags}</code>.</li>
-        <li>Environment: {rocmReference.methodology.env.join(', ')}.</li>
-      </ul>
-    </details>
-  </section>
 
   <script is:inline>
     function initBenchmarksDashboard() {
@@ -4221,49 +4013,6 @@ const jsonLd = {
       display: none;
     }
 
-    .rocm-reference {
-      gap: 1rem;
-      padding-top: 2.75rem;
-    }
-
-    .rocm-head h2 {
-      font-size: 1.85rem;
-    }
-
-    .rocm-head p {
-      font-size: 0.81rem;
-    }
-
-    .rocm-summary {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .rocm-summary .summary-card,
-    .rocm-summary .summary-card:last-child {
-      display: block;
-      min-height: 5.25rem;
-      padding: 0.8rem;
-      border: 0;
-      border-left: 1px solid var(--bench-rule);
-      border-bottom: 1px solid var(--bench-rule);
-    }
-
-    .rocm-summary .summary-card:nth-child(odd) {
-      border-left: 0;
-    }
-
-    .rocm-summary .summary-card:nth-last-child(-n + 2) {
-      border-bottom: 0;
-    }
-
-    .rocm-rank-row .bar-line.rocm {
-      grid-template-columns: 2.8rem minmax(48px, 1fr) 7.7rem;
-    }
-
-    .rocm-method {
-      display: block;
-    }
   }
 
   /* Backend selector is the primary navigation for published measurements. */

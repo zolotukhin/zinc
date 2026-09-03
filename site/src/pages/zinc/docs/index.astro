@@ -20,9 +20,10 @@ const breadcrumbItems = [
 const docMeta: Record<string, { label: string; description: string; order: number }> = {
   'development': { label: 'Development Guide', description: 'Build, test, debug, benchmark, and contribute.', order: 5 },
   'getting-started': { label: 'Getting Started', description: 'Build ZINC, verify Vulkan, and run the first prompt.', order: 1 },
-  'hardware-requirements': { label: 'Hardware Requirements', description: 'Linux, AMD/Intel GPUs, Vulkan, VRAM, macOS, and Apple Silicon expectations.', order: 2 },
-  'running-zinc': { label: 'Running ZINC', description: 'CLI usage, server mode, KV quantization, and graph exports.', order: 3 },
-  api: { label: 'Serving HTTP API', description: 'OpenAI-compatible request and response shapes.', order: 4 },
+  'hardware-requirements': { label: 'Hardware Requirements', description: 'Vulkan, ROCm, Metal, CUDA, GPU, VRAM, operating-system, and driver requirements.', order: 2 },
+  rocm: { label: 'ROCm Backend', description: 'Build and validate the first-class HIP path on supported AMD RDNA4 systems.', order: 3 },
+  'running-zinc': { label: 'Running ZINC', description: 'CLI usage, server mode, KV quantization, and graph exports.', order: 4 },
+  api: { label: 'Serving HTTP API', description: 'OpenAI-compatible request and response shapes.', order: 5 },
   opencode: { label: 'OpenCode Setup', description: 'Configure OpenCode local coding with ZINC and Qwen through the OpenAI-compatible API, with thinking, tools, and trace proxy guidance.', order: 6 },
   spec: { label: 'Technical Specification', description: 'Architecture, kernels, model support, and scheduler behavior.', order: 10 },
   'rdna4-tuning': { label: 'RDNA4 Tuning Guide', description: 'Cooperative matrix, bandwidth tuning, and toolchain notes.', order: 11 },
@@ -36,8 +37,9 @@ const docMeta: Record<string, { label: string; description: string; order: numbe
 };
 
 const orderedDocs = [...docs].sort((a, b) => (docMeta[a.slug]?.order ?? 99) - (docMeta[b.slug]?.order ?? 99));
-const startHere = orderedDocs.filter(doc => ['getting-started', 'hardware-requirements', 'running-zinc', 'api', 'opencode', 'development'].includes(doc.slug));
-const deepDocs = orderedDocs.filter(doc => !['getting-started', 'hardware-requirements', 'running-zinc', 'api', 'opencode', 'development'].includes(doc.slug));
+const startHereSlugs = ['getting-started', 'hardware-requirements', 'rocm', 'running-zinc', 'api', 'opencode', 'development'];
+const startHere = orderedDocs.filter(doc => startHereSlugs.includes(doc.slug));
+const deepDocs = orderedDocs.filter(doc => !startHereSlugs.includes(doc.slug));
 
 const combinedDocs = [
   ...startHere.map(doc => ({ label: docMeta[doc.slug]?.label ?? doc.title, href: `/zinc/docs/${doc.slug}` })),
@@ -51,7 +53,7 @@ const jsonLd = {
     {
       '@type': 'CollectionPage',
       name: 'ZINC Documentation',
-      description: 'Documentation for using ZINC on consumer GPUs and Apple Silicon: getting started, hardware requirements, running the engine, then deeper tuning and reference material.',
+      description: 'Documentation for using ZINC with Vulkan, ROCm, Metal, and experimental CUDA: getting started, hardware requirements, running the engine, then deeper tuning and reference material.',
       url: `${siteUrl}/zinc/docs`,
       mainEntity: {
         '@type': 'ItemList',
@@ -70,8 +72,8 @@ const jsonLd = {
 
 <BaseLayout
   title="ZINC Documentation"
-  description="Documentation for using ZINC on consumer GPUs and Apple Silicon: getting started, hardware requirements, running the CLI and server, plus architecture, tuning, and API reference."
-  keywords="ZINC docs, ZINC getting started, ZINC hardware requirements, how to run ZINC, consumer GPU inference docs, Vulkan GGUF docs, ZINC API, RDNA4 tuning"
+  description="Documentation for using ZINC through Vulkan, ROCm, Metal, and experimental CUDA: getting started, hardware requirements, CLI and server use, architecture, tuning, and API reference."
+  keywords="ZINC docs, ZINC getting started, ZINC hardware requirements, ROCm GGUF inference, Vulkan GGUF docs, Metal inference, CUDA inference, ZINC API, RDNA4 tuning"
   jsonLd={jsonLd}
 >
   <Breadcrumbs items={breadcrumbItems} />
@@ -89,8 +91,8 @@ const jsonLd = {
     <section class="status-banner">
       <div>
         <p class="kicker">Current Status</p>
-      <h2>Supported on AMD, Intel Arc, and Apple Silicon</h2>
-      <p>The CLI path is the best-supported way to use ZINC today. Linux Vulkan covers AMD RDNA3/RDNA4 and Intel Arc Xe2/Battlemage; macOS uses the native Metal path on Apple Silicon. Server mode and broader model coverage are still evolving.</p>
+        <h2>Vulkan, ROCm, and Metal are supported</h2>
+        <p>AMD Radeon can use Vulkan or ROCm, Intel Arc uses Vulkan, and Apple Silicon uses Metal. The NVIDIA CUDA backend is available for experimental use. The CLI remains the best-supported way to start, while server and model coverage continue to mature.</p>
       </div>
       <a href="/zinc/benchmarks/" class="status-link">Benchmarks</a>
     </section>
@@ -105,10 +107,10 @@ git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 zig build -Doptimize=ReleaseFast
 
-# RDNA4 Linux only; skip on Intel Arc and macOS.
+# RDNA4 Vulkan only; skip for ROCm, Intel Arc, CUDA, and macOS.
 export RADV_PERFTEST=coop_matrix
 
-# Verify Vulkan, shaders, and the runtime path first
+# Verify the selected GPU backend and runtime path first
 ./zig-out/bin/zinc --check
 
 # Show supported models for this machine

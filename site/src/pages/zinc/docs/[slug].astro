@@ -76,14 +76,19 @@ export async function getStaticPaths() {
       keywords: 'ZINC development, build ZINC, test ZINC, debug ZINC, ZINC contributing, Zig build, graph export, GPU profiling, RDNA4 benchmarking, Metal development, Vulkan development',
     },
     'getting-started': {
-      title: 'Run LLMs on AMD and Intel Arc GPUs with ZINC',
-      description: 'Build ZINC, select Vulkan, ROCm, or Metal, pull a managed GGUF model, and run local LLM inference on AMD GPUs, Intel Arc, or Apple Silicon.',
-      keywords: 'run LLMs on AMD GPUs, ROCm LLM inference, run LLMs on Intel Arc, ZINC getting started, local LLM inference AMD, Intel Arc Vulkan inference, Vulkan LLM inference, GGUF on AMD GPU, ZINC quick start, Apple Silicon local LLM',
+      title: 'Run Local LLMs with ZINC',
+      description: 'Build ZINC, select Vulkan, ROCm, Metal, or experimental CUDA, pull a managed GGUF model, and run local inference on AMD Radeon, Intel Arc, Apple Silicon, or NVIDIA RTX.',
+      keywords: 'run local LLMs, run LLMs on AMD GPUs, ROCm LLM inference, run LLMs on Intel Arc, Apple Silicon local LLM, NVIDIA CUDA GGUF, ZINC getting started, Vulkan LLM inference, ZINC quick start',
     },
     'hardware-requirements': {
       title: 'ZINC Hardware Requirements',
-      description: 'Supported consumer GPUs, Vulkan requirements, Linux expectations, VRAM guidance, and machine sizing for running ZINC locally.',
-      keywords: 'ZINC hardware requirements, consumer GPU requirements, AMD GPU requirements, Intel Arc inference, RX 9070 XT inference, Radeon AI PRO R9700 inference, ZINC Vulkan requirements, ZINC Linux requirements, GGUF hardware guide',
+      description: 'Supported consumer GPUs, Vulkan, ROCm, Metal, and CUDA requirements, operating-system guidance, VRAM sizing, and driver checks for running ZINC locally.',
+      keywords: 'ZINC hardware requirements, ROCm requirements, Vulkan requirements, Metal requirements, CUDA requirements, AMD GPU requirements, Intel Arc inference, Apple Silicon inference, NVIDIA RTX inference, Radeon AI PRO R9700 inference, GGUF hardware guide',
+    },
+    'rocm': {
+      title: 'ZINC ROCm Backend Guide',
+      description: 'Build, verify, run, benchmark, and troubleshoot ZINC through ROCm and HIP on supported AMD RDNA4 GPUs.',
+      keywords: 'ZINC ROCm, ROCm HIP GGUF inference, AMD RDNA4 ROCm, Radeon AI PRO R9700, gfx1201, ROCm 7.2, ZINC backend rocm, local LLM AMD GPU',
     },
     'running-zinc': {
       title: 'Running ZINC',

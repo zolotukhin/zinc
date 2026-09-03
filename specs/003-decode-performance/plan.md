@@ -26,9 +26,9 @@ Optimize ZINC decode throughput from 4 tok/s to 107+ tok/s on RDNA4 by eliminati
 | Principle | Status | Notes |
 |-----------|--------|-------|
 | I. Performance-First | ✅ PASS | This feature IS the performance optimization. All changes profiling-driven. |
-| II. RDNA4-Native | ✅ PASS | All new shaders target wave64, 64 CUs, 32KB L1. No cross-vendor compromises. |
+| II. Architecture-Native | ✅ PASS | All new Vulkan shaders target wave64, 64 CUs, and 32KB L1 without constraining other native backends. |
 | III. Zig Systems Correctness | ✅ PASS | All host code in Zig. GPU buffers explicitly managed. No hidden allocations (removing per-token alloc/free in SSM). |
-| IV. Vulkan-First | ✅ PASS | All GPU work via GLSL compute → SPIR-V. System glslc 2023.8 only. |
+| IV. First-Class GPU Backends | ✅ PASS | This backend-specific optimization stays within Vulkan and does not change the ROCm, Metal, or CUDA paths. |
 | V. Production Serving | ⚠️ NOTE | Feature focuses on single-request decode. This is prerequisite for multi-request (Phase 4). No violation — single-request throughput is foundational. |
 | VI. Correctness Validation | ✅ PASS | Token-exact match required vs pre-optimization output. Router and gate values validated within tolerance. |
 

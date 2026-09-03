@@ -26,9 +26,9 @@ Build a full-stack LLM inference engine in Zig + Vulkan compute shaders, targeti
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
 - [x] **Performance-First (I)**: All kernel designs include bandwidth utilization targets; profiling data required for validation
-- [x] **RDNA4-Native (II)**: Shaders target wave64, 64 CUs, 32KB L1/CU, 6MB L2; no generic GPU fallbacks
+- [x] **Architecture-Native (II)**: The original Vulkan shaders target wave64, 64 CUs, 32KB L1/CU, and 6MB L2 without constraining later native backends
 - [x] **Zig Systems Correctness (III)**: All host code in Zig; explicit GPU memory management; comptime for dispatch tables
-- [x] **Vulkan-First (IV)**: Vulkan compute only; GLSL→SPIR-V via system glslc; cooperative matrix leveraged
+- [x] **First-Class GPU Backends (IV)**: This original phase implements Vulkan; ROCm, Metal, and CUDA remain isolated native paths under the shared frontend
 - [x] **Production Serving (V)**: Continuous batching + paged KV cache + OpenAI API from Phase 2
 - [x] **Correctness Validation (VI)**: All outputs validated against llama.cpp/reference baselines; >99.5% cosine similarity
 

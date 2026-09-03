@@ -8,11 +8,11 @@
 **Rationale**: No hidden allocations (critical for GPU memory management), C ABI compatible (zero-overhead Vulkan calls), comptime for kernel dispatch tables, cross-compilation to single binary.
 **Alternatives considered**: Rust (borrow checker overhead on GPU buffer management, FFI friction with Vulkan C API), C++ (undefined behavior, complex build systems, 15K+ lines problem seen in llama.cpp ggml-vulkan.cpp).
 
-### D2: Vulkan Compute over ROCm/HIP
+### D2: AMD Backend Strategy — Vulkan and ROCm/HIP
 
-**Decision**: Vulkan compute shaders are the only GPU backend.
-**Rationale**: ROCm does not support RDNA3/RDNA4 consumer GPUs — only MI-series datacenter GPUs. Vulkan works on all AMD GPUs via RADV driver. Measured dispatch overhead of 0.016µs/dispatch makes Vulkan viable for high-dispatch-count inference.
-**Alternatives considered**: ROCm/HIP (doesn't work on target hardware), OpenCL (no cooperative matrix extension, worse driver support), DirectX (Windows only).
+**Decision**: Keep Vulkan and ROCm/HIP as first-class AMD backends with separate native kernels and separately published measurements.
+**Rationale**: Vulkan remains the broad Linux path through RADV, while the validated RDNA4 ROCm stack provides native HIP execution and WMMA access. The shared Zig frontend keeps model and serving behavior aligned without pretending the driver stacks have identical performance characteristics.
+**Alternatives considered**: Vulkan-only or ROCm-only support (needlessly removes a useful AMD path), OpenCL (no comparable cooperative-matrix path and weaker driver support), DirectX (Windows only).
 
 ### D3: System glslc (shaderc 2023.8)
 

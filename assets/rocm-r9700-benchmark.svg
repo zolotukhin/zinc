@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="610" viewBox="0 0 1120 610" role="img" aria-labelledby="title desc">
+  <title id="title">ZINC versus llama.cpp on Radeon AI PRO R9700 with ROCm</title>
+  <desc id="desc">Six horizontal bars show ZINC ahead of the same-machine llama.cpp comparison in combined prompt and decode time. Every row also lists ZINC performance as a percentage of llama.cpp for prefill and decode.</desc>
+  <rect width="1120" height="610" fill="#f7f5f0"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" fill="#1f2428">
+    <text x="48" y="58" font-size="26" font-weight="700">Six models. Six wins.</text>
+    <text x="48" y="88" font-size="15" fill="#59636e">Radeon AI PRO R9700 · ROCm · reusable servers · median core workload</text>
+    <text x="1072" y="58" font-size="16" font-weight="700" text-anchor="end" fill="#b84a00">ZINC vs llama.cpp</text>
+
+    <text x="48" y="138" font-size="12" font-weight="700" fill="#59636e">MODEL</text>
+    <text x="420" y="138" font-size="12" font-weight="700" fill="#59636e">COMBINED THROUGHPUT</text>
+    <text x="1072" y="138" font-size="12" font-weight="700" text-anchor="end" fill="#59636e">PHASES</text>
+
+    <line x1="48" y1="152" x2="1072" y2="152" stroke="#d7d2c8"/>
+    <line x1="820" y1="164" x2="820" y2="548" stroke="#6e7781" stroke-dasharray="4 5"/>
+    <text x="820" y="570" font-size="11" text-anchor="middle" fill="#6e7781">llama.cpp = 100%</text>
+
+    <g transform="translate(0 176)">
+      <text x="48" y="18" font-size="16" font-weight="600">Gemma 4 26B-A4B</text>
+      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
+      <rect x="420" y="2" width="469" height="22" fill="#d35400"/>
+      <text x="902" y="19" font-size="14" font-weight="700">117%</text>
+      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 187% · decode 115%</text>
+    </g>
+
+    <g transform="translate(0 238)">
+      <text x="48" y="18" font-size="16" font-weight="600">Gemma 4 31B</text>
+      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
+      <rect x="420" y="2" width="448" height="22" fill="#d35400"/>
+      <text x="881" y="19" font-size="14" font-weight="700">112%</text>
+      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 223% · decode 108%</text>
+    </g>
+
+    <g transform="translate(0 300)">
+      <text x="48" y="18" font-size="16" font-weight="600">Muse Glimmer 30B</text>
+      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
+      <rect x="420" y="2" width="442" height="22" fill="#d35400"/>
+      <text x="875" y="19" font-size="14" font-weight="700">110%</text>
+      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 163% · decode 108%</text>
+    </g>
+
+    <g transform="translate(0 362)">
+      <text x="48" y="18" font-size="16" font-weight="600">Qwen 3.5 9B</text>
+      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
+      <rect x="420" y="2" width="453" height="22" fill="#d35400"/>
+      <text x="886" y="19" font-size="14" font-weight="700">113%</text>
+      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 146% · decode 113%</text>
+    </g>
+
+    <g transform="translate(0 424)">
+      <text x="48" y="18" font-size="16" font-weight="600">Qwen 3.6 35B-A3B</text>
+      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
+      <rect x="420" y="2" width="486" height="22" fill="#d35400"/>
+      <text x="919" y="19" font-size="14" font-weight="700">121%</text>
+      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 115% · decode 122%</text>
+    </g>
+
+    <g transform="translate(0 486)">
+      <text x="48" y="18" font-size="16" font-weight="600">Qwen 3.8 27B</text>
+      <rect x="420" y="2" width="400" height="22" fill="#d9d5cc"/>
+      <rect x="420" y="2" width="490" height="22" fill="#d35400"/>
+      <text x="923" y="19" font-size="14" font-weight="700">123%</text>
+      <text x="1072" y="42" font-size="13" text-anchor="end" fill="#59636e">prefill 260% · decode 108%</text>
+    </g>
+
+    <line x1="48" y1="548" x2="1072" y2="548" stroke="#d7d2c8"/>
+    <text x="48" y="584" font-size="12" fill="#59636e">Same GPU, GGUF, prompts, warmups, and measured runs. Full samples and revisions: zolotukhin.ai/zinc/benchmarks</text>
+  </g>
+</svg>
