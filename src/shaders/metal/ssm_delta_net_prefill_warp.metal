@@ -13,6 +13,12 @@
 //
 // Grid: (dt_rank, head_v_dim / n_simdgroups) threadgroups
 // Threadgroup: 32 * n_simdgroups = 128 threads
+//
+// Shape-generic in dt_rank / n_group / d_inner via the push constants (the
+// Qwen3.6 35B-A3B dt_rank=32 and the Qwen3.6/3.8 27B dt_rank=48 both route
+// here); requires head_v_dim == d_state == 128 (state rows are 4 columns per
+// lane) and n_tokens <= 512 (gate/beta threadgroup cache). The dispatcher
+// (`canUseSsmDeltaNetPrefillWarp`) enforces both.
 
 #include <metal_stdlib>
 #include <simd/simd.h>
@@ -38,7 +44,7 @@ struct Params {
     uint output_offset;
 };
 
-// Specialized for the Qwen3.5/3.6 SSM config: dt_rank=32, head_v_dim=128, d_state=128, n_group=16, d_inner=4096
+// Register-resident delta-net scan; head_v_dim == d_state == 128 (see header).
 kernel void main0(
     constant Params& p [[buffer(0)]],
     device const float* conv_out [[buffer(1)]],
@@ -49,16 +55,19 @@ kernel void main0(
     device float* state [[buffer(6)]],
     device float* output [[buffer(7)]],
     uint3 tg_pos [[threadgroup_position_in_grid]],
-    uint tid [[thread_position_in_threadgroup]],
+    uint3 tid3 [[thread_position_in_threadgroup]],
     uint simd_width [[thread_execution_width]],
     uint simdgroups_per_tg [[simdgroups_per_threadgroup]]
 ) {
+    // MSL requires all position attributes to share a dimensionality, so the
+    // thread index arrives as uint3 alongside the 2-D threadgroup position.
+    const uint tid = tid3.x;
     const uint head = tg_pos.x;
     const uint simd_lane = tid % simd_width;
     const uint simd_idx = tid / simd_width;
     const uint row = tg_pos.y * simdgroups_per_tg + simd_idx;
 
-    if (head >= p.dt_rank || row >= p.head_v_dim || p.head_v_dim > 128u || p.d_state > 128u) {
+    if (head >= p.dt_rank || row >= p.head_v_dim || p.head_v_dim != 128u || p.d_state != 128u || p.n_tokens > 512u) {
         return;
     }
 

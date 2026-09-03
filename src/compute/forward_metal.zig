@@ -1273,6 +1273,59 @@ fn ssmDeltaNetPrefillThreadgroupSize(
     return 64;
 }
 
+/// `ZINC_METAL_SSM_DELTA_NET_PREFILL_WARP` (default on): run the batched
+/// delta-net scan on `ssm_delta_net_prefill_warp` (one simdgroup per state
+/// row, register-resident state, no barriers per token) instead of the block
+/// kernel (one threadgroup per head, state read-modify-written in device
+/// memory per token).
+fn ssmDeltaNetPrefillWarpEnabled() bool {
+    return readBoolEnv("ZINC_METAL_SSM_DELTA_NET_PREFILL_WARP") orelse true;
+}
+
+/// Simdgroups per threadgroup for the warp scan: grid.y = head_v_dim / this.
+const ssm_delta_net_prefill_warp_simdgroups: u32 = 4;
+/// The warp kernel caches gate/beta for every token in threadgroup memory.
+const ssm_delta_net_prefill_warp_max_tokens: u32 = 512;
+
+fn canUseSsmDeltaNetPrefillWarp(engine: *const InferenceEngine, push: *const SsmDeltaNetPrefillPush) bool {
+    const pipe = &engine.ssm_delta_net_prefill_warp_pipe;
+    return ssmDeltaNetPrefillWarpEnabled() and
+        push.head_v_dim == 128 and
+        push.d_state == 128 and
+        push.n_tokens >= 1 and
+        push.n_tokens <= ssm_delta_net_prefill_warp_max_tokens and
+        pipe.handle != null and
+        pipe.thread_execution_width == 32 and
+        pipe.max_threads_per_threadgroup >= 32 * ssm_delta_net_prefill_warp_simdgroups;
+}
+
+/// Batched delta-net scan dispatch: the warp kernel when the shape admits it
+/// (Qwen 27B dense hybrid 48x128x128, Qwen 35B-A3B 32x128x128), else the
+/// block kernel. Before the warp route, the 27B took the block kernel's
+/// generic scalar path at ~9 ms per layer for 165 tokens — the largest
+/// single prefill bucket (144 calls, ~1.3 s of a 3.6 s 496-token prefill).
+fn dispatchSsmDeltaNetPrefillOnCmd(
+    engine: *const InferenceEngine,
+    cmd: *MetalCommand,
+    bufs: []const *const MetalBuffer,
+    push: *const SsmDeltaNetPrefillPush,
+) void {
+    if (canUseSsmDeltaNetPrefillWarp(engine, push)) {
+        cmd.dispatchV2(
+            &engine.ssm_delta_net_prefill_warp_pipe,
+            .{ push.dt_rank, push.head_v_dim / ssm_delta_net_prefill_warp_simdgroups, 1 },
+            .{ 32 * ssm_delta_net_prefill_warp_simdgroups, 1, 1 },
+            bufs,
+            push,
+            @sizeOf(SsmDeltaNetPrefillPush),
+            0,
+        );
+        return;
+    }
+    const tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, push.dt_rank, push.head_v_dim, push.d_state, push.n_group);
+    cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ push.dt_rank, 1, 1 }, .{ tg_size, 1, 1 }, bufs, push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+}
+
 fn canUseQwenSsmConvD4FastPath(
     engine: *const InferenceEngine,
     conv_channels: u32,
@@ -7240,6 +7293,7 @@ pub const InferenceEngine = struct {
     ssm_delta_net_pipe: MetalPipeline,
     ssm_delta_net_offset_pipe: MetalPipeline,
     ssm_delta_net_prefill_pipe: MetalPipeline,
+    ssm_delta_net_prefill_warp_pipe: MetalPipeline,
     ssm_delta_net_gated_norm_pipe: MetalPipeline,
     ssm_delta_net_gated_norm_qwen_pipe: MetalPipeline,
     ssm_gated_norm_pipe: MetalPipeline,
@@ -8229,6 +8283,7 @@ pub const InferenceEngine = struct {
         self.ssm_delta_net_pipe = try loadShaderPipeline(ctx, "ssm_delta_net");
         self.ssm_delta_net_offset_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_offset");
         self.ssm_delta_net_prefill_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_prefill");
+        self.ssm_delta_net_prefill_warp_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_prefill_warp");
         self.ssm_delta_net_gated_norm_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_gated_norm");
         self.ssm_delta_net_gated_norm_qwen_pipe = try loadShaderPipeline(ctx, "ssm_delta_net_gated_norm_qwen");
         self.ssm_gated_norm_pipe = try loadShaderPipeline(ctx, "ssm_gated_norm");
@@ -9095,6 +9150,7 @@ pub const InferenceEngine = struct {
         metal_pipeline.freePipeline(&self.ssm_delta_net_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_offset_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_prefill_pipe);
+        metal_pipeline.freePipeline(&self.ssm_delta_net_prefill_warp_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_gated_norm_pipe);
         metal_pipeline.freePipeline(&self.ssm_delta_net_gated_norm_qwen_pipe);
         metal_pipeline.freePipeline(&self.ssm_gated_norm_pipe);
@@ -19575,8 +19631,7 @@ fn recordQwenRoutePackedPrefixSsmLayerOnCmd(
         // exactly) each thread handles head_v_dim/tg_threads = 1 row instead of
         // 2, roughly halving that serial inner loop. This main route-packed
         // prefix path covers every SSM layer, yet was still hardcoded to 64.
-        const dn_tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, dt_rank, head_v_dim, d_state, n_group);
-        cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ dt_rank, 1, 1 }, .{ dn_tg_size, 1, 1 }, &dn_bufs, &push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+        dispatchSsmDeltaNetPrefillOnCmd(engine, cmd, &dn_bufs, &push);
         if (profile) |p| p.ssm_delta_calls += n_tokens;
         engine.position = n_tokens - 1;
         profileSsmBarrierBuffers(cmd, profile, .delta, &.{&scratch.attn_out});
@@ -22965,8 +23020,7 @@ fn recordQwen35Dense9bPrefixSsmDensePrefillLayerOnCmd(
             &engine.ssm_state_bufs.?[layer_idx],
             branch_work_buf,
         };
-        const tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, dt_rank, head_v_dim, d_state, n_group);
-        cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ dt_rank, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+        dispatchSsmDeltaNetPrefillOnCmd(engine, cmd, &bufs, &push);
         if (profile) |p| p.ssm_delta_calls += 1;
     }
     profileSsmBarrierBuffers(cmd, profile, .delta, &.{
@@ -23175,8 +23229,7 @@ fn prepareQwenSsmPrefillProjectionChunk(engine: *InferenceEngine, prompt_len: us
                 &engine.ssm_state_bufs.?[0],
                 &engine.qwen_ssm_prefill_branch_buf,
             };
-            const tg_size = ssmDeltaNetPrefillThreadgroupSize(&engine.ssm_delta_net_prefill_pipe, dt_rank, head_v_dim, d_state, n_group);
-            cmd.dispatchV2(&engine.ssm_delta_net_prefill_pipe, .{ dt_rank, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+            dispatchSsmDeltaNetPrefillOnCmd(engine, &cmd, &bufs, &push);
             if (profile) |p| p.ssm_delta_calls += 1;
         }
         profileSsmBarrierBuffers(&cmd, profile, .delta, &.{
@@ -32368,6 +32421,149 @@ test "ssm_delta_net_prefill exact Qwen shape matches CPU reference" {
     const tg_size = ssmDeltaNetPrefillThreadgroupSize(&pipe, dt_rank, head_v_dim, d_state, n_group);
     var cmd = try metal_command.beginCommand(ctx);
     cmd.dispatchV2(&pipe, .{ dt_rank, 1, 1 }, .{ tg_size, 1, 1 }, &bufs, &push, @sizeOf(SsmDeltaNetPrefillPush), 0);
+    cmd.commitAndWait();
+
+    for (0..token_count * d_inner_usize) |i| {
+        try std.testing.expectApproxEqAbs(ref_output[i], output_ptr[i], 0.003);
+    }
+    for (0..state_len) |i| {
+        try std.testing.expectApproxEqAbs(ref_state[i], state_ptr[i], 0.003);
+    }
+}
+
+test "ssm_delta_net_prefill_warp exact Qwen 27B shape matches CPU reference" {
+    const ctx = shim.mtl_init();
+    try std.testing.expect(ctx != null);
+    defer shim.mtl_destroy(ctx);
+
+    var pipe = try loadShaderPipeline(ctx, "ssm_delta_net_prefill_warp");
+    defer metal_pipeline.freePipeline(&pipe);
+    try std.testing.expect(pipe.thread_execution_width == 32);
+
+    // Qwen3.6/3.8 27B dense hybrid: 48 heads over 16 groups (3 heads per group).
+    const n_tokens: u32 = 5;
+    const dt_rank: u32 = 48;
+    const head_v_dim: u32 = 128;
+    const d_state: u32 = 128;
+    const n_group: u32 = 16;
+    const d_inner: u32 = dt_rank * head_v_dim;
+    const qk_dim: u32 = d_state * n_group;
+    const conv_len: u32 = 2 * qk_dim + d_inner;
+    const state_len: usize = @as(usize, dt_rank) * head_v_dim * head_v_dim;
+    const token_count: usize = @intCast(n_tokens);
+    const dt_rank_usize: usize = @intCast(dt_rank);
+    const d_inner_usize: usize = @intCast(d_inner);
+    const conv_len_usize: usize = @intCast(conv_len);
+
+    var conv_buf = try metal_buffer.createBuffer(ctx, n_tokens * conv_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&conv_buf);
+    var alpha_buf = try metal_buffer.createBuffer(ctx, n_tokens * dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&alpha_buf);
+    var dt_bias_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&dt_bias_buf);
+    var ssm_a_buf = try metal_buffer.createBuffer(ctx, dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&ssm_a_buf);
+    var beta_buf = try metal_buffer.createBuffer(ctx, n_tokens * dt_rank * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&beta_buf);
+    var state_buf = try metal_buffer.createBuffer(ctx, state_len * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&state_buf);
+    var output_buf = try metal_buffer.createBuffer(ctx, n_tokens * d_inner * @sizeOf(f32));
+    defer metal_buffer.freeBuffer(&output_buf);
+
+    const conv_ptr: [*]f32 = @ptrCast(@alignCast(conv_buf.cpu_ptr.?));
+    const alpha_ptr: [*]f32 = @ptrCast(@alignCast(alpha_buf.cpu_ptr.?));
+    const dt_bias_ptr: [*]f32 = @ptrCast(@alignCast(dt_bias_buf.cpu_ptr.?));
+    const ssm_a_ptr: [*]f32 = @ptrCast(@alignCast(ssm_a_buf.cpu_ptr.?));
+    const beta_ptr: [*]f32 = @ptrCast(@alignCast(beta_buf.cpu_ptr.?));
+    const state_ptr: [*]f32 = @ptrCast(@alignCast(state_buf.cpu_ptr.?));
+    const output_ptr: [*]f32 = @ptrCast(@alignCast(output_buf.cpu_ptr.?));
+
+    for (0..token_count) |t| {
+        for (0..conv_len_usize) |j| {
+            const pattern: i32 = @intCast((t * 17 + j * 7) % 23);
+            conv_ptr[t * conv_len_usize + j] =
+                @as(f32, @floatFromInt(pattern - 11)) * 0.0125 + @as(f32, @floatFromInt(t)) * 0.002;
+        }
+        for (0..dt_rank_usize) |h| {
+            const idx = t * dt_rank_usize + h;
+            alpha_ptr[idx] = @as(f32, @floatFromInt(@as(i32, @intCast(t)) - @as(i32, @intCast(h % 5)))) * 0.025;
+            beta_ptr[idx] = @as(f32, @floatFromInt(@as(i32, @intCast((t + h) % 7)) - 3)) * 0.03;
+        }
+    }
+    for (0..dt_rank_usize) |h| {
+        dt_bias_ptr[h] = @as(f32, @floatFromInt(@as(i32, @intCast(h % 5)) - 2)) * 0.02;
+        ssm_a_ptr[h] = -0.25 - @as(f32, @floatFromInt(h % 3)) * 0.04;
+    }
+    for (0..state_len) |i| {
+        state_ptr[i] = @as(f32, @floatFromInt(@as(i32, @intCast(i % 19)) - 9)) * 0.004;
+    }
+    @memset(output_ptr[0 .. n_tokens * d_inner], 0);
+
+    const allocator = std.testing.allocator;
+    const ref_state = try allocator.alloc(f32, state_len);
+    defer allocator.free(ref_state);
+    const ref_output = try allocator.alloc(f32, token_count * d_inner_usize);
+    defer allocator.free(ref_output);
+    @memcpy(ref_state, state_ptr[0..state_len]);
+    @memset(ref_output, 0);
+
+    for (0..token_count) |t| {
+        const conv_base = t * conv_len_usize;
+        const dt_base = t * dt_rank_usize;
+        const out_base = t * d_inner_usize;
+        refRunSsmDeltaNet(
+            conv_ptr[conv_base .. conv_base + conv_len_usize],
+            alpha_ptr[dt_base .. dt_base + dt_rank_usize],
+            dt_bias_ptr[0..dt_rank],
+            beta_ptr[dt_base .. dt_base + dt_rank_usize],
+            ssm_a_ptr[0..dt_rank],
+            ref_state,
+            ref_output[out_base .. out_base + d_inner_usize],
+            dt_rank,
+            head_v_dim,
+            d_state,
+            n_group,
+        );
+    }
+
+    const push = SsmDeltaNetPrefillPush{
+        .d_inner = d_inner,
+        .dt_rank = dt_rank,
+        .head_v_dim = head_v_dim,
+        .d_state = d_state,
+        .n_group = n_group,
+        .has_dt_bias = 1,
+        .has_ssm_a = 1,
+        .n_tokens = n_tokens,
+        .alpha_stride = dt_rank,
+        .beta_stride = dt_rank,
+        .conv_stride = conv_len,
+        .output_stride = d_inner,
+        .alpha_offset = 0,
+        .beta_offset = 0,
+        .conv_offset = 0,
+        .output_offset = 0,
+    };
+    const bufs = [_]*const MetalBuffer{
+        &conv_buf,
+        &alpha_buf,
+        &dt_bias_buf,
+        &ssm_a_buf,
+        &beta_buf,
+        &state_buf,
+        &output_buf,
+    };
+
+    var cmd = try metal_command.beginCommand(ctx);
+    cmd.dispatchV2(
+        &pipe,
+        .{ dt_rank, head_v_dim / ssm_delta_net_prefill_warp_simdgroups, 1 },
+        .{ 32 * ssm_delta_net_prefill_warp_simdgroups, 1, 1 },
+        &bufs,
+        &push,
+        @sizeOf(SsmDeltaNetPrefillPush),
+        0,
+    );
     cmd.commitAndWait();
 
     for (0..token_count * d_inner_usize) |i| {
