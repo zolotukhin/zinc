@@ -2045,7 +2045,7 @@ pub const ForwardCuda = struct {
     }
 
     /// Allocate the speculative context before prompt timing begins. This is
-    /// model/runtime setup (equivalent to creating llama.cpp's draft context),
+    /// model/runtime setup (equivalent to creating the reference draft context),
     /// not prompt processing, and can involve hundreds of MiB of rollback rows.
     pub fn mtpPrepare(self: *ForwardCuda) !bool {
         if (!self.mtpEnabled()) return false;
@@ -2257,7 +2257,7 @@ pub const ForwardCuda = struct {
     }
 
     /// Prime the draft head from the target prompt hidden rows left by
-    /// prefillBatched. Initialization is charged to prefill, matching llama.cpp.
+    /// prefillBatched. Initialization is charged to prefill, matching the reference runtime.
     pub fn mtpPrime(self: *ForwardCuda, prompt_tokens: []const u32) !bool {
         if (!self.mtpEnabled() or prompt_tokens.len == 0 or self.batch == null) return false;
         const d = self.d;

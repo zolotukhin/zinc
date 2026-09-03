@@ -21,7 +21,7 @@ struct FlashAttnPush {
 // at ~1000 ctx while touching only ~2 MB of KV (a 71 MB dmmv takes 269 us).
 // There is simply no other work resident to hide the L2 latency of the
 // KV stream, so decode throughput decays linearly with context while
-// llama.cpp (whose flash_attn_ext_vec splits the KV scan across many
+// The comparison runtime (whose flash_attn_ext_vec splits the KV scan across many
 // simdgroups) stays flat.
 //
 // This kernel keeps one threadgroup per Q head but runs FLASH_SPLIT_NSG

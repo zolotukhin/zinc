@@ -68,7 +68,7 @@ pub const Tokenizer = struct {
         legacy,
         gpt2_ascii,
         gemma4_bpe,
-        /// llama.cpp `llama4` pretokenizer regex (Muse Glimmer). Differs from
+        /// Reference `llama4` pretokenizer regex (Muse Glimmer). Differs from
         /// gpt2_ascii in newline-absorbing punctuation runs, 3-digit caps,
         /// symbol-prefixed words, suffix contractions, and case splitting.
         llama4,
@@ -412,7 +412,7 @@ pub const Tokenizer = struct {
         return byte >= 'a' and byte <= 'z';
     }
 
-    /// ASCII implementation of the llama.cpp `llama4` pretokenizer regex
+    /// ASCII implementation of the reference `llama4` pretokenizer regex
     /// (Muse Glimmer et al.):
     ///   [^\r\n\p{L}\p{N}]?[upper]*[lower]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
     /// | [^\r\n\p{L}\p{N}]?[upper]+[lower]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
@@ -1017,7 +1017,7 @@ pub const Tokenizer = struct {
         enable_thinking: ?bool = null,
         add_generation_prompt: bool = true,
         /// Date exposed to templates that request `strftime_now`, in ISO form.
-        /// Null uses the current UTC date, matching llama.cpp's Jinja runtime.
+        /// Null uses the current UTC date, matching the reference Jinja runtime.
         current_date: ?[]const u8 = null,
         /// When true, skip the thinking template entirely even if the tokenizer supports it.
         skip_thinking_template: bool = false,

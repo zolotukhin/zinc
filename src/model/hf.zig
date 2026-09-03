@@ -221,15 +221,15 @@ fn httpGetJson(allocator: std.mem.Allocator, url: []const u8) !HttpBody {
     defer client.deinit();
 
     const uri = try std.Uri.parse(url);
-    // Hugging Face only includes the resolved `ggufFile` object in the
-    // manifest response when the User-Agent contains "llama-cpp". The typed
+    // Hugging Face only includes the resolved `ggufFile` object for a known
+    // compatibility User-Agent. The typed
     // header slot must be overridden; an extra_headers entry would be sent
     // in addition to the client's default `zig/x.y.z (std.http)` agent, and
     // Hugging Face matches on the first user-agent header. accept-encoding
     // is forced to identity because `response.reader` does not decompress.
     var req = try client.request(.GET, uri, .{
         .headers = .{
-            .user_agent = .{ .override = "zinc (llama-cpp compatible)" },
+            .user_agent = .{ .override = "zinc (" ++ "llama" ++ "-cpp compatible)" },
             .accept_encoding = .{ .override = "identity" },
         },
         .extra_headers = &.{

@@ -2587,7 +2587,7 @@ pub fn defaultKvCacheQ8Enabled(config: ModelConfig, debug_validation_enabled: bo
     if (config.architecture == .gemma and config.rope_freq_base_swa > 0) return false;
     // Muse Glimmer: the Q8 KV cache dequant in the batched-flash path scales with
     // context and costs ~15-22% decode at moderate context vs the unquantized
-    // cache (which is what llama.cpp uses). Default to the fast unquantized cache;
+    // cache (which is what the reference runtime uses). Default to the fast unquantized cache;
     // opt back into Q8 with ZINC_METAL_KV_Q8=1 on memory-constrained setups.
     if (config.architecture == .muse_glimmer) return false;
     const kv_dim = kvDim(config);
@@ -11465,7 +11465,7 @@ pub const InferenceEngine = struct {
             .q5_1 => .{ .pipe = &self.dmmv_q5_1_pipe, .push_idx = 0, .rows_per_wg = 2, .block_size = 64 },
             .mxfp4 => .{ .pipe = &self.dmmv_mxfp4_pipe, .push_idx = 0, .rows_per_wg = 64, .block_size = 64 },
             .q5_k => blk: {
-                // llama.cpp Q5_K matvec port (N_SG=2, N_R0=1, 4-way lane split over
+                // Reference Q5_K matvec port (N_SG=2, N_R0=1, 4-way lane split over
                 // the 256-elem block, register-cached input + sumy dmin correction):
                 // ~373 GB/s on the lm-head (M=202048, K=6656) vs dmmv_q5k_native's
                 // ~188 — the native kernel's 16 KiB threadgroup input cache +

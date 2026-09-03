@@ -9,7 +9,7 @@ struct DmmvPush {
     uint y_offset;
 };
 
-// Port of llama.cpp's kernel_mul_mv_q5_K_f32_impl (N_R0_Q5_K=1) for dense
+// Port of the reference kernel_mul_mv_q5_K_f32_impl (N_R0_Q5_K=1) for dense
 // single-token decode, in ZINC's buffer/push convention (W[0], p[1], X[2],
 // Y[3]) — mirrors dmmv_q6k_llama.metal.
 //
