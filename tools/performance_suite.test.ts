@@ -42,7 +42,7 @@ import {
   intelZincCommand,
   rdnaZincCommand,
   resolveLocalLlamaServer,
-  rdnaDpmHighScript,
+  rdnaDpmNormalizeScript,
   summarizeValues,
   validateZincBackend,
   zincServerTimingWaitSeconds,
@@ -314,14 +314,17 @@ test("parseArgs reads RDNA backend and device options", () => {
   expect(args.rdnaWorkdir).toBe("/root/zinc-bench");
 });
 
-test("RDNA performance script stabilizes PCIe and AMD memory clocks safely", () => {
-  const script = rdnaDpmHighScript();
+test("RDNA performance script stabilizes PCIe and leaves the AMD DPM governor on auto", () => {
+  const script = rdnaDpmNormalizeScript();
   expect(script).toContain("/sys/module/pcie_aspm/parameters/policy");
   expect(script).toContain("echo performance");
   expect(script).toContain("/sys/class/drm/card*/device");
   expect(script).toContain("pp_dpm_mclk");
   expect(script).toContain("power_dpm_force_performance_level");
-  expect(script).toContain("echo high");
+  // Forcing `high` locks a fixed nominal DPM state and measured 4% slower than
+  // the card default on the R9700 (both ZINC and the comparison runtime).
+  expect(script).toContain("echo auto");
+  expect(script).not.toContain("echo high");
   expect(script).toContain("2>/dev/null || true");
   expect(script).not.toContain("do;");
   expect(script).not.toContain("then;");

@@ -33,6 +33,7 @@ const hf_mod = @import("model/hf.zig");
 const tokenizer_mod = @import("model/tokenizer.zig");
 const graph_mod = @import("compute/graph.zig");
 const memory_plan = @import("gpu/memory_plan.zig");
+const kv_dtype = @import("compute/kv_dtype.zig");
 const process_lock_mod = @import("gpu/process_lock.zig");
 const server_runtime = @import("server/runtime.zig");
 // These modules import vulkan/ transitively — only available on Linux until T010-T014 refactor.
@@ -2967,7 +2968,7 @@ pub fn main() !void {
             // buffers to system memory (Qwen 3.8 27B on a 32 GB R9700 lost
             // 17% of MTP decode and 10% of plain decode that way).
             const auto_context = memory_plan.autoContextTokensForDeviceBudget(
-                memory_plan.profile(model.config),
+                memory_plan.profileWithKvBytes(model.config, kv_dtype.elementBytes()),
                 forward_mod.tensorBytes(&model),
                 vk_instance.vramBytes(),
                 model.config.context_length,

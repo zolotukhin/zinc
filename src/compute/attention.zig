@@ -3,6 +3,7 @@
 //! This helper owns the pipeline resources needed to bind paged attention
 //! inputs and record a flash-attention compute pass.
 const std = @import("std");
+const kv_dtype = @import("kv_dtype.zig");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
 const Pipeline = @import("../vulkan/pipeline.zig").Pipeline;
@@ -111,7 +112,7 @@ pub const AttentionDispatch = struct {
         };
 
         // Flash attention: 6 bindings (Q, K cache, V cache, page table, output, per-head sinks)
-        const attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
+        const attn_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("flash_attn") }) catch unreachable;
         const pipeline = pipeline_mod.createFromSpirvWithOptions(instance, attn_path, 6, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
             log.warn("flash_attn shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
@@ -123,7 +124,7 @@ pub const AttentionDispatch = struct {
         // handles all prompt tokens with per-query causal masking. Used by
         // both the prefill batched path (n_queries=N) and the decode-shape
         // foundation gated by ZINC_BATCH_ATTN=1 (n_queries=1).
-        const attn_batched_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_batched.spv", .{shader_dir}) catch unreachable;
+        const attn_batched_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("flash_attn_batched") }) catch unreachable;
         const pipeline_batched = pipeline_mod.createFromSpirvWithOptions(instance, attn_batched_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
             log.warn("flash_attn_batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
@@ -152,7 +153,7 @@ pub const AttentionDispatch = struct {
         if (fa_split_k_request > 1) {
             // path_buf was reused by the batched-shader path above; rebuild
             // the flash_attn.spv path before specializing the split-K variant.
-            const split_attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn.spv", .{shader_dir}) catch unreachable;
+            const split_attn_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("flash_attn") }) catch unreachable;
             const split_specs = [_]pipeline_mod.SpecConst{.{ .id = 0, .value = fa_split_k_request }};
             pipeline_split = pipeline_mod.createFromSpirvWithOptions(instance, split_attn_path, 6, @sizeOf(FlashAttnPush), &split_specs, wave64_push_options, allocator) catch |err| blk: {
                 log.warn("flash_attn split-K specialization not loaded: {s}", .{@errorName(err)});

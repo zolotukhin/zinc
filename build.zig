@@ -246,6 +246,7 @@ pub fn build(b: *std.Build) void {
         "softmax_topk_batch",
         "router_f32_batch",
         "flash_attn",
+        "flash_attn_f16kv",
         "flash_attn_split_merge",
         "deinterleave",
         "deinterleave_batched",
@@ -306,13 +307,17 @@ pub fn build(b: *std.Build) void {
         "dmmv_q6k_batch",
         "dmmv_q6k_batch_kpar",
         "kv_cache_write",
+        "kv_cache_write_f16kv",
         "norm_rope",
         "quantize_q8_1",
         // Batched prefill shaders — ported from the Metal backend so the
         // Vulkan/RDNA side can share the prefillBatched orchestration.
         "rope_batched",
         "flash_attn_batched",
+        "flash_attn_batched_f16kv",
         "kv_cache_write_batched",
+        "kv_cache_write_batched_f16kv",
+        "kv_cache_write_single_f16kv",
         "residual_rms_norm",
         "residual_rms_norm_wide",
         "post_norm_residual_rms_norm",
@@ -334,8 +339,11 @@ pub fn build(b: *std.Build) void {
         "rms_norm_dmmv_q4k_alpha_beta",
         "rms_norm_dmmv_alpha_beta_ksplit",
         "qk_norm_rope_kv_write",
+        "qk_norm_rope_kv_write_f16kv",
         "qk_norm_rope_kv_write_batched",
+        "qk_norm_rope_kv_write_batched_f16kv",
         "k_norm_rope_kv_write_batched",
+        "k_norm_rope_kv_write_batched_f16kv",
         // Effort-6 GEMM port: tiled Q4_K dense GEMM plus its routed MoE
         // gather sibling. Both are compile-registered foundations; production
         // prefill still uses route-packed columns until the routed GEMM has a

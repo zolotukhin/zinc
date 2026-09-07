@@ -32,6 +32,7 @@ const MoeFusedDownAccPushConstants = dmmv_mod.MoeFusedDownAccPushConstants;
 const MoeGateUpGegluPushConstants = dmmv_mod.MoeGateUpGegluPushConstants;
 const BatchDmmvPushConstants = dmmv_mod.BatchDmmvPushConstants;
 const elementwise_mod = @import("elementwise.zig");
+const kv_dtype = @import("kv_dtype.zig");
 const ElementwiseDispatch = elementwise_mod.ElementwiseDispatch;
 const RmsNormPush = elementwise_mod.RmsNormPush;
 const SwigluPush = elementwise_mod.SwigluPush;
@@ -1844,8 +1845,11 @@ pub const InferenceEngine = struct {
         const mtp_candidate = mtpModelEligible(config.*, model) and envFlagEnabled("ZINC_MTP", true);
         const n_kv_layers: u32 = config.n_layers + (if (mtp_candidate) config.n_nextn_layers else 0);
         var plan_config = config.*;
-        plan_config.n_layers = n_kv_layers;
-        const runtime_profile = memory_plan.profile(plan_config);
+        // memory_plan.kvLayerCount() counts the attending layers of n_layers plus
+        // n_nextn_layers, so pass the base layer count and let the NextN block be
+        // budgeted only when MTP will actually allocate its cache.
+        plan_config.n_nextn_layers = if (mtp_candidate) config.n_nextn_layers else 0;
+        const runtime_profile = memory_plan.profileWithKvBytes(plan_config, kv_dtype.elementBytes());
         const mtp_reserved_bytes: u64 = if (mtp_candidate) mtpReservedBytes(config.*) else 0;
         if (mtp_candidate) {
             log.info("NextN/MTP: Vulkan draft block enabled ({d} extra KV layer(s) budgeted; set ZINC_MTP=0 to disable)", .{config.n_nextn_layers});
@@ -2190,17 +2194,31 @@ pub const InferenceEngine = struct {
         if (mtp_candidate and mtp_reserved_bytes > 0) {
             mtp_vram_hold = Buffer.initDeviceLocal(instance, mtp_reserved_bytes, storage_xfer) catch null;
         }
-        // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32))
-        const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dim) * @sizeOf(f32);
+        // KV cache: per-layer, flat layout (context_length * kv_dim * sizeof(f32)).
+        // Only full-attention layers own one — the DeltaNet/SSM layers of a hybrid
+        // model keep recurrent state and never read it, so they get a placeholder
+        // (same layout as the Metal backend). On Qwen 3.8 27B this is 17 caches
+        // instead of 65, i.e. 136 KB/token instead of 520 KB.
+        const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dim) * kv_dtype.elementBytes();
         const kv_k_cache = try allocator.alloc(Buffer, n_kv_layers);
         errdefer allocator.free(kv_k_cache);
         const kv_v_cache = try allocator.alloc(Buffer, n_kv_layers);
         errdefer allocator.free(kv_v_cache);
 
+        var kv_owned_layers: u32 = 0;
         for (0..n_kv_layers) |i| {
-            kv_k_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_per_layer, storage_xfer);
-            kv_v_cache[i] = try Buffer.initDeviceLocal(instance, kv_cache_per_layer, storage_xfer);
+            const bytes = if (layerOwnsKvCache(config.*, i)) kv_cache_per_layer else kv_placeholder_bytes;
+            if (bytes == kv_cache_per_layer) kv_owned_layers += 1;
+            kv_k_cache[i] = try Buffer.initDeviceLocal(instance, bytes, storage_xfer);
+            kv_v_cache[i] = try Buffer.initDeviceLocal(instance, bytes, storage_xfer);
         }
+        log.info("KV cache: {d}/{d} layers attend, {s} ({d} MB total at {d} tokens)", .{
+            kv_owned_layers,
+            n_kv_layers,
+            if (kv_dtype.f16Enabled()) "f16" else "f32",
+            @as(u64, kv_owned_layers) * kv_cache_per_layer * 2 / (1024 * 1024),
+            max_ctx,
+        });
 
         log.debug("KV cache: {d} layers × {d} MB = {d} MB total", .{
             config.n_layers,
@@ -7920,13 +7938,40 @@ pub const InferenceEngine = struct {
                                     );
                                 }
                                 // Transfer fallback: Q RoPE before barrier (original order preserved)
-                                self.decode_cmd.computeAndTransferBarrier();
-                                const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * layer_kv_vec_size;
-                                const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
-                                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
-                                const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
-                                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
-                                self.decode_cmd.transferToComputeBarrier();
+                                if (self.elementwise.pipeline_kv_cache_write_single_f16 == null) {
+                                    self.decode_cmd.computeAndTransferBarrier();
+                                    const kv_offset = @as(vk.c.VkDeviceSize, physical_token) * layer_kv_vec_size;
+                                    const k_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
+                                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.k_buf.handle, self.kv_k_cache[layer_idx].handle, 1, &k_region);
+                                    const v_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = kv_offset, .size = layer_kv_vec_size };
+                                    vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.v_buf.handle, self.kv_v_cache[layer_idx].handle, 1, &v_region);
+                                    self.decode_cmd.transferToComputeBarrier();
+                                } else {
+                                    // An f16 cache cannot take a raw byte copy of the f32 K/V
+                                    // vectors, so it goes through a converting dispatch.
+                                    const kv_pip = &self.elementwise.pipeline_kv_cache_write_single_f16.?;
+                                    self.decode_cmd.computeBarrier();
+                                    const kv_push = elementwise_mod.KvCacheWriteSingleF16Push{
+                                        .kv_dim = layer_kv_dim,
+                                        .dst_elem_offset = physical_token * layer_kv_dim,
+                                    };
+                                    self.pushDispatch4(
+                                        kv_pip,
+                                        std.mem.asBytes(&kv_push),
+                                        self.k_buf.handle,
+                                        self.k_buf.size,
+                                        self.kv_k_cache[layer_idx].handle,
+                                        self.kv_k_cache[layer_idx].size,
+                                        self.v_buf.handle,
+                                        self.v_buf.size,
+                                        self.kv_v_cache[layer_idx].handle,
+                                        self.kv_v_cache[layer_idx].size,
+                                        (layer_kv_dim + 63) / 64,
+                                        1,
+                                        1,
+                                    );
+                                    self.decode_cmd.computeBarrier();
+                                }
                             }
                         }
                     }
@@ -29339,7 +29384,7 @@ pub const InferenceEngine = struct {
             try self.decode_cmd.submitAndWait(self.instance.compute_queue);
         }
 
-        const capture_rows: u32 = @min(self.max_context_tokens, mtp_prefill_capture_max_rows);
+        const capture_rows: u32 = @min(self.max_context_tokens, mtpCaptureRowCap());
         var capture = try Buffer.initDeviceLocal(self.instance, hidden_size * capture_rows, storage_xfer);
         errdefer capture.deinit();
 
@@ -31017,7 +31062,20 @@ const MtpVkState = struct {
 };
 
 const mtp_prime_chunk_rows: u32 = 64;
-const mtp_prefill_capture_max_rows: u32 = 2048;
+/// Upper bound on the prompt rows the NextN prime can capture. The capture
+/// buffer is rows x hidden f32, so this trades VRAM (671 MB at the default on a
+/// 5120-wide model) against the longest prompt that can still use speculative
+/// decoding: a prompt longer than this falls back to ordinary decode, which on
+/// Qwen 3.8 27B is 34 tok/s instead of 78. It was 2048, which switched MTP off
+/// for essentially every real long-context prompt.
+const mtp_prefill_capture_max_rows: u32 = 32768;
+
+/// `mtp_prefill_capture_max_rows`, overridable with ZINC_MTP_CAPTURE_ROWS.
+fn mtpCaptureRowCap() u32 {
+    const v = std.posix.getenv("ZINC_MTP_CAPTURE_ROWS") orelse return mtp_prefill_capture_max_rows;
+    const parsed = std.fmt.parseInt(u32, v, 10) catch return mtp_prefill_capture_max_rows;
+    return @max(@as(u32, 1), parsed);
+}
 
 /// ZINC_MTP_DRAFTS (default 2, clamped to 1..mtp_max_draft).
 /// Draft count from ZINC_MTP_DRAFTS: 1-3 fixed (default 2); `auto` returns
@@ -31029,6 +31087,21 @@ fn mtpDraftsFixedFromEnv() ?u32 {
     return @min(mtp_max_draft, @max(@as(u32, 1), parsed));
 }
 /// History slots to allocate: the fixed count, or the adaptive maximum.
+/// Bytes handed to a layer that never reads the KV cache. A real (if tiny)
+/// buffer keeps every handle valid, so a stray binding faults loudly on the
+/// device instead of dereferencing null on the host.
+const kv_placeholder_bytes: u64 = 256;
+
+/// Whether `layer_idx` owns a KV cache. Hybrid models run full attention every
+/// `full_attn_interval` layers and DeltaNet/SSM in between; layers past
+/// `n_layers` are appended NextN/MTP blocks, which always attend.
+fn layerOwnsKvCache(cfg: ModelConfig, layer_idx: usize) bool {
+    if (layer_idx >= cfg.n_layers) return true;
+    const interval = if (cfg.full_attn_interval > 0) cfg.full_attn_interval else 1;
+    if (interval <= 1) return true;
+    return ((layer_idx + 1) % interval) == 0;
+}
+
 fn mtpDraftLimitFromEnv() u32 {
     return mtpDraftsFixedFromEnv() orelse mtp_max_draft;
 }
@@ -31046,7 +31119,7 @@ fn mtpReservedBytes(cfg: ModelConfig) u64 {
     const slots: u64 = mtpDraftLimitFromEnv();
     const hist = @as(u64, cfg.n_layers) * slots * (state_bytes + conv_bytes);
     const logits = @as(u64, cfg.vocab_size) * f4 * mtp_max_verify;
-    const capture = @as(u64, mtp_prefill_capture_max_rows) * hidden * f4;
+    const capture = @as(u64, mtpCaptureRowCap()) * hidden * f4;
     const prime = @as(u64, mtp_prime_chunk_rows) * hidden * f4 * 4;
     return hist + logits + capture + prime + hidden * f4 * 8;
 }

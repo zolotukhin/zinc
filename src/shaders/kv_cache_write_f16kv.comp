@@ -1,0 +1,34 @@
+#version 460
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// GENERATED-STYLE SIBLING of kv_cache_write.comp: identical maths, but the KV cache is
+// stored as f16 (half the bytes per token, so twice the context and half the
+// attention read bandwidth). Element indices are unchanged: an f16vec4 holds
+// the same four elements a vec4 did, so every base/offset computation carries
+// over verbatim. Keep in sync with kv_cache_write.comp.
+// ZINC — KV cache write via compute (replaces vkCmdCopyBuffer + transfer barriers)
+// Copies K and V vectors into their respective paged KV caches at the given token offset.
+// Single dispatch replaces 2 vkCmdCopyBuffer + compute→transfer + transfer→compute barriers,
+// keeping the entire decode in the compute pipeline.
+//
+// Dispatch: ((kv_dim + 63) / 64, 1, 1)
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint kv_dim;       // number of floats per K/V vector (n_kv_heads * head_dim)
+    uint dst_offset;   // destination offset in floats (physical_token * kv_dim)
+};
+
+layout(set = 0, binding = 0) readonly  buffer KSrc  { float k_src[]; };
+layout(set = 0, binding = 1)           buffer KDst  { float16_t k_dst[]; };
+layout(set = 0, binding = 2) readonly  buffer VSrc  { float v_src[]; };
+layout(set = 0, binding = 3)           buffer VDst  { float16_t v_dst[]; };
+
+void main() {
+    uint i = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    if (i < kv_dim) {
+        k_dst[dst_offset + i] = float16_t(k_src[i]);
+        v_dst[dst_offset + i] = float16_t(v_src[i]);
+    }
+}

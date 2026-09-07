@@ -222,7 +222,33 @@ pub fn requestBudget(
 /// and KV-cache scaling. The returned profile does not include model weights.
 /// @param config Model configuration with dimensions, expert counts, and SSM parameters.
 /// @returns      `RuntimeMemoryProfile` capturing fixed overhead and per-token KV cost.
+/// Layers that own a KV cache. Hybrid models (Qwen 3.5/3.6/3.8 dense-hybrid)
+/// run full attention only every `full_attn_interval` layers; the rest are
+/// DeltaNet/SSM layers that keep recurrent state instead and never read the KV
+/// cache, so budgeting a cache for them wastes most of the context window (on
+/// Qwen 3.8 27B, 65 layers budgeted where 17 attend: 520 KB/token instead of
+/// 136 KB). An appended NextN/MTP block always attends.
+pub fn kvLayerCount(config: ModelConfig) u32 {
+    const interval = if (config.full_attn_interval > 0) config.full_attn_interval else 1;
+    const attending: u32 = if (interval <= 1) config.n_layers else blk: {
+        var count: u32 = 0;
+        var i: u32 = 0;
+        while (i < config.n_layers) : (i += 1) {
+            if ((i + 1) % interval == 0) count += 1;
+        }
+        break :blk count;
+    };
+    return attending + config.n_nextn_layers;
+}
+
 pub fn profile(config: ModelConfig) RuntimeMemoryProfile {
+    return profileWithKvBytes(config, @sizeOf(f32));
+}
+
+/// `profile()` with an explicit KV element size. The Vulkan backend stores the
+/// cache as f16 by default (see compute/kv_dtype.zig), which halves the
+/// per-token cost and therefore doubles the context that fits.
+pub fn profileWithKvBytes(config: ModelConfig, kv_elem_bytes: u64) RuntimeMemoryProfile {
     const hidden_size = @as(u64, config.hidden_dim) * @sizeOf(f32);
     const logits_size = @as(u64, config.vocab_size) * @sizeOf(f32);
     const q_dim = @as(u64, config.n_heads) * config.head_dim;
@@ -269,7 +295,7 @@ pub fn profile(config: ModelConfig) RuntimeMemoryProfile {
             gate_buf_size + gate_buf_size + gate_buf_size + down_buf_size + hidden_size +
             router_size + gpu_ssm_bytes,
         .fixed_host_visible_bytes = logits_size + hidden_size + router_size + ssm_staging_size + router_out_size,
-        .device_local_bytes_per_token = @as(u64, config.n_layers) * kv_dim * @sizeOf(f32) * 2,
+        .device_local_bytes_per_token = @as(u64, kvLayerCount(config)) * kv_dim * kv_elem_bytes * 2,
         .host_visible_bytes_per_token = @sizeOf(u32),
         .gpu_ssm_bytes = gpu_ssm_bytes,
     };

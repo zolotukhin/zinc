@@ -3,6 +3,7 @@
 //! This helper loads the RMS norm, SwiGLU, and RoPE pipelines and records the
 //! push constants needed for their dispatches.
 const std = @import("std");
+const kv_dtype = @import("kv_dtype.zig");
 const vk = @import("../vulkan/vk.zig");
 const Instance = @import("../vulkan/instance.zig").Instance;
 const Pipeline = @import("../vulkan/pipeline.zig").Pipeline;
@@ -90,6 +91,12 @@ pub const SsmConv1dBatchedPush = extern struct {
     kernel_is_f16: u32,
     state_offset: u32,
     n_tokens: u32,
+};
+
+/// Push constants of kv_cache_write_single_f16kv.
+pub const KvCacheWriteSingleF16Push = extern struct {
+    kv_dim: u32,
+    dst_elem_offset: u32,
 };
 
 /// Push constants of embed_gather (NextN/MTP chained cycle: dequantize the
@@ -459,6 +466,7 @@ pub const ElementwiseDispatch = struct {
     /// Batched conv variant that also writes the per-token ring history (NextN/MTP).
     pipeline_ssm_conv1d_batched_hist: ?Pipeline,
     pipeline_embed_gather: ?Pipeline,
+    pipeline_kv_cache_write_single_f16: ?Pipeline,
     /// Batched f32 alpha/beta SSM projection pipeline, or null.
     pipeline_dmmv_f32_dual_batch: ?Pipeline,
     /// In-place SSM Q/K normalization pipeline, or null.
@@ -750,6 +758,12 @@ pub const ElementwiseDispatch = struct {
             log.warn("embed_gather shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+        // Only needed when the cache is f16 (see compute/kv_dtype.zig).
+        const kv_single_f16_path = std.fmt.bufPrint(&path_buf, "{s}/kv_cache_write_single_f16kv.spv", .{shader_dir}) catch unreachable;
+        const pipeline_kv_cache_write_single_f16 = if (!kv_dtype.f16Enabled()) null else pipeline_mod.createFromSpirvWithOptions(instance, kv_single_f16_path, 4, @sizeOf(KvCacheWriteSingleF16Push), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("kv_cache_write_single_f16kv shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
 
         const f32_dual_batch_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_f32_dual_batch.spv", .{shader_dir}) catch unreachable;
         const pipeline_dmmv_f32_dual_batch = pipeline_mod.createFromSpirvWithOptions(instance, f32_dual_batch_path, 5, @sizeOf(F32DualBatchPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
@@ -884,7 +898,7 @@ pub const ElementwiseDispatch = struct {
         };
 
         // kv_cache_write: 4 bindings (k_src, k_dst, v_src, v_dst)
-        const kvcw_path = std.fmt.bufPrint(&path_buf, "{s}/kv_cache_write.spv", .{shader_dir}) catch unreachable;
+        const kvcw_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("kv_cache_write") }) catch unreachable;
         const pipeline_kv_cache_write = pipeline_mod.createFromSpirvWithOptions(instance, kvcw_path, 4, @sizeOf(KvCacheWritePush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("kv_cache_write shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
@@ -893,7 +907,7 @@ pub const ElementwiseDispatch = struct {
         // kv_cache_write_batched: 5 bindings (k_src, k_dst, v_src, v_dst, page_table).
         // Writes N tokens' K/V into their paged slots in one dispatch — replaces
         // the per-token vkCmdCopyBuffer loop that prefillBatched used to emit.
-        const kvcwb_path = std.fmt.bufPrint(&path_buf, "{s}/kv_cache_write_batched.spv", .{shader_dir}) catch unreachable;
+        const kvcwb_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("kv_cache_write_batched") }) catch unreachable;
         const pipeline_kv_cache_write_batched = pipeline_mod.createFromSpirvWithOptions(instance, kvcwb_path, 5, @sizeOf(KvCacheWriteBatchedPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("kv_cache_write_batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
@@ -1000,19 +1014,19 @@ pub const ElementwiseDispatch = struct {
         // kv_k_cache, v_src, kv_v_cache). Targets the per-attention-layer
         // (Q norm+rope → K norm+rope → kv_cache_write) trio on Qwen 3
         // family dense attention. Saves 2 dispatches + 1 barrier per layer.
-        const qk_norm_rope_kv_write_path = std.fmt.bufPrint(&path_buf, "{s}/qk_norm_rope_kv_write.spv", .{shader_dir}) catch unreachable;
+        const qk_norm_rope_kv_write_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("qk_norm_rope_kv_write") }) catch unreachable;
         const pipeline_qk_norm_rope_kv_write = pipeline_mod.createFromSpirvWithOptions(instance, qk_norm_rope_kv_write_path, 8, @sizeOf(QkNormRopeKvWritePush), &.{}, push_wave64_options, allocator) catch |err| blk: {
             log.warn("qk_norm_rope_kv_write shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
-        const qk_norm_rope_kv_write_batched_path = std.fmt.bufPrint(&path_buf, "{s}/qk_norm_rope_kv_write_batched.spv", .{shader_dir}) catch unreachable;
+        const qk_norm_rope_kv_write_batched_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("qk_norm_rope_kv_write_batched") }) catch unreachable;
         const pipeline_qk_norm_rope_kv_write_batched = pipeline_mod.createFromSpirvWithOptions(instance, qk_norm_rope_kv_write_batched_path, 8, @sizeOf(QkNormRopeKvWriteBatchedPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
             log.warn("qk_norm_rope_kv_write_batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
-        const k_norm_rope_kv_write_batched_path = std.fmt.bufPrint(&path_buf, "{s}/k_norm_rope_kv_write_batched.spv", .{shader_dir}) catch unreachable;
+        const k_norm_rope_kv_write_batched_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("k_norm_rope_kv_write_batched") }) catch unreachable;
         const pipeline_k_norm_rope_kv_write_batched = pipeline_mod.createFromSpirvWithOptions(instance, k_norm_rope_kv_write_batched_path, 7, @sizeOf(KNormRopeKvWriteBatchedPush), &.{}, push_wave64_options, allocator) catch |err| blk: {
             log.warn("k_norm_rope_kv_write_batched shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
@@ -1040,6 +1054,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_ssm_conv1d_batched = pipeline_ssm_conv1d_batched,
             .pipeline_ssm_conv1d_batched_hist = pipeline_ssm_conv1d_batched_hist,
             .pipeline_embed_gather = pipeline_embed_gather,
+            .pipeline_kv_cache_write_single_f16 = pipeline_kv_cache_write_single_f16,
             .pipeline_dmmv_f32_dual_batch = pipeline_dmmv_f32_dual_batch,
             .pipeline_ssm_qk_norm = pipeline_ssm_qk_norm,
             .pipeline_ssm_delta_net = pipeline_ssm_delta_net,
@@ -1579,6 +1594,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_ssm_conv1d_batched) |*p| p.deinit();
         if (self.pipeline_ssm_conv1d_batched_hist) |*p| p.deinit();
         if (self.pipeline_embed_gather) |*p| p.deinit();
+        if (self.pipeline_kv_cache_write_single_f16) |*p| p.deinit();
         if (self.pipeline_dmmv_f32_dual_batch) |*p| p.deinit();
         if (self.pipeline_ssm_qk_norm) |*p| p.deinit();
         if (self.pipeline_ssm_delta_net) |*p| p.deinit();

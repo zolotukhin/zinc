@@ -1,0 +1,30 @@
+#version 460
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// ZINC — single-token K/V cache write with f32 -> f16 conversion.
+//
+// The decode fallback path (no fused Q/K norm+rope+write kernel for this
+// architecture) used to drop K and V into the cache with a plain
+// vkCmdCopyBuffer. That copies raw bytes, which is wrong once the cache stores
+// f16, so under ZINC_KV_F16 that copy becomes this dispatch. Destination is a
+// flat element offset (physical slot * kv_dim) — the caller already resolved
+// the page, so there is no page-table lookup here.
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint kv_dim;          // elements per K/V vector
+    uint dst_elem_offset; // physical_token * kv_dim
+};
+
+layout(set = 0, binding = 0) readonly buffer KSrc { float     k_src[]; };
+layout(set = 0, binding = 1)          buffer KDst { float16_t k_dst[]; };
+layout(set = 0, binding = 2) readonly buffer VSrc { float     v_src[]; };
+layout(set = 0, binding = 3)          buffer VDst { float16_t v_dst[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= kv_dim) return;
+    k_dst[dst_elem_offset + i] = float16_t(k_src[i]);
+    v_dst[dst_elem_offset + i] = float16_t(v_src[i]);
+}

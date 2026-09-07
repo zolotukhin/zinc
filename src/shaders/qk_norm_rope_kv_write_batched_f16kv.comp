@@ -1,0 +1,158 @@
+#version 460
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// GENERATED-STYLE SIBLING of qk_norm_rope_kv_write_batched.comp: identical maths, but the KV cache is
+// stored as f16 (half the bytes per token, so twice the context and half the
+// attention read bandwidth). Element indices are unchanged: an f16vec4 holds
+// the same four elements a vec4 did, so every base/offset computation carries
+// over verbatim. Keep in sync with qk_norm_rope_kv_write_batched.comp.
+// ZINC - batched Gemma SWA Q/K norm + RoPE + KV cache write.
+//
+// This is the page-aware, token-batched sibling of qk_norm_rope_kv_write.comp.
+// It targets Gemma SWA layers, where RoPE frequencies are computed from
+// rope_freq_base_swa. Full-attention Gemma layers still use the existing path
+// because they need the precomputed frequency buffer and the page table, which
+// would exceed the current 8-buffer push-descriptor shape.
+//
+// Dispatch: (n_q_heads + n_k_heads, n_tokens, 1), local_size_x = 64.
+// Binding 4 is the page table. K and V are written directly to paged KV cache.
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0)          buffer QData     { float q_data[]; };
+layout(set = 0, binding = 1) readonly buffer QWeight   { float q_weight[]; };
+layout(set = 0, binding = 2) readonly buffer KSrc      { float k_src[]; };
+layout(set = 0, binding = 3) readonly buffer KWeight   { float k_weight[]; };
+layout(set = 0, binding = 4) readonly buffer PageTable { uint  page_ids[]; };
+layout(set = 0, binding = 5)          buffer KvK       { float16_t kv_k[]; };
+layout(set = 0, binding = 6) readonly buffer VSrc      { float v_src[]; };
+layout(set = 0, binding = 7)          buffer KvV       { float16_t kv_v[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;
+    uint rope_dim;
+    uint n_q_heads;
+    uint n_k_heads;
+    uint n_tokens;
+    uint page_size;
+    uint base_token;
+    uint freq_base_bits;
+    uint attn_scale_bits;
+    uint eps_bits;
+    uint v_norm;
+};
+
+shared float s_partial[64];
+shared float s_partial_v[64];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint head_group = gl_WorkGroupID.x;
+    const uint tok = gl_WorkGroupID.y;
+
+    const bool is_q = head_group < n_q_heads;
+    const uint head = is_q ? head_group : (head_group - n_q_heads);
+    const float eps = uintBitsToFloat(eps_bits);
+
+    const uint q_base = (tok * n_q_heads + head) * head_dim;
+    const uint kv_src_base = (tok * n_k_heads + head) * head_dim;
+    const uint kv_dim = n_k_heads * head_dim;
+    const uint logical_token = base_token + tok;
+    const uint page_idx = logical_token / page_size;
+    const uint page_off = logical_token % page_size;
+    const uint physical_tok = page_ids[page_idx] * page_size + page_off;
+    const uint kv_dst_base = physical_tok * kv_dim + head * head_dim;
+
+    float sum_sq = 0.0;
+    float v_sum_sq = 0.0;
+    if (is_q) {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            const float v = q_data[q_base + i];
+            sum_sq += v * v;
+        }
+    } else {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            const float k = k_src[kv_src_base + i];
+            sum_sq += k * k;
+            if (v_norm != 0u) {
+                const float v = v_src[kv_src_base + i];
+                v_sum_sq += v * v;
+            }
+        }
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+    v_sum_sq = subgroupAdd(v_sum_sq);
+
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            s_partial[gl_SubgroupID] = sum_sq;
+            s_partial_v[gl_SubgroupID] = v_sum_sq;
+        }
+        barrier();
+        if (tid == 0u) {
+            float total = 0.0;
+            float total_v = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                total += s_partial[sg];
+                total_v += s_partial_v[sg];
+            }
+            s_partial[0] = total;
+            s_partial_v[0] = total_v;
+        }
+        barrier();
+        sum_sq = s_partial[0];
+        v_sum_sq = s_partial_v[0];
+    }
+
+    const float rms_inv = inversesqrt(sum_sq / float(head_dim) + eps);
+    const float v_rms_inv = inversesqrt(v_sum_sq / float(head_dim) + eps);
+    const float freq_base = uintBitsToFloat(freq_base_bits);
+    const float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;
+    const uint half_rot = rope_dim / 2u;
+
+    for (uint i = tid; i < half_rot; i += 64u) {
+        float lo;
+        float hi;
+        if (is_q) {
+            lo = q_weight[i] * (q_data[q_base + i] * rms_inv);
+            hi = q_weight[i + half_rot] * (q_data[q_base + i + half_rot] * rms_inv);
+        } else {
+            lo = k_weight[i] * (k_src[kv_src_base + i] * rms_inv);
+            hi = k_weight[i + half_rot] * (k_src[kv_src_base + i + half_rot] * rms_inv);
+        }
+
+        const float exponent = float(2u * i) / float(rope_dim);
+        const float freq_i = 1.0 / pow(freq_base, exponent);
+        const float theta = float(logical_token) * freq_i;
+        const float cos_t = cos(theta) * attn_scale;
+        const float sin_t = sin(theta) * attn_scale;
+
+        const float rot_lo = lo * cos_t - hi * sin_t;
+        const float rot_hi = lo * sin_t + hi * cos_t;
+        if (is_q) {
+            q_data[q_base + i] = rot_lo;
+            q_data[q_base + i + half_rot] = rot_hi;
+        } else {
+            kv_k[kv_dst_base + i] = float16_t(rot_lo);
+            kv_k[kv_dst_base + i + half_rot] = float16_t(rot_hi);
+        }
+    }
+
+    for (uint i = rope_dim + tid; i < head_dim; i += 64u) {
+        if (is_q) {
+            q_data[q_base + i] = q_weight[i] * (q_data[q_base + i] * rms_inv);
+        } else {
+            kv_k[kv_dst_base + i] = float16_t(k_weight[i] * (k_src[kv_src_base + i] * rms_inv));
+        }
+    }
+
+    if (!is_q) {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            const float v = v_src[kv_src_base + i];
+            kv_v[kv_dst_base + i] = float16_t((v_norm != 0u) ? (v * v_rms_inv) : v);
+        }
+    }
+}
