@@ -261,6 +261,38 @@ is at ~80% of the 28.3 ms weight-streaming floor; the rest is ~800 small
 dispatches (the 48 DeltaNet layers run ~10 each). Fusing the SSM layer's
 z-projection/gated-norm/out-projection chain is the next real lever.
 
+## Round 5 (2026-09-07, evening): the benchmark harness was pinning the clocks down
+
+The refreshed suite still published 53.6 tok/s for the core scenario while the
+same command run by hand gave 55.9. Two findings, both about the harness rather
+than the engine:
+
+1. **The RDNA target measures the server, not the CLI.** `runRdnaTarget`
+   launches `zinc --port N` and drives it through the OpenAI API, so every
+   published prompt carries 19 extra chat-template tokens (core prefill 67, not
+   48). Per *cycle* the CLI and the server are identical (38.2 vs 38.1 ms); the
+   published number is lower only because that longer prompt accepts 51.1% of
+   drafts instead of 54.3%. Nothing to fix, but per-scenario CLI numbers are
+   not comparable to the published ones.
+2. **The suite forced `power_dpm_force_performance_level=high` before every
+   run, and on the R9700 that is 4.3% slower than the card's default `auto`.**
+   Same binary, same prompt, same 48/94 acceptance:
+
+   | DPM | server decode |
+   |---|---:|
+   | `high` (what the harness pinned) | 53.5 / 53.6 / 53.6 |
+   | `auto` (card default) | 55.91 / 56.14 / 56.00 / 55.94 |
+
+   Forcing `high` locks a fixed nominal DPM state and gives up opportunistic
+   boost. The pin came from the 9070 XT work (blog post
+   `2026-06-14-rx-9070-xt-prefill-mystery-25x-regression-mesa-devel`), where
+   `auto` let SCLK fall to an idle 0 MHz state and consecutive samples ramped;
+   on this card `auto` is as stable as `high` (0.4% spread over four runs) and
+   the suite already runs a warmup before the measured runs. `rdnaDpmHighScript`
+   is now `rdnaDpmNormalizeScript` and sets `auto` (PCIe ASPM still forced to
+   `performance`). Both runtimes are measured under the same policy, so the
+   comparison stays fair — llama.cpp's own numbers move with it.
+
 ## Known gaps / follow-ups
 
 - **Cached-prefix sessions**: when the server reuses a prompt prefix

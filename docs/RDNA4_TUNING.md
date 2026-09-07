@@ -228,6 +228,13 @@ Scope and knobs:
 - `ZINC_VK_QUEUE_FAMILY=<n>` overrides the Vulkan queue family (diagnostic;
   families 0 and 1 perform the same on the R9700).
 
+Measuring it: the perf suite drives the **server** (not the CLI), so its prompts
+carry the chat template and accept fewer drafts than a bare `--chat --prompt`
+run — expect ~1 tok/s between the two on the same text. Do not force
+`power_dpm_force_performance_level=high` on this card: it locks a fixed nominal
+DPM state, costs 4.3% of decode, and `auto` is just as stable here (the suite
+sets `auto` and forces PCIe ASPM to `performance`).
+
 ## ZINC_RT, this guide, and what changes
 
 The Vulkan-specific advice above is about driver, firmware, and toolchain. **All of it still applies under ZINC_RT** because ZINC_RT uses the same `amdgpu` kernel driver. Disable GECC. Stay on Mesa 25.0.7 (when running anything that links libvulkan, including dev tooling and CI shader compilation). Stay on kernel 6.14 if you can. Pin shaderc 2023.8.

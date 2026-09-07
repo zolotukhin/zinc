@@ -1662,12 +1662,20 @@ async function stopProcess(child, graceMs = 5000) {
   }
 }
 
-export function rdnaDpmHighScript() {
-  return "if [ -w /sys/module/pcie_aspm/parameters/policy ]; then echo performance > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true; fi; for c in /sys/class/drm/card*/device; do if [ -f \"$c/pp_dpm_mclk\" ] && grep -q amdgpu \"$c/uevent\" 2>/dev/null; then levels=$(awk 'END { print NR }' \"$c/pp_dpm_mclk\" 2>/dev/null || printf 0); if [ \"${levels:-0}\" -ge 5 ]; then echo high > \"$c/power_dpm_force_performance_level\" 2>/dev/null || true; fi; fi; done; true";
+// Put the benchmark GPU in a known state: PCIe ASPM off and the amdgpu DPM
+// governor at its default `auto`. Forcing `high` (what this did until
+// 2026-09-07) locks the R9700 to a fixed nominal DPM state and gives up
+// opportunistic boost: measured over the four Qwen 3.8 27B scenarios, `high`
+// cost ZINC 4.1-4.4% and llama.cpp 3.3-3.5% of decode, on every run. `auto` is
+// what an unconfigured card does and is just as stable here (0.4% spread over
+// four runs, and the suite already runs a warmup). The pin came from the
+// 9070 XT, where `auto` let SCLK idle at 0 MHz and consecutive samples ramped.
+export function rdnaDpmNormalizeScript() {
+  return "if [ -w /sys/module/pcie_aspm/parameters/policy ]; then echo performance > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true; fi; for c in /sys/class/drm/card*/device; do if [ -f \"$c/pp_dpm_mclk\" ] && grep -q amdgpu \"$c/uevent\" 2>/dev/null; then levels=$(awk 'END { print NR }' \"$c/pp_dpm_mclk\" 2>/dev/null || printf 0); if [ \"${levels:-0}\" -ge 5 ]; then echo auto > \"$c/power_dpm_force_performance_level\" 2>/dev/null || true; fi; fi; done; true";
 }
 
-async function lockRdnaDpmHigh(creds, timeoutMs = 30000) {
-  await runShell(rdnaRemoteCommand(rdnaDpmHighScript(), creds), { cwd: ROOT, timeoutMs }).catch(() => {});
+async function lockRdnaDpmNormal(creds, timeoutMs = 30000) {
+  await runShell(rdnaRemoteCommand(rdnaDpmNormalizeScript(), creds), { cwd: ROOT, timeoutMs }).catch(() => {});
 }
 
 function detectLocalLlamaServer(args) {
@@ -1819,7 +1827,7 @@ async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs, targ
   // Card discovery: the discrete GPU is whichever card1/card2 has
   // amdgpu driver + a 6-level pp_dpm_mclk; we just try both.
   if (lockDpm) {
-    await lockRdnaDpmHigh(creds);
+    await lockRdnaDpmNormal(creds);
   }
 
   const cmd = [
@@ -1868,7 +1876,7 @@ async function launchRdnaLlamaServer(caseDef, creds, serverPath, timeoutMs, targ
 async function launchRdnaZincServer(caseDef, creds, timeoutMs) {
   const port = await pickOpenPort();
   const logPath = `/tmp/zinc-rdna-zinc-${port}.log`;
-  await lockRdnaDpmHigh(creds);
+  await lockRdnaDpmNormal(creds);
 
   const cmd = [
     "./zig-out/bin/zinc",
@@ -2127,7 +2135,7 @@ export function remoteZincCommand(caseDef, creds) {
 export function rdnaZincCommand(caseDef, creds) {
   return remoteZincCommand(caseDef, {
     ...creds,
-    commandPrelude: rdnaDpmHighScript(),
+    commandPrelude: rdnaDpmNormalizeScript(),
     env: { RADV_PERFTEST: "coop_matrix", ...(creds.env ?? {}) },
   });
 }
