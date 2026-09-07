@@ -174,7 +174,7 @@ R9700, Qwen 3.8 27B Q4_K_M, 96 greedy tokens, server path:
 | | decode tok/s |
 |---|---:|
 | `ZINC_MTP=0` | 33.0 |
-| `ZINC_MTP=1` (default) | 49.9 |
+| `ZINC_MTP=1` (default) | 55.5 |
 
 Scope and knobs:
 
@@ -185,10 +185,12 @@ Scope and knobs:
   prime the NextN block.
 - `ZINC_MTP=0` disables MTP. `ZINC_MTP_COLS=0` disables the column-parallel
   Q4_K/Q5_K/Q6_K matvec route used by the verification batch (A/B only);
-  `ZINC_MTP_COLS_ROWS` (2/4/8, default 4) and `ZINC_MTP_LMHEAD_ROWS` (default 8)
-  pick its rows-per-workgroup variants.
+  `ZINC_MTP_COLS_ROWS` (2/4/8, default 4), `ZINC_MTP_LMHEAD_ROWS` (default 8)
+  and `ZINC_MTP_WIDE_ROWS` (gate/up, default 4) pick rows-per-workgroup
+  variants; `ZINC_MTP_COLS3=0` disables the unguarded three-column kernels
+  and `ZINC_MTP_FUSED_GATEUP=0` the fused gate+up+SwiGLU one (A/B only).
 - `ZINC_MTP_DRAFT_VOCAB=<rows>` limits the draft lm-head to the first N
-  (frequency-ordered) vocabulary rows; default 131072 for vocabularies above
+  (frequency-ordered) vocabulary rows; default 98304 for vocabularies above
   160K rows, 0 = all rows. Verification always scores the full vocabulary, so
   this only trades draft acceptance for draft cost.
 - `ZINC_MTP_DP4A=1` runs the Q4_K verification matvecs on int8 dp4a with

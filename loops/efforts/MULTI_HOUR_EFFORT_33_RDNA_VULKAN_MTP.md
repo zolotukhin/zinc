@@ -1,4 +1,4 @@
-# Effort 33 — NextN/MTP speculative decoding on the Vulkan backend (R9700, Qwen 3.8 27B) — STATUS: LANDED, +52% SERVER DECODE (32.9 → 49.9 tok/s), GREEDY OUTPUT BIT-IDENTICAL
+# Effort 33 — NextN/MTP speculative decoding on the Vulkan backend (R9700, Qwen 3.8 27B) — STATUS: LANDED, 32.9 → 55.5 tok/s SERVER DECODE (+69%), GREEDY OUTPUT BIT-IDENTICAL
 
 Follows [Effort 32](MULTI_HOUR_EFFORT_32_RDNA_QWEN38_27B_DECODE.md) (plain decode
 31.3 → 32.1 tok/s on the same card). Same node (`hft`, Radeon AI PRO R9700,
@@ -11,8 +11,9 @@ RADV GFX1201, Mesa 25.0.7), same model (`Qwen3.8-27B-Q4_K_M.gguf`, 64 layers =
 |---|---:|---:|
 | Vulkan server, `ZINC_MTP=0` | 32.9 | 30.4 |
 | Vulkan server, `ZINC_MTP=1` (default), first landing | 43.2 | 23.2 |
-| Vulkan server, `ZINC_MTP=1` (default), after round 2 | **49.9** | **20.1** |
-| Vulkan CLI, `-c 8192`, MTP off / on (round 2) | 32.5 / 48.9 | 30.7 / 20.4 |
+| Vulkan server, `ZINC_MTP=1` (default), after round 2 | 49.9 | 20.1 |
+| Vulkan server, `ZINC_MTP=1` (default), after round 3 | **55.5** (55.4–55.7 over 6 runs) | **18.0** |
+| Vulkan CLI, `-c 8192`, MTP off / on (round 3) | 32.5 / 54.3 | 30.7 / 18.4 |
 | ROCm CLI MTP (earlier work, reference) | 48.9 vs 32.4 | |
 | llama.cpp 9400c8946 llama-server, no MTP | 29.9 | |
 
@@ -135,6 +136,34 @@ small-batch matvec design (LDS-staged activations with a decode-shaped weight
 stream, or a wave32 variant); the other ~2 ms sit in the SSM projection column
 kernels for the same reason. With that, the cycle would be ~36 ms and the
 target reachable.
+
+## Round 3 (target "55 stable"): 49.9 → 55.5 tok/s
+
+Cycle after round 3 (CLI, `-c 8192`): drafts 2.75 ms, verification pass 34.6
+ms, restore+catch-up 0.95 ms → ~38.3 ms per cycle at 2.09 committed tokens.
+
+| change | pass ms | CLI tok/s |
+|---|---:|---:|
+| start of round 3 | 38.1 | 48.9 |
+| **unguarded 3-column kernels** (`dmmv_*_rows4_cols3`, lm head `dmmv_q6k_rows8_cols3`): the per-row `if (row >= M) break` inside the unrolled row loop and the `if (c < num_cols)` around the activation loads kept the compiler from issuing an iteration's 24 loads up front; our shapes are all multiples of 4 and a 3-token batch has exactly 3 columns, so both guards go | 35.0 | 52.5 |
+| draft: block input + pending-h upload + NextN step in one command buffer; restore copies + catch-up in one; the pass records its own embedding copy (12 → 4 submits per cycle) | 35.0 | 53.0 |
+| K/V-only NextN catch-up (`spec_kv_only`: no Q/gate projections, flash, o-proj or FFN-norm tail; also prime 9.0 → 6.8 ms) | 34.7 | 53.7 |
+| draft lm-head over 98304 rows (server 54.4 → 54.8) and the unguarded fused gate+up+SwiGLU 3-column kernel (`ZINC_MTP_FUSED_GATEUP`, now on) | 34.6 | 54.3 (server 55.5) |
+
+Neutral or rejected this round: process-wide `RADV_PERFTEST=cswave32` (one
+36.3 ms reading that never reproduced; explicit wave32 on the column
+pipelines is 3 ms *worse*, `ZINC_MTP_COLS_WAVE32` keeps the driver default),
+rows 8 for gate/up (`ZINC_MTP_WIDE_ROWS`), serializing gate and up
+(`ZINC_MTP_GATEUP_SERIAL`, +0.4 ms), compute-only layer hand-off barriers
+(no change, kept), the fused norm+RoPE+KV kernel (not applicable: Qwen 3.8
+uses precomputed IMROPE frequencies).
+
+The pass is now ~34.6 ms for 3 tokens vs ~31 ms of decode-rate streaming;
+the FFN column kernels stream at ~500 GB/s (decode 590) with activation
+re-reads accounting for most of the rest. Acceptance is prompt-dependent
+(47–54% on this prompt family), so "stable" here means the benchmark prompt
+and the server path; longer generations with lower acceptance land in the
+low 50s.
 
 ## Known gaps / follow-ups
 

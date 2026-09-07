@@ -1,0 +1,125 @@
+#version 460
+// ZINC — Q6_K dequant-matvec for 1..4 activation columns, 4 rows per workgroup.
+//
+// Speculative-verification sibling of dmmv_q6k_rows4: the same wave64 block
+// mapping (16 lanes per Q6_K block, 4 blocks in flight), but every block's
+// activation slice is loaded once per column and applied to four rows, and
+// every row's weights are dequantized once and applied to all columns. The
+// activation matrix is [num_cols][K] (column-major rows), the output is
+// [num_cols][M]. Streams each weight byte exactly once for the whole batch.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
+layout(set = 0, binding = 1) readonly buffer Input { vec4 x_v4[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint num_cols;
+};
+
+const uint NUM_ROWS = 8u;
+const uint MAX_COLS = 3u;  // three-column, unguarded variant (lm head)
+const uint BLOCK_BYTES = 210u;
+
+shared float s_sg_sums[4];
+
+float fp16_to_fp32(uint h) {
+    return unpackHalf2x16(h).x;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+    uint x_v4_base = x_offset / 16u;
+    uint y_base = y_offset / 4u;
+    uint blocks_per_row = K / 256u;
+    uint x_col_stride_v4 = K / 4u;
+
+    uint itid = tid % 16u;
+    uint ix = tid / 16u;
+    uint half_id = itid / 8u;
+    uint local_id = itid % 8u;
+    uint e_start = local_id * 4u;
+    uint is = e_start / 16u;
+    uint x_v4_in_block_base = (half_id * 128u + e_start) / 4u;
+
+    uint row_base = wg_id * NUM_ROWS;
+    if (row_base >= M) return;
+
+    float sums[NUM_ROWS][MAX_COLS];
+    [[unroll]] for (uint r = 0u; r < NUM_ROWS; r++) {
+        [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) sums[r][c] = 0.0;
+    }
+
+    for (uint b = ix; b < blocks_per_row; b += 4u) {
+        uint x_blk = x_v4_base + (b * 256u) / 4u + x_v4_in_block_base;
+        vec4 bx[MAX_COLS][4];
+        [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) {
+            uint xb = x_blk + c * x_col_stride_v4;
+            bx[c][0] = x_v4[xb];
+            bx[c][1] = x_v4[xb + 8u];
+            bx[c][2] = x_v4[xb + 16u];
+            bx[c][3] = x_v4[xb + 24u];
+        }
+        [[unroll]] for (uint r = 0u; r < NUM_ROWS; r++) {
+            uint row = row_base + r;
+            // M % NUM_ROWS == 0 and num_cols == MAX_COLS are guaranteed by the host.
+            uint bb = a_offset + row * blocks_per_row * BLOCK_BYTES + b * BLOCK_BYTES;
+            uint d_bits = uint(w[bb + 208u]) | (uint(w[bb + 209u]) << 8);
+            float d = fp16_to_fp32(d_bits);
+            uint ql_base = bb + half_id * 64u;
+            uint qh_base = bb + 128u + half_id * 32u;
+            uint sc_base = bb + 192u + half_id * 8u;
+            uint b_s0 = uint(w[sc_base + is]);
+            uint b_s2 = uint(w[sc_base + is + 2u]);
+            uint b_s4 = uint(w[sc_base + is + 4u]);
+            uint b_s6 = uint(w[sc_base + is + 6u]);
+            float ds0 = d * ((b_s0 >= 128u) ? float(b_s0) - 256.0 : float(b_s0));
+            float ds2 = d * ((b_s2 >= 128u) ? float(b_s2) - 256.0 : float(b_s2));
+            float ds4 = d * ((b_s4 >= 128u) ? float(b_s4) - 256.0 : float(b_s4));
+            float ds6 = d * ((b_s6 >= 128u) ? float(b_s6) - 256.0 : float(b_s6));
+            [[unroll]] for (uint li = 0u; li < 4u; li++) {
+                uint l = e_start + li;
+                uint ql_lo = uint(w[ql_base + l]);
+                uint ql_hi = uint(w[ql_base + l + 32u]);
+                uint qh_v = uint(w[qh_base + l]);
+                float w1 = ds0 * (float((ql_lo & 0xFu) | (((qh_v >> 0) & 3u) << 4)) - 32.0);
+                float w2 = ds2 * (float((ql_hi & 0xFu) | (((qh_v >> 2) & 3u) << 4)) - 32.0);
+                float w3 = ds4 * (float((ql_lo >> 4) | (((qh_v >> 4) & 3u) << 4)) - 32.0);
+                float w4 = ds6 * (float((ql_hi >> 4) | (((qh_v >> 6) & 3u) << 4)) - 32.0);
+                [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) {
+                    sums[r][c] += w1 * bx[c][0][li] + w2 * bx[c][1][li] + w3 * bx[c][2][li] + w4 * bx[c][3][li];
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = row_base + r;
+        if (row >= M) break;
+        [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) {
+            if (c < num_cols) {
+                float s = subgroupAdd(sums[r][c]);
+                if (gl_NumSubgroups > 1u) {
+                    if (subgroupElect()) s_sg_sums[gl_SubgroupID] = s;
+                    barrier();
+                    if (tid == 0u) {
+                        for (uint sg = 1u; sg < gl_NumSubgroups; sg++) s += s_sg_sums[sg];
+                    }
+                    barrier();
+                }
+                if (tid == 0u) y[y_base + c * M + row] = s;
+            }
+        }
+    }
+}
