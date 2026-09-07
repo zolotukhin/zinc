@@ -29143,7 +29143,7 @@ pub const InferenceEngine = struct {
     // -----------------------------------------------------------------------
     // NextN / MTP (multi-token prediction) speculative decoding — Vulkan.
     //
-    // Mirrors the llama.cpp DECODER_MTP contract: the appended NextN block at
+    // Mirrors the upstream reference's DECODER_MTP contract: the appended NextN block at
     // layer index n_layers consumes [enorm(embed(x_p)) | hnorm(h_{p-1})] through
     // eh_proj, runs one full-attention decoder block with its own KV cache at
     // position p, then shared_head_norm + the shared lm-head predicts x_{p+1}.
