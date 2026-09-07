@@ -1,0 +1,117 @@
+#version 460
+// ZINC — gather one token-embedding row on the GPU.
+//
+// NextN/MTP chained cycle: a draft token is the argmax result that is still
+// on the device, so the next draft's block input and the verification rows
+// are dequantized here instead of round-tripping through the host (each
+// round trip idled the GPU for a submit, a fence wait and a host dequant).
+// The arithmetic mirrors the host dequantRow path exactly (`precise`, no
+// contraction) so the rows are bit-identical to plain decode's embeddings.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PushConstants {
+    uint cols;         // hidden_dim (row length in elements)
+    uint index_offset; // element index into Index holding the row id
+    uint out_offset;   // float offset of the destination row in Out
+    uint vocab_last;   // row id clamp (vocab_size - 1)
+    uint qtype;        // 0=f32 1=f16 2=q8_0 3=q4_k 4=q6_k
+};
+
+layout(set = 0, binding = 0) readonly buffer Table { uint t_u32[]; };
+layout(set = 0, binding = 1) readonly buffer Index { uint idx[]; };
+layout(set = 0, binding = 2) writeonly buffer Out { float o[]; };
+
+uint rd8(uint byte_off) {
+    return (t_u32[byte_off >> 2] >> ((byte_off & 3u) * 8u)) & 0xFFu;
+}
+uint rd16(uint byte_off) {
+    return rd8(byte_off) | (rd8(byte_off + 1u) << 8);
+}
+float f16_at(uint byte_off) {
+    return unpackHalf2x16(rd16(byte_off)).x;
+}
+int s8_at(uint byte_off) {
+    return (int(rd8(byte_off) << 24)) >> 24;
+}
+// GGML get_scale_min_k4 over the 12 packed scale bytes at sc_off.
+void scale_min_k4(uint sc_off, uint j, out uint sc, out uint m) {
+    if (j < 4u) {
+        sc = rd8(sc_off + j) & 63u;
+        m = rd8(sc_off + j + 4u) & 63u;
+    } else {
+        sc = (rd8(sc_off + j + 4u) & 0xFu) | ((rd8(sc_off + j - 4u) >> 6) << 4);
+        m = (rd8(sc_off + j + 4u) >> 4) | ((rd8(sc_off + j) >> 6) << 4);
+    }
+}
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint row = min(idx[index_offset], vocab_last);
+    if (qtype == 0u) {
+        uint row_u32 = row * cols;
+        for (uint i = t; i < cols; i += 256u) o[out_offset + i] = uintBitsToFloat(t_u32[row_u32 + i]);
+    } else if (qtype == 1u) {
+        uint row_b = row * cols * 2u;
+        for (uint i = t; i < cols; i += 256u) o[out_offset + i] = f16_at(row_b + i * 2u);
+    } else if (qtype == 2u) {
+        // Q8_0: 32 elements per 34-byte block (f16 d, 32 x int8).
+        uint row_b = row * (cols / 32u) * 34u;
+        for (uint i = t; i < cols; i += 256u) {
+            uint bo = row_b + (i / 32u) * 34u;
+            float d = f16_at(bo);
+            precise float r = float(s8_at(bo + 2u + (i % 32u))) * d;
+            o[out_offset + i] = r;
+        }
+    } else if (qtype == 3u) {
+        // Q4_K: 256 elements per 144-byte block (d, dmin, scales[12], qs[128]).
+        // Thread t -> group grp (64 outputs), nibble hf, lane l.
+        uint bpr = cols / 256u;
+        uint row_b = row * bpr * 144u;
+        uint grp = t / 64u;
+        uint hf = (t % 64u) / 32u;
+        uint l = t % 32u;
+        for (uint b = 0u; b < bpr; b++) {
+            uint bb = row_b + b * 144u;
+            float d = f16_at(bb);
+            float dmin = f16_at(bb + 2u);
+            uint sc; uint m;
+            scale_min_k4(bb + 4u, 2u * grp + hf, sc, m);
+            precise float dd = d * float(sc);
+            precise float mm = dmin * float(m);
+            uint q = rd8(bb + 16u + grp * 32u + l);
+            uint nib = (hf == 0u) ? (q & 0xFu) : (q >> 4);
+            precise float r = dd * float(nib) - mm;
+            o[out_offset + b * 256u + grp * 64u + hf * 32u + l] = r;
+        }
+    } else {
+        // Q6_K: 256 elements per 210-byte block (ql[128], qh[64], scales[16], d).
+        // Thread t -> hf n, quarter k (+0/+32/+64/+96 of the CPU loop), lane l.
+        uint bpr = cols / 256u;
+        uint row_b = row * bpr * 210u;
+        uint n = t / 128u;
+        uint k = (t % 128u) / 32u;
+        uint l = t % 32u;
+        for (uint b = 0u; b < bpr; b++) {
+            uint bb = row_b + b * 210u;
+            float d = f16_at(bb + 208u);
+            uint ql_o = bb + n * 64u;
+            uint qh_o = bb + 128u + n * 32u;
+            uint sc_o = bb + 192u + n * 8u;
+            uint is = l / 16u;
+            uint ql_lo = rd8(ql_o + l);
+            uint ql_hi = rd8(ql_o + l + 32u);
+            uint qh = rd8(qh_o + l);
+            uint rq;
+            if (k == 0u) rq = (ql_lo & 0xFu) | (((qh >> 0) & 3u) << 4);
+            else if (k == 1u) rq = (ql_hi & 0xFu) | (((qh >> 2) & 3u) << 4);
+            else if (k == 2u) rq = (ql_lo >> 4) | (((qh >> 4) & 3u) << 4);
+            else rq = (ql_hi >> 4) | (((qh >> 6) & 3u) << 4);
+            float q = float(int(rq) - 32);
+            precise float ds = d * float(s8_at(sc_o + is + 2u * k));
+            precise float r = ds * q;
+            o[out_offset + b * 256u + n * 128u + k * 32u + l] = r;
+        }
+    }
+}

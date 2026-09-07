@@ -185,6 +185,82 @@ low 50s.
   GPU (the process lock makes them wait out their timeout), so run the
   server-facing tests separately.
 
+## Round 4 (2026-09-07, afternoon): keep the suite's core row at 55
+
+Goal: the published core scenario (96 greedy tokens, chat prompt, CLI with
+auto context) read 52.9 while the server A/B read 55.5; keep 55+ everywhere.
+
+1. **The CLI's auto context spilled VRAM.** The Vulkan CLI handed the engine
+   the architectural maximum (262144) and let it trim against the *full* card:
+   30851 tokens, 32.4 GB of 32.6 GB used, ~300 MB evicted to system memory.
+   Decode paid 17% with MTP (44.8 vs 54.0 tok/s at `-c 16384`) and 10% without
+   (28.9 vs 32.0). Plain decode with an explicit `-c 30851` was fine only
+   because it has no MTP history buffers. Fix: the CLI now plans the context
+   like the server and the Metal CLI (`memory_plan.autoContextTokensForDeviceBudget`,
+   85% of VRAM): 22016 tokens, no spill, 53.7 tok/s on the suite command.
+   The per-token flat KV cache is allocated for all 65 layers (48 of them
+   DeltaNet layers that never read it: 532 KB/token); trimming that is a
+   separate follow-up worth 4x the context.
+2. **Chained cycle.** The two drafts and the verification batch are one
+   command buffer; the draft token never leaves the device. A new
+   `embed_gather` shader dequantizes the embedding row of a device-side token
+   id (Q4_K/Q6_K/Q8_0/F16/F32, `precise` so it is bit-identical to the host
+   `dequantRow`) into the next draft's block input and the verification rows.
+   `decodeStep` gained `decode_defer_submit` (record only), `mtpDraftStep`
+   split into record/sample halves, `mtpTargetBatch` takes rows 1.. as
+   pre-gathered. Worth ~0.3 ms per cycle (the round trips were cheaper than
+   estimated: the drafts' 2.7 ms wall was mostly GPU work).
+3. **Deferred restore + catch-up.** The rejected-draft state restore and the
+   NextN catch-up (rows 1.. only; row 0 duplicates what draft 1 wrote) are
+   recorded at the start of the next cycle's command buffer instead of their
+   own submit. Anything else that touches the state flushes first
+   (`mtpFlushPending` in plain `decodeStep`, both prefill entries; a new
+   request discards it). Catch-up wall 0.9 → 0.1 ms per cycle.
+   Bug found on the way: the deferred catch-up staged its embedding rows in
+   `prime_embed_staging`, which the verification batch then overwrote with
+   the seed row before the buffer was submitted, so position pos+1 of the
+   NextN cache saw the wrong token — the server's acceptance dropped from
+   51% to 47% while the CLI prompt happened to be unaffected. The batch now
+   copies the seed row from `embed_staging` (draft 1's own row).
+4. **Asynchronous catch-up (tried, reverted).** Submitting the catch-up
+   without waiting and letting the next cycle queue behind it moved the same
+   GPU time into the next wait; neutral, more fences — removed.
+5. **Three drafts.** Six four-column kernels (`*_cols4`, MAX_COLS = 4 siblings
+   of the cols3 ones) make the 4-row pass 42 ms instead of 48, but it is
+   still ~8% dearer than the 3-row pass and the third position accepts far
+   less than the second (p3 ≈ 0.25 vs p2 ≈ 0.8 on context-long), so fixed
+   three drafts lose (53.7 vs 54.2) and the adaptive policy
+   (`ZINC_MTP_DRAFTS=auto`, EMA per-position acceptance, switch when
+   p1·p2·p3 > 0.13·E2) is a wash: context-medium +2.2, context-long −1.5,
+   core −0.2. Default stays 2; both remain opt-in.
+6. **Draft vocabulary.** 81920 rows: +0.3 tok/s on the core prompt, but loses
+   drafts on context-long and decode-extended (−0.8, −1.5); 65536 worse.
+   Default stays 98304.
+7. **Server.** The draft state is now prepared before the first prefill (it
+   was prepared lazily in `mtpPrime`, so request 1 of every server ran plain
+   decode); the server logs per-request MTP statistics when the next request
+   begins.
+
+Results (R9700, greedy, byte-identical to plain decode on every prompt):
+
+| scenario | before (suite, 2026-09-07 morning) | after |
+|---|---:|---:|
+| core, 96 tokens (CLI auto ctx) | 52.9 (45–48 when the spill hit) | 54.6 |
+| core, 97 / 255 tokens | — | 55.2 / 54.1 |
+| context-medium, 160 | 68.5* | 60.2 |
+| context-long, 128 | 58.6 | 66.2 |
+| decode-extended, 256 | 61.2 | 66.3 |
+| server, core prompt, 96 tokens | 55.5 (round 3) / 51.3 (chained, before the staging fix) | 53.6 |
+
+(*) the morning suite ran with the spilling planner; its per-scenario numbers
+were partly luck (VRAM 99.4% full, evictions not deterministic).
+
+Per cycle now: verify ≈ 34.8 ms, drafts ≈ 2.5 ms, restore/catch-up ≈ 0.5 ms,
+overhead ≈ 0.3 ms; 2.09 tokens per cycle on the core prompt. The verify pass
+is at ~80% of the 28.3 ms weight-streaming floor; the rest is ~800 small
+dispatches (the 48 DeltaNet layers run ~10 each). Fusing the SSM layer's
+z-projection/gated-norm/out-projection chain is the next real lever.
+
 ## Known gaps / follow-ups
 
 - **Cached-prefix sessions**: when the server reuses a prompt prefix
@@ -195,10 +271,10 @@ low 50s.
   transcript row, and prime only the suffix rows.
 - **Sampling**: MTP is greedy-only (as in llama.cpp's initial MTP); requests
   with temperature > 0 use the ordinary path.
-- **CLI auto-context**: the CLI trims the context to fill VRAM to the margin
-  (30851 tokens here) and still shows ~2 ms restores and 35–39 tok/s; the
-  server planner leaves headroom (22016 tokens, 28 GB used) and gets the full
-  43 tok/s. Pass `-c` on the CLI for now.
+- **CLI auto-context**: fixed in round 4 (the CLI plans with the 85% rule
+  like the server). The flat KV cache still allocates 532 KB/token for all 65
+  layers although only 17 attend; sizing it for the attention layers would
+  quadruple the auto context of this hybrid.
 - **Remaining pass headroom (~7 ms of 38)**: see "Why the pass stalls" above;
   small attention dispatches for 3 rows (~0.7 ms) and the three sequential
   argmax reductions in the tail (~0.2 ms) are the only cheap leftovers.
@@ -212,6 +288,6 @@ low 50s.
   an empty list and every request 404s).
 - `ZINC_MTP_PROFILE=1 --profile` keeps one submit per layer function so the
   `--profile` phase totals attribute GPU time ("NextN/MTP GPU phase totals").
-- DPM on the node had been left at `high` from an earlier session; it was set
-  back to `auto` during this effort. Clocks (SCLK ~2290, MCLK 1258) were
+- DPM on the node reads `high` after every perf-suite run: the suite's remote
+  command prelude (`rdnaDpmHighScript`) pins it and does not restore it. Clocks (SCLK ~2290, MCLK 1258) were
   identical for decode and for the slow pass, so clocks were never the cause.

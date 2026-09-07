@@ -2957,7 +2957,23 @@ pub fn main() !void {
             std.process.exit(1);
         };
         defer model.deinit(&vk_instance);
-        memory_plan.applyRequestedContextLimit(&model.config, config.context_length);
+        if (config.context_length) |requested_context| {
+            memory_plan.applyRequestedContextLimit(&model.config, requested_context);
+        } else {
+            // Same vLLM-style auto context as the server and the Metal CLI:
+            // spend 85% of VRAM on weights + KV. Handing the engine the
+            // architectural ceiling instead lets it trim against the full
+            // card, which fills VRAM to the last few hundred MB and spills
+            // buffers to system memory (Qwen 3.8 27B on a 32 GB R9700 lost
+            // 17% of MTP decode and 10% of plain decode that way).
+            const auto_context = memory_plan.autoContextTokensForDeviceBudget(
+                memory_plan.profile(model.config),
+                forward_mod.tensorBytes(&model),
+                vk_instance.vramBytes(),
+                model.config.context_length,
+            );
+            memory_plan.applyRequestedContextLimit(&model.config, auto_context);
+        }
 
         var engine = forward_mod.InferenceEngine.init(&model, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
             log.err("Failed to init inference engine: {s}", .{@errorName(err)});

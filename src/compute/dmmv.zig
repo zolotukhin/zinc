@@ -382,10 +382,15 @@ pub const DmmvDispatch = struct {
     pipeline_q5k_rows4_cols: ?Pipeline,
     /// MAX_COLS = 3 variants (3-token verification batches, fewer live registers).
     pipeline_q4k_rows4_cols3: ?Pipeline,
+    pipeline_q4k_rows4_cols4: ?Pipeline,
     pipeline_q6k_rows4_cols3: ?Pipeline,
+    pipeline_q6k_rows4_cols4: ?Pipeline,
     pipeline_q5k_rows4_cols3: ?Pipeline,
+    pipeline_q5k_rows4_cols4: ?Pipeline,
     pipeline_q6k_rows8_cols3: ?Pipeline,
+    pipeline_q6k_rows8_cols4: ?Pipeline,
     pipeline_q4k_rows8_cols3: ?Pipeline,
+    pipeline_q4k_rows8_cols4: ?Pipeline,
     pipeline_q4k_cols_r8: ?Pipeline,
     pipeline_q6k_cols_r2: ?Pipeline,
     pipeline_q6k_cols_r8: ?Pipeline,
@@ -393,6 +398,7 @@ pub const DmmvDispatch = struct {
     pipeline_q4k_fused_gate_up_swiglu_cols: ?Pipeline,
     /// Three-column, unguarded variant of the fused gate+up+SwiGLU column kernel.
     pipeline_q4k_fused_gate_up_swiglu_cols3: ?Pipeline,
+    pipeline_q4k_fused_gate_up_swiglu_cols4: ?Pipeline,
     /// Q4_K x Q8_1 (dp4a) column matvec for 2-4 column batches (NextN/MTP verification).
     pipeline_q4k_q8_1_cols: ?Pipeline,
     /// MXFP4 pipeline, or null.
@@ -1086,14 +1092,24 @@ pub const DmmvDispatch = struct {
         };
         const q4k_cols3_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows4_cols3.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k_rows4_cols3 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_cols3_path, 3, push_size, &.{}, cols_options, allocator) catch null;
+        const q4k_cols4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows4_cols4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_rows4_cols4 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_cols4_path, 3, push_size, &.{}, cols_options, allocator) catch null;
         const q6k_cols3_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows4_cols3.spv", .{shader_dir}) catch unreachable;
         const pipeline_q6k_rows4_cols3 = pipeline_mod.createFromSpirvWithOptions(instance, q6k_cols3_path, 3, push_size, &.{}, cols_options, allocator) catch null;
+        const q6k_cols4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows4_cols4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_rows4_cols4 = pipeline_mod.createFromSpirvWithOptions(instance, q6k_cols4_path, 3, push_size, &.{}, cols_options, allocator) catch null;
         const q5k_cols3_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_rows4_cols3.spv", .{shader_dir}) catch unreachable;
         const pipeline_q5k_rows4_cols3 = pipeline_mod.createFromSpirvWithOptions(instance, q5k_cols3_path, 3, push_size, &.{}, cols_options, allocator) catch null;
+        const q5k_cols4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_rows4_cols4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q5k_rows4_cols4 = pipeline_mod.createFromSpirvWithOptions(instance, q5k_cols4_path, 3, push_size, &.{}, cols_options, allocator) catch null;
         const q6k_r8_cols3_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows8_cols3.spv", .{shader_dir}) catch unreachable;
         const pipeline_q6k_rows8_cols3 = pipeline_mod.createFromSpirvWithOptions(instance, q6k_r8_cols3_path, 3, push_size, &.{}, cols_options, allocator) catch null;
+        const q6k_r8_cols4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows8_cols4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_rows8_cols4 = pipeline_mod.createFromSpirvWithOptions(instance, q6k_r8_cols4_path, 3, push_size, &.{}, cols_options, allocator) catch null;
         const q4k_r8_cols3_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows8_cols3.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k_rows8_cols3 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_r8_cols3_path, 3, push_size, &.{}, cols_options, allocator) catch null;
+        const q4k_r8_cols4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows8_cols4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_rows8_cols4 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_r8_cols4_path, 3, push_size, &.{}, cols_options, allocator) catch null;
         const q4k_rows2_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows2_cols.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k_cols_r2 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_rows2_cols_path, 3, push_size, &.{}, cols_options, allocator) catch |err| blk: {
             log.warn("Q4_K rows2 cols shader not loaded: {s}", .{@errorName(err)});
@@ -1121,6 +1137,8 @@ pub const DmmvDispatch = struct {
         };
         const q4k_fused_gateup_cols3_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_swiglu_cols3.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k_fused_gate_up_swiglu_cols3 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gateup_cols3_path, 4, push_size, &.{}, cols_options, allocator) catch null;
+        const q4k_fused_gateup_cols4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_swiglu_cols4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_fused_gate_up_swiglu_cols4 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gateup_cols4_path, 4, push_size, &.{}, cols_options, allocator) catch null;
         const q4k_q81_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_q8_1_cols.spv", .{shader_dir}) catch unreachable;
         const pipeline_q4k_q8_1_cols = pipeline_mod.createFromSpirvWithOptions(instance, q4k_q81_cols_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
             log.warn("Q4_K x Q8_1 cols shader not loaded: {s}", .{@errorName(err)});
@@ -2464,15 +2482,21 @@ pub const DmmvDispatch = struct {
             .pipeline_q4k_cols_r2 = pipeline_q4k_cols_r2,
             .pipeline_q5k_rows4_cols = pipeline_q5k_rows4_cols,
             .pipeline_q4k_rows4_cols3 = pipeline_q4k_rows4_cols3,
+            .pipeline_q4k_rows4_cols4 = pipeline_q4k_rows4_cols4,
             .pipeline_q6k_rows4_cols3 = pipeline_q6k_rows4_cols3,
+            .pipeline_q6k_rows4_cols4 = pipeline_q6k_rows4_cols4,
             .pipeline_q5k_rows4_cols3 = pipeline_q5k_rows4_cols3,
+            .pipeline_q5k_rows4_cols4 = pipeline_q5k_rows4_cols4,
             .pipeline_q6k_rows8_cols3 = pipeline_q6k_rows8_cols3,
+            .pipeline_q6k_rows8_cols4 = pipeline_q6k_rows8_cols4,
             .pipeline_q4k_rows8_cols3 = pipeline_q4k_rows8_cols3,
+            .pipeline_q4k_rows8_cols4 = pipeline_q4k_rows8_cols4,
             .pipeline_q4k_cols_r8 = pipeline_q4k_cols_r8,
             .pipeline_q6k_cols_r2 = pipeline_q6k_cols_r2,
             .pipeline_q6k_cols_r8 = pipeline_q6k_cols_r8,
             .pipeline_q4k_fused_gate_up_swiglu_cols = pipeline_q4k_fused_gate_up_swiglu_cols,
             .pipeline_q4k_fused_gate_up_swiglu_cols3 = pipeline_q4k_fused_gate_up_swiglu_cols3,
+            .pipeline_q4k_fused_gate_up_swiglu_cols4 = pipeline_q4k_fused_gate_up_swiglu_cols4,
             .pipeline_q4k_q8_1_cols = pipeline_q4k_q8_1_cols,
             .pipeline_q8_0 = pipeline_q8_0,
             .pipeline_q8_0_batch = pipeline_q8_0_batch,
@@ -6023,15 +6047,21 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q4k_cols_r2) |*p| p.deinit();
         if (self.pipeline_q5k_rows4_cols) |*p| p.deinit();
         if (self.pipeline_q4k_rows4_cols3) |*p| p.deinit();
+        if (self.pipeline_q4k_rows4_cols4) |*p| p.deinit();
         if (self.pipeline_q6k_rows4_cols3) |*p| p.deinit();
+        if (self.pipeline_q6k_rows4_cols4) |*p| p.deinit();
         if (self.pipeline_q5k_rows4_cols3) |*p| p.deinit();
+        if (self.pipeline_q5k_rows4_cols4) |*p| p.deinit();
         if (self.pipeline_q6k_rows8_cols3) |*p| p.deinit();
+        if (self.pipeline_q6k_rows8_cols4) |*p| p.deinit();
         if (self.pipeline_q4k_rows8_cols3) |*p| p.deinit();
+        if (self.pipeline_q4k_rows8_cols4) |*p| p.deinit();
         if (self.pipeline_q4k_cols_r8) |*p| p.deinit();
         if (self.pipeline_q6k_cols_r2) |*p| p.deinit();
         if (self.pipeline_q6k_cols_r8) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_swiglu_cols) |*p| p.deinit();
         if (self.pipeline_q4k_fused_gate_up_swiglu_cols3) |*p| p.deinit();
+        if (self.pipeline_q4k_fused_gate_up_swiglu_cols4) |*p| p.deinit();
         if (self.pipeline_q4k_q8_1_cols) |*p| p.deinit();
         if (self.pipeline_q8_0) |*p| p.deinit();
         if (self.pipeline_q8_0_batch) |*p| p.deinit();

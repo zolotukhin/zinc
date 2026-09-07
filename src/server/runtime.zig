@@ -105,7 +105,13 @@ pub const mtp_max_draft: u32 = if (gpu.is_vulkan) InferenceEngine.mtp_max_draft_
 
 /// Reset per-request MTP state; call before the prompt prefill.
 pub fn mtpBeginRequest(_engine: *InferenceEngine) void {
-    if (comptime gpu.is_vulkan) _engine.mtpBeginRequest();
+    if (comptime gpu.is_vulkan) {
+        // Prepare the draft state before the prompt prefill so the very first
+        // request captures its prompt rows (preparing lazily in mtpPrime left
+        // request 1 on ordinary decode).
+        if (_engine.mtpEnabled()) _ = _engine.mtpPrepare() catch false;
+        _engine.mtpBeginRequest();
+    }
 }
 
 /// Prime the NextN block over the freshly prefilled prompt. Returns false when

@@ -92,6 +92,16 @@ pub const SsmConv1dBatchedPush = extern struct {
     n_tokens: u32,
 };
 
+/// Push constants of embed_gather (NextN/MTP chained cycle: dequantize the
+/// embedding row of a device-side token id into a destination row).
+pub const EmbedGatherPush = extern struct {
+    cols: u32,
+    index_offset: u32,
+    out_offset: u32,
+    vocab_last: u32,
+    qtype: u32,
+};
+
 /// `SsmConv1dBatchedPush` plus the history slot stride for ssm_conv1d_batched_hist.
 pub const SsmConv1dBatchedHistPush = extern struct {
     conv_channels: u32,
@@ -448,6 +458,7 @@ pub const ElementwiseDispatch = struct {
     pipeline_ssm_conv1d_batched: ?Pipeline,
     /// Batched conv variant that also writes the per-token ring history (NextN/MTP).
     pipeline_ssm_conv1d_batched_hist: ?Pipeline,
+    pipeline_embed_gather: ?Pipeline,
     /// Batched f32 alpha/beta SSM projection pipeline, or null.
     pipeline_dmmv_f32_dual_batch: ?Pipeline,
     /// In-place SSM Q/K normalization pipeline, or null.
@@ -732,6 +743,11 @@ pub const ElementwiseDispatch = struct {
         const conv_batched_hist_path = std.fmt.bufPrint(&path_buf, "{s}/ssm_conv1d_batched_hist.spv", .{shader_dir}) catch unreachable;
         const pipeline_ssm_conv1d_batched_hist = pipeline_mod.createFromSpirvWithOptions(instance, conv_batched_hist_path, 4, @sizeOf(SsmConv1dBatchedHistPush), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("ssm_conv1d_batched_hist shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const embed_gather_path = std.fmt.bufPrint(&path_buf, "{s}/embed_gather.spv", .{shader_dir}) catch unreachable;
+        const pipeline_embed_gather = pipeline_mod.createFromSpirvWithOptions(instance, embed_gather_path, 3, @sizeOf(EmbedGatherPush), &.{}, push_options, allocator) catch |err| blk: {
+            log.warn("embed_gather shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -1023,6 +1039,7 @@ pub const ElementwiseDispatch = struct {
             .pipeline_ssm_conv1d = pipeline_ssm_conv1d,
             .pipeline_ssm_conv1d_batched = pipeline_ssm_conv1d_batched,
             .pipeline_ssm_conv1d_batched_hist = pipeline_ssm_conv1d_batched_hist,
+            .pipeline_embed_gather = pipeline_embed_gather,
             .pipeline_dmmv_f32_dual_batch = pipeline_dmmv_f32_dual_batch,
             .pipeline_ssm_qk_norm = pipeline_ssm_qk_norm,
             .pipeline_ssm_delta_net = pipeline_ssm_delta_net,
@@ -1561,6 +1578,7 @@ pub const ElementwiseDispatch = struct {
         if (self.pipeline_ssm_conv1d) |*p| p.deinit();
         if (self.pipeline_ssm_conv1d_batched) |*p| p.deinit();
         if (self.pipeline_ssm_conv1d_batched_hist) |*p| p.deinit();
+        if (self.pipeline_embed_gather) |*p| p.deinit();
         if (self.pipeline_dmmv_f32_dual_batch) |*p| p.deinit();
         if (self.pipeline_ssm_qk_norm) |*p| p.deinit();
         if (self.pipeline_ssm_delta_net) |*p| p.deinit();

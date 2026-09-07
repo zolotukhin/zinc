@@ -834,7 +834,7 @@ fn findLoadedTensor(model: *const Model, name: []const u8) ?*const LoadedTensor 
     return null;
 }
 
-fn tensorBytes(model: *const Model) u64 {
+pub fn tensorBytes(model: *const Model) u64 {
     // Only count device-local tensors against the VRAM budget. MoE expert
     // tensors offloaded to host-visible memory live in system RAM and do
     // not consume VRAM, so they must not be subtracted from the KV budget.
@@ -1319,6 +1319,12 @@ pub const InferenceEngine = struct {
     /// Set by callers that already began `decode_cmd`; decodeStep then records
     /// into the open command buffer instead of resetting it (NextN/MTP drafts).
     decode_cmd_preopened: bool = false,
+    /// NextN/MTP chained cycle: decodeStep leaves the command buffer open
+    /// (no end/submit) so drafts and the verification batch share one submission.
+    decode_defer_submit: bool = false,
+    /// NextN/MTP chained cycle: mtpRunNextnBatch records into the open command
+    /// buffer without ending/submitting it.
+    mtp_nextn_record_only: bool = false,
     /// NextN/MTP catch-up: the batched attention layer only needs the K/V cache
     /// rows written; skip Q/gate projections, flash attention and the tail.
     spec_kv_only: bool = false,
@@ -7258,6 +7264,7 @@ pub const InferenceEngine = struct {
             // this command buffer; keep recording into it.
             self.decode_cmd_preopened = false;
         } else {
+            try self.mtpFlushPending(state);
             if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.beginOneTime();
@@ -11742,7 +11749,8 @@ pub const InferenceEngine = struct {
         }
         _ = self.writeTimestamp(vk.c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
-        try self.decode_cmd.end();
+        const defer_submit = self.decode_defer_submit;
+        if (!defer_submit) try self.decode_cmd.end();
         var prefill_record_elapsed_ns: u64 = 0;
         if (track_decode_timing) {
             const cpu_record_end = std.time.nanoTimestamp();
@@ -11751,7 +11759,9 @@ pub const InferenceEngine = struct {
             prefill_record_elapsed_ns = elapsed;
         }
         const submit_wait_start = if (track_decode_timing) std.time.nanoTimestamp() else 0;
-        if (self.prefill_pipeline_mode) {
+        if (defer_submit) {
+            // NextN/MTP chained cycle: the caller keeps recording and submits.
+        } else if (self.prefill_pipeline_mode) {
             // Pipelined prefill: fire-and-forget. prefillBatch() waits for the
             // corresponding fence before the next reuse of this slot.
             try self.decode_cmd.submit(self.instance.compute_queue);
@@ -12482,7 +12492,10 @@ pub const InferenceEngine = struct {
             2, 8 => rows_sel,
             else => 4,
         };
+        // Fixed-width, unguarded column kernels for the 3-token (2 drafts) and
+        // 4-token (3 drafts) verification batches.
         const use_cols3 = n_tokens == 3 and (M % rows) == 0 and envFlagEnabled("ZINC_MTP_COLS3", true);
+        const use_cols4 = n_tokens == 4 and (M % rows) == 0 and envFlagEnabled("ZINC_MTP_COLS3", true);
         const cols3_pip: ?*const Pipeline = if (!use_cols3) null else if (rows == 8) (switch (tensor.info.type_) {
             .q6_k => if (self.dmmv.pipeline_q6k_rows8_cols3) |*p| @as(?*const Pipeline, p) else null,
             .q4_k => if (self.dmmv.pipeline_q4k_rows8_cols3) |*p| @as(?*const Pipeline, p) else null,
@@ -12493,7 +12506,17 @@ pub const InferenceEngine = struct {
             .q5_k => if (self.dmmv.pipeline_q5k_rows4_cols3) |*p| p else null,
             else => null,
         };
-        const pip = cols3_pip orelse cols_pip orelse {
+        const cols4_pip: ?*const Pipeline = if (!use_cols4) null else if (rows == 8) (switch (tensor.info.type_) {
+            .q6_k => if (self.dmmv.pipeline_q6k_rows8_cols4) |*p| @as(?*const Pipeline, p) else null,
+            .q4_k => if (self.dmmv.pipeline_q4k_rows8_cols4) |*p| @as(?*const Pipeline, p) else null,
+            else => null,
+        }) else if (rows != 4) null else switch (tensor.info.type_) {
+            .q4_k => if (self.dmmv.pipeline_q4k_rows4_cols4) |*p| p else null,
+            .q6_k => if (self.dmmv.pipeline_q6k_rows4_cols4) |*p| p else null,
+            .q5_k => if (self.dmmv.pipeline_q5k_rows4_cols4) |*p| p else null,
+            else => null,
+        };
+        const pip = cols3_pip orelse cols4_pip orelse cols_pip orelse {
             if (rows_sel != 4) log.warn("spec cols: rows={d} pipeline missing for {s}; generic path", .{ rows_sel, @tagName(tensor.info.type_) });
             return false;
         };
@@ -24693,14 +24716,14 @@ pub const InferenceEngine = struct {
                     0,
                 );
             }
-        } else if (self.spec_batch_active and n_tokens == 3 and (hidden_dim & 255) == 0 and (inter_dim & 1) == 0 and
+        } else if (self.spec_batch_active and (n_tokens == 3 or n_tokens == 4) and (hidden_dim & 255) == 0 and (inter_dim & 1) == 0 and
             gate_t.info.type_ == .q4_k and up_t.info.type_ == .q4_k and
-            self.dmmv.pipeline_q4k_fused_gate_up_swiglu_cols3 != null and
+            (if (n_tokens == 3) self.dmmv.pipeline_q4k_fused_gate_up_swiglu_cols3 else self.dmmv.pipeline_q4k_fused_gate_up_swiglu_cols4) != null and
             envFlagEnabled("ZINC_MTP_FUSED_GATEUP", true))
         {
             // NextN/MTP verification batch: one fused gate+up+SwiGLU dispatch
-            // streams both matrices once for the 3 columns (unguarded loads).
-            const fused_pip = &self.dmmv.pipeline_q4k_fused_gate_up_swiglu_cols3.?;
+            // streams both matrices once for the 3 or 4 columns (unguarded loads).
+            const fused_pip = if (n_tokens == 3) &self.dmmv.pipeline_q4k_fused_gate_up_swiglu_cols3.? else &self.dmmv.pipeline_q4k_fused_gate_up_swiglu_cols4.?;
             const push = BatchDmmvPushConstants{
                 .M = inter_dim,
                 .K = hidden_dim,
@@ -27558,6 +27581,7 @@ pub const InferenceEngine = struct {
     /// @param state Decode state for the current request.
     /// @param prompt_tokens Tokenized prompt sequence to prefill.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        try self.mtpFlushPending(state);
         const mode = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse "";
         const intel_batched_env = std.posix.getenv("ZINC_INTEL_BATCHED_PREFILL");
         const cfg = self.model.config;
@@ -28314,6 +28338,7 @@ pub const InferenceEngine = struct {
     /// @param prompt_tokens Tokenized input sequence to prefill. No-op when empty.
     /// @note This is the per-token serial path. For the experimental batched variant see `prefillBatched`.
     pub fn prefillBatch(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
+        try self.mtpFlushPending(state);
         if (prompt_tokens.len == 0) return;
 
         const prompt_token_count: u32 = @intCast(@min(prompt_tokens.len, std.math.maxInt(u32)));
@@ -29247,6 +29272,23 @@ pub const InferenceEngine = struct {
         var spec_argmax_staging = try Buffer.init(self.instance, @sizeOf(u32) * mtp_max_verify, xfer_both, host_flags);
         errdefer spec_argmax_staging.deinit();
         try mtpMapWhole(self.instance, &spec_argmax_staging);
+        var chain_tokens_staging = try Buffer.init(self.instance, @sizeOf(u32) * mtp_max_draft, xfer_both, host_flags);
+        errdefer chain_tokens_staging.deinit();
+        try mtpMapWhole(self.instance, &chain_tokens_staging);
+        // Chained cycle: drafts and verification in one submission, with the
+        // draft embeddings gathered on the device (see mtpRecordEmbedGather).
+        const chain_ok = blk: {
+            if (!envFlagEnabled("ZINC_MTP_CHAIN", true)) break :blk false;
+            if (self.elementwise.pipeline_embed_gather == null) break :blk false;
+            if (cfg.architecture == .gemma) break :blk false;
+            const embd_t = self.tensor_map.get("token_embd.weight") orelse break :blk false;
+            break :blk switch (embd_t.info.type_) {
+                .f32, .f16 => true,
+                .q8_0 => (cfg.hidden_dim % 32) == 0,
+                .q4_k, .q6_k => (cfg.hidden_dim % 256) == 0,
+                else => false,
+            };
+        };
         var spec_argmax_sets: [mtp_max_verify]vk.c.VkDescriptorSet = undefined;
         for (0..mtp_max_verify) |t| {
             const ds = try self.argmax.allocDescriptorSet();
@@ -29326,6 +29368,9 @@ pub const InferenceEngine = struct {
             .spec_q8_1_buf = spec_q8_1_buf,
             .spec_argmax_result_buf = spec_argmax_result_buf,
             .spec_argmax_staging = spec_argmax_staging,
+            .chain_tokens_staging = chain_tokens_staging,
+            .chain_ok = chain_ok,
+            .draft_fixed = mtpDraftsFixedFromEnv(),
             .spec_argmax_sets = spec_argmax_sets,
             .prime_chunk_rows = prime_chunk_rows,
             .prime_embed_rows = prime_embed_rows,
@@ -29373,7 +29418,7 @@ pub const InferenceEngine = struct {
     /// Build the NextN block input for one token as its own submission:
     /// eh_buf = eh_proj([enorm(embed(token)) | hnorm(h)]), where `h_buf`/`h_offset`
     /// point at the normalized target hidden row preceding `token`.
-    fn mtpBuildBlockInput(self: *InferenceEngine, token: u32, h_buf: vk.c.VkBuffer, h_offset: vk.c.VkDeviceSize, own_cb: bool) !void {
+    fn mtpBuildBlockInput(self: *InferenceEngine, token: u32, h_buf: vk.c.VkBuffer, h_offset: vk.c.VkDeviceSize, own_cb: bool, embed_pregathered: bool) !void {
         const mtp = &(self.mtp orelse return error.MtpNotPrepared);
         const lt = self.layer_tensors[@intCast(mtp.layer)];
         const eh_proj = lt.nextn_eh_proj orelse return error.TensorNotFound;
@@ -29381,18 +29426,25 @@ pub const InferenceEngine = struct {
         const hnorm = lt.nextn_hnorm orelse return error.TensorNotFound;
         const hidden_dim = self.model.config.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
-        const saved_prefill_active = self.prefill_active;
-        self.prefill_active = false;
-        try self.embedToken(token);
-        self.prefill_active = saved_prefill_active;
+        if (!embed_pregathered) {
+            const saved_prefill_active = self.prefill_active;
+            self.prefill_active = false;
+            try self.embedToken(token);
+            self.prefill_active = saved_prefill_active;
+        }
         if (own_cb) {
             if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
             try self.decode_cmd.reset();
             try self.decode_cmd.beginOneTime();
         }
-        const embed_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
-        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.embed_staging.handle, mtp.embed_buf.handle, 1, &embed_region);
-        self.decode_cmd.transferToComputeBarrier();
+        if (embed_pregathered) {
+            // embed_buf was written by the device-side gather (chained cycle).
+            self.decode_cmd.computeBarrier();
+        } else {
+            const embed_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.embed_staging.handle, mtp.embed_buf.handle, 1, &embed_region);
+            self.decode_cmd.transferToComputeBarrier();
+        }
         try self.mtpRecordRmsNormRow(mtp.embed_buf.handle, 0, enorm, mtp.concat_buf.handle, 0, hidden_dim);
         try self.mtpRecordRmsNormRow(h_buf, h_offset, hnorm, mtp.concat_buf.handle, hidden_size, hidden_dim);
         self.decode_cmd.computeBarrier();
@@ -29437,7 +29489,16 @@ pub const InferenceEngine = struct {
             self.decode_cmd.transferToComputeBarrier();
             mtp.h_upload_pending = false;
         }
-        try self.mtpBuildBlockInput(token, mtp.h_input_buf.handle, 0, false);
+        try self.mtpDraftRecord(state, token, pos, false);
+        return self.sampleGreedy();
+    }
+
+    /// Record one NextN draft step into the open command buffer (no submit):
+    /// block input for `token` at `pos`, the appended block, the draft lm-head
+    /// and its argmax (result left in argmax_result_buf / argmax_result_staging).
+    fn mtpDraftRecord(self: *InferenceEngine, state: *DecodeState, token: u32, pos: u32, embed_pregathered: bool) !void {
+        const mtp = &(self.mtp orelse return error.MtpNotPrepared);
+        try self.mtpBuildBlockInput(token, mtp.h_input_buf.handle, 0, false, embed_pregathered);
         const lt = self.layer_tensors[@intCast(mtp.layer)];
         const saved_start = self.partial_decode_start_layer;
         const saved_end = self.partial_decode_end_layer;
@@ -29488,13 +29549,36 @@ pub const InferenceEngine = struct {
         state.position = pos;
         self.decode_cmd_preopened = true;
         try self.decodeStep(state, token, true);
-        return self.sampleGreedy();
     }
 
     /// Reset per-request NextN bookkeeping (call before a new prompt's prefill).
     pub fn mtpBeginRequest(self: *InferenceEngine) void {
         self.mtp_prefill_capture_count = 0;
         if (self.mtp) |*m| {
+            if (m.cycles > 0) {
+                // Previous request's cycle statistics (the CLI prints its own at the end).
+                const acceptance = if (m.drafted > 0) 100.0 * @as(f64, @floatFromInt(m.accepted)) / @as(f64, @floatFromInt(m.drafted)) else 0.0;
+                log.info("NextN/MTP: request accepted {d}/{d} draft tokens ({d:.1}%) over {d} cycles; draft={d:.1} ms target={d:.1} ms restore={d:.1} ms catch-up={d:.1} ms", .{
+                    m.accepted,                                  m.drafted,                                   acceptance,
+                    m.cycles,                                    @as(f64, @floatFromInt(m.draft_ns)) / 1e6,   @as(f64, @floatFromInt(m.target_ns)) / 1e6,
+                    @as(f64, @floatFromInt(m.restore_ns)) / 1e6, @as(f64, @floatFromInt(m.catchup_ns)) / 1e6,
+                });
+                m.cycles = 0;
+                m.drafted = 0;
+                m.accepted = 0;
+                m.draft_ns = 0;
+                m.target_ns = 0;
+                m.restore_ns = 0;
+                m.catchup_ns = 0;
+                m.tb_embed_ns = 0;
+                m.tb_ssm_ns = 0;
+                m.tb_attn_ns = 0;
+                m.tb_ffn_ns = 0;
+                m.tb_tail_ns = 0;
+            }
+            // A new prompt replaces the model state: the previous request's
+            // deferred restore/catch-up is moot.
+            m.pending_committed = 0;
             m.primed = false;
             @memset(m.pending_h, 0);
         }
@@ -29521,7 +29605,64 @@ pub const InferenceEngine = struct {
         const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size * @as(vk.c.VkDeviceSize, n_rows) };
         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, staging.handle, dst.handle, 1, &region);
     }
-    fn mtpTargetBatch(self: *InferenceEngine, state: *DecodeState, tokens: []const u32, base: u32, predictions: []u32) !void {
+    /// Record the deferred restore + NextN catch-up of the last chained cycle
+    /// into the open command buffer (no submit) and clear it.
+    fn mtpRecordPending(self: *InferenceEngine, state: *DecodeState) !void {
+        const mtp = &(self.mtp orelse return);
+        if (mtp.pending_committed == 0) return;
+        const committed = mtp.pending_committed;
+        if (committed < mtp.pending_t) {
+            try self.mtpRecordRestore(committed);
+            self.decode_cmd.transferToComputeBarrier();
+        }
+        if (committed >= 2) {
+            // Row 0 (seed, pending_h) is exactly what draft 1 already wrote at
+            // `pos`; only the later rows need the target's h instead of the
+            // draft block's own. Their h rows were staged at accept time.
+            self.mtp_nextn_record_only = true;
+            defer self.mtp_nextn_record_only = false;
+            try self.mtpRunNextnBatch(state, mtp.pending_tokens[1..committed], mtp.pending_pos + 1, .host_rows, true);
+            self.decode_cmd.computeBarrier();
+        }
+        mtp.pending_committed = 0;
+    }
+    /// Submit the deferred restore + catch-up now (anything other than the next
+    /// chained cycle that touches the model state calls this first).
+    fn mtpFlushPending(self: *InferenceEngine, state: *DecodeState) !void {
+        const mtp = &(self.mtp orelse return);
+        if (mtp.pending_committed == 0) return;
+        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+        try self.mtpRecordPending(state);
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+    }
+    /// Record a device-side embedding gather: the row id is read from
+    /// `index_buf[index_elem]` (clamped to the vocabulary) and dequantized into
+    /// row `dst_row` of `dst`, bit-identical to embedToken's host dequant.
+    fn mtpRecordEmbedGather(self: *InferenceEngine, index_buf: Buffer, index_elem: u32, dst: Buffer, dst_row: u32) !void {
+        const pip = if (self.elementwise.pipeline_embed_gather) |*p| p else return error.ShaderNotLoaded;
+        const cfg = self.model.config;
+        const embd = self.tensor_map.get("token_embd.weight") orelse return error.TensorNotFound;
+        const qtype: u32 = switch (embd.info.type_) {
+            .f32 => 0,
+            .f16 => 1,
+            .q8_0 => 2,
+            .q4_k => 3,
+            .q6_k => 4,
+            else => return error.UnsupportedEmbeddingType,
+        };
+        const push = elementwise_mod.EmbedGatherPush{
+            .cols = cfg.hidden_dim,
+            .index_offset = index_elem,
+            .out_offset = dst_row * cfg.hidden_dim,
+            .vocab_last = cfg.vocab_size -| 1,
+            .qtype = qtype,
+        };
+        self.pushDispatch3(pip, std.mem.asBytes(&push), embd.gpu_buffer.handle, embd.gpu_buffer.size, index_buf.handle, index_buf.size, dst.handle, dst.size, 1, 1, 1);
+    }
+    fn mtpTargetBatch(self: *InferenceEngine, state: *DecodeState, tokens: []const u32, base: u32, predictions: []u32, chained: bool) !void {
         const mtp = &(self.mtp orelse return error.MtpNotPrepared);
         const T: u32 = @intCast(tokens.len);
         std.debug.assert(T >= 1 and T <= mtp_max_verify);
@@ -29547,7 +29688,11 @@ pub const InferenceEngine = struct {
         const scratch_attn_out = self.batched_scratch_attn_out.?;
 
         var tb_timer = try std.time.Timer.start();
-        try self.mtpStageEmbeddingRows(tokens, &mtp.prime_embed_staging);
+        // Chained cycle: rows 1.. were gathered on the device, and the seed row is
+        // the one draft 1's embedToken left in embed_staging (prime_embed_staging
+        // belongs to the deferred catch-up recorded earlier in this command
+        // buffer; its copy executes after any host write made now).
+        if (!chained) try self.mtpStageEmbeddingRows(tokens, &mtp.prime_embed_staging);
         mtp.tb_embed_ns += tb_timer.lap();
 
         const saved_position = state.position;
@@ -29577,10 +29722,16 @@ pub const InferenceEngine = struct {
         state.position = base;
         // One command buffer for the whole verification pass.
         if (!mtp_profile) {
-            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-            try self.decode_cmd.reset();
-            try self.decode_cmd.beginOneTime();
-            self.mtpRecordEmbeddingRowsCopy(&mtp.prime_embed_staging, scratch_hidden, tokens.len);
+            if (chained) {
+                // Command buffer already open (drafts recorded ahead of this batch).
+                self.decode_cmd.computeToTransferBarrier();
+                self.mtpRecordEmbeddingRowsCopy(&self.embed_staging, scratch_hidden, 1);
+            } else {
+                if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+                try self.decode_cmd.reset();
+                try self.decode_cmd.beginOneTime();
+                self.mtpRecordEmbeddingRowsCopy(&mtp.prime_embed_staging, scratch_hidden, tokens.len);
+            }
             self.decode_cmd.transferToComputeBarrier();
         } else {
             try self.decode_cmd.reset();
@@ -29835,6 +29986,7 @@ pub const InferenceEngine = struct {
             scratch_swiglu,
             scratch_down,
         );
+        if (self.mtp_nextn_record_only) return;
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
     }
@@ -29901,7 +30053,17 @@ pub const InferenceEngine = struct {
         const mtp = &(self.mtp orelse return error.MtpNotPrimed);
         if (!mtp.primed) return error.MtpNotPrimed;
         const hidden_dim = self.model.config.hidden_dim;
-        const n_limit: u32 = @max(@as(u32, 1), @min(max_drafts, mtp.hist_slots));
+        const want_drafts: u32 = mtp.draft_fixed orelse blk: {
+            // Expected tokens per cycle: E2 = 1 + p1 + p1*p2; a third draft adds
+            // p1*p2*p3 tokens for ~13% more cycle time (4-row pass + one draft).
+            const e2 = 1.0 + mtp.ema_p1 + mtp.ema_p1 * mtp.ema_p2;
+            // The third position is only observed while drafting three; until
+            // then assume it tracks the second (slightly worse).
+            const p3_est = if (mtp.p3_observed >= 8) mtp.ema_p3 else 0.9 * mtp.ema_p2;
+            const gain3 = mtp.ema_p1 * mtp.ema_p2 * p3_est;
+            break :blk if (gain3 > 0.13 * e2) @as(u32, 3) else @as(u32, 2);
+        };
+        const n_limit: u32 = @max(@as(u32, 1), @min(@min(max_drafts, mtp.hist_slots), want_drafts));
         var timer = try std.time.Timer.start();
 
         // h_input <- pending_h (the target's normalized hidden preceding `seed`).
@@ -29913,39 +30075,90 @@ pub const InferenceEngine = struct {
         }
         var drafts: [mtp_max_draft]u32 = @splat(0);
         var n_drafted: u32 = 0;
-        var fed = seed;
-        while (n_drafted < n_limit) : (n_drafted += 1) {
-            const draft = try self.mtpDraftStep(state, fed, pos + n_drafted);
-            drafts[n_drafted] = draft;
-            fed = draft;
-            if (draft == eos_id) {
-                n_drafted += 1;
-                break;
-            }
-        }
-        mtp.draft_ns += timer.lap();
-
         var target_tokens: [mtp_max_verify]u32 = @splat(0);
-        target_tokens[0] = seed;
-        @memcpy(target_tokens[1 .. 1 + n_drafted], drafts[0..n_drafted]);
         var predictions: [mtp_max_verify]u32 = @splat(0);
-        const T = n_drafted + 1;
-        try self.mtpTargetBatch(state, target_tokens[0..T], pos, predictions[0..T]);
-        mtp.target_ns += timer.lap();
+        target_tokens[0] = seed;
+        const chained = mtp.chain_ok and !envFlagEnabled("ZINC_MTP_PROFILE", false);
+        var T: u32 = 0;
+        if (chained) {
+            // Chained cycle: both drafts and the verification batch in one
+            // submission. Draft tokens never leave the device: their embedding
+            // rows are gathered by embed_gather for the next draft's block input
+            // and for the verification rows; the host reads the tokens back
+            // together with the verification argmaxes.
+            try self.ensureBatchedScratchCapacity(n_limit + 1);
+            const scratch_hidden = self.batched_scratch_hidden.?;
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.beginOneTime();
+            // The previous cycle's restore + NextN catch-up go first (deferred to
+            // share this submission).
+            try self.mtpRecordPending(state);
+            {
+                const hidden_size_up = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+                const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size_up };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.h_staging.handle, mtp.h_input_buf.handle, 1, &region);
+                self.decode_cmd.transferToComputeBarrier();
+                mtp.h_upload_pending = false;
+            }
+            self.decode_defer_submit = true;
+            defer self.decode_defer_submit = false;
+            var d: u32 = 0;
+            while (d < n_limit) : (d += 1) {
+                try self.mtpDraftRecord(state, if (d == 0) seed else 0, pos + d, d != 0);
+                self.decode_cmd.computeBarrier();
+                self.decode_cmd.computeToTransferBarrier();
+                const tok_region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = @sizeOf(u32) * @as(vk.c.VkDeviceSize, d), .size = @sizeOf(u32) };
+                vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.argmax_result_buf.handle, mtp.chain_tokens_staging.handle, 1, &tok_region);
+                try self.mtpRecordEmbedGather(self.argmax_result_buf, 0, scratch_hidden, d + 1);
+                if (d + 1 < n_limit) try self.mtpRecordEmbedGather(self.argmax_result_buf, 0, mtp.embed_buf, 0);
+                self.decode_cmd.computeBarrier();
+            }
+            n_drafted = n_limit;
+            mtp.draft_ns += timer.lap();
+            T = n_drafted + 1;
+            try self.mtpTargetBatch(state, target_tokens[0..T], pos, predictions[0..T], true);
+            const ct_ptr: [*]const u32 = @ptrCast(@alignCast(mtp.chain_tokens_staging.mapped.?));
+            for (0..n_drafted) |k| drafts[k] = ct_ptr[k];
+            // Same contract as the sequential path: nothing is drafted past EOS.
+            if (n_drafted > 1 and drafts[0] == eos_id) n_drafted = 1;
+            @memcpy(target_tokens[1 .. 1 + n_drafted], drafts[0..n_drafted]);
+            mtp.target_ns += timer.lap();
+        } else {
+            var fed = seed;
+            while (n_drafted < n_limit) : (n_drafted += 1) {
+                const draft = try self.mtpDraftStep(state, fed, pos + n_drafted);
+                drafts[n_drafted] = draft;
+                fed = draft;
+                if (draft == eos_id) {
+                    n_drafted += 1;
+                    break;
+                }
+            }
+            mtp.draft_ns += timer.lap();
+
+            @memcpy(target_tokens[1 .. 1 + n_drafted], drafts[0..n_drafted]);
+            T = n_drafted + 1;
+            try self.mtpTargetBatch(state, target_tokens[0..T], pos, predictions[0..T], false);
+            mtp.target_ns += timer.lap();
+        }
 
         var accepted: u32 = 0;
         while (accepted < n_drafted and predictions[accepted] == drafts[accepted]) : (accepted += 1) {}
         const committed = accepted + 1;
-        // Restore copies (when a draft was rejected) and the NextN catch-up share
-        // one command buffer.
-        if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
-        try self.decode_cmd.reset();
-        try self.decode_cmd.beginOneTime();
-        if (committed < T) {
-            try self.mtpRecordRestore(committed);
-            self.decode_cmd.transferToComputeBarrier();
-        }
         state.position = pos + committed;
+        // Restore copies (when a draft was rejected) and the NextN catch-up share
+        // one command buffer. Chained cycle: deferred into the next cycle's
+        // submission (or flushed by whatever touches the state first).
+        if (!chained) {
+            if (self.instance.push_descriptor_fn == null) _ = vk.c.vkResetDescriptorPool(self.instance.device, self.shared_pool, 0);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.beginOneTime();
+            if (committed < T) {
+                try self.mtpRecordRestore(committed);
+                self.decode_cmd.transferToComputeBarrier();
+            }
+        }
         mtp.restore_ns += timer.lap();
 
         // Pair rows for the committed tokens: token r pairs with h preceding it.
@@ -29955,13 +30168,33 @@ pub const InferenceEngine = struct {
             @memcpy(mtp.pair_h[row * hidden_dim ..][0..hidden_dim], mtp.target_h[(row - 1) * hidden_dim ..][0..hidden_dim]);
         }
         @memcpy(mtp.pending_h, mtp.target_h[(committed - 1) * hidden_dim ..][0..hidden_dim]);
-        {
+        if (chained) {
+            // Stage the h rows for the catch-up now; the copies and the NextN
+            // batch are recorded by the next cycle (mtpRecordPending).
+            if (committed >= 2) {
+                const hs_ptr: [*]f32 = @ptrCast(@alignCast(mtp.prime_h_staging.mapped.?));
+                @memcpy(hs_ptr[0 .. @as(usize, committed - 1) * hidden_dim], mtp.pair_h[hidden_dim .. @as(usize, committed) * hidden_dim]);
+            }
+            mtp.pending_committed = committed;
+            mtp.pending_t = T;
+            mtp.pending_pos = pos;
+            mtp.pending_tokens = target_tokens;
+        } else {
             const hs_ptr: [*]f32 = @ptrCast(@alignCast(mtp.prime_h_staging.mapped.?));
             @memcpy(hs_ptr[0 .. @as(usize, committed) * hidden_dim], mtp.pair_h[0 .. @as(usize, committed) * hidden_dim]);
+            try self.mtpRunNextnBatch(state, target_tokens[0..committed], pos, .host_rows, true);
         }
-        try self.mtpRunNextnBatch(state, target_tokens[0..committed], pos, .host_rows, true);
         mtp.catchup_ns += timer.lap();
 
+        // Per-position acceptance estimates (exponential moving averages).
+        const alpha: f32 = 0.1;
+        if (n_drafted >= 1) mtp.ema_p1 += alpha * ((if (accepted >= 1) @as(f32, 1.0) else @as(f32, 0.0)) - mtp.ema_p1);
+        if (n_drafted >= 2 and accepted >= 1) mtp.ema_p2 += alpha * ((if (accepted >= 2) @as(f32, 1.0) else @as(f32, 0.0)) - mtp.ema_p2);
+        if (n_drafted >= 3 and accepted >= 2) {
+            if (mtp.p3_observed == 0) mtp.ema_p3 = mtp.ema_p2; // seed the estimate from the second position
+            mtp.ema_p3 += alpha * ((if (accepted >= 3) @as(f32, 1.0) else @as(f32, 0.0)) - mtp.ema_p3);
+            mtp.p3_observed += 1;
+        }
         mtp.cycles += 1;
         mtp.drafted += n_drafted;
         mtp.accepted += accepted;
@@ -30707,6 +30940,23 @@ const MtpVkState = struct {
     h_upload_pending: bool = false,
     spec_argmax_result_buf: Buffer, // [mtp_max_verify] u32
     spec_argmax_staging: Buffer,
+    chain_tokens_staging: Buffer, // host-visible [mtp_max_draft] u32: draft tokens of a chained cycle
+    chain_ok: bool = false, // chained cycle available (embed_gather shader + supported embedding type)
+    // Deferred restore + NextN catch-up of the last chained cycle: recorded at
+    // the start of the next cycle's command buffer (or flushed before any other
+    // engine work touches the model state). 0 = nothing pending.
+    pending_committed: u32 = 0,
+    pending_t: u32 = 0,
+    pending_pos: u32 = 0,
+    pending_tokens: [mtp_max_verify]u32 = @splat(0),
+    // Draft-count policy: ZINC_MTP_DRAFTS pins it (default 2); `auto` drafts 2
+    // and a third only while the running per-position acceptance estimates say
+    // the extra accepted tokens outweigh the wider (4-row) verification pass.
+    draft_fixed: ?u32 = null,
+    ema_p1: f32 = 0.7,
+    ema_p2: f32 = 0.5,
+    ema_p3: f32 = 0.4,
+    p3_observed: u32 = 0, // cycles that drafted a third token (ema_p3 is a guess before ~8)
     spec_argmax_sets: [mtp_max_verify]vk.c.VkDescriptorSet,
     // NextN prime / catch-up batches (rows = tokens in one chunk).
     prime_chunk_rows: u32,
@@ -30751,6 +31001,7 @@ const MtpVkState = struct {
         self.spec_q8_1_buf.deinit();
         self.spec_argmax_result_buf.deinit();
         self.spec_argmax_staging.deinit();
+        self.chain_tokens_staging.deinit();
         self.prime_embed_rows.deinit();
         self.prime_concat_rows.deinit();
         self.prime_h_rows.deinit();
@@ -30769,10 +31020,17 @@ const mtp_prime_chunk_rows: u32 = 64;
 const mtp_prefill_capture_max_rows: u32 = 2048;
 
 /// ZINC_MTP_DRAFTS (default 2, clamped to 1..mtp_max_draft).
-fn mtpDraftLimitFromEnv() u32 {
+/// Draft count from ZINC_MTP_DRAFTS: 1-3 fixed (default 2); `auto` returns
+/// null and lets mtpCycle pick 2 or 3 per cycle from the running acceptance.
+fn mtpDraftsFixedFromEnv() ?u32 {
     const v = std.posix.getenv("ZINC_MTP_DRAFTS") orelse return 2;
+    if (std.ascii.eqlIgnoreCase(v, "auto")) return null;
     const parsed = std.fmt.parseInt(u32, v, 10) catch return 2;
     return @min(mtp_max_draft, @max(@as(u32, 1), parsed));
+}
+/// History slots to allocate: the fixed count, or the adaptive maximum.
+fn mtpDraftLimitFromEnv() u32 {
+    return mtpDraftsFixedFromEnv() orelse mtp_max_draft;
 }
 
 /// Device bytes the NextN runtime state will need (reserved in the context budget).
