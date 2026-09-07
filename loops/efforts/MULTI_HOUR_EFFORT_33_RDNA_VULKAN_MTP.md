@@ -165,6 +165,26 @@ re-reads accounting for most of the rest. Acceptance is prompt-dependent
 and the server path; longer generations with lower acceptance land in the
 low 50s.
 
+## Validation with MTP enabled (2026-09-07, node `hft`, `ZINC_MTP` default on)
+
+- `zig build test -Dbackend=vulkan`: 617 passed, 1 skipped.
+- `bun test` on the node (Vulkan build, node model files via
+  `ZINC_QWEN3_8B_MODEL` / `ZINC_QWEN36_35B_MODEL` / `ZINC_QWEN38_27B_MODEL`):
+  638 passed, 3 skipped, 1 failed. The three CLI smokes (Qwen3.5 9B, Qwen3.6
+  35B-A3B, Qwen3.8 27B: first token 11751, "Paris") pass through the MTP
+  generate loop. The failure was `source_hygiene` (a comment naming the
+  comparison runtime), fixed in `b0de412c`. The skips are the managed-cache
+  chat smokes (the test looks in the macOS cache path) and the API smoke,
+  which needs a live server URL.
+- Against a live Qwen 3.8 27B server (`ZINC_API_BASE_URL=http://127.0.0.1:<port>/v1`):
+  `OpenAI API smoke > external server` passes and
+  `bun tests/test_openai_sdk.ts --base-url ...` passes all 13 checks
+  (non-streaming, streaming, sequential and overlapped streams, health under
+  load, completions, error format, 404, OpenAI SDK streaming and
+  non-streaming). Gotcha: the CLI smokes cannot run while a server holds the
+  GPU (the process lock makes them wait out their timeout), so run the
+  server-facing tests separately.
+
 ## Known gaps / follow-ups
 
 - **Cached-prefix sessions**: when the server reuses a prompt prefix
