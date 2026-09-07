@@ -1,0 +1,146 @@
+#version 460
+#include "dp4a_compat.glsl"
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Q4_K x Q8_1 column-parallel matvec for tiny token batches (NextN/MTP
+// verification, 2-4 columns). Same weight decode and int8 dot products as
+// dmmv_q4k_q8_1.comp; the Q8_1 activation blocks are laid out
+// [num_cols][K/32] and every decoded weight sub-block is applied to all
+// columns, so the f32 dequant + FMA cost that makes the f32 column kernels
+// ALU-bound at 3 columns is replaced by one dp4a per 4 weights per column.
+// Output is [num_cols][M].
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint num_cols;
+};
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { uint a_u32[]; };
+layout(set = 0, binding = 1) readonly buffer VectorXQ81 { uint x_q81[]; };
+layout(set = 0, binding = 2) writeonly buffer VectorY { float y_data[]; };
+
+const uint Q4K_BLOCK_U32 = 36u;
+const uint Q8_1_U32_PER_BLOCK = 9u;
+layout(constant_id = 0) const uint NUM_ROWS = 2u;
+const uint MAX_COLS = 4u;
+
+shared float s_sg_sums[NUM_ROWS * MAX_COLS][4];
+
+uint q4k_scale_byte(uint sc0, uint sc1, uint sc2, uint idx) {
+    uint word = (idx < 4u) ? sc0 : ((idx < 8u) ? sc1 : sc2);
+    return (word >> ((idx & 3u) * 8u)) & 0xFFu;
+}
+
+void q4k_scale_min(uint sb, uint sc0, uint sc1, uint sc2, out float sc_val, out float mn_val) {
+    if (sb < 4u) {
+        const uint b0 = q4k_scale_byte(sc0, sc1, sc2, sb);
+        const uint b4 = q4k_scale_byte(sc0, sc1, sc2, sb + 4u);
+        sc_val = float(b0 & 63u);
+        mn_val = float(b4 & 63u);
+    } else {
+        const uint b = q4k_scale_byte(sc0, sc1, sc2, sb);
+        const uint b4 = q4k_scale_byte(sc0, sc1, sc2, sb + 4u);
+        const uint bm4 = q4k_scale_byte(sc0, sc1, sc2, sb - 4u);
+        sc_val = float((b4 & 0xFu) | ((bm4 >> 6) << 4));
+        mn_val = float(((b4 >> 4) & 0xFu) | ((b >> 6) << 4));
+    }
+}
+
+uint q4k_pack_nibbles(uint qs_word, bool high) {
+    if (high) qs_word >>= 4u;
+    const uint q0 = qs_word & 0xFu;
+    const uint q1 = (qs_word >> 8u) & 0xFu;
+    const uint q2 = (qs_word >> 16u) & 0xFu;
+    const uint q3 = (qs_word >> 24u) & 0xFu;
+    return q0 | (q1 << 8u) | (q2 << 16u) | (q3 << 24u);
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint row0 = gl_WorkGroupID.x * NUM_ROWS;
+    if (row0 >= M) return;
+    const uint blocks_per_row = K / 256u;
+    const uint a_base = a_offset / 4u;
+    const uint x_base_block = x_offset / 36u;
+    const uint x_col_blocks = K / 32u;
+    const uint y_base = y_offset / 4u;
+    const uint sb = tid & 7u;
+    const uint block_lane = tid >> 3u;
+    const uint q_group = sb >> 1u;
+    const bool high = (sb & 1u) != 0u;
+
+    float sums[NUM_ROWS][MAX_COLS];
+    [[unroll]] for (uint r = 0u; r < NUM_ROWS; r++) {
+        [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) sums[r][c] = 0.0;
+    }
+
+    for (uint b = block_lane; b < blocks_per_row; b += 8u) {
+        // Q8_1 sub-block (32 activations) shared by every row of this workgroup.
+        const uint x_sub = b * 8u + sb;
+        int xq[MAX_COLS][8];
+        vec2 xds[MAX_COLS];
+        [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) {
+            if (c < num_cols) {
+                const uint xb = (x_base_block + c * x_col_blocks + x_sub) * Q8_1_U32_PER_BLOCK;
+                [[unroll]] for (uint p = 0u; p < 8u; p++) xq[c][p] = int(x_q81[xb + p]);
+                xds[c] = unpackHalf2x16(x_q81[xb + 8u]);
+            }
+        }
+        [[unroll]] for (uint r = 0u; r < NUM_ROWS; r++) {
+            const uint row = row0 + r;
+            if (row >= M) break;
+            const uint blk_u32 = a_base + row * blocks_per_row * Q4K_BLOCK_U32 + b * Q4K_BLOCK_U32;
+            const uint d_dmin = a_u32[blk_u32];
+            const float d_val = unpackHalf2x16(d_dmin & 0xFFFFu).x;
+            const float dmin_val = unpackHalf2x16(d_dmin >> 16).x;
+            const uint sc0 = a_u32[blk_u32 + 1u];
+            const uint sc1 = a_u32[blk_u32 + 2u];
+            const uint sc2 = a_u32[blk_u32 + 3u];
+            float sc_val;
+            float mn_val;
+            q4k_scale_min(sb, sc0, sc1, sc2, sc_val, mn_val);
+            const float dsc = d_val * sc_val;
+            const float dmn = dmin_val * mn_val;
+            const uint qs_base = blk_u32 + 4u + q_group * 8u;
+            int qw[8];
+            [[unroll]] for (uint p = 0u; p < 8u; p++) qw[p] = int(q4k_pack_nibbles(a_u32[qs_base + p], high));
+            [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) {
+                if (c < num_cols) {
+                    int isum = 0;
+                    [[unroll]] for (uint p = 0u; p < 8u; p++) {
+                        isum = dotPacked4x8AccSatEXT(qw[p], xq[c][p], isum);
+                    }
+                    sums[r][c] += xds[c].x * dsc * float(isum) - dmn * xds[c].y;
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0u; r < NUM_ROWS; r++) {
+        const uint row = row0 + r;
+        if (row >= M) break;
+        [[unroll]] for (uint c = 0u; c < MAX_COLS; c++) {
+            if (c < num_cols) {
+                float s = subgroupAdd(sums[r][c]);
+                if (gl_NumSubgroups > 1u) {
+                    if (subgroupElect()) s_sg_sums[r * MAX_COLS + c][gl_SubgroupID] = s;
+                    barrier();
+                    if (tid == 0u) {
+                        for (uint sg = 1u; sg < gl_NumSubgroups; sg++) s += s_sg_sums[r * MAX_COLS + c][sg];
+                    }
+                    barrier();
+                }
+                if (tid == 0u) y_data[y_base + c * M + row] = s;
+            }
+        }
+    }
+}

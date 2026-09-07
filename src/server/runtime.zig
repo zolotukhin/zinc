@@ -100,6 +100,77 @@ pub fn decodeStep(
     }
 }
 
+/// NextN/MTP speculative decoding (Vulkan backend). Greedy requests only.
+pub const mtp_max_draft: u32 = if (gpu.is_vulkan) InferenceEngine.mtp_max_draft_tokens else 3;
+
+/// Reset per-request MTP state; call before the prompt prefill.
+pub fn mtpBeginRequest(_engine: *InferenceEngine) void {
+    if (comptime gpu.is_vulkan) _engine.mtpBeginRequest();
+}
+
+/// Prime the NextN block over the freshly prefilled prompt. Returns false when
+/// MTP is unavailable (env off, model without NextN block, partial prefill).
+pub fn mtpPrime(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens: []const u32) bool {
+    if (comptime gpu.is_vulkan) {
+        if (!_engine.mtpEnabled()) return false;
+        if (!(_engine.mtpPrepare() catch false)) return false;
+        return _engine.mtpPrime(_state, _prompt_tokens) catch false;
+    }
+    return false;
+}
+
+/// Token source that replaces `decodeStep` + greedy `sample` with NextN/MTP
+/// cycles when active, and falls back to the plain path otherwise.
+pub const MtpSource = struct {
+    active: bool = false,
+    queue: [mtp_max_draft + 1]u32 = undefined,
+    n: u32 = 0,
+    i: u32 = 0,
+    eos_id: u32 = std.math.maxInt(u32),
+
+    /// Feed `prev` to the model and return the next token. `tokens_remaining`
+    /// is the number of tokens the request may still produce (>= 1).
+    pub fn step(
+        self: *MtpSource,
+        _engine: *InferenceEngine,
+        _state: *DecodeState,
+        prev: u32,
+        tokens_remaining: u32,
+        _params: SamplingParams,
+        _random: std.Random,
+    ) !u32 {
+        if (comptime gpu.is_vulkan) {
+            if (self.active) {
+                if (self.i < self.n) {
+                    const t = self.queue[self.i];
+                    self.i += 1;
+                    return t;
+                }
+                const context_room = _engine.max_context_tokens -| _state.position;
+                if (tokens_remaining >= 2 and context_room > 2) {
+                    const max_drafts: u32 = @min(mtp_max_draft, @min(tokens_remaining - 1, context_room - 2));
+                    const r = try _engine.mtpCycle(_state, prev, _state.position, max_drafts, self.eos_id);
+                    self.n = 0;
+                    self.i = 0;
+                    var k: u32 = 0;
+                    while (k < r.n_accepted) : (k += 1) {
+                        self.queue[self.n] = r.drafts[k];
+                        self.n += 1;
+                    }
+                    self.queue[self.n] = r.next_token;
+                    self.n += 1;
+                    self.i = 1;
+                    return self.queue[0];
+                }
+                // Last token of the request: plain step (the request ends here).
+                self.active = false;
+            }
+        }
+        try decodeStep(_engine, _state, prev, true);
+        return sample(_engine, _state, _params, _random);
+    }
+};
+
 /// Sample the next token from the model's logit distribution.
 /// @param _engine Inference engine holding the current logits.
 /// @param _state Decode state used to retrieve generated-token history for repetition penalty.

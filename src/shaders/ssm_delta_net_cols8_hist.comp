@@ -51,6 +51,13 @@ layout(set = 0, binding = 6) writeonly buffer Output {
     float out_data[];
 };
 
+// NextN/MTP rollback history: the recurrent state after token t (t < n_tok - 1)
+// is stored at hist[t * hist_stride + ...] so a rejected draft restores with
+// one copy instead of per-token delta dispatches and state copies.
+layout(set = 0, binding = 7) writeonly buffer History {
+    float hist[];
+};
+
 layout(push_constant) uniform PushConstants {
     uint d_inner;
     uint dt_rank;
@@ -66,6 +73,7 @@ layout(push_constant) uniform PushConstants {
     uint ab_stride_tok;
     uint y_stride_tok;
     uint ab_ksplit;      // alpha/beta partial count, laid out [chunk][head] (1 = plain)
+    uint hist_stride;    // floats per history slot (== state size in floats)
 };
 
 const uint LANES_PER_ROW = 16u;
@@ -198,6 +206,10 @@ void main() {
         }
 
         if (t + 1u < n_tok) {
+            [[unroll]] for (uint r = 0u; r < COLS_PER_LANE; r++) {
+                uint col = r * LANES_PER_ROW + lane;
+                hist[t * hist_stride + row_base + col] = reg_state[r];
+            }
             barrier();
         }
     }

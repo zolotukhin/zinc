@@ -273,6 +273,14 @@ pub const Instance = struct {
                 }
             }
         }
+        if (std.posix.getenv("ZINC_VK_QUEUE_FAMILY")) |v| {
+            if (std.fmt.parseInt(u32, v, 10) catch null) |want| {
+                if (want < qf_count and (qf_props[want].queueFlags & vk.c.VK_QUEUE_COMPUTE_BIT) != 0) {
+                    log.info("Vulkan queue family override: {d} (ZINC_VK_QUEUE_FAMILY)", .{want});
+                    compute_family = want;
+                }
+            }
+        }
         const compute_queue_family = compute_family orelse {
             log.err("No compute queue family found", .{});
             return error.NoComputeQueue;
@@ -337,9 +345,13 @@ pub const Instance = struct {
             .cooperativeMatrixRobustBufferAccess = vk.c.VK_FALSE,
         };
 
+        const device_chain_head: ?*const anyopaque = if (device_caps.cooperative_matrix)
+            @ptrCast(&cooperative_matrix_features)
+        else
+            @ptrCast(&subgroup_extended_types_features);
         const device_create_info = vk.c.VkDeviceCreateInfo{
             .sType = vk.c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = if (device_caps.cooperative_matrix) &cooperative_matrix_features else &subgroup_extended_types_features,
+            .pNext = device_chain_head,
             .flags = 0,
             .queueCreateInfoCount = 1,
             .pQueueCreateInfos = &queue_create_info,

@@ -2462,6 +2462,7 @@ fn handleChatCompletions(
         server_state.chat_reuse_cache.matchingPrefixLen(parsed.session_id, resources.model_path, prompt_tokens, std.time.nanoTimestamp())
     else
         0;
+    runtime.mtpBeginRequest(engine);
     const prefill_start_ns = std.time.nanoTimestamp();
     const prefill_work_tokens = if (reused_prefix_len > 0)
         prompt_tokens.len - reused_prefix_len
@@ -2501,6 +2502,12 @@ fn handleChatCompletions(
     const prefill_end_ns = std.time.nanoTimestamp();
     logPrefillTiming(prefill_work_tokens, prefill_start_ns, prefill_end_ns);
     server_state.setActiveContextTokens(state.position);
+    // NextN/MTP speculative decoding: greedy requests whose whole prompt was
+    // prefilled in this request (no cached-prefix reuse yet).
+    var mtp_src = runtime.MtpSource{ .eos_id = tokenizer.eos_id };
+    if (reused_prefix_len == 0 and !sampling.requiresLogitsReadback()) {
+        mtp_src.active = runtime.mtpPrime(engine, &state, prompt_tokens);
+    }
 
     if (parsed.stream) {
         // Decode loop with buffered stop detection.
@@ -2552,11 +2559,11 @@ fn handleChatCompletions(
                 if (isReplacementArtifact(tok_text)) {
                     if (generated < max_tokens) {
                         if (conn.isPeerClosed()) return;
-                        runtime.decodeStep(engine, &state, prev_token, true) catch break;
-                        processed_generated_tokens.append(allocator, prev_token) catch {};
+                        const fed_token = prev_token;
+                        prev_token = mtp_src.step(engine, &state, prev_token, max_tokens - generated, sampling, random) catch break;
+                        processed_generated_tokens.append(allocator, fed_token) catch {};
                         server_state.setActiveContextTokens(state.position);
                         if (conn.isPeerClosed()) return;
-                        prev_token = runtime.sample(engine, &state, sampling, random);
                         state.generated_tokens.append(allocator, prev_token) catch {};
                         generated += 1;
                         continue;
@@ -2690,11 +2697,11 @@ fn handleChatCompletions(
                 // Generate next token
                 if (generated < max_tokens) {
                     if (conn.isPeerClosed()) return;
-                    runtime.decodeStep(engine, &state, prev_token, true) catch break;
-                    processed_generated_tokens.append(allocator, prev_token) catch {};
+                    const fed_token = prev_token;
+                    prev_token = mtp_src.step(engine, &state, prev_token, max_tokens - generated, sampling, random) catch break;
+                    processed_generated_tokens.append(allocator, fed_token) catch {};
                     server_state.setActiveContextTokens(state.position);
                     if (conn.isPeerClosed()) return;
-                    prev_token = runtime.sample(engine, &state, sampling, random);
                     state.generated_tokens.append(allocator, prev_token) catch {};
                 } else break;
             }
@@ -2792,10 +2799,10 @@ fn handleChatCompletions(
                 var decode_buf2: [256]u8 = undefined;
                 const tok_utf8 = tokenizer.decodeToken(prev, &decode_buf2);
                 if (isReplacementArtifact(tok_utf8)) {
-                    runtime.decodeStep(engine, &state, prev, true) catch break;
-                    processed_generated_tokens.append(allocator, prev) catch {};
+                    const fed_token = prev;
+                    prev = mtp_src.step(engine, &state, prev, max_tokens - ns_gen, sampling, random) catch break;
+                    processed_generated_tokens.append(allocator, fed_token) catch {};
                     server_state.setActiveContextTokens(state.position);
-                    prev = runtime.sample(engine, &state, sampling, random);
                     state.generated_tokens.append(allocator, prev) catch {};
                     continue;
                 }
@@ -2807,10 +2814,10 @@ fn handleChatCompletions(
                 } else false;
                 if (hit) break;
                 if (ns_gen >= max_tokens) break;
-                runtime.decodeStep(engine, &state, prev, true) catch break;
-                processed_generated_tokens.append(allocator, prev) catch {};
+                const fed_token = prev;
+                prev = mtp_src.step(engine, &state, prev, max_tokens - ns_gen, sampling, random) catch break;
+                processed_generated_tokens.append(allocator, fed_token) catch {};
                 server_state.setActiveContextTokens(state.position);
-                prev = runtime.sample(engine, &state, sampling, random);
                 state.generated_tokens.append(allocator, prev) catch {};
             }
             if (!nsIsEog(tokenizer, prev) and ns_gen >= max_tokens and findStreamingStopStart(text_buf.items, stop_strs) == null) {

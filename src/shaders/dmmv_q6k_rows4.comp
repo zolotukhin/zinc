@@ -1,0 +1,142 @@
+#version 460
+// ZINC — Q6_K dequant-matvec, NUM_ROWS=4 sibling of dmmv_q6k_wide (NUM_ROWS=8).
+//
+// Mid-width decode projections (M == hidden_dim, e.g. the dense-hybrid 27B
+// FFN down and attention o-proj at M=5120) launch only M/2 wave64 workgroups
+// with the 2-row kernel and each workgroup re-reads the whole activation
+// vector; 4 rows per workgroup halves that re-read traffic while keeping
+// enough waves in flight (8 rows measured slower on RDNA4 for these shapes).
+// Same bindings, push constants and acc_mode semantics as dmmv_q6k.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Weight { uint8_t w[]; };
+layout(set = 0, binding = 1) readonly buffer Input  { vec4 x_v4[]; };
+layout(set = 0, binding = 2) buffer Output { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint M;
+    uint K;
+    uint a_offset;
+    uint x_offset;
+    uint y_offset;
+    uint acc_mode;
+};
+
+const uint NUM_ROWS = 4u;
+const uint LANES_PER_BLOCK = 16u;
+const uint BLOCK_BYTES = 210u;
+
+shared float s_sg_sums[4];
+
+float fp16_to_fp32(uint h) {
+    return unpackHalf2x16(h).x;
+}
+
+float block_dot_q6k(uint bb, uint half_id, uint e_start, uint is,
+                    vec4 bx0, vec4 bx32, vec4 bx64, vec4 bx96) {
+    uint d_bits = uint(w[bb + 208u]) | (uint(w[bb + 209u]) << 8);
+    float d = fp16_to_fp32(d_bits);
+
+    uint ql_base = bb + half_id * 64u;
+    uint qh_base = bb + 128u + half_id * 32u;
+    uint sc_base = bb + 192u + half_id * 8u;
+
+    uint b_s0 = uint(w[sc_base + is]);
+    uint b_s2 = uint(w[sc_base + is + 2u]);
+    uint b_s4 = uint(w[sc_base + is + 4u]);
+    uint b_s6 = uint(w[sc_base + is + 6u]);
+    float s0 = (b_s0 >= 128u) ? float(b_s0) - 256.0 : float(b_s0);
+    float s2 = (b_s2 >= 128u) ? float(b_s2) - 256.0 : float(b_s2);
+    float s4 = (b_s4 >= 128u) ? float(b_s4) - 256.0 : float(b_s4);
+    float s6 = (b_s6 >= 128u) ? float(b_s6) - 256.0 : float(b_s6);
+
+    float ds0 = d * s0;
+    float ds2 = d * s2;
+    float ds4 = d * s4;
+    float ds6 = d * s6;
+    float sum = 0.0;
+
+    for (uint li = 0u; li < 4u; li++) {
+        uint l = e_start + li;
+        uint ql_lo = uint(w[ql_base + l]);
+        uint ql_hi = uint(w[ql_base + l + 32u]);
+        uint qh_v = uint(w[qh_base + l]);
+
+        uint q1 = (ql_lo & 0xFu) | (((qh_v >> 0) & 3u) << 4);
+        uint q2 = (ql_hi & 0xFu) | (((qh_v >> 2) & 3u) << 4);
+        uint q3 = (ql_lo >> 4) | (((qh_v >> 4) & 3u) << 4);
+        uint q4 = (ql_hi >> 4) | (((qh_v >> 6) & 3u) << 4);
+
+        sum += ds0 * (float(q1) - 32.0) * bx0[li];
+        sum += ds2 * (float(q2) - 32.0) * bx32[li];
+        sum += ds4 * (float(q3) - 32.0) * bx64[li];
+        sum += ds6 * (float(q4) - 32.0) * bx96[li];
+    }
+
+    return sum;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+    uint x_v4_base = x_offset / 16u;
+    uint y_base = y_offset / 4u;
+    uint blocks_per_row = K / 256u;
+
+    uint itid = tid % LANES_PER_BLOCK;
+    uint ix = tid / LANES_PER_BLOCK;
+
+    uint half_id = itid / 8u;
+    uint local_id = itid % 8u;
+    uint e_start = local_id * 4u;
+    uint is = e_start / 16u;
+    uint x_v4_in_block_base = (half_id * 128u + e_start) / 4u;
+
+    uint row_base = wg_id * NUM_ROWS;
+    if (row_base >= M) return;
+
+    float sums[NUM_ROWS];
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        sums[r] = 0.0;
+    }
+
+    for (uint b = ix; b < blocks_per_row; b += 4u) {
+        uint x_v4_block = x_v4_base + (b * 256u) / 4u + x_v4_in_block_base;
+        vec4 bx0 = x_v4[x_v4_block];
+        vec4 bx32 = x_v4[x_v4_block + 8u];
+        vec4 bx64 = x_v4[x_v4_block + 16u];
+        vec4 bx96 = x_v4[x_v4_block + 24u];
+
+        for (uint r = 0u; r < NUM_ROWS; r++) {
+            uint row = row_base + r;
+            if (row >= M) break;
+            uint row_offset = a_offset + row * blocks_per_row * BLOCK_BYTES;
+            sums[r] += block_dot_q6k(row_offset + b * BLOCK_BYTES, half_id, e_start, is, bx0, bx32, bx64, bx96);
+        }
+    }
+
+    for (uint r = 0u; r < NUM_ROWS; r++) {
+        uint row = row_base + r;
+        if (row >= M) break;
+
+        float sum = subgroupAdd(sums[r]);
+        if (gl_NumSubgroups > 1u) {
+            if (subgroupElect()) s_sg_sums[gl_SubgroupID] = sum;
+            barrier();
+            if (tid == 0u) {
+                for (uint sg = 1u; sg < gl_NumSubgroups; sg++) sum += s_sg_sums[sg];
+            }
+            barrier();
+        }
+        if (tid == 0u) {
+            if (acc_mode != 0u)
+                y[y_base + row] += sum;
+            else
+                y[y_base + row] = sum;
+        }
+    }
+}

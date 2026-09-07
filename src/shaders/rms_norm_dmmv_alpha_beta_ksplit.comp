@@ -1,0 +1,115 @@
+#version 460
+// ZINC — fused RMS norm + f32 alpha/beta DMMV, K-split across workgroups.
+//
+// Decode sibling of rms_norm_dmmv_q4k_alpha_beta for the dense-hybrid 27B
+// (f32 alpha/beta, dt_rank=48 rows, K=5120). The one-workgroup-per-row form
+// launches only dt_rank waves, each streaming ~100 KB alone, so the dispatch is
+// latency-bound (~24 us/layer). Here the grid is (M rows, k_split chunks): every
+// workgroup derives the full-vector RMS (an L2-resident 20 KB re-read) and then
+// produces a partial alpha/beta dot over its K chunk. Partials are laid out
+// [chunk][row]; the delta-net shaders sum the k_split partials in fixed order so
+// the result stays deterministic. Row-0 workgroups also write their chunk of
+// the normalized hidden vector for the wqkv/z projections that follow.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M;          // alpha rows == beta rows (dt_rank)
+    uint K;          // hidden_dim (multiple of 4 * k_split)
+    uint eps_bits;   // RMS norm epsilon (f32 bits)
+    uint k_split;    // number of K chunks (gl_NumWorkGroups.y)
+};
+
+layout(set = 0, binding = 0) readonly  buffer Hidden   { vec4  hidden_v4[]; };
+layout(set = 0, binding = 1) readonly  buffer NormW    { vec4  norm_w_v4[]; };
+layout(set = 0, binding = 2) readonly  buffer AlphaW   { vec4  alpha_w_v4[]; };
+layout(set = 0, binding = 3) readonly  buffer BetaW    { vec4  beta_w_v4[];  };
+layout(set = 0, binding = 4) writeonly buffer NormOut  { vec4  norm_out_v4[]; };
+layout(set = 0, binding = 5) writeonly buffer AlphaOut { float alpha_out[]; };
+layout(set = 0, binding = 6) writeonly buffer BetaOut  { float beta_out[];  };
+
+shared float s_reduce[16];
+shared float s_rms_inv;
+shared float s_alpha_sum;
+shared float s_beta_sum;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.x;
+    uint chunk = gl_WorkGroupID.y;
+    float eps = uintBitsToFloat(eps_bits);
+    uint K_v4 = K / 4u;
+    uint chunk_v4 = K_v4 / k_split;
+    uint c0 = chunk * chunk_v4;
+
+    // Full-vector RMS (every workgroup; the hidden vector is L2-resident).
+    float sum_sq = 0.0;
+    for (uint i = tid; i < K_v4; i += 64u) {
+        vec4 v = hidden_v4[i];
+        sum_sq += dot(v, v);
+    }
+    sum_sq = subgroupAdd(sum_sq);
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            s_reduce[gl_SubgroupID] = sum_sq;
+        }
+        barrier();
+        if (tid == 0u) {
+            float merged = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                merged += s_reduce[sg];
+            }
+            sum_sq = merged;
+        }
+    }
+    if (tid == 0u) {
+        s_rms_inv = inversesqrt(sum_sq / float(K) + eps);
+    }
+    barrier();
+    float rms_inv = s_rms_inv;
+
+    if (row >= M) return;
+
+    if (row == 0u) {
+        for (uint i = c0 + tid; i < c0 + chunk_v4; i += 64u) {
+            norm_out_v4[i] = norm_w_v4[i] * (hidden_v4[i] * rms_inv);
+        }
+    }
+
+    float sum_alpha = 0.0;
+    float sum_beta = 0.0;
+    uint row_base_v4 = row * K_v4;
+    for (uint i = c0 + tid; i < c0 + chunk_v4; i += 64u) {
+        vec4 nv = norm_w_v4[i] * (hidden_v4[i] * rms_inv);
+        sum_alpha += dot(alpha_w_v4[row_base_v4 + i], nv);
+        sum_beta += dot(beta_w_v4[row_base_v4 + i], nv);
+    }
+    sum_alpha = subgroupAdd(sum_alpha);
+    sum_beta = subgroupAdd(sum_beta);
+    if (gl_NumSubgroups > 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            s_reduce[gl_SubgroupID] = sum_alpha;
+            s_reduce[gl_SubgroupID + 8u] = sum_beta;
+        }
+        barrier();
+        if (tid == 0u) {
+            float merged_alpha = 0.0;
+            float merged_beta = 0.0;
+            for (uint sg = 0u; sg < gl_NumSubgroups; sg++) {
+                merged_alpha += s_reduce[sg];
+                merged_beta += s_reduce[sg + 8u];
+            }
+            s_alpha_sum = merged_alpha;
+            s_beta_sum = merged_beta;
+        }
+        barrier();
+        sum_alpha = s_alpha_sum;
+        sum_beta = s_beta_sum;
+    }
+    if (tid == 0u) {
+        alpha_out[chunk * M + row] = sum_alpha;
+        beta_out[chunk * M + row] = sum_beta;
+    }
+}

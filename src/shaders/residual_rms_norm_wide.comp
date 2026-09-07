@@ -1,0 +1,50 @@
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Wide-workgroup variant of residual_rms_norm.comp for tiny token batches
+// (NextN/MTP verification): 512 threads per row instead of one wave.
+//   hidden[i]   += scale * residual[i];   // in place
+//   norm_out[i]  = weights[i] * hidden[i] * rsqrt(mean(hidden^2) + eps);
+// Dispatch: (n_tokens, 1, 1). Same bindings/push constants as the 64-thread kernel.
+layout(local_size_x = 512) in;
+
+layout(push_constant) uniform PushConstants {
+    uint  n;         // hidden_dim
+    float eps;
+    float scale;
+};
+
+layout(set = 0, binding = 0)          buffer Hidden    { float hidden[];   };
+layout(set = 0, binding = 1) readonly buffer Residual  { float residual[]; };
+layout(set = 0, binding = 2) writeonly buffer NormOut  { float norm_out[]; };
+layout(set = 0, binding = 3) readonly buffer Weights   { float weights[];  };
+
+shared float s_partial[16];
+
+void main() {
+    uint tid   = gl_LocalInvocationID.x;
+    uint token = gl_WorkGroupID.x;
+    uint base  = token * n;
+
+    float sum_sq = 0.0;
+    for (uint i = tid; i < n; i += 512u) {
+        float h = fma(scale, residual[base + i], hidden[base + i]);
+        hidden[base + i] = h;
+        sum_sq += h * h;
+    }
+    float total = subgroupAdd(sum_sq);
+    if (gl_SubgroupInvocationID == 0u) s_partial[gl_SubgroupID] = total;
+    barrier();
+    if (tid == 0u) {
+        float merged = 0.0;
+        for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_partial[sg];
+        s_partial[0] = merged;
+    }
+    barrier();
+    total = s_partial[0];
+    float rms_inv = inversesqrt((total / float(n)) + eps);
+
+    for (uint i = tid; i < n; i += 512u) {
+        norm_out[base + i] = weights[i] * hidden[base + i] * rms_inv;
+    }
+}

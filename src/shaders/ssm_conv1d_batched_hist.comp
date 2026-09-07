@@ -1,0 +1,116 @@
+#version 460
+// ZINC — batched SSM 1D convolution with in-place output.
+//
+// Each invocation owns one channel and walks the prompt-token chunk in order,
+// preserving the exact recurrent conv-state dependency while avoiding one
+// dispatch per token. The input/output buffer is [n_tokens, conv_channels];
+// each element is overwritten with conv1d(input history) * sigmoid(conv1d).
+//
+// Cycle-3 optimization: the recurrent conv state (d_conv-1 values per channel)
+// is cached in shared memory for the duration of the token loop, eliminating
+// per-token global-memory state reads. Each thread owns exactly one channel
+// (no cross-thread sharing), so no barrier is needed inside the loop. Conv
+// kernel weights are also register-cached since they are constant across tokens.
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer QkvData {
+    float qkv_data[];
+};
+
+layout(set = 0, binding = 1) readonly buffer ConvKernelF32 {
+    float conv_kernel_f32[];
+};
+
+layout(set = 0, binding = 1) readonly buffer ConvKernelF16 {
+    float16_t conv_kernel_f16[];
+};
+
+layout(set = 0, binding = 2) buffer ConvState {
+    float state[];
+};
+
+// NextN/MTP rollback history: the conv ring after token t (t < n_tokens - 1)
+// is stored at hist[t * hist_stride + slot * conv_channels + ch].
+layout(set = 0, binding = 3) writeonly buffer ConvHist {
+    float hist[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint conv_channels;
+    uint d_conv;
+    uint kernel_is_f16;
+    uint state_offset;
+    uint n_tokens;
+    uint hist_stride;   // floats per history slot (== (d_conv - 1) * conv_channels)
+};
+
+// Shared memory cache for the conv state: up to 7 slots × 64 threads.
+// Production d_conv=4 → 3 slots × 64 = 192 floats = 768 bytes.
+const uint MAX_D_CONV_1 = 7u;
+shared float s_state[MAX_D_CONV_1 * 64];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint ch = gl_GlobalInvocationID.x;
+
+    bool ch_ok = ch < conv_channels;
+    uint d_conv_1 = d_conv - 1u;
+    uint offset = state_offset;
+
+    // Register-cache conv kernel weights (constant across tokens).
+    float kw[8];
+    for (uint ki = 0u; ki < d_conv; ki++) {
+        uint k_idx = ch * d_conv + ki;
+        kw[ki] = (kernel_is_f16 != 0u)
+            ? float(conv_kernel_f16[k_idx])
+            : conv_kernel_f32[k_idx];
+    }
+
+    // Load conv state from global memory into shared memory (once).
+    // Thread tid owns channel ch — each thread reads/writes only its own
+    // column in s_state, so no barrier is needed inside the token loop.
+    for (uint slot = 0u; slot < d_conv_1; slot++) {
+        s_state[slot * 64u + tid] = ch_ok ? state[slot * conv_channels + ch] : 0.0;
+    }
+    barrier();
+
+    for (uint tok = 0u; tok < n_tokens; tok++) {
+        uint tok_base = tok * conv_channels;
+        float current = ch_ok ? qkv_data[tok_base + ch] : 0.0;
+
+        float sum = 0.0;
+        for (uint ki = 0u; ki < d_conv; ki++) {
+            float sv;
+            if (ki < d_conv_1) {
+                uint slot = offset + ki;
+                if (slot >= d_conv_1) slot -= d_conv_1;
+                sv = s_state[slot * 64u + tid];
+            } else {
+                sv = current;
+            }
+            sum += kw[ki] * sv;
+        }
+
+        float sig = 1.0 / (1.0 + exp(-sum));
+        if (ch_ok) qkv_data[tok_base + ch] = sum * sig;
+        s_state[offset * 64u + tid] = current;
+
+        offset += 1u;
+        if (offset >= d_conv_1) offset = 0u;
+        if (tok + 1u < n_tokens && ch_ok) {
+            for (uint slot = 0u; slot < d_conv_1; slot++) {
+                hist[tok * hist_stride + slot * conv_channels + ch] = s_state[slot * 64u + tid];
+            }
+        }
+    }
+    barrier();
+
+    // Write conv state back to global memory.
+    for (uint slot = 0u; slot < d_conv_1; slot++) {
+        if (ch_ok) state[slot * conv_channels + ch] = s_state[slot * 64u + tid];
+    }
+}

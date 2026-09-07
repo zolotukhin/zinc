@@ -368,6 +368,25 @@ pub const DmmvDispatch = struct {
     pipeline_q6k: ?Pipeline,
     /// Q6K wide-vocab variant (NUM_ROWS=8) for tall LM heads.
     pipeline_q6k_wide: ?Pipeline,
+    /// Q6_K NUM_ROWS=4 variant for M == hidden_dim decode projections, or null.
+    pipeline_q6k_rows4: ?Pipeline,
+    /// Q4_K NUM_ROWS=4 variant for M == hidden_dim decode projections, or null.
+    pipeline_q4k_rows4: ?Pipeline,
+    /// Q6_K 4-rows x 1..4-columns variant for speculative verification batches, or null.
+    pipeline_q6k_rows4_cols: ?Pipeline,
+    /// Q4_K 4-rows x 1..4-columns variant for speculative verification batches, or null.
+    pipeline_q4k_rows4_cols: ?Pipeline,
+    /// NUM_ROWS = 2/8 variants of the column kernels (ZINC_MTP_COLS_ROWS).
+    pipeline_q4k_cols_r2: ?Pipeline,
+    /// Q5_K column matvec (NextN/MTP verification; SSM out projection).
+    pipeline_q5k_rows4_cols: ?Pipeline,
+    pipeline_q4k_cols_r8: ?Pipeline,
+    pipeline_q6k_cols_r2: ?Pipeline,
+    pipeline_q6k_cols_r8: ?Pipeline,
+    /// Fused Q4_K gate+up+SwiGLU for 2-4 column batches (NextN/MTP verification).
+    pipeline_q4k_fused_gate_up_swiglu_cols: ?Pipeline,
+    /// Q4_K x Q8_1 (dp4a) column matvec for 2-4 column batches (NextN/MTP verification).
+    pipeline_q4k_q8_1_cols: ?Pipeline,
     /// MXFP4 pipeline, or null.
     pipeline_mxfp4: ?Pipeline,
     /// Q5_0 pipeline, or null.
@@ -1018,6 +1037,61 @@ pub const DmmvDispatch = struct {
         const q6k_wide_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_wide.spv", .{shader_dir}) catch unreachable;
         const pipeline_q6k_wide = pipeline_mod.createFromSpirvWithOptions(instance, q6k_wide_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
             log.warn("Q6_K wide shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q6k_rows4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_rows4 = pipeline_mod.createFromSpirvWithOptions(instance, q6k_rows4_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q6_K rows4 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q4k_rows4_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows4.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_rows4 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_rows4_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q4_K rows4 shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q6k_rows4_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows4_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_rows4_cols = pipeline_mod.createFromSpirvWithOptions(instance, q6k_rows4_cols_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q6_K rows4 cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q4k_rows4_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows4_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_rows4_cols = pipeline_mod.createFromSpirvWithOptions(instance, q4k_rows4_cols_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q4_K rows4 cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q5k_rows4_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q5k_rows4_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q5k_rows4_cols = pipeline_mod.createFromSpirvWithOptions(instance, q5k_rows4_cols_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q5_K rows4 cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q4k_rows2_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows2_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_cols_r2 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_rows2_cols_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q4_K rows2 cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q4k_rows8_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_rows8_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_cols_r8 = pipeline_mod.createFromSpirvWithOptions(instance, q4k_rows8_cols_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q4_K rows8 cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q6k_rows2_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows2_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_cols_r2 = pipeline_mod.createFromSpirvWithOptions(instance, q6k_rows2_cols_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q6_K rows2 cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q6k_rows8_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q6k_rows8_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q6k_cols_r8 = pipeline_mod.createFromSpirvWithOptions(instance, q6k_rows8_cols_path, 3, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q6_K rows8 cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q4k_fused_gateup_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_fused_gate_up_swiglu_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_fused_gate_up_swiglu_cols = pipeline_mod.createFromSpirvWithOptions(instance, q4k_fused_gateup_cols_path, 4, push_size, &.{}, push_desc_options, allocator) catch |err| blk: {
+            log.warn("Q4_K fused gate/up/SwiGLU cols shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        const q4k_q81_cols_path = std.fmt.bufPrint(&path_buf, "{s}/dmmv_q4k_q8_1_cols.spv", .{shader_dir}) catch unreachable;
+        const pipeline_q4k_q8_1_cols = pipeline_mod.createFromSpirvWithOptions(instance, q4k_q81_cols_path, 3, push_size, &.{}, effective_wave64_options, allocator) catch |err| blk: {
+            log.warn("Q4_K x Q8_1 cols shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
 
@@ -2351,6 +2425,17 @@ pub const DmmvDispatch = struct {
             .pipeline_q5k = pipeline_q5k,
             .pipeline_q6k = pipeline_q6k,
             .pipeline_q6k_wide = pipeline_q6k_wide,
+            .pipeline_q6k_rows4 = pipeline_q6k_rows4,
+            .pipeline_q4k_rows4 = pipeline_q4k_rows4,
+            .pipeline_q6k_rows4_cols = pipeline_q6k_rows4_cols,
+            .pipeline_q4k_rows4_cols = pipeline_q4k_rows4_cols,
+            .pipeline_q4k_cols_r2 = pipeline_q4k_cols_r2,
+            .pipeline_q5k_rows4_cols = pipeline_q5k_rows4_cols,
+            .pipeline_q4k_cols_r8 = pipeline_q4k_cols_r8,
+            .pipeline_q6k_cols_r2 = pipeline_q6k_cols_r2,
+            .pipeline_q6k_cols_r8 = pipeline_q6k_cols_r8,
+            .pipeline_q4k_fused_gate_up_swiglu_cols = pipeline_q4k_fused_gate_up_swiglu_cols,
+            .pipeline_q4k_q8_1_cols = pipeline_q4k_q8_1_cols,
             .pipeline_q8_0 = pipeline_q8_0,
             .pipeline_q8_0_batch = pipeline_q8_0_batch,
             .pipeline_q8_0_kpar_batch = pipeline_q8_0_kpar_batch,
@@ -5893,6 +5978,17 @@ pub const DmmvDispatch = struct {
         if (self.pipeline_q5k) |*p| p.deinit();
         if (self.pipeline_q6k) |*p| p.deinit();
         if (self.pipeline_q6k_wide) |*p| p.deinit();
+        if (self.pipeline_q6k_rows4) |*p| p.deinit();
+        if (self.pipeline_q4k_rows4) |*p| p.deinit();
+        if (self.pipeline_q6k_rows4_cols) |*p| p.deinit();
+        if (self.pipeline_q4k_rows4_cols) |*p| p.deinit();
+        if (self.pipeline_q4k_cols_r2) |*p| p.deinit();
+        if (self.pipeline_q5k_rows4_cols) |*p| p.deinit();
+        if (self.pipeline_q4k_cols_r8) |*p| p.deinit();
+        if (self.pipeline_q6k_cols_r2) |*p| p.deinit();
+        if (self.pipeline_q6k_cols_r8) |*p| p.deinit();
+        if (self.pipeline_q4k_fused_gate_up_swiglu_cols) |*p| p.deinit();
+        if (self.pipeline_q4k_q8_1_cols) |*p| p.deinit();
         if (self.pipeline_q8_0) |*p| p.deinit();
         if (self.pipeline_q8_0_batch) |*p| p.deinit();
         if (self.pipeline_q8_0_kpar_batch) |*p| p.deinit();

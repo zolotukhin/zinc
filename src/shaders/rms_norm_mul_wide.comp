@@ -1,0 +1,55 @@
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Wide-workgroup variant of rms_norm_mul.comp for tiny token batches (the
+// NextN/MTP verification pass runs 2-4 rows): 512 threads per row instead of
+// one wave, so a 3-row dispatch is not a three-wave latency chain.
+// Same bindings and push constants as rms_norm_mul.comp.
+layout(local_size_x = 512) in;
+
+layout(set = 0, binding = 0) readonly  buffer X      { vec4 x_v4[];      };
+layout(set = 0, binding = 1) readonly  buffer Weight { vec4 weight_v4[]; };
+layout(set = 0, binding = 2) writeonly buffer Y      { vec4 y_v4[];      };
+
+layout(push_constant) uniform PushConstants {
+    uint N;      // hidden dimension (must be divisible by 4)
+    float eps;   // epsilon for numerical stability
+};
+
+const uint MAX_PER_THREAD = 4u;
+shared float s_partial[16];
+shared float s_rms_inv;
+
+void main() {
+    uint tid   = gl_LocalInvocationID.x;
+    uint token = gl_WorkGroupID.x;
+    uint N_v4  = N >> 2;
+    uint base_v4 = token * N_v4;
+
+    vec4 reg_x[MAX_PER_THREAD];
+    float sum_sq = 0.0;
+    uint slot = 0u;
+    for (uint i_v4 = tid; i_v4 < N_v4; i_v4 += 512u) {
+        vec4 v = x_v4[base_v4 + i_v4];
+        if (slot < MAX_PER_THREAD) reg_x[slot] = v;
+        slot++;
+        sum_sq += dot(v, v);
+    }
+    sum_sq = subgroupAdd(sum_sq);
+    if (gl_SubgroupInvocationID == 0u) s_partial[gl_SubgroupID] = sum_sq;
+    barrier();
+    if (tid == 0u) {
+        float merged = 0.0;
+        for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_partial[sg];
+        s_rms_inv = inversesqrt(merged / float(N) + eps);
+    }
+    barrier();
+    float rms_inv = s_rms_inv;
+
+    slot = 0u;
+    for (uint i_v4 = tid; i_v4 < N_v4; i_v4 += 512u) {
+        vec4 v = (slot < MAX_PER_THREAD) ? reg_x[slot] : x_v4[base_v4 + i_v4];
+        slot++;
+        y_v4[base_v4 + i_v4] = weight_v4[i_v4] * (v * rms_inv);
+    }
+}

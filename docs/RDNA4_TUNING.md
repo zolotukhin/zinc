@@ -160,6 +160,48 @@ GGUF models commonly ship Q8_0 for tensors the publisher considered precision-se
 
 On the T-CPU autopilot path, adding `attn_qkv` to the Q8_0 → Q4_0 re-quantize-at-load list moved decode from 32.8 to 37.6 tok/s and prefill from 28.5 to 32.7 tok/s on the 9800X3D bench, with output staying coherent. The model is already Q4_K everywhere else; per-weight noise on the SSM in-proj is averaged out by the L2-normalized delta-net recurrence one layer downstream. The same lever applies on RDNA4 wherever a tensor is loaded Q8_0 by default and the kernel has a Q4_0 variant. See `forward_zinc_rt.zig`'s `q4_candidates` list for the current set.
 
+## NextN/MTP speculative decoding (Qwen 3.8 GGUFs with an appended NextN block)
+
+Qwen 3.8 GGUFs that carry the model's NextN block use it automatically on the
+Vulkan backend, in the CLI and in the OpenAI-compatible server. Each cycle
+drafts two tokens with the NextN block, verifies the seed plus drafts in one
+3-token pass of the full model, restores the DeltaNet/conv state at the
+accepted boundary when a draft is rejected, and catches the NextN block up over
+the committed rows. Greedy output is bit-identical to ordinary decode.
+
+R9700, Qwen 3.8 27B Q4_K_M, 96 greedy tokens, server path:
+
+| | decode tok/s |
+|---|---:|
+| `ZINC_MTP=0` | 33.0 |
+| `ZINC_MTP=1` (default) | 49.9 |
+
+Scope and knobs:
+
+- Greedy requests only (default `temperature`, `top_p`, repetition penalty);
+  sampled requests take the ordinary path.
+- Server requests that reuse a cached prompt prefix (`session_id` clients)
+  fall back to ordinary decode for now; a full-prompt prefill is required to
+  prime the NextN block.
+- `ZINC_MTP=0` disables MTP. `ZINC_MTP_COLS=0` disables the column-parallel
+  Q4_K/Q5_K/Q6_K matvec route used by the verification batch (A/B only);
+  `ZINC_MTP_COLS_ROWS` (2/4/8, default 4) and `ZINC_MTP_LMHEAD_ROWS` (default 8)
+  pick its rows-per-workgroup variants.
+- `ZINC_MTP_DRAFT_VOCAB=<rows>` limits the draft lm-head to the first N
+  (frequency-ordered) vocabulary rows; default 131072 for vocabularies above
+  160K rows, 0 = all rows. Verification always scores the full vocabulary, so
+  this only trades draft acceptance for draft cost.
+- `ZINC_MTP_DP4A=1` runs the Q4_K verification matvecs on int8 dp4a with
+  Q8_1-quantized activations: ~3% faster, but the output is no longer
+  bit-identical to plain decode (off by default).
+- `ZINC_MTP_DRAFTS` (1–3, default 2) sets the draft window.
+- `ZINC_MTP_PROFILE=1` with `--profile` prints per-phase GPU totals for the
+  verification pass (one submit per layer function, slower).
+- Pass `-c <tokens>` on the CLI: its auto-sized context fills VRAM to the
+  margin and slows the state restores; the server planner leaves headroom.
+- `ZINC_VK_QUEUE_FAMILY=<n>` overrides the Vulkan queue family (diagnostic;
+  families 0 and 1 perform the same on the R9700).
+
 ## ZINC_RT, this guide, and what changes
 
 The Vulkan-specific advice above is about driver, firmware, and toolchain. **All of it still applies under ZINC_RT** because ZINC_RT uses the same `amdgpu` kernel driver. Disable GECC. Stay on Mesa 25.0.7 (when running anything that links libvulkan, including dev tooling and CI shader compilation). Stay on kernel 6.14 if you can. Pin shaderc 2023.8.
