@@ -476,7 +476,8 @@ const banner =
     \\
     \\Server options:
     \\  -p, --port <port>        Server port (default: 8080)
-    \\  --parallel <n>           Max concurrent requests (default: 4)
+    \\  --parallel <n>           Requests in flight; CUDA decodes them together, other
+    \\                           backends serialize generation and queue the rest (default: 4)
     \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
     \\
     \\Model management:
@@ -523,7 +524,8 @@ const banner_full =
     \\
     \\Server options:
     \\  -p, --port <port>        Server port (default: 8080)
-    \\  --parallel <n>           Max concurrent requests (default: 4)
+    \\  --parallel <n>           Requests in flight; CUDA decodes them together, other
+    \\                           backends serialize generation and queue the rest (default: 4)
     \\  chat                     Start the server on port 9090 and open the built-in chat UI in your browser
     \\
     \\Model management:
@@ -2892,7 +2894,11 @@ pub fn main() !void {
                 log.info("Output ({d} tokens): {s}", .{ output_tokens.len, output_text });
             }
         } else {
-            log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
+            // Metal serialises generation behind ServerState.generation_mutex, so
+            // --parallel is how many requests may be in flight (one running, the
+            // rest queued), not how many decode at once. Only the CUDA serve path
+            // has real slots.
+            log.info("Server mode — port {d}, generation serialized, up to {d} request(s) in flight", .{ config.port, config.max_parallel });
 
             var manager = if (resolved_model) |startup_model|
                 model_manager_mod.ModelManager.init(startup_model.spec, &device, allocator) catch |err| {
@@ -3141,7 +3147,10 @@ pub fn main() !void {
             });
         }
     } else {
-        log.info("Server mode — port {d}, max {d} concurrent requests", .{ config.port, config.max_parallel });
+        // Same as the Metal branch: one generation at a time behind
+        // ServerState.generation_mutex; --parallel bounds the queue, not the
+        // number of requests decoding together.
+        log.info("Server mode — port {d}, generation serialized, up to {d} request(s) in flight", .{ config.port, config.max_parallel });
 
         var manager = if (resolved_model) |startup_model|
             model_manager_mod.ModelManager.init(startup_model.spec, &vk_instance, gpu_config, shader_dir, allocator) catch |err| {
