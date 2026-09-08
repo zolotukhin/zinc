@@ -89,7 +89,7 @@ Generate a chat completion from a message list.
 | `max_tokens` | integer | 256 | Maximum generated tokens before context-budget clamping. |
 | `temperature` | float | 0.0 | Sampling temperature. `0` uses greedy decoding. Values are clamped to `0..2`. |
 | `top_p` | float | 1.0 | Nucleus sampling threshold, clamped to `0..1`. |
-| `enable_thinking` | boolean | model default | For templates that support it, request an open thinking block. Catalog entries with unstable thinking can force this off. |
+| `enable_thinking` | boolean | model default | For templates that support it, request an open thinking block. Catalog entries with unstable thinking force it off. Sending `false` also matters on the tool-calling path: without it, a request carrying `tools` gets a bare assistant header with nothing suppressing deliberation, and a thinking model can spend the whole `max_tokens` budget reasoning before it ever emits the tool call. |
 | `stream` | boolean | false | Enable Server-Sent Events streaming. |
 | `tools` | array | empty | OpenAI function-tool definitions. Rendered for ChatML/Qwen-style templates when tool calling is enabled. |
 | `tool_choice` | string or object | `auto` | `"none"` suppresses tool injection. `"auto"` and forced function-object choices are currently treated as automatic tool choice. |

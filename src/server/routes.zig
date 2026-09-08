@@ -1289,7 +1289,17 @@ fn shouldForceDisableThinking(managed_id: ?[]const u8, model_path: []const u8, d
     return !entry.thinking_stable;
 }
 
-fn shouldSkipThinkingTemplateForRequest(tools_len: usize, tool_choice: ToolChoice) bool {
+fn shouldSkipThinkingTemplateForRequest(tools_len: usize, tool_choice: ToolChoice, enable_thinking: ?bool) bool {
+    // A caller who explicitly asked for no thinking (or a model whose thinking
+    // the catalog force-disables) keeps the closed <think></think> scaffold even
+    // when tools are present. The bare assistant header below is the only
+    // prefix with nothing suppressing deliberation, so on a thinking model it
+    // can spend the whole completion budget reasoning and never reach the
+    // <tool_call>. The scaffold ends in a blank line, so a tool call still
+    // follows it cleanly.
+    if (enable_thinking) |want| {
+        if (!want) return false;
+    }
     return tools_len > 0 and tool_choice != .none;
 }
 
@@ -2317,7 +2327,7 @@ fn handleChatCompletions(
     }
     // Tool-calling requests skip the Qwen empty-thinking scaffold so the
     // assistant can begin directly with a <tool_call> block.
-    const skip_thinking_template = shouldSkipThinkingTemplateForRequest(parsed.tools.len, parsed.tool_choice);
+    const skip_thinking_template = shouldSkipThinkingTemplateForRequest(parsed.tools.len, parsed.tool_choice, parsed.enable_thinking);
     if (skip_thinking_template) {
         parsed.enable_thinking = null;
     }
@@ -4235,10 +4245,15 @@ test "buildChatPrompt enables thinking when requested" {
 }
 
 test "tool-calling requests skip qwen thinking scaffold" {
-    try std.testing.expect(shouldSkipThinkingTemplateForRequest(1, .auto));
-    try std.testing.expect(shouldSkipThinkingTemplateForRequest(1, .required));
-    try std.testing.expect(!shouldSkipThinkingTemplateForRequest(1, .none));
-    try std.testing.expect(!shouldSkipThinkingTemplateForRequest(0, .auto));
+    try std.testing.expect(shouldSkipThinkingTemplateForRequest(1, .auto, null));
+    try std.testing.expect(shouldSkipThinkingTemplateForRequest(1, .required, null));
+    try std.testing.expect(!shouldSkipThinkingTemplateForRequest(1, .none, null));
+    try std.testing.expect(!shouldSkipThinkingTemplateForRequest(0, .auto, null));
+    // enable_thinking=false keeps the no-thinking scaffold on the tool path.
+    try std.testing.expect(!shouldSkipThinkingTemplateForRequest(1, .auto, false));
+    try std.testing.expect(!shouldSkipThinkingTemplateForRequest(1, .required, false));
+    // enable_thinking=true is the caller asking for deliberation: still skip.
+    try std.testing.expect(shouldSkipThinkingTemplateForRequest(1, .auto, true));
 
     var tok = makeTestTokenizer(
         \\{%- if add_generation_prompt %}
@@ -4263,6 +4278,38 @@ test "tool-calling requests skip qwen thinking scaffold" {
     const prompt = try buildChatPrompt(std.testing.allocator, &tok, &roles, &contents, null, true, &tools, .auto, &buf);
     try std.testing.expect(std.mem.endsWith(u8, prompt, "<|im_start|>assistant\n"));
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<think>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "<tool_call>") != null);
+}
+
+test "tool-calling with enable_thinking=false keeps the no-thinking scaffold" {
+    // Regression: the tool path used to discard the caller's flag, leaving a bare
+    // assistant header — the one prefix with nothing suppressing deliberation. On
+    // a thinking model that can burn the whole completion budget reasoning, so the
+    // tool call never arrives. The closed scaffold still admits a <tool_call>.
+    var tok = makeTestTokenizer(
+        \\{%- if add_generation_prompt %}
+        \\  {{- '<|im_start|>assistant\n' }}
+        \\  {%- if enable_thinking is defined and enable_thinking is true %}
+        \\    {{- '<think>\n' }}
+        \\  {%- else %}
+        \\    {{- '<think>\n\n</think>\n\n' }}
+        \\  {%- endif %}
+        \\{%- endif %}
+    );
+    defer tok.token_to_id.deinit();
+
+    const roles = [_][]const u8{"user"};
+    const contents = [_][]const u8{"call a tool"};
+    const tools = [_]tool_format.ToolDefinition{.{
+        .name = "read",
+        .description = "Read a file.",
+        .parameters_json = "{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"}}}",
+    }};
+    var buf: [4096]u8 = undefined;
+    const skip = shouldSkipThinkingTemplateForRequest(tools.len, .auto, false);
+    try std.testing.expect(!skip);
+    const prompt = try buildChatPrompt(std.testing.allocator, &tok, &roles, &contents, false, skip, &tools, .auto, &buf);
+    try std.testing.expect(std.mem.endsWith(u8, prompt, "<|im_start|>assistant\n<think>\n\n</think>\n\n"));
     try std.testing.expect(std.mem.indexOf(u8, prompt, "<tool_call>") != null);
 }
 
