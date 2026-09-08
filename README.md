@@ -47,8 +47,8 @@ cd zinc
 zig build -Doptimize=ReleaseFast
 
 ./zig-out/bin/zinc --check
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "Hello" --chat
+./zig-out/bin/zinc model pull qwen38-27b-q4k-m
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --prompt "Hello" --chat
 ```
 
 Build the native AMD ROCm backend with:
@@ -79,21 +79,17 @@ one place.
 ZINC works with local GGUF files and a managed model catalog. Current tuning
 work covers Qwen 3.5, Qwen 3.6, Qwen 3.8, Gemma 4, and Muse Glimmer.
 
-- The Muse checkpoint used in ZINC measurements is the exact
-  [Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf)
-  file published by Meta.
-
 You can also point directly at a file or Hugging Face repository:
 
 ```bash
 ./zig-out/bin/zinc -m /path/to/model.gguf --prompt "The capital of France is"
-./zig-out/bin/zinc -hf Qwen/Qwen3-0.6B-GGUF:Q8_0 --prompt "Hello" --chat
+./zig-out/bin/zinc -hf unsloth/Qwen3.8-27B-GGUF:Q4_K_M --prompt "Hello" --chat
 ```
 
 ## Local server and API
 
 ```bash
-./zig-out/bin/zinc chat --model-id qwen35-9b-q4k-m
+./zig-out/bin/zinc chat --model-id qwen38-27b-q4k-m
 ```
 
 This starts the browser chat and OpenAI-compatible API. Health checks are at

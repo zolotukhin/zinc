@@ -16,8 +16,8 @@ If that works, move on to the [hardware requirements](/zinc/docs/hardware-requir
 git clone https://github.com/zolotukhin/zinc.git
 cd zinc
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "What is the capital of France?" --chat
+./zig-out/bin/zinc model pull qwen38-27b-q4k-m
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --prompt "What is the capital of France?" --chat
 ```
 
 On RDNA4 Linux with the Vulkan build, set the cooperative matrix fast path before the check or first prompt:
@@ -48,7 +48,7 @@ This list keeps the local ZINC models in one place. A model ID is present only w
 | **Qwen 3.5 9B Q4_K_M** | Local GGUF | `qwen35-9b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | 8+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Qwen 3.6 35B-A3B Q4_K_XL** | Local GGUF | `qwen36-35b-a3b-q4k-xl` · [checkpoint](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | 24+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Qwen 3.8 27B Q4_K_M** | Local GGUF | `qwen38-27b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 24+ GB VRAM or 32+ GB unified | AMD RDNA4 ROCm and Apple Metal |
-| **Muse Glimmer 30B Q4_K_M** | Local GGUF | Direct file · [exact 17 GB GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/blob/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf) | 24+ GB VRAM or unified | AMD ROCm and Apple Metal validation target |
+| **Muse Glimmer 30B Q4_K_M** | Local GGUF | `muse-glimmer-30b-q4k-m` · [checkpoint](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF) | 24+ GB VRAM or unified | AMD ROCm, Apple Metal |
 | **Gemma 4 26B-A4B Q4_K_M** | Local GGUF | `gemma4-26b-a4b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | 16+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 | **Gemma 4 31B Q4_K_M** | Local GGUF | `gemma4-31b-q4k-m` · [checkpoint](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF) | 24+ GB VRAM or unified | AMD Vulkan/ROCm, Intel Vulkan, Apple Metal |
 
@@ -130,7 +130,7 @@ The catalog auto-detects your GPU profile (`amd-rdna4-32gb`, `apple-silicon`, et
 ## Download a model
 
 ```bash
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
+./zig-out/bin/zinc model pull qwen38-27b-q4k-m
 ```
 
 This downloads the model into a local cache and verifies the SHA-256 hash.
@@ -156,7 +156,7 @@ To reproduce an API chat workload exactly from the CLI, pass its system turn exp
 # RDNA4 Vulkan only — required, not optional. Skip for ROCm, Intel Arc, CUDA, and macOS.
 export RADV_PERFTEST=coop_matrix
 
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "What is the capital of France?" --chat
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --prompt "What is the capital of France?" --chat
 ```
 
 Good first-run signals in the logs:
@@ -181,7 +181,7 @@ This starts the server (default port 9090) and opens the built-in chat UI in you
 You can also start the server manually:
 
 ```bash
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m -p 8080
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m -p 8080
 ```
 
 Then open `http://localhost:8080/` in your browser.
@@ -190,13 +190,13 @@ Then open `http://localhost:8080/` in your browser.
 
 ```bash
 # Set a default model for future runs
-./zig-out/bin/zinc model use qwen35-9b-q4k-m
+./zig-out/bin/zinc model use qwen38-27b-q4k-m
 
 # Check the active default
 ./zig-out/bin/zinc model active
 
 # Remove a cached model
-./zig-out/bin/zinc model rm qwen35-9b-q4k-m
+./zig-out/bin/zinc model rm qwen38-27b-q4k-m
 ```
 
 ## What to read next

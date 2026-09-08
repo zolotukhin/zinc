@@ -141,7 +141,7 @@ Most likely cause: the cooperative-matrix path is not enabled in this shell. Set
 ```bash
 export RADV_PERFTEST=coop_matrix
 ./zig-out/bin/zinc --check                               # should report READY [OK] or READY WITH WARNINGS
-./zig-out/bin/zinc --model-id qwen35-9b-q4k-m --prompt "hi" --chat
+./zig-out/bin/zinc --model-id qwen38-27b-q4k-m --prompt "hi" --chat
 ```
 
 Use `--system-prompt <text>` with `--chat` when CLI prompt construction must
@@ -174,7 +174,7 @@ For Intel Arc, ensure a recent Mesa (25.x+) with ANV. For AMD, RADV is the recom
 The model is too large for current VRAM at the auto-allocated context length. Check the actual usage estimate:
 
 ```bash
-./zig-out/bin/zinc --check --model-id qwen35-9b-q4k-m
+./zig-out/bin/zinc --check --model-id qwen38-27b-q4k-m
 # Look for: "VRAM fit (catalog): X.XX / Y.YY GiB device-local (headroom Z.ZZ GiB) [OK|WARN|FAIL]"
 ```
 
@@ -220,6 +220,7 @@ ID                             Released     Status        Fit    Installed   Act
 qwen35-9b-q4k-m                2026-02-28   supported     yes    yes         yes      tested + exact fit
 qwen36-35b-a3b-q4k-xl          2026-04-15   supported     yes    no          no       tested + exact fit
 qwen38-27b-q4k-m               2026-08-14   supported     yes    no          no       tested + catalog fit
+muse-glimmer-30b-q4k-m         2026-08-09   supported     yes    no          no       tested + catalog fit
 gemma4-31b-q4k-m               2026-04-02   supported     yes    no          no       tested + catalog fit
 gemma4-26b-a4b-q4k-m           2026-04-02   supported     yes    no          no       tested + catalog fit
 ```
@@ -234,19 +235,19 @@ If you want ZINC to manage downloads and the default startup model for you:
 
 ```bash
 # Download one managed model into the local cache
-./zig-out/bin/zinc model pull qwen35-9b-q4k-m
+./zig-out/bin/zinc model pull qwen38-27b-q4k-m
 
 # Mark it as the default managed model for future runs
-./zig-out/bin/zinc model use qwen35-9b-q4k-m
+./zig-out/bin/zinc model use qwen38-27b-q4k-m
 
 # Inspect the current managed default
 ./zig-out/bin/zinc model active
 
 # Remove a cached managed model
-./zig-out/bin/zinc model rm qwen35-9b-q4k-m
+./zig-out/bin/zinc model rm qwen38-27b-q4k-m
 
 # Force-unload it from the local server first if it is still active there
-./zig-out/bin/zinc model rm --force qwen35-9b-q4k-m
+./zig-out/bin/zinc model rm --force qwen38-27b-q4k-m
 ```
 
 `model rm` is conservative by default: if the local ZINC server still has that model loaded in GPU memory, the command refuses and leaves the cache untouched. Use `--force` to have the local server unload it first. If your server uses a non-default port, add `--port <port>` before `model rm`.
@@ -404,7 +405,7 @@ curl http://localhost:8080/v1/models
 curl http://localhost:8080/v1/models/activate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-9b-q4k-m"
+    "model": "qwen38-27b-q4k-m"
   }'
 ```
 
@@ -415,14 +416,14 @@ curl http://localhost:8080/v1/models/activate \
 curl http://localhost:8080/v1/models/remove \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-9b-q4k-m"
+    "model": "qwen38-27b-q4k-m"
   }'
 
 # Force the server to unload it first if it is still active
 curl http://localhost:8080/v1/models/remove \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen35-9b-q4k-m",
+    "model": "qwen38-27b-q4k-m",
     "force": true
   }'
 ```

@@ -165,6 +165,28 @@ pub const entries = [_]CatalogEntry{
         },
     },
     .{
+        .id = "muse-glimmer-30b-q4k-m",
+        .display_name = "Muse Glimmer 30B Q4_K_M",
+        .release_date = "2026-08-09",
+        .family = "muse-glimmer",
+        .format = "gguf",
+        .quantization = "Q4_K_M",
+        .file_name = "Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
+        .homepage_url = "https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF",
+        .download_url = "https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/resolve/main/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf?download=true",
+        .sha256 = "4cc57c0f51040a226e5a72cc47b7613f7772950e460a665f7083de89f183f60e",
+        .size_bytes = 16_756_683_904,
+        .required_vram_bytes = 20 * 1024 * 1024 * 1024,
+        .default_context_length = 4096,
+        .recommended_for_chat = true,
+        .thinking_stable = true,
+        .status = .supported,
+        .tested_profiles = &.{
+            "amd-rdna4-32gb",
+            apple_silicon_profile,
+        },
+    },
+    .{
         .id = "gemma4-31b-q4k-m",
         .display_name = "Gemma 4 31B Q4_K_M",
         .release_date = "2026-04-02",
@@ -381,6 +403,7 @@ pub fn ggufArchForFamily(family: []const u8) ?[]const u8 {
         .{ "qwen2.5", "qwen2" },
         .{ "qwen2", "qwen2" },
         .{ "mistral", "mistral" },
+        .{ "muse-glimmer", "muse-glimmer" },
         .{ "gemma4", "gemma4" },
         .{ "gemma2", "gemma2" },
         .{ "gemma", "gemma" },
@@ -465,12 +488,31 @@ test "find returns qwen3.8 27b dense entry" {
     try std.testing.expect(supportsProfile(entry.*, apple_silicon_profile));
 }
 
+test "find returns Muse Glimmer entry" {
+    const entry = find("muse-glimmer-30b-q4k-m") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("Muse Glimmer 30B Q4_K_M", entry.display_name);
+    try std.testing.expectEqualStrings("2026-08-09", entry.release_date);
+    try std.testing.expectEqualStrings("muse-glimmer", entry.family);
+    try std.testing.expectEqualStrings("Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf", entry.file_name);
+    try std.testing.expectEqualStrings("4cc57c0f51040a226e5a72cc47b7613f7772950e460a665f7083de89f183f60e", entry.sha256);
+    try std.testing.expectEqual(@as(u64, 16_756_683_904), entry.size_bytes);
+    try std.testing.expect(entry.recommended_for_chat);
+    try std.testing.expect(entry.thinking_stable);
+    try std.testing.expect(entry.status == .supported);
+    try std.testing.expect(supportsProfile(entry.*, "amd-rdna4-32gb"));
+    try std.testing.expect(supportsProfile(entry.*, apple_silicon_profile));
+}
+
 test "qwen3.6 family reuses qwen35 gguf architecture mapping" {
     try std.testing.expectEqualStrings("qwen35", ggufArchForFamily("qwen3.6") orelse return error.TestExpectedEqual);
 }
 
 test "qwen3.8 family reuses qwen35 gguf architecture mapping" {
     try std.testing.expectEqualStrings("qwen35", ggufArchForFamily("qwen3.8") orelse return error.TestExpectedEqual);
+}
+
+test "Muse Glimmer family maps to its GGUF architecture" {
+    try std.testing.expectEqualStrings("muse-glimmer", ggufArchForFamily("muse-glimmer") orelse return error.TestExpectedEqual);
 }
 
 test "findForLoadedModel matches managed-cache qwen36 path" {
@@ -507,6 +549,15 @@ test "findForLoadedModel matches qwen38 27b dense filename" {
         "Qwen3.8 27B Q4 K M",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("qwen38-27b-q4k-m", entry.id);
+}
+
+test "findForLoadedModel matches Muse Glimmer filename" {
+    const entry = findForLoadedModel(
+        null,
+        "/root/models/muse-glimmer/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
+        "Muse Glimmer 30B Q4 K M",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("muse-glimmer-30b-q4k-m", entry.id);
 }
 
 test "profileForGpu maps RDNA4 32 GB boards" {
