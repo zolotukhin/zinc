@@ -1325,6 +1325,10 @@ pub const InferenceEngine = struct {
     /// NextN/MTP chained cycle: decodeStep leaves the command buffer open
     /// (no end/submit) so drafts and the verification batch share one submission.
     decode_defer_submit: bool = false,
+    /// Absolute position that row 0 of the prefill capture corresponds to. Zero
+    /// for a full prompt prefill; the reused prefix length when only a suffix was
+    /// prefilled (see mtpPrimeSuffix).
+    mtp_prime_capture_base: u32 = 0,
     /// NextN/MTP chained cycle: mtpRunNextnBatch records into the open command
     /// buffer without ending/submitting it.
     mtp_nextn_record_only: bool = false,
@@ -27656,6 +27660,11 @@ pub const InferenceEngine = struct {
     /// @param prompt_tokens Tokenized prompt sequence to prefill.
     pub fn prefillBatched(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
         try self.mtpFlushPending(state);
+        // Rebuilding the context from scratch leaves the NextN cache describing a
+        // conversation that no longer exists.
+        if (state.position == 0) {
+            if (self.mtp) |*m| m.resident_context_len = 0;
+        }
         const mode = std.posix.getenv("ZINC_BATCHED_PREFILL") orelse "";
         const intel_batched_env = std.posix.getenv("ZINC_INTEL_BATCHED_PREFILL");
         const cfg = self.model.config;
@@ -29626,8 +29635,13 @@ pub const InferenceEngine = struct {
     }
 
     /// Reset per-request NextN bookkeeping (call before a new prompt's prefill).
+    /// Reset per-request NextN bookkeeping. `pending_h` and `resident_context_len`
+    /// describe what the engine physically holds, not this request, so they
+    /// survive: a prompt that reuses the resident prefix primes only its suffix
+    /// (mtpPrimeSuffix). A prefill from position 0 clears them.
     pub fn mtpBeginRequest(self: *InferenceEngine) void {
         self.mtp_prefill_capture_count = 0;
+        self.mtp_prime_capture_base = 0;
         if (self.mtp) |*m| {
             if (m.cycles > 0) {
                 // Previous request's cycle statistics (the CLI prints its own at the end).
@@ -29654,7 +29668,6 @@ pub const InferenceEngine = struct {
             // deferred restore/catch-up is moot.
             m.pending_committed = 0;
             m.primed = false;
-            @memset(m.pending_h, 0);
         }
     }
 
@@ -29994,12 +30007,20 @@ pub const InferenceEngine = struct {
             switch (h_source) {
                 .capture_prev => {
                     const pos = base + t;
+                    const cap_base = self.mtp_prime_capture_base;
                     if (pos == 0) {
                         const zr = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = dst_off, .size = hidden_size };
                         vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.zero_row.handle, mtp.prime_h_rows.handle, 1, &zr);
+                    } else if (pos - 1 < cap_base) {
+                        // The row before the capture window: priming a suffix, so
+                        // this is the last row of the context already resident,
+                        // carried in h_input_buf (already output_norm'ed).
+                        const pr = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = dst_off, .size = hidden_size };
+                        vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.h_input_buf.handle, mtp.prime_h_rows.handle, 1, &pr);
+                        self.decode_cmd.transferToComputeBarrier();
                     } else {
                         const cap = self.mtp_prefill_capture orelse return error.MtpNotPrepared;
-                        const src_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, pos - 1) * hidden_size;
+                        const src_off: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, (pos - 1) - cap_base) * hidden_size;
                         self.decode_cmd.transferToComputeBarrier();
                         try self.mtpRecordRmsNormRow(cap.handle, src_off, out_norm, mtp.prime_h_rows.handle, dst_off, hidden_dim);
                     }
@@ -30078,6 +30099,7 @@ pub const InferenceEngine = struct {
         const cfg = self.model.config;
         const hidden_dim = cfg.hidden_dim;
         const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+        self.mtp_prime_capture_base = 0;
         var timer = try std.time.Timer.start();
         var start: u32 = 0;
         while (start < N) {
@@ -30102,7 +30124,83 @@ pub const InferenceEngine = struct {
         }
         state.position = N;
         mtp.primed = true;
+        mtp.resident_context_len = N;
         log.info("NextN/MTP: primed {d} prompt rows in {d:.1} ms (draft window {d})", .{ N, @as(f64, @floatFromInt(timer.read())) / 1_000_000.0, mtp.hist_slots });
+        return true;
+    }
+
+    /// Prime the NextN block over just the tokens appended after a reused prompt
+    /// prefix, so a conversation that skipped most of its prefill still gets
+    /// speculative decoding instead of falling back to ordinary decode.
+    ///
+    /// Sound only when the engine still physically holds that prefix — the caller
+    /// establishes that (the server reuses a prefix only for the resident
+    /// conversation) and this checks it against `resident_context_len`, which the
+    /// NextN catch-up keeps current. Any mismatch returns false and the caller
+    /// falls back, which is exactly today's behaviour.
+    ///
+    /// Opt-in via ZINC_MTP_REUSE until it has been measured on hardware.
+    pub fn mtpPrimeSuffix(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32, reused_prefix_len: u32) !bool {
+        if (!envFlagEnabled("ZINC_MTP_REUSE", false)) return false;
+        const mtp = &(self.mtp orelse return false);
+        const N: u32 = @intCast(prompt_tokens.len);
+        if (reused_prefix_len == 0 or reused_prefix_len >= N) return false;
+        const suffix_len = N - reused_prefix_len;
+        if (mtp.resident_context_len != reused_prefix_len) {
+            log.warn("NextN/MTP: suffix prime skipped (NextN cache holds {d} positions, prompt reuses {d}); using ordinary greedy decode", .{ mtp.resident_context_len, reused_prefix_len });
+            return false;
+        }
+        if (self.mtp_prefill_capture_count != suffix_len or state.position != N) {
+            log.warn("NextN/MTP: suffix prime skipped (captured {d}/{d} appended rows, position {d}); using ordinary greedy decode", .{ self.mtp_prefill_capture_count, suffix_len, state.position });
+            return false;
+        }
+        const cfg = self.model.config;
+        const hidden_dim = cfg.hidden_dim;
+        const hidden_size = @as(vk.c.VkDeviceSize, hidden_dim) * @sizeOf(f32);
+        var timer = try std.time.Timer.start();
+
+        // Row 0 of the capture is position `reused_prefix_len`, and the h feeding
+        // it is the carried row from the resident context.
+        self.mtp_prime_capture_base = reused_prefix_len;
+        {
+            const hs_ptr: [*]f32 = @ptrCast(@alignCast(mtp.h_staging.mapped.?));
+            @memcpy(hs_ptr[0..hidden_dim], mtp.pending_h);
+            try self.decode_cmd.reset();
+            try self.decode_cmd.beginOneTime();
+            const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.h_staging.handle, mtp.h_input_buf.handle, 1, &region);
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+            mtp.h_upload_pending = false;
+        }
+
+        var start: u32 = 0;
+        while (start < suffix_len) {
+            const chunk: u32 = @min(mtp.prime_chunk_rows, suffix_len - start);
+            const base = reused_prefix_len + start;
+            try self.mtpRunNextnBatch(state, prompt_tokens[base .. base + chunk], base, .capture_prev, false);
+            start += chunk;
+        }
+
+        // Carried row for the first draft: the last appended row's normalized hidden.
+        {
+            const cap = self.mtp_prefill_capture orelse return error.MtpNotPrepared;
+            const out_norm = self.tensor_map.get("output_norm.weight") orelse return error.TensorNotFound;
+            try self.decode_cmd.reset();
+            try self.decode_cmd.beginOneTime();
+            try self.mtpRecordRmsNormRow(cap.handle, @as(vk.c.VkDeviceSize, suffix_len - 1) * hidden_size, out_norm, mtp.h_input_buf.handle, 0, hidden_dim);
+            self.decode_cmd.computeToTransferBarrier();
+            const region = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = hidden_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, mtp.h_input_buf.handle, mtp.h_staging.handle, 1, &region);
+            try self.decode_cmd.end();
+            try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+            const h_ptr: [*]const f32 = @ptrCast(@alignCast(mtp.h_staging.mapped.?));
+            @memcpy(mtp.pending_h, h_ptr[0..hidden_dim]);
+        }
+        state.position = N;
+        mtp.primed = true;
+        mtp.resident_context_len = N;
+        log.info("NextN/MTP: primed {d} appended rows over a {d}-token reused prefix in {d:.1} ms", .{ suffix_len, reused_prefix_len, @as(f64, @floatFromInt(timer.read())) / 1_000_000.0 });
         return true;
     }
 
@@ -30272,6 +30370,9 @@ pub const InferenceEngine = struct {
         mtp.cycles += 1;
         mtp.drafted += n_drafted;
         mtp.accepted += accepted;
+        // The NextN catch-up covered every committed token, so its cache now
+        // matches the model's up to the new position.
+        mtp.resident_context_len = pos + committed;
         return .{
             .next_token = predictions[accepted],
             .n_drafted = n_drafted,
@@ -31016,6 +31117,12 @@ const MtpVkState = struct {
     spec_argmax_staging: Buffer,
     chain_tokens_staging: Buffer, // host-visible [mtp_max_draft] u32: draft tokens of a chained cycle
     chain_ok: bool = false, // chained cycle available (embed_gather shader + supported embedding type)
+    /// Positions 0..resident_context_len-1 of the NextN block's KV are valid for
+    /// the conversation the engine currently holds, and `pending_h` is the
+    /// normalized hidden row for position resident_context_len-1. Both survive a
+    /// request boundary, which is what lets a reused prompt prefix skip straight
+    /// to priming its suffix. Zeroed whenever a prefill rebuilds from position 0.
+    resident_context_len: u32 = 0,
     // Deferred restore + NextN catch-up of the last chained cycle: recorded at
     // the start of the next cycle's command buffer (or flushed before any other
     // engine work touches the model state). 0 = nothing pending.

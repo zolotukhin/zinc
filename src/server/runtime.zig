@@ -125,6 +125,18 @@ pub fn mtpPrime(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens:
     return false;
 }
 
+/// Prime the NextN block over only the tokens appended after a reused prompt
+/// prefix. Returns false when the engine no longer holds that prefix, in which
+/// case the caller keeps ordinary decode.
+pub fn mtpPrimeSuffix(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens: []const u32, _reused_prefix_len: u32) bool {
+    if (comptime gpu.is_vulkan) {
+        if (!_engine.mtpEnabled()) return false;
+        if (!(_engine.mtpPrepare() catch false)) return false;
+        return _engine.mtpPrimeSuffix(_state, _prompt_tokens, _reused_prefix_len) catch false;
+    }
+    return false;
+}
+
 /// Token source that replaces `decodeStep` + greedy `sample` with NextN/MTP
 /// cycles when active, and falls back to the plain path otherwise.
 pub const MtpSource = struct {

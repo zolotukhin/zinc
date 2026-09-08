@@ -2551,11 +2551,16 @@ fn handleChatCompletions(
     const prefill_end_ns = std.time.nanoTimestamp();
     logPrefillTiming(prefill_work_tokens, prefill_start_ns, prefill_end_ns);
     server_state.setActiveContextTokens(state.position);
-    // NextN/MTP speculative decoding: greedy requests whose whole prompt was
-    // prefilled in this request (no cached-prefix reuse yet).
+    // NextN/MTP speculative decoding, for greedy requests. A prompt prefilled in
+    // full primes over all of it; one that reused the resident prefix primes only
+    // the tokens appended after it, which is the case that used to drop to
+    // ordinary decode and give up most of the speedup.
     var mtp_src = runtime.MtpSource{ .eos_id = tokenizer.eos_id };
-    if (reused_prefix_len == 0 and !sampling.requiresLogitsReadback()) {
-        mtp_src.active = runtime.mtpPrime(engine, &state, prompt_tokens);
+    if (!sampling.requiresLogitsReadback()) {
+        mtp_src.active = if (reused_prefix_len == 0)
+            runtime.mtpPrime(engine, &state, prompt_tokens)
+        else
+            runtime.mtpPrimeSuffix(engine, &state, prompt_tokens, @intCast(reused_prefix_len));
     }
 
     if (parsed.stream) {
