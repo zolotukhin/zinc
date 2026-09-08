@@ -46,6 +46,27 @@ pub const LoadedTensor = struct {
 /// `ffn_down_exps_scale.weight` (Q4_K_M variants only).
 /// Dense tensors and non-expert MoE tensors (router gate, attention, embeddings, etc.)
 /// are not matched.
+/// Whether `name` belongs to an appended NextN/MTP block, i.e. `blk.<i>.*`
+/// with `i >= first_nextn_layer`. Those blocks are excluded from ordinary
+/// inference, so with speculative decoding off their weights are dead VRAM —
+/// 276 MiB on Qwen 3.8 27B, which is the difference between a 258K and the
+/// model's full 262K context on a 32 GB card.
+/// Mirror of the engine's `ZINC_MTP` switch (compute/forward.zig), read here so
+/// the loader can drop weights the engine will never bind.
+fn mtpWantedFromEnv() bool {
+    const raw = std.posix.getenv("ZINC_MTP") orelse return true;
+    if (raw.len == 0) return true;
+    return !(std.mem.eql(u8, raw, "0") or std.ascii.eqlIgnoreCase(raw, "false") or std.ascii.eqlIgnoreCase(raw, "off"));
+}
+
+pub fn isAppendedNextnTensor(name: []const u8, first_nextn_layer: u32) bool {
+    if (!std.mem.startsWith(u8, name, "blk.")) return false;
+    const rest = name["blk.".len..];
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return false;
+    const idx = std.fmt.parseInt(u32, rest[0..dot], 10) catch return false;
+    return idx >= first_nextn_layer;
+}
+
 pub fn isMoEExpertTensor(name: []const u8) bool {
     return std.mem.endsWith(u8, name, "ffn_gate_exps.weight") or
         std.mem.endsWith(u8, name, "ffn_up_exps.weight") or
@@ -604,10 +625,22 @@ pub fn load(
     }
     _ = decideOffloadForLoad(total_tensor_bytes, offloadable_tensor_bytes, instance.vramBytes());
 
+    // With speculative decoding off, the appended NextN block never runs, so
+    // its weights are not uploaded at all (see isAppendedNextnTensor). The
+    // engine's mtpModelEligible() then finds no NextN tensors and stays off,
+    // which is consistent: the two decisions read the same switch.
+    const skip_nextn = config.n_nextn_layers > 0 and !mtpWantedFromEnv();
+    const first_nextn_layer = config.n_layers;
+    var skipped_nextn_bytes: u64 = 0;
+
     var total_vram: u64 = 0;
     var total_host_visible: u64 = 0;
     for (gf.tensors.items) |tensor_info| {
         const tensor_size = tensor_info.sizeBytes();
+        if (skip_nextn and isAppendedNextnTensor(tensor_info.name, first_nextn_layer)) {
+            skipped_nextn_bytes += tensor_size;
+            continue;
+        }
         const data_offset = gf.tensor_data_offset + tensor_info.offset;
         const src_data = mmap_data[data_offset..][0..@intCast(tensor_size)];
         const offload = shouldOffloadToHost(tensor_info.name);
@@ -644,6 +677,9 @@ pub fn load(
         });
     }
 
+    if (skipped_nextn_bytes > 0) {
+        log.info("NextN/MTP off: skipped {d} MB of appended block weights", .{skipped_nextn_bytes / (1024 * 1024)});
+    }
     if (total_host_visible > 0) {
         log.info("Loaded {d} tensors | {d} MB device-local VRAM | {d} MB host-visible (system RAM)", .{
             loaded_tensors.items.len,
