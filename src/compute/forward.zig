@@ -12431,7 +12431,30 @@ pub const InferenceEngine = struct {
         attn_scale: f32,
         sink_offset: u32,
     ) !void {
-        const pip = &(self.attention.pipeline_batched orelse return error.ShaderNotLoaded);
+        // Long prompts can go to the query-tiled kernel: one workgroup per 4
+        // queries instead of per query, so a loaded K/V row feeds 4 dot products
+        // instead of 1. Short batches keep the untiled kernel, where the tile
+        // would mostly be padding.
+        //
+        // Opt-in (ZINC_FA_QUERY_TILE=1) until it has a clean A/B: the benchmark
+        // node's GPU was busy serving when this landed, so the only numbers taken
+        // were contended and prove nothing. It also changes summation order
+        // (serial per key vs the untiled kernel's 16-way tree), so output moves in
+        // the last bits — expected, but it means "identical output" cannot be the
+        // correctness check; the needle-retrieval test is.
+        const qt_min_queries: u32 = 16;
+        const use_qt = n_queries >= qt_min_queries and
+            head_dim <= 512 and
+            self.attention.pipeline_batched_qt != null and
+            envFlagEnabled("ZINC_FA_QUERY_TILE", false);
+        const pip = if (use_qt)
+            &self.attention.pipeline_batched_qt.?
+        else
+            &(self.attention.pipeline_batched orelse return error.ShaderNotLoaded);
+        const groups_y: u32 = if (use_qt)
+            (n_queries + attn_mod.flash_attn_query_tile - 1) / attn_mod.flash_attn_query_tile
+        else
+            n_queries;
         const push = FlashAttnBatchedPush{
             .head_dim = head_dim,
             .n_heads = n_heads,
@@ -12459,14 +12482,18 @@ pub const InferenceEngine = struct {
                 sinks,
                 sinks_size,
                 n_heads,
-                n_queries,
+                groups_y,
                 1,
             );
             return;
         }
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet6(ds, q_buf, q_size, k_cache, k_cache_size, v_cache, v_cache_size, page_table, page_table_size, out_buf, out_size, sinks, sinks_size);
-        try self.attention.recordFlashAttnBatched(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
+        if (use_qt) {
+            try self.attention.recordFlashAttnBatchedQt(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
+        } else {
+            try self.attention.recordFlashAttnBatched(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
+        }
     }
 
     /// Batched projection: weight × [N_tokens columns of x] → [N_tokens columns of y].

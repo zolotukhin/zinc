@@ -314,6 +314,8 @@ pub fn build(b: *std.Build) void {
         // Vulkan/RDNA side can share the prefillBatched orchestration.
         "rope_batched",
         "flash_attn_batched",
+        "flash_attn_batched_qt",
+        "flash_attn_batched_qt_f16kv",
         "flash_attn_batched_f16kv",
         "kv_cache_write_batched",
         "kv_cache_write_batched_f16kv",

@@ -1,0 +1,239 @@
+#version 460
+// ZINC — query-tiled batched causal flash attention for prefill.
+//
+// Sibling of flash_attn_batched.comp. That kernel gives each (head, query) its
+// own workgroup, so a lane loads a whole K vector to produce exactly one dot
+// product and the six query heads sharing a KV head each re-read the same keys.
+// On a 20K prefill that put attention at ~4.7 TFLOP/s while the FFN in the same
+// pass ran at 32.
+//
+// Here one workgroup owns QT consecutive queries of one head. A key loaded once
+// feeds QT dot products, and a V row loaded once is scaled into QT accumulators,
+// so K/V traffic per query drops by QT and the QT independent FMA chains supply
+// the instruction-level parallelism the old kernel got from unrolling.
+//
+// Arithmetic per query is unchanged and runs in the same order (same key order,
+// same online-softmax rescaling), so output is bit-identical to the untiled
+// kernel.
+//
+// Dispatch: grid.x = n_heads, grid.y = ceil(n_queries / QT), local_size_x = 64.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;
+    uint n_heads;
+    uint n_kv_heads;
+    uint seq_start;       // position of the first query in the KV cache
+    uint n_queries;
+    uint page_size;
+    uint attn_scale_bits; // float scale reinterpreted as uint (0 = 1/sqrt(head_dim))
+    uint sink_offset;     // layer_idx * n_heads — index into sink_data
+};
+
+layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];    };
+layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[]; };
+layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];    };
+layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[]; };
+layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];    };
+layout(set = 0, binding = 2) readonly  buffer VCacheV4  { vec4  v_data_v4[]; };
+layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];  };
+layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];    };
+layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[]; };
+layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
+
+const uint QT = 4u;             // queries per workgroup
+const uint BLOCK_SIZE = 256u;   // keys per block
+const uint BLOCK_SIZE_V4 = BLOCK_SIZE >> 2;
+const uint HEAD_DIM_V4_MAX = 128u; // head_dim up to 512
+
+shared vec4  s_q4[QT * HEAD_DIM_V4_MAX];
+shared vec4  s_out_v4[QT * HEAD_DIM_V4_MAX];
+shared float s_scores[QT * BLOCK_SIZE];
+shared uvec4 s_kv_base_uv4[BLOCK_SIZE_V4];
+shared float s_max_old[QT];
+shared float s_sum_old[QT];
+shared float s_reduce[QT * 4];
+shared float s_reduce_scalar[QT];
+
+void main() {
+    const uint head = gl_WorkGroupID.x;
+    const uint q_first = gl_WorkGroupID.y * QT;
+    const uint tid = gl_LocalInvocationID.x;
+
+    const uint q_per_kv = max(n_heads / max(n_kv_heads, 1u), 1u);
+    const uint kv_head = head / q_per_kv;
+    const uint head_dim_v4 = head_dim >> 2;
+
+    // Queries this workgroup owns; the tail workgroup may own fewer.
+    const uint q_count = min(QT, n_queries - min(q_first, n_queries));
+
+    // Longest causal reach in the tile — the last query's.
+    const uint causal_max = (q_count == 0u) ? 0u : (seq_start + q_first + q_count);
+
+    for (uint slot = 0u; slot < QT; slot++) {
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            s_out_v4[slot * HEAD_DIM_V4_MAX + d4] = vec4(0.0);
+            if (slot < q_count) {
+                const uint qb_v4 = (((q_first + slot) * n_heads + head) * head_dim) >> 2;
+                s_q4[slot * HEAD_DIM_V4_MAX + d4] = q_data_v4[qb_v4 + d4];
+            }
+        }
+        if (tid == 0u) {
+            s_max_old[slot] = -1.0e30;
+            s_sum_old[slot] = 0.0;
+        }
+    }
+    barrier();
+    if (q_count == 0u) return;
+
+    const float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
+
+    for (uint block_start = 0u; block_start < causal_max; block_start += BLOCK_SIZE) {
+        const uint block_end = min(block_start + BLOCK_SIZE, causal_max);
+        const uint block_len = block_end - block_start;
+
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint seq_pos = block_start + i;
+            const uint page_id = page_ids[seq_pos / page_size];
+            const uint page_off = seq_pos % page_size;
+            s_kv_base_uv4[i >> 2][i & 3u] = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                              + kv_head * head_dim) >> 2;
+        }
+        barrier();
+
+        // Scores: one lane owns a key and reuses each loaded K vec4 across the
+        // QT queries. The four accumulator chains are the ILP here.
+        float local_max[QT];
+        for (uint s = 0u; s < QT; s++) local_max[s] = -1.0e30;
+
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint k_base_v4 = s_kv_base_uv4[i >> 2][i & 3u];
+            float acc0 = 0.0;
+            float acc1 = 0.0;
+            float acc2 = 0.0;
+            float acc3 = 0.0;
+            for (uint d4 = 0u; d4 < head_dim_v4; d4++) {
+                const vec4 k = k_data_v4[k_base_v4 + d4];
+                acc0 += dot(s_q4[0u * HEAD_DIM_V4_MAX + d4], k);
+                acc1 += dot(s_q4[1u * HEAD_DIM_V4_MAX + d4], k);
+                acc2 += dot(s_q4[2u * HEAD_DIM_V4_MAX + d4], k);
+                acc3 += dot(s_q4[3u * HEAD_DIM_V4_MAX + d4], k);
+            }
+            const uint seq_pos = block_start + i;
+            // Causal: query slot s sits at seq_start + q_first + s.
+            float sc0 = (0u < q_count && seq_pos <= seq_start + q_first + 0u) ? acc0 * scale : -1.0e30;
+            float sc1 = (1u < q_count && seq_pos <= seq_start + q_first + 1u) ? acc1 * scale : -1.0e30;
+            float sc2 = (2u < q_count && seq_pos <= seq_start + q_first + 2u) ? acc2 * scale : -1.0e30;
+            float sc3 = (3u < q_count && seq_pos <= seq_start + q_first + 3u) ? acc3 * scale : -1.0e30;
+            s_scores[0u * BLOCK_SIZE + i] = sc0;
+            s_scores[1u * BLOCK_SIZE + i] = sc1;
+            s_scores[2u * BLOCK_SIZE + i] = sc2;
+            s_scores[3u * BLOCK_SIZE + i] = sc3;
+            local_max[0] = max(local_max[0], sc0);
+            local_max[1] = max(local_max[1], sc1);
+            local_max[2] = max(local_max[2], sc2);
+            local_max[3] = max(local_max[3], sc3);
+        }
+
+        float block_max[QT];
+        for (uint s = 0u; s < QT; s++) {
+            float m = subgroupMax(local_max[s]);
+            if (gl_NumSubgroups > 1u) {
+                if (gl_SubgroupInvocationID == 0u) s_reduce[s * 4u + gl_SubgroupID] = m;
+                barrier();
+                if (tid == 0u) {
+                    float merged = -1.0e30;
+                    for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged = max(merged, s_reduce[s * 4u + sg]);
+                    s_reduce_scalar[s] = merged;
+                }
+                barrier();
+                m = s_reduce_scalar[s];
+            }
+            block_max[s] = m;
+        }
+
+        float new_max[QT];
+        float rescale[QT];
+        for (uint s = 0u; s < QT; s++) {
+            new_max[s] = max(s_max_old[s], block_max[s]);
+            rescale[s] = exp(s_max_old[s] - new_max[s]);
+        }
+
+        float local_sum[QT];
+        for (uint s = 0u; s < QT; s++) local_sum[s] = 0.0;
+        for (uint i = tid; i < block_len; i += 64u) {
+            for (uint s = 0u; s < QT; s++) {
+                const float e = exp(s_scores[s * BLOCK_SIZE + i] - new_max[s]);
+                s_scores[s * BLOCK_SIZE + i] = e;
+                local_sum[s] += e;
+            }
+        }
+        float block_sum[QT];
+        for (uint s = 0u; s < QT; s++) {
+            float t = subgroupAdd(local_sum[s]);
+            if (gl_NumSubgroups > 1u) {
+                if (gl_SubgroupInvocationID == 0u) s_reduce[s * 4u + gl_SubgroupID] = t;
+                barrier();
+                if (tid == 0u) {
+                    float merged = 0.0;
+                    for (uint sg = 0u; sg < gl_NumSubgroups; sg++) merged += s_reduce[s * 4u + sg];
+                    s_reduce_scalar[s] = merged;
+                }
+                barrier();
+                t = s_reduce_scalar[s];
+            }
+            block_sum[s] = t;
+        }
+        barrier();
+
+        // V accumulation: one lane owns a d4 slice and reuses each loaded V
+        // vec4 across the QT queries.
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            vec4 acc0 = vec4(0.0);
+            vec4 acc1 = vec4(0.0);
+            vec4 acc2 = vec4(0.0);
+            vec4 acc3 = vec4(0.0);
+            for (uint i = 0u; i < block_len; i++) {
+                const vec4 v = v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + d4];
+                acc0 += s_scores[0u * BLOCK_SIZE + i] * v;
+                acc1 += s_scores[1u * BLOCK_SIZE + i] * v;
+                acc2 += s_scores[2u * BLOCK_SIZE + i] * v;
+                acc3 += s_scores[3u * BLOCK_SIZE + i] * v;
+            }
+            s_out_v4[0u * HEAD_DIM_V4_MAX + d4] = s_out_v4[0u * HEAD_DIM_V4_MAX + d4] * rescale[0] + acc0;
+            s_out_v4[1u * HEAD_DIM_V4_MAX + d4] = s_out_v4[1u * HEAD_DIM_V4_MAX + d4] * rescale[1] + acc1;
+            s_out_v4[2u * HEAD_DIM_V4_MAX + d4] = s_out_v4[2u * HEAD_DIM_V4_MAX + d4] * rescale[2] + acc2;
+            s_out_v4[3u * HEAD_DIM_V4_MAX + d4] = s_out_v4[3u * HEAD_DIM_V4_MAX + d4] * rescale[3] + acc3;
+        }
+        barrier();
+
+        if (tid == 0u) {
+            for (uint s = 0u; s < QT; s++) {
+                s_sum_old[s] = s_sum_old[s] * rescale[s] + block_sum[s];
+                s_max_old[s] = new_max[s];
+            }
+        }
+        barrier();
+    }
+
+    // Sink + normalize + write. sink_data is NaN for layers without sinks.
+    const float sink_val = sink_data[sink_offset + head];
+    for (uint slot = 0u; slot < QT; slot++) {
+        if (slot >= q_count) continue;
+        float final_sum = s_sum_old[slot];
+        float out_rescale = 1.0;
+        if (!isnan(sink_val)) {
+            const float sink_max = max(s_max_old[slot], sink_val);
+            out_rescale = exp(s_max_old[slot] - sink_max);
+            final_sum = s_sum_old[slot] * out_rescale + exp(sink_val - sink_max);
+        }
+        const float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
+        const uint out_base_v4 = (((q_first + slot) * n_heads + head) * head_dim) >> 2;
+        for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
+            o_data_v4[out_base_v4 + d4] = s_out_v4[slot * HEAD_DIM_V4_MAX + d4] * out_rescale * inv_sum;
+        }
+    }
+}
