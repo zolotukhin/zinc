@@ -65,9 +65,20 @@ const ChatReuseEntry = struct {
     }
 };
 
+/// Prompt-prefix reuse for chat sessions.
+///
+/// The table can hold many sessions, but only one of them can actually be
+/// reused at any moment: generation is serialized behind one engine, so the KV
+/// cache — and, on a hybrid model, the DeltaNet recurrent state — physically
+/// holds exactly one conversation, whichever ran last. Handing back a prefix for
+/// any other session would splice a different conversation's state into this
+/// one and answer from it, silently. `live_session` is that owner; everything
+/// else falls back to a full prefill, which is slower and correct.
 const ChatReuseCache = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayListUnmanaged(ChatReuseEntry) = .{},
+    /// Session whose transcript is resident in the engine right now, if any.
+    live_session: ?[]u8 = null,
 
     fn init(allocator: std.mem.Allocator) ChatReuseCache {
         return .{ .allocator = allocator };
@@ -76,6 +87,7 @@ const ChatReuseCache = struct {
     fn clear(self: *ChatReuseCache) void {
         for (self.entries.items) |*entry| entry.deinit(self.allocator);
         self.entries.clearAndFree(self.allocator);
+        self.clearLive();
     }
 
     fn deinit(self: *ChatReuseCache) void {
@@ -120,17 +132,39 @@ const ChatReuseCache = struct {
 
     fn matchingPrefixLen(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8, prompt_tokens: []const u32, now_ns: i128) usize {
         self.pruneExpired(now_ns);
+        const resident = if (self.live_session) |live| std.mem.eql(u8, live, session_id) else false;
         for (self.entries.items) |*entry| {
             if (!std.mem.eql(u8, entry.session_id, session_id)) continue;
+            // The session is active either way, so keep it off the eviction
+            // block even when its state is no longer the resident one.
+            entry.last_used_ns = now_ns;
+            if (!resident) return 0; // see the type comment
             if (!std.mem.eql(u8, entry.model_path, model_path)) return 0;
             if (!std.mem.startsWith(u32, prompt_tokens, entry.prompt_tokens)) return 0;
-            entry.last_used_ns = now_ns;
             return entry.prompt_tokens.len;
         }
         return 0;
     }
 
+    /// Record that `session_id` now owns the engine's KV and recurrent state.
+    fn markLive(self: *ChatReuseCache, session_id: []const u8) !void {
+        self.clearLive();
+        if (session_id.len == 0) return;
+        self.live_session = try self.allocator.dupe(u8, session_id);
+    }
+
+    /// Drop the resident-session claim. Call this whenever a generation is about
+    /// to overwrite the engine's state, including generations that carry no
+    /// session at all — those clobber the cache just as thoroughly.
+    fn clearLive(self: *ChatReuseCache) void {
+        if (self.live_session) |s| self.allocator.free(s);
+        self.live_session = null;
+    }
+
     fn removeSession(self: *ChatReuseCache, session_id: []const u8) void {
+        if (self.live_session) |live| {
+            if (std.mem.eql(u8, live, session_id)) self.clearLive();
+        }
         if (self.findSessionIndex(session_id)) |idx| {
             self.removeAt(idx);
         }
@@ -158,6 +192,7 @@ const ChatReuseCache = struct {
             owned.deinit(self.allocator);
         }
         try self.entries.append(self.allocator, entry);
+        try self.markLive(session_id);
     }
 };
 
@@ -2472,6 +2507,10 @@ fn handleChatCompletions(
         server_state.chat_reuse_cache.matchingPrefixLen(parsed.session_id, resources.model_path, prompt_tokens, std.time.nanoTimestamp())
     else
         0;
+    // From here the engine's KV and recurrent state belong to this request. If it
+    // fails or is a one-off with no session, nothing may be reused after it;
+    // warmChatReuseCache re-stakes the claim when a transcript is stored.
+    server_state.chat_reuse_cache.clearLive();
     runtime.mtpBeginRequest(engine);
     const prefill_start_ns = std.time.nanoTimestamp();
     const prefill_work_tokens = if (reused_prefix_len > 0)
@@ -2941,6 +2980,9 @@ fn handleCompletions(
     }
 
     var generation_guard = GenerationGuard.acquire(server_state);
+    // /v1/completions runs on the same engine, so it invalidates any resident
+    // chat transcript just as a chat request would.
+    server_state.chat_reuse_cache.clearLive();
     defer generation_guard.release();
     if (!try ensureRequestedModelActive(conn, manager, server_state, parsed.model_id)) return;
     const resources = manager.currentResources() orelse {
@@ -5019,16 +5061,40 @@ test "supportsEnabledThinking requires tokenizer support and request flag" {
     try std.testing.expect(!supportsEnabledThinking(&plain_tok, true));
 }
 
-test "ChatReuseCache stores distinct sessions independently" {
+test "ChatReuseCache reuses only the session resident in the engine" {
+    // Generation is serialized behind one engine, so its KV — and on a hybrid
+    // model its DeltaNet state — holds exactly one conversation. Both sessions
+    // stay in the table, but once session-b has run, reusing session-a's prefix
+    // would answer session-a from session-b's state. It must miss and re-prefill.
     var cache = ChatReuseCache.init(std.testing.allocator);
     defer cache.deinit();
 
     try cache.store("session-a", "/tmp/model.gguf", &.{ 1, 2, 3 }, 10);
-    try cache.store("session-b", "/tmp/model.gguf", &.{ 4, 5 }, 20);
+    try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 15));
 
-    try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 30));
+    try cache.store("session-b", "/tmp/model.gguf", &.{ 4, 5 }, 20);
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 30));
     try std.testing.expectEqual(@as(usize, 2), cache.matchingPrefixLen("session-b", "/tmp/model.gguf", &.{ 4, 5, 6 }, 31));
     try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("session-c", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 32));
+
+    // session-a's transcript was never dropped: running it again makes it
+    // resident, and its prefix is reusable once more.
+    try cache.store("session-a", "/tmp/model.gguf", &.{ 1, 2, 3 }, 40);
+    try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 41));
+}
+
+test "ChatReuseCache residency is dropped by a generation that stores nothing" {
+    // A request without a session_id (or one that fails before storing) still
+    // overwrites the engine's state, so the previous session stops being
+    // reusable. handleChatCompletions calls clearLive() before generating.
+    var cache = ChatReuseCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.store("session-a", "/tmp/model.gguf", &.{ 1, 2, 3 }, 10);
+    try std.testing.expectEqual(@as(usize, 3), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 11));
+
+    cache.clearLive();
+    try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("session-a", "/tmp/model.gguf", &.{ 1, 2, 3, 9 }, 12));
 }
 
 test "ChatReuseCache prunes idle sessions automatically" {
@@ -5064,8 +5130,13 @@ test "ChatReuseCache evicts least recently used session when full" {
     try cache.store(evicted_session, "/tmp/model.gguf", token_pair[0..], @intCast(chat_reuse_max_sessions + 2));
 
     try std.testing.expectEqual(@as(usize, chat_reuse_max_sessions), cache.count());
+    // Eviction and residency are separate: make each session resident in turn so
+    // the lookup reports whether its transcript survived, not who ran last.
+    try cache.markLive("session-1");
     try std.testing.expectEqual(@as(usize, 0), cache.matchingPrefixLen("session-1", "/tmp/model.gguf", &.{ 1, 101, 999 }, @intCast(chat_reuse_max_sessions + 3)));
+    try cache.markLive("session-0");
     try std.testing.expectEqual(@as(usize, 2), cache.matchingPrefixLen("session-0", "/tmp/model.gguf", &.{ 0, 100, 999 }, @intCast(chat_reuse_max_sessions + 4)));
+    try cache.markLive(evicted_session);
     try std.testing.expectEqual(@as(usize, 2), cache.matchingPrefixLen(evicted_session, "/tmp/model.gguf", &.{ @intCast(chat_reuse_max_sessions), @intCast(chat_reuse_max_sessions + 100), 999 }, @intCast(chat_reuse_max_sessions + 5)));
 }
 
