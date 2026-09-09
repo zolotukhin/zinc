@@ -27700,7 +27700,73 @@ pub const InferenceEngine = struct {
             }
             return;
         }
+        // Scratch for the batched path scales with the prompt: on Qwen 3.8 27B
+        // it is ~320 KB per token across hidden/norm/q/k/v/attn_out/gate/up/
+        // swiglu/down, so a 20K prompt asks for 6.1 GiB. After 16.3 GiB of
+        // weights and the KV cache there is nowhere near that free, and the
+        // overflow lands in system memory over PCIe — prefill throughput fell
+        // from 424 tok/s at 4K to 312 at 16K, and a prompt near the context
+        // ceiling reset the GPU outright. Splitting the prompt keeps scratch
+        // bounded; each chunk re-streams the weights, which costs ~28 ms a pass
+        // against seconds of PCIe traffic saved.
+        const scratch_chunk = self.prefillScratchChunkLimit();
+        if (scratch_chunk > 0 and prompt_tokens.len > scratch_chunk) {
+            log.info("Batched prefill chunking: {d} tokens in chunks of {d} (scratch budget {d} MB; set ZINC_PREFILL_SCRATCH_MB=0 to disable)", .{
+                prompt_tokens.len,
+                scratch_chunk,
+                prefillScratchBudgetMb(),
+            });
+            var offset: usize = 0;
+            while (offset < prompt_tokens.len) {
+                const end = @min(offset + scratch_chunk, prompt_tokens.len);
+                try self.prefillBatchedImpl(state, prompt_tokens[offset..end]);
+                offset = end;
+            }
+            return;
+        }
         return self.prefillBatchedImpl(state, prompt_tokens);
+    }
+
+    /// Tokens per prefill chunk that keep the batched scratch buffers inside
+    /// `ZINC_PREFILL_SCRATCH_MB` (0 disables chunking and restores the old
+    /// all-at-once behaviour). Derived from the same per-token dimensions
+    /// ensureBatchedScratchCapacity allocates, so it tracks the model rather than
+    /// a hard-coded token count.
+    fn prefillScratchChunkLimit(self: *const InferenceEngine) usize {
+        const budget_mb = prefillScratchBudgetMb();
+        if (budget_mb == 0) return 0;
+        const per_token = self.batchedScratchBytesPerToken();
+        if (per_token == 0) return 0;
+        const budget: u64 = budget_mb * 1024 * 1024;
+        const limit = budget / per_token;
+        // A chunk below this is more weight re-streaming than it is worth.
+        const floor: u64 = 256;
+        return @intCast(@max(limit, floor));
+    }
+
+    /// Bytes of batched scratch a single prompt token needs. Mirrors the slots
+    /// grown by ensureBatchedScratchCapacity.
+    fn batchedScratchBytesPerToken(self: *const InferenceEngine) u64 {
+        const cfg = &self.model.config;
+        const hidden_dim: u64 = cfg.hidden_dim;
+        const q_dim: u64 = @as(u64, cfg.n_heads) * cfg.head_dim;
+        const kv_dim: u64 = @as(u64, cfg.n_kv_heads) * cfg.head_dim;
+        const inter_dim: u64 = if (cfg.intermediate_dim > 0) cfg.intermediate_dim else hidden_dim * 4;
+        const ssm_conv_dim: u64 = if (cfg.ssm_d_inner > 0)
+            @as(u64, cfg.ssm_d_inner) + 2 * @as(u64, cfg.ssm_n_group) * @as(u64, cfg.ssm_d_state)
+        else
+            0;
+        const d_inner: u64 = cfg.ssm_d_inner;
+        const dims: u64 = hidden_dim // hidden
+            + hidden_dim // norm
+            + @max(q_dim, @max(d_inner, @as(u64, cfg.ssm_dt_rank))) // q
+            + 2 * @max(kv_dim, @as(u64, cfg.ssm_dt_rank)) // k, v
+            + @max(q_dim, d_inner) // attn_out
+            + @max(inter_dim, ssm_conv_dim) // gate
+            + @max(inter_dim, d_inner) // up
+            + @max(inter_dim, d_inner) // swiglu
+            + hidden_dim; // down
+        return dims * @sizeOf(f32);
     }
 
     fn prefillBatchedImpl(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32) !void {
@@ -31216,6 +31282,12 @@ fn mtpCaptureRowCap() u32 {
 /// ZINC_MTP_DRAFTS (default 2, clamped to 1..mtp_max_draft).
 /// Draft count from ZINC_MTP_DRAFTS: 1-3 fixed (default 2); `auto` returns
 /// null and lets mtpCycle pick 2 or 3 per cycle from the running acceptance.
+/// Scratch budget for one prefill chunk, in MB. 0 disables chunking.
+fn prefillScratchBudgetMb() u64 {
+    const raw = std.posix.getenv("ZINC_PREFILL_SCRATCH_MB") orelse return 1024;
+    return std.fmt.parseInt(u64, raw, 10) catch 1024;
+}
+
 fn mtpDraftsFixedFromEnv() ?u32 {
     const v = std.posix.getenv("ZINC_MTP_DRAFTS") orelse return 2;
     if (std.ascii.eqlIgnoreCase(v, "auto")) return null;
