@@ -1861,8 +1861,14 @@ pub const InferenceEngine = struct {
             log.info("NextN/MTP: Vulkan draft block enabled ({d} extra KV layer(s) budgeted; set ZINC_MTP=0 to disable)", .{config.n_nextn_layers});
         }
         const requested_ctx = config.context_length;
+        // The batched prefill's scratch is allocated on first use and is not part
+        // of runtime_profile, so the context budget has to leave room for it or
+        // the two overcommit the card: a long prompt then spills to system memory
+        // and, near the ceiling, has reset the GPU. Chunking caps that scratch at
+        // ZINC_PREFILL_SCRATCH_MB, which is exactly what to reserve here.
+        const prefill_scratch_bytes: u64 = prefillScratchBudgetMb() * 1024 * 1024;
         const max_ctx = runtime_profile.maxContextTokensForDeviceLocalBudget(
-            weights_bytes + mtp_reserved_bytes,
+            weights_bytes + mtp_reserved_bytes + prefill_scratch_bytes,
             instance.vramBytes(),
             requested_ctx,
         );
