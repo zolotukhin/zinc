@@ -60,6 +60,12 @@ pub const FlashAttnSplitMergePush = extern struct {
 /// in the shader.
 pub const flash_attn_query_tile: u32 = 4;
 
+/// Query heads per KV head that flash_attn_batched_gqa groups. Must match HEADS
+/// in the shader; the host only selects it when n_heads/n_kv_heads matches.
+pub const flash_attn_gqa_heads: u32 = 6;
+/// head_dim the grouped kernel is specialized for (one output vec4 per lane).
+pub const flash_attn_gqa_head_dim: u32 = 256;
+
 pub const AttentionDispatch = struct {
     /// Vulkan compute pipeline, or null if unavailable.
     pipeline: ?Pipeline,
@@ -69,6 +75,11 @@ pub const AttentionDispatch = struct {
     /// `query_tile` consecutive queries of a head, so each loaded K/V row feeds
     /// that many dot products. Null when the shader is unavailable.
     pipeline_batched_qt: ?Pipeline,
+    /// Head-grouped prefill variant (flash_attn_batched_gqa): one workgroup owns
+    /// one query position across the `flash_attn_gqa_heads` query heads that
+    /// share a KV head, so each loaded K/V row feeds that many dot products.
+    /// Requires head_dim 256 and that exact GQA ratio.
+    pipeline_batched_gqa: ?Pipeline,
     /// Split-K variant — same flash_attn.spv specialized with N_I_CHUNKS=fa_split_k_active
     /// so it writes per-chunk partials into partial_attn_out_buf instead of the
     /// final normalized output. Enabled by default (N=4); disabled when ZINC_FA_SPLIT_K is 0 or 1.
@@ -145,6 +156,11 @@ pub const AttentionDispatch = struct {
             log.warn("flash_attn_batched_qt shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+        const attn_gqa_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("flash_attn_batched_gqa") }) catch unreachable;
+        const pipeline_batched_gqa = pipeline_mod.createFromSpirvWithOptions(instance, attn_gqa_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+            log.warn("flash_attn_batched_gqa shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
 
         // Split-K variant. The pipeline reuses flash_attn.spv with the
         // N_I_CHUNKS spec const set; its "output" binding (4) is wired to
@@ -200,6 +216,7 @@ pub const AttentionDispatch = struct {
             .pipeline = pipeline,
             .pipeline_batched = pipeline_batched,
             .pipeline_batched_qt = pipeline_batched_qt,
+            .pipeline_batched_gqa = pipeline_batched_gqa,
             .pipeline_split = pipeline_split,
             .pipeline_split_merge = pipeline_split_merge,
             .fa_split_k_active = fa_split_k_active,
@@ -270,6 +287,33 @@ pub const AttentionDispatch = struct {
     /// @param attn_scale Attention softmax scale factor (0 = use 1/sqrt(head_dim)).
     /// @param sink_offset Per-layer offset into the sink buffer (layer_idx * n_heads).
     /// @returns `error.ShaderNotLoaded` when the batched pipeline is unavailable.
+    pub fn recordFlashAttnBatchedGqa(
+        self: *const AttentionDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        head_dim: u32,
+        n_heads: u32,
+        n_kv_heads: u32,
+        seq_start: u32,
+        n_queries: u32,
+        page_size: u32,
+        attn_scale: f32,
+        sink_offset: u32,
+    ) !void {
+        const pip = if (self.pipeline_batched_gqa) |*p| p else return error.ShaderNotLoaded;
+        const push = FlashAttnBatchedPush{
+            .head_dim = head_dim,
+            .n_heads = n_heads,
+            .n_kv_heads = n_kv_heads,
+            .seq_start = seq_start,
+            .n_queries = n_queries,
+            .page_size = page_size,
+            .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
+            .sink_offset = sink_offset,
+        };
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_kv_heads, n_queries, 1);
+    }
+
     pub fn recordFlashAttnBatchedQt(
         self: *const AttentionDispatch,
         cmd: *CommandBuffer,
@@ -400,6 +444,7 @@ pub const AttentionDispatch = struct {
         if (self.pipeline) |*p| p.deinit();
         if (self.pipeline_batched) |*p| p.deinit();
         if (self.pipeline_batched_qt) |*p| p.deinit();
+        if (self.pipeline_batched_gqa) |*p| p.deinit();
         if (self.pipeline_split) |*p| p.deinit();
         if (self.pipeline_split_merge) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);

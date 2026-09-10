@@ -315,6 +315,8 @@ pub fn build(b: *std.Build) void {
         "rope_batched",
         "flash_attn_batched",
         "flash_attn_batched_qt",
+        "flash_attn_batched_gqa",
+        "flash_attn_batched_gqa_f16kv",
         "flash_attn_batched_qt_f16kv",
         "flash_attn_batched_f16kv",
         "kv_cache_write_batched",

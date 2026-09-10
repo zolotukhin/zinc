@@ -1,0 +1,205 @@
+#version 460
+// ZINC — batched causal flash attention for prefill, grouped over the query
+// heads that share a KV head.
+//
+// flash_attn_batched gives each (head, query) its own workgroup, so a lane loads
+// a whole K vector to produce exactly one dot product. On a model with
+// n_heads/n_kv_heads = 6, six workgroups then load byte-for-byte the same keys
+// and values. Measured on a 20K prefill that path runs at ~4.7 TFLOP/s and about
+// 200 GB/s effective, against 576 GB/s of bandwidth and an FFN in the same pass
+// managing 32 TFLOP/s.
+//
+// Here one workgroup owns one query position across all HEADS heads of a KV
+// head, so each loaded K/V row is used HEADS times. The earlier query-tiled
+// attempt (flash_attn_batched_qt) got the reuse and lost more than it gained by
+// paying ~21 KB of LDS per workgroup and dropping to 4 accumulator chains; this
+// keeps LDS near 13 KB, holds the output accumulators in registers rather than
+// LDS, and keeps a 4-deep unroll over the head dimension on top of the HEADS
+// independent chains.
+//
+// Requires head_dim_v4 == 64 (head_dim 256) so each of the 64 lanes owns exactly
+// one output vec4, and n_heads/n_kv_heads == HEADS. The host checks both and
+// falls back to flash_attn_batched otherwise.
+//
+// Dispatch: grid.x = n_kv_heads, grid.y = n_queries, local_size_x = 64.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;
+    uint n_heads;
+    uint n_kv_heads;
+    uint seq_start;
+    uint n_queries;
+    uint page_size;
+    uint attn_scale_bits;
+    uint sink_offset;
+};
+
+layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];    };
+layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[]; };
+layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];    };
+layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[]; };
+layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];    };
+layout(set = 0, binding = 2) readonly  buffer VCacheV4  { vec4  v_data_v4[]; };
+layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];  };
+layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];    };
+layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[]; };
+layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
+
+const uint HEADS = 6u;          // query heads per KV head
+const uint HEAD_DIM_V4 = 64u;   // head_dim 256
+const uint BLOCK_SIZE = 256u;
+const uint BLOCK_SIZE_V4 = BLOCK_SIZE >> 2;
+
+shared vec4  s_q4[HEADS * HEAD_DIM_V4];      // 6 KB
+shared float s_scores[HEADS * BLOCK_SIZE];   // 6 KB
+shared uvec4 s_kv_base_uv4[BLOCK_SIZE_V4];   // 1 KB
+shared float s_max_old[HEADS];
+shared float s_sum_old[HEADS];
+shared float s_reduce_scalar[HEADS];
+
+void main() {
+    const uint kv_head = gl_WorkGroupID.x;
+    const uint query_idx = gl_WorkGroupID.y;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint head0 = kv_head * HEADS;
+
+    // Stage Q for all HEADS of this KV head.
+    for (uint h = 0u; h < HEADS; h++) {
+        const uint qb_v4 = ((query_idx * n_heads + head0 + h) * head_dim) >> 2;
+        s_q4[h * HEAD_DIM_V4 + tid] = q_data_v4[qb_v4 + tid];
+    }
+    if (tid < HEADS) {
+        s_max_old[tid] = -1.0e30;
+        s_sum_old[tid] = 0.0;
+    }
+    barrier();
+
+    const float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
+    const uint causal_len = seq_start + query_idx + 1u;
+
+    // Output accumulators live in registers: 64 lanes cover head_dim_v4 exactly,
+    // so each lane owns one vec4 per head for the whole pass.
+    vec4 out0 = vec4(0.0); vec4 out1 = vec4(0.0); vec4 out2 = vec4(0.0);
+    vec4 out3 = vec4(0.0); vec4 out4 = vec4(0.0); vec4 out5 = vec4(0.0);
+
+    for (uint block_start = 0u; block_start < causal_len; block_start += BLOCK_SIZE) {
+        const uint block_end = min(block_start + BLOCK_SIZE, causal_len);
+        const uint block_len = block_end - block_start;
+
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint seq_pos = block_start + i;
+            const uint page_id = page_ids[seq_pos / page_size];
+            const uint page_off = seq_pos % page_size;
+            s_kv_base_uv4[i >> 2][i & 3u] = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                              + kv_head * head_dim) >> 2;
+        }
+        barrier();
+
+        // Scores: a lane owns a key and reuses each loaded K vec4 across HEADS
+        // dot products, 4 head-dim steps deep for latency hiding.
+        float lmax0 = -1.0e30; float lmax1 = -1.0e30; float lmax2 = -1.0e30;
+        float lmax3 = -1.0e30; float lmax4 = -1.0e30; float lmax5 = -1.0e30;
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint kb = s_kv_base_uv4[i >> 2][i & 3u];
+            float a0 = 0.0; float a1 = 0.0; float a2 = 0.0;
+            float a3 = 0.0; float a4 = 0.0; float a5 = 0.0;
+            for (uint d4 = 0u; d4 < HEAD_DIM_V4; d4 += 4u) {
+                const vec4 k0 = k_data_v4[kb + d4];
+                const vec4 k1 = k_data_v4[kb + d4 + 1u];
+                const vec4 k2 = k_data_v4[kb + d4 + 2u];
+                const vec4 k3 = k_data_v4[kb + d4 + 3u];
+                a0 += dot(s_q4[0u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[0u * HEAD_DIM_V4 + d4 + 1u], k1)
+                    + dot(s_q4[0u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[0u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a1 += dot(s_q4[1u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[1u * HEAD_DIM_V4 + d4 + 1u], k1)
+                    + dot(s_q4[1u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[1u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a2 += dot(s_q4[2u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[2u * HEAD_DIM_V4 + d4 + 1u], k1)
+                    + dot(s_q4[2u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[2u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a3 += dot(s_q4[3u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[3u * HEAD_DIM_V4 + d4 + 1u], k1)
+                    + dot(s_q4[3u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[3u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a4 += dot(s_q4[4u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[4u * HEAD_DIM_V4 + d4 + 1u], k1)
+                    + dot(s_q4[4u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[4u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a5 += dot(s_q4[5u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[5u * HEAD_DIM_V4 + d4 + 1u], k1)
+                    + dot(s_q4[5u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[5u * HEAD_DIM_V4 + d4 + 3u], k3);
+            }
+            a0 *= scale; a1 *= scale; a2 *= scale; a3 *= scale; a4 *= scale; a5 *= scale;
+            s_scores[0u * BLOCK_SIZE + i] = a0; s_scores[1u * BLOCK_SIZE + i] = a1;
+            s_scores[2u * BLOCK_SIZE + i] = a2; s_scores[3u * BLOCK_SIZE + i] = a3;
+            s_scores[4u * BLOCK_SIZE + i] = a4; s_scores[5u * BLOCK_SIZE + i] = a5;
+            lmax0 = max(lmax0, a0); lmax1 = max(lmax1, a1); lmax2 = max(lmax2, a2);
+            lmax3 = max(lmax3, a3); lmax4 = max(lmax4, a4); lmax5 = max(lmax5, a5);
+        }
+
+        float bmax0 = subgroupMax(lmax0); float bmax1 = subgroupMax(lmax1);
+        float bmax2 = subgroupMax(lmax2); float bmax3 = subgroupMax(lmax3);
+        float bmax4 = subgroupMax(lmax4); float bmax5 = subgroupMax(lmax5);
+        barrier();
+
+        const float nm0 = max(s_max_old[0], bmax0); const float nm1 = max(s_max_old[1], bmax1);
+        const float nm2 = max(s_max_old[2], bmax2); const float nm3 = max(s_max_old[3], bmax3);
+        const float nm4 = max(s_max_old[4], bmax4); const float nm5 = max(s_max_old[5], bmax5);
+        const float rs0 = exp(s_max_old[0] - nm0); const float rs1 = exp(s_max_old[1] - nm1);
+        const float rs2 = exp(s_max_old[2] - nm2); const float rs3 = exp(s_max_old[3] - nm3);
+        const float rs4 = exp(s_max_old[4] - nm4); const float rs5 = exp(s_max_old[5] - nm5);
+
+        float ls0 = 0.0; float ls1 = 0.0; float ls2 = 0.0;
+        float ls3 = 0.0; float ls4 = 0.0; float ls5 = 0.0;
+        for (uint i = tid; i < block_len; i += 64u) {
+            float e;
+            e = exp(s_scores[0u * BLOCK_SIZE + i] - nm0); s_scores[0u * BLOCK_SIZE + i] = e; ls0 += e;
+            e = exp(s_scores[1u * BLOCK_SIZE + i] - nm1); s_scores[1u * BLOCK_SIZE + i] = e; ls1 += e;
+            e = exp(s_scores[2u * BLOCK_SIZE + i] - nm2); s_scores[2u * BLOCK_SIZE + i] = e; ls2 += e;
+            e = exp(s_scores[3u * BLOCK_SIZE + i] - nm3); s_scores[3u * BLOCK_SIZE + i] = e; ls3 += e;
+            e = exp(s_scores[4u * BLOCK_SIZE + i] - nm4); s_scores[4u * BLOCK_SIZE + i] = e; ls4 += e;
+            e = exp(s_scores[5u * BLOCK_SIZE + i] - nm5); s_scores[5u * BLOCK_SIZE + i] = e; ls5 += e;
+        }
+        const float bs0 = subgroupAdd(ls0); const float bs1 = subgroupAdd(ls1);
+        const float bs2 = subgroupAdd(ls2); const float bs3 = subgroupAdd(ls3);
+        const float bs4 = subgroupAdd(ls4); const float bs5 = subgroupAdd(ls5);
+        barrier();
+
+        // V: a lane owns one d4 slice and reuses each loaded V vec4 across HEADS.
+        out0 *= rs0; out1 *= rs1; out2 *= rs2; out3 *= rs3; out4 *= rs4; out5 *= rs5;
+        for (uint i = 0u; i < block_len; i++) {
+            const vec4 v = v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + tid];
+            out0 += s_scores[0u * BLOCK_SIZE + i] * v;
+            out1 += s_scores[1u * BLOCK_SIZE + i] * v;
+            out2 += s_scores[2u * BLOCK_SIZE + i] * v;
+            out3 += s_scores[3u * BLOCK_SIZE + i] * v;
+            out4 += s_scores[4u * BLOCK_SIZE + i] * v;
+            out5 += s_scores[5u * BLOCK_SIZE + i] * v;
+        }
+
+        if (tid == 0u) {
+            s_sum_old[0] = s_sum_old[0] * rs0 + bs0; s_max_old[0] = nm0;
+            s_sum_old[1] = s_sum_old[1] * rs1 + bs1; s_max_old[1] = nm1;
+            s_sum_old[2] = s_sum_old[2] * rs2 + bs2; s_max_old[2] = nm2;
+            s_sum_old[3] = s_sum_old[3] * rs3 + bs3; s_max_old[3] = nm3;
+            s_sum_old[4] = s_sum_old[4] * rs4 + bs4; s_max_old[4] = nm4;
+            s_sum_old[5] = s_sum_old[5] * rs5 + bs5; s_max_old[5] = nm5;
+        }
+        barrier();
+    }
+
+    // Sink + normalize + write, per head.
+    for (uint h = 0u; h < HEADS; h++) {
+        const float sink_val = sink_data[sink_offset + head0 + h];
+        float final_sum = s_sum_old[h];
+        float out_rescale = 1.0;
+        if (!isnan(sink_val)) {
+            const float sink_max = max(s_max_old[h], sink_val);
+            out_rescale = exp(s_max_old[h] - sink_max);
+            final_sum = s_sum_old[h] * out_rescale + exp(sink_val - sink_max);
+        }
+        const float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
+        const float f = out_rescale * inv_sum;
+        vec4 acc;
+        if (h == 0u) acc = out0; else if (h == 1u) acc = out1; else if (h == 2u) acc = out2;
+        else if (h == 3u) acc = out3; else if (h == 4u) acc = out4; else acc = out5;
+        const uint ob_v4 = ((query_idx * n_heads + head0 + h) * head_dim) >> 2;
+        o_data_v4[ob_v4 + tid] = acc * f;
+    }
+}
