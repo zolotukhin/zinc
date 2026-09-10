@@ -31289,6 +31289,12 @@ fn mtpCaptureRowCap() u32 {
 /// Draft count from ZINC_MTP_DRAFTS: 1-3 fixed (default 2); `auto` returns
 /// null and lets mtpCycle pick 2 or 3 per cycle from the running acceptance.
 /// Scratch budget for one prefill chunk, in MB. 0 disables chunking.
+///
+/// Measured on Qwen 3.8 27B, R9700, a 20,043-token prompt:
+///   monolithic 336.7 tok/s | 512 MB 344.0 | 1 GB 352.6 | 2 GB 356.1 | 4 GB 348.0
+/// The curve is shallow, so 1 GB is the default rather than the 2 GB peak: the
+/// extra gigabyte buys ~1% of prefill and costs ~15K tokens of context, since
+/// the context plan reserves this same figure.
 fn prefillScratchBudgetMb() u64 {
     const raw = std.posix.getenv("ZINC_PREFILL_SCRATCH_MB") orelse return 1024;
     return std.fmt.parseInt(u64, raw, 10) catch 1024;

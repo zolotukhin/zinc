@@ -137,3 +137,45 @@ Switches: `ZINC_KV_F16=0` (f32 cache), `ZINC_MTP=0`, `ZINC_MTP_CAPTURE_ROWS`,
 `ZINC_FA_QUERY_TILE=1`.
 
 Tests at the end of this effort: Zig 617/618 (1 skip), bun 639 pass / 3 skip.
+
+## Prefill, measured 2026-09-10 (idle card, 20,043-token prompt)
+
+The card was finally free, so the prefill work has real numbers. Both of my
+predictions were wrong in instructive ways.
+
+| | 20K prefill |
+|---|---:|
+| unchunked (previous behaviour) | 336.7 tok/s |
+| chunked, 1 GB scratch budget | 352.6 |
+| chunked, 2 GB | 356.1 |
+| chunked + query-tiled attention | 255.6 |
+| **llama.cpp, clean single request** | **459.3** |
+
+**llama.cpp's prefill is 459 tok/s** — 19,934 tokens in 43.4 s on an idle card.
+The earlier 165 tok/s reading was contention from my own profiling job; the 466
+reading was genuine. Quote 459.
+
+**Chunking is worth ~5%, not the fix I claimed.** The scratch spill was real
+(6.1 GiB wanted, 5.1 GiB free) but it was never the dominant cost. Re-profiling
+with chunking on shows why: attention is now ~43% of prefill (was 28%), dense FFN
+~35%, DeltaNet ~21%. Chunking cut the linear work; attention is quadratic and
+untouched by it, so its share grew.
+
+**The query-tiled attention kernel is a 28% regression** (356 -> 256) and stays
+off. The reuse argument was right and the implementation was wrong: it spends
+~21 KB of LDS per workgroup against the original's ~4 KB, which collapses
+occupancy, and it has 4 accumulator chains where the original unrolls 16. Memory
+reuse bought at the price of latency hiding is a losing trade on this part.
+
+**What a correct attention kernel needs:** keep the 16-way ILP and small LDS
+while getting reuse. The promising shape is grouping the `q_per_kv` = 6 query
+heads that share a KV head (one workgroup = 1 query position x 6 heads): the same
+K load feeds 6 dot products, Q costs 6 KB of LDS instead of 16, and the output
+accumulators stay in registers (6 vec4 = 24 VGPRs per lane) rather than LDS.
+Budget: attention is ~24 s of the 57 s; llama.cpp is 13.6 s ahead, so attention
+needs roughly a 2.2x speedup to close the gap on its own.
+
+**Test hygiene note:** the needle assertion in the first A/B reported MISS on
+every run because it only generated 8 tokens — not enough for the model to
+answer. It proved nothing. Generate >= 40 before trusting it.
+
