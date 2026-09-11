@@ -368,8 +368,31 @@ What "usable at 262K" needs, checked one by one on the card:
    with a subgroup-clustered max over the 32 lanes that hold the block (the
    rope writer's lane→element mapping keeps a block inside one wave). This is
    the next lever; it is what makes 262K + speculation possible.
-4. **A 250K-token prompt over the API** needs the request body path (a 1.1 MB
-   argv exceeds Linux's 128 KiB single-argument limit); the run in this pass
-   failed to start because a previous test server still held the GPU lock —
-   `/root/ctx262k.sh` step 3 — and is still to be done.
+4. **A 226K-token conversation over the API, measured** (`ZINC_MTP=0 -c
+   262144`, thinking off, `session_id` set):
+
+   | | wall | |
+   |---|---:|---|
+   | turn 1: full prefill of 225,584 tokens | 1,387 s (23.1 min) | 162.7 tok/s, 256-token chunks |
+   | **turn 2: reused prefix + 29 new tokens** | **8 s** | `spliced engine_only_tokens=4` → `hit reused=225594 appended=29`; needle at 60% depth answered |
+
+   The second turn of a conversation that fills most of the window costs
+   seconds instead of another 23 minutes. Prefill at this depth is slower than
+   the 20K figure predicts (~18.7 min): 881 chunks of 256 re-stream the weights
+   (~25 s) and the DP4a GEMMs lose efficiency at 256 columns.
+
+   **Decode at a genuinely full window is 8.3 tok/s (120 ms/token), not the
+   33.9 quoted above for "262K context".** That earlier number, and llama.cpp's
+   30.5 beside it, were taken with the window allocated but nearly empty, so
+   attention had nothing to read. With 225K tokens resident each decoded token
+   reads the whole 14.8 GB cache across the 17 attending layers; at 576 GB/s
+   that plus the weights bounds decode near ~19 tok/s, and the split-K decode
+   kernel reaches ~164 GB/s effective. Two levers, both real: the decode
+   attention kernel at depth, and q8_0 KV, which halves that traffic and is
+   also what lets speculation fit at 262K. llama.cpp at the same resident depth
+   is unmeasured (it would cost another ~20-minute prefill on the card).
+
+   Gotcha: `/root/mk_needle.py` counts ~18 tokens per line but the real rate is
+   3.44 bytes/token, so its "250K" file was ~332K tokens and the server's
+   capacity check rejected it with a 400 (correctly). Size prompts by bytes.
 

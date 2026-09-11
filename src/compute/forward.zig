@@ -27780,7 +27780,7 @@ pub const InferenceEngine = struct {
             log.info("Batched prefill chunking: {d} tokens in chunks of {d} (scratch budget {d} MB; set ZINC_PREFILL_SCRATCH_MB=0 to disable)", .{
                 prompt_tokens.len,
                 scratch_chunk,
-                prefillScratchBudgetMb(),
+                self.prefill_scratch_budget_bytes / (1024 * 1024),
             });
             var offset: usize = 0;
             while (offset < prompt_tokens.len) {
