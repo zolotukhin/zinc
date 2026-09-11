@@ -179,3 +179,53 @@ needs roughly a 2.2x speedup to close the gap on its own.
 every run because it only generated 8 tokens — not enough for the model to
 answer. It proved nothing. Generate >= 40 before trusting it.
 
+## Where the prefill gap actually is (2026-09-10, measured)
+
+Three attention rewrites, all measured on an idle card against a 20,043-token
+prompt:
+
+| attempt | hypothesis | result |
+|---|---|---:|
+| query tiling (4 queries/workgroup) | bandwidth, via query reuse | −28% |
+| head grouping, 64 threads | bandwidth, via 6:1 GQA reuse | **+2.8%** |
+| head grouping, 384 threads | wave occupancy | −7% |
+
+Cutting K/V traffic sixfold moved the total 2.8%; raising waves-in-flight
+sixfold made it worse. Only the middle one is committed (`1d3975e9`).
+
+**Do not trust the prefill phase profiler for attribution.** With grouping on it
+reports attention *slower* (1.87 ms/token vs 1.66) while the pass is *faster*
+(55.4 s vs 56.4), and its per-phase figures sum to 3.83 ms/token against an
+actual 2.81. The "attention is 43% of prefill" figure it produced is what sent me
+into three kernels; the real share is 22%.
+
+**The honest decomposition** comes from the length curve, since attention is the
+only quadratic term. Chunking and grouping on:
+
+| prompt | ms/token |
+|---:|---:|
+| 4,099 | 2.282 |
+| 8,086 | 2.377 |
+| 16,040 | 2.613 |
+| 20,043 | 2.777 |
+
+Least squares on T/n = a + b·n gives a = 2.141 ms/token and b = 3.08e-5
+ms/token², predicting 55.3 s against 55.7 measured. At 20K that is:
+
+- **linear (projections, FFN, DeltaNet): 42.9 s, 78%**
+- **quadratic (attention): 12.4 s, 22%**
+
+llama.cpp does the whole 20K pass in 43.4 s = 2.177 ms/token. **Our linear term
+alone is 2.141 ms/token** — essentially their entire pass. So the per-token work
+is at parity and the whole 12.3 s gap is attention: 79 TFLOP in 12.4 s = 6.4
+TFLOP/s, against the ~32 TFLOP/s the dense FFN reaches on the same silicon.
+
+**What that means for the next attempt.** Attention needs ~5x, not 20%, so
+variants of the current shape cannot get there — the three above moved it by at
+most 13% of the phase. The shape itself is the problem: one workgroup per query
+position walking its whole causal range. A FlashAttention-2 style kernel tiles a
+block of queries against a block of keys, keeps the accumulators in registers
+across the key loop, and stages K/V tiles in LDS once per query block. That is a
+focused piece of work with a clear target (6.4 -> ~30 TFLOP/s), and it is the
+only remaining item between us and llama.cpp on prefill.
+
