@@ -125,6 +125,11 @@ pub fn mtpPrime(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens:
     return false;
 }
 
+/// Forget captured prefill rows so the next prefill's capture starts at row 0.
+pub fn mtpResetCapture(_engine: *InferenceEngine) void {
+    if (comptime gpu.is_vulkan) _engine.mtpResetCapture();
+}
+
 /// Prime the NextN block over only the tokens appended after a reused prompt
 /// prefix. Returns false when the engine no longer holds that prefix, in which
 /// case the caller keeps ordinary decode.

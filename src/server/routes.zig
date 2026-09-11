@@ -146,6 +146,45 @@ const ChatReuseCache = struct {
         return 0;
     }
 
+    const Match = struct {
+        /// Stored engine-transcript tokens to continue from (all of them).
+        reused: usize,
+        /// Prompt tokens those correspond to; the prompt's remainder is the new tail.
+        consumed: usize,
+    };
+
+    /// Like matchingPrefixLen, but also accepts a prompt whose re-rendered
+    /// history dropped tokens the engine holds (see alignEngineTranscript). On
+    /// such a match the caller continues the stored transcript and appends
+    /// `prompt_tokens[consumed..]`.
+    fn matchSession(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8, prompt_tokens: []const u32, now_ns: i128) ?Match {
+        self.pruneExpired(now_ns);
+        const resident = if (self.live_session) |live| std.mem.eql(u8, live, session_id) else false;
+        for (self.entries.items) |*entry| {
+            if (!std.mem.eql(u8, entry.session_id, session_id)) continue;
+            entry.last_used_ns = now_ns;
+            if (!resident) return null;
+            if (!std.mem.eql(u8, entry.model_path, model_path)) return null;
+            if (std.mem.startsWith(u32, prompt_tokens, entry.prompt_tokens)) {
+                return .{ .reused = entry.prompt_tokens.len, .consumed = entry.prompt_tokens.len };
+            }
+            if (alignEngineTranscript(entry.prompt_tokens, prompt_tokens, chat_reuse_max_skip)) |consumed| {
+                return .{ .reused = entry.prompt_tokens.len, .consumed = consumed };
+            }
+            return null;
+        }
+        return null;
+    }
+
+    /// Tokens of the transcript stored for `session_id`, regardless of
+    /// residency. Diagnostics only.
+    fn entryTokens(self: *ChatReuseCache, session_id: []const u8) ?[]const u32 {
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.session_id, session_id)) return entry.prompt_tokens;
+        }
+        return null;
+    }
+
     /// Record that `session_id` now owns the engine's KV and recurrent state.
     fn markLive(self: *ChatReuseCache, session_id: []const u8) !void {
         self.clearLive();
@@ -1303,6 +1342,112 @@ fn buildChatTranscriptPrompt(
     }, buf);
 }
 
+/// Most engine-only tokens the transcript aligner will skip at one spot. A
+/// past turn's reasoning block, which the chat template drops on re-render, can
+/// run to thousands of tokens; the empty scaffold of a thinking-off turn is 4-5.
+const chat_reuse_max_skip: usize = 8192;
+
+/// Align the engine's transcript with a canonical re-render that may omit
+/// tokens the engine holds: the chat template drops past assistant turns'
+/// reasoning (and the empty think scaffold), but the model saw them, and for a
+/// recurrent model only the exact engine transcript is continuable. Returns how
+/// many canonical tokens the whole engine sequence consumed, or null when the
+/// two cannot be aligned by skipping at most `max_skip` engine tokens at a
+/// time. The canonical side may never carry extras of its own, and every skip
+/// must be followed by `resync_run` matching tokens, so a different
+/// conversation that merely shares a prefix does not align.
+fn alignEngineTranscript(engine: []const u32, canonical: []const u32, max_skip: usize) ?usize {
+    const resync_run: usize = 4;
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < engine.len) {
+        if (j < canonical.len and engine[i] == canonical[j]) {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        var k: usize = 1;
+        var found = false;
+        while (k <= max_skip and i + k < engine.len) : (k += 1) {
+            if (j >= canonical.len) break;
+            const run = @min(resync_run, @min(engine.len - (i + k), canonical.len - j));
+            if (std.mem.eql(u32, engine[i + k .. i + k + run], canonical[j .. j + run])) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return null;
+        i += k;
+    }
+    return j;
+}
+
+test "alignEngineTranscript skips engine-only blocks and reports consumed" {
+    const engine = [_]u32{ 1, 2, 3, 90, 91, 92, 4, 5, 6, 7 };
+    const canon = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    try std.testing.expectEqual(@as(?usize, 7), alignEngineTranscript(&engine, &canon, chat_reuse_max_skip));
+    try std.testing.expectEqual(@as(?usize, 3), alignEngineTranscript(&[_]u32{ 1, 2, 3 }, &canon, chat_reuse_max_skip));
+    // The canonical side carries something the engine never saw: no alignment.
+    try std.testing.expectEqual(@as(?usize, null), alignEngineTranscript(&[_]u32{ 1, 2, 3, 4, 5, 6 }, &[_]u32{ 1, 2, 9, 3, 4, 5, 6 }, chat_reuse_max_skip));
+    // Trailing engine extras cannot be verified against anything: no alignment.
+    try std.testing.expectEqual(@as(?usize, null), alignEngineTranscript(&[_]u32{ 1, 2, 3, 90 }, &[_]u32{ 1, 2, 3 }, chat_reuse_max_skip));
+    // Two dropped blocks across two past turns.
+    const engine2 = [_]u32{ 1, 90, 91, 2, 3, 4, 5, 90, 91, 92, 6, 7, 8, 9 };
+    const canon2 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    try std.testing.expectEqual(@as(?usize, 9), alignEngineTranscript(&engine2, &canon2, chat_reuse_max_skip));
+}
+
+/// The tokens a chat template appends after an assistant reply (end of turn),
+/// recovered from the canonical transcript as whatever follows the last
+/// occurrence of the engine's final token. Null when that token is not there,
+/// which happens when the re-render re-tokenized the reply itself.
+fn transcriptTailAfter(engine_seq: []const u32, canonical: []const u32) ?[]const u32 {
+    if (engine_seq.len == 0) return null;
+    const last = engine_seq[engine_seq.len - 1];
+    var idx = canonical.len;
+    while (idx > 0) : (idx -= 1) {
+        if (canonical[idx - 1] == last) return canonical[idx..];
+    }
+    return null;
+}
+
+test "transcriptTailAfter returns the end-of-turn tokens after the reply" {
+    const engine = [_]u32{ 5, 6, 7, 42 };
+    const canon = [_]u32{ 5, 6, 7, 42, 151645, 198 };
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 151645, 198 }, transcriptTailAfter(&engine, &canon).?);
+    // Reply already ended with the end-of-turn token: only the newline remains.
+    const engine2 = [_]u32{ 5, 6, 7, 42, 151645 };
+    try std.testing.expectEqualSlices(u32, &[_]u32{198}, transcriptTailAfter(&engine2, &canon).?);
+    try std.testing.expectEqual(@as(?[]const u32, null), transcriptTailAfter(&[_]u32{ 5, 99 }, &canon));
+}
+
+/// Why a session's stored transcript did not prefix-match the new prompt: the
+/// first diverging token and the text around it on both sides.
+fn logChatReuseMiss(tokenizer: anytype, session_id: []const u8, stored: []const u32, prompt: []const u32) void {
+    const n = @min(stored.len, prompt.len);
+    var idx: usize = 0;
+    while (idx < n and stored[idx] == prompt[idx]) : (idx += 1) {}
+    const lo = if (idx >= 12) idx - 12 else 0;
+    var stored_buf: [512]u8 = undefined;
+    var prompt_buf: [512]u8 = undefined;
+    const s_txt = decodeTokenWindow(tokenizer, stored, lo, @min(stored.len, idx + 12), &stored_buf);
+    const p_txt = decodeTokenWindow(tokenizer, prompt, lo, @min(prompt.len, idx + 12), &prompt_buf);
+    log.info("chat cache miss: session={s} stored={d} prompt={d} diverge_at={d} stored_text={s} prompt_text={s}", .{ session_id, stored.len, prompt.len, idx, s_txt, p_txt });
+}
+
+fn decodeTokenWindow(tokenizer: anytype, toks: []const u32, lo: usize, hi: usize, buf: []u8) []const u8 {
+    var len: usize = 0;
+    var dec: [64]u8 = undefined;
+    var i = lo;
+    while (i < hi) : (i += 1) {
+        const t = tokenizer.decodeToken(toks[i], &dec);
+        if (len + t.len > buf.len) break;
+        @memcpy(buf[len .. len + t.len], t);
+        len += t.len;
+    }
+    return buf[0..len];
+}
+
 fn isTransientChatReuseHint(role: []const u8, content: []const u8) bool {
     if (!std.mem.eql(u8, role, "system")) return false;
     const trimmed = std.mem.trimLeft(u8, content, " \t\r\n");
@@ -1380,33 +1525,41 @@ fn warmChatReuseCache(
     const transcript_tokens = try tokenizer.encodePrompt(transcript_prompt, allocator);
     defer allocator.free(transcript_tokens);
 
-    const prompt_mismatch = if (transcript_tokens.len < prompt_tokens.len)
-        prompt_tokens.len
+    // The engine sequence — what the model saw and produced this request — is
+    // what the next turn continues. The canonical re-render from the messages
+    // is only consulted for the template's end-of-turn tail; it cannot be
+    // compared token-for-token because it drops or re-tokenizes the reasoning
+    // block (see alignEngineTranscript for how the next request is matched).
+    const engine_seq = try allocator.alloc(u32, processed_prefix_len);
+    defer allocator.free(engine_seq);
+    @memcpy(engine_seq[0..prompt_tokens.len], prompt_tokens);
+    @memcpy(engine_seq[prompt_tokens.len..], processed_generated_tokens);
+    const tail: ?[]const u32 = if (state.position == processed_prefix_len and !trimmed_transient_hints)
+        transcriptTailAfter(engine_seq, transcript_tokens)
     else
-        firstTokenMismatch(transcript_tokens[0..prompt_tokens.len], prompt_tokens);
-    const response_mismatch = if (transcript_tokens.len < processed_prefix_len or prompt_mismatch != null)
-        @as(?usize, 0)
-    else
-        firstTokenMismatch(transcript_tokens[prompt_tokens.len..processed_prefix_len], processed_generated_tokens);
-
-    const can_incremental =
-        state.position == processed_prefix_len and
-        !trimmed_transient_hints and
-        transcript_tokens.len >= processed_prefix_len and
-        prompt_mismatch == null and
-        response_mismatch == null;
-
-    if (can_incremental) {
-        const suffix_tokens = transcript_tokens[processed_prefix_len..];
+        null;
+    if (tail) |suffix_tokens| {
+        const stored_seq = try allocator.alloc(u32, processed_prefix_len + suffix_tokens.len);
+        defer allocator.free(stored_seq);
+        @memcpy(stored_seq[0..processed_prefix_len], engine_seq);
+        @memcpy(stored_seq[processed_prefix_len..], suffix_tokens);
         if (suffix_tokens.len > 0) {
+            // The end-of-turn tail is prefilled here, so extend the draft block
+            // over it too or the next turn's suffix prime finds the NextN cache
+            // one step short.
+            runtime.mtpResetCapture(engine);
             try engine.prefillBatched(state, suffix_tokens);
+            _ = runtime.mtpPrimeSuffix(engine, state, stored_seq, @intCast(processed_prefix_len));
         }
         log.info("chat cache updated: session={s} prefix={d} suffix={d}", .{
             session_id,
-            transcript_tokens.len,
-            transcript_tokens.len - processed_prefix_len,
+            stored_seq.len,
+            suffix_tokens.len,
         });
-    } else {
+        try server_state.chat_reuse_cache.store(session_id, resources.model_path, stored_seq, now_ns);
+        return;
+    }
+    {
         var rebuild_reason: []const u8 = if (trimmed_transient_hints) "transient_hints_trimmed" else "prefix_mismatch";
         if (state.position != processed_prefix_len) {
             rebuild_reason = "state_position_mismatch";
@@ -1414,29 +1567,21 @@ fn warmChatReuseCache(
                 state.position,
                 processed_prefix_len,
             });
-        } else if (prompt_mismatch) |mismatch| {
-            const transcript_token = if (mismatch < transcript_tokens.len) transcript_tokens[mismatch] else @as(u32, 0);
-            const prompt_token = if (mismatch < prompt_tokens.len) prompt_tokens[mismatch] else @as(u32, 0);
-            log.info("chat cache skipped after prompt mismatch: idx={d} transcript={d} prompt={d}", .{
-                mismatch,
-                transcript_token,
-                prompt_token,
-            });
-        } else if (response_mismatch) |mismatch| {
-            const transcript_slice = transcript_tokens[prompt_tokens.len..processed_prefix_len];
-            const transcript_token = if (mismatch < transcript_slice.len) transcript_slice[mismatch] else @as(u32, 0);
-            const processed_token = if (mismatch < processed_generated_tokens.len) processed_generated_tokens[mismatch] else @as(u32, 0);
-            log.info("chat cache skipped after response mismatch: idx={d} transcript={d} processed={d} processed_len={d}", .{
-                mismatch,
-                transcript_token,
-                processed_token,
-                processed_generated_tokens.len,
+        } else {
+            log.info("chat cache could not find the end-of-turn tail for the engine sequence: session={s} engine={d} canonical={d}", .{
+                session_id,
+                processed_prefix_len,
+                transcript_tokens.len,
             });
         }
         if (transcript_tokens.len > resources.context_capacity_tokens) return error.ContextLengthExceeded;
         state.position = 0;
         state.generated_tokens.clearRetainingCapacity();
+        runtime.mtpResetCapture(engine);
         try engine.prefillBatched(state, transcript_tokens);
+        // A rebuilt transcript is a fresh prefill; prime the draft block over
+        // it so the next turn can speculate from the reused prefix.
+        _ = runtime.mtpPrime(engine, state, transcript_tokens);
         server_state.setActiveContextTokens(state.position);
         log.info("chat cache rebuilt canonical transcript: session={s} reason={s} prefix={d}", .{
             session_id,
@@ -1446,15 +1591,6 @@ fn warmChatReuseCache(
     }
 
     try server_state.chat_reuse_cache.store(session_id, resources.model_path, transcript_tokens, now_ns);
-}
-
-fn firstTokenMismatch(a: []const u32, b: []const u32) ?usize {
-    const n = @min(a.len, b.len);
-    for (0..n) |i| {
-        if (a[i] != b[i]) return i;
-    }
-    if (a.len != b.len) return n;
-    return null;
 }
 
 fn appendAssistantToolCallHistoryBlock(
@@ -2409,6 +2545,13 @@ fn handleChatCompletions(
     errdefer allocator.free(prompt_tokens);
     defer allocator.free(prompt_tokens);
     defer server_state.clearActiveContext();
+    // What the engine actually prefills and continues. Differs from
+    // prompt_tokens only when a stored session transcript is spliced in (see
+    // the reuse decision below); usage reported to the client stays canonical.
+    var engine_prompt_tokens: []const u32 = prompt_tokens;
+    var spliced_prompt: ?[]u32 = null;
+    defer if (spliced_prompt) |sp| allocator.free(sp);
+    var reused_prefix_len: usize = 0;
     if (prompt_tokens.len == 0) {
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
@@ -2474,7 +2617,7 @@ fn handleChatCompletions(
                     parsed.contents,
                     assistant_text,
                     &state,
-                    prompt_tokens,
+                    engine_prompt_tokens,
                     processed_generated_tokens.items,
                     allocator,
                 ) catch |err| {
@@ -2503,10 +2646,35 @@ fn handleChatCompletions(
         if (conn.isPeerClosed()) return;
     }
 
-    const reused_prefix_len = if (cacheable_session)
-        server_state.chat_reuse_cache.matchingPrefixLen(parsed.session_id, resources.model_path, prompt_tokens, std.time.nanoTimestamp())
-    else
-        0;
+    if (cacheable_session) {
+        if (server_state.chat_reuse_cache.matchSession(parsed.session_id, resources.model_path, prompt_tokens, std.time.nanoTimestamp())) |m| {
+            if (m.consumed == m.reused) {
+                reused_prefix_len = m.reused;
+            } else if (server_state.chat_reuse_cache.entryTokens(parsed.session_id)) |stored| {
+                // The engine keeps its own transcript — it holds tokens the
+                // template drops on re-render, such as a past turn's reasoning
+                // or empty think scaffold — and the request's new tail is
+                // appended to it. That is the conversation the model actually
+                // generated against.
+                const tail = prompt_tokens[m.consumed..];
+                if (allocator.alloc(u32, stored.len + tail.len)) |buf| {
+                    @memcpy(buf[0..stored.len], stored);
+                    @memcpy(buf[stored.len..], tail);
+                    spliced_prompt = buf;
+                    engine_prompt_tokens = buf;
+                    reused_prefix_len = m.reused;
+                    log.info("chat cache spliced: session={s} engine_transcript={d} engine_only_tokens={d} tail={d}", .{
+                        parsed.session_id,
+                        stored.len,
+                        stored.len - m.consumed,
+                        tail.len,
+                    });
+                } else |_| {}
+            }
+        } else if (server_state.chat_reuse_cache.entryTokens(parsed.session_id)) |stored| {
+            logChatReuseMiss(tokenizer, parsed.session_id, stored, prompt_tokens);
+        }
+    }
     // From here the engine's KV and recurrent state belong to this request. If it
     // fails or is a one-off with no session, nothing may be reused after it;
     // warmChatReuseCache re-stakes the claim when a transcript is stored.
@@ -2514,13 +2682,13 @@ fn handleChatCompletions(
     runtime.mtpBeginRequest(engine);
     const prefill_start_ns = std.time.nanoTimestamp();
     const prefill_work_tokens = if (reused_prefix_len > 0)
-        prompt_tokens.len - reused_prefix_len
+        engine_prompt_tokens.len - reused_prefix_len
     else
-        prompt_tokens.len;
+        engine_prompt_tokens.len;
     if (reused_prefix_len > 0) {
         state.position = @intCast(reused_prefix_len);
-        if (reused_prefix_len < prompt_tokens.len) {
-            engine.prefillBatched(&state, prompt_tokens[reused_prefix_len..]) catch |err| {
+        if (reused_prefix_len < engine_prompt_tokens.len) {
+            engine.prefillBatched(&state, engine_prompt_tokens[reused_prefix_len..]) catch |err| {
                 log.err("Chat prefill failed after cache hit: {s}", .{@errorName(err)});
                 server_state.clearChatReuseSession(parsed.session_id);
                 if (parsed.stream) {
@@ -2534,11 +2702,11 @@ fn handleChatCompletions(
         log.info("chat cache hit: session={s} reused={d} appended={d}", .{
             parsed.session_id,
             reused_prefix_len,
-            prompt_tokens.len - reused_prefix_len,
+            engine_prompt_tokens.len - reused_prefix_len,
         });
     } else {
         if (parsed.session_id.len > 0) server_state.clearChatReuseSession(parsed.session_id);
-        engine.prefillBatched(&state, prompt_tokens) catch |err| {
+        engine.prefillBatched(&state, engine_prompt_tokens) catch |err| {
             log.err("Chat prefill failed: {s}", .{@errorName(err)});
             if (parsed.stream) {
                 conn.writeSseDone() catch {};
@@ -2558,9 +2726,9 @@ fn handleChatCompletions(
     var mtp_src = runtime.MtpSource{ .eos_id = tokenizer.eos_id };
     if (!sampling.requiresLogitsReadback()) {
         mtp_src.active = if (reused_prefix_len == 0)
-            runtime.mtpPrime(engine, &state, prompt_tokens)
+            runtime.mtpPrime(engine, &state, engine_prompt_tokens)
         else
-            runtime.mtpPrimeSuffix(engine, &state, prompt_tokens, @intCast(reused_prefix_len));
+            runtime.mtpPrimeSuffix(engine, &state, engine_prompt_tokens, @intCast(reused_prefix_len));
     }
 
     if (parsed.stream) {

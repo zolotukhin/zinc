@@ -123,8 +123,15 @@ Q6_K projections at Q4_K efficiency save ~7 s, which is 59.6 → ~42 s = 480 tok
 | launch | context | decode | speculation |
 |---|---:|---:|---|
 | no `-c` | 168,960 | ~55 | on |
-| `-c 226934` | 226,934 | ~55 | on |
-| `ZINC_MTP=0 -c 262144` | 262,144 | ~34 | off |
+| `-c 226934` | 225,729 | ~55 | on |
+| `ZINC_MTP=0 -c 262144` | 261,022 | ~34 | off |
+| `ZINC_PREFILL_SCRATCH_MB=0 ZINC_MTP=0 -c 262144` | 262,144 | ~34 | off |
+
+The two trimmed rows are the honest numbers as of 2026-09-11: the context plan
+now reserves prefill scratch, and at the ceiling it shrinks that reserve to its
+80 MB floor (256-token chunks) before trimming. The nominal 262,144 only ever fit
+because scratch was unreserved and spilled to system memory during long
+prefills; `ZINC_PREFILL_SCRATCH_MB=0` restores exactly that behaviour.
 
 The long-lived 9090 server on the node is pinned at 32k by a launcher invoked
 over SSH from outside the node — nothing on the node carries that flag and the
@@ -307,4 +314,62 @@ raise register-tile reuse further, and f16 packed math for the score products,
 which the reference uses when accumulation stays f32; (2) linear — the DeltaNet
 QKV (Q6_K, K=5120) and out-proj (Q5_K, K=6144) GEMMs at ~12-13 TFLOP/s against
 the dense FFN's 25-32, a kernel-efficiency problem at short K rather than a gate.
+
+## 262K usability pass (2026-09-11)
+
+What "usable at 262K" needs, checked one by one on the card:
+
+1. **Fits.** With scratch reserved the honest ceiling is 261,022 (MTP off) or
+   225,729 (MTP on); see the table above. Scratch auto-reduces to its floor
+   before the context is trimmed (`Prefill scratch budget reduced from 1024 MB
+   to 80 MB so the requested 262144-token context fits`).
+2. **Turn-to-turn reuse — fixed and verified.** Two problems found with the
+   session cache, measured over the API, both now closed (`routes.zig`):
+   - **Thinking off (the tool-calling / bot path): the cache never hit.** The
+     engine's transcript keeps the empty `<think>` scaffold the model actually
+     saw in its prompt, while the next request re-renders that assistant turn
+     without it, so `startsWith` diverged at the scaffold and every turn
+     re-prefilled the whole conversation. With thinking on it is worse: the
+     re-render drops or *re-tokenizes* the reasoning block, so no re-render can
+     ever match. For a recurrent model a partial prefix is useless (the DeltaNet
+     state exists only at the end), so the exact engine transcript is the only
+     thing continuable. The fix stops comparing re-renders: the cache stores
+     the **engine sequence** (prompt + generated + the template's end-of-turn
+     tail, recovered from the canonical render by `transcriptTailAfter`), and
+     the next request is matched by `alignEngineTranscript`, which lets the
+     engine hold tokens the re-render dropped (up to 8,192 at a spot, each skip
+     confirmed by 4 matching tokens) and then **splices** the request's new
+     tail onto the stored transcript. The model continues exactly the
+     conversation it generated against.
+   - **Speculation was lost across a stored turn.** The end-of-turn tail is
+     prefilled after the reply without the draft block, so the next turn found
+     the NextN cache one step short. `warmChatReuseCache` now extends it
+     (`mtpResetCapture` + `mtpPrimeSuffix`) and primes after a rebuild.
+
+   Verified 2026-09-11, two turns of one session over the API:
+
+   | | turn 2 log | decode |
+   |---|---|---:|
+   | thinking off | `spliced: engine_only_tokens=4` → `hit: reused=66 appended=27` → `primed 27 appended rows over a 66-token reused prefix in 2.9 ms` | 77 tok/s |
+   | thinking on | `hit: reused=102 appended=25` → `primed 25 appended rows … in 2.5 ms` | 69 tok/s |
+
+   Both answered the needle. `ZINC_MTP_REUSE` now defaults on. The chat handler
+   reports canonical prompt token counts to the client; only the engine sees
+   the spliced sequence.
+3. **Speculation at 262K** cannot fit at f16: 17 attending layers x 262,144 x
+   64 KiB = 17,408 MiB of cache against 16,303 MiB of weights on a 32,624 MiB
+   card. **q8_0 KV** (32-element blocks, f16 scale) is 9,248 MiB, which leaves
+   ~7 GiB for the draft block's cache, its 671 MB capture buffer and a full
+   1 GB scratch budget — and halves attention's KV traffic at long context.
+   Sites: 5 writers (`kv_cache_write{,_batched,_single}`, `qk_norm_rope_kv_write
+   {,_batched}`, `k_norm_rope_kv_write_batched`) and the readers (`flash_attn`,
+   `flash_attn_batched*`). The tiled prefill kernel is a natural fit: each lane
+   already owns a 32-dim slice = one q8 block. Writers quantize per 32-block
+   with a subgroup-clustered max over the 32 lanes that hold the block (the
+   rope writer's lane→element mapping keeps a block inside one wave). This is
+   the next lever; it is what makes 262K + speculation possible.
+4. **A 250K-token prompt over the API** needs the request body path (a 1.1 MB
+   argv exceeds Linux's 128 KiB single-argument limit); the run in this pass
+   failed to start because a previous test server still held the GPU lock —
+   `/root/ctx262k.sh` step 3 — and is still to be done.
 

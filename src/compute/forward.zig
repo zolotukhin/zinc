@@ -1329,6 +1329,11 @@ pub const InferenceEngine = struct {
     /// for a full prompt prefill; the reused prefix length when only a suffix was
     /// prefilled (see mtpPrimeSuffix).
     mtp_prime_capture_base: u32 = 0,
+    /// Effective batched-prefill scratch budget in bytes, decided at init. Starts
+    /// at ZINC_PREFILL_SCRATCH_MB and shrinks (to a 256-token floor) when the
+    /// requested context would not otherwise fit: the context wins, prefill just
+    /// runs in smaller chunks. 0 means chunking is off.
+    prefill_scratch_budget_bytes: u64 = 0,
     /// NextN/MTP chained cycle: mtpRunNextnBatch records into the open command
     /// buffer without ending/submitting it.
     mtp_nextn_record_only: bool = false,
@@ -1866,12 +1871,37 @@ pub const InferenceEngine = struct {
         // the two overcommit the card: a long prompt then spills to system memory
         // and, near the ceiling, has reset the GPU. Chunking caps that scratch at
         // ZINC_PREFILL_SCRATCH_MB, which is exactly what to reserve here.
-        const prefill_scratch_bytes: u64 = prefillScratchBudgetMb() * 1024 * 1024;
-        const max_ctx = runtime_profile.maxContextTokensForDeviceLocalBudget(
+        var prefill_scratch_bytes: u64 = prefillScratchBudgetMb() * 1024 * 1024;
+        var max_ctx = runtime_profile.maxContextTokensForDeviceLocalBudget(
             weights_bytes + mtp_reserved_bytes + prefill_scratch_bytes,
             instance.vramBytes(),
             requested_ctx,
         );
+        if (max_ctx < requested_ctx and prefill_scratch_bytes > 0) {
+            // The context is what the user asked for; scratch is a transient.
+            // Give the context first claim and let prefill run in whatever
+            // chunk size the remainder allows, down to a 256-token floor. At the
+            // full 262,144 window on a 32 GB card the remainder is ~200 MB.
+            const floor_bytes = batchedScratchBytesPerTokenForConfig(config) * prefill_scratch_floor_tokens;
+            const need = runtime_profile.totalDeviceLocalBytes(weights_bytes + mtp_reserved_bytes, requested_ctx);
+            const vram = instance.vramBytes();
+            const left: u64 = if (vram > need) vram - need else 0;
+            const reduced = @min(prefill_scratch_bytes, @max(left, floor_bytes));
+            if (reduced < prefill_scratch_bytes) {
+                log.info("Prefill scratch budget reduced from {d} MB to {d} MB so the requested {d}-token context fits (chunks of ~{d} tokens)", .{
+                    prefill_scratch_bytes / (1024 * 1024),
+                    reduced / (1024 * 1024),
+                    requested_ctx,
+                    reduced / @max(batchedScratchBytesPerTokenForConfig(config), 1),
+                });
+                prefill_scratch_bytes = reduced;
+                max_ctx = runtime_profile.maxContextTokensForDeviceLocalBudget(
+                    weights_bytes + mtp_reserved_bytes + prefill_scratch_bytes,
+                    vram,
+                    requested_ctx,
+                );
+            }
+        }
         if (max_ctx == 0) {
             log.err("No decode context fits within {d:.2} GiB VRAM budget", .{
                 @as(f64, @floatFromInt(instance.vramBytes())) / (1024.0 * 1024.0 * 1024.0),
@@ -4023,6 +4053,7 @@ pub const InferenceEngine = struct {
             .instance = instance,
             .allocator = allocator,
             .max_context_tokens = max_ctx,
+            .prefill_scratch_budget_bytes = prefill_scratch_bytes,
             .force_cpu_argmax = force_cpu_argmax,
             .force_cpu_ssm = force_cpu_ssm,
             .force_cpu_moe = force_cpu_moe,
@@ -27768,21 +27799,21 @@ pub const InferenceEngine = struct {
     /// ensureBatchedScratchCapacity allocates, so it tracks the model rather than
     /// a hard-coded token count.
     fn prefillScratchChunkLimit(self: *const InferenceEngine) usize {
-        const budget_mb = prefillScratchBudgetMb();
-        if (budget_mb == 0) return 0;
+        const budget: u64 = self.prefill_scratch_budget_bytes;
+        if (budget == 0) return 0;
         const per_token = self.batchedScratchBytesPerToken();
         if (per_token == 0) return 0;
-        const budget: u64 = budget_mb * 1024 * 1024;
         const limit = budget / per_token;
-        // A chunk below this is more weight re-streaming than it is worth.
-        const floor: u64 = 256;
-        return @intCast(@max(limit, floor));
+        return @intCast(@max(limit, prefill_scratch_floor_tokens));
     }
 
     /// Bytes of batched scratch a single prompt token needs. Mirrors the slots
     /// grown by ensureBatchedScratchCapacity.
     fn batchedScratchBytesPerToken(self: *const InferenceEngine) u64 {
-        const cfg = &self.model.config;
+        return batchedScratchBytesPerTokenForConfig(&self.model.config);
+    }
+
+    fn batchedScratchBytesPerTokenForConfig(cfg: *const ModelConfig) u64 {
         const hidden_dim: u64 = cfg.hidden_dim;
         const q_dim: u64 = @as(u64, cfg.n_heads) * cfg.head_dim;
         const kv_dim: u64 = @as(u64, cfg.n_kv_heads) * cfg.head_dim;
@@ -30240,9 +30271,11 @@ pub const InferenceEngine = struct {
     /// NextN catch-up keeps current. Any mismatch returns false and the caller
     /// falls back, which is exactly today's behaviour.
     ///
-    /// Opt-in via ZINC_MTP_REUSE until it has been measured on hardware.
+    /// Verified on hardware in both thinking modes (2026-09-11): a reused turn
+    /// primes its appended rows in ~3 ms and decodes at speculative speed with
+    /// the same answer. ZINC_MTP_REUSE=0 disables it.
     pub fn mtpPrimeSuffix(self: *InferenceEngine, state: *DecodeState, prompt_tokens: []const u32, reused_prefix_len: u32) !bool {
-        if (!envFlagEnabled("ZINC_MTP_REUSE", false)) return false;
+        if (!envFlagEnabled("ZINC_MTP_REUSE", true)) return false;
         const mtp = &(self.mtp orelse return false);
         const N: u32 = @intCast(prompt_tokens.len);
         if (reused_prefix_len == 0 or reused_prefix_len >= N) return false;
@@ -30303,6 +30336,13 @@ pub const InferenceEngine = struct {
         mtp.resident_context_len = N;
         log.info("NextN/MTP: primed {d} appended rows over a {d}-token reused prefix in {d:.1} ms", .{ suffix_len, reused_prefix_len, @as(f64, @floatFromInt(timer.read())) / 1_000_000.0 });
         return true;
+    }
+
+    /// Forget captured prefill rows so the next prefill's capture starts at row
+    /// 0; used before a transcript suffix or rebuild prefill inside a request.
+    pub fn mtpResetCapture(self: *InferenceEngine) void {
+        self.mtp_prefill_capture_count = 0;
+        self.mtp_prime_capture_base = 0;
     }
 
     pub fn mtpPerf(self: *const InferenceEngine) MtpPerf {
@@ -31317,6 +31357,11 @@ fn mtpCaptureRowCap() u32 {
 /// ZINC_MTP_DRAFTS (default 2, clamped to 1..mtp_max_draft).
 /// Draft count from ZINC_MTP_DRAFTS: 1-3 fixed (default 2); `auto` returns
 /// null and lets mtpCycle pick 2 or 3 per cycle from the running acceptance.
+/// Smallest prefill chunk worth running: below this, re-streaming the weights per
+/// chunk costs more than the scratch it saves. Also the floor the context plan
+/// reserves for scratch when a requested context leaves little else.
+const prefill_scratch_floor_tokens: u64 = 256;
+
 /// Scratch budget for one prefill chunk, in MB. 0 disables chunking.
 ///
 /// Measured on Qwen 3.8 27B, R9700, a 20,043-token prompt:
