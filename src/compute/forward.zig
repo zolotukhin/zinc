@@ -12456,7 +12456,16 @@ pub const InferenceEngine = struct {
         // Head-grouped kernel: one workgroup per query position covering the
         // query heads that share a KV head, so each K/V row loaded feeds that
         // many dot products. Only for the shape it is specialized for.
-        const use_gqa = n_queries >= qt_min_queries and
+        // Register-tiled kernel: one wave per 4 (query, head) rows x 32 key
+        // columns, head dim split across lanes, per-lane online softmax. The
+        // shape the comparison runtime uses; the three earlier kernels were not.
+        const use_tile = n_queries >= qt_min_queries and
+            head_dim == attn_mod.flash_attn_gqa_head_dim and
+            n_kv_heads > 0 and
+            n_heads % n_kv_heads == 0 and
+            self.attention.pipeline_batched_tile != null and
+            envFlagEnabled("ZINC_FA_TILE", true);
+        const use_gqa = !use_tile and n_queries >= qt_min_queries and
             head_dim == attn_mod.flash_attn_gqa_head_dim and
             n_kv_heads > 0 and
             n_heads == n_kv_heads * attn_mod.flash_attn_gqa_heads and
@@ -12466,14 +12475,18 @@ pub const InferenceEngine = struct {
             head_dim <= 512 and
             self.attention.pipeline_batched_qt != null and
             envFlagEnabled("ZINC_FA_QUERY_TILE", false);
-        const pip = if (use_gqa)
+        const pip = if (use_tile)
+            &self.attention.pipeline_batched_tile.?
+        else if (use_gqa)
             &self.attention.pipeline_batched_gqa.?
         else if (use_qt)
             &self.attention.pipeline_batched_qt.?
         else
             &(self.attention.pipeline_batched orelse return error.ShaderNotLoaded);
-        const groups_x: u32 = if (use_gqa) n_kv_heads else n_heads;
-        const groups_y: u32 = if (use_qt)
+        const groups_x: u32 = if (use_tile or use_gqa) n_kv_heads else n_heads;
+        const groups_y: u32 = if (use_tile)
+            ((n_heads / n_kv_heads) * n_queries + attn_mod.flash_attn_tile_rows - 1) / attn_mod.flash_attn_tile_rows
+        else if (use_qt)
             (n_queries + attn_mod.flash_attn_query_tile - 1) / attn_mod.flash_attn_query_tile
         else
             n_queries;
@@ -12511,7 +12524,9 @@ pub const InferenceEngine = struct {
         }
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet6(ds, q_buf, q_size, k_cache, k_cache_size, v_cache, v_cache_size, page_table, page_table_size, out_buf, out_size, sinks, sinks_size);
-        if (use_gqa) {
+        if (use_tile) {
+            try self.attention.recordFlashAttnBatchedTile(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
+        } else if (use_gqa) {
             try self.attention.recordFlashAttnBatchedGqa(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
         } else if (use_qt) {
             try self.attention.recordFlashAttnBatchedQt(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);

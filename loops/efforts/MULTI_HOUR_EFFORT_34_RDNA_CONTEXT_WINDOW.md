@@ -75,12 +75,10 @@ required for the full window.
 | decode, short prompt | **55.0** | 31.0 |
 | decode, 20K context | **44.2** | 28.9 |
 | decode, 262K context | **33.9** | 30.5 |
-| prefill, 20K context | 335 | 466 *(unverified)* |
+| prefill, 20K context | 362.7 | 459.3 |
 
-**The prefill number for llama.cpp is not trustworthy yet.** One clean run gave
-466 tok/s; a second run across four prompt lengths gave a consistent 165 tok/s,
-but that one overlapped a profiling job of mine. Re-measure on an idle card with
-a fresh single-request server before quoting it. Our own 335 is solid.
+Both prefill numbers are clean (idle card, single request, 2026-09-10). The
+sections at the end of this log carry the decomposition.
 
 ## Open: prefill
 
@@ -228,4 +226,50 @@ block of queries against a block of keys, keeps the accumulators in registers
 across the key loop, and stages K/V tiles in LDS once per query block. That is a
 focused piece of work with a clear target (6.4 -> ~30 TFLOP/s), and it is the
 only remaining item between us and llama.cpp on prefill.
+
+## Both sides decomposed (2026-09-11)
+
+The same length-curve fit on llama.cpp, same prompts, idle card:
+
+| at 20K | ZINC | llama.cpp |
+|---|---:|---:|
+| linear (per-token) | 2.141 ms/tok → 42.8 s | 1.956 ms/tok → 39.1 s |
+| quadratic (attention) | 3.08e-5 → 12.3 s | 0.99e-5 → 4.0 s |
+
+So their attention is 3.1x faster, not free, and the 12 s gap is **8.3 s of
+attention plus 3.7 s of linear work**. Matching their attention alone lands at
+46.8 s — still 3.7 s behind. Beating them needs attention *and* ~9% off the
+linear term.
+
+The linear side: the DeltaNet QKV projection already runs the DP4a Q8_1 path in
+prefill (`qwenDenseSsmProjDp4aEnabled`, n_tokens >= 32), so its 12.2 TFLOP/s
+against the dense down's 25.1 on the same Q6_K kernel is efficiency at K=5120
+versus K=17408 — a per-tile overhead that a 3.4x shorter K loop cannot amortize —
+not a missing switch.
+
+**The reference scalar attention kernel's shape for head size 256 on AMD**
+(derived from its tuning selection): workgroup 256 = 4 independent wave64s,
+each wave owning Br/row_split = 4 query rows against Bc = 32 key columns per
+step, head dim split 8 ways across lanes (each lane holds a 32-dim slice), no
+LDS staging of K/V, the 4x4 score tile and the 4x8-vec4 output tile in
+registers, and — the part that matters — **each 8-lane column group keeps its
+own online softmax** so the inner loop has no cross-lane reduction; the 8
+partials merge once at the end through shuffles. Per K vec4 loaded: 4 FMAs
+(rows); per Q vec4 read: 4 FMAs (columns). `flash_attn_batched_tile.comp` is
+that shape on our paged f16 cache with causal masking done arithmetically and
+GQA heads packed as rows (r = q·gqa + h) so heads sharing a KV head share a wave.
+
+**Result of that shape** (`flash_attn_batched_tile`, 20,043-token prompt, idle
+card, both runs retrieve the needle):
+
+| | 20K prefill |
+|---|---:|
+| head-grouped kernel (previous best) | 360.2 tok/s |
+| **register-tiled kernel** | **397.5** |
+| llama.cpp | 459.3 |
+
+55.6 s → 50.4 s: attention from ~12.3 s to ~7.1 s (1.7x). Gap to llama.cpp is
+1.16x, from 1.29x. First attention change of four that moved the needle, and it
+is the one that changed the algorithm's shape rather than its memory traffic or
+occupancy.
 

@@ -1,0 +1,245 @@
+#version 460
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// GENERATED-STYLE SIBLING of flash_attn_batched_tile.comp: identical maths, but the KV cache is
+// stored as f16 (half the bytes per token, so twice the context and half the
+// attention read bandwidth). Element indices are unchanged: an f16vec4 holds
+// the same four elements a vec4 did, so every base/offset computation carries
+// over verbatim. Keep in sync with flash_attn_batched_tile.comp.
+// ZINC — register-tiled causal flash attention for prefill.
+//
+// Three earlier prefill kernels kept the shape "one workgroup per query walks
+// its whole causal range" and moved a 20K prefill by -28%, +2.8% and -7%. The
+// length curve says why: attention is ~12.3 s of a 55 s pass here against ~4 s
+// for the comparison runtime on the same card, and its kernel is a different
+// shape, which this adopts.
+//
+// One wave (64 lanes) owns ROWS = 4 (query, head) rows of one KV head. Lanes
+// are arranged D_SPLIT x COL_GROUPS = 8 x 8: the 8 lanes of a column group each
+// hold a 32-dim slice of the head dimension, and the 8 column groups each own
+// COLS = 4 of the BC = 32 key columns in a step. So every K vec4 a lane loads
+// feeds 4 row FMAs, every Q vec4 it reads feeds 4 column FMAs, and the 4x4
+// score tile lives in registers. The output accumulators (4 rows x 8 vec4)
+// also stay in registers for the whole pass.
+//
+// The part that makes it fast: each column group keeps its own online softmax
+// (running max, sum, and output) over the columns it owns, so the inner loop
+// has no cross-lane reduction at all — only the score butterfly across the 8
+// dim lanes. The 8 partial softmaxes are merged once at the end with shuffles.
+//
+// Rows of a KV head are numbered r = q * gqa + h so the heads sharing a KV head
+// sit in the same wave and reuse its K/V loads. Rows in a wave can differ in
+// query position; the causal edge is handled by masking scores to -inf.
+//
+// Fixed to head_dim 256 (D_SPLIT * DV4 * 4). Host checks it and falls back.
+// Dispatch: grid.x = n_kv_heads, grid.y = ceil(gqa * n_queries / ROWS).
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;
+    uint n_heads;
+    uint n_kv_heads;
+    uint seq_start;
+    uint n_queries;
+    uint page_size;
+    uint attn_scale_bits;
+    uint sink_offset;
+};
+
+layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];    };
+layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[]; };
+layout(set = 0, binding = 1) readonly  buffer KCache    { float16_t k_data_h[]; };
+layout(set = 0, binding = 1) readonly  buffer KCacheV4  { f16vec4 k_data_h4[]; };
+layout(set = 0, binding = 2) readonly  buffer VCache    { float16_t v_data_h[]; };
+layout(set = 0, binding = 2) readonly  buffer VCacheV4  { f16vec4 v_data_h4[]; };
+layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];  };
+layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];    };
+layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[]; };
+layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
+
+const uint ROWS = 4u;
+const uint D_SPLIT = 8u;
+const uint DV4 = 8u;                 // vec4s of head dim per lane: 256 / 8 / 4
+const uint HEAD_DIM_V4 = 64u;
+const uint COL_GROUPS = 8u;          // 64 / D_SPLIT
+const uint COLS = 4u;
+const uint BC = COL_GROUPS * COLS;   // 32 key columns per step
+const float NEG_HALF_MAX = -1.7e38;
+
+shared vec4 s_q[ROWS * HEAD_DIM_V4];  // 4 KB, scaled Q rows
+
+void main() {
+    const uint kv_head = gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint d_tid = tid % D_SPLIT;
+    const uint col_tid = tid / D_SPLIT;
+    const uint gqa = n_heads / n_kv_heads;
+    const uint head0 = kv_head * gqa;
+    const uint total_rows = gqa * n_queries;
+    const uint row_base = gl_WorkGroupID.y * ROWS;
+    const float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
+    const float neg_inf = uintBitsToFloat(0xff800000u);
+
+    uint row_q[ROWS];
+    uint row_head[ROWS];
+    uint row_qp[ROWS];
+    bool row_valid[ROWS];
+    uint max_qp = 0u;
+    for (uint r = 0u; r < ROWS; r++) {
+        const uint rg = row_base + r;
+        row_valid[r] = rg < total_rows;
+        const uint rr = row_valid[r] ? rg : 0u;
+        row_q[r] = rr / gqa;
+        row_head[r] = head0 + (rr % gqa);
+        row_qp[r] = seq_start + row_q[r];
+        max_qp = max(max_qp, row_qp[r]);
+    }
+
+    for (uint idx = tid; idx < ROWS * HEAD_DIM_V4; idx += 64u) {
+        const uint r = idx / HEAD_DIM_V4;
+        const uint d = idx % HEAD_DIM_V4;
+        vec4 qv = vec4(0.0);
+        if (row_valid[r]) {
+            qv = q_data_v4[((row_q[r] * n_heads + row_head[r]) * head_dim >> 2) + d] * scale;
+        }
+        s_q[idx] = qv;
+    }
+    barrier();
+
+    vec4 Of[ROWS][DV4];
+    float Mf[ROWS];
+    float Lf[ROWS];
+    for (uint r = 0u; r < ROWS; r++) {
+        Mf[r] = NEG_HALF_MAX;
+        Lf[r] = 0.0;
+        for (uint d = 0u; d < DV4; d++) Of[r][d] = vec4(0.0);
+    }
+
+    const uint n_cols_total = max_qp + 1u;   // causal: keys 0..max_qp
+    const uint kv_row_stride_v4 = (n_kv_heads * head_dim) >> 2;
+    const uint kv_head_off_v4 = (kv_head * head_dim) >> 2;
+
+    for (uint j = 0u; j < n_cols_total; j += BC) {
+        uint kbase[COLS];
+        uint kpos[COLS];
+        bool kvalid[COLS];
+        for (uint c = 0u; c < COLS; c++) {
+            const uint pos = j + c * COL_GROUPS + col_tid;
+            kpos[c] = pos;
+            kvalid[c] = pos < n_cols_total;
+            const uint p = kvalid[c] ? pos : 0u;
+            const uint page_id = page_ids[p / page_size];
+            kbase[c] = (page_id * page_size + (p % page_size)) * kv_row_stride_v4 + kv_head_off_v4 + d_tid;
+        }
+
+        float Sf[ROWS][COLS];
+        for (uint r = 0u; r < ROWS; r++)
+            for (uint c = 0u; c < COLS; c++) Sf[r][c] = 0.0;
+
+        for (uint d = 0u; d < DV4; d++) {
+            const uint qd = d * D_SPLIT + d_tid;
+            vec4 qc0 = s_q[0u * HEAD_DIM_V4 + qd];
+            vec4 qc1 = s_q[1u * HEAD_DIM_V4 + qd];
+            vec4 qc2 = s_q[2u * HEAD_DIM_V4 + qd];
+            vec4 qc3 = s_q[3u * HEAD_DIM_V4 + qd];
+            for (uint c = 0u; c < COLS; c++) {
+                if (!kvalid[c]) continue;
+                const vec4 k = vec4(k_data_h4[kbase[c] + d * D_SPLIT]);
+                Sf[0][c] += dot(qc0, k);
+                Sf[1][c] += dot(qc1, k);
+                Sf[2][c] += dot(qc2, k);
+                Sf[3][c] += dot(qc3, k);
+            }
+        }
+
+        // Full dot products: butterfly across the 8 dim lanes of each column group.
+        for (uint c = 0u; c < COLS; c++) {
+            for (uint r = 0u; r < ROWS; r++) {
+                float v = Sf[r][c];
+                v += subgroupShuffleXor(v, 4u);
+                v += subgroupShuffleXor(v, 2u);
+                v += subgroupShuffleXor(v, 1u);
+                Sf[r][c] = v;
+            }
+        }
+
+        // Causal edge and tail: masked scores go to -inf so their exp is 0
+        // regardless of the running max.
+        for (uint r = 0u; r < ROWS; r++)
+            for (uint c = 0u; c < COLS; c++)
+                if (!kvalid[c] || kpos[c] > row_qp[r]) Sf[r][c] = neg_inf;
+
+        // Per-column-group online softmax: no cross-lane traffic here.
+        float eM[ROWS];
+        for (uint r = 0u; r < ROWS; r++) {
+            float rowmax = NEG_HALF_MAX;
+            for (uint c = 0u; c < COLS; c++) rowmax = max(rowmax, Sf[r][c]);
+            const float m_new = max(Mf[r], rowmax);
+            eM[r] = exp(Mf[r] - m_new);
+            Mf[r] = m_new;
+            Lf[r] *= eM[r];
+        }
+        for (uint d = 0u; d < DV4; d++)
+            for (uint r = 0u; r < ROWS; r++) Of[r][d] *= eM[r];
+
+        for (uint c = 0u; c < COLS; c++) {
+            if (!kvalid[c]) continue;
+            const float p0 = exp(Sf[0][c] - Mf[0]);
+            const float p1 = exp(Sf[1][c] - Mf[1]);
+            const float p2 = exp(Sf[2][c] - Mf[2]);
+            const float p3 = exp(Sf[3][c] - Mf[3]);
+            Lf[0] += p0; Lf[1] += p1; Lf[2] += p2; Lf[3] += p3;
+            for (uint d = 0u; d < DV4; d++) {
+                const vec4 v = vec4(v_data_h4[kbase[c] + d * D_SPLIT]);
+                Of[0][d] += p0 * v;
+                Of[1][d] += p1 * v;
+                Of[2][d] += p2 * v;
+                Of[3][d] += p3 * v;
+            }
+        }
+    }
+
+    // Merge the 8 column groups (lanes differing in col_tid: xor 8, 16, 32).
+    for (uint r = 0u; r < ROWS; r++) {
+        float m = Mf[r];
+        m = max(m, subgroupShuffleXor(m, 8u));
+        m = max(m, subgroupShuffleXor(m, 16u));
+        m = max(m, subgroupShuffleXor(m, 32u));
+        const float sc = exp(Mf[r] - m);
+        Mf[r] = m;
+        float l = Lf[r] * sc;
+        l += subgroupShuffleXor(l, 8u);
+        l += subgroupShuffleXor(l, 16u);
+        l += subgroupShuffleXor(l, 32u);
+        Lf[r] = l;
+        for (uint d = 0u; d < DV4; d++) {
+            vec4 o = Of[r][d] * sc;
+            o += subgroupShuffleXor(o, 8u);
+            o += subgroupShuffleXor(o, 16u);
+            o += subgroupShuffleXor(o, 32u);
+            Of[r][d] = o;
+        }
+    }
+
+    if (col_tid == 0u) {
+        for (uint r = 0u; r < ROWS; r++) {
+            if (!row_valid[r]) continue;
+            const float sink_val = sink_data[sink_offset + row_head[r]];
+            float final_sum = Lf[r];
+            float out_rescale = 1.0;
+            if (!isnan(sink_val)) {
+                const float sink_max = max(Mf[r], sink_val);
+                out_rescale = exp(Mf[r] - sink_max);
+                final_sum = Lf[r] * out_rescale + exp(sink_val - sink_max);
+            }
+            const float f = out_rescale * (final_sum > 0.0 ? 1.0 / final_sum : 0.0);
+            const uint ob = ((row_q[r] * n_heads + row_head[r]) * head_dim) >> 2;
+            for (uint d = 0u; d < DV4; d++) {
+                o_data_v4[ob + d * D_SPLIT + d_tid] = Of[r][d] * f;
+            }
+        }
+    }
+}
