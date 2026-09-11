@@ -273,3 +273,38 @@ card, both runs retrieve the needle):
 is the one that changed the algorithm's shape rather than its memory traffic or
 occupancy.
 
+**Four waves sharing Q + branch-free loop** (`271f71de`): 397.5 → **414.6 tok/s**
+at 20K (48.3 s). Gap to llama.cpp 1.11x. Both taken from the reference's
+configuration: a 256-thread workgroup stages one 16-row Q tile behind a single
+barrier so its four waves stream the same K/V through L0/L1, and invalid columns
+load from a clamped address and are masked to -inf instead of branched around.
+
+**Linear term, tried and rejected:** `dmmv.zig` selects the BM64/BN64 Q6_K Q8_1
+kernel for K=5120 only when `N == 64` (the K=17408 gate accepts any 64-aligned
+N), so prefill chunks take the BM32 ragged kernel. Widening the gate and padding
+long batches to 64 columns measured **410.3 vs 414.6** at 20K and 441 vs 450 at
+1.5K — the BM64 tile is not faster at this M/K, so the QKV projection's 12.2
+TFLOP/s is not a tile-selection accident. Reverted. The remaining ~3.7 s of
+linear gap is diffuse GEMM efficiency (effort 15 territory), not a switch.
+
+## Standing at the end of this effort (2026-09-11)
+
+| 20K prefill | tok/s | pass |
+|---|---:|---:|
+| start of the prefill work (unchunked, original attention) | 335 | 59.6 s |
+| + scratch chunking | 352.6 | 56.8 s |
+| + head-grouped attention | 362.7 | 55.3 s |
+| + register-tiled attention | 397.5 | 50.4 s |
+| **+ 4 waves sharing Q, branch-free** | **414.6** | **48.3 s** |
+| llama.cpp | 459.3 | 43.4 s |
+
+Decode still leads at every length (55.0 / 44.2 / 33.9 vs 31.0 / 28.9 / 30.5),
+context at parity (262,144). Prefill gap 1.29x → 1.11x; the rest is ~3 s of
+attention (theirs is 4.0 s, ours ~5 s now) and ~3.7 s of linear work.
+
+Next levers, in order: (1) attention — 8 rows per wave or a 64-column step to
+raise register-tile reuse further, and f16 packed math for the score products,
+which the reference uses when accumulation stays f32; (2) linear — the DeltaNet
+QKV (Q6_K, K=5120) and out-proj (Q5_K, K=6144) GEMMs at ~12-13 TFLOP/s against
+the dense FFN's 25-32, a kernel-efficiency problem at short K rather than a gate.
+
