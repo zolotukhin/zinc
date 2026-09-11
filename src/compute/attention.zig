@@ -65,8 +65,9 @@ pub const flash_attn_query_tile: u32 = 4;
 pub const flash_attn_gqa_heads: u32 = 6;
 /// head_dim the grouped kernel is specialized for (one output vec4 per lane).
 pub const flash_attn_gqa_head_dim: u32 = 256;
-/// (query, head) rows per wave in flash_attn_batched_tile; must match ROWS.
-pub const flash_attn_tile_rows: u32 = 4;
+/// (query, head) rows per workgroup in flash_attn_batched_tile; must match
+/// WAVES * ROWS in the shader.
+pub const flash_attn_tile_rows: u32 = 16;
 
 pub const AttentionDispatch = struct {
     /// Vulkan compute pipeline, or null if unavailable.

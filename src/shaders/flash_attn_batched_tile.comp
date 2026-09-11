@@ -24,12 +24,20 @@
 // sit in the same wave and reuse its K/V loads. Rows in a wave can differ in
 // query position; the causal edge is handled by masking scores to -inf.
 //
+// A workgroup is WAVES = 4 such waves that share one staged Q tile (16 rows,
+// 16 KB of LDS) and run independently after that single barrier, so the K/V
+// each wave streams is the same data its three neighbours on the CU stream and
+// the L0/L1 caches serve most of it. Invalid columns (past the causal edge or
+// the tail) are loaded from a clamped valid address rather than branched
+// around, and their scores are masked to -inf, which keeps the inner loops free
+// of divergence.
+//
 // Fixed to head_dim 256 (D_SPLIT * DV4 * 4). Host checks it and falls back.
-// Dispatch: grid.x = n_kv_heads, grid.y = ceil(gqa * n_queries / ROWS).
+// Dispatch: grid.x = n_kv_heads, grid.y = ceil(gqa * n_queries / (WAVES*ROWS)).
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PushConstants {
     uint head_dim;
@@ -53,7 +61,9 @@ layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];    };
 layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[]; };
 layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[]; };
 
-const uint ROWS = 4u;
+const uint WAVES = 4u;
+const uint ROWS = 4u;                // rows per wave
+const uint WG_ROWS = WAVES * ROWS;   // rows per workgroup
 const uint D_SPLIT = 8u;
 const uint DV4 = 8u;                 // vec4s of head dim per lane: 256 / 8 / 4
 const uint HEAD_DIM_V4 = 64u;
@@ -62,17 +72,20 @@ const uint COLS = 4u;
 const uint BC = COL_GROUPS * COLS;   // 32 key columns per step
 const float NEG_HALF_MAX = -1.7e38;
 
-shared vec4 s_q[ROWS * HEAD_DIM_V4];  // 4 KB, scaled Q rows
+shared vec4 s_q[WG_ROWS * HEAD_DIM_V4];  // 16 KB, scaled Q rows
 
 void main() {
     const uint kv_head = gl_WorkGroupID.x;
     const uint tid = gl_LocalInvocationID.x;
-    const uint d_tid = tid % D_SPLIT;
-    const uint col_tid = tid / D_SPLIT;
+    const uint wave = tid / 64u;
+    const uint lane = tid % 64u;
+    const uint d_tid = lane % D_SPLIT;
+    const uint col_tid = lane / D_SPLIT;
     const uint gqa = n_heads / n_kv_heads;
     const uint head0 = kv_head * gqa;
     const uint total_rows = gqa * n_queries;
-    const uint row_base = gl_WorkGroupID.y * ROWS;
+    const uint wg_row_base = gl_WorkGroupID.y * WG_ROWS;
+    const uint row_base = wg_row_base + wave * ROWS;
     const float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
     const float neg_inf = uintBitsToFloat(0xff800000u);
 
@@ -91,16 +104,20 @@ void main() {
         max_qp = max(max_qp, row_qp[r]);
     }
 
-    for (uint idx = tid; idx < ROWS * HEAD_DIM_V4; idx += 64u) {
-        const uint r = idx / HEAD_DIM_V4;
+    for (uint idx = tid; idx < WG_ROWS * HEAD_DIM_V4; idx += 256u) {
+        const uint sr = idx / HEAD_DIM_V4;
         const uint d = idx % HEAD_DIM_V4;
+        const uint rg = wg_row_base + sr;
         vec4 qv = vec4(0.0);
-        if (row_valid[r]) {
-            qv = q_data_v4[((row_q[r] * n_heads + row_head[r]) * head_dim >> 2) + d] * scale;
+        if (rg < total_rows) {
+            const uint sq = rg / gqa;
+            const uint sh = head0 + (rg % gqa);
+            qv = q_data_v4[((sq * n_heads + sh) * head_dim >> 2) + d] * scale;
         }
         s_q[idx] = qv;
     }
     barrier();
+    const uint q_row0 = wave * ROWS;
 
     vec4 Of[ROWS][DV4];
     float Mf[ROWS];
@@ -134,12 +151,11 @@ void main() {
 
         for (uint d = 0u; d < DV4; d++) {
             const uint qd = d * D_SPLIT + d_tid;
-            vec4 qc0 = s_q[0u * HEAD_DIM_V4 + qd];
-            vec4 qc1 = s_q[1u * HEAD_DIM_V4 + qd];
-            vec4 qc2 = s_q[2u * HEAD_DIM_V4 + qd];
-            vec4 qc3 = s_q[3u * HEAD_DIM_V4 + qd];
+            vec4 qc0 = s_q[(q_row0 + 0u) * HEAD_DIM_V4 + qd];
+            vec4 qc1 = s_q[(q_row0 + 1u) * HEAD_DIM_V4 + qd];
+            vec4 qc2 = s_q[(q_row0 + 2u) * HEAD_DIM_V4 + qd];
+            vec4 qc3 = s_q[(q_row0 + 3u) * HEAD_DIM_V4 + qd];
             for (uint c = 0u; c < COLS; c++) {
-                if (!kvalid[c]) continue;
                 const vec4 k = k_data_v4[kbase[c] + d * D_SPLIT];
                 Sf[0][c] += dot(qc0, k);
                 Sf[1][c] += dot(qc1, k);
@@ -179,7 +195,8 @@ void main() {
             for (uint r = 0u; r < ROWS; r++) Of[r][d] *= eM[r];
 
         for (uint c = 0u; c < COLS; c++) {
-            if (!kvalid[c]) continue;
+            // Masked columns have score -inf, so p == 0 and the clamped V row
+            // contributes nothing; no branch needed.
             const float p0 = exp(Sf[0][c] - Mf[0]);
             const float p1 = exp(Sf[1][c] - Mf[1]);
             const float p2 = exp(Sf[2][c] - Mf[2]);
