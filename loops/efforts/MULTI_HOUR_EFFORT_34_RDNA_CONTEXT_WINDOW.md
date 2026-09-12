@@ -610,3 +610,15 @@ generated reader had answered correctly at 226K). No gain and a correctness
 question: reverted to the generated reader. The int8-dot kernel is the q8
 prefill lever.
 
+**int8-dot kernels, measured at 20K (q8 cache, needle found at 1.5K and 20K):**
+
+| q8, 20K | prefill | decode (spec on) |
+|---|---:|---:|
+| generated f32-dot reader | 356.6 tok/s | 56.9 |
+| **int8-dot (`ZINC_FA_Q8_MMQ`)** | **397.9** | **63.9** |
+| f16 cache, for reference | 412.6 | — |
+
+Attention is about a fifth of a 20K pass, so an 11.6% whole-pass gain means
+the attention itself roughly doubled. Now the default for a q8 cache; the 100K
+prefill and the depth decode A/B follow.
+

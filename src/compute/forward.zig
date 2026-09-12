@@ -8110,7 +8110,7 @@ pub const InferenceEngine = struct {
                         const use_mmq_decode = !use_gqa_decode and kv_dtype.isQ8() and
                             self.attention.pipeline_split_mmq != null and
                             layer_head_dim == attn_mod.flash_attn_gqa_head_dim and
-                            envFlagEnabled("ZINC_FA_Q8_MMQ", false);
+                            envFlagEnabled("ZINC_FA_Q8_MMQ", true);
                         const attn_pip = if (use_gqa_decode) &self.attention.pipeline_gqa_split.? else if (use_mmq_decode) &self.attention.pipeline_split_mmq.? else split_pip;
                         const attn_groups_x: u32 = if (use_gqa_decode) layer_n_kv_heads else config.n_heads;
                         if (attn_pip.uses_push_descriptors) {
@@ -12519,7 +12519,7 @@ pub const InferenceEngine = struct {
             self.fa_split_k > 1 and
             envFlagEnabled("ZINC_FA_SMALL_BATCH_DECODE", true))
         {
-            const small_mmq = kv_dtype.isQ8() and head_dim == attn_mod.flash_attn_gqa_head_dim and self.attention.pipeline_split_mmq != null and envFlagEnabled("ZINC_FA_Q8_MMQ", false);
+            const small_mmq = kv_dtype.isQ8() and head_dim == attn_mod.flash_attn_gqa_head_dim and self.attention.pipeline_split_mmq != null and envFlagEnabled("ZINC_FA_Q8_MMQ", true);
             const small_split: ?*const Pipeline = if (small_mmq) &self.attention.pipeline_split_mmq.? else if (self.attention.pipeline_split) |*p| p else null;
             if (small_split) |split_pip| {
                 if (self.attention.pipeline_split_merge) |*merge_pip| {
@@ -12595,7 +12595,7 @@ pub const InferenceEngine = struct {
         // int8-dot variant of the tiled kernel for a q8 cache (opt-in until measured).
         const use_mmq = use_tile and kv_dtype.isQ8() and
             self.attention.pipeline_batched_tile_mmq != null and
-            envFlagEnabled("ZINC_FA_Q8_MMQ", false);
+            envFlagEnabled("ZINC_FA_Q8_MMQ", true);
         const pip = if (use_mmq)
             &self.attention.pipeline_batched_tile_mmq.?
         else if (use_tile)
