@@ -2906,7 +2906,9 @@ fn handleChatCompletions(
                 _ = runtime.mtpPrimeSuffix(engine, &state, engine_prompt_tokens[0..split_at], @intCast(reused_prefix_len));
             }
         }
-        checkpointed = runtime.ssmCheckpointTake(engine, &state);
+        // ZINC_CHAT_CHECKPOINT=0 falls back to transcript reuse (diagnostics).
+        const checkpoints_enabled = if (std.posix.getenv("ZINC_CHAT_CHECKPOINT")) |v| !std.mem.eql(u8, v, "0") else true;
+        checkpointed = checkpoints_enabled and runtime.ssmCheckpointTake(engine, &state);
         if (checkpointed) {
             // Store the tokens the engine actually processed: after a text
             // splice they differ from the canonical prompt and its indices.

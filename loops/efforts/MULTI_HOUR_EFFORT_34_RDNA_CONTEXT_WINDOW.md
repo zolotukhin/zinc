@@ -860,3 +860,9 @@ int8-dot, so the int8 path is worth 64% on the 197K prefill. Stage 19 asks
 order 1,1,2,1 to separate "first restore after the chunked prefill" from "no
 prior answer in the context".
 
+**Stage 18b: the suffix through the prefill tile kernel does not change it
+either** (`ZINC_FA_SMALL_BATCH_DECODE=0`, order 1,2,5: q1 `PLUM-4417-`, q2/q5
+correct). Attention kernels are exonerated. Stage 20 (after 19) disables the
+checkpoint (`ZINC_CHAT_CHECKPOINT=0`, transcript reuse): if q1 then answers,
+the checkpoint take/restore itself is numerically off.
+
