@@ -885,3 +885,19 @@ the previous turn moves. Stage 20b: a barrier-ordered checkpoint copy first
 (the take had no barrier against the prefill's dispatches), then the top-2
 margins at each generated token, then transcript reuse on the same build.
 
+**Stage 20b: the barrier changes nothing, and the margins settle it.** With
+`ZINC_LOG_TOPK=1` (CPU argmax, speculation off) the greedy tokens of the 5%
+answer at 197K are `PL` `UM` `-` `4` `4` `1` `7` `-` with margins of 3–9
+logits, and then:
+
+    top=EOS logit=19.067   second='Z' logit=18.921   margin=0.146
+
+The cut is a **0.146-logit near-tie** between ending the turn and continuing
+the code; every other token in the run has a margin of 1–13. That is why four
+numeric configurations agree (their differences are below 0.15 logits), why
+four prior complete answers or the old scaffold-carrying rendering flip it,
+and why llama.cpp's f16 pipeline lands on the other side. It is a model
+decision on the farthest fact, not an engine defect. The checkpoint-copy
+barrier (74ff61f7) stays as hygiene. The 197K first-question score is 4/5 on
+this margin; with any prior complete answer in the context it is 5/5.
+
