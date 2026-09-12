@@ -1,5 +1,6 @@
 #version 460
-// GENERATED-STYLE SIBLING of flash_attn.comp: identical maths, but the KV cache is
+// HAND-TUNED SIBLING of flash_attn.comp (the 16-wide K loop is rewritten for q8;
+// regenerate with mk_q8kv.py and re-apply if flash_attn.comp changes): identical maths, but the KV cache is
 // stored as q8_0 blocks (32 int8 + an f16 scale, 36 bytes per 32 elements).
 // vec4 index i lives in block i>>3 at uint i&7; the block's scale is uint 8.
 // Keep in sync with flash_attn.comp.
@@ -227,23 +228,38 @@ void main() {
             float acc14 = 0.0;
             float acc15 = 0.0;
             uint d4 = 0u;
+            // q8 fast path: 16 vec4 = two 32-element blocks. Load each block's
+            // scale once and apply it to the block's partial sum, so the inner
+            // dots see one uint load per vec4 instead of a data load plus a
+            // scale load. Rows are block-aligned, so k_base_v4 + d4 is a block
+            // start whenever d4 is a multiple of 8.
             for (; d4 + 16u <= head_dim_v4; d4 += 16u) {
-                acc0  += dot(s_q4[d4],       q8_load_k(k_base_v4 + d4));
-                acc1  += dot(s_q4[d4 + 1u],  q8_load_k(k_base_v4 + d4 + 1u));
-                acc2  += dot(s_q4[d4 + 2u],  q8_load_k(k_base_v4 + d4 + 2u));
-                acc3  += dot(s_q4[d4 + 3u],  q8_load_k(k_base_v4 + d4 + 3u));
-                acc4  += dot(s_q4[d4 + 4u],  q8_load_k(k_base_v4 + d4 + 4u));
-                acc5  += dot(s_q4[d4 + 5u],  q8_load_k(k_base_v4 + d4 + 5u));
-                acc6  += dot(s_q4[d4 + 6u],  q8_load_k(k_base_v4 + d4 + 6u));
-                acc7  += dot(s_q4[d4 + 7u],  q8_load_k(k_base_v4 + d4 + 7u));
-                acc8  += dot(s_q4[d4 + 8u],  q8_load_k(k_base_v4 + d4 + 8u));
-                acc9  += dot(s_q4[d4 + 9u],  q8_load_k(k_base_v4 + d4 + 9u));
-                acc10 += dot(s_q4[d4 + 10u], q8_load_k(k_base_v4 + d4 + 10u));
-                acc11 += dot(s_q4[d4 + 11u], q8_load_k(k_base_v4 + d4 + 11u));
-                acc12 += dot(s_q4[d4 + 12u], q8_load_k(k_base_v4 + d4 + 12u));
-                acc13 += dot(s_q4[d4 + 13u], q8_load_k(k_base_v4 + d4 + 13u));
-                acc14 += dot(s_q4[d4 + 14u], q8_load_k(k_base_v4 + d4 + 14u));
-                acc15 += dot(s_q4[d4 + 15u], q8_load_k(k_base_v4 + d4 + 15u));
+                const uint blk0 = (k_base_v4 + d4) >> 3;
+                const uint blk1 = blk0 + 1u;
+                const uint u0 = blk0 * 9u;
+                const uint u1 = blk1 * 9u;
+                const float s0 = 127.0 * unpackHalf2x16(k_data_u[u0 + 8u]).x;
+                const float s1 = 127.0 * unpackHalf2x16(k_data_u[u1 + 8u]).x;
+                float b0 = dot(s_q4[d4],      vec4(unpackSnorm4x8(k_data_u[u0])))
+                         + dot(s_q4[d4 + 1u], vec4(unpackSnorm4x8(k_data_u[u0 + 1u])))
+                         + dot(s_q4[d4 + 2u], vec4(unpackSnorm4x8(k_data_u[u0 + 2u])))
+                         + dot(s_q4[d4 + 3u], vec4(unpackSnorm4x8(k_data_u[u0 + 3u])));
+                float b1 = dot(s_q4[d4 + 4u], vec4(unpackSnorm4x8(k_data_u[u0 + 4u])))
+                         + dot(s_q4[d4 + 5u], vec4(unpackSnorm4x8(k_data_u[u0 + 5u])))
+                         + dot(s_q4[d4 + 6u], vec4(unpackSnorm4x8(k_data_u[u0 + 6u])))
+                         + dot(s_q4[d4 + 7u], vec4(unpackSnorm4x8(k_data_u[u0 + 7u])));
+                float b2 = dot(s_q4[d4 + 8u],  vec4(unpackSnorm4x8(k_data_u[u1])))
+                         + dot(s_q4[d4 + 9u],  vec4(unpackSnorm4x8(k_data_u[u1 + 1u])))
+                         + dot(s_q4[d4 + 10u], vec4(unpackSnorm4x8(k_data_u[u1 + 2u])))
+                         + dot(s_q4[d4 + 11u], vec4(unpackSnorm4x8(k_data_u[u1 + 3u])));
+                float b3 = dot(s_q4[d4 + 12u], vec4(unpackSnorm4x8(k_data_u[u1 + 4u])))
+                         + dot(s_q4[d4 + 13u], vec4(unpackSnorm4x8(k_data_u[u1 + 5u])))
+                         + dot(s_q4[d4 + 14u], vec4(unpackSnorm4x8(k_data_u[u1 + 6u])))
+                         + dot(s_q4[d4 + 15u], vec4(unpackSnorm4x8(k_data_u[u1 + 7u])));
+                acc0 += b0 * s0;
+                acc1 += b1 * s0;
+                acc2 += b2 * s1;
+                acc3 += b3 * s1;
             }
             for (; d4 + 8u <= head_dim_v4; d4 += 8u) {
                 acc0 += dot(s_q4[d4],      q8_load_k(k_base_v4 + d4));

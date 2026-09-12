@@ -436,3 +436,33 @@ empty think block (thinking on by default in their template), so correctness at
 depth is measured separately by the multi-needle eval with thinking disabled on
 both engines (`chat_template_kwargs.enable_thinking=false` for llama.cpp).
 
+**q8 validation (2026-09-12).** First run fell to a generic prefill path
+(233 tok/s, capture count 2× the prompt, speculation skipped) because the
+accelerated dense-hybrid prefill gates tested for the untiled batched kernel,
+which q8 does not load; `batchedAttentionAvailable()` now accepts the tiled
+kernel. With that:
+
+| needle prompt | f16 | q8 | answer |
+|---|---:|---:|---|
+| 1,568 tokens: prefill / decode | 444.6 / 78.0 tok/s | 443.7 / 76.0 | same |
+| 20,043 tokens: prefill / decode | 412.6 / 44.1 | 369.2 / 39.8 | same, primed |
+
+~10% instruction cost at 20K on both sides (two loads per vec4 in the
+generated readers); the byte saving only pays at depth, which the 226K stage
+measures. The decode reader's 16-wide K loop is hand-tuned afterwards to load
+each block's scale once (`flash_attn_q8kv.comp`, "HAND-TUNED SIBLING").
+
+**The GPU reset near the ceiling, explained.** The first q8 run at the full
+window with speculation on (which q8 makes fit: `requested 262144, reserved
+262144`, cache 9,792 MB, scratch at its full 1 GB so chunks of 3,276) died
+mid-prefill with `radv/amdgpu: the context is lost … guilty of a hard recovery`
+and dmesg `ring comp_1.1.0 timeout` — the compute-ring watchdog, not a memory
+fault (the prime-capture bounds are checked). Each prefill chunk's attention
+layer is one submission, and its work grows with the depth it attends over; a
+3,276-token chunk at 200K depth exceeded the driver's limit, while the f16 run
+at the same depth with 256-token chunks (scratch floor) ran for 23 minutes
+without incident. Same mechanism as the very first reset, a 26.7K prompt
+submitted whole before chunking existed. Chunks are now bounded by
+query × key pairs as well as by scratch (`ZINC_PREFILL_ATTN_PAIRS`, default
+3e8: 1,500 tokens at 200K depth, scratch-limited when shallow).
+

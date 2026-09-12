@@ -2257,7 +2257,7 @@ pub const InferenceEngine = struct {
         log.info("KV cache: {d}/{d} layers attend, {s} ({d} MB total at {d} tokens)", .{
             kv_owned_layers,
             n_kv_layers,
-            if (kv_dtype.f16Enabled()) "f16" else "f32",
+            @tagName(kv_dtype.layout()),
             @as(u64, kv_owned_layers) * kv_cache_per_layer * 2 / (1024 * 1024),
             max_ctx,
         });
@@ -27792,7 +27792,16 @@ pub const InferenceEngine = struct {
             });
             var offset: usize = 0;
             while (offset < prompt_tokens.len) {
-                const end = @min(offset + scratch_chunk, prompt_tokens.len);
+                // A chunk's attention layer is one GPU job whose work grows
+                // with the depth it attends over. Bound the chunk by
+                // query x key pairs so a deep chunk cannot outrun the driver's
+                // compute-ring watchdog: a 3,276-token chunk at 200K depth
+                // reset the card (amdgpu "ring comp_1.1.0 timeout"); 256-token
+                // chunks at the same depth ran for 23 minutes without incident.
+                const depth: u64 = state.position;
+                const by_depth: u64 = @max(prefill_scratch_floor_tokens, prefillAttnPairsBudget() / @max(depth, 1));
+                const chunk: usize = @intCast(@min(@as(u64, scratch_chunk), by_depth));
+                const end = @min(offset + chunk, prompt_tokens.len);
                 try self.prefillBatchedImpl(state, prompt_tokens[offset..end]);
                 offset = end;
             }
@@ -31369,6 +31378,14 @@ fn mtpCaptureRowCap() u32 {
 /// chunk costs more than the scratch it saves. Also the floor the context plan
 /// reserves for scratch when a requested context leaves little else.
 const prefill_scratch_floor_tokens: u64 = 256;
+
+/// Largest query x key product one prefill chunk may attend over, so a chunk
+/// deep in the context stays a bounded GPU job. 3e8 keeps a chunk at 1,500
+/// tokens at 200K depth and leaves shallow chunks scratch-limited.
+fn prefillAttnPairsBudget() u64 {
+    const raw = std.posix.getenv("ZINC_PREFILL_ATTN_PAIRS") orelse return 300_000_000;
+    return std.fmt.parseInt(u64, raw, 10) catch 300_000_000;
+}
 
 /// Scratch budget for one prefill chunk, in MB. 0 disables chunking.
 ///
