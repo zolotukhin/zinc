@@ -538,4 +538,9 @@ same butterfly. PV stays f32 for now (V dequantized per block). Opt-in
 (`ZINC_FA_Q8_MMQ=1`) until the needle and speed checks land; the same trick is
 the plan for the q8 decode kernel once the split-K chunk scaling has been
 measured.
+The decode side gets the same treatment in `flash_attn_q8mmq` (split-K, per
+head): Q quantized once per block into 64 uints of LDS, then 64 int8-dot
+instructions per key instead of 256 f32 FMAs. Selected with the same
+`ZINC_FA_Q8_MMQ=1` for the split-K decode dispatch and for small batches at
+depth. Both are measured behind the depth A/Bs.
 

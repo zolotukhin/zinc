@@ -8107,7 +8107,11 @@ pub const InferenceEngine = struct {
                             layer_head_dim == attn_mod.flash_attn_gqa_head_dim and
                             config.n_heads == layer_n_kv_heads * attn_mod.flash_attn_gqa_heads and
                             envFlagEnabled("ZINC_FA_GQA_DECODE", false);
-                        const attn_pip = if (use_gqa_decode) &self.attention.pipeline_gqa_split.? else split_pip;
+                        const use_mmq_decode = !use_gqa_decode and kv_dtype.isQ8() and
+                            self.attention.pipeline_split_mmq != null and
+                            layer_head_dim == attn_mod.flash_attn_gqa_head_dim and
+                            envFlagEnabled("ZINC_FA_Q8_MMQ", false);
+                        const attn_pip = if (use_gqa_decode) &self.attention.pipeline_gqa_split.? else if (use_mmq_decode) &self.attention.pipeline_split_mmq.? else split_pip;
                         const attn_groups_x: u32 = if (use_gqa_decode) layer_n_kv_heads else config.n_heads;
                         if (attn_pip.uses_push_descriptors) {
                             const split_push = FlashAttnPush{
@@ -12515,7 +12519,9 @@ pub const InferenceEngine = struct {
             self.fa_split_k > 1 and
             envFlagEnabled("ZINC_FA_SMALL_BATCH_DECODE", true))
         {
-            if (self.attention.pipeline_split) |*split_pip| {
+            const small_mmq = kv_dtype.isQ8() and head_dim == attn_mod.flash_attn_gqa_head_dim and self.attention.pipeline_split_mmq != null and envFlagEnabled("ZINC_FA_Q8_MMQ", false);
+            const small_split: ?*const Pipeline = if (small_mmq) &self.attention.pipeline_split_mmq.? else if (self.attention.pipeline_split) |*p| p else null;
+            if (small_split) |split_pip| {
                 if (self.attention.pipeline_split_merge) |*merge_pip| {
                     if (split_pip.uses_push_descriptors and merge_pip.uses_push_descriptors) {
                         var j: u32 = 0;

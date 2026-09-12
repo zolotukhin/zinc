@@ -114,6 +114,9 @@ pub const AttentionDispatch = struct {
     /// Specialized with the same N_I_CHUNKS and HEADS = 6; the host uses it only
     /// when head_dim == 256 and n_heads == 6 * n_kv_heads.
     pipeline_gqa_split: ?Pipeline,
+    /// q8-cache decode kernel with Q.K^T on the int8 dot (flash_attn_q8mmq),
+    /// split-K capable; loaded only for a q8 cache. Opt-in.
+    pipeline_split_mmq: ?Pipeline,
     /// N_I_CHUNKS the split pipelines were specialized with (1 if disabled).
     fa_split_k_active: u32,
     /// Descriptor pool for this dispatch.
@@ -210,6 +213,7 @@ pub const AttentionDispatch = struct {
         // Override with ZINC_FA_SPLIT_K=N (N ∈ {0,1,2,4}; 0 or 1 disable).
         var pipeline_split: ?Pipeline = null;
         var pipeline_gqa_split: ?Pipeline = null;
+        var pipeline_split_mmq: ?Pipeline = null;
         var pipeline_split_merge: ?Pipeline = null;
         var fa_split_k_active: u32 = 1;
         const fa_split_k_env = std.posix.getenv("ZINC_FA_SPLIT_K");
@@ -241,6 +245,13 @@ pub const AttentionDispatch = struct {
 
             if (pipeline_split != null and pipeline_split_merge != null) {
                 fa_split_k_active = fa_split_k_request;
+                if (kv_dtype.isQ8()) {
+                    const mmq_attn_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_q8mmq.spv", .{shader_dir}) catch unreachable;
+                    pipeline_split_mmq = pipeline_mod.createFromSpirvWithOptions(instance, mmq_attn_path, 6, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+                        log.warn("flash_attn_q8mmq shader not loaded: {s}", .{@errorName(err)});
+                        break :blk null;
+                    };
+                }
                 const gqa_attn_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("flash_attn_gqa") }) catch unreachable;
                 pipeline_gqa_split = pipeline_mod.createFromSpirvWithOptions(instance, gqa_attn_path, 6, @sizeOf(FlashAttnPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
                     log.warn("flash_attn_gqa split-K specialization not loaded: {s}", .{@errorName(err)});
@@ -265,6 +276,7 @@ pub const AttentionDispatch = struct {
             .pipeline_split_merge = pipeline_split_merge,
             .fa_split_k_active = fa_split_k_active,
             .pipeline_gqa_split = pipeline_gqa_split,
+            .pipeline_split_mmq = pipeline_split_mmq,
             .descriptor_pool = descriptor_pool,
             .device = instance.device,
         };
@@ -593,6 +605,7 @@ pub const AttentionDispatch = struct {
         if (self.pipeline_batched_tile) |*p| p.deinit();
         if (self.pipeline_batched_tile_mmq) |*p| p.deinit();
         if (self.pipeline_gqa_split) |*p| p.deinit();
+        if (self.pipeline_split_mmq) |*p| p.deinit();
         if (self.pipeline_split) |*p| p.deinit();
         if (self.pipeline_split_merge) |*p| p.deinit();
         vk.c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
