@@ -585,3 +585,14 @@ phrasing draws a refusal with thinking off; the depth prompts now use the
 neutral "project codename" fact, and correctness at depth is judged by the
 five-fact eval rerun.)
 
+**Speculation at depth, with the verify batch on the decode kernel** (100K
+resident, q8, depth-scaled chunks, 48-token generations after a reused prefix):
+
+| | per verify cycle | tok/s |
+|---|---:|---:|
+| verify through the tiled prefill kernel | 188 ms | slower than plain decode |
+| verify through the split-K decode kernel, per query | **96 ms** | **26.3** |
+| same, grouped decode kernel | 94 ms | 26.6 |
+
+Plain decode at the same depth: 24.1 (scaled chunks) / 14.6 (the old 4 chunks).
+
