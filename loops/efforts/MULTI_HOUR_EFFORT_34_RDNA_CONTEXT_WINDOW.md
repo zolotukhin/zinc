@@ -714,3 +714,28 @@ at 100K with reuse **off** (full re-prefill each turn): 5/5 pins it on the splic
 path; a miss means the model's own multi-turn history truncates it and llama.cpp
 on the same live flow says whether that is shared.
 
+## Root cause: the reuse path, not q8/kernels/speculation (2026-09-12)
+
+Stage 13 — the live five-fact flow at 100K with reuse **off** (full re-prefill
+each turn, clean history) — scores **5/5**, against 3/5 for the same flow with
+reuse on. Everything else held equal. So the deep-needle truncation is the
+session reuse path, and the scaffold-accumulation idea is too small to be it
+(20 tokens in 100K). What a fresh prefill rebuilds and reuse carries, on this
+hybrid model, is the **DeltaNet recurrent state** (48 of 65 layers): it is f32
+regardless of KV format, which is exactly why q8 and f16 truncate identically,
+and it is absent from single requests (stage 12) and reuse-off (stage 13). Next:
+read how chat reuse carries or recomputes DeltaNet state across turns, since that
+determines whether the fix is a recompute trigger or a drift correction.
+
+### Standing scoreboard at depth (2026-09-12)
+
+| 100K–226K resident | ZINC | llama.cpp |
+|---|---:|---:|
+| decode, speculation on | 26–39 tok/s | 18.5 |
+| prefill (q8, int8-dot) | 288 tok/s | ~290 |
+| turn-to-turn reuse | 6–9 s | 1 s |
+| deep-needle eval | 3/5 (reuse) · 5/5 (fresh) | 5/5 |
+
+Decode and prefill at depth are now at or ahead of llama.cpp; the one open gap is
+reuse-path correctness on deep needles.
+
