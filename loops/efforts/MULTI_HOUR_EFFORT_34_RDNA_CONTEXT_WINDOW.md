@@ -665,3 +665,13 @@ numerics: RoPE angles for the high-frequency dims computed as
 `cos(position * freq)` in f32 (position 200K puts the argument near 2e5 rad,
 where a GLSL range reduction keeps only a couple of digits of the fraction).
 
+**Isolation (stage 9, 100K, q8 int8-dot):** speculation off, on with the verify
+routing, on with the tiled verify — all three answer `PLUM-4417-` and stop.
+Speculation is not the cause; the truncation is in plain greedy decode at
+depth, and the eval shows it depends on the needle's depth (5–50% facts
+answered in full, 75–95% truncated). Remaining candidates: q8 quantization
+noise on far keys (int8 Q × int8 K, ~1% per score, enough to blunt a lone
+needle's softmax peak among 100K keys) or the session-reuse path. Stage 10
+runs the five-fact document at 100K on q8 and on f16 through a session, plus
+the deep fact as a single request.
+
