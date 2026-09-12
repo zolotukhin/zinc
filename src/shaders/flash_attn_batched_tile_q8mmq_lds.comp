@@ -149,7 +149,12 @@ void main() {
         for (uint u = 0u; u < 8u; u++) Of[r][u] = vec4(0.0);
     }
 
-    const uint n_cols_total = max_qp + 1u;
+    // Workgroup-uniform column bound: the loop holds barriers, so every wave
+    // must run the same number of steps. Rows are consecutive, so the last
+    // valid row of the workgroup has the largest query position; rows with
+    // smaller positions mask the extra columns to -inf as usual.
+    const uint wg_last_row = min(wg_row_base + WG_ROWS, total_rows) - 1u;
+    const uint n_cols_total = seq_start + wg_last_row / gqa + 1u;
     const uint kv_row_stride_blk = (n_kv_heads * head_dim) >> 5;   // blocks per position
     const uint kv_head_off_blk = (kv_head * head_dim) >> 5;
 

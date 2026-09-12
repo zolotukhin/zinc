@@ -1075,3 +1075,12 @@ switch. "Bit-identical, no speedup" was the production kernel measured against
 itself. The rescale-skip result (stage 25) is unaffected (it edited the
 production kernels). Selection fixed; re-measuring.
 
+**Stage 39c/40: the LDS variant, actually running.** First result: flash
+0.473 → 0.449 ms (−5%) at 17K depth, 100K prefill 323.7 → 332.4 tok/s, but the
+logits differed from the baseline by ~1 logit (both configurations are
+deterministic run-to-run, 68 and 62 identical tokens). Cause: the column loop
+bound was per wave (each wave's own causal limit) while the loop now holds
+workgroup barriers, so waves with shorter rows left early and stopped loading
+their share of the tile. Bound made workgroup-uniform (the last row's
+position); re-measuring.
+
