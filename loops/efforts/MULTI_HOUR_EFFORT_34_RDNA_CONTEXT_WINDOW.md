@@ -1083,4 +1083,8 @@ bound was per wave (each wave's own causal limit) while the loop now holds
 workgroup barriers, so waves with shorter rows left early and stopped loading
 their share of the tile. Bound made workgroup-uniform (the last row's
 position); re-measuring.
+With the uniform bound: **bit-identical** (91 greedy tokens, identical top-2
+logits; 20K five-fact 5/5), flash 0.476 → 0.455 ms at 17K depth (−4.4%), 100K
+prefill 323.7 → **331.0 tok/s**. Default on (`ZINC_FA_TILE_LDS=0` to disable).
+197K re-measure queued.
 
