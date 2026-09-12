@@ -1,5 +1,6 @@
 #version 460
-// GENERATED-STYLE SIBLING of flash_attn_batched_tile.comp: identical maths, but the KV cache is
+// HAND-TUNED SIBLING of flash_attn_batched_tile.comp (block scales staged in LDS per
+// step; regenerate with mk_q8kv.py and re-apply if the source changes): identical maths, but the KV cache is
 // stored as q8_0 blocks (32 int8 + an f16 scale, 36 bytes per 32 elements).
 // vec4 index i lives in block i>>3 at uint i&7; the block's scale is uint 8.
 // Keep in sync with flash_attn_batched_tile.comp.
@@ -88,6 +89,8 @@ const uint BC = COL_GROUPS * COLS;   // 32 key columns per step
 const float NEG_HALF_MAX = -1.7e38;
 
 shared vec4 s_q[WG_ROWS * HEAD_DIM_V4];  // 16 KB, scaled Q rows
+shared float s_kscale[BC * 8u];           // 1 KB: this step's K block scales (x127), [column][block]
+shared float s_vscale[BC * 8u];           // 1 KB: same for V
 
 void main() {
     const uint kv_head = gl_WorkGroupID.x;
@@ -160,6 +163,22 @@ void main() {
             kbase[c] = (page_id * page_size + (p % page_size)) * kv_row_stride_v4 + kv_head_off_v4 + d_tid;
         }
 
+        // Stage the 32 x 8 block scales for K and V once per step (one lane
+        // each), so the inner loops read them from LDS instead of reloading a
+        // block's scale for every vec4 — the generated reader's two loads per
+        // vec4 cost q8 prefill ~1.5x at depth.
+        {
+            const uint cc = tid >> 3;            // column 0..31 of this step
+            const uint blk = tid & 7u;           // block within the 256-wide row
+            const uint pos = j + cc;
+            const uint pp = (pos < n_cols_total) ? pos : 0u;
+            const uint page_id = page_ids[pp / page_size];
+            const uint row_blk = (((page_id * page_size + (pp % page_size)) * kv_row_stride_v4 + kv_head_off_v4) >> 3) + blk;
+            s_kscale[cc * 8u + blk] = 127.0 * unpackHalf2x16(k_data_u[row_blk * 9u + 8u]).x;
+            s_vscale[cc * 8u + blk] = 127.0 * unpackHalf2x16(v_data_u[row_blk * 9u + 8u]).x;
+        }
+        barrier();
+
         float Sf[ROWS][COLS];
         for (uint r = 0u; r < ROWS; r++)
             for (uint c = 0u; c < COLS; c++) Sf[r][c] = 0.0;
@@ -171,7 +190,8 @@ void main() {
             vec4 qc2 = s_q[(q_row0 + 2u) * HEAD_DIM_V4 + qd];
             vec4 qc3 = s_q[(q_row0 + 3u) * HEAD_DIM_V4 + qd];
             for (uint c = 0u; c < COLS; c++) {
-                const vec4 k = q8_load_k(kbase[c] + d * D_SPLIT);
+                const uint kblk = (kbase[c] >> 3) + d;   // kbase includes d_tid (< 8); rows are block-aligned
+                const vec4 k = vec4(unpackSnorm4x8(k_data_u[kblk * 9u + d_tid])) * s_kscale[(c * COL_GROUPS + col_tid) * 8u + d];
                 Sf[0][c] += dot(qc0, k);
                 Sf[1][c] += dot(qc1, k);
                 Sf[2][c] += dot(qc2, k);
@@ -218,7 +238,8 @@ void main() {
             const float p3 = exp(Sf[3][c] - Mf[3]);
             Lf[0] += p0; Lf[1] += p1; Lf[2] += p2; Lf[3] += p3;
             for (uint d = 0u; d < DV4; d++) {
-                const vec4 v = q8_load_v(kbase[c] + d * D_SPLIT);
+                const uint vblk = (kbase[c] >> 3) + d;
+                const vec4 v = vec4(unpackSnorm4x8(v_data_u[vblk * 9u + d_tid])) * s_vscale[(c * COL_GROUPS + col_tid) * 8u + d];
                 Of[0][d] += p0 * v;
                 Of[1][d] += p1 * v;
                 Of[2][d] += p2 * v;
