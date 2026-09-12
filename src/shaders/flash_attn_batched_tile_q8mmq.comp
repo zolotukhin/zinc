@@ -21,6 +21,7 @@
 // grid.y = ceil(gqa * n_queries / 16), local_size_x = 256.
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #include "dp4a_compat.glsl"
 
@@ -209,16 +210,23 @@ void main() {
                 if (!kvalid[c] || kpos[c] > row_qp[r]) Sf[r][c] = neg_inf;
 
         float eM[ROWS];
+        bool max_changed = false;
         for (uint r = 0u; r < ROWS; r++) {
             float rowmax = NEG_HALF_MAX;
             for (uint c = 0u; c < COLS; c++) rowmax = max(rowmax, Sf[r][c]);
             const float m_new = max(Mf[r], rowmax);
+            max_changed = max_changed || (m_new > Mf[r]);
             eM[r] = exp(Mf[r] - m_new);
             Mf[r] = m_new;
             Lf[r] *= eM[r];
         }
-        for (uint u = 0u; u < 8u; u++)
-            for (uint r = 0u; r < ROWS; r++) Of[r][u] *= eM[r];
+        // Deep into a sequence the running max rarely moves; when no row of
+        // this wave moved, every correction is exactly 1 and the rescale of
+        // the 32 accumulator vec4s is skipped (wave-uniform branch, exact).
+        if (subgroupAny(max_changed)) {
+            for (uint u = 0u; u < 8u; u++)
+                for (uint r = 0u; r < ROWS; r++) Of[r][u] *= eM[r];
+        }
 
         // PV: this lane's 32-dim slice of V for each column, dequantized to f32.
         for (uint c = 0u; c < COLS; c++) {

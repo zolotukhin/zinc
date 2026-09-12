@@ -36,6 +36,7 @@
 // Dispatch: grid.x = n_kv_heads, grid.y = ceil(gqa * n_queries / (WAVES*ROWS)).
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
 
 layout(local_size_x = 256) in;
 
@@ -183,16 +184,23 @@ void main() {
 
         // Per-column-group online softmax: no cross-lane traffic here.
         float eM[ROWS];
+        bool max_changed = false;
         for (uint r = 0u; r < ROWS; r++) {
             float rowmax = NEG_HALF_MAX;
             for (uint c = 0u; c < COLS; c++) rowmax = max(rowmax, Sf[r][c]);
             const float m_new = max(Mf[r], rowmax);
+            max_changed = max_changed || (m_new > Mf[r]);
             eM[r] = exp(Mf[r] - m_new);
             Mf[r] = m_new;
             Lf[r] *= eM[r];
         }
-        for (uint d = 0u; d < DV4; d++)
-            for (uint r = 0u; r < ROWS; r++) Of[r][d] *= eM[r];
+        // Deep into a sequence the running max rarely moves; when no row of
+        // this wave moved, every correction is exactly 1 and the accumulator
+        // rescale is skipped (wave-uniform branch, exact).
+        if (subgroupAny(max_changed)) {
+            for (uint d = 0u; d < DV4; d++)
+                for (uint r = 0u; r < ROWS; r++) Of[r][d] *= eM[r];
+        }
 
         for (uint c = 0u; c < COLS; c++) {
             // Masked columns have score -inf, so p == 0 and the clamped V row
