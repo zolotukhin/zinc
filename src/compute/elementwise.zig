@@ -759,7 +759,7 @@ pub const ElementwiseDispatch = struct {
             break :blk null;
         };
         // Only needed when the cache is f16 (see compute/kv_dtype.zig).
-        const kv_single_f16_path = std.fmt.bufPrint(&path_buf, "{s}/kv_cache_write_single_f16kv.spv", .{shader_dir}) catch unreachable;
+        const kv_single_f16_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ shader_dir, kv_dtype.shaderName("kv_cache_write_single") }) catch unreachable;
         const pipeline_kv_cache_write_single_f16 = if (!kv_dtype.f16Enabled()) null else pipeline_mod.createFromSpirvWithOptions(instance, kv_single_f16_path, 4, @sizeOf(KvCacheWriteSingleF16Push), &.{}, push_options, allocator) catch |err| blk: {
             log.warn("kv_cache_write_single_f16kv shader not loaded: {s}", .{@errorName(err)});
             break :blk null;

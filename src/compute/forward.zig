@@ -1860,7 +1860,7 @@ pub const InferenceEngine = struct {
         // n_nextn_layers, so pass the base layer count and let the NextN block be
         // budgeted only when MTP will actually allocate its cache.
         plan_config.n_nextn_layers = if (mtp_candidate) config.n_nextn_layers else 0;
-        const runtime_profile = memory_plan.profileWithKvBytes(plan_config, kv_dtype.elementBytes());
+        const runtime_profile = memory_plan.profileWithKvBlockBytes(plan_config, kv_dtype.bytesPer32Elems());
         const mtp_reserved_bytes: u64 = if (mtp_candidate) mtpReservedBytes(config.*) else 0;
         if (mtp_candidate) {
             log.info("NextN/MTP: Vulkan draft block enabled ({d} extra KV layer(s) budgeted; set ZINC_MTP=0 to disable)", .{config.n_nextn_layers});
@@ -2241,7 +2241,7 @@ pub const InferenceEngine = struct {
         // model keep recurrent state and never read it, so they get a placeholder
         // (same layout as the Metal backend). On Qwen 3.8 27B this is 17 caches
         // instead of 65, i.e. 136 KB/token instead of 520 KB.
-        const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dim) * kv_dtype.elementBytes();
+        const kv_cache_per_layer = @as(vk.c.VkDeviceSize, max_ctx) * @as(vk.c.VkDeviceSize, kv_dtype.rowBytes(kv_dim));
         const kv_k_cache = try allocator.alloc(Buffer, n_kv_layers);
         errdefer allocator.free(kv_k_cache);
         const kv_v_cache = try allocator.alloc(Buffer, n_kv_layers);
@@ -12490,7 +12490,7 @@ pub const InferenceEngine = struct {
         // Register-tiled kernel: one wave per 4 (query, head) rows x 32 key
         // columns, head dim split across lanes, per-lane online softmax. The
         // shape the comparison runtime uses; the three earlier kernels were not.
-        const use_tile = n_queries >= qt_min_queries and
+        const use_tile = (n_queries >= qt_min_queries or kv_dtype.isQ8()) and
             head_dim == attn_mod.flash_attn_gqa_head_dim and
             n_kv_heads > 0 and
             n_heads % n_kv_heads == 0 and
@@ -12564,6 +12564,14 @@ pub const InferenceEngine = struct {
         } else {
             try self.attention.recordFlashAttnBatched(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
         }
+    }
+
+    /// Whether some kernel can serve batched (prefill) attention: the untiled
+    /// kernel, or the tiled one for the head size it is specialized for — which
+    /// is the only prefill reader a q8 cache has.
+    fn batchedAttentionAvailable(self: *const InferenceEngine) bool {
+        if (self.attention.pipeline_batched != null) return true;
+        return self.attention.pipeline_batched_tile != null and self.model.config.head_dim == attn_mod.flash_attn_gqa_head_dim;
     }
 
     /// Batched projection: weight × [N_tokens columns of x] → [N_tokens columns of y].
@@ -24653,7 +24661,7 @@ pub const InferenceEngine = struct {
         if (!self.isQwenDenseHybridLayerMajorPrefillModel()) return false;
         if (!self.isQwenDensePrefillAccelGpu()) return false;
         if (self.instance.push_descriptor_fn == null) return false;
-        if (self.attention.pipeline_batched == null) return false;
+        if (!self.batchedAttentionAvailable()) return false;
         if (self.elementwise.pipeline_rope_batched == null) return false;
         if (self.elementwise.pipeline_kv_cache_write_batched == null) return false;
         if (self.elementwise.pipeline_sigmoid_mul == null) return false;
@@ -24679,7 +24687,7 @@ pub const InferenceEngine = struct {
         if (!self.isQwen36A3bMoePrefillModel()) return false;
         if (!self.isAmdRdna() and !self.intelA3bProductionEnabled()) return false;
         if (self.instance.push_descriptor_fn == null) return false;
-        if (self.attention.pipeline_batched == null) return false;
+        if (!self.batchedAttentionAvailable()) return false;
         if (self.elementwise.pipeline_rope_batched == null) return false;
         if (self.elementwise.pipeline_kv_cache_write_batched == null) return false;
         if (self.elementwise.pipeline_sigmoid_mul == null) return false;

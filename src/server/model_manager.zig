@@ -494,7 +494,7 @@ fn loadResourcesInto(
     // caller doesn't pin one. Matches the Metal path — see
     // `memory_plan.autoContextTokensForDeviceBudget` for the vLLM-inspired math.
     const effective_requested = spec.requested_context_length orelse memory_plan.autoContextTokensForDeviceBudget(
-        memory_plan.profileWithKvBytes(resources.model.config, kv_dtype.elementBytes()),
+        memory_plan.profileWithKvBlockBytes(resources.model.config, kv_dtype.bytesPer32Elems()),
         tensorBytes(&resources.model),
         instance.vramBytes(),
         resources.model.config.context_length,
@@ -518,7 +518,7 @@ fn loadResourcesInto(
     resources.display_name = try allocator.dupe(u8, modelDisplayName(&resources.model));
     errdefer allocator.free(resources.display_name);
     const weights_bytes = tensorBytes(&resources.model);
-    const profile = memory_plan.profileWithKvBytes(resources.model.config, kv_dtype.elementBytes());
+    const profile = memory_plan.profileWithKvBlockBytes(resources.model.config, kv_dtype.bytesPer32Elems());
     const runtime_ctx = resources.engine.max_context_tokens;
     const kv_cache_bytes = profile.deviceLocalContextBytes(runtime_ctx);
     const runtime_device_local_bytes = profile.runtimeDeviceLocalBytes(runtime_ctx);

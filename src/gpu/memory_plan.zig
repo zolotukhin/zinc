@@ -249,6 +249,13 @@ pub fn profile(config: ModelConfig) RuntimeMemoryProfile {
 /// cache as f16 by default (see compute/kv_dtype.zig), which halves the
 /// per-token cost and therefore doubles the context that fits.
 pub fn profileWithKvBytes(config: ModelConfig, kv_elem_bytes: u64) RuntimeMemoryProfile {
+    return profileWithKvBlockBytes(config, kv_elem_bytes * 32);
+}
+
+/// Like profileWithKvBytes, but the cache is sized per 32-element block so a
+/// block-quantized layout (q8_0: 32 int8 + an f16 scale, 36 bytes) fits the
+/// arithmetic. kv_dim is a multiple of 32 for every supported model.
+pub fn profileWithKvBlockBytes(config: ModelConfig, kv_bytes_per_32_elems: u64) RuntimeMemoryProfile {
     const hidden_size = @as(u64, config.hidden_dim) * @sizeOf(f32);
     const logits_size = @as(u64, config.vocab_size) * @sizeOf(f32);
     const q_dim = @as(u64, config.n_heads) * config.head_dim;
@@ -295,7 +302,7 @@ pub fn profileWithKvBytes(config: ModelConfig, kv_elem_bytes: u64) RuntimeMemory
             gate_buf_size + gate_buf_size + gate_buf_size + down_buf_size + hidden_size +
             router_size + gpu_ssm_bytes,
         .fixed_host_visible_bytes = logits_size + hidden_size + router_size + ssm_staging_size + router_out_size,
-        .device_local_bytes_per_token = @as(u64, kvLayerCount(config)) * kv_dim * kv_elem_bytes * 2,
+        .device_local_bytes_per_token = @as(u64, kvLayerCount(config)) * (kv_dim / 32) * kv_bytes_per_32_elems * 2,
         .host_visible_bytes_per_token = @sizeOf(u32),
         .gpu_ssm_bytes = gpu_ssm_bytes,
     };

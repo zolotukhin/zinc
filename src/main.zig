@@ -2974,7 +2974,7 @@ pub fn main() !void {
             // buffers to system memory (Qwen 3.8 27B on a 32 GB R9700 lost
             // 17% of MTP decode and 10% of plain decode that way).
             const auto_context = memory_plan.autoContextTokensForDeviceBudget(
-                memory_plan.profileWithKvBytes(model.config, kv_dtype.elementBytes()),
+                memory_plan.profileWithKvBlockBytes(model.config, kv_dtype.bytesPer32Elems()),
                 forward_mod.tensorBytes(&model),
                 vk_instance.vramBytes(),
                 model.config.context_length,

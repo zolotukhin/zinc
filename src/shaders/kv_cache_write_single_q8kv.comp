@@ -1,0 +1,47 @@
+#version 460
+// ZINC — q8_0 KV-cache sibling of kv_cache_write_single.comp: identical maths, block-quantized store.
+// Loops that store into the cache run in uniform control flow with a lane
+// predicate, because the block quantization is a subgroup operation.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint kv_dim;          // elements per K/V vector, multiple of 32
+    uint dst_elem_offset; // physical_token * kv_dim, in elements (block-aligned)
+};
+layout(set = 0, binding = 0) readonly buffer KSrc { float k_src[]; };
+layout(set = 0, binding = 1)          buffer KDst { uint  k_dst[]; };
+layout(set = 0, binding = 2) readonly buffer VSrc { float v_src[]; };
+layout(set = 0, binding = 3)          buffer VDst { uint  v_dst[]; };
+// ---- q8_0 block store -------------------------------------------------------
+// The cache is a uint[]: a 32-element block is 9 uints — 8 uints of packed int8
+// (4 per uint) and one uint holding the block's f16 scale in its low half.
+// Q8_STORE writes one element per lane and must be reached by every lane of
+// the wave in uniform control flow: lane l holds an element with
+// (l & 31) == (e & 31), so lanes 4k..4k+3 pack one uint and lane 32k writes the
+// scale. Inactive lanes contribute 0 to the block max and store nothing.
+#define Q8_STORE(BUF, BASE_ELEM, E, VAL, ACTIVE) { \
+    const float _v = (ACTIVE) ? (VAL) : 0.0; \
+    const float _amax = subgroupClusteredMax(abs(_v), 32u); \
+    const float _inv = _amax > 0.0 ? 127.0 / _amax : 0.0; \
+    const uint _b = uint(int(round(_v * _inv))) & 0xFFu; \
+    const uint _b1 = subgroupShuffleDown(_b, 1u); \
+    const uint _b2 = subgroupShuffleDown(_b, 2u); \
+    const uint _b3 = subgroupShuffleDown(_b, 3u); \
+    const uint _lane = gl_SubgroupInvocationID; \
+    const uint _idx = (BASE_ELEM) + (E); \
+    const uint _blk = _idx >> 5; \
+    if ((ACTIVE) && (_lane & 3u) == 0u) BUF[_blk * 9u + ((_idx & 31u) >> 2)] = _b | (_b1 << 8) | (_b2 << 16) | (_b3 << 24); \
+    if ((ACTIVE) && (_lane & 31u) == 0u) BUF[_blk * 9u + 8u] = packHalf2x16(vec2(_amax / 127.0, 0.0)); \
+}
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    const bool lane_on = i < kv_dim;
+    const uint ii = lane_on ? i : 0u;
+    Q8_STORE(k_dst, dst_elem_offset, ii, k_src[ii], lane_on);
+    Q8_STORE(v_dst, dst_elem_offset, ii, v_src[ii], lane_on);
+}

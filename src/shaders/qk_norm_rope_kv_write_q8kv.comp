@@ -1,0 +1,163 @@
+#version 460
+// ZINC — q8_0 KV-cache sibling of qk_norm_rope_kv_write.comp: identical maths, block-quantized store.
+// Every loop that stores into the cache runs in uniform control flow with a
+// lane predicate, because the block quantization is a subgroup operation.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0)          buffer QData   { float q_data[];   };
+layout(set = 0, binding = 1) readonly buffer QWeight { float q_weight[]; };
+layout(set = 0, binding = 2) readonly buffer KSrc    { float k_src[];    };
+layout(set = 0, binding = 3) readonly buffer KWeight { float k_weight[]; };
+layout(set = 0, binding = 4) readonly buffer FreqBuf { float inv_freq[]; };
+layout(set = 0, binding = 5)          buffer KvK     { uint  kv_k[];     };
+layout(set = 0, binding = 6) readonly buffer VSrc    { float v_src[];    };
+layout(set = 0, binding = 7)          buffer KvV     { uint  kv_v[];     };
+
+layout(push_constant) uniform PushConstants {
+    uint  head_dim;
+    uint  rope_dim;
+    uint  n_q_heads;
+    uint  n_k_heads;
+    uint  position;
+    uint  freq_base_bits;   // 0 => use freq buffer
+    uint  attn_scale_bits;  // 0 => scale = 1.0
+    uint  eps_bits;
+    uint  dst_offset;       // physical_token * kv_dim (elements)
+    uint  v_norm;           // 1 => unit-RMS-normalize V while writing kv_v
+};
+
+shared float s_partial[64];
+shared float s_partial_v[64];
+
+// ---- q8_0 block store -------------------------------------------------------
+// The cache is a uint[]: a 32-element block is 9 uints — 8 uints of packed int8
+// (4 per uint) and one uint holding the block's f16 scale in its low half.
+// Q8_STORE writes one element per lane and must be reached by every lane of
+// the wave in uniform control flow: lane l holds an element with
+// (l & 31) == (e & 31), so lanes 4k..4k+3 pack one uint and lane 32k writes the
+// scale. Inactive lanes contribute 0 to the block max and store nothing.
+#define Q8_STORE(BUF, BASE_ELEM, E, VAL, ACTIVE) { \
+    const float _v = (ACTIVE) ? (VAL) : 0.0; \
+    const float _amax = subgroupClusteredMax(abs(_v), 32u); \
+    const float _inv = _amax > 0.0 ? 127.0 / _amax : 0.0; \
+    const uint _b = uint(int(round(_v * _inv))) & 0xFFu; \
+    const uint _b1 = subgroupShuffleDown(_b, 1u); \
+    const uint _b2 = subgroupShuffleDown(_b, 2u); \
+    const uint _b3 = subgroupShuffleDown(_b, 3u); \
+    const uint _lane = gl_SubgroupInvocationID; \
+    const uint _idx = (BASE_ELEM) + (E); \
+    const uint _blk = _idx >> 5; \
+    if ((ACTIVE) && (_lane & 3u) == 0u) BUF[_blk * 9u + ((_idx & 31u) >> 2)] = _b | (_b1 << 8) | (_b2 << 16) | (_b3 << 24); \
+    if ((ACTIVE) && (_lane & 31u) == 0u) BUF[_blk * 9u + 8u] = packHalf2x16(vec2(_amax / 127.0, 0.0)); \
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg  = gl_WorkGroupID.x;
+    bool is_q = (wg < n_q_heads);
+    uint head = is_q ? wg : (wg - n_q_heads);
+    uint base = head * head_dim;
+    float eps = uintBitsToFloat(eps_bits);
+    uint k_dst_base = dst_offset + base;
+
+    float sum_sq = 0.0;
+    float v_sum_sq = 0.0;
+    if (is_q) {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            float val = q_data[base + i];
+            sum_sq += val * val;
+        }
+    } else {
+        for (uint i = tid; i < head_dim; i += 64u) {
+            float val = k_src[base + i];
+            sum_sq += val * val;
+            if (v_norm != 0u) {
+                float v = v_src[base + i];
+                v_sum_sq += v * v;
+            }
+        }
+    }
+    sum_sq = subgroupAdd(sum_sq);
+    v_sum_sq = subgroupAdd(v_sum_sq);
+    if (gl_SubgroupSize < 64u) {
+        s_partial[tid] = sum_sq;
+        s_partial_v[tid] = v_sum_sq;
+        barrier();
+        if (tid == 0u) {
+            float total = 0.0;
+            float total_v = 0.0;
+            uint num_sg = (64u + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+            for (uint s = 0u; s < num_sg; s++) {
+                total += s_partial[s * gl_SubgroupSize];
+                total_v += s_partial_v[s * gl_SubgroupSize];
+            }
+            s_partial[0] = total;
+            s_partial_v[0] = total_v;
+        }
+        barrier();
+        sum_sq = s_partial[0];
+        v_sum_sq = s_partial_v[0];
+    }
+    float rms_inv = inversesqrt(sum_sq / float(head_dim) + eps);
+    float v_rms_inv = inversesqrt(v_sum_sq / float(head_dim) + eps);
+    float freq_base = uintBitsToFloat(freq_base_bits);
+    float attn_scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : 1.0;
+    bool use_freq_buf = (freq_base_bits == 0u);
+    uint half_rot = rope_dim / 2u;
+
+    for (uint i_base = 0u; i_base < half_rot; i_base += 64u) {
+        const bool lane_on = i_base + tid < half_rot;
+        const uint i = min(i_base + tid, half_rot - 1u);
+        float val_lo, val_hi;
+        if (is_q) {
+            val_lo = q_weight[i]            * (q_data[base + i]            * rms_inv);
+            val_hi = q_weight[i + half_rot] * (q_data[base + i + half_rot] * rms_inv);
+        } else {
+            val_lo = k_weight[i]            * (k_src[base + i]            * rms_inv);
+            val_hi = k_weight[i + half_rot] * (k_src[base + i + half_rot] * rms_inv);
+        }
+        float freq_i;
+        if (use_freq_buf) {
+            freq_i = inv_freq[i];
+        } else {
+            float exponent = float(2u * i) / float(rope_dim);
+            freq_i = 1.0 / pow(freq_base, exponent);
+        }
+        float theta = float(position) * freq_i;
+        float cos_t = cos(theta) * attn_scale;
+        float sin_t = sin(theta) * attn_scale;
+        float rot_lo = val_lo * cos_t - val_hi * sin_t;
+        float rot_hi = val_lo * sin_t + val_hi * cos_t;
+        if (is_q) {
+            if (lane_on) {
+                q_data[base + i]            = rot_lo;
+                q_data[base + i + half_rot] = rot_hi;
+            }
+        } else {
+            Q8_STORE(kv_k, k_dst_base, i, rot_lo, lane_on);
+            Q8_STORE(kv_k, k_dst_base, i + half_rot, rot_hi, lane_on);
+        }
+    }
+    for (uint i_base = rope_dim; i_base < head_dim; i_base += 64u) {
+        const bool lane_on = i_base + tid < head_dim;
+        const uint i = min(i_base + tid, head_dim - 1u);
+        if (is_q) {
+            if (lane_on) q_data[base + i] = q_weight[i] * (q_data[base + i] * rms_inv);
+        } else {
+            Q8_STORE(kv_k, k_dst_base, i, k_weight[i] * (k_src[base + i] * rms_inv), lane_on);
+        }
+    }
+    if (!is_q) {
+        for (uint i_base = 0u; i_base < head_dim; i_base += 64u) {
+            const bool lane_on = i_base + tid < head_dim;
+            const uint i = min(i_base + tid, head_dim - 1u);
+            float v = v_src[base + i];
+            Q8_STORE(kv_v, k_dst_base, i, (v_norm != 0u) ? (v * v_rms_inv) : v, lane_on);
+        }
+    }
+}
