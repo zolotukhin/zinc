@@ -924,4 +924,12 @@ llama.cpp's; that is the remaining prefill gap. The per-question latency gap
 (3–4 s vs 1 s at 197K) is the other open metric; the suffix prefill is
 ~0.75 s and generation ~0.4 s, so the rest is tokenizing and matching the
 1.1 MB prompt each turn.
+Stage 23b: 2 GB scratch (6,553-token chunks) + 5e8 pairs: 1007 s. Chunk size
+is worth under 1%. Next lever is inside the tile kernel: per 32-key step each
+lane spends 128 multiplies rescaling its output accumulators by the running-max
+correction, which is exactly 1 once the max has settled — now skipped on a
+wave-uniform `subgroupAny(max_changed)` (bf8f78d0, exact). The larger lever is
+the PV side: dequantizing V (int8 → f32 with a scale) costs about as many
+instructions as the 512 FMAs it feeds; packed-f16 PV with per-tile f32 flush
+would cut that ~2.5× and is the candidate after the A/B.
 
