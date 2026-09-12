@@ -603,3 +603,10 @@ shows the decode changes paying at moderate depth too: **57.2 tok/s with
 speculation on the q8 cache** (39.8 before scaled chunks and the verify-batch
 routing; f16 was 44.1), needle found.
 
+**100K prefill, q8 vs f16** (server, speculation off): q8 231.5 tok/s (430 s),
+f16 287.0 tok/s (347 s) — the staged-scale reader changed nothing at depth
+either, and its q8 run missed the needle where f16 found it (q8 on the
+generated reader had answered correctly at 226K). No gain and a correctness
+question: reverted to the generated reader. The int8-dot kernel is the q8
+prefill lever.
+
