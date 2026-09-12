@@ -933,3 +933,18 @@ the PV side: dequantizing V (int8 → f32 with a scale) costs about as many
 instructions as the 512 FMAs it feeds; packed-f16 PV with per-tile f32 flush
 would cut that ~2.5× and is the candidate after the A/B.
 
+**Stage 24: where a question turn's 4 s go at 197K.**
+
+| step | time |
+|---|---:|
+| tokenize the 771 KB rendered prompt | 2.5–2.6 s |
+| reuse matching (exact prefix + checkpoint restore) | < 0.1 s |
+| suffix prefill (29–36 tokens at depth) | 0.6–0.7 s |
+| generation (4–8 tokens) | 0.2–0.3 s |
+
+Tokenization is two thirds of the turn. Fix: cache the previous request's
+rendered text and tokens per session; a new prompt shares a byte prefix up to
+the previous assistant header, and `<|im_start|>` is a hard BPE boundary, so
+the cached tokens up to the k-th `<|im_start|>` plus an encode of the tail
+equal a full encode exactly. Expected turn: ~1.3 s (llama.cpp: 1 s).
+
