@@ -812,3 +812,24 @@ accumulate in a different order than single-token decode) flipping a near-tie
 between continuing a code and ending the turn. Stage 15 runs the 197K flow with
 speculation off and again with it on.
 
+**Stage 15 → 16: a client retry broke checkpointed reuse (fixed, 7db40a1b).**
+Stage 15's SSH session died mid-run, and re-driving the live server from a
+fresh client re-sent turn 0. That retry exposed three bugs in the checkpoint
+path, each invisible in the clean stage-14 flow:
+
+1. The restore refused any prompt matched by *text* rather than exact tokens,
+   even with the entry length, checkpoint position and engine position all
+   equal. After one text splice every later question fell to a full 197K
+   re-prefill: 17 minutes per question.
+2. A turn whose canonical history ends exactly at the restored checkpoint (the
+   retried turn) took no new checkpoint, so the transcript path replaced the
+   entry and the session lost its checkpoint.
+3. The stored prefix sliced the canonical prompt with the engine's indices;
+   after a splice those differ, so the entry held the wrong tokens (and could
+   run past the end of the shorter prompt).
+
+The fix restores whenever the reused length equals the checkpoint position,
+re-checkpoints a turn that ends at the checkpoint, and stores the tokens the
+engine processed. Stage 16 reruns the 197K five-fact flow with the retry in
+both speculation modes.
+
