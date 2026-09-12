@@ -17,13 +17,12 @@
 
 layout(local_size_x = 64) in;
 
-// Split-K: when N_I_CHUNKS > 1 the dispatch grid is (n_heads, N_I_CHUNKS, 1) and
-// each WG processes 1/N_I_CHUNKS of the i-axis, writing partial unnormalized O,
+// Split-K: when n_chunks > 1 the dispatch grid is (n_heads, n_chunks, 1) and
+// each WG processes 1/n_chunks of the i-axis, writing partial unnormalized O,
 // running max M, and running sum L to the output buffer (in a layout the
-// flash_attn_split_merge shader expects). When N_I_CHUNKS == 1 (default) the
+// flash_attn_split_merge shader expects). When n_chunks == 1 (default) the
 // shader is bit-equivalent to the pre-split path: grid (n_heads, 1, 1), full
 // i-axis sweep, final normalize + sink merge written to o_data.
-layout(constant_id = 0) const uint N_I_CHUNKS = 1u;
 
 layout(push_constant) uniform PushConstants {
     uint head_dim;      // dimension per head (e.g. 128)
@@ -33,6 +32,7 @@ layout(push_constant) uniform PushConstants {
     uint page_size;     // tokens per page (16)
     uint attn_scale_bits; // float attention scale (reinterpreted as uint, 0 = use 1/sqrt(head_dim))
     uint sink_offset;     // starting index into sink_data for this layer (layer_idx * n_heads)
+    uint n_chunks;        // split-K chunks this dispatch runs (1 = write final output)
 };
 
 // Buffer bindings. Q, K, V, and Output are aliased as vec4 so the inner
@@ -96,7 +96,7 @@ shared float s_reduce_scalar;
 
 void main() {
     uint head = gl_WorkGroupID.x;   // query head index
-    uint chunk_id = gl_WorkGroupID.y; // 0 when N_I_CHUNKS == 1, else 0..N_I_CHUNKS-1
+    uint chunk_id = gl_WorkGroupID.y; // 0 when n_chunks == 1, else 0..n_chunks-1
     uint tid = gl_LocalInvocationID.x;  // 0..63
 
     // GQA: map query head to its corresponding KV head
@@ -105,18 +105,18 @@ void main() {
     // Base offset into query buffer for this head
     uint q_base = head * head_dim;
 
-    // Compute this WG's i-axis range. When N_I_CHUNKS == 1 the compiler folds
+    // Compute this WG's i-axis range. When n_chunks == 1 the compiler folds
     // the spec-const branch and this collapses to [0, seq_len) — bit-equivalent
-    // to the pre-split path. With N_I_CHUNKS > 1 each chunk takes a contiguous
+    // to the pre-split path. With n_chunks > 1 each chunk takes a contiguous
     // slice; the last chunk picks up any non-divisible tail.
     uint i_start;
     uint i_end;
-    if (N_I_CHUNKS == 1u) {
+    if (n_chunks == 1u) {
         i_start = 0u;
         i_end = seq_len;
     } else {
-        i_start = (chunk_id * seq_len) / N_I_CHUNKS;
-        i_end = (chunk_id + 1u == N_I_CHUNKS) ? seq_len : (((chunk_id + 1u) * seq_len) / N_I_CHUNKS);
+        i_start = (chunk_id * seq_len) / n_chunks;
+        i_end = (chunk_id + 1u == n_chunks) ? seq_len : (((chunk_id + 1u) * seq_len) / n_chunks);
     }
 
     // --- Load query vector into registers ---
@@ -480,7 +480,7 @@ void main() {
         barrier();
     }
 
-    if (N_I_CHUNKS == 1u) {
+    if (n_chunks == 1u) {
         // --- Phase 5: Normalize output by total softmax sum ---
         float final_sum = s_sum_old;
         float rescale = 1.0;
@@ -502,18 +502,18 @@ void main() {
         // Buffer layout (writeonly view of o_data, o_data_v4 — actually points
         // at partial_attn_out_buf in the host wiring). Partial outputs first,
         // followed by per-chunk LSE pairs.
-        //   partial O region: head_dim * N_I_CHUNKS * n_heads floats
-        //     index = (head * N_I_CHUNKS + chunk_id) * head_dim + d
-        //   LSE region (offset = n_heads * N_I_CHUNKS * head_dim):
-        //     index = lse_base + (head * N_I_CHUNKS + chunk_id) * 2 + (0:M, 1:L)
+        //   partial O region: head_dim * n_chunks * n_heads floats
+        //     index = (head * n_chunks + chunk_id) * head_dim + d
+        //   LSE region (offset = n_heads * n_chunks * head_dim):
+        //     index = lse_base + (head * n_chunks + chunk_id) * 2 + (0:M, 1:L)
         // No sinks here — sinks fold in inside flash_attn_split_merge.
-        uint partial_o_base_v4 = ((head * N_I_CHUNKS + chunk_id) * head_dim) >> 2;
+        uint partial_o_base_v4 = ((head * n_chunks + chunk_id) * head_dim) >> 2;
         for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
             o_data_v4[partial_o_base_v4 + d4] = s_out_v4[d4];
         }
         if (tid == 0u) {
-            uint lse_base = n_heads * N_I_CHUNKS * head_dim;
-            uint lse_idx = lse_base + (head * N_I_CHUNKS + chunk_id) * 2u;
+            uint lse_base = n_heads * n_chunks * head_dim;
+            uint lse_idx = lse_base + (head * n_chunks + chunk_id) * 2u;
             o_data[lse_idx + 0u] = s_max_old;
             o_data[lse_idx + 1u] = s_sum_old;
         }

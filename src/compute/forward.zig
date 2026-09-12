@@ -1334,6 +1334,11 @@ pub const InferenceEngine = struct {
     /// requested context would not otherwise fit: the context wins, prefill just
     /// runs in smaller chunks. 0 means chunking is off.
     prefill_scratch_budget_bytes: u64 = 0,
+    /// Prime the NextN draft block chunk by chunk during a chunked prefill, so
+    /// speculation works at any prompt length instead of only up to the
+    /// prime-capture cap. The server clears it for requests that sample
+    /// non-greedily (speculation is unused there).
+    mtp_prime_during_prefill: bool = true,
     /// NextN/MTP chained cycle: mtpRunNextnBatch records into the open command
     /// buffer without ending/submitting it.
     mtp_nextn_record_only: bool = false,
@@ -3063,8 +3068,9 @@ pub const InferenceEngine = struct {
         }
         var partial_attn_out_buf = Buffer{ .handle = null, .memory = null, .size = 0, .mapped = null, .device = instance.device };
         if (fa_split_k > 1) {
-            const partial_o_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * fa_split_k * config.head_dim;
-            const partial_lse_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * fa_split_k * 2;
+            const max_chunks: u32 = @max(fa_split_k, attn_mod.flash_attn_max_split_chunks);
+            const partial_o_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * max_chunks * config.head_dim;
+            const partial_lse_floats: vk.c.VkDeviceSize = @as(vk.c.VkDeviceSize, config.n_heads) * max_chunks * 2;
             const partial_size = (partial_o_floats + partial_lse_floats) * @sizeOf(f32);
             partial_attn_out_buf = try Buffer.initDeviceLocal(instance, partial_size, storage_xfer);
             errdefer partial_attn_out_buf.deinit();
@@ -8069,8 +8075,12 @@ pub const InferenceEngine = struct {
                     const o_proj_quant_ok = if (o_tensor_for_merge) |ot| ot.info.type_ == .q4_k else false;
                     const apply_attn_gate_for_merge = lt.attn_gate != null;
                     const post_attn_norm_for_merge = config.architecture == .gemma and lt.post_attention_norm != null;
+                    const attn_chunks: u32 = if (use_split_k) self.splitKChunksForSeq(attn_seq_len) else 1;
+                    // The fused o-proj merge reads partials laid out for the base
+                    // chunk count only.
                     const fused_oproj_merge_active = self.use_fused_oproj_merge and
                         use_split_k and
+                        attn_chunks == self.fa_split_k and
                         self.dmmv.pipeline_q4k_o_proj_merge != null and
                         o_proj_quant_ok and
                         !apply_attn_gate_for_merge and
@@ -8090,7 +8100,16 @@ pub const InferenceEngine = struct {
                         const merge_pip = &self.attention.pipeline_split_merge.?;
                         const sink_buf = self.attn_sinks_buf;
                         const sink_offset: u32 = layer * config.n_heads;
-                        if (split_pip.uses_push_descriptors) {
+                        // Grouped variant: one workgroup per KV head serves all
+                        // the query heads that share it, so each K/V row is
+                        // streamed once per token instead of once per head.
+                        const use_gqa_decode = self.attention.pipeline_gqa_split != null and
+                            layer_head_dim == attn_mod.flash_attn_gqa_head_dim and
+                            config.n_heads == layer_n_kv_heads * attn_mod.flash_attn_gqa_heads and
+                            envFlagEnabled("ZINC_FA_GQA_DECODE", false);
+                        const attn_pip = if (use_gqa_decode) &self.attention.pipeline_gqa_split.? else split_pip;
+                        const attn_groups_x: u32 = if (use_gqa_decode) layer_n_kv_heads else config.n_heads;
+                        if (attn_pip.uses_push_descriptors) {
                             const split_push = FlashAttnPush{
                                 .head_dim = layer_head_dim,
                                 .n_heads = config.n_heads,
@@ -8099,9 +8118,10 @@ pub const InferenceEngine = struct {
                                 .page_size = kv_page_size_tokens,
                                 .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
                                 .sink_offset = sink_offset,
+                                .n_chunks = attn_chunks,
                             };
                             self.pushDispatch6(
-                                split_pip,
+                                attn_pip,
                                 std.mem.asBytes(&split_push),
                                 self.q_buf.handle,
                                 self.q_buf.size,
@@ -8115,12 +8135,12 @@ pub const InferenceEngine = struct {
                                 self.partial_attn_out_buf.size,
                                 sink_buf.handle,
                                 sink_buf.size,
-                                config.n_heads,
-                                self.fa_split_k,
+                                attn_groups_x,
+                                attn_chunks,
                                 1,
                             );
                         } else {
-                            const split_ds = try self.allocDescSet(split_pip.descriptor_set_layout);
+                            const split_ds = try self.allocDescSet(attn_pip.descriptor_set_layout);
                             self.writeDescSet6(
                                 split_ds,
                                 self.q_buf.handle,
@@ -8136,7 +8156,11 @@ pub const InferenceEngine = struct {
                                 sink_buf.handle,
                                 sink_buf.size,
                             );
-                            try self.attention.recordFlashAttnSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset);
+                            if (use_gqa_decode) {
+                                try self.attention.recordFlashAttnGqaSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset, attn_chunks);
+                            } else {
+                                try self.attention.recordFlashAttnSplit(&self.decode_cmd, split_ds, layer_head_dim, config.n_heads, layer_n_kv_heads, attn_seq_len, kv_page_size_tokens, config.attn_scale, sink_offset, attn_chunks);
+                            }
                         }
                         self.decode_cmd.computeBarrier();
                         if (!fused_oproj_merge_active) {
@@ -8145,6 +8169,7 @@ pub const InferenceEngine = struct {
                                     .head_dim = layer_head_dim,
                                     .n_heads = config.n_heads,
                                     .sink_offset = sink_offset,
+                                    .n_chunks = attn_chunks,
                                 };
                                 self.pushDispatch3(
                                     merge_pip,
@@ -8170,7 +8195,7 @@ pub const InferenceEngine = struct {
                                     sink_buf.handle,
                                     sink_buf.size,
                                 );
-                                try self.attention.recordFlashAttnSplitMerge(&self.decode_cmd, merge_ds, layer_head_dim, config.n_heads, sink_offset);
+                                try self.attention.recordFlashAttnSplitMerge(&self.decode_cmd, merge_ds, layer_head_dim, config.n_heads, sink_offset, attn_chunks);
                             }
                         }
                     } else if (use_batched) {
@@ -8238,6 +8263,7 @@ pub const InferenceEngine = struct {
                                 .page_size = kv_page_size_tokens,
                                 .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
                                 .sink_offset = sink_offset,
+                                .n_chunks = 1,
                             };
                             self.pushDispatch6(
                                 pip,
@@ -12564,6 +12590,21 @@ pub const InferenceEngine = struct {
         } else {
             try self.attention.recordFlashAttnBatched(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
         }
+    }
+
+    /// Split-K chunks for a decode attention dispatch over `seq_len` keys. A
+    /// fixed 4 chunks leaves 24 heads x 4 = 96 workgroups walking 56K keys each
+    /// at 226K resident tokens — a fraction of the card — which is why decode at
+    /// depth measured 8.3 tok/s whether the cache was f16 or q8. Scale the count
+    /// with depth so each chunk stays near ZINC_FA_SPLIT_K_KEYS keys, up to
+    /// flash_attn_max_split_chunks (the partial buffer's size).
+    fn splitKChunksForSeq(self: *const InferenceEngine, seq_len: u32) u32 {
+        const base = self.fa_split_k;
+        if (base <= 1) return base;
+        const keys_per_chunk = envU32("ZINC_FA_SPLIT_K_KEYS", 2048);
+        const max_chunks = @min(attn_mod.flash_attn_max_split_chunks, envU32("ZINC_FA_SPLIT_K_MAX", attn_mod.flash_attn_max_split_chunks));
+        const wanted = seq_len / @max(keys_per_chunk, 1);
+        return @max(base, @min(max_chunks, wanted));
     }
 
     /// Whether some kernel can serve batched (prefill) attention: the untiled
@@ -27790,8 +27831,16 @@ pub const InferenceEngine = struct {
                 scratch_chunk,
                 self.prefill_scratch_budget_bytes / (1024 * 1024),
             });
+            // Speculation at depth: the prime-capture buffer holds far fewer rows
+            // than a long prompt, so prime the draft block chunk by chunk as the
+            // rows are captured, carrying the last normalized row across chunks
+            // exactly as a reused prefix does. A failure just leaves the
+            // request on ordinary decode, as before.
+            var prime_chunks = self.mtp_prime_during_prefill and self.mtpEnabled() and (self.mtpPrepare() catch false);
             var offset: usize = 0;
             while (offset < prompt_tokens.len) {
+                if (prime_chunks) self.mtpResetCapture();
+                const chunk_base: u32 = state.position;
                 // A chunk's attention layer is one GPU job whose work grows
                 // with the depth it attends over. Bound the chunk by
                 // query x key pairs so a deep chunk cannot outrun the driver's
@@ -27803,6 +27852,13 @@ pub const InferenceEngine = struct {
                 const chunk: usize = @intCast(@min(@as(u64, scratch_chunk), by_depth));
                 const end = @min(offset + chunk, prompt_tokens.len);
                 try self.prefillBatchedImpl(state, prompt_tokens[offset..end]);
+                if (prime_chunks) {
+                    const primed = if (chunk_base == 0)
+                        self.mtpPrime(state, prompt_tokens[0..end]) catch false
+                    else
+                        self.mtpPrimeSuffix(state, prompt_tokens[0..end], chunk_base) catch false;
+                    if (!primed) prime_chunks = false;
+                }
                 offset = end;
             }
             return;
@@ -30241,6 +30297,8 @@ pub const InferenceEngine = struct {
         const mtp = &(self.mtp orelse return false);
         const N: u32 = @intCast(prompt_tokens.len);
         if (N == 0) return false;
+        // Primed chunk by chunk during a chunked prefill (see prefillBatched).
+        if (mtp.primed and mtp.resident_context_len == N and state.position == N) return true;
         if (self.mtp_prefill_capture_count != N or state.position != N) {
             log.warn("NextN/MTP: prime skipped (captured {d}/{d} prompt rows, position {d}); using ordinary greedy decode", .{ self.mtp_prefill_capture_count, N, state.position });
             return false;
@@ -30297,6 +30355,8 @@ pub const InferenceEngine = struct {
         const N: u32 = @intCast(prompt_tokens.len);
         if (reused_prefix_len == 0 or reused_prefix_len >= N) return false;
         const suffix_len = N - reused_prefix_len;
+        // The appended rows were already primed chunk by chunk during their prefill.
+        if (mtp.primed and mtp.resident_context_len == N and state.position == N) return true;
         if (mtp.resident_context_len != reused_prefix_len) {
             log.warn("NextN/MTP: suffix prime skipped (NextN cache holds {d} positions, prompt reuses {d}); using ordinary greedy decode", .{ mtp.resident_context_len, reused_prefix_len });
             return false;
@@ -30360,6 +30420,11 @@ pub const InferenceEngine = struct {
     pub fn mtpResetCapture(self: *InferenceEngine) void {
         self.mtp_prefill_capture_count = 0;
         self.mtp_prime_capture_base = 0;
+    }
+
+    /// Whether a chunked prefill primes the draft block as it goes.
+    pub fn mtpSetPrimeDuringPrefill(self: *InferenceEngine, on: bool) void {
+        self.mtp_prime_during_prefill = on;
     }
 
     pub fn mtpPerf(self: *const InferenceEngine) MtpPerf {
@@ -31382,6 +31447,11 @@ const prefill_scratch_floor_tokens: u64 = 256;
 /// Largest query x key product one prefill chunk may attend over, so a chunk
 /// deep in the context stays a bounded GPU job. 3e8 keeps a chunk at 1,500
 /// tokens at 200K depth and leaves shallow chunks scratch-limited.
+fn envU32(name: []const u8, default: u32) u32 {
+    const raw = std.posix.getenv(name) orelse return default;
+    return std.fmt.parseInt(u32, raw, 10) catch default;
+}
+
 fn prefillAttnPairsBudget() u64 {
     const raw = std.posix.getenv("ZINC_PREFILL_ATTN_PAIRS") orelse return 300_000_000;
     return std.fmt.parseInt(u64, raw, 10) catch 300_000_000;

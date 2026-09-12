@@ -676,6 +676,12 @@ pub const Tokenizer = struct {
         return prompt_tokens;
     }
 
+    /// Encode text that may contain special-token markers, without prepending
+    /// BOS: for appending a rendered tail to a token sequence the engine holds.
+    pub fn encodeAppended(self: *const Tokenizer, text: []const u8, allocator: std.mem.Allocator) ![]u32 {
+        return self.encodeWithSpecialTokens(text, allocator);
+    }
+
     /// Encode text that may contain special token markers (e.g. `<|...|>`).
     /// Special tokens that exist in the vocabulary are mapped directly to their
     /// token IDs; the remaining text segments are BPE-encoded normally.

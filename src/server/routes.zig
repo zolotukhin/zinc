@@ -176,6 +176,20 @@ const ChatReuseCache = struct {
         return null;
     }
 
+    /// Stored transcript tokens for `session_id` when that session is the one
+    /// resident in the engine and the model matches — the only case in which
+    /// they can be continued.
+    fn residentEntryTokens(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8) ?[]const u32 {
+        const resident = if (self.live_session) |live| std.mem.eql(u8, live, session_id) else false;
+        if (!resident) return null;
+        for (self.entries.items) |*entry| {
+            if (!std.mem.eql(u8, entry.session_id, session_id)) continue;
+            if (!std.mem.eql(u8, entry.model_path, model_path)) return null;
+            return entry.prompt_tokens;
+        }
+        return null;
+    }
+
     /// Tokens of the transcript stored for `session_id`, regardless of
     /// residency. Diagnostics only.
     fn entryTokens(self: *ChatReuseCache, session_id: []const u8) ?[]const u32 {
@@ -1419,6 +1433,74 @@ test "transcriptTailAfter returns the end-of-turn tokens after the reply" {
     const engine2 = [_]u32{ 5, 6, 7, 42, 151645 };
     try std.testing.expectEqualSlices(u32, &[_]u32{198}, transcriptTailAfter(&engine2, &canon).?);
     try std.testing.expectEqual(@as(?[]const u32, null), transcriptTailAfter(&[_]u32{ 5, 99 }, &canon));
+}
+
+fn decodeTokensToText(allocator: std.mem.Allocator, tokenizer: anytype, toks: []const u32) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+    var dec: [256]u8 = undefined;
+    for (toks) |t| {
+        const piece = tokenizer.decodeToken(t, &dec);
+        try out.appendSlice(allocator, piece);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Remove every closed `<think>…</think>` block (and up to two newlines after
+/// it) from `text`: what a chat template drops when it re-renders a past
+/// assistant turn. An unclosed block is kept, since the template keeps it too.
+fn stripClosedThinkingBlocks(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (std.mem.indexOfPos(u8, text, i, thinking_open_tag)) |open| {
+            if (std.mem.indexOfPos(u8, text, open + thinking_open_tag.len, "</think>")) |close| {
+                try out.appendSlice(allocator, text[i..open]);
+                var j = close + "</think>".len;
+                var nl: usize = 0;
+                while (j < text.len and text[j] == '\n' and nl < 2) : (j += 1) nl += 1;
+                i = j;
+                continue;
+            }
+        }
+        try out.appendSlice(allocator, text[i..]);
+        break;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "stripClosedThinkingBlocks drops closed blocks and keeps an unclosed one" {
+    const a = std.testing.allocator;
+    const s1 = try stripClosedThinkingBlocks(a, "A<think>\n\n</think>\n\nB<think>\nreason\n</think>\n\nC");
+    defer a.free(s1);
+    try std.testing.expectEqualStrings("ABC", s1);
+    const s2 = try stripClosedThinkingBlocks(a, "A<think>\nstill going");
+    defer a.free(s2);
+    try std.testing.expectEqualStrings("A<think>\nstill going", s2);
+}
+
+/// Token alignment fails when a reply's generated tokens do not re-tokenize to
+/// the canonical render of the same text. Compare as text instead: the new
+/// prompt must begin with the stored transcript minus its thinking blocks, and
+/// whatever follows is the new tail, tokenized on its own (it starts at a
+/// special-token boundary, so that is stable). Returns the spliced sequence.
+fn spliceByText(allocator: std.mem.Allocator, tokenizer: anytype, stored: []const u32, prompt: []const u32) !?[]u32 {
+    const s_text = try decodeTokensToText(allocator, tokenizer, stored);
+    defer allocator.free(s_text);
+    const p_text = try decodeTokensToText(allocator, tokenizer, prompt);
+    defer allocator.free(p_text);
+    const s_stripped = try stripClosedThinkingBlocks(allocator, s_text);
+    defer allocator.free(s_stripped);
+    if (s_stripped.len == 0 or p_text.len <= s_stripped.len) return null;
+    if (!std.mem.startsWith(u8, p_text, s_stripped)) return null;
+    const tail = try tokenizer.encodeAppended(p_text[s_stripped.len..], allocator);
+    defer allocator.free(tail);
+    if (tail.len == 0) return null;
+    const out = try allocator.alloc(u32, stored.len + tail.len);
+    @memcpy(out[0..stored.len], stored);
+    @memcpy(out[stored.len..], tail);
+    return out;
 }
 
 /// Why a session's stored transcript did not prefix-match the new prompt: the
@@ -2671,6 +2753,20 @@ fn handleChatCompletions(
                     });
                 } else |_| {}
             }
+        } else if (server_state.chat_reuse_cache.residentEntryTokens(parsed.session_id, resources.model_path)) |stored| {
+            const by_text = spliceByText(allocator, tokenizer, stored, prompt_tokens) catch null;
+            if (by_text) |buf| {
+                spliced_prompt = buf;
+                engine_prompt_tokens = buf;
+                reused_prefix_len = stored.len;
+                log.info("chat cache spliced by text: session={s} engine_transcript={d} tail={d}", .{
+                    parsed.session_id,
+                    stored.len,
+                    buf.len - stored.len,
+                });
+            } else {
+                logChatReuseMiss(tokenizer, parsed.session_id, stored, prompt_tokens);
+            }
         } else if (server_state.chat_reuse_cache.entryTokens(parsed.session_id)) |stored| {
             logChatReuseMiss(tokenizer, parsed.session_id, stored, prompt_tokens);
         }
@@ -2680,6 +2776,7 @@ fn handleChatCompletions(
     // warmChatReuseCache re-stakes the claim when a transcript is stored.
     server_state.chat_reuse_cache.clearLive();
     runtime.mtpBeginRequest(engine);
+    runtime.mtpSetPrimeDuringPrefill(engine, !sampling.requiresLogitsReadback());
     const prefill_start_ns = std.time.nanoTimestamp();
     const prefill_work_tokens = if (reused_prefix_len > 0)
         engine_prompt_tokens.len - reused_prefix_len

@@ -1,29 +1,29 @@
 #version 460
 // ZINC — Split-K flash attention merge pass.
-// Companion to flash_attn.comp's split-K mode (N_I_CHUNKS > 1). One workgroup
-// per query head: read N_I_CHUNKS partials produced by the split-K dispatch,
+// Companion to flash_attn.comp's split-K mode (n_chunks > 1). One workgroup
+// per query head: read n_chunks partials produced by the split-K dispatch,
 // combine them via the standard log-sum-exp merge, fold in the per-head sink
 // term, normalize, and write the final attention output.
 //
 // Dispatch: grid (n_heads, 1, 1), local_size_x = 64.
 //
 // Input buffer (binding 0) layout:
-//   partial O region: head_dim * N_I_CHUNKS * n_heads floats
-//     idx = (head * N_I_CHUNKS + chunk_id) * head_dim + d
-//   LSE region (offset = n_heads * N_I_CHUNKS * head_dim):
-//     idx = lse_base + (head * N_I_CHUNKS + chunk_id) * 2 + (0:M, 1:L)
+//   partial O region: head_dim * n_chunks * n_heads floats
+//     idx = (head * n_chunks + chunk_id) * head_dim + d
+//   LSE region (offset = n_heads * n_chunks * head_dim):
+//     idx = lse_base + (head * n_chunks + chunk_id) * 2 + (0:M, 1:L)
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_clustered : require
 
 layout(local_size_x = 64) in;
 
-layout(constant_id = 0) const uint N_I_CHUNKS = 2u;
 
 layout(push_constant) uniform PushConstants {
     uint head_dim;        // dimension per head
     uint n_heads;         // number of query heads
     uint sink_offset;     // starting index into sink_data for this layer
+    uint n_chunks;        // partials per head written by the split dispatch
 };
 
 layout(set = 0, binding = 0) readonly  buffer Partial    { float p_data[];     };
@@ -33,7 +33,7 @@ layout(set = 0, binding = 1) writeonly buffer OutputV4   { vec4  o_data_v4[];  }
 layout(set = 0, binding = 2) readonly  buffer Sinks      { float sink_data[];  };
 
 // LDS: per-chunk M, L, and post-merge weights. Sized for up to 16 chunks
-// (a generous ceiling — the host caller dispatches with N_I_CHUNKS in {2, 4}
+// (a generous ceiling — the host caller dispatches with n_chunks in {2, 4}
 // during normal use but the shader degrades gracefully for higher values).
 shared float s_M_chunks[16];
 shared float s_L_chunks[16];
@@ -45,12 +45,12 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
 
     uint head_dim_v4 = head_dim >> 2;
-    uint lse_base = n_heads * N_I_CHUNKS * head_dim;
-    uint lse_head_base = lse_base + head * N_I_CHUNKS * 2u;
+    uint lse_base = n_heads * n_chunks * head_dim;
+    uint lse_head_base = lse_base + head * n_chunks * 2u;
 
     // Phase A — per-head merge weights and inv_L (effort-11 cycle 22).
     //
-    // Fast path (N_I_CHUNKS == 4, the only configuration shipped via the
+    // Fast path (n_chunks == 4, the only configuration shipped via the
     // host-side ZINC_FA_SPLIT_K=4 default): cluster-parallel reduction.
     // Lanes 0..3 each load one chunk's (M, L), then subgroupClusteredMax
     // (cluster_size = 4) computes the per-head M_global / M_full and
@@ -68,10 +68,10 @@ void main() {
     // (the inv_L scales the final attn output, not used in any exact
     // comparison). Coherence is verified at L≈846 in the keep gate.
     //
-    // Slow path (N_I_CHUNKS != 4): the original scalar-on-tid==0 form,
+    // Slow path (n_chunks != 4): the original scalar-on-tid==0 form,
     // bit-equivalent to pre-cycle-22. Folded out at pipeline-spec time
-    // because N_I_CHUNKS is a spec const.
-    if (N_I_CHUNKS == 4u) {
+    // because n_chunks is a spec const.
+    if (n_chunks == 4u) {
         bool lane_active = tid < 4u;
         uint chunk = tid;
 
@@ -104,7 +104,7 @@ void main() {
         }
     } else {
         // Stage per-chunk M, L into LDS.
-        if (tid < N_I_CHUNKS) {
+        if (tid < n_chunks) {
             s_M_chunks[tid] = p_data[lse_head_base + tid * 2u + 0u];
             s_L_chunks[tid] = p_data[lse_head_base + tid * 2u + 1u];
         }
@@ -112,7 +112,7 @@ void main() {
 
         if (tid == 0u) {
             float M_global = -1.0e30;
-            for (uint i = 0u; i < N_I_CHUNKS; i++) {
+            for (uint i = 0u; i < n_chunks; i++) {
                 M_global = max(M_global, s_M_chunks[i]);
             }
             float sink_val = sink_data[sink_offset + head];
@@ -120,7 +120,7 @@ void main() {
             float M_full = has_sink ? max(M_global, sink_val) : M_global;
 
             float L_full = 0.0;
-            for (uint i = 0u; i < N_I_CHUNKS; i++) {
+            for (uint i = 0u; i < n_chunks; i++) {
                 float Li = s_L_chunks[i];
                 float w = (Li > 0.0) ? exp(s_M_chunks[i] - M_full) : 0.0;
                 s_weights[i] = w;
@@ -136,7 +136,7 @@ void main() {
 
     // Phase B — combine the partials per d (effort-11 cycle 23).
     //
-    // Fast path (N_I_CHUNKS == 4 && head_dim_v4 == 32, the dominant
+    // Fast path (n_chunks == 4 && head_dim_v4 == 32, the dominant
     // configuration for Qwen3 8B / 35B head_dim=128 attention): pair
     // lanes via a cluster-2 chunk split. The prior loop kept only 32 of
     // 64 wave lanes busy because head_dim_v4 == 32 means just 32 unique
@@ -158,11 +158,11 @@ void main() {
     // matching the cycle-22 Phase A precedent.
     //
     // Slow path: original loop, bit-equivalent to pre-cycle-23. Folded
-    // out at pipeline-spec time when N_I_CHUNKS != 4 (spec const).
+    // out at pipeline-spec time when n_chunks != 4 (spec const).
     float inv_L = s_inv_L_full;
     uint o_base_v4 = (head * head_dim) >> 2;
 
-    if (N_I_CHUNKS == 4u && head_dim_v4 == 32u) {
+    if (n_chunks == 4u && head_dim_v4 == 32u) {
         uint d4 = tid >> 1u;
         uint chunk_pair_id = tid & 1u;
         uint chunk_lo = chunk_pair_id * 2u;
@@ -181,8 +181,8 @@ void main() {
     } else {
         for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
             vec4 acc = vec4(0.0);
-            for (uint i = 0u; i < N_I_CHUNKS; i++) {
-                uint partial_base_v4 = ((head * N_I_CHUNKS + i) * head_dim) >> 2;
+            for (uint i = 0u; i < n_chunks; i++) {
+                uint partial_base_v4 = ((head * n_chunks + i) * head_dim) >> 2;
                 acc += s_weights[i] * p_data_v4[partial_base_v4 + d4];
             }
             o_data_v4[o_base_v4 + d4] = acc * inv_L;

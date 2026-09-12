@@ -1,0 +1,239 @@
+#version 460
+// ZINC — decode flash attention grouped over the 6 query heads that share a KV
+// head (GQA 6:1), split-K compatible.
+//
+// flash_attn dispatches one workgroup per query head, so with a 6:1 GQA ratio
+// every K/V row is streamed six times per token; at 226K resident tokens that
+// is ~88 GB per decoded token across the 16 attending layers, and decode sat
+// at 8.3 tok/s whether the cache was f16 or q8. Here one workgroup owns one KV
+// head and the six query heads that read it: each K row loaded feeds six dot
+// products and each V row six accumulations.
+//
+// Written without head-indexed arrays or single accumulation chains: a first
+// version with `acc[HEADS]` loops and one chain per head ran at 18.9 tok/s at
+// 20K against 29.0 for the per-head kernel. Everything is hand-unrolled for
+// HEADS = 6, the V phase takes four keys per step into two chains per head,
+// and LDS stays at ~13 KB.
+//
+// Same push constants, bindings, partial/LSE layout and n_chunks split-K
+// contract as flash_attn.comp, so flash_attn_split_merge is unchanged.
+// Dispatch: grid.x = n_kv_heads, grid.y = n_chunks, local_size_x = 64.
+// Requires head_dim == 256 and n_heads == 6 * n_kv_heads (host checks).
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants {
+    uint head_dim;
+    uint n_heads;
+    uint n_kv_heads;
+    uint seq_len;
+    uint page_size;
+    uint attn_scale_bits;
+    uint sink_offset;
+    uint n_chunks;        // split-K chunks this dispatch runs (1 = write final output)
+};
+
+layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];     };
+layout(set = 0, binding = 0) readonly  buffer QueryV4   { vec4  q_data_v4[];  };
+layout(set = 0, binding = 1) readonly  buffer KCache    { float k_data[];     };
+layout(set = 0, binding = 1) readonly  buffer KCacheV4  { vec4  k_data_v4[];  };
+layout(set = 0, binding = 2) readonly  buffer VCache    { float v_data[];     };
+layout(set = 0, binding = 2) readonly  buffer VCacheV4  { vec4  v_data_v4[];  };
+layout(set = 0, binding = 3) readonly  buffer PageTable { uint  page_ids[];   };
+layout(set = 0, binding = 4) writeonly buffer Output    { float o_data[];     };
+layout(set = 0, binding = 4) writeonly buffer OutputV4  { vec4  o_data_v4[];  };
+layout(set = 0, binding = 5) readonly  buffer Sinks     { float sink_data[];  };
+
+const uint HEADS = 6u;
+const uint HEAD_DIM_V4 = 64u;   // head_dim 256
+const uint BLOCK_SIZE = 256u;
+const uint BLOCK_SIZE_V4 = BLOCK_SIZE >> 2;
+
+shared vec4  s_q4[HEADS * HEAD_DIM_V4];        // 6 KB
+shared vec4  s_scores[HEADS * BLOCK_SIZE_V4];  // 6 KB: scores of 4 consecutive keys per vec4
+shared uvec4 s_kv_base_uv4[BLOCK_SIZE_V4];     // 1 KB
+shared float s_max_old[HEADS];
+shared float s_sum_old[HEADS];
+
+void main() {
+    const uint kv_head = gl_WorkGroupID.x;
+    const uint chunk_id = gl_WorkGroupID.y;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint head0 = kv_head * HEADS;
+
+    uint i_start;
+    uint i_end;
+    if (n_chunks == 1u) {
+        i_start = 0u;
+        i_end = seq_len;
+    } else {
+        i_start = (chunk_id * seq_len) / n_chunks;
+        i_end = (chunk_id + 1u == n_chunks) ? seq_len : (((chunk_id + 1u) * seq_len) / n_chunks);
+    }
+
+    s_q4[0u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 0u) * head_dim >> 2) + tid];
+    s_q4[1u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 1u) * head_dim >> 2) + tid];
+    s_q4[2u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 2u) * head_dim >> 2) + tid];
+    s_q4[3u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 3u) * head_dim >> 2) + tid];
+    s_q4[4u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 4u) * head_dim >> 2) + tid];
+    s_q4[5u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 5u) * head_dim >> 2) + tid];
+    if (tid < HEADS) {
+        s_max_old[tid] = -1.0e30;
+        s_sum_old[tid] = 0.0;
+    }
+    barrier();
+
+    const float scale = attn_scale_bits != 0u ? uintBitsToFloat(attn_scale_bits) : inversesqrt(float(head_dim));
+
+    // Output accumulators, two chains per head, lane tid owns vec4 tid.
+    vec4 oa0 = vec4(0.0), ob0 = vec4(0.0), oa1 = vec4(0.0), ob1 = vec4(0.0), oa2 = vec4(0.0), ob2 = vec4(0.0);
+    vec4 oa3 = vec4(0.0), ob3 = vec4(0.0), oa4 = vec4(0.0), ob4 = vec4(0.0), oa5 = vec4(0.0), ob5 = vec4(0.0);
+
+    for (uint block_start = i_start; block_start < i_end; block_start += BLOCK_SIZE) {
+        const uint block_end = min(block_start + BLOCK_SIZE, i_end);
+        const uint block_len = block_end - block_start;
+        const uint block_len4 = (block_len + 3u) >> 2;
+
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint seq_pos = block_start + i;
+            const uint page_id = page_ids[seq_pos / page_size];
+            const uint page_off = seq_pos % page_size;
+            s_kv_base_uv4[i >> 2][i & 3u] = ((page_id * page_size + page_off) * n_kv_heads * head_dim
+                                              + kv_head * head_dim) >> 2;
+        }
+        // Keys past block_len inside the last vec4 of scores must read as -inf.
+        for (uint i4 = tid; i4 < BLOCK_SIZE_V4; i4 += 64u) {
+            s_scores[0u * BLOCK_SIZE_V4 + i4] = vec4(-1.0e30);
+            s_scores[1u * BLOCK_SIZE_V4 + i4] = vec4(-1.0e30);
+            s_scores[2u * BLOCK_SIZE_V4 + i4] = vec4(-1.0e30);
+            s_scores[3u * BLOCK_SIZE_V4 + i4] = vec4(-1.0e30);
+            s_scores[4u * BLOCK_SIZE_V4 + i4] = vec4(-1.0e30);
+            s_scores[5u * BLOCK_SIZE_V4 + i4] = vec4(-1.0e30);
+        }
+        barrier();
+
+        float lmax0 = -1.0e30, lmax1 = -1.0e30, lmax2 = -1.0e30, lmax3 = -1.0e30, lmax4 = -1.0e30, lmax5 = -1.0e30;
+        for (uint i = tid; i < block_len; i += 64u) {
+            const uint kb = s_kv_base_uv4[i >> 2][i & 3u];
+            float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0, a4 = 0.0, a5 = 0.0;
+            float c0 = 0.0, c1 = 0.0, c2 = 0.0, c3 = 0.0, c4 = 0.0, c5 = 0.0;
+            for (uint d4 = 0u; d4 < HEAD_DIM_V4; d4 += 4u) {
+                const vec4 k0 = k_data_v4[kb + d4];
+                const vec4 k1 = k_data_v4[kb + d4 + 1u];
+                const vec4 k2 = k_data_v4[kb + d4 + 2u];
+                const vec4 k3 = k_data_v4[kb + d4 + 3u];
+                a0 += dot(s_q4[0u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[0u * HEAD_DIM_V4 + d4 + 1u], k1);
+                c0 += dot(s_q4[0u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[0u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a1 += dot(s_q4[1u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[1u * HEAD_DIM_V4 + d4 + 1u], k1);
+                c1 += dot(s_q4[1u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[1u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a2 += dot(s_q4[2u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[2u * HEAD_DIM_V4 + d4 + 1u], k1);
+                c2 += dot(s_q4[2u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[2u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a3 += dot(s_q4[3u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[3u * HEAD_DIM_V4 + d4 + 1u], k1);
+                c3 += dot(s_q4[3u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[3u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a4 += dot(s_q4[4u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[4u * HEAD_DIM_V4 + d4 + 1u], k1);
+                c4 += dot(s_q4[4u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[4u * HEAD_DIM_V4 + d4 + 3u], k3);
+                a5 += dot(s_q4[5u * HEAD_DIM_V4 + d4], k0) + dot(s_q4[5u * HEAD_DIM_V4 + d4 + 1u], k1);
+                c5 += dot(s_q4[5u * HEAD_DIM_V4 + d4 + 2u], k2) + dot(s_q4[5u * HEAD_DIM_V4 + d4 + 3u], k3);
+            }
+            const float sc0 = (a0 + c0) * scale, sc1 = (a1 + c1) * scale, sc2 = (a2 + c2) * scale;
+            const float sc3 = (a3 + c3) * scale, sc4 = (a4 + c4) * scale, sc5 = (a5 + c5) * scale;
+            s_scores[0u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] = sc0;
+            s_scores[1u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] = sc1;
+            s_scores[2u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] = sc2;
+            s_scores[3u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] = sc3;
+            s_scores[4u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] = sc4;
+            s_scores[5u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] = sc5;
+            lmax0 = max(lmax0, sc0); lmax1 = max(lmax1, sc1); lmax2 = max(lmax2, sc2);
+            lmax3 = max(lmax3, sc3); lmax4 = max(lmax4, sc4); lmax5 = max(lmax5, sc5);
+        }
+        const float bmax0 = subgroupMax(lmax0), bmax1 = subgroupMax(lmax1), bmax2 = subgroupMax(lmax2);
+        const float bmax3 = subgroupMax(lmax3), bmax4 = subgroupMax(lmax4), bmax5 = subgroupMax(lmax5);
+        barrier();
+
+        const float nm0 = max(s_max_old[0], bmax0), nm1 = max(s_max_old[1], bmax1), nm2 = max(s_max_old[2], bmax2);
+        const float nm3 = max(s_max_old[3], bmax3), nm4 = max(s_max_old[4], bmax4), nm5 = max(s_max_old[5], bmax5);
+        const float rs0 = exp(s_max_old[0] - nm0), rs1 = exp(s_max_old[1] - nm1), rs2 = exp(s_max_old[2] - nm2);
+        const float rs3 = exp(s_max_old[3] - nm3), rs4 = exp(s_max_old[4] - nm4), rs5 = exp(s_max_old[5] - nm5);
+
+        // Exponentiate in place, four keys per lane-iteration; padding keys give 0.
+        float ls0 = 0.0, ls1 = 0.0, ls2 = 0.0, ls3 = 0.0, ls4 = 0.0, ls5 = 0.0;
+        for (uint i4 = tid; i4 < block_len4; i4 += 64u) {
+            vec4 e;
+            e = exp(s_scores[0u * BLOCK_SIZE_V4 + i4] - nm0); s_scores[0u * BLOCK_SIZE_V4 + i4] = e; ls0 += e.x + e.y + e.z + e.w;
+            e = exp(s_scores[1u * BLOCK_SIZE_V4 + i4] - nm1); s_scores[1u * BLOCK_SIZE_V4 + i4] = e; ls1 += e.x + e.y + e.z + e.w;
+            e = exp(s_scores[2u * BLOCK_SIZE_V4 + i4] - nm2); s_scores[2u * BLOCK_SIZE_V4 + i4] = e; ls2 += e.x + e.y + e.z + e.w;
+            e = exp(s_scores[3u * BLOCK_SIZE_V4 + i4] - nm3); s_scores[3u * BLOCK_SIZE_V4 + i4] = e; ls3 += e.x + e.y + e.z + e.w;
+            e = exp(s_scores[4u * BLOCK_SIZE_V4 + i4] - nm4); s_scores[4u * BLOCK_SIZE_V4 + i4] = e; ls4 += e.x + e.y + e.z + e.w;
+            e = exp(s_scores[5u * BLOCK_SIZE_V4 + i4] - nm5); s_scores[5u * BLOCK_SIZE_V4 + i4] = e; ls5 += e.x + e.y + e.z + e.w;
+        }
+        const float bs0 = subgroupAdd(ls0), bs1 = subgroupAdd(ls1), bs2 = subgroupAdd(ls2);
+        const float bs3 = subgroupAdd(ls3), bs4 = subgroupAdd(ls4), bs5 = subgroupAdd(ls5);
+        barrier();
+
+        // V: lane tid owns vec4 tid; four keys per step, two chains per head.
+        oa0 *= rs0; ob0 *= rs0; oa1 *= rs1; ob1 *= rs1; oa2 *= rs2; ob2 *= rs2;
+        oa3 *= rs3; ob3 *= rs3; oa4 *= rs4; ob4 *= rs4; oa5 *= rs5; ob5 *= rs5;
+        const uint full4 = block_len >> 2;
+        for (uint i4 = 0u; i4 < full4; i4++) {
+            const uvec4 vb = s_kv_base_uv4[i4];
+            const vec4 v0 = v_data_v4[vb.x + tid];
+            const vec4 v1 = v_data_v4[vb.y + tid];
+            const vec4 v2 = v_data_v4[vb.z + tid];
+            const vec4 v3 = v_data_v4[vb.w + tid];
+            vec4 p;
+            p = s_scores[0u * BLOCK_SIZE_V4 + i4]; oa0 += p.x * v0 + p.y * v1; ob0 += p.z * v2 + p.w * v3;
+            p = s_scores[1u * BLOCK_SIZE_V4 + i4]; oa1 += p.x * v0 + p.y * v1; ob1 += p.z * v2 + p.w * v3;
+            p = s_scores[2u * BLOCK_SIZE_V4 + i4]; oa2 += p.x * v0 + p.y * v1; ob2 += p.z * v2 + p.w * v3;
+            p = s_scores[3u * BLOCK_SIZE_V4 + i4]; oa3 += p.x * v0 + p.y * v1; ob3 += p.z * v2 + p.w * v3;
+            p = s_scores[4u * BLOCK_SIZE_V4 + i4]; oa4 += p.x * v0 + p.y * v1; ob4 += p.z * v2 + p.w * v3;
+            p = s_scores[5u * BLOCK_SIZE_V4 + i4]; oa5 += p.x * v0 + p.y * v1; ob5 += p.z * v2 + p.w * v3;
+        }
+        for (uint i = full4 << 2; i < block_len; i++) {
+            const vec4 v = v_data_v4[s_kv_base_uv4[i >> 2][i & 3u] + tid];
+            oa0 += s_scores[0u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] * v;
+            oa1 += s_scores[1u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] * v;
+            oa2 += s_scores[2u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] * v;
+            oa3 += s_scores[3u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] * v;
+            oa4 += s_scores[4u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] * v;
+            oa5 += s_scores[5u * BLOCK_SIZE_V4 + (i >> 2)][i & 3u] * v;
+        }
+
+        if (tid == 0u) {
+            s_sum_old[0] = s_sum_old[0] * rs0 + bs0; s_max_old[0] = nm0;
+            s_sum_old[1] = s_sum_old[1] * rs1 + bs1; s_max_old[1] = nm1;
+            s_sum_old[2] = s_sum_old[2] * rs2 + bs2; s_max_old[2] = nm2;
+            s_sum_old[3] = s_sum_old[3] * rs3 + bs3; s_max_old[3] = nm3;
+            s_sum_old[4] = s_sum_old[4] * rs4 + bs4; s_max_old[4] = nm4;
+            s_sum_old[5] = s_sum_old[5] * rs5 + bs5; s_max_old[5] = nm5;
+        }
+        barrier();
+    }
+
+    const vec4 o0 = oa0 + ob0, o1 = oa1 + ob1, o2 = oa2 + ob2, o3 = oa3 + ob3, o4 = oa4 + ob4, o5 = oa5 + ob5;
+    for (uint h = 0u; h < HEADS; h++) {
+        const uint head = head0 + h;
+        const vec4 acc = (h == 0u) ? o0 : (h == 1u) ? o1 : (h == 2u) ? o2 : (h == 3u) ? o3 : (h == 4u) ? o4 : o5;
+        if (n_chunks == 1u) {
+            float final_sum = s_sum_old[h];
+            float out_rescale = 1.0;
+            const float sink_val = sink_data[sink_offset + head];
+            if (!isnan(sink_val)) {
+                const float sink_max = max(s_max_old[h], sink_val);
+                out_rescale = s_sum_old[h] > 0.0 ? exp(s_max_old[h] - sink_max) : 0.0;
+                final_sum = s_sum_old[h] * out_rescale + exp(sink_val - sink_max);
+            }
+            const float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
+            o_data_v4[((head * head_dim) >> 2) + tid] = acc * out_rescale * inv_sum;
+        } else {
+            o_data_v4[(((head * n_chunks + chunk_id) * head_dim) >> 2) + tid] = acc;
+            if (tid == 0u) {
+                const uint lse_base = n_heads * n_chunks * head_dim;
+                const uint lse_idx = lse_base + (head * n_chunks + chunk_id) * 2u;
+                o_data[lse_idx + 0u] = s_max_old[h];
+                o_data[lse_idx + 1u] = s_sum_old[h];
+            }
+        }
+    }
+}

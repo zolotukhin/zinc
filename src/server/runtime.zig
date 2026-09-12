@@ -125,6 +125,12 @@ pub fn mtpPrime(_engine: *InferenceEngine, _state: *DecodeState, _prompt_tokens:
     return false;
 }
 
+/// Whether a chunked prefill primes the draft block chunk by chunk (off for
+/// requests that sample non-greedily, where speculation is unused).
+pub fn mtpSetPrimeDuringPrefill(_engine: *InferenceEngine, _on: bool) void {
+    if (comptime gpu.is_vulkan) _engine.mtpSetPrimeDuringPrefill(_on);
+}
+
 /// Forget captured prefill rows so the next prefill's capture starts at row 0.
 pub fn mtpResetCapture(_engine: *InferenceEngine) void {
     if (comptime gpu.is_vulkan) _engine.mtpResetCapture();

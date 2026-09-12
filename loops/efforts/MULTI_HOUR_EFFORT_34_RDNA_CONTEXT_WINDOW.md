@@ -466,3 +466,42 @@ submitted whole before chunking existed. Chunks are now bounded by
 query × key pairs as well as by scratch (`ZINC_PREFILL_ATTN_PAIRS`, default
 3e8: 1,500 tokens at 200K depth, scratch-limited when shallow).
 
+## Decode at depth: the grouped kernel (2026-09-12)
+
+flash_attn dispatches one workgroup per query head, so with 6:1 GQA every K/V
+row is streamed six times per decoded token (~88 GB at 226K resident across the
+16 attending layers). That is why halving the cache's bytes (q8) did nothing for
+decode at depth: the traffic is the redundancy, not the format.
+`flash_attn_gqa` (+ f16kv/q8kv variants, split-K compatible, same partial/LSE
+layout so the merge pass is unchanged) gives one workgroup a KV head and the six
+query heads that read it. Host gate: head_dim 256, n_heads == 6·n_kv_heads,
+`ZINC_FA_GQA_DECODE` (default on when applicable).
+
+The first version used `acc[HEADS]`-style arrays indexed in loops bounded by a
+specialization constant and one accumulation chain per head — and measured
+**18.9 tok/s at 20K with speculation off against 29.0 for the per-head kernel**
+(q8: 18.0). At 20K depth attention is a fifth of the per-token cost, so the
+test can only show overhead, and the overhead was a third of the token. The
+rewrite is hand-unrolled for six heads, keeps scores as vec4 groups of four
+keys, takes four keys per V step into two chains per head, and stays at ~13 KB
+of LDS. Measured next, together with per-chunk speculation priming
+(`mtp_prime_during_prefill`: the draft block is primed chunk by chunk during a
+chunked prefill, carrying the last normalized row across chunks exactly as a
+reused prefix does, so speculation no longer stops at the 32,768-row capture
+cap) and the text-level cache fallback (`spliceByText`: when a reply's generated
+tokens do not re-tokenize to the canonical render, compare the transcript as
+text minus closed think blocks and tokenize only the new tail).
+
+**The grouped decode kernel, rewritten:** 26.0 tok/s at 20K with speculation
+off against 28.4 per-head (v1: 18.9). Still behind, and the reason is now
+visible: at 20K attention is a fifth of the token and neither kernel is
+traffic-bound, so grouping cannot win there — and at 226K the split-K dispatch
+is 24 heads × 4 chunks = 96 workgroups each walking 56K keys serially, a
+fraction of the card, which grouping shrinks to 16. The occupancy, not the
+bytes, is what bounds decode at depth. `n_chunks` is now a push constant
+(flash_attn, flash_attn_gqa, flash_attn_split_merge; the fused o-proj merge
+keeps the base count and is skipped otherwise) and `splitKChunksForSeq` scales
+it with the resident context — about 2,048 keys per chunk, up to 64 chunks
+(`ZINC_FA_SPLIT_K_KEYS`, `ZINC_FA_SPLIT_K_MAX`; the partial buffer is sized for
+64). Grouped decode stays opt-in (`ZINC_FA_GQA_DECODE=1`) until the depth A/B.
+
