@@ -795,3 +795,20 @@ entries). Engine: `ssmCheckpointTake/Restore/Position/Invalidate`
 `storeCheckpointed`, `checkpointPosFor`, `lastAssistantHeaderEnd`, and the split
 prefill in the chat handler. Verified next at 20K, 100K and 197K.
 
+**Checkpointed reuse, measured** (q8, speculation on, five facts, reuse on):
+
+| | 20K | 100K | 197K |
+|---|---:|---:|---:|
+| before (transcript replay) | 5/5 | 3/5 | 3/5 |
+| **after (checkpoint + canonical suffix)** | **5/5** | **5/5** | **4/5** |
+| per question | 1 s | 2 s | 3–4 s |
+
+The deep facts that truncated (75%, 95%) now answer at every depth. The one
+remaining miss moved to the shallow 5% fact at 197K (`PLUM-4417-`, the same
+hyphen-then-stop shape), and every miss so far has been with speculation on
+while every speculation-off run at depth has been 5/5 — so the last suspect is
+the verify batch's numerics (batched DMMV columns and the 3-token SSM step
+accumulate in a different order than single-token decode) flipping a near-tie
+between continuing a code and ending the turn. Stage 15 runs the 197K flow with
+speculation off and again with it on.
+
