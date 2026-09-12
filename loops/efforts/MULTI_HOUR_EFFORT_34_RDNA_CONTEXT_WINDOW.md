@@ -630,3 +630,12 @@ costs what packed f16 FMAs save, so the next prefill lever at depth is the
 chunk cap (`ZINC_PREFILL_ATTN_PAIRS`, 1,500-token chunks at 200K bite the
 GEMMs), to be raised cautiously now that the attention job is faster.
 
+**int8-dot decode at 100K** (q8, speculation on, verify on the decode kernel,
+64-token generations): f32-dot 29.6 tok/s (verify cycle 96 ms) → **int8-dot
+39.1 tok/s** (74 ms). Decode at 100K resident went 14.6 → 39.1 over the day.
+Open question: both stage-7 runs missed the neutral needle while the
+speculation-off runs at 100K found it and the 226K speculation-on run (verify
+through the tiled kernel) was correct — the verify routing at large chunk
+counts is the suspect; the eval rerun and an isolation run (routing on/off,
+replies printed) settle it.
+
