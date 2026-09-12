@@ -978,3 +978,21 @@ tie. The 20K prefill (415 vs 459) splits by the length curve into linear
 2.10 vs 1.91 ms/token and attention 0.31 vs 0.27 — the linear layers carry
 most of that gap; next: a per-kernel profile of a 20K prefill.
 
+**Stage 28/29: the 20K prefill, per sub-phase** (CLI, `ZINC_PREFILL_PROFILE=1`,
+17,120 tokens, 404 tok/s = 2.47 ms/token; the profiler sums to ~109%):
+
+| phase | ms/token | share | useful rate |
+|---|---:|---:|---:|
+| dense FFN gate/up (Q4_K + Q6_K layers) | 0.698 | 28% | ~33 TFLOPS |
+| dense FFN down (Q4_K + Q6_K) | 0.506 | 20% | ~23 TFLOPS |
+| **DeltaNet qkv projection (Q6_K, K=5120)** | **0.483** | **20%** | **~8 TFLOPS** |
+| attention layers (projections + flash attention) | 0.640 | 26% | flash ≈ 0.26 |
+| DeltaNet out projection (Q5_K) | 0.147 | 6% | ~14 TFLOPS |
+| DeltaNet z projection | 0.134 | 5% | ~15 TFLOPS |
+| DeltaNet scan + conv + norms | 0.075 | 3% | |
+
+The recurrent scan is cheap (0.049 ms); the qkv projection is the outlier at a
+third of the FFN GEMMs' efficiency. At FFN-down efficiency it would take
+~0.17 ms: −0.31 ms/token = −12% of the 20K prefill (405 → ~460 tok/s, llama.cpp
+459) and ~6% at 197K.
+

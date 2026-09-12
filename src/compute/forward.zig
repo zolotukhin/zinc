@@ -31862,6 +31862,10 @@ pub fn generate(
             const dense_ffn_avg = to_ms(dense_ffn_ns) / samples_f;
             const tail_avg = to_ms(tail_ns) / samples_f;
             const embed_avg = to_ms(embed_ns) / samples_f;
+            inline for (@typeInfo(ProfilePhase).@"enum".fields) |f| {
+                const v = engine.prefill_gpu_phase_ns[f.value];
+                if (v > 0) log.info("Prefill GPU sub-phase {s}: {d:.1} ms total, {d:.3} ms/tok", .{ f.name, to_ms(v), to_ms(v) / samples_f });
+            }
             log.info(
                 "Prefill GPU phases: per-tok attn={d:.2} ms moe={d:.2} ms shared={d:.2} ms ssm={d:.2} ms dense_ffn={d:.2} ms tail={d:.2} ms embed={d:.3} ms | totals attn={d:.1} moe={d:.1} shared={d:.1} ssm={d:.1} dense_ffn={d:.1} tail={d:.1} embed={d:.1}",
                 .{
