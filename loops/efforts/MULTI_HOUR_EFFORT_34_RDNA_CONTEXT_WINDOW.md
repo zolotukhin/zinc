@@ -901,3 +901,12 @@ decision on the farthest fact, not an engine defect. The checkpoint-copy
 barrier (74ff61f7) stays as hygiene. The 197K first-question score is 4/5 on
 this margin; with any prior complete answer in the context it is 5/5.
 
+**Stage 20b, transcript reuse on the same build: q1 `PLUM-4417-ZEBRA`, 3/3.**
+With `ZINC_CHAT_CHECKPOINT=0` the previous turn is replayed with its empty
+think scaffold, and the 0.146-logit tie lands on the other side. The canonical
+rendering (what the checkpoint path and llama.cpp both feed the model) is the
+right one to keep; which side of a 0.15-logit tie an engine's numerics land on
+is not a correctness property. Correctness thread closed: at 197K the
+first-question score is 4/5 on that one tie and 5/5 otherwise; every deep fact
+answers; every turn after the first is 3–4 s.
+
