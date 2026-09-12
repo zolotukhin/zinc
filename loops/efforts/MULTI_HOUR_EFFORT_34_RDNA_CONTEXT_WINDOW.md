@@ -1009,3 +1009,11 @@ with the same K and tile: the Q6_K DP4a kernels read weights with byte loads
 prefill (qkv 0.43 + FFN-down 0.30 + gate/up 0.35 ms/token). Next: 16-bit weight
 loads in the four Q6_K DP4a kernels.
 
+**Stage 33: 16-bit weight loads in the Q6_K DP4a kernels: +4% at 17K** (419 →
+436 tok/s; cumulative 404 → 436, +7.8%). FFN-down Q6_K 0.301 → 0.236 ms/token
+(−22%); qkv only 0.431 → 0.416; gate/up Q6_K unchanged (0.36). Bit-identical
+math (same integers), 20K five-fact 5/5 with identical answers. The qkv kernel
+is therefore not load-instruction-bound either; its Q8_1 activation tile may be
+read column-major (uncoalesced across the 64 columns) where the FFN kernels
+read a block-interleaved layout.
+

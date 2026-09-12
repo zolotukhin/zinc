@@ -26,6 +26,7 @@
 #include "dp4a_compat.glsl"
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_control_flow_attributes : require
 
 const uint BM = 32u;
@@ -66,6 +67,7 @@ layout(push_constant) uniform PushConstants {
 };
 
 layout(set = 0, binding = 0) readonly buffer MatA  { uint8_t a_data[]; };
+layout(set = 0, binding = 0) readonly buffer MatA16 { uint16_t a_u16[]; };
 layout(set = 0, binding = 1) readonly buffer ActB  { uint b_packed[]; };
 layout(set = 0, binding = 2) readonly buffer SclB  { float b_scale[]; };
 layout(set = 0, binding = 3) writeonly buffer MatD { float d_data[]; };
@@ -103,15 +105,21 @@ void load_q6k_run_i8(uint byte_off, uint kb, out uint packed[4], out float s) {
     const float d = unpackHalf2x16(d_bits).x;
     s = d * float(signed_i8(uint(a_data[sc_base + scale_idx])));
 
+    // 16-bit weight loads: ql/qh runs are 2-byte aligned (a Q6_K block is 210
+    // bytes), so each load brings two elements; per-byte nibble/bit extraction
+    // on the 16-bit word halves the load instructions of the byte version.
     [[unroll]] for (uint p = 0u; p < 4u; p++) {
         uint w = 0u;
-        [[unroll]] for (uint b = 0u; b < 4u; b++) {
-            const uint i = p * 4u + b;
-            const uint ql_raw = uint(a_data[ql_off + i]);
-            const uint ql_nib = hi_nibble ? (ql_raw >> 4) : (ql_raw & 0xFu);
-            const uint qh_raw = uint(a_data[qh_off + i]);
-            const int q = int(ql_nib | (((qh_raw >> qh_shift) & 3u) << 4)) - 32;
-            w |= (uint(q) & 0xFFu) << (b * 8u);
+        [[unroll]] for (uint bp = 0u; bp < 2u; bp++) {
+            const uint i = p * 4u + bp * 2u;
+            const uint ql2 = uint(a_u16[(ql_off + i) >> 1]);
+            const uint qh2 = uint(a_u16[(qh_off + i) >> 1]);
+            const uint nib = hi_nibble ? ((ql2 >> 4) & 0x0F0Fu) : (ql2 & 0x0F0Fu);
+            const uint v = nib | (((qh2 >> qh_shift) & 0x0303u) << 4);   // two bytes, each 0..63
+            const int q0 = int(v & 0xFFu) - 32;
+            const int q1 = int((v >> 8) & 0xFFu) - 32;
+            w |= (uint(q0) & 0xFFu) << (bp * 16u);
+            w |= (uint(q1) & 0xFFu) << (bp * 16u + 8u);
         }
         packed[p] = w;
     }
