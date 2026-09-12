@@ -12620,7 +12620,10 @@ pub const InferenceEngine = struct {
             self.attention.pipeline_batched_tile_mmq != null and
             envFlagEnabled("ZINC_FA_Q8_MMQ", true);
         const use_mmq_lds = use_mmq and self.attention.pipeline_batched_tile_mmq_lds != null and envFlagEnabled("ZINC_FA_TILE_LDS", true);
-        const pip = if (use_mmq_lds)
+        const use_mmq_f16pv = use_mmq_lds and self.attention.pipeline_batched_tile_mmq_lds_f16pv != null and envFlagEnabled("ZINC_FA_TILE_F16PV", false);
+        const pip = if (use_mmq_f16pv)
+            &self.attention.pipeline_batched_tile_mmq_lds_f16pv.?
+        else if (use_mmq_lds)
             &self.attention.pipeline_batched_tile_mmq_lds.?
         else if (use_mmq)
             &self.attention.pipeline_batched_tile_mmq.?
