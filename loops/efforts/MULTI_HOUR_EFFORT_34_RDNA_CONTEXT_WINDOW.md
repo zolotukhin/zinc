@@ -596,3 +596,10 @@ resident, q8, depth-scaled chunks, 48-token generations after a reused prefix):
 
 Plain decode at the same depth: 24.1 (scaled chunks) / 14.6 (the old 4 chunks).
 
+**Staged block scales: null.** q8 prefill at 20K 370.5 tok/s against 369.2 with
+the generated reader — the scale reloads were not the q8 penalty; the int8-dot
+kernel (stage 6) is the test that matters for q8 prefill. The same 20K run
+shows the decode changes paying at moderate depth too: **57.2 tok/s with
+speculation on the q8 cache** (39.8 before scaled chunks and the verify-batch
+routing; f16 was 44.1), needle found.
+
