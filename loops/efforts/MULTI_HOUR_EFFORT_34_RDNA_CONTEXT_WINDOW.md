@@ -1088,3 +1088,9 @@ logits; 20K five-fact 5/5), flash 0.476 → 0.455 ms at 17K depth (−4.4%), 100
 prefill 323.7 → **331.0 tok/s**. Default on (`ZINC_FA_TILE_LDS=0` to disable).
 197K re-measure queued.
 
+**Stage 41: 197K prefill with the LDS-staged kernel: 889.7 s = 221.7 tok/s**
+(llama.cpp 893 s = 221 tok/s). Parity at 197K, with NextN priming (6% of the
+run) still on. Prefill scorecard now: 20K 470 vs 459, 100K 331 vs ~290, 197K
+221.7 vs 221 — ZINC matches or leads at every measured length. Next: the
+packed-f16 PV variant (ZINC_FA_TILE_F16PV, off by default) under A/B.
+
