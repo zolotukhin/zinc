@@ -675,3 +675,16 @@ needle's softmax peak among 100K keys) or the session-reuse path. Stage 10
 runs the five-fact document at 100K on q8 and on f16 through a session, plus
 the deep fact as a single request.
 
+**Depth truncation: q8 and f16 are identical** (stage 10, 100K, speculation
+off): both answer 5/25/50% in full and truncate 75% (`88-` for 88-Q-3105) and
+95% (`23.`), and for both the 75% fact answered **correctly as a single request**
+(`88-Q-3105`). So it is not q8, not the kernels (f16 does the same), not
+speculation, not retrieval (the fact is there). It tracks the multi-turn
+session, but the single-request control changed two things at once — it dropped
+the reuse/splice path *and* the prior Q&A history. Stage 12 sends the identical
+full transcript through the reuse path (session_id) and through a fresh
+monolithic prefill (no session_id), and the monolithic one to llama.cpp: if
+ZINC-monolithic answers and ZINC-spliced truncates it is the splice; if both
+truncate it is how ZINC decodes that exact context, and the llama.cpp run on the
+same tokens says whether that is an engine gap.
+
