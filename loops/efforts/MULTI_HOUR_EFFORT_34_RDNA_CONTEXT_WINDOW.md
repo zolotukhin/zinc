@@ -910,3 +910,18 @@ is not a correctness property. Correctness thread closed: at 197K the
 first-question score is 4/5 on that one tie and 5/5 otherwise; every deep fact
 answers; every turn after the first is 3–4 s.
 
+**Stage 23: the chunk budget is not the lever.** `ZINC_PREFILL_ATTN_PAIRS=5e8`
+(chunks stay 3,276 tokens to full depth): 197K prefill 1009 s vs 1015 s, no
+watchdog. Length-curve split of the two engines (20K and 197K points):
+
+| | linear ms/token | attention ms/token per 1K depth |
+|---|---:|---:|
+| ZINC | 2.10 | 0.0155 |
+| llama.cpp | 1.91 | 0.0133 |
+
+At 197K attention is 59% of ZINC's time and its per-pair cost is 14% above
+llama.cpp's; that is the remaining prefill gap. The per-question latency gap
+(3–4 s vs 1 s at 197K) is the other open metric; the suffix prefill is
+~0.75 s and generation ~0.4 s, so the rest is tokenizing and matching the
+1.1 MB prompt each turn.
+
