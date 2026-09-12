@@ -30535,6 +30535,9 @@ pub const InferenceEngine = struct {
         const ckpt = &self.ssm_checkpoint.?;
         try self.decode_cmd.reset();
         try self.decode_cmd.beginOneTime();
+        // Order the copies after every compute dispatch submitted so far (the
+        // prefill that produced this state): the copy must not overlap it.
+        self.decode_cmd.computeToTransferBarrier();
         for (0..n_layers) |i| {
             const base = self.ssm_checkpoint_layer_stride * @as(vk.c.VkDeviceSize, i);
             const c = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = base, .size = self.ssm_checkpoint_conv_size };
@@ -30565,6 +30568,7 @@ pub const InferenceEngine = struct {
         const n_layers = self.model.config.n_layers;
         try self.decode_cmd.reset();
         try self.decode_cmd.beginOneTime();
+        self.decode_cmd.computeToTransferBarrier();
         for (0..n_layers) |i| {
             const base = self.ssm_checkpoint_layer_stride * @as(vk.c.VkDeviceSize, i);
             const c = vk.c.VkBufferCopy{ .srcOffset = base, .dstOffset = 0, .size = self.ssm_checkpoint_conv_size };
@@ -30572,6 +30576,7 @@ pub const InferenceEngine = struct {
             const st = vk.c.VkBufferCopy{ .srcOffset = base + self.ssm_checkpoint_conv_size, .dstOffset = 0, .size = self.ssm_checkpoint_state_size };
             vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, ckpt.handle, self.gpu_ssm_states[i].handle, 1, &st);
         }
+        self.decode_cmd.transferToComputeBarrier();
         try self.decode_cmd.end();
         try self.decode_cmd.submitAndWait(self.instance.compute_queue);
         @memcpy(self.ssm_conv_state_offsets[0..n_layers], self.ssm_checkpoint_offsets);
