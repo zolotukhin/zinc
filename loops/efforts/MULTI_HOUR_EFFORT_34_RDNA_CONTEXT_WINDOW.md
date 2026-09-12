@@ -965,3 +965,16 @@ first, `ZINC_TOKENIZE_CACHE_VERIFY=1`: every cached tokenization equals the
 full encode (197266, 197298, 197323, 197356 tokens). Stage 27 measures the turn
 without the verification encode.
 
+**Stage 27: a question turn at 197K is now 1 s** (was 4 s; llama.cpp 1 s).
+Tokenization 2484 ms → 1 ms from the cache; what remains is the suffix prefill
+(0.6–0.7 s) and generation (0.2–0.3 s). Per-question latency is at parity.
+
+Scorecard after stage 27 (Qwen 3.8 27B Q4_K_M, R9700, ZINC vs llama.cpp):
+decode ahead everywhere (55.8 vs 31.0 short; 22–29 vs 18.5 at 197K); prefill
+ahead at short and medium prompts, parity at 100K, behind 7–12% at 197K
+(attention kernel latency-bound; MTP priming 6% of it); per-question latency
+1 s vs 1 s; five facts 5/5 vs 5/5 at 100K, 4/5 vs 5/5 at 197K on a 0.146-logit
+tie. The 20K prefill (415 vs 459) splits by the length curve into linear
+2.10 vs 1.91 ms/token and attention 0.31 vs 0.27 — the linear layers carry
+most of that gap; next: a per-kernel profile of a 20K prefill.
+
