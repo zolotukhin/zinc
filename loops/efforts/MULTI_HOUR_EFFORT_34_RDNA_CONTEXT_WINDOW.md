@@ -639,3 +639,29 @@ through the tiled kernel) was correct — the verify routing at large chunk
 counts is the suspect; the eval rerun and an isolation run (routing on/off,
 replies printed) settle it.
 
+## Full-context eval, rerun on the fixed build (2026-09-12)
+
+q8 cache, speculation on, int8-dot kernels, depth-scaled split-K, verify on the
+decode kernel (`5268d26b` + merge fix), same 197K document and questions:
+
+| | ZINC | llama.cpp |
+|---|---:|---:|
+| correct | **3 / 5** | 5 / 5 |
+| prefill 197,241 tokens | 1,016 s (194 tok/s) — was 1,666 | 893 s (221 tok/s) |
+| per question | 6 s, six of six from cache hits | 1 s |
+| decode at 197K resident | 22.4–29.5 tok/s | 18.5 |
+
+The two misses are truncations, not wrong retrievals: `88-` for 88-Q-3105 and
+`23.` for 23.5 degrees, each "Generated 3 tokens" — the model emitted
+end-of-sequence right after a hyphen or a decimal point. The same shape appeared
+in the first eval (`88-` after a full re-prefill on the old build) and in the
+very first f16, speculation-off 226K run (`PLUM-4417-` for turn 1), so it
+predates every kernel from today; at 20K the same prompts answer in full. The
+100K runs split by speculation: off → full answers (f16 and int8-dot q8), on →
+misses (stage 7, both decode kernels). Stage 9 prints the replies with
+speculation off, on with the verify routing, and on with the tiled verify, at
+100K, to separate speculation from numerics at depth. Candidates if it is
+numerics: RoPE angles for the high-frequency dims computed as
+`cos(position * freq)` in f32 (position 200K puts the argument near 2e5 rad,
+where a GLSL range reduction keeps only a couple of digits of the fraction).
+
