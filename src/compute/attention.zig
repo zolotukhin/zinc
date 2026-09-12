@@ -22,7 +22,11 @@ pub const FlashAttnPush = extern struct {
     attn_scale_bits: u32, // float scale bits (0 = use 1/sqrt(head_dim))
     sink_offset: u32,
     /// Split-K chunks this dispatch runs; 1 writes the final output.
-    n_chunks: u32, // layer_idx * n_heads — starting index into sink_data for this layer
+    n_chunks: u32,
+    /// vec4 offsets of this query's row block in the Q and output buffers, for
+    /// batched callers that run the decode kernel per query; 0 otherwise.
+    q_offset_v4: u32,
+    o_offset_v4: u32, // layer_idx * n_heads — starting index into sink_data for this layer
 };
 
 /// Push constants for flash_attn_batched. Shared by two callers:
@@ -51,6 +55,7 @@ pub const FlashAttnSplitMergePush = extern struct {
     n_heads: u32,
     sink_offset: u32,
     n_chunks: u32,
+    o_offset_v4: u32,
 };
 
 /// Owns the Vulkan compute pipelines for flash attention and records
@@ -298,6 +303,8 @@ pub const AttentionDispatch = struct {
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
             .sink_offset = sink_offset,
             .n_chunks = 1,
+            .q_offset_v4 = 0,
+            .o_offset_v4 = 0,
         };
 
         // One workgroup per query head
@@ -471,6 +478,8 @@ pub const AttentionDispatch = struct {
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
             .sink_offset = sink_offset,
             .n_chunks = n_chunks,
+            .q_offset_v4 = 0,
+            .o_offset_v4 = 0,
         };
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_kv_heads, n_chunks, 1);
     }
@@ -498,6 +507,8 @@ pub const AttentionDispatch = struct {
             .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
             .sink_offset = sink_offset,
             .n_chunks = n_chunks,
+            .q_offset_v4 = 0,
+            .o_offset_v4 = 0,
         };
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, n_chunks, 1);
     }
@@ -528,6 +539,7 @@ pub const AttentionDispatch = struct {
             .n_heads = n_heads,
             .sink_offset = sink_offset,
             .n_chunks = n_chunks,
+            .o_offset_v4 = 0,
         };
         cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_heads, 1, 1);
     }

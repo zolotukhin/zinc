@@ -24,6 +24,7 @@ layout(push_constant) uniform PushConstants {
     uint n_heads;         // number of query heads
     uint sink_offset;     // starting index into sink_data for this layer
     uint n_chunks;        // partials per head written by the split dispatch
+    uint o_offset_v4;     // vec4 offset of this query's row block in o_data (batched callers)
 };
 
 layout(set = 0, binding = 0) readonly  buffer Partial    { float p_data[];     };
@@ -160,7 +161,7 @@ void main() {
     // Slow path: original loop, bit-equivalent to pre-cycle-23. Folded
     // out at pipeline-spec time when n_chunks != 4 (spec const).
     float inv_L = s_inv_L_full;
-    uint o_base_v4 = (head * head_dim) >> 2;
+    uint o_base_v4 = o_offset_v4 + ((head * head_dim) >> 2);
 
     if (n_chunks == 4u && head_dim_v4 == 32u) {
         uint d4 = tid >> 1u;

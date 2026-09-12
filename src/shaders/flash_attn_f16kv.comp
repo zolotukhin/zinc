@@ -40,6 +40,8 @@ layout(push_constant) uniform PushConstants {
     uint attn_scale_bits; // float attention scale (reinterpreted as uint, 0 = use 1/sqrt(head_dim))
     uint sink_offset;     // starting index into sink_data for this layer (layer_idx * n_heads)
     uint n_chunks;        // split-K chunks this dispatch runs (1 = write final output)
+    uint q_offset_v4;     // vec4 offset of this query's row block in q_data (batched callers)
+    uint o_offset_v4;     // vec4 offset of this query's row block in o_data (batched callers)
 };
 
 // Buffer bindings. Q, K, V, and Output are aliased as vec4 so the inner
@@ -133,7 +135,7 @@ void main() {
     // 64 threads do one iter; for head_dim=512 each thread does two
     // iters. The same vec4 layout feeds Phase 4 (V-acc) and Phase 5.
     uint head_dim_v4 = head_dim >> 2;
-    uint q_base_v4 = q_base >> 2;
+    uint q_base_v4 = q_offset_v4 + (q_base >> 2);
     for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
         s_out_v4[d4] = vec4(0.0);
         s_q4[d4] = q_data_v4[q_base_v4 + d4];
@@ -499,7 +501,7 @@ void main() {
         }
 
         float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
-        uint o_base_v4 = (head * head_dim) >> 2;
+        uint o_base_v4 = o_offset_v4 + ((head * head_dim) >> 2);
 
         for (uint d4 = tid; d4 < head_dim_v4; d4 += 64u) {
             o_data_v4[o_base_v4 + d4] = s_out_v4[d4] * rescale * inv_sum;

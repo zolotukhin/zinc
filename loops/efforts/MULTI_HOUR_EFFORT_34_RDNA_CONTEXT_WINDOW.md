@@ -505,3 +505,22 @@ it with the resident context — about 2,048 keys per chunk, up to 64 chunks
 (`ZINC_FA_SPLIT_K_KEYS`, `ZINC_FA_SPLIT_K_MAX`; the partial buffer is sized for
 64). Grouped decode stays opt-in (`ZINC_FA_GQA_DECODE=1`) until the depth A/B.
 
+## 226K with speculation and the text fallback (2026-09-12, measured)
+
+q8, `-c 262144`, per-chunk priming, per-head decode with the base 4 chunks:
+
+| | wall | log |
+|---|---:|---|
+| turn 1, 225,584 tokens | 2,113 s | every 3,276-row chunk primed (~280 ms each), no reset |
+| turn 2, reused | 9 s | `spliced engine_only_tokens=4` → hit → `primed 29 appended rows … in 2.8 ms` → drafts 5/6 accepted |
+| turn 3, reused | **23 s** (was 2,091 s) | `spliced by text: tail=24` → hit → 6/8 accepted |
+
+Session reuse now holds at full depth on both turns, and speculation primes at
+any depth. But decode with speculation at depth is **5.0 tok/s against 7.7
+without**: `target=1508.8 ms over 3 cycles` — each verify step (a 3-token
+batch through the tiled prefill kernel, which has no split-K) is ~500 ms,
+because 3 queries × 6 heads = 18 rows fill 8 workgroups that walk all 226K keys
+serially. The same occupancy disease as decode, in the other kernel. Next:
+route small batches at depth through the split-K decode kernel per query
+(q/o offsets in its push constants), so a verify costs ~3 decode attentions.
+

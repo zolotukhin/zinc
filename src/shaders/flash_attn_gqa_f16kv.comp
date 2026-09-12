@@ -40,6 +40,8 @@ layout(push_constant) uniform PushConstants {
     uint attn_scale_bits;
     uint sink_offset;
     uint n_chunks;        // split-K chunks this dispatch runs (1 = write final output)
+    uint q_offset_v4;     // vec4 offset of this query's row block in q_data (batched callers)
+    uint o_offset_v4;     // vec4 offset of this query's row block in o_data (batched callers)
 };
 
 layout(set = 0, binding = 0) readonly  buffer Query     { float q_data[];     };
@@ -80,12 +82,12 @@ void main() {
         i_end = (chunk_id + 1u == n_chunks) ? seq_len : (((chunk_id + 1u) * seq_len) / n_chunks);
     }
 
-    s_q4[0u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 0u) * head_dim >> 2) + tid];
-    s_q4[1u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 1u) * head_dim >> 2) + tid];
-    s_q4[2u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 2u) * head_dim >> 2) + tid];
-    s_q4[3u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 3u) * head_dim >> 2) + tid];
-    s_q4[4u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 4u) * head_dim >> 2) + tid];
-    s_q4[5u * HEAD_DIM_V4 + tid] = q_data_v4[((head0 + 5u) * head_dim >> 2) + tid];
+    s_q4[0u * HEAD_DIM_V4 + tid] = q_data_v4[q_offset_v4 + ((head0 + 0u) * head_dim >> 2) + tid];
+    s_q4[1u * HEAD_DIM_V4 + tid] = q_data_v4[q_offset_v4 + ((head0 + 1u) * head_dim >> 2) + tid];
+    s_q4[2u * HEAD_DIM_V4 + tid] = q_data_v4[q_offset_v4 + ((head0 + 2u) * head_dim >> 2) + tid];
+    s_q4[3u * HEAD_DIM_V4 + tid] = q_data_v4[q_offset_v4 + ((head0 + 3u) * head_dim >> 2) + tid];
+    s_q4[4u * HEAD_DIM_V4 + tid] = q_data_v4[q_offset_v4 + ((head0 + 4u) * head_dim >> 2) + tid];
+    s_q4[5u * HEAD_DIM_V4 + tid] = q_data_v4[q_offset_v4 + ((head0 + 5u) * head_dim >> 2) + tid];
     if (tid < HEADS) {
         s_max_old[tid] = -1.0e30;
         s_sum_old[tid] = 0.0;
@@ -232,7 +234,7 @@ void main() {
                 final_sum = s_sum_old[h] * out_rescale + exp(sink_val - sink_max);
             }
             const float inv_sum = final_sum > 0.0 ? 1.0 / final_sum : 0.0;
-            o_data_v4[((head * head_dim) >> 2) + tid] = acc * out_rescale * inv_sum;
+            o_data_v4[o_offset_v4 + ((head * head_dim) >> 2) + tid] = acc * out_rescale * inv_sum;
         } else {
             o_data_v4[(((head * n_chunks + chunk_id) * head_dim) >> 2) + tid] = acc;
             if (tid == 0u) {

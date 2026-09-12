@@ -8119,6 +8119,8 @@ pub const InferenceEngine = struct {
                                 .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
                                 .sink_offset = sink_offset,
                                 .n_chunks = attn_chunks,
+                                .q_offset_v4 = 0,
+                                .o_offset_v4 = 0,
                             };
                             self.pushDispatch6(
                                 attn_pip,
@@ -8170,6 +8172,7 @@ pub const InferenceEngine = struct {
                                     .n_heads = config.n_heads,
                                     .sink_offset = sink_offset,
                                     .n_chunks = attn_chunks,
+                                    .o_offset_v4 = 0,
                                 };
                                 self.pushDispatch3(
                                     merge_pip,
@@ -8264,6 +8267,8 @@ pub const InferenceEngine = struct {
                                 .attn_scale_bits = if (config.attn_scale != 0) @as(u32, @bitCast(config.attn_scale)) else 0,
                                 .sink_offset = sink_offset,
                                 .n_chunks = 1,
+                                .q_offset_v4 = 0,
+                                .o_offset_v4 = 0,
                             };
                             self.pushDispatch6(
                                 pip,
@@ -12498,6 +12503,55 @@ pub const InferenceEngine = struct {
         attn_scale: f32,
         sink_offset: u32,
     ) !void {
+        // A small batch deep in the context — a speculative verify — has no
+        // split-K in the tiled kernel: 3 queries x 6 heads is 8 workgroups
+        // walking every key serially, ~500 ms per verify at 226K, which made
+        // speculation at depth slower than plain decode. Run the split-K decode
+        // kernel once per query instead (queries sit at consecutive positions
+        // and their K/V rows are already written), so a verify costs a few
+        // decode attentions.
+        if (n_queries <= small_batch_decode_max_queries and
+            seq_start >= small_batch_decode_min_depth and
+            self.fa_split_k > 1 and
+            envFlagEnabled("ZINC_FA_SMALL_BATCH_DECODE", true))
+        {
+            if (self.attention.pipeline_split) |*split_pip| {
+                if (self.attention.pipeline_split_merge) |*merge_pip| {
+                    if (split_pip.uses_push_descriptors and merge_pip.uses_push_descriptors) {
+                        var j: u32 = 0;
+                        while (j < n_queries) : (j += 1) {
+                            const seq_len_j = seq_start + j + 1;
+                            const chunks = self.splitKChunksForSeq(seq_len_j);
+                            const off_v4: u32 = (j * n_heads * head_dim) >> 2;
+                            const push = FlashAttnPush{
+                                .head_dim = head_dim,
+                                .n_heads = n_heads,
+                                .n_kv_heads = n_kv_heads,
+                                .seq_len = seq_len_j,
+                                .page_size = page_size,
+                                .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
+                                .sink_offset = sink_offset,
+                                .n_chunks = chunks,
+                                .q_offset_v4 = off_v4,
+                                .o_offset_v4 = off_v4,
+                            };
+                            self.pushDispatch6(split_pip, std.mem.asBytes(&push), q_buf, q_size, k_cache, k_cache_size, v_cache, v_cache_size, page_table, page_table_size, self.partial_attn_out_buf.handle, self.partial_attn_out_buf.size, sinks, sinks_size, n_heads, chunks, 1);
+                            self.decode_cmd.computeBarrier();
+                            const merge_push = FlashAttnSplitMergePush{
+                                .head_dim = head_dim,
+                                .n_heads = n_heads,
+                                .sink_offset = sink_offset,
+                                .n_chunks = chunks,
+                                .o_offset_v4 = off_v4,
+                            };
+                            self.pushDispatch3(merge_pip, std.mem.asBytes(&merge_push), self.partial_attn_out_buf.handle, self.partial_attn_out_buf.size, out_buf, out_size, sinks, sinks_size, n_heads, 1, 1);
+                            self.decode_cmd.computeBarrier();
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         // Long prompts can go to the query-tiled kernel: one workgroup per 4
         // queries instead of per query, so a loaded K/V row feeds 4 dot products
         // instead of 1. Short batches keep the untiled kernel, where the tile
@@ -31447,6 +31501,11 @@ const prefill_scratch_floor_tokens: u64 = 256;
 /// Largest query x key product one prefill chunk may attend over, so a chunk
 /// deep in the context stays a bounded GPU job. 3e8 keeps a chunk at 1,500
 /// tokens at 200K depth and leaves shallow chunks scratch-limited.
+/// Batches this small, this deep, run the split-K decode kernel per query in
+/// dispatchFlashAttnBatched instead of the tiled prefill kernel.
+const small_batch_decode_max_queries: u32 = 4;
+const small_batch_decode_min_depth: u32 = 4096;
+
 fn envU32(name: []const u8, default: u32) u32 {
     const raw = std.posix.getenv(name) orelse return default;
     return std.fmt.parseInt(u32, raw, 10) catch default;
