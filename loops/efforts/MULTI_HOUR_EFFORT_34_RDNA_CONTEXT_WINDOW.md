@@ -948,3 +948,15 @@ the previous assistant header, and `<|im_start|>` is a hard BPE boundary, so
 the cached tokens up to the k-th `<|im_start|>` plus an encode of the tail
 equal a full encode exactly. Expected turn: ~1.3 s (llama.cpp: 1 s).
 
+**Stage 25: the rescale skip changes nothing** — 87.6K-token prefill, q8:
+289.2 → 289.0 tok/s. Removing an eighth of the per-step ALU work moves nothing,
+so the tile kernel is not ALU-bound; a rough budget confirms it (the 197K
+attention would take ~25 s of pure ALU and ~55 GB/s of VRAM, against ~600 s
+observed). It is latency-bound: q8 blocks are 36 bytes, so each K or V block is
+nine scalar dword loads, and 4 waves × ~90 VGPRs leave few waves per CU to
+cover them. That is also why the PV instruction-count rewrite would not pay.
+The lever there is memory-level parallelism (LDS-staged K/V with cooperative
+vectorized loads and a software-pipelined next tile), which is the shape of
+llama.cpp's scalar FA — a kernel-architecture change, deferred. The rescale
+skip stays (exact, harmless).
+
