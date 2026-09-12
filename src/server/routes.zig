@@ -2664,12 +2664,16 @@ fn handleChatCompletions(
     // `encode` uses the tokenizer's allocator, which differs from the per-request
     // page allocator in server mode. Keep BOS packing in `encodePrompt` so this
     // route cannot accidentally free tokenizer-owned memory with the wrong allocator.
+    const tokenize_start_ns = std.time.nanoTimestamp();
     const prompt_tokens = tokenizer.encodePrompt(prompt, allocator) catch {
         try conn.sendError(500, "internal_error", "Tokenization failed");
         return;
     };
     errdefer allocator.free(prompt_tokens);
     defer allocator.free(prompt_tokens);
+    if (prompt_tokens.len >= 16384) {
+        log.info("chat request: tokenized {d} bytes into {d} tokens in {d} ms", .{ prompt.len, prompt_tokens.len, @divTrunc(std.time.nanoTimestamp() - tokenize_start_ns, 1_000_000) });
+    }
     defer server_state.clearActiveContext();
     // What the engine actually prefills and continues. Differs from
     // prompt_tokens only when a stored session transcript is spliced in (see
@@ -2831,6 +2835,9 @@ fn handleChatCompletions(
     runtime.mtpBeginRequest(engine);
     runtime.mtpSetPrimeDuringPrefill(engine, !sampling.requiresLogitsReadback());
     const prefill_start_ns = std.time.nanoTimestamp();
+    if (prompt_tokens.len >= 16384) {
+        log.info("chat request: {d} ms from tokenization to prefill (reuse matching)", .{@divTrunc(prefill_start_ns - tokenize_start_ns, 1_000_000)});
+    }
     const prefill_work_tokens = if (reused_prefix_len > 0)
         engine_prompt_tokens.len - reused_prefix_len
     else
