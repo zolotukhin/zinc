@@ -1339,6 +1339,22 @@ pub const InferenceEngine = struct {
     /// prime-capture cap. The server clears it for requests that sample
     /// non-greedily (speculation is unused there).
     mtp_prime_during_prefill: bool = true,
+    /// One recurrent-state checkpoint for chat reuse: every SSM layer's conv and
+    /// recurrent state, their ring offsets, the position, and the draft block's
+    /// carried row, taken at the end of the assistant header each turn. The next
+    /// turn rolls back to it and re-processes the canonical suffix (previous
+    /// answer, end of turn, new question), so the reused context is exactly what
+    /// a fresh render would be — no accumulated per-turn scaffolds in the
+    /// DeltaNet state. This is how llama.cpp reuses on hybrid models too.
+    ssm_checkpoint: ?Buffer = null,
+    ssm_checkpoint_layer_stride: vk.c.VkDeviceSize = 0,
+    ssm_checkpoint_conv_size: vk.c.VkDeviceSize = 0,
+    ssm_checkpoint_state_size: vk.c.VkDeviceSize = 0,
+    ssm_checkpoint_offsets: []u32 = &.{},
+    ssm_checkpoint_pending_h: []f32 = &.{},
+    ssm_checkpoint_position: u32 = 0,
+    ssm_checkpoint_mtp_ok: bool = false,
+    ssm_checkpoint_valid: bool = false,
     /// NextN/MTP chained cycle: mtpRunNextnBatch records into the open command
     /// buffer without ending/submitting it.
     mtp_nextn_record_only: bool = false,
@@ -2353,8 +2369,8 @@ pub const InferenceEngine = struct {
             const gpu_conv_size = @as(vk.c.VkDeviceSize, (config.ssm_d_conv - 1) * gpu_conv_ch) * @sizeOf(f32);
             const gpu_state_size = @as(vk.c.VkDeviceSize, dt_rank_g * head_v_dim_g * head_v_dim_g) * @sizeOf(f32);
             for (0..config.n_layers) |i| {
-                gpu_ssm_conv_states[i] = try Buffer.initDeviceLocal(instance, gpu_conv_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-                gpu_ssm_states[i] = try Buffer.initDeviceLocal(instance, gpu_state_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                gpu_ssm_conv_states[i] = try Buffer.initDeviceLocal(instance, gpu_conv_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                gpu_ssm_states[i] = try Buffer.initDeviceLocal(instance, gpu_state_size, vk.c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             }
             // Zero-fill GPU SSM buffers via vkCmdFillBuffer
             try decode_cmd.reset();
@@ -4526,6 +4542,7 @@ pub const InferenceEngine = struct {
     }
 
     fn resetRequestState(self: *InferenceEngine, requested_context_tokens: u32) !void {
+        self.ssm_checkpoint_valid = false;
         self.freeActiveKvPages();
         try self.ensureKvPagesForContext(requested_context_tokens);
 
@@ -30493,6 +30510,90 @@ pub const InferenceEngine = struct {
     /// Whether a chunked prefill primes the draft block as it goes.
     pub fn mtpSetPrimeDuringPrefill(self: *InferenceEngine, on: bool) void {
         self.mtp_prime_during_prefill = on;
+    }
+
+    fn ssmCheckpointSupported(self: *const InferenceEngine) bool {
+        return self.model.config.ssm_d_inner > 0 and self.gpu_ssm_states.len == self.model.config.n_layers and self.gpu_ssm_states.len > 0 and self.gpu_ssm_states[0].handle != null;
+    }
+
+    /// Snapshot the recurrent state at the current position (see the field doc).
+    pub fn ssmCheckpointTake(self: *InferenceEngine, state: *DecodeState) !bool {
+        if (!self.ssmCheckpointSupported()) return false;
+        const n_layers = self.model.config.n_layers;
+        if (self.ssm_checkpoint == null) {
+            self.ssm_checkpoint_conv_size = self.gpu_ssm_conv_states[0].size;
+            self.ssm_checkpoint_state_size = self.gpu_ssm_states[0].size;
+            self.ssm_checkpoint_layer_stride = self.ssm_checkpoint_conv_size + self.ssm_checkpoint_state_size;
+            const total = self.ssm_checkpoint_layer_stride * @as(vk.c.VkDeviceSize, n_layers);
+            self.ssm_checkpoint = try Buffer.initDeviceLocal(self.instance, total, vk.c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.c.VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            self.ssm_checkpoint_offsets = try self.allocator.alloc(u32, n_layers);
+            self.ssm_checkpoint_pending_h = try self.allocator.alloc(f32, self.model.config.hidden_dim);
+            log.info("Chat reuse: recurrent-state checkpoint buffer {d} MB", .{total / (1024 * 1024)});
+        }
+        const ckpt = &self.ssm_checkpoint.?;
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+        for (0..n_layers) |i| {
+            const base = self.ssm_checkpoint_layer_stride * @as(vk.c.VkDeviceSize, i);
+            const c = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = base, .size = self.ssm_checkpoint_conv_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gpu_ssm_conv_states[i].handle, ckpt.handle, 1, &c);
+            const st = vk.c.VkBufferCopy{ .srcOffset = 0, .dstOffset = base + self.ssm_checkpoint_conv_size, .size = self.ssm_checkpoint_state_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, self.gpu_ssm_states[i].handle, ckpt.handle, 1, &st);
+        }
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        @memcpy(self.ssm_checkpoint_offsets, self.ssm_conv_state_offsets[0..n_layers]);
+        self.ssm_checkpoint_position = state.position;
+        self.ssm_checkpoint_mtp_ok = false;
+        if (self.mtp) |*m| {
+            if (m.primed and m.resident_context_len == state.position) {
+                @memcpy(self.ssm_checkpoint_pending_h, m.pending_h[0..self.model.config.hidden_dim]);
+                self.ssm_checkpoint_mtp_ok = true;
+            }
+        }
+        self.ssm_checkpoint_valid = true;
+        return true;
+    }
+
+    /// Roll the recurrent state back to the checkpoint. The KV rows past it are
+    /// overwritten by the caller's re-prefill of the canonical suffix.
+    pub fn ssmCheckpointRestore(self: *InferenceEngine, state: *DecodeState) !bool {
+        if (!self.ssm_checkpoint_valid) return false;
+        const ckpt = &(self.ssm_checkpoint orelse return false);
+        const n_layers = self.model.config.n_layers;
+        try self.decode_cmd.reset();
+        try self.decode_cmd.beginOneTime();
+        for (0..n_layers) |i| {
+            const base = self.ssm_checkpoint_layer_stride * @as(vk.c.VkDeviceSize, i);
+            const c = vk.c.VkBufferCopy{ .srcOffset = base, .dstOffset = 0, .size = self.ssm_checkpoint_conv_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, ckpt.handle, self.gpu_ssm_conv_states[i].handle, 1, &c);
+            const st = vk.c.VkBufferCopy{ .srcOffset = base + self.ssm_checkpoint_conv_size, .dstOffset = 0, .size = self.ssm_checkpoint_state_size };
+            vk.c.vkCmdCopyBuffer(self.decode_cmd.handle, ckpt.handle, self.gpu_ssm_states[i].handle, 1, &st);
+        }
+        try self.decode_cmd.end();
+        try self.decode_cmd.submitAndWait(self.instance.compute_queue);
+        @memcpy(self.ssm_conv_state_offsets[0..n_layers], self.ssm_checkpoint_offsets);
+        state.position = self.ssm_checkpoint_position;
+        state.generated_tokens.clearRetainingCapacity();
+        if (self.mtp) |*m| {
+            if (self.ssm_checkpoint_mtp_ok) {
+                @memcpy(m.pending_h[0..self.model.config.hidden_dim], self.ssm_checkpoint_pending_h);
+                m.resident_context_len = self.ssm_checkpoint_position;
+                m.primed = true;
+            } else {
+                m.resident_context_len = 0;
+                m.primed = false;
+            }
+        }
+        return true;
+    }
+
+    pub fn ssmCheckpointPosition(self: *const InferenceEngine) ?u32 {
+        return if (self.ssm_checkpoint_valid) self.ssm_checkpoint_position else null;
+    }
+
+    pub fn ssmCheckpointInvalidate(self: *InferenceEngine) void {
+        self.ssm_checkpoint_valid = false;
     }
 
     pub fn mtpPerf(self: *const InferenceEngine) MtpPerf {

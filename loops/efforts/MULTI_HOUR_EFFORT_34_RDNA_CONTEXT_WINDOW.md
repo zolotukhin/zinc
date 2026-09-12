@@ -775,3 +775,23 @@ Left for a deliberate follow-up rather than a rushed patch. The reuse path stays
 on: it is correct at the depths a bot actually runs, and it is what makes 262K
 usable turn to turn.
 
+## Fix: recurrent-state checkpoints for chat reuse (2026-09-12)
+
+The design tension resolves the way llama.cpp resolves it on hybrid models:
+checkpoint the recurrent state at a turn boundary and roll back to it. Each
+turn the handler prefills the prompt up to the end of the last
+`<|im_start|>assistant\n` (canonical history), primes the draft block over it,
+takes a checkpoint — every SSM layer's conv and recurrent state copied to a
+device-local buffer (~150 MB), the conv ring offsets, the position, and the
+draft block's carried row — stores that canonical prefix as the session entry,
+then prefills the generation prompt (scaffold or thinking header) and primes it.
+The next turn matches by plain prefix, restores the checkpoint, and prefills
+the canonical suffix: previous answer, end of turn, new question, new header.
+The reused context is therefore exactly a fresh render; nothing accumulates in
+the DeltaNet state, thinking-on sessions drop past reasoning canonically, and
+the token/text aligners are no longer needed on this path (kept for legacy
+entries). Engine: `ssmCheckpointTake/Restore/Position/Invalidate`
+(`forward.zig`, SSM buffers now `TRANSFER_SRC` too); server:
+`storeCheckpointed`, `checkpointPosFor`, `lastAssistantHeaderEnd`, and the split
+prefill in the chat handler. Verified next at 20K, 100K and 197K.
+

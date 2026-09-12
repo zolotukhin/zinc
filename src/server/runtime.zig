@@ -131,6 +131,24 @@ pub fn mtpSetPrimeDuringPrefill(_engine: *InferenceEngine, _on: bool) void {
     if (comptime gpu.is_vulkan) _engine.mtpSetPrimeDuringPrefill(_on);
 }
 
+/// Recurrent-state checkpoints for chat reuse on hybrid models (see
+/// InferenceEngine.ssm_checkpoint). All return false / null on other backends.
+pub fn ssmCheckpointTake(_engine: *InferenceEngine, _state: *DecodeState) bool {
+    if (comptime gpu.is_vulkan) return _engine.ssmCheckpointTake(_state) catch false;
+    return false;
+}
+pub fn ssmCheckpointRestore(_engine: *InferenceEngine, _state: *DecodeState) bool {
+    if (comptime gpu.is_vulkan) return _engine.ssmCheckpointRestore(_state) catch false;
+    return false;
+}
+pub fn ssmCheckpointPosition(_engine: *const InferenceEngine) ?u32 {
+    if (comptime gpu.is_vulkan) return _engine.ssmCheckpointPosition();
+    return null;
+}
+pub fn ssmCheckpointInvalidate(_engine: *InferenceEngine) void {
+    if (comptime gpu.is_vulkan) _engine.ssmCheckpointInvalidate();
+}
+
 /// Forget captured prefill rows so the next prefill's capture starts at row 0.
 pub fn mtpResetCapture(_engine: *InferenceEngine) void {
     if (comptime gpu.is_vulkan) _engine.mtpResetCapture();

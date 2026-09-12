@@ -56,6 +56,10 @@ const ChatReuseEntry = struct {
     model_path: []u8,
     prompt_tokens: []u32,
     last_used_ns: i128,
+    /// Position of the engine's recurrent-state checkpoint for this session
+    /// (the end of the assistant header of its last turn); 0 when the entry is a
+    /// legacy end-of-transcript one.
+    checkpoint_pos: u32 = 0,
 
     fn deinit(self: *ChatReuseEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.session_id);
@@ -79,6 +83,8 @@ const ChatReuseCache = struct {
     entries: std.ArrayListUnmanaged(ChatReuseEntry) = .{},
     /// Session whose transcript is resident in the engine right now, if any.
     live_session: ?[]u8 = null,
+    /// Set by storeCheckpointed for the duration of its store() call.
+    pending_checkpoint_pos: u32 = 0,
 
     fn init(allocator: std.mem.Allocator) ChatReuseCache {
         return .{ .allocator = allocator };
@@ -176,6 +182,27 @@ const ChatReuseCache = struct {
         return null;
     }
 
+    /// Store a canonical prefix with the engine's checkpoint position (see
+    /// InferenceEngine.ssm_checkpoint): the next turn matches by plain prefix,
+    /// rolls the recurrent state back, and re-processes the canonical suffix.
+    fn storeCheckpointed(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8, prefix_tokens: []const u32, checkpoint_pos: u32, now_ns: i128) !void {
+        self.pending_checkpoint_pos = checkpoint_pos;
+        defer self.pending_checkpoint_pos = 0;
+        try self.store(session_id, model_path, prefix_tokens, now_ns);
+    }
+
+    /// The resident session's checkpoint position, if its entry has one.
+    fn checkpointPosFor(self: *ChatReuseCache, session_id: []const u8, model_path: []const u8) ?u32 {
+        const resident = if (self.live_session) |live| std.mem.eql(u8, live, session_id) else false;
+        if (!resident) return null;
+        for (self.entries.items) |*entry| {
+            if (!std.mem.eql(u8, entry.session_id, session_id)) continue;
+            if (!std.mem.eql(u8, entry.model_path, model_path)) return null;
+            return if (entry.checkpoint_pos > 0) entry.checkpoint_pos else null;
+        }
+        return null;
+    }
+
     /// Stored transcript tokens for `session_id` when that session is the one
     /// resident in the engine and the model matches — the only case in which
     /// they can be continued.
@@ -239,7 +266,9 @@ const ChatReuseCache = struct {
             .model_path = try self.allocator.dupe(u8, model_path),
             .prompt_tokens = try self.allocator.dupe(u32, prompt_tokens),
             .last_used_ns = now_ns,
+            .checkpoint_pos = self.pending_checkpoint_pos,
         };
+        self.pending_checkpoint_pos = 0;
         errdefer {
             var owned = entry;
             owned.deinit(self.allocator);
@@ -1503,6 +1532,21 @@ fn spliceByText(allocator: std.mem.Allocator, tokenizer: anytype, stored: []cons
     return out;
 }
 
+/// Index just past the last `<|im_start|>assistant\n` in `prompt`: the point up
+/// to which the prompt is canonical history and after which this turn's
+/// generation prompt (think scaffold or thinking header) begins. Null when the
+/// header cannot be located as tokens.
+fn lastAssistantHeaderEnd(allocator: std.mem.Allocator, tokenizer: anytype, prompt: []const u32) ?usize {
+    const header = tokenizer.encodeAppended("<|im_start|>assistant\n", allocator) catch return null;
+    defer allocator.free(header);
+    if (header.len == 0 or prompt.len < header.len) return null;
+    var i: usize = prompt.len - header.len + 1;
+    while (i > 0) : (i -= 1) {
+        if (std.mem.eql(u32, prompt[i - 1 .. i - 1 + header.len], header)) return i - 1 + header.len;
+    }
+    return null;
+}
+
 /// Why a session's stored transcript did not prefix-match the new prompt: the
 /// first diverging token and the text around it on both sides.
 fn logChatReuseMiss(tokenizer: anytype, session_id: []const u8, stored: []const u32, prompt: []const u32) void {
@@ -2634,6 +2678,9 @@ fn handleChatCompletions(
     var spliced_prompt: ?[]u32 = null;
     defer if (spliced_prompt) |sp| allocator.free(sp);
     var reused_prefix_len: usize = 0;
+    // Set when this turn stored a canonical prefix with a recurrent-state
+    // checkpoint; the post-generation transcript warm is then unnecessary.
+    var checkpointed = false;
     if (prompt_tokens.len == 0) {
         try conn.sendError(500, "internal_error", "Tokenization produced no prompt tokens");
         return;
@@ -2684,30 +2731,32 @@ fn handleChatCompletions(
     defer if (cache_assistant_text) |text| allocator.free(text);
     defer {
         if (cacheable_session) {
-            if (cache_assistant_text) |assistant_text| {
-                warmChatReuseCache(
-                    server_state,
-                    resources,
-                    tokenizer,
-                    engine,
-                    thinking_enabled,
-                    skip_thinking_template,
-                    parsed.tools,
-                    parsed.tool_choice,
-                    parsed.session_id,
-                    parsed.roles,
-                    parsed.contents,
-                    assistant_text,
-                    &state,
-                    engine_prompt_tokens,
-                    processed_generated_tokens.items,
-                    allocator,
-                ) catch |err| {
-                    log.info("chat cache disabled: {s}", .{@errorName(err)});
+            if (!checkpointed) {
+                if (cache_assistant_text) |assistant_text| {
+                    warmChatReuseCache(
+                        server_state,
+                        resources,
+                        tokenizer,
+                        engine,
+                        thinking_enabled,
+                        skip_thinking_template,
+                        parsed.tools,
+                        parsed.tool_choice,
+                        parsed.session_id,
+                        parsed.roles,
+                        parsed.contents,
+                        assistant_text,
+                        &state,
+                        engine_prompt_tokens,
+                        processed_generated_tokens.items,
+                        allocator,
+                    ) catch |err| {
+                        log.info("chat cache disabled: {s}", .{@errorName(err)});
+                        server_state.clearChatReuseSession(parsed.session_id);
+                    };
+                } else {
                     server_state.clearChatReuseSession(parsed.session_id);
-                };
-            } else {
-                server_state.clearChatReuseSession(parsed.session_id);
+                }
             }
         }
     }
@@ -2728,6 +2777,10 @@ fn handleChatCompletions(
         if (conn.isPeerClosed()) return;
     }
 
+    // A checkpointed session matches by plain canonical prefix and continues
+    // from the engine's recurrent-state checkpoint (restored below), never from
+    // the end of the previous generation.
+    var checkpoint_pos: ?u32 = if (cacheable_session) server_state.chat_reuse_cache.checkpointPosFor(parsed.session_id, resources.model_path) else null;
     if (cacheable_session) {
         if (server_state.chat_reuse_cache.matchSession(parsed.session_id, resources.model_path, prompt_tokens, std.time.nanoTimestamp())) |m| {
             if (m.consumed == m.reused) {
@@ -2783,9 +2836,29 @@ fn handleChatCompletions(
     else
         engine_prompt_tokens.len;
     if (reused_prefix_len > 0) {
+        if (checkpoint_pos) |cp| {
+            // The entry is a canonical prefix ending at the checkpoint; the
+            // engine must roll back to it before the suffix is prefilled.
+            if (cp == reused_prefix_len and runtime.ssmCheckpointPosition(engine) == cp and spliced_prompt == null and runtime.ssmCheckpointRestore(engine, &state)) {
+                log.info("chat cache checkpoint restored: session={s} position={d}", .{ parsed.session_id, cp });
+            } else {
+                log.info("chat cache checkpoint unavailable: session={s} entry={d} engine={?d}; full prefill", .{ parsed.session_id, cp, runtime.ssmCheckpointPosition(engine) });
+                reused_prefix_len = 0;
+                checkpoint_pos = null;
+            }
+        }
+    }
+    // Where this turn's canonical history ends: everything after the last
+    // assistant header is the generation prompt (think scaffold or thinking
+    // header). The recurrent state is checkpointed exactly there, so the next
+    // turn can roll back and re-process the canonical suffix instead of
+    // continuing from a transcript that accumulates one scaffold per turn.
+    const header_end: usize = if (cacheable_session) (lastAssistantHeaderEnd(allocator, tokenizer, engine_prompt_tokens) orelse engine_prompt_tokens.len) else engine_prompt_tokens.len;
+    const split_at: usize = if (header_end > reused_prefix_len and header_end < engine_prompt_tokens.len) header_end else engine_prompt_tokens.len;
+    if (reused_prefix_len > 0) {
         state.position = @intCast(reused_prefix_len);
-        if (reused_prefix_len < engine_prompt_tokens.len) {
-            engine.prefillBatched(&state, engine_prompt_tokens[reused_prefix_len..]) catch |err| {
+        if (reused_prefix_len < split_at) {
+            engine.prefillBatched(&state, engine_prompt_tokens[reused_prefix_len..split_at]) catch |err| {
                 log.err("Chat prefill failed after cache hit: {s}", .{@errorName(err)});
                 server_state.clearChatReuseSession(parsed.session_id);
                 if (parsed.stream) {
@@ -2803,7 +2876,8 @@ fn handleChatCompletions(
         });
     } else {
         if (parsed.session_id.len > 0) server_state.clearChatReuseSession(parsed.session_id);
-        engine.prefillBatched(&state, engine_prompt_tokens) catch |err| {
+        runtime.ssmCheckpointInvalidate(engine);
+        engine.prefillBatched(&state, engine_prompt_tokens[0..split_at]) catch |err| {
             log.err("Chat prefill failed: {s}", .{@errorName(err)});
             if (parsed.stream) {
                 conn.writeSseDone() catch {};
@@ -2812,6 +2886,42 @@ fn handleChatCompletions(
             }
             return;
         };
+    }
+    if (split_at < engine_prompt_tokens.len) {
+        // Prime what was just prefilled (a chunked prefill already did; these
+        // return early then), checkpoint at the end of the canonical history,
+        // store the canonical prefix, then prefill this turn's generation
+        // prompt and prime it too.
+        if (!sampling.requiresLogitsReadback()) {
+            _ = if (reused_prefix_len == 0)
+                runtime.mtpPrime(engine, &state, engine_prompt_tokens[0..split_at])
+            else
+                runtime.mtpPrimeSuffix(engine, &state, engine_prompt_tokens[0..split_at], @intCast(reused_prefix_len));
+        }
+        checkpointed = runtime.ssmCheckpointTake(engine, &state);
+        if (checkpointed) {
+            server_state.chat_reuse_cache.storeCheckpointed(parsed.session_id, resources.model_path, prompt_tokens[0..split_at], @intCast(split_at), std.time.nanoTimestamp()) catch |err| {
+                log.warn("chat cache: could not store checkpointed prefix: {s}", .{@errorName(err)});
+                checkpointed = false;
+            };
+        }
+        runtime.mtpResetCapture(engine);
+        engine.prefillBatched(&state, engine_prompt_tokens[split_at..]) catch |err| {
+            log.err("Chat prefill failed (generation prompt): {s}", .{@errorName(err)});
+            if (parsed.session_id.len > 0) server_state.clearChatReuseSession(parsed.session_id);
+            if (parsed.stream) {
+                conn.writeSseDone() catch {};
+            } else {
+                try conn.sendError(500, "internal_error", "Prefill failed");
+            }
+            return;
+        };
+        if (!sampling.requiresLogitsReadback()) {
+            _ = runtime.mtpPrimeSuffix(engine, &state, engine_prompt_tokens, @intCast(split_at));
+        }
+        if (checkpointed) {
+            log.info("chat cache checkpoint taken: session={s} position={d} generation_prompt={d}", .{ parsed.session_id, split_at, engine_prompt_tokens.len - split_at });
+        }
     }
     const prefill_end_ns = std.time.nanoTimestamp();
     logPrefillTiming(prefill_work_tokens, prefill_start_ns, prefill_end_ns);
