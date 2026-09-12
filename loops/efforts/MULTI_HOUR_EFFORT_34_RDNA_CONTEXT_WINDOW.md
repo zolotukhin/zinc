@@ -1016,4 +1016,8 @@ math (same integers), 20K five-fact 5/5 with identical answers. The qkv kernel
 is therefore not load-instruction-bound either; its Q8_1 activation tile may be
 read column-major (uncoalesced across the 64 columns) where the FFN kernels
 read a block-interleaved layout.
+100K prefill with the retile + 16-bit loads: 289 → 303.7 tok/s (+5%). The
+GGUF says the 48 DeltaNet qkv projections are 24 × Q6_K and 24 × Q4_K (the
+DP4a qkv path accepts only Q6_K/Q5_K), ffn_down is 33 × Q6_K + 32 × Q4_K,
+gate/up all Q4_K, ssm_out Q5_K, attention q/k/o Q4_K, v 9 × Q6_K.
 
