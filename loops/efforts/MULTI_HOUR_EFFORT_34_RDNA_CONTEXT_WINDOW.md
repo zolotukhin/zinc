@@ -544,3 +544,26 @@ instructions per key instead of 256 f32 FMAs. Selected with the same
 `ZINC_FA_Q8_MMQ=1` for the split-K decode dispatch and for small batches at
 depth. Both are measured behind the depth A/Bs.
 
+## Full-context eval, first run (2026-09-12): 1/5 against 5/5, and why
+
+Five facts planted at 5/25/50/75/95% depth in a ~197K-token document, asked one
+per turn with thinking off on both engines (`/root/fullctx_eval.py`):
+
+| | ZINC (q8, spec on, build c8b39c4a) | llama.cpp |
+|---|---:|---:|
+| correct | **1 / 5** | **5 / 5** |
+| prefill 197K | 1,666 s | 893 s (221 tok/s) |
+| per question | 12 s, or a 1,670 s re-prefill | 1 s (28 new tokens) |
+| decode at depth | 2.3–7.2 tok/s | 18.5 tok/s |
+
+Every question answered from a **cache hit** came back as `!!!!…` — token 0,
+the signature of NaN logits — and every question that fell back to a full
+re-prefill was answered correctly. The same hit-then-answer sequence was
+correct in the 226K three-turn run on the previous build, so the delta was the
+depth-scaled split-K: `flash_attn_split_merge` sized its LDS arrays for 16
+chunks ("a generous ceiling") while the split dispatch now issues up to 64 at
+depth, so lanes 16–63 wrote past them. Fixed (`MAX_CHUNKS = 64`, matching
+`flash_attn_max_split_chunks`); the ZINC half of the eval reruns after the
+depth A/Bs. llama.cpp's numbers stand: correct at every depth, 1-second turns
+through its prompt cache, 18.5 tok/s with 197K resident.
+

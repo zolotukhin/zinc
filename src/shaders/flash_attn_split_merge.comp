@@ -36,9 +36,13 @@ layout(set = 0, binding = 2) readonly  buffer Sinks      { float sink_data[];  }
 // LDS: per-chunk M, L, and post-merge weights. Sized for up to 16 chunks
 // (a generous ceiling — the host caller dispatches with n_chunks in {2, 4}
 // during normal use but the shader degrades gracefully for higher values).
-shared float s_M_chunks[16];
-shared float s_L_chunks[16];
-shared float s_weights[16];
+// Must match attention.flash_attn_max_split_chunks: the split dispatch scales
+// its chunk count with depth up to this. Sized 16 before, and a 64-chunk merge
+// wrote past these arrays — NaN logits after every cache hit at 100K+ depth.
+const uint MAX_CHUNKS = 64u;
+shared float s_M_chunks[MAX_CHUNKS];
+shared float s_L_chunks[MAX_CHUNKS];
+shared float s_weights[MAX_CHUNKS];
 shared float s_inv_L_full;
 
 void main() {
