@@ -846,3 +846,10 @@ restore after the chunked prefill" from "the fact itself"; stage 18 A/Bs
 f32-dot decode attention, suffix attention through the tile kernel, and the
 f16 cache.
 
+**Stage 17: the 5% fact asked last answers in full, twice — 6/6.** Order
+2,3,4,5,1,1 at 197K with checkpointed reuse: every answer correct, q1 →
+`PLUM-4417-ZEBRA` both times, 7 restores, 0 fallbacks. So the fact is
+retrievable through the reuse flow; the miss is specific to it being the
+*first* question after the turn-0 prefill (a single prompt answers it first).
+Stage 18 asks 1,2,5 with one numeric path changed per run.
+
