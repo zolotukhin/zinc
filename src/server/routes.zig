@@ -279,6 +279,75 @@ const ChatReuseCache = struct {
 };
 
 /// Shared server state tracking active requests, context usage, and generation serialization.
+/// Per-session cache of the last rendered chat prompt and its tokens. A turn's
+/// prompt repeats the previous one up to the previous assistant header, and
+/// `<|im_start|>` is a hard tokenizer boundary, so the cached tokens up to the
+/// k-th `<|im_start|>` plus an encode of the tail equal a full encode — and a
+/// 770 KB prompt at 197K tokens takes 2.5 s to tokenize from scratch.
+const TokenizeCache = struct {
+    session_id: []u8 = &.{},
+    text: []u8 = &.{},
+    tokens: []u32 = &.{},
+    im_start_id: ?u32 = null,
+
+    const alloc = std.heap.page_allocator;
+    const marker = "<|im_start|>";
+    const min_prompt_bytes: usize = 65536;
+
+    const Split = struct { tokens: usize, bytes: usize };
+
+    fn imStartId(self: *TokenizeCache, tokenizer: anytype) ?u32 {
+        if (self.im_start_id) |id| return id;
+        const t = tokenizer.encodePrompt(marker, alloc) catch return null;
+        defer alloc.free(t);
+        const body = if (t.len == 2 and tokenizer.bos_id != null and t[0] == tokenizer.bos_id.?) t[1..] else t;
+        if (body.len != 1) return null;
+        self.im_start_id = body[0];
+        return body[0];
+    }
+
+    /// Where the new prompt can reuse the cached tokens: the last `<|im_start|>`
+    /// inside the shared byte prefix, mapped to its token index.
+    fn split(self: *const TokenizeCache, session_id: []const u8, text: []const u8, im_start: u32) ?Split {
+        if (self.tokens.len == 0 or !std.mem.eql(u8, self.session_id, session_id)) return null;
+        const common = std.mem.indexOfDiff(u8, self.text, text) orelse @min(self.text.len, text.len);
+        const b = std.mem.lastIndexOf(u8, text[0..common], marker) orelse return null;
+        if (b == 0) return null;
+        var k: usize = 0;
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, text[0..b], i, marker)) |pos| {
+            k += 1;
+            i = pos + marker.len;
+        }
+        var seen: usize = 0;
+        for (self.tokens, 0..) |t, idx| {
+            if (t != im_start) continue;
+            if (seen == k) return .{ .tokens = idx, .bytes = b };
+            seen += 1;
+        }
+        return null;
+    }
+
+    fn store(self: *TokenizeCache, session_id: []const u8, text: []const u8, tokens: []const u32) void {
+        const sid = alloc.dupe(u8, session_id) catch return;
+        const txt = alloc.dupe(u8, text) catch {
+            alloc.free(sid);
+            return;
+        };
+        const tok = alloc.dupe(u32, tokens) catch {
+            alloc.free(sid);
+            alloc.free(txt);
+            return;
+        };
+        if (self.session_id.len > 0) alloc.free(self.session_id);
+        if (self.text.len > 0) alloc.free(self.text);
+        if (self.tokens.len > 0) alloc.free(self.tokens);
+        self.session_id = sid;
+        self.text = txt;
+        self.tokens = tok;
+    }
+};
+
 pub const ServerState = struct {
     started_at: i64,
     active_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -287,6 +356,7 @@ pub const ServerState = struct {
     generation_mutex: std.Thread.Mutex = .{},
     downloads: DownloadTracker = .{},
     chat_reuse_cache: ChatReuseCache,
+    tokenize_cache: TokenizeCache = .{},
 
     /// Create a new server state anchored to the given UNIX timestamp.
     /// @param started_at UNIX timestamp (seconds) of server startup, stored for uptime calculations.
@@ -2665,14 +2735,43 @@ fn handleChatCompletions(
     // page allocator in server mode. Keep BOS packing in `encodePrompt` so this
     // route cannot accidentally free tokenizer-owned memory with the wrong allocator.
     const tokenize_start_ns = std.time.nanoTimestamp();
-    const prompt_tokens = tokenizer.encodePrompt(prompt, allocator) catch {
-        try conn.sendError(500, "internal_error", "Tokenization failed");
-        return;
+    var tokenize_cached = false;
+    const prompt_tokens: []u32 = blk: {
+        if (parsed.session_id.len > 0 and prompt.len >= TokenizeCache.min_prompt_bytes) {
+            if (server_state.tokenize_cache.imStartId(tokenizer)) |im_start| {
+                if (server_state.tokenize_cache.split(parsed.session_id, prompt, im_start)) |sp| {
+                    if (tokenizer.encodePrompt(prompt[sp.bytes..], allocator)) |tail| {
+                        defer allocator.free(tail);
+                        const tail_tokens = if (tail.len > 0 and tokenizer.bos_id != null and tail[0] == tokenizer.bos_id.? and tokenizer.prepend_bos) tail[1..] else tail;
+                        if (tail_tokens.len > 0 and tail_tokens[0] == im_start) {
+                            const out = try allocator.alloc(u32, sp.tokens + tail_tokens.len);
+                            @memcpy(out[0..sp.tokens], server_state.tokenize_cache.tokens[0..sp.tokens]);
+                            @memcpy(out[sp.tokens..], tail_tokens);
+                            tokenize_cached = true;
+                            break :blk out;
+                        }
+                    } else |_| {}
+                }
+            }
+        }
+        break :blk tokenizer.encodePrompt(prompt, allocator) catch {
+            try conn.sendError(500, "internal_error", "Tokenization failed");
+            return;
+        };
     };
     errdefer allocator.free(prompt_tokens);
     defer allocator.free(prompt_tokens);
+    if (tokenize_cached and std.posix.getenv("ZINC_TOKENIZE_CACHE_VERIFY") != null) {
+        if (tokenizer.encodePrompt(prompt, allocator)) |full| {
+            defer allocator.free(full);
+            log.info("tokenize cache: verify {s} ({d} cached vs {d} full)", .{ if (std.mem.eql(u32, full, prompt_tokens)) "OK" else "MISMATCH", prompt_tokens.len, full.len });
+        } else |_| {}
+    }
+    if (parsed.session_id.len > 0 and prompt.len >= TokenizeCache.min_prompt_bytes) {
+        server_state.tokenize_cache.store(parsed.session_id, prompt, prompt_tokens);
+    }
     if (prompt_tokens.len >= 16384) {
-        log.info("chat request: tokenized {d} bytes into {d} tokens in {d} ms", .{ prompt.len, prompt_tokens.len, @divTrunc(std.time.nanoTimestamp() - tokenize_start_ns, 1_000_000) });
+        log.info("chat request: tokenized {d} bytes into {d} tokens in {d} ms{s}", .{ prompt.len, prompt_tokens.len, @divTrunc(std.time.nanoTimestamp() - tokenize_start_ns, 1_000_000), if (tokenize_cached) " (prefix from cache)" else "" });
     }
     defer server_state.clearActiveContext();
     // What the engine actually prefills and continues. Differs from
