@@ -622,3 +622,11 @@ Attention is about a fifth of a 20K pass, so an 11.6% whole-pass gain means
 the attention itself roughly doubled. Now the default for a q8 cache; the 100K
 prefill and the depth decode A/B follow.
 
+**int8-dot prefill at 100K** (server, speculation off): 288.3 tok/s (345.5 s)
+against 231.5 for the f32-dot q8 reader and 287.0 for the f16 cache — q8
+prefill at depth is at f16 parity, so the cache that lets speculation fit at
+262K no longer costs prefill. PV stays f32: with int8 V the f16 conversion
+costs what packed f16 FMAs save, so the next prefill lever at depth is the
+chunk cap (`ZINC_PREFILL_ATTN_PAIRS`, 1,500-token chunks at 200K bite the
+GEMMs), to be raised cautiously now that the attention job is faster.
+
