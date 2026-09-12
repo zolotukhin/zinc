@@ -100,6 +100,9 @@ pub const AttentionDispatch = struct {
     /// (query, head) rows x 32 key columns per step with the head dimension
     /// split across lanes and per-lane online softmax. head_dim 256 only.
     pipeline_batched_tile: ?Pipeline,
+    /// q8-cache prefill kernel with the Q.K^T product on the int8 dot instruction
+    /// (flash_attn_batched_tile_q8mmq). Loaded only for a q8 cache; opt-in.
+    pipeline_batched_tile_mmq: ?Pipeline,
     /// Split-K variant — same flash_attn.spv specialized with N_I_CHUNKS=fa_split_k_active
     /// so it writes per-chunk partials into partial_attn_out_buf instead of the
     /// final normalized output. Enabled by default (N=4); disabled when ZINC_FA_SPLIT_K is 0 or 1.
@@ -191,6 +194,11 @@ pub const AttentionDispatch = struct {
             log.warn("flash_attn_batched_tile shader not loaded: {s}", .{@errorName(err)});
             break :blk null;
         };
+        const attn_mmq_path = std.fmt.bufPrint(&path_buf, "{s}/flash_attn_batched_tile_q8mmq.spv", .{shader_dir}) catch unreachable;
+        const pipeline_batched_tile_mmq: ?Pipeline = if (!kv_dtype.isQ8()) null else pipeline_mod.createFromSpirvWithOptions(instance, attn_mmq_path, 6, @sizeOf(FlashAttnBatchedPush), &.{}, wave64_push_options, allocator) catch |err| blk: {
+            log.warn("flash_attn_batched_tile_q8mmq shader not loaded: {s}", .{@errorName(err)});
+            break :blk null;
+        };
 
         // Split-K variant. The pipeline reuses flash_attn.spv with the
         // N_I_CHUNKS spec const set; its "output" binding (4) is wired to
@@ -252,6 +260,7 @@ pub const AttentionDispatch = struct {
             .pipeline_batched_qt = pipeline_batched_qt,
             .pipeline_batched_gqa = pipeline_batched_gqa,
             .pipeline_batched_tile = pipeline_batched_tile,
+            .pipeline_batched_tile_mmq = pipeline_batched_tile_mmq,
             .pipeline_split = pipeline_split,
             .pipeline_split_merge = pipeline_split_merge,
             .fa_split_k_active = fa_split_k_active,
@@ -326,6 +335,36 @@ pub const AttentionDispatch = struct {
     /// @param attn_scale Attention softmax scale factor (0 = use 1/sqrt(head_dim)).
     /// @param sink_offset Per-layer offset into the sink buffer (layer_idx * n_heads).
     /// @returns `error.ShaderNotLoaded` when the batched pipeline is unavailable.
+    /// Same contract as recordFlashAttnBatchedTile, on the int8-dot q8 kernel.
+    pub fn recordFlashAttnBatchedTileMmq(
+        self: *const AttentionDispatch,
+        cmd: *CommandBuffer,
+        descriptor_set: vk.c.VkDescriptorSet,
+        head_dim: u32,
+        n_heads: u32,
+        n_kv_heads: u32,
+        seq_start: u32,
+        n_queries: u32,
+        page_size: u32,
+        attn_scale: f32,
+        sink_offset: u32,
+    ) !void {
+        const pip = if (self.pipeline_batched_tile_mmq) |*p| p else return error.ShaderNotLoaded;
+        const push = FlashAttnBatchedPush{
+            .head_dim = head_dim,
+            .n_heads = n_heads,
+            .n_kv_heads = n_kv_heads,
+            .seq_start = seq_start,
+            .n_queries = n_queries,
+            .page_size = page_size,
+            .attn_scale_bits = if (attn_scale != 0) @as(u32, @bitCast(attn_scale)) else 0,
+            .sink_offset = sink_offset,
+        };
+        const gqa = n_heads / n_kv_heads;
+        const groups_y = (gqa * n_queries + flash_attn_tile_rows - 1) / flash_attn_tile_rows;
+        cmd.dispatchWithPush(pip, descriptor_set, std.mem.asBytes(&push), n_kv_heads, groups_y, 1);
+    }
+
     pub fn recordFlashAttnBatchedTile(
         self: *const AttentionDispatch,
         cmd: *CommandBuffer,
@@ -552,6 +591,7 @@ pub const AttentionDispatch = struct {
         if (self.pipeline_batched_qt) |*p| p.deinit();
         if (self.pipeline_batched_gqa) |*p| p.deinit();
         if (self.pipeline_batched_tile) |*p| p.deinit();
+        if (self.pipeline_batched_tile_mmq) |*p| p.deinit();
         if (self.pipeline_gqa_split) |*p| p.deinit();
         if (self.pipeline_split) |*p| p.deinit();
         if (self.pipeline_split_merge) |*p| p.deinit();

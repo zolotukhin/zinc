@@ -12586,7 +12586,13 @@ pub const InferenceEngine = struct {
             head_dim <= 512 and
             self.attention.pipeline_batched_qt != null and
             envFlagEnabled("ZINC_FA_QUERY_TILE", false);
-        const pip = if (use_tile)
+        // int8-dot variant of the tiled kernel for a q8 cache (opt-in until measured).
+        const use_mmq = use_tile and kv_dtype.isQ8() and
+            self.attention.pipeline_batched_tile_mmq != null and
+            envFlagEnabled("ZINC_FA_Q8_MMQ", false);
+        const pip = if (use_mmq)
+            &self.attention.pipeline_batched_tile_mmq.?
+        else if (use_tile)
             &self.attention.pipeline_batched_tile.?
         else if (use_gqa)
             &self.attention.pipeline_batched_gqa.?
@@ -12635,7 +12641,9 @@ pub const InferenceEngine = struct {
         }
         const ds = try self.allocDescSet(pip.descriptor_set_layout);
         self.writeDescSet6(ds, q_buf, q_size, k_cache, k_cache_size, v_cache, v_cache_size, page_table, page_table_size, out_buf, out_size, sinks, sinks_size);
-        if (use_tile) {
+        if (use_mmq) {
+            try self.attention.recordFlashAttnBatchedTileMmq(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
+        } else if (use_tile) {
             try self.attention.recordFlashAttnBatchedTile(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);
         } else if (use_gqa) {
             try self.attention.recordFlashAttnBatchedGqa(&self.decode_cmd, ds, head_dim, n_heads, n_kv_heads, seq_start, n_queries, page_size, attn_scale, sink_offset);

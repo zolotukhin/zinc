@@ -524,3 +524,18 @@ serially. The same occupancy disease as decode, in the other kernel. Next:
 route small batches at depth through the split-K decode kernel per query
 (q/o offsets in its push constants), so a verify costs ~3 decode attentions.
 
+## Prefill at depth: the int8-dot kernel for the q8 cache (2026-09-12)
+
+At 226K the tiled prefill kernel sustains ~11 TFLOP/s of f32 FMA (10 PFLOP of
+attention in ~900 s at f16; the generated q8 reader ~1,600 s) against llama.cpp's
+~17. A q8 cache holds int8 keys already, so `flash_attn_batched_tile_q8mmq`
+computes Q·K^T on `dotPacked4x8` — four multiply-adds per instruction: a lane
+owns one 32-element block of the head dimension instead of one vec4 of every
+block, Q is quantized once per (row, block) into int8 in LDS with the attention
+scale folded in, and a (row, column) partial is 8 int8-dot instructions times
+the two block scales, against 32 f32 FMAs. The 8 dim-lanes' partials sum by the
+same butterfly. PV stays f32 for now (V dequantized per block). Opt-in
+(`ZINC_FA_Q8_MMQ=1`) until the needle and speed checks land; the same trick is
+the plan for the q8 decode kernel once the split-K chunk scaling has been
+measured.
+
