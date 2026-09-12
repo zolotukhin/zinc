@@ -1021,3 +1021,11 @@ GGUF says the 48 DeltaNet qkv projections are 24 × Q6_K and 24 × Q4_K (the
 DP4a qkv path accepts only Q6_K/Q5_K), ffn_down is 33 × Q6_K + 32 × Q4_K,
 gate/up all Q4_K, ssm_out Q5_K, attention q/k/o Q4_K, v 9 × Q6_K.
 
+**Stage 35: the Q4_K half of the qkv projections through the DP4a GEMM: +10%.**
+Splitting the qkv phase by weight type showed the 24 Q6_K layers at 0.117
+ms/token (21 TFLOPS) and the 24 Q4_K layers at 0.302 (8 TFLOPS): the Q4_K
+ones fell through to the batched DMMV chunks because the qkv DP4a path only
+took Q6_K/Q5_K. Routing them through the Q4_K z-projection DP4a GEMM (generic
+in M): 0.302 → 0.083 ms/token; 17K prefill 432 → **475 tok/s**. Cumulative
+today: 404 → 475 (+17.5%). 20K five-fact 5/5.
+

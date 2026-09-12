@@ -215,6 +215,8 @@ const ProfilePhase = enum(u8) {
     ssm_proj,
     ssm_proj_norm_ab,
     ssm_proj_qkv,
+    ssm_proj_qkv_q4,
+    ssm_proj_qkv_q6,
     ssm_proj_z,
     ssm_proj_alpha,
     ssm_proj_beta,
@@ -287,6 +289,8 @@ const ProfilePhase = enum(u8) {
             .ssm_proj => "ssm_proj",
             .ssm_proj_norm_ab => "ssm_proj_norm_ab",
             .ssm_proj_qkv => "ssm_proj_qkv",
+            .ssm_proj_qkv_q4 => "ssm_proj_qkv_q4",
+            .ssm_proj_qkv_q6 => "ssm_proj_qkv_q6",
             .ssm_proj_z => "ssm_proj_z",
             .ssm_proj_alpha => "ssm_proj_alpha",
             .ssm_proj_beta => "ssm_proj_beta",
@@ -23134,10 +23138,19 @@ pub const InferenceEngine = struct {
                 self.endProfilePhase(.ssm_proj_qkv_z, ssm_proj_qkv_z_phase);
             } else {
                 const ssm_proj_qkv_phase = self.beginProfilePhase();
-                const wqkv_dp4a = try self.dispatchQwen36SsmQkvDp4a(wqkv_t, scratch_norm, scratch_gate, conv_channels, hidden_dim, n_tokens, shared_q8_1_ok, shared_q8_1_cols);
+                const ssm_proj_qkv_typed_phase = self.beginProfilePhase();
+                // Half of the 27B's qkv projections are Q4_K (the other half
+                // Q6_K); the Q4_K ones take the same DP4a GEMM as the Q4_K z
+                // projection (generic in M) instead of the batched DMMV chunks,
+                // which ran them at a third of the Q6_K half's rate.
+                const wqkv_dp4a = if (wqkv_t.info.type_ == .q4_k)
+                    try self.dispatchQwen36SsmZDp4a(wqkv_t, scratch_norm, scratch_gate, conv_channels, hidden_dim, n_tokens, shared_q8_1_ok, shared_q8_1_cols)
+                else
+                    try self.dispatchQwen36SsmQkvDp4a(wqkv_t, scratch_norm, scratch_gate, conv_channels, hidden_dim, n_tokens, shared_q8_1_ok, shared_q8_1_cols);
                 if (!wqkv_dp4a) {
                     try self.dispatchProjectionBatched(wqkv_t, scratch_norm, scratch_gate, conv_channels, hidden_dim, n_tokens);
                 }
+                self.endProfilePhase(if (wqkv_t.info.type_ == .q6_k) .ssm_proj_qkv_q6 else .ssm_proj_qkv_q4, ssm_proj_qkv_typed_phase);
                 self.endProfilePhase(.ssm_proj_qkv, ssm_proj_qkv_phase);
 
                 const ssm_proj_z_phase = self.beginProfilePhase();
