@@ -853,3 +853,10 @@ retrievable through the reuse flow; the miss is specific to it being the
 *first* question after the turn-0 prefill (a single prompt answers it first).
 Stage 18 asks 1,2,5 with one numeric path changed per run.
 
+**Stage 18a: f32-dot attention does not change it.** `ZINC_FA_Q8_MMQ=0`, order
+1,2,5: q1 still `PLUM-4417-`, q2/q5 correct. The int8 Q quantization is
+exonerated; and the f32-dot q8 prefill took 1665 s against 1016 s with
+int8-dot, so the int8 path is worth 64% on the 197K prefill. Stage 19 asks
+order 1,1,2,1 to separate "first restore after the chunked prefill" from "no
+prior answer in the context".
+
